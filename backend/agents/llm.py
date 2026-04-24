@@ -599,6 +599,41 @@ class TokenTrackingCallback(BaseCallbackHandler):
                     self.model_name, exc,
                 )
                 self.last_ratelimit_state = {}
+            # Z.1 (#290) checkbox 3: mirror the normalised snapshot into
+            # ``SharedKV("provider_ratelimit")`` with a 60 s per-field
+            # TTL so dashboard polling endpoints + future adaptive-
+            # backoff logic (Z.2 / Z.4) can read the latest state
+            # cross-worker without holding a callback reference.
+            #
+            # Skip conditions — all silent, none raise:
+            #   - ``self.provider`` is None: callback instantiated via
+            #     legacy fixture that predates the ``provider`` kwarg.
+            #     Not a hard-fail; the snapshot will land on the next
+            #     live turn that carries a provider.
+            #   - ``self.last_ratelimit_state`` is empty: normalise
+            #     returned ``{}`` — unmapped provider (Ollama, Gemini
+            #     today) or response carried no rate-limit headers at
+            #     all. Writing ``{}`` under the provider key would
+            #     overwrite a genuine prior snapshot from a sibling
+            #     turn with stale "no data" — simpler to not write and
+            #     let the previous entry age out naturally.
+            #   - SharedKV throws (Redis drop mid-flight, disk-full on
+            #     in-memory fallback, JSON-encode edge case): already
+            #     handled inside ``set_with_ttl`` via SharedKV's Redis-
+            #     best-effort contract, but wrap in an outer try/except
+            #     so a bug in the TTL wrapper can't abort the LLM turn.
+            try:
+                if self.provider and self.last_ratelimit_state:
+                    _get_ratelimit_kv().set_with_ttl(
+                        self.provider,
+                        self.last_ratelimit_state,
+                        _RATELIMIT_TTL_SECONDS,
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "provider_ratelimit SharedKV write skipped for %s: %s",
+                    self.provider or "<unknown>", exc,
+                )
             usage: dict = {}
             if response.llm_output:
                 usage = response.llm_output.get("token_usage", {})
@@ -731,6 +766,53 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 logger.debug("turn.complete emit skipped: %s", exc)
         except Exception as exc:
             logger.warning("Token tracking failed for %s: %s", self.model_name, exc)
+
+# ─────────────────────────────────────────────────────────────────
+# Z.1 (#290) checkbox 3 (2026-04-24): cross-worker rate-limit state
+# store. Each LLM turn's ``on_llm_end`` mirrors
+# ``self.last_ratelimit_state`` into this shared hash keyed by provider
+# name, so dashboard endpoints + future adaptive-backoff logic
+# (Z.2 / Z.4) read the latest snapshot without having to hold a
+# reference to the LangChain callback instance.
+#
+# Key shape intentionally omits tenant / user: the rate-limit is an
+# instance-wide property of the single API key every tenant shares,
+# so the scope of the information is instance-wide too. Adding tenant
+# to the key would produce N copies of the same numbers and confuse
+# readers into thinking the limits are tenant-scoped.
+#
+# TTL = 60 s: rate-limit windows reset ≤ 60 s on all seven mapped
+# providers. Stale-ing after that prevents the dashboard from
+# surfacing a minute-old "0 remaining" when the provider has already
+# refilled. Enforced per-field via ``SharedKV.set_with_ttl`` (embedded
+# ``_expires_at`` + lazy prune) so touching one provider's entry
+# doesn't inadvertently refresh another's expiry.
+#
+# Module-global audit (SOP Step 1, 2026-04-21 rule): the ``SharedKV``
+# is Redis-backed when ``OMNISIGHT_REDIS_URL`` is set (rubric #2
+# "coordinate via Redis" — one hash shared across every uvicorn
+# worker + replica); in-memory fallback is per-worker (rubric #3
+# "deliberately per-worker" for single-worker dev). No new
+# shared-mutable surface beyond what ``SharedKV`` already guarantees.
+_RATELIMIT_TTL_SECONDS = 60.0
+_RATELIMIT_KV_NAMESPACE = "provider_ratelimit"
+_ratelimit_kv_singleton = None
+
+
+def _get_ratelimit_kv():  # noqa: ANN202
+    """Lazy-init + cache the module-level ``SharedKV("provider_ratelimit")``.
+
+    Lazy rather than at import time so ``shared_state.reset_for_tests``
+    (which nulls out the Redis clients) does not leave this callback
+    holding a stale reference — a fresh ``SharedKV`` instance reopens
+    the connection via ``get_sync_redis`` on first use.
+    """
+    global _ratelimit_kv_singleton
+    if _ratelimit_kv_singleton is None:
+        from backend.shared_state import SharedKV
+        _ratelimit_kv_singleton = SharedKV(_RATELIMIT_KV_NAMESPACE)
+    return _ratelimit_kv_singleton
+
 
 # Cache to avoid re-creating LLM instances
 _cache: dict[str, BaseChatModel] = {}
@@ -1105,7 +1187,18 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
 
 
 def list_providers() -> list[dict]:
-    """Return metadata about all supported providers."""
+    """Return metadata about all supported providers.
+
+    Phase 5b-2 (#llm-credentials): the ``configured`` flag goes through
+    :func:`backend.llm_credential_resolver.is_provider_configured`
+    rather than reading ``bool(settings.{provider}_api_key)`` directly.
+    This keeps the resolver as the single source of truth for
+    "does this provider have a credential available"; when row 5b-5's
+    auto-migration mirrors DB rows back into Settings, the flag flips
+    through the same code path as :func:`get_llm`.
+    """
+    from backend.llm_credential_resolver import is_provider_configured
+
     providers = [
         {
             "id": "anthropic",
@@ -1119,7 +1212,7 @@ def list_providers() -> list[dict]:
             ],
             "requires_key": True,
             "env_var": "OMNISIGHT_ANTHROPIC_API_KEY",
-            "configured": bool(settings.anthropic_api_key),
+            "configured": is_provider_configured("anthropic"),
         },
         {
             "id": "google",
@@ -1133,7 +1226,7 @@ def list_providers() -> list[dict]:
             ],
             "requires_key": True,
             "env_var": "OMNISIGHT_GOOGLE_API_KEY",
-            "configured": bool(settings.google_api_key),
+            "configured": is_provider_configured("google"),
         },
         {
             "id": "openai",
@@ -1147,7 +1240,7 @@ def list_providers() -> list[dict]:
             ],
             "requires_key": True,
             "env_var": "OMNISIGHT_OPENAI_API_KEY",
-            "configured": bool(settings.openai_api_key),
+            "configured": is_provider_configured("openai"),
         },
         {
             "id": "xai",
@@ -1159,7 +1252,7 @@ def list_providers() -> list[dict]:
             ],
             "requires_key": True,
             "env_var": "OMNISIGHT_XAI_API_KEY",
-            "configured": bool(settings.xai_api_key),
+            "configured": is_provider_configured("xai"),
         },
         {
             "id": "groq",
@@ -1173,7 +1266,7 @@ def list_providers() -> list[dict]:
             ],
             "requires_key": True,
             "env_var": "OMNISIGHT_GROQ_API_KEY",
-            "configured": bool(settings.groq_api_key),
+            "configured": is_provider_configured("groq"),
         },
         {
             "id": "deepseek",
@@ -1185,7 +1278,7 @@ def list_providers() -> list[dict]:
             ],
             "requires_key": True,
             "env_var": "OMNISIGHT_DEEPSEEK_API_KEY",
-            "configured": bool(settings.deepseek_api_key),
+            "configured": is_provider_configured("deepseek"),
         },
         {
             "id": "together",
@@ -1199,7 +1292,7 @@ def list_providers() -> list[dict]:
             ],
             "requires_key": True,
             "env_var": "OMNISIGHT_TOGETHER_API_KEY",
-            "configured": bool(settings.together_api_key),
+            "configured": is_provider_configured("together"),
         },
         {
             "id": "openrouter",
@@ -1229,7 +1322,7 @@ def list_providers() -> list[dict]:
             ],
             "requires_key": True,
             "env_var": "OMNISIGHT_OPENROUTER_API_KEY",
-            "configured": bool(settings.openrouter_api_key),
+            "configured": is_provider_configured("openrouter"),
         },
         {
             "id": "ollama",
@@ -1245,7 +1338,7 @@ def list_providers() -> list[dict]:
             ],
             "requires_key": False,
             "env_var": None,
-            "configured": True,  # always available if Ollama is running
+            "configured": is_provider_configured("ollama"),
             "base_url": settings.ollama_base_url,
         },
     ]
