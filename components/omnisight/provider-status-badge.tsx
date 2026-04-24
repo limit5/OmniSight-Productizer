@@ -34,12 +34,17 @@
  *     429 the next call) and "near-saturated" as either counter's
  *     usage ≥ 80% (remaining ≤ 20%).
  *
- * Accessibility: the badge carries an ``aria-label`` with the specific
- * balance dollars + rate-limit remaining counts so screen-reader users
- * get the numbers, not just "red circle" — per the Z.4 a11y checkbox.
- * The tooltip (``title``) carries the same information for sighted
- * mouse users; unsupported providers get a sentence explaining why
- * rather than cryptic empty-state.
+ * Accessibility (Z.4 checkbox 6): the badge carries an ``aria-label``
+ * with the specific balance dollars + rate-limit remaining counts so
+ * screen-reader users get the numbers, not just "red circle". Contract
+ * guarantee: whenever ``balanceRemaining`` is a finite number, the
+ * aria-label surfaces the formatted currency (``$X.XX`` or ``¥X.XX``);
+ * whenever a rate-limit counter is finite, the aria-label surfaces the
+ * integer count — across all four tiers, including gray unsupported /
+ * no-data edge cases where stale-cache data may still be present. The
+ * tooltip (``title``) carries the same information for sighted mouse
+ * users; unsupported providers get a sentence explaining why rather
+ * than cryptic empty-state. Locked by `test/components/provider-a11y.test.tsx`.
  *
  * Scope discipline — this checkbox is ONLY the sub-component. The
  * card-expansion panel (checkbox 2), provider roll-up (3), OpenRouter
@@ -271,11 +276,36 @@ export function describeProviderStatus(
   result: ProviderStatusResult,
 ): string {
   const parts: string[] = [`${props.provider}:`]
+  const hasBalance =
+    props.balanceRemaining !== null &&
+    props.balanceRemaining !== undefined &&
+    Number.isFinite(props.balanceRemaining)
+  const hasGranted =
+    props.grantedTotal !== null &&
+    props.grantedTotal !== undefined &&
+    Number.isFinite(props.grantedTotal) &&
+    (props.grantedTotal as number) > 0
+  const req = props.rateLimitRemainingRequests
+  const tok = props.rateLimitRemainingTokens
+  const hasReq = req !== null && req !== undefined && Number.isFinite(req)
+  const hasTok = tok !== null && tok !== undefined && Number.isFinite(tok)
+
+  // Unsupported: short-circuits to the reason text, but if the backend
+  // still reported a concrete balance (e.g. stale cache from before a
+  // vendor deprecated the public API), surface it alongside the reason
+  // so the screen-reader user hears the number, not just "unsupported".
   if (result.tier === "gray" && props.status === "unsupported") {
     parts.push(
       props.reason ||
         "provider does not expose a public balance API — see provider dashboard",
     )
+    if (hasBalance) {
+      parts.push(
+        hasGranted
+          ? `balance ${formatCurrency(props.balanceRemaining as number, props.currency)} / ${formatCurrency(props.grantedTotal as number, props.currency)}.`
+          : `balance ${formatCurrency(props.balanceRemaining as number, props.currency)}.`,
+      )
+    }
     return parts.join(" ")
   }
   if (result.tier === "gray" && result.reasons[0] === "loading") {
@@ -283,33 +313,44 @@ export function describeProviderStatus(
     return parts.join(" ")
   }
   if (result.tier === "gray") {
-    parts.push("no balance or rate-limit data available")
+    // No computable tier (e.g. balance absolute only, no granted total,
+    // no rate-limit data). Surface whatever concrete numbers we DO have
+    // so the aria-label never degrades to "no data" when the backend
+    // actually sent a dollar value.
+    if (!hasBalance && !hasReq && !hasTok) {
+      parts.push("no balance or rate-limit data available")
+      return parts.join(" ")
+    }
+    if (hasBalance) {
+      parts.push(
+        hasGranted
+          ? `balance ${formatCurrency(props.balanceRemaining as number, props.currency)} / ${formatCurrency(props.grantedTotal as number, props.currency)}.`
+          : `balance ${formatCurrency(props.balanceRemaining as number, props.currency)}.`,
+      )
+    }
+    if (hasReq || hasTok) {
+      const bits: string[] = []
+      if (hasReq) bits.push(`${req} req remaining`)
+      if (hasTok) bits.push(`${tok} tokens remaining`)
+      parts.push(`rate-limit: ${bits.join(", ")}.`)
+    }
     return parts.join(" ")
   }
   const tierLabel = result.tier.toUpperCase()
   parts.push(tierLabel + ".")
-  if (
-    props.balanceRemaining !== null &&
-    props.balanceRemaining !== undefined
-  ) {
-    if (
-      props.grantedTotal !== null &&
-      props.grantedTotal !== undefined &&
-      props.grantedTotal > 0
-    ) {
+  if (hasBalance) {
+    if (hasGranted) {
       parts.push(
-        `balance ${formatCurrency(props.balanceRemaining, props.currency)} / ${formatCurrency(props.grantedTotal, props.currency)} (${result.balancePct?.toFixed(1)}%).`,
+        `balance ${formatCurrency(props.balanceRemaining as number, props.currency)} / ${formatCurrency(props.grantedTotal as number, props.currency)} (${result.balancePct?.toFixed(1)}%).`,
       )
     } else {
-      parts.push(`balance ${formatCurrency(props.balanceRemaining, props.currency)}.`)
+      parts.push(`balance ${formatCurrency(props.balanceRemaining as number, props.currency)}.`)
     }
   }
-  const req = props.rateLimitRemainingRequests
-  const tok = props.rateLimitRemainingTokens
-  if ((req !== null && req !== undefined) || (tok !== null && tok !== undefined)) {
+  if (hasReq || hasTok) {
     const bits: string[] = []
-    if (req !== null && req !== undefined) bits.push(`${req} req remaining`)
-    if (tok !== null && tok !== undefined) bits.push(`${tok} tokens remaining`)
+    if (hasReq) bits.push(`${req} req remaining`)
+    if (hasTok) bits.push(`${tok} tokens remaining`)
     parts.push(`rate-limit: ${bits.join(", ")}.`)
   }
   if (result.reasons.length > 0 && result.tier !== "green") {
