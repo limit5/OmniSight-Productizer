@@ -20,10 +20,19 @@
  *      happened server-side; the stub is our best-effort local mirror.)
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react"
-import { MessageCircle, Sparkles, RefreshCw } from "lucide-react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react"
+import { MessageCircle, Sparkles, RefreshCw, Pencil, X } from "lucide-react"
 import {
   fetchChatSessions,
+  renameChatSession,
   subscribeEvents,
   type ChatSessionItem,
   type SSEEvent,
@@ -79,6 +88,18 @@ export function ChatSessionsSidebar({
   )
   const [loading, setLoading] = useState(initialSessions === undefined)
   const [error, setError] = useState<string | null>(null)
+  // ZZ.B2 checkbox 2 — inline rename: at most one session in
+  // "editing" mode at a time (keeps the sidebar compact and avoids
+  // a mid-edit focus-steal if SSE re-renders the list). `renameError`
+  // is per-session so a failed PATCH surfaces only on the row that
+  // actually failed instead of blowing up a top-level banner.
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
+  const [renameSaving, setRenameSaving] = useState(false)
+  const [renameError, setRenameError] = useState<{
+    sessionId: string
+    message: string
+  } | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -167,6 +188,110 @@ export function ChatSessionsSidebar({
     [sessions],
   )
 
+  const startRename = useCallback((sessionId: string) => {
+    setRenameError(null)
+    setEditingSessionId(sessionId)
+    // Focus is handled by a follow-up effect once the input mounts.
+  }, [])
+
+  const cancelRename = useCallback(() => {
+    setEditingSessionId(null)
+    setRenameError(null)
+  }, [])
+
+  // Focus the input whenever rename mode engages. Pulling focus in the
+  // effect (rather than a ref-callback) keeps the call guarded against
+  // React StrictMode double-mounts in dev.
+  useEffect(() => {
+    if (editingSessionId && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select()
+    }
+  }, [editingSessionId])
+
+  const commitRename = useCallback(
+    async (sessionId: string, rawTitle: string) => {
+      const trimmed = rawTitle.trim()
+      // Empty → send `null` so the backend clears `user_title` and the
+      // sidebar falls back to `auto_title` / hash per the fallback
+      // chain. Non-empty → the operator's override wins over auto.
+      const payload = trimmed ? trimmed.slice(0, 120) : null
+      setRenameSaving(true)
+      setRenameError(null)
+      // Optimistic update so the sidebar feels instant — if the PATCH
+      // fails we roll back to the pre-rename metadata below.
+      const snapshot = sessions
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.session_id === sessionId
+            ? {
+                ...s,
+                metadata: payload
+                  ? { ...s.metadata, user_title: payload }
+                  : (() => {
+                      const { user_title: _removed, ...rest } = s.metadata
+                      return rest
+                    })(),
+                updated_at: Date.now() / 1000,
+              }
+            : s,
+        ),
+      )
+      try {
+        const res = await renameChatSession(sessionId, payload)
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.session_id === sessionId
+              ? { ...s, metadata: res.metadata ?? s.metadata }
+              : s,
+          ),
+        )
+        setEditingSessionId(null)
+      } catch (exc) {
+        // Roll back to the snapshot so the operator doesn't see a
+        // phantom successful rename that actually failed on the wire.
+        // Exit rename mode too so the fallback chain's current winner
+        // (auto_title / hash) is what renders — otherwise the input
+        // would keep the abandoned draft visible on top of a stale
+        // error, which is worse UX than a clean revert + inline
+        // error the operator can dismiss by clicking the pencil
+        // again.
+        setSessions(snapshot)
+        setEditingSessionId(null)
+        setRenameError({
+          sessionId,
+          message: exc instanceof Error ? exc.message : String(exc),
+        })
+      } finally {
+        setRenameSaving(false)
+      }
+    },
+    [sessions],
+  )
+
+  const onRenameFormSubmit = useCallback(
+    (sessionId: string) =>
+      (ev: FormEvent<HTMLFormElement>) => {
+        ev.preventDefault()
+        const input = ev.currentTarget.elements.namedItem("rename") as
+          | HTMLInputElement
+          | null
+        if (!input) return
+        void commitRename(sessionId, input.value)
+      },
+    [commitRename],
+  )
+
+  const onRenameKeyDown = useCallback(
+    (ev: KeyboardEvent<HTMLInputElement>) => {
+      if (ev.key === "Escape") {
+        ev.preventDefault()
+        cancelRename()
+      }
+    },
+    [cancelRename],
+  )
+
   return (
     <aside
       data-testid="chat-sessions-sidebar"
@@ -217,42 +342,106 @@ export function ChatSessionsSidebar({
           sorted.map((s) => {
             const resolved = resolveSessionTitle(s)
             const selected = s.session_id === selectedSessionId
+            const isEditing = editingSessionId === s.session_id
             return (
               <li
                 key={s.session_id}
                 data-testid={`chat-session-row-${s.session_id}`}
                 data-title-source={resolved.source}
+                className="group"
               >
-                <button
-                  type="button"
-                  onClick={() => onSelect?.(s.session_id)}
-                  className={
-                    "flex w-full items-center gap-2 rounded border px-2 py-1.5 text-left transition-colors " +
-                    (selected
-                      ? "border-[var(--neural-blue)] bg-[var(--neural-blue)]/10"
-                      : "border-transparent hover:border-[var(--border)] hover:bg-[var(--secondary)]/60")
-                  }
-                >
-                  {resolved.source === "auto" && (
-                    <Sparkles
-                      size={10}
-                      className="shrink-0 text-[var(--validation-emerald,#10b981)]"
-                      aria-label="auto-titled"
-                      data-testid={`chat-session-auto-badge-${s.session_id}`}
-                    />
-                  )}
-                  <span
-                    data-testid={`chat-session-title-${s.session_id}`}
-                    className="truncate font-mono text-xs text-[var(--foreground)]"
-                    title={
-                      resolved.source === "hash"
-                        ? s.session_id
-                        : resolved.title
+                {isEditing ? (
+                  <form
+                    data-testid={`chat-session-rename-form-${s.session_id}`}
+                    onSubmit={onRenameFormSubmit(s.session_id)}
+                    className={
+                      "flex w-full items-center gap-1 rounded border px-2 py-1.5 " +
+                      (selected
+                        ? "border-[var(--neural-blue)] bg-[var(--neural-blue)]/10"
+                        : "border-[var(--border)] bg-[var(--secondary)]/40")
                     }
                   >
-                    {resolved.title}
-                  </span>
-                </button>
+                    <input
+                      ref={inputRef}
+                      name="rename"
+                      type="text"
+                      maxLength={120}
+                      defaultValue={
+                        resolved.source === "hash" ? "" : resolved.title
+                      }
+                      onKeyDown={onRenameKeyDown}
+                      disabled={renameSaving}
+                      placeholder="Rename session (empty = revert)"
+                      data-testid={`chat-session-rename-input-${s.session_id}`}
+                      className="min-w-0 flex-1 bg-transparent font-mono text-xs text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]"
+                    />
+                    <button
+                      type="button"
+                      onClick={cancelRename}
+                      disabled={renameSaving}
+                      data-testid={`chat-session-rename-cancel-${s.session_id}`}
+                      aria-label="Cancel rename"
+                      className="rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--secondary)] disabled:opacity-50"
+                    >
+                      <X size={10} />
+                    </button>
+                  </form>
+                ) : (
+                  <div className="flex w-full items-stretch">
+                    <button
+                      type="button"
+                      onClick={() => onSelect?.(s.session_id)}
+                      className={
+                        "flex min-w-0 flex-1 items-center gap-2 rounded-l border border-r-0 px-2 py-1.5 text-left transition-colors " +
+                        (selected
+                          ? "border-[var(--neural-blue)] bg-[var(--neural-blue)]/10"
+                          : "border-transparent hover:border-[var(--border)] hover:bg-[var(--secondary)]/60")
+                      }
+                    >
+                      {resolved.source === "auto" && (
+                        <Sparkles
+                          size={10}
+                          className="shrink-0 text-[var(--validation-emerald,#10b981)]"
+                          aria-label="auto-titled"
+                          data-testid={`chat-session-auto-badge-${s.session_id}`}
+                        />
+                      )}
+                      <span
+                        data-testid={`chat-session-title-${s.session_id}`}
+                        className="truncate font-mono text-xs text-[var(--foreground)]"
+                        title={
+                          resolved.source === "hash"
+                            ? s.session_id
+                            : resolved.title
+                        }
+                      >
+                        {resolved.title}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => startRename(s.session_id)}
+                      aria-label="Rename session"
+                      data-testid={`chat-session-rename-${s.session_id}`}
+                      className={
+                        "flex shrink-0 items-center justify-center rounded-r border border-l-0 px-1.5 text-[var(--muted-foreground)] opacity-0 transition-opacity hover:bg-[var(--secondary)] hover:text-[var(--foreground)] focus:opacity-100 group-hover:opacity-100 " +
+                        (selected
+                          ? "border-[var(--neural-blue)] bg-[var(--neural-blue)]/10"
+                          : "border-transparent")
+                      }
+                    >
+                      <Pencil size={10} />
+                    </button>
+                  </div>
+                )}
+                {renameError?.sessionId === s.session_id && (
+                  <div
+                    data-testid={`chat-session-rename-error-${s.session_id}`}
+                    className="mt-0.5 rounded bg-[var(--critical-red)]/10 px-1.5 py-0.5 font-mono text-[9px] text-[var(--critical-red)]"
+                  >
+                    rename failed: {renameError.message}
+                  </div>
+                )}
               </li>
             )
           })

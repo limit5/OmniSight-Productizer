@@ -22,6 +22,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     ...actual,
     subscribeEvents: vi.fn(),
     fetchChatSessions: vi.fn(),
+    renameChatSession: vi.fn(),
   }
 })
 

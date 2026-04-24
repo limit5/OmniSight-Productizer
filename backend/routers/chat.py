@@ -28,7 +28,8 @@ import uuid
 from datetime import datetime
 
 import asyncpg
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from backend import auth as _au
@@ -583,3 +584,77 @@ async def list_sessions(
         conn, user.id, limit=bounded,
     )
     return {"items": items, "count": len(items)}
+
+
+class SessionTitleBody(BaseModel):
+    """Body for ``PATCH /chat/sessions/{session_id}/title``.
+
+    ``title`` is the operator-authored override. ``None`` or empty/
+    whitespace clears the override (reverts to ``auto_title`` or hash
+    per the frontend fallback chain). 120-char defensive cap mirrors
+    the one ``set_session_auto_title`` applies to LLM output so the
+    sidebar never has to truncate on render.
+    """
+    title: str | None = Field(default=None, max_length=120)
+
+
+@router.patch("/sessions/{session_id}/title")
+async def rename_session(
+    session_id: str,
+    body: SessionTitleBody,
+    request: Request,
+    user: _au.User = Depends(_au.require_operator),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """ZZ.B2 #304-2 checkbox 2: operator-authored session rename.
+
+    Sets (or clears when ``title`` is empty/``None``) the
+    ``metadata.user_title`` field on ``chat_sessions`` for the current
+    user + tenant. When set, the frontend fallback chain prefers the
+    ``user_title`` over ``auto_title`` / hash. When cleared, the row
+    drops back to whichever auto/hash label the rest of the chain
+    yields.
+
+    Emits ``session.titled`` with ``source="user"`` so other devices
+    of the same operator relabel the sidebar row in-place; the SSE
+    path mirrors the auto-title path (checkbox 1) so the frontend
+    reducer branch doesn't need a new event type.
+
+    A 404 is returned when no row matched — typically means the
+    session was never persisted (no chat_messages write yet) or it
+    belongs to a different tenant.
+    """
+    from backend import db as _db
+    updated = await _db.set_session_user_title(
+        conn, session_id=session_id, user_id=user.id, title=body.title,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="session not found")
+    meta = await _db.get_chat_session_metadata(
+        conn, session_id=session_id, user_id=user.id,
+    ) or {}
+    # Pick the effective title to broadcast: the cleaned input on set,
+    # or the surviving auto_title (if any) on clear. Empty broadcast
+    # title is the signal to the sidebar that the user override went
+    # away — it then falls back to auto / hash via resolveSessionTitle.
+    cleaned = (body.title or "").strip()
+    if cleaned:
+        broadcast_title = cleaned[:120]
+    else:
+        broadcast_title = str(meta.get("auto_title", ""))
+    try:
+        from backend.db_context import current_tenant_id
+        emit_session_titled(
+            session_id=session_id,
+            user_id=user.id,
+            title=broadcast_title,
+            source="user",
+            broadcast_scope="user",
+            tenant_id=current_tenant_id(),
+        )
+    except Exception as exc:  # pragma: no cover — best-effort fan-out
+        logger.debug("emit_session_titled (user) failed: %s", exc)
+    return {
+        "session_id": session_id,
+        "metadata": meta,
+    }

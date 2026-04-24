@@ -2464,6 +2464,62 @@ async def set_session_auto_title(
     return affected > 0
 
 
+async def set_session_user_title(
+    conn,
+    *,
+    session_id: str,
+    user_id: str,
+    title: str | None,
+) -> bool:
+    """Write / clear ``metadata.user_title`` — operator-authored override.
+
+    Unlike :func:`set_session_auto_title` (at-most-once, LLM-produced),
+    the user title is editable: an empty / ``None`` value removes the
+    key so the sidebar falls back to ``auto_title`` / hash per the
+    ZZ.B2 checkbox-2 fallback chain. A non-empty value is upserted
+    (``metadata || jsonb_build_object`` merges without touching other
+    keys, notably preserving any ``auto_title`` the background task
+    has already written).
+
+    Returns ``True`` when the target row existed (and therefore the
+    caller's intent was applied), ``False`` when no row matched —
+    callers map that to a 404 response.
+
+    Tenant-scoped via :func:`tenant_where_pg` so a swapped auth token
+    cannot rename another tenant's session.
+    """
+    import time as _time
+    ts = _time.time()
+    cleaned = (title or "").strip()[:120]  # defensive cap mirroring auto-title
+    conditions: list[str] = ["session_id = $1", "user_id = $2"]
+    params: list = [session_id, user_id]
+    tenant_where_pg(conditions, params)
+    if cleaned:
+        params.extend([cleaned, ts])
+        sql = (
+            "UPDATE chat_sessions SET "
+            "metadata = metadata || jsonb_build_object('user_title', $"
+            + str(len(params) - 1)
+            + "::text), "
+            "updated_at = $" + str(len(params))
+            + " WHERE " + " AND ".join(conditions)
+        )
+    else:
+        params.append(ts)
+        sql = (
+            "UPDATE chat_sessions SET "
+            "metadata = metadata - 'user_title', "
+            "updated_at = $" + str(len(params))
+            + " WHERE " + " AND ".join(conditions)
+        )
+    status = await conn.execute(sql, *params)
+    try:
+        affected = int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        affected = 0
+    return affected > 0
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  User drafts (Q.6 #300, checkbox 1)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

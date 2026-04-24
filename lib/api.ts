@@ -2876,6 +2876,36 @@ export async function fetchChatSessions(
   )
 }
 
+/**
+ * ZZ.B2 #304-2 checkbox 2 — operator rename for a chat session.
+ *
+ * Writes (or clears, when `title` is `null` / empty) the
+ * `metadata.user_title` field on the backend and triggers a
+ * `session.titled` SSE event with `source="user"` so other devices of
+ * the same operator relabel the sidebar row in-place.
+ *
+ * Empty `title` intentionally clears the override so the fallback
+ * chain drops to `auto_title` / hash — the sidebar does not need a
+ * separate "revert" endpoint.
+ */
+export interface ChatSessionRenameResponse {
+  session_id: string
+  metadata: ChatSessionMetadata
+}
+
+export async function renameChatSession(
+  sessionId: string,
+  title: string | null,
+): Promise<ChatSessionRenameResponse> {
+  return request<ChatSessionRenameResponse>(
+    `/chat/sessions/${encodeURIComponent(sessionId)}/title`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    },
+  )
+}
+
 export async function submitDag(
   dag: unknown,
   opts: {
