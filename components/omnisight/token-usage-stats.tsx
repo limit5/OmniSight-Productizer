@@ -16,6 +16,7 @@ import {
 } from "lucide-react"
 import { AI_MODEL_INFO, type AIModel } from "./agent-matrix-wall"
 import { MetricSparkline } from "./host-device-panel"
+import { SessionHeatmap } from "./session-heatmap"
 import {
   subscribeEvents,
   fetchTokenBurnRate,
@@ -178,6 +179,15 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
   const [burnWindow, setBurnWindow] = useState<TokenBurnRateWindow>("1h")
   const [burnPoints, setBurnPoints] = useState<TokenBurnRatePoint[]>([])
   const [burnHover, setBurnHover] = useState(false)
+  // ZZ.C2 #305-2 (2026-04-24) checkbox 3: Session Heatmap section
+  // mounts at the bottom of the expanded TokenUsageStats panel but is
+  // itself collapsed by default — the 7d / 30d calendar grid is dense
+  // enough that always-on would eat the bottom third of the panel for
+  // operators who don't need it on every glance. Click the header row
+  // to reveal ``<SessionHeatmap />``; default fold state avoids
+  // hammering the ``/runtime/tokens/heatmap`` endpoint on every mount
+  // (component only subscribes / polls once expanded).
+  const [heatmapExpanded, setHeatmapExpanded] = useState(false)
   useEffect(() => {
     const handle = subscribeEvents((event) => {
       if (event.event === "turn_metrics") {
@@ -1105,6 +1115,40 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
               )
             })}
           </div>
+        </div>
+      )}
+
+      {/* ZZ.C2 #305-2 (2026-04-24) checkbox 3 — collapsible Session
+          Heatmap mount. Rendered only when the outer TokenUsageStats
+          panel is also expanded, so a fully-collapsed panel keeps its
+          compact "just the Row 1 header" footprint. Default folded
+          (``heatmapExpanded=false``) per spec "預設折起避免佔版面" —
+          operators click the header to reveal the 7d / 30d grid. The
+          ``<SessionHeatmap />`` component only fires its
+          ``fetchTokenHeatmap`` + 60 s polling once mounted, so keeping
+          the section collapsed also avoids hitting the endpoint until
+          the operator actually wants the visualisation. */}
+      {expanded && (
+        <div className="border-t border-[var(--border)]" data-testid="session-heatmap-section">
+          <button
+            type="button"
+            onClick={() => setHeatmapExpanded((v) => !v)}
+            className="w-full px-4 py-2 flex items-center justify-between text-xs font-mono text-[var(--muted-foreground)] hover:bg-[var(--secondary)]/50 transition-colors"
+            aria-expanded={heatmapExpanded}
+            data-testid="session-heatmap-section-toggle"
+          >
+            <span className="flex items-center gap-2 min-w-0">
+              <BarChart3 size={12} className="text-[var(--neural-blue)] shrink-0" />
+              <span>SESSION HEATMAP</span>
+              <span className="text-[9px] text-[var(--muted-foreground)]/60 hidden sm:inline">
+                {heatmapExpanded ? "" : "(7d / 30d)"}
+              </span>
+            </span>
+            <span className="shrink-0">
+              {heatmapExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            </span>
+          </button>
+          {heatmapExpanded && <SessionHeatmap />}
         </div>
       )}
     </div>
