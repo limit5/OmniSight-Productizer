@@ -593,11 +593,58 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                     const failureCount = tstats?.failureCount ?? 0
                     const callCount = tstats?.callCount ?? 0
                     const failureRed = hasToolStats && failureCount > 0
+                    // ZZ.A3 #303-3 (2026-04-24) checkbox 4: p95 outlier
+                    // highlight. Compute p95 from *prior* turns only
+                    // (exclude the latest) so ``latest > p95`` is a
+                    // non-tautological outlier test — otherwise the
+                    // latest turn is always at-or-below p95 of the set
+                    // it belongs to, and the check degenerates into
+                    // ``latest > max - epsilon``. Require ≥4 prior
+                    // samples for the baseline to be meaningful (with
+                    // HISTORY_DEPTH=10, the signal first lights up on
+                    // turn 5). Nearest-rank p95 (``ceil(n * 0.95) - 1``)
+                    // — for small n (<20) this approximates max(prior),
+                    // which is the right "exceeds 95% of recent" signal
+                    // at this sample depth.
+                    const latestLatency = hist.length > 0
+                      ? hist[hist.length - 1].latency
+                      : null
+                    const priorLatencies = hist
+                      .slice(0, -1)
+                      .map((h) => h.latency)
+                      .filter((l) => Number.isFinite(l) && l > 0)
+                    const MIN_PRIOR = 4
+                    let p95Latency: number | null = null
+                    let isOutlier = false
+                    if (
+                      priorLatencies.length >= MIN_PRIOR &&
+                      latestLatency !== null &&
+                      latestLatency > 0
+                    ) {
+                      const sorted = [...priorLatencies].sort((a, b) => a - b)
+                      const idx = Math.min(
+                        sorted.length - 1,
+                        Math.max(0, Math.ceil(sorted.length * 0.95) - 1),
+                      )
+                      p95Latency = sorted[idx]
+                      isOutlier = latestLatency > p95Latency
+                    }
                     return (
                       <div
                         className="flex items-center justify-end gap-2 mb-3"
                         data-testid="turn-mini-stats"
                       >
+                        {isOutlier && (
+                          <span
+                            className="inline-flex items-center gap-0.5 font-mono text-[9px] font-semibold text-[var(--hardware-orange)] animate-pulse"
+                            title={`這 turn 異常慢 — latency ${latestLatency}ms 超過 p95 (${p95Latency}ms) of 最近 ${priorLatencies.length} turns`}
+                            aria-label="This turn is abnormally slow — latency exceeds p95 of recent turns"
+                            data-testid="turn-p95-outlier"
+                          >
+                            <AlertTriangle size={10} />
+                            SLOW
+                          </span>
+                        )}
                         <span
                           className="font-mono text-[9px] text-[var(--muted-foreground)]"
                           title="Average gap between LLM turns (tool exec + event bus + context gather)"
