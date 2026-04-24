@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import {
   ChevronDown,
   ChevronUp,
@@ -138,19 +138,65 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
   // (``usedModels`` set, line ~137). Self-contained — no use-engine
   // wiring needed; the shared ``EventSource`` deduplicates underneath.
   const [contextByModel, setContextByModel] = useState<Record<string, ContextSnapshot>>({})
+  // ZZ.A3 (#303-3, 2026-04-24): per-turn mini-stats for Row 3 right-
+  // aligned "avg gap Xms | tools N / failed M" columns.
+  //
+  // ``turnHistoryByModel``: rolling buffer of the last HISTORY_DEPTH
+  // ``turn_metrics`` events per model (timestamps parsed as epoch ms +
+  // each turn's ``latency_ms``). Used to compute:
+  //     gap_i = (t[i].ts - t[i-1].ts) - t[i].latency_ms
+  // which is the spec's "tool 執行 + event bus 排程 + 等 context gather"
+  // time between LLM calls (ZZ.A3 checkbox 1). Average over the buffer
+  // yields "avg gap" — needs ≥2 turns to produce a value, otherwise
+  // renders "—".
+  //
+  // ``toolStatsByModel``: latest ``turn_tool_stats`` per model. The SSE
+  // event itself carries no model field (summarizer doesn't know which
+  // LLM node ran above it), so we attribute each emission to the model
+  // of the most-recently-seen ``turn_metrics`` via ``lastMetricsModelRef``.
+  // Summarizer fires after ``on_llm_end`` in the same graph run so the
+  // ordering holds; with concurrent agents this is a best-effort
+  // heuristic — good enough for initial UX, documented here for future
+  // tightening (would need backend to add ``model`` to SSETurnToolStats).
+  const HISTORY_DEPTH = 10
+  const [turnHistoryByModel, setTurnHistoryByModel] = useState<Record<string, { ts: number; latency: number }[]>>({})
+  const [toolStatsByModel, setToolStatsByModel] = useState<Record<string, { callCount: number; failureCount: number; failedTools: string[] }>>({})
+  const lastMetricsModelRef = useRef<string | null>(null)
   useEffect(() => {
     const handle = subscribeEvents((event) => {
-      if (event.event !== "turn_metrics") return
-      const d = event.data
-      if (!d.model) return
-      setContextByModel(prev => ({
-        ...prev,
-        [d.model.toLowerCase()]: {
-          tokensUsed: d.tokens_used,
-          contextLimit: d.context_limit,
-          contextUsagePct: d.context_usage_pct,
-        },
-      }))
+      if (event.event === "turn_metrics") {
+        const d = event.data
+        if (!d.model) return
+        const modelKey = d.model.toLowerCase()
+        setContextByModel(prev => ({
+          ...prev,
+          [modelKey]: {
+            tokensUsed: d.tokens_used,
+            contextLimit: d.context_limit,
+            contextUsagePct: d.context_usage_pct,
+          },
+        }))
+        const parsed = d.timestamp ? Date.parse(d.timestamp) : NaN
+        const ts = Number.isFinite(parsed) ? parsed : Date.now()
+        setTurnHistoryByModel(prev => {
+          const prior = prev[modelKey] ?? []
+          const next = [...prior, { ts, latency: d.latency_ms ?? 0 }].slice(-HISTORY_DEPTH)
+          return { ...prev, [modelKey]: next }
+        })
+        lastMetricsModelRef.current = modelKey
+      } else if (event.event === "turn_tool_stats") {
+        const d = event.data
+        const modelKey = lastMetricsModelRef.current
+        if (!modelKey) return
+        setToolStatsByModel(prev => ({
+          ...prev,
+          [modelKey]: {
+            callCount: d.tool_call_count,
+            failureCount: d.tool_failure_count,
+            failedTools: d.failed_tools ?? [],
+          },
+        }))
+      }
     })
     return () => handle.close()
   }, [])
@@ -508,7 +554,7 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                   </div>
                   
                   {/* Row 3: Usage Bar */}
-                  <div className="h-2 rounded-full bg-[var(--border)] overflow-hidden mb-3">
+                  <div className="h-2 rounded-full bg-[var(--border)] overflow-hidden mb-1.5">
                     <div
                       className="h-full rounded-full transition-all duration-500"
                       style={{
@@ -517,6 +563,75 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                       }}
                     />
                   </div>
+
+                  {/* Row 3 mini-stats (ZZ.A3 #303-3, 2026-04-24):
+                      right-aligned "avg gap Xms" + "tools N / failed M"
+                      companions to the Row 3 usage bar. ``avg gap`` is
+                      averaged across up to HISTORY_DEPTH recent turns
+                      of this model (see turn_metrics subscriber above);
+                      needs ≥2 turns to compute, otherwise renders "—".
+                      ``tools / failed`` comes from the latest
+                      turn_tool_stats attributed to this model — the
+                      "failed N" digit goes red + bold when ``N > 0`` so
+                      a glance at the card reveals retry-loop turns.
+                      When no turn_tool_stats has landed for this model
+                      yet, render "tools — / failed —" muted. */}
+                  {(() => {
+                    const modelKey = item.model.toLowerCase()
+                    const hist = turnHistoryByModel[modelKey] ?? []
+                    const gaps: number[] = []
+                    for (let i = 1; i < hist.length; i++) {
+                      const delta = hist[i].ts - hist[i - 1].ts
+                      const g = delta - hist[i].latency
+                      if (Number.isFinite(g) && g >= 0) gaps.push(g)
+                    }
+                    const avgGap = gaps.length > 0
+                      ? Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length)
+                      : null
+                    const tstats = toolStatsByModel[modelKey]
+                    const hasToolStats = !!tstats
+                    const failureCount = tstats?.failureCount ?? 0
+                    const callCount = tstats?.callCount ?? 0
+                    const failureRed = hasToolStats && failureCount > 0
+                    return (
+                      <div
+                        className="flex items-center justify-end gap-2 mb-3"
+                        data-testid="turn-mini-stats"
+                      >
+                        <span
+                          className="font-mono text-[9px] text-[var(--muted-foreground)]"
+                          title="Average gap between LLM turns (tool exec + event bus + context gather)"
+                          data-testid="turn-avg-gap"
+                        >
+                          avg gap {avgGap !== null ? `${avgGap}ms` : "—"}
+                        </span>
+                        <span className="font-mono text-[9px] text-[var(--muted-foreground)]/60">|</span>
+                        <span
+                          className="font-mono text-[9px] text-[var(--muted-foreground)]"
+                          title={
+                            hasToolStats
+                              ? failureCount > 0
+                                ? `tools ${callCount} / failed ${failureCount} — ${(tstats?.failedTools ?? []).join(", ") || "(no tool names reported)"}`
+                                : `tools ${callCount} / failed ${failureCount}`
+                              : "no turn_tool_stats seen for this model yet"
+                          }
+                          data-testid="turn-tool-count"
+                        >
+                          tools {hasToolStats ? callCount : "—"} / failed{" "}
+                          <span
+                            className={
+                              failureRed
+                                ? "text-[var(--critical-red)] font-semibold"
+                                : ""
+                            }
+                            data-testid="turn-failed-count"
+                          >
+                            {hasToolStats ? failureCount : "—"}
+                          </span>
+                        </span>
+                      </div>
+                    )
+                  })()}
 
                   {/* Row 3a (context window): per-turn ``tokens_used /
                       context_limit`` progress bar. ZZ.A2 #303-2 (2026-

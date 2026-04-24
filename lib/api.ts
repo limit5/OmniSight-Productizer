@@ -136,6 +136,26 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  // ─── ZZ.A3 (#303-3) per-turn tool-execution summary ───
+  // Emitted by ``backend/agents/nodes.py::summarizer_node`` once at the
+  // end of every graph run. ``agent_type`` + ``task_id`` identify the
+  // run; ``tool_call_count`` / ``tool_failure_count`` are the aggregates
+  // the TokenUsageStats card's "tools N / failed M" mini-columns render.
+  // ``failed_tools`` preserves order + duplicates (retry loops count).
+  // The event carries NO model field — summarizer doesn't know which
+  // model the LLM node used; the frontend attributes each emission to
+  // the most-recently-seen ``turn_metrics.model`` (same graph run).
+  | {
+      event: "turn_tool_stats"
+      data: {
+        agent_type: string
+        task_id: string | null
+        tool_call_count: number
+        tool_failure_count: number
+        failed_tools: string[]
+        timestamp: string
+      }
+    }
   // ─── Q.2 (#296) new device login alert (broadcast_scope=user) ───
   | {
       event: "security.new_device_login"
@@ -291,6 +311,8 @@ const SSE_EVENT_TYPES = [
   "host.metrics.tick",
   // ─── ZZ.A2 (#303-2) per-turn context-usage snapshot for TokenUsageStats card ───
   "turn_metrics",
+  // ─── ZZ.A3 (#303-3) per-turn tool-execution summary for TokenUsageStats card ───
+  "turn_tool_stats",
   // ─── Q.3-SUB-1 (#297) workflow_run state sync ───
   "workflow_updated",
   // ─── Q.3-SUB-3 (#297) notification read-state sync ───
