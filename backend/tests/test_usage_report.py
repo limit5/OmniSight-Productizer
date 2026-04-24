@@ -145,6 +145,53 @@ class TestHttpMode:
         assert rows[0]["cpu_seconds_total"] == 1000.0
         assert rows[0]["disk_used_gb"] == 0.5
 
+    def test_http_sends_named_user_agent(self, ur, monkeypatch):
+        """Default UA must NOT be ``Python-urllib/*`` — CF Bot Fight Mode.
+
+        Regression guard: Cloudflare Bot Fight Mode (Error 1010
+        "browser_signature_banned") blocks the stdlib default UA. This
+        test ensures every urllib request from the HTTP path carries an
+        explicit, named-tool UA so billing reports from a CF-fronted
+        prod backend work out of the box.
+        """
+        seen: list[dict[str, str]] = []
+
+        def fake_urlopen(req, timeout=10):
+            seen.append({k.lower(): v for k, v in req.header_items()})
+            return _FakeResp(json.dumps({"tenants": []}).encode())
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        ur._rows_http("http://localhost:8000", token=None)
+
+        assert seen, "no HTTP requests captured"
+        for headers in seen:
+            ua = headers.get("user-agent", "")
+            assert ua, f"request missing User-Agent header: {headers}"
+            assert not ua.lower().startswith("python-urllib"), (
+                f"default urllib UA would be blocked by CF Bot Fight Mode: {ua!r}"
+            )
+            assert "omnisight" in ua.lower(), (
+                f"expected a named-tool UA for edge-log attribution, got {ua!r}"
+            )
+
+    def test_http_honours_ua_override_env(self, ur, monkeypatch):
+        """``OMNISIGHT_USAGE_REPORT_UA`` overrides the default UA."""
+        seen: list[str] = []
+
+        def fake_urlopen(req, timeout=10):
+            seen.append(dict(req.header_items()).get("User-agent", ""))
+            return _FakeResp(json.dumps({"tenants": []}).encode())
+
+        monkeypatch.setenv(
+            "OMNISIGHT_USAGE_REPORT_UA",
+            "custom-ops-tool/9.9 (+audit)",
+        )
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        ur._rows_http("http://localhost:8000", token=None)
+
+        assert seen
+        assert all(ua == "custom-ops-tool/9.9 (+audit)" for ua in seen)
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  CLI entry

@@ -75,10 +75,20 @@ def _rows_http(api_url: str, token: str | None) -> list[dict[str, Any]]:
     the backend's ``requests`` / ``httpx`` dependency is *not* imported
     on purpose; billing tooling should stay trivially portable.
     """
+    import os
     import urllib.error
     import urllib.request
 
-    headers = {"Accept": "application/json"}
+    # User-Agent is mandatory against CF-fronted prod — the default
+    # ``Python-urllib/3.x`` signature is flagged by Cloudflare Bot Fight
+    # Mode (Error 1010 "browser_signature_banned"). Override via
+    # OMNISIGHT_USAGE_REPORT_UA if the operator needs a different
+    # identifier for edge-log attribution.
+    ua = os.environ.get(
+        "OMNISIGHT_USAGE_REPORT_UA",
+        "OmniSight-UsageReport/1.0 (+https://github.com/limit5/OmniSight-Productizer)",
+    )
+    headers = {"Accept": "application/json", "User-Agent": ua}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
