@@ -14,9 +14,10 @@ import {
   ArrowDownRight,
   AlertTriangle
 } from "lucide-react"
-import { AI_MODEL_INFO, type AIModel } from "./agent-matrix-wall"
+import { AI_MODEL_INFO, getModelInfo, type AIModel } from "./agent-matrix-wall"
 import { MetricSparkline } from "./host-device-panel"
 import { SessionHeatmap } from "./session-heatmap"
+import { ProviderRollup, groupByProvider } from "./provider-rollup"
 import {
   subscribeEvents,
   fetchTokenBurnRate,
@@ -629,13 +630,34 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
             </div>
           </div>
           
-          {/* Per-Model Usage */}
-          <div className="space-y-2">
-            {sortedData.map(item => {
+          {/* Per-Model Usage — grouped by provider (Z.4 #293 checkbox 3).
+              The flat per-model list was hitting 9+ rows once every
+              configured provider wired credentials; we now collapse one
+              layer by provider so the summary shows aggregated tokens +
+              cost, and the per-model cards reveal on click. Grouping
+              uses `getModelInfo(...).provider` so OpenRouter pass-through
+              models (`anthropic/claude-*`) currently bucket under their
+              resolved vendor ("Anthropic") — the OpenRouter namespace
+              special-case that puts them under "OpenRouter" is checkbox 4
+              and ships separately. */}
+          <ProviderRollup
+            groups={groupByProvider(sortedData, (model) => {
+              const info = getModelInfo(model)
+              return { provider: info.provider, color: info.color }
+            })}
+            grandTotalTokens={totals.totalTokens}
+            // Default the per-provider groups to expanded so the per-model
+            // cards (context bar, cache bar, turn stats, etc.) stay visible
+            // on first mount — the summary row is additive context above
+            // the existing detail rows. Operators who want the compact
+            // summary-only view can collapse each provider manually; the
+            // rollup's per-instance state (see module-global audit in
+            // provider-rollup.tsx) remembers their choice for the life of
+            // the panel mount.
+            defaultExpanded
+            renderRow={(item) => {
               const modelInfo = AI_MODEL_INFO[item.model]
               const isSelected = selectedModel === item.model
-              // Guard against 0/0 NaN for placeholder rows (configured
-              // provider, no usage yet). Treat no-usage as 0%.
               const usagePercent = totals.totalTokens > 0
                 ? (item.totalTokens / totals.totalTokens) * 100
                 : 0
@@ -643,7 +665,6 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
 
               return (
                 <button
-                  key={item.model}
                   onClick={() => setSelectedModel(isSelected ? null : item.model)}
                   className={`w-full text-left p-3 rounded-lg transition-all ${
                     isSelected
@@ -1113,8 +1134,8 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                   )}
                 </button>
               )
-            })}
-          </div>
+            }}
+          />
         </div>
       )}
 
