@@ -725,6 +725,17 @@ async def jira_webhook(request: Request):
         return JSONResponse(status_code=401, content={"detail": "Invalid token"})
 
     event = await request.json()
+
+    # Y-prep.3 (#289) — automation dispatcher fires for ALL events regardless
+    # of whether an internal Task matches the issue key. The existing
+    # status-sync path below only fires when there IS a match; the two paths
+    # are independent. Dispatcher failures are logged but must not block the
+    # status-sync path (best-effort).
+    try:
+        await _on_jira_event(event)
+    except Exception as exc:
+        logger.warning("_on_jira_event dispatch failed (non-critical): %s", exc)
+
     issue_key = event.get("issue", {}).get("key", "")
 
     task = _find_task_by_issue_url(issue_key)
@@ -741,3 +752,93 @@ async def jira_webhook(request: Request):
             return await _sync_external_to_task(task, new_status, "jira")
 
     return {"status": "ok", "event": "no_status_change"}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  JIRA inbound event dispatcher (Y-prep.3 / #289)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def _on_jira_event(event: dict) -> None:
+    """Parse JIRA ``webhookEvent`` and route to the matching handler.
+
+    JIRA Cloud sends a top-level ``webhookEvent`` string identifying the
+    event kind (`jira:issue_created` / `jira:issue_updated` /
+    `comment_created` / `comment_updated` / …). This dispatcher normalises
+    that string, routes to the matching ``_on_jira_*`` handler, and returns.
+
+    The three handler stubs below are intentionally minimal — they log the
+    event and return without side-effects. The follow-up Y-prep.3 bullet
+    (``backend/jira_event_router.py``) will replace each stub body with the
+    real action: `/command` comment → CATC ``jira_command`` emit, status →
+    Done → artifact packaging, intake-label → ``intent_bridge`` CATC task
+    creation. Keeping the dispatcher and the action logic in separate
+    commits matches Y-prep.3's bullet ordering and keeps the blast radius of
+    each step small.
+
+    Module-global state audit: this dispatcher is a pure function taking
+    ``event`` as input. No module-level caches or singletons; each worker
+    processes events independently (qualified answer #1: "not shared — each
+    worker derives the same routing from the same payload").
+    """
+    webhook_event = (event.get("webhookEvent") or "").strip()
+    if not webhook_event:
+        logger.debug("JIRA webhook: missing webhookEvent field; ignoring")
+        return
+
+    # Comment events carry an additional `comment.*` sub-event indicator in
+    # some JIRA versions; prefer the top-level string when present.
+    logger.info("JIRA webhook event: %s", webhook_event)
+
+    if webhook_event == "comment_created":
+        await _on_jira_comment_created(event)
+    elif webhook_event == "comment_updated":
+        # Same shape as `comment_created`; route to the same handler so that
+        # edited commands are re-evaluated. Negative-path filters (e.g.
+        # "only `/command` lines trigger") live inside the handler.
+        await _on_jira_comment_created(event)
+    elif webhook_event == "jira:issue_updated":
+        await _on_jira_issue_updated(event)
+    elif webhook_event == "jira:issue_created":
+        await _on_jira_issue_created(event)
+    else:
+        logger.debug("JIRA webhook: unhandled event type %r", webhook_event)
+
+
+async def _on_jira_comment_created(event: dict) -> None:
+    """Stub — filled in by the Y-prep.3 `jira_event_router.py` bullet.
+
+    Planned behaviour: when the comment body starts with ``/<command>``,
+    emit a ``jira_command`` CATC event that the O5 IntentSource consumes to
+    trigger an agent. Non-command comments are ignored.
+    """
+    logger.debug(
+        "JIRA comment_created stub: issue=%s (handler pending Y-prep.3 router)",
+        (event.get("issue") or {}).get("key", ""),
+    )
+
+
+async def _on_jira_issue_updated(event: dict) -> None:
+    """Stub — filled in by the Y-prep.3 `jira_event_router.py` bullet.
+
+    Planned behaviour: when the changelog shows a status transition whose
+    ``toString`` is in the configured whitelist (default ``Done``/``Closed``),
+    trigger the artifact packaging pipeline (reusing the Gerrit
+    change-merged artifact path).
+    """
+    logger.debug(
+        "JIRA issue_updated stub: issue=%s (handler pending Y-prep.3 router)",
+        (event.get("issue") or {}).get("key", ""),
+    )
+
+
+async def _on_jira_issue_created(event: dict) -> None:
+    """Stub — filled in by the Y-prep.3 `jira_event_router.py` bullet.
+
+    Planned behaviour: when the created issue carries the configured intake
+    label (default ``omnisight-intake``), call ``intent_bridge`` to create
+    a CATC task.
+    """
+    logger.debug(
+        "JIRA issue_created stub: issue=%s (handler pending Y-prep.3 router)",
+        (event.get("issue") or {}).get("key", ""),
+    )
