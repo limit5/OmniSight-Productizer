@@ -500,3 +500,169 @@ async def test_put_appears_in_migrator_tables_in_order():
     # PK is composite TEXT — must NOT be in the IDENTITY subset
     # (which would crash sequence-reset at cutover time).
     assert "user_drafts" not in mig.TABLES_WITH_IDENTITY_ID
+
+
+# ── Q.6 checkbox 3: dedicated 24h GC loop ────────────────────────
+
+
+async def test_gc_sweep_drops_stale_rows(pg_test_pool, pg_test_dsn, monkeypatch):
+    """``user_drafts_gc.sweep_once`` must remove rows older than the
+    24 h retention window. The contract mirrors the opportunistic
+    sweep in the PUT handler, but this codepath runs even when no
+    HTTP traffic is hitting the worker."""
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+
+    from backend import db as _db
+    from backend import user_drafts_gc as gc
+
+    if _db._db is not None:
+        await _db.close()
+    await _db.init()
+    try:
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE user_drafts RESTART IDENTITY CASCADE")
+            await conn.execute(
+                "INSERT INTO user_drafts (user_id, slot_key, content, "
+                "updated_at, tenant_id) VALUES "
+                "($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)",
+                "u-fresh", "invoke:main", "new", time.time(), "t-default",
+                "u-stale", "chat:main", "old",
+                time.time() - (25 * 3600), "t-default",
+            )
+
+        deleted = await gc.sweep_once()
+        assert deleted >= 1
+
+        async with pg_test_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id FROM user_drafts ORDER BY user_id"
+            )
+        assert [r["user_id"] for r in rows] == ["u-fresh"]
+    finally:
+        await _db.close()
+
+
+async def test_gc_sweep_idempotent_on_clean_table(pg_test_pool, pg_test_dsn, monkeypatch):
+    """On a table whose rows are all inside the 24 h window the sweep
+    must be a safe no-op (0 deleted, no exception). Guards against
+    DELETE-without-predicate regressions."""
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+
+    from backend import db as _db
+    from backend import user_drafts_gc as gc
+
+    if _db._db is not None:
+        await _db.close()
+    await _db.init()
+    try:
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE user_drafts RESTART IDENTITY CASCADE")
+            await conn.execute(
+                "INSERT INTO user_drafts (user_id, slot_key, content, "
+                "updated_at, tenant_id) VALUES ($1, $2, $3, $4, $5)",
+                "u-fresh", "invoke:main", "new", time.time(), "t-default",
+            )
+        deleted = await gc.sweep_once()
+        assert deleted == 0
+        async with pg_test_pool.acquire() as conn:
+            remaining = await conn.fetchval(
+                "SELECT COUNT(*) FROM user_drafts WHERE user_id = 'u-fresh'"
+            )
+        assert remaining == 1
+    finally:
+        await _db.close()
+
+
+async def test_gc_loop_exits_cleanly_on_cancel(monkeypatch):
+    """The background loop must release the ``_LOOP_RUNNING`` flag on
+    cancellation so a subsequent start (e.g. lifespan restart in a
+    reload-under-test) succeeds. Mirrors the DLQ loop guarantee."""
+    import asyncio as _aio
+
+    from backend import user_drafts_gc as gc
+
+    gc._reset_for_tests()
+
+    # Drive the body fast so we don't wait for the real 1 h interval.
+    async def _noop_sweep() -> int:
+        return 0
+    monkeypatch.setattr(gc, "sweep_once", _noop_sweep)
+
+    task = _aio.create_task(gc.run_gc_loop(interval_s=0.01))
+    await _aio.sleep(0.05)
+    assert gc._LOOP_RUNNING is True
+
+    task.cancel()
+    try:
+        await task
+    except _aio.CancelledError:
+        pass
+
+    assert gc._LOOP_RUNNING is False
+    assert task.done()
+
+
+async def test_gc_loop_second_start_is_noop(monkeypatch):
+    """Singleton guard: calling ``run_gc_loop`` while one is already
+    running must return immediately without blocking. Prevents two
+    sweeps from racing against the same pool in a single worker."""
+    import asyncio as _aio
+
+    from backend import user_drafts_gc as gc
+
+    gc._reset_for_tests()
+
+    async def _noop_sweep() -> int:
+        return 0
+    monkeypatch.setattr(gc, "sweep_once", _noop_sweep)
+
+    t1 = _aio.create_task(gc.run_gc_loop(interval_s=0.01))
+    await _aio.sleep(0.05)
+    assert gc._LOOP_RUNNING is True
+
+    result = await _aio.wait_for(gc.run_gc_loop(interval_s=0.01), timeout=0.5)
+    assert result is None  # early return, did not block
+
+    t1.cancel()
+    try:
+        await t1
+    except _aio.CancelledError:
+        pass
+    gc._reset_for_tests()
+
+
+async def test_gc_loop_survives_sweep_errors(monkeypatch):
+    """If one sweep raises (transient PG hiccup, pool exhaustion),
+    the loop must log + carry on to the next tick instead of dying.
+    This is the "idle workers need this" correctness property — the
+    loop has to keep running once started."""
+    import asyncio as _aio
+
+    from backend import user_drafts_gc as gc
+
+    gc._reset_for_tests()
+
+    call_count = {"n": 0}
+
+    async def _flaky_sweep() -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("transient boom")
+        return 0
+    monkeypatch.setattr(gc, "sweep_once", _flaky_sweep)
+
+    task = _aio.create_task(gc.run_gc_loop(interval_s=0.01))
+    # Wait long enough for ≥ 2 ticks (first raises, second returns 0).
+    await _aio.sleep(0.15)
+
+    assert call_count["n"] >= 2, (
+        f"loop died after the first sweep raised; only {call_count['n']} "
+        "call(s) observed — expected the loop to catch and continue."
+    )
+
+    task.cancel()
+    try:
+        await task
+    except _aio.CancelledError:
+        pass
+    gc._reset_for_tests()

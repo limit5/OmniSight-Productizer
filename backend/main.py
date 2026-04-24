@@ -217,6 +217,11 @@ async def lifespan(app: FastAPI):
     # and triggers LRU cleanup when over soft threshold.
     from backend import tenant_quota as _tq
     quota_task = asyncio.create_task(_tq.run_quota_sweep_loop())
+    # Q.6 #300 checkbox 3: dedicated user_drafts 24h retention sweep.
+    # Opportunistic GC on PUT only bounds active typers; idle workers
+    # need this explicit loop to prevent stale drafts from lingering.
+    from backend import user_drafts_gc as _ud_gc
+    drafts_gc_task = asyncio.create_task(_ud_gc.run_gc_loop())
     # M4: cgroup per-container sampler → per-tenant Prometheus gauges +
     # billing accumulator. Lifespan-scoped so it starts with the app
     # and stops cleanly at shutdown.
@@ -245,7 +250,7 @@ async def lifespan(app: FastAPI):
         _log.info("[lifecycle] graceful_shutdown result: %s", result)
     except Exception as exc:
         _log.warning("[lifecycle] graceful_shutdown raised: %s", exc)
-    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task, quota_task, host_metrics_task, host_ringbuf_task):
+    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task, quota_task, drafts_gc_task, host_metrics_task, host_ringbuf_task):
         t.cancel()
         try:
             await t
