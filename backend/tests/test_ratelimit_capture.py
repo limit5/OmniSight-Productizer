@@ -465,3 +465,153 @@ class TestUnknownProviderSkipsEndToEnd:
         cb_oll.on_llm_end(_result_with_headers({}))
 
         assert fresh_kv.get_all_with_ttl() == {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Z.5 (#294) — Slim regression net for the rate-limit capture pipeline
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The Z.5 checkbox spells the matrix as "四家 provider 的 header 解析、
+# TTL 過期、unknown provider 跳過" — three canonical locks against drift,
+# kept intentionally tight even as the comprehensive Z.1 classes above
+# (TestFourProviderNormalise / TestFourProviderSharedKVWrite /
+# TestFourProviderCoexistence / TestFourProviderTTLExpiry /
+# TestUnknownProviderSkipsEndToEnd) expand. These three tests are
+# dependency-free (no real Redis, no HTTP) so they remain runnable as
+# a sub-second smoke subset via ``pytest -k TestZ5RatelimitRegressionNet``.
+#
+# Mirrors the Z.5 ``test_pricing.py`` pattern: slim canonical regression
+# class that references the comprehensive suites exist elsewhere but locks
+# the exact regression matrix from the Z.5 checkbox wording.
+#
+# Module-global audit (SOP Step 1, 2026-04-21 rule)
+# ─────────────────────────────────────────────────
+# Each test consumes the existing ``fresh_kv`` + ``silent_track_tokens``
+# fixtures, both of which monkeypatch the per-process singletons back to
+# a clean state before / after each case. No new module-level mutable
+# state is introduced. ``time.time`` monkeypatching is scoped to the
+# individual test via pytest's ``monkeypatch`` fixture (auto-rolled-back
+# at teardown) — no cross-test clock pollution. Per the SOP rubric:
+# answer #1 ("derived from shared static source") for the static
+# ``_PROVIDER_RATELIMIT_HEADERS`` mapping every worker re-derives, and
+# answer #3 ("deliberately per-worker") for the in-memory SharedKV
+# fallback the test exercises (Redis-coordinated in production per the
+# SharedKV contract).
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestZ5RatelimitRegressionNet:
+    """One canonical lock per dimension of the Z.1 rate-limit contract.
+
+    The richer per-branch matrices already live above
+    (TestFourProviderNormalise + TestFourProviderTTLExpiry +
+    TestUnknownProviderSkipsEndToEnd). This class is the Z.5 regression
+    *net* — tripping any of the three cases flags a load-bearing
+    invariant break and signals where to look in the wider suite.
+    """
+
+    @pytest.mark.parametrize(
+        "provider,model,headers,expected", PROVIDER_CASES,
+    )
+    def test_four_provider_header_parse(
+        self, silent_track_tokens, fresh_kv,
+        provider, model, headers, expected,
+    ):
+        """Dimension 1: 四家 provider 的 header 解析.
+
+        Realistic vendor-shaped headers from each of Anthropic /
+        OpenAI / DeepSeek / OpenRouter must round-trip through
+        ``on_llm_end`` into the unified
+        ``{remaining_requests, remaining_tokens, reset_at_ts,
+        retry_after_s}`` dict AND land under the per-provider
+        ``SharedKV("provider_ratelimit")`` key. A schema drift in
+        ``_PROVIDER_RATELIMIT_HEADERS`` (vendor renames a header,
+        someone accidentally drops one of the four providers from
+        the mapping) trips both the in-memory state assertion and
+        the SharedKV mirror assertion in this test.
+        """
+        cb = TokenTrackingCallback(model, provider=provider)
+        cb.on_llm_start()
+        cb.on_llm_end(_result_with_headers(headers))
+
+        # In-memory snapshot carries the unified contract values.
+        state = cb.last_ratelimit_state
+        assert state, f"{provider} produced empty ratelimit_state"
+        for k, v in expected.items():
+            assert state[k] == v, (
+                f"{provider}.{k}: expected {v!r}, got {state[k]!r}"
+            )
+        assert isinstance(state["reset_at_ts"], float)
+
+        # SharedKV mirror is byte-identical — the in-memory snapshot
+        # and the cross-worker view must never diverge.
+        stored = fresh_kv.get_with_ttl(provider)
+        assert stored == cb.last_ratelimit_state, (
+            f"{provider} SharedKV diverged from in-memory snapshot"
+        )
+
+    def test_ttl_expiry_60s_end_to_end(
+        self, silent_track_tokens, fresh_kv, monkeypatch,
+    ):
+        """Dimension 2: TTL 過期.
+
+        Write at frozen t=1000 with a real ``on_llm_end`` round-trip;
+        live at t+30s; pruned at t+61s. The pruning is destructive —
+        the raw hash row is gone, not just masked on read — so a
+        regression that switched ``set_with_ttl`` to a soft-expire
+        envelope (lazy-evict-only-on-get-with-ttl, raw entry leaks)
+        would trip the destructive-prune assertion.
+
+        Locks the constant at ``_RATELIMIT_TTL_SECONDS == 60.0`` to
+        catch a silent retune (someone bumps it to 5 minutes for
+        "convenience" and breaks the dashboard's freshness guarantee).
+        """
+        assert _RATELIMIT_TTL_SECONDS == 60.0
+        monkeypatch.setattr(time, "time", lambda: 1000.0)
+
+        cb = TokenTrackingCallback("claude-opus-4-7", provider="anthropic")
+        cb.on_llm_start()
+        cb.on_llm_end(_result_with_headers(ANTHROPIC_HEADERS))
+
+        # Mid-window — entry live.
+        assert fresh_kv.get_with_ttl("anthropic", now=1030.0) is not None
+        # Just past the 60 s window — pruned and destructive.
+        assert fresh_kv.get_with_ttl("anthropic", now=1061.0) is None
+        assert fresh_kv.get("anthropic", default="__missing__") == "__missing__"
+
+    def test_unknown_provider_skip_preserves_siblings(
+        self, silent_track_tokens, fresh_kv,
+    ):
+        """Dimension 3: unknown provider 跳過.
+
+        An Ollama turn (provider absent from
+        ``_PROVIDER_RATELIMIT_HEADERS``) interleaved between two live
+        sibling turns must:
+
+        (a) NOT write under the unknown provider key — there is no
+            mapping, so any normalised payload would be empty.
+        (b) NOT clobber the live siblings' entries — the dashboard
+            invariant is that one provider's turn cannot delete
+            another provider's snapshot.
+
+        A regression that wrote ``{}`` under the unknown key, or that
+        wiped sibling keys on every turn, would trip this test.
+        """
+        cb_a = TokenTrackingCallback("claude-opus-4-7", provider="anthropic")
+        cb_a.on_llm_start()
+        cb_a.on_llm_end(_result_with_headers(ANTHROPIC_HEADERS))
+
+        cb_oll = TokenTrackingCallback("llama3.1", provider="ollama")
+        cb_oll.on_llm_start()
+        cb_oll.on_llm_end(_result_with_headers({}))
+
+        cb_o = TokenTrackingCallback("gpt-4o", provider="openai")
+        cb_o.on_llm_start()
+        cb_o.on_llm_end(_result_with_headers(OPENAI_HEADERS))
+
+        snap = fresh_kv.get_all_with_ttl()
+        assert set(snap.keys()) == {"anthropic", "openai"}, (
+            f"Ollama turn must skip + preserve siblings; got {snap}"
+        )
+        assert snap["anthropic"]["remaining_requests"] == 987
+        assert snap["openai"]["remaining_requests"] == 9998
