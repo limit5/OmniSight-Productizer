@@ -108,6 +108,25 @@ UI_FRAMEWORKS: frozenset[str] = frozenset({
 ``resolve_ui_framework`` for the detection order."""
 
 
+SUPPORTED_ANDROID_EMULATOR_ACTIONS: frozenset[str] = frozenset({
+    "create",
+    "start",
+})
+"""P11 #351 checkbox 3 — recognized ``action`` values for
+``android_emulator_command``. Maps 1:1 to Google's Android CLI
+emulator sub-commands shipped 2026-04-18:
+
+* ``create`` → ``android emulator create <avd_name>`` (replaces
+  operator-side ``avdmanager create avd …`` / manual AVD config).
+* ``start``  → ``android emulator start <avd_name>`` (replaces the
+  legacy ``$ANDROID_HOME/emulator/emulator -avd <name>`` invocation
+  baked into ``boot_android_emulator``).
+
+Screenshots remain on ``adb shell screencap`` (see
+``adb_screencap_command``) — Google's Android CLI does not yet
+expose a screenshot sub-command."""
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Error hierarchy
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -124,6 +143,11 @@ class UnknownDeviceFarmError(MobileSimError):
 class UnsupportedProfileError(MobileSimError):
     """Profile's ``target_kind`` is not ``mobile`` or platform is neither
     ``ios`` nor ``android``."""
+
+
+class UnknownAndroidEmulatorActionError(MobileSimError):
+    """``android_emulator_command`` called with an action outside
+    ``SUPPORTED_ANDROID_EMULATOR_ACTIONS`` (P11 #351 checkbox 3)."""
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -204,6 +228,117 @@ class MobileSimResult:
 
     def overall_pass(self) -> bool:
         return all(self.gates.values()) and not self.errors
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Android CLI emulator helpers (P11 #351 checkbox 3)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def android_cli_available() -> bool:
+    """True when Google's Android CLI (``android`` binary distributed
+    from ``d.android.com/tools/agents``) is on PATH.
+
+    ``boot_android_emulator`` uses this to pick between the P11 #351
+    fast path (``android emulator start``) and the legacy
+    ``$ANDROID_HOME/emulator/emulator -avd`` fallback. Deliberately
+    **not cached** — an operator may run
+    ``scripts/install_android_cli.sh`` mid-session and the boot path
+    must see it on the next call.
+    """
+    return shutil.which("android") is not None
+
+
+def android_emulator_command(
+    action: str,
+    avd_name: str,
+    *,
+    api_level: str = "",
+    extra_args: Sequence[str] = (),
+) -> list[str]:
+    """Emit the ``android emulator <action> …`` argv (P11 #351 checkbox 3).
+
+    Pure command builder — does not probe the host, invoke subprocess,
+    or fall back. Callers gate on ``android_cli_available()`` and route
+    to the legacy ``emulator`` binary branch when ``False``.
+
+    =====================  ===============================================
+    action                 emitted argv
+    =====================  ===============================================
+    ``"create"``           ``android emulator create <avd_name>
+                           [--api-level <N>] [extra_args]``
+    ``"start"``            ``android emulator start <avd_name> [extra_args]``
+    =====================  ===============================================
+
+    Action tokens are case-insensitive and hyphen/underscore interchangeable.
+
+    Parameters
+    ----------
+    action
+        One of ``SUPPORTED_ANDROID_EMULATOR_ACTIONS``.
+    avd_name
+        AVD identifier (e.g. ``omnisight_pixel8_api34``). Required for
+        both actions — ``android emulator start`` without a target AVD
+        prints usage; we reject upstream so callers get a deterministic
+        error rather than a silently-launched "default" AVD.
+    api_level
+        Optional API level (e.g. ``"34"``). Only consumed by ``create``;
+        passed as ``--api-level <N>``. Ignored for ``start``.
+    extra_args
+        Appended verbatim after the required positional(s). Typical
+        uses: ``("-no-window", "-no-audio")`` for headless ``start``,
+        ``("--device", "pixel_8")`` for ``create``.
+
+    Returns
+    -------
+    list[str]
+        argv suitable for ``subprocess.run`` / ``subprocess.Popen``.
+        Does NOT invoke.
+
+    Raises
+    ------
+    UnknownAndroidEmulatorActionError
+        ``action`` is not in ``SUPPORTED_ANDROID_EMULATOR_ACTIONS``.
+    ValueError
+        ``avd_name`` is empty.
+    """
+    norm = action.strip().lower().replace("_", "-")
+    if norm not in SUPPORTED_ANDROID_EMULATOR_ACTIONS:
+        raise UnknownAndroidEmulatorActionError(
+            f"android_emulator_command: action={action!r} is not supported; "
+            f"valid values: {sorted(SUPPORTED_ANDROID_EMULATOR_ACTIONS)}"
+        )
+    if not avd_name:
+        raise ValueError(
+            "android_emulator_command requires a non-empty avd_name "
+            "(e.g. 'omnisight_pixel8_api34')"
+        )
+    argv: list[str] = ["android", "emulator", norm, avd_name]
+    if norm == "create" and api_level:
+        argv.extend(["--api-level", str(api_level)])
+    argv.extend(extra_args)
+    return argv
+
+
+def adb_screencap_command(
+    *,
+    remote_path: str = "/sdcard/screencap.png",
+    extra_args: Sequence[str] = (),
+) -> list[str]:
+    """Emit the ``adb shell screencap -p <remote_path>`` argv.
+
+    Preserved alongside the Android CLI emulator fast path (P11 #351
+    checkbox 3) — Google's Android CLI does not yet expose a
+    screenshot sub-command, so captures continue to flow through adb
+    regardless of whether the emulator was launched by
+    ``android emulator start`` or the legacy ``emulator -avd`` binary.
+
+    Pure command builder. The caller still needs a follow-up
+    ``adb pull <remote_path> <local_path>`` to retrieve the PNG.
+    """
+    argv: list[str] = ["adb", "shell", "screencap", "-p", remote_path]
+    argv.extend(extra_args)
+    return argv
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -336,33 +471,61 @@ def boot_android_emulator(
     api_level: str = "",
     env: Optional[Mapping[str, str]] = None,
 ) -> EmulatorBootReport:
-    """``$ANDROID_HOME/emulator/emulator -avd <name>`` wrapper.
+    """Android emulator boot wrapper with P11 #351 Android-CLI fast path.
 
-    We don't block on full boot — we check ``adb shell getprop
-    sys.boot_completed`` once with a short timeout. Absent adb/emulator
-    falls back to ``mock`` so a sandboxed runner still produces a
-    report.
+    Launch strategy:
+      1. If Google's Android CLI is on PATH → ``android emulator start
+         <avd_name> -no-window -no-audio -no-snapshot`` (P11 #351
+         checkbox 3 fast path — 3× faster / 70% less token per Google
+         2026-04-18 benchmark).
+      2. Else if legacy ``$ANDROID_HOME/emulator/emulator`` is on PATH
+         → ``emulator -avd <name> -no-window -no-audio -no-snapshot``
+         (pre-P11 path — retained so operator-incomplete hosts keep
+         building).
+      3. Else → ``status="mock"`` so a sandboxed / Linux-sans-SDK
+         runner still produces a structured report rather than hanging.
+
+    Either launcher feeds back into the same ``adb shell getprop
+    sys.boot_completed`` probe — adb is always required because boot
+    completion detection is intrinsic to Android's boot protocol, not
+    the emulator wrapper. The detail string carries
+    ``android-cli: …`` / ``legacy-emulator: …`` so operators can
+    tell which path ran without re-reading the source.
     """
     src = env if env is not None else os.environ
     name = (src.get("OMNISIGHT_ANDROID_AVD_NAME") or "").strip() or avd_name or "omnisight_pixel8_api34"
     level = (src.get("OMNISIGHT_ANDROID_API_LEVEL") or "").strip() or api_level or "34"
 
+    cli_path = shutil.which("android")
     emu = shutil.which("emulator")
     adb = shutil.which("adb")
-    if not emu or not adb:
+    if not adb or (not cli_path and not emu):
         return EmulatorBootReport(
             status="mock",
             kind="avd",
             device_model=name,
             runtime=f"API {level}",
-            detail="emulator/adb not on PATH",
+            detail="android CLI / emulator / adb not on PATH",
         )
+
+    if cli_path:
+        launch_argv = android_emulator_command(
+            "start",
+            avd_name=name,
+            extra_args=("-no-window", "-no-audio", "-no-snapshot"),
+        )
+        launch_argv[0] = cli_path
+        launcher_kind = "android-cli"
+    else:
+        launch_argv = [emu, "-avd", name, "-no-window", "-no-audio", "-no-snapshot"]
+        launcher_kind = "legacy-emulator"
+
     try:
         # Start the emulator in the background — a real runner would
         # wait on boot_completed; we keep P2 synchronous by just
         # attempting a boot check with a tight timeout.
         subprocess.Popen(
-            [emu, "-avd", name, "-no-window", "-no-audio", "-no-snapshot"],
+            launch_argv,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         probe = subprocess.run(
@@ -370,18 +533,19 @@ def boot_android_emulator(
             capture_output=True, text=True, timeout=30,
         )
         booted = probe.returncode == 0 and probe.stdout.strip() == "1"
+        body = (probe.stdout or probe.stderr or "").strip()
         return EmulatorBootReport(
             status="booted" if booted else "fail",
             kind="avd",
             device_model=name,
             runtime=f"API {level}",
-            detail=(probe.stdout or probe.stderr or "")[:200],
+            detail=f"{launcher_kind}: {body}"[:200],
         )
     except Exception as exc:  # noqa: BLE001
         return EmulatorBootReport(
             status="fail", kind="avd",
             device_model=name, runtime=f"API {level}",
-            detail=f"boot error: {exc}",
+            detail=f"{launcher_kind} boot error: {exc}",
         )
 
 

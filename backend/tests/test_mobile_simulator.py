@@ -136,6 +136,177 @@ class TestEmulatorBoot:
         assert report.device_model == "myavd"
         assert "33" in report.runtime
 
+    def test_android_mock_when_adb_absent_even_with_cli(self, monkeypatch):
+        """P11 #351 checkbox 3 — adb is always required. Android CLI
+        present but no adb ⇒ still mock (can't probe boot_completed)."""
+        _stub_which(monkeypatch, {"android": "/usr/local/bin/android"})
+        report = ms.boot_android_emulator()
+        assert report.status == "mock"
+        assert "adb" in report.detail
+
+    def test_android_cli_fast_path_launch_argv(self, monkeypatch):
+        """P11 #351 checkbox 3 fast path — when both `android` CLI and
+        `adb` are on PATH, boot spawns `android emulator start <avd>`
+        rather than the legacy `emulator -avd` binary."""
+        _stub_which(monkeypatch, {
+            "android": "/usr/local/bin/android",
+            "adb": "/usr/bin/adb",
+            # Deliberately no "emulator" — proves CLI path doesn't need it.
+        })
+        launched: list[list[str]] = []
+
+        class _FakePopen:
+            def __init__(self, argv, **_kwargs):
+                launched.append(list(argv))
+
+        monkeypatch.setattr(ms.subprocess, "Popen", _FakePopen)
+
+        class _Proc:
+            returncode = 0
+            stdout = "1\n"
+            stderr = ""
+
+        monkeypatch.setattr(ms.subprocess, "run", lambda *a, **k: _Proc())
+
+        report = ms.boot_android_emulator(avd_name="p11_avd")
+        assert report.status == "booted"
+        assert report.detail.startswith("android-cli:")
+        assert len(launched) == 1
+        argv = launched[0]
+        # Resolved `android` binary path (not the literal "android" token).
+        assert argv[0] == "/usr/local/bin/android"
+        assert argv[1:4] == ["emulator", "start", "p11_avd"]
+        # Headless flags propagate through extra_args.
+        assert "-no-window" in argv
+
+    def test_android_legacy_fallback_when_cli_missing(self, monkeypatch):
+        """Fallback — `android` CLI absent but legacy `emulator` + `adb`
+        present ⇒ pre-P11 `emulator -avd` path still works."""
+        _stub_which(monkeypatch, {
+            "emulator": "/opt/sdk/emulator/emulator",
+            "adb": "/usr/bin/adb",
+        })
+        launched: list[list[str]] = []
+        monkeypatch.setattr(
+            ms.subprocess, "Popen",
+            lambda argv, **_kwargs: launched.append(list(argv)) or object(),
+        )
+
+        class _Proc:
+            returncode = 0
+            stdout = "1\n"
+            stderr = ""
+
+        monkeypatch.setattr(ms.subprocess, "run", lambda *a, **k: _Proc())
+
+        report = ms.boot_android_emulator(avd_name="legacy_avd")
+        assert report.status == "booted"
+        assert report.detail.startswith("legacy-emulator:")
+        assert launched[0][0] == "/opt/sdk/emulator/emulator"
+        assert "-avd" in launched[0] and "legacy_avd" in launched[0]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Android CLI emulator helpers (P11 #351 checkbox 3)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestAndroidEmulatorHelpers:
+    def test_supported_emulator_actions_are_create_and_start(self):
+        assert ms.SUPPORTED_ANDROID_EMULATOR_ACTIONS == frozenset({"create", "start"})
+
+    def test_android_cli_available_proxies_shutil_which(self, monkeypatch):
+        monkeypatch.setattr(ms.shutil, "which", lambda name: None)
+        assert ms.android_cli_available() is False
+        monkeypatch.setattr(
+            ms.shutil, "which",
+            lambda name: "/usr/local/bin/android" if name == "android" else None,
+        )
+        assert ms.android_cli_available() is True
+
+    def test_emulator_command_start_emits_expected_argv(self):
+        argv = ms.android_emulator_command("start", "omnisight_pixel8_api34")
+        assert argv == ["android", "emulator", "start", "omnisight_pixel8_api34"]
+
+    def test_emulator_command_create_emits_expected_argv_with_api_level(self):
+        argv = ms.android_emulator_command(
+            "create", "omnisight_pixel8_api34", api_level="34",
+        )
+        assert argv == [
+            "android", "emulator", "create", "omnisight_pixel8_api34",
+            "--api-level", "34",
+        ]
+
+    def test_emulator_command_create_without_api_level_omits_flag(self):
+        argv = ms.android_emulator_command("create", "demo_avd")
+        assert argv == ["android", "emulator", "create", "demo_avd"]
+        assert "--api-level" not in argv
+
+    def test_emulator_command_start_ignores_api_level(self):
+        # api_level is a `create`-only knob — must not leak into start argv
+        # (the CLI would reject it and the caller would get a confusing
+        # error).
+        argv = ms.android_emulator_command(
+            "start", "demo_avd", api_level="34",
+        )
+        assert "--api-level" not in argv
+        assert argv == ["android", "emulator", "start", "demo_avd"]
+
+    def test_emulator_command_appends_extra_args(self):
+        argv = ms.android_emulator_command(
+            "start", "demo_avd",
+            extra_args=("-no-window", "-no-audio"),
+        )
+        assert argv[-2:] == ["-no-window", "-no-audio"]
+
+    def test_emulator_command_case_and_separator_insensitive(self):
+        for token in ("Start", "START", " start "):
+            argv = ms.android_emulator_command(token, "demo_avd")
+            assert argv[2] == "start"
+        for token in ("Create",):
+            argv = ms.android_emulator_command(token, "demo_avd")
+            assert argv[2] == "create"
+
+    def test_emulator_command_unknown_action_raises(self):
+        with pytest.raises(ms.UnknownAndroidEmulatorActionError):
+            ms.android_emulator_command("destroy", "demo_avd")
+        with pytest.raises(ms.UnknownAndroidEmulatorActionError):
+            ms.android_emulator_command("run", "demo_avd")
+
+    def test_emulator_command_empty_avd_name_raises(self):
+        with pytest.raises(ValueError):
+            ms.android_emulator_command("start", "")
+        with pytest.raises(ValueError):
+            ms.android_emulator_command("create", "")
+
+    def test_emulator_command_is_pure_and_does_not_probe_host(self, monkeypatch):
+        """Regression gate — argv construction must never call
+        shutil.which / subprocess. Caller composes host probe +
+        argv builder independently."""
+        calls: list[str] = []
+        monkeypatch.setattr(
+            ms.shutil, "which",
+            lambda name: calls.append(name) or None,
+        )
+        ms.android_emulator_command("start", "demo_avd")
+        ms.android_emulator_command("create", "demo_avd", api_level="34")
+        assert calls == []
+
+    def test_adb_screencap_command_default_path(self):
+        """Screenshots retain `adb shell screencap` regardless of whether
+        the emulator was booted via `android emulator start` or the
+        legacy `emulator` binary — Google's Android CLI does not yet
+        expose a screenshot sub-command."""
+        argv = ms.adb_screencap_command()
+        assert argv == ["adb", "shell", "screencap", "-p", "/sdcard/screencap.png"]
+
+    def test_adb_screencap_command_custom_path_and_extras(self):
+        argv = ms.adb_screencap_command(
+            remote_path="/sdcard/z.png", extra_args=("-d", "emulator-5554"),
+        )
+        assert argv[:5] == ["adb", "shell", "screencap", "-p", "/sdcard/z.png"]
+        assert argv[5:] == ["-d", "emulator-5554"]
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Smoke
