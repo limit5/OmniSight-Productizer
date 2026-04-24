@@ -408,6 +408,8 @@ def get_llm(
     provider: str | None = None,
     model: str | None = None,
     bind_tools: list | None = None,
+    *,
+    allow_failover: bool = True,
 ) -> BaseChatModel | None:
     """Create or retrieve a cached LLM instance.
 
@@ -415,6 +417,14 @@ def get_llm(
         provider: Override the configured provider.
         model: Override the model name.
         bind_tools: Optional list of LangChain tools to bind.
+        allow_failover: When ``True`` (default) a failed primary init
+            walks ``settings.llm_fallback_chain`` and promotes to the
+            first healthy provider — existing wide-blast behaviour for
+            all pre-existing callers. When ``False`` the helper returns
+            ``None`` if the *specific* (provider, model) pair cannot
+            initialise, with no cascade. Used by
+            :func:`get_cheapest_model` so a missing DeepSeek key does
+            not silently route a utility call to flagship Opus.
 
     Returns:
         A LangChain chat model, or None if the provider can't be initialized.
@@ -458,6 +468,15 @@ def get_llm(
         # M3: cooldown decisions consult the per-tenant per-key breaker
         # so one tenant's bad key cannot push other tenants down-chain.
         if llm is None:
+            if not allow_failover:
+                # ZZ.B2 #304-2 checkbox 3: caller opted out of the
+                # chain walk (typically ``get_cheapest_model``). Do
+                # NOT record a breaker failure — "no API key
+                # configured" is an operational state, not a health
+                # signal, and flipping the circuit here would poison
+                # the legacy cooldown path for later opportunistic
+                # calls that DO want the chain.
+                return None
             # Primary provider also failed — record so its breaker opens.
             _record_provider_failure(provider, reason="primary_init_failed")
             chain = [p.strip() for p in settings.llm_fallback_chain.split(",") if p.strip()]
@@ -510,6 +529,87 @@ def get_llm(
     except Exception as exc:
         logger.warning("Failed to init LLM [%s]: %s", provider, exc)
         return None
+
+
+# ZZ.B2 #304-2 checkbox 3 (2026-04-24): ordered cheapest-first
+# preference list for utility LLM calls (auto-title generation, and
+# any future short-form summarise/classify helpers). Rates below
+# correspond to the per-1M-token pricing in
+# ``backend.events._MODEL_PRICING_PER_MTOK`` on 2026-04-24; the order
+# additionally honours the user's stated preference (Haiku 4.5 /
+# DeepSeek chat / OpenRouter 最便宜).
+#
+# Each entry is ``(provider, model)``. ``model`` must be an explicit
+# string — falling through to the provider default would risk picking
+# the provider's flagship (e.g. claude-sonnet-4) and defeating the
+# "cheapest-first" guarantee. OpenRouter's aggregator entry is an
+# exception: the slash-routed id ``anthropic/claude-haiku-4`` is
+# already the cheapest Haiku route through that provider.
+#
+# Module-global audit (SOP Step 1, 2026-04-21 rule): this is a module-
+# const tuple literal — every uvicorn worker derives the identical
+# list from the same source (SOP answer #1 "不共享，因為每 worker
+# 從同樣來源推導出同樣的值"). No shared mutable state is introduced.
+_CHEAPEST_MODEL_PREFERENCE: tuple[tuple[str, str], ...] = (
+    ("deepseek", "deepseek-chat"),              # $0.27 / $1.10 per 1M tok
+    ("anthropic", "claude-haiku-4-20250506"),   # $0.80 / $4.00 per 1M tok (Haiku 4.5)
+    ("openrouter", "anthropic/claude-haiku-4"), # Aggregator fallback — single key
+    ("groq", "llama-3.1-8b-instant"),           # Free tier / very cheap + fast
+)
+
+
+def get_cheapest_model(
+    bind_tools: list | None = None,
+) -> BaseChatModel | None:
+    """Return an LLM backed by the cheapest configured provider.
+
+    ZZ.B2 #304-2 checkbox 3: utility LLM calls (auto-title generation
+    first, future short-form classifiers second) only spend a handful
+    of output tokens per invocation. Routing that traffic through the
+    operator-pinned primary (typically Claude Opus) burns flagship
+    quota on work that a Haiku / DeepSeek / Groq tier model performs
+    equally well at 1–5% of the cost.
+
+    Walks :data:`_CHEAPEST_MODEL_PREFERENCE` in declared order and
+    returns the first entry whose provider has credentials + whose
+    ``_create_llm`` init succeeds. Uses ``get_llm(..., allow_failover=
+    False)`` so a missing DeepSeek key does not silently cascade back
+    to Opus and defeat the whole point of the helper.
+
+    If every preference entry fails (fresh install, no keys configured,
+    no Ollama), falls back to ``get_llm()`` so the feature still
+    works — the caller accepts that its cost guarantee degrades to
+    "primary provider's rate" in that edge case rather than silently
+    breaking the downstream feature. Callers that cannot tolerate
+    that fallback (e.g. a ``token_frozen`` guard) should check the
+    returned model's ``.model_name`` attribute.
+
+    ``bind_tools`` is passed through for call-site symmetry with
+    :func:`get_llm`; the auto-title helper does not bind tools but
+    future summariser callers may.
+
+    Module-global audit: this function is stateless. It consults the
+    module-const :data:`_CHEAPEST_MODEL_PREFERENCE` and delegates all
+    cache/state to :func:`get_llm` (which already handles the per-
+    provider cache + per-tenant circuit breaker correctly).
+    """
+    for provider, model in _CHEAPEST_MODEL_PREFERENCE:
+        llm = get_llm(
+            provider=provider,
+            model=model,
+            bind_tools=bind_tools,
+            allow_failover=False,
+        )
+        if llm is not None:
+            logger.debug(
+                "get_cheapest_model picked %s / %s", provider, model,
+            )
+            return llm
+    logger.debug(
+        "get_cheapest_model preference list exhausted — "
+        "falling back to primary get_llm() (cost guarantee degraded)",
+    )
+    return get_llm(bind_tools=bind_tools)
 
 
 def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:

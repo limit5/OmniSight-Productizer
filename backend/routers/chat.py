@@ -372,15 +372,23 @@ def _condense_turn(text: str) -> str:
 
 
 async def _compose_title_via_llm(user_turns: list[str]) -> str:
-    """Call an LLM to produce a <= 8-word descriptive title.
+    """Call a cheap LLM to produce a <= 8-word descriptive title.
 
-    Uses the configured primary provider via ``get_llm()`` — ZZ.B2
-    checkbox 3 is the follow-up that swaps in a ``get_cheapest_model()``
-    helper to avoid burning the Opus quota on 10-char titles.
+    ZZ.B2 #304-2 checkbox 3 (2026-04-24): routes through
+    :func:`backend.agents.llm.get_cheapest_model` so the title spend
+    lands on Haiku / DeepSeek / Groq / OpenRouter cheapest rather
+    than the operator-pinned primary (typically Opus). A title is 8
+    output tokens — running it on Opus ($75/Mtok out) when Haiku
+    ($4/Mtok out) produces an equivalent line wastes flagship quota
+    ~18× per call. The helper falls back to the primary provider if
+    no cheaper option has credentials, so a fresh install still
+    titles sessions; callers tolerating the downgrade is acceptable
+    for a best-effort background task.
+
     Intentionally scoped to one LLM call; any error is returned as
     an empty string so the caller skips the SSE emit.
     """
-    from backend.agents.llm import get_llm
+    from backend.agents.llm import get_cheapest_model
     condensed = [_condense_turn(t) for t in user_turns if t]
     condensed = [c for c in condensed if c]
     if not condensed:
@@ -393,7 +401,7 @@ async def _compose_title_via_llm(user_turns: list[str]) -> str:
         "title text.\n\n" + joined
     )
     try:
-        llm = get_llm()
+        llm = get_cheapest_model()
         if llm is None:
             return ""
         response = await asyncio.wait_for(llm.ainvoke(prompt), timeout=15.0)
