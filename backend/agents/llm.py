@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -79,6 +80,271 @@ def _serialize_message(msg) -> dict:  # noqa: ANN001
     return out
 
 
+# ─────────────────────────────────────────────────────────────────
+# Z.1 (#290) checkbox 2 (2026-04-24): per-provider rate-limit header
+# name → unified-key mapping.
+# ─────────────────────────────────────────────────────────────────
+#
+# The eight adapter providers cluster into two schema families:
+#
+#   - **Anthropic native** — emits
+#     ``anthropic-ratelimit-{requests,tokens}-{remaining,reset}`` where
+#     the ``-reset`` values are RFC 3339 absolute timestamps.
+#   - **OpenAI-compatible** — the ``/v1/chat/completions`` wire
+#     contract used by OpenAI, xAI, Groq, DeepSeek, Together, and
+#     OpenRouter. Emits ``x-ratelimit-{remaining,reset}-{requests,tokens}``
+#     where ``-reset`` values are *duration* strings (``"12ms"``,
+#     ``"1s"``, ``"1m30s"``) measured from response time.
+#
+# Ollama is deliberately absent: the local runtime has no HTTP rate
+# limits, so ``_normalize_ratelimit_headers`` returns ``{}`` for it
+# and the downstream SharedKV write (later Z.1 checkbox) skips the
+# provider on truthiness. A provider added later without a row here
+# gets the same "skip" treatment, which is safer than guessing a
+# schema — the operator's 429 logs will surface the new provider and
+# the mapping can be added explicitly.
+#
+# Picking token-reset over request-reset for the single ``reset_at`` slot:
+# LLM traffic is token-dominated; the request bucket almost never binds
+# before the token bucket. If the unified dict later needs to expose
+# both, split into ``reset_requests_at_ts`` / ``reset_tokens_at_ts`` —
+# but right now one field keeps the SharedKV payload + UI card simple.
+#
+# Module-global audit (SOP Step 1, 2026-04-21): this is a module-const
+# dict literal — every uvicorn worker derives the same mapping from
+# the same source (answer #1 "不共享，因為每 worker 從同樣來源推導出
+# 同樣的值"). No shared mutable state introduced.
+_PROVIDER_RATELIMIT_HEADERS: dict[str, dict[str, str]] = {
+    "anthropic": {
+        "remaining_requests": "anthropic-ratelimit-requests-remaining",
+        "remaining_tokens": "anthropic-ratelimit-tokens-remaining",
+        "reset_at": "anthropic-ratelimit-tokens-reset",
+        "retry_after": "retry-after",
+    },
+    "openai": {
+        "remaining_requests": "x-ratelimit-remaining-requests",
+        "remaining_tokens": "x-ratelimit-remaining-tokens",
+        "reset_at": "x-ratelimit-reset-tokens",
+        "retry_after": "retry-after",
+    },
+    "xai": {
+        "remaining_requests": "x-ratelimit-remaining-requests",
+        "remaining_tokens": "x-ratelimit-remaining-tokens",
+        "reset_at": "x-ratelimit-reset-tokens",
+        "retry_after": "retry-after",
+    },
+    "groq": {
+        "remaining_requests": "x-ratelimit-remaining-requests",
+        "remaining_tokens": "x-ratelimit-remaining-tokens",
+        "reset_at": "x-ratelimit-reset-tokens",
+        "retry_after": "retry-after",
+    },
+    "deepseek": {
+        "remaining_requests": "x-ratelimit-remaining-requests",
+        "remaining_tokens": "x-ratelimit-remaining-tokens",
+        "reset_at": "x-ratelimit-reset-tokens",
+        "retry_after": "retry-after",
+    },
+    "together": {
+        "remaining_requests": "x-ratelimit-remaining-requests",
+        "remaining_tokens": "x-ratelimit-remaining-tokens",
+        "reset_at": "x-ratelimit-reset-tokens",
+        "retry_after": "retry-after",
+    },
+    "openrouter": {
+        "remaining_requests": "x-ratelimit-remaining-requests",
+        "remaining_tokens": "x-ratelimit-remaining-tokens",
+        "reset_at": "x-ratelimit-reset-tokens",
+        "retry_after": "retry-after",
+    },
+    # Google Gemini uses a gRPC/REST API; LangChain's langchain-google-
+    # genai does not currently surface per-request rate-limit headers
+    # through any of the 5 paths ``_extract_response_headers`` walks,
+    # so it's omitted here alongside Ollama. Revisit if an adapter
+    # version lands that mirrors the SDK's ``x-goog-quota-*`` headers.
+}
+
+
+_DURATION_RE = re.compile(
+    r"^\s*"
+    r"(?:(?P<h>\d+)h)?"
+    r"(?:(?P<m>\d+)m(?!s))?"
+    r"(?:(?P<s>\d+(?:\.\d+)?)s)?"
+    r"(?:(?P<ms>\d+(?:\.\d+)?)ms)?"
+    r"\s*$"
+)
+
+
+def _parse_duration_seconds(val) -> float | None:  # noqa: ANN001
+    """Parse an OpenAI-style duration string (``"12ms"`` / ``"1s"`` /
+    ``"1m30s"`` / ``"2h"``) into total seconds. Returns ``None`` for
+    anything the grammar doesn't recognise — the caller decides whether
+    to fall through to a bare-float parse or give up."""
+    if not isinstance(val, str):
+        return None
+    s = val.strip()
+    if not s:
+        return None
+    m = _DURATION_RE.match(s)
+    if not m or not any(v is not None for v in m.groupdict().values()):
+        return None
+    total = 0.0
+    if m.group("h"):
+        total += int(m.group("h")) * 3600
+    if m.group("m"):
+        total += int(m.group("m")) * 60
+    if m.group("s"):
+        total += float(m.group("s"))
+    if m.group("ms"):
+        total += float(m.group("ms")) / 1000.0
+    return total
+
+
+_ISO8601_HINT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T")
+
+
+def _parse_reset_value(val, *, now_fn=None) -> float | None:  # noqa: ANN001
+    """Parse a provider-shaped reset-timestamp value into a unix epoch
+    (seconds, float).
+
+    Handles three shapes observed across the seven supported providers:
+
+    1. **RFC 3339 absolute** — Anthropic (``"2026-04-24T13:00:00Z"``,
+       also any ``±HH:MM`` offset). Returned as-is after epoch
+       conversion.
+    2. **Duration offset** — OpenAI-compatible family (``"12ms"``,
+       ``"1s"``, ``"1m30s"``). Added to current wall-clock so every
+       downstream reader agrees on an absolute frame of reference;
+       this loses a few ms of precision versus anchoring at HTTP
+       response-received time, which is fine for a dashboard card.
+    3. **Bare numeric seconds** — some gateways strip the unit suffix
+       and emit ``"30"``. Treated as a seconds offset from now.
+
+    Malformed / empty input → ``None`` (never raises).
+
+    ``now_fn`` is injectable so tests can freeze the clock without
+    monkey-patching ``time`` globally — ``None`` (default) resolves
+    lazily to ``time.time`` so a monkeypatch on ``time.time`` at the
+    call site still takes effect.
+    """
+    if not val or not isinstance(val, str):
+        return None
+    s = val.strip()
+    if _ISO8601_HINT_RE.match(s):
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return dt.timestamp()
+        except (ValueError, TypeError):
+            pass
+    _now = now_fn if now_fn is not None else time.time
+    offset = _parse_duration_seconds(s)
+    if offset is not None:
+        return _now() + offset
+    try:
+        return _now() + float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_retry_after_seconds(val, *, now_fn=None) -> float | None:  # noqa: ANN001
+    """Parse an HTTP ``Retry-After`` value into seconds-from-now.
+
+    Per RFC 9110 §10.2.3, this header is either a non-negative integer
+    of seconds or an HTTP-date. Modern providers always emit the former,
+    but we decode the latter defensively so a CDN-inserted rewrite
+    (Cloudflare sometimes swaps in a date form) doesn't silently give
+    us ``None``.
+
+    ``now_fn=None`` resolves lazily to ``time.time`` so a test-time
+    monkeypatch on ``time.time`` still takes effect for the HTTP-date
+    branch.
+    """
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        return max(0.0, float(s))
+    except (ValueError, TypeError):
+        pass
+    _now = now_fn if now_fn is not None else time.time
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(s)
+        if dt is not None:
+            return max(0.0, dt.timestamp() - _now())
+    except (ValueError, TypeError, IndexError):
+        pass
+    return None
+
+
+def _parse_int_or_none(val) -> int | None:  # noqa: ANN001
+    """Coerce a header value to int. Float strings are accepted (some
+    providers emit ``"42.0"``); negatives are preserved rather than
+    clamped to 0 since a negative remaining would itself signal an
+    unexpected upstream state worth surfacing to the dashboard."""
+    if val is None:
+        return None
+    try:
+        return int(float(str(val).strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalize_ratelimit_headers(
+    provider: str | None,
+    headers: dict | None,
+) -> dict:
+    """Regularise provider-specific rate-limit headers into a unified
+    ``{remaining_requests, remaining_tokens, reset_at_ts, retry_after_s}``
+    dict.
+
+    Z.1 (#290) checkbox 2. Rules:
+
+    - Unknown / unmapped provider (Ollama, Google Gemini today, any
+      future adapter lacking a row) → ``{}``. Caller branches on
+      truthiness and skips the SharedKV write (the next checkbox).
+    - Empty or non-dict ``headers`` → ``{}`` (same truthiness contract).
+    - For mapped providers, header lookup is case-insensitive — SDKs
+      normalise to lowercase but an intermediate ``httpx.Headers``
+      view can preserve mixed case, and defending here costs nothing.
+    - Missing individual fields degrade to ``None`` (not ``0``) —
+      preserves the NULL-vs-genuine-zero contract ZZ.A1 established
+      so the dashboard can draw "—" for "unknown" separately from
+      "0 remaining".
+    - If every field is ``None``, the result collapses back to ``{}``
+      so "known provider, but this response carried no rate-limit
+      headers at all" is indistinguishable from "unknown provider"
+      for downstream purposes.
+
+    Never raises: a malformed individual field is swallowed by the
+    per-field parse helpers and emerges as ``None``.
+    """
+    if not provider or not isinstance(headers, dict) or not headers:
+        return {}
+    mapping = _PROVIDER_RATELIMIT_HEADERS.get(provider)
+    if mapping is None:
+        return {}
+    lower = {
+        k.lower(): v for k, v in headers.items() if isinstance(k, str)
+    }
+    raw_req = lower.get(mapping["remaining_requests"].lower())
+    raw_tok = lower.get(mapping["remaining_tokens"].lower())
+    raw_reset = lower.get(mapping["reset_at"].lower())
+    raw_retry = lower.get(mapping["retry_after"].lower())
+
+    result: dict = {
+        "remaining_requests": _parse_int_or_none(raw_req),
+        "remaining_tokens": _parse_int_or_none(raw_tok),
+        "reset_at_ts": _parse_reset_value(raw_reset),
+        "retry_after_s": _parse_retry_after_seconds(raw_retry),
+    }
+    if all(v is None for v in result.values()):
+        return {}
+    return result
+
+
 class TokenTrackingCallback(BaseCallbackHandler):
     """LangChain callback that feeds token usage into the system tracker.
 
@@ -134,6 +400,16 @@ class TokenTrackingCallback(BaseCallbackHandler):
         # write. Empty dict (not ``None``) when headers can't be
         # located so readers branch on truthiness rather than identity.
         self.last_response_headers: dict = {}
+        # Z.1 (#290) checkbox 2 (2026-04-24): the post-``on_llm_end``
+        # normalised rate-limit snapshot produced by
+        # ``_normalize_ratelimit_headers`` — keys are the unified
+        # ``{remaining_requests, remaining_tokens, reset_at_ts,
+        # retry_after_s}`` set. Empty dict when either the provider is
+        # unmapped (Ollama / Google Gemini today) or the response
+        # carried no rate-limit headers. The subsequent Z.1 checkbox
+        # reads this attribute and mirrors it into
+        # ``SharedKV("provider_ratelimit")`` with a 60s TTL.
+        self.last_ratelimit_state: dict = {}
 
     def on_chat_model_start(  # noqa: ANN001
         self,
@@ -304,6 +580,25 @@ class TokenTrackingCallback(BaseCallbackHandler):
                     self.model_name, exc,
                 )
                 self.last_response_headers = {}
+            # Z.1 (#290) checkbox 2: normalise the raw headers into the
+            # unified ``{remaining_requests, remaining_tokens,
+            # reset_at_ts, retry_after_s}`` dict and stash it on the
+            # instance. Own try/except so a normalise bug (e.g. the
+            # provider emits a reset-timestamp shape we haven't seen)
+            # degrades to ``{}`` rather than aborting the LLM turn — the
+            # raw snapshot above is already safe. The next checkbox
+            # reads ``self.last_ratelimit_state`` and mirrors it into
+            # ``SharedKV("provider_ratelimit")``.
+            try:
+                self.last_ratelimit_state = _normalize_ratelimit_headers(
+                    self.provider, self.last_response_headers,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "rate-limit header normalisation skipped for %s: %s",
+                    self.model_name, exc,
+                )
+                self.last_ratelimit_state = {}
             usage: dict = {}
             if response.llm_output:
                 usage = response.llm_output.get("token_usage", {})

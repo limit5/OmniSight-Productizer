@@ -56,7 +56,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.outputs import LLMResult
+from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph, add_messages
 
@@ -81,6 +81,7 @@ __all__ = [
     "BaseChatModel",
     "BaseCallbackHandler",
     "LLMResult",
+    "ChatGeneration",
     # ── Stable interface ──
     "invoke_chat",
     "stream_chat",

@@ -32,11 +32,8 @@ import logging
 
 import pytest
 
-from langchain_core.messages import AIMessage
-from langchain_core.outputs import ChatGeneration
-
 from backend.agents.llm import TokenTrackingCallback
-from backend.llm_adapter import LLMResult
+from backend.llm_adapter import AIMessage, ChatGeneration, LLMResult
 
 
 # ─────────────────────────────────────────────────────────────────
