@@ -1,6 +1,8 @@
 "use client"
 
 // ZZ.C1 (#305-1, 2026-04-24) checkbox 3 — PromptVersionDrawer.
+// ZZ.C1 (#305-1, 2026-04-24) checkbox 4 — jump-to-next-hunk (``n`` key)
+// + unfold context (default 3 lines) layered on top.
 //
 // Opens from the ORCHESTRATOR AI panel ("System Prompt Versions" button
 // under the LLM MODEL section). Shows a per-agent timeline of prompt
@@ -18,6 +20,22 @@
 // render in both columns with neutral background. This is the literal
 // "新增行綠 / 刪除行紅" requirement from the TODO row spec.
 //
+// Hunk navigation + unfold context (ZZ.C1 checkbox 4):
+//   - The flat ``DiffRow[]`` from ``changesToDiffRows`` is grouped into
+//     ``DiffSegment[]`` by ``groupRowsIntoSegments`` — each hunk (run of
+//     removed/added rows) becomes one segment, and runs of context rows
+//     that exceed ``2 × contextLines`` collapse behind an "Expand N
+//     lines" button matching git / GitHub / GitLab's 3-line-context
+//     convention. ``contextLines`` defaults to 3 to line up with the
+//     backend ``difflib.unified_diff(n=3)`` call in
+//     ``backend/routers/system.py::get_prompt_diff``.
+//   - ``n`` advances ``activeHunkIndex`` to the next hunk (wraps) and
+//     calls ``scrollIntoView`` on that hunk's anchor row.
+//     ``Shift+n`` / ``N`` steps backward. The binding only fires when
+//     the drawer is open, a diff is rendered, and focus is not inside
+//     a form control (select / input / textarea) so the agent
+//     dropdown's type-ahead still works.
+//
 // Subtype list: spec calls for 12 subtypes ("orchestrator / firmware /
 // software / etc."). The list is exposed as ``DEFAULT_PROMPT_AGENT_SUBTYPES``
 // so app integrators can override. Default mapping derives slugs from
@@ -34,6 +52,9 @@ import {
   RefreshCw,
   ChevronRight,
   AlertCircle,
+  ChevronsUpDown,
+  ArrowDown,
+  ArrowUp,
 } from "lucide-react"
 import { diffLines, type Change } from "diff"
 import {
@@ -41,6 +62,13 @@ import {
   type PromptVersionEntry,
   type PromptVersionsListResponse,
 } from "@/lib/api"
+
+/** ZZ.C1 checkbox 4: default number of context lines kept visible around
+ *  each hunk. Matches ``difflib.unified_diff(n=3)`` the backend uses in
+ *  ``backend/routers/system.py::get_prompt_diff`` and the git /
+ *  GitHub / GitLab convention, so the drawer and the server-rendered
+ *  diff agree on how much context an unfold click reveals. */
+export const DEFAULT_DIFF_CONTEXT_LINES = 3
 
 /** ZZ.C1 checkbox 3: dropdown options for the agent_type selector. The
  *  spec calls for "12 subtype" — orchestrator + 4 firmware (general,
@@ -89,6 +117,10 @@ export interface PromptVersionDrawerProps {
    *  prompt-version-drawer.test.tsx can drive the rendering branch
    *  independently of the ``diff`` lib. */
   diffLinesFn?: (a: string, b: string) => Change[]
+  /** ZZ.C1 checkbox 4: how many context lines to keep visible around
+   *  each hunk before collapsing the middle. Defaults to 3 to match
+   *  ``difflib.unified_diff(n=3)`` server-side and the git convention. */
+  contextLines?: number
 }
 
 interface DiffRow {
@@ -99,6 +131,18 @@ interface DiffRow {
   /** New (right) column content; null on a pure-removed row. */
   right: string | null
 }
+
+/** ZZ.C1 checkbox 4: one piece of the rendered diff after the
+ *  ``groupRowsIntoSegments`` pass. A ``hunk`` is a contiguous run of
+ *  changed rows (removed / added — what ``n`` jumps between). A
+ *  ``context-visible`` segment renders its rows inline. A
+ *  ``context-collapsed`` segment is hidden behind an "Expand N lines"
+ *  button and only renders its rows after the operator clicks to
+ *  unfold. */
+export type DiffSegment =
+  | { type: "hunk"; hunkIndex: number; rows: DiffRow[]; id: string }
+  | { type: "context-visible"; rows: DiffRow[]; id: string }
+  | { type: "context-collapsed"; rows: DiffRow[]; id: string }
 
 function shortHash(hash: string): string {
   return hash ? hash.slice(0, 8) : "—"
@@ -187,6 +231,182 @@ export function changesToDiffRows(changes: Change[]): DiffRow[] {
   return rows
 }
 
+/**
+ * ZZ.C1 checkbox 4: partition the flat ``DiffRow[]`` into a linear list
+ * of "segments" for the side-by-side renderer. A segment is either a
+ * **hunk** (a contiguous run of removed/added rows — what git calls a
+ * "hunk" in unified-diff terminology) or a **context band** (a
+ * contiguous run of unchanged rows). Context bands longer than
+ * ``2 × contextLines`` get split into a visible head, a collapsed
+ * middle, and a visible tail, matching the git / GitHub / GitLab
+ * convention of showing a few lines of context around each hunk and
+ * hiding the rest behind an "Expand" button.
+ *
+ * Edge cases:
+ *  - ``rows=[]`` → ``[]`` (nothing to render)
+ *  - Whole diff is context (no changed rows) → single visible segment
+ *    if len ≤ contextLines, else visible head + collapsed tail.
+ *  - Two hunks with < ``2 × contextLines`` of context between them →
+ *    context stays fully visible (no collapse)
+ *  - Leading context before the first hunk → collapsed head +
+ *    visible tail (only the contextLines rows immediately before the
+ *    hunk stay visible)
+ *  - Trailing context after the last hunk → visible head +
+ *    collapsed tail
+ *
+ * Segment ids are derived from the row index where the underlying run
+ * starts. The drawer's ``expandedContextIds`` Set keys off these ids,
+ * and the ids stay stable across re-renders of the same diff but
+ * naturally reset when the operator picks a new pair (the row list
+ * changes and the ``useMemo`` tied to the selected pair drops the
+ * stale expand state).
+ */
+export function groupRowsIntoSegments(
+  rows: DiffRow[],
+  contextLines: number = DEFAULT_DIFF_CONTEXT_LINES,
+): DiffSegment[] {
+  if (rows.length === 0) return []
+  const segments: DiffSegment[] = []
+
+  interface Run {
+    changed: boolean
+    start: number
+    rows: DiffRow[]
+  }
+  const runs: Run[] = []
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i]
+    const changed = r.kind !== "context"
+    const last = runs[runs.length - 1]
+    if (last && last.changed === changed) {
+      last.rows.push(r)
+    } else {
+      runs.push({ changed, start: i, rows: [r] })
+    }
+  }
+
+  const n = Math.max(0, Math.floor(contextLines))
+  let hunkCounter = 0
+  for (let r = 0; r < runs.length; r++) {
+    const run = runs[r]
+    if (run.changed) {
+      segments.push({
+        type: "hunk",
+        hunkIndex: hunkCounter++,
+        rows: run.rows,
+        id: `hunk-${run.start}`,
+      })
+      continue
+    }
+    const hasHunkBefore = r > 0
+    const hasHunkAfter = r < runs.length - 1
+    const len = run.rows.length
+    if (!hasHunkBefore && !hasHunkAfter) {
+      // No hunk anywhere — whole diff is context.
+      if (n === 0 && len > 0) {
+        segments.push({
+          type: "context-collapsed",
+          rows: run.rows,
+          id: `ctx-${run.start}-all`,
+        })
+      } else if (len <= n) {
+        segments.push({
+          type: "context-visible",
+          rows: run.rows,
+          id: `ctx-${run.start}-only`,
+        })
+      } else {
+        // Show a head of ``n`` lines + collapsed tail.
+        segments.push({
+          type: "context-visible",
+          rows: run.rows.slice(0, n),
+          id: `ctx-${run.start}-head`,
+        })
+        segments.push({
+          type: "context-collapsed",
+          rows: run.rows.slice(n),
+          id: `ctx-${run.start}-tail`,
+        })
+      }
+      continue
+    }
+    if (hasHunkBefore && hasHunkAfter) {
+      // Between two hunks — show n at top (tail of prev context) + n at
+      // bottom (head of next). Collapse the middle if longer than 2n.
+      if (len <= n * 2) {
+        segments.push({
+          type: "context-visible",
+          rows: run.rows,
+          id: `ctx-${run.start}-full`,
+        })
+      } else {
+        if (n > 0) {
+          segments.push({
+            type: "context-visible",
+            rows: run.rows.slice(0, n),
+            id: `ctx-${run.start}-top`,
+          })
+        }
+        segments.push({
+          type: "context-collapsed",
+          rows: run.rows.slice(n, len - n),
+          id: `ctx-${run.start}-mid`,
+        })
+        if (n > 0) {
+          segments.push({
+            type: "context-visible",
+            rows: run.rows.slice(len - n),
+            id: `ctx-${run.start}-bot`,
+          })
+        }
+      }
+      continue
+    }
+    if (!hasHunkBefore && hasHunkAfter) {
+      // Leading context — anchor the visible tail to the upcoming hunk.
+      if (len <= n) {
+        segments.push({
+          type: "context-visible",
+          rows: run.rows,
+          id: `ctx-${run.start}-lead`,
+        })
+      } else {
+        segments.push({
+          type: "context-collapsed",
+          rows: run.rows.slice(0, len - n),
+          id: `ctx-${run.start}-lead-hidden`,
+        })
+        segments.push({
+          type: "context-visible",
+          rows: run.rows.slice(len - n),
+          id: `ctx-${run.start}-lead-tail`,
+        })
+      }
+      continue
+    }
+    // hasHunkBefore && !hasHunkAfter → trailing context.
+    if (len <= n) {
+      segments.push({
+        type: "context-visible",
+        rows: run.rows,
+        id: `ctx-${run.start}-trail`,
+      })
+    } else {
+      segments.push({
+        type: "context-visible",
+        rows: run.rows.slice(0, n),
+        id: `ctx-${run.start}-trail-head`,
+      })
+      segments.push({
+        type: "context-collapsed",
+        rows: run.rows.slice(n),
+        id: `ctx-${run.start}-trail-hidden`,
+      })
+    }
+  }
+  return segments
+}
+
 export function PromptVersionDrawer({
   open,
   onClose,
@@ -194,6 +414,7 @@ export function PromptVersionDrawer({
   subtypes = DEFAULT_PROMPT_AGENT_SUBTYPES,
   fetchVersions = fetchPromptVersions,
   diffLinesFn = diffLines,
+  contextLines = DEFAULT_DIFF_CONTEXT_LINES,
 }: PromptVersionDrawerProps) {
   const [agentType, setAgentType] = useState<string>(defaultAgentType)
   const [versions, setVersions] = useState<PromptVersionEntry[]>([])
@@ -324,6 +545,7 @@ export function PromptVersionDrawer({
             </p>
             <p className="font-mono text-[10px] text-[var(--muted-foreground)]">
               Pick two rows to side-by-side diff (additions green / deletions red).
+              Press <kbd className="px-1 rounded bg-[var(--secondary)] text-[var(--foreground)]">n</kbd> to jump to the next hunk.
             </p>
           </div>
           <select
@@ -501,6 +723,7 @@ export function PromptVersionDrawer({
                 from={selectedPair.from}
                 to={selectedPair.to}
                 rows={diffRows}
+                contextLines={contextLines}
               />
             )}
           </div>
@@ -514,16 +737,91 @@ function DiffPanel({
   from,
   to,
   rows,
+  contextLines,
 }: {
   from: PromptVersionEntry
   to: PromptVersionEntry
   rows: DiffRow[]
+  contextLines: number
 }) {
   const identical = from.content_hash === to.content_hash
   const empty = !identical && rows.length === 0
 
   const removedCount = rows.filter(r => r.kind === "removed").length
   const addedCount = rows.filter(r => r.kind === "added").length
+
+  const segments = useMemo(
+    () => groupRowsIntoSegments(rows, contextLines),
+    [rows, contextLines],
+  )
+
+  // ``expandedContextIds`` tracks which collapsed segments the operator
+  // has unfolded. Reset whenever the segment list changes (different
+  // pair picked / contextLines changed).
+  const [expandedContextIds, setExpandedContextIds] = useState<Set<string>>(
+    () => new Set(),
+  )
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- collapse state is derived from the (new) segment identities; explicit reset on the segment transition.
+    setExpandedContextIds(new Set())
+  }, [segments])
+
+  const hunkCount = useMemo(
+    () => segments.filter(s => s.type === "hunk").length,
+    [segments],
+  )
+
+  const [activeHunkIndex, setActiveHunkIndex] = useState<number>(0)
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset the cursor when the rendered diff changes.
+    setActiveHunkIndex(0)
+  }, [segments])
+
+  const hunkRefs = useRef<Map<number, HTMLTableSectionElement | null>>(new Map())
+
+  const jumpToHunk = useCallback(
+    (next: number) => {
+      if (hunkCount === 0) return
+      const target = ((next % hunkCount) + hunkCount) % hunkCount
+      setActiveHunkIndex(target)
+      const el = hunkRefs.current.get(target)
+      if (el && typeof el.scrollIntoView === "function") {
+        el.scrollIntoView({ block: "nearest", behavior: "smooth" })
+      }
+    },
+    [hunkCount],
+  )
+
+  // ZZ.C1 checkbox 4: ``n`` / ``Shift+n`` jumps between hunks when the
+  // diff is rendered. Skip when focus is inside a form control so the
+  // agent dropdown's type-ahead (operator types ``o`` to jump to
+  // "Orchestrator" etc.) still works.
+  useEffect(() => {
+    if (identical || empty || hunkCount === 0) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "n" && e.key !== "N") return
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const target = e.target as HTMLElement | null
+      if (target) {
+        const tag = target.tagName
+        if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return
+        if (target.isContentEditable) return
+      }
+      e.preventDefault()
+      const goBack = e.key === "N" || e.shiftKey
+      jumpToHunk(goBack ? activeHunkIndex - 1 : activeHunkIndex + 1)
+    }
+    window.addEventListener("keydown", handler)
+    return () => window.removeEventListener("keydown", handler)
+  }, [identical, empty, hunkCount, activeHunkIndex, jumpToHunk])
+
+  const expandSegment = useCallback((id: string) => {
+    setExpandedContextIds(prev => {
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
+  }, [])
 
   return (
     <div className="h-full flex flex-col">
@@ -560,6 +858,38 @@ function DiffPanel({
           <span className="text-[var(--validation-emerald)]">+{addedCount}</span>
           <ChevronRight size={10} className="opacity-40" />
           <span>{rows.length} rendered row{rows.length === 1 ? "" : "s"}</span>
+          {hunkCount > 0 && (
+            <>
+              <ChevronRight size={10} className="opacity-40" />
+              <span data-testid="prompt-version-diff-hunk-counter">
+                hunk {activeHunkIndex + 1} / {hunkCount}
+              </span>
+              <button
+                type="button"
+                onClick={() => jumpToHunk(activeHunkIndex - 1)}
+                aria-label="Previous hunk"
+                data-testid="prompt-version-diff-prev-hunk"
+                className="ml-auto p-0.5 rounded hover:bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+              >
+                <ArrowUp size={10} />
+              </button>
+              <button
+                type="button"
+                onClick={() => jumpToHunk(activeHunkIndex + 1)}
+                aria-label="Next hunk (n)"
+                data-testid="prompt-version-diff-next-hunk"
+                className="p-0.5 rounded hover:bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+              >
+                <ArrowDown size={10} />
+              </button>
+              <kbd
+                className="font-mono text-[9px] px-1 rounded border border-[var(--border)] bg-[var(--secondary)] text-[var(--muted-foreground)]"
+                title="Press n to jump to the next hunk, Shift+n for the previous"
+              >
+                n
+              </kbd>
+            </>
+          )}
         </div>
       </div>
 
@@ -588,43 +918,138 @@ function DiffPanel({
           className="flex-1 overflow-auto font-mono text-[10px] tabular-nums"
         >
           <table className="w-full border-collapse">
-            <tbody>
-              {rows.map((row, i) => (
-                <tr
-                  key={i}
-                  data-testid="prompt-version-diff-row"
-                  data-row-kind={row.kind}
-                >
-                  <td
-                    className="align-top w-1/2 px-2 py-0.5 whitespace-pre-wrap break-words"
-                    style={{
-                      backgroundColor:
-                        row.kind === "removed"
-                          ? "color-mix(in srgb, var(--critical-red) 18%, transparent)"
-                          : "transparent",
-                      color: row.kind === "removed" ? "var(--critical-red)" : "var(--foreground)",
+            {segments.map(segment => {
+              if (segment.type === "hunk") {
+                const isActive = segment.hunkIndex === activeHunkIndex
+                return (
+                  <tbody
+                    key={segment.id}
+                    data-testid="prompt-version-diff-hunk"
+                    data-hunk-index={segment.hunkIndex}
+                    data-hunk-active={isActive || undefined}
+                    ref={el => {
+                      if (el) hunkRefs.current.set(segment.hunkIndex, el)
+                      else hunkRefs.current.delete(segment.hunkIndex)
                     }}
+                    style={
+                      isActive
+                        ? {
+                            outline: "1px solid var(--artifact-purple)",
+                            outlineOffset: "-1px",
+                          }
+                        : undefined
+                    }
                   >
-                    {row.left ?? " "}
-                  </td>
-                  <td
-                    className="align-top w-1/2 px-2 py-0.5 whitespace-pre-wrap break-words border-l border-[var(--border)]/40"
-                    style={{
-                      backgroundColor:
-                        row.kind === "added"
-                          ? "color-mix(in srgb, var(--validation-emerald) 18%, transparent)"
-                          : "transparent",
-                      color: row.kind === "added" ? "var(--validation-emerald)" : "var(--foreground)",
-                    }}
+                    {segment.rows.map((row, i) => (
+                      <DiffTableRow
+                        key={`${segment.id}-${i}`}
+                        row={row}
+                        testid="prompt-version-diff-row"
+                      />
+                    ))}
+                  </tbody>
+                )
+              }
+              if (segment.type === "context-visible") {
+                return (
+                  <tbody
+                    key={segment.id}
+                    data-testid="prompt-version-diff-context"
                   >
-                    {row.right ?? " "}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
+                    {segment.rows.map((row, i) => (
+                      <DiffTableRow
+                        key={`${segment.id}-${i}`}
+                        row={row}
+                        testid="prompt-version-diff-row"
+                      />
+                    ))}
+                  </tbody>
+                )
+              }
+              // collapsed segment
+              const isExpanded = expandedContextIds.has(segment.id)
+              if (isExpanded) {
+                return (
+                  <tbody
+                    key={segment.id}
+                    data-testid="prompt-version-diff-context-unfolded"
+                    data-segment-id={segment.id}
+                  >
+                    {segment.rows.map((row, i) => (
+                      <DiffTableRow
+                        key={`${segment.id}-${i}`}
+                        row={row}
+                        testid="prompt-version-diff-row"
+                      />
+                    ))}
+                  </tbody>
+                )
+              }
+              const hiddenCount = segment.rows.length
+              return (
+                <tbody key={segment.id} data-testid="prompt-version-diff-context-collapsed-group">
+                  <tr>
+                    <td colSpan={2} className="p-0">
+                      <button
+                        type="button"
+                        data-testid="prompt-version-diff-context-collapsed"
+                        data-segment-id={segment.id}
+                        data-hidden-lines={hiddenCount}
+                        onClick={() => expandSegment(segment.id)}
+                        className="w-full flex items-center justify-center gap-2 py-1 font-mono text-[10px] text-[var(--muted-foreground)] bg-[var(--secondary)]/40 hover:bg-[var(--secondary)]/80 border-y border-[var(--border)]/40 transition-colors"
+                        aria-label={`Expand ${hiddenCount} hidden context line${hiddenCount === 1 ? "" : "s"}`}
+                        title={`Expand ${hiddenCount} hidden context line${hiddenCount === 1 ? "" : "s"}`}
+                      >
+                        <ChevronsUpDown size={10} className="opacity-60" />
+                        <span>
+                          Expand {hiddenCount} line{hiddenCount === 1 ? "" : "s"} of context
+                        </span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              )
+            })}
           </table>
         </div>
       )}
     </div>
+  )
+}
+
+function DiffTableRow({
+  row,
+  testid,
+}: {
+  row: DiffRow
+  testid: string
+}) {
+  return (
+    <tr data-testid={testid} data-row-kind={row.kind}>
+      <td
+        className="align-top w-1/2 px-2 py-0.5 whitespace-pre-wrap break-words"
+        style={{
+          backgroundColor:
+            row.kind === "removed"
+              ? "color-mix(in srgb, var(--critical-red) 18%, transparent)"
+              : "transparent",
+          color: row.kind === "removed" ? "var(--critical-red)" : "var(--foreground)",
+        }}
+      >
+        {row.left ?? " "}
+      </td>
+      <td
+        className="align-top w-1/2 px-2 py-0.5 whitespace-pre-wrap break-words border-l border-[var(--border)]/40"
+        style={{
+          backgroundColor:
+            row.kind === "added"
+              ? "color-mix(in srgb, var(--validation-emerald) 18%, transparent)"
+              : "transparent",
+          color: row.kind === "added" ? "var(--validation-emerald)" : "var(--foreground)",
+        }}
+      >
+        {row.right ?? " "}
+      </td>
+    </tr>
   )
 }

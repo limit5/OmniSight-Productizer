@@ -23,6 +23,8 @@ import { render, fireEvent, act, waitFor } from "@testing-library/react"
 import {
   PromptVersionDrawer,
   changesToDiffRows,
+  groupRowsIntoSegments,
+  DEFAULT_DIFF_CONTEXT_LINES,
   DEFAULT_PROMPT_AGENT_SUBTYPES,
   type PromptAgentSubtype,
 } from "@/components/omnisight/prompt-version-drawer"
@@ -372,5 +374,413 @@ describe("<PromptVersionDrawer>", () => {
     const select = view.getByTestId("prompt-version-drawer-agent-select") as HTMLSelectElement
     expect(select.querySelectorAll("option")).toHaveLength(2)
     expect(select.value).toBe("alpha")
+  })
+})
+
+/**
+ * ZZ.C1 checkbox 4 — pure-function coverage for the hunk / context
+ * segment partition. These pin the contract the side-by-side renderer
+ * and the ``n`` keyboard handler rely on:
+ *  - A hunk is a contiguous run of removed/added rows (what git calls a
+ *    "hunk" and what ``n`` jumps between).
+ *  - Context bands longer than 2×N collapse behind a single
+ *    ``context-collapsed`` segment whose rows are hidden until the
+ *    operator expands them; shorter bands stay fully visible.
+ *  - Leading / trailing bands shrink to one-sided visible + collapsed
+ *    so only the contextLines adjacent to a hunk survive by default.
+ */
+describe("groupRowsIntoSegments()", () => {
+  function ctx(n: number): { kind: "context"; left: string; right: string }[] {
+    return Array.from({ length: n }, (_, i) => ({
+      kind: "context" as const,
+      left: `c${i}`,
+      right: `c${i}`,
+    }))
+  }
+  function hunk(n: number): { kind: "removed" | "added"; left: string | null; right: string | null }[] {
+    const out: { kind: "removed" | "added"; left: string | null; right: string | null }[] = []
+    for (let i = 0; i < n; i++) {
+      if (i % 2 === 0) out.push({ kind: "removed", left: `r${i}`, right: null })
+      else out.push({ kind: "added", left: null, right: `a${i}` })
+    }
+    return out
+  }
+
+  it("exposes 3 as the shipped default to match difflib's unified_diff(n=3)", () => {
+    expect(DEFAULT_DIFF_CONTEXT_LINES).toBe(3)
+  })
+
+  it("empty rows → empty segments", () => {
+    expect(groupRowsIntoSegments([], 3)).toEqual([])
+  })
+
+  it("whole diff is context and length ≤ N → one visible segment", () => {
+    const segs = groupRowsIntoSegments(ctx(2), 3)
+    expect(segs).toHaveLength(1)
+    expect(segs[0].type).toBe("context-visible")
+    expect(segs[0].rows).toHaveLength(2)
+  })
+
+  it("whole diff is context and length > N → visible head + collapsed tail", () => {
+    const segs = groupRowsIntoSegments(ctx(10), 3)
+    expect(segs).toHaveLength(2)
+    expect(segs[0].type).toBe("context-visible")
+    expect(segs[0].rows).toHaveLength(3)
+    expect(segs[1].type).toBe("context-collapsed")
+    expect(segs[1].rows).toHaveLength(7)
+  })
+
+  it("total rewrite — all rows are changed → one hunk, no context", () => {
+    const segs = groupRowsIntoSegments(hunk(5), 3)
+    expect(segs).toHaveLength(1)
+    expect(segs[0].type).toBe("hunk")
+    if (segs[0].type === "hunk") {
+      expect(segs[0].hunkIndex).toBe(0)
+      expect(segs[0].rows).toHaveLength(5)
+    }
+  })
+
+  it("leading context longer than N → collapsed head + visible tail anchored to hunk", () => {
+    const rows = [...ctx(10), ...hunk(2)]
+    const segs = groupRowsIntoSegments(rows, 3)
+    expect(segs.map(s => s.type)).toEqual([
+      "context-collapsed",
+      "context-visible",
+      "hunk",
+    ])
+    expect(segs[0].rows).toHaveLength(10 - 3)
+    expect(segs[1].rows).toHaveLength(3)
+  })
+
+  it("leading context ≤ N → stays fully visible", () => {
+    const rows = [...ctx(2), ...hunk(2)]
+    const segs = groupRowsIntoSegments(rows, 3)
+    expect(segs.map(s => s.type)).toEqual(["context-visible", "hunk"])
+    expect(segs[0].rows).toHaveLength(2)
+  })
+
+  it("trailing context longer than N → visible head + collapsed tail", () => {
+    const rows = [...hunk(2), ...ctx(10)]
+    const segs = groupRowsIntoSegments(rows, 3)
+    expect(segs.map(s => s.type)).toEqual([
+      "hunk",
+      "context-visible",
+      "context-collapsed",
+    ])
+    expect(segs[1].rows).toHaveLength(3)
+    expect(segs[2].rows).toHaveLength(10 - 3)
+  })
+
+  it("middle context between two hunks > 2N → visible/collapsed/visible", () => {
+    const rows = [...hunk(2), ...ctx(20), ...hunk(2)]
+    const segs = groupRowsIntoSegments(rows, 3)
+    expect(segs.map(s => s.type)).toEqual([
+      "hunk",
+      "context-visible",
+      "context-collapsed",
+      "context-visible",
+      "hunk",
+    ])
+    expect(segs[1].rows).toHaveLength(3)
+    expect(segs[2].rows).toHaveLength(20 - 6)
+    expect(segs[3].rows).toHaveLength(3)
+    // Hunk indices monotonically increase.
+    const hunkSegs = segs.filter(s => s.type === "hunk")
+    expect(hunkSegs).toHaveLength(2)
+  })
+
+  it("middle context between two hunks ≤ 2N → stays fully visible", () => {
+    const rows = [...hunk(1), ...ctx(5), ...hunk(1)]
+    const segs = groupRowsIntoSegments(rows, 3)
+    expect(segs.map(s => s.type)).toEqual([
+      "hunk",
+      "context-visible",
+      "hunk",
+    ])
+    expect(segs[1].rows).toHaveLength(5)
+  })
+
+  it("contextLines=0 → every context row is collapsed", () => {
+    const rows = [...hunk(1), ...ctx(4), ...hunk(1)]
+    const segs = groupRowsIntoSegments(rows, 0)
+    expect(segs.map(s => s.type)).toEqual([
+      "hunk",
+      "context-collapsed",
+      "hunk",
+    ])
+    expect(segs[1].rows).toHaveLength(4)
+  })
+
+  it("hunkIndex values are 0-based and stable across hunks", () => {
+    const rows = [...hunk(1), ...ctx(10), ...hunk(1), ...ctx(2), ...hunk(1)]
+    const segs = groupRowsIntoSegments(rows, 3)
+    const hunkIndices = segs
+      .filter((s): s is Extract<typeof segs[number], { type: "hunk" }> => s.type === "hunk")
+      .map(s => s.hunkIndex)
+    expect(hunkIndices).toEqual([0, 1, 2])
+  })
+
+  it("segment ids are unique so expand-state can key off them", () => {
+    const rows = [
+      ...ctx(10),
+      ...hunk(2),
+      ...ctx(20),
+      ...hunk(2),
+      ...ctx(10),
+    ]
+    const segs = groupRowsIntoSegments(rows, 3)
+    const ids = segs.map(s => s.id)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
+/**
+ * ZZ.C1 checkbox 4 — UI wiring: the collapsed band renders an "Expand N
+ * lines" button that unfolds when clicked, and ``n`` / ``Shift+n``
+ * cycles ``activeHunkIndex`` across hunks (wrapping at the ends). The
+ * binding ignores keystrokes whose target is a form control so
+ * <select>'s built-in type-ahead is not hijacked.
+ */
+describe("<PromptVersionDrawer> — unfold + keyboard nav", () => {
+  const LONG_CONTEXT = Array.from({ length: 12 }, (_, i) => `ctx line ${i}`).join("\n")
+  function twoHunkPair() {
+    const oldBody = [
+      LONG_CONTEXT,
+      "ORIGINAL ONE",
+      LONG_CONTEXT,
+      "ORIGINAL TWO",
+      LONG_CONTEXT,
+    ].join("\n") + "\n"
+    const newBody = [
+      LONG_CONTEXT,
+      "EDITED ONE",
+      LONG_CONTEXT,
+      "EDITED TWO",
+      LONG_CONTEXT,
+    ].join("\n") + "\n"
+    return {
+      from: makeEntry({
+        id: 1,
+        version: 1,
+        content_hash: "a".repeat(64),
+        content: oldBody,
+      }),
+      to: makeEntry({
+        id: 2,
+        version: 2,
+        content_hash: "b".repeat(64),
+        content: newBody,
+      }),
+    }
+  }
+
+  it("renders an Expand-context button for long leading context and expands on click", async () => {
+    const { from, to } = twoHunkPair()
+    const fetcher = vi.fn().mockResolvedValue(makeListResponse([to, from]))
+    const view = render(
+      <PromptVersionDrawer open={true} onClose={() => {}} fetchVersions={fetcher} />,
+    )
+    await waitFor(() => expect(view.getAllByTestId("prompt-version-row")).toHaveLength(2))
+    const rows = view.getAllByTestId("prompt-version-row")
+    act(() => { fireEvent.click(rows[0]) })
+    act(() => { fireEvent.click(rows[1]) })
+
+    const collapsed = await waitFor(() =>
+      view.getAllByTestId("prompt-version-diff-context-collapsed"),
+    )
+    // 12-line leading band collapses 12-3=9 hidden lines; 12-line
+    // middle band collapses 12-6=6 hidden; trailing band 12-3=9.
+    expect(collapsed.length).toBeGreaterThanOrEqual(1)
+    const hiddenCounts = collapsed.map(b =>
+      Number(b.getAttribute("data-hidden-lines") ?? "0"),
+    )
+    expect(hiddenCounts).toEqual(expect.arrayContaining([9, 6]))
+    for (const btn of collapsed) {
+      expect(btn.textContent).toMatch(/Expand \d+ lines? of context/)
+    }
+
+    const firstCollapsed = collapsed[0]
+    const segmentId = firstCollapsed.getAttribute("data-segment-id")
+    expect(segmentId).not.toBeNull()
+    act(() => { fireEvent.click(firstCollapsed) })
+    // Expanded — collapsed button for this segment disappears, unfolded
+    // tbody with the same segment-id takes its place.
+    const remaining = view.queryAllByTestId("prompt-version-diff-context-collapsed")
+      .map(el => el.getAttribute("data-segment-id"))
+    expect(remaining).not.toContain(segmentId)
+    const unfolded = view.getAllByTestId("prompt-version-diff-context-unfolded")
+    expect(unfolded.some(el => el.getAttribute("data-segment-id") === segmentId)).toBe(true)
+  })
+
+  it("collapsed context exposes the button label 'Expand N lines of context'", async () => {
+    const { from, to } = twoHunkPair()
+    const fetcher = vi.fn().mockResolvedValue(makeListResponse([to, from]))
+    const view = render(
+      <PromptVersionDrawer open={true} onClose={() => {}} fetchVersions={fetcher} />,
+    )
+    await waitFor(() => expect(view.getAllByTestId("prompt-version-row")).toHaveLength(2))
+    const rows = view.getAllByTestId("prompt-version-row")
+    act(() => { fireEvent.click(rows[0]) })
+    act(() => { fireEvent.click(rows[1]) })
+    const btn = await waitFor(() => view.getAllByTestId("prompt-version-diff-context-collapsed")[0])
+    expect(btn.getAttribute("aria-label")).toMatch(/Expand \d+ hidden context line/)
+  })
+
+  it("hunk counter badge surfaces the 1/N position, toolbar buttons navigate", async () => {
+    const { from, to } = twoHunkPair()
+    const fetcher = vi.fn().mockResolvedValue(makeListResponse([to, from]))
+    const view = render(
+      <PromptVersionDrawer open={true} onClose={() => {}} fetchVersions={fetcher} />,
+    )
+    await waitFor(() => expect(view.getAllByTestId("prompt-version-row")).toHaveLength(2))
+    const rows = view.getAllByTestId("prompt-version-row")
+    act(() => { fireEvent.click(rows[0]) })
+    act(() => { fireEvent.click(rows[1]) })
+
+    const counter = await waitFor(() => view.getByTestId("prompt-version-diff-hunk-counter"))
+    expect(counter).toHaveTextContent(/hunk 1 \/ 2/)
+    // Click the next-hunk toolbar button → counter advances.
+    act(() => { fireEvent.click(view.getByTestId("prompt-version-diff-next-hunk")) })
+    expect(view.getByTestId("prompt-version-diff-hunk-counter")).toHaveTextContent(/hunk 2 \/ 2/)
+    // Wrap — next past the end goes back to hunk 1.
+    act(() => { fireEvent.click(view.getByTestId("prompt-version-diff-next-hunk")) })
+    expect(view.getByTestId("prompt-version-diff-hunk-counter")).toHaveTextContent(/hunk 1 \/ 2/)
+    // Previous wraps the other way.
+    act(() => { fireEvent.click(view.getByTestId("prompt-version-diff-prev-hunk")) })
+    expect(view.getByTestId("prompt-version-diff-hunk-counter")).toHaveTextContent(/hunk 2 \/ 2/)
+  })
+
+  it("n key jumps to the next hunk (wrapping), Shift+n goes back", async () => {
+    const { from, to } = twoHunkPair()
+    const fetcher = vi.fn().mockResolvedValue(makeListResponse([to, from]))
+    const view = render(
+      <PromptVersionDrawer open={true} onClose={() => {}} fetchVersions={fetcher} />,
+    )
+    await waitFor(() => expect(view.getAllByTestId("prompt-version-row")).toHaveLength(2))
+    const rows = view.getAllByTestId("prompt-version-row")
+    act(() => { fireEvent.click(rows[0]) })
+    act(() => { fireEvent.click(rows[1]) })
+    await waitFor(() => view.getByTestId("prompt-version-diff-hunk-counter"))
+
+    const initialActive = view
+      .getAllByTestId("prompt-version-diff-hunk")
+      .find(el => el.getAttribute("data-hunk-active") === "true")
+    expect(initialActive?.getAttribute("data-hunk-index")).toBe("0")
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "n", bubbles: true }))
+    })
+    const afterN = view
+      .getAllByTestId("prompt-version-diff-hunk")
+      .find(el => el.getAttribute("data-hunk-active") === "true")
+    expect(afterN?.getAttribute("data-hunk-index")).toBe("1")
+
+    // Wrap past last → back to hunk 0.
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "n", bubbles: true }))
+    })
+    const afterWrap = view
+      .getAllByTestId("prompt-version-diff-hunk")
+      .find(el => el.getAttribute("data-hunk-active") === "true")
+    expect(afterWrap?.getAttribute("data-hunk-index")).toBe("0")
+
+    // Shift+n goes backward (0 → 1 via wrap).
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "N", shiftKey: true, bubbles: true }),
+      )
+    })
+    const afterShift = view
+      .getAllByTestId("prompt-version-diff-hunk")
+      .find(el => el.getAttribute("data-hunk-active") === "true")
+    expect(afterShift?.getAttribute("data-hunk-index")).toBe("1")
+  })
+
+  it("n key does not navigate when no diff is rendered (single selection)", async () => {
+    const { from, to } = twoHunkPair()
+    const fetcher = vi.fn().mockResolvedValue(makeListResponse([to, from]))
+    const view = render(
+      <PromptVersionDrawer open={true} onClose={() => {}} fetchVersions={fetcher} />,
+    )
+    await waitFor(() => expect(view.getAllByTestId("prompt-version-row")).toHaveLength(2))
+    const rows = view.getAllByTestId("prompt-version-row")
+    // Only one pick → diff not rendered yet.
+    act(() => { fireEvent.click(rows[0]) })
+    expect(view.queryByTestId("prompt-version-diff-side-by-side")).toBeNull()
+    // n should be a no-op (no counter exists).
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "n", bubbles: true }))
+    })
+    expect(view.queryByTestId("prompt-version-diff-hunk-counter")).toBeNull()
+  })
+
+  it("n key is ignored when focus is inside the agent_type <select>", async () => {
+    const { from, to } = twoHunkPair()
+    const fetcher = vi.fn().mockResolvedValue(makeListResponse([to, from]))
+    const view = render(
+      <PromptVersionDrawer open={true} onClose={() => {}} fetchVersions={fetcher} />,
+    )
+    await waitFor(() => expect(view.getAllByTestId("prompt-version-row")).toHaveLength(2))
+    const rows = view.getAllByTestId("prompt-version-row")
+    act(() => { fireEvent.click(rows[0]) })
+    act(() => { fireEvent.click(rows[1]) })
+    await waitFor(() => view.getByTestId("prompt-version-diff-hunk-counter"))
+
+    // Focus the select, then dispatch `n` with the select as event target.
+    const select = view.getByTestId("prompt-version-drawer-agent-select") as HTMLSelectElement
+    select.focus()
+    act(() => {
+      const evt = new KeyboardEvent("keydown", { key: "n", bubbles: true })
+      select.dispatchEvent(evt)
+    })
+    const active = view
+      .getAllByTestId("prompt-version-diff-hunk")
+      .find(el => el.getAttribute("data-hunk-active") === "true")
+    // Cursor did not move off hunk 0.
+    expect(active?.getAttribute("data-hunk-index")).toBe("0")
+  })
+
+  it("contextLines prop override shrinks the visible context band", async () => {
+    const { from, to } = twoHunkPair()
+    const fetcher = vi.fn().mockResolvedValue(makeListResponse([to, from]))
+    const view = render(
+      <PromptVersionDrawer
+        open={true}
+        onClose={() => {}}
+        fetchVersions={fetcher}
+        contextLines={1}
+      />,
+    )
+    await waitFor(() => expect(view.getAllByTestId("prompt-version-row")).toHaveLength(2))
+    const rows = view.getAllByTestId("prompt-version-row")
+    act(() => { fireEvent.click(rows[0]) })
+    act(() => { fireEvent.click(rows[1]) })
+    const collapsed = await waitFor(() =>
+      view.getAllByTestId("prompt-version-diff-context-collapsed"),
+    )
+    // contextLines=1 → visible bands shrink to 1 row each, more rows
+    // collapsed than with the default of 3.
+    const hidden = collapsed.reduce(
+      (acc, b) => acc + Number(b.getAttribute("data-hidden-lines") ?? "0"),
+      0,
+    )
+    expect(hidden).toBeGreaterThanOrEqual(11 + 10 + 11) // 3 bands of 12 lines with n=1 → 11 + 10 + 11
+  })
+
+  it("hunk counter disappears when the diff is identical (no hunks)", async () => {
+    const sameHash = "c".repeat(64)
+    const v1 = makeEntry({ id: 10, version: 5, content_hash: sameHash, content: "x\n" })
+    const v2 = makeEntry({ id: 11, version: 6, content_hash: sameHash, content: "x\n" })
+    const fetcher = vi.fn().mockResolvedValue(makeListResponse([v2, v1]))
+    const view = render(
+      <PromptVersionDrawer open={true} onClose={() => {}} fetchVersions={fetcher} />,
+    )
+    await waitFor(() => expect(view.getAllByTestId("prompt-version-row")).toHaveLength(2))
+    const rows = view.getAllByTestId("prompt-version-row")
+    act(() => { fireEvent.click(rows[0]) })
+    act(() => { fireEvent.click(rows[1]) })
+    await waitFor(() => view.getByTestId("prompt-version-diff-identical"))
+    expect(view.queryByTestId("prompt-version-diff-hunk-counter")).toBeNull()
+    expect(view.queryByTestId("prompt-version-diff-next-hunk")).toBeNull()
   })
 })
