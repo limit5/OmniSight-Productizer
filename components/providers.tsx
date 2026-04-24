@@ -5,6 +5,7 @@ import { AuthProvider } from "@/lib/auth-context"
 import { TenantProvider } from "@/lib/tenant-context"
 import { StorageBridge } from "@/components/storage-bridge"
 import { ApiErrorToastCenter } from "@/components/omnisight/api-error-toast-center"
+import { DraftSyncToastCenter } from "@/components/omnisight/draft-sync-toast-center"
 
 interface ProvidersProps {
   children: React.ReactNode
@@ -18,6 +19,7 @@ export function Providers({ children }: ProvidersProps) {
           <StorageBridge />
           {children}
           <ApiErrorToastCenter />
+          <DraftSyncToastCenter />
         </TenantProvider>
       </AuthProvider>
     </I18nProvider>

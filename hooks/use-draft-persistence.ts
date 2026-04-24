@@ -12,9 +12,13 @@
  *   4. Swallow errors silently — the operator is typing, a toast on
  *      a flaky tunnel would be hostile.
  *
- * Future Q.6 checkboxes (2 = restore on new device, 3 = 24 h GC,
- * 4 = conflict toast on restore) layer on top of this — restore is
- * a one-shot fetch on mount; this hook stays write-only.
+ * Q.6 checkbox 4 (2026-04-24) adds a final step: on a successful PUT,
+ * echo ``{content, updated_at}`` into local storage so the next
+ * restore (on this device, new tab, or after a refresh) can compare
+ * the server's ``updated_at`` against what this device knows about —
+ * if the server is newer the difference must have come from a peer
+ * device, and ``useDraftRestore`` fires the "synced from another
+ * device" toast.
  *
  * The hook returns nothing; callers wire it up purely for its side
  * effect on `value` changes. The `enabled` flag is the pull-out
@@ -25,7 +29,8 @@
 
 import * as React from "react"
 
-import { putUserDraft } from "@/lib/api"
+import { putUserDraft, type DraftResponse } from "@/lib/api"
+import { writeDraftLocalEntry } from "@/lib/draft-sync-bus"
 
 export const DRAFT_DEBOUNCE_MS = 500
 
@@ -44,6 +49,14 @@ export interface UseDraftPersistenceOptions {
   writer?: (slotKey: string, content: string) => Promise<unknown>
   /** Override for the debounce window — defaults to 500 ms. */
   debounceMs?: number
+  /**
+   * When ``true`` (default), successful PUTs echo the returned
+   * ``{content, updated_at}`` into local storage so Q.6 checkbox 4's
+   * conflict-on-restore comparison has something to compare against.
+   * Tests that stub the writer with a non-DraftResponse shape can
+   * disable this without wedging on the type guard.
+   */
+  persistLocalEcho?: boolean
 }
 
 /**
@@ -64,6 +77,7 @@ export function useDraftPersistence({
   enabled = true,
   writer = putUserDraft,
   debounceMs = DRAFT_DEBOUNCE_MS,
+  persistLocalEcho = true,
 }: UseDraftPersistenceOptions): void {
   // First render is a "load" event from the operator's perspective
   // (the parent might set `value` from local storage before the
@@ -80,13 +94,32 @@ export function useDraftPersistence({
     if (!enabled) return
     if (!slotKey) return
     const timer = setTimeout(() => {
-      void writer(slotKey, value).catch(() => {
-        // Deliberately silent — the operator is typing, the next
-        // tick will retry naturally, and the restore-on-new-device
-        // flow tolerates a missed write since it only reads the
-        // most recent committed row.
-      })
+      void writer(slotKey, value)
+        .then((res) => {
+          if (!persistLocalEcho) return
+          // Q.6 checkbox 4 — echo server-committed {content, updated_at}
+          // so the next restore can tell whether the remote row came
+          // from this device or a peer. Defensive typing: we accept
+          // any writer override that returns at least
+          // ``{content: string, updated_at: number}``; anything else
+          // (e.g. unit-test mocks returning ``{}``) is silently
+          // skipped so tests do not have to mirror the full shape.
+          const r = res as Partial<DraftResponse> | null | undefined
+          if (!r) return
+          if (typeof r.content !== "string") return
+          if (typeof r.updated_at !== "number") return
+          writeDraftLocalEntry(slotKey, {
+            content: r.content,
+            updated_at: r.updated_at,
+          })
+        })
+        .catch(() => {
+          // Deliberately silent — the operator is typing, the next
+          // tick will retry naturally, and the restore-on-new-device
+          // flow tolerates a missed write since it only reads the
+          // most recent committed row.
+        })
     }, debounceMs)
     return () => clearTimeout(timer)
-  }, [slotKey, value, enabled, writer, debounceMs])
+  }, [slotKey, value, enabled, writer, debounceMs, persistLocalEcho])
 }

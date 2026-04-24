@@ -20,14 +20,17 @@ import {
   DRAFT_DEBOUNCE_MS,
   useDraftPersistence,
 } from "@/hooks/use-draft-persistence"
+import { readDraftLocalEntry } from "@/lib/draft-sync-bus"
 
 beforeEach(() => {
   vi.useFakeTimers()
+  window.localStorage.clear()
 })
 
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
+  window.localStorage.clear()
 })
 
 describe("useDraftPersistence", () => {
@@ -168,6 +171,90 @@ describe("useDraftPersistence", () => {
     expect(writer).toHaveBeenCalledTimes(1)
     // No assertion needed beyond "the test did not crash" — vitest
     // would fail the test on an unhandled rejection.
+  })
+
+  it("echoes server {content, updated_at} into local storage after a successful PUT", async () => {
+    // Q.6 checkbox 4 — the echoed pair is what the next restore
+    // compares against when deciding whether to surface the toast.
+    const writer = vi.fn().mockResolvedValue({
+      slot_key: "invoke:main",
+      content: "typed",
+      updated_at: 12345.6,
+    })
+    let value = "x"
+    const { rerender } = renderHook(() =>
+      useDraftPersistence({
+        slotKey: "invoke:main",
+        value,
+        writer,
+      }),
+    )
+    value = "typed"
+    rerender()
+    act(() => {
+      vi.advanceTimersByTime(DRAFT_DEBOUNCE_MS)
+    })
+    expect(writer).toHaveBeenCalledTimes(1)
+    // Drain microtasks so the .then() that writes localStorage runs.
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(readDraftLocalEntry("invoke:main")).toEqual({
+      content: "typed",
+      updated_at: 12345.6,
+    })
+  })
+
+  it("skips local echo when writer returns a non-DraftResponse shape", async () => {
+    // Guards against tests that stub the writer with ``{}`` — we must
+    // not crash or write bogus data.
+    const writer = vi.fn().mockResolvedValue({})
+    let value = "x"
+    const { rerender } = renderHook(() =>
+      useDraftPersistence({
+        slotKey: "invoke:main",
+        value,
+        writer,
+      }),
+    )
+    value = "typed"
+    rerender()
+    act(() => {
+      vi.advanceTimersByTime(DRAFT_DEBOUNCE_MS)
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(readDraftLocalEntry("invoke:main")).toBeNull()
+  })
+
+  it("skips local echo when persistLocalEcho=false even on a shaped response", async () => {
+    const writer = vi.fn().mockResolvedValue({
+      slot_key: "invoke:main",
+      content: "typed",
+      updated_at: 1,
+    })
+    let value = "x"
+    const { rerender } = renderHook(() =>
+      useDraftPersistence({
+        slotKey: "invoke:main",
+        value,
+        writer,
+        persistLocalEcho: false,
+      }),
+    )
+    value = "typed"
+    rerender()
+    act(() => {
+      vi.advanceTimersByTime(DRAFT_DEBOUNCE_MS)
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(readDraftLocalEntry("invoke:main")).toBeNull()
   })
 
   it("uses a custom debounce window when supplied", () => {

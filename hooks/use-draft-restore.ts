@@ -22,14 +22,34 @@
  *      circuits so `onRestore` is only called when there is actually
  *      something to restore.
  *
- * Q.6 checkbox 4 layers the conflict toast on top of this by reading
- * `updated_at` against a local-storage cache — out of scope here.
+ * Q.6 checkbox 4 (2026-04-24) — conflict-on-restore toast:
+ * Compare the server-returned ``updated_at`` against the local
+ * storage cache written by ``useDraftPersistence`` on the previous
+ * successful PUT.
+ *
+ *   - server.updated_at > local.updated_at (or no local entry at all
+ *     on a fresh device) → adopt remote AND emit a ``draft_synced``
+ *     event on the ``onDraftSynced`` bus so the toast center fires
+ *     「從他裝置同步了草稿」.
+ *   - server.updated_at == local.updated_at → same row we already
+ *     persisted from this device; silently adopt (or no-op) and
+ *     skip the toast.
+ *   - server.updated_at < local.updated_at → stale server (e.g.
+ *     clock skew, or we won the race); skip the toast, still adopt
+ *     on a non-empty content so the composer stays in sync with the
+ *     authoritative row — the next 500 ms debounce tick from this
+ *     device will overwrite it anyway per the last-writer-wins spec.
  */
 "use client"
 
 import * as React from "react"
 
 import { getUserDraft, type DraftResponse } from "@/lib/api"
+import {
+  emitDraftSynced,
+  readDraftLocalEntry,
+  writeDraftLocalEntry,
+} from "@/lib/draft-sync-bus"
 
 export interface UseDraftRestoreOptions {
   /** Slot key — `invoke:main` / `chat:main` / `chat:<thread_id>`. */
@@ -86,7 +106,55 @@ export function useDraftRestore({
         if (cancelled) return
         if (!res || typeof res.content !== "string") return
         if (res.content.length === 0) return
+
+        // Q.6 checkbox 4 — conflict detection. Compare the server's
+        // ``updated_at`` against the local-storage echo from the
+        // previous successful PUT by this device. Emit a sync event
+        // when the remote is strictly newer, OR when this device has
+        // no local echo at all (fresh device restoring a draft from
+        // a peer) — both cases surface the toast「從他裝置同步了草稿」.
+        const local = readDraftLocalEntry(slotKey)
+        const remoteTs = typeof res.updated_at === "number" ? res.updated_at : null
+        let syncedFromPeer = false
+        if (remoteTs !== null) {
+          if (local === null) {
+            // Fresh device — the content came from a peer by
+            // definition (this device never wrote the slot).
+            syncedFromPeer = true
+          } else if (remoteTs > local.updated_at) {
+            syncedFromPeer = true
+          } else if (
+            // Same timestamp but content diverges — treat as a peer
+            // write we happened to be identical-ts to (extremely rare,
+            // but ``updated_at`` is only second-granularity on some
+            // clocks). Surface the toast for safety.
+            remoteTs === local.updated_at &&
+            res.content !== local.content
+          ) {
+            syncedFromPeer = true
+          }
+        }
+
         onRestoreRef.current(res)
+
+        // Echo the authoritative server row into local storage so a
+        // subsequent restore (same session, new tab) sees the freshly
+        // adopted value as the "current local" baseline.
+        if (remoteTs !== null) {
+          writeDraftLocalEntry(slotKey, {
+            content: res.content,
+            updated_at: remoteTs,
+          })
+        }
+
+        if (syncedFromPeer && remoteTs !== null) {
+          emitDraftSynced({
+            slotKey,
+            content: res.content,
+            remoteUpdatedAt: remoteTs,
+            localUpdatedAt: local?.updated_at ?? null,
+          })
+        }
       } catch {
         // Deliberately silent — see module docstring.
       }
