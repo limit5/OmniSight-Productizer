@@ -1376,6 +1376,7 @@ async def verify_gerrit_submit_rule(
 # would otherwise leave the URL stuck on `http://internal-host:8000`.
 
 _WEBHOOK_PATH = "/api/v1/webhooks/gerrit"
+_JIRA_WEBHOOK_PATH = "/api/v1/webhooks/jira"
 
 
 def _mask_secret(value: str) -> str:
@@ -1391,23 +1392,27 @@ def _mask_secret(value: str) -> str:
     return f"{value[:4]}…{value[-4:]}"
 
 
-def _derive_webhook_url(request: Request) -> str:
-    """Build the externally-facing URL Gerrit will POST events to.
+def _derive_webhook_url(request: Request, path: str = _WEBHOOK_PATH) -> str:
+    """Build the externally-facing URL an external system will POST to.
 
     Honours ``X-Forwarded-Proto`` / ``X-Forwarded-Host`` first because
     cloudflared (default deploy) terminates HTTPS upstream — without
     these headers we'd hand the operator ``http://127.0.0.1:8000/...``,
-    which Gerrit cannot reach. Falls back to ``Request.base_url`` which
-    Starlette derives from the actual HTTP/1.1 ``Host`` header.
+    which the external system cannot reach. Falls back to
+    ``Request.base_url`` which Starlette derives from the actual
+    HTTP/1.1 ``Host`` header.
+
+    ``path`` defaults to the Gerrit webhook path (original caller);
+    pass ``_JIRA_WEBHOOK_PATH`` for the JIRA rotate endpoint.
     """
     fwd_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
     fwd_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
     if fwd_proto and fwd_host:
-        return f"{fwd_proto}://{fwd_host}{_WEBHOOK_PATH}"
+        return f"{fwd_proto}://{fwd_host}{path}"
     base = str(request.base_url or "").rstrip("/")
     if base:
-        return f"{base}{_WEBHOOK_PATH}"
-    return _WEBHOOK_PATH
+        return f"{base}{path}"
+    return path
 
 
 @router.get("/git-forge/gerrit/webhook-info")
@@ -1574,6 +1579,56 @@ async def generate_gerrit_webhook_secret(
             "Save this value now — it will not be shown again. Paste it "
             "into Gerrit `refs/meta/config:webhooks.config` under the "
             "matching `[remote ...]` block as `secret = <value>`."
+        ),
+    }
+
+
+@router.post("/git-forge/jira/webhook-secret/generate")
+async def generate_jira_webhook_secret(
+    request: Request, _user=Depends(_au.require_admin)
+):
+    """Mint + persist a fresh ``jira_webhook_secret`` and return it once.
+
+    Mirrors the Gerrit rotate endpoint (Y-prep.2 #288). 32 bytes of
+    ``secrets.token_urlsafe`` → ~43-char URL-safe string with ~256 bits
+    of entropy. The plain value is returned **only** in this response —
+    the operator must capture it and paste it into JIRA's webhook
+    ``Authorization`` header configuration before closing the modal;
+    subsequent reads (``GET /settings``) surface only the
+    ``configured``/``""`` status via the webhooks block.
+
+    Cross-worker coherence: ``_apply_runtime_setting`` writes through
+    the Redis-backed SharedKV mirror (``jira_webhook_secret`` is in
+    ``_SHARED_KV_STR_FIELDS``), so peer workers pick up the rotated
+    secret on their next overlay — the inbound
+    ``POST /api/v1/webhooks/jira`` verifier on any worker compares
+    against the new value, not the one in this worker's .env-loaded
+    ``settings`` from boot.
+
+    JIRA webhooks use a shared token in the ``Authorization: Bearer
+    <token>`` header (not HMAC body signing like Gerrit), so the
+    ``signature_header`` / ``signature_algorithm`` fields in the
+    response reflect that — structural parity with the Gerrit response
+    shape, accurate semantics for the JIRA transport.
+    """
+    new_secret = _secrets.token_urlsafe(32)
+    _apply_runtime_setting("jira_webhook_secret", new_secret)
+    logger.info(
+        "jira_webhook_secret rotated by user=%s len=%d",
+        getattr(_user, "username", "?"),
+        len(new_secret),
+    )
+    return {
+        "status": "ok",
+        "secret": new_secret,
+        "secret_masked": _mask_secret(new_secret),
+        "webhook_url": _derive_webhook_url(request, _JIRA_WEBHOOK_PATH),
+        "signature_header": "Authorization",
+        "signature_algorithm": "bearer-token",
+        "note": (
+            "Save this value now — it will not be shown again. In JIRA's "
+            "webhook settings, set the request ``Authorization`` header to "
+            "``Bearer <value>`` so the inbound verifier accepts events."
         ),
     }
 
