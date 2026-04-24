@@ -558,6 +558,24 @@ class SSETurnComplete(BaseModel):
     timestamp: str = ""
 
 
+class SSESessionTitled(BaseModel):
+    """session.titled — ZZ.B2 #304-2 checkbox 1 LLM-generated chat title.
+
+    Fires once per session after the background task composes
+    ``metadata.auto_title`` from the first 3 condensed user turns.
+    The sidebar subscribes and relabels the matching row in-place.
+
+    ``user_id`` is carried so the frontend can self-filter even while
+    ``broadcast_scope='user'`` is advisory. ``source`` is ``"auto"``
+    today; reserved values ``"user"`` (operator rename) are for later.
+    """
+    session_id: str
+    user_id: str
+    title: str
+    source: str = "auto"
+    timestamp: str = ""
+
+
 class SSEHostMetricsTick(BaseModel):
     """host.metrics.tick — H1 5s whole-host sampling push.
 
@@ -624,6 +642,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "integration.settings.updated": SSEIntegrationSettingsUpdated,
     # Q.3-SUB-6 (#297): cross-device chat-history push
     "chat.message": SSEChatMessage,
+    # ZZ.B2 #304-2 checkbox 1: LLM-generated auto-title push
+    "session.titled": SSESessionTitled,
 }
 
 

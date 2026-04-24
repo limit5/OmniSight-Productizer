@@ -172,6 +172,11 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # No FK by design (matches ``chat_messages`` precedent — see
     # migration 0022's docstring for the rationale).
     "user_drafts",
+    # ZZ.B2 #304-2 (alembic 0026): per-user chat-session metadata for
+    # the left-sidebar title (LLM-generated auto_title + optional
+    # user_title). PK is (session_id, user_id, tenant_id); upserted
+    # on every chat message write.
+    "chat_sessions",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY

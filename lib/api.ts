@@ -272,6 +272,17 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  // ─── ZZ.B2 (#304-2) LLM-generated chat-session auto-title (broadcast_scope=user) ───
+  | {
+      event: "session.titled"
+      data: {
+        session_id: string
+        user_id: string
+        title: string
+        source: "auto" | "user"
+        timestamp?: string
+      }
+    }
 
 export interface HostMetricsTickSample {
   cpu_percent: number
@@ -369,6 +380,8 @@ const SSE_EVENT_TYPES = [
   "integration.settings.updated",
   // ─── Q.3-SUB-6 (#297) chat-history cross-device sync ───
   "chat.message",
+  // ─── ZZ.B2 (#304-2) LLM-generated chat-session auto-title push ───
+  "session.titled",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"
@@ -2823,6 +2836,44 @@ export async function validateDag(
     method: "POST",
     body: JSON.stringify({ dag, target_platform: targetPlatform }),
   })
+}
+
+/**
+ * ZZ.B2 #304-2 checkbox 1 — chat-session row returned by
+ * `GET /chat/sessions`. `metadata.auto_title` is the LLM-generated
+ * descriptive title; `metadata.user_title` is the operator override
+ * (reserved for checkbox 2's fallback chain). Rendering precedence is
+ * owned by the frontend: `user_title ?? auto_title ?? hash`.
+ */
+export interface ChatSessionMetadata {
+  auto_title?: string
+  user_title?: string
+  [k: string]: unknown
+}
+
+export interface ChatSessionItem {
+  session_id: string
+  user_id: string
+  tenant_id: string
+  metadata: ChatSessionMetadata
+  created_at: number
+  updated_at: number
+}
+
+export interface ChatSessionListResponse {
+  items: ChatSessionItem[]
+  count: number
+}
+
+export async function fetchChatSessions(
+  opts: { limit?: number } = {},
+): Promise<ChatSessionListResponse> {
+  const params = new URLSearchParams()
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit))
+  const qs = params.toString()
+  return request<ChatSessionListResponse>(
+    `/chat/sessions${qs ? `?${qs}` : ""}`,
+  )
 }
 
 export async function submitDag(

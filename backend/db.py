@@ -905,6 +905,26 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tenant
     ON chat_messages(tenant_id);
 
+-- ZZ.B2 #304-2 checkbox 1: per-user chat-session metadata. One row per
+-- (session_id, user_id, tenant_id). Stores the LLM-generated auto_title
+-- and optional user_title inside ``metadata``. Hydrated on every chat
+-- write via ``upsert_chat_session``; the 3-user-turn trigger in
+-- ``backend.routers.chat`` fills ``metadata.auto_title`` once and emits
+-- SSE ``session.titled`` so the sidebar re-labels without a refetch.
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    session_id  TEXT NOT NULL,
+    user_id     TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL DEFAULT 't-default',
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (session_id, user_id, tenant_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated
+    ON chat_sessions(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_tenant
+    ON chat_sessions(tenant_id);
+
 -- Q.6 #300 (alembic 0022): per-user draft slots. Backs the 500 ms
 -- debounce write from the INVOKE command bar and the workspace chat
 -- composer so an accidental refresh / device switch does not lose
@@ -2231,6 +2251,217 @@ async def prune_chat_messages(conn, user_id: str, *, days: int = RETENTION_DAYS)
         return int(status.rsplit(" ", 1)[-1])
     except (ValueError, AttributeError):
         return 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Chat sessions (ZZ.B2 #304-2, checkbox 1)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# One row per originator session hash that has produced at least one
+# chat_messages row. Stores a JSON metadata blob the UI reads for the
+# left-sidebar title (``auto_title`` LLM-generated; ``user_title``
+# operator-set takes precedence; raw ``session_id[:8]`` hash is the
+# fallback owned entirely by the frontend).
+#
+# Module-global audit (SOP Step 1): pool-native asyncpg; no module
+# state added. Tenant scope enforced via ``tenant_where_pg`` /
+# ``tenant_insert_value`` mirroring ``chat_messages``. The 3-turn
+# trigger in ``backend.routers.chat._maybe_schedule_auto_title`` is
+# advisory — at-most-once per session is enforced by the
+# ``auto_title`` field already being present (checked under a PG
+# advisory-ish conditional UPDATE, see ``set_session_auto_title``).
+
+import json as _json_chat_sessions
+
+
+async def upsert_chat_session(
+    conn,
+    *,
+    session_id: str,
+    user_id: str,
+    now: float | None = None,
+) -> None:
+    """Idempotent insert-or-touch for a chat session.
+
+    Called from the chat router on every persisted ``chat_messages``
+    write so the ``chat_sessions`` row is guaranteed to exist by the
+    time the 3-user-turn trigger fires. ``updated_at`` is refreshed on
+    every call so the sidebar can order sessions by recency. The
+    ``metadata`` column is left untouched — only ``set_session_auto_title``
+    / user-title writers mutate it.
+    """
+    import time as _time
+    ts = _time.time() if now is None else float(now)
+    tenant = tenant_insert_value()
+    await conn.execute(
+        "INSERT INTO chat_sessions (session_id, user_id, tenant_id, "
+        "metadata, created_at, updated_at) VALUES "
+        "($1, $2, $3, '{}'::jsonb, $4, $5) "
+        "ON CONFLICT (session_id, user_id, tenant_id) "
+        "DO UPDATE SET updated_at = EXCLUDED.updated_at",
+        session_id,
+        user_id,
+        tenant,
+        ts,
+        ts,
+    )
+
+
+async def count_user_turns_in_session(
+    conn,
+    *,
+    session_id: str,
+    user_id: str,
+) -> int:
+    """Count ``role='user'`` messages for a (user, session) pair.
+
+    Drives the 3-user-turn trigger in
+    ``backend.routers.chat._maybe_schedule_auto_title``. Tenant-scoped
+    because ``chat_messages`` is tenant-scoped; a stray cross-tenant
+    row must not tip the count over 3.
+    """
+    conditions: list[str] = ["user_id = $1", "session_id = $2", "role = $3"]
+    params: list = [user_id, session_id, "user"]
+    tenant_where_pg(conditions, params)
+    sql = (
+        "SELECT COUNT(*) AS c FROM chat_messages WHERE "
+        + " AND ".join(conditions)
+    )
+    row = await conn.fetchrow(sql, *params)
+    return int(row["c"]) if row else 0
+
+
+async def get_chat_session_metadata(
+    conn,
+    *,
+    session_id: str,
+    user_id: str,
+) -> dict | None:
+    """Return the ``metadata`` dict for a session or ``None`` on miss.
+
+    ``metadata`` is stored as JSONB on PG (decoded to dict by asyncpg)
+    / TEXT-of-JSON on SQLite (decoded here). Returns ``None`` when the
+    row doesn't exist so callers branch once.
+    """
+    conditions: list[str] = ["session_id = $1", "user_id = $2"]
+    params: list = [session_id, user_id]
+    tenant_where_pg(conditions, params)
+    sql = (
+        "SELECT metadata FROM chat_sessions WHERE "
+        + " AND ".join(conditions)
+    )
+    row = await conn.fetchrow(sql, *params)
+    if row is None:
+        return None
+    raw = row["metadata"]
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return _json_chat_sessions.loads(raw) if raw else {}
+        except ValueError:
+            return {}
+    return {}
+
+
+async def list_chat_sessions_for_user(
+    conn,
+    user_id: str,
+    *,
+    limit: int = 50,
+) -> list[dict]:
+    """Return the most-recent ``limit`` sessions for ``user_id``.
+
+    Ordered by ``updated_at DESC`` (most-active first) to match the
+    sidebar's top-of-list convention. ``metadata`` is decoded to a
+    dict in every row regardless of backend dialect so the API
+    endpoint + frontend don't need to probe.
+    """
+    conditions: list[str] = ["user_id = $1"]
+    params: list = [user_id]
+    tenant_where_pg(conditions, params)
+    params.append(int(limit))
+    sql = (
+        "SELECT session_id, user_id, tenant_id, metadata, "
+        "created_at, updated_at FROM chat_sessions WHERE "
+        + " AND ".join(conditions)
+        + " ORDER BY updated_at DESC LIMIT $" + str(len(params))
+    )
+    rows = await conn.fetch(sql, *params)
+    out: list[dict] = []
+    for r in rows:
+        meta = r["metadata"]
+        if isinstance(meta, str):
+            try:
+                meta = _json_chat_sessions.loads(meta) if meta else {}
+            except ValueError:
+                meta = {}
+        elif meta is None:
+            meta = {}
+        out.append({
+            "session_id": r["session_id"],
+            "user_id": r["user_id"],
+            "tenant_id": r["tenant_id"],
+            "metadata": meta,
+            "created_at": float(r["created_at"]),
+            "updated_at": float(r["updated_at"]),
+        })
+    return out
+
+
+async def set_session_auto_title(
+    conn,
+    *,
+    session_id: str,
+    user_id: str,
+    title: str,
+) -> bool:
+    """Write ``metadata.auto_title`` iff it hasn't been set yet.
+
+    Returns ``True`` when a row was updated (this caller won the race
+    to generate the title), ``False`` when the field was already
+    present (another background task beat us to it, or this session
+    already had an auto_title from a prior run). The race is covered
+    by a conditional UPDATE that matches only rows where the JSONB
+    ``auto_title`` field is missing, so concurrent 3-turn triggers
+    from two uvicorn workers converge to one winner without an
+    explicit advisory lock.
+
+    ``user_title`` is deliberately untouched — if an operator has set
+    it, we still record the auto_title alongside (so the system
+    preserves both facets; the sidebar precedence rule lives in the
+    UI per the checkbox-2 spec).
+    """
+    import time as _time
+    title_clean = (title or "").strip()[:120]  # defensive cap on LLM output
+    if not title_clean:
+        return False
+    ts = _time.time()
+    # Condition: only set if auto_title is not yet present. The JSON
+    # ``?`` operator tests key existence on JSONB; the NOT means "no
+    # auto_title yet".
+    conditions: list[str] = [
+        "session_id = $1",
+        "user_id = $2",
+        "NOT (metadata ? 'auto_title')",
+    ]
+    params: list = [session_id, user_id]
+    tenant_where_pg(conditions, params)
+    params.extend([title_clean, ts])
+    sql = (
+        "UPDATE chat_sessions SET "
+        "metadata = metadata || jsonb_build_object('auto_title', $"
+        + str(len(params) - 1)
+        + "::text), "
+        "updated_at = $" + str(len(params))
+        + " WHERE " + " AND ".join(conditions)
+    )
+    status = await conn.execute(sql, *params)
+    try:
+        affected = int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        affected = 0
+    return affected > 0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

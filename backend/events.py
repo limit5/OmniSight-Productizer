@@ -1068,6 +1068,47 @@ def emit_chat_message(
     _log(f"[CHAT] {role} {message_id} (user={user_id})")
 
 
+def emit_session_titled(
+    session_id: str,
+    user_id: str,
+    title: str,
+    *,
+    source: str = "auto",
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+) -> None:
+    """ZZ.B2 #304-2 checkbox 1: broadcast a newly-generated session title.
+
+    Fires from the background task that composes ``metadata.auto_title``
+    after a chat session accumulates 3 user turns. The sidebar listens
+    for this event and relabels the corresponding row in-place —
+    operators don't need to refetch ``GET /chat/sessions``.
+
+    ``source`` distinguishes the origin so the sidebar can surface a
+    subtle "✨ auto-titled" badge vs a plain user-set rename later:
+
+    * ``"auto"`` — LLM-generated from the first 3 condensed turns.
+    * ``"user"`` — operator-edited via future rename UI (reserved).
+
+    ``broadcast_scope='user'`` is advisory — the event carries
+    ``user_id`` so the frontend self-filters before applying the
+    title. Same pattern as ``emit_chat_message`` (user-scoped across
+    the operator's devices but scoped by payload, not by the bus).
+    """
+    broadcast_scope = _resolve_scope("emit_session_titled", broadcast_scope, "user")
+    bus.publish("session.titled", {
+        "session_id": session_id,
+        "user_id": user_id,
+        "title": title,
+        "source": source,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[SESSION-TITLED] user={user_id} session={session_id[:8]} "
+        f"source={source} title={title[:60]!r}",
+    )
+
+
 def emit_new_device_login(
     user_id: str,
     token_hint: str,

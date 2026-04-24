@@ -34,7 +34,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend import auth as _au
 from backend.agents.graph import run_graph
 from backend.db_pool import get_conn
-from backend.events import emit_chat_message, emit_pipeline_phase
+from backend.events import emit_chat_message, emit_pipeline_phase, emit_session_titled
 from backend.models import (
     AISuggestion,
     ChatRequest,
@@ -162,6 +162,11 @@ async def _persist_and_emit(
     row count bounded to the last 30 days without needing a dedicated
     cron. Emit failures are swallowed — PG is the source of truth and
     the bus is latency-optimisation.
+
+    ZZ.B2 #304-2 checkbox 1: also upserts the ``chat_sessions`` row
+    and schedules the auto-title background task when the session hits
+    3 user turns (no auto_title yet). Both are best-effort — a failure
+    here must not block the chat response.
     """
     from backend import db as _db
     payload = {
@@ -198,6 +203,240 @@ async def _persist_and_emit(
         )
     except Exception as exc:
         logger.debug("emit_chat_message failed for %s: %s", msg.id, exc)
+    # ZZ.B2 #304-2 checkbox 1 — keep the chat_sessions row fresh and
+    # fire the 3-user-turn auto-title trigger. Best-effort: a failure
+    # here must never bubble up and break the chat response.
+    if session_id:
+        try:
+            await _db.upsert_chat_session(
+                conn, session_id=session_id, user_id=user_id,
+            )
+        except Exception as exc:
+            logger.debug("upsert_chat_session failed: %s", exc)
+        if payload["role"] == "user":
+            try:
+                await _maybe_schedule_auto_title(
+                    conn, session_id=session_id, user_id=user_id,
+                )
+            except Exception as exc:
+                logger.debug("auto-title trigger check failed: %s", exc)
+
+
+# ZZ.B2 #304-2 checkbox 1: auto-title generation.
+#
+# Module-global audit (SOP Step 1, 2026-04-21 rule): the only module-
+# global state here is ``_auto_title_inflight`` — a per-worker set of
+# ``(user_id, session_id)`` pairs the current process has already
+# scheduled for title generation. The reason this is a per-worker set
+# and not a cross-worker lock:
+#
+#   1. PG is the single source of truth. ``set_session_auto_title``
+#      uses a conditional UPDATE (``NOT (metadata ? 'auto_title')``)
+#      so concurrent 3-turn triggers from two uvicorn workers
+#      converge to one winner. The loser's UPDATE affects 0 rows
+#      and :func:`emit_session_titled` is only called for the winner.
+#   2. The in-process set is a cheap dedupe — prevents the same
+#      worker from firing 3 overlapping background tasks because of
+#      3 chat writes hitting the 3-user-turn threshold near-simultaneously
+#      (e.g. if the user pastes 3 messages back-to-back). Losing
+#      this set is acceptable (next 3 writes would still race to the
+#      conditional UPDATE and PG picks the winner) — falls under SOP
+#      "故意每 worker 獨立" (acceptable answer #3).
+#
+# Net effect: at-most-once auto-title per session, enforced by PG;
+# the per-worker set is a latency-optimisation, not a correctness
+# guarantee.
+
+_auto_title_inflight: set[tuple[str, str]] = set()
+_AUTO_TITLE_TURN_THRESHOLD = 3
+
+
+async def _maybe_schedule_auto_title(
+    conn: asyncpg.Connection,
+    *,
+    session_id: str,
+    user_id: str,
+) -> None:
+    """Kick off auto-title generation when the session hits 3 user turns.
+
+    Skips when:
+      * ``metadata.auto_title`` is already set for this session (the
+        LLM has already titled it — don't re-title on every further
+        turn, wastes tokens).
+      * The same ``(user_id, session_id)`` is already in-flight in
+        this worker process.
+      * Fewer than 3 user turns have been persisted yet.
+    """
+    from backend import db as _db
+    meta = await _db.get_chat_session_metadata(
+        conn, session_id=session_id, user_id=user_id,
+    )
+    if meta is not None and "auto_title" in meta:
+        return
+    key = (user_id, session_id)
+    if key in _auto_title_inflight:
+        return
+    count = await _db.count_user_turns_in_session(
+        conn, session_id=session_id, user_id=user_id,
+    )
+    if count < _AUTO_TITLE_TURN_THRESHOLD:
+        return
+    _auto_title_inflight.add(key)
+    from backend.db_context import current_tenant_id
+    tenant_id = current_tenant_id() or "t-default"
+    asyncio.create_task(
+        _generate_auto_title(
+            session_id=session_id, user_id=user_id, tenant_id=tenant_id,
+        ),
+    )
+
+
+async def _generate_auto_title(
+    *,
+    session_id: str,
+    user_id: str,
+    tenant_id: str,
+) -> None:
+    """Background task: condense the first 3 user turns → LLM → persist title.
+
+    Uses its own pool connection (the request-scoped ``conn`` has
+    returned by the time this runs). Failures are logged + swallowed —
+    the session just stays titled-by-hash until the next chance.
+    """
+    from backend import db as _db
+    from backend.db_pool import get_pool
+    from backend.db_context import set_tenant_id, current_tenant_id
+    title_for_emit: str = ""
+    # contextvars are task-local — an ``asyncio.create_task`` spawn
+    # gets its own copy so restoring isn't strictly required here, but
+    # we capture + restore anyway so the pattern survives a future
+    # refactor that reuses a shared task.
+    prior_tenant = current_tenant_id()
+    try:
+        set_tenant_id(tenant_id)
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await _db.list_chat_messages(conn, user_id, limit=50)
+            user_turns = [
+                r["content"] for r in rows if r.get("role") == "user"
+                and r.get("session_id") == session_id
+            ][:_AUTO_TITLE_TURN_THRESHOLD]
+            if len(user_turns) < _AUTO_TITLE_TURN_THRESHOLD:
+                return
+            title = await _compose_title_via_llm(user_turns)
+            if not title:
+                return
+            updated = await _db.set_session_auto_title(
+                conn, session_id=session_id, user_id=user_id, title=title,
+            )
+            if not updated:
+                return
+        title_for_emit = title
+    except Exception as exc:
+        logger.warning("auto-title generation failed: %s", exc)
+    finally:
+        set_tenant_id(prior_tenant)
+        _auto_title_inflight.discard((user_id, session_id))
+    if title_for_emit:
+        try:
+            emit_session_titled(
+                session_id=session_id,
+                user_id=user_id,
+                title=title_for_emit,
+                source="auto",
+                broadcast_scope="user",
+                tenant_id=tenant_id,
+            )
+        except Exception as exc:
+            logger.debug("emit_session_titled failed: %s", exc)
+
+
+# Hard cap on each condensed turn so a runaway 10k-char pasted log
+# doesn't drive up the title-generation prompt.
+_AUTO_TITLE_CONDENSE_CHARS = 240
+
+
+def _condense_turn(text: str) -> str:
+    """Compact a single user turn for the title-prompt input.
+
+    Keeps the first line and the first ``_AUTO_TITLE_CONDENSE_CHARS``
+    chars — sufficient for the LLM to infer intent, cheap on tokens.
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    # Collapse multi-line paste: first non-empty line carries most intent.
+    first_line = next((ln for ln in s.splitlines() if ln.strip()), s)
+    return first_line.strip()[:_AUTO_TITLE_CONDENSE_CHARS]
+
+
+async def _compose_title_via_llm(user_turns: list[str]) -> str:
+    """Call an LLM to produce a <= 8-word descriptive title.
+
+    Uses the configured primary provider via ``get_llm()`` — ZZ.B2
+    checkbox 3 is the follow-up that swaps in a ``get_cheapest_model()``
+    helper to avoid burning the Opus quota on 10-char titles.
+    Intentionally scoped to one LLM call; any error is returned as
+    an empty string so the caller skips the SSE emit.
+    """
+    from backend.agents.llm import get_llm
+    condensed = [_condense_turn(t) for t in user_turns if t]
+    condensed = [c for c in condensed if c]
+    if not condensed:
+        return ""
+    joined = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(condensed))
+    prompt = (
+        "Summarize the following chat conversation as a short, "
+        "descriptive title (max 8 words, no quotes, no trailing "
+        "punctuation, no prefixes like 'Chat:'). Return ONLY the "
+        "title text.\n\n" + joined
+    )
+    try:
+        llm = get_llm()
+        if llm is None:
+            return ""
+        response = await asyncio.wait_for(llm.ainvoke(prompt), timeout=15.0)
+        content = getattr(response, "content", response)
+        if isinstance(content, list):
+            # Structured LLM output — flatten like turn.complete does.
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    text = block.get("text") or block.get("content") or ""
+                    if text:
+                        parts.append(str(text))
+                else:
+                    parts.append(str(block))
+            content = "\n".join(parts)
+        return _sanitize_title(str(content))
+    except Exception as exc:
+        logger.debug("LLM title generation failed: %s", exc)
+        return ""
+
+
+def _sanitize_title(raw: str) -> str:
+    """Trim LLM output to a single-line title, bounded length.
+
+    Strips leading/trailing quotes, dangling punctuation, and caps at
+    ~80 chars. Matches the common 'llm returns "Thing title"' pattern
+    so the sidebar never renders the outer quotes.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    # Take only the first non-empty line.
+    s = next((ln for ln in s.splitlines() if ln.strip()), s).strip()
+    # Strip surrounding quotes a chatty model sometimes adds.
+    for pair in ('""', "''", "``"):
+        if len(s) >= 2 and s[0] == pair[0] and s[-1] == pair[1]:
+            s = s[1:-1].strip()
+    # Drop "Title:" / "Chat:" style prefixes.
+    low = s.lower()
+    for prefix in ("title:", "chat:", "session:", "conversation:"):
+        if low.startswith(prefix):
+            s = s[len(prefix):].strip()
+            low = s.lower()
+    return s[:80].rstrip(" .,;:")
 
 
 @router.post("", response_model=ChatResponse)
@@ -318,3 +557,29 @@ async def clear_history(
     """
     from backend import db as _db
     await _db.clear_chat_messages(conn, user.id)
+
+
+@router.get("/sessions")
+async def list_sessions(
+    user: _au.User = Depends(_au.require_operator),
+    conn: asyncpg.Connection = Depends(get_conn),
+    limit: int = 50,
+):
+    """ZZ.B2 #304-2 checkbox 1: list the user's recent chat sessions.
+
+    Drives the left-sidebar workflow/chat list. Each row returns the
+    session hash + ``metadata`` so the UI can pick between
+    ``user_title`` / ``auto_title`` / hash per the checkbox-2 fallback
+    chain (implemented on the frontend, not here — this endpoint is
+    purely a projection).
+
+    Tenant-scoped via the request's tenant contextvar. ``limit`` is
+    clamped to [1, 200] so a malicious caller can't OOM by asking
+    for a huge page.
+    """
+    from backend import db as _db
+    bounded = max(1, min(int(limit), 200))
+    items = await _db.list_chat_sessions_for_user(
+        conn, user.id, limit=bounded,
+    )
+    return {"items": items, "count": len(items)}
