@@ -474,7 +474,16 @@ CREATE TABLE IF NOT EXISTS token_usage (
     -- always populate them via SharedTokenUsage.track().
     cache_read_tokens   INTEGER,
     cache_create_tokens INTEGER,
-    cache_hit_ratio     REAL
+    cache_hit_ratio     REAL,
+    -- ZZ.A3 (#303-3): per-turn LLM-compute boundary stamps in
+    -- ISO-8601 UTC. Last-turn snapshots (overwrite, not accumulate)
+    -- so downstream can compute (a) LLM compute time = ended - started
+    -- of the same row, and (b) inter-turn gap = this_turn.started -
+    -- prior_turn.ended (tool + event-bus + context-gather wait).
+    -- NULL on pre-ZZ.A3 rows per the same NULL-vs-genuine-zero
+    -- contract cache_* fields established in ZZ.A1.
+    turn_started_at     TEXT,
+    turn_ended_at       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS simulations (
@@ -1255,11 +1264,16 @@ async def upsert_token_usage(conn, data: dict) -> None:
     # legacy worker, or a provider that doesn't report cache fields)
     # passes None through and the NULL is preserved end-to-end so the
     # UI can distinguish "no data" from "genuine 0".
-    # 11 positional placeholders; ON CONFLICT (model) DO UPDATE uses
-    # EXCLUDED.* per PG convention. Caller (routers/system.py
-    # _persist_token_usage) is fire-and-forget from the LLM callback —
-    # asyncpg auto-commits each statement outside a tx block, matching
-    # the prior compat-wrapper's explicit .commit().
+    # ZZ.A3 (#303-3, 2026-04-24): extended again with the two
+    # per-turn boundary stamps (``turn_started_at`` / ``turn_ended_at``,
+    # ISO-8601 UTC). Same NULL-preservation contract — pre-ZZ.A3 rows
+    # pass ``None`` through and the dashboard renders "—" instead of a
+    # fabricated gap of 0ms. 13 positional placeholders now; ON
+    # CONFLICT (model) DO UPDATE uses EXCLUDED.* per PG convention.
+    # Caller (routers/system.py _persist_token_usage) is fire-and-forget
+    # from the LLM callback — asyncpg auto-commits each statement
+    # outside a tx block, matching the prior compat-wrapper's explicit
+    # .commit().
     def _int_or_none(key: str):
         val = data.get(key)
         return None if val is None else int(val)
@@ -1268,11 +1282,22 @@ async def upsert_token_usage(conn, data: dict) -> None:
         val = data.get(key)
         return None if val is None else float(val)
 
+    def _str_or_none(key: str):
+        # ZZ.A3: empty-string is treated as "no stamp yet" and coerced
+        # to SQL NULL so the DB column stays a clean NULL until a real
+        # turn lands — avoids persisting a synthetic "" that the UI
+        # would then have to special-case separately from None.
+        val = data.get(key)
+        if val is None or val == "":
+            return None
+        return str(val)
+
     await conn.execute(
         """INSERT INTO token_usage (model, input_tokens, output_tokens,
              total_tokens, cost, request_count, avg_latency, last_used,
-             cache_read_tokens, cache_create_tokens, cache_hit_ratio)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             cache_read_tokens, cache_create_tokens, cache_hit_ratio,
+             turn_started_at, turn_ended_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            ON CONFLICT (model) DO UPDATE SET
              input_tokens = EXCLUDED.input_tokens,
              output_tokens = EXCLUDED.output_tokens,
@@ -1283,7 +1308,9 @@ async def upsert_token_usage(conn, data: dict) -> None:
              last_used = EXCLUDED.last_used,
              cache_read_tokens = EXCLUDED.cache_read_tokens,
              cache_create_tokens = EXCLUDED.cache_create_tokens,
-             cache_hit_ratio = EXCLUDED.cache_hit_ratio
+             cache_hit_ratio = EXCLUDED.cache_hit_ratio,
+             turn_started_at = EXCLUDED.turn_started_at,
+             turn_ended_at = EXCLUDED.turn_ended_at
         """,
         data["model"],
         int(data.get("input_tokens", 0)),
@@ -1296,6 +1323,8 @@ async def upsert_token_usage(conn, data: dict) -> None:
         _int_or_none("cache_read_tokens"),
         _int_or_none("cache_create_tokens"),
         _float_or_none("cache_hit_ratio"),
+        _str_or_none("turn_started_at"),
+        _str_or_none("turn_ended_at"),
     )
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from backend.llm_adapter import (
@@ -58,11 +59,21 @@ class TokenTrackingCallback(BaseCallbackHandler):
         # "—" per the NULL-vs-genuine-zero contract.
         self.provider = provider
         self._start: float = 0
+        # ZZ.A3 (#303-3, 2026-04-24): ISO-8601 UTC wall-clock of the
+        # most recent on_llm_start — stashed on the instance so
+        # on_llm_end can hand both boundaries to track_tokens (and
+        # through to SharedTokenUsage) in the same call. The
+        # difference ``turn_ended_at - turn_started_at`` is pure LLM
+        # compute; the gap between consecutive turns' stamps is the
+        # tool-execution + event-bus-scheduling + context-gather
+        # wait the ZZ.A3 dashboard surfaces.
+        self._start_ts_utc: str = ""
         self.last_cache_read: int = 0
         self.last_cache_create: int = 0
 
     def on_llm_start(self, *args, **kwargs) -> None:  # noqa: ANN002
         self._start = time.time()
+        self._start_ts_utc = datetime.now(timezone.utc).isoformat()
 
     @staticmethod
     def _extract_cache_tokens(usage: dict) -> tuple[int, int]:
@@ -130,8 +141,17 @@ class TokenTrackingCallback(BaseCallbackHandler):
             # counters into ``track_tokens`` so ``SharedTokenUsage``
             # and the ``token_usage`` row both accumulate the lifetime
             # totals + recomputed hit ratio.
+            # ZZ.A3 (#303-3, 2026-04-24): also plumb the
+            # on_llm_start / on_llm_end wall-clock stamps through so
+            # the dashboard can derive per-turn LLM compute time +
+            # inter-turn gap. ``turn_ended_at`` is captured here
+            # (as close to the track_tokens call as possible) so the
+            # stored value reflects "LLM call completed" rather than
+            # "track_tokens invoked", which may drift slightly if the
+            # cache-extract codepath above spent cycles.
             input_tokens = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
             output_tokens = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
+            turn_ended_at = datetime.now(timezone.utc).isoformat()
             track_tokens(
                 self.model_name,
                 input_tokens,
@@ -139,6 +159,8 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 latency_ms,
                 cache_read_tokens=cache_read,
                 cache_create_tokens=cache_create,
+                turn_started_at=self._start_ts_utc or None,
+                turn_ended_at=turn_ended_at,
             )
 
             # ZZ.A2 #303-2: emit per-turn context-usage snapshot so the

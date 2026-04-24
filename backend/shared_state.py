@@ -558,6 +558,20 @@ def _fresh_token_entry(model: str) -> dict:
         "cache_read_tokens": 0,
         "cache_create_tokens": 0,
         "cache_hit_ratio": 0.0,
+        # ZZ.A3 (#303-3, 2026-04-24): per-turn LLM-compute boundary
+        # stamps in ISO-8601 UTC. These are *last-turn snapshots* (not
+        # accumulated) — each ``track()`` overwrites with the current
+        # turn's ``on_llm_start`` / ``on_llm_end`` wall-clock. The
+        # difference ``turn_ended_at - turn_started_at`` is pure LLM
+        # compute; the difference between consecutive turns'
+        # ``turn_started_at`` and the prior turn's ``turn_ended_at`` is
+        # the inter-turn gap (tool execution + event-bus scheduling +
+        # context-gather wait) that ZZ.A3's dashboard surfaces. Fresh
+        # ZZ rows start "" and get populated on the first ``track()``;
+        # legacy pre-ZZ rows loaded from Redis/PG preserve NULL via
+        # _normalize_token_entry so the UI can render "—" vs a real 0.
+        "turn_started_at": "",
+        "turn_ended_at": "",
         # Internal: sum of all observed latencies, used to recompute
         # the avg on each track(). Stripped from the dict returned to
         # callers by _strip_internal — see get_all().
@@ -592,6 +606,16 @@ def _normalize_token_entry(entry: dict) -> dict:
         entry["cache_create_tokens"] = None
     if "cache_hit_ratio" not in entry:
         entry["cache_hit_ratio"] = None
+    # ZZ.A3 (#303-3): same NULL-vs-genuine-zero contract as cache
+    # fields above — pre-ZZ rows had no per-turn boundary stamps, so
+    # their absence is preserved as None and the dashboard renders
+    # "—" instead of a fabricated gap. Fresh ZZ rows go through
+    # _fresh_token_entry (starts "") and get populated on first
+    # track().
+    if "turn_started_at" not in entry:
+        entry["turn_started_at"] = None
+    if "turn_ended_at" not in entry:
+        entry["turn_ended_at"] = None
     entry.setdefault("_total_latency", 0.0)
     return entry
 
@@ -599,6 +623,8 @@ def _normalize_token_entry(entry: dict) -> dict:
 def _apply_token_delta(
     entry: dict, inp: int, out: int, latency_ms: float, cost: float,
     now_hms: str, cache_read: int = 0, cache_create: int = 0,
+    turn_started_at: str | None = None,
+    turn_ended_at: str | None = None,
 ) -> None:
     entry["input_tokens"] += inp
     entry["output_tokens"] += out
@@ -626,6 +652,16 @@ def _apply_token_delta(
     entry["cache_hit_ratio"] = (
         round(entry["cache_read_tokens"] / denom, 6) if denom > 0 else 0.0
     )
+    # ZZ.A3 (#303-3): last-turn snapshot — overwrite with the current
+    # turn's wall-clock boundaries. Callers that didn't capture
+    # timestamps (e.g. legacy test fixtures) pass None and the stored
+    # value is left alone, so partial-knowledge callers don't erase a
+    # previously-populated value. First ZZ-era track() on a legacy row
+    # upgrades NULL → string the same way cache fields do.
+    if turn_started_at is not None:
+        entry["turn_started_at"] = turn_started_at
+    if turn_ended_at is not None:
+        entry["turn_ended_at"] = turn_ended_at
 
 
 def _strip_internal(entry: dict) -> dict:
@@ -646,7 +682,9 @@ class SharedTokenUsage:
     def track(self, model: str, input_tokens: int, output_tokens: int,
               latency_ms: float, cost: float,
               cache_read_tokens: int = 0,
-              cache_create_tokens: int = 0) -> dict:
+              cache_create_tokens: int = 0,
+              turn_started_at: str | None = None,
+              turn_ended_at: str | None = None) -> dict:
         """Atomically update usage for a model. Returns new totals.
 
         ZZ.A1 (#303-1): ``cache_read_tokens`` / ``cache_create_tokens``
@@ -658,6 +696,18 @@ class SharedTokenUsage:
         default to 0 so existing callers keep compiling without
         change; the ZZ code path plumbs real values through the LLM
         callback.
+
+        ZZ.A3 (#303-3): ``turn_started_at`` / ``turn_ended_at`` are
+        ISO-8601 UTC strings captured in the LLM callback at
+        ``on_llm_start`` / ``on_llm_end`` respectively. Stored as
+        last-turn snapshots (overwrite semantics, not accumulation)
+        so the dashboard can compute (a) per-turn LLM compute time
+        via ``end - start`` of the same row and (b) the inter-turn
+        gap — tool execution + event-bus scheduling + context-gather
+        wait — via ``this_turn.start - last_turn.end``. Callers that
+        didn't capture stamps pass ``None`` and the stored field is
+        left untouched, so back-compat test fixtures keep working
+        without fabricating wall-clock values.
         """
         now_hms = datetime.now().strftime("%H:%M:%S")
         r = get_sync_redis()
@@ -672,6 +722,8 @@ class SharedTokenUsage:
                 _apply_token_delta(
                     entry, input_tokens, output_tokens, latency_ms, cost,
                     now_hms, cache_read_tokens, cache_create_tokens,
+                    turn_started_at=turn_started_at,
+                    turn_ended_at=turn_ended_at,
                 )
                 r.hset(field_key, model, json.dumps(entry))
                 return _strip_internal(dict(entry))
@@ -686,6 +738,8 @@ class SharedTokenUsage:
             _apply_token_delta(
                 entry, input_tokens, output_tokens, latency_ms, cost, now_hms,
                 cache_read_tokens, cache_create_tokens,
+                turn_started_at=turn_started_at,
+                turn_ended_at=turn_ended_at,
             )
             self._local[model] = entry
             return _strip_internal(dict(entry))

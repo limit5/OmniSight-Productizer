@@ -1102,7 +1102,9 @@ _PRICING = {
 
 def track_tokens(model: str, input_tokens: int, output_tokens: int,
                  latency_ms: int, cache_read_tokens: int = 0,
-                 cache_create_tokens: int = 0) -> None:
+                 cache_create_tokens: int = 0,
+                 turn_started_at: str | None = None,
+                 turn_ended_at: str | None = None) -> None:
     """Track token usage for a model (called synchronously from LLM callback).
 
     ZZ.A1 (#303-1): ``cache_read_tokens`` / ``cache_create_tokens``
@@ -1113,6 +1115,17 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int,
     the lifetime running totals (source of truth is the dict here;
     SharedTokenUsage recomputes independently from its own lifetime
     totals and the two should match).
+
+    ZZ.A3 (#303-3): ``turn_started_at`` / ``turn_ended_at`` are
+    ISO-8601 UTC strings captured in the LLM callback at
+    ``on_llm_start`` / ``on_llm_end``. Stored as last-turn snapshots
+    (overwrite, not accumulate) so the dashboard can compute per-turn
+    LLM compute time (end - start of the same row) and the inter-turn
+    gap (this_turn.start - last_turn.end) — the tool + event-bus +
+    context-gather wait that falls outside the LLM compute window.
+    Callers that didn't capture stamps pass ``None`` (default) and
+    the stored field is left untouched, so back-compat tests and
+    rule-based code paths don't fabricate wall-clock values.
     """
     _maybe_reset_daily_budget()
     if model not in _token_usage:
@@ -1132,6 +1145,14 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int,
             "cache_read_tokens": 0,
             "cache_create_tokens": 0,
             "cache_hit_ratio": 0.0,
+            # ZZ.A3 (#303-3): per-turn boundary stamps start empty on
+            # fresh ZZ rows (same convention as ``last_used``) and
+            # get populated by the first track() call; legacy rows
+            # loaded via load_token_usage_from_db preserve None
+            # through _normalize_token_entry so the UI can distinguish
+            # "no data" from a real 0ms gap.
+            "turn_started_at": "",
+            "turn_ended_at": "",
         }
     u = _token_usage[model]
     prev_cost = u["cost"]
@@ -1159,11 +1180,26 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int,
         round(u["cache_read_tokens"] / denom, 6) if denom > 0 else 0.0
     )
 
+    # ZZ.A3 (#303-3): overwrite (not accumulate) per-turn boundaries.
+    # When the caller omits stamps (e.g. rule-based fallback path
+    # inside the graph, or a test fixture calling track_tokens
+    # directly) we leave the stored value alone so a previously
+    # populated last-turn snapshot isn't clobbered by a "no data"
+    # write. The legacy NULL → string upgrade happens implicitly —
+    # once a ZZ-era caller provides stamps the field becomes
+    # authoritative.
+    if turn_started_at is not None:
+        u["turn_started_at"] = turn_started_at
+    if turn_ended_at is not None:
+        u["turn_ended_at"] = turn_ended_at
+
     # I10: track in shared state for cross-worker visibility
     _token_usage_shared.track(
         model, input_tokens, output_tokens, latency_ms, cost_delta,
         cache_read_tokens=cache_read_tokens,
         cache_create_tokens=cache_create_tokens,
+        turn_started_at=turn_started_at,
+        turn_ended_at=turn_ended_at,
     )
     if cost_delta > 0:
         _hourly_ledger_shared.record(cost_delta)
