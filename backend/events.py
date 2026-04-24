@@ -481,6 +481,49 @@ def emit_turn_metrics(
     )
 
 
+def emit_turn_tool_stats(
+    agent_type: str,
+    tool_call_count: int,
+    tool_failure_count: int,
+    *,
+    failed_tools: list[str] | None = None,
+    task_id: str | None = None,
+    session_id: str | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+    **extra: Any,
+) -> None:
+    """ZZ.A3 #303-3: per-turn tool-execution summary for the UI.
+
+    Fired once from :func:`backend.agents.nodes.summarizer_node` at the
+    end of every graph turn with the aggregate of
+    ``GraphState.tool_results``. ``tool_failure_count`` is the count of
+    results the tool executor flagged ``success=False`` (the LangGraph
+    shape's equivalent of the spec's ``result.error is not None``).
+
+    ``failed_tools`` preserves insertion order *and* duplicates — a tool
+    that failed three times in the same turn shows up three times, so
+    the red "failed N" badge on the TokenUsageStats card matches the
+    retry loop's actual attempt count instead of a de-duped set.
+    """
+    broadcast_scope = _resolve_scope("emit_turn_tool_stats", broadcast_scope, "global")
+    failed = list(failed_tools or [])
+    bus.publish("turn_tool_stats", {
+        "agent_type": agent_type,
+        "task_id": task_id,
+        "tool_call_count": int(tool_call_count),
+        "tool_failure_count": int(tool_failure_count),
+        "failed_tools": failed,
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[TURN-TOOLS] {agent_type} tools={tool_call_count} failed={tool_failure_count}"
+        + (f" ({','.join(failed)[:60]})" if failed else ""),
+        "warn" if tool_failure_count > 0 else "info",
+    )
+
+
 def emit_simulation(sim_id: str, action: str, detail: str = "",
                     session_id: str | None = None,
                     broadcast_scope: str | None = None,

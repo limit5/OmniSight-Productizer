@@ -438,6 +438,29 @@ class SSEIntegrationSettingsUpdated(BaseModel):
     timestamp: str = ""
 
 
+class SSETurnToolStats(BaseModel):
+    """turn_tool_stats — ZZ.A3 #303-3 per-turn tool-execution summary.
+
+    Emitted once from the summarizer node at the very end of every
+    :func:`backend.agents.graph.run_graph` execution. Aggregates the
+    ``GraphState.tool_results`` list into a turn-level snapshot the UI
+    can render as "tools 5 / failed 1" in the TokenUsageStats card.
+
+    ``tool_failure_count`` counts entries where the tool executor marked
+    ``result.success == False`` — i.e. the LangGraph shape's equivalent
+    of the spec's ``result.error is not None``. ``failed_tools`` is the
+    ordered list of tool names that failed (with duplicates preserved so
+    a repeated failure of the same tool shows up as a higher count in
+    the badge).
+    """
+    agent_type: str = ""
+    task_id: Optional[str] = None
+    tool_call_count: int = 0
+    tool_failure_count: int = 0
+    failed_tools: list[str] = Field(default_factory=list)
+    timestamp: str = ""
+
+
 class SSETurnMetrics(BaseModel):
     """turn_metrics — ZZ.A2 #303-2 per-turn LLM context-usage snapshot.
 
@@ -519,6 +542,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "host.metrics.tick": SSEHostMetricsTick,
     # ZZ.A2 #303-2: per-turn context-usage snapshot for TokenUsageStats card
     "turn_metrics": SSETurnMetrics,
+    # ZZ.A3 #303-3: per-turn tool-execution summary for TokenUsageStats card
+    "turn_tool_stats": SSETurnToolStats,
     # Q.3-SUB-1 (#297): cross-device workflow_run state push
     "workflow_updated": SSEWorkflowUpdated,
     # Q.3-SUB-3 (#297): cross-device notification read-state push

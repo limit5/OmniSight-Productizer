@@ -20,7 +20,7 @@ from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMes
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm
-from backend.events import emit_tool_progress, emit_pipeline_phase
+from backend.events import emit_tool_progress, emit_pipeline_phase, emit_turn_tool_stats
 from backend.prompt_loader import (
     build_system_prompt,
     build_skill_injection,
@@ -1247,6 +1247,25 @@ def summarizer_node(state: GraphState) -> dict:
     """Synthesize tool results into a final answer."""
     agent_type = state.routed_to
     prefix = f"[{agent_type.upper()} AGENT]"
+
+    # ZZ.A3 #303-3: emit per-turn tool-execution summary before we
+    # branch into the answer-synthesis paths. Runs at every turn end
+    # (even the "no tools were called" pass-through below) so the UI
+    # sees a zeroed snapshot and can clear any stale "failed N" badge
+    # from a previous turn on the same agent card.
+    try:
+        tool_call_count = len(state.tool_results)
+        failed_tools = [r.tool_name for r in state.tool_results if not r.success]
+        emit_turn_tool_stats(
+            agent_type,
+            tool_call_count,
+            len(failed_tools),
+            failed_tools=failed_tools,
+            task_id=state.task_id,
+            broadcast_scope="global",
+        )
+    except Exception as exc:  # pragma: no cover — best-effort telemetry
+        logger.debug("emit_turn_tool_stats skipped: %s", exc)
 
     # If we already have an answer (no tools were called), pass through
     if state.answer and not state.tool_results:

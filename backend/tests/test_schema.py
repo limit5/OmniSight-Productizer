@@ -180,6 +180,8 @@ class TestSSESchemaExport:
             "integration.settings.updated", "chat.message",
             # ZZ.A2 (#303-2) per-turn context-usage snapshot
             "turn_metrics",
+            # ZZ.A3 (#303-3) per-turn tool-execution summary
+            "turn_tool_stats",
         }
         assert set(SSE_EVENT_SCHEMAS.keys()) == expected_events
 
