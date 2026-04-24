@@ -28,10 +28,22 @@ Module-global state audit (per SOP Step 1):
       "derived from a shared static source" escape hatch (answer 1 of the
       three valid answers). The YAML is bundled in the production image and
       read-only at runtime.
-    - `reload()` clears this worker's local cache. Cross-worker reload
-      fan-out (SharedKV broadcast) is Z.3 checkbox 4's responsibility, not
-      this checkbox — `reload()` is callable but the broadcast wiring lands
-      with the `/runtime/pricing/reload` endpoint.
+    - `reload()` clears this worker's local cache. Z.3 checkbox 4 wires
+      `POST /runtime/pricing/reload` to call `reload()` locally, then
+      `publish_cross_worker(PRICING_RELOAD_EVENT, ...)` so peer workers'
+      registered callback (`_on_pricing_reload_event` below) re-reads the
+      same YAML — matches answer 2 of the three valid audit answers
+      ("Redis-coordinated"). When Redis is absent the broadcast no-ops
+      and only the calling worker reloads (degraded but safe; operator
+      runbook covers the manual rolling restart fallback).
+    - There is a small reload-propagation window where worker A has
+      already re-read the YAML and worker B has not yet processed the
+      pubsub message (bounded by `pubsub.get_message(timeout=1.0)` in
+      `shared_state.start_pubsub_listener`). Token-tracking calls landing
+      on B during that window will bill at the old rates. This is
+      acceptable per Z.3 checkbox 7 — "既有 token usage 紀錄不重算成本，
+      保留當時計費，只影響未來計價" — the old vs new rates are both
+      valid "future" prices in those sub-second windows.
     - `_FALLBACK_WARN_TS` (Z.3 checkbox 3) is a module-level dict mapping
       a throttle key (`fallback_arm:<provider_key>`) to the unix timestamp
       of its last `WARNING` emit. **Intentionally per-worker** — answer 3
@@ -308,3 +320,49 @@ def reset_cache_for_tests() -> None:
     _PRICING_CACHE = None
     with _FALLBACK_WARN_LOCK:
         _FALLBACK_WARN_TS.clear()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Z.3 checkbox 4 (#292) — cross-worker reload fan-out
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# `POST /runtime/pricing/reload` (in backend/routers/system.py) reloads
+# the YAML on the worker that received the request, then publishes a
+# `PRICING_RELOAD_EVENT` over Redis pub/sub. Every worker (including the
+# originator) registers `_on_pricing_reload_event` below at import time
+# so peers re-read the same YAML without an explicit per-worker hit.
+# Origin filtering is intentionally absent: invalidating a stale cache
+# costs ~one disk read on the next get_pricing() call, much cheaper than
+# the bookkeeping required to suppress one self-message.
+
+PRICING_RELOAD_EVENT = "pricing_reload"
+
+
+def _on_pricing_reload_event(event: str, data: dict) -> None:
+    """Cross-worker callback: clear this worker's pricing cache.
+
+    Invoked by `shared_state.start_pubsub_listener` when any worker
+    publishes `PRICING_RELOAD_EVENT` via `publish_cross_worker`. Body
+    is intentionally tiny — the next `get_pricing()` call re-loads
+    the YAML lazily, so this callback only has to invalidate.
+    """
+    if event != PRICING_RELOAD_EVENT:
+        return
+    global _PRICING_CACHE
+    _PRICING_CACHE = None
+    logger.info(
+        "llm_pricing cross-worker reload received (origin=%s); "
+        "next lookup will re-read YAML",
+        data.get("origin_worker", "<unknown>") if isinstance(data, dict) else "<unknown>",
+    )
+
+
+# Register at import time — mirrors the `events.py` precedent. Wrapped in
+# try/except so the import order never blocks on a circular dep or a
+# missing shared_state module during early bootstrap (matches the same
+# defensive pattern in backend/events.py:265-269).
+try:
+    from backend.shared_state import register_cross_worker_callback as _register_cb
+    _register_cb(_on_pricing_reload_event)
+except Exception:  # pragma: no cover — defensive, like events.py
+    pass

@@ -2167,6 +2167,42 @@ async def reset_token_freeze():
     return {"status": "unfrozen"}
 
 
+@router.post("/pricing/reload", dependencies=_REQUIRE_ADMIN)
+async def reload_pricing_table():
+    """Hot-reload `config/llm_pricing.yaml` and broadcast to all workers.
+
+    Z.3 checkbox 4 (#292). Operator workflow: edit the YAML on disk
+    (e.g. anthropic raises Sonnet from 3/15 to 3.5/16), POST here, every
+    uvicorn worker re-reads the file. Without this endpoint the only
+    way to pick up a price change is a rolling restart through Caddy.
+
+    Local + remote reload semantics:
+        - This worker calls `pricing.reload()` synchronously and uses
+          the returned status as the response payload.
+        - `publish_cross_worker(PRICING_RELOAD_EVENT, ...)` fans the
+          signal out via Redis pub/sub. Every peer (including this
+          worker — the listener filters on event name only) calls
+          `pricing._on_pricing_reload_event` which clears its local
+          cache so its next `get_pricing()` re-reads the YAML.
+        - When Redis is unavailable `publish_cross_worker` returns
+          False and only this worker reloads. Operator runbook
+          documents the manual rolling restart fallback.
+    """
+    from backend import pricing as _pricing
+    from backend.shared_state import publish_cross_worker as _publish
+    status = _pricing.reload()
+    broadcast_ok = _publish(_pricing.PRICING_RELOAD_EVENT, {
+        "origin_worker": str(os.getpid()),
+    })
+    return {
+        "status": "reloaded",
+        "loaded_from_yaml": status["loaded_from_yaml"],
+        "providers": status["providers"],
+        "metadata": status["metadata"],
+        "broadcast": "redis_pubsub" if broadcast_ok else "local_only",
+    }
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Notifications
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

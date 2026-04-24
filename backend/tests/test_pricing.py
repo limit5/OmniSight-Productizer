@@ -1,14 +1,14 @@
-"""Z.3 (#292) checkbox 3 — fallback-strategy + throttled warning tests.
+"""Z.3 (#292) checkbox 3 + checkbox 4 — fallback-strategy, throttled
+warning, and `POST /runtime/pricing/reload` tests.
 
-Scope is strictly the behavior added by this checkbox:
-    - provider known + model unknown → `providers[<provider>]._default`
-    - both unknown (or missing) → global `defaults`
-    - each fallback arm emits a `WARNING` once per (arm, provider) key
-      per 24 h in this worker, does not log on repeats, and does not log
-      on exact-hit / `provider=None` scan-hit paths.
+Scope is the behaviour added by Z.3:
+    - checkbox 3: fallback chain + throttled WARNING emission per arm.
+    - checkbox 4: `POST /runtime/pricing/reload` endpoint + the
+      cross-worker `pricing_reload` event callback that clears each
+      peer worker's local cache.
 
-Future checkboxes (Z.3 checkbox 6 = YAML-corrupt boot resilience + reload
-endpoint; Z.5 = cross-worker sync) will extend this file.
+Z.3 checkbox 6 (YAML-corrupt boot resilience + cross-worker reload
+under live Redis) will extend this file further.
 """
 
 from __future__ import annotations
@@ -187,3 +187,145 @@ class TestPriceNeutralityAcrossFallbacks:
     @pytest.mark.parametrize("model,expected", list(EXPECT.items()))
     def test_legacy_model_bit_identical_via_scan(self, model, expected):
         assert get_pricing(None, model) == expected
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Z.3 checkbox 4 (#292) — POST /runtime/pricing/reload + cross-worker fan-out
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestCrossWorkerCallbackRegistration:
+    """The pricing module registers `_on_pricing_reload_event` against
+    `shared_state._pubsub_callbacks` at import time so peer workers
+    receive reload signals via the shared Redis pub/sub channel."""
+
+    def test_callback_is_registered_at_import(self):
+        from backend import shared_state
+        assert pricing._on_pricing_reload_event in shared_state._pubsub_callbacks
+
+    def test_event_constant_is_stable(self):
+        # Wire-format string — changing it would silently break already
+        # deployed peer workers listening for the old name during a
+        # rolling restart, so it's a public contract.
+        assert pricing.PRICING_RELOAD_EVENT == "pricing_reload"
+
+    def test_callback_clears_local_cache(self):
+        # Populate the cache then deliver a synthetic event.
+        get_pricing("anthropic", "claude-opus-4-7")
+        assert pricing._PRICING_CACHE is not None
+        pricing._on_pricing_reload_event(pricing.PRICING_RELOAD_EVENT, {
+            "origin_worker": "12345",
+        })
+        assert pricing._PRICING_CACHE is None
+
+    def test_callback_ignores_unrelated_events(self):
+        # The cross-worker bus carries multiple event types (e.g. "sse").
+        # Pricing's callback must filter — receiving an "sse" event must
+        # NOT clear the pricing cache.
+        get_pricing("anthropic", "claude-opus-4-7")
+        before = pricing._PRICING_CACHE
+        assert before is not None
+        pricing._on_pricing_reload_event("sse", {"origin_worker": "x"})
+        assert pricing._PRICING_CACHE is before
+
+    def test_callback_tolerates_non_dict_data(self):
+        # Defensive: pubsub payload should always be a dict, but the
+        # callback should not crash if a malformed message arrives.
+        get_pricing("anthropic", "claude-opus-4-7")
+        pricing._on_pricing_reload_event(pricing.PRICING_RELOAD_EVENT, None)  # type: ignore[arg-type]
+        assert pricing._PRICING_CACHE is None
+
+
+class TestReloadPricingEndpoint:
+    """`POST /runtime/pricing/reload` reloads YAML on the calling worker
+    and returns the loader status. Auth defaults to "open" mode in the
+    test conftest so the admin gate is satisfied implicitly; the route
+    object's dependencies are asserted separately so a future auth-mode
+    change in the test harness does not silently drop the gate."""
+
+    @pytest.mark.asyncio
+    async def test_endpoint_returns_reload_status(self, client):
+        # Prime cache with one lookup so we can verify the endpoint
+        # actually invalidates it.
+        get_pricing("anthropic", "claude-opus-4-7")
+        assert pricing._PRICING_CACHE is not None
+
+        resp = await client.post("/api/v1/runtime/pricing/reload")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "reloaded"
+        assert body["loaded_from_yaml"] is True
+        assert "anthropic" in body["providers"]
+        assert "openai" in body["providers"]
+        # metadata block from config/llm_pricing.yaml should round-trip.
+        assert "schema_version" in body["metadata"]
+        # No Redis in the test env, so the broadcast falls back to local.
+        assert body["broadcast"] in ("redis_pubsub", "local_only")
+
+    @pytest.mark.asyncio
+    async def test_endpoint_picks_up_yaml_edits(self, client, tmp_path, monkeypatch):
+        # Point pricing at a temporary YAML, post reload, observe the
+        # new rates take effect for the next get_pricing() call.
+        fake = tmp_path / "fake_pricing.yaml"
+        fake.write_text(
+            "providers:\n"
+            "  testvendor:\n"
+            "    test-model-v1:\n"
+            "      input: 99.0\n"
+            "      output: 999.0\n"
+            "defaults:\n"
+            "  input: 7.0\n"
+            "  output: 11.0\n"
+            "metadata:\n"
+            "  schema_version: 1\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+
+        resp = await client.post("/api/v1/runtime/pricing/reload")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["providers"] == ["testvendor"]
+        assert get_pricing("testvendor", "test-model-v1") == (99.0, 999.0)
+        assert get_pricing("unknown", "any") == (7.0, 11.0)
+
+    @pytest.mark.asyncio
+    async def test_endpoint_survives_yaml_missing_at_reload(
+        self, client, tmp_path, monkeypatch,
+    ):
+        # If the YAML is removed between reloads (operator typo, deploy
+        # slipping a file out from under the worker), the endpoint must
+        # still return 200 — billing falls back to the hard-coded table.
+        missing = tmp_path / "definitely_not_there.yaml"
+        monkeypatch.setattr(pricing, "_PRICING_PATH", missing)
+
+        resp = await client.post("/api/v1/runtime/pricing/reload")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "reloaded"
+        assert body["loaded_from_yaml"] is False
+        assert body["providers"] == []
+        # Pre-Z.3 hard-coded fallback still serves Opus 4.7 at $5/$25.
+        assert get_pricing(None, "claude-opus-4-7") == (5.0, 25.0)
+
+    def test_endpoint_route_requires_admin(self):
+        # Lock the dependency wiring directly — the test conftest
+        # disables auth-mode enforcement so a request-level 401/403
+        # won't appear, but the route definition must still attach the
+        # admin gate so production deployments (auth-mode=session/
+        # strict) reject non-admin callers.
+        from backend.routers.system import router
+        match = [
+            r for r in router.routes
+            if getattr(r, "path", None) == "/runtime/pricing/reload"
+        ]
+        assert len(match) == 1, "endpoint not registered exactly once"
+        assert "POST" in match[0].methods
+        dep_names = [
+            getattr(d.dependency, "__name__", str(d.dependency))
+            for d in match[0].dependencies
+        ]
+        # _REQUIRE_ADMIN at system.py:63 builds Depends(require_role("admin"))
+        # whose inner is named `_dep`; current_user is the router-level
+        # baseline. Both must be present.
+        assert "current_user" in dep_names
+        assert "_dep" in dep_names
