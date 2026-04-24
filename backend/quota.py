@@ -77,11 +77,30 @@ class PlanQuota:
 # ``useEngine`` endpoints into one ``/dashboard/summary`` aggregator
 # and switch to SSE push for state that changes less than once per
 # poll window. Tracked as follow-up, not this commit's scope.
+#
+# Phase-4 SP-4-5 (2026-04-24): the dashboard-side fix landed. 4-1
+# added ``GET /api/v1/dashboard/summary`` (one request replaces the
+# 11-endpoint ``useEngine`` fan-out); 4-2 rewrote ``useEngine`` to
+# consume the aggregator; 4-3 widened the poll interval from 5s to
+# 10s; 4-4 inventoried the remaining panel-local polls (absorb /
+# SSE-first / keep-independent per
+# ``docs/dashboard-polling-inventory.md``). The realistic free-tier
+# per-tab budget is now ~6 aggregator calls/min + safety-net polls
+# ≈ 10-15 req/min/tab. With 3 tabs open a single user uses ~45
+# req/min — 300/60s leaves 6x headroom while restoring ``per_user``
+# as a real defensive cap against compromised-credential abuse or
+# runaway client bugs. ``per_tenant`` drops in lockstep to 600/60s
+# so small teams still fit (3-4 users × 45 = ~180 req/min leaves
+# ~3x headroom) while the tier ceiling reins in tenant-wide abuse.
+# ``per_ip`` stays at 1200 because the CF-Free-Rate-Limiting
+# rationale behind SP-8.1b is unchanged — edge has no useful gate
+# below 1200/min, so the backend remains the sole per-IP cap and
+# keeps the bursty headroom for legitimate shared-NAT traffic.
 PLAN_QUOTAS: dict[str, PlanQuota] = {
     "free": PlanQuota(
         per_ip=RateLimitBudget(capacity=1200, window_seconds=60.0),
-        per_user=RateLimitBudget(capacity=1200, window_seconds=60.0),
-        per_tenant=RateLimitBudget(capacity=1500, window_seconds=60.0),
+        per_user=RateLimitBudget(capacity=300, window_seconds=60.0),
+        per_tenant=RateLimitBudget(capacity=600, window_seconds=60.0),
     ),
     "starter": PlanQuota(
         per_ip=RateLimitBudget(capacity=2400, window_seconds=60.0),

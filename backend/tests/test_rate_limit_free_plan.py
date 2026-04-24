@@ -35,23 +35,45 @@ def test_free_per_ip_budget_matches_dashboard_burst():
 
 
 def test_free_per_user_budget_matches_dashboard_burst():
-    """SP-8.1c (2026-04-21): per_user was 120 — tripped by
-    ``useEngine``'s 11-endpoint × 5s = 132 req/min single-tab
-    burst. Bumped to match per_ip (1200/min) so a single operator
-    running 3 tabs still has headroom. See operator screenshot
-    2026-04-21 + ``backend/quota.py`` docstring for the full root
-    cause."""
+    """Phase-4 SP-4-5 (2026-04-24): reverses SP-8.1c's 1200/min
+    relaxation now that the dashboard-side fix has landed.
+
+    History:
+      * Pre SP-8.1c the cap was 120/min — too tight for the legacy
+        ``useEngine`` 11-endpoint × 5s fan-out (132 req/min per
+        tab) and it 429-cascaded on every cold load.
+      * SP-8.1c raised it to 1200/min as a stop-gap while the
+        dashboard was still running the chatty fan-out. That
+        number kept users unblocked but stopped being a real
+        defensive cap — legitimate steady-state traffic could sit
+        at 80-90% of it.
+      * Phase-4 4-1..4-3 replaced the fan-out with a single
+        ``/dashboard/summary`` aggregator polled every 10s, so one
+        tab now drives ~10-15 req/min. 300/60s (3 tabs × 15 =
+        ~45) leaves 6x headroom while turning ``per_user`` back
+        into a real cap against compromised credentials or
+        runaway clients.
+
+    See ``backend/quota.py`` docstring + ``docs/dashboard-polling-
+    inventory.md`` for the per-tab budget derivation.
+    """
     free = quota_for_plan("free")
-    assert free.per_user.capacity == 1200
+    assert free.per_user.capacity == 300
 
 
 def test_free_per_tenant_budget_matches_multi_user_envelope():
-    """SP-8.1c (2026-04-21): per_tenant raised to 1500 — just above
-    per_user (1200) so any single user can't individually saturate
-    the tenant ceiling, but multi-user teams get a reasonable shared
-    cap."""
+    """Phase-4 SP-4-5 (2026-04-24): drops per_tenant from 1500 to
+    600 in lockstep with ``per_user`` (300).
+
+    Small free-tier team of 3-4 users × ~45 req/min/user = ~180
+    req/min ≪ 600/60s, so legitimate multi-user traffic still has
+    ~3x headroom while the tenant-wide cap meaningfully reins in
+    abuse. The invariant ``per_tenant >= per_user`` (see
+    ``test_quota.test_per_tenant_greater_than_per_user``) holds:
+    600 >= 300.
+    """
     free = quota_for_plan("free")
-    assert free.per_tenant.capacity == 1500
+    assert free.per_tenant.capacity == 600
 
 
 def test_plan_hierarchy_preserved_after_tuning():
