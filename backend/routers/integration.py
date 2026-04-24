@@ -15,7 +15,9 @@ from pydantic import BaseModel
 from backend import auth as _au
 from backend.config import (
     LEGACY_CREDENTIAL_FIELDS,
+    LEGACY_LLM_CREDENTIAL_FIELDS,
     is_legacy_credential_field,
+    is_legacy_llm_credential_field,
     settings,
 )
 from backend.db_context import set_tenant_id
@@ -425,12 +427,18 @@ class SettingsUpdate(BaseModel):
     updates: dict[str, str | int | float | bool]
 
 
-# Whitelist of fields safe to update at runtime
+# Whitelist of fields safe to update at runtime.
+#
+# Phase 5b-6 (2026-04-24) removed the 8 ``{provider}_api_key`` fields
+# + ``ollama_base_url`` from this set. Those fields are now owned by
+# the ``llm_credentials`` table (Phase 5b-1 through 5b-5) and writes
+# must go through ``POST /api/v1/llm-credentials`` so the value is
+# Fernet-encrypted + per-tenant scoped + persisted across backend
+# restarts. The PUT handler below surfaces a 200 response with
+# ``rejected[<field>]="deprecated: use POST /api/v1/llm-credentials"``
+# + audit trail when a legacy UI keeps writing them.
 _UPDATABLE_FIELDS = frozenset({
     "llm_provider", "llm_model", "llm_temperature", "llm_fallback_chain",
-    "anthropic_api_key", "google_api_key", "openai_api_key", "xai_api_key",
-    "groq_api_key", "deepseek_api_key", "together_api_key", "openrouter_api_key",
-    "ollama_base_url",
     "github_token", "gitlab_token", "gitlab_url", "git_ssh_key_path",
     "gerrit_enabled", "gerrit_url", "gerrit_ssh_host", "gerrit_ssh_port",
     "gerrit_project", "gerrit_replication_targets",
@@ -473,10 +481,27 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
     # contract), but we log WHO kept using the superseded UI so operators
     # can track migration progress over time.
     deprecated_writes: dict[str, str] = {}
+    # Phase 5b-6 (#llm-credentials): legacy LLM credential writes are
+    # stronger than the Phase 5-10 warn-and-write pattern — the whole
+    # point of 5b-1..5b-5 was to move keys out of process memory, so
+    # we REJECT the write and point the caller at the new endpoint.
+    # Still emit an audit row + response block so operators notice.
+    deprecated_llm_rejects: dict[str, str] = {}
     actor_id = getattr(_user, "id", None) or getattr(_user, "email", None) or "admin"
     for key, value in body.updates.items():
         if key not in _UPDATABLE_FIELDS:
-            rejected[key] = "not updatable"
+            # Phase 5b-6: legacy LLM credential writes deserve a more
+            # actionable rejection reason than plain "not updatable" —
+            # tell the caller where the field moved to.
+            if is_legacy_llm_credential_field(key):
+                replacement_hint = LEGACY_LLM_CREDENTIAL_FIELDS[key]
+                rejected[key] = (
+                    "deprecated: use POST /api/v1/llm-credentials "
+                    f"(→ {replacement_hint})"
+                )
+                deprecated_llm_rejects[key] = replacement_hint
+            else:
+                rejected[key] = "not updatable"
             continue
         if not hasattr(settings, key):
             rejected[key] = "unknown field"
@@ -529,6 +554,43 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
             logger.warning(
                 "audit-warn for deprecated settings write failed: %s "
                 "(write itself took effect; audit row missing)",
+                exc,
+            )
+
+    # Phase 5b-6 (#llm-credentials): audit + warn-log for rejected
+    # LLM credential writes. Plaintext value is explicitly NOT echoed
+    # into the audit row (``after`` carries field metadata only) so a
+    # snapshot of the audit log cannot be replayed to recover the
+    # attempted key. Best-effort: a failed audit write must not poison
+    # the HTTP response.
+    if deprecated_llm_rejects:
+        try:
+            from backend import audit as _audit
+            for key, replacement_hint in deprecated_llm_rejects.items():
+                logger.warning(
+                    "Phase-5b-6 deprecated-write rejected: settings.%s — "
+                    "authoritative source is %s (use POST "
+                    "/api/v1/llm-credentials)",
+                    key, replacement_hint,
+                )
+                await _audit.log(
+                    action="settings.legacy_llm_credential_write",
+                    entity_kind="settings_legacy_llm_field",
+                    entity_id=key,
+                    before=None,
+                    after={
+                        "field": key,
+                        "replacement": replacement_hint,
+                        "note": "rejected — authoritative source is "
+                                "llm_credentials (Phase 5b); caller should "
+                                "POST /api/v1/llm-credentials instead",
+                    },
+                    actor=str(actor_id),
+                )
+        except Exception as exc:
+            logger.warning(
+                "audit-warn for deprecated LLM settings write failed: %s "
+                "(write was already rejected; audit row missing)",
                 exc,
             )
 
@@ -587,6 +649,19 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
             "fields": deprecated_writes,
             "migrate_to": "git_accounts",
             "doc": "/docs/phase-5-multi-account/02-migration-runbook.md",
+        }
+    # Phase 5b-6 (#llm-credentials): surface a separate deprecation
+    # banner for rejected LLM credential writes. The UI can use this
+    # to redirect the user to the new ``POST /api/v1/llm-credentials``
+    # endpoint. Separate key from Phase 5-10's ``deprecations`` block
+    # so the UI can render different messaging (Phase 5b is REJECTED
+    # not warned — the write did not take effect).
+    if deprecated_llm_rejects:
+        response["llm_deprecations"] = {
+            "fields": deprecated_llm_rejects,
+            "migrate_to": "llm_credentials",
+            "endpoint": "/api/v1/llm-credentials",
+            "doc": "/docs/ops/llm_credentials.md",
         }
     return response
 

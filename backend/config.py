@@ -473,6 +473,69 @@ def is_legacy_credential_field(name: str) -> bool:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 5b-6 (#llm-credentials) LLM credential deprecation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Phase 5b-1 through 5b-5 shipped the ``llm_credentials`` table +
+# CRUD API + UI + lifespan auto-migration as the authoritative source
+# for per-tenant, multi-account LLM provider credentials. The
+# ``Settings`` scalar fields below are the previous generation and
+# are now deprecated:
+#
+#   * READ stays OK — ``backend.llm_credential_resolver`` falls back
+#     to ``settings.{provider}_api_key`` when the DB has no row for
+#     a provider, so deployments that never populated
+#     ``llm_credentials`` keep working unchanged. Phase 5b-5's
+#     lifespan auto-migration converts them on next backend boot
+#     unless ``OMNISIGHT_LLM_CREDENTIAL_MIGRATE=skip`` is set.
+#   * WRITE via ``PUT /runtime/settings`` is now REJECTED. The
+#     ``_UPDATABLE_FIELDS`` whitelist in
+#     :mod:`backend.routers.integration` no longer lists these
+#     fields, so writes return ``rejected[field]="deprecated: use
+#     POST /api/v1/llm-credentials"`` + emit an ``audit.log`` row
+#     with ``action=settings.legacy_llm_credential_write`` + the
+#     response carries a ``deprecations`` block the UI can surface.
+#
+# Fields intentionally NOT listed here (and why):
+#   * ``llm_provider`` / ``llm_model`` / ``llm_temperature`` /
+#     ``llm_fallback_chain`` — routing / selection knobs, not
+#     credentials. Still go through the Settings path in
+#     Phase 5b-6; future phases may promote them to DB.
+#   * ``token_*`` budget knobs — observability configuration, not
+#     a credential.
+#   * Git-forge credentials (``github_token`` / ``gerrit_url`` /
+#     ...) — those are Phase 5-10 scope and live in
+#     ``LEGACY_CREDENTIAL_FIELDS`` above.
+
+LEGACY_LLM_CREDENTIAL_FIELDS: dict[str, str] = {
+    "anthropic_api_key":  "llm_credentials(provider='anthropic').encrypted_value",
+    "google_api_key":     "llm_credentials(provider='google').encrypted_value",
+    "openai_api_key":     "llm_credentials(provider='openai').encrypted_value",
+    "xai_api_key":        "llm_credentials(provider='xai').encrypted_value",
+    "groq_api_key":       "llm_credentials(provider='groq').encrypted_value",
+    "deepseek_api_key":   "llm_credentials(provider='deepseek').encrypted_value",
+    "together_api_key":   "llm_credentials(provider='together').encrypted_value",
+    "openrouter_api_key": "llm_credentials(provider='openrouter').encrypted_value",
+    # Not a secret per se but same lifecycle: 5b-4 UI moved it into
+    # ``llm_credentials(provider='ollama').metadata.base_url``.
+    "ollama_base_url":    "llm_credentials(provider='ollama').metadata.base_url",
+}
+
+
+def is_legacy_llm_credential_field(name: str) -> bool:
+    """Return True when ``name`` is a Phase-5b-deprecated LLM
+    credential field on the ``Settings`` singleton.
+
+    Use this at write sites (``PUT /runtime/settings``) to decide
+    whether to reject + emit ``audit.log(action=
+    "settings.legacy_llm_credential_write", ...)``. Read sites MUST
+    NOT gate on this — reads still fall back through
+    :mod:`backend.llm_credential_resolver`.
+    """
+    return name in LEGACY_LLM_CREDENTIAL_FIELDS
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  L1-03: startup-time config validation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
