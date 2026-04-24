@@ -989,6 +989,45 @@ CREATE INDEX IF NOT EXISTS idx_git_accounts_last_used
 CREATE UNIQUE INDEX IF NOT EXISTS uq_git_accounts_default_per_platform
     ON git_accounts(tenant_id, platform)
     WHERE is_default = 1;
+
+-- Phase 5b-1 (#llm-credentials): one row per LLM-provider credential.
+-- Replaces the legacy in-memory-only ``Settings.{provider}_api_key``
+-- scalar fields so operator-rotated keys survive ``docker compose
+-- restart`` and rolling redeploys. See docs/phase-5b-llm-credentials/
+-- 01-design.md for the full rationale and alembic 0029 for the PG
+-- mirror. SQLite schema below is the dialect-shifted dev-parity
+-- version (JSONB → TEXT-of-JSON, BOOLEAN → INTEGER 0/1, DOUBLE
+-- PRECISION → REAL). Empty until rows 5b-2 / 5b-5 land.
+CREATE TABLE IF NOT EXISTS llm_credentials (
+    id                TEXT PRIMARY KEY,
+    tenant_id         TEXT NOT NULL DEFAULT 't-default'
+                            REFERENCES tenants(id) ON DELETE CASCADE,
+    provider          TEXT NOT NULL
+                            CHECK (provider IN (
+                                'anthropic','google','openai','xai',
+                                'groq','deepseek','together',
+                                'openrouter','ollama'
+                            )),
+    label             TEXT NOT NULL DEFAULT '',
+    encrypted_value   TEXT NOT NULL DEFAULT '',
+    metadata          TEXT NOT NULL DEFAULT '{}',
+    auth_type         TEXT NOT NULL DEFAULT 'pat',
+    is_default        INTEGER NOT NULL DEFAULT 0,
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    last_used_at      REAL,
+    created_at        REAL NOT NULL,
+    updated_at        REAL NOT NULL,
+    version           INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_llm_credentials_tenant
+    ON llm_credentials(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_llm_credentials_tenant_provider
+    ON llm_credentials(tenant_id, provider);
+CREATE INDEX IF NOT EXISTS idx_llm_credentials_last_used
+    ON llm_credentials(tenant_id, last_used_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_credentials_default_per_provider
+    ON llm_credentials(tenant_id, provider)
+    WHERE is_default = 1;
 """
 
 

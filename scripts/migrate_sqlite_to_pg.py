@@ -183,6 +183,13 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # app-generated TEXT ``id`` (same convention as tenant_secrets);
     # NOT in TABLES_WITH_IDENTITY_ID. Empty until rows 5-2 / 5-5 land.
     "git_accounts",
+    # Phase 5b-1 (alembic 0029): one row per LLM-provider credential
+    # (anthropic/google/openai/xai/groq/deepseek/together/openrouter/
+    # ollama). FK ``tenant_id → tenants(id) ON DELETE CASCADE`` so it
+    # must replay AFTER tenants. PK is the app-generated TEXT ``id``
+    # (same convention as tenant_secrets / git_accounts); NOT in
+    # TABLES_WITH_IDENTITY_ID. Empty until rows 5b-2 / 5b-5 land.
+    "llm_credentials",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY
