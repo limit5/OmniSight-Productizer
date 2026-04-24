@@ -30,14 +30,64 @@ logger = logging.getLogger(__name__)
 
 
 class TokenTrackingCallback(BaseCallbackHandler):
-    """LangChain callback that feeds token usage into the system tracker."""
+    """LangChain callback that feeds token usage into the system tracker.
+
+    ZZ.A1 (#303-1): the callback also normalises prompt-cache hit / write
+    counters across providers so downstream dashboards can surface a
+    single ``cache_read`` / ``cache_create`` pair regardless of vendor
+    shape. Anthropic reports both sides
+    (``usage.cache_read_input_tokens`` + ``usage.cache_creation_input_tokens``);
+    OpenAI only reports reads (``usage.prompt_tokens_details.cached_tokens``)
+    and has no equivalent of cache creation — we normalise creation to 0
+    for OpenAI rather than leaving it ``None`` so callers don't branch.
+    The normalised pair is stashed on the instance
+    (``last_cache_read`` / ``last_cache_create``) for the follow-up
+    tracker-schema checkbox to consume; ``track_tokens`` itself is left
+    untouched in this checkbox.
+    """
 
     def __init__(self, model_name: str) -> None:
         self.model_name = model_name
         self._start: float = 0
+        self.last_cache_read: int = 0
+        self.last_cache_create: int = 0
 
     def on_llm_start(self, *args, **kwargs) -> None:  # noqa: ANN002
         self._start = time.time()
+
+    @staticmethod
+    def _extract_cache_tokens(usage: dict) -> tuple[int, int]:
+        """Return (cache_read, cache_create) normalised across providers.
+
+        Priority order:
+        1. Anthropic-native keys on ``usage`` itself
+           (``cache_read_input_tokens`` / ``cache_creation_input_tokens``).
+        2. OpenAI-native nested dict
+           (``prompt_tokens_details.cached_tokens``; no creation side).
+        3. LangChain's unified ``usage_metadata.input_token_details``
+           shape (``cache_read`` / ``cache_creation``), which some
+           langchain-anthropic / langchain-openai versions surface when
+           ``llm_output`` is empty.
+        Missing fields default to 0 — they're additive counters where
+        "absent" and "zero" are indistinguishable to the dashboard.
+        """
+        if not isinstance(usage, dict):
+            return 0, 0
+
+        cache_read = usage.get("cache_read_input_tokens")
+        cache_create = usage.get("cache_creation_input_tokens")
+        if cache_read is not None or cache_create is not None:
+            return int(cache_read or 0), int(cache_create or 0)
+
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict) and "cached_tokens" in details:
+            return int(details.get("cached_tokens") or 0), 0
+
+        itd = usage.get("input_token_details")
+        if isinstance(itd, dict) and ("cache_read" in itd or "cache_creation" in itd):
+            return int(itd.get("cache_read") or 0), int(itd.get("cache_creation") or 0)
+
+        return 0, 0
 
     def on_llm_end(self, response: LLMResult, **kwargs) -> None:  # noqa: ANN003
         try:
@@ -49,6 +99,24 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 usage = response.llm_output.get("token_usage", {})
                 if not usage:
                     usage = response.llm_output.get("usage", {})
+            # Some providers (notably langchain-anthropic ≥ 0.3) expose
+            # usage only on per-generation ``usage_metadata`` when
+            # ``llm_output`` is empty — fall back to the first generation
+            # so cache counters aren't silently lost.
+            if not usage:
+                try:
+                    gen = response.generations[0][0]
+                    msg = getattr(gen, "message", None)
+                    meta = getattr(msg, "usage_metadata", None) if msg else None
+                    if isinstance(meta, dict):
+                        usage = meta
+                except (AttributeError, IndexError, TypeError):
+                    usage = {}
+
+            cache_read, cache_create = self._extract_cache_tokens(usage)
+            self.last_cache_read = cache_read
+            self.last_cache_create = cache_create
+
             track_tokens(
                 self.model_name,
                 usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0),
