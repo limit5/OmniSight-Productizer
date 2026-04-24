@@ -942,6 +942,48 @@ CREATE INDEX IF NOT EXISTS idx_user_drafts_updated_at
     ON user_drafts(updated_at);
 CREATE INDEX IF NOT EXISTS idx_user_drafts_tenant
     ON user_drafts(tenant_id);
+
+-- Phase 5-1 (#multi-account-forge): one row per forge account.
+-- Replaces the legacy ``Settings.{github,gitlab}_token{,_map}`` JSON
+-- blobs that could not represent multiple accounts on the same host.
+-- See docs/phase-5-multi-account/01-design.md for the full rationale
+-- and alembic 0027 for the PG mirror. The SQLite schema below is the
+-- dialect-shifted dev-parity version (JSONB → TEXT-of-JSON, BOOLEAN
+-- → INTEGER 0/1, DOUBLE PRECISION → REAL).
+CREATE TABLE IF NOT EXISTS git_accounts (
+    id                       TEXT PRIMARY KEY,
+    tenant_id                TEXT NOT NULL DEFAULT 't-default'
+                                    REFERENCES tenants(id) ON DELETE CASCADE,
+    platform                 TEXT NOT NULL
+                                    CHECK (platform IN ('github','gitlab','gerrit','jira')),
+    instance_url             TEXT NOT NULL DEFAULT '',
+    label                    TEXT NOT NULL DEFAULT '',
+    username                 TEXT NOT NULL DEFAULT '',
+    encrypted_token          TEXT NOT NULL DEFAULT '',
+    encrypted_ssh_key        TEXT NOT NULL DEFAULT '',
+    ssh_host                 TEXT NOT NULL DEFAULT '',
+    ssh_port                 INTEGER NOT NULL DEFAULT 0,
+    project                  TEXT NOT NULL DEFAULT '',
+    encrypted_webhook_secret TEXT NOT NULL DEFAULT '',
+    url_patterns             TEXT NOT NULL DEFAULT '[]',
+    auth_type                TEXT NOT NULL DEFAULT 'pat',
+    is_default               INTEGER NOT NULL DEFAULT 0,
+    enabled                  INTEGER NOT NULL DEFAULT 1,
+    metadata                 TEXT NOT NULL DEFAULT '{}',
+    last_used_at             REAL,
+    created_at               REAL NOT NULL,
+    updated_at               REAL NOT NULL,
+    version                  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_git_accounts_tenant
+    ON git_accounts(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_git_accounts_tenant_platform
+    ON git_accounts(tenant_id, platform);
+CREATE INDEX IF NOT EXISTS idx_git_accounts_last_used
+    ON git_accounts(tenant_id, last_used_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_git_accounts_default_per_platform
+    ON git_accounts(tenant_id, platform)
+    WHERE is_default = 1;
 """
 
 

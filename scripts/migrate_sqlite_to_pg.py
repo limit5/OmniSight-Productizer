@@ -177,6 +177,12 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # user_title). PK is (session_id, user_id, tenant_id); upserted
     # on every chat message write.
     "chat_sessions",
+    # Phase 5-1 (alembic 0027): one row per forge account
+    # (github/gitlab/gerrit/jira). FK ``tenant_id → tenants(id)
+    # ON DELETE CASCADE`` so it must replay AFTER tenants. PK is the
+    # app-generated TEXT ``id`` (same convention as tenant_secrets);
+    # NOT in TABLES_WITH_IDENTITY_ID. Empty until rows 5-2 / 5-5 land.
+    "git_accounts",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY
