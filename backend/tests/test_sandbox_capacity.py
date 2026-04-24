@@ -369,6 +369,67 @@ class TestCostWeights:
         ) is True
         assert sc.snapshot()["total_used"] == 4.0
 
+    def test_weight_metadata_matches_todo_spec(self):
+        """H4a TODO row: initial cost-weight estimates per sandbox class.
+
+        Mirrors the resource envelopes called out in the TODO.md H4a spec
+        (unit-test / lint ~512MB / 1 core burst; integration ~1.5GB / 2 core;
+        compile 2GB / 4 core sustained; QEMU 2GB / 2 core; ssh-remote 成本
+        在對端). If the TODO text changes, this test must change with it —
+        that's the whole point: the test pins the agreed initial estimates.
+        """
+        lw = sc.cost_estimate(sc.SandboxCostWeight.gvisor_lightweight)
+        assert (lw.tokens, lw.memory_mb, lw.cpu_cores, lw.burst) == (
+            1.0, 512, 1.0, True,
+        )
+        assert "unit test" in lw.use_case or "lint" in lw.use_case
+
+        net = sc.cost_estimate(sc.SandboxCostWeight.docker_t2_networked)
+        assert (net.tokens, net.memory_mb, net.cpu_cores, net.burst) == (
+            2.0, 1536, 2.0, False,
+        )
+
+        cmp_ = sc.cost_estimate(sc.SandboxCostWeight.phase64c_local_compile)
+        assert (cmp_.tokens, cmp_.memory_mb, cmp_.cpu_cores, cmp_.burst) == (
+            4.0, 2048, 4.0, False,
+        )
+        assert "make -j4" in cmp_.use_case
+
+        qemu = sc.cost_estimate(sc.SandboxCostWeight.phase64c_qemu_aarch64)
+        assert (qemu.tokens, qemu.memory_mb, qemu.cpu_cores, qemu.burst) == (
+            3.0, 2048, 2.0, False,
+        )
+
+        ssh = sc.cost_estimate(sc.SandboxCostWeight.phase64c_ssh_remote)
+        assert (ssh.tokens, ssh.memory_mb, ssh.cpu_cores, ssh.burst) == (
+            0.5, 256, 0.5, True,
+        )
+
+    def test_weight_metadata_matches_enum_values(self):
+        """Drift guard — every enum member MUST have a metadata row, and
+        the ``tokens`` field MUST equal the enum's float value.
+
+        Prevents the classic bug of adding a new SandboxCostWeight member
+        in one PR, forgetting the COST_WEIGHT_ESTIMATES row, and shipping
+        a KeyError into prod the first time a caller passes the new member
+        to ``cost_estimate()``.
+        """
+        for member in sc.SandboxCostWeight:
+            assert member in sc.COST_WEIGHT_ESTIMATES, (
+                f"SandboxCostWeight.{member.name} has no COST_WEIGHT_ESTIMATES row"
+            )
+            est = sc.COST_WEIGHT_ESTIMATES[member]
+            assert est.tokens == float(member.value), (
+                f"{member.name} enum value {member.value} != metadata tokens {est.tokens}"
+            )
+
+    def test_default_cost_is_lightweight(self):
+        """DEFAULT_COST should remain the lightweight (1-token) weight so
+        callers that don't pass a cost enum default to the cheapest class.
+        """
+        assert sc.DEFAULT_COST is sc.SandboxCostWeight.gvisor_lightweight
+        assert sc.cost_estimate(sc.DEFAULT_COST).tokens == 1.0
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Reset

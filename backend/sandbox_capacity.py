@@ -41,6 +41,17 @@ TURBO_TENANT_CAP_RATIO: float = float(
 
 
 class SandboxCostWeight(float, Enum):
+    """H4a initial cost weights (DRF tokens) per sandbox class.
+
+    1 token ≈ 1 CPU core × 512 MiB RAM (see ``backend/container.py`` M1
+    mapping). The values here are the first-cut estimates agreed in the
+    H4a design; H4b will replace them with `configs/sandbox_cost_weights.yaml`
+    derived from real sandbox telemetry (see ``scripts/calibrate_sandbox_cost.py``).
+
+    Per-class resource envelopes — kept in sync with ``COST_WEIGHT_ESTIMATES``
+    below so downstream code can look up memory/core hints by enum member.
+    """
+
     gvisor_lightweight = 1.0
     docker_t2_networked = 2.0
     phase64c_local_compile = 4.0
@@ -48,7 +59,83 @@ class SandboxCostWeight(float, Enum):
     phase64c_ssh_remote = 0.5
 
 
+@dataclass(frozen=True)
+class CostEstimate:
+    """Initial-estimate metadata for a :class:`SandboxCostWeight` member.
+
+    * ``tokens`` — DRF tokens (matches the enum's float value).
+    * ``memory_mb`` — expected peak RSS in MiB (used by ``container.py``
+      to derive ``--memory`` when the caller passes a weight).
+    * ``cpu_cores`` — expected CPU envelope in cores.
+    * ``burst`` — ``True`` for short bursty workloads (unit tests, lint),
+      ``False`` for sustained workloads (compile, QEMU). Sustained
+      workloads are what the AIMD controller throttles first on host
+      pressure because they dominate CPU×time.
+    * ``use_case`` — one-line human summary for UI tooltips / audit.
+    """
+
+    tokens: float
+    memory_mb: int
+    cpu_cores: float
+    burst: bool
+    use_case: str
+
+
+# H4a initial estimates — 1 token ≈ 1 core × 512 MiB. Values mirror the
+# TODO.md H4a row for SandboxCostWeight. Keep the two tables consistent:
+# any change here must also update the enum member's float value (and
+# vice versa); the ``test_weight_metadata_matches_enum_values`` guard
+# test fails loudly if they drift.
+COST_WEIGHT_ESTIMATES: dict[SandboxCostWeight, CostEstimate] = {
+    SandboxCostWeight.gvisor_lightweight: CostEstimate(
+        tokens=1.0,
+        memory_mb=512,
+        cpu_cores=1.0,
+        burst=True,
+        use_case="unit test / lint",
+    ),
+    SandboxCostWeight.docker_t2_networked: CostEstimate(
+        tokens=2.0,
+        memory_mb=1536,  # ~1.5 GiB
+        cpu_cores=2.0,
+        burst=False,
+        use_case="integration test with network",
+    ),
+    SandboxCostWeight.phase64c_local_compile: CostEstimate(
+        tokens=4.0,
+        memory_mb=2048,  # ~2 GiB
+        cpu_cores=4.0,
+        burst=False,
+        use_case="make -j4 local compile (sustained)",
+    ),
+    SandboxCostWeight.phase64c_qemu_aarch64: CostEstimate(
+        tokens=3.0,
+        memory_mb=2048,  # ~2 GiB
+        cpu_cores=2.0,
+        burst=False,
+        use_case="aarch64 cross-compile under qemu",
+    ),
+    SandboxCostWeight.phase64c_ssh_remote: CostEstimate(
+        tokens=0.5,
+        memory_mb=256,
+        cpu_cores=0.5,
+        burst=True,
+        use_case="ssh remote (compute on far side, local is just client)",
+    ),
+}
+
+
 DEFAULT_COST = SandboxCostWeight.gvisor_lightweight
+
+
+def cost_estimate(weight: SandboxCostWeight) -> CostEstimate:
+    """Return the :class:`CostEstimate` metadata for *weight*.
+
+    Convenience accessor so callers don't need to import the dict.
+    Raises ``KeyError`` if a new enum member is added without a matching
+    ``COST_WEIGHT_ESTIMATES`` row — caught by the drift-guard test.
+    """
+    return COST_WEIGHT_ESTIMATES[weight]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
