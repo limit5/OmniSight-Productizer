@@ -2,36 +2,77 @@
 
 // ZZ.B1 (#304-1, 2026-04-24): per-turn timeline cards — ccxray 招牌 UI.
 //
-// First checkbox of ZZ.B1: render the five-line card at the top of the
-// ORCHESTRATOR AI panel with horizontal-scroll / vertical-stack layout
-// modes the operator can toggle. Data source in this initial landing is
-// the existing ``turn_metrics`` + ``turn_tool_stats`` SSE stream (shared
-// with TokenUsageStats). The dedicated ``turn.complete`` SSE event +
-// ``GET /runtime/turns`` history endpoint + drawer with full LLM
-// messages are subsequent checkboxes in ZZ.B1 — when they ship, they
-// upgrade Line 5's placeholder body and enable historical backfill on
-// mount. For now the card renders from what today's backend already
-// emits, so the UI is useful from day one instead of gated on the
-// backend work.
+// Checkbox 1 landed the five-line TurnCard (horizontal/vertical layouts,
+// ring buffer of the last 100 turns, SSE wiring to ``turn_metrics`` +
+// ``turn_tool_stats``). Checkbox 2 (this change) adds the click-to-expand
+// detail drawer: tapping a card opens ``<TurnDetailDrawer>`` showing full
+// LLM messages (system / user / assistant / tool), per-message prompt
+// token breakdown, and used-tools detail (name + success + args + result
+// + duration). The dedicated ``turn.complete`` SSE event that will carry
+// the messages + per-tool-call bodies is checkbox 3; until it lands the
+// drawer degrades gracefully — it shows the metadata we already have
+// (tokens, cost, cache, latency, gap, context) plus any ``failed_tools``
+// from ``turn_tool_stats``, and a clear "waiting for turn.complete event"
+// placeholder in the messages section so operators know WHY the body is
+// empty. This is the NULL-vs-genuine-zero contract ZZ.A1 established for
+// every other surface on this card.
 //
 // Ring buffer: last 100 turns kept in component state (LRU by turn
 // arrival order). The buffer matches the spec's "前端用 ring buffer 存
 // 最近 100 turn" requirement; once ``GET /runtime/turns?limit=50`` lands
 // in a later checkbox we'll seed the buffer on mount.
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import {
   Clock,
   ChevronUp,
   ChevronDown,
   Rows3,
   MoveHorizontal,
+  X,
+  AlertTriangle,
+  CheckCircle2,
+  Wrench,
 } from "lucide-react"
 import { subscribeEvents } from "@/lib/api"
 import { getModelInfo } from "./agent-matrix-wall"
 
 const RING_BUFFER_SIZE = 100
 const LINE5_MAX_CHARS = 80
+
+/**
+ * ZZ.B1 checkbox 2: one LLM message part inside a turn — system prompt,
+ * the user's inbound message, the assistant response, or a tool result.
+ * Populated by the (future) ``turn.complete`` SSE event / ``GET
+ * /runtime/turns`` endpoint (ZZ.B1 checkbox 3); absent until that ships,
+ * in which case the drawer degrades to a placeholder.
+ */
+export interface TurnMessagePart {
+  role: "system" | "user" | "assistant" | "tool"
+  content: string
+  /** Prompt token count contributed by this message (for Line 3 of the
+   *  drawer's "prompt token breakdown per message" section). `null` when
+   *  the backend cannot attribute tokens at message granularity. */
+  tokens?: number | null
+  /** Only meaningful for ``role="tool"`` (the tool whose result this
+   *  message carries) or ``role="assistant"`` entries that represent
+   *  tool-call requests. */
+  toolName?: string | null
+}
+
+/**
+ * ZZ.B1 checkbox 2: one tool invocation's detail inside a turn. The
+ * drawer renders a list of these in the "used tools 明細" section.
+ * ``success`` is required (drives the pass/fail badge); args / result /
+ * durationMs are optional and rendered only when present.
+ */
+export interface TurnToolCallDetail {
+  name: string
+  success: boolean
+  args?: Record<string, unknown> | null
+  result?: string | null
+  durationMs?: number | null
+}
 
 export interface TurnCardData {
   turnNumber: number
@@ -55,6 +96,17 @@ export interface TurnCardData {
   gapMs: number | null
   costUsd: number | null
   summary: string | null
+  /** ZZ.B1 checkbox 2 drawer payload — populated when ``turn.complete``
+   *  ships (checkbox 3). ``undefined`` = not yet received → drawer shows
+   *  "waiting for turn.complete" placeholder; ``[]`` = received but
+   *  empty (degenerate turn, e.g. synthesised cancellation) → drawer
+   *  shows "no messages recorded for this turn". */
+  messages?: TurnMessagePart[]
+  /** ZZ.B1 checkbox 2 drawer payload — tool invocation detail. Same
+   *  NULL-vs-empty-array contract as ``messages``. When absent, the
+   *  drawer falls back to the summary aggregates from ``turn_tool_stats``
+   *  (call count + failed tool names) so the section isn't empty. */
+  toolCallDetails?: TurnToolCallDetail[]
 }
 
 // Rough public-list pricing per 1M tokens (input / output). ZZ.B1 first
@@ -147,6 +199,16 @@ export function TurnTimeline({
 
   const [turns, setTurns] = useState<TurnCardData[]>(externalTurns ?? [])
   const turnCounterRef = useRef(0)
+  // ZZ.B1 checkbox 2: drawer open state. Keyed by turnNumber because
+  // the TurnCardData reference changes every time ``turn_tool_stats``
+  // attaches to the latest turn (immutable update) — tracking the card
+  // by identity would close the drawer on every SSE frame. ``null`` =
+  // closed.
+  const [selectedTurnNumber, setSelectedTurnNumber] = useState<number | null>(null)
+  const closeDrawer = useCallback(() => setSelectedTurnNumber(null), [])
+  const selectedTurn = selectedTurnNumber !== null
+    ? turns.find(t => t.turnNumber === selectedTurnNumber) ?? null
+    : null
 
   useEffect(() => {
     if (externalTurns) {
@@ -300,9 +362,14 @@ export function TurnTimeline({
               turn={t}
               anchorMs={anchorMs}
               compact={layout === "horizontal"}
+              onClick={() => setSelectedTurnNumber(t.turnNumber)}
             />
           ))}
         </div>
+      )}
+
+      {selectedTurn && (
+        <TurnDetailDrawer turn={selectedTurn} onClose={closeDrawer} />
       )}
     </div>
   )
@@ -312,10 +379,12 @@ function TurnCard({
   turn,
   anchorMs,
   compact,
+  onClick,
 }: {
   turn: TurnCardData
   anchorMs: number
   compact: boolean
+  onClick?: () => void
 }) {
   const modelInfo = getModelInfo(turn.model)
   const ctxPct = turn.contextUsagePct
@@ -341,7 +410,19 @@ function TurnCard({
     <div
       data-testid="turn-card"
       data-turn-number={turn.turnNumber}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      aria-label={onClick ? `Turn ${turn.turnNumber} detail` : undefined}
+      onClick={onClick}
+      onKeyDown={onClick ? (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault()
+          onClick()
+        }
+      } : undefined}
       className={`rounded-md bg-[var(--secondary)] p-2 border border-[var(--border)]/50 ${
+        onClick ? "cursor-pointer hover:border-[var(--neural-blue)]/60 hover:bg-[var(--secondary)]/80 focus:outline-none focus:ring-1 focus:ring-[var(--neural-blue)]/60" : ""
+      } ${
         compact ? "min-w-[280px] max-w-[300px] shrink-0" : "w-full"
       }`}
     >
@@ -480,6 +561,352 @@ function TurnCard({
         title={rawSummary || displaySummary}
       >
         {displaySummary}
+      </div>
+    </div>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * ZZ.B1 checkbox 2 — <TurnDetailDrawer>
+ * Modal-style drawer opened when an operator clicks a TurnCard. Renders
+ * full LLM messages (system / user / assistant / tool) with per-message
+ * prompt-token breakdown, plus a tool-call detail list. When the
+ * ``turn.complete`` SSE event hasn't landed for this turn yet (checkbox
+ * 3 work), the body sections degrade to informative placeholders so the
+ * operator understands the "empty" state isn't a bug — it's "we don't
+ * have that detail for this turn (yet)".
+ * ──────────────────────────────────────────────────────────────────── */
+
+const ROLE_STYLES: Record<TurnMessagePart["role"], { label: string; color: string; bg: string }> = {
+  system:    { label: "SYSTEM",    color: "var(--muted-foreground)",    bg: "color-mix(in srgb, var(--muted-foreground) 12%, transparent)" },
+  user:      { label: "USER",      color: "var(--neural-blue)",         bg: "color-mix(in srgb, var(--neural-blue) 12%, transparent)" },
+  assistant: { label: "ASSISTANT", color: "var(--validation-emerald)",  bg: "color-mix(in srgb, var(--validation-emerald) 12%, transparent)" },
+  tool:      { label: "TOOL",      color: "var(--artifact-purple)",     bg: "color-mix(in srgb, var(--artifact-purple) 12%, transparent)" },
+}
+
+function stringifyArgs(args: TurnToolCallDetail["args"]): string {
+  if (args === null || args === undefined) return ""
+  try {
+    return JSON.stringify(args, null, 2)
+  } catch {
+    return String(args)
+  }
+}
+
+function TurnDetailDrawer({
+  turn,
+  onClose,
+}: {
+  turn: TurnCardData
+  onClose: () => void
+}) {
+  const modelInfo = getModelInfo(turn.model)
+
+  // ESC to close. Registered once per open; removed on unmount.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose()
+    }
+    window.addEventListener("keydown", handler)
+    return () => window.removeEventListener("keydown", handler)
+  }, [onClose])
+
+  const messages = turn.messages
+  const hasMessages = Array.isArray(messages)
+  const messagesEmpty = hasMessages && messages!.length === 0
+
+  // Tool call details: prefer explicit structured list; else fall back
+  // to the aggregates carried by ``turn_tool_stats`` so the section is
+  // not empty even before ``turn.complete`` ships.
+  const toolDetails = turn.toolCallDetails
+  const hasExplicitTools = Array.isArray(toolDetails)
+  const fallbackToolEntries: TurnToolCallDetail[] =
+    !hasExplicitTools && turn.failedTools.length > 0
+      ? turn.failedTools.map(n => ({ name: n, success: false }))
+      : []
+  const renderedTools: TurnToolCallDetail[] = hasExplicitTools
+    ? (toolDetails as TurnToolCallDetail[])
+    : fallbackToolEntries
+
+  // Summed prompt tokens across messages (for the breakdown footer's
+  // sanity check — should roughly equal inputTokens + cacheRead +
+  // cacheCreate, minus any output-side attribution).
+  const perMsgTokenSum = hasMessages
+    ? messages!.reduce((acc, m) => acc + (m.tokens ?? 0), 0)
+    : 0
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Turn ${turn.turnNumber} detail`}
+      data-testid="turn-detail-drawer"
+      className="fixed inset-0 z-[70] flex items-stretch justify-end"
+    >
+      <div
+        data-testid="turn-detail-drawer-backdrop"
+        className="absolute inset-0 bg-[var(--deep-space-start,#010409)]/70 backdrop-blur-[2px]"
+        onClick={onClose}
+        aria-hidden
+      />
+      <div
+        data-testid="turn-detail-drawer-panel"
+        className="relative w-[min(640px,calc(100vw-2rem))] h-full bg-[var(--background)] border-l border-[var(--border)] shadow-2xl overflow-y-auto"
+      >
+        {/* Header */}
+        <div className="sticky top-0 z-10 bg-[var(--background)] border-b border-[var(--border)] px-4 py-3 flex items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 font-mono text-xs text-[var(--muted-foreground)]">
+              <span className="font-semibold text-[var(--foreground)]" data-testid="turn-detail-turn-number">
+                Turn #{turn.turnNumber}
+              </span>
+              <span
+                data-testid="turn-detail-model"
+                className="px-1 rounded truncate"
+                style={{ backgroundColor: `color-mix(in srgb, ${modelInfo.color} 15%, transparent)`, color: modelInfo.color }}
+                title={turn.model}
+              >
+                {turn.agentSubtype || modelInfo.shortLabel || turn.model}
+              </span>
+              <span className="tabular-nums" data-testid="turn-detail-timestamp">
+                {turn.timestamp}
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close detail drawer"
+            data-testid="turn-detail-close"
+            className="p-1 rounded hover:bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Metadata strip — always available from turn_metrics */}
+        <div
+          data-testid="turn-detail-metadata"
+          className="px-4 py-3 grid grid-cols-2 gap-x-4 gap-y-2 font-mono text-[10px] text-[var(--muted-foreground)] border-b border-[var(--border)]"
+        >
+          <div>
+            <span className="text-[var(--foreground)] font-semibold">{formatCost(turn.costUsd)}</span>
+            <span className="ml-2">cost (est.)</span>
+          </div>
+          <div>
+            <span className="text-[var(--foreground)] tabular-nums">{turn.latencyMs}ms</span>
+            <span className="ml-2">latency</span>
+          </div>
+          <div>
+            <span className="text-[var(--foreground)] tabular-nums">{formatTokens(turn.inputTokens)}</span>
+            <span className="mx-1">in /</span>
+            <span className="text-[var(--foreground)] tabular-nums">{formatTokens(turn.outputTokens)}</span>
+            <span className="ml-1">out</span>
+          </div>
+          <div>
+            <span className="text-[var(--foreground)] tabular-nums">
+              {turn.contextUsagePct !== null ? `${turn.contextUsagePct.toFixed(0)}%` : "—"}
+            </span>
+            <span className="ml-2">context</span>
+          </div>
+          <div>
+            <span className="text-[var(--foreground)] tabular-nums">
+              {turn.cacheReadTokens !== null ? formatTokens(turn.cacheReadTokens) : "—"}
+            </span>
+            <span className="mx-1">read /</span>
+            <span className="text-[var(--foreground)] tabular-nums">
+              {turn.cacheCreateTokens !== null ? formatTokens(turn.cacheCreateTokens) : "—"}
+            </span>
+            <span className="ml-1">write</span>
+          </div>
+          <div>
+            <span className="text-[var(--foreground)] tabular-nums">
+              {turn.gapMs !== null ? `${turn.gapMs}ms` : "—"}
+            </span>
+            <span className="ml-2">gap</span>
+          </div>
+        </div>
+
+        {/* LLM messages */}
+        <div className="px-4 py-3 border-b border-[var(--border)]" data-testid="turn-detail-messages-section">
+          <div className="flex items-center justify-between mb-2 font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wide">
+            <span>LLM Messages</span>
+            {hasMessages && !messagesEmpty && (
+              <span className="tabular-nums" data-testid="turn-detail-messages-count">
+                {messages!.length} message{messages!.length === 1 ? "" : "s"}
+              </span>
+            )}
+          </div>
+
+          {!hasMessages && (
+            <div
+              data-testid="turn-detail-messages-placeholder"
+              className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40 px-3 py-4 font-mono text-[10px] text-[var(--muted-foreground)]"
+            >
+              Waiting for <code className="text-[var(--foreground)]">turn.complete</code> event — the
+              backend checkbox that carries full message bodies + per-message token attribution has not shipped
+              yet. Once it does, this section will render system / user / assistant / tool messages for this turn.
+            </div>
+          )}
+
+          {messagesEmpty && (
+            <div
+              data-testid="turn-detail-messages-empty"
+              className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40 px-3 py-4 font-mono text-[10px] text-[var(--muted-foreground)]"
+            >
+              No messages recorded for this turn.
+            </div>
+          )}
+
+          {hasMessages && !messagesEmpty && (
+            <div className="space-y-2">
+              {messages!.map((msg, idx) => {
+                const style = ROLE_STYLES[msg.role]
+                return (
+                  <div
+                    key={`${msg.role}-${idx}`}
+                    data-testid="turn-detail-message"
+                    data-role={msg.role}
+                    className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40"
+                  >
+                    <div className="flex items-center justify-between px-2 py-1 border-b border-[var(--border)]/40">
+                      <span
+                        data-testid="turn-detail-message-role"
+                        className="font-mono text-[9px] font-semibold px-1.5 py-0.5 rounded"
+                        style={{ color: style.color, backgroundColor: style.bg }}
+                      >
+                        {style.label}
+                      </span>
+                      <span
+                        data-testid="turn-detail-message-tokens"
+                        className="font-mono text-[9px] text-[var(--muted-foreground)] tabular-nums"
+                        title="Prompt token contribution for this message (null when unattributed)"
+                      >
+                        {typeof msg.tokens === "number"
+                          ? `${formatTokens(msg.tokens)} tokens`
+                          : "— tokens"}
+                      </span>
+                    </div>
+                    {msg.toolName && (
+                      <div
+                        data-testid="turn-detail-message-tool-name"
+                        className="px-2 pt-1 font-mono text-[9px] text-[var(--artifact-purple)]"
+                      >
+                        tool: {msg.toolName}
+                      </div>
+                    )}
+                    <pre
+                      data-testid="turn-detail-message-content"
+                      className="px-2 py-2 font-mono text-[10px] text-[var(--foreground)] whitespace-pre-wrap break-words"
+                    >
+                      {msg.content}
+                    </pre>
+                  </div>
+                )
+              })}
+              <div
+                data-testid="turn-detail-messages-sum"
+                className="text-right font-mono text-[9px] text-[var(--muted-foreground)] tabular-nums pt-1"
+              >
+                sum across messages: {formatTokens(perMsgTokenSum)} tokens
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Used tools detail */}
+        <div className="px-4 py-3" data-testid="turn-detail-tools-section">
+          <div className="flex items-center gap-2 mb-2 font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wide">
+            <Wrench size={10} />
+            <span>Used Tools</span>
+            {turn.toolCallCount !== null && (
+              <span className="ml-auto tabular-nums" data-testid="turn-detail-tools-count">
+                {turn.toolCallCount} call{turn.toolCallCount === 1 ? "" : "s"}
+                {turn.toolFailureCount !== null && turn.toolFailureCount > 0 && (
+                  <span className="ml-1 text-[var(--critical-red)] font-semibold">
+                    · {turn.toolFailureCount} failed
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+
+          {renderedTools.length === 0 && (
+            <div
+              data-testid="turn-detail-tools-empty"
+              className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40 px-3 py-3 font-mono text-[10px] text-[var(--muted-foreground)]"
+            >
+              {turn.toolCallCount === 0
+                ? "No tools invoked on this turn."
+                : hasExplicitTools
+                  ? "No tool call details recorded."
+                  : "Waiting for turn.complete event — tool call arguments and results will appear here once the backend emits them."}
+            </div>
+          )}
+
+          {renderedTools.length > 0 && (
+            <div className="space-y-2">
+              {renderedTools.map((tc, idx) => (
+                <div
+                  key={`${tc.name}-${idx}`}
+                  data-testid="turn-detail-tool-call"
+                  data-success={tc.success ? "true" : "false"}
+                  className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40"
+                >
+                  <div className="flex items-center gap-2 px-2 py-1 border-b border-[var(--border)]/40">
+                    {tc.success ? (
+                      <CheckCircle2 size={11} className="text-[var(--validation-emerald)]" aria-hidden />
+                    ) : (
+                      <AlertTriangle size={11} className="text-[var(--critical-red)]" aria-hidden />
+                    )}
+                    <span
+                      data-testid="turn-detail-tool-call-name"
+                      className="font-mono text-[10px] text-[var(--foreground)]"
+                    >
+                      {tc.name}
+                    </span>
+                    <span
+                      data-testid="turn-detail-tool-call-status"
+                      className={`ml-auto font-mono text-[9px] ${
+                        tc.success
+                          ? "text-[var(--validation-emerald)]"
+                          : "text-[var(--critical-red)] font-semibold"
+                      }`}
+                    >
+                      {tc.success ? "ok" : "failed"}
+                    </span>
+                    {typeof tc.durationMs === "number" && (
+                      <span className="font-mono text-[9px] text-[var(--muted-foreground)] tabular-nums">
+                        {tc.durationMs}ms
+                      </span>
+                    )}
+                  </div>
+                  {tc.args !== null && tc.args !== undefined && (
+                    <div className="px-2 pt-1 font-mono text-[9px]">
+                      <span className="text-[var(--muted-foreground)]">args:</span>
+                      <pre
+                        data-testid="turn-detail-tool-call-args"
+                        className="mt-0.5 text-[var(--foreground)] whitespace-pre-wrap break-words"
+                      >
+                        {stringifyArgs(tc.args)}
+                      </pre>
+                    </div>
+                  )}
+                  {tc.result && (
+                    <div className="px-2 py-1 font-mono text-[9px]">
+                      <span className="text-[var(--muted-foreground)]">result:</span>
+                      <pre
+                        data-testid="turn-detail-tool-call-result"
+                        className="mt-0.5 text-[var(--foreground)] whitespace-pre-wrap break-words"
+                      >
+                        {tc.result}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
