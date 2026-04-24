@@ -1,0 +1,114 @@
+# LLM pricing table — USD per 1M tokens, split input / output.
+#
+# Z.3 (#292) — external config for token → dollar conversion. Replaces
+# the hard-coded `_PRICING` dict in backend/routers/system.py:1094-1103
+# so rate changes ship via YAML edit + /runtime/pricing/reload instead of
+# code deploy. This file is the authoritative source at boot; a later
+# checkbox wires backend/pricing.py::get_pricing(provider, model) to load
+# and hot-reload it.
+#
+# Fallback chain (implemented by the later checkbox in Z.3):
+#   1. providers[<provider>][<model>]    — exact model hit
+#   2. providers[<provider>]._default    — provider known, model unknown
+#   3. defaults                          — both unknown
+#
+# Pricing distinction from configs/provider_pricing.yaml:
+#   - configs/provider_pricing.yaml  — blended per-tier (premium/default/budget)
+#     estimator used by backend/forecast.py for budget forecasting.
+#   - config/llm_pricing.yaml (this) — exact per-model (input, output) pair
+#     used by backend/routers/system.py::track_tokens() for accurate billing.
+#   The two files are intentionally not merged: forecasts need blended tiers,
+#   billing needs exact input/output split. Keep both in sync when adding
+#   a new provider or model.
+#
+# Source values cross-referenced 2026-04-22 against each vendor's public
+# pricing page; unchanged values carried over verbatim from the pre-Z.3
+# hard-coded dict so the YAML migration is price-neutral (Z.3 task 7:
+# "既有 token usage 紀錄不重算成本，只影響未來計價" — and "未來計價"
+# itself should not shift at cutover).
+
+providers:
+  # Anthropic — https://www.anthropic.com/pricing
+  anthropic:
+    claude-opus-4-7:            {input:  5.00, output: 25.00}  # Opus 4.7 (released 2026-04-15)
+    claude-opus-4-20250514:     {input: 15.00, output: 75.00}  # Opus 4.0 legacy
+    claude-sonnet-4-20250514:   {input:  3.00, output: 15.00}  # Sonnet 4
+    claude-haiku-4-5:           {input:  1.00, output:  5.00}  # Haiku 4.5
+    _default:                   {input:  3.00, output: 15.00}  # assume Sonnet tier
+
+  # OpenAI — https://openai.com/api/pricing/
+  openai:
+    gpt-5:                      {input:  5.00, output: 20.00}
+    gpt-5-mini:                 {input:  0.50, output:  2.00}
+    gpt-4o:                     {input:  5.00, output: 15.00}
+    gpt-4o-mini:                {input:  0.15, output:  0.60}
+    _default:                   {input:  5.00, output: 15.00}
+
+  # Google — https://ai.google.dev/pricing
+  google:
+    gemini-2.5-pro:             {input:  1.25, output:  5.00}
+    gemini-2.5-flash:           {input:  0.30, output:  1.20}
+    gemini-1.5-pro:             {input:  0.50, output:  1.50}
+    _default:                   {input:  0.50, output:  1.50}
+
+  # xAI — https://x.ai/api
+  xai:
+    grok-4:                     {input:  5.00, output: 15.00}
+    grok-3-mini:                {input:  2.00, output: 10.00}
+    _default:                   {input:  3.00, output: 12.00}
+
+  # Groq — https://console.groq.com/docs/models (inference-only, not training)
+  groq:
+    llama-3.3-70b-versatile:    {input:  0.60, output:  0.60}
+    llama-3.1-8b-instant:       {input:  0.05, output:  0.08}
+    _default:                   {input:  0.60, output:  0.60}
+
+  # DeepSeek — https://api-docs.deepseek.com/quick_start/pricing
+  deepseek:
+    deepseek-chat:              {input:  0.14, output:  0.28}
+    deepseek-reasoner:          {input:  0.55, output:  2.19}
+    _default:                   {input:  0.14, output:  0.28}
+
+  # Together.ai — https://www.together.ai/pricing
+  together:
+    "meta-llama/Llama-3.3-70B-Instruct-Turbo": {input: 0.88, output: 0.88}
+    "deepseek-ai/DeepSeek-V3":  {input:  1.25, output:  1.25}
+    _default:                   {input:  1.00, output:  1.00}
+
+  # OpenRouter — https://openrouter.ai/docs#models (aggregator; model
+  # names keep vendor/ prefix. Prices mirror upstream vendor + OR markup.)
+  openrouter:
+    "anthropic/claude-sonnet-4":   {input:  3.00, output: 15.00}
+    "anthropic/claude-opus-4":     {input: 15.00, output: 75.00}
+    "openai/gpt-4o":               {input:  5.00, output: 15.00}
+    "google/gemini-2.5-pro":       {input:  1.25, output:  5.00}
+    _default:                      {input:  4.00, output: 16.00}
+
+  # Ollama — locally hosted, no per-token vendor cost. Kept at 0/0 so
+  # usage ledger renders "$0.00" not "—" (consistent row shape).
+  ollama:
+    "gemma4:e4b":               {input:  0.00, output:  0.00}
+    "gemma4:e2b":               {input:  0.00, output:  0.00}
+    "gemma2:27b":               {input:  0.00, output:  0.00}
+    _default:                   {input:  0.00, output:  0.00}
+
+# Global fallback when neither provider nor model is recognised.
+# Deliberately higher than the cheapest providers to make "unknown"
+# appear expensive in dashboards — forces operator attention rather than
+# silently mis-billing as ~free.
+defaults:
+  input:  1.00
+  output: 3.00
+
+metadata:
+  updated_at: 2026-04-25
+  source: "https://github.com/OmniSight/OmniSight-Productizer/issues/292"
+  schema_version: 1
+  notes: |
+    Rates verified 2026-04-22 against each vendor's public price page.
+    Existing models carry values bit-identical to the pre-Z.3 hard-coded
+    _PRICING dict (backend/routers/system.py:1094-1103 pre-migration)
+    so no historical token_usage row changes cost at cutover.
+    When a vendor adjusts pricing: edit this file, PR, then operator
+    runs POST /runtime/pricing/reload (require_admin) to hot-reload
+    without a backend redeploy.
