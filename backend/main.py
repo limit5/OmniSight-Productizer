@@ -904,6 +904,8 @@ from backend.routers import dashboard as _dashboard_router  # Phase 4-1 aggregat
 app.include_router(_dashboard_router.router, prefix=settings.api_prefix)
 from backend.routers import git_accounts as _git_accounts_router  # Phase 5-4 multi-account forge CRUD
 app.include_router(_git_accounts_router.router, prefix=settings.api_prefix)
+from backend.routers import llm_credentials as _llm_credentials_router  # Phase 5b-3 LLM credentials CRUD
+app.include_router(_llm_credentials_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import
