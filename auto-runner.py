@@ -44,11 +44,14 @@ SECTION_COOLDOWN_S = 10     # 跨 ### 區塊的冷卻秒數
 # ── Track filter（平行化用）──
 # 設定 OMNISIGHT_RUNNER_FILTER 環境變數來限制此 runner 只處理特定 Priority 系列。
 #
-# 支援兩種粒度：
-#   字母級：  OMNISIGHT_RUNNER_FILTER=L,G,H,R     → 跑 L/G/H/R 所有子項
-#   子項級：  OMNISIGHT_RUNNER_FILTER=B13,B14      → 只跑 B13 和 B14
-#             OMNISIGHT_RUNNER_FILTER=B13           → 只跑 B13
-#             OMNISIGHT_RUNNER_FILTER=S2-0,S2-1     → 只跑 S2-0 和 S2-1
+# 支援三種粒度：
+#   字母級：    OMNISIGHT_RUNNER_FILTER=L,G,H,R     → 跑 L/G/H/R 所有子項
+#   群組級：    OMNISIGHT_RUNNER_FILTER=Y-prep       → 跑 Y-prep.1/2/3
+#               OMNISIGHT_RUNNER_FILTER=Q             → 跑 Q.1-Q.8（注意：filter=Y 不含 Y-prep）
+#   子項級：    OMNISIGHT_RUNNER_FILTER=B13,B14       → 只跑 B13 和 B14
+#               OMNISIGHT_RUNNER_FILTER=B13            → 只跑 B13
+#               OMNISIGHT_RUNNER_FILTER=S2-0,S2-1      → 只跑 S2-0 和 S2-1
+#               OMNISIGHT_RUNNER_FILTER=Y-prep.1       → 只跑 Y-prep 第一顆
 #
 # 混用也可以：
 #   OMNISIGHT_RUNNER_FILTER=B13,G,H   → B13 + G 系列全部 + H 系列全部
@@ -69,30 +72,40 @@ def _section_matches_filter(section_title):
     檢查 section 標題是否匹配 RUNNER_FILTER。
 
     匹配規則（依精確度遞減嘗試）：
-      1. 完整子項號碼匹配：「B13」匹配 "### B13. FUI Error..."
-      2. 帶連字號的子項：「S2-0」匹配 "### S2-0. API 隱形..."
-      3. 字母級匹配：「B」匹配所有 "### B*." sections
-      4. 無法解析 → 接受（安全 fallback）
+      1. 完整匹配：       「B13」→ "### B13. FUI..."；「Y-prep.1」→ "### Y-prep.1 ..."
+      2. 群組前綴匹配：    「Y-prep」→ "### Y-prep.1/2/3 ..."；「Q」→ "### Q.1-Q.8"
+                          （filter 不含 "." 時生效，比對 ID 是否以 "filter." 開頭）
+      3. 字母級匹配：      「B」→ 所有 ID 形如 B<digit>... 的 section
+                          （只在 ID 是字母+數字時生效，避免「P」誤抓「Phase」）
+      4. 無法解析：        在 filter 模式下視為不通過（避免誤跑）
+
+    Regex 說明：捕獲到第一個空白為止，允許 "." 進 ID（讓 "Y-prep.1" 整顆抓進來），
+    然後 strip 尾隨 "."（讓 "P0." 還原成 "P0"）。
     """
     if not RUNNER_FILTER:
         return True  # 無 filter = 全部接受
 
     import re
-    # 從 "### B13. FUI..." 或 "### S2-0. API..." 提取完整編號
-    m = re.match(r"###\s+([A-Za-z]\S*?)\.", section_title)
+    # 抓到第一個空白（或行尾），允許 word chars / "." / "-" 進 ID。
+    m = re.match(r"###\s+([A-Za-z][\w.-]*?)(?=\s|$)", section_title)
     if not m:
-        return True  # 無法解析 → 接受
+        return False  # filter 模式下，無法解析 = 拒絕（避免誤跑）
 
-    section_id = m.group(1).upper()  # e.g. "B13", "S2-0", "L10", "G1"
+    # rstrip(".") 處理 "P0." → "P0"；對 "Y-PREP.1" 不影響（尾不是 "."）。
+    section_id = m.group(1).rstrip(".").upper()
 
     for f in RUNNER_FILTER:
-        # 完整匹配：filter="B13" matches section_id="B13"
+        # 1. 完整匹配
         if section_id == f:
             return True
-        # 前綴匹配：filter="B" matches section_id="B13", "B14", "B2"
-        # 但 filter="B1" 只 matches "B1", "B10"-"B19"（不匹配 "B2"）
-        if len(f) == 1 and section_id.startswith(f):
+        # 2. 群組前綴：filter="Y-prep" → "Y-PREP.1"。filter 含 "." 時跳過。
+        if "." not in f and section_id.startswith(f + "."):
             return True
+        # 3. 字母級前綴 + 數字 guard：filter="P" 不該抓 "PHASE"。
+        if len(f) == 1 and section_id.startswith(f):
+            rest = section_id[len(f):]
+            if rest and rest[0].isdigit():
+                return True
 
     return False
 
