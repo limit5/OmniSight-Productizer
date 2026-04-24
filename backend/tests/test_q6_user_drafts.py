@@ -261,6 +261,123 @@ async def test_put_accepts_future_chat_thread_slot_key(
     assert res.json()["slot_key"] == "chat:01jw3p7c8e2v8fk9wnh7m5q4tz"
 
 
+# ── GET restore contract (checkbox 2) ────────────────────────────
+
+
+async def test_get_returns_empty_shape_for_unknown_slot(
+    _drafts_client: AsyncClient,
+):
+    """A slot that was never written returns a shaped empty body
+    (``content=""`` / ``updated_at=null``) not 404 — the restore
+    flow calls this on every page mount and a 404 would just
+    pollute the DevTools network tab while forcing the frontend
+    into a ``DraftResponse | null`` branch."""
+    res = await _drafts_client.get("/api/v1/user/drafts/invoke:main")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body == {"slot_key": "invoke:main", "content": "", "updated_at": None}
+
+
+async def test_get_returns_stored_content_after_put(
+    _drafts_client: AsyncClient,
+):
+    """Round-trip: PUT then GET returns the same ``content`` and
+    the server-committed ``updated_at`` so the frontend can echo
+    the timestamp into local storage for the checkbox 4 conflict
+    check."""
+    put = await _drafts_client.put(
+        "/api/v1/user/drafts/invoke:main",
+        json={"content": "/status --verbose"},
+    )
+    assert put.status_code == 200
+    put_ts = put.json()["updated_at"]
+
+    res = await _drafts_client.get("/api/v1/user/drafts/invoke:main")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["slot_key"] == "invoke:main"
+    assert body["content"] == "/status --verbose"
+    assert body["updated_at"] == pytest.approx(put_ts, rel=1e-6)
+
+
+async def test_get_isolated_per_slot_key(
+    _drafts_client: AsyncClient,
+):
+    """INVOKE and chat drafts must not cross-leak — they share the
+    user_id but the PK is (user_id, slot_key) and GET must honour
+    that scope."""
+    await _drafts_client.put(
+        "/api/v1/user/drafts/invoke:main", json={"content": "INVOKE body"},
+    )
+    await _drafts_client.put(
+        "/api/v1/user/drafts/chat:main", json={"content": "CHAT body"},
+    )
+    invoke = (await _drafts_client.get("/api/v1/user/drafts/invoke:main")).json()
+    chat = (await _drafts_client.get("/api/v1/user/drafts/chat:main")).json()
+    assert invoke["content"] == "INVOKE body"
+    assert chat["content"] == "CHAT body"
+
+
+async def test_get_isolated_per_user(
+    _drafts_client: AsyncClient, pg_test_pool,
+):
+    """User B's draft must not surface to user A's GET — PK scopes
+    on user_id and the handler must pass the current operator's id
+    into ``get_user_draft``."""
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO user_drafts (user_id, slot_key, content, "
+            "updated_at, tenant_id) VALUES "
+            "($1, $2, $3, $4, $5)",
+            "user-b", "invoke:main", "B's private draft",
+            time.time(), "t-default",
+        )
+
+    res = await _drafts_client.get("/api/v1/user/drafts/invoke:main")
+    assert res.status_code == 200
+    body = res.json()
+    # Fixture user id is "anonymous" (open auth) — B's row must be
+    # invisible.
+    assert body["content"] == ""
+    assert body["updated_at"] is None
+
+
+@pytest.mark.parametrize("bad_key", [
+    "no-colon",
+    ":missing-ns",
+    "missing-scope:",
+    "Invoke:Main",
+    "invoke:main:extra",
+    "ns/with/slash:scope",
+])
+async def test_get_rejects_malformed_slot_key(
+    _drafts_client: AsyncClient, bad_key: str,
+):
+    """The same ``_validate_slot_key`` guard that gates PUT must
+    also gate GET so a caller cannot probe arbitrary shapes."""
+    res = await _drafts_client.get(f"/api/v1/user/drafts/{bad_key}")
+    assert res.status_code in (400, 404), (
+        f"expected 400/404 for {bad_key!r}, got {res.status_code}: {res.text}"
+    )
+
+
+async def test_get_accepts_future_chat_thread_slot_key(
+    _drafts_client: AsyncClient,
+):
+    """``chat:<thread_id>`` — lock the future extension shape now
+    so a later checkbox sweep doesn't silently regress the GET
+    validator."""
+    thread_slot = "chat:01jw3p7c8e2v8fk9wnh7m5q4tz"
+    await _drafts_client.put(
+        f"/api/v1/user/drafts/{thread_slot}",
+        json={"content": "thread-scoped"},
+    )
+    res = await _drafts_client.get(f"/api/v1/user/drafts/{thread_slot}")
+    assert res.status_code == 200
+    assert res.json()["slot_key"] == thread_slot
+    assert res.json()["content"] == "thread-scoped"
+
+
 # ── opportunistic GC ─────────────────────────────────────────────
 
 

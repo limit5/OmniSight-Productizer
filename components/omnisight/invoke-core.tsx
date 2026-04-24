@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react"
 import { Send, Zap } from "lucide-react"
 import { matchCommands, CATEGORY_COLORS, type SlashCommand } from "@/lib/slash-commands"
 import { useDraftPersistence } from "@/hooks/use-draft-persistence"
+import { useDraftRestore } from "@/hooks/use-draft-restore"
 
 interface InvokeCoreProps {
   onInvoke?: () => void
@@ -37,12 +38,27 @@ export function InvokeCore({
 
   // Q.6 (#300, checkbox 1) — debounced server-side draft persistence.
   // Watches ``command`` so an accidental tab close does not lose
-  // half-typed slash commands; the restore-on-new-device flow lands
-  // in checkbox 2.
+  // half-typed slash commands.
   useDraftPersistence({
     slotKey: draftSlotKey,
     value: command,
     enabled: draftPersistenceEnabled,
+  })
+
+  // Q.6 (#300, checkbox 2) — restore the server-stored draft once on
+  // mount. Only overwrites the composer if it is still empty at the
+  // time the fetch resolves, so a fast typist who started before the
+  // round-trip finished is not clobbered.
+  useDraftRestore({
+    slotKey: draftSlotKey,
+    enabled: draftPersistenceEnabled,
+    onRestore: (draft) => {
+      setCommand((prev) => {
+        if (prev.length > 0) return prev
+        onCommandChange?.(draft.content)
+        return draft.content
+      })
+    },
   })
 
   const handleInvoke = () => {

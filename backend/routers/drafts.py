@@ -1,4 +1,4 @@
-"""Q.6 #300 (2026-04-24, checkbox 1) — per-user draft composer slots.
+"""Q.6 #300 (2026-04-24, checkboxes 1-2) — per-user draft composer slots.
 
 Backs the 500 ms debounce write from the INVOKE command bar
 (``components/omnisight/invoke-core.tsx``) and the workspace chat
@@ -14,11 +14,16 @@ PUT /user/drafts/{slot_key}
     ``{slot_key, content, updated_at}`` so the client can echo the
     server-side timestamp into local storage for the Q.6 conflict
     check on restore (checkbox 4).
+GET /user/drafts/{slot_key}
+    Restore-on-new-device read (Q.6 checkbox 2). Returns the current
+    server-stored ``{slot_key, content, updated_at}`` or an empty
+    draft shape (``content=""``, ``updated_at=None``) when the row
+    is absent so the frontend can treat the "never typed here"
+    case branch-free. Called once on mount by both composers.
 
-The GET / DELETE counterparts arrive in Q.6 checkboxes 2-3; this
-file is intentionally write-only on first land so the frontend can
-start collecting drafts while the restore UX is still being
-designed.
+The DELETE counterpart arrives with Q.6 checkbox 3 (retention GC is
+currently opportunistic on every PUT, so explicit delete is not yet
+required for correctness).
 
 Conflict policy (Q.6 spec, last-writer-wins)
 ────────────────────────────────────────────
@@ -114,3 +119,31 @@ async def put_user_draft(
         "content": body.content,
         "updated_at": committed_at,
     }
+
+
+@router.get("/user/drafts/{slot_key}")
+async def get_user_draft(
+    slot_key: str,
+    user: auth.User = Depends(auth.current_user),
+) -> dict:
+    """Q.6 #300 checkbox 2 — restore on new device.
+
+    Fetch the server-stored draft for ``(current_user, slot_key)``.
+    Returns ``{slot_key, content, updated_at}`` when the row exists,
+    or a shaped empty response (``content=""``, ``updated_at=None``)
+    when no row has ever been written so the caller can skip a
+    "is it null?" branch in JS.
+
+    Returning 200 + empty over 404 is deliberate: the frontend calls
+    this on every page mount and a 404 on a fresh slot would just
+    pollute the DevTools network tab. The empty-shape contract also
+    keeps the TS type a single ``DraftResponse`` on the happy path
+    instead of forcing a ``DraftResponse | null`` union.
+    """
+    _validate_slot_key(slot_key)
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await db_helpers.get_user_draft(conn, user.id, slot_key)
+    if row is None:
+        return {"slot_key": slot_key, "content": "", "updated_at": None}
+    return row

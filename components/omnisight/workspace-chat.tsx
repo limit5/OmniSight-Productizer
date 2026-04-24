@@ -60,6 +60,7 @@ import {
 } from "@/app/workspace/[type]/types"
 import { useOptionalWorkspaceType } from "@/components/omnisight/workspace-context"
 import { useDraftPersistence } from "@/hooks/use-draft-persistence"
+import { useDraftRestore } from "@/hooks/use-draft-restore"
 
 // ─── Public shapes ─────────────────────────────────────────────────────────
 
@@ -258,12 +259,22 @@ export function WorkspaceChat({
   const [draftText, setDraftText] = React.useState<string>("")
   // Q.6 (#300, checkbox 1) — debounced server-side draft persistence.
   // Watches ``draftText`` so an accidental tab close does not lose
-  // the half-typed prompt; the restore-on-new-device flow lands in
-  // checkbox 2.
+  // the half-typed prompt.
   useDraftPersistence({
     slotKey: draftSlotKey,
     value: draftText,
     enabled: draftPersistenceEnabled,
+  })
+  // Q.6 (#300, checkbox 2) — restore the server-stored draft once on
+  // mount. Only overwrites the composer if it is still empty at the
+  // time the fetch resolves, so a fast typist who started before the
+  // round-trip finished is not clobbered.
+  useDraftRestore({
+    slotKey: draftSlotKey,
+    enabled: draftPersistenceEnabled,
+    onRestore: (draft) => {
+      setDraftText((prev) => (prev.length === 0 ? draft.content : prev))
+    },
   })
   const [pendingAttachments, setPendingAttachments] = React.useState<WorkspaceChatAttachment[]>(
     [],

@@ -1993,10 +1993,19 @@ export async function getSessionsPresence(): Promise<PresenceResponse> {
 
 // ─── Q.6 (#300) Per-user draft composer slots ───────────────
 
+/**
+ * Q.6 (#300) draft response shape.
+ *
+ * ``updated_at`` is ``number`` on a hit (server-committed wall-clock
+ * seconds) and ``null`` on the "never typed here" miss path so the
+ * restore flow can treat both cases uniformly without a separate
+ * 404 branch. PUT always returns a number (fresh write); GET returns
+ * ``null`` only when no row has been written for the slot yet.
+ */
 export interface DraftResponse {
   slot_key: string
   content: string
-  updated_at: number
+  updated_at: number | null
 }
 
 /**
@@ -2021,6 +2030,29 @@ export async function putUserDraft(
     method: "PUT",
     body: JSON.stringify({ content }),
   }, { skipGlobalErrorHandler: true })
+}
+
+/**
+ * Q.6 (#300, checkbox 2) — restore on new device.
+ *
+ * Fetch the server-stored draft for this slot once on composer mount.
+ * When the slot has never been written, the backend returns
+ * ``{content: "", updated_at: null}`` (shaped empty, not 404) so the
+ * frontend can assign ``content`` straight into the editor without
+ * needing to distinguish "never existed" from "empty string" — the
+ * composer starts blank either way.
+ *
+ * ``skipGlobalErrorHandler: true`` because a flaky restore on page
+ * load should not block the operator from typing; the composer
+ * falls back to the local-storage cache (Q.6 checkbox 4 wiring) and
+ * the next 500 ms debounce tick will re-sync.
+ */
+export async function getUserDraft(slotKey: string): Promise<DraftResponse> {
+  return request<DraftResponse>(
+    `/user/drafts/${encodeURIComponent(slotKey)}`,
+    { method: "GET" },
+    { skipGlobalErrorHandler: true },
+  )
 }
 
 // ─── Self-service password change ───────────────────────────
