@@ -97,6 +97,18 @@ MAX_BACKOFF_S = 3600.0
 # import the constant rather than hard-coding the string twice.
 BALANCE_NAMESPACE = "provider_balance"
 
+# Z.2 boundary contract (2026-04-24): separate namespace holding
+# per-provider "last failure timestamp" markers so the endpoint can
+# render ``stale_since`` next to a cached value when the provider's API
+# is currently 5xx-ing / unreachable / returning malformed bodies.
+# Written on :class:`BalanceFetchError` + unexpected-exception paths,
+# cleared on successful fetch. Auth-fail (fetcher returns ``None``)
+# intentionally does NOT touch this marker — auth errors are
+# operator-side (key revoked / rotated), not "provider is having
+# trouble", so the "stale because server is down" semantic does not
+# apply.
+STALE_NAMESPACE = "provider_balance_stale"
+
 
 def _env_float(name: str, default: float) -> float:
     raw = (os.environ.get(name) or "").strip()
@@ -143,6 +155,56 @@ def _kv() -> SharedKV:
     return SharedKV(BALANCE_NAMESPACE)
 
 
+def _stale_kv() -> SharedKV:
+    return SharedKV(STALE_NAMESPACE)
+
+
+def _write_stale_marker(
+    stale_kv: SharedKV, provider: str, now: float,
+) -> None:
+    """Record a provider-side failure timestamp.
+
+    Best-effort: a SharedKV write failure is logged by the caller
+    context (``refresh_once`` wraps writes in ``except Exception``)
+    rather than here — we keep this helper contract-simple so the
+    refresher + endpoint can share the exact same write semantics
+    without a thin wrapper drifting.
+    """
+    stale_kv.set(provider, f"{now:.6f}")
+
+
+def _clear_stale_marker(stale_kv: SharedKV, provider: str) -> None:
+    """Drop the stale marker for a provider.
+
+    Called after a successful fetch so the endpoint stops rendering
+    ``stale_since`` on the next cache read.
+    """
+    stale_kv.delete(provider)
+
+
+def _read_stale_marker(
+    stale_kv: SharedKV, provider: str,
+) -> float | None:
+    """Return the recorded failure epoch, or ``None`` when the slot is
+    empty / unparseable.
+
+    Unparseable entries are self-healed — we delete and return
+    ``None`` so a corrupted slot does not permanently mask a provider
+    behind a "stale" render that never clears on the next success.
+    """
+    raw = stale_kv.get(provider, "")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        try:
+            stale_kv.delete(provider)
+        except Exception:
+            pass
+        return None
+
+
 def _serialise_balance(info: BalanceInfo) -> str:
     """Serialise a ``BalanceInfo`` for the SharedKV hash slot.
 
@@ -183,25 +245,31 @@ async def refresh_once(
     fetchers: dict[str, Callable[..., Awaitable[BalanceInfo | None]]] | None = None,
     key_resolver: Callable[[str], str | None] | None = None,
     kv: SharedKV | None = None,
+    stale_kv: SharedKV | None = None,
 ) -> dict[str, str]:
     """Run one refresh pass over all supported providers.
 
     Returns a ``{provider: outcome}`` map where outcome is one of:
 
-    * ``"ok"`` — fetched + cached, backoff reset.
+    * ``"ok"`` — fetched + cached, backoff reset, stale marker cleared.
     * ``"auth_fail"`` — fetcher returned ``None`` (401/403 / bad key).
-      Cache untouched, backoff advanced.
+      Cache untouched, backoff advanced. Stale marker **not** touched —
+      the key being revoked is an operator-side concern, not a
+      "provider is down" signal that should change the cached-snapshot
+      freshness contract.
     * ``"fetch_error"`` — :class:`BalanceFetchError` or unexpected
-      exception. Cache untouched, backoff advanced.
+      exception. Cache untouched, backoff advanced, stale marker
+      written so any prior cached snapshot served by the endpoint
+      next carries ``stale_since=<now>``.
     * ``"no_key"`` — no key configured in Settings; no HTTP call,
-      no backoff, no cache write.
+      no backoff, no cache write, no stale marker change.
     * ``"backoff"`` — provider is currently within its backoff window;
-      skipped this tick.
+      skipped this tick (no fetch attempt, no cache/stale write).
 
-    Injection points (``fetchers``, ``key_resolver``, ``kv``, ``now``)
-    exist so unit tests can drive the pure logic without touching
-    HTTP, Redis, or the real clock. Production callers pass nothing
-    and the defaults do the right thing.
+    Injection points (``fetchers``, ``key_resolver``, ``kv``,
+    ``stale_kv``, ``now``) exist so unit tests can drive the pure
+    logic without touching HTTP, Redis, or the real clock. Production
+    callers pass nothing and the defaults do the right thing.
     """
     _now = now if now is not None else time.time()
     _fetchers = (
@@ -209,6 +277,7 @@ async def refresh_once(
     )
     _resolve = key_resolver if key_resolver is not None else _resolve_api_key
     _store = kv if kv is not None else _kv()
+    _stale = stale_kv if stale_kv is not None else _stale_kv()
 
     outcomes: dict[str, str] = {}
     for provider, fetcher in _fetchers.items():
@@ -233,12 +302,23 @@ async def refresh_once(
                 "backing off %.0fs",
                 provider, exc.reason, delay,
             )
+            try:
+                _write_stale_marker(_stale, provider, _now)
+            except Exception as stale_exc:
+                logger.warning(
+                    "llm_balance_refresher: %s stale marker write "
+                    "failed: %s",
+                    provider, stale_exc,
+                )
             outcomes[provider] = "fetch_error"
             continue
         except Exception as exc:
             # Any unexpected error — network, JSON, whatever — treat as
             # a transient fetch error. Back off so we don't hammer the
-            # vendor and log loudly so the operator notices.
+            # vendor and log loudly so the operator notices. Same
+            # stale-marker semantics as ``BalanceFetchError`` since from
+            # the endpoint's perspective "the refresh failed for a
+            # reason that is not the operator's fault" is one concept.
             delay = bo.record_failure(
                 now=_now, base_interval_s=base_interval_s,
             )
@@ -247,6 +327,14 @@ async def refresh_once(
                 "backing off %.0fs",
                 provider, type(exc).__name__, exc, delay,
             )
+            try:
+                _write_stale_marker(_stale, provider, _now)
+            except Exception as stale_exc:
+                logger.warning(
+                    "llm_balance_refresher: %s stale marker write "
+                    "failed: %s",
+                    provider, stale_exc,
+                )
             outcomes[provider] = "fetch_error"
             continue
 
@@ -271,6 +359,18 @@ async def refresh_once(
             logger.warning(
                 "llm_balance_refresher: %s SharedKV write failed: %s",
                 provider, exc,
+            )
+        # Success → clear any previously-recorded stale marker so the
+        # endpoint stops rendering ``stale_since`` on the next read.
+        # Wrapped defensively so a flaky SharedKV here cannot cascade
+        # into an uncaught exception that skips the backoff reset.
+        try:
+            _clear_stale_marker(_stale, provider)
+        except Exception as stale_exc:
+            logger.warning(
+                "llm_balance_refresher: %s stale marker clear "
+                "failed: %s",
+                provider, stale_exc,
             )
         bo.reset(now=_now, base_interval_s=base_interval_s)
         outcomes[provider] = "ok"

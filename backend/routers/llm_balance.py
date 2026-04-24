@@ -82,8 +82,12 @@ from backend.llm_balance import (
 )
 from backend.llm_balance_refresher import (
     BALANCE_NAMESPACE,
+    STALE_NAMESPACE,
+    _clear_stale_marker,
+    _read_stale_marker,
     _resolve_api_key,
     _serialise_balance,
+    _write_stale_marker,
 )
 from backend.shared_state import SharedKV
 
@@ -130,6 +134,7 @@ def _unsupported_envelope(provider: str) -> dict[str, Any]:
 
 def _ok_envelope(
     provider: str, info: BalanceInfo, *, source: str,
+    stale_since: float | None = None,
 ) -> dict[str, Any]:
     """Shape an ``ok`` response from a ``BalanceInfo``.
 
@@ -137,6 +142,16 @@ def _ok_envelope(
     when the endpoint triggered a fresh fetch this request. The
     dashboard uses this hint to render a subtle "just-fetched" vs
     "cached N min ago" distinction.
+
+    ``stale_since`` is a unix epoch float recording the most-recent
+    provider-side failure (5xx / transport / malformed response) —
+    when present it tells the UI "this cached value is from before
+    the provider started failing at this time". ``None`` means the
+    last fetch attempt either succeeded or has not yet returned a
+    signal that the provider is unhealthy. The field is always
+    emitted (not conditionally-present) so the envelope key-set
+    stays stable and the UI does not have to special-case missing
+    vs null.
     """
     return {
         "status": "ok",
@@ -148,6 +163,7 @@ def _ok_envelope(
         "last_refreshed_at": info.get("last_refreshed_at"),
         "source": source,
         "raw": info.get("raw") or {},
+        "stale_since": stale_since,
     }
 
 
@@ -192,25 +208,40 @@ async def resolve_balance(
     kv: SharedKV | None = None,
     fetchers: dict[str, Callable[..., Awaitable[BalanceInfo | None]]] | None = None,
     key_resolver: Callable[[str], str | None] | None = None,
+    stale_kv: SharedKV | None = None,
+    now: float | None = None,
 ) -> dict[str, Any]:
     """Serve one provider's balance envelope.
 
     Contract mirrors the Z.2 checkbox spec:
 
     1. Unsupported provider → ``unsupported`` envelope (no fetch, no
-       cache touch).
-    2. Cache hit → ``ok`` envelope with ``source="cache"``.
+       cache touch, no stale-marker touch).
+    2. Cache hit → ``ok`` envelope with ``source="cache"``. If the
+       provider-side failure marker at ``stale_kv[provider]`` is set,
+       ``stale_since`` carries that epoch timestamp; otherwise it is
+       ``None``. The fetcher is **not** invoked on cache hit so a live
+       vendor 5xx triggered by this request cannot flip the marker —
+       marker updates come only from the refresher + cache-miss path.
     3. Cache miss → call the fetcher once.
-       * Fetcher returns a ``BalanceInfo`` → write to cache + ``ok``
-         envelope with ``source="live"``.
-       * Fetcher returns ``None`` (auth failure / no key) → ``error``
-         envelope, **no** cache write.
-       * Fetcher raises :class:`BalanceFetchError` or an unexpected
-         exception → ``error`` envelope, **no** cache write.
+       * Fetcher returns a ``BalanceInfo`` → write to cache, **clear**
+         any existing stale marker, return ``ok`` envelope with
+         ``source="live"`` and ``stale_since=None``.
+       * Fetcher returns ``None`` (auth failure) → ``error`` envelope,
+         **no** cache write, **no** stale-marker change (401/403 is an
+         operator-side problem; marking stale would incorrectly
+         suggest the provider is unreachable).
+       * Fetcher raises :class:`BalanceFetchError` / unexpected
+         exception → ``error`` envelope, **no** cache write, **write**
+         the stale marker so any concurrent worker that finds a cache
+         entry (e.g. a refresher that succeeded on another replica
+         between our miss read and this failure) renders
+         ``stale_since`` correctly.
 
-    Injection hooks exist so tests can exercise every branch without
-    touching Redis, HTTP, or the system clock; production callers leave
-    everything ``None``.
+    Injection hooks (``kv``, ``fetchers``, ``key_resolver``,
+    ``stale_kv``, ``now``) exist so tests can exercise every branch
+    without touching Redis, HTTP, or the system clock; production
+    callers leave everything ``None``.
     """
     if not is_balance_supported(provider):
         return _unsupported_envelope(provider)
@@ -220,10 +251,14 @@ async def resolve_balance(
     )
     _resolve = key_resolver if key_resolver is not None else _resolve_api_key
     _store = kv if kv is not None else SharedKV(BALANCE_NAMESPACE)
+    _stale = stale_kv if stale_kv is not None else SharedKV(STALE_NAMESPACE)
 
     cached = _read_cache(_store, provider)
     if cached is not None:
-        return _ok_envelope(provider, cached, source="cache")
+        stale_since = _read_stale_marker(_stale, provider)
+        return _ok_envelope(
+            provider, cached, source="cache", stale_since=stale_since,
+        )
 
     # Cache miss — trigger one live fetch. Resolving the key inside the
     # miss branch (rather than earlier) keeps keyless "unsupported"
@@ -243,20 +278,42 @@ async def resolve_balance(
         # not include this provider. Treat as unsupported-in-scope.
         return _unsupported_envelope(provider)
 
+    import time as _time  # local import to keep module top tidy
+    _now = now if now is not None else _time.time()
+
     try:
         info = await fetcher(api_key)
     except BalanceFetchError as exc:
+        try:
+            _write_stale_marker(_stale, provider, _now)
+        except Exception as stale_exc:
+            logger.warning(
+                "llm_balance: stale marker write failed for %s: %s",
+                provider, stale_exc,
+            )
         return _error_envelope(provider, f"fetch failed: {exc.reason}")
     except Exception as exc:  # noqa: BLE001 — outer boundary
         logger.warning(
             "llm_balance on-demand fetch unexpected error for %s: %s",
             provider, exc,
         )
+        try:
+            _write_stale_marker(_stale, provider, _now)
+        except Exception as stale_exc:
+            logger.warning(
+                "llm_balance: stale marker write failed for %s: %s",
+                provider, stale_exc,
+            )
         return _error_envelope(
             provider, f"unexpected error: {type(exc).__name__}",
         )
 
     if info is None:
+        # Auth-fail: keep cache (if any) and stale marker untouched.
+        # Per Z.2 spec "不 cache" means "don't write the auth-fail as
+        # a new cache entry" — existing cache from prior success keeps
+        # serving until a valid key lands. No stale-marker change
+        # because 401/403 is operator-side, not provider-down.
         return _error_envelope(
             provider,
             "authentication failed — key may be missing or revoked",
@@ -271,8 +328,17 @@ async def resolve_balance(
             "llm_balance: SharedKV write failed for %s: %s",
             provider, exc,
         )
+    # Successful live fetch clears any previously-recorded stale
+    # marker so subsequent cache reads render without ``stale_since``.
+    try:
+        _clear_stale_marker(_stale, provider)
+    except Exception as stale_exc:
+        logger.warning(
+            "llm_balance: stale marker clear failed for %s: %s",
+            provider, stale_exc,
+        )
 
-    return _ok_envelope(provider, info, source="live")
+    return _ok_envelope(provider, info, source="live", stale_since=None)
 
 
 async def resolve_all_balances(
@@ -280,6 +346,8 @@ async def resolve_all_balances(
     kv: SharedKV | None = None,
     fetchers: dict[str, Callable[..., Awaitable[BalanceInfo | None]]] | None = None,
     key_resolver: Callable[[str], str | None] | None = None,
+    stale_kv: SharedKV | None = None,
+    now: float | None = None,
 ) -> dict[str, Any]:
     """Return every provider's balance envelope in one payload.
 
@@ -307,11 +375,17 @@ async def resolve_all_balances(
     that single provider and let the other eight through.
     """
     _store = kv if kv is not None else SharedKV(BALANCE_NAMESPACE)
+    _stale = stale_kv if stale_kv is not None else SharedKV(STALE_NAMESPACE)
     provider_names = sorted(_VALID_PROVIDER_NAMES)
 
     coros = [
         resolve_balance(
-            p, kv=_store, fetchers=fetchers, key_resolver=key_resolver,
+            p,
+            kv=_store,
+            fetchers=fetchers,
+            key_resolver=key_resolver,
+            stale_kv=_stale,
+            now=now,
         )
         for p in provider_names
     ]

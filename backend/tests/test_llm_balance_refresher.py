@@ -666,6 +666,217 @@ class TestRunRefreshLoop:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Z.2 boundary — stale marker write / clear contract
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# The boundary row in TODO.md locks two distinct failure contracts at
+# the refresher layer:
+#   * 5xx / transport / malformed → write stale marker at ``now`` so
+#     the endpoint's next cache-hit read surfaces ``stale_since``.
+#   * Auth-fail (None) → leave stale marker alone (401/403 is operator
+#     side; misrepresenting it as "provider down" would mislead the
+#     dashboard).
+# Successful refresh clears any prior marker so the stale badge flips
+# off on the next read.
+
+
+class TestRefreshOnceStaleMarker:
+
+    async def test_fetch_error_writes_stale_marker_at_now(self):
+        kv = _make_kv()
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        state: dict[str, lbr._ProviderBackoff] = {}
+
+        await lbr.refresh_once(
+            state=state, base_interval_s=600, now=7_777.0,
+            fetchers={"deepseek": _make_fetcher_raises("upstream 502")},
+            key_resolver=lambda p: "sk",
+            kv=kv, stale_kv=stale,
+        )
+
+        marker = stale.get("deepseek")
+        assert marker, "BalanceFetchError must write stale marker"
+        assert float(marker) == pytest.approx(7_777.0)
+
+    async def test_unexpected_exception_writes_stale_marker(self):
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+
+        async def bad(api_key, *, now=None, **_):
+            raise RuntimeError("vendor schema drift")
+
+        state: dict[str, lbr._ProviderBackoff] = {}
+        await lbr.refresh_once(
+            state=state, base_interval_s=600, now=2_000.0,
+            fetchers={"openrouter": bad},
+            key_resolver=lambda p: "sk",
+            kv=_make_kv(), stale_kv=stale,
+        )
+        assert float(stale.get("openrouter")) == pytest.approx(2_000.0)
+
+    async def test_success_clears_prior_stale_marker(self):
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        # Pretend a prior failure stamped a marker.
+        stale.set("deepseek", "3333.0")
+        state: dict[str, lbr._ProviderBackoff] = {}
+
+        outcomes = await lbr.refresh_once(
+            state=state, base_interval_s=600, now=9_000.0,
+            fetchers={"deepseek": _make_fetcher_ok()},
+            key_resolver=lambda p: "sk",
+            kv=_make_kv(), stale_kv=stale,
+        )
+        assert outcomes["deepseek"] == "ok"
+        assert stale.get("deepseek") == "", (
+            "Successful fetch must clear prior stale marker"
+        )
+
+    async def test_auth_fail_does_not_touch_stale_marker(self):
+        """Prior marker stays; no new marker is written on auth-fail.
+        Locks both halves in one assertion: (a) auth-fail doesn't write
+        where there was none, (b) auth-fail doesn't clear where there
+        was one either."""
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        stale.set("deepseek", "4444.0")
+        state: dict[str, lbr._ProviderBackoff] = {}
+
+        await lbr.refresh_once(
+            state=state, base_interval_s=600, now=9_000.0,
+            fetchers={"deepseek": _make_fetcher_auth_fail()},
+            key_resolver=lambda p: "sk-revoked",
+            kv=_make_kv(), stale_kv=stale,
+        )
+        # Unchanged.
+        assert stale.get("deepseek") == "4444.0"
+
+    async def test_auth_fail_does_not_write_stale_when_none(self):
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        state: dict[str, lbr._ProviderBackoff] = {}
+
+        await lbr.refresh_once(
+            state=state, base_interval_s=600, now=9_000.0,
+            fetchers={"deepseek": _make_fetcher_auth_fail()},
+            key_resolver=lambda p: "sk-revoked",
+            kv=_make_kv(), stale_kv=stale,
+        )
+        assert stale.get("deepseek") == "", (
+            "Auth-fail must not synthesise a stale marker where none "
+            "existed"
+        )
+
+    async def test_no_key_does_not_touch_stale_marker(self):
+        """No HTTP attempt means no 'provider is down' signal to
+        record. Existing marker (if any) must survive — a prior 5xx
+        followed by an operator clearing the key doesn't mean the
+        provider recovered."""
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        stale.set("deepseek", "5555.0")
+        state: dict[str, lbr._ProviderBackoff] = {}
+
+        outcomes = await lbr.refresh_once(
+            state=state, base_interval_s=600, now=9_000.0,
+            fetchers={"deepseek": _make_fetcher_ok()},
+            key_resolver=lambda p: None,
+            kv=_make_kv(), stale_kv=stale,
+        )
+        assert outcomes["deepseek"] == "no_key"
+        assert stale.get("deepseek") == "5555.0"
+
+    async def test_backoff_gate_does_not_touch_stale_marker(self):
+        """Within the backoff window we skip the fetch entirely — the
+        marker set by the previous failure must survive so the endpoint
+        keeps rendering ``stale_since`` until the next successful
+        fetch."""
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        stale.set("deepseek", "6666.0")
+        state = {
+            "deepseek": lbr._ProviderBackoff(
+                consecutive_failures=2, next_attempt_at=10_000.0,
+            ),
+        }
+
+        outcomes = await lbr.refresh_once(
+            state=state, base_interval_s=600, now=5_000.0,
+            fetchers={"deepseek": _make_fetcher_ok()},
+            key_resolver=lambda p: "sk",
+            kv=_make_kv(), stale_kv=stale,
+        )
+        assert outcomes["deepseek"] == "backoff"
+        assert stale.get("deepseek") == "6666.0"
+
+    async def test_multi_provider_stale_markers_independent(self):
+        """Refresher writes per-provider markers; one failing vendor
+        cannot accidentally mark the other stale."""
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        state: dict[str, lbr._ProviderBackoff] = {}
+
+        await lbr.refresh_once(
+            state=state, base_interval_s=600, now=1_000.0,
+            fetchers={
+                "deepseek": _make_fetcher_raises("502"),
+                "openrouter": _make_fetcher_ok(amount=5.25),
+            },
+            key_resolver=lambda p: "sk",
+            kv=_make_kv(), stale_kv=stale,
+        )
+        assert float(stale.get("deepseek")) == pytest.approx(1_000.0)
+        assert stale.get("openrouter") == "", (
+            "Successful provider must not inherit another's stale "
+            "marker"
+        )
+
+
+class TestStaleMarkerHelpers:
+    """Direct unit tests for the helpers so the endpoint + refresher
+    share a single well-understood contract."""
+
+    def test_write_and_read_round_trip(self):
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        lbr._write_stale_marker(stale, "deepseek", 12345.6789)
+        assert lbr._read_stale_marker(stale, "deepseek") == pytest.approx(
+            12345.6789,
+        )
+
+    def test_read_empty_returns_none(self):
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        assert lbr._read_stale_marker(stale, "deepseek") is None
+
+    def test_clear_removes_entry(self):
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        lbr._write_stale_marker(stale, "deepseek", 1.0)
+        lbr._clear_stale_marker(stale, "deepseek")
+        assert lbr._read_stale_marker(stale, "deepseek") is None
+
+    def test_unparseable_marker_self_heals(self):
+        """Corrupted entry gets deleted on read so the next successful
+        fetch can stop rendering stale without a manual intervention."""
+        import uuid
+        stale = SharedKV(f"stale_{uuid.uuid4().hex[:8]}")
+        stale.set("deepseek", "not-a-float")
+        result = lbr._read_stale_marker(stale, "deepseek")
+        assert result is None
+        assert stale.get("deepseek") == "", (
+            "Unparseable entry must be self-healed (deleted)"
+        )
+
+    def test_stale_namespace_constant_is_distinct_from_balance(self):
+        """Cache + stale live in separate SharedKV namespaces so a
+        read of one cannot surface the other's data."""
+        assert lbr.STALE_NAMESPACE != lbr.BALANCE_NAMESPACE
+        assert lbr.STALE_NAMESPACE == "provider_balance_stale"
+
+
 class TestRegistryIntegration:
 
     async def test_default_fetcher_set_is_supported_providers(

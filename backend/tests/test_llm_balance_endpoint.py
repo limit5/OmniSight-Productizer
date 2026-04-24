@@ -490,7 +490,7 @@ class TestEnvelopeShape:
         assert set(out.keys()) == {
             "status", "provider", "currency",
             "balance_remaining", "granted_total", "usage_total",
-            "last_refreshed_at", "source", "raw",
+            "last_refreshed_at", "source", "raw", "stale_since",
         }
 
     async def test_unsupported_envelope_keys(self):
@@ -780,7 +780,7 @@ class TestBatchEnvelopeShape:
         assert set(envelopes["deepseek"].keys()) == {
             "status", "provider", "currency",
             "balance_remaining", "granted_total", "usage_total",
-            "last_refreshed_at", "source", "raw",
+            "last_refreshed_at", "source", "raw", "stale_since",
         }
         # error shape
         assert set(envelopes["openrouter"].keys()) == {
@@ -790,3 +790,357 @@ class TestBatchEnvelopeShape:
         assert set(envelopes["anthropic"].keys()) == {
             "status", "provider", "reason",
         }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Z.2 boundary — stale_since + auth-fail "no cache write" contract
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# The boundary row spells out two distinct failure-mode contracts:
+#
+# 1. **API key 格式錯 / 作廢** (auth failure) → ``{status: "error",
+#    message: "..."}`` **不 cache**. Existing cache from a previous
+#    successful fetch stays in place so "下次正常 key 要能立刻 pick up"
+#    — the next refresh with a valid key repopulates without having
+#    to invalidate an older-but-still-useful snapshot first.
+#
+# 2. **DeepSeek / OpenRouter API 本身 5xx** (provider-side failure)
+#    → 回 **快取值** 並標 ``stale_since``. The cache is not
+#    overwritten, but a separate marker is set so cache reads render
+#    with a "value is from before {ts}" badge.
+#
+# These tests lock both halves of the contract at the service layer.
+
+
+def _stale_kv() -> SharedKV:
+    """Fresh stale-marker SharedKV namespace per test — separate from
+    the cache namespace so a test can't accidentally read the marker
+    as if it were a cached BalanceInfo."""
+    return SharedKV(
+        f"provider_balance_stale_endpoint_test_{uuid.uuid4().hex[:8]}"
+    )
+
+
+class TestBoundaryStaleSinceOnCacheHit:
+    """Case 2: when a stale marker is set for a provider with cached
+    data, the cache-hit path must surface ``stale_since``."""
+
+    async def test_cache_hit_without_marker_emits_stale_since_none(self):
+        """Happy path — cache hit, no marker → envelope carries
+        ``stale_since=None`` (key always present for shape stability)."""
+        kv = _kv()
+        stale = _stale_kv()
+        from backend.llm_balance_refresher import _serialise_balance
+        kv.set("deepseek", _serialise_balance(_balance()))
+
+        out = await endpoint.resolve_balance(
+            "deepseek",
+            kv=kv, stale_kv=stale,
+            fetchers={}, key_resolver=lambda p: None,
+        )
+
+        assert out["status"] == "ok"
+        assert out["source"] == "cache"
+        assert out["stale_since"] is None
+
+    async def test_cache_hit_with_marker_emits_stale_since_epoch(self):
+        """After the refresher recorded a failure and left the cache
+        intact, the endpoint's cache read must surface the marker
+        timestamp so the UI renders the stale badge."""
+        kv = _kv()
+        stale = _stale_kv()
+        from backend.llm_balance_refresher import (
+            _serialise_balance, _write_stale_marker,
+        )
+        kv.set("openrouter", _serialise_balance(_balance(amount=33.0)))
+        failure_at = 1_700_000_000.0
+        _write_stale_marker(stale, "openrouter", failure_at)
+
+        out = await endpoint.resolve_balance(
+            "openrouter",
+            kv=kv, stale_kv=stale,
+            fetchers={}, key_resolver=lambda p: None,
+        )
+
+        assert out["status"] == "ok"
+        assert out["source"] == "cache"
+        assert out["balance_remaining"] == 33.0, (
+            "Cached balance still served — 5xx contract is 'return "
+            "cached value' not 'return error'"
+        )
+        assert out["stale_since"] == pytest.approx(failure_at)
+
+    async def test_cache_hit_unparseable_marker_self_heals(self):
+        """A corrupted marker entry must not permanently stick — the
+        read path deletes and returns None so the next successful
+        refresh tick stops rendering stale."""
+        kv = _kv()
+        stale = _stale_kv()
+        from backend.llm_balance_refresher import _serialise_balance
+        kv.set("deepseek", _serialise_balance(_balance()))
+        stale.set("deepseek", "not-a-float")
+
+        out = await endpoint.resolve_balance(
+            "deepseek",
+            kv=kv, stale_kv=stale,
+            fetchers={}, key_resolver=lambda p: None,
+        )
+
+        assert out["status"] == "ok"
+        assert out["stale_since"] is None
+        assert stale.get("deepseek") == "", (
+            "Unparseable marker should be self-healed (deleted)"
+        )
+
+    async def test_cache_hit_fetcher_never_invoked(self):
+        """Cache hit must short-circuit — even with a stale marker, we
+        do not trigger a live fetch (which would obscure the refresher's
+        own failure detection + retry schedule)."""
+        kv = _kv()
+        stale = _stale_kv()
+        from backend.llm_balance_refresher import (
+            _serialise_balance, _write_stale_marker,
+        )
+        kv.set("deepseek", _serialise_balance(_balance()))
+        _write_stale_marker(stale, "deepseek", 12345.0)
+
+        called: list[str] = []
+
+        async def fetcher(api_key: str, **_: Any):
+            called.append(api_key)
+            return _balance()
+
+        await endpoint.resolve_balance(
+            "deepseek",
+            kv=kv, stale_kv=stale,
+            fetchers={"deepseek": fetcher},
+            key_resolver=lambda p: "sk",
+        )
+
+        assert called == [], (
+            "Cache hit + stale must NOT re-fetch — refresher owns "
+            "that retry cadence"
+        )
+
+
+class TestBoundaryStaleMarkerLifecycle:
+    """Case 2 continued: the endpoint's own cache-miss write path
+    must clear the stale marker on success and set it on 5xx."""
+
+    async def test_live_fetch_success_clears_stale_marker(self):
+        kv = _kv()
+        stale = _stale_kv()
+        from backend.llm_balance_refresher import _write_stale_marker
+        _write_stale_marker(stale, "deepseek", 5_000.0)
+
+        out = await endpoint.resolve_balance(
+            "deepseek",
+            kv=kv, stale_kv=stale,
+            fetchers={"deepseek": _make_fetcher_ok(amount=1.5)},
+            key_resolver=lambda p: "sk",
+        )
+
+        assert out["status"] == "ok"
+        assert out["source"] == "live"
+        assert out["stale_since"] is None
+        assert stale.get("deepseek") == "", (
+            "Successful fetch must clear any prior stale marker"
+        )
+
+    async def test_live_fetch_5xx_writes_stale_marker(self):
+        """Cache miss + 5xx currently returns an error envelope (nothing
+        to serve), but we still write the marker so that a concurrent
+        refresher worker that succeeded-then-failed leaves behind a
+        consistent signal for the next cache hit."""
+        kv = _kv()
+        stale = _stale_kv()
+
+        out = await endpoint.resolve_balance(
+            "deepseek",
+            kv=kv, stale_kv=stale,
+            fetchers={"deepseek": _make_fetcher_raises("upstream 502")},
+            key_resolver=lambda p: "sk",
+            now=9_999.0,
+        )
+
+        assert out["status"] == "error"
+        assert out["message"] == "fetch failed: upstream 502"
+        assert kv.get("deepseek") == "", "5xx does not create a cache"
+        marker = stale.get("deepseek")
+        assert marker, "5xx must write the stale marker"
+        assert float(marker) == pytest.approx(9_999.0)
+
+    async def test_live_fetch_unexpected_exception_writes_stale_marker(
+        self,
+    ):
+        """Defence-in-depth — an unhandled exception escaping the
+        fetcher is treated the same as a 5xx for stale-marker
+        purposes. Keeps the UI coherent if a vendor rolls out a
+        schema change that temporarily breaks normalisation."""
+        kv = _kv()
+        stale = _stale_kv()
+
+        out = await endpoint.resolve_balance(
+            "openrouter",
+            kv=kv, stale_kv=stale,
+            fetchers={"openrouter": _make_fetcher_crashes()},
+            key_resolver=lambda p: "sk",
+            now=42.0,
+        )
+
+        assert out["status"] == "error"
+        assert "RuntimeError" in out["message"]
+        assert float(stale.get("openrouter")) == pytest.approx(42.0)
+
+
+class TestBoundaryAuthFailDoesNotMarkStale:
+    """Case 1: auth failure is operator-side, not provider-down. The
+    endpoint must NOT mark the provider stale on 401/403 — doing so
+    would mislead the dashboard into showing a "provider unavailable"
+    stale badge when the real issue is the operator's key."""
+
+    async def test_live_fetch_auth_fail_leaves_stale_marker_absent(self):
+        kv = _kv()
+        stale = _stale_kv()
+
+        out = await endpoint.resolve_balance(
+            "deepseek",
+            kv=kv, stale_kv=stale,
+            fetchers={"deepseek": _make_fetcher_auth_fail()},
+            key_resolver=lambda p: "sk-revoked",
+        )
+
+        assert out["status"] == "error"
+        assert "authentication failed" in out["message"]
+        assert stale.get("deepseek") == "", (
+            "Auth failure must NOT write stale marker — distinct "
+            "contract from 5xx"
+        )
+
+    async def test_live_fetch_auth_fail_preserves_existing_stale_marker(
+        self,
+    ):
+        """If the refresher recorded a prior 5xx and this request's
+        fetch hits 401 (operator just rotated the key mid-outage), we
+        leave the previously-recorded marker in place — the cache
+        entry behind it is genuinely stale regardless of why the
+        current attempt failed. Consistency > cleverness here."""
+        kv = _kv()
+        stale = _stale_kv()
+        from backend.llm_balance_refresher import _write_stale_marker
+        _write_stale_marker(stale, "deepseek", 8_888.0)
+
+        out = await endpoint.resolve_balance(
+            "deepseek",
+            kv=kv, stale_kv=stale,
+            fetchers={"deepseek": _make_fetcher_auth_fail()},
+            key_resolver=lambda p: "sk",
+        )
+
+        assert out["status"] == "error"
+        marker = stale.get("deepseek")
+        assert marker and float(marker) == pytest.approx(8_888.0), (
+            "Prior stale marker survives the auth-fail branch"
+        )
+
+    async def test_live_fetch_auth_fail_does_not_touch_existing_cache(
+        self,
+    ):
+        """Per Z.2 spec '下次正常 key 要能立刻 pick up' — auth-fail
+        must not invalidate an existing cache, so that the next
+        successful refresh-with-valid-key can overwrite cleanly
+        without a gap."""
+        kv = _kv()
+        stale = _stale_kv()
+        from backend.llm_balance_refresher import _serialise_balance
+        # Seed a cache that would be served on subsequent reads; this
+        # test targets the cache-miss path so we use a separate
+        # provider to verify the miss branch without inverting cache
+        # hit.
+        kv.set("openrouter", _serialise_balance(_balance(amount=10.0)))
+        # Now trigger deepseek which has NO cache.
+        out = await endpoint.resolve_balance(
+            "deepseek",
+            kv=kv, stale_kv=stale,
+            fetchers={"deepseek": _make_fetcher_auth_fail()},
+            key_resolver=lambda p: "sk",
+        )
+        assert out["status"] == "error"
+        # openrouter cache untouched by deepseek's auth-fail.
+        assert kv.get("openrouter"), (
+            "Auth-fail on one provider must not touch another "
+            "provider's cache slot"
+        )
+
+
+class TestBoundaryNoKeyPath:
+    """Case 1 narrower — the no-key branch (resolver returns None)
+    short-circuits before touching the fetcher. It must not write the
+    stale marker either (no HTTP attempt means no "provider is down"
+    signal to record)."""
+
+    async def test_no_key_does_not_write_stale_marker(self):
+        kv = _kv()
+        stale = _stale_kv()
+
+        out = await endpoint.resolve_balance(
+            "deepseek",
+            kv=kv, stale_kv=stale,
+            fetchers={"deepseek": _make_fetcher_ok()},
+            key_resolver=lambda p: None,
+        )
+
+        assert out["status"] == "error"
+        assert "no API key configured" in out["message"]
+        assert stale.get("deepseek") == ""
+
+
+class TestBoundaryBatchAggregation:
+    """Sanity check that the batch endpoint threads the same stale_kv
+    handle across all per-provider calls, so a marker set by one
+    call's fetcher-raise path is visible to a subsequent call's
+    cache-hit read in the same round."""
+
+    async def test_batch_propagates_stale_since_to_cache_envelopes(self):
+        kv = _kv()
+        stale = _stale_kv()
+        from backend.llm_balance_refresher import (
+            _serialise_balance, _write_stale_marker,
+        )
+        # Seed both supported providers with cache + distinct markers.
+        kv.set("deepseek", _serialise_balance(_balance(amount=1.0)))
+        kv.set("openrouter", _serialise_balance(_balance(amount=2.0)))
+        _write_stale_marker(stale, "deepseek", 1_111.0)
+        # openrouter has cache but NO marker — fresh.
+
+        out = await endpoint.resolve_all_balances(
+            kv=kv, stale_kv=stale,
+            fetchers={},
+            key_resolver=lambda p: None,
+        )
+        envelopes = {e["provider"]: e for e in out["providers"]}
+        assert envelopes["deepseek"]["stale_since"] == pytest.approx(
+            1_111.0,
+        )
+        assert envelopes["openrouter"]["stale_since"] is None
+
+    async def test_batch_unsupported_envelopes_have_no_stale_since(self):
+        """Unsupported providers (anthropic etc.) never carry
+        ``stale_since`` — the key is exclusive to the ``ok`` shape
+        since only ``ok`` envelopes represent cached data."""
+        out = await endpoint.resolve_all_balances(
+            kv=_kv(), stale_kv=_stale_kv(),
+            fetchers={}, key_resolver=lambda p: None,
+        )
+        envelopes = {e["provider"]: e for e in out["providers"]}
+        # Unsupported providers: {anthropic, google, groq, ollama,
+        # openai, together, xai}. Their envelope shape is
+        # {status, provider, reason} with no stale_since key.
+        for name in {
+            "anthropic", "google", "groq", "ollama",
+            "openai", "together", "xai",
+        }:
+            assert envelopes[name]["status"] == "unsupported"
+            assert "stale_since" not in envelopes[name], (
+                "Unsupported envelope must not carry stale_since"
+            )
