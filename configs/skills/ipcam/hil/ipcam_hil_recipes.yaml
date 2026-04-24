@@ -86,6 +86,78 @@ hil_recipes:
       - "No session TEARDOWN 500 during cleanup"
       - "Memory growth < 50 MB during 120 s window"
 
+  - id: hil_onvif_device_information
+    name: "ONVIF GetDeviceInformation Round-Trip"
+    description: "HIL test: ONVIF Device Manager queries device metadata and validates Profile S fields"
+    equipment:
+      - "Target board running ipcam_rtsp_server + onvif_device"
+      - "Host PC with ONVIF Device Manager (ODM) or happytimesoft onvif-cli"
+      - "Wired LAN (dedicated VLAN is fine; no multicast required for this recipe)"
+    steps:
+      - "Boot the device with OMNISIGHT_IPCAM_ENABLED=1 and default admin/hunter2 creds"
+      - "Launch ODM; add device by IP (no WS-Discovery dependency in this recipe)"
+      - "Authenticate with WS-UsernameToken — realm OmniSight-IPCam"
+      - "Record the Device Information panel (Manufacturer / Model / FW / Serial / HW ID)"
+    pass_criteria:
+      - "All five fields populated (non-empty)"
+      - "Firmware version matches ``/etc/omnisight-version``"
+      - "SerialNumber matches the board's fused MAC-based serial"
+      - "No WS-Addressing errors in the ONVIF trace"
+
+  - id: hil_onvif_media_stream_uri
+    name: "ONVIF GetStreamUri → RTSP PLAY"
+    description: "HIL test: verify the RTSP URL returned by ONVIF GetStreamUri is actually playable"
+    equipment:
+      - "Target board running ipcam_rtsp_server + onvif_device"
+      - "Host PC with onvif-cli + ffplay"
+    steps:
+      - "From host: onvif-cli -u admin -p hunter2 media GetProfiles"
+      - "Extract the first ProfileToken"
+      - "onvif-cli media GetStreamUri --profile <token>"
+      - "ffplay <returned rtsp URL> for 10 s"
+    pass_criteria:
+      - "GetStreamUri returns rtsp://<device-ip>:8554/live/main"
+      - "ffplay negotiates SETUP + PLAY within 2 s"
+      - "Video renders at the declared resolution + fps (±5%)"
+      - "Stopping ffplay sends TEARDOWN; manager.status()['active_sessions']→0"
+
+  - id: hil_onvif_events_pullpoint
+    name: "ONVIF CreatePullPointSubscription + PullMessages"
+    description: "HIL test: verify motion detection events are delivered to an NVR pull subscriber"
+    equipment:
+      - "Target board"
+      - "Host PC with onvif-cli"
+    steps:
+      - "CreatePullPointSubscription InitialTerminationTime=PT60S"
+      - "Parse SubscriptionId from response"
+      - "On target: trigger three synthetic motion events via a debug CLI"
+      - "From host: PullMessages Timeout=PT1S MessageLimit=10"
+      - "Verify all three NotificationMessages returned"
+      - "Unsubscribe"
+    pass_criteria:
+      - "Subscription token is non-empty and opaque"
+      - "PullMessages returns exactly 3 NotificationMessages"
+      - "Each carries topic ``tns1:RuleEngine/MotionRegionDetector`` and UtcTime"
+      - "Unsubscribe 200 OK; subsequent PullMessages on same token → 404"
+
+  - id: hil_onvif_ptz_move
+    name: "ONVIF PTZ AbsoluteMove + GetStatus feedback"
+    description: "HIL test: AbsoluteMove commands reach the motor and GetStatus reflects the new position"
+    equipment:
+      - "Target board with mechanical PTZ head OR a simulated PTZ driver"
+      - "Host PC with onvif-cli"
+    steps:
+      - "GetConfigurations — record pan/tilt/zoom ranges"
+      - "AbsoluteMove Position=(pan=0.3, tilt=-0.2, zoom=0.5)"
+      - "Wait 500 ms for mechanical settle"
+      - "GetStatus and parse tt:Position"
+      - "Stop PanTilt=true Zoom=true"
+    pass_criteria:
+      - "AbsoluteMove returns 200 OK"
+      - "GetStatus pan/tilt/zoom within ±0.02 of the commanded values"
+      - "MoveStatus reports IDLE after Stop"
+      - "Out-of-range command (pan=5.0) clamps to pan_range[1] — no fault"
+
   - id: hil_backend_fallback
     name: "Backend Auto-Fallback (gstreamer → live555 → stub)"
     description: "HIL test: remove gstreamer RTSP plugin on target and verify server still comes up on live555"

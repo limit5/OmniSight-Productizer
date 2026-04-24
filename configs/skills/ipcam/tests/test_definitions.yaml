@@ -56,3 +56,63 @@ test_suites:
     description: "Verify graceful fallback when live555 and gstreamer are unavailable, invalid mount paths, session not found, malformed requests"
     test_file: backend/tests/test_ipcam_rtsp_server.py
     markers: ["rtsp_error"]
+
+  - id: onvif_config_validation
+    name: "ONVIF Service Config Validation Tests"
+    description: "Verify ONVIFServiceConfig — port ranges, schemes, scope URI grammar, XAddr assembly"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["onvif_config"]
+
+  - id: onvif_dataclass_validation
+    name: "ONVIF Data Class Invariant Tests"
+    description: "Verify DeviceInformation / NetworkInterface / User / VideoSource / PTZConfiguration invariants"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["onvif_dataclasses"]
+
+  - id: onvif_soap_envelope
+    name: "ONVIF SOAP 1.2 Envelope Parser Tests"
+    description: "Verify parse_soap_envelope + build_soap_response + build_soap_fault — reject SOAP 1.1, extract Action / MessageID, tolerate BOM"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["soap_envelope"]
+
+  - id: onvif_wsse
+    name: "ONVIF WS-UsernameToken Tests"
+    description: "Verify WS-UsernameToken PasswordDigest (SHA1(nonce + created + password)) + PasswordText, 5-min clock-skew window, nonce anti-replay"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["wsse_username_token"]
+
+  - id: onvif_device_service
+    name: "ONVIF Device Service Tests"
+    description: "Verify GetDeviceInformation / GetSystemDateAndTime / GetCapabilities / GetNetworkInterfaces / GetServices / GetScopes / {Get,Set}Hostname / {Get,Create,Delete,Set}Users"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["onvif_device"]
+
+  - id: onvif_media_service
+    name: "ONVIF Media Service Tests"
+    description: "Verify GetProfiles / GetProfile / GetVideoSources / GetVideoEncoderConfigurations / GetStreamUri maps to RTSP mount / GetSnapshotUri"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["onvif_media"]
+
+  - id: onvif_events_service
+    name: "ONVIF Events Service Tests"
+    description: "Verify CreatePullPointSubscription / PullMessages / Renew / Unsubscribe + topic-filter prefix matching + expired-subscription purge"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["onvif_events"]
+
+  - id: onvif_ptz_service
+    name: "ONVIF PTZ Service Tests"
+    description: "Verify GetConfigurations / GetStatus / ContinuousMove / AbsoluteMove / RelativeMove / Stop / range clamping / Presets set-goto-remove cycle"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["onvif_ptz"]
+
+  - id: onvif_fault_rendering
+    name: "ONVIF Fault Rendering Tests"
+    description: "Verify SOAP Fault XML is well-formed, subcodes translate to ter:... correctly, cross-service action mismatches return ActionNotSupported"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["onvif_fault"]
+
+  - id: onvif_rtsp_integration
+    name: "ONVIF ↔ RTSP Integration Tests"
+    description: "Verify media profiles follow RTSP mount changes, GetStreamUri returns rtsp://<host>:<port>/<mount>, thread-safe dispatch"
+    test_file: backend/tests/test_onvif_device.py
+    markers: ["onvif_integration"]

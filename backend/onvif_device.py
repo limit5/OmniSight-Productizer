@@ -604,6 +604,7 @@ def build_soap_fault(err: ONVIFError) -> bytes:
         "<s:Reason>",
         f'<s:Text xml:lang="en">{reason}</s:Text>',
         "</s:Reason>",
+        "</s:Fault>",
         "</s:Body>",
         "</s:Envelope>",
     ]
@@ -921,7 +922,8 @@ class ONVIFDevice:
     def create_subscription(
         self, topic_filter: str = "", timeout_s: Optional[int] = None
     ) -> EventSubscription:
-        timeout_s = timeout_s or _DEFAULT_SUBSCRIPTION_TIMEOUT_S
+        if timeout_s is None:
+            timeout_s = _DEFAULT_SUBSCRIPTION_TIMEOUT_S
         if not 1 <= timeout_s <= _MAX_SUBSCRIPTION_TIMEOUT_S:
             raise ONVIFBadRequest(
                 f"Subscription timeout out of range: {timeout_s}",
@@ -959,7 +961,7 @@ class ONVIFDevice:
     ) -> list[NotificationMessage]:
         if limit <= 0 or limit > _MAX_PULL_MESSAGE_LIMIT:
             raise ONVIFBadRequest(
-                f"PullMessages limit out of range: {limit}",
+                f"PullMessages MessageLimit out of range: {limit}",
                 subcode="ter:InvalidArgVal",
             )
         with self._lock:
