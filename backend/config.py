@@ -386,6 +386,85 @@ settings = Settings()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 5-10 (#multi-account-forge) legacy credential deprecation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Phase 5-1 through 5-9 shipped the ``git_accounts`` table + CRUD API
+# + UI as the authoritative source for per-tenant, multi-account forge
+# credentials. The ``Settings`` scalar / JSON-map fields below are the
+# previous generation and are now deprecated:
+#
+#   * READ stays OK — ``backend.git_credentials._build_registry`` still
+#     synthesises a virtual ``git_accounts``-shaped row from whichever
+#     of these is set, so operator deployments that never populated
+#     ``git_accounts`` keep working unchanged until Phase 5-5's
+#     lifespan auto-migration converts them on next backend boot.
+#   * WRITE (via ``PUT /runtime/settings``) is considered deprecated.
+#     Callers that write a legacy field emit an ``audit.log`` row with
+#     ``action=settings.legacy_credential_write`` so the trail records
+#     *who* kept the old UI alive; the response also carries a
+#     ``deprecations`` block so the frontend can surface a yellow
+#     "move to SYSTEM INTEGRATIONS → Git Accounts" banner.
+#
+# The registry is a plain ``dict[str, str]`` mapping the Settings field
+# name to a short replacement hint — the hint is what shows up in the
+# audit-log ``after`` dict and the PUT response's ``deprecations`` key,
+# so it needs to be accurate (grep-able when debugging later) but
+# short (UI surface).
+#
+# Fields intentionally NOT listed here (and why):
+#   * ``gerrit_enabled`` — master switch / feature flag, not a
+#     credential. Stays as a Settings scalar even after migration.
+#   * ``gerrit_replication_targets`` — list of git *destinations*
+#     (post-merge push), not a credential. See Phase 5-7 HANDOFF.
+#   * ``jira_intake_label`` / ``jira_done_statuses`` — routing knobs
+#     for JIRA inbound automation, not the JIRA credential itself.
+#   * ``ollama_base_url`` / ``*_api_key`` — LLM-provider credentials.
+#     Phase 5b has a separate ``llm_credentials`` table; those
+#     deprecation hooks land with 5b-6, not here.
+
+LEGACY_CREDENTIAL_FIELDS: dict[str, str] = {
+    # GitHub
+    "github_token":              "git_accounts(platform='github', is_default=TRUE)",
+    "github_token_map":          "git_accounts(platform='github', url_patterns=[...])",
+    "github_webhook_secret":     "git_accounts(platform='github').encrypted_webhook_secret",
+    # GitLab
+    "gitlab_token":              "git_accounts(platform='gitlab', is_default=TRUE)",
+    "gitlab_url":                "git_accounts(platform='gitlab').instance_url",
+    "gitlab_token_map":          "git_accounts(platform='gitlab', url_patterns=[...])",
+    "gitlab_webhook_secret":     "git_accounts(platform='gitlab').encrypted_webhook_secret",
+    # Gerrit
+    "gerrit_url":                "git_accounts(platform='gerrit').instance_url",
+    "gerrit_ssh_host":           "git_accounts(platform='gerrit').ssh_host",
+    "gerrit_ssh_port":           "git_accounts(platform='gerrit').ssh_port",
+    "gerrit_project":            "git_accounts(platform='gerrit').project",
+    "gerrit_instances":          "one git_accounts(platform='gerrit') row per instance",
+    "gerrit_webhook_secret":     "git_accounts(platform='gerrit').encrypted_webhook_secret",
+    # JIRA
+    "notification_jira_url":     "git_accounts(platform='jira').instance_url",
+    "notification_jira_token":   "git_accounts(platform='jira').encrypted_token",
+    "notification_jira_project": "git_accounts(platform='jira').project",
+    "jira_webhook_secret":       "git_accounts(platform='jira').encrypted_webhook_secret",
+    # Shared SSH fallback
+    "git_ssh_key_path":          "git_accounts.encrypted_ssh_key",
+    "git_ssh_key_map":           "git_accounts.encrypted_ssh_key + url_patterns",
+}
+
+
+def is_legacy_credential_field(name: str) -> bool:
+    """Return True when ``name`` is a Phase-5-deprecated credential
+    field on the ``Settings`` singleton.
+
+    Use this at write sites (``PUT /runtime/settings``, wizard /
+    rotate helpers) to decide whether to emit
+    ``audit.log(action="settings.legacy_credential_write", ...)``.
+    Read sites MUST NOT gate on this — reads still resolve through
+    the legacy shim in ``backend.git_credentials``.
+    """
+    return name in LEGACY_CREDENTIAL_FIELDS
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  L1-03: startup-time config validation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #

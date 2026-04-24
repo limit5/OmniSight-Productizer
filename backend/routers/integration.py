@@ -13,7 +13,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend import auth as _au
-from backend.config import settings
+from backend.config import (
+    LEGACY_CREDENTIAL_FIELDS,
+    is_legacy_credential_field,
+    settings,
+)
 from backend.db_context import set_tenant_id
 from backend.shared_state import SharedKV
 
@@ -191,6 +195,13 @@ def _apply_runtime_setting(key: str, value) -> None:
     mirroring policy and type-aware serialisation centralised.
     Typed fields (bool / int) are stored as ``str(value)`` in Redis
     and coerced back on overlay — see ``_coerce_kv_value``.
+
+    Phase 5-10 (#multi-account-forge): when the field is a deprecated
+    credential (listed in ``config.LEGACY_CREDENTIAL_FIELDS``), emit
+    an ``audit.log`` row via the fire-and-forget sync wrapper so the
+    rotate / wizard / finalize entry points carry the same telemetry
+    as ``PUT /runtime/settings``. ``log_sync`` never raises — silently
+    noops when there's no running loop (unit-test edge case).
     """
     if hasattr(settings, key):
         setattr(settings, key, value)
@@ -202,6 +213,34 @@ def _apply_runtime_setting(key: str, value) -> None:
                 "SharedKV mirror failed for %s: %s (local setattr "
                 "still in effect, cross-worker coherence degraded)",
                 key, exc,
+            )
+    if is_legacy_credential_field(key):
+        replacement_hint = LEGACY_CREDENTIAL_FIELDS[key]
+        logger.warning(
+            "Phase-5-10 deprecated-write: settings.%s — "
+            "authoritative source is %s",
+            key, replacement_hint,
+        )
+        try:
+            from backend import audit as _audit
+            _audit.log_sync(
+                action="settings.legacy_credential_write",
+                entity_kind="settings_legacy_field",
+                entity_id=key,
+                before=None,
+                after={
+                    "field": key,
+                    "replacement": replacement_hint,
+                    "note": "legacy scalar write via wizard/rotate; "
+                            "authoritative source is git_accounts (Phase 5)",
+                },
+                actor="system",
+            )
+        except Exception as exc:
+            logger.warning(
+                "audit-warn for deprecated settings write failed: %s "
+                "(write itself took effect; audit row missing)",
+                exc,
             )
 
 
@@ -427,6 +466,14 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
 
     applied = {}
     rejected = {}
+    # Phase 5-10 (#multi-account-forge): collect legacy credential
+    # writes for the audit trail + response banner. The set of fields
+    # considered legacy lives in ``backend.config.LEGACY_CREDENTIAL_FIELDS``
+    # (registry-of-truth); the write still applies (read-OK, write-warn
+    # contract), but we log WHO kept using the superseded UI so operators
+    # can track migration progress over time.
+    deprecated_writes: dict[str, str] = {}
+    actor_id = getattr(_user, "id", None) or getattr(_user, "email", None) or "admin"
     for key, value in body.updates.items():
         if key not in _UPDATABLE_FIELDS:
             rejected[key] = "not updatable"
@@ -436,6 +483,8 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
             continue
         setattr(settings, key, value)
         applied[key] = True
+        if is_legacy_credential_field(key):
+            deprecated_writes[key] = LEGACY_CREDENTIAL_FIELDS[key]
         # Mirror the subset whose coherence is operator-visible into
         # ``SharedKV`` so the other workers pick it up on their next
         # ``_overlay_runtime_settings()`` call. Silent failure on
@@ -451,6 +500,37 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
                     "still in effect, cross-worker coherence degraded)",
                     key, exc,
                 )
+
+    # Phase 5-10: audit the legacy writes (best-effort — the write has
+    # already taken effect, so an audit-pool hiccup must not fail the
+    # HTTP mutation). One row per field keeps grep-by-field simple.
+    if deprecated_writes:
+        try:
+            from backend import audit as _audit
+            for key, replacement_hint in deprecated_writes.items():
+                logger.warning(
+                    "Phase-5-10 deprecated-write: settings.%s — "
+                    "authoritative source is %s",
+                    key, replacement_hint,
+                )
+                await _audit.log(
+                    action="settings.legacy_credential_write",
+                    entity_kind="settings_legacy_field",
+                    entity_id=key,
+                    before=None,
+                    after={
+                        "field": key,
+                        "replacement": replacement_hint,
+                        "note": "legacy scalar write; authoritative source is git_accounts (Phase 5)",
+                    },
+                    actor=str(actor_id),
+                )
+        except Exception as exc:
+            logger.warning(
+                "audit-warn for deprecated settings write failed: %s "
+                "(write itself took effect; audit row missing)",
+                exc,
+            )
 
     # Clear LLM cache if provider/model/key changed
     llm_related = {"llm_", "anthropic_", "google_", "openai_", "xai_", "groq_", "deepseek_", "together_", "openrouter_", "ollama_"}
@@ -491,13 +571,24 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
             )
 
     logger.info("Settings updated: %s", list(applied.keys()))
-    return {
+    response: dict[str, object] = {
         "status": "updated",
         "applied": list(applied.keys()),
         "rejected": rejected,
         "note": "Changes persist via Redis across workers + restarts; "
                 "full DB persistence lands in Phase 5b.",
     }
+    # Phase 5-10 (#multi-account-forge): surface a deprecation banner
+    # when the operator wrote a legacy credential field. The frontend
+    # INTEGRATION SETTINGS modal reads this block and renders an inline
+    # "move to Git Accounts" link; empty dict when no legacy writes.
+    if deprecated_writes:
+        response["deprecations"] = {
+            "fields": deprecated_writes,
+            "migrate_to": "git_accounts",
+            "doc": "/docs/phase-5-multi-account/02-migration-runbook.md",
+        }
+    return response
 
 
 @router.post("/test/{integration}")
