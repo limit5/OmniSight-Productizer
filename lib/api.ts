@@ -2010,6 +2010,135 @@ export async function resolveGitAccountForUrl(url: string): Promise<GitAccountRe
   })
 }
 
+// ─── Phase 5b-4 (#llm-credentials) — llm_credentials CRUD client ───
+//
+// Wraps the `/llm-credentials` REST surface (backend/routers/llm_credentials.py).
+// Plaintext API keys never round-trip through these reads — only the masked
+// `…last4` fingerprint (`value_fingerprint`) lands in the response. Mutations
+// accept plaintext and the backend Fernet-encrypts before persisting.
+//
+// Provider set matches the backend `_PROVIDER_PATTERN`:
+//   anthropic | google | openai | xai | groq | deepseek | together |
+//   openrouter | ollama
+// Ollama is keyless — it uses `metadata.base_url` instead of `value`.
+export type LLMCredentialProvider =
+  | "anthropic"
+  | "google"
+  | "openai"
+  | "xai"
+  | "groq"
+  | "deepseek"
+  | "together"
+  | "openrouter"
+  | "ollama"
+export type LLMCredentialAuthType = "pat" | "oauth"
+
+export interface LLMCredential {
+  id: string
+  tenant_id: string
+  provider: LLMCredentialProvider
+  label: string
+  // Masked fingerprint — `""` when the value is unset (e.g. Ollama).
+  value_fingerprint: string
+  auth_type: LLMCredentialAuthType
+  is_default: boolean
+  enabled: boolean
+  metadata: Record<string, unknown>
+  last_used_at: string | null
+  created_at: string | null
+  updated_at: string | null
+  version: number
+}
+
+export interface LLMCredentialCreate {
+  provider: LLMCredentialProvider
+  label?: string
+  value?: string
+  auth_type?: LLMCredentialAuthType
+  is_default?: boolean
+  enabled?: boolean
+  metadata?: Record<string, unknown>
+}
+
+// PATCH body — all optional; for key rotation, omit (or leave `undefined`)
+// means "leave it alone" and explicit empty string `""` means "clear it".
+export interface LLMCredentialUpdate {
+  label?: string
+  auth_type?: LLMCredentialAuthType
+  is_default?: boolean
+  enabled?: boolean
+  metadata?: Record<string, unknown>
+  value?: string
+}
+
+export interface LLMCredentialListResponse {
+  items: LLMCredential[]
+  count: number
+}
+
+export interface LLMCredentialTestResult {
+  credential_id: string
+  provider: LLMCredentialProvider
+  status: "ok" | "error"
+  model_count?: number
+  http_status?: number
+  base_url?: string
+  message?: string
+  [key: string]: unknown
+}
+
+export async function listLlmCredentials(opts?: {
+  provider?: LLMCredentialProvider
+  enabled_only?: boolean
+}): Promise<LLMCredentialListResponse> {
+  const qs = new URLSearchParams()
+  if (opts?.provider) qs.set("provider", opts.provider)
+  if (opts?.enabled_only) qs.set("enabled_only", "true")
+  const suffix = qs.toString() ? `?${qs.toString()}` : ""
+  return request<LLMCredentialListResponse>(`/llm-credentials${suffix}`)
+}
+
+export async function getLlmCredential(id: string): Promise<LLMCredential> {
+  return request<LLMCredential>(`/llm-credentials/${encodeURIComponent(id)}`)
+}
+
+export async function createLlmCredential(body: LLMCredentialCreate): Promise<LLMCredential> {
+  return request<LLMCredential>("/llm-credentials", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function updateLlmCredential(
+  id: string,
+  body: LLMCredentialUpdate,
+): Promise<LLMCredential> {
+  return request<LLMCredential>(`/llm-credentials/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteLlmCredential(
+  id: string,
+  opts?: { auto_elect_new_default?: boolean },
+): Promise<{ status: string; [key: string]: unknown }> {
+  // Default to true to match backend; pass `false` to refuse-without-replacement.
+  const elect = opts?.auto_elect_new_default ?? true
+  const qs = `?auto_elect_new_default=${elect ? "true" : "false"}`
+  return request<{ status: string; [key: string]: unknown }>(
+    `/llm-credentials/${encodeURIComponent(id)}${qs}`,
+    { method: "DELETE" },
+  )
+}
+
+export async function testLlmCredentialById(id: string): Promise<LLMCredentialTestResult> {
+  return request<LLMCredentialTestResult>(
+    `/llm-credentials/${encodeURIComponent(id)}/test`,
+    { method: "POST" },
+  )
+}
+
 // ─── B14 Part C row 224: Verify the merger-agent-bot Gerrit group ───
 //
 // Gerrit Setup Wizard Step 3 shows the operator the SSH commands they must

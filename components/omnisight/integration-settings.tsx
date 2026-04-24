@@ -870,6 +870,480 @@ function AccountManagerSection({
   )
 }
 
+// ─── Phase 5b-4 (#llm-credentials) — LLMCredentialManagerSection ───────────
+//
+// Replaces the legacy single-field-per-provider LLM PROVIDERS grid (8 password
+// inputs saved via `PUT /runtime/settings`) with a per-provider, multi-account,
+// DB-backed manager that wraps the `/api/v1/llm-credentials` CRUD surface
+// (Phase 5b-3). Each provider tab lists its credentials with masked
+// fingerprints; per-row TEST probes the stored key live (POST {id}/test);
+// per-row ROTATE swaps the key in-place (PATCH {id} {value}); per-row SET
+// promotes to platform default (PATCH {id} {is_default: true}); DELETE shows a
+// confirm dialog with an auto-elect-new-default note. ADD supports the same
+// metadata.base_url for Ollama and plain label+value for the 8 keyed providers.
+//
+// Why no "TEST BEFORE SAVE" affordance: unlike git-forge credentials, the
+// backend does not expose an unsaved-candidate probe endpoint for LLMs. The
+// Phase 5b-3 test surface is strictly saved-credential-id scoped. Operators
+// SAVE first, then use the per-row TEST button.
+
+const LLM_PROVIDERS_META: Array<{
+  id: api.LLMCredentialProvider
+  label: string
+  color: string
+  hint: string
+  keyless: boolean
+}> = [
+  { id: "anthropic", label: "Anthropic", color: "var(--neural-blue)", hint: "Claude — x-api-key header auth", keyless: false },
+  { id: "openai", label: "OpenAI", color: "var(--validation-emerald)", hint: "GPT — Bearer auth", keyless: false },
+  { id: "google", label: "Google", color: "var(--hardware-orange)", hint: "Gemini — query-param key auth", keyless: false },
+  { id: "openrouter", label: "OpenRouter", color: "var(--neural-purple)", hint: "Aggregator — Bearer auth", keyless: false },
+  { id: "xai", label: "xAI (Grok)", color: "var(--critical-red)", hint: "Grok — Bearer auth", keyless: false },
+  { id: "groq", label: "Groq", color: "var(--neural-blue)", hint: "Groq LPU — Bearer auth", keyless: false },
+  { id: "deepseek", label: "DeepSeek", color: "var(--validation-emerald)", hint: "DeepSeek — Bearer auth", keyless: false },
+  { id: "together", label: "Together", color: "var(--hardware-orange)", hint: "Together.ai — Bearer auth", keyless: false },
+  { id: "ollama", label: "Ollama", color: "var(--neural-purple)", hint: "Local (no key) — needs metadata.base_url", keyless: true },
+]
+
+interface NewLlmCredentialForm {
+  label: string
+  value: string
+  base_url: string     // ollama only
+  is_default: boolean
+}
+
+const EMPTY_LLM_FORM: NewLlmCredentialForm = {
+  label: "",
+  value: "",
+  base_url: "",
+  is_default: false,
+}
+
+function llmProviderMeta(p: api.LLMCredentialProvider) {
+  return LLM_PROVIDERS_META.find(x => x.id === p) ?? LLM_PROVIDERS_META[0]
+}
+
+function LLMCredentialManagerSection() {
+  const [creds, setCreds] = useState<api.LLMCredential[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [activeProvider, setActiveProvider] = useState<api.LLMCredentialProvider>("anthropic")
+  const [adding, setAdding] = useState(false)
+  const [form, setForm] = useState<NewLlmCredentialForm>(EMPTY_LLM_FORM)
+  const [submitting, setSubmitting] = useState(false)
+  const [perRowTest, setPerRowTest] = useState<Record<string, TestResult & { running?: boolean }>>({})
+  const [rotating, setRotating] = useState<api.LLMCredential | null>(null)
+  const [rotateValue, setRotateValue] = useState("")
+  const [rotateSubmitting, setRotateSubmitting] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<api.LLMCredential | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const resp = await api.listLlmCredentials()
+      setCreds(resp.items)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const filtered = creds.filter(c => c.provider === activeProvider)
+
+  const handleSubmitNew = async () => {
+    setSubmitting(true)
+    setError(null)
+    try {
+      const meta = llmProviderMeta(activeProvider)
+      const body: api.LLMCredentialCreate = {
+        provider: activeProvider,
+        label: form.label.trim(),
+        value: meta.keyless ? "" : form.value,
+        is_default: form.is_default,
+        metadata: meta.keyless && form.base_url.trim()
+          ? { base_url: form.base_url.trim() }
+          : {},
+      }
+      await api.createLlmCredential(body)
+      setAdding(false)
+      setForm(EMPTY_LLM_FORM)
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleTestRow = async (c: api.LLMCredential) => {
+    setPerRowTest(prev => ({ ...prev, [c.id]: { status: "testing", running: true } }))
+    try {
+      const r = await api.testLlmCredentialById(c.id)
+      setPerRowTest(prev => ({ ...prev, [c.id]: { ...r, running: false } as TestResult }))
+    } catch (e) {
+      setPerRowTest(prev => ({
+        ...prev,
+        [c.id]: { status: "error", message: String(e), running: false },
+      }))
+    }
+  }
+
+  const handleSetDefault = async (c: api.LLMCredential) => {
+    if (c.is_default) return
+    setError(null)
+    try {
+      await api.updateLlmCredential(c.id, { is_default: true })
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const handleConfirmRotate = async () => {
+    if (!rotating) return
+    setRotateSubmitting(true)
+    setError(null)
+    try {
+      await api.updateLlmCredential(rotating.id, { value: rotateValue })
+      setRotating(null)
+      setRotateValue("")
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setRotateSubmitting(false)
+    }
+  }
+
+  const handleConfirmDelete = async () => {
+    if (!confirmDelete) return
+    setDeleting(true)
+    setError(null)
+    try {
+      await api.deleteLlmCredential(confirmDelete.id, { auto_elect_new_default: true })
+      setConfirmDelete(null)
+      setPerRowTest(prev => {
+        const next = { ...prev }
+        delete next[confirmDelete.id]
+        return next
+      })
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const renderRow = (c: api.LLMCredential) => {
+    const meta = llmProviderMeta(c.provider)
+    const test = perRowTest[c.id]
+    const baseUrl = typeof c.metadata?.base_url === "string" ? c.metadata.base_url as string : ""
+    return (
+      <div
+        key={c.id}
+        data-testid={`llm-credential-row-${c.id}`}
+        className="flex items-start gap-2 p-1.5 rounded border border-[var(--border)] bg-[var(--background)]"
+      >
+        <span
+          className="font-mono text-[8px] px-1 py-0.5 rounded uppercase shrink-0 mt-0.5"
+          style={{ backgroundColor: `${meta.color}22`, color: meta.color }}
+        >
+          {c.provider}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[10px] text-[var(--foreground)] truncate" title={c.label || c.id}>
+              {c.label || c.id}
+            </span>
+            {c.is_default && (
+              <span
+                title="Provider default — resolver picks this when no explicit credential is requested"
+                className="font-mono text-[8px] px-1 py-0.5 rounded bg-[var(--validation-emerald)]/15 text-[var(--validation-emerald)]"
+                data-testid={`llm-credential-default-badge-${c.id}`}
+              >
+                ★ DEFAULT
+              </span>
+            )}
+            {!c.enabled && (
+              <span className="font-mono text-[8px] px-1 py-0.5 rounded bg-[var(--muted-foreground)]/15 text-[var(--muted-foreground)]">
+                DISABLED
+              </span>
+            )}
+          </div>
+          <div className="font-mono text-[8px] text-[var(--muted-foreground)] truncate">
+            {c.value_fingerprint
+              ? <span>key {c.value_fingerprint}</span>
+              : meta.keyless
+                ? <span>keyless · {baseUrl || "(no base_url)"}</span>
+                : <span>(no key)</span>}
+          </div>
+          {test && (
+            <div
+              data-testid={`llm-credential-test-result-${c.id}`}
+              className={`font-mono text-[8px] mt-0.5 ${
+                test.status === "ok" ? "text-[var(--validation-emerald)]"
+                : test.status === "testing" ? "text-[var(--neural-blue)]"
+                : "text-[var(--critical-red)]"
+              }`}
+            >
+              {test.status === "testing" ? "TESTING…" : `${(test.status as string).toUpperCase()}: ${test.message ?? (test.model_count !== undefined ? `${test.model_count} models` : "ok")}`}
+            </div>
+          )}
+        </div>
+        {!c.is_default && (
+          <button
+            onClick={() => handleSetDefault(c)}
+            title="Set as provider default"
+            data-testid={`llm-credential-set-default-${c.id}`}
+            className="px-1.5 py-0.5 rounded font-mono text-[8px] bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/10 shrink-0"
+          >
+            ★ SET
+          </button>
+        )}
+        <button
+          onClick={() => handleTestRow(c)}
+          disabled={test?.running}
+          title="Probe this credential's stored key against the provider's list-models endpoint"
+          data-testid={`llm-credential-test-${c.id}`}
+          className="px-1.5 py-0.5 rounded font-mono text-[8px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-30 shrink-0"
+        >
+          TEST
+        </button>
+        {!meta.keyless && (
+          <button
+            onClick={() => { setRotating(c); setRotateValue("") }}
+            title="Rotate the API key in place (old ciphertext replaced, version bumped)"
+            data-testid={`llm-credential-rotate-${c.id}`}
+            className="px-1.5 py-0.5 rounded font-mono text-[8px] bg-[var(--hardware-orange)]/10 text-[var(--hardware-orange)] hover:bg-[var(--hardware-orange)]/20 shrink-0"
+          >
+            ROTATE
+          </button>
+        )}
+        <button
+          onClick={() => setConfirmDelete(c)}
+          title="Delete this credential"
+          data-testid={`llm-credential-delete-${c.id}`}
+          className="p-0.5 rounded hover:bg-[var(--critical-red)]/10 shrink-0"
+        >
+          <Trash2 size={10} className="text-[var(--muted-foreground)] hover:text-[var(--critical-red)]" />
+        </button>
+      </div>
+    )
+  }
+
+  const activeMeta = llmProviderMeta(activeProvider)
+
+  return (
+    <div className="space-y-2" data-testid="llm-credential-manager-section">
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px] font-bold text-[var(--neural-blue)]">
+          LLM CREDENTIALS
+        </span>
+        <button
+          onClick={refresh}
+          disabled={loading}
+          className="font-mono text-[8px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] disabled:opacity-30"
+          title="Reload from /llm-credentials"
+        >
+          {loading ? "…" : "REFRESH"}
+        </button>
+      </div>
+      <div className="font-mono text-[8px] text-[var(--muted-foreground)]/80 leading-relaxed">
+        Multi-account LLM provider keys, Fernet-encrypted at rest. Resolver picks
+        the ⭐ default per provider unless explicitly overridden. Plaintext never
+        leaves the server — list shows masked fingerprints only. Changes persist
+        across backend restarts.
+      </div>
+
+      {/* Provider tabs */}
+      <div className="flex items-center gap-1 border-b border-[var(--border)] overflow-x-auto">
+        {LLM_PROVIDERS_META.map(p => (
+          <button
+            key={p.id}
+            data-testid={`llm-credential-provider-tab-${p.id}`}
+            onClick={() => { setActiveProvider(p.id); setAdding(false) }}
+            className={`px-2 py-1 font-mono text-[9px] uppercase tracking-wider transition-colors whitespace-nowrap ${
+              activeProvider === p.id
+                ? "text-[var(--foreground)] border-b-2"
+                : "text-[var(--muted-foreground)] border-b-2 border-transparent"
+            }`}
+            style={activeProvider === p.id ? { borderBottomColor: p.color } : undefined}
+          >
+            {p.label}
+            {creds.filter(c => c.provider === p.id).length > 0 && (
+              <span
+                className="ml-1 px-1 py-0.5 rounded text-[7px] normal-case"
+                style={{ backgroundColor: `${p.color}22`, color: p.color }}
+              >
+                {creds.filter(c => c.provider === p.id).length}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {error && (
+        <div
+          data-testid="llm-credential-manager-error"
+          className="font-mono text-[9px] text-[var(--critical-red)] bg-[var(--critical-red)]/10 px-2 py-1 rounded"
+        >
+          {error}
+        </div>
+      )}
+
+      {/* Credential list */}
+      {loading ? (
+        <div className="font-mono text-[9px] text-[var(--muted-foreground)] py-2">Loading…</div>
+      ) : filtered.length === 0 ? (
+        <div className="font-mono text-[9px] text-[var(--muted-foreground)] opacity-60 py-1">
+          No {activeMeta.label} credentials yet — use ADD to create one.
+        </div>
+      ) : (
+        <div className="space-y-1">{filtered.map(renderRow)}</div>
+      )}
+
+      {/* Add form */}
+      {adding ? (
+        <div
+          className="mt-1 p-2 rounded border space-y-1.5"
+          style={{ borderColor: `${activeMeta.color}55` }}
+          data-testid="llm-credential-add-form"
+        >
+          <div className="font-mono text-[8px] uppercase tracking-wider" style={{ color: activeMeta.color }}>
+            Add {activeMeta.label} credential · {activeMeta.hint}
+          </div>
+          <SettingField label="Label" value={form.label} onChange={v => setForm(f => ({ ...f, label: v }))} />
+          {activeMeta.keyless ? (
+            <SettingField label="Base URL" value={form.base_url} onChange={v => setForm(f => ({ ...f, base_url: v }))} />
+          ) : (
+            <SettingField label="API Key" value={form.value} type="password" onChange={v => setForm(f => ({ ...f, value: v }))} />
+          )}
+          <div className="flex items-center gap-2">
+            <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Default ⭐</label>
+            <button
+              onClick={() => setForm(f => ({ ...f, is_default: !f.is_default }))}
+              className={`px-2 py-0.5 rounded font-mono text-[9px] transition-colors ${
+                form.is_default
+                  ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
+                  : "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+              }`}
+              data-testid="llm-credential-form-default-toggle"
+            >
+              {form.is_default ? "ON" : "OFF"}
+            </button>
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => { setAdding(false); setForm(EMPTY_LLM_FORM) }}
+              className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]"
+              data-testid="llm-credential-form-cancel"
+            >
+              CANCEL
+            </button>
+            <button
+              onClick={handleSubmitNew}
+              disabled={submitting}
+              data-testid="llm-credential-form-save"
+              className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)] text-black font-semibold disabled:opacity-30"
+            >
+              {submitting ? "SAVING…" : "SAVE"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={() => setAdding(true)}
+          data-testid="llm-credential-add-button"
+          className="mt-1 flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] hover:bg-[var(--background)] transition-colors"
+          style={{ color: activeMeta.color }}
+        >
+          <Plus size={10} /> Add {activeMeta.label} Credential
+        </button>
+      )}
+
+      {/* Rotate dialog */}
+      {rotating && (
+        <div
+          data-testid="llm-credential-rotate-dialog"
+          className="mt-1 p-2 rounded border border-[var(--hardware-orange)]/40 bg-[var(--hardware-orange)]/5 space-y-1.5"
+        >
+          <div className="font-mono text-[9px] text-[var(--hardware-orange)] uppercase tracking-wider">
+            Rotate {rotating.label || rotating.id} · {rotating.provider}
+          </div>
+          <div className="font-mono text-[8px] text-[var(--muted-foreground)]">
+            Current key {rotating.value_fingerprint || "(unset)"}. Paste the new key
+            below — old ciphertext is replaced on PATCH and the version counter bumps.
+          </div>
+          <SettingField
+            label="New Key"
+            value={rotateValue}
+            type="password"
+            onChange={v => setRotateValue(v)}
+          />
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => { setRotating(null); setRotateValue("") }}
+              className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]"
+              data-testid="llm-credential-rotate-cancel"
+            >
+              CANCEL
+            </button>
+            <button
+              onClick={handleConfirmRotate}
+              disabled={rotateSubmitting || rotateValue.length === 0}
+              data-testid="llm-credential-rotate-confirm"
+              className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--hardware-orange)] text-black font-semibold disabled:opacity-30"
+            >
+              {rotateSubmitting ? "ROTATING…" : "ROTATE"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirm */}
+      {confirmDelete && (
+        <div
+          data-testid="llm-credential-delete-confirm"
+          className="mt-1 p-2 rounded border border-[var(--critical-red)]/40 bg-[var(--critical-red)]/5 space-y-1.5"
+        >
+          <div className="font-mono text-[9px] text-[var(--critical-red)] uppercase tracking-wider">
+            Delete {confirmDelete.label || confirmDelete.id}?
+          </div>
+          {confirmDelete.is_default && (
+            <div className="font-mono text-[8px] text-[var(--hardware-orange)]">
+              ⚠ This is the provider default. Backend will auto-elect the next
+              available {confirmDelete.provider} credential if any exists.
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => setConfirmDelete(null)}
+              className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]"
+              data-testid="llm-credential-delete-cancel"
+            >
+              CANCEL
+            </button>
+            <button
+              onClick={handleConfirmDelete}
+              disabled={deleting}
+              data-testid="llm-credential-delete-confirm-button"
+              className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--critical-red)] text-black font-semibold disabled:opacity-30"
+            >
+              {deleting ? "DELETING…" : "DELETE"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function formatBytes(n: number): string {
   if (n === 0) return "0 B"
   const units = ["B", "KiB", "MiB", "GiB", "TiB"]
@@ -3423,9 +3897,6 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                   rejected: {Object.entries(saveFeedback.rejected).map(([k, v]) => `${k} (${v})`).join("; ")}
                 </div>
               )}
-              <div className="opacity-50 mt-0.5">
-                note: changes are runtime-only and will reset on backend restart
-              </div>
             </div>
           )}
           {saveFeedback && saveFeedback.kind === "error" && (
@@ -3490,50 +3961,15 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 </>
               )
             })()}
-            {/* API Keys with status indicators */}
-            <div className="pt-1.5 pb-0.5">
-              <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider">API Keys</span>
-            </div>
-            {[
-              { id: "anthropic", label: "Anthropic", key: "anthropic_api_key" },
-              { id: "openai", label: "OpenAI", key: "openai_api_key" },
-              { id: "google", label: "Google", key: "google_api_key" },
-              { id: "openrouter", label: "OpenRouter", key: "openrouter_api_key" },
-              { id: "xai", label: "xAI (Grok)", key: "xai_api_key" },
-              { id: "groq", label: "Groq", key: "groq_api_key" },
-              { id: "deepseek", label: "DeepSeek", key: "deepseek_api_key" },
-              { id: "together", label: "Together", key: "together_api_key" },
-            ].map(({ id, label, key }) => {
-              const configured = providers.find(p => p.id === id)?.configured ?? false
-              const hasLocalEdit = key in dirty && String(dirty[key]).length > 0
-              const showConfigured = configured || hasLocalEdit
-              return (
-                <div key={id} className="flex items-center gap-2">
-                  <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 flex items-center gap-1">
-                    <span className={`w-1.5 h-1.5 rounded-full ${showConfigured ? "bg-[var(--validation-emerald)]" : "bg-[var(--muted-foreground)]/30"}`} />
-                    {label}
-                  </label>
-                  <input
-                    type="password"
-                    value={key in dirty ? String(dirty[key]) : String(settingsData["llm"]?.[key] ?? "")}
-                    onChange={e => setVal(key, e.target.value)}
-                    placeholder={configured ? "••• configured •••" : "paste key here"}
-                    className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50 focus:outline-none focus:border-[var(--neural-blue)]"
-                  />
-                </div>
-              )
-            })}
-            <div className="flex items-center gap-2">
-              <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 flex items-center gap-1">
-                <span className={`w-1.5 h-1.5 rounded-full ${providers.find(p => p.id === "ollama")?.configured ? "bg-[var(--validation-emerald)]" : "bg-[var(--muted-foreground)]/30"}`} />
-                Ollama
-              </label>
-              <input
-                type="text"
-                value={"ollama_base_url" in dirty ? String(dirty["ollama_base_url"]) : String(settingsData["llm"]?.["ollama_base_url"] ?? "http://localhost:11434")}
-                onChange={e => setVal("ollama_base_url", e.target.value)}
-                className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
-              />
+            {/* Phase 5b-4 (#llm-credentials) — multi-account, DB-backed key
+                manager replaces the legacy 8-password-field grid + single
+                Ollama base URL input. Credentials are Fernet-encrypted at
+                rest and persist across backend restarts. The provider /
+                model / fallback-chain dropdowns above still go through
+                PUT /runtime/settings (they are routing knobs, not
+                credentials). */}
+            <div className="pt-1.5">
+              <LLMCredentialManagerSection />
             </div>
             <div className="pt-1">
               <SettingField label="Fallback" value={getVal("llm", "fallback_chain")} onChange={v => setVal("llm_fallback_chain", v)} />
