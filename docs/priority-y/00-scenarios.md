@@ -2,7 +2,7 @@
 
 > 文件起點：2026-04-25  
 > 對應 TODO：`Y0. Multi-user × Multi-project 情境盤點 + 架構文件 (#276)`  
-> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-5（多專案同產品線 — Doorbell 線下三 project 分開計費共用 SOP / skill pack）**，承接 S-1 / S-2 / S-3 / S-4 已落地章節；其餘 S-6～S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
+> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-6（多分支同專案 — Doorbell V1 客戶 A 量產期下 main / staging / v2.1-hotfix / customer-x-fork 四 branch 並行開發、workspace 要能同時保有）**，承接 S-1 / S-2 / S-3 / S-4 / S-5 已落地章節；其餘 S-7～S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
 
 ---
 
@@ -14,8 +14,8 @@
 | [S-2 多租戶單用戶](#s-2-多租戶單用戶) | `[x]` 第 2 勾選 | 完成（2026-04-25） |
 | [S-3 跨租戶協作](#s-3-跨租戶協作) | `[x]` 第 3 勾選 | 完成（2026-04-25） |
 | [S-4 多產品線](#s-4-多產品線) | `[x]` 第 4 勾選 | 完成（2026-04-25） |
-| [S-5 多專案同產品線](#s-5-多專案同產品線) | `[x]` 第 5 勾選（本 row） | **本次完成** |
-| [S-6 多分支同專案](#s-6-多分支同專案) | `[ ]` 第 6 勾選 | Skeleton |
+| [S-5 多專案同產品線](#s-5-多專案同產品線) | `[x]` 第 5 勾選 | 完成（2026-04-25） |
+| [S-6 多分支同專案](#s-6-多分支同專案) | `[x]` 第 6 勾選（本 row） | **本次完成** |
 | [S-7 消失用戶回收](#s-7-消失用戶回收) | `[ ]` 第 7 勾選 | Skeleton |
 | [S-8 熱點撞牆](#s-8-熱點撞牆) | `[ ]` 第 8 勾選 | Skeleton |
 | [S-9 遺留相容](#s-9-遺留相容) | `[ ]` 第 9 勾選 | Skeleton |
@@ -1554,9 +1554,368 @@ S-5 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
 
 ## S-6 多分支同專案
 
-> **Skeleton — TBD by future row** (TODO 第 6 勾選)。
-> 一個專案下 `main / staging / v2.1-hotfix / customer-x-fork` 四 branch 並行開發，workspace 要能同時保有。
-> 預定章節：S-6.1 workspace 路徑模型、S-6.2 git worktree 策略、S-6.3 branch-level GC。
+> 一個專案下 `main / staging / v2.1-hotfix / customer-x-fork` 四 branch 並行開發，workspace 要能同時保有；branch 是 first-class scope（介於 project 與 task 之間）、有獨立 lifecycle / 獨立 workspace path / 獨立並行 lock，但不另起 quota / RBAC 階層。
+
+### S-6.1 角色 Persona — Doorbell V1 客戶 A 量產期下的 4 branch
+
+承接 S-5.1 Doorbell `firmware-doorbell-v1-customer-a` project（Quinn = owner、production stage、customer A 綁定）；S-6 把該 project 內部 branch 模型展開：
+
+| Branch | 用途 | 預設 push policy | 預設 reviewer | 工程角色對應 |
+|---|---|---|---|---|
+| **`main`** | trunk、客戶 A 量產追溯來源 | protected — 走 PR + 兩位 admin / line owner approve；禁直推 | Doris (line owner) + Bob (tenant admin) 必至少一人 | Carol（contributor）平日 PR 標的、不能直推 |
+| **`staging`** | 整合 / pre-prod、跑完整 nightly 測試套組 | protected — fast-forward only from feature branches；禁強制覆蓋 | Quinn (project owner) | Carol / Pam 各自 feature merge 進來測 |
+| **`v2.1-hotfix`** | 量產出貨後的緊急修補（customer A 已部署 v2.1，hotfix 不能等下一次 staging release）| 允許 cherry-pick 自 main、不允許 staging 雜訊；merge 必走 fast-forward | Quinn + Doris 雙簽 | 緊急時 oncall 工程師（依 S-4.4 routing）直接開 worktree |
+| **`customer-x-fork`** | customer A 客製分支（含客戶私有 secrets / 客戶限定 telemetry）、不回流 main | private — 不公開 PR；diff 紀錄寫進 customer A audit chain（呼應 S-5.3 雙鏈）| Bob (tenant admin) — 客戶分支的合規責任歸屬 | Pam（IPCam line owner、跨支援）受邀 reviewer；Carol 不能直接 push 客戶分支需 Bob grant |
+
+**S-6.1 設計斷言**：
+1. **branch 不是新 RBAC 階層** — 上表的「reviewer」「push policy」是 project-scoped policy（存在 `projects.metadata.branch_policies` 或 `project_branches` 表的 column）、不是 user role 屬性；Quinn 仍是 V1 project owner、Carol 仍是 V1 contributor、僅各 branch 的「能否 push / 能否 merge」由 policy 評估。維持 S-1.6 RBAC 二維 (user × scope) 模型不擴成三維。
+2. **branch 是 first-class scope，介於 project 與 task** — workspace path / workflow_run attribution / git worktree 都依 `(project, branch)` 為 key；但 LLM cap / git_account / SOP / on-call routing 仍走 project / line / tenant 既有三層繼承（S-5.4），不為 branch 另設第四層 — 否則 resolver 爆炸（project × branch × line × tenant 四層、預設值組合過多）。
+3. **`customer-x-fork` 不是 cross-tenant share** — 客戶 A 是 acme tenant 內部 `customer_accounts` row（S-5.3）、不是獨立 OmniSight tenant；customer-x-fork branch 的 commit / artifact 仍存 acme tenant 內、僅 RBAC + audit chain 加倍嚴格（雙鏈寫 acme + customer-A、push policy 從 line owner 升 tenant admin）。若 customer A 自己也是 OmniSight tenant 想直接看 fork → 走 S-3 cross-tenant share 路徑（S-5.9 Q1 已標）。
+4. **branch 名稱有保留字 + 強制白名單** — `main / master / staging / production / hotfix*/release-*/customer-*-fork` 是 first-class 名稱（policy 預設套用嚴格 reviewer 規則）；`agent/*` / `task/*` / `retry/*` 是系統保留命名（worktree 內部使用，user 不能直接建）— 防 user 開 `agent/anything` branch 干擾系統 retry path（呼應 backend/workspace.py:50-56 anchor commit + agent branch 約定）。
+5. **branch policy 可繼承 line / tenant default、可 per-branch override** — Doorbell 線預設「`main`/`staging` protected、`customer-*-fork` private」由 line owner Doris 設一次；V1 project 內若 Quinn 想為 `staging` 額外加「強制 nightly 過綠」就走 project-scoped override（與 S-5.4 SOP override 同模式、預設 inherit、顯式 override）。
+6. **同 user 同 project 不同 branch 不同 capability** — Carol 在 V1 `main` 是「能開 PR 不能直推」、在 `staging` 是「能直推 feature/* 但 main merge 要 reviewer」、在 `customer-x-fork` 是「需 Bob grant 才能 push」；UI 在 branch picker 切換時動態展示 capability badge（不切 sidebar 結構、僅切 inline button enable 狀態）。
+
+### S-6.2 Workspace 路徑模型 — 從 agent-scoped 升至 (project, branch, agent, task) 巢狀
+
+**現況**（S-6.10 row 1: `backend/workspace.py:29 + 96-104`）：
+```
+.agent_workspaces/
+└── {safe_agent_id}/                      # ← 唯一鍵
+    └── agent/{safe_agent}/{safe_task}    # ← git branch 名
+```
+
+**S-6 要求**：四 branch 並行存在 + 每 branch 內可有多 agent task workspace + 不破壞既有 agent retry anchor 機制 → 升至：
+
+```
+.agent_workspaces/
+├── {tenant_id}/                          # S-2 多租戶單用戶（在 multi-tenant 啟用後 nest）
+│   └── {product_line_id}/                # S-4 多產品線（pl-default fallback）
+│       └── {project_id}/                 # S-5 project（含 default project）
+│           ├── _branches/
+│           │   ├── main/                 # ← S-6 新增：long-lived branch worktree
+│           │   ├── staging/
+│           │   ├── v2.1-hotfix/
+│           │   └── customer-x-fork/
+│           └── _tasks/
+│               └── {agent_id}/{task_id}/ # ← 既有 agent task workspace、改路徑但結構不變
+└── _legacy/                              # 既有 .agent_workspaces/{agent_id} 透過 symlink 兼容
+    └── {agent_id} → ../<full_path>       # 1 release 過渡期保留
+```
+
+**Path sanitization invariant**（沿用既有 `re.sub(r'[^a-zA-Z0-9_-]', '_', x)` 模式）：每段（tenant_id / product_line_id / project_id / branch / agent_id / task_id）獨立 sanitize；branch 額外處理 `/` → `__`（branch `feature/foo` 落地為 `feature__foo`，UI 反映原值）。
+
+**S-6.2 設計斷言**：
+1. **`_branches/` 與 `_tasks/` 分兩個子目錄、不混合** — long-lived branch worktree 是「永久 checkout、agent 進去做事」、agent task workspace 是「臨時 worktree、用完 finalize / cleanup」；兩者 lifecycle 完全不同（branch 跟 git ref、task 跟 task lifecycle）— 同層混放會讓 GC policy 爆炸（cleanup 既存 agent task 又要排除 long-lived branch）。
+2. **底線前綴 `_branches/` / `_tasks/` 是保留字** — 防 branch 取名 `branches` 或 project 取名 `tasks` 撞路徑（OS 層面 hard collision）；底線前綴是 OmniSight 內部 namespace marker（與 git refs `refs/heads` / `refs/tags` 設計同哲學）。
+3. **既有 `.agent_workspaces/{agent_id}` 透過 `_legacy/` symlink 過渡** — 1 release 過渡期保留 symlink、避免既有 agent / 既有 audit log path reference / 既有 finalized workspace 全部立刻失效；遷移時對既有 row 跑 backfill `migrate_workspace_paths()` script（不複製檔案、僅建 symlink + 更新 `agent_workspaces` table 的 `path` 欄位）。
+4. **每段 sanitize 獨立、不允許跨段 escape** — 嚴格白名單 `^[a-zA-Z0-9_-]+$` per segment；branch 的 `/` 是合法 git 規約但落地必轉 `__`（雙 underscore 因為單 underscore 會與 sanitize 後的非法字元混淆）；防 `../` path traversal + 防 user 取 branch `..` 或 `.git` 等保留名（reject 422）。
+5. **路徑不嵌入 customer_account_id 或 lifecycle_stage** — project_id 已唯一識別、customer_account_id 是計費 attribution（S-5.3）、lifecycle_stage 是狀態機（S-5.5），都是 column-level metadata 不該影響 disk path（避免 lifecycle promote 時整個 workspace 大搬家、避免 customer rebind 時 workspace 路徑漂）。
+6. **disk quota 仍走 tenant-scope（既有 `backend/tenant_quota.py`）+ 新增 per-branch breakdown view** — Y9 dashboard 加「V1 內 4 branch 各佔多少 disk」切片頁；硬上限仍是 tenant 級（plan-based），per-branch 是觀察用 not enforcement。
+7. **完全相容既有 `agent/{safe_agent}/{safe_task}` git branch 命名** — workspace path 改了但**不**改 git branch 命名規約（`agent/*` / `task/*` 仍由 backend/workspace.py:139-143 生成）；branch 名只是 worktree 內部的 ref，不出現在 disk path（disk path 用 `task_id` segment 而非 git branch 名）。
+
+### S-6.3 Git Worktree 策略 — 1 bare clone × N worktree
+
+**現況**（S-6.10 row 3: `backend/workspace.py:161-198`）：每次 `ws_provision` 對 `_MAIN_REPO`（即 OmniSight repo 自身）跑 `git worktree add`，agent task 結束後 `git worktree remove`；單個 long-lived 主倉、N 個短命 worktree。
+
+**S-6 要求**：對「**外部**客戶 git repo」（如 customer A 的 firmware repo）支援 4 個 long-lived branch worktree + N 個臨時 agent task worktree → 升至：
+
+```
+{workspaces_root}/{tenant}/{line}/{project}/
+├── _bare/                                # ← S-6 新增：每 project 一個 bare clone
+│   ├── HEAD
+│   ├── objects/
+│   ├── refs/
+│   └── packed-refs                       # 共享 object store、所有 worktree 從這裡 fork
+├── _branches/
+│   ├── main/                             # git worktree add ../../_bare main
+│   ├── staging/
+│   ├── v2.1-hotfix/
+│   └── customer-x-fork/
+└── _tasks/{agent_id}/{task_id}/          # git worktree add ../../_bare agent/{agent_id}/{task_id}
+```
+
+**啟動偽碼**（S-6 落地時 Y6 / R 系列實作）：
+
+```python
+# backend/workspace.py 新增（取代既有 _MAIN_REPO 單根模型）
+async def ensure_project_bare(project_id: str, repo_source: str) -> Path:
+    """確保 project bare clone 存在；不存在時 git clone --bare。
+    
+    Module-global state 稽核：bare path 由 (workspaces_root, project_id) 決定、
+    每 worker 推導出同樣值（合格答案 #1）；bare clone 本身的並發走 PG advisory
+    lock（合格答案 #2）。"""
+    bare = workspaces_root / project.tenant_id / project.product_line_id / project_id / "_bare"
+    if bare.exists():
+        return bare
+    async with pg_advisory_lock(("project_bare", project_id)):
+        if bare.exists():  # 雙重檢查（lock 等到時可能已被別 worker 建好）
+            return bare
+        await _run(f'git clone --bare "{repo_source}" "{bare}"')
+        return bare
+
+async def provision_branch_worktree(project_id: str, branch: str) -> Path:
+    """確保 long-lived branch worktree 存在（idempotent）。"""
+    bare = await ensure_project_bare(project_id, repo_source)
+    safe_branch = branch.replace("/", "__")
+    wt = bare.parent / "_branches" / safe_branch
+    async with pg_advisory_lock(("branch_worktree", project_id, branch)):
+        if wt.exists() and (wt / ".git").exists():
+            # 確保 ref 仍指對；可能 upstream 被 force-push、本地 stale
+            await _run(f'git fetch origin "{branch}:{branch}"', cwd=wt)
+            return wt
+        await _run(f'git worktree add "{wt}" "{branch}"', cwd=bare)
+        return wt
+
+async def provision_agent_task_worktree(project_id: str, agent_id: str, task_id: str,
+                                         base_branch: str) -> Path:
+    """既有 ws_provision 流程；現在多了 base_branch 參數（取代隱式 HEAD）。"""
+    bare = await ensure_project_bare(project_id, repo_source)
+    agent_branch = f"agent/{sanitize(agent_id)}/{sanitize(task_id)}"
+    wt = bare.parent / "_tasks" / sanitize(agent_id) / sanitize(task_id)
+    async with pg_advisory_lock(("agent_worktree", project_id, agent_id, task_id)):
+        # 從指定 base_branch（main / staging / v2.1-hotfix）fork agent branch
+        await _run(f'git branch "{agent_branch}" "{base_branch}"', cwd=bare)
+        await _run(f'git worktree add "{wt}" "{agent_branch}"', cwd=bare)
+        # ... 既有 anchor_sha 邏輯（backend/workspace.py:200-214）保持不變
+        return wt
+```
+
+**S-6.3 設計斷言**：
+1. **Bare clone per project，所有 worktree 共用 object store** — 4 個 long-lived branch + N 個 agent task worktree 共用同一 `_bare/objects/`，磁碟省 4×~ + git fetch 只下載一次；bare clone 本身是 idempotent（雙重檢查 + advisory lock）每 worker 從相同 source 推導出相同路徑（合格答案 #1）。
+2. **PG advisory lock keyed (project_id, branch)** — 取代既有「靠 agent_id 唯一性 + 無鎖」模型；同 project 同 branch 兩個 in-flight 操作（如 worktree add 與 branch fetch）必序列化；不同 branch / 不同 project 完全 parallel。Lock key namespace 用 hash(("branch_worktree", project_id, branch)) 對應 PG 64-bit advisory lock id；txn level 鎖（自動釋放）。
+3. **Long-lived branch worktree 與 agent task worktree 兩條獨立 path** — `provision_branch_worktree` / `provision_agent_task_worktree` 分兩 function、不共用 `_workspaces` registry（branch worktree 不註冊到 `_workspaces` dict、後者只追蹤 ephemeral agent task）；理由：lifecycle 不同（前者跟 branch、後者跟 task）、cleanup policy 不同、registry 共用會混淆 GC 範圍。
+4. **`agent/{agent}/{task}` 仍從指定 `base_branch` fork 而非從隱式 HEAD** — 既有 `backend/workspace.py:164` 的 `git branch "{branch}" HEAD` 升為 `git branch "{agent_branch}" "{base_branch}"`；workflow_run 觸發時必帶 `branch` 參數（S-6.5 endpoint 規格化）；缺 branch 預設 `main`（與既有 HEAD 行為對齊但顯式化）。
+5. **External clone path（既有 `git clone "{source}" "{ws_path}"`）退役**（`backend/workspace.py:193-197`） — 改一律走「先 bare clone 一份 → worktree add」；理由：既有路徑每 task fresh clone 浪費頻寬 + 每 task 各自 push 認證、改 bare clone 後 4 branch + N task 共用一次 fetch 的 object pack。external repo 的 auth env（`backend/git_auth.py`）只在 bare clone 時用一次。
+6. **Force-push detection + recovery** — `provision_branch_worktree` 的 fetch 步驟若回 `non-fast-forward` 警告（即 upstream 被 force-push）、worktree 內 working tree 標 stale、SSE 推 project owner notification + audit 寫 `branch.upstream_force_pushed(branch=...)` 不自動 reset；強制 reset 走人類動作 `POST /projects/{id}/branches/{branch}/reset-to-upstream` + step-up MFA（防意外 lose 本地 commit）。
+7. **保留 anchor_sha 不變**（呼應既有 R8 #314 design） — `provision_agent_task_worktree` 仍 capture `anchor_sha`、retry path 仍從 anchor 重建；S-6 把 anchor 概念明確 anchor 在「branch fork 時 base_branch 的當下 HEAD」（既有「HEAD」隱式版本對齊）。
+
+### S-6.4 Branch Lifecycle 狀態機 — long-lived vs ephemeral
+
+S-6 引入 typed branch type + lifecycle stage：
+
+```
+                                           ┌── deleted (可選；ref 真的刪掉)
+                                           ▼
+   ┌── active ──→ frozen ──→ archived (可選 un-archive 30d) ──→ purged
+   │   │            │
+   │   │            └── (frozen → active 復活、僅 long-lived)
+   │   │
+   │   └── (long-lived 與 ephemeral 在 active 階段同 schema、其他階段歧異)
+   │
+   └── (新建)
+```
+
+**Branch type × lifecycle 表**：
+
+| Type | active 行為 | frozen 行為 | archived 行為 |
+|---|---|---|---|
+| **long-lived**（main / staging / v2.1-hotfix / customer-x-fork） | worktree 永久存在；可被多 agent task fork；可手動 delete-ref 但有 protected guard | worktree 仍在但 push policy 升「禁所有 push」；通常 release 過後 freeze 防誤改 | worktree 拆掉、git ref 保留 + tag `archived/<branch>/<date>`；un-archive 30d 內可逆復活 worktree |
+| **ephemeral**（`agent/*` / `retry/*` / `task/*`） | worktree 在 task lifecycle 內存活；task finalize 後 worktree cleanup、ref 保留 | 不適用（ephemeral 無 freeze 概念） | task 結束後 90d ref 進 GC 候選、purge cron 跑時刪 ref + objects（無 reachable parent 時）|
+
+**S-6.4 設計斷言**：
+1. **long-lived 與 ephemeral branch 在 schema 用 enum 顯式區分**（`project_branches.kind text CHECK IN ('long_lived', 'ephemeral')`） — 不靠 branch 名前綴推斷（`agent/*` 是約定 / 名前綴可被 user 繞過）；schema 級 enum 才是 invariant 來源。
+2. **long-lived branch 升 frozen 是 release 流程的 first-class 動作** — 不靠 git protected branch hook（外部設定不可審計）；走 `POST /projects/{id}/branches/{branch}/freeze`、寫 audit `branch.frozen(reason='v2.1.0_released')`、push policy 自動切「reject all」、UI banner 顯示 freeze 狀態。
+3. **archived 是 worktree 拆 + ref 保留 + tag mark**（與 S-5.5 project archived 同設計哲學） — disk 釋放（worktree 拆）但歷史保留（ref + tag），便於後續 forensic / 客戶資料可回溯；un-archive 在 30d 內由 project owner 單方解（不需要 admin）— 因為 branch archive 比 project archive 影響範圍小（只該 branch、不影響其他 branch），緩衝期可短於 S-5.5 的 90d。
+4. **purged 是不可逆終態 — 只對 ephemeral + 30d 後** — long-lived branch 不會 auto-purge（即使 archived 後 30d 也保留 ref + tag）；ephemeral branch 在 archived 後 90d 自動 purge（git gc reachable from no ref）；purge 寫 audit `branch.purged(name=..., last_commit=...)` 包含最後 commit SHA forensic 用。
+5. **agent task workspace 不直接寫 `branch_lifecycle_history`** — task workspace 本身有 finalize / cleanup（既有 backend/workspace.py:862）、不需要 branch-level history；只 long-lived branch 與 ephemeral branch（kind=ephemeral but persisted as ref）兩類進 lifecycle 表。
+6. **branch lifecycle 變更必走 audit + project chain 雙寫**（呼應 S-3 / S-5 雙鏈設計） — `customer-x-fork` 的 lifecycle 變更必雙寫 acme tenant chain + customer-A chain（因 customer-x-fork 與 customer A 直接綁）；其他 branch 只寫 acme tenant chain。
+7. **`v2.1-hotfix` 是 release 後的 typed branch 模式** — 自動命名 `<release-tag>-hotfix`、自動繼承 release tag 對應 commit 為 base、自動套 push policy「from main cherry-pick only」；UI 提供「create hotfix from release」一鍵動作；release 結束 30d 自動 freeze（避免長期野生）。
+
+### S-6.5 workflow_run × branch attribution
+
+S-6 要求每個 workflow_run 必綁 branch：
+
+**現況**（S-6.10 row 5: `backend/alembic/versions/0002_workflow_runs.py`）：`workflow_runs` 無 `branch` 欄位、無 `project_id` FK；`backend/alembic/versions/0006_project_runs.py` 有 join 表 `project_runs(project_id, workflow_run_ids)` 但 project_id 是 string label。
+
+**S-6 schema 增量**（與 Y4 對齊）：
+
+```
+workflow_runs                  -- 既有表 + S-6 新增欄位
+  ...
+  project_id          uuid fk projects(id) NULL          -- S-5 / Y4 加（先 nullable）
+  branch              text                               -- S-6 加：'main' / 'staging' / 'v2.1-hotfix' / 'customer-x-fork' / 'agent/foo/task-42'
+  branch_kind         text                               -- S-6 加：'long_lived' / 'ephemeral'，冗餘但加速 query
+  base_branch         text                               -- S-6 加：fork 自哪 branch（agent/* 必填，long_lived 為 NULL）
+  ...
+  -- index: (project_id, branch, started_at DESC) for "show V1 main 最近 100 runs"
+```
+
+**S-6.5 設計斷言**：
+1. **`workflow_runs.branch` NOT NULL（兩階段 migration）** — Y4 落地時先 nullable + backfill `'main'`、1 release 後加 NOT NULL；理由：S-6.5 attribution 是核心 invariant、不能 NULL 否則 LLM cost / artifact / audit 都無法歸因到正確 branch；但 NOT NULL 變更需與既有資料 backfill 雙寫（與 S-5.6 partial CHECK 同模式）。
+2. **branch 不引入新 quota 維度** — LLM cap 仍走 project（S-5.2 三層 atomic decrement）、disk quota 仍走 tenant；branch 只是 attribution + dashboard 切片用。理由：S-6.1 設計斷言 2「branch 不擴成第四層繼承」；多 branch 同時跑爆同 project cap 是預期行為（呼應 S-5.7 緊邊界 line budget）。
+3. **`base_branch` 用於 anchor 推導 + audit forensic** — agent/* ephemeral branch 的 `base_branch='main'` / `'staging'` / `'v2.1-hotfix'` 必填、否則 retry path 不知該從哪 fork；long-lived branch 自身 `base_branch=NULL`（自己就是 base）；audit 寫 `workflow_run.started(branch=..., base=...)` 雙欄。
+4. **`branch_kind` 是冗餘欄位但加速 query** — 從 `branch` 名前綴或 `project_branches.kind` 都可推、但 dashboard query「列出 V1 過去 30d ephemeral run 數」不想 join；冗餘欄位寫入時走 trigger 或 application-level 約束（兩處保持 sync）。
+5. **同一 workflow_run 不能跨 branch** — 一個 run 對應恰好一個 (project, branch) tuple；想 cross-branch 比對（如「main vs customer-x-fork 在同一 workflow 跑出來的 artifact diff」）走外部 dashboard 比對 N 個 run、不在 single run 內混 branch。
+6. **artifact / audit_log 也加 `branch` 欄位**（與 workflow_run 同模式） — `artifacts.branch` + `audit_log.branch` 兩處加 nullable text；UI 切片頁可依 branch 過濾 artifact / audit（partial index `WHERE branch IS NOT NULL`）。
+
+### S-6.6 schema 增量（與 Y1 / Y4 對齊）
+
+S-6 在 Y1 / Y4 / Y6 / Y9 落地時對 schema 的增量（在 S-1.6 + S-2.6 + S-3.5 + S-4.6 + S-5.6 既有設計上加）：
+
+```
+project_branches             -- Y4 新表（S-6.4 long-lived + ephemeral lifecycle 權威源）
+  id                  uuid pk
+  project_id          uuid fk projects(id) NOT NULL
+  name                text NOT NULL                       -- 'main' / 'agent/carol/task-42' 等原值（含 '/'）
+  kind                text NOT NULL                       -- CHECK IN ('long_lived', 'ephemeral')
+  lifecycle_stage     text NOT NULL DEFAULT 'active'      -- CHECK IN ('active','frozen','archived','purged')
+  base_branch_name    text                                -- ephemeral 必填、long_lived 為 NULL
+  push_policy         text NOT NULL DEFAULT 'protected'   -- CHECK IN ('protected','fast_forward_only','open','private','reject_all')
+  metadata            jsonb NOT NULL DEFAULT '{}'         -- 含 reviewer 設定 / hotfix release tag / customer fork audit chain pointer
+  created_at          timestamptz NOT NULL
+  archived_at         timestamptz
+  purged_at           timestamptz
+  UNIQUE (project_id, name)
+  CONSTRAINT base_branch_required CHECK (
+    (kind = 'ephemeral' AND base_branch_name IS NOT NULL) OR
+    (kind = 'long_lived' AND base_branch_name IS NULL)
+  )
+  -- partial unique index: 一 project 內 long_lived branch 同 name 不能並存 active & archived
+  -- CREATE UNIQUE INDEX idx_project_branches_active ON project_branches(project_id, name)
+  --   WHERE lifecycle_stage = 'active'
+
+branch_lifecycle_history     -- Y4 新表（S-6.4 狀態機轉移 audit 副本）
+  id                  uuid pk
+  branch_id           uuid fk project_branches(id) NOT NULL
+  from_stage          text                                -- NULL = 新建
+  to_stage            text NOT NULL
+  changed_by          uuid fk users(id)                   -- NULL = system cron（archived → purged）
+  reason              text                                -- 'release_tagged' / 'force_push_recovery' / 'agent_task_finalized' 等
+  metadata            jsonb NOT NULL DEFAULT '{}'         -- 含 last_commit_sha / release_tag 等 forensic 欄
+  changed_at          timestamptz NOT NULL
+
+agent_workspaces             -- 既有 in-memory `_workspaces` dict 升 durable 表
+  agent_id            text PRIMARY KEY
+  task_id             text NOT NULL
+  project_id          uuid fk projects(id) NOT NULL       -- S-5 加
+  branch_id           uuid fk project_branches(id)        -- S-6 加：agent task fork 自哪 branch
+  agent_branch_name   text NOT NULL                       -- 'agent/{agent}/{task}'
+  workspace_path      text NOT NULL                       -- S-6.2 新版 nested path
+  status              text NOT NULL DEFAULT 'active'      -- 'active' / 'finalized' / 'cleaned'
+  anchor_sha          text                                -- R8 既有
+  created_at          timestamptz NOT NULL
+  finalized_at        timestamptz
+  cleaned_at          timestamptz
+  -- index: (project_id, branch_id, status) for "show V1 main 上仍 active 的 agent task"
+
+workflow_runs                -- 既有表 + S-6 新增欄位（呼應 S-6.5）
+  ...
+  project_id          uuid fk projects(id) NULL           -- S-5 / Y4 加
+  branch              text                                -- S-6 加（兩階段 NULL → NOT NULL）
+  branch_kind         text                                -- S-6 加（冗餘加速）
+  base_branch         text                                -- S-6 加
+  ...
+  -- index: (project_id, branch, started_at DESC)
+
+artifacts                    -- 既有表
+  ...
+  branch              text                                -- S-6 加 nullable + partial index
+
+audit_log                    -- 既有表（S-3 / S-4 / S-5 已加多欄、S-6 再加）
+  ...
+  branch              text                                -- S-6 加 nullable + partial index `WHERE branch IS NOT NULL`
+```
+
+**S-6.6 設計斷言**：
+1. **新表 2 張**（`project_branches` + `branch_lifecycle_history`） + **既有表加欄位 3 張**（`workflow_runs` + `artifacts` + `audit_log`） + **`agent_workspaces` 從 in-memory 升 durable 表**（既有 `backend/workspace.py:60 _workspaces dict` 是 module-global，多 worker 不共享 → 必須升 PG row）— 維持「擴充既有 schema、不另起平行表」的 Y 系列共識（S-3.5 / S-4.6 / S-5.6 已建立模式）。
+2. **`project_branches.kind` 用 text + CHECK 而非 PG enum**（沿用 S-3.5 / S-4.6 / S-5.6 既有 CHECK 設計）— 避免 enum migration 痛點；`lifecycle_stage` 同模式。
+3. **`agent_workspaces` 升 durable PG 表是必要 module-global state 修復**（呼應 SOP Step 1 module-global 稽核） — 既有 `_workspaces: dict[str, WorkspaceInfo]` 是 module-level dict、`uvicorn --workers 4` 下 4 worker 各持一份不同步、registry 一致性靠各 worker 自己 startup `cleanup_orphan_worktrees()` 補（startup 才一致；runtime 期間 worker 互相不知對方創了哪些 workspace）— S-6 多 branch 情境下這 race 變嚴重（worker A 給 branch=`main` 開 task workspace、worker B 同時給 branch=`staging` 開另一 task、registry 各持半份）；改 PG 表 + 既有 advisory lock 序列化是合格答案 #2「透過 PG 協調」。
+4. **`project_branches` partial unique index 處理 active 與 archived 並存** — 同 project 同 name long-lived branch 可能被 archived 後又重建（如 `v2.1-hotfix` 第一輪 archived、第二輪 release v2.2 又開新的）；partial unique 只 enforce active row、archived row 可多份（`WHERE lifecycle_stage = 'active'`、與 S-5.6 `idx_projects_active_per_line` 同模式）。
+5. **`base_branch_name` CHECK constraint 強制 ephemeral 必填、long_lived 必空** — 防 schema 層 silent bug（`agent/foo/task-42` 沒填 base 的話 retry path 找不到 fork 點）；CHECK 相容兩階段（`kind='long_lived' AND base_branch_name IS NULL` 與 `kind='ephemeral' AND base_branch_name IS NOT NULL` 互斥組合）。
+6. **`audit_log.branch` partial index** — `WHERE branch IS NOT NULL`；既有 audit query 不依 branch（已加 product_line_id / project_id / share_id partial index），new partial index 加速「列出 V1 customer-x-fork 過去 30d 所有 audit」forensic 用；非必查欄不加 mandatory index、避免拖慢 audit_log insert hot path。
+7. **`workflow_runs.branch` 兩階段 NOT NULL migration** — Y4 落地時 nullable、Y4+1 release 把既有 row backfill `'main'` 後加 NOT NULL；同時 backfill 也補 `branch_kind='long_lived'` + `base_branch=NULL`（既有 run 預設視為 main 上的 long-lived run）。
+
+### S-6.7 Operator 工作流 — Doorbell V1 從 1 branch 變 4 branch 的 7 步演進
+
+從 V1 既有「只有 main」（S-5.7 落地後）演進到 4 branch 並行：
+
+1. **Day 0 — V1 既有狀況（S-5.7 落地後）**  
+   `firmware-doorbell-v1-customer-a` project 在 acme tenant `pl-doorbell` 線下、lifecycle=`production`、customer A 綁定；git remote origin=`acme-doorbell-bot` 帳號（S-4.3 git resolver 走 line-default）；只有 `main` long-lived branch、`agent/*` ephemeral 隨 task 開合；workspace path 仍是 S-5 新版 `_branches/main/` + `_tasks/{agent}/{task}/`。
+
+2. **Day 1 — Quinn 開 `staging` long-lived branch**  
+   Quinn 走 `POST /api/v1/projects/firmware-doorbell-v1-customer-a/branches { name: 'staging', kind: 'long_lived', base_ref: 'main', push_policy: 'fast_forward_only' }`。  
+   backend：(a) `provision_branch_worktree('staging')` 建 worktree `_branches/staging/`、(b) PG 寫 `project_branches(name='staging', kind='long_lived', lifecycle_stage='active')`、(c) audit 寫 `branch.created(name='staging', from='main')`、(d) SSE 推 V1 project members banner「staging branch 已上線」。
+
+3. **Day 7 — release v2.0 + Carol 觸發第一個 staging-targeted workflow_run**  
+   Carol 走 `POST /workflows/run { workflow_id: 'nightly-firmware-test', project_id: V1, branch: 'staging' }`。  
+   backend：(a) `provision_agent_task_worktree(project, agent, task, base_branch='staging')` 建 `_tasks/{agent}/{task}/`、(b) git branch `agent/{agent}/{task}` fork 自 staging HEAD、(c) `workflow_runs` row 寫 `branch='staging' base_branch='staging' branch_kind='ephemeral'`、(d) anchor_sha 取自 staging HEAD（呼應 S-6.3 設計斷言 7）。
+
+4. **Day 14 — Customer A 反饋 v2.0 出貨後緊急 bug、Quinn 開 `v2.1-hotfix`**  
+   Quinn 走 `POST /branches { name: 'v2.1-hotfix', kind: 'long_lived', base_ref: 'tag/v2.0.0', push_policy: 'protected', metadata: { release_tag: 'v2.0.0', auto_freeze_after_days: 30 } }`。  
+   backend：(a) 建 worktree `_branches/v2.1-hotfix/` 自 release tag `v2.0.0` fork（不是從 main HEAD、避免帶入 v2.0 之後的 main 變更）、(b) push_policy='protected'+雙簽 reviewer（Quinn+Doris）、(c) audit 寫 `branch.created(name='v2.1-hotfix', from_tag='v2.0.0', kind='hotfix')`。
+
+5. **Day 14+1h — Bob 開 `customer-x-fork` 客製分支**  
+   Bob（tenant admin、因 customer-x-fork 是 customer A 私有需 admin）走 `POST /branches { name: 'customer-x-fork', kind: 'long_lived', base_ref: 'main', push_policy: 'private', metadata: { customer_account_id: '<cust-a-id>' } }`。  
+   backend：(a) 建 worktree、(b) audit 雙鏈寫 acme tenant chain + customer-A chain（branch.metadata.customer_account_id 觸發 S-3 / S-5 雙鏈規則）、(c) push policy 升「private + audit 全 push 雙鏈」、(d) Pam（IPCam line owner）獲邀 reviewer（cross-line support）。
+
+6. **Day 30 — release v2.1.0 + auto-freeze cron 跑**  
+   release tag `v2.1.0` 自 v2.1-hotfix push 出去後 30d、auto_freeze_after_days cron 觸發：`PATCH /branches/v2.1-hotfix { lifecycle_stage: 'frozen', reason: 'release_v2.1.0_completed' }`。  
+   backend：(a) push_policy 自動切 'reject_all'、(b) UI banner「branch frozen」、(c) audit 寫 `branch.frozen` + `branch_lifecycle_history(from='active', to='frozen', changed_by=NULL, reason='auto_freeze_after_30d')`、(d) worktree 仍在（archive 才拆）。
+
+7. **Day 60 — 4 branch 並行運行、SSE dashboard 顯示用量切片**  
+   V1 project 內：`main`（穩定 trunk、Carol 平日 PR 標的） / `staging`（每晚 nightly 跑）/ `v2.1-hotfix`（frozen、僅查歷史） / `customer-x-fork`（Pam 主動維護、客戶反饋走這條）。  
+   Y8 dashboard：(a) 「V1 LLM 30d 用量 18M / 20M cap」總計（呼應 S-5.2 project cap）、(b) 各 branch 切片：main 8M / staging 6M / v2.1-hotfix 0M / customer-x-fork 4M、(c) 每 branch 最近 5 個 workflow_run 列表、(d) 每 branch 對應 customer audit chain（僅 customer-x-fork 雙鏈、其他單鏈）。
+
+**S-6.7 設計斷言**：
+1. **建 long-lived branch 由 project owner（Quinn）發起、customer-x-fork 升 tenant admin（Bob）** — 一般 long-lived branch 是工程治理範疇 project owner 即可；客戶私有 fork 是合規範疇升 tenant admin（呼應 S-6.1 customer-x-fork reviewer 規則）。
+2. **`v2.1-hotfix` fork 自 release tag 而非 main HEAD** — 與 S-3.6 三段式狀態機 / S-5.5 graduated 中介態同設計哲學：跨重大邊界（release）必有 anchor、避免帶入 release 之後 main 上的不想要變更；`from_tag` 是 first-class 欄位（不是 metadata）的考量留 Y4 落地時定。
+3. **`auto_freeze_after_days` 是 release 後 hygiene 機制** — 防 v2.1-hotfix 一直開著被當 long-term feature branch 用；30d 是合理 default（一般 hotfix release 28d 觀察期 + 緩衝、與 S-5.5 graduated 30d 觀察期級別一致）；user 可在 metadata 顯式覆寫（30/60/90 三選）。
+4. **4 branch 同時跑爆 project cap 是預期行為** — V1 project cap 20M、4 branch 各跑 nightly + on-demand 加總若超 20M 是 throttle 該 project（S-5.2 設計斷言 2）；UI 預先警告「某 branch 用量月增 X% 接近 project cap」、不為 branch 自動分 cap（呼應 S-6.5 設計斷言 2「branch 不引入 quota 維度」）。
+
+### S-6.8 邊界 / 退化情境
+
+| 邊界場景 | 預期行為 | 驗收條件 |
+|---|---|---|
+| Carol（contributor）想直推 V1 `main` | 403 — main push_policy='protected' 走 PR + 雙簽；UI 在 PR 創建時 require min 2 reviewer（Doris+Bob 至少一） | Y4 git push hook（pre-receive）+ PR endpoint check `project_branches.push_policy` |
+| 兩個 workflow_run 同時 target V1 `staging`（不同 task_id） | 完全允許（兩 ephemeral worktree 各自 fork staging HEAD、staging worktree 本身不變動）；advisory lock 只 serialize 「同 project 同 branch 的 worktree 元操作」、不 serialize agent task workspace 內部活動 | Y6 PG advisory lock keyed `(project_id, agent_id, task_id)`；多 task 並行 OK |
+| Quinn force-push V1 `main`（rebase 重寫歷史） | (a) `provision_branch_worktree` 下次 fetch 偵測 `non-fast-forward`、worktree 標 stale；(b) 仍 active 的 `agent/*` ephemeral 若 base_branch=main 會看到 anchor_sha 已不在 remote main、retry path 走 anchor 自身（仍指向被 rebase 前的 commit、forensic 可重建）；(c) audit 寫 `branch.upstream_force_pushed` + SSE 警告 + 不自動 reset | Y6 force-push detection；Y8 stale banner |
+| `customer-x-fork` 與 main 嚴重 diverge（半年沒同步）想 cherry-pick 一批 main 上的 commit | 完全合法；走 git merge / git cherry-pick 之外無 OmniSight 額外限制；audit 寫每筆 cherry-pick commit 對應的 source / target branch | Y6 不擴；走標準 git 操作 |
+| Bob 想刪 V1 `main` ref | 422 — `main` 是 project default branch（`projects.metadata.default_branch='main'`）+ `kind='long_lived'`、刪 default branch 必先改 default、且需 tenant owner step-up MFA；UI 引導「先設新 default 再刪舊」 | Y4 DELETE branch endpoint check default_branch 條件 |
+| `agent/carol/task-42` ephemeral branch 跑到一半 V1 project 被 archive（S-5 lifecycle） | (a) 立即 reject 新 workflow_run、(b) 既有 in-flight task 走 graceful shutdown（與 S-5.7 cron archive 同流）、(c) workspace 進 archived 狀態、agent_workspaces.status='cleaned'；ephemeral branch ref 在 90d 後 cron purge | Y4 project archive 觸發 cascade；Y6 workspace cleanup hook |
+| User 取 branch 名 `..` 或 `_branches` 或 `_tasks` 或 `agent/x` | 422 — schema 級 CHECK + application 級 reject；保留命名 `_branches/_tasks/agent/*/retry/*/task/*` 全 reject；防 path traversal + 命名衝突 | Y4 POST /branches input validation；CHECK constraint on `project_branches.name` regex |
+| 同 project 同 branch name `staging` 已 archived、想再開新的 `staging` | 完全允許；partial unique 只 enforce active row、archived row 可多份；新 row 是 fresh `kind='long_lived' lifecycle_stage='active'`、舊 row 留 `archived` | partial unique index `WHERE lifecycle_stage='active'` |
+| `customer-x-fork` push 時 push policy='private'、Carol 試圖 review 該分支 PR | UI 隱藏 PR（partial filter；Carol 不在 reviewer list）；endpoint /api/v1/projects/V1/branches/customer-x-fork/prs 對 Carol 回 403；audit 寫 `branch.private_pr_access_denied` | Y4 endpoint check `push_policy='private'` + reviewer list whitelist |
+| customer A churn（customer_accounts.status='churned'）、customer-x-fork 該怎麼辦 | (a) customer-x-fork 不自動 archive（呼應 S-5.9 Q5 churn 不自動 archive）、(b) UI banner 警告「客戶已 churn、此 fork 是 dangling」、(c) Bob 顯式決定 archive / 重歸 main / 留作參考；archive 時 worktree 拆但 ref 留 + tag `archived/customer-x-fork/2026-...`（forensic 用）| Y4 customer churn 觸發 SSE + Y8 banner；branch archive 走人類動作 |
+| 既有 `.agent_workspaces/{agent_id}` legacy path 在升級後 worker 找不到 | `migrate_workspace_paths()` script 在 alembic upgrade 時跑、為每筆 in-flight workspace 建 symlink；worker 啟動時 `cleanup_orphan_worktrees()` 對 legacy + new path 都 scan；過渡期 1 release 後移除 legacy path 支援 | Y6 migration script + symlink；Y6+1 release 移除 legacy code path |
+| Doorbell 線上線後 Carol 看到 V1 project 內 4 個 branch、想知道每 branch 的最近 commit / 是誰改的 | Y8 frontend 在 project detail page 加 branch list 表格：每 row 顯示 name / kind / lifecycle / 最後 commit（SHA + author + timestamp） / 30d push 次數 / 30d workflow_run 次數 / 30d LLM token 用量切片 | Y8 GET /projects/{id}/branches/summary endpoint + 表格 UI |
+| Bob 想對 V1 project 設「所有 branch 都 require Doris approve」（line-level branch policy） | line owner Doris 在 line-level 設 default branch policy `{ all_branches_require_approver: 'line_owner' }`、project 自動繼承（與 S-5.4 SOP 三層繼承同模式）；project 想 override 走顯式按鈕 | Y4 product_line.metadata.branch_policy_default + project-level override UI |
+
+### S-6.9 Open Questions（標記給 Y1～Y10 後續勾選）
+
+1. **「主倉 vs 外部 repo 的 bare clone 邊界」** — S-6.3 規格化「每 project 一個 bare clone」假設了 `repo_source` 是 git URL；但 OmniSight 自身也是「project」之一（`backend/workspace.py:33 _MAIN_REPO`）— OmniSight repo 自己是否也走 bare clone 模型？目前傾向「OmniSight repo 是特殊 project，不走 bare clone（OmniSight 本身不在 `.agent_workspaces/` 內），保持既有 `_MAIN_REPO` 直接 worktree from」；但這個非對稱性需在 Y6 落地時定。
+2. **「customer-x-fork 的 secrets 注入路徑」** — customer-x-fork 內可能有 customer A 私有的 LLM key（A 想用自己的 Anthropic 帳號跑、不燒 acme tenant cap）、或 customer A 私有的 firmware signing key — 是繼承 acme tenant_secrets（S-1.3）還是另起 customer_secrets（per-customer secret store）？目前傾向「customer 私有 secret 走 customer_secrets per-customer key 表（與 S-3 cross-tenant secret 隔離設計同哲學再下一層）」、但 schema + RBAC 留 Y3 / Y9 落地時定。
+3. **「agent/* ephemeral branch 的 retry semantics 是否跨 base_branch 變更」** — Carol 在 main 開 task → fork agent/carol/task-42 from main HEAD → main 被 force-push → retry 時 anchor_sha 仍指原 main commit、但 base_branch=main 已不同 — retry 是該回 anchor（既有 R8 #314 行為）還是走「重 fork 自新 main HEAD」？目前傾向「retry 仍走 anchor（保持 R8 invariant），警告 user main 已動」；但這需 Y6 retry path 落地時驗證 + 寫測試。
+4. **「branch 是否該支援 nested hierarchy / merge graph 視覺化」** — 部分團隊想看「customer-x-fork 從 main fork 出去多少 commit、main 之後又長出多少 commit、diverge graph」— 是否該在 OmniSight 內建 git graph 渲染？目前傾向「不內建（Gerrit / GitLab / GitHub 已做得好），OmniSight 只做 branch metadata + workflow_run 切片」；但 Y8 dashboard 落地時可能仍要做最簡 ascii graph。
+5. **「branch 對 chatops mirror 的能見度」** — Carol 在 `customer-x-fork` push commit 時 chatops mirror（既有 R 系列）是該 mirror 到 acme 全 tenant Slack channel 還是僅 customer A 私有 channel？呼應 S-3.4 設計斷言 1「跨 tenant 看到的 ≤ host viewer 看到的」、傾向「customer-x-fork 預設只 mirror 到 customer-A scoped channel + acme admin channel」；但 channel 路由邏輯留 R 系列 chatops 重寫時定。
+
+### S-6.10 既有實作對照表
+
+S-6 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
+
+| S-6 invariant | 目前狀況 | 缺口 |
+|---|---|---|
+| Workspace path layout（per-tenant / per-line / per-project / per-branch nested） | ❌ — `backend/workspace.py:29` `_WORKSPACES_ROOT = .agent_workspaces`；`backend/workspace.py:96-104` path 由 `safe_agent_id` 單一 segment 構成、不嵌入 project_id / line / tenant；`safe_agent_id = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_id)` 既有 sanitize 邏輯可重用 | Y6 改寫 path computation：`{tenant}/{line}/{project}/_branches/{branch}/` 與 `{tenant}/{line}/{project}/_tasks/{agent}/{task}/` 兩條；`migrate_workspace_paths()` script + 1 release symlink 過渡 |
+| Branch 作為 first-class scope | ❌ — `backend/models.py:61-75` `AgentWorkspace.branch` 是欄位但僅作 「agent task git branch ref」字串、未代表 long-lived branch；`workflow_runs` 表（`backend/alembic/versions/0002_workflow_runs.py`）無 branch / project_id；`agent_workspaces` 完全不存在 PG 表（in-memory dict） | Y4 新建 `project_branches` 表（11 欄）+ `branch_lifecycle_history` 表（7 欄）；`agent_workspaces` in-memory 升 PG 表（11 欄）；`workflow_runs` + `artifacts` + `audit_log` 各加 `branch` text + partial index |
+| Bare clone per project + N worktree | ❌ — `backend/workspace.py:161-198` 對 `_MAIN_REPO` 直接 `git worktree add` 或對 external 直接 `git clone`；無 bare clone 中介層 | Y6 新建 `ensure_project_bare(project_id, repo_source)` + `provision_branch_worktree(...)` + `provision_agent_task_worktree(...)` 三 fn；`_MAIN_REPO` 是 OmniSight 自身、留特例（S-6.9 Q1） |
+| PG advisory lock per (project, branch) | ❌ — `backend/workspace.py:622-859` 既有 cleanup 路徑用 in-memory `_workspaces` dict、無 PG lock；`.git/index.lock` 60s 容忍是 fs 層 + 啟動掃；runtime 並發無防護 | Y6 加 `pg_advisory_lock(("branch_worktree", project_id, branch))` + `pg_advisory_lock(("agent_worktree", ...))` 兩條；txn-level lock 自動釋放 |
+| Long-lived branch lifecycle 狀態機 | ❌ — 完全不存在；branch 僅為 git ref、無 typed status / freeze / archive 概念 | Y4 加 `project_branches.lifecycle_stage` 4 enum（active / frozen / archived / purged）+ branch_lifecycle_history join 表 + `POST /branches/{id}/freeze` + `POST /branches/{id}/archive` + `POST /branches/{id}/un-archive`（30d 內可逆） |
+| `workflow_runs.branch` 欄位 | ❌ — `backend/alembic/versions/0002_workflow_runs.py` 僅 (id, kind, started_at, completed_at, status, last_step_id, metadata)；branch 不在 first-class 欄位、metadata jsonb 也未約定 | Y4 加 `branch text` + `branch_kind text` + `base_branch text`、兩階段 NULL → backfill 'main' → NOT NULL；index `(project_id, branch, started_at DESC)` |
+| `workflow_runs` 接受 branch 參數 | ❌ — `backend/routers/invoke.py:1039-1050` `ws_provision()` 不傳 branch；branch 由 `agent_id / task_id` 推導 | Y4 `POST /workflows/run` schema 加 `branch?: string default 'main'`；invoke router 傳給 `provision_agent_task_worktree(... base_branch=branch)` |
+| Branch push policy enforcement | ❌ — 無 push hook / pre-receive hook；既有 git push 走 git_credentials.py / S-4.3 git resolver、不檢 push_policy | Y4 加 `project_branches.push_policy` 5 enum + 在 PR endpoint / git push hook 檢；'protected' 走雙簽 reviewer、'fast_forward_only' 走 git fast-forward 檢、'private' 走 reviewer whitelist、'reject_all' frozen 用 |
+| Per-branch LLM cost / artifact / audit attribution | ❌ — 既有 `backend/llm_secrets.py:106-216` LLM gating 不分 branch（亦不分 project，待 S-5 落地）；artifacts 表（`backend/alembic/versions/...`）無 branch 欄；audit_log 已加 product_line_id / project_id / share_id（S-3 / S-4 / S-5）但無 branch | Y6 `llm_token_meter.check_budget()` 加 `branch` context（不擴 cap 維度只記 attribution）；artifacts.branch 加 nullable + partial index；audit_log.branch 加 nullable + partial index `WHERE branch IS NOT NULL` |
+| Frontend branch picker | ❌ — `components/omnisight/workspace-context.tsx:35-79` `WorkspaceState` 只 (type / project / agentSession / preview)、無 branch；`app/workspace/[type]/{software,web,mobile}/page.tsx` 無 branch picker；project switcher 走 lib/tenant-context.tsx 但 project 維度本身亦待 S-5 落地 | Y8 新增 `lib/branch-context.tsx` + `useBranch()` + sidebar branch picker subordinate to project picker（呼應 S-5.10）；project detail page 加 branch list 表格（S-6.8 row 12） |
+| Per-branch dashboard | ❌ — Y8 dashboard 仍待 S-5 落地 project-level、無 branch 切片 | Y8 加 `/projects/{id}/branches` 頁、跨 branch 列出近期 workflow_run / 30d LLM 用量 / push 頻率 / lifecycle stage badge |
+| `agent_workspaces` durable PG 表（取代 in-memory dict） | ❌ — `backend/workspace.py:60` `_workspaces: dict[str, WorkspaceInfo]` 是 module-global、`uvicorn --workers N` 多 worker 各持一份；既有 `cleanup_orphan_worktrees()` startup 對齊但 runtime 期間 worker 互不知 | Y4 新表 + 寫入時序：`provision_*` 一律先寫 PG row 再做 disk op、advisory lock 保護；既有 `_workspaces` dict 退役 / 改為 read-through cache（合格答案 #2「透過 PG 協調」） |
+| Force-push detection + recovery flow | ❌ — 既有 fetch / pull 路徑無 detection；branch ref stale 時靜默 | Y6 `provision_branch_worktree` fetch step parse `non-fast-forward` warning；audit `branch.upstream_force_pushed`；UI banner；`POST /branches/{name}/reset-to-upstream` 強制 reset 走 step-up MFA |
+| Branch GC / purge cron | ❌ — 既有 `cleanup_orphan_worktrees()` 是 startup 一次性掃；無周期性 GC；ephemeral branch ref 在 task 結束後留下無 GC | Y6 cron `branch_purge_after_90d`：對 `lifecycle_stage='archived' AND archived_at < now() - 90d` 的 ephemeral branch 拆 ref + git gc；不對 long-lived auto-purge |
+
+**S-6.10 對 Y1 / Y4 / Y6 / Y8 / Y9 的關鍵 deliverable**：
+1. **Y4 新增 2 表 + 1 表升 durable + 3 表加欄位** — `project_branches`(11 欄)、`branch_lifecycle_history`(7 欄)、`agent_workspaces` in-memory dict 升 PG 表(11 欄)、`workflow_runs.branch` + `branch_kind` + `base_branch`、`artifacts.branch`、`audit_log.branch`；外加 1 條 partial unique index（active branch per project）+ 1 條 CHECK（base_branch_required）。
+2. **Y4 endpoint set** — `POST /projects/{id}/branches` + `PATCH /branches/{id}` + `DELETE /branches/{id}`（含 default_branch guard）+ `POST /branches/{id}/freeze` + `POST /branches/{id}/archive` + `POST /branches/{id}/un-archive`（30d 內可逆）+ `POST /branches/{id}/reset-to-upstream`（force-push recovery、step-up MFA）+ `POST /workflows/run` schema 加 `branch` 參數 + `GET /projects/{id}/branches/summary`（每 branch 30d push / run / token 切片）。
+3. **Y6 workspace 重寫** — `ensure_project_bare()` + `provision_branch_worktree()` + `provision_agent_task_worktree()` 三 fn；既有 `ws_provision` 退役 / 包裝；`_workspaces` in-memory dict 改為 PG-backed read-through cache；PG advisory lock 鎖 (project_id, branch) 與 (project_id, agent_id, task_id) 兩 namespace；force-push detection；`migrate_workspace_paths()` 一次性 script + 1 release symlink 過渡。
+4. **Y6 LLM token meter 加 branch context** — `llm_token_meter.check_budget(tenant, line, project, branch=...)` 把 branch 寫進 `token_usage` row（attribution、不 enforcement）；不擴 cap 維度（呼應 S-6.5 設計斷言 2）。
+5. **Y8 frontend** — `lib/branch-context.tsx` + `useBranch()` + sidebar branch picker subordinate to project picker subordinate to line picker subordinate to tenant switcher（4 層）+ project detail page branch list 表格 + `/projects/{id}/branches` 切片頁 + force-push stale banner + customer-x-fork churn banner（呼應 S-6.8 row 9 / row 10）。
+6. **Y9 audit + cron** — `audit_log.branch` partial index + `branch_lifecycle_history` join；cron `branch_purge_after_90d` 對 archived ephemeral branch 拆 ref；customer-x-fork lifecycle 變更必雙鏈寫入 acme tenant chain + customer-A chain（呼應 S-3 / S-5 雙鏈、S-6.4 設計斷言 6）。
 
 ## S-7 消失用戶回收
 
@@ -1627,4 +1986,5 @@ S-1.3 / S-1.4 已給出 secret + project 部分。完整矩陣（涵蓋 audit / 
 | 2026-04-25 | TODO 第 3 勾選（跨租戶協作） | S-3 章節展開（9 子節 + 6-persona host/guest 雙視角 Acme/Cobalt + Joint Firmware 9 步 onboarding + resolve_role 三維合成偽碼 + audit 雙鏈寫入對照表 + cross-tenant secret 隔離 6 場景 + schema 增量 2 表 2 欄 + 9 邊界 + 5 open questions + 16 行對照表）；S-2 row 標完成（2026-04-25）；S-4 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 4 勾選（多產品線） | S-4 章節展開（10 子節 + 6-persona Acme 三線（IPCam Pam / Doorbell Doris / Intercom Ian + Alice/Bob/Carol 對照組）+ LLM 雙層預算階層偽碼 + git resolver 階層偽碼 + on-call routing 階層偽碼 + SOP/skill_pack 共享範圍 + schema 增量 3 表 5 欄 + Acme 1→3 線 7 步演進時間軸 + 9 邊界 + 5 open questions + 16 行對照表）；S-3 row 標完成（2026-04-25）；S-5 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 5 勾選（多專案同產品線） | S-5 章節展開（10 子節 + 6-persona Doorbell 三 project（V1 客戶 A 量產 Quinn / V2 客戶 B POC Rita / V3 內部 R&D Sam + Doris/Carol/Bob 對照組）+ 三層 LLM 預算階層偽碼（tenant ceiling × line budget × project cap）+ customer attribution 模型（customer_accounts 表 + is_internal 互斥 CHECK）+ SOP/skill_pack 三層繼承解析 + inheritance vs clone 雙 mode + lifecycle 狀態機 6 stage 嚴格白名單轉移 + schema 增量 3 表 4 欄（customer_accounts + project_lifecycle_history + sop_overrides + projects 4 欄）+ Doorbell 1→3 project 7 步演進時間軸 + 11 邊界 + 5 open questions + 17 行對照表）；S-4 row 標完成（2026-04-25）；S-6 ～ S-9 維持 skeleton；共用區段仍 stub。|
+| 2026-04-25 | TODO 第 6 勾選（多分支同專案） | S-6 章節展開（10 子節 + 4-branch persona 矩陣（main / staging / v2.1-hotfix / customer-x-fork × push policy × reviewer × 工程角色）+ workspace 路徑 nested 模型（tenant/line/project/_branches/_tasks 4 段 + sanitize 規約 + legacy symlink 過渡）+ git worktree 策略偽碼（per-project bare clone × N worktree 共享 object store + ensure_project_bare / provision_branch_worktree / provision_agent_task_worktree 三 fn + PG advisory lock keyed (project, branch)）+ branch lifecycle 狀態機 4 stage（active / frozen / archived / purged）+ long-lived vs ephemeral typed enum + workflow_run × branch attribution（branch / branch_kind / base_branch 3 欄兩階段 NOT NULL）+ schema 增量 2 新表 + 1 表升 durable + 3 表加欄位（project_branches + branch_lifecycle_history + agent_workspaces 升 PG + workflow_runs/artifacts/audit_log 各加 branch）+ Doorbell V1 1→4 branch 7 步演進時間軸（含 release v2.0 / v2.1-hotfix from tag / customer-x-fork 雙鏈 audit / auto-freeze 30d）+ 13 邊界 + 5 open questions + 14 行對照表（含既有 backend/workspace.py module-global state 升 PG 表合格答案 #2 的具體實作路徑））；S-5 row 標完成（2026-04-25）；S-7 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | 完整 S-2 章節（10 子節 + Bridge MSP × Acme/Blossom/Cobalt 5-persona 矩陣 + tenant switcher UX 4 步流程 + middleware 升級偽碼 + RBAC `resolve_role(user, tenant, project)` 二維解析 + audit cross-contamination 4 條 invariant + Y1 新增欄位（`is_super_admin` / `last_active_tenant_id` / `sessions.active_tenant_id` / `impersonation_*` / `is_primary` partial unique index）+ Maya 7 步 onboarding 時間軸 + 8 邊界場景 + 5 open questions + 16 行對照表盤點 Y2/Y3/Y8 缺口）；S-3 ～ S-9 仍留 skeleton；共用區段不動。 |
