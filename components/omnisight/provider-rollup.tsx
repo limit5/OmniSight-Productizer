@@ -271,95 +271,100 @@ export function ProviderRollup<T extends ProviderRollupRow>({
             data-provider-key={group.providerKey}
             data-expanded={open ? "true" : "false"}
           >
+            {/* 2026-04-25 UX fix v2: rebuilt as a 2-row flex-col header.
+              * v1 (single-row, `truncate`) collapsed labels to first
+              * letters when status badge + numbers competed for width.
+              * v2 (right-stack `tokens/cost` over `pct`) made the right
+              * cluster overlap the center label cluster on narrow cards.
+              *
+              * Operator wants "多行但顯示完整" — multi-line, fully
+              * readable. So: split into TWO logical rows.
+              *
+              *   Row A — identity strip:
+              *     [chevron] [dot] Provider Label (full, break-words)
+              *
+              *   Row B — metrics strip:
+              *     [count models] [status badge] [tokens] [cost] [pct]
+              *     justified between groups so right side stays right-
+              *     aligned but each label / value gets its full width
+              *     instead of fighting for a single horizontal lane.
+              *
+              * Both rows use `flex-wrap` so under extreme width pressure
+              * they degrade by line-wrap (e.g. tokens drops below cost
+              * on a sub-300 px card) instead of clipping. No `truncate`,
+              * no `shrink-0`-everywhere — every value gets its full
+              * width. */}
             <button
               type="button"
               onClick={() => toggle(group.providerKey)}
               aria-expanded={open}
               aria-label={summaryAriaLabel}
-              className={`w-full text-left p-3 rounded-lg transition-all bg-[var(--secondary)] hover:bg-[var(--secondary)]/80 flex items-center gap-2`}
+              className={`w-full text-left p-3 rounded-lg transition-all bg-[var(--secondary)] hover:bg-[var(--secondary)]/80 flex flex-col gap-1.5`}
               data-testid={`provider-rollup-summary-${group.providerKey}`}
             >
-              <span
-                className="shrink-0 text-[var(--muted-foreground)]"
-                aria-hidden="true"
-                data-testid={`provider-rollup-chevron-${group.providerKey}`}
-              >
-                {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              </span>
-              <span
-                className="w-3 h-3 rounded-full shrink-0"
-                style={{ backgroundColor: group.color }}
-                aria-hidden="true"
-              />
-              <span
-                className="font-mono text-xs font-semibold text-[var(--foreground)] min-w-0 truncate"
-                data-testid={`provider-rollup-label-${group.providerKey}`}
-              >
-                {group.providerLabel}
-              </span>
-              <span
-                className="font-mono text-[10px] text-[var(--muted-foreground)] shrink-0"
-                data-testid={`provider-rollup-model-count-${group.providerKey}`}
-              >
-                {group.rows.length} {group.rows.length === 1 ? "model" : "models"}
-              </span>
-              {renderStatusBadge ? (
+              {/* Row A — identity strip */}
+              <div className="flex items-center gap-2 min-w-0">
                 <span
-                  className="shrink-0 ml-1"
-                  data-testid={`provider-rollup-status-slot-${group.providerKey}`}
-                  onClickCapture={(e) => {
-                    // Keep badge-hosted click handlers (tooltip triggers
-                    // etc.) from toggling the summary row. The badge
-                    // itself is non-interactive presentation today, but
-                    // checkbox 5 may later turn the badge into a link to
-                    // the provider card — guard early so that change
-                    // doesn't silently break the toggle.
-                    e.stopPropagation()
-                  }}
+                  className="shrink-0 text-[var(--muted-foreground)]"
+                  aria-hidden="true"
+                  data-testid={`provider-rollup-chevron-${group.providerKey}`}
                 >
-                  {renderStatusBadge(group.providerKey)}
+                  {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </span>
-              ) : null}
-              {/* 2026-04-25 UX fix: provider rollup summary row was
-                * overflowing on narrow panels — the trailing
-                * `ml-auto ... shrink-0` cluster pushed
-                * `tokens / cost / pct` past the right edge whenever
-                * label + status badge consumed enough space. Operator-
-                * reported "綠色 tokens 字超過版面".
-                *
-                * New layout: stack tokens+cost on one line with `pct`
-                * wrapping under `tokens` on narrow cards (own `flex-col`
-                * container so the rest of the row stays single-line).
-                * Removed `shrink-0` from the outer span and replaced
-                * `w-14` fixed width on pct with `tabular-nums` so the
-                * percent renders as `12.3%` cleanly without padding to
-                * 14ch. Numbers carry `tabular-nums` so column align
-                * works without explicit width. */}
-              <span
-                className="ml-auto flex flex-col items-end gap-0 shrink min-w-0 leading-tight"
-                data-testid={`provider-rollup-summary-numbers-${group.providerKey}`}
-              >
-                <span className="flex items-baseline gap-2">
+                <span
+                  className="w-3 h-3 rounded-full shrink-0"
+                  style={{ backgroundColor: group.color }}
+                  aria-hidden="true"
+                />
+                <span
+                  className="font-mono text-xs font-semibold text-[var(--foreground)] break-words"
+                  data-testid={`provider-rollup-label-${group.providerKey}`}
+                >
+                  {group.providerLabel}
+                </span>
+              </div>
+              {/* Row B — metrics strip */}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-6">
+                <span
+                  className="font-mono text-[10px] text-[var(--muted-foreground)] shrink-0"
+                  data-testid={`provider-rollup-model-count-${group.providerKey}`}
+                >
+                  {group.rows.length} {group.rows.length === 1 ? "model" : "models"}
+                </span>
+                {renderStatusBadge ? (
                   <span
-                    className="font-mono text-[11px] text-[var(--validation-emerald)] tabular-nums whitespace-nowrap"
+                    className="shrink-0"
+                    data-testid={`provider-rollup-status-slot-${group.providerKey}`}
+                    onClickCapture={(e) => {
+                      // Keep badge-hosted click handlers (tooltip triggers
+                      // etc.) from toggling the summary row.
+                      e.stopPropagation()
+                    }}
+                  >
+                    {renderStatusBadge(group.providerKey)}
+                  </span>
+                ) : null}
+                <span className="ml-auto flex flex-wrap items-baseline justify-end gap-x-3 gap-y-1">
+                  <span
+                    className="font-mono text-[11px] text-[var(--validation-emerald)] tabular-nums whitespace-nowrap shrink-0"
                     data-testid={`provider-rollup-tokens-${group.providerKey}`}
                   >
-                    {formatTokens(group.totals.totalTokens)} tok
+                    {formatTokens(group.totals.totalTokens)} tokens
                   </span>
                   <span
-                    className="font-mono text-[11px] font-semibold text-[var(--hardware-orange)] tabular-nums whitespace-nowrap"
+                    className="font-mono text-[11px] font-semibold text-[var(--hardware-orange)] tabular-nums whitespace-nowrap shrink-0"
                     data-testid={`provider-rollup-cost-${group.providerKey}`}
                   >
                     {formatCost(group.totals.cost)}
                   </span>
+                  <span
+                    className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums whitespace-nowrap shrink-0"
+                    data-testid={`provider-rollup-pct-${group.providerKey}`}
+                  >
+                    {pct.toFixed(1)}%
+                  </span>
                 </span>
-                <span
-                  className="font-mono text-[9px] text-[var(--muted-foreground)] tabular-nums whitespace-nowrap"
-                  data-testid={`provider-rollup-pct-${group.providerKey}`}
-                >
-                  {pct.toFixed(1)}% of total
-                </span>
-              </span>
+              </div>
             </button>
             {open ? (
               <div
