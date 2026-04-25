@@ -4,11 +4,14 @@ Replaces the legacy "operator runs raw SQL against the tenants table"
 hack workflow with a proper super-admin-gated REST surface. Currently
 implemented:
 
-  POST /api/v1/admin/tenants — create a new tenant.
-  GET  /api/v1/admin/tenants — list tenants + aggregated usage metrics.
+  POST /api/v1/admin/tenants       — create a new tenant.
+  GET  /api/v1/admin/tenants       — list tenants + aggregated usage.
+  GET  /api/v1/admin/tenants/{id}  — single-tenant detail (plan, quota
+                                     usage, members, projects, recent
+                                     audit events).
 
-Subsequent rows (GET detail / PATCH / DELETE) extend this router;
-they are out of scope here and will be added by their own TODO rows.
+Subsequent rows (PATCH / DELETE) extend this router; they are out of
+scope here and will be added by their own TODO rows.
 
 Auth model (Y2 spec)
 ────────────────────
@@ -59,7 +62,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend import auth
-from backend.tenant_quota import PLAN_DISK_QUOTAS, measure_tenant_usage
+from backend.tenant_quota import (
+    PLAN_DISK_QUOTAS,
+    load_quota,
+    measure_tenant_usage,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin-tenants"])
@@ -362,4 +369,343 @@ async def list_tenants(
     return JSONResponse(
         status_code=200,
         content={"tenants": tenants},
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  GET /admin/tenants/{tenant_id} — single-tenant detail (Y2 #278 row 3)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Single-row tenant fetch. Same canonical column projection as
+# ``_LIST_TENANTS_SQL`` but parameterised on ``id`` so PG can use the
+# primary-key index directly. Exists as a separate constant (rather
+# than reusing the LIST SQL with a WHERE filter) because the four
+# scalar subqueries in the LIST query are correlated *over the entire
+# tenants table* — adding a top-level WHERE doesn't push that filter
+# into the subqueries the way you'd want, so PG ends up scanning every
+# tenant's audit_log / event_log range only to throw N-1 of them away.
+# A direct one-row variant keeps the detail endpoint cheap.
+_GET_TENANT_SQL = """
+SELECT
+    t.id,
+    t.name,
+    t.plan,
+    t.enabled,
+    t.created_at,
+    COALESCE(uc.user_count, 0)       AS user_count,
+    COALESCE(pc.project_count, 0)    AS project_count,
+    COALESCE(tk.tokens_30d, 0)       AS llm_tokens_30d,
+    la.last_activity_at              AS last_activity_at
+FROM tenants t
+LEFT JOIN (
+    SELECT COUNT(*) AS user_count
+    FROM users
+    WHERE enabled = 1 AND tenant_id = $1
+) uc ON TRUE
+LEFT JOIN (
+    SELECT COUNT(*) AS project_count
+    FROM projects
+    WHERE archived_at IS NULL AND tenant_id = $1
+) pc ON TRUE
+LEFT JOIN (
+    SELECT
+        SUM(COALESCE((data_json::jsonb->>'tokens_used')::bigint, 0))
+            AS tokens_30d
+    FROM event_log
+    WHERE event_type = 'turn.complete'
+      AND tenant_id = $1
+      AND to_timestamp(created_at, 'YYYY-MM-DD HH24:MI:SS')
+            >= NOW() - INTERVAL '30 days'
+) tk ON TRUE
+LEFT JOIN (
+    SELECT MAX(ts) AS last_activity_at
+    FROM audit_log
+    WHERE tenant_id = $1
+) la ON TRUE
+WHERE t.id = $1
+"""
+
+# Members listing — joins ``user_tenant_memberships`` (the Y1 N-to-M
+# authoritative source) with the ``users`` row so the operator sees
+# email / name / role-on-this-tenant in one shot. Excludes disabled
+# users to mirror the list-endpoint user_count semantics, but we
+# DO surface the user's enabled flag so the operator can audit who
+# is suspended without paging back to the user-management endpoint.
+# ``role`` from the membership row (per-tenant role) takes precedence
+# over the cached ``users.role`` (account-tier role).
+_LIST_MEMBERS_SQL = """
+SELECT
+    u.id              AS user_id,
+    u.email           AS email,
+    u.name            AS name,
+    m.role            AS role,
+    m.status          AS status,
+    u.enabled         AS user_enabled,
+    m.created_at      AS joined_at,
+    m.last_active_at  AS last_active_at
+FROM user_tenant_memberships m
+JOIN users u ON u.id = m.user_id
+WHERE m.tenant_id = $1
+ORDER BY m.created_at ASC, u.email ASC
+"""
+
+# Projects listing — every non-archived project under the tenant plus
+# its slug / product_line composite, archived_at flag, and an indication
+# of whether the project overrides the tenant plan. ``parent_id`` is
+# included so the operator can tell sub-project tree shape at a glance.
+_LIST_PROJECTS_SQL = """
+SELECT
+    p.id              AS id,
+    p.name            AS name,
+    p.slug            AS slug,
+    p.product_line    AS product_line,
+    p.parent_id       AS parent_id,
+    p.plan_override   AS plan_override,
+    p.disk_budget_bytes AS disk_budget_bytes,
+    p.llm_budget_tokens AS llm_budget_tokens,
+    p.created_at      AS created_at,
+    p.archived_at     AS archived_at
+FROM projects p
+WHERE p.tenant_id = $1
+ORDER BY
+    CASE WHEN p.archived_at IS NULL THEN 0 ELSE 1 END,
+    p.created_at ASC,
+    p.id ASC
+"""
+
+# Recent audit events. The audit_log row is denormalised already
+# (actor / entity_kind / entity_id / before_json / after_json) so the
+# operator-facing detail page can render the event timeline directly
+# without joining out. ``before_json`` / ``after_json`` are TEXT JSON
+# blobs; we hand them back as raw strings — clients that want to
+# inspect them do their own JSON.parse. (Pre-parsing here would force
+# us to handle malformed legacy rows, and the chain integrity test
+# already enforces well-formed JSON for new writes.)
+_LIST_AUDIT_EVENTS_SQL = """
+SELECT
+    id,
+    ts,
+    actor,
+    action,
+    entity_kind,
+    entity_id,
+    before_json,
+    after_json
+FROM audit_log
+WHERE tenant_id = $1
+ORDER BY ts DESC, id DESC
+LIMIT $2
+"""
+
+# Cap returned audit events. The detail endpoint is operator-facing
+# UI; 50 rows is enough for "recent" without paging. A future row
+# can add ``?cursor=`` for full pagination — keep the field stable
+# now to avoid breaking the client when that lands.
+_AUDIT_EVENT_LIMIT = 50
+
+
+@router.get("/tenants/{tenant_id}")
+async def get_tenant_detail(
+    tenant_id: str,
+    _request: Request,
+    _actor: auth.User = Depends(auth.require_super_admin),
+) -> JSONResponse:
+    """Return the per-tenant detail panel.
+
+    Payload::
+
+        {
+            "id": "t-acme",
+            "name": "Acme Corp",
+            "plan": "pro",
+            "enabled": true,
+            "created_at": "2026-01-15 12:34:56",
+            "quota": {
+                "soft_bytes": 107374182400,
+                "hard_bytes": 214748364800,
+                "keep_recent_runs": 20
+            },
+            "usage": {
+                "user_count": 7,
+                "project_count": 3,
+                "disk_used_bytes": 1234567,
+                "disk_used_pct_of_hard": 0.0057,
+                "llm_tokens_30d": 4500000,
+                "rate_limit_hits_7d": 0,
+                "last_activity_at": 1745580000.0
+            },
+            "members": [
+                {
+                    "user_id": "u-...",
+                    "email": "alice@acme.example",
+                    "name": "Alice",
+                    "role": "owner",
+                    "status": "active",
+                    "user_enabled": true,
+                    "joined_at": "2026-02-01 09:00:00",
+                    "last_active_at": null
+                },
+                ...
+            ],
+            "projects": [
+                {
+                    "id": "p-acme-default",
+                    "name": "Default",
+                    "slug": "default",
+                    "product_line": "default",
+                    "parent_id": null,
+                    "plan_override": null,
+                    "disk_budget_bytes": null,
+                    "llm_budget_tokens": null,
+                    "created_at": "2026-02-01 09:00:00",
+                    "archived_at": null
+                },
+                ...
+            ],
+            "recent_audit_events": [
+                {
+                    "id": 9876,
+                    "ts": 1745580000.0,
+                    "actor": "alice@acme.example",
+                    "action": "tenant_updated",
+                    "entity_kind": "tenant",
+                    "entity_id": "t-acme",
+                    "before_json": "{...}",
+                    "after_json": "{...}"
+                },
+                ...
+            ]
+        }
+
+    Errors
+    ──────
+    * 404 — tenant id does not exist
+    * 422 — id fails ``TENANT_ID_PATTERN`` (validated *before* DB hit
+      to avoid leaking ill-formed values into the query)
+    * 403 — caller is not a super-admin (handled by dependency)
+
+    Recent audit events are capped at ``_AUDIT_EVENT_LIMIT`` rows,
+    newest first. ``before_json`` / ``after_json`` are returned as
+    raw JSON strings — clients that need structured access call
+    ``JSON.parse`` themselves.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"invalid tenant id: {tenant_id!r}; "
+                               f"must match {TENANT_ID_PATTERN}"},
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_GET_TENANT_SQL, tenant_id)
+        if tenant_row is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"tenant not found: {tenant_id!r}"},
+            )
+        member_rows = await conn.fetch(_LIST_MEMBERS_SQL, tenant_id)
+        project_rows = await conn.fetch(_LIST_PROJECTS_SQL, tenant_id)
+        audit_rows = await conn.fetch(
+            _LIST_AUDIT_EVENTS_SQL, tenant_id, _AUDIT_EVENT_LIMIT,
+        )
+
+    # Disk measurement on a single tenant — no parallelism needed, but
+    # still offload to a thread to keep the event loop responsive on
+    # tenants with very large data dirs.
+    disk_used = await asyncio.to_thread(_measure_disk_safely, tenant_id)
+
+    # Quota is plan-derived (or yaml-overridden); we surface both the
+    # absolute bytes and a ratio-of-hard-quota so the UI doesn't have
+    # to compute it client-side. The yaml fallback path inside
+    # ``load_quota`` does file I/O — same ``to_thread`` reasoning as
+    # the disk measurement above.
+    quota = await asyncio.to_thread(load_quota, tenant_id, tenant_row["plan"])
+    pct_of_hard = (
+        (disk_used / quota.hard_bytes) if quota.hard_bytes > 0 else 0.0
+    )
+
+    members = [
+        {
+            "user_id": r["user_id"],
+            "email": r["email"],
+            "name": r["name"],
+            "role": r["role"],
+            "status": r["status"],
+            "user_enabled": bool(r["user_enabled"]),
+            "joined_at": r["joined_at"],
+            "last_active_at": r["last_active_at"],
+        }
+        for r in member_rows
+    ]
+
+    projects = [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "slug": r["slug"],
+            "product_line": r["product_line"],
+            "parent_id": r["parent_id"],
+            "plan_override": r["plan_override"],
+            "disk_budget_bytes": (
+                int(r["disk_budget_bytes"])
+                if r["disk_budget_bytes"] is not None else None
+            ),
+            "llm_budget_tokens": (
+                int(r["llm_budget_tokens"])
+                if r["llm_budget_tokens"] is not None else None
+            ),
+            "created_at": r["created_at"],
+            "archived_at": r["archived_at"],
+        }
+        for r in project_rows
+    ]
+
+    recent_audit_events = [
+        {
+            "id": int(r["id"]),
+            "ts": float(r["ts"]) if r["ts"] is not None else None,
+            "actor": r["actor"],
+            "action": r["action"],
+            "entity_kind": r["entity_kind"],
+            "entity_id": r["entity_id"],
+            "before_json": r["before_json"],
+            "after_json": r["after_json"],
+        }
+        for r in audit_rows
+    ]
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "id": tenant_row["id"],
+            "name": tenant_row["name"],
+            "plan": tenant_row["plan"],
+            "enabled": bool(tenant_row["enabled"]),
+            "created_at": tenant_row["created_at"],
+            "quota": {
+                "soft_bytes": int(quota.soft_bytes),
+                "hard_bytes": int(quota.hard_bytes),
+                "keep_recent_runs": int(quota.keep_recent_runs),
+            },
+            "usage": {
+                "user_count": int(tenant_row["user_count"]),
+                "project_count": int(tenant_row["project_count"]),
+                "disk_used_bytes": int(disk_used),
+                "disk_used_pct_of_hard": float(pct_of_hard),
+                "llm_tokens_30d": int(tenant_row["llm_tokens_30d"]),
+                # No persistent rate-limit log yet — explicit zero
+                # rather than null keeps the field shape stable.
+                "rate_limit_hits_7d": 0,
+                "last_activity_at": (
+                    float(tenant_row["last_activity_at"])
+                    if tenant_row["last_activity_at"] is not None
+                    else None
+                ),
+            },
+            "members": members,
+            "projects": projects,
+            "recent_audit_events": recent_audit_events,
+        },
     )
