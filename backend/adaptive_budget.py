@@ -114,6 +114,79 @@ unbounded entries."""
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Mode multiplier (TODO H4a row 2580)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MODE_MULTIPLIER: dict[str, float] = {
+    "turbo": 1.0,
+    "full_auto": 0.7,
+    "supervised": 0.4,
+    "manual": 0.15,
+}
+"""H4a row 2580 — per-mode fraction of ``CAPACITY_MAX`` allowed.
+
+Composes with the AIMD-shaped budget: the effective per-cycle admission
+ceiling is ``min(floor(MODE_MULTIPLIER[mode] * CAPACITY_MAX),
+current_budget())``. The intuition:
+
+* **turbo (1.0)** — power-user opt-in to use the full host envelope; the
+  AIMD controller is the only governor.
+* **full_auto (0.7)** — keep ~30% of host headroom unspent so an
+  unattended session leaves room for ad-hoc operator tasks.
+* **supervised (0.4)** — visible session, half-throttle so a runaway
+  decision can't eat the box before the human notices.
+* **manual (0.15)** — every action is human-approved; concurrency is
+  almost always 1–2 anyway, so the cap is symbolic but prevents
+  pathological queue depth in case of a misconfigured tenant.
+
+Keyed by string (matches :class:`backend.decision_engine.OperationMode`'s
+``str, Enum`` value) so this module doesn't import ``decision_engine``
+— preserves the ``adaptive_budget`` → ``sandbox_capacity`` direction
+(downstream consumers wire upward, not the reverse). ``OperationMode``
+members can still be passed directly because their ``.value`` matches
+the dict key.
+"""
+
+
+def mode_multiplier(mode: str) -> float:
+    """Return the per-mode capacity fraction for *mode*.
+
+    Falls back to the ``supervised`` multiplier (0.4) for unknown modes
+    — defensive default that keeps a typo'd / future-mode session
+    bounded rather than silently granting full capacity.
+    """
+    key = mode.value if hasattr(mode, "value") else str(mode)
+    return MODE_MULTIPLIER.get(key, MODE_MULTIPLIER["supervised"])
+
+
+def effective_budget(
+    mode: str,
+    *,
+    aimd_budget: int | None = None,
+) -> int:
+    """Compose the per-mode ceiling with the AIMD-shaped budget.
+
+    ``effective = min(floor(MODE_MULTIPLIER[mode] * CAPACITY_MAX),
+    aimd_budget)``.
+
+    * ``aimd_budget`` defaults to :func:`current_budget` so callers in
+      the production path don't need to pass it; tests pass it
+      explicitly to drive the composition deterministically.
+    * Floored at ``1`` so the most-throttled mode (``manual`` × small
+      ``CAPACITY_MAX``) still grants at least one slot — matches the
+      same anti-deadlock floor enforced by
+      :func:`backend.sandbox_capacity._effective_capacity_max_locked`.
+
+    H4a row 2581 wires this into ``_ModeSlot.acquire(cost)`` so the
+    token-based admission path consults the composed ceiling on every
+    fresh acquire.
+    """
+    mode_cap = max(1, int(mode_multiplier(mode) * CAPACITY_MAX))
+    aimd = aimd_budget if aimd_budget is not None else current_budget()
+    return max(1, min(mode_cap, aimd))
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public types
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

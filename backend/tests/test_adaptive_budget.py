@@ -358,6 +358,83 @@ class TestSpikeRecoveryCycle:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Mode multiplier (TODO H4a row 2580)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestModeMultiplier:
+    def test_multiplier_table_matches_todo_spec(self):
+        # TODO H4a row 2580 字面值: turbo=1.0 / full_auto=0.7 /
+        # supervised=0.4 / manual=0.15. 鎖死 — 任何 typo / drift 立即紅。
+        assert ab.MODE_MULTIPLIER == {
+            "turbo": 1.0,
+            "full_auto": 0.7,
+            "supervised": 0.4,
+            "manual": 0.15,
+        }
+
+    def test_mode_multiplier_accepts_string(self):
+        assert ab.mode_multiplier("turbo") == 1.0
+        assert ab.mode_multiplier("full_auto") == 0.7
+        assert ab.mode_multiplier("supervised") == 0.4
+        assert ab.mode_multiplier("manual") == 0.15
+
+    def test_mode_multiplier_accepts_operation_mode_enum(self):
+        # OperationMode 是 str-Enum；adaptive_budget 用 .value 取值
+        # (避免 import decision_engine 造成 circular)。
+        from backend.decision_engine import OperationMode
+        assert ab.mode_multiplier(OperationMode.turbo) == 1.0
+        assert ab.mode_multiplier(OperationMode.full_auto) == 0.7
+        assert ab.mode_multiplier(OperationMode.supervised) == 0.4
+        assert ab.mode_multiplier(OperationMode.manual) == 0.15
+
+    def test_mode_multiplier_unknown_falls_back_to_supervised(self):
+        # 防呆：typo 或未來新模式不會誤授 full capacity。
+        assert ab.mode_multiplier("nonexistent_mode") == ab.MODE_MULTIPLIER["supervised"]
+        assert ab.mode_multiplier("") == ab.MODE_MULTIPLIER["supervised"]
+
+    def test_effective_budget_takes_min_of_mode_cap_and_aimd(self):
+        # CAPACITY_MAX=12, supervised=0.4 → mode_cap = floor(4.8) = 4.
+        # aimd=10 → effective = min(4, 10) = 4 (mode 限制贏)。
+        assert ab.effective_budget("supervised", aimd_budget=10) == 4
+        # aimd=2 → effective = min(4, 2) = 2 (AIMD 限制贏)。
+        assert ab.effective_budget("supervised", aimd_budget=2) == 2
+
+    def test_effective_budget_turbo_is_only_governed_by_aimd(self):
+        # turbo=1.0 → mode_cap = CAPACITY_MAX。AIMD 永遠是天花板。
+        assert ab.effective_budget("turbo", aimd_budget=CAPACITY_MAX) == CAPACITY_MAX
+        assert ab.effective_budget("turbo", aimd_budget=3) == 3
+
+    def test_effective_budget_full_auto_keeps_30pct_headroom(self):
+        # full_auto=0.7 × CAPACITY_MAX(12) = floor(8.4) = 8。
+        assert ab.effective_budget("full_auto", aimd_budget=CAPACITY_MAX) == 8
+
+    def test_effective_budget_manual_floors_at_one(self):
+        # manual=0.15 × CAPACITY_MAX(12) = floor(1.8) = 1。
+        # 即使 aimd 高、mode_cap 也只給 1 — manual session 本來就近乎序列。
+        assert ab.effective_budget("manual", aimd_budget=CAPACITY_MAX) == 1
+        assert ab.effective_budget("manual", aimd_budget=ab.FLOOR_BUDGET) == 1
+
+    def test_effective_budget_anti_deadlock_floor(self):
+        # 即使 aimd_budget=0 (理論上 FLOOR_BUDGET 已防止此 case，但 helper
+        # 自己也 floor 1) — 確保任何呼叫都不會回 0。
+        for mode in ("turbo", "full_auto", "supervised", "manual"):
+            assert ab.effective_budget(mode, aimd_budget=0) >= 1
+
+    def test_effective_budget_reads_live_current_budget_when_aimd_none(self):
+        # Default 路徑：production code 不傳 aimd_budget，helper 從
+        # current_budget() 讀活值。AIMD shrunk → effective 自動跟著縮。
+        ab.reset(initial_budget=6, now=0.0)
+        assert ab.effective_budget("turbo") == 6  # min(12, 6) = 6
+        # 模擬 MD halve: budget 6→3
+        ab.tick(cpu_percent=90, mem_percent=10, deferred_count=0, now=0.0)
+        ab.tick(cpu_percent=90, mem_percent=10, deferred_count=0, now=10.0)
+        assert ab.current_budget() == 3
+        assert ab.effective_budget("turbo") == 3
+        # supervised mode_cap=4, aimd=3 → min=3 (AIMD 贏)
+        assert ab.effective_budget("supervised") == 3
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Drift guard
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -383,6 +460,28 @@ class TestDriftGuards:
         assert ab._clamp(ab.FLOOR_BUDGET) == ab.FLOOR_BUDGET
         assert ab._clamp(CAPACITY_MAX) == CAPACITY_MAX
         assert ab._clamp(CAPACITY_MAX + 100) == CAPACITY_MAX
+
+    def test_every_operation_mode_has_a_multiplier(self):
+        # Drift guard: 任何新增 OperationMode 必須同步補 MODE_MULTIPLIER。
+        # 沒補的話這條會紅 — 阻擋 silent fall-through 到 supervised 預設。
+        # 這比 mode_multiplier() 的 defensive default 更早 catch drift —
+        # default 是 runtime safety net、這條是 dev-time tripwire。
+        from backend.decision_engine import OperationMode
+        for mode in OperationMode:
+            assert mode.value in ab.MODE_MULTIPLIER, (
+                f"OperationMode.{mode.name}={mode.value!r} missing from "
+                f"MODE_MULTIPLIER — add an entry to backend/adaptive_budget.py"
+            )
+
+    def test_multiplier_envelope_is_monotone_descending(self):
+        # turbo > full_auto > supervised > manual — 任何一個換掉就紅。
+        # 反映 SOP：愈自動的模式給愈多並行。
+        assert ab.MODE_MULTIPLIER["turbo"] > ab.MODE_MULTIPLIER["full_auto"]
+        assert ab.MODE_MULTIPLIER["full_auto"] > ab.MODE_MULTIPLIER["supervised"]
+        assert ab.MODE_MULTIPLIER["supervised"] > ab.MODE_MULTIPLIER["manual"]
+        # 上下界鎖：turbo 最多 100%、manual 必須 > 0 (anti-deadlock)。
+        assert ab.MODE_MULTIPLIER["turbo"] <= 1.0
+        assert ab.MODE_MULTIPLIER["manual"] > 0.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
