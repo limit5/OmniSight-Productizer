@@ -293,18 +293,19 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
         )}
       </div>
 
-      {/* R22.2 (2026-04-25 follow-up): switch from fixed-track grid
-          to flex layout. The earlier `grid-cols-[7rem_1fr_4rem]`
-          set a hard minimum of ~12rem; on narrow viewports + 2-col
-          parent grid the row's content overflowed into the LOCKS
-          cell. Flex with explicit `shrink-0` on the value, `flex-1
-          min-w-0` on the bar, and `min-w-0 + truncate` on the label
-          gives a deterministic squeeze order under tight space:
-          first the bar shrinks (it's the visual filler, not the
-          critical info), then the label truncates. The percentage
-          number is the most important data on the row, so it never
-          shrinks. */}
-      <div className="space-y-2">
+      {/* R22.3 (2026-04-25 follow-up²): two-line layout per row.
+          Earlier single-line flex (label · bar · pct) squeezed the
+          bar to almost nothing on narrow panels — the bar lives in
+          the same row as the label + percentage, so any space they
+          need is taken from the bar. Splitting into:
+              line 1: label  ───────────────  percentage
+              line 2: ████████████████████████████ (full-width bar)
+          gives the bar the entire block width to draw in, makes the
+          label + percentage roomy and easy to read, and keeps the
+          vertical rhythm tidy. Bar height bumped to ``h-2.5`` (down
+          from h-3) since it's now the only thing on its line and
+          doesn't need to compete for visual weight. */}
+      <div className="space-y-2.5">
         {rows.map((row) => {
           const pct = Math.max(0, Math.min(1, row.rate))
           const widthPct = pct === 0 ? 0 : Math.max(2, pct * 100)
@@ -312,17 +313,38 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
           return (
             <div
               key={row.label}
-              className="flex items-center gap-2 min-w-0"
+              className="space-y-1 min-w-0"
               data-testid={`merger-row-${row.label.toLowerCase().replace(/\s+/g, "-")}`}
             >
-              <span
-                className="font-mono text-[9.5px] tracking-[0.12em] text-[var(--muted-foreground,#94a3b8)] truncate basis-24 shrink min-w-0"
-                title={row.label}
-              >
-                {row.label}
-              </span>
+              {/* Line 1 — label left, percentage right. Items use
+                  ``items-baseline`` so the small label aligns with
+                  the bottom of the bigger percentage digit, not its
+                  top. */}
+              <div className="flex items-baseline justify-between gap-2 min-w-0">
+                <span
+                  className="font-mono text-[9.5px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)] truncate min-w-0 uppercase"
+                  title={row.label}
+                >
+                  {row.label}
+                </span>
+                <span
+                  className="font-mono text-[13px] font-bold tabular-nums shrink-0 leading-none whitespace-nowrap"
+                  style={{
+                    color: row.color,
+                    textShadow: isActive
+                      ? `0 0 8px color-mix(in srgb, ${row.color} 60%, transparent)`
+                      : undefined,
+                  }}
+                >
+                  {fmtPct(row.rate)}
+                </span>
+              </div>
+
+              {/* Line 2 — full-width bar. Track has the recessed
+                  inset shadow look so the empty channel reads as
+                  carved-in behind the fill. */}
               <div
-                className="relative h-3 rounded-full overflow-hidden border border-[var(--neural-border,rgba(148,163,184,0.25))] flex-1 min-w-0"
+                className="relative h-2.5 rounded-full overflow-hidden border border-[var(--neural-border,rgba(148,163,184,0.25))] w-full"
                 style={{
                   background: `color-mix(in srgb, ${row.track} 6%, transparent)`,
                   boxShadow: "inset 0 1px 2px rgba(0,0,0,0.4)",
@@ -340,9 +362,8 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
                       : undefined,
                   }}
                 >
-                  {/* Top sheen — adds the dimensional "wet pill" look so
-                      the bar reads as a 3D filled capsule, not a flat
-                      rectangle. Only on non-zero bars. */}
+                  {/* Top sheen — dimensional "wet pill" look so the
+                      bar reads as a 3D filled capsule, not flat. */}
                   {isActive && (
                     <div
                       aria-hidden
@@ -355,17 +376,6 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
                   )}
                 </div>
               </div>
-              <span
-                className="font-mono text-[12px] font-bold tabular-nums text-right shrink-0 leading-none whitespace-nowrap"
-                style={{
-                  color: row.color,
-                  textShadow: isActive
-                    ? `0 0 8px color-mix(in srgb, ${row.color} 60%, transparent)`
-                    : undefined,
-                }}
-              >
-                {fmtPct(row.rate)}
-              </span>
             </div>
           )
         })}
