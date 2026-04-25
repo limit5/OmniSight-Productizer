@@ -320,24 +320,44 @@ export function ProviderRollup<T extends ProviderRollupRow>({
                   {renderStatusBadge(group.providerKey)}
                 </span>
               ) : null}
-              <span className="ml-auto flex items-center gap-3 shrink-0">
-                <span
-                  className="font-mono text-[11px] text-[var(--validation-emerald)]"
-                  data-testid={`provider-rollup-tokens-${group.providerKey}`}
-                >
-                  {formatTokens(group.totals.totalTokens)} tokens
+              {/* 2026-04-25 UX fix: provider rollup summary row was
+                * overflowing on narrow panels — the trailing
+                * `ml-auto ... shrink-0` cluster pushed
+                * `tokens / cost / pct` past the right edge whenever
+                * label + status badge consumed enough space. Operator-
+                * reported "綠色 tokens 字超過版面".
+                *
+                * New layout: stack tokens+cost on one line with `pct`
+                * wrapping under `tokens` on narrow cards (own `flex-col`
+                * container so the rest of the row stays single-line).
+                * Removed `shrink-0` from the outer span and replaced
+                * `w-14` fixed width on pct with `tabular-nums` so the
+                * percent renders as `12.3%` cleanly without padding to
+                * 14ch. Numbers carry `tabular-nums` so column align
+                * works without explicit width. */}
+              <span
+                className="ml-auto flex flex-col items-end gap-0 shrink min-w-0 leading-tight"
+                data-testid={`provider-rollup-summary-numbers-${group.providerKey}`}
+              >
+                <span className="flex items-baseline gap-2">
+                  <span
+                    className="font-mono text-[11px] text-[var(--validation-emerald)] tabular-nums whitespace-nowrap"
+                    data-testid={`provider-rollup-tokens-${group.providerKey}`}
+                  >
+                    {formatTokens(group.totals.totalTokens)} tok
+                  </span>
+                  <span
+                    className="font-mono text-[11px] font-semibold text-[var(--hardware-orange)] tabular-nums whitespace-nowrap"
+                    data-testid={`provider-rollup-cost-${group.providerKey}`}
+                  >
+                    {formatCost(group.totals.cost)}
+                  </span>
                 </span>
                 <span
-                  className="font-mono text-[11px] font-semibold text-[var(--hardware-orange)]"
-                  data-testid={`provider-rollup-cost-${group.providerKey}`}
-                >
-                  {formatCost(group.totals.cost)}
-                </span>
-                <span
-                  className="font-mono text-[10px] text-[var(--muted-foreground)] w-14 text-right"
+                  className="font-mono text-[9px] text-[var(--muted-foreground)] tabular-nums whitespace-nowrap"
                   data-testid={`provider-rollup-pct-${group.providerKey}`}
                 >
-                  {pct.toFixed(1)}%
+                  {pct.toFixed(1)}% of total
                 </span>
               </span>
             </button>
