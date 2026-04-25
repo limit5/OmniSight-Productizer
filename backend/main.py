@@ -1008,6 +1008,8 @@ from backend.routers import admin_tenants as _admin_tenants_router  # Y2 (#278) 
 app.include_router(_admin_tenants_router.router, prefix=settings.api_prefix)
 from backend.routers import tenant_invites as _tenant_invites_router  # Y3 (#279) row 1 — invite issuance
 app.include_router(_tenant_invites_router.router, prefix=settings.api_prefix)
+from backend.routers import admin_super_admins as _admin_super_admins_router  # Y3 (#279) row 5 — super-admin self-service
+app.include_router(_admin_super_admins_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import
