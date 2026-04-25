@@ -173,7 +173,7 @@
 
 ## 5. 12-Phase 實施路線圖
 
-### Phase A — 4 Templates + Pydantic Schema（1-2 週）
+### Phase A — 4 Templates + Pydantic Schema + RLM-Pattern Cognitive Load（1.5-2 週）
 
 **範圍**：Spec Template / Task Template / Impl Template / Review Template 的 Pydantic 定義 + FastAPI validation + state machine + cognitive load scanner（fan-in/out/mock limit）。
 
@@ -184,10 +184,11 @@
 - `backend/cognitive_load.py` — fan-in/out/mock 量化器
 - `backend/template_validator.py` — Attention-enforcement 中介層
 - `backend/tests/test_templates.py` — ~120 unit test
+- **BP.A.5b** RLM-pattern decomposition 決策分支（**2026-04-25 新增 from RLM Option B**）：當 `context_tokens > 100_000` AND `task_type ∈ {analysis, audit, forensics}` AND **非** `task_type ∈ {crud, retrieval, simple_lookup}` → 走「partition + map + summarize」recursion mode（hard depth=1 cap，借 RLM 概念但不裝 library）；否則走 standard agent dispatch。+ ~50 LOC + 30 test。
 
-**工時**：1-2 週 / 3-5 commits / 單 session 可完
+**工時**：1.5-2 週 / 4-6 commits / 單 session 可完（原 1-2w + RLM Option B 微調 0.5w）
 
-**風險**：低 — 純 additive，不動現有 topology
+**風險**：低 — 純 additive，不動現有 topology；RLM-pattern decision branch fail-open（heuristic 失誤時 regress to standard dispatch）
 
 ---
 
@@ -309,8 +310,9 @@
 - `backend/red_card.py` — 3 連 `Verified -1` → 斷 API + Jira `[BLOCKED]`
 - Notification 加 `is_red_card` bool
 - `backend/tests/test_red_card.py` — ~25 test
+- **BP.H.2.b** `recursive_subcall_budget`（**2026-04-25 新增 from RLM Option B**）：單一 root task 累積 sub-LM call > 3 → yellow card（warn + slow down）；> 5 → red card（熔斷整條 agent + 升級人類）。直接 mitigate reproduction paper 警告的 `depth>1 = 96x slowdown`；對齊既有 R0/R2/Watchdog 3-tier 升級階梯。+ ~30 LOC + 10 test。可配置 per-Guild override。
 
-**工時**：1 週 / 3 commits
+**工時**：1 週 / 3-4 commits（原 1w + 0.5d 吸收 BP.H.2.b）
 
 **風險**：🟢 低
 
@@ -390,23 +392,131 @@
 
 ---
 
+### Phase M — L1 Skill Auto-Distillation（2 週）— **2026-04-25 新增**
+
+> 補完 [agentic-self-improvement.md](agentic-self-improvement.md) §L1「知識繁衍」設計實作落差。OmniSight 既有設計文件規劃但 0% 實作；仿 Hermes Agent (NousResearch, 30k stars) skill distillation pattern。
+
+**範圍**：當 task 完成且滿足 `(tool_calls > 5 OR iterations > 3) AND success == true AND duration > threshold` → Architect Guild 用 Opus 4.7 將 trajectory 摘要成 markdown skill doc，寫入 `auto_distilled_skills` 表（與 human-curated `configs/skills/` 隔離），**必經 human review** 才升格進 production skill pack。
+
+**前置**：Phase B（Architect Guild 存在）
+
+**交付**：
+- alembic migration：`auto_distilled_skills` table（schema 仿 `git_accounts` pattern：id / tenant_id / skill_name / source_task_id / markdown_content / version / status `draft|reviewed|promoted` / created_at）
+- `backend/skill_distiller.py` — trajectory → markdown summarizer（Architect Guild 接 hook）
+- `backend/routers/auto_skills.py` — REST CRUD + review/promote endpoint
+- 前端 `components/omnisight/skill-review-panel.tsx` — operator 審核 UI
+- audit_log 紀錄 distillation event + promotion event
+- `backend/tests/test_skill_distiller.py` — ~40 test
+- 與 R3 Scratchpad 共存：scratchpad 是 in-task working memory，distiller 是 cross-task knowledge
+
+**工時**：2 週 / 6-8 commits
+
+**風險**：🟢 低 — human-in-loop 設計、Phase D 合規友善（每個 promoted skill 有完整 traceability）
+
+---
+
+### Phase N — Web Search Tool + Sanitization Layer（1 週）— **2026-04-25 新增**
+
+> 解 LLM knowledge cutoff 問題、為 Intel + Architect Guild 提供 latest knowledge 通道。
+
+**範圍**：Tavily-based web search tool，限定 Intel + Architect 兩 Guild 預設可用，其他 Guild 預設 off；per-tenant daily cost cap + sanitization 層 + audit_log 整合。
+
+**前置**：Phase B（Intel + Architect Guild exist）
+
+**交付**：
+- `backend/web_search.py` — Tavily client + per-tenant rate limit + cost tracker
+- `backend/web_sanitizer.py` — prompt injection filter（剝 zero-width chars / hidden instructions / 結構化 LLM-generated content marker）
+- env knobs：`OMNISIGHT_WEB_SEARCH_PROVIDER=none|tavily|exa|perplexity` (default `none`)、`OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD=5.00` per-tenant
+- 新 tool 掛到 Intel + Architect Guild loadout (BP.B 已預留 intel)
+- audit_log 紀錄每次 search query（Phase D 合規 traceability）
+- `backend/tests/test_web_search.py` — ~30 test (rate limit / sanitization / fallback / cost cap)
+
+**工時**：1 週 / 4-5 commits
+
+**風險**：🟡 中 — prompt injection / cost runaway / data retention vs Phase D；mitigation：默認 off + per-tenant cap + sanitization
+
+---
+
+### Phase R — RTK (Rust Token Killer) Hardening（1 週）— **2026-04-25 新增**
+
+> 補完 [rust_token_killer.md](rust_token_killer.md) 設計實作落差。OmniSight `Dockerfile.agent:35-36` 已裝 RTK base 但 install 失敗會被 `\|\| true` 吞掉、無 prompt 規範、無 fallback、無 `.rtkignore` — 整體只 30% 實作。
+
+**範圍**：RTK 從「裝了沒在用」升到「production-grade 預設使用 + 失敗自動降級」，預估能省 30% LLM token cost on noisy task（Valgrind / make / git diff）。
+
+**前置**：無（純 Docker image + agent prompt）
+
+**交付**：
+- `backend/docker/Dockerfile.agent`：RTK install 失敗改 hard-fail（移除 `\|\| true`）+ 寫 prod log
+- `configs/.rtkignore` global 配置：排除 `/build /bin /dist *.o *.so *.a` + binary 副檔名
+- Agent system prompt 加規範段：強制 high-noise command 使用 RTK 前綴
+- `backend/rtk_fallback.py` — 連續 2 次同 task 編譯失敗 → 自動 `--no-rtk` 重抓 raw output（doc § 三.1 緩解策略）
+- 強迫 agent 走 Bash path（剝 native `Read_File_Tool` 對 build / log path 的訪問權；走 PEP Gateway）
+- Prometheus metric `omnisight_rtk_compression_ratio` + `omnisight_rtk_fallback_total`
+- `backend/tests/test_rtk_integration.py` — ~25 test (compression / fallback / .rtkignore / prompt 規範驗證)
+
+**工時**：1 週 / 4-5 commits
+
+**風險**：🟢 低 — base 已就位，補完是 incremental hardening
+
+**為什麼納入主線而非 W3**：當前 Dockerfile.agent 的 `\|\| true` swallow 是**潛在安全網漏洞**（RTK 默默沒裝、agent 卻假設有壓縮 → context overflow 變相風險），優先級高於 RLM-pattern。
+
+---
+
+### Phase S — Tier 0 Control Plane 顯式化 + Sandbox 4-tier 完整 audit（1 週）— **2026-04-25 新增**
+
+> 補完 [tiered-sandbox-architecture.md](tiered-sandbox-architecture.md) 設計實作落差。Tier 1/2 已 production-grade、Tier 0/3 隱式存在但未顯式命名 → 影響 Phase D 合規 traceability。
+
+**範圍**：把現有 backend 顯式標為 Tier 0 控制面、完整文件化 4-tier 邊界 + 對映 Phase B Guild × Tier 矩陣 + 每 Guild 准入哪些 Tier；不動 runtime 行為，純 documentation hardening + audit。
+
+**前置**：Phase B（Guild exists）
+
+**交付**：
+- `backend/sandbox_tier.py` — Tier enum + Guild × Tier 准入 matrix（`{architect: T0+T2, bsp: T1+T3, hal: T1+T3, frontend: T0+T2, ...}`）
+- `configs/sandbox_tier_policy.yaml` — operator 可改寫
+- 文件化 audit：每個 Guild × Tier 組合的安全屬性 + 合規 claim（Phase D auxiliary check 直接引用）
+- PEP Gateway 加 Tier-aware policy（補完 line 2742 既有 PEP-tier integration 的 documentation gap）
+- 新 Risk R12（gVisor cost-weight only / not actual runtime）寫進文件 — 防止「以為有 gVisor 但其實沒有」誤導 claim
+- `backend/tests/test_sandbox_tier_policy.py` — ~20 test (Guild × Tier matrix / policy parsing / PEP integration)
+
+**工時**：1 週 / 3-4 commits
+
+**風險**：🟢 低 — 純命名 + 文件化，零 runtime 改動
+
+**為什麼納入主線而非 W3**：Phase D 合規（IEC 62304 / ISO 26262）要求 sandbox boundary explicit；Tier 0/3 的命名隱式會被合規 review 卡住。
+
+---
+
 ### Phase 彙總
 
-| Phase | 內容 | 工時 | 前置 | 風險 |
-|---|---|---|---|---|
-| **A** | 4 Templates + Cognitive Load | 1-2 週 | — | 🟢 |
-| **B** | Guild 重組 + AGENT_TOOLS | 2-3 週 | A | 🟠 |
-| **C** | T-shirt Gateway + S/M/XL | 2-3 週 | B | 🟠 |
-| **D** | 4 合規矩陣（輔助）| 2-3 週 + 法務 | B | 🔴 |
-| **E** | GraphRAG / Neo4j | **延後 v1.0+** | — | — |
-| **F** | Model Mapping 三態旗標 | 1 週 | B | 🟢 |
-| **G** | TDD Dual-Patchset | 1-2 週 | B | 🟢 |
-| **H** | 3 級懲罰 + Red Card | 1 週 | R0/R2/Watchdog（已完）| 🟢 |
-| **I** | SecOps Threat Intel | 1-2 週 | — | 🟢 |
-| **J** | Self-healing Docs | 1 週 | B | 🟢 |
-| **K** | Frontend 6 component | 2-3 週 | B + TODO Phase 4 | 🟠 |
-| **L** | Test 分級聚合 | 2-3 週 | A-K | 🟢 |
-| **合計** | | **~18-25 週**（單人）| | |
+| Phase | 內容 | 工時 | 前置 | 風險 | Window |
+|---|---|---|---|---|---|
+| **A** | 4 Templates + Cognitive Load | 1-2 週 | — | 🟢 | W1 |
+| **B** | Guild 重組 + AGENT_TOOLS | 2-3 週 | A | 🟠 | W1 |
+| **C** | T-shirt Gateway + S/M/XL | 2-3 週 | B | 🟠 | W2 |
+| **D** | 4 合規矩陣（輔助）| 2-3 週 + 法務 | B | 🔴 | W2 |
+| **E** | GraphRAG / Neo4j | **延後 v1.0+** | — | — | W4 |
+| **F** | Model Mapping 三態旗標 | 1.5 週 | B | 🟢 | W1 |
+| **G** | TDD Dual-Patchset | 1-2 週 | B | 🟢 | W2 |
+| **H** | 3 級懲罰 + Red Card | 1 週 | R0/R2/Watchdog（已完）| 🟢 | W1 |
+| **I** | SecOps Threat Intel | 1-2 週 | — | 🟢 | W1 |
+| **J** | Self-healing Docs | 1 週 | B | 🟢 | W2 |
+| **K** | Frontend 6 component | 2-3 週 | B + TODO Phase 4 | 🟠 | W2 |
+| **L** | Test 分級聚合 | 2-3 週 | A-K | 🟢 | W2 |
+| **M** ⭐ | L1 Skill Auto-Distillation | 2 週 | B | 🟢 | W1.5 (新增 D' path) |
+| **N** ⭐ | Web Search Tool + Sanitization | 1 週 | B | 🟡 | W1.5 (新增 D' path) |
+| **R** ⭐ | RTK Hardening | 1 週 | — | 🟢 | W1.5 (新增 D' path) |
+| **S** ⭐ | Tier 0 Control Plane Explicit | 1 週 | B | 🟢 | W1.5 (新增 D' path) |
+| **合計（含新增主線 4 顆）** | | **~23.5-30.5 週**（單人）| | | |
+
+**Window 3 backlog（D' path）— 詳見 §6.6**：
+- **Phase O** L3 Evaluator Agent (γ) — 2-3 週
+- **Phase P** L2 Toolmaking + Human Review (δ) — 2 週
+- **Phase T** Hardware Bridge Daemon — 2 週
+- **Phase U** gVisor Production Adoption — 2-3 週
+
+**Window 4（Post-v1.0）**：
+- **Phase Q** L4 Data Flywheel Loop Closure (ε) — 1.5-2 週（auto fine-tune，需法務 review）
+- **Phase E** GraphRAG / Neo4j — 既有延後項
 
 ---
 
@@ -651,6 +761,11 @@ OMNISIGHT_GUILD_ALIAS_MODE=dual-write|guild-only  # Phase B 遷移期
 | R7 | Test suite 時間暴漲拖慢 CI | 🟢 低 | 🟡 中 | CI shard 4→8-way + pytest marker 分級 |
 | R8 | Neo4j 延後後重啟技術債 | 🟢 低 | 🟢 低 | v1.0 後開 ADR-002 重啟議題 |
 | R9 | D1/D2 pilot 豁免後 D3-D29 陸續有人「跟進 pilot」推進造成範圍失控 | 🟡 低 | 🟡 中 | **明確 gate**：僅 D1 (SKILL-UVC) + D2 (SKILL-IPCAM) 享豁免（source_of_truth 在此 ADR R9 + TODO BP.W3.1 註腳）；D3+ 須 Phase B 完後才啟動；任何 agent session 若欲繞過須先提交 ADR 修訂 PR |
+| R10 | RLM library 整合誘惑 — `rlms` PyPI 包看似一行 swap 解 long-context、但 reproduction paper [arXiv 2603.02615] 揭露 depth>1 latency 96x、simple task regression、unbounded cost | 🟡 中 | 🟢 低 | **per-Guild opt-in flag** + **硬 depth=1 cap** + token budget 必繼承 + 反向測試「RLM mode vs vanilla 比較」必跑；Option B 借模式不裝 library；Option A full integration 須 ≥3 reproduction papers + ≥1 big-co prod report 才重啟（見 §Appendix C trigger） |
+| R11 | RTK install 在 `Dockerfile.agent` 失敗被 `\|\| true` 吞掉 → agent 假設有壓縮但實際無、context overflow 變相風險 | 🟠 中 | 🟡 中 | Phase R 移除 `\|\| true`、改 hard-fail + prod log；新 Prometheus metric `omnisight_rtk_install_status` 監控 base image RTK 是否正常 |
+| R12 | gVisor 在 `sandbox_capacity.py` 是 cost weight 而非 actual runtime — 文件聲稱有但 prod 跑 docker default → **誤導性安全 claim** | 🔴 高 | 🟢 低 | Phase S 文件化此事實 + Risk R12 explicit warning「合規 claim 不可引用 gVisor」；正式 gVisor adoption 留 Phase U Window 3；防止 Phase D 第三方 legal review 被誤導 |
+| R13 | Hardware Bridge Daemon (Tier 3 RPC `flash_board`) 只在 test enum 字串、無實際 daemon 服務 → 自動化燒錄韌體不可能、所有「flash 韌體」task 仍需 operator 手動 | 🟠 中 | 🟡 中 | Phase T (Window 3) ship FastAPI daemon；在此之前 Priority A1 prod hardware 驗證走 operator 手動 SOP（已記錄於 docs/ops/）|
+| R14 | self-improvement L1-L4 設計 vs 實作 gap 已存在數月、未被當作風險追蹤 | 🟡 低 | 🟢 低 | Phase M (主線) 補 L1、Phase O/P (W3) 補 L3/L2、Phase Q (Post-v1.0) 補 L4；Appendix C 紀錄 surveillance lesson-learned |
 
 ---
 
@@ -758,6 +873,63 @@ class ReviewTemplate(BaseModel):
 
 ---
 
-**ADR 狀態**：Proposed — 待 operator 最終核准後進入 Accepted。
+## Appendix C: External Research Surveillance Process — 2026-04-25 新增
 
-**下次修訂觸發**：(1) Phase A 完成後補實作細節；(2) Phase B 完成後更新 Appendix A；(3) 法務 review 結果影響 Phase D 設計時。
+> 本附錄記錄外部 research paper 評估方法論、surveillance trigger 條件、以及 RLM 評估案例的 lesson-learned。當未來下一波 research wave 來時，agent / operator 應 reuse 此框架而非從零討論。
+
+### C.1 評估方法論（Effects Audit Framework）
+
+每當外部 research paper / repo 被提議整合到 OmniSight，必走以下 7 步驟：
+
+1. **真實性驗證** — paper 真存在？作者可信？arxiv ID 有效？
+2. **獨立 reproduction 檢查** — 是否有第三方 reproduction paper？對 abstract claim 的 caveat？
+3. **OmniSight 架構對映** — 哪些功能已被 R0-R4 / G / I / J / K / M / O / Phase A-L 涵蓋？淨增量百分比？
+4. **Red-line 對映** — 是否撞 multi-tenancy / audit chain / cost ceiling / PEP gateway / Phase D 合規 5 條紅線？
+5. **整合 path 三選項** — Option A 全量 / Option B 借模式 / Option C 延後
+6. **工時 + 可逆性 + 風險評估** — phase-by-phase + reversibility + numeric risk score
+7. **Decision rubric** — 走主線 / Window 3 backlog / Post-v1.0 / 不做
+
+### C.2 Trigger 條件（什麼情況重啟評估）
+
+| Trigger | 重啟動作 |
+|---|---|
+| ≥ 3 reproduction papers + ≥ 1 big-co prod deployment report 任一外部 paper | 重新走 §C.1 七步驟 |
+| 既有 risk register 中 R10/R11/R12/R13/R14 任一 mitigation 失效 | 該 Risk 行重做風險評估 |
+| 外部 paper 引用既有 OmniSight design doc 或公開 benchmark | 評估反向採納可能性（OmniSight pattern 是否值得對外推廣）|
+| Phase B 完成後（Guild 重組 land）| 重新評估 RLM/L2/L4 等延後項目 |
+
+### C.3 Lesson-Learned：RLM 評估案例（2026-04-25）
+
+**案例**：Recursive Language Models (arXiv 2512.24601) — alexzhang13/rlm 3.7k stars。
+
+**評估結果**：
+- 真實性 ✅（MIT OASYS lab、credentials 齊全）
+- Reproduction caveat 🔴（depth>1 = 96x slowdown / simple task regression）
+- OmniSight 對映：70% 已被 R3 Scratchpad / CATC / Tiered Sandbox 涵蓋；淨增量 25-30%
+- Red-line 撞 5 條（multi-tenancy / audit / cost / PEP / Phase D）
+- Decision：Option B 借模式不裝 library + 6 處 BP 微調
+
+### C.4 Lesson-Learned：審計盲區紀錄
+
+審計過程中**自我發現**的盲區，記錄以避免下次重犯：
+
+1. **漏 L2 Toolmaking** — 當時提案只覆蓋 L1+L3，L2 完全沒提；潛意識被 SOTA research（Hermes / Memento-Skills 多在 markdown skill distillation 止步）帶歪、忽略 OmniSight 自身設計獨特性（agent 自寫 executable script）。Mitigation：Phase D' 的 W3.11 (BP.P) 補。
+2. **L4 草率 dismiss** — 當時用一句「production 風險高」帶過、未量化「OmniSight 已有 4 個 finetune_*.py 即 70% built / 剩 10% 是 loop closure」。Mitigation：Phase Q (Post-v1.0) 補完。
+3. **漏 RTK 完整化審計** — agentic-self-improvement.md 評估時沒同時看 rust_token_killer.md，導致 RTK 30% 部分實作被忽略。Mitigation：Phase R 主線補。
+4. **漏 Tiered Sandbox 4-tier 完整 audit** — 同上，Tier 0 顯式化 / gVisor false claim / Hardware Bridge daemon missing 三件事 surveillance 漏掉。Mitigation：Phase S + R12 + R13 補。
+
+**規範**：未來評估外部 research 時，**必須同時 sweep 現有 `docs/design/*.md` 所有 design 文件實作落差**，避免單一切角審計。建議走 §C.1 第 3 步「OmniSight 架構對映」時用 grep / wc -l 系統化盤點 design vs 實作。
+
+### C.5 Naming Collision 紀錄
+
+`Phase H` 在 ADR 與 TODO 兩處意思不同：
+- **Blueprint Phase H** = 3-tier Penalty + Red Card（本 ADR §5）
+- **TODO Priority H** = Host-aware Coordinator（TODO line 2525+）
+
+兩者都用字母 H，純為命名巧合。未來 ADR 修訂或 TODO refactor 應考慮把 BP 統一前綴 `BP.X` 避免混淆。本附錄首次明文化此事實。
+
+---
+
+**ADR 狀態**：**Accepted (2026-04-24) + Amended (2026-04-25 D' path 整合)** — RLM Option B 6 處微調 + Phase M/N/R/S 主線新增 + Phase O/P/T/U Window 3 + Phase Q Post-v1.0 + Risk R10-R14 + Appendix C。
+
+**下次修訂觸發**：(1) Phase A 完成後補實作細節；(2) Phase B 完成後更新 Appendix A；(3) 法務 review 結果影響 Phase D 設計時；(4) Appendix C 任一 trigger 條件被滿足時。

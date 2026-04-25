@@ -128,15 +128,16 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [~] **BP.W0.5** Priority Z LLM Provider Observability（~3.5d）→ 見 Priority Z *(partial 2026-04-25: Z.1 rate-limit header 擷取 5/5 `[x]` ✅、Z.2 DeepSeek+OpenRouter balance fetch 6/6 `[x]` ✅、**Z.3 pricing YAML hot-reload 3/7 partial**（已有 `config/llm_pricing.yaml` commit `ecbe1223` + 2-3 顆 checkbox）、Z.4 UI per-provider balance/rate-limit panel 0/7 未動、Z.5 tests + 支援度矩陣 0/6 未動。Aggregate 14/31 = 45% complete。剩餘預估 ~2d (Z.3 收尾 + Z.4 UI + Z.5 test)。)*
 - [x] **BP.W0.6** Y-prep Gerrit+JIRA hardening（~2.5d）→ 見 Priority Y-prep *(done 2026-04-25: 上一版 annotation 是 stale snapshot — 重查 TODO 後確認 Y-prep 三個子項目 **15/15 全數 `[x]`** 已完。**Y-prep.1 Gerrit webhook routing 5/5** — TestGerritEventRouting / NegativeCases / CommentAddedReviewBoundary / ChangeMergedReplicationTargetsBoundary / SignatureVerifier 共 31 test + pytest.ini `p0` marker + conftest `pytest_collection_modifyitems` + `pytest_runtime_makereport` enforcement hook。**Y-prep.2 JIRA webhook secret rotation 4/4** — 後端 `POST /runtime/git-forge/jira/webhook-secret/generate` endpoint + 前端 `JiraWebhookSecretRotateDialog` 四階段 state machine + `TestJiraWebhookSecretRotate` 3 test（rotate_one_time_reveal + requires_admin + cross_worker_propagation）且本 session 跑 3/3 綠 in 2.91s + webhooks.py `_overlay_runtime_settings()` 讀側收尾閉環 SharedKV cross-worker。**Y-prep.3 JIRA 入站 webhook 事件路由器 6/6** — `_on_jira_event()` dispatcher + `backend/jira_event_router.py` 3 handler 映射（comment-command + status-transition + intake-label）+ 3 audit events（`jira.command_received` / `jira.status_transitioned` / `jira.intake_triggered`）+ `_SHARED_KV_STR_FIELDS` 加 `jira_intake_label` / `jira_done_statuses` + 3 test + `docs/integrations/jira-automation.md`。Aggregate 15/15 = **100% complete**，operator action 零。)*
 
-### BP.A — 4 Templates + Cognitive Load Scanner（~1-2 週）
+### BP.A — 4 Templates + Cognitive Load Scanner（~1.5-2 週）
 > 純 additive，零衝突；Blueprint 主線開頭
 - [ ] BP.A.1 `backend/templates/spec.py` — Pydantic SpecTemplate (system_boundaries / hardware_constraints / api_idl_schema / bdd_executable_specs / edge_cases_handled ≥ 3)
 - [ ] BP.A.2 `backend/templates/task.py` — Pydantic TaskTemplate (target_triple / allowed_dependencies / max_cognitive_load_tokens / guild_id / size)
 - [ ] BP.A.3 `backend/templates/impl.py` — Pydantic ImplTemplate (source_code_payload / compiled_exit_code / time_complexity / target_triple)
 - [ ] BP.A.4 `backend/templates/review.py` — Pydantic ReviewTemplate（強制 audit_type="advisory" + requires_human_signoff=true 的 Auxiliary disclaimer）
 - [ ] BP.A.5 `backend/cognitive_load.py` — fan-in / fan-out / mock-limit 量化器
+- [ ] **BP.A.5b** RLM-pattern decomposition 決策分支（**2026-04-25 from RLM Option B**）：當 `context_tokens > 100_000` AND `task_type ∈ {analysis, audit, forensics}` AND **非** `task_type ∈ {crud, retrieval, simple_lookup}` → 走「partition + map + summarize」recursion mode（hard depth=1 cap，借 RLM 概念但**不裝** `rlms` library）；否則走 standard agent dispatch；fail-open 設計（heuristic 失誤 regress to dispatch）；source-of-truth = ADR R10 + Appendix C
 - [ ] BP.A.6 `backend/template_validator.py` — FastAPI 驗證中介層（Pydantic ValidationError → 認知懲罰 prompt）
-- [ ] BP.A.7 `backend/tests/test_templates.py` — ~120 unit test
+- [ ] BP.A.7 `backend/tests/test_templates.py` — ~150 unit test（原 120 + RLM-pattern 30）
 
 ### BP.I — SecOps Threat Intel Agent（~1-2 週）
 > 零前置；可插入 A/B 之間
@@ -177,10 +178,12 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.H — 3-tier Penalty + Red Card（~1 週）
 > 前置 R0 / R2 / Watchdog（已完）；BP.B 完後加 guild_id label
+> 注意：此「Phase H」是 Blueprint Phase H，與 TODO `Priority H — Host-aware Coordinator`（line 2525+）是**不同**東西，命名碰撞（見 ADR Appendix C §C.5）
 - [ ] BP.H.1 `backend/cognitive_penalty.py` — CI report → 警告 prompt 回注
 - [ ] BP.H.2 `backend/red_card.py` — 3 連 `Verified -1` → 斷 API + Jira `[BLOCKED]`
+- [ ] **BP.H.2.b** `recursive_subcall_budget`（**2026-04-25 from RLM Option B**）：單一 root task 累積 sub-LM call > 3 → yellow card（warn + slow down）；> 5 → red card（熔斷整條 agent + 升級人類）；直接 mitigate reproduction paper 警告的 `depth>1 = 96x slowdown`；可配置 per-Guild override；source-of-truth = ADR R10 + Appendix C
 - [ ] BP.H.3 Notification 加 `is_red_card` bool；映射到 L3 Jira + L4 PagerDuty
-- [ ] BP.H.4 `backend/tests/test_red_card.py` — ~25 test
+- [ ] BP.H.4 `backend/tests/test_red_card.py` — ~35 test（原 25 + sub-call budget 10）
 
 ### BP.C — T-shirt Gateway + S/M/XL Topology（~2-3 週）
 > 前置 BP.B；feature flag `OMNISIGHT_TOPOLOGY_MODE=legacy|smxl`
@@ -238,6 +241,44 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] BP.L.4 Coverage gate 套到 new module
 - [ ] BP.L.5 Full suite 時間目標 ≤ 240 min
 
+### BP.M — L1 Skill Auto-Distillation（~2 週）— **2026-04-25 D' 主線新增**
+> 補完 `docs/design/agentic-self-improvement.md` §L1 設計實作落差；仿 Hermes Agent (NousResearch) skill distillation pattern；human-review gate 後升格 production skill pack。
+- [ ] BP.M.1 alembic migration `auto_distilled_skills` table（id / tenant_id / skill_name / source_task_id / markdown_content / version / status `draft|reviewed|promoted` / created_at）
+- [ ] BP.M.2 `backend/skill_distiller.py` — trajectory → markdown summarizer，Architect Guild 接 hook（trigger: `tool_calls > 5 OR iterations > 3` AND `success == true`）
+- [ ] BP.M.3 `backend/routers/auto_skills.py` — REST CRUD + `POST {id}/review` + `POST {id}/promote` endpoint
+- [ ] BP.M.4 `components/omnisight/skill-review-panel.tsx` — operator 審核 UI（draft → reviewed → promoted 三階段）
+- [ ] BP.M.5 audit_log 紀錄 distillation event + promotion event（Phase D traceability）
+- [ ] BP.M.6 與 R3 Scratchpad 關係文件化：scratchpad in-task working memory / distiller cross-task knowledge
+- [ ] BP.M.7 `backend/tests/test_skill_distiller.py` ~40 test
+
+### BP.N — Web Search Tool + Sanitization Layer（~1 週）— **2026-04-25 D' 主線新增**
+> 解 LLM knowledge cutoff、為 Intel + Architect Guild 加 latest-knowledge 通道；per-tenant cost cap + sanitization + audit_log。
+- [ ] BP.N.1 `backend/web_search.py` — Tavily client + per-tenant rate limit + cost tracker
+- [ ] BP.N.2 `backend/web_sanitizer.py` — prompt injection filter（zero-width chars / hidden instructions / LLM-content marker）
+- [ ] BP.N.3 env knobs：`OMNISIGHT_WEB_SEARCH_PROVIDER=none|tavily|exa|perplexity` (default `none`) + `OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD=5.00` per-tenant
+- [ ] BP.N.4 新 tool 掛 Intel + Architect Guild loadout（其他 Guild 預設 off）
+- [ ] BP.N.5 audit_log 紀錄每次 search query（Phase D 合規 traceability）
+- [ ] BP.N.6 `backend/tests/test_web_search.py` ~30 test (rate limit / sanitization / fallback / cost cap)
+
+### BP.R — RTK (Rust Token Killer) Hardening（~1 週）— **2026-04-25 D' 主線新增**
+> 補完 `docs/design/rust_token_killer.md` 設計實作落差；現況 `Dockerfile.agent:35-36` install 失敗被 `|| true` 吞掉、無 prompt 規範、無 fallback、無 `.rtkignore` — 30% 實作。Phase R ship 後預估省 30% LLM token cost on noisy task（Valgrind / make / git diff）。
+- [ ] BP.R.1 `backend/docker/Dockerfile.agent` 移除 `|| true` swallow，install 失敗改 hard-fail + 寫 prod log（解 Risk R11）
+- [ ] BP.R.2 `configs/.rtkignore` 全域配置：排除 `/build /bin /dist *.o *.so *.a` + binary 副檔名
+- [ ] BP.R.3 Agent system prompt 加規範段：強制 high-noise command 使用 RTK 前綴（doc § 二.2）
+- [ ] BP.R.4 `backend/rtk_fallback.py` — 連續 2 次同 task 編譯失敗 → 自動 `--no-rtk` 重抓 raw output（doc § 三.1 緩解策略）
+- [ ] BP.R.5 強迫 agent 走 Bash path（剝 native `Read_File_Tool` 對 build / log path 訪問權；走 PEP Gateway）
+- [ ] BP.R.6 Prometheus metric `omnisight_rtk_compression_ratio` + `omnisight_rtk_fallback_total` + `omnisight_rtk_install_status`
+- [ ] BP.R.7 `backend/tests/test_rtk_integration.py` ~25 test (compression / fallback / .rtkignore / prompt 規範)
+
+### BP.S — Tier 0 Control Plane 顯式化 + 4-tier Sandbox 完整 audit（~1 週）— **2026-04-25 D' 主線新增**
+> 補完 `docs/design/tiered-sandbox-architecture.md` 設計-實作 gap；Tier 1/2 已 production-grade、Tier 0/3 隱式存在 → 影響 Phase D 合規 traceability。**純命名 + 文件化、零 runtime 改動**。
+- [ ] BP.S.1 `backend/sandbox_tier.py` — Tier enum + Guild × Tier 准入 matrix（`{architect: T0+T2, bsp: T1+T3, hal: T1+T3, frontend: T0+T2, ...}`）
+- [ ] BP.S.2 `configs/sandbox_tier_policy.yaml` — operator 可改寫
+- [ ] BP.S.3 文件化 audit：每個 Guild × Tier 組合的安全屬性 + 合規 claim（Phase D auxiliary check 直接引用）
+- [ ] BP.S.4 PEP Gateway Tier-aware policy 文件化（補完 line 2742 既有 PEP-tier integration 的 documentation gap）
+- [ ] BP.S.5 紀錄 Risk R12（gVisor cost-weight only / not actual runtime）— 防誤導 claim
+- [ ] BP.S.6 `backend/tests/test_sandbox_tier_policy.py` ~20 test (Guild × Tier matrix / policy parsing / PEP integration)
+
 ### BP.W3 — Backlog 收尾（Blueprint 完成後，~30-50 週）
 > 等 Phase B 完成後按 Guild 歸屬批次重做
 - [ ] BP.W3.1 D3-D29 27 個 embedded skill packs（rework ~5-10% per pack；修訂 2026-04-24：原估 30% 過度保守）
@@ -249,9 +290,15 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] BP.W3.6 F1-F3 META bundles
 - [ ] BP.W3.7 S2 / R4-R9 / H4 / P9-12 等 orthogonal 剩餘
 - [ ] BP.W3.8 ZZ 系列 Agent observability 補強
+- [ ] **BP.W3.9** RLM library 全量整合可行性研究（**2026-04-25 from RLM Option B**）— 候選整合點 Forensics Guild Context Absorber；trigger 條件：≥3 reproduction papers + ≥1 big-co prod deployment report；source-of-truth = ADR R10 + Appendix C
+- [ ] **BP.W3.10 Phase O γ** L3 Evaluator Agent（**2026-04-25 D' Window 3**）— 補完 `agentic-self-improvement.md` §L3；定時掃 `audit_log` fail trajectory，Evaluator Agent 用 Opus 4.7 propose `prompt_registry` 新版本，必經 human review 才 promote；前置：prompt_registry 累積 trajectory；~2-3 週
+- [ ] **BP.W3.11 Phase P δ** L2 Toolmaking + Human Review（**2026-04-25 D' Window 3**）— 補完 `agentic-self-improvement.md` §L2；agent 自寫 script → staging area `data/skill_tools/staging/` → Architect 評估 + Auditor 安全審 → human review 才 promote 到 `scripts/agent_authored/` + register 全域；PEP Gateway 套最嚴 T1 sandbox tier；audit chain 紀錄 author/reviewer；~2 週；風險 🟡 中（exec code 比 markdown skill 高一階、human-gate 收斂）
+- [ ] **BP.W3.12 Phase T** Hardware Bridge Daemon (Tier 3 RPC)（**2026-04-25 D' Window 3**）— 補完 `tiered-sandbox-architecture.md` Tier 3；FastAPI daemon 部署於 EVK 連接機，提供 `flash_board / read_uart / capture_signal` JSON-only API；解 Risk R13；~2 週；風險 🟡 中
+- [ ] **BP.W3.13 Phase U** gVisor Production Adoption (Tier 1)（**2026-04-25 D' Window 3**）— 補完 `tiered-sandbox-architecture.md` Tier 1；現況只有 cost weight 定義（Risk R12）；正式上 prod gVisor runtime + benchmark 對比 docker default；~2-3 週；風險 🟡 中（性能 + 相容性）
 
 ### BP.W4 — 延後到 v1.0 後
 - [ ] BP.E GraphRAG / Neo4j（藍圖 §3.4 + §4.1）
+- [ ] **Phase Q ε** L4 Data Flywheel Loop Closure（**2026-04-25 D' Post-v1.0**）— 補完 `agentic-self-improvement.md` §L4；既有 4 個 `finetune_*.py` 70% 基建已就位，剩 quality gate + canary deploy + rollback；風險 🔴 高（auto fine-tune / AutoDAN-Turbo specification gaming / Phase D 合規衝擊）；**operator 需明確同意才開**；默認 env flag `OMNISIGHT_AUTO_FINETUNE=off`
 
 ### BP 衝突決議追蹤（見 ADR §4，共 16 項）
 - [x] A1 Phase-3-Runtime-v2 觀察窗 → 已解 2026-04-24
@@ -270,6 +317,14 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] C4 ProjectClass 三維正交（implements: BP.C.6）
 - [ ] C5 Notification Red Card 映射（implements: BP.H.3）
 - [ ] C6 37 role skill 物理位置遷移（implements: BP.B.6）
+
+### BP 風險登記簿 v2（2026-04-25 D' path 擴充）
+- [x] R1-R9（原 ADR §8）— 詳見 ADR
+- [ ] **R10** RLM library 整合誘惑（implements: BP.A.5b decision-branch + BP.H.2.b subcall budget + BP.W3.9 future eval + ADR Appendix C trigger）
+- [ ] **R11** RTK install `\|\| true` swallow → context overflow 變相風險（implements: BP.R.1 + BP.R.6 monitor）
+- [ ] **R12** gVisor cost-weight only 不是 actual runtime → 誤導 claim（implements: BP.S.5 文件警告 + BP.W3.13 真正 prod adoption）
+- [ ] **R13** Hardware Bridge daemon (Tier 3) 缺失（implements: BP.W3.12 ship FastAPI daemon）
+- [ ] **R14** self-improvement L1-L4 設計-實作 gap 數月未追（implements: BP.M L1 主線 + BP.W3.10/11 L2/L3 + BP.W4 L4）
 
 ---
 
@@ -3717,16 +3772,22 @@ BP.W0.3 Phase 5 Multi-account forge（~2-3 週）→ BP.W0.4 Phase 5b LLM key pe
 BP.W0.5 Z LLM Provider Observability（~3.5d）→ BP.W0.6 Y-prep Gerrit+JIRA hardening（~2.5d）
 
 ### Phase 31 — Blueprint V2 主線 Window 1（~6-8 週，低風險優先）
-BP.A 4 Templates → BP.I SecOps Intel → BP.B Guild 重組 → BP.F Model Mapping 三態旗標 → BP.H 3-tier Penalty + Red Card
+BP.A 4 Templates + BP.A.5b RLM-pattern → BP.I SecOps Intel → BP.B Guild 重組 → BP.F Model Mapping 三態旗標 → BP.H 3-tier Penalty + Red Card + BP.H.2.b subcall budget
+
+### Phase 31.5 — Blueprint V2 主線 Window 1.5（~5.5 週，2026-04-25 D' 新增）
+**主線新增 4 顆**（補 design doc 落差 + RLM Option B + self-improvement L1）：
+BP.M L1 Skill Auto-Distillation（2w） → BP.N Web Search Tool（1w） → BP.R RTK Hardening（1w） → BP.S Tier 0 Sandbox 顯式（1w） + Option B 6 處微調（0.5w）
 
 ### Phase 32 — Blueprint V2 主線 Window 2（~8-12 週，深度整合）
 BP.C T-shirt Gateway + S/M/XL → BP.D 4 Compliance Matrices auxiliary（並行第三方 legal review）→ BP.G TDD Dual-Patchset → BP.J Self-healing Docs → BP.K Frontend 6 component → BP.L Test 分級聚合
 
-### Phase 33 — Blueprint V2 Window 3 backlog（~30-50 週）
+### Phase 33 — Blueprint V2 Window 3 backlog（~35-55 週，2026-04-25 D' 擴充）
 等 BP.B 完後按 Guild 歸屬批次重做：D3-D29（D1 + D2 pilot 豁免見 ADR R9）/ E1-E15 / Y / T / V 剩餘 / F META / S2 剩餘 / R4-R9 / H4 / P9-P12 / ZZ
+**+ 5 個新增 Window 3 phase（D' path）**：BP.W3.9 RLM library full-eval（trigger-gated）/ BP.W3.10 Phase O γ L3 Evaluator Agent / BP.W3.11 Phase P δ L2 Toolmaking / BP.W3.12 Phase T Hardware Bridge Daemon / BP.W3.13 Phase U gVisor Production Adoption
 
-### Phase 34 — 延後 v1.0 後
+### Phase 34 — 延後 v1.0 後（2026-04-25 D' 擴充）
 BP.E GraphRAG / Neo4j
+**+ Phase Q ε** L4 Data Flywheel Loop Closure（auto fine-tune；需法務 review；默認 off）
 
 **Blueprint 主線總計**：~21-29 週 ≈ 5-7 個月 wall-clock；含 Window 3 backlog 收尾合計 9-12 個月。
 
