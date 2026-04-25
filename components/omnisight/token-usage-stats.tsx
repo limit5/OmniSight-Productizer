@@ -368,9 +368,18 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
               />
             </span>
           )}
+          {/* 2026-04-25 UX fix: collapsed-header simplified to just
+            * `<tokens> tokens` (green). The total-cost (orange) used to
+            * sit here too, but it visually collided with the
+            * burn-rate `$X.XX/hr` badge (also orange, ~30 px to the
+            * right) — operator-reported "橘色數字重疊". Cost is still
+            * fully visible in the expanded view (Row 1 right card,
+            * line 615-618) AND surfaced in the burn-rate badge as
+            * a per-hour rate. Removing the redundant cost label
+            * here reclaims ~80-100 px of horizontal space and
+            * eliminates the visual overlap. */}
           <span className="ml-auto flex items-center gap-3 shrink-0">
-            <span className="text-[var(--validation-emerald)]">{formatTokens(totals.totalTokens)} tokens</span>
-            <span className="text-[var(--hardware-orange)]">{formatCost(totals.cost)}</span>
+            <span className="text-[var(--validation-emerald)] tabular-nums">{formatTokens(totals.totalTokens)} tokens</span>
           </span>
         </button>
         {/* Burn-rate sparkline + current-rate badge (ZZ.B3 #304-3
@@ -1126,24 +1135,37 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                     )
                   })()}
 
-                  {/* Row 4: Input/Output Tokens — flex-wrap so the
-                      output cluster drops to a second line on
-                      narrow cards when token counts are big
-                      ("1.2M" vs "1,234,567"). Each cluster is
-                      ``shrink-0`` so its inner label + number
-                      never break mid-group. */}
-                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-2">
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <ArrowDownRight size={12} className="text-[var(--validation-emerald)]" />
-                      <span className="font-mono text-[11px] text-[var(--muted-foreground)]">Input Tokens:</span>
-                      <span className="font-mono text-[11px] font-medium text-[var(--validation-emerald)]">
+                  {/* Row 4: Input/Output Tokens — 2026-04-25 UX fix
+                      Operator-reported: green token numbers were
+                      overflowing the card width when a model row was
+                      placed in the `grid-cols-2` 2-column layout.
+                      Old design used `flex flex-wrap shrink-0` per
+                      cluster, which kept the inner label+number group
+                      atomic and broke layout when the number was big
+                      enough that label + value couldn't fit in half
+                      the card width.
+                      New design: stack vertically (one row per
+                      direction), label-left / number-right with
+                      `min-w-0 truncate` on the label so a long label
+                      degrades gracefully instead of pushing the number
+                      off-card. Matches the visual rhythm of Total
+                      Tokens / Requests / Avg Latency rows below. */}
+                  <div className="flex flex-col gap-1 mb-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <ArrowDownRight size={12} className="text-[var(--validation-emerald)] shrink-0" />
+                        <span className="font-mono text-[11px] text-[var(--muted-foreground)] truncate">Input Tokens:</span>
+                      </div>
+                      <span className="font-mono text-[11px] font-medium text-[var(--validation-emerald)] tabular-nums shrink-0">
                         {formatTokens(item.inputTokens)}
                       </span>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <ArrowUpRight size={12} className="text-[var(--neural-blue)]" />
-                      <span className="font-mono text-[11px] text-[var(--muted-foreground)]">Output Tokens:</span>
-                      <span className="font-mono text-[11px] font-medium text-[var(--neural-blue)]">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <ArrowUpRight size={12} className="text-[var(--neural-blue)] shrink-0" />
+                        <span className="font-mono text-[11px] text-[var(--muted-foreground)] truncate">Output Tokens:</span>
+                      </div>
+                      <span className="font-mono text-[11px] font-medium text-[var(--neural-blue)] tabular-nums shrink-0">
                         {formatTokens(item.outputTokens)}
                       </span>
                     </div>
