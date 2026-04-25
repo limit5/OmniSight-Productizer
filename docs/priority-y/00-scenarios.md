@@ -2,7 +2,7 @@
 
 > 文件起點：2026-04-25  
 > 對應 TODO：`Y0. Multi-user × Multi-project 情境盤點 + 架構文件 (#276)`  
-> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-7（消失用戶回收 — user 離職 / tenant 退訂 / project 封存時的 graceful offboarding：migrate ownership、保留 audit、釋放 quota）**，承接 S-1 / S-2 / S-3 / S-4 / S-5 / S-6 已落地章節；其餘 S-8 ～ S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
+> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-8（熱點撞牆 — 單 project 打爆 tenant quota → 其他 project 被餓死還是 project 間 DRF 公平分配？）**，承接 S-1 ～ S-7 已落地章節；其餘 S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
 
 ---
 
@@ -16,8 +16,8 @@
 | [S-4 多產品線](#s-4-多產品線) | `[x]` 第 4 勾選 | 完成（2026-04-25） |
 | [S-5 多專案同產品線](#s-5-多專案同產品線) | `[x]` 第 5 勾選 | 完成（2026-04-25） |
 | [S-6 多分支同專案](#s-6-多分支同專案) | `[x]` 第 6 勾選 | 完成（2026-04-25） |
-| [S-7 消失用戶回收](#s-7-消失用戶回收) | `[x]` 第 7 勾選（本 row） | **本次完成** |
-| [S-8 熱點撞牆](#s-8-熱點撞牆) | `[ ]` 第 8 勾選 | Skeleton |
+| [S-7 消失用戶回收](#s-7-消失用戶回收) | `[x]` 第 7 勾選 | 完成（2026-04-25） |
+| [S-8 熱點撞牆](#s-8-熱點撞牆) | `[x]` 第 8 勾選（本 row） | **本次完成** |
 | [S-9 遺留相容](#s-9-遺留相容) | `[ ]` 第 9 勾選 | Skeleton |
 | [共用區段：ER / 權限矩陣 / migration](#共用區段) | 全九勾選成型後彙整 | Stub |
 
@@ -2363,9 +2363,397 @@ S-7 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
 
 ## S-8 熱點撞牆
 
-> **Skeleton — TBD by future row** (TODO 第 8 勾選)。
-> 單 project 打爆 tenant quota → 其他 project 被餓死還是 project 間 DRF 公平分配？
-> 預定章節：S-8.1 fairness 模型選擇、S-8.2 throttle vs reject、S-8.3 emergency burst 機制。
+> 單 project 在某時段打爆 tenant 的 LLM token 月預算（或 tenant 在某時段打爆 host 的 CPU / memory 並發預算）→ 其他 project / 其他 tenant 是否會被餓死？本章鎖定 OmniSight 的「公平分配 vs hard isolation vs 動態降級」三選一決策、並把既有 `tenant_aimd` + `host_metrics.get_culprit_tenant` + `circuit_breaker` + `RedisLimiter` + `SharedCounter` 五件零組件對齊成 **DRF (Dominant Resource Fairness) 三層 quota engine** 的單一事實來源；為 Y6（quota engine 落地）/ Y8（dashboard 火災現場視覺化）/ Y9（hotspot audit + SSE）/ Y10（per-tenant fairness policy 設定）的設計提供可引用骨架。
+
+### S-8.1 角色 Persona — 三類資源 × 三類 victim
+
+S-8 的 actor 與 victim 不再是「user 對 user」（S-1 ～ S-7），而是「資源燒手 vs 被餓死的鄰居」。承接 Acme（IPCam Pam / Doorbell Doris / Intercom Ian 三線、共 100M tokens / 30d 預算 — S-4.2 設計）+ Cobalt（cross-tenant guest 受影響者 — S-3）+ Bridge MSP（Maya 跨 tenant 服務的 N:N 視角 — S-2）已建構樣本：
+
+| Persona | 資源燒手 / 被餓死 | 場景 | 該 do | 該 not do |
+|---|---|---|---|---|
+| **Pam（IPCam line owner、quota offender）** | 燒手（line 級別） | 一個夜跑 fuzzing batch 把 IPCam line 50M token cap 在 6h 內燒完 | 接受該 line 進 throttle、line 內公平分 IPCam 三 project | 不能向 Doorbell / Intercom line 借 budget（S-4.2 設計斷言 2 已釘） |
+| **Doris（Doorbell line owner、無辜鄰居）** | 被餓死（其他 line） | Doorbell V1 量產期、卻因 Pam 燒爆 host CPU 連 LLM call latency 都拉長 | 走 SSE 看到「IPCam 線是 culprit」+ host CPU hot 警示、提 ticket 要求 Bob 介入 | 不能 bypass throttle 自己跳隊；不能要求 Pam 線 hard cap（合作友善） |
+| **Quinn（V1 project owner、line 內無辜鄰居）** | 被餓死（同 line 內其他 project） | IPCam Pam 線 50M cap 燒完、Quinn 的 V1 量產 P0 bug 修復也被 throttle | 走 emergency burst 申請（owner step-up + 限額 1 次 / 月） | 不能向 Doorbell 線借 cap（line 隔離不破）；不能繞 burst 限制 |
+| **Cher（cobalt guest、跨 tenant 無辜鄰居）** | 被餓死（cross-tenant share 級別） | Cobalt guest 對 acme 某 share 的 LLM-driven query 被 acme 整 tenant 的 quota 撞牆波及 | 走「caller pays」原路 — share 用 cobalt 自己 LLM cap、acme 撞牆與 Cher 無關 | 不能要求 acme 釋放 cap 給 share；不能要求 host 提供 fallback LLM provider |
+| **Pat（platform super-admin、host 級別仲裁者）** | 仲裁者（host CPU / memory 撞牆） | 多 tenant 同時 LLM 大批量撞 host 95% CPU、tenant_aimd plan_derate 進 FLAT path | 看 dashboard 找 culprit、必要時 PATCH 該 tenant 的 emergency_pause + 通知 owner | 不能對 culprit tenant 直接 disable（屬安全事件、不是熱點問題）；不能跨 tenant 強制 budget 重分配 |
+| **Bob（acme tenant admin、tenant 級別仲裁者）** | 仲裁者（tenant 內 line 撞 ceiling） | IPCam line 50M 燒完、Bob 是否要從 Doorbell 借 5M？ | 走 `POST /tenants/{id}/budgets/rebalance` 顯式重分配（雙簽 + audit）；查 dashboard 對 culprit project 排序 | 不能 silent 自動重分配（S-4.2 設計斷言 2、line 隔離是 invariant、人類顯式動作才能破） |
+
+**S-8.1 設計斷言**：
+1. **「資源燒手」與「被餓死」是同一機制的兩端、不該獨立設計** — DRF 引擎判斷誰是 culprit + 誰要被 throttle 是同一輪 control cycle 的兩端決策；既有 `tenant_aimd.plan_derate()` (`backend/tenant_aimd.py:112-180`) 已是這個雙端模型的雛形（CULPRIT / FLAT / RECOVER / HOLD 四 reason）、S-8 只擴維（host CPU → token budget + concurrent request）不重設計。
+2. **公平分配的「層級」與資源 scope 嚴格對齊** — host CPU / memory 撞牆 → host 級 DRF（platform Pat 仲裁、跨 tenant 公平）；tenant LLM ceiling 撞牆 → tenant 級 DRF（admin Bob 仲裁、tenant 內 line / project 公平）；line LLM cap 撞牆 → line 級 DRF（line owner 仲裁、line 內 project 公平）。**3 個層級各自獨立 cycle、不互相替代**。
+3. **floor multiplier 0.1 是 OmniSight 已釘的「不餓死保證」** — `tenant_aimd.AimdConfig.min_multiplier=0.1` (`backend/tenant_aimd.py:48`) 明示「a tenant can never be starved to death」；S-8 把這個 invariant 提升為 first-class 設計斷言、應用到 token budget / concurrent request 兩個新增 quota 維度（不只 CPU）。
+4. **cross-tenant 「caller pays」是 fairness 計算的天然斷點** — Cher 對 acme share 的 LLM call 由 cobalt 付（S-3.4 設計斷言 2）、所以 acme tenant 撞牆與 Cher 無關（acme 不該因「擔心 Cher 燒爆」而限制 share）；fairness 計算是「按付費 tenant scope」累計、跨 tenant 不入 acme tenant 公平池。
+5. **emergency burst 與「公平分配」是不同象限** — 公平分配解「日常吞吐如何均衡」；emergency burst 解「P0 incident 時的偶發超用」；前者走 control loop（多輪平滑），後者走 audit-heavy 一次性核准（owner / admin step-up + 月限 1 次）。混在同一 endpoint 會讓「日常吵 burst」吃掉 emergency 的合規額度。
+6. **service token 不獨立進公平池** — 與 S-1.1 / S-7.1 設計斷言一致，service token 的用量歸 owner_user_id 對應的 user / project；fairness 計算不另起 service token 維度（避免「CI burst 每天都被 throttle」與「人類 owner 已要求 abandon」兩個 signal 互踩）。
+
+### S-8.2 三類撞牆的觸發訊號 + 反應策略對照表
+
+OmniSight 在 S-8 範圍內必處理三類撞牆訊號、各自有獨立的觸發路徑、ack 路徑、與 fairness 應對；混合處理會讓 audit / dashboard 解讀困難。
+
+| 撞牆類型 | 觸發訊號（已存在） | 既有反應 | S-8 應補的 fairness 行為 | 對應 actor |
+|---|---|---|---|---|
+| **host CPU / memory hotspot** | `host_metrics.get_culprit_tenant()` (`backend/host_metrics.py:805-845`) — 1 outlier 比 next 高 ≥ 150% margin、絕對值 ≥ 80% CPU | `tenant_aimd.plan_derate()` 把 culprit multiplier × 0.5、floor 0.1；無 culprit + host hot 走 FLAT path 全降 | 把 multiplier 也應用到 LLM token rate（不只 sandbox concurrency）；DerateReason 加 `HOTSPOT_TOKEN`、與既有 `CULPRIT/FLAT` 並排 | platform Pat（觀察）+ AIMD cycle（自動）|
+| **tenant LLM token ceiling 撞牆**（30d window）| 不存在 — 目前 `backend/llm_secrets.py` + `backend/llm_balance.py` 只讀 provider 側 balance、沒 per-tenant 月度 token 計數器 | 不存在 — 撞牆後 provider 回 429、`agents/llm.py:117-165` 解析 ratelimit header 但無 enforcement，整 tenant 一起 429 | Y6 新增 `llm_token_meter`（SharedCounter `omnisight:shared:counter:llm_tokens:{tenant_id}:30d` + `_line:{line_id}:30d` + `_project:{project_id}:30d`）+ DRF 切片：line ceiling 撞牆 → line 內 project 按 weighted fair-share 重排 | tenant admin Bob（仲裁）+ line owner Pam（觀察）|
+| **per-request concurrent slot 撞牆**（並發 invoke）| `backend/routers/invoke.py:75-115` `_invoke_slot()` 申請 decision_engine.parallel_slot()；無 per-tenant queue | 全 tenant 共池 FIFO、asyncio.Task 隱式排程；mode multiplier 全 tenant 一致（`adaptive_budget.py:120-148` MODE_MULTIPLIER） | Y6 加 per-tenant slot weighted fair queue：每 tenant 有 `weight × baseline_slot` 配額、同 tenant 內 project 走 round-robin；`base_slot` 仍由 host AIMD `current_budget()` 決定 | line owner / project owner（觀察）|
+
+**S-8.2 設計斷言**：
+1. **三類訊號各自有獨立 SSE event type、不合併** — `host.hotspot_changed` / `tenant.token_ceiling_hit` / `tenant.slot_starved` 是三個獨立 SSE event（與 S-7.3 設計斷言類似的多 stage 模式）；frontend 可分別訂閱 dashboard 不同 panel；audit_log.action 也是三個獨立 enum 值、forensic 可分別查。
+2. **token ceiling 撞牆優先級 > slot 撞牆 > host hotspot** — 月度 token 撞牆是計費邊界（影響月帳單、客戶感受最直接）、slot 撞牆是當下吞吐邊界（用戶感受是 latency 拉高）、host hotspot 是平台健康（用戶通常感知不到、是 infra 維運層）；UI / dashboard 按此順序醒目 banner、frontend 在多 banner 同時彈出時先顯 token、再顯 slot、host 走 status badge（不擋使用流程）。
+3. **三層 quota 都走 SharedCounter 而非 in-memory dict** — `backend/shared_state.py:90-148` SharedCounter 已有 INCR / DECR / get、Redis-backed；prod `OMNISIGHT_WORKERS=2 × 2 replica = 4 worker` 多進程一致性必走 Redis；module-global dict 失敗的歷史教訓（`backend/workspace.py` `_workspaces` dict / `backend/budget_strategy.py` `_current` 全局狀態）已被 S-6.6 / S-6 對照表寫進。
+4. **既有 `RedisLimiter` 是 HTTP 請求級不是 LLM-token 級** — `backend/rate_limit.py:150-226` Lua-atomic token bucket 是 per-IP / per-user / per-tenant 的「請求頻率」限制、與 LLM token 計費無關；**不能把 plan_quotas 直接當 LLM ceiling**（PLAN_QUOTAS 的 600 / 60s 是 request rate、不是 30d token 預算）；S-8 必另起 `llm_token_meter` 模組、不重用 RedisLimiter 的桶。
+5. **circuit_breaker.is_open 是「provider 撞牆」不是 OmniSight 內部 fairness** — `backend/circuit_breaker.py:217-235` 對 (tenant_id, provider, fingerprint) 三元 tuple 開路 300s、其本質是「provider 端 429 後給 5 min 冷卻」；S-8 的 fairness 是 OmniSight 內部 quota 不是 provider 限制（兩者可同時觸發、行為獨立）；UI banner 必區分「您的 LLM provider 暫時 unavailable（circuit breaker）」vs「您的 tenant 月度預算用盡（token meter）」。
+6. **MODE_MULTIPLIER 是「人類運維選擇」不是 fairness 信號** — `backend/adaptive_budget.py:120-148` 中 turbo=1.0 / full_auto=0.7 / supervised=0.4 / manual=0.15 是 OperationMode 的人類選擇（user 在 dashboard 切 mode）、不是 culprit 反應；S-8 fairness multiplier 與 MODE_MULTIPLIER 是兩個獨立乘數、final effective slot = `MODE_MULTIPLIER × tenant_aimd_multiplier × line_drf_share`。
+
+### S-8.3 DRF（Dominant Resource Fairness）模型 — 為何選 DRF 不選 priority queue / hard cap
+
+**candidate fairness 模型 4 選**：
+
+| 模型 | 機制 | 優點 | OmniSight 不適用原因 |
+|---|---|---|---|
+| **a. Hard cap per project**（FIFO 內部） | 每 project 設絕對上限、超過 reject | 簡單、可預測 | 不公平 — Quinn 的 P0 bug 修復跟 Sam 的 R&D 拿同樣 cap、business 重要性不對等；line budget 在多 project 不均使用時浪費 |
+| **b. Priority queue**（每 project 一個 priority level） | admin 給 project 排序、高 priority 先得 budget | 對應業務優先級 | priority 是離散的、無法表達「Pam 線該分 50% / Doris 線 35% / Intercom 15%」連續比例；admin 要排序 N project 心智負擔大 |
+| **c. Strict isolation**（每 project 拿到固定 share、不可調用對方剩餘） | 嚴格隔離、誰用不完誰浪費 | 完全可預測 | budget 利用率低 — V3 R&D 5M cap 平常用不到 1M、其他 project 想用也不行 |
+| **d. DRF (Dominant Resource Fairness)** | 多資源（token / slot / disk）按各 tenant / project 的「dominant resource share」動態平衡 | 公平 + 高利用率 + 多資源同框架 | 心智成本高、需 tooling 解釋；本章為解這個成本而寫 |
+
+**OmniSight 選 DRF 的關鍵理由**：
+
+1. **多資源同時撞牆** — Pam 的 fuzzing batch 同時燒 LLM token + sandbox slot + CPU；hard cap (a) 與 priority (b) 只看一個資源、其他資源仍會被燒手獨占；DRF 把 (token usage / token cap, slot usage / slot cap, cpu / cpu cap) 三維 vector 投影到 dominant axis、用「dominant share」當公平基準。
+2. **既有零組件已 DRF-friendly** — `tenant_aimd.plan_derate()` 已實作了「culprit 偵測 + multiplier」這對 DRF 來說是 second-half 邏輯；OmniSight 缺的是 first-half（per-tenant resource demand 統計、dominant axis 選擇），用 SharedCounter 三維（token / slot / cpu）即可補。
+3. **floor 0.1 已釘 + 不餓死保證已存在** — DRF 常被批評「culprit 被打太重」，但 OmniSight 的 `min_multiplier=0.1` floor 已預先處理；DRF 的 max-min fairness 對齊 floor 後變「至少 10% baseline 永遠保證」+「剩 90% 按 demand 公平分」。
+4. **caller pays 是 DRF 的天然 scope 邊界** — DRF 算「同 tenant 內」公平；cross-tenant share 走 caller pays（S-3.4 設計斷言 2）、自然不入 fairness 池；不需要寫額外 cross-tenant 公平邏輯。
+
+**DRF 三層 cycle 偽碼**（host / tenant / line 三層各自跑、不互相替代）：
+
+```python
+# backend/drf_engine.py（Y6 新增、本 row 規格化）
+@dataclass
+class ResourceDemand:
+    """單一 entity (tenant / line / project) 的 demand vector。"""
+    token_used_30d: int      # SharedCounter("llm_tokens:{scope}:30d").get()
+    slot_used_now: int       # SharedCounter("slots:{scope}:active").get()
+    cpu_pct_now: float       # host_metrics.TenantUsage.cpu_percent
+
+@dataclass
+class ResourceCap:
+    """同 entity 的 cap vector。"""
+    token_cap: int           # tenant_quota / line_budget / project_cap (S-4.2/S-5.2)
+    slot_cap: int            # baseline_slot × MODE_MULTIPLIER
+    cpu_cap_pct: float       # 100% (host) / per-tenant CPU budget (M4 future)
+
+def compute_dominant_share(d: ResourceDemand, c: ResourceCap) -> tuple[str, float]:
+    """選 entity 自身 demand / cap 比例最高的軸 = dominant axis。"""
+    shares = {
+        "token": d.token_used_30d / max(c.token_cap, 1),
+        "slot": d.slot_used_now / max(c.slot_cap, 1),
+        "cpu": d.cpu_pct_now / max(c.cpu_cap_pct, 1.0),
+    }
+    axis, share = max(shares.items(), key=lambda kv: kv[1])
+    return axis, share
+
+def drf_plan(scope_demands: dict[str, ResourceDemand],
+             scope_caps: dict[str, ResourceCap],
+             pool_remaining: ResourceCap) -> dict[str, float]:
+    """
+    Max-min fairness on dominant axis:
+      1. 算每 scope 的 dominant share
+      2. 排序由低到高
+      3. 按 dominant share 給每 scope 分配「剩餘 / N」、底已填滿就減一個 N 繼續分
+      4. 結果是 multiplier dict {scope_id: 0.0-1.0}（floor 0.1）
+    """
+    plan = {}
+    for sid, demand in scope_demands.items():
+        axis, share = compute_dominant_share(demand, scope_caps[sid])
+        # max-min fairness — 細節見實作（DRF Ghodsi NSDI'11 paper）
+        multiplier = max(0.1, _max_min_fair_share(share, len(scope_demands)))
+        plan[sid] = multiplier
+    return plan
+```
+
+**S-8.3 設計斷言**：
+1. **DRF 是 OmniSight 已部分實作的事實答案、不是新概念引入** — 既有 `tenant_aimd` 是 DRF 的 second-half；S-8 設計把這個事實寫成 first-class、避免後續 reviewer 誤把 DRF 當作 greenfield 重設計；Y6 落地是「補 first-half + 串連既有 second-half」、不是新建一個 fairness 引擎。
+2. **dominant axis 用「per-entity max share」而非全域 max share** — Ghodsi DRF 原文（NSDI'11）的設計：每 entity 自己選 dominant axis（即 entity 自己最受限的資源）；OmniSight 三軸（token / slot / cpu）每 tenant / line / project 自選、不全域統一。理由：Pam 的 dominant 可能是 token（fuzzing batch 燒 token）、Doris 的 dominant 可能是 slot（量產 push commit 多 sandbox）、Sam 的 dominant 可能是 cpu（本地 compile heavy）；強迫單一全域 axis 會讓 fairness 退化成「按該軸分」、其他軸不公平。
+3. **三層 cycle 各自獨立 + 結果是乘數疊乘** — final_slot_multiplier(project) = `host_aimd_multiplier(tenant)` × `tenant_drf_multiplier(line)` × `line_drf_multiplier(project)`；三層各自跑、各層 floor 0.1；最壞情況 0.1³ = 0.1% baseline 但實際永遠不會三層同時 floor（host 撞牆 ≠ tenant 撞牆 ≠ line 撞牆）。
+4. **DRF cycle 頻率是 30s（與 tenant_aimd 既有 cycle 對齊）** — `backend/adaptive_budget.py:84-108` AIMD 每 30s 一輪；S-8 三層 DRF 也走 30s（同 cycle 共讀 `host_metrics.get_all_tenant_usage()` 結果）；不引入新 cron 頻率減少維運負擔。
+5. **SharedCounter / SharedKV 是唯一狀態載體、`drf_engine` 是 stateless 函數** — 與 `tenant_aimd` 既有設計一致（plan_derate 是 pure function、state 在 `_state` dict）；S-8 升級時 `_state` 改 SharedKV("drf_state") 跨 worker 共享、計算函數仍 pure。
+6. **floor 0.1 是「保證 IP / 不餓死」、不是「fair share lower bound」** — 0.1 multiplier 不代表 0.1 dominant share、是 baseline budget 的 10%（與 `tenant_aimd.AimdConfig` 一致）；想升 0.05 floor 需 follow-up Y10 task（`min_multiplier` 配置化）。
+
+### S-8.4 Throttle vs Reject — 兩種降級行為的選擇
+
+撞牆後對「該 LLM call 怎麼處理」有兩條路：
+
+| 處理方式 | 行為 | 客戶感受 | OmniSight 採用情境 |
+|---|---|---|---|
+| **Throttle**（延遲 + 排隊） | 把 request 進 queue 等下一輪 cycle 釋放 budget；client 看到 latency 拉高但不 fail | 慢、但能用 | 預設 — 月度 token 還剩 / line cap 還剩 / 公平分配壓低 weight 但不歸零；fits Quinn 的 V1 P0 場景（寧可 10s 等也不要 fail）|
+| **Reject**（HTTP 4xx / 5xx 立刻退） | 立刻回 429（rate limit）/ 402（quota exhausted）/ 503（服務忙）；client 自己決定是否重試 | 失敗、需要重試 | 月度 token 0 剩 / tenant suspended（S-7.3）/ host 撞牆且 floor=0.1 也撐不住 |
+
+**OmniSight 兩條路的具體 dispatch 表**：
+
+| 觸發條件 | 處理 | HTTP code | client 該如何處理 |
+|---|---|---|---|
+| `tenant token_used_30d / token_cap < 1.0`（cap 還剩）+ DRF multiplier × 0.5 | Throttle | 200（內部排隊） | 等 — server 側 latency 自然拉高 |
+| `tenant token_used_30d / token_cap >= 1.0`（cap 用盡） | Reject | 402（quota exhausted） | 升 plan / 等下個 30d window |
+| `line token_used_30d / line_cap >= 1.0` 但 tenant 還剩 | Reject | 402（line quota exhausted） | 顯示「IPCam line 額度用盡、其他 line 仍可」+ 顯式跨 line rebalance 路徑（Bob / owner 雙簽） |
+| `tenant_aimd multiplier == 0.1` floor + 還在燒 | Throttle（等下一輪 cycle） | 200（佇列、長 latency） | 等 30s ～ 5min；UI banner「您的 tenant 是當前 culprit」 |
+| `circuit_breaker.is_open(tenant, provider, fp)` | Reject | 503（provider unavailable） | 等 5min cooldown + 切 fallback provider（若有 chain） |
+| `tenant.lifecycle_stage IN ('suspended','wind_down')` | Reject | 402（tenant frozen, S-7.3） | 走 S-7 reactivate / wind_down / terminate 流程 |
+| `tenant.lifecycle_stage = 'terminated'` | Reject | 403（tenant terminated, S-7.3） | 不可恢復 |
+| host CPU > 95% + per-tenant slot floor reached | Throttle | 200（asyncio.Task 排隊延後 invoke） | 等 — 不告訴 client；運維 dashboard 看 |
+
+**S-8.4 設計斷言**：
+1. **「還有額度」走 throttle、「用盡」走 reject** — 這是 HTTP 語意正確性的根本：throttle (200 + 長 latency) 表示「服務仍可用、只是慢」、reject (4xx) 表示「請求無法滿足、改變條件再試」；混用會讓 client retry 邏輯混亂。
+2. **`circuit_breaker` 走 reject 而非 throttle** — provider 撞牆是外部依賴失效、不是「等等就好」、立即 503 讓 client 切 fallback chain 比 throttle 更友善（既有 `backend/agents/llm.py` failover loop 已實作 fallback chain）。
+3. **402 vs 429 嚴格區分** — 402 = 計費資源不足（need plan upgrade）、429 = 請求頻率過高（need slow down）；S-8 的 token / line cap 撞牆是 402、`RedisLimiter` per-IP rate-limit 才是 429；UI banner 兩條路訊息不同。
+4. **throttle 的 latency budget 預設 60s** — 等 cycle 釋放最多等 2 個 30s cycle = 60s；超過 60s 仍未釋放 → 自動 fallback 走 reject 402；理由：client 端 read timeout 通常 60-120s、不該等到 client 自己 timeout 才返錯（會浪費連線資源）。
+5. **throttle / reject 的決策必走「同 transaction 計費」** — 不允許「先 reject 再扣 token」（雙扣）或「throttle 期間扣 token 但實際 provider 沒呼叫」（虛扣）；既有 `llm_balance` 機制確保扣費發生在 provider 真正回應後（S-8.5 細節）；S-8 不重設計這個。
+6. **host hotspot throttle 對 client 不感知** — 與 token / slot 撞牆不同、host CPU 撞牆不該回 4xx 給 client；asyncio.Task 排隊延後 invoke、client 端只感受 latency 拉高；理由：host 健康是平台運維邊界、不是用戶業務邊界。
+
+### S-8.5 Token meter — Y6 落地的具體 SharedCounter 模型
+
+S-8.2 / S-8.3 / S-8.4 的核心依賴是「per-scope 月度 token 計數器」、本子節展開 `llm_token_meter` 的具體 SharedCounter 模型 + atomic check-and-spend 偽碼。
+
+**SharedCounter key 設計**：
+
+```
+omnisight:shared:counter:llm_tokens:tenant:{tenant_id}:30d        # tenant 30d window
+omnisight:shared:counter:llm_tokens:line:{line_id}:30d            # line 30d window
+omnisight:shared:counter:llm_tokens:project:{project_id}:30d      # project 30d window
+omnisight:shared:counter:llm_tokens:user:{user_id}:30d            # user 30d window（S-1.2 歸因）
+omnisight:shared:counter:llm_tokens:share:{share_id}:30d          # cross-tenant share（S-3.4 caller pays）
+```
+
+**check-and-spend 偽碼**（Y6 落地、本 row 規格化）：
+
+```python
+# backend/llm_token_meter.py（Y6 新增）
+async def check_and_reserve(
+    tenant_id: str,
+    line_id: str | None,
+    project_id: str | None,
+    user_id: str,
+    share_id: str | None,
+    estimated_tokens: int,
+) -> ReservationResult:
+    """Atomic check-then-reserve across 4 levels (tenant / line / project / user).
+
+    Returns:
+      ReservationResult(allowed=True, reservation_id=...) — 預留成功、後續 commit_actual_tokens()
+      ReservationResult(allowed=False, throttle_ms=N) — DRF multiplier < 1.0 走 throttle
+      ReservationResult(allowed=False, http_code=402, scope='line') — line cap 用盡、reject
+
+    Module-global state? NO — all counters in Redis SharedCounter（合格答案 #2）;
+                                drf_state in SharedKV; AIMD state remains the only
+                                module-global, see backend/tenant_aimd.py（既有合格答案 #2）.
+    """
+    async with redis_client.pipeline(transaction=True) as pipe:
+        # 1. 讀 4 層當前 used + cap
+        # 2. 加上 estimated_tokens 看是否撞牆
+        # 3. 同時讀 drf_state 拿當前 multiplier
+        # 4. 看 throttle vs reject 表決定
+        # 5. allowed → INCR pending_reservations:{reservation_id} + return id
+    ...
+
+async def commit_actual_tokens(
+    reservation_id: str,
+    actual_input_tokens: int,
+    actual_output_tokens: int,
+) -> None:
+    """LLM call 完成後寫真實用量、釋放 pending reservation。
+
+    與 reservation 差距：
+      actual < estimated → DECR 4 個 counter 多扣的部分
+      actual > estimated → 警告（不擋）+ 寫 audit「token estimation drift」
+    """
+    ...
+
+async def release_reservation(reservation_id: str) -> None:
+    """LLM call 失敗（network / circuit_breaker open / timeout）→ 完全釋放預留額度。"""
+    ...
+```
+
+**S-8.5 設計斷言**：
+1. **四層 SharedCounter 必走 atomic pipeline** — Redis MULTI/EXEC pipeline 保證 4 層 INCR 同 transaction，避免「tenant cap 通過、line cap 沒通過」silent inconsistency；既有 `backend/rate_limit.py:111-147` Lua-atomic 是同模式（_TOKEN_BUCKET_LUA）、S-8 重用 Lua-atomic 模式不同 script。
+2. **預估 vs 實際 tokens 雙寫** — input tokens 在 invoke 前可估（prompt template + history token count）、output tokens 必等 LLM 回 response 才知；分 `check_and_reserve` + `commit_actual_tokens` 兩階段、close to AWS X-Ray / Stripe payment authorization 行業模式（authorize → capture）；中間 `release_reservation` 處理 LLM call 失敗時釋放。
+3. **30d window 走 滑動窗 而非 fixed window** — fixed window（每月 1 號 reset）容易「月底前一晚燒爆」、滑動窗（過去 30d 累計）更平滑；用 Redis ZADD `score=now timestamp` + ZREMRANGEBYSCORE 清過期即可；既有 `backend/quota.py` 是 fixed window（per_tenant 60s）、S-8 不重用該模型。
+4. **user / share 計數器是 attribution-only 不是 enforcement** — S-1.2 設計斷言 2 已釘「歸因不是 enforcement」；user counter 用於 dashboard / billing breakdown、share counter 用於 caller pays attribution；real-time gating 只走 tenant / line / project 三層（避免每次 LLM call 撞 5 個 counter）。
+5. **reservation TTL = 5 min**（即使沒 commit 也會過期釋放） — 防止「reservation 寫了但 commit / release 都沒呼叫」leak；TTL 觸發走 audit 「token reservation expired」+ 自動 DECR 釋放；與既有 `secret_store` 30s lease 同模式。
+6. **token estimation drift > 50%** 觸發 warning audit — actual / estimated > 1.5 → 寫 audit「estimation drift」+ 通知 Y8 dashboard banner（給 prompt template 設計者改進預估器）；不阻擋 LLM call、純 forensic。
+
+### S-8.6 Schema 增量（與 Y4 / Y6 / Y10 對齊）
+
+S-8 在既有 S-1 ～ S-7 schema 上加：
+
+```
+tenant_quota                         -- 既有表（S-7 已加 frozen_at / released_at）
+  ...
+  token_cap_30d         bigint                       -- S-8 加：tenant 級月度 token 預算（Acme=100M）
+  token_used_30d        bigint NOT NULL DEFAULT 0    -- S-8 加：snapshot from SharedCounter（dashboard 快取）
+  token_cap_updated_at  timestamptz                  -- S-8 加：上次 plan 升降時間
+  drf_strategy          text NOT NULL DEFAULT 'drf_dominant'  -- S-8 加：'drf_dominant' / 'hard_cap' / 'priority' future
+  emergency_burst_used_this_month integer NOT NULL DEFAULT 0  -- S-8 加：月度 emergency burst 已用次數（cap 1）
+  emergency_burst_reset_at timestamptz               -- S-8 加：每月 reset
+
+product_lines                        -- 既有表（S-4.6）
+  ...
+  token_cap_30d         bigint                       -- S-8 加：line 級月度 token 預算（IPCam=50M / Doorbell=35M / Intercom=10M / pl-default=5M）
+  token_used_30d        bigint NOT NULL DEFAULT 0    -- S-8 加：snapshot
+  drf_weight            real NOT NULL DEFAULT 1.0    -- S-8 加：DRF 權重（admin 可調 0.5 ～ 2.0）
+
+projects                             -- 既有表（S-5.6 + S-7.7）
+  ...
+  token_cap_30d         bigint                       -- S-8 加：project 級月度 token 預算（V1=20M / V2=10M / V3=5M）
+  token_used_30d        bigint NOT NULL DEFAULT 0    -- S-8 加：snapshot
+  drf_weight            real NOT NULL DEFAULT 1.0    -- S-8 加：line 內 project 之間的 DRF 權重
+
+drf_state                            -- S-8 新表（與 SharedKV 互備、給跨 cycle 持久化）
+  scope_type            text NOT NULL                -- CHECK IN ('host','tenant','line','project')
+  scope_id              text NOT NULL                -- '*' for host 級 / tenant_id / line_id / project_id
+  multiplier            real NOT NULL DEFAULT 1.0    -- 0.1 ～ 1.0（floor 對齊 tenant_aimd.AimdConfig.min_multiplier）
+  dominant_axis         text                          -- 'token' / 'slot' / 'cpu'
+  last_changed_at       timestamptz NOT NULL
+  last_reason           text NOT NULL                -- 'CULPRIT' / 'FLAT' / 'RECOVER' / 'HOLD' / 'HOTSPOT_TOKEN' / 'HOTSPOT_SLOT'
+  PRIMARY KEY (scope_type, scope_id)
+  -- index: (last_changed_at DESC) 給 dashboard 看「最近 N 個被 throttled scope」
+
+emergency_burst_requests             -- S-8 新表
+  id                    uuid pk
+  tenant_id             uuid fk tenants(id) NOT NULL
+  scope_type            text NOT NULL                -- CHECK IN ('tenant','line','project')
+  scope_id              text NOT NULL                -- 對應 tenant_id / line_id / project_id
+  requested_at          timestamptz NOT NULL
+  requested_by_user_id  uuid fk users(id) NOT NULL
+  burst_tokens          bigint NOT NULL              -- 申請額度（合理上限：cap × 0.2）
+  reason                text NOT NULL                -- 'p0_incident' / 'customer_demo' / 'release_gate' / 'other'
+  approved_at           timestamptz
+  approved_by_user_id   uuid fk users(id)            -- owner / admin 雙簽（step-up MFA）
+  executed_at           timestamptz                  -- burst 真正寫進 token_cap 的時間
+  status                text NOT NULL DEFAULT 'pending'  -- CHECK IN ('pending','approved','executed','expired','rejected')
+  expires_at            timestamptz NOT NULL          -- approved 後 24h 內必 execute
+  metadata              jsonb NOT NULL DEFAULT '{}'
+  -- partial unique: WHERE status IN ('pending','approved')（同 scope 同月不能同時 2 個 pending）
+  -- index: (tenant_id, requested_at DESC) 給 dashboard
+
+audit_log                            -- 既有表（S-7.7 已加 redacted_*）
+  ...
+  -- S-8 不新增 column、純加新 action enum 值：
+  -- 'tenant.token_ceiling_hit' / 'tenant.line_cap_hit' / 'tenant.project_cap_hit'
+  -- 'tenant.drf_throttled' / 'tenant.drf_recovered'
+  -- 'tenant.emergency_burst_requested' / 'tenant.emergency_burst_approved' / 'tenant.emergency_burst_executed'
+  -- 'tenant.host_hotspot_culprit' / 'tenant.host_hotspot_flat'
+```
+
+**S-8.6 設計斷言**：
+1. **`token_used_30d` 是 snapshot 不是權威來源** — 權威是 SharedCounter（Redis）、PG snapshot 只給 dashboard / billing batch query 用、避免每次 dashboard reload 撞 Redis；snapshot 走 60s 寫一次 cron（既有 LLM balance refresher 同模式 — `backend/llm_balance_refresher.py`）。
+2. **`drf_weight` 是 admin 可調的 fairness 細節旋鈕** — Bob 可在 dashboard 把 V1（量產）weight 設 2.0、V3（R&D）設 0.5 → DRF cycle 對 V1 給 2x share；初版預設全 1.0；改 weight 必走 admin step-up + audit。
+3. **`drf_state` 表與 SharedKV 雙寫互備** — SharedKV 是 hot path（每 30s read / write）、drf_state PG 表是 forensic（cycle 結束後寫 row、forensic 查「過去 7d 哪些 scope 被 throttled」）；雙寫不對齊時 SharedKV 為準（PG 是 stale-read OK 的角色）。
+4. **`emergency_burst_requests` 月限 1 次 hard cap** — `emergency_burst_used_this_month` counter + monthly reset cron；超過 1 次 reject 422 + 引導「升 tenant plan 而非 burst」；理由：burst 是「偶發 incident 緩衝」、不是「日常超額路徑」（用日常超額會讓 fairness 失效）。
+5. **`emergency_burst_requests.expires_at = approved_at + 24h`** — 與 S-7 雙簽流程同模式（拖延的 approve 失效）；24h 是合理 incident response 窗、超過必重新申請；避免「approved 但拖到下個月才 execute」破壞月度統計。
+6. **`drf_state.multiplier` 用 real（float）而非 numeric** — 計算頻繁、精度需求低（0.1 ～ 1.0 兩位小數已夠）；real（4 byte）vs numeric（變動）省空間 + 算術快；與 `tenant_aimd._state` in-memory float 對齊。
+7. **`audit_log` 純加 action enum 值不加欄位** — S-8 的 forensic 都用既有 action / actor / target 三欄表達；新 action 名稱明示 hotspot 子類型（token vs slot vs host hotspot）+ DRF 子事件；不破壞 audit chain hash 模型。
+
+### S-8.7 Operator 工作流時間軸 — IPCam line 撞牆 8 步
+
+**情境**：2026-06-15 23:30 Pam 排了 IPCam fuzzing nightly batch（規模比平常大 10x、預估燒 5M tokens / h）。Acme tenant 100M / 30d、IPCam line 50M / 30d。當月 Day 1 ～ 14 已用 30M（line）/ 60M（tenant）。
+
+```
+Day 14 23:30 — Pam 提交 fuzzing nightly batch、CI service token 觸發 50 個 parallel workflow_run
+Day 14 23:30 + 1s — 每個 run 預估 100K tokens、check_and_reserve(line=ipcam) 通過（still under 50M）
+Day 14 23:50 — IPCam line token_used_30d = 35M / 50M（70%）；tenant 65M / 100M（65%）
+              — drf_engine cycle 看 IPCam line dominant share = 70% > Doorbell 30% > Intercom 5%
+              — drf_state(line=ipcam) multiplier=0.5（從 1.0 進 CULPRIT path）
+              — SSE 推 dashboard：「IPCam 線是當前 quota culprit、其他線享有 + 50% 分享」
+Day 14 23:55 — 第二輪 cycle、IPCam 仍是 culprit、multiplier × 0.5 = 0.25
+              — Pam 看到 dashboard SSE banner「您的 line 進入 throttle、新 LLM call 將排隊」
+              — 部分 fuzzing run latency 從 5s 拉到 30s（throttle 排隊）
+Day 15 00:30 — IPCam line token_used_30d = 48M / 50M（96%）
+              — line 級 cap 即將撞牆、Pam 收 inbox alert + email「line 額度 30 min 內將用盡」
+              — Pam 自評：今晚 fuzzing 是 P0 release-gate（不是日常）、可走 emergency burst
+Day 15 00:35 — Pam 走 POST /tenants/{acme}/lines/{ipcam}/emergency-burst { burst_tokens: 5M, reason: 'release_gate' }
+              — backend transaction：emergency_burst_requests 寫 pending row
+              — 通知 Bob (admin) + Alice (owner)，要求雙簽 step-up
+Day 15 00:40 — Bob 收 SSE banner「Pam 申請 5M emergency burst、請審查」
+              — Bob review：reason 合理、月內 IPCam burst 0/1 已用、approve
+              — emergency_burst_requests.status='approved' + approved_by=Bob + expires_at=now()+24h
+              — 自動 execute：line.token_cap_30d = 50M + 5M = 55M
+              — emergency_burst_used_this_month++（IPCam 已 1/1）
+              — audit 雙寫：tenant.emergency_burst_approved + tenant.emergency_burst_executed
+Day 15 00:45 — IPCam line cap 升至 55M、token_used 48M / 55M（87%）+ multiplier 從 0.25 進 RECOVER path
+              — fuzzing latency 恢復正常
+Day 15 04:00 — fuzzing batch 完成、IPCam line token_used 53M / 55M、剩餘 2M 撐到月底
+Day 15 ~ Day 30 — IPCam Pam 再不能走 emergency burst（月內 1/1 用完）
+Day 31 00:00 — emergency_burst_used_this_month reset cron、IPCam burst 額度恢復 0/1
+              — token_used_30d 滑動窗自然滑出 Day 1 用量、cap utilization 重算
+```
+
+**S-8.7 設計斷言**：
+1. **8 步混合「自動 cycle + 人類介入」** — drf_engine 30s cycle 是自動（Day 14 23:50 ～ 23:55）、emergency burst 是人類顯式（Day 15 00:35 ～ 00:40）；兩者各自走 audit + SSE，UI banner 區分顏色（自動=黃色 throttle、人類介入=綠色 burst approved）。
+2. **「IPCam 是 culprit、其他線享 + 50% 分享」是 dashboard 第一級訊息** — Doris / Ian 不需要看 detailed multiplier、看到「您不是 culprit、可繼續用」即可；frontend lib/quota-listener.tsx 訂閱 `tenant.drf_throttled` SSE event、彈 banner 給 affected tenant member；culprit tenant member 收 amber banner、其他 tenant member 收 green badge。
+3. **emergency burst 必走「scope 對齊」雙簽** — scope=line 必 line owner（Pam）+ tenant admin（Bob）雙簽；scope=project 必 project owner（Quinn）+ line owner（Pam）雙簽；scope=tenant 必 tenant admin + tenant owner 雙簽；scope 升一級多一個簽名、避免 line owner 為自己 line burst 走「自簽」。
+4. **`expires_at = approved_at + 24h` 是 hard cap** — Bob approve 後 Pam 必 24h 內 execute（execute 即 cap 升）；過期未 execute 自動 status='expired' + 釋放 month quota slot；理由：approved 拖到下個月才 execute 會混亂 billing 月度報表。
+5. **emergency burst 月限 1 次 hard cap、reset 走 cron** — 與 `tenants.emergency_burst_reset_at` cron 對齊；超 1 次 422 + UI 引導「請聯繫 admin 升 plan、不該日常依賴 burst」；理由：burst 設計是「偶發 incident 緩衝」、若每月用 = plan 不夠、走 plan upgrade 路徑。
+6. **fuzzing batch 完成後 IPCam line 不立即 RECOVER 到 1.0** — `tenant_aimd` AI step 0.05 / cycle = ~10 個 cycle (5 min) 才回到 1.0；理由：避免「立刻恢復 → 立刻又被燒爆」抖動；既有 AIMD 設計已證 5 min recover 是合理。
+
+### S-8.8 邊界 / 退化情境
+
+| 邊界場景 | 預期行為 | 驗收條件 |
+|---|---|---|
+| 多 tenant 同時 host CPU > 95%、`get_culprit_tenant()` 返 None（兩個 tenant 都熱）| `tenant_aimd.plan_derate()` 走 FLAT path 全降 multiplier × 0.5（既有 `backend/tenant_aimd.py:151-165`）；S-8 不改既有行為、僅 audit 寫 `host.hotspot_flat` event | tenant_aimd 既有 FLAT path + S-8 audit 加 enum |
+| culprit tenant 只有 1 個 line 撞牆（其他線正常）| host AIMD 不動（host CPU 仍正常）；tenant DRF cycle 對該 line multiplier × 0.5；其他 line 不受影響 | drf_engine 三層獨立 cycle 設計 |
+| culprit project 是 V3 R&D（drf_weight=0.5）| DRF 計算「effective demand = actual_demand / weight」、V3 顯得 share 更高、被 throttle 更嚴；但 floor 0.1 仍保證；audit 寫 reason='CULPRIT_LOW_WEIGHT' | drf_engine weighted demand 計算 |
+| emergency burst 月限已用、但 P0 incident 又來 | 422 reject + 引導「升 plan 或聯繫 platform Pat 走特例」；platform-side 路徑 `POST /platform/tenants/{id}/override-burst-limit`（Pat + acme owner 雙簽 + audit 雙倍寫）| Y4 platform endpoint + 平台級 override 路徑 |
+| share guest（cobalt 端）撞牆、acme 端 tenant 還剩很多 | guest 端 cobalt 自己的 LLM cap 用盡、reject 402；acme 端不受影響（caller pays、S-3.4 / S-8.1 設計斷言 4）| `share_id` SharedCounter 計數正確 |
+| circuit_breaker 對 (acme, anthropic) 開 + DRF 也 throttle acme | 兩條獨立路徑、優先級：circuit_breaker（503 立刻退、走 fallback chain）→ DRF throttle（200 排隊）；UI banner 兩條訊息分別顯示 | `agents/llm.py` failover loop + drf_engine 解耦 |
+| token estimation drift（actual = 3 × estimated）| commit_actual_tokens 寫真實值、超過 reservation 部分繼續扣 SharedCounter；audit 寫 warning「estimation drift」+ 推 dashboard prompt designer banner；不擋下次 call | S-8.5 設計斷言 6 + Y8 dashboard banner |
+| reservation 寫了但 commit / release 都沒呼叫（worker 死掉）| 5 min TTL 後自動 DECR 釋放 + audit「token reservation expired」；下個 cycle 重算 fairness 不受 leak 影響 | S-8.5 設計斷言 5 + Redis TTL |
+| line cap 用盡但 tenant cap 還有、Pam 想立刻借 | reject 402 + 引導「請走 emergency burst 或 line rebalance」；不允許 silent fallthrough（S-4.2 設計斷言 2「line 隔離是 invariant」）| Y4 reject + UI guide |
+| Bob 走 line rebalance：IPCam 50→45 / Doorbell 35→40（顯式調 cap）| `POST /tenants/{id}/budgets/rebalance` 雙簽（Bob + Alice）+ audit 雙寫；line cap 立即生效（與 S-4.2 設計斷言 5 對齊）| Y4 rebalance endpoint |
+| host AIMD 把 acme multiplier 打到 floor 0.1 + tenant 內又 DRF 把 IPCam 打到 floor 0.1 | effective_multiplier = 0.1 × 0.1 = 0.01（≤ floor）— **採取 max(各層 floor) 而非乘**；最終 multiplier = max(0.1, 0.01) = 0.1（floor 保證）| drf_engine 累乘後 clamp floor |
+| 測試環境 Redis 不可用、SharedCounter 走 in-memory fallback | 既有 `backend/shared_state.py:32-58` `_get_redis_url() == ""` 走 in-memory；單 worker dev 場景 OK；prod 多 worker 必有 Redis（既有 deployment 已 wire — `.env` `OMNISIGHT_REDIS_URL`）| `backend/shared_state.py:101` redis-or-local fallback |
+| user 個人 daily cap（S-1.2 設計斷言 3 `daily_token_cap`）撞牆 vs DRF | user 個人 cap 是 attribution-only、不入 DRF 計算（S-8.5 設計斷言 4）；user 撞 daily cap 自己的 reject 402、與 DRF 獨立 | S-1.2 + S-8.5 設計斷言 4 |
+| MSP Maya（S-2 多 tenant 單 user）跨 tenant 服務、本人撞牆 | 不是 DRF 範疇 — DRF 計算「同 tenant 內」公平、Maya 在 acme + blossom + cobalt 各自有自己的 user_id × tenant 配對；每 tenant 獨立 fairness 池 | S-2 N:N 模型 + DRF tenant scope |
+| auto rebalance（plan 降級導致 line cap > tenant cap）| 走 S-4.8 設計斷言「按比例縮減」path、自動重算 line cap、寫 audit；DRF cycle 下個迭代用新 cap | S-4 設計 + S-8 對齊 |
+| TTL 滑動窗 + 月底前 1h 大批 commit | sliding window 自動把 30d 之前的扣除滑出；最後 1h 的 commit 仍計入新 30d 起點；不會「月底特例燒爆」 | Redis ZADD/ZREMRANGEBYSCORE |
+
+### S-8.9 Open Questions（標記給 Y6 / Y10 後續勾選）
+
+1. **「DRF dominant axis 的 weight 是否該 admin 可調」** — S-8.6 schema `drf_weight` 已預留欄位（line / project 級）；但 dominant axis 本身（token vs slot vs cpu）是否該 admin 可調 weight（如「token 軸 weight=2.0 比 cpu 重視 2x」）？目前傾向「不可調、三軸 max-min 平等對待」、避免 admin 配置複雜度爆炸；但企業客戶可能想 prefer token over cpu fairness、留 Y10 落地時最終決議。
+2. **「sliding window 30d vs fixed window 月初 reset」** — S-8.5 設計斷言 3 已選 sliding window；但 billing 體系（Stripe / 內部報表）通常按月（fixed window）、雙系統不對齊可能造成 dashboard 與帳單對不上；目前傾向「token meter 用 sliding window（fairness 友善）+ billing report 走 fixed window 月底彙總（accounting 友善）」雙軌；但實作細節留 Y10。
+3. **「emergency burst 月限 1 次 vs N 次 configurable」** — S-8.6 schema hard-coded 月限 1 次；但企業 plan 可能想配「月限 3 次、每次最多 cap × 0.1」、提高客戶體驗；目前傾向「初版鎖 1 次、Y10 開 per-plan configurable」、避免一上來就過度設計；但若早期客戶 push back 強烈、提前到 Y6 落地時實作。
+4. **「DRF cycle 30s vs 動態頻率」** — S-8.3 設計斷言 4 鎖 30s（與 tenant_aimd 對齊）；但 host 高負載期可能想加快到 10s（更靈敏）、低負載想拉長到 60s（省 PG 寫）；目前傾向「靜態 30s、與 tenant_aimd 共 cycle 同 cron 頻道」、避免雙頻率失同步；動態頻率留 Y10 P3。
+5. **「project 級 DRF weight 是 admin 設 vs project owner 設」** — S-8.6 設計斷言 2 寫「Bob 可調」（admin）；但 project owner Quinn / Sam / Rita 可能想自設 V1=2.0 / V3=0.5；目前傾向「admin only」（避免 project owner 為自己 project 偏袒）；但 Y4 落地時可能加「project owner 可 propose、admin approve」流程；留 Y4 / Y10 細化。
+
+### S-8.10 既有實作對照表
+
+S-8 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
+
+| S-8 invariant | 目前狀況 | 缺口 |
+|---|---|---|
+| Per-tenant AIMD multiplier 控制律 | ✅ — `backend/tenant_aimd.py:42-228` 完整實作 `AimdConfig` + `plan_derate()` + 4 reason enum（CULPRIT / FLAT / RECOVER / HOLD）+ `min_multiplier=0.1` floor + `_state` dict | 缺：`_state` 是 module-global、需升 SharedKV("drf_state") 跨 worker 共享（合格答案 #2）；缺 token / slot 軸 |
+| Host CPU culprit 偵測 | ✅ — `backend/host_metrics.py:805-845` `get_culprit_tenant()` outlier 規則（≥ 80% CPU + ≥ 150% margin）+ `backend/tenant_aimd.py:131-149` 對接 | 缺：token / slot 軸 culprit 偵測（DRF dominant axis 選擇）；目前只 CPU 軸 |
+| Token bucket Redis-atomic | ✅ 用於 HTTP request 級 — `backend/rate_limit.py:111-147` Lua-atomic + `backend/quota.py:99-127` PLAN_QUOTAS 4 plan | 缺：LLM token 級 Lua-atomic（Y6 新增 `llm_token_meter` 模組、不重用 RedisLimiter） |
+| SharedCounter / SharedKV 跨 worker | ✅ — `backend/shared_state.py:90-148` SharedCounter INCR/DECR/get + `:150-240` SharedKV with TTL；prod 已 wire `OMNISIGHT_REDIS_URL` 4 worker 一致 | 缺：應用到 token meter（key prefix `omnisight:shared:counter:llm_tokens:*`）；目前無 LLM token 計數器 |
+| LLM gateway with rate-limit header parsing | ✅ — `backend/agents/llm.py:117-246` parse Anthropic / OpenAI ratelimit reset header；`_parse_reset_value()` RFC3339 + Duration | 缺：把 parsed remaining_tokens 寫進 SharedCounter / SharedKV 通知 DRF cycle；目前 header 讀取後無動作 |
+| Provider circuit breaker（per-tenant-per-key） | ✅ — `backend/circuit_breaker.py:154-235` open / cooldown 300s / auto-half-open + tenant-key fingerprint 三元 tuple | 無缺口；S-8.4 行為對照表沿用既有 + audit 加新 enum |
+| LLM provider failover chain | ✅ — `backend/agents/llm.py` get_llm() multi-provider fallback；`OMNISIGHT_LLM_FALLBACK_CHAIN` env knob | 無缺口；S-8.4 設計斷言 2 沿用 |
+| Tenant disk quota（FYI 對照、不是 token quota） | ✅ — `backend/tenant_quota.py:64-69 PLAN_DISK_QUOTAS` + LRU sweep | 無缺口（disk vs LLM 不同維度、S-8 純 LLM token）；Y6 落地時參考 PLAN_DISK_QUOTAS 模式設 PLAN_TOKEN_QUOTAS |
+| Workflow run scheduling（per-tenant queue） | ❌ — `backend/routers/invoke.py:75-115` `_invoke_slot()` 走 decision_engine.parallel_slot()、全 tenant 共池 FIFO；無 per-tenant queue / weighted fair-share | Y6 加 per-tenant slot weighted fair queue（S-8.2 第 3 行 + S-8.3 設計斷言 3） |
+| Adaptive concurrency budget | ✅ — `backend/adaptive_budget.py:1-148` AIMD host-level（cpu/mem 30s）+ MODE_MULTIPLIER（turbo / full_auto / supervised / manual） | 無缺口；S-8.2 設計斷言 6 釐清 MODE_MULTIPLIER vs DRF multiplier 是兩個獨立乘數 |
+| Budget strategy global state | ⚠️ 既有但限制 — `backend/budget_strategy.py:51-148` 4 strategy（quality / balanced / cost_saver / sprint）+ `_current` 全局；非 per-tenant；改 strategy 通過 SSE event | Y10 升級為 per-tenant 設定（呼應 S-8.10 Open Q4）；目前 S-8 不依賴 strategy（DRF 與 strategy orthogonal） |
+| Provider balance tracking | ⚠️ 部分 — `backend/llm_balance.py:67-96` BalanceInfo / `llm_balance_refresher.py` 背景 refresh 寫 SharedKV | 缺：tenant 月度 token 計帳（balance 是 provider account 維度、不是 tenant 維度）；Y6 加 tenant token meter 與 provider balance 並存 |
+| Token estimation pre-call | ❌ — 不存在；目前 LLM call 不預估 input tokens、不知道將燒多少 | Y6 加 `estimate_tokens(prompt, history, model)` fn（用 tiktoken / 各 provider tokenizer）+ S-8.5 reservation 機制 |
+| 30d sliding window meter | ❌ — 不存在；既有 `quota.py` 60s fixed window；無滑動窗 | Y6 加 Redis ZADD/ZREMRANGEBYSCORE 模式 |
+| Frontend quota dashboard / fairness banner | ❌ — 不存在；目前 dashboard 顯示 disk quota（既有）但無 LLM token cap / DRF multiplier panel | Y8 加 `lib/quota-listener.tsx`（SSE `tenant.drf_throttled` / `host.hotspot_changed` / `tenant.token_ceiling_hit` 三 event）+ `/dashboard/quota` 頁面（三層 token utilization + DRF multiplier panel + culprit highlight）+ amber banner（culprit）/ green badge（受惠 tenant） |
+| Emergency burst endpoint + UI | ❌ — 不存在 | Y4 `POST /tenants/{id}/[lines/{lid}/]emergency-burst` + `/approve` + `/execute`；Y8 admin approve modal + UI 月限 1/1 計數器 banner |
+| audit_log lifecycle action enum | ⚠️ 既有 schema OK、缺 S-8 enum 值 | Y9 加 8 個 action enum（token_ceiling_hit / line_cap_hit / project_cap_hit / drf_throttled / drf_recovered / emergency_burst_* / host_hotspot_*） |
+
+**S-8.10 對 Y4 / Y6 / Y8 / Y9 / Y10 的關鍵 deliverable**：
+1. **Y1 / Y4 schema** — `tenant_quota` 加 5 欄（token_cap_30d / token_used_30d / token_cap_updated_at / drf_strategy / emergency_burst_used_this_month / emergency_burst_reset_at）+ `product_lines` 加 3 欄（token_cap_30d / token_used_30d / drf_weight）+ `projects` 加 3 欄（token_cap_30d / token_used_30d / drf_weight）+ 2 新表（`drf_state` 6 欄、`emergency_burst_requests` 12 欄含 partial unique index）+ audit_log 加 8 個 action enum 值（純 enum、不加 column）。
+2. **Y4 endpoint set** — `GET /tenants/{id}/quota`（三層 cap / used / multiplier 切片）+ `POST /tenants/{id}/budgets/rebalance`（line 間 cap 重分配、雙簽）+ `POST /tenants/{id}/[lines/{lid}/[projects/{pid}/]]emergency-burst`（雙簽 + 月限 1）+ `POST /emergency-burst/{id}/approve` + `POST /emergency-burst/{id}/execute` + `GET /tenants/{id}/drf-state`（dashboard query）+ `PATCH /tenants/{id}/[lines/{lid}/[projects/{pid}/]]drf-weight`（admin step-up）+ platform-side `POST /platform/tenants/{id}/override-burst-limit`（Pat + acme owner 雙簽）。
+3. **Y6 background fns** — `backend/llm_token_meter.py`（check_and_reserve / commit_actual_tokens / release_reservation 3 fn + Redis ZADD sliding window）+ `backend/drf_engine.py`（compute_dominant_share / drf_plan / apply_to_tenant_aimd 3 fn + 三層 cycle 30s）+ `backend/per_tenant_slot_queue.py`（per-tenant weighted fair queue + asyncio.PriorityQueue）+ `backend/agents/llm.py` 改寫（在 get_llm() 後加 reserve / commit / release wrap）+ cron `monthly_emergency_burst_reset` + cron `token_used_30d_snapshot_to_pg`（既有 LLM balance refresher 同模式）+ cron `emergency_burst_request_expire_after_24h`。
+4. **Y8 frontend** — `lib/quota-listener.tsx`（訂 3 SSE event）+ `/dashboard/quota` 頁（三層 utilization + DRF multiplier + culprit panel + amber/green banner）+ `/tenant/[id]/budgets/rebalance` 頁（line 間 cap 拖拉重分配 + 雙簽 confirmation）+ `/emergency-burst/[id]` 頁（reason / 月限狀態 / 雙簽 approve）+ admin role gate（`<RequireRole min="admin">` HOC + 灰按鈕 fallback）。
+5. **Y9 audit + cron** — audit_log 加 8 個 action enum 值（無 schema 動）+ SSE event types 3 個（host.hotspot_changed / tenant.token_ceiling_hit / tenant.slot_starved）+ cron `monthly_emergency_burst_reset`（每月 1 號 00:00 reset emergency_burst_used_this_month）+ cron `token_used_30d_snapshot_to_pg`（60s）+ cron `emergency_burst_request_expire_after_24h`（每小時掃 expires_at）。
+6. **Y10 retention + per-tenant config** — `docs/ops/drf_fairness_policy.md`（DRF 模型解釋 + emergency burst SOP）+ tenant-level setting `drf_strategy` configurable（drf_dominant / hard_cap / priority future enum）+ per-plan emergency burst limit（free=0/月、starter=1、pro=3、enterprise=N）+ cross-platform export（DRF state ndjson + Prometheus metric `omnisight_drf_multiplier{scope_type=tenant|line|project,scope_id=...}`）。
+
+
 
 ## S-9 遺留相容
 
@@ -2426,4 +2814,5 @@ S-1.3 / S-1.4 已給出 secret + project 部分。完整矩陣（涵蓋 audit / 
 | 2026-04-25 | TODO 第 5 勾選（多專案同產品線） | S-5 章節展開（10 子節 + 6-persona Doorbell 三 project（V1 客戶 A 量產 Quinn / V2 客戶 B POC Rita / V3 內部 R&D Sam + Doris/Carol/Bob 對照組）+ 三層 LLM 預算階層偽碼（tenant ceiling × line budget × project cap）+ customer attribution 模型（customer_accounts 表 + is_internal 互斥 CHECK）+ SOP/skill_pack 三層繼承解析 + inheritance vs clone 雙 mode + lifecycle 狀態機 6 stage 嚴格白名單轉移 + schema 增量 3 表 4 欄（customer_accounts + project_lifecycle_history + sop_overrides + projects 4 欄）+ Doorbell 1→3 project 7 步演進時間軸 + 11 邊界 + 5 open questions + 17 行對照表）；S-4 row 標完成（2026-04-25）；S-6 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 6 勾選（多分支同專案） | S-6 章節展開（10 子節 + 4-branch persona 矩陣（main / staging / v2.1-hotfix / customer-x-fork × push policy × reviewer × 工程角色）+ workspace 路徑 nested 模型（tenant/line/project/_branches/_tasks 4 段 + sanitize 規約 + legacy symlink 過渡）+ git worktree 策略偽碼（per-project bare clone × N worktree 共享 object store + ensure_project_bare / provision_branch_worktree / provision_agent_task_worktree 三 fn + PG advisory lock keyed (project, branch)）+ branch lifecycle 狀態機 4 stage（active / frozen / archived / purged）+ long-lived vs ephemeral typed enum + workflow_run × branch attribution（branch / branch_kind / base_branch 3 欄兩階段 NOT NULL）+ schema 增量 2 新表 + 1 表升 durable + 3 表加欄位（project_branches + branch_lifecycle_history + agent_workspaces 升 PG + workflow_runs/artifacts/audit_log 各加 branch）+ Doorbell V1 1→4 branch 7 步演進時間軸（含 release v2.0 / v2.1-hotfix from tag / customer-x-fork 雙鏈 audit / auto-freeze 30d）+ 13 邊界 + 5 open questions + 14 行對照表（含既有 backend/workspace.py module-global state 升 PG 表合格答案 #2 的具體實作路徑））；S-5 row 標完成（2026-04-25）；S-7 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 7 勾選（消失用戶回收） | S-7 章節展開（10 子節 + 5-persona 三條 offboarding 路徑視角矩陣（Carol 離職 / Bob admin actor / Alice owner-churn / Pat platform super-admin / Cher guest survivor × do/not-do）+ user 離職 graceful offboarding 5 步偽碼（handover-plan → disable transaction → ownership migration → quota release → 28d grace + 永久 audit-actor 保留）+ tenant 退訂 4-state lifecycle 狀態機（active → suspended → wind_down → terminated）含 4 stage 行為矩陣（quota / LLM / data / audit / guest 視角）+ Cobalt 退訂 60d + 90d 端到端時間軸 + project archive cascade 6 軸對照表（LLM cap / disk artifact / workflow_run / project_members / customer_account / 統計）+ audit retention 4 層模型（永久保留 / PII redactable / business payload / ephemeral cache）+ chain hash 不重算的 GDPR Art.17 redaction 框架 + quota 釋放 vs 凍結三場景 6-row 行為差異表（user 離職 / tenant suspended / wind_down / terminated / project archived / purged）+ schema 增量（既有 6 表加 18 欄 + 2 新表（ownership_migrations 10 欄 + redaction_requests 11 欄）+ 4 條 partial index + 2 條 CHECK）+ 三條 7 步 operator 時間軸（Carol 離職 / Cobalt 退訂 / V2 archive）+ 16 邊界 + 5 open questions + 14 行對照表（含既有 backend/auth.py:486-549 disable user 路徑 + backend/api_keys.py:48-151 revoke_key fn + backend/alembic/0019_session_revocations 7d retention + backend/audit.py:80-84 隱式永久保留的延伸路徑））；S-6 row 標完成（2026-04-25）；S-8 ～ S-9 維持 skeleton；共用區段仍 stub。|
+| 2026-04-25 | TODO 第 8 勾選（熱點撞牆） | S-8 章節展開（10 子節 + 6-persona 「資源燒手 vs 被餓死鄰居」雙端矩陣（Pam IPCam line owner culprit / Doris Doorbell line owner victim / Quinn V1 project owner victim / Cher cobalt guest cross-tenant 旁觀 / Pat platform 仲裁 / Bob acme tenant admin 仲裁 × do/not-do）+ 三類撞牆訊號 × fairness 對照表（host CPU/mem hotspot / tenant LLM token ceiling / per-request concurrent slot）+ DRF (Dominant Resource Fairness) 模型選擇 4 candidate 對比（hard cap / priority queue / strict isolation / DRF）+ 三層 cycle 偽碼（host / tenant / line 各自獨立 30s + 結果是 multiplier 累乘 + floor max 0.1 不餓死）+ throttle vs reject 兩類降級行為 7 場景 dispatch 表（402 quota exhausted vs 429 rate limit vs 503 provider unavailable vs 200 throttle）+ token meter SharedCounter 5-key 設計（tenant / line / project / user / share）+ check_and_reserve / commit_actual_tokens / release_reservation 三階段偽碼 + 5 min reservation TTL + estimation drift > 50% audit warning + sliding window 30d Redis ZADD/ZREMRANGEBYSCORE + schema 增量（既有 3 表加 11 欄 + 2 新表（drf_state 6 欄、emergency_burst_requests 12 欄）+ 1 條 partial unique index + audit_log 加 8 個 action enum 值不加欄位）+ IPCam line 撞牆 8 步 operator 時間軸（fuzzing batch → DRF cycle culprit detect → throttle → emergency burst 雙簽 → cap 升 → recover）+ 17 邊界 + 5 open questions + 17 行對照表（含既有 backend/tenant_aimd.py:42-228 完整 AIMD 控制律 + backend/host_metrics.py:805-845 get_culprit_tenant 1-outlier 規則 + backend/rate_limit.py:111-147 Lua-atomic token bucket + backend/shared_state.py:90-148 SharedCounter / SharedKV + backend/circuit_breaker.py:154-235 per-tenant-per-key 熔斷 + backend/agents/llm.py:117-246 ratelimit header parser + backend/adaptive_budget.py:1-148 host AIMD + MODE_MULTIPLIER + backend/budget_strategy.py:51-148 4 strategy 全局 + backend/llm_balance.py + backend/quota.py:99-127 PLAN_QUOTAS 4 plan 是 HTTP request 級不是 LLM token 級的釐清 + backend/routers/invoke.py:75-115 _invoke_slot 全 tenant 共池 FIFO 缺 per-tenant queue 缺口））；S-7 row 標完成（2026-04-25）；S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | 完整 S-2 章節（10 子節 + Bridge MSP × Acme/Blossom/Cobalt 5-persona 矩陣 + tenant switcher UX 4 步流程 + middleware 升級偽碼 + RBAC `resolve_role(user, tenant, project)` 二維解析 + audit cross-contamination 4 條 invariant + Y1 新增欄位（`is_super_admin` / `last_active_tenant_id` / `sessions.active_tenant_id` / `impersonation_*` / `is_primary` partial unique index）+ Maya 7 步 onboarding 時間軸 + 8 邊界場景 + 5 open questions + 16 行對照表盤點 Y2/Y3/Y8 缺口）；S-3 ～ S-9 仍留 skeleton；共用區段不動。 |
