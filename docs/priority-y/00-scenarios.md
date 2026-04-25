@@ -2,7 +2,7 @@
 
 > 文件起點：2026-04-25  
 > 對應 TODO：`Y0. Multi-user × Multi-project 情境盤點 + 架構文件 (#276)`  
-> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-1（單租戶多用戶）**，其餘 S-2～S-9 章節僅留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
+> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-3（跨租戶協作 — guest 模型）**，承接 S-1 / S-2 已落地章節；其餘 S-4～S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
 
 ---
 
@@ -11,8 +11,8 @@
 | 章節 | TODO 對應 | 狀態 |
 |---|---|---|
 | [S-1 單租戶多用戶](#s-1-單租戶多用戶) | `[x]` 第 1 勾選 | 完成（2026-04-25） |
-| [S-2 多租戶單用戶](#s-2-多租戶單用戶) | `[x]` 第 2 勾選（本 row） | **本次完成** |
-| [S-3 跨租戶協作](#s-3-跨租戶協作) | `[ ]` 第 3 勾選 | Skeleton |
+| [S-2 多租戶單用戶](#s-2-多租戶單用戶) | `[x]` 第 2 勾選 | 完成（2026-04-25） |
+| [S-3 跨租戶協作](#s-3-跨租戶協作) | `[x]` 第 3 勾選（本 row） | **本次完成** |
 | [S-4 多產品線](#s-4-多產品線) | `[ ]` 第 4 勾選 | Skeleton |
 | [S-5 多專案同產品線](#s-5-多專案同產品線) | `[ ]` 第 5 勾選 | Skeleton |
 | [S-6 多分支同專案](#s-6-多分支同專案) | `[ ]` 第 6 勾選 | Skeleton |
@@ -520,9 +520,260 @@ S-2 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
 
 ## S-3 跨租戶協作
 
-> **Skeleton — TBD by future row** (TODO 第 3 勾選)。
-> tenant A 邀請 tenant B 的 user 作為 guest 看他們某個 project（唯讀 / 可評論），但不能看 tenant A 其他 project。
-> 預定章節：S-3.1 share 模型、S-3.2 guest 的 RBAC fence、S-3.3 audit 在 host + guest 雙鏈寫入、S-3.4 cross-tenant secret 隔離。
+> tenant A（**host**）想把自己某個 project 開放給 tenant B 的 user（**guest**）看（唯讀）或讓他評論（read-comment），但 guest 不應該看到 host 的其他 project / 其他 secret / 其他 audit；guest 在 host 的視角是「**在自己的 tenant 裡看到一個被 mount 進來的外部 project**」、不是「臨時切到 host tenant」。
+
+> **與 S-1 / S-2 的差異邊界**：S-1 是「同 tenant 多 user」、S-2 是「同 user 多 tenant 但 tenant 之間互不交集」、S-3 是首次出現「**資料跨 tenant 邊界流動**」的情境 — host 的某個 project row 在 guest tenant 的 sidebar 出現、host 的 audit 事件在 guest 視角部分可見、host 的 LLM 預算可能因 guest 的瀏覽 / 評論而消耗。S-1 / S-2 的所有 invariant 仍持續成立（guest 看 host 的 project ≠ guest 變成 host tenant 的 member）；S-3 在這之上加一條新的權威表 `project_shares` 與 guest 視角的 fence 規則。
+
+### S-3.1 角色 Persona — Host / Guest 雙視角
+
+接續 S-1 的 Acme Cameras（`t-acme`）+ S-2 的 Bridge MSP（`t-bridge-msp`）。新增第三家 `Cobalt Drones`（`t-cobalt`，無人機公司，與 Acme 合作 ISP 韌體 ）作為 host / guest 互補樣本。
+
+| Persona | 主 tenant | guest 身份 | 該 do | 該 not do |
+|---|---|---|---|---|
+| **Alice**（Acme owner，host 端決策者） | `t-acme` (owner) | — | 對 `firmware-ipcam` project 發 share invite 給 cobalt 的 Cher、設 role=`commenter`、設 expires_at=90d、撤銷 share | 不能對外分享自己沒 owner 權限的 project（即使 tenant-owner 也要 project-owner 雙簽）；不能把 share role 拉高到 `contributor`（最高 commenter）；不能無限期 share（必設 expires） |
+| **Cher**（Cobalt owner，guest 端決策者 / 接收者） | `t-cobalt` (owner) | `t-acme` 的 `firmware-ipcam` project guest viewer | 在 cobalt tenant 的 sidebar 看到「**Shared with us**」分組，內含 `firmware-ipcam`（標 host=acme + 紅 guest badge）；接受 / 拒絕 share；設 cobalt 內部誰可以代表 cobalt 進去看 | 不能把 host 的 project 在 cobalt 內 fork 為自己的 project；不能把 host project 內的 artifact 下載後再上傳到 cobalt 自己的 project（DRM-style 無法強制，但 audit 會 surface） |
+| **Cody**（Cobalt 韌體工程師，guest 實際使用者） | `t-cobalt` (member, contributor of `t-cobalt`'s `drone-isp` project) | `t-acme` 的 `firmware-ipcam` project guest commenter | 在 cobalt UI 內進入「Shared with us → firmware-ipcam」、看 workflow_run / artifact / SOP；可在 artifact 上加 comment（注 `actor=cody@cobalt.com tenant=t-cobalt`）給 acme 的 Carol 看 | 不能 trigger workflow_run（即使 commenter）；不能 inject agent hint；不能讀任何 acme 的 secret（即使 fingerprint）；不能看 acme 的 `data-pipeline`（acme 內 Cody 沒有任何 visibility） |
+| **Carol**（Acme 韌體工程師，host 端 project owner） | `t-acme` (member, contributor → S-3 後升 owner of `firmware-ipcam`) | — | 在 share 操作中是「project 端授權者」（與 tenant-owner Alice 雙簽授權）；在 firmware-ipcam 的 comment thread 看到 cody 的留言、可回覆 | 不能單獨授權跨 tenant share（必須同時有 project-owner + tenant-owner / admin 簽）；不能撤銷其他 project 的 share |
+| **Eve**（Acme 實習生 viewer） | `t-acme` (viewer) | — | 看 firmware-ipcam dashboard 時可看到 sidebar 提示「此 project 已分享給 1 個外部 tenant（cobalt）」、但看不到 share 細節（who can comment / when expires） | 不能看 share 詳情（屬 admin / project-owner-only）；不能撤銷 share |
+| **Mark**（Bridge MSP owner） | `t-bridge-msp` (owner) | （MSP 不在 S-3 直接情境裡，但作為「N:N user 同時是 guest 在多 host」的對照） | 若 bridge MSP 之後同時被 acme / blossom 各 share 1 個 project 進來 → 在 bridge tenant sidebar 看到 2 個 shared-with-us project、各自獨立 fence | 不能用 acme share 進來的 project 的 artifact 在 blossom share 進來的 project 裡引用（跨 host 互不可見） |
+
+**S-3.1 設計斷言**：
+1. **「Guest」不是 tenant 內角色、是 share 邊界 metadata** — guest 角色的 user 仍然完全屬於 guest tenant（`user_tenant_memberships(cody, t-cobalt, member, active)`）、不在 host tenant 建任何 row；host 視角看到的「guest」是透過 `project_shares` 反查得來。這保證撤銷 share 時 guest user 在 host 端立刻消失（不需要刪 user / membership / role row 三處）。
+2. **Share 授權需「雙簽」** — host 端的 project share 必須同時有：(a) **project-level owner 同意**（Carol 是 firmware-ipcam owner）+ (b) **tenant-level owner / admin 同意**（Alice / Bob）。理由：project owner 知道內容該不該給外部看（業務判斷）、tenant owner 知道對方 tenant 是否可信（合規 / 法務判斷）；單一一方都不夠安全。Y4 endpoint `POST /.../projects/{pid}/shares` 必須在 backend 強制這個 quorum（不能只信任 frontend）。
+3. **Guest role 的最大值是 `commenter`（不能是 contributor / owner）** — 跨 tenant 的 RBAC ceiling 設在 `commenter`、即使 host 想開放更多也不允許。理由：contributor 能 trigger workflow_run（要燒 host LLM quota）、能改 SOP（影響 host 內部其他 user），這兩個都不該由跨 tenant 帳號控制；想真正讓對方 contribute、就應該邀請對方為 host tenant 的 member（走 S-2 invite 流），而非 guest。
+4. **Share 必須有 `expires_at`（hard cap 1 年）** — 永久 share 是合規大忌（離職員工、退休合作夥伴一直保有 access）；UI 預設 90d、最大 365d、續期需要重新雙簽。Y1 schema 在 `project_shares.expires_at` 上設 `NOT NULL` + CHECK constraint 強制。
+5. **Guest 在 host 端 audit 是 first-class actor** — `audit_log.actor` 一直記成 `cody@cobalt.com`（不是匿名化、不是 `guest@*`），但**多加一欄** `actor_external_tenant_id='t-cobalt'`，讓 host 端的 audit 篩選時能 surface 「是哪個外部 tenant 的人做的」、避免事後追責失準。
+
+### S-3.2 Share 模型 — 三維度權限合成
+
+S-3 的權限是「(guest_user, host_project, share_role)」三維度合成、與 S-1 / S-2 的「(user, scope) 二維」並列。完整解析路徑：
+
+```python
+# 偽碼，Y4 / Y5 落地時實作
+def resolve_role(user, tenant_id, project_id=None):
+    # super-admin 跨 tenant — 同 S-2.4
+    if user.is_super_admin:
+        return "owner" if has_impersonation_token(tenant_id) else None
+
+    # 1) S-2 既有路徑：user 是 tenant_id 的 member？
+    tm = fetch_membership(user.id, tenant_id)
+    if tm and tm.status == "active":
+        # 走 S-1 / S-2 的「member 二維解析」(已實作於 S-2.4)
+        return _resolve_member_role(tm, user.id, project_id)
+
+    # 2) S-3 新路徑：user 是 tenant_id 內某 project 的 guest？
+    if project_id is None:
+        return None  # 沒有 tenant membership 又沒指定 project_id → 不能進 tenant scope
+
+    share = fetch_active_share(project_id, guest_tenant_id=user.tenant_id)
+    if share is None or share.expires_at < now():
+        return None  # 403
+
+    # guest fence：guest user 必須在自己的 tenant 內也是該 share 的 in-scope user
+    # （見 S-3.4 設計斷言 2 — share 是 tenant-level grant，不是 user-level）
+    guest_membership = fetch_membership(user.id, user.tenant_id)
+    if guest_membership is None or guest_membership.status != "active":
+        return None  # guest user 連自己 tenant 都不在 → 403
+
+    # share role 可被 guest tenant 端再往下收緊（不能往上）
+    capped = _cap_role(share.role, guest_membership.role)
+    return capped  # 可能是 "viewer" / "commenter" / None
+```
+
+**S-3.2 設計斷言**：
+1. **Guest 路徑與 member 路徑完全不交叉** — `resolve_role` 先判斷「user 是不是這個 tenant 的 member」、是就走 S-1 / S-2；否則才看 share。一個 user **不可能同時是 host tenant 的 member 又是 guest**（若 Cody 哪天加入 acme 為 member，share 路徑就被 short-circuit、走 member 路徑，避免雙重路徑導致 RBAC 推導歧義）。Y2 / Y5 dependency 強制這個排他性。
+2. **Share 是 tenant-to-project 的 grant、不是 user-to-project 的 grant** — `project_shares.guest_tenant_id` 是 `t-cobalt`、不是 `cody@cobalt.com`。理由：(a) host 端不需要知道 guest tenant 內哪些 user 該 access，由 guest tenant 自己 RBAC 決定；(b) guest user 異動（離職 / 加入）不需要 host 端配合改 share；(c) audit 上仍能透過 `actor_user_id` 知道是 guest tenant 內哪個 user 真正動作。
+3. **Guest 端可「再下調」role、不能「再上調」** — host 設 share role=`commenter`，guest tenant 內：(a) 預設所有 active member 都繼承為 commenter；(b) guest tenant 的 admin 可在 cobalt UI 設「只有 cody / cher 能進這個 share」（fence 縮小）；(c) 但 guest tenant 不能把 share role 升為 contributor（即使 host 同意也不行 — 因為 guest 的角色是跨 tenant ceiling）。Y4 endpoint 用 `_cap_role(share_role, guest_member_role_for_this_share)` 取 min。
+4. **`fetch_active_share` 必查 `expires_at`** — 不能依賴 cron 撤銷過期 share；middleware 每 request 檢查（避免 cron 延遲導致過期 share 仍被使用）。配 LRU cache（key=(project_id, guest_tenant_id)，TTL 30s + invalidation hook on share mutation）。
+5. **`resolve_role` 對 share 路徑回傳 `None` 時必須 403、不能 fallthrough 到 viewer** — 這個 fence 是安全邊界，不存在「降級為 viewer 是友善 default」的設計空間；任何 fallthrough 都是 cross-tenant leak。
+
+### S-3.3 Audit 雙鏈寫入（host + guest）
+
+S-3 是 audit chain 設計最複雜的一段：guest user 在 host project 內的每個動作必須**同時寫入兩條 chain**（host 的 + guest 的），且兩條鏈的內容**部分對稱、部分非對稱**。
+
+**非對稱性的根源**：host 端要看到「Cody 來看了我的 artifact」（forensic / 客戶服務），guest tenant 端要看到「我的 user Cody 上週外出存取了 acme 的 4 個 artifact」（離職前審查 / 計費對帳）。但兩端不能完整看到對方鏈的全部 row（否則就是 leak）。
+
+| 事件 | host (`t-acme`) chain 寫什麼 | guest (`t-cobalt`) chain 寫什麼 |
+|---|---|---|
+| Cody 第一次 access shared project | `audit.guest_session_started(guest=cody@cobalt.com, guest_tenant=t-cobalt, project=fw-ipcam, share_id=sh-123)` | `audit.cross_tenant_access(actor=cody, target_tenant=t-acme, target_project=fw-ipcam, share_id=sh-123)` |
+| Cody 看 artifact `art-456` | `audit.artifact_viewed(actor=cody@cobalt.com, actor_external_tenant=t-cobalt, target=art-456)` | `audit.cross_tenant_artifact_view(actor=cody, target_tenant=t-acme, target_artifact_kind=image)` ← 注意：不寫 host artifact id（避免 host 內部 artifact 命名洩漏到 guest tenant audit） |
+| Cody 對 artifact 加 comment | `audit.comment_added(actor=cody@cobalt.com, content=<full text>, target=art-456)` | `audit.cross_tenant_comment_posted(actor=cody, target_tenant=t-acme, target_kind=artifact)` ← 注意：不寫 comment 內文（避免 host 內部討論進到 guest tenant audit） |
+| Alice 撤銷 share | `audit.share_revoked(actor=alice@acme.com, share_id=sh-123, guest_tenant=t-cobalt, reason="contract_ended")` | `audit.cross_tenant_share_revoked(target_tenant=t-acme, target_project=fw-ipcam, share_id=sh-123, reason="contract_ended")` |
+| Cody 在 cobalt 內部被 Cher 撤銷 access（cobalt 自己縮小 fence） | （**不寫**）— 這是 guest tenant 內部的權限變動、host 不該知道 cobalt 內部 RBAC 細節 | `audit.guest_fence_narrowed(actor=cher@cobalt.com, removed_user=cody, share_id=sh-123)` |
+
+**S-3.3 設計斷言**：
+1. **「雙寫」必須在同一 transaction 內** — 否則 host 寫成功但 guest 寫失敗會出現「acme 看到 Cody 來過、cobalt 卻說沒這事」的審計分歧。Y9 落地時用 PG 2-phase commit 還是 advisory lock + try/catch + retry — Y9 reviewer 抉擇；本 row 規範「**雙寫必須要嘛同成功要嘛同失敗**」+「失敗模式要求 client 收到 5xx 而非 silent partial write」。
+2. **兩條鏈的 row 內容**「**對應但非鏡像**」 — host 鏈內容詳細（包含 artifact id、comment 內文）、guest 鏈內容是「sanitized 摘要」（只到 kind 層、不到 instance 層）。理由：guest tenant 的 audit 不該成為「窺探 host 內部命名空間」的後門。
+3. **`actor` 在兩條鏈都是 `cody@cobalt.com`** — 不在 host 鏈匿名化為 `guest_001@t-cobalt`（會讓 forensic 查無此人 / 客訴對接時對不到人）；但 host 鏈額外加 `actor_external_tenant_id` 欄位（S-3.1 設計斷言 5）讓 host 端 audit 篩選器能「我只想看 cobalt 的人做了什麼」一鍵分組。
+4. **`share_id` 是兩條鏈的 join key** — forensic 場景 (e.g. cobalt 與 acme 對帳「上個月 Cody 看了多少次」) 由 reviewer 用 `share_id` 在兩 tenant audit 各自查、比對 row count 一致 — 不靠任何「跨 tenant audit join API」（那會打破 audit chain 的 per-tenant 隔離 invariant）。
+5. **撤銷 share 的 `reason` 是必填欄位** — 強制 enum {`contract_ended` / `security_incident` / `lifecycle_expiry` / `requested_by_guest` / `other`}+ 自由 text 補充。理由：撤銷 share 是高敏感事件、半年後回頭看 audit 必須能立刻知道「為什麼當初撤銷」、純空白 reason 會讓 forensic 失去脈絡。
+6. **`audit.guest_fence_narrowed` 不外寫到 host** — guest tenant 內部的 RBAC 細節（cobalt 把 cody 從 share 移除、改派 daria）是 cobalt 的內部紀律、host 不該觸及；host 視角只看到「依然有人來自 cobalt」即可。
+
+### S-3.4 Cross-Tenant Secret 隔離
+
+S-3 引入「跨 tenant 邊界資料流動」、最危險的 leak 路徑是 secret。完整 fence 設計：
+
+| 場景 | 預期行為 | 為什麼 |
+|---|---|---|
+| Cody（guest commenter）想 `GET /api/v1/tenants/t-acme/secrets` | 403 — guest role 從 `commenter` 推導對 secret 端的 capability=`null` | secret 端從來只開給 host tenant 內部 user（S-1.3 設計斷言 1-3）；guest role ceiling 在 `commenter`、與 secret read 完全不交集 |
+| Cody 透過 share 內 commentable workflow_run 觸發某個 inline command (e.g. `/regen-artifact`) | 403 + 提示「此操作需 contributor 權限、guest 無法執行」 | guest ceiling 在 `commenter`，所有 mutator (含 trigger workflow_run、即使「只是 regen 既有 artifact」) 走 contributor capability check、guest 全 403 |
+| Cody 在 comment 內 paste `sk-xxxx`（手動社交工程） | host 端 audit row `actor=cody, content="sk-xxxx"` 完整保留（自動 redact 反而失證據鏈完整性）；但 host 端 UI 顯示 comment 時自動 mask（`sk-***xxxx`）+ 顯示 banner「Comment contains potential secret pattern」+ host 端 owner 可手動申請刪除 row | 跨 tenant 來的 comment 是 untrusted input、host 端要假設可能含惡意 / 釣魚內容；但 audit 完整性高於 UI 美觀 |
+| Acme 的 `firmware-ipcam` 跑的 workflow_run 內呼叫 Anthropic API 燒了 200K tokens、Cody 在 share 內看到該 workflow_run 的 cost panel | Cody 看不到 cost / token 用量（S-1.5 設計斷言 1 viewer 限制延伸：guest commenter ≤ host viewer 對 secret-derived field 的可見性） | LLM token 量是 secret-derived（揭露 host 內部成本結構、competitive 敏感）；guest 看 artifact 內容 OK、看 cost 不 OK |
+| Cody 透過 cobalt 自己的 LLM secret 在 share 範圍內加 comment（cobalt 內部走 Claude API 提煉留言）| 走 cobalt secret、計費走 cobalt quota、cobalt audit 寫`llm.call_in_cross_tenant_share`；host 端 audit 寫 `comment_added`、不知道 cobalt 用了什麼 LLM | 跨 tenant share 的「LLM 用量歸屬」永遠記在 caller 的 tenant — 否則 host 會被惡意 guest 用 LLM 量打爆 quota（DoS） |
+| host project 的 SOP markdown 內含 `${SECRET_LLM_KEY}` 模板變數、Cody 在 commentable view 看到的應該是什麼 | 看到 `${SECRET_LLM_KEY}`（**不展開**）— SOP 模板對 guest 永遠是 raw 形式；只有 host 內部 contributor 在 sandbox 內 trigger workflow_run 時才走 secret_store.decrypt 注入環境變數 | 模板變數展開（template substitution）只發生在 sandbox runtime；UI render 端永遠不展開 — guest 看到的就是 SOP 作者寫的原文 |
+
+**S-3.4 設計斷言**：
+1. **「跨 tenant 看到的」 ≤「host viewer 看到的」** — 任何 host 內部 viewer（如 Eve）看不到的資訊（secret fingerprint、LLM cost、internal audit、其他 project 名）guest 也看不到。這是 RBAC ceiling 的延伸：guest commenter 對「secret-derived」欄位的能見度 ≤ host viewer = `null`。Y5 implementation 要把 `is_guest_actor` flag 帶進每個 RBAC 檢查 dependency、預設黑名單模式。
+2. **LLM 計費歸屬「caller pays」** — 跨 tenant share 內 guest 觸發的任何 LLM 呼叫（即使是 cobalt 自己想用 Claude 提煉留言） 走 caller (cobalt) 的 secret + quota；host (acme) 不為此扣費。Y6 / Y9 quota 計量必須在 LLM call site 帶 `caller_tenant_id` (而非 `resource_tenant_id`)。
+3. **comment 內容是 untrusted input、必須在 UI render 端走 secret pattern detector** — frontend 對 `sk-...` / `ghp_...` / `xoxp-...` 等已知 secret prefix 自動 mask + 顯示 banner；audit 端保留原文（forensic 完整性）。Y8 frontend 落地時整合既有 `lib/secrets-detect.ts` (若不存在則新建)。
+4. **SOP / template 對 guest 永遠 raw、不展開** — 這條 invariant 預防最隱蔽的一類 leak（SOP 內模板變數的展開時機若搞錯、guest 在 view-time 看到展開後的明文 secret）。Y4 / Y6 落地時 template engine 只在 workflow_run sandbox 內執行；UI render path 走 raw 模板。
+5. **撤銷 share ≠ 撤銷既有 audit row 內的 secret 痕跡** — 即使 acme 撤銷對 cobalt 的 share，過去 90d 內 Cody 加的 comment 仍在 audit 內留存（含他在 comment 內 paste 過的 `sk-xxxx`）。host 端 owner 可走「申請 audit row 刪除」工單流（觸發 R5 audit chain re-verify、寫 `audit.row_redacted_post_review` meta event）。Y9 落地時要支援這條 redaction path、不能讓 audit 變成永久 secret 累積桶。
+
+### S-3.5 schema 衝擊（與 Y1 對齊）
+
+S-3 在 Y1 落地時對 schema 的增量（在 S-1.6 + S-2.6 既有設計上加）：
+
+```
+project_shares             -- Y1 新表（S-3 權威來源）
+  id              uuid pk
+  project_id      uuid fk projects(id)             -- host 端 project
+  host_tenant_id  text fk tenants(id)              -- 冗餘（projects.tenant_id 可推），但讓 RLS index 容易
+  guest_tenant_id text fk tenants(id)              -- 被 share 的對象 tenant
+  role            text                             -- 'viewer' / 'commenter'（ceiling，S-3.1 設計斷言 3）
+  granted_by      uuid fk users(id)                -- host 端發起授權的 user（雙簽中的 project-owner 端）
+  approved_by     uuid fk users(id)                -- host 端 tenant-owner / admin 簽核 user（雙簽中的 tenant 端）
+  expires_at      timestamptz NOT NULL             -- hard cap，CHECK (expires_at <= created_at + interval '365 days')
+  status          text                             -- 'pending_guest_accept' / 'active' / 'revoked' / 'expired'
+  revoked_at      timestamptz
+  revoked_by      uuid fk users(id)
+  revoked_reason  text                             -- enum check: contract_ended / security_incident / ...
+  created_at      timestamptz
+  CONSTRAINT no_self_share CHECK (host_tenant_id <> guest_tenant_id)
+  UNIQUE (project_id, guest_tenant_id) WHERE status IN ('active', 'pending_guest_accept')
+
+project_share_members      -- Y1 新表（S-3 guest tenant 內部 fence）
+  share_id        uuid fk project_shares(id)
+  user_id         uuid fk users(id)                -- 在 guest tenant 內被授權的 user（subset of guest_tenant 全員）
+  role_override   text                             -- NULL = 繼承 share.role；非 NULL = 在 ceiling 內再下調
+  added_by        uuid fk users(id)                -- guest tenant 內加入此 user 的 admin
+  added_at        timestamptz
+  PRIMARY KEY (share_id, user_id)
+
+audit_log                  -- 既有表（S-3 加欄位）
+  ...
+  actor_external_tenant_id text NULL               -- S-3 新增：當 actor 是 guest 時的 origin tenant
+  share_id                 uuid NULL fk project_shares(id) -- S-3 新增：跨 tenant 操作的 join key
+  ...
+```
+
+**S-3.5 設計斷言**：
+1. **`UNIQUE (project_id, guest_tenant_id) WHERE status IN ('active', 'pending')` partial index** — 同一 (project, guest tenant) 對至多有一個 active share（避免重複 share 撤銷時誤判）；舊的 revoked / expired row 留歷史證據、不參與唯一性。
+2. **`CHECK (host_tenant_id <> guest_tenant_id)`** — 拒絕「自己 share 給自己」（S-2 範圍、不該走 S-3 路徑）。Y4 endpoint 在 backend 也要檢、不能只靠 DB constraint。
+3. **`granted_by` + `approved_by` 不能是同一 user** — schema 不強制（不容易寫出簡潔 CHECK），但 Y4 endpoint 強制 `actor_doing_grant != actor_doing_approve`；理由 = S-3.1 設計斷言 2 雙簽要兩個人。
+4. **`project_share_members.role_override` 走「下調 only」** — Y4 endpoint 在寫入時做 `_cap_role(share.role, role_override)` 的方向性檢查；DB 層留純 text 不做 CHECK（避免 enum 演進時要改 constraint）。
+5. **`audit_log.share_id` NULL 是常態** — 大多數 audit row 是 host 內部動作、與 share 無關；只在 (a) guest 觸發的事件、(b) host 端對 share 本身的 mutation（grant / revoke）兩類 row 上非 NULL。Y9 加 partial index `WHERE share_id IS NOT NULL` 加速跨 tenant audit 篩選。
+6. **既有 `users.tenant_id` 在 S-3 路徑下絕不參與 RBAC 推導** — `resolve_role` 路徑（S-3.2）只查 `user_tenant_memberships` + `project_shares`、永不讀 `users.tenant_id`。`users.tenant_id` 仍持續為「主 tenant 快取」（S-1.6 / S-2.6），在 S-3 路徑下完全是 noise — 防 reviewer 寫出「if user.tenant_id == project_shares.host_tenant_id」這類 nonsense check。
+
+### S-3.6 Operator 工作流 — Acme 與 Cobalt 的 Joint Firmware 計畫
+
+從 acme 與 cobalt 簽 NDA 到 cody 第一次 comment 的時間軸：
+
+1. **Day 0 — 法務簽 NDA**（OmniSight 之外）  
+   acme 與 cobalt 簽署「ISP 韌體聯合開發」NDA，明確「acme 將開放 firmware-ipcam project 給 cobalt 工程團隊唯讀 + 評論、為期 90 天、cobalt 工程師不能下載 source code 商用化」。
+
+2. **Day 1 — Carol（project owner）發起 share request**  
+   Carol 在 acme UI 走 `POST /api/v1/tenants/t-acme/projects/firmware-ipcam/shares { guest_tenant_id: "t-cobalt", role: "commenter", expires_in_days: 90, reason: "Joint ISP firmware POC" }`。  
+   backend 寫 `project_shares(status='pending_tenant_approve', granted_by=carol, ...)`、發通知給 acme tenant admin/owner。
+
+3. **Day 1+10min — Alice（tenant owner）批准雙簽**  
+   Alice 在 admin notification 點 `Approve`、走 `POST /api/v1/tenants/t-acme/shares/{sh-123}/approve { mfa_code: 654321 }`（強制 MFA step-up，呼應 S-2.7 設計斷言 4）。  
+   backend 改 `project_shares.status='pending_guest_accept'` + 寫 audit `share.granted_by_host(actor=alice, granted_by=carol, share_id=sh-123)`、發通知到 cobalt 的 owner Cher 信箱（含 OmniSight 內 deep-link）。
+
+4. **Day 2 — Cher（guest tenant owner）審 + 接受**  
+   Cher 點通知 link、登入 cobalt UI、看 `/cross-tenant-shares/incoming` 頁面，看到 acme firmware-ipcam 的 share invite（含 host 名稱、project 名稱、role=commenter、expires=Day 91）。Cher 點 `Accept`、走 `POST /api/v1/tenants/t-cobalt/incoming-shares/{sh-123}/accept`。  
+   backend 改 `project_shares.status='active'` + 寫雙鏈 audit（`share.accepted_by_guest(actor=cher, ...)` 進 cobalt 鏈 + 鏡像 `share.guest_accepted(...)` 進 acme 鏈）。
+
+5. **Day 2+5min — Cher 設 fence（只授權 cody + cher 自己進這個 share）**  
+   `POST /api/v1/tenants/t-cobalt/incoming-shares/{sh-123}/members { user_ids: [cody, cher], role_override: null }`。  
+   backend 寫 `project_share_members` 兩 row、寫 audit `guest_fence_set(actor=cher, share=sh-123, members=[cody, cher])`（**只進 cobalt 鏈、不外洩到 acme** — 呼應 S-3.3 設計斷言 6）。
+
+6. **Day 3 — Cody 第一次進 share**  
+   Cody 在 cobalt UI sidebar 看到「**Shared with us**」分組、點 `firmware-ipcam (acme)`、進入 share 視角。  
+   middleware 在第一次 `GET /api/v1/projects/firmware-ipcam` 時 resolve_role 走 share 路徑 → 推出 commenter → 允許。寫 audit `audit.guest_session_started`（雙鏈）。  
+   Cody 看 artifact 列表、點 view 一個 ISP 校準 image、加 comment「校準對 IR-cut 切換時偏色 2°、可調 GAMMA 曲線改善」。
+
+7. **Day 5 — Carol 看到 Cody 的 comment 並回覆**  
+   Carol 在 acme UI 看 firmware-ipcam project 的 comment thread、看到 Cody 的留言（標 cobalt guest 紅 badge）、回覆「明天 push commit `cobalt-isp-tune-v1.2` 修這條」。  
+   寫 audit `comment_added(actor=carol)` 進 acme 鏈 + 鏡像 `comment_added_by_host_in_share` 進 cobalt 鏈。
+
+8. **Day 60 — Eve（acme 實習生 viewer）進 firmware-ipcam dashboard 看到「此 project 已分享給 1 個外部 tenant」提示**  
+   Eve 看 dashboard 發現「Cross-tenant access: 1 active share」灰色 badge、但點不開細節（屬 admin / project-owner-only）— 呼應 S-3.1 Eve persona。
+
+9. **Day 91 — Share 自動 expire**  
+   背景 cron task 每 1h 跑一次 `UPDATE project_shares SET status='expired' WHERE expires_at < now() AND status='active'`、同時對每個 expired share 寫雙鏈 audit `share.lifecycle_expired`。  
+   middleware cache 自動 invalidate（呼應 S-2.3 設計斷言 1）；Cody 下次 fetch 收 403。  
+   想續 share 必須走完整雙簽流程（不能只 PATCH expires_at）。
+
+**S-3.6 設計斷言**：
+1. **「pending_tenant_approve → pending_guest_accept → active」三段式狀態機** — host 內部雙簽 + guest 接受是兩個獨立 gate，缺一不可；host approve 後 guest 不一定要接受（cobalt Cher 也可拒絕）— 拒絕走 `POST /.../incoming-shares/{id}/reject` + status='rejected' + 雙鏈 audit。
+2. **Cron 自動 expire 是 best-effort、不取代 middleware 即時檢查** — 呼應 S-3.2 設計斷言 4；cron 每 1h 跑只是讓 status field 視覺一致 + 觸發通知，但 RBAC gate 不依賴 cron（middleware 每 request 查 expires_at）。
+3. **續 share = 開新 share** — 不允許 PATCH 既有 share 的 expires_at（會繞過雙簽）；想續期就 create 新 share row + revoked 舊 row（兩條 row 都留 audit、forensic 完整）。
+4. **MFA step-up 對 host approve 強制、對 guest accept 也強制** — 雙方都是高敏感邊界動作（host 開門 + guest 接門）、都走 MFA；但 guest 端日常進入 share 不再 MFA（只第一次 accept 時）。
+
+### S-3.7 邊界 / 退化情境
+
+| 邊界場景 | 預期行為 | 驗收條件 |
+|---|---|---|
+| Cody（guest）的 cobalt membership 在 share 期間被撤銷（中途離職） | middleware 下次 request 走 `fetch_membership(cody, t-cobalt)` 看到 status≠active → 403；cobalt 端的 `project_share_members(cody)` row 不需 cascade 刪（保留 forensic） | Y2 middleware test：guest user 的 home tenant membership inactive 時、share 路徑也 403（不能用 share 路徑繞過 home tenant 的撤銷）|
+| Acme 自己被 disabled（plan 過期） | 既有 share 自動進入 read-only 降級（呼應 S-1.8 邊界場景）— guest 仍可看但不能 comment；解 disable 後 share 自動恢復；不需手動 revoke 再 grant | Y2 middleware：tenant.enabled=false 時所有 mutator 拒絕、含 share 內的 comment endpoint |
+| Cobalt 自己被 disabled | 既有 share 進入 read-only 降級 — cobalt 端 user 仍能看 host project 但不能 comment（出於對等原則） | Y2 middleware：guest_tenant.enabled=false 時對該 tenant 全 read-only、含跨 tenant share |
+| Acme 想撤銷 share 但 Cody 正在加 comment 那一秒 | comment endpoint 已通過 middleware 檢查、寫入完成、回 200；下一個 request 走 fetch_active_share → revoked → 403。已寫入的 comment 在 audit 內保留 | Y4 endpoint：share revoke 不 retroactively 撤銷已存事件、只影響後續 request |
+| Cobalt 接受 share 但 1 小時後改主意拒絕 | accept 後 1h 內可走 `POST /.../incoming-shares/{id}/reject` 撤銷接受（24h 寬限期 grace window）；超過 24h 想退出走 `POST /.../incoming-shares/{id}/leave` | Y4 endpoint：accept → reject 在 24h 內允許；之後改走 leave 路徑（語義不同：reject = 一開始就不要、leave = 用過了想撤）|
+| Acme 把 firmware-ipcam project archive 了（軟封存） | 既有 share 自動降為「viewer-only」+ banner「Project archived, comments disabled」；guest 仍可看 read-only | Y4 archive endpoint：cascade 設 share 內所有 commenter 降為 viewer fence |
+| Acme 把 firmware-ipcam project 硬刪 | 所有對該 project 的 share `status='cascade_deleted'` + 雙鏈 audit；guest 端 sidebar 自動移除該 entry | Y4 delete endpoint：cascade 處理 project_shares + project_share_members + 雙鏈 audit |
+| Cody 在 comment 內貼了 `ghp_xxx` 這類 GitHub PAT pattern | host UI 自動 mask 顯示為 `ghp_***xxx` + banner「Comment contains potential secret pattern」+ host owner 可走 redaction 流；audit row 保留原文 | Y8 frontend：lib/secrets-detect.ts pattern matcher；Y9 audit redaction endpoint |
+| Cobalt 想看「自己 user 在 acme 那邊看了什麼」（管理層審核） | 走 cobalt 內 audit 查 `cross_tenant_artifact_view`（kind 級摘要）— 看不到 acme 內部 artifact id；想看明細需要直接去問 acme（NDA + 法務） | S-3.3 設計斷言 2 對應 — guest 鏈是 sanitized，Y9 不違背 |
+| acme 想對單一 cobalt user 限制 access（e.g. cody 但不要 daria） | 不允許 — share 是 tenant-to-project grant；想限制 user 由 cobalt 端設 fence (`project_share_members`)；acme 想 vetoe 某 user 必須整個 revoke share 重新發 | S-3.2 設計斷言 2 — host 不該知道 guest tenant 內細節、不該寫 user-level grant；UI 在 acme 端不顯示 cobalt user 列表 |
+
+### S-3.8 Open Questions（標記給 Y1～Y10 後續勾選）
+
+1. **「跨 tenant 的 LLM call attribution」深層細節** — S-3.4 設計斷言 2 寫「caller pays」，但若 host 端的 SOP 內某個 step 自動觸發 LLM call（即使是 guest 看 page 觸發的 lazy-load）— 該算 caller 還是 host？目前傾向「host 內的自動觸發 LLM 算 host 帳、guest 主動點 button 觸發算 guest 帳」、Y6 / Y9 落地時定。
+2. **「Share 模型是否支援 chained share」** — Acme share 給 Cobalt、Cobalt 能不能再 share 給 Bridge MSP？目前傾向**禁止**（chain share 是 audit 與 RBAC 推導惡夢、且 NDA 通常不支援）— DB 層面用 `CHECK (NOT EXISTS subquery)` 還是 endpoint 層面拒絕？等 Y4 落地時確認可行性。
+3. **「Comment thread 的 read receipt」** — Carol 想知道「Cody 看到我的回覆了沒」 — 這需要寫額外的 `comment_views` 表 + 雙鏈 audit；MVP 先不做、等實際使用反饋後決定。
+4. **「Guest tenant 端的 LLM token cap on cross-tenant share」** — Cobalt 內部能不能對「對 acme share 的 LLM 用量」設專門 cap（避免 cobalt 員工狂在 acme 那邊用 LLM 燒 cobalt quota）？S-1.7 / S-1.8 的 per-user daily cap 模型可延伸、但 fence 維度是 (cobalt_user, acme_share, tokens_per_day) 三維、Y6 落地時設計。
+5. **「Share metadata 的可見性對等」** — Cobalt 的 owner Cher 看到 acme 是「Acme Cameras（owner: alice@acme.com）」的程度有多細？目前傾向只露出 tenant display name + 邀請者 email、不露出其他內部 user / project / spend。但若 cobalt 法務要求「對方公司基本資訊揭露」可能需更多欄位 — Y4 落地時定。
+
+### S-3.9 既有實作的對照表
+
+S-3 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
+
+| S-3 invariant | 目前狀況 | 缺口 |
+|---|---|---|
+| `project_shares` 表 | ❌ | Y1 新建（同 S-1.10 / S-2.10 提到的 5 表之一）|
+| `project_share_members` 表 | ❌ | Y1 新建（S-3 增量、S-1.6 / S-2.6 未列）|
+| `audit_log.actor_external_tenant_id` 欄位 | ❌ — 現有 `actor` 是 single text email（`backend/audit.py:95,187`）| Y1 加欄位 + Y9 audit log path 同步寫 |
+| `audit_log.share_id` 欄位 | ❌ | Y1 加欄位 + Y4 share 操作時寫 |
+| 既有 `POST /report/share` endpoint | ✅ `backend/routers/report.py:97` — 只支援 signed read-only URL（無 user-scope、無 commenter、無 tenant 對 tenant grant）| **不衝突 / 不取代** — 兩條完全不同的 path：report-share 是「公開連結 + HMAC 簽名 + 24h 過期」對 PDF report；S-3 是「user × tenant × project × commenter」對 live project。Y4 文件要釐清「signed URL 適合分享 snapshot、project_shares 適合 live 協作」 |
+| 既有 `task_comments` 表 | ✅ `backend/alembic/versions/0001_baseline.py:64-70` — `(id, task_id, author, content, timestamp)` task-scoped、無 tenant 隔離、無 RBAC 區分 read vs read-comment | **部分可重用 / 必須延伸** — 既有 schema 可作為 comment payload 模板、但需加 `actor_external_tenant_id` 欄位 + 改 author 從 plain text 升為 user_id reference + 加 `share_id` join key（Y1 / Y4）|
+| `_tenant_header_gate` middleware (`backend/main.py:625-661`) | ✅ S-2 已規劃升級為查 `user_tenant_memberships`（S-2.3）| Y2 升級時要再加第二查路：(a) member 查 ✓ → 走 S-1/S-2 path、(b) member 查 ✗ → 接 share 查路（fetch_active_share + project_share_members）→ 走 S-3 path；兩條路順序不可逆（S-3.2 設計斷言 1）|
+| `resolve_role` helper | ❌ — 既有 `backend/auth.py:47` `ROLES = ("viewer", "operator", "admin")` 是 global 階層、不是 (user, scope) 二維 | Y2 / Y5 新建 `resolve_role(user, tenant, project)`（S-2.4）、Y5 再延伸支援 share 路徑（S-3.2）|
+| Frontend 「Shared with us」sidebar 分組 | ❌ — 既有 `lib/tenant-context.tsx` 只列 user 自己 membership 的 tenants、沒「跨 tenant guest project」 概念 | Y8 新增：tenant context 加第二個 list `incoming_shares: ProjectShare[]`、sidebar 分兩組（My projects / Shared with us）|
+| Frontend `/cross-tenant-shares/incoming` page (guest 端 inbox) | ❌ | Y8 新建（settings 頁底下的 Shares tab）|
+| Frontend `/projects/{pid}/settings` 內 Shares tab（host 端管理） | ❌ — 既有 `app/projects` 整個資料夾不存在（S-1.10 既已標）| Y8 新建（呼應 TODO 1773）|
+| Comment redaction endpoint（host owner 申請刪除 audit row 內 comment 文字） | ❌ — 既有 audit row 是 immutable（呼應 R5 audit chain 設計）| Y9 新建：redaction 是「append meta event、不真改舊 row」式設計（保留 chain 完整性）|
+| Secret pattern detector (frontend) | ❌ — 既有 `lib/` 目錄沒 `secrets-detect.ts`（grep `lib/*.ts*` 無命中）| Y8 新建：純前端 regex matcher、覆蓋 `sk-` / `ghp_` / `xoxp-` / `AIza` 等常見 prefix |
+| Cron task：share 自動 expire | ❌ | Y9 新建（lifespan async task、每 1h 跑一次、寫雙鏈 audit）|
+| MFA step-up for share approve / accept | ⚠️ K MFA 系列 ✅ session-level step-up、但無 endpoint-level enforcement | Y3 / Y5 沿用 S-2.7 規劃的 `require_mfa_step_up` dependency |
+
+**S-3.9 對 Y1 / Y4 / Y5 / Y9 的關鍵 deliverable**：
+1. **Y1 新增 2 表 + 2 欄位** — `project_shares` (15 欄) + `project_share_members` (5 欄) + `audit_log.actor_external_tenant_id` + `audit_log.share_id`；外加 partial unique index `(project_id, guest_tenant_id) WHERE status IN ('active', 'pending_guest_accept')` + `CHECK (host_tenant_id <> guest_tenant_id)` + `CHECK (expires_at <= created_at + interval '365 days')`。
+2. **Y2 middleware 第二查路** — `_tenant_header_gate` 升級時加 share path（S-2 升級的 member path 之後）；確保 member-then-share 順序不可逆（S-3.2 設計斷言 1）。
+3. **Y4 4 endpoint set** — `POST /.../projects/{pid}/shares` (host 端發起) + `POST /.../shares/{id}/approve` (host 端雙簽核) + `POST /.../incoming-shares/{id}/accept|reject|leave` (guest 端) + `PATCH /.../incoming-shares/{id}/members` (guest 端 fence)。
+4. **Y5 `resolve_role` 延伸** — 在 S-2 規劃的 member 路徑後加 share 路徑（cap_role + guest_membership 雙檢查）。
+5. **Y8 frontend** — sidebar 「Shared with us」分組 + `/cross-tenant-shares/incoming` 頁 + project settings 內 Shares tab + comment 內 secret pattern detector + guest badge 視覺。
+6. **Y9 audit + cron + redaction** — 雙鏈 audit 寫入 transaction-safe / cron task / comment redaction endpoint（append meta event）。
+
+---
 
 ## S-4 多產品線
 
@@ -607,4 +858,6 @@ S-1.3 / S-1.4 已給出 secret + project 部分。完整矩陣（涵蓋 audit / 
 | 日期 | 對應勾選 | 變更摘要 |
 |---|---|---|
 | 2026-04-25 | TODO 第 1 勾選（單租戶多用戶） | 初次落地。完整 S-1 章節（10 子節 + 6-persona 矩陣 + secret/project RBAC 表 + Acme 7 步落地時間軸 + 8 邊界 + 5 open questions + 對照表）；S-2 ～ S-9 留 skeleton；共用區段（ER / 權限矩陣 / migration）留 stub。 |
+| 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | S-2 章節展開（10 子節 + 5-persona Bridge MSP + Maya 7 步 onboarding + middleware 升級偽碼 + resolve_role 二維解析 + audit hygiene 4 種查詢 + schema 增量 5 欄 + 8 邊界 + 5 open questions + 16 行對照表）；S-1 row 標完成（2026-04-25）；S-3 ～ S-9 維持 skeleton；共用區段不收尾。 |
+| 2026-04-25 | TODO 第 3 勾選（跨租戶協作） | S-3 章節展開（9 子節 + 6-persona host/guest 雙視角 Acme/Cobalt + Joint Firmware 9 步 onboarding + resolve_role 三維合成偽碼 + audit 雙鏈寫入對照表 + cross-tenant secret 隔離 6 場景 + schema 增量 2 表 2 欄 + 9 邊界 + 5 open questions + 16 行對照表）；S-2 row 標完成（2026-04-25）；S-4 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | 完整 S-2 章節（10 子節 + Bridge MSP × Acme/Blossom/Cobalt 5-persona 矩陣 + tenant switcher UX 4 步流程 + middleware 升級偽碼 + RBAC `resolve_role(user, tenant, project)` 二維解析 + audit cross-contamination 4 條 invariant + Y1 新增欄位（`is_super_admin` / `last_active_tenant_id` / `sessions.active_tenant_id` / `impersonation_*` / `is_primary` partial unique index）+ Maya 7 步 onboarding 時間軸 + 8 邊界場景 + 5 open questions + 16 行對照表盤點 Y2/Y3/Y8 缺口）；S-3 ～ S-9 仍留 skeleton；共用區段不動。 |
