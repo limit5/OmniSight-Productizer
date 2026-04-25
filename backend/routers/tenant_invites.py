@@ -1088,3 +1088,533 @@ async def revoke_invite(
             "current_status": cur_status,
         },
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y3 (#279) row 4 — POST /api/v1/invites/{id}/accept
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Consume a one-time invite token. Two operating modes — the caller is
+# either anonymous (no session cookie) or already authenticated:
+#
+#   ┌──────────────────────────────────────────────────────────────┐
+#   │ caller state │ acceptance behaviour                          │
+#   ├──────────────┼───────────────────────────────────────────────┤
+#   │ anonymous    │ if no users row matches the invite email,     │
+#   │              │ create one (random uid, password hash empty   │
+#   │              │ unless body.password is supplied + zxcvbn-    │
+#   │              │ compatible). Then materialise a membership    │
+#   │              │ row. The freshly-created (or already-existing │
+#   │              │ but logged-out) user is identified solely by  │
+#   │              │ proving knowledge of the token plaintext —    │
+#   │              │ there is no session cookie at this point.     │
+#   │ authenticated│ MUST already have an account. We refuse to    │
+#   │              │ silently bind a token to whatever account is  │
+#   │              │ logged in if its email differs from the       │
+#   │              │ invite email — that would let an admin invite │
+#   │              │ alice@x.com and have bob@y.com (logged in as  │
+#   │              │ a different account) consume the link.        │
+#   │              │ The session.email must match invite.email     │
+#   │              │ case-insensitively or we 409.                 │
+#   └──────────────┴───────────────────────────────────────────────┘
+#
+# Input contract
+# ──────────────
+#   POST /api/v1/invites/{invite_id}/accept
+#   body  : {"token": "<plaintext>", "name"?: "...", "password"?: "..."}
+#   auth  : optional — anonymous OR session-bound. The endpoint NEVER
+#           depends on auth.current_user (which would 401 in
+#           session/strict mode against an anon caller); instead it
+#           probes the session cookie inline via auth.get_session and
+#           treats failure as anonymous.
+#   out   : 200 {invite_id, tenant_id, user_id, role, status, already_member}
+#   errors:
+#     400 — body missing/malformed token
+#     403 — token plaintext does not hash to invite.token_hash
+#     404 — invite not found
+#     409 — invite not in pending state (already accepted / revoked /
+#           email-mismatch when authenticated)
+#     410 — invite expired (persisted status='pending' but wall-clock
+#           is past expires_at, OR persisted status='expired')
+#     422 — malformed invite_id
+#     429 — too many failed attempts on this invite (10/token/min,
+#           the TODO row 7 literal "accept 失敗每 token 每分鐘不超過 10")
+#
+# State machine (the *only* mutating endpoint that touches both
+# tenant_invites and user_tenant_memberships in a single transaction)
+# ───────────────────────────────────────────────────────────────────
+#   pending ──(token matches + email matches caller)──▶ accepted
+#                                                     +─── creates user (anon caller)
+#                                                     +─── creates / upserts membership
+# All three writes go in one ``async with conn.transaction()`` so a
+# crash mid-flight does not leave a half-materialised membership with
+# the invite still pending. ``users.email`` is UNIQUE so a concurrent
+# anon-accept of the same email loses the race deterministically — the
+# loser falls back to "user already exists, treat as authenticated".
+#
+# Idempotence
+# ───────────
+# A re-POST after a successful accept lands on a non-pending row and
+# returns 409. We DON'T return 200 with ``already_accepted=True`` like
+# revoke does, because the second caller is most likely an attacker
+# replaying a leaked token plaintext — silently 200-ing would leak the
+# fact that the token was indeed valid. 409 is the only response that
+# does not distinguish "wrong token" from "already accepted" via timing
+# (both fail at the status check).
+#
+# Module-global state audit (SOP Step 1)
+# ──────────────────────────────────────
+# Two new SQL constants (``_FETCH_INVITE_FOR_ACCEPT_SQL``,
+# ``_MARK_INVITE_ACCEPTED_SQL``) + two rate-limit knobs
+# (``ACCEPT_FAIL_RATE_LIMIT_*``). All immutable; every uvicorn worker
+# derives the same value from the same source — qualifying answer #1.
+# DB state shared via PG (qualifying answer #2). Rate limit goes
+# through ``backend.rate_limit.get_limiter`` which is Redis-coordinated
+# in prod and per-replica in dev (qualifying answer #2/#3 already
+# documented on that module).
+#
+# Read-after-write timing audit (SOP Step 1)
+# ──────────────────────────────────────────
+# The whole transaction runs under one ``conn.transaction()``: the
+# SELECT … FOR UPDATE serialises concurrent accept attempts on the
+# same invite row. Two anon callers presenting valid tokens at the
+# same time: the loser's transaction blocks at FOR UPDATE, sees the
+# row has flipped to 'accepted' on its retry-read, and returns 409.
+# No timing-visible regression vs. row 1 (POST) / row 3 (DELETE) which
+# both already use single-statement RETURNING.
+
+# Rate-limit knobs for the failed-acceptance bucket. Per-invite-id
+# (NOT per-IP) because the threat model is "attacker brute-forces the
+# token plaintext"; the bucket key is the invite_id, capacity 10,
+# window 60s — TODO row 7 literal.
+ACCEPT_FAIL_RATE_LIMIT_CAP = 10
+ACCEPT_FAIL_RATE_LIMIT_WINDOW_SECONDS = 60.0
+
+# SELECT … FOR UPDATE: locks the invite row inside the transaction so
+# concurrent accept attempts serialise. Projects token_hash because we
+# need to verify it; the hash never reaches the response.
+_FETCH_INVITE_FOR_ACCEPT_SQL = """
+SELECT id, tenant_id, email, role, token_hash, status, expires_at
+FROM tenant_invites
+WHERE id = $1
+FOR UPDATE
+"""
+
+# Atomic flip-on-success. Uses the same row already locked by the
+# preceding SELECT … FOR UPDATE so this UPDATE never blocks.
+_MARK_INVITE_ACCEPTED_SQL = """
+UPDATE tenant_invites
+SET status = 'accepted'
+WHERE id = $1
+"""
+
+# Membership upsert. ON CONFLICT (user_id, tenant_id) DO NOTHING
+# matches the "one user → N memberships" semantic from the TODO row:
+# if the user is *already* a member of this tenant (e.g. an admin
+# re-invited them with a different role by mistake), we do not bump
+# their role on accept — admin must use the membership management
+# endpoints for role changes. The acceptance is still considered
+# successful (the invite gets flipped to 'accepted' and the response
+# carries ``already_member=true``).
+_UPSERT_MEMBERSHIP_SQL = """
+INSERT INTO user_tenant_memberships
+    (user_id, tenant_id, role, status, created_at)
+VALUES ($1, $2, $3, 'active', $4)
+ON CONFLICT (user_id, tenant_id) DO NOTHING
+RETURNING user_id
+"""
+
+
+class AcceptInviteRequest(BaseModel):
+    """Body for ``POST /api/v1/invites/{id}/accept``.
+
+    The plaintext ``token`` is REQUIRED — it's the only proof of
+    "I'm the human the admin invited". ``name`` and ``password`` are
+    only consulted on the anonymous-caller branch (creating the
+    user). On the authenticated branch they are ignored — name lives
+    on the existing ``users`` row, password rotation has its own
+    dedicated endpoint.
+    """
+
+    token: str = Field(
+        min_length=16,
+        max_length=512,
+        description=(
+            "Plaintext invite token from the email. The server hashes "
+            "with sha256 and compares against tenant_invites.token_hash."
+        ),
+    )
+    name: str = Field(
+        default="",
+        max_length=160,
+        description=(
+            "Optional display name. Only consulted on the anonymous-"
+            "caller branch (where we are creating the user row). On "
+            "an authenticated accept, the existing users.name wins."
+        ),
+    )
+    password: str | None = Field(
+        default=None,
+        description=(
+            "Optional password to set on the freshly-created user. "
+            "Only consulted on the anonymous-caller branch. If absent "
+            "the user is created with an empty password_hash and must "
+            "complete the password-set flow before logging in. "
+            "Authenticated branch ignores this field entirely."
+        ),
+    )
+
+    @field_validator("token")
+    @classmethod
+    def _token_shape(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("token must not be empty")
+        # token_urlsafe(32) = ~43 chars of url-safe base64. We accept
+        # anything in the [16..512] band so an admin who shipped a
+        # stricter / looser convention does not break the accept
+        # path; the actual validation is sha256(plaintext) ==
+        # invite.token_hash, not regex matching.
+        return v
+
+
+@router.post("/invites/{invite_id}/accept")
+async def accept_invite(
+    invite_id: str,
+    body: AcceptInviteRequest,
+    request: Request,
+) -> JSONResponse:
+    """Consume a one-time invite token.
+
+    Open to both anonymous and authenticated callers — see the module
+    docstring for the two-branch semantics.
+
+    Returns 200 with::
+
+        {
+            "invite_id": "inv-...",
+            "tenant_id": "t-acme",
+            "user_id": "u-...",          # the user the membership was
+                                          # materialised onto (existing
+                                          # row for authed caller, freshly
+                                          # created for anon caller)
+            "role": "admin",             # the membership role granted
+            "status": "accepted",
+            "already_member": false      # true if the user already had
+                                          # an active membership row in
+                                          # this tenant pre-accept
+        }
+    """
+    # 1. Validate path id at the regex layer before any DB work.
+    if not _is_valid_invite_id(invite_id):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"invalid invite id: {invite_id!r}; "
+                               f"must match {INVITE_ID_PATTERN}"},
+        )
+
+    # 2. Optional auth probe. We deliberately do NOT depend on
+    #    auth.current_user — that helper raises 401 in session/strict
+    #    mode for an anon caller, which would block the legitimate
+    #    "no account yet" flow. Instead we look at the cookie and
+    #    treat failure as anonymous.
+    session_user: auth.User | None = None
+    try:
+        cookie = request.cookies.get(auth.SESSION_COOKIE) or ""
+        if cookie:
+            sess = await auth.get_session(cookie)
+            if sess:
+                u = await auth.get_user(sess.user_id)
+                if u and u.enabled:
+                    session_user = u
+    except Exception as exc:  # pragma: no cover — best-effort optional auth
+        logger.debug(
+            "accept_invite optional-auth probe failed (treating as anon): %s",
+            exc,
+        )
+
+    actor_label = (
+        session_user.email if session_user is not None else "anonymous"
+    )
+
+    # 3. Rate-limit the FAILED attempts. We don't decrement the bucket
+    #    on success (an admin sending a real invite link to a real
+    #    recipient may then click the link from multiple devices in
+    #    quick succession — that's not abuse). Bucket key is the
+    #    invite_id so an attacker brute-forcing the plaintext on one
+    #    invite cannot exhaust our tokens for unrelated invites.
+    from backend.rate_limit import get_limiter
+    rl_key = f"invite_accept_fail:{invite_id}"
+
+    def _record_fail_and_check() -> tuple[bool, float]:
+        return get_limiter().allow(
+            key=rl_key,
+            capacity=ACCEPT_FAIL_RATE_LIMIT_CAP,
+            window_seconds=ACCEPT_FAIL_RATE_LIMIT_WINDOW_SECONDS,
+        )
+
+    # 4. Transactional accept. We wrap SELECT FOR UPDATE + UPDATE +
+    #    optional user-create + membership upsert in one transaction
+    #    so a crash mid-flight does not leave a half-materialised
+    #    membership with the invite still pending.
+    from backend.db_pool import get_pool
+
+    candidate_token_hash = _hash_token(body.token)
+    now_iso = _now_iso()
+
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            invite = await conn.fetchrow(
+                _FETCH_INVITE_FOR_ACCEPT_SQL, invite_id,
+            )
+            if invite is None:
+                # Treat unknown id as a failed attempt for rate-limit
+                # purposes — otherwise an attacker could enumerate
+                # which inv-* prefixes are live by probing without
+                # cost.
+                allowed, retry_after = _record_fail_and_check()
+                if not allowed:
+                    return JSONResponse(
+                        status_code=429,
+                        content={
+                            "detail": (
+                                f"too many failed accept attempts on "
+                                f"{invite_id!r}; retry in "
+                                f"{int(retry_after)}s"
+                            ),
+                        },
+                        headers={
+                            "Retry-After": str(max(1, int(retry_after))),
+                        },
+                    )
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "detail": f"invite not found: {invite_id!r}",
+                    },
+                )
+
+            # Expired-by-wallclock guard. The persisted status may
+            # still be 'pending' while the housekeeping sweep catches
+            # up, but functionally the invite is dead.
+            try:
+                exp_dt = datetime.strptime(
+                    invite["expires_at"], "%Y-%m-%d %H:%M:%S",
+                ).replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                exp_dt = datetime.now(timezone.utc) - timedelta(seconds=1)
+            wallclock_expired = exp_dt <= datetime.now(timezone.utc)
+
+            if invite["status"] != "pending" or wallclock_expired:
+                allowed, retry_after = _record_fail_and_check()
+                if not allowed:
+                    return JSONResponse(
+                        status_code=429,
+                        content={
+                            "detail": (
+                                f"too many failed accept attempts on "
+                                f"{invite_id!r}; retry in "
+                                f"{int(retry_after)}s"
+                            ),
+                        },
+                        headers={
+                            "Retry-After": str(max(1, int(retry_after))),
+                        },
+                    )
+                # 410 for expired (persisted or wall-clock), 409 for
+                # accepted / revoked. 410 Gone matches the semantic
+                # "this resource is permanently unavailable".
+                effective_status = (
+                    "expired" if (
+                        invite["status"] == "expired" or wallclock_expired
+                    ) else invite["status"]
+                )
+                if effective_status == "expired":
+                    return JSONResponse(
+                        status_code=410,
+                        content={
+                            "detail": (
+                                f"invite {invite_id!r} has expired; "
+                                f"ask the admin to issue a new one"
+                            ),
+                            "invite_id": invite_id,
+                            "current_status": effective_status,
+                        },
+                    )
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": (
+                            f"invite {invite_id!r} is not pending: "
+                            f"current status is {effective_status!r}"
+                        ),
+                        "invite_id": invite_id,
+                        "current_status": effective_status,
+                    },
+                )
+
+            # Token verification — constant-time compare on the hex
+            # digest so a timing oracle does not let an attacker
+            # progressively recover the plaintext.
+            if not secrets.compare_digest(
+                candidate_token_hash, invite["token_hash"],
+            ):
+                allowed, retry_after = _record_fail_and_check()
+                if not allowed:
+                    return JSONResponse(
+                        status_code=429,
+                        content={
+                            "detail": (
+                                f"too many failed accept attempts on "
+                                f"{invite_id!r}; retry in "
+                                f"{int(retry_after)}s"
+                            ),
+                        },
+                        headers={
+                            "Retry-After": str(max(1, int(retry_after))),
+                        },
+                    )
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": (
+                            f"token does not match invite {invite_id!r}"
+                        ),
+                    },
+                )
+
+            invite_email_norm = _normalise_email(invite["email"])
+            invite_tenant = invite["tenant_id"]
+            invite_role = invite["role"]
+
+            # Branch on session presence.
+            if session_user is not None:
+                # Authenticated branch: caller's email MUST match the
+                # invite email, otherwise we'd silently bind the
+                # invite to a different account.
+                caller_email_norm = _normalise_email(session_user.email)
+                if caller_email_norm != invite_email_norm:
+                    # Email mismatch is NOT a brute-force attempt
+                    # (the caller already proved they have a session)
+                    # so we do NOT decrement the rate-limit bucket on
+                    # this branch — surface a clean 409 immediately.
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "detail": (
+                                f"invite was issued to "
+                                f"{invite_email_norm!r}, but the "
+                                f"current session is "
+                                f"{caller_email_norm!r}; sign out "
+                                f"first or ask the admin to re-issue "
+                                f"the invite to your address"
+                            ),
+                            "invite_email": invite_email_norm,
+                            "session_email": caller_email_norm,
+                        },
+                    )
+                target_user_id = session_user.id
+                target_user_email = session_user.email
+                user_was_created = False
+            else:
+                # Anonymous branch: look up by normalised email; create
+                # if no row exists. ``users.email`` is UNIQUE so two
+                # concurrent anon-accepts of the same email serialise
+                # via PG's unique constraint — the loser's INSERT
+                # raises and we treat as "user already exists".
+                existing = await conn.fetchrow(
+                    "SELECT id, email FROM users WHERE lower(email) = $1",
+                    invite_email_norm,
+                )
+                if existing is not None:
+                    # User already has an account — anonymous caller
+                    # claiming the invite without proving session
+                    # ownership of the account. We accept the invite
+                    # (token plaintext is sufficient proof), but the
+                    # user must log in afterwards to actually use the
+                    # new membership.
+                    target_user_id = existing["id"]
+                    target_user_email = existing["email"]
+                    user_was_created = False
+                else:
+                    # Mint a fresh user row. Role on the user account
+                    # itself is 'viewer' (most-restrictive); the
+                    # membership row carries the elevated tenant role.
+                    new_uid = f"u-{secrets.token_hex(5)}"
+                    pw_hash = (
+                        auth.hash_password(body.password)
+                        if body.password
+                        else ""
+                    )
+                    await conn.execute(
+                        "INSERT INTO users (id, email, name, role, "
+                        "password_hash, oidc_provider, oidc_subject, "
+                        "enabled, tenant_id) "
+                        "VALUES ($1, $2, $3, 'viewer', $4, '', '', 1, $5)",
+                        new_uid, invite_email_norm,
+                        (body.name or "").strip()[:160],
+                        pw_hash, invite_tenant,
+                    )
+                    target_user_id = new_uid
+                    target_user_email = invite_email_norm
+                    user_was_created = True
+
+            # Materialise the membership. ON CONFLICT DO NOTHING means
+            # an existing active membership wins — the invite is still
+            # marked accepted (admin's intent was satisfied — the user
+            # is in the tenant) and the response carries
+            # ``already_member=True`` so the UI can suppress a "you
+            # joined!" toast.
+            inserted = await conn.fetchrow(
+                _UPSERT_MEMBERSHIP_SQL,
+                target_user_id, invite_tenant, invite_role, now_iso,
+            )
+            already_member = inserted is None
+
+            # Flip the invite to 'accepted'. The SELECT … FOR UPDATE
+            # earlier locks the row, so this UPDATE never blocks even
+            # under contention.
+            await conn.execute(_MARK_INVITE_ACCEPTED_SQL, invite_id)
+
+    # 5. Audit. We log the *transition* — never the token plaintext or
+    #    its hash. The audit row carries enough to reconstruct the
+    #    event without becoming a leak surface for the cryptographic
+    #    proof.
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_invite_accepted",
+            entity_kind="tenant_invite",
+            entity_id=invite_id,
+            before={
+                "invite_id": invite_id,
+                "tenant_id": invite_tenant,
+                "status": "pending",
+            },
+            after={
+                "invite_id": invite_id,
+                "tenant_id": invite_tenant,
+                "status": "accepted",
+                "user_id": target_user_id,
+                "role": invite_role,
+                "user_was_created": user_was_created,
+                "already_member": already_member,
+            },
+            actor=actor_label,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning("tenant_invite_accepted audit emit failed: %s", exc)
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "invite_id": invite_id,
+            "tenant_id": invite_tenant,
+            "user_id": target_user_id,
+            "user_email": target_user_email,
+            "role": invite_role,
+            "status": "accepted",
+            "user_was_created": user_was_created,
+            "already_member": already_member,
+        },
+    )
