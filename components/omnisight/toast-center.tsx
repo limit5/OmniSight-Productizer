@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { AlertOctagon, AlertTriangle, Check, X } from "lucide-react"
+import { AlertOctagon, AlertTriangle, Check, ChevronDown, ChevronUp, HelpCircle, X } from "lucide-react"
 import {
   type DecisionPayload,
   type DecisionSeverity,
@@ -58,6 +58,14 @@ export function ToastCenter() {
   const [overflow, setOverflow] = useState(0)
   const [now, setNow] = useState<number>(() => Date.now())
   const focusedRef = useRef<string | null>(null)
+  // R20 Part A (2026-04-25): which toasts have their inline coaching
+  // card expanded. Keyed by decision id. Default collapsed so the
+  // toast stays compact; operator clicks "WHY?" to read the
+  // What / Why / If approve / If reject explanation.
+  const [expandedCoaching, setExpandedCoaching] = useState<Record<string, boolean>>({})
+  const toggleCoaching = useCallback((id: string) => {
+    setExpandedCoaching((cur) => ({ ...cur, [id]: !cur[id] }))
+  }, [])
 
   const dismiss = useCallback((id: string) => {
     setToasts((cur) => {
@@ -262,6 +270,24 @@ export function ToastCenter() {
               >
                 <X className="w-3 h-3" aria-hidden /> REJECT
               </button>
+              {/* R20 Part A (2026-04-25): WHY? toggle — only renders when
+                  the backend attached a coaching payload (PEP HOLD toasts
+                  always carry one; other decision kinds may not). */}
+              {t.decision.source?.coaching && (
+                <button
+                  onClick={() => toggleCoaching(t.decision.id)}
+                  data-testid={`toast-coaching-toggle-${t.decision.id}`}
+                  aria-expanded={!!expandedCoaching[t.decision.id]}
+                  aria-label={expandedCoaching[t.decision.id] ? "hide explanation" : "explain this decision"}
+                  className="flex items-center gap-1 font-mono text-[10px] tracking-wider px-2 py-1 rounded-sm border border-[var(--neural-cyan,#67e8f9)]/60 text-[var(--neural-cyan,#67e8f9)] hover:bg-[var(--neural-cyan,#67e8f9)]/10"
+                >
+                  <HelpCircle className="w-3 h-3" aria-hidden />
+                  WHY?
+                  {expandedCoaching[t.decision.id]
+                    ? <ChevronUp className="w-3 h-3" aria-hidden />
+                    : <ChevronDown className="w-3 h-3" aria-hidden />}
+                </button>
+              )}
               <span
                 className="ml-auto font-mono text-[11px] tabular-nums font-semibold"
                 style={{
@@ -276,6 +302,35 @@ export function ToastCenter() {
                 A·R·Esc
               </span>
             </div>
+
+            {/* R20 Part A: inline coaching card. Renders only when the
+                operator clicked WHY? above. Four sections: What this
+                tool does · Why it was held · What approve does · What
+                reject does. Each section is a labelled paragraph, not
+                a list, so the toast stays compact when expanded. */}
+            {t.decision.source?.coaching && expandedCoaching[t.decision.id] && (
+              <div
+                data-testid={`toast-coaching-card-${t.decision.id}`}
+                className="mx-2.5 mb-2 px-2 py-1.5 rounded-sm border border-[var(--neural-cyan,#67e8f9)]/30 bg-[var(--neural-cyan,#67e8f9)]/[0.04] font-mono text-[10px] leading-snug text-[var(--foreground,#e2e8f0)] space-y-1.5"
+              >
+                <div>
+                  <span className="font-bold text-[var(--neural-cyan,#67e8f9)] tracking-wider">WHAT &gt;</span>{" "}
+                  {t.decision.source.coaching.what}
+                </div>
+                <div>
+                  <span className="font-bold text-[var(--fui-orange,#f59e0b)] tracking-wider">WHY HELD &gt;</span>{" "}
+                  {t.decision.source.coaching.why}
+                </div>
+                <div>
+                  <span className="font-bold text-[var(--validation-emerald,#10b981)] tracking-wider">IF APPROVE &gt;</span>{" "}
+                  {t.decision.source.coaching.if_approve}
+                </div>
+                <div>
+                  <span className="font-bold text-[var(--critical-red,#ef4444)] tracking-wider">IF REJECT &gt;</span>{" "}
+                  {t.decision.source.coaching.if_reject}
+                </div>
+              </div>
+            )}
 
             {/* Countdown bar */}
             <div

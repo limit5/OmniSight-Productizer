@@ -3770,6 +3770,18 @@ export interface DecisionSource {
   agent_id?: string | null
   task_id?: string | null
   reason?: string
+  // R20 Part A (2026-04-25): per-decision coaching content rendered as
+  // an inline expandable card on the PEP toast — explains in plain
+  // English what the tool does, why the call was held, and what each
+  // button does. Backend builds this in `pep_gateway._build_coaching`
+  // when `kind === "pep_tool_intercept"`; absent for other decision
+  // kinds (operator gating, cost gating, etc.).
+  coaching?: {
+    what: string
+    why: string
+    if_approve: string
+    if_reject: string
+  }
   [extra: string]: unknown
 }
 

@@ -586,6 +586,94 @@ def _finalize(dec: PepDecision, *, skip_recent: bool = False) -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+# R20 (Part A, 2026-04-25): inline coaching payload attached to every
+# PEP HOLD so the toast UI can show "What is this / Why was it held /
+# What happens on approve / What happens on reject" instead of just a
+# raw rule name. Operator-reported: a bare warning with no guidance left
+# users staring at toasts not knowing whether to approve or reject.
+# Lookup is keyed by tool name; the rule overlays a more specific "why"
+# when a known prod-scope rule fired.
+_TOOL_COACHING: dict[str, dict[str, str]] = {
+    "run_simulation": {
+        "what": "Runs a hardware or algorithm simulation against the platform under test.",
+        "why_default": "Simulations consume CPU/GPU/disk and can run for minutes — held outside the t1 whitelist so a runaway sim can't starve other agents.",
+        "if_approve": "The sim kicks off inside the sandbox; results stream into the artifact panel and the agent continues with the next step.",
+        "if_reject": "The tool call returns [BLOCKED] to the agent. It will either skip this step or pick a different verification path.",
+    },
+    "run_bash": {
+        "what": "Executes a shell command inside the agent sandbox tier.",
+        "why_default": "Arbitrary shell isn't on the t1 whitelist — review the command for destructive flags (rm -rf, dd, mkfs) or production-scope targets before allowing.",
+        "if_approve": "The command runs in the sandbox with timeout enforcement; stdout/stderr return as the tool result.",
+        "if_reject": "Command blocked and the agent receives [BLOCKED]. It will either retry with a different approach or report the failure.",
+    },
+    "deploy_to_evk": {
+        "what": "Pushes a built firmware artifact to the connected EVK hardware.",
+        "why_default": "Deploys touch real hardware and can leave the EVK in a half-flashed state — always held for human eyeball regardless of tier.",
+        "if_approve": "Artifact is flashed to the EVK; the agent moves on to verification (boot check, sanity tests).",
+        "if_reject": "Deploy cancelled. The agent receives [BLOCKED] and will not write to hardware without a fresh approval.",
+    },
+    "git_push": {
+        "what": "Pushes the local branch to a remote git host (GitHub / GitLab / Gerrit).",
+        "why_default": "Pushes are visible to teammates and can trigger CI pipelines — held when not on the current tier's whitelist.",
+        "if_approve": "Branch is pushed; downstream CI and reviewers see the change.",
+        "if_reject": "Push cancelled; commits stay local. The agent will not retry without operator action.",
+    },
+    "create_pr": {
+        "what": "Opens a pull/merge request from the current branch on the remote git host.",
+        "why_default": "PRs notify reviewers and start CI — held so the operator can confirm scope and target branch.",
+        "if_approve": "PR is created with the agent's title/body; reviewers are notified per repo policy.",
+        "if_reject": "No PR is opened. Commits remain on the branch but no review is requested.",
+    },
+    "gerrit_submit_review": {
+        "what": "Submits a Gerrit review (Code-Review/Verified vote + comments).",
+        "why_default": "Votes affect merge eligibility — held so the operator confirms the score and message.",
+        "if_approve": "Review is posted; vote may unblock or block the change per Gerrit's submit rules.",
+        "if_reject": "No review is posted; the change-set keeps its current vote tally.",
+    },
+}
+
+# Rule-specific override for the "why" line. When the prod-scope rule
+# fires, we want the explanation to call out the production target, not
+# the tool's generic safety reason.
+_RULE_WHY_OVERRIDES: dict[str, str] = {
+    "deploy_prod": "Command targets PRODUCTION — held regardless of tool because a bad prod deploy is the kind of thing you want to read carefully before approving.",
+    "kubectl_prod_context": "kubectl context is set to a PRODUCTION cluster — held to prevent accidental modification of live workloads.",
+    "kubectl_prod_ns": "kubectl namespace is 'prod'/'production' — held to prevent accidental modification of live workloads.",
+    "terraform_apply": "terraform apply mutates infrastructure state — held so the operator can read the diff before committing.",
+    "helm_upgrade_prod": "helm upgrade against a PRODUCTION namespace — held to prevent accidental rollout to a live cluster.",
+    "ansible_playbook_prod": "Ansible playbook targets PRODUCTION — held so the operator can confirm the play list and host pattern.",
+    "aws_prod_profile": "AWS CLI is using the PRODUCTION profile — held to prevent accidental change to prod resources.",
+    "gcloud_prod_project": "gcloud is targeting a project named '*prod*' — held to prevent accidental change to prod resources.",
+    "psql_prod_host": "psql is connecting to a host named '*prod*' — held to prevent accidental SQL against prod data.",
+    "docker_push_prod": "docker push is tagged ':prod' — held so the operator can confirm the image before publishing.",
+}
+
+
+def _build_coaching(
+    tool: str, rule: str, impact_scope: str, command: str,
+) -> dict[str, str]:
+    """R20 Part A: per-decision coaching card content.
+
+    Returned dict is attached to ``Decision.source.coaching`` and rendered
+    inline by the frontend toast. Always returns the four required keys
+    so the UI can render unconditionally — unknown tools fall back to a
+    generic-but-safe template that still beats a bare rule name.
+    """
+    base = _TOOL_COACHING.get(tool) or {
+        "what": f"Runs the agent tool {tool!r} (no human-friendly description registered for this tool yet — tell the platform team to add one to _TOOL_COACHING).",
+        "why_default": "Tool isn't on the current sandbox tier's whitelist — review the command and impact scope before allowing.",
+        "if_approve": "The tool runs and the result returns to the agent.",
+        "if_reject": "The agent receives [BLOCKED] and will pick a different approach or surface the failure.",
+    }
+    why = _RULE_WHY_OVERRIDES.get(rule) or base["why_default"]
+    return {
+        "what": base["what"],
+        "why": why,
+        "if_approve": base["if_approve"],
+        "if_reject": base["if_reject"],
+    }
+
+
 def _propose_hold(
     dec: PepDecision,
     *,
@@ -635,6 +723,10 @@ def _propose_hold(
             "impact_scope": dec.impact_scope,
             "rule": dec.rule,
             "category": "pep_tool_intercept",
+            # R20 Part A: inline coaching card content for the toast UI.
+            "coaching": _build_coaching(
+                dec.tool, dec.rule, dec.impact_scope, dec.command,
+            ),
         },
     )
     return prop.id
