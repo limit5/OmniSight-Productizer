@@ -534,7 +534,7 @@ export function PromptVersionDrawer({
   // operator-interactive only, no SEO/initial-render need).
   if (typeof document === "undefined") return null
 
-  const drawer = (
+  const drawerNode = (
     <div
       role="dialog"
       aria-modal="true"
@@ -747,6 +747,8 @@ export function PromptVersionDrawer({
       </div>
     </div>
   )
+
+  return createPortal(drawerNode, document.body)
 }
 
 function DiffPanel({
@@ -1031,8 +1033,6 @@ function DiffPanel({
       )}
     </div>
   )
-
-  return createPortal(drawer, document.body)
 }
 
 function DiffTableRow({
