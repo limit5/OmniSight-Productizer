@@ -462,6 +462,18 @@ html {
   background: var(--muted-foreground);
 }
 
+/* Neutral muted state — used when a status is "Not Applicable" rather
+ * than offline (e.g. WSL2 indicator on a non-WSL2 host). Distinct from
+ * status-dot-error (red, blinking, alarming) and status-dot-idle
+ * (muted gray, no glow); muted shows a subtle dim glow to convey "we
+ * checked, the answer is N/A — not a problem".
+ * Added 2026-04-25 (R15 follow-up UI/UX fix). */
+.status-dot-muted {
+  background: var(--muted-foreground);
+  box-shadow: 0 0 4px var(--muted-foreground);
+  opacity: 0.6;
+}
+
 /* Vortex rotation */
 @keyframes vortex-spin {
   0% { transform: rotate(0deg); }

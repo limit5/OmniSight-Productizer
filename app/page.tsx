@@ -626,7 +626,11 @@ export default function Home() {
           finished={systemStatus?.tasks_completed ?? syncCount}
           total={systemStatus?.tasks_total ?? tasks.length}
           inProgress={systemStatus?.agents_running ?? agents.filter(a => a.status === "running").length}
-          wslStatus={systemStatus?.wsl_status === "OK" ? "OK" : "OFFLINE"}
+          wslStatus={
+            systemStatus?.wsl_status === "OK" ? "OK"
+            : systemStatus?.wsl_status === "N/A" ? "N/A"
+            : "OFFLINE"
+          }
           usbStatus={systemStatus?.usb_status ?? "Detecting..."}
           onEmergencyStop={handleEmergencyStop}
           onResume={handleResume}

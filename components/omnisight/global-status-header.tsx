@@ -12,7 +12,7 @@ interface StatusHeaderProps {
   finished: number
   total: number
   inProgress: number
-  wslStatus: "OK" | "OFFLINE"
+  wslStatus: "OK" | "OFFLINE" | "N/A"
   usbStatus: string
   onEmergencyStop?: () => void
   onResume?: () => void
@@ -153,20 +153,49 @@ export function GlobalStatusHeader({
           </div>
         </div>
 
-        {/* Environment Probes & Emergency Stop */}
-        <div className="flex items-center gap-4">
-          {/* Status Indicators - hidden on tablet.
-            * Each pill has a fixed-width inner span (right-padded to the
-            * widest possible label, e.g. WSL2 reserves room for OFFLINE
-            * not OK) so changing state doesn't push the rest of the
-            * header sideways. USB string is truncated at 14 chars + ….  */}
-          <div className="hidden lg:flex items-center gap-4 shrink-0">
+        {/* Environment Probes & Emergency Stop
+          * Layout 2026-04-25 (R15 follow-up UI/UX fix):
+          *   - Right-side `gap-4` → `gap-2`: saves ~50-80px across 11 gaps
+          *   - WSL2/USB pills: `hidden lg:flex` → `hidden xl:flex` so they
+          *     only show on very-wide screens (1280px+); reclaims ~280px
+          *     for the rest of the controls on standard 1080p screens.
+          *     Tooltip on dot + screen-reader label preserve a11y.
+          *   - WSL2 status now supports "N/A" tri-state (host is not WSL2 —
+          *     e.g. native Linux / macOS): muted-gray, not red, so the
+          *     header doesn't scream OFFLINE on a perfectly healthy
+          *     non-WSL2 deploy. */}
+        <div className="flex items-center gap-2">
+          {/* Status Indicators — only on very-wide screens (xl+).
+            * Each pill has a fixed-width inner span so changing state
+            * doesn't push the rest of the header sideways.  */}
+          <div className="hidden xl:flex items-center gap-3 shrink-0">
             <div className="flex items-center gap-2 shrink-0" style={{ width: 110 }}>
-              <div className={`status-dot ${wslStatus === "OK" ? "status-dot-active" : "status-dot-error"}`} />
+              <div
+                className={`status-dot ${
+                  wslStatus === "OK"
+                    ? "status-dot-active"
+                    : wslStatus === "N/A"
+                    ? "status-dot-muted"
+                    : "status-dot-error"
+                }`}
+                title={
+                  wslStatus === "OK"
+                    ? "WSL2 environment detected"
+                    : wslStatus === "N/A"
+                    ? "Host is not WSL2 (Linux/macOS native) — not an error"
+                    : "WSL2 status unavailable — backend may be unreachable"
+                }
+              />
               <span className="font-mono text-xs text-[var(--foreground)] whitespace-nowrap">
                 WSL2:{" "}
                 <span
-                  className={`inline-block tabular-nums text-right ${wslStatus === "OK" ? "text-[var(--validation-emerald)]" : "text-[var(--critical-red)]"}`}
+                  className={`inline-block tabular-nums text-right ${
+                    wslStatus === "OK"
+                      ? "text-[var(--validation-emerald)]"
+                      : wslStatus === "N/A"
+                      ? "text-[var(--muted-foreground)]"
+                      : "text-[var(--critical-red)]"
+                  }`}
                   style={{ minWidth: 56 }}
                   title={`WSL2 ${wslStatus}`}
                 >
