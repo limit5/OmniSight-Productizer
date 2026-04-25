@@ -2,7 +2,7 @@
 
 > 文件起點：2026-04-25  
 > 對應 TODO：`Y0. Multi-user × Multi-project 情境盤點 + 架構文件 (#276)`  
-> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-4（多產品線 — 一個 tenant 下三條獨立產品線各有 LLM 預算 / git 整合目標 / on-call）**，承接 S-1 / S-2 / S-3 已落地章節；其餘 S-5～S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
+> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-5（多專案同產品線 — Doorbell 線下三 project 分開計費共用 SOP / skill pack）**，承接 S-1 / S-2 / S-3 / S-4 已落地章節；其餘 S-6～S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
 
 ---
 
@@ -13,8 +13,8 @@
 | [S-1 單租戶多用戶](#s-1-單租戶多用戶) | `[x]` 第 1 勾選 | 完成（2026-04-25） |
 | [S-2 多租戶單用戶](#s-2-多租戶單用戶) | `[x]` 第 2 勾選 | 完成（2026-04-25） |
 | [S-3 跨租戶協作](#s-3-跨租戶協作) | `[x]` 第 3 勾選 | 完成（2026-04-25） |
-| [S-4 多產品線](#s-4-多產品線) | `[x]` 第 4 勾選（本 row） | **本次完成** |
-| [S-5 多專案同產品線](#s-5-多專案同產品線) | `[ ]` 第 5 勾選 | Skeleton |
+| [S-4 多產品線](#s-4-多產品線) | `[x]` 第 4 勾選 | 完成（2026-04-25） |
+| [S-5 多專案同產品線](#s-5-多專案同產品線) | `[x]` 第 5 勾選（本 row） | **本次完成** |
 | [S-6 多分支同專案](#s-6-多分支同專案) | `[ ]` 第 6 勾選 | Skeleton |
 | [S-7 消失用戶回收](#s-7-消失用戶回收) | `[ ]` 第 7 勾選 | Skeleton |
 | [S-8 熱點撞牆](#s-8-熱點撞牆) | `[ ]` 第 8 勾選 | Skeleton |
@@ -1137,9 +1137,420 @@ S-4 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
 
 ## S-5 多專案同產品線
 
-> **Skeleton — TBD by future row** (TODO 第 5 勾選)。
-> Doorbell 下「V1 客戶 A 量產」「V2 客戶 B POC」「V3 內部 R&D」三專案，分開計費但共用 Doorbell 的 SOP / skill pack。
-> 預定章節：S-5.1 SOP 繼承層級、S-5.2 計費分流、S-5.3 skill pack 共用 vs override。
+> 一個 product_line（Doorbell）內部同時養多個 project — `firmware-doorbell-v1-customer-a`（量產出貨給 Customer A 的智能門鈴 BSP，2 年合約）/ `firmware-doorbell-v2-customer-b`（替 Customer B 客製化 ISP tuning 的 POC 階段，3 個月合約）/ `firmware-doorbell-v3-internal-rnd`（內部探索新一代 SoC 的研發、無外部客戶）。三 project 在**業務上完全分開**（外部客戶 / 計費 / 合規邊界都獨立）—  但**共用同一條產品線的工程資源**（同一份 Doorbell 標準 SOP / 同一 skill pack 庫 / 同一個 git org / 同一個 PagerDuty schedule）。
+
+> **與 S-4 的差異邊界**：S-4 是「**tenant 內部資源垂直切分**」的第一層（tenants → product_lines），S-5 是同一階層**再下一層**（product_lines → projects）；兩層的本質差異 ≠ 都是一樣的階層化。S-4 的 product_line 是「**運營邊界**」（誰負責這條線、用哪個 git org、on-call 是誰）— 線間設計上「彼此獨立、互不影響」是 raison d'être；S-5 的 project 是「**計費 / 客戶 / 生命週期邊界**」（這個 project 的 token 用量算誰錢、客戶交付節點、archive 不影響其他 project）— project 間刻意「**共用 SOP / skill_pack / git org / on-call**」是 raison d'être（同一條產品線不能各 project 各自為政、Doorbell 標準燒錄流程必須三 project 一致）。本章節要把這個「**對稱表面下的非對稱本質**」釐清，避免 reviewer 機械式套用 S-4 的「per-line 隔離」模板到 project 層、過度切割反而讓「同產品線多 project 共享資源」這個目的退化。
+
+> **S-5 引入的三類新 invariant**（S-1 / S-2 / S-3 / S-4 都沒有）：
+> 1. **Customer attribution** — project 必綁定 `customer_account_id`（外部客戶交付）或 `is_internal=true`（無外部客戶 / R&D）— 這是計費 export / 合約對帳的 first-class field，**不是 metadata.tags** 自由欄位。
+> 2. **Lifecycle stage 顯式狀態機** — `lifecycle_stage ∈ ('rnd', 'poc', 'production', 'graduated', 'archived')` 的 typed enum + 狀態轉移規則（不允許 `rnd → production` 直接跳階、必須走 `rnd → poc → production`）— Y4 endpoint 在轉換時驗算前置條件。
+> 3. **三層 LLM 預算階層 + caller-pays skill_pack** — 在 S-4.2 雙層（tenant ceiling / product_line budget）之上再加 project budget 第三層；skill_pack 跨 project 共用時 token 用量計入 caller project（不是 skill_pack owner project）— 與 S-3.4 跨 tenant「caller pays」對稱。
+
+### S-5.1 角色 Persona — Doorbell 三專案
+
+接續 S-4 的 Acme Cameras / `t-acme` / `pl-doorbell`（Doris 為 Doorbell line owner）。Doorbell 線此時已運營半年、累積三個 project：
+
+- `firmware-doorbell-v1-customer-a` — 已量產出貨給 **Customer A**（連鎖物流商，部署 5,000 台）2 年合約、月度交付 firmware patch；lifecycle_stage = `production`；Doorbell 線 LLM 預算 35M / 30d 中、本 project 拿 20M（commercial workload heavy）。
+- `firmware-doorbell-v2-customer-b` — 替 **Customer B**（Tier-1 安防經銷）做客製化 ISP tuning POC、3 個月合約（剩 2 個月）、若通過驗證合約轉量產；lifecycle_stage = `poc`；本 project 拿 10M / 30d。
+- `firmware-doorbell-v3-internal-rnd` — 內部研發新一代 ISP 演算法（無外部客戶、為下一代 BSP 鋪路）；lifecycle_stage = `rnd`；本 project 拿 5M / 30d。
+
+| Persona | 主 tenant | tenant role | product_line scope | project scope | 該 do | 該 not do |
+|---|---|---|---|---|---|---|
+| **Doris**（S-4 Doorbell line owner） | `t-acme` | member | `pl-doorbell` (line owner) | 全 3 project（line owner 預設賦權） | 開新 project、改 project 預算 cap（合計受 line budget 約束）、改 project lifecycle_stage（含 archive）、設 project-level git default override、跨 project 看用量 dashboard | 不能改 tenant ceiling；不能跨 line 動 project（要把 V1 搬到 IPCam line 必須兩 line owner 雙簽 + tenant admin 簽，呼應 S-4.8）|
+| **Quinn**（V1 客戶 A 工程主管） | `t-acme` | member | `pl-doorbell` (line member) | `firmware-doorbell-v1-customer-a` (project owner) | 在 V1 內 push branch、跑 workflow_run、看 V1 的 LLM 用量 / token cost、改 V1 SOP override、看 V1 client A audit、出 V1 的月度計費 export | 不能進 V2 / V3；不能改 Doorbell line budget；不能改 V1 的 customer_account_id（屬於合約變更、tenant admin 動作）|
+| **Rita**（V2 客戶 B POC 工程師） | `t-acme` | member | `pl-doorbell` (line member) | `firmware-doorbell-v2-customer-b` (project owner) | 在 V2 內所有對應動作、若 POC 通過走 `lifecycle_stage` poc → graduated 流程、出 customer B 試用報告 | 不能進 V1 / V3；不能直接把 V2 設成 `production`（必走 graduated 中介狀態 + tenant admin 簽）|
+| **Sam**（V3 內部 R&D 工程師） | `t-acme` | member | `pl-doorbell` (line member) | `firmware-doorbell-v3-internal-rnd` (project owner) | 在 V3 內探索新演算法、跑大量 LLM call、不需出計費 export（無外部客戶）、可 clone V1 / V2 的 SOP 為 V3 內部變體（呼應 S-4.5 設計斷言 4 的 cross-line 也適用 cross-project）| 不能把 V3 升 `production`（lifecycle_stage 轉換需 `customer_account_id` non-NULL OR tenant owner override）|
+| **Carol**（S-1 韌體工程師） | `t-acme` | member | `pl-doorbell` (line member) | V1 contributor（被 Quinn 加入幫忙 BSP review） | push branch、看 V1 的 SOP / skill_pack（從 line / tenant 繼承）、跑 V1 的 workflow_run、看 V1 用量 dashboard（read-only）| 不能改 V1 預算 / customer / lifecycle；不能進 V2 / V3；不能讀 V1 的 customer A NDA secret（owner-only step-up） |
+| **Bob**（S-1 tenant admin） | `t-acme` | admin | 全 3 條 line（admin 預設賦權） | 全 9 project（admin 預設賦權所有 line × 所有 project） | 跨 project 看用量、改 customer_account_id 綁定（合約變更）、強制 archive 違規 project、轉移 V1 ownership 給其他 user（離職 offboarding，呼應 S-7） | 不能升 R&D 直接到 production（lifecycle 狀態機強制不論 role）|
+
+**S-5.1 設計斷言**：
+1. **Project owner 不是新 RBAC 階層、是 `project_members.role` 的一個值**（沿用 S-4.1 設計斷言 3 的設計哲學） — `project_members.role ∈ ('owner', 'contributor', 'viewer')`、與 `product_line_members.role` / `project_share_members.role` 同 vocabulary；想真正在 project 內動 budget / customer / lifecycle，必須是 `project_members(quinn, v1, role='owner')` + Doorbell line member（line member 自動含 project viewer 預設、想 push 必須 explicit `contributor`）。Y4 endpoint 在改 project-level 設定時 require `(tenant_role ≥ admin) OR (product_line_role ≥ owner) OR (project_role == 'owner')` 三選一。
+2. **Line owner 預設訪問所有 line 內 project**（沿用 S-4.1 設計斷言 2 的階層繼承） — Doris 不需要在 `project_members` 各 project 寫 row、middleware fallback「line role ≥ owner → 任意該 line 內 project OK」；`project_members` row 的存在意義是「line member 級 user 被授權進入特定 project 的 contributor / owner」。
+3. **`customer_account_id` 是 project 的 first-class 計費欄位、不是 `metadata.tags`** — 既有 SaaS 業界慣例：客戶歸屬一旦走 metadata 自由欄位（`tags: ["customer:acme"]`），就無法寫 type-safe export、無法強制 audit、無法在 schema 層做 unique constraint（同一 customer 名下多 project 的 cross-check）；S-5 強制 `projects.customer_account_id uuid fk customer_accounts(id) NULL` + `projects.is_internal boolean NOT NULL` + 兩者互斥（CHECK constraint）。
+4. **Lifecycle stage 是強型別 enum、不是 status string**（與 S-3 的 share status 三段式狀態機同模型） — `lifecycle_stage ∈ ('rnd', 'poc', 'production', 'graduated', 'archived')` + 狀態轉移規則（見 S-5.5）；不接受 `'experimental'` / `'beta'` / `'deprecated'` 等自由命名 — 限制 5 值是為了 Y8 dashboard / Y4 endpoint / Y9 audit 都能基於同一 typed vocabulary 寫 type-safe code。
+5. **「三 project 共用 Doorbell SOP / skill_pack」是 invariant、不是 default** — Quinn 不能在 V1 內 fork 一份「Doorbell 燒錄前 SOP」並私改 — 那是違反「同產品線必有一致燒錄流程」的工程治理原則。Quinn 想要 project-specific 的細節，必須是 SOP `inheritance` mode（V1 SOP override `parameters` jsonb + 繼承 line SOP body）— 不是 SOP `clone` mode（複製整個 SOP body）。Y4 落地時 `POST /projects/{id}/sops` 兩種 mode 並存、UI 預設 `inheritance` mode；clone mode 只在跨 line / 跨 tenant 時允許（S-4.5 設計斷言 4 已限制）。
+
+### S-5.2 LLM 預算階層 — 三層擴充（Tenant Ceiling × Line Budget × Project Cap）
+
+S-5 在 S-4.2 雙層（tenant ceiling × product_line budget）之上再加第三層 project cap：
+
+**配額模型**（Acme enterprise plan = 100M tokens / 30d、Doorbell line = 35M / 30d 為例）：
+
+```
+tenant t-acme:                      ceiling = 100M tokens / 30d  (S-4.2)
+└── pl-doorbell:                    budget  =  35M tokens / 30d  (S-4.2)
+    ├── firmware-doorbell-v1-A:     cap     =  20M tokens / 30d  (S-5 新增 third-tier)
+    ├── firmware-doorbell-v2-B:     cap     =  10M tokens / 30d  (S-5 新增)
+    ├── firmware-doorbell-v3-rnd:   cap     =   5M tokens / 30d  (S-5 新增)
+    └── line-default (unallocated): cap     =   0M tokens / 30d  (Σ 已 = line budget; 0 fallback)
+                                              ─────────
+                                               35M tokens   ← Σ(project cap) ≤ line budget
+```
+
+**配額檢查偽碼**（Y6 落地時實作，三層 atomic decrement，呼應 S-4.2 偽碼三層延伸）：
+
+```python
+# 偽碼，Y6 落地時實作
+async def check_llm_budget(tenant_id, product_line_id, project_id, tokens_to_consume):
+    # 1) project cap (若 project_id 非 NULL)
+    if project_id is not None:
+        proj_remaining = await fetch_atomic("llm_meter:proj:" + project_id, "tokens_30d")
+        if proj_remaining < tokens_to_consume:
+            raise LLMQuotaExceeded(scope="project", id=project_id)
+
+    # 2) product_line budget (S-4.2 既有)
+    pl_remaining = await fetch_atomic("llm_meter:pl:" + product_line_id, "tokens_30d")
+    if pl_remaining < tokens_to_consume:
+        raise LLMQuotaExceeded(scope="product_line", id=product_line_id)
+
+    # 3) tenant ceiling (S-1.2 / S-4.2 既有)
+    tenant_remaining = await fetch_atomic("llm_meter:t:" + tenant_id, "tokens_30d")
+    if tenant_remaining < tokens_to_consume:
+        raise LLMQuotaExceeded(scope="tenant", id=tenant_id)
+
+    # 4) 三層 atomic decrement（同 transaction、要嘛同成功要嘛同失敗）
+    keys = [
+        ("llm_meter:t:" + tenant_id, tokens_to_consume),
+        ("llm_meter:pl:" + product_line_id, tokens_to_consume),
+    ]
+    if project_id is not None:
+        keys.append(("llm_meter:proj:" + project_id, tokens_to_consume))
+    await atomic_decrement_n(keys)  # PG SELECT FOR UPDATE 鎖 N row 一次
+```
+
+**S-5.2 設計斷言**：
+1. **Σ(project cap) ≤ line budget 是 backend invariant**（與 S-4.2 設計斷言 1 同模型、再下一層） — Doris 想把 V1 cap 從 20M 升到 25M、若 Σ(V1 25M + V2 10M + V3 5M) = 40M > 35M line budget 必須 reject + 提示「需先降 V2 / V3 或升 line budget」。Y4 `PATCH /projects/{id}` endpoint 在 backend 走 `SELECT SUM(cap) FROM projects WHERE product_line_id=?` + 比對 line budget、超則 409。
+2. **Project cap 超用優先 throttle 該 project、不影響其他 project**（S-4.2 設計斷言 2 的 project 層延伸） — V1 燒到 20M 觸發 throttle、V2 / V3 仍可正常用各自 cap。理由：V1 客戶 A 的 token 大量消費可能源自合約交付期密集驗證、不該因此餓死 V2 / V3 — 這是 S-5「分開計費」的核心訴求。
+3. **Skill_pack 跨 project 共用時 caller pays**（呼應 S-3.4 跨 tenant caller pays + S-4.5 設計斷言 3） — Doorbell line 的「ISP 自動 tuning skill_pack」被 V2 callsite 觸發時、token 用量計入 V2 project cap，**不是** skill_pack owning line 或 owning project；理由：caller pays 讓「誰用誰負責」清晰、避免「fork skill_pack 變成繞過自己 cap 的後門」。
+4. **三層 atomic decrement 必同 transaction**（S-4.2 設計斷言 4 的三層延伸） — Race scenario：V1 與 V2 同時各觸發 5M tokens call、line budget 剩 8M。若 project counter 各 -5M 成功 但 line counter 變 -2M（超 line budget）= 違反 invariant。`atomic_decrement_n` 必走 PG `SELECT ... FOR UPDATE` 鎖 N row（tenant + line + project）一次、任一不足整批 rollback。Y6 落地時 SOP Step 1 必寫「合格答案 #2 — 透過 PG 序列化」釋因。
+5. **無 `project_id` context 的 LLM call 走「line-default」桶**（呼應 S-4.2 設計斷言 6 的 `pl-default` 設計、向下擴散） — line-level 工具（如「Doorbell 線總用量 dashboard」呼叫 LLM 做 trend 摘要）、無明確 project 主體 — 這類 call 計入 line counter（不需設 project counter），不破壞 Σ(project cap) ≤ line budget invariant（line budget 預留差值即是 line-default 桶）。
+6. **Project cap = NULL 表示「不獨立 cap、共用 line budget 剩餘額度」** — 小 project / 短期實驗不需要設 cap、`projects.llm_cap_tokens` NULL 時自動套用「line budget - Σ(已設 cap)」剩餘額度；Y6 atomic decrement 對 NULL cap project 只做兩層（line + tenant）、不做第三層；簡化新 project bootstrap UX。
+7. **Lifecycle stage 影響 budget 預設值** — `production` project 預設 cap 較大（quinn 量產期需要穩定額度）、`poc` 預設較小（短期實驗）、`rnd` 預設最小（探索性）、`graduated` 維持 poc 期間值不重設、`archived` cap 自動歸 0；新 project bootstrap wizard 依 lifecycle 選 cap default。
+
+### S-5.3 Customer Attribution — Project 計費客戶綁定
+
+S-5 引入 OmniSight 第一個「**外部客戶**」概念。先區分三層：
+
+```
+tenant t-acme              ← OmniSight 內部「公司主體」(S-1)
+└── pl-doorbell            ← Acme 內部產品線 (S-4)
+    └── firmware-...-v1-A  ← project (S-5)
+                                │
+                                └── customer_account_id → cust-customer-a (Customer A 連鎖物流商)
+                                                         (外部客戶帳號、與 S-3 跨 tenant 不同層)
+```
+
+**`customer_accounts` 表**（per-tenant 內部客戶清單，與 S-3 跨 tenant share 完全不同維度）：
+
+```
+customer_accounts            -- Y1 新表（S-5 計費歸屬權威來源）
+  id                  uuid pk
+  tenant_id           text fk tenants(id) NOT NULL
+  display_name        text NOT NULL                       -- 'Customer A 連鎖物流商' / 'Customer B Tier-1 安防經銷'
+  external_ref        text                                -- 客戶 ERP / 合約系統 ID（自由格式、acme 自填）
+  billing_email       text                                -- 月度計費 export 寄送地址（不等於 OmniSight user）
+  contact_email       text                                -- 業務 / 工程 PoC 通訊（NDA 範圍內）
+  status              text NOT NULL DEFAULT 'active'      -- 'active' / 'paused' / 'churned'
+  metadata            jsonb NOT NULL DEFAULT '{}'         -- 客戶等級、合約類別等（自由欄位）
+  created_at          timestamptz NOT NULL
+  archived_at         timestamptz
+  UNIQUE (tenant_id, display_name)
+```
+
+**`projects.customer_account_id` 與 `is_internal` 的互斥約束**：
+
+```
+projects                    -- 既有 Y1 / S-4 草圖（再加 S-5 欄位）
+  ...
+  customer_account_id   uuid fk customer_accounts(id) NULL    -- S-5 加：外部客戶綁定
+  is_internal           boolean NOT NULL DEFAULT false        -- S-5 加：true 表無外部客戶（R&D / 內部工具）
+  CONSTRAINT customer_or_internal CHECK (
+    (is_internal AND customer_account_id IS NULL) OR
+    (NOT is_internal AND customer_account_id IS NOT NULL)
+  )
+  ...
+```
+
+**S-5.3 設計斷言**：
+1. **`customer_accounts` 表是 OmniSight tenant 內部 view**（不是 OmniSight 平台層的 entity） — Customer A 不會自己登入 OmniSight；customer_accounts row 是 acme 內部對「我的客戶 A」的記錄、用於 (a) 計費 export 對帳 (b) NDA / 合約 metadata 集中存放 (c) cross-project 看「Customer A 名下所有 project」。Customer A 自己的 OmniSight tenant（如果存在）是另一條 reality（透過 S-3 cross-tenant share 連接）。
+2. **`is_internal` 與 `customer_account_id` 互斥但不可雙 NULL** — V3 R&D project 必走 `is_internal=true`、不能 customer_account_id 也 NULL；理由：強迫每個 project 顯式宣告「對外計費 vs 內部自燒」、避免「忘記填客戶 → 計費 export 漏單」的 silent bug。CHECK constraint 在 schema 層強制；UI 在新建 project 時必選一個（two-choice radio button）。
+3. **Customer attribution 變更走 audit + 雙簽**（呼應 S-3.6 雙簽精神） — Bob 想把 V1 從 Customer A 改綁 Customer C（合約轉手），這是 financial-impact 動作；Y4 endpoint require `tenant_role ≥ admin` + step-up MFA + audit 雙寫（`project.customer_changed(old=A, new=C)` 寫進 acme tenant chain + customer-level audit chain）。Doris（line owner）不能單獨改、避免操作風險。
+4. **Customer churn 不級聯 archive project**（呼應 S-2.10 + S-1.8 的 graceful degradation） — Customer B POC 失敗、acme 把 customer_accounts(B).status 設 'churned'；V2 project **不自動 archive**（V2 內可能有寶貴 firmware artifact / IP）— 改成 banner 警告 + lifecycle_stage 強制不能升 production；Doris 顯式決定 archive / 重歸內部 R&D / 重綁其他 customer。
+5. **Customer-level audit chain**（額外 chain、不取代 tenant chain） — V1 的所有 audit 自動寫**雙鏈**：(a) acme tenant chain（既有）+ (b) customer-A chain（per-customer 鏈，按 customer_account_id 切）— 讓 Customer A 出 audit export 給合規方時、acme 可只給「Customer A 名下所有 project 的事件」、不用先過濾 acme 全 tenant chain（呼應 S-3.3 雙鏈設計、再下一層）。Y9 落地時 `audit_log.customer_account_id` nullable + partial index。
+6. **Customer 跨 line 的 project 列表是 first-class view** — Customer A 在 acme 內可能同時有 V1（Doorbell line）+ 另一個 IPCam line 內的 project（同一 customer 跨 line）；Y8 dashboard 必有 `/customers/{id}` 頁、橫跨 line 列出該 customer 所有 project；filter 不靠 metadata.tags、靠 schema-level fk。
+
+### S-5.4 SOP / Skill Pack 三層繼承解析
+
+S-4.5 已建立「SOP / skill_pack 兩層繼承（tenant → product_line）+ specific-first 解析方向」；S-5 把它擴成三層（tenant → product_line → project）：
+
+```python
+# 偽碼，Y4 / R 系列落地時實作（specific-first，與 git/on-call 方向相反）
+def resolve_sop(project_id, sop_slug):
+    # 1) project SOP override（最具體）
+    sop = fetch_one(
+        "SELECT * FROM sop_definitions "
+        "WHERE project_id = ? AND slug = ? AND archived_at IS NULL",
+        project_id, sop_slug,
+    )
+    if sop: return sop
+
+    # 2) product_line SOP（S-4.5 既有層）
+    project = fetch_project(project_id)
+    sop = fetch_one(
+        "SELECT * FROM sop_definitions "
+        "WHERE product_line_id = ? AND project_id IS NULL "
+        "AND slug = ? AND archived_at IS NULL",
+        project.product_line_id, sop_slug,
+    )
+    if sop: return sop
+
+    # 3) tenant-wide SOP（S-4.5 既有層）
+    sop = fetch_one(
+        "SELECT * FROM sop_definitions "
+        "WHERE tenant_id = ? AND product_line_id IS NULL AND project_id IS NULL "
+        "AND slug = ? AND archived_at IS NULL",
+        project.tenant_id, sop_slug,
+    )
+    if sop: return sop
+
+    # 4) system default（R 系列既有 ROM SOP 庫）
+    return fetch_system_sop(sop_slug)
+```
+
+**Inheritance vs Clone 模式對照**（呼應 S-5.1 設計斷言 5）：
+
+| 模式 | schema 表現 | 行為 | 適用場景 |
+|---|---|---|---|
+| **Inheritance**（V1 用 line SOP 但改部分參數） | `sop_overrides(project_id, parent_sop_id, parameters_jsonb)` 一張薄表、不複製 SOP body；`resolve_sop` 走 line SOP body + project override parameters merge | line SOP body 升版時 V1 自動受惠（升版者顯式評估後可選 propagate yes/no） | 量產 project 微調參數（如 V1 客戶 A 想把「燒錄超時」從 60s 改 120s 但其他步驟不動）|
+| **Clone**（V3 想自定整個流程、與 line 解耦） | `sop_definitions(project_id, ...full body...)` 完整複製 row + `metadata.cloned_from_sop_id` 記錄祖先 | 父 SOP 升版不影響 clone；clone 之後 V3 內獨立演化 | R&D project 探索新流程、與標準完全脫鉤 |
+
+**S-5.4 設計斷言**：
+1. **SOP / skill_pack 表加 nullable `project_id` 欄位**（與 S-4.5 設計斷言 1 同模式、再下一層） — Y4 加 `sop_definitions.project_id NULL` + `skill_packs.project_id NULL`；NULL 表示 line-wide（S-4.5）或 tenant-wide（既有）；resolver 走 project → line → tenant → system。
+2. **Resolver 走 specific-first**（沿用 S-4.5 設計斷言 2、再下一層） — project SOP 永遠 override line SOP；line SOP 永遠 override tenant SOP；理由：越具體的 scope 越精準（V1 量產期的「BSP 燒錄前流程」一定比 Doorbell 線標準更貼近 V1 客戶 A 場景）。
+3. **Inheritance 是預設、Clone 是顯式選擇**（呼應 S-5.1 設計斷言 5） — Quinn 在 V1 內想要 SOP override：UI 預設「我要 inherit Doorbell SOP 並 override 部分參數」(inheritance mode、寫 sop_overrides row、保留升版 propagation)；Clone mode 必須顯式點按「我要完全 fork」按鈕、UI 警告「fork 後 line SOP 升版不會自動帶入」。預設 inheritance 是為了避免「Quinn 隨手 fork → 半年後 Doorbell 線 SOP 升版 V1 沒跟到 → 不一致」。
+4. **Skill_pack 計費 caller pays**（呼應 S-3.4 + S-5.2 設計斷言 3） — Doorbell line 的「自動 ISP tuning skill_pack」被 V2 callsite 觸發、token 用量計 V2 project counter；skill_pack 自身不計帳（無「skill_pack owner project」概念）。Y6 落地時 `skill_pack_invoke()` 必帶 `caller_project_id` context、傳給 `check_llm_budget()`。
+5. **跨 project clone SOP 是顯式動作 + 強制斷代**（呼應 S-4.5 設計斷言 4 cross-line 也適用 cross-project） — Sam 想把 V1 客戶 A 的「客製化燒錄 SOP」clone 到 V3 內部試驗；走 `POST /sops/{id}/clone {target_project: v3}`、新 SOP 在 V3 內生成獨立 row + `metadata.cloned_from_sop_id` 記祖先 + audit 寫 `sop.cloned_cross_project`；新 row 與原 row 完全斷代（V1 SOP 升版不影響 V3 clone）— 避免「Quinn 改 V1 客戶 A 的 SOP 結果 Sam 的 V3 內部試驗也跟著動」。
+6. **Tenant-wide SOP 改動需 tenant admin / owner 簽**（沿用 S-4.5 設計斷言 5） — 呼叫範圍越廣、權限階層越高；line-wide SOP 改動 line owner（Doris）即可；project-scoped SOP 改動 project owner（Quinn）即可。
+
+### S-5.5 Project Lifecycle 狀態機
+
+S-5 引入 typed lifecycle stage、嚴格狀態機（不允許任意跳階）：
+
+```
+                        ┌─── archived ───┐  (任何階段都可進、不可逆)
+                        │                │
+                        ▼                │
+       ┌──── rnd ──→ poc ──→ graduated ──→ production
+       │              │                       │
+       │              └────  rejected ────────┘ (poc 失敗 / graduated 失敗)
+       └────────────  (rejected → archived 自動 90d) ──────────────
+```
+
+**狀態說明**：
+
+| stage | 含義 | 進入條件 | 退出條件 | 預設 LLM cap |
+|---|---|---|---|---|
+| `rnd` | 內部研發、無外部客戶 | 新建時 `is_internal=true` 預設 | → `poc` 需綁 customer_account_id + tenant admin 簽 | 5M / 30d |
+| `poc` | 外部客戶 POC、合約有期限 | 新建時帶 customer_account_id 預設 / 從 `rnd` 升 | → `graduated` 需 owner + admin 雙簽 + POC 通過驗證 / → `rejected` 失敗 | 10M / 30d |
+| `graduated` | POC 通過、過渡到量產（合約轉長期） | 從 `poc` 升、必走中介狀態 | → `production` 需 tenant admin 簽 + 30d 觀察期 / → `archived` 客戶取消 | 15M / 30d (繼承 poc cap 不重設) |
+| `production` | 量產交付、長期合約 | 從 `graduated` 升、不能跳階 | → `archived` 合約結束 | 20M / 30d |
+| `rejected` | POC 失敗、無轉量產（保留 audit + artifact） | 從 `poc` / `graduated` 失敗 | 90d 後自動 archive cron | 1M / 30d (僅查歷史用) |
+| `archived` | 不可逆終態（保留 audit + 可 export） | 任何 stage 進入 | 不可退出（除非 tenant admin un-archive、僅 90d 內可逆） | 0 |
+
+**S-5.5 設計斷言**：
+1. **狀態轉移走嚴格白名單、不允許任意跳階** — Y4 `PATCH /projects/{id} {lifecycle_stage}` endpoint 在 backend 維護 transition table、不在白名單的轉換 reject 422；理由：避免 R&D project 被誤升 production（合規 / 計費風險）、避免 production 直接退 rnd（影響合約）。
+2. **`rnd → poc` 必綁 customer_account_id + 強制 tenant admin 簽** — R&D project 升為外部客戶 POC 是合約 + NDA 邊界跨入點、不能只由 project owner 決定；Y4 endpoint require `tenant_role ≥ admin` + step-up MFA + audit 寫 `project.lifecycle_promoted_to_poc(customer=...)`。
+3. **`graduated` 是強制中介狀態、不可跳過**（與 S-3.6 三段式 share 狀態機同設計哲學） — POC 通過驗證後不直接升 `production`、必先進 `graduated`（30d 觀察期）；理由：production cap 較大（20M）+ 合約已轉長期 = 客戶開始扣月費；middle state 留時間驗證「POC 通過 ≠ 量產穩定」 + 留客戶法務簽合約緩衝。`graduated` 階段 cap 維持 poc 值（10M）不立即升 20M，避免「升階就燒爆預算」。
+4. **`archived` 不可逆但 90d 緩衝期可 un-archive** — archive 是 graceful 終態（保留 audit + artifact + branch 留 `customer-x-fork` 可下載 export）；un-archive 在 90d 內由 tenant admin 單方解（合約延長 / 客戶回來談）；> 90d 後 token 重置 + workspace path 進 GC（呼應 S-7 範圍）。
+5. **Lifecycle stage 變更必雙鏈 audit**（呼應 S-5.3 設計斷言 5） — 寫 acme tenant chain + customer-level chain 雙鏡像；customer 對帳時可看「我的 V1 何時從 poc 升到 production」、acme 內部 forensic 可看跨 line lifecycle 演進。
+6. **`rejected` 是顯式失敗終態、不混用 `archived`** — POC 失敗（客戶不續約 / 驗證未通過）走 `rejected`、保留「為什麼不續」context（audit `lifecycle_rejected(reason=...)`）；archived 是 happy ending（量產合約結束）；分兩個 enum value 讓計費 export / 商業 dashboard 區分「失敗」vs「正常退場」。
+7. **狀態轉移引發 LLM cap 自動調整 + 通知**（呼應 S-4.7 設計斷言 3 + S-5.2 設計斷言 7） — `poc → graduated` 時 cap 維持 10M 不動（避免突跳 20M）、`graduated → production` 時 cap 自動升 20M（line budget 容許下）、`*  → archived` 時 cap 歸 0；同 transaction 內 SSE 推 project owner notification。
+
+### S-5.6 schema 衝擊（與 Y1 / Y4 對齊）
+
+S-5 在 Y1 / Y4 / Y6 / Y9 落地時對 schema 的增量（在 S-1.6 + S-2.6 + S-3.5 + S-4.6 既有設計上加）：
+
+```
+customer_accounts            -- Y1 新表（S-5.3 計費歸屬權威）
+  id                  uuid pk
+  tenant_id           text fk tenants(id) NOT NULL
+  display_name        text NOT NULL
+  external_ref        text                                -- ERP / 合約系統 ID
+  billing_email       text                                -- 月度 export 寄送
+  contact_email       text                                -- PoC 通訊
+  status              text NOT NULL DEFAULT 'active'      -- 'active' / 'paused' / 'churned'
+  metadata            jsonb NOT NULL DEFAULT '{}'
+  created_at          timestamptz NOT NULL
+  archived_at         timestamptz
+  UNIQUE (tenant_id, display_name)
+
+projects                     -- 既有 Y1 / S-4 草圖（再加 S-5 欄位）
+  ...
+  customer_account_id   uuid fk customer_accounts(id) NULL    -- S-5 加
+  is_internal           boolean NOT NULL DEFAULT false        -- S-5 加
+  lifecycle_stage       text NOT NULL DEFAULT 'rnd'           -- S-5 加 enum: rnd/poc/graduated/production/rejected/archived
+  llm_cap_tokens        bigint                                -- S-5 加：30d cap; NULL = 共用 line budget 剩餘
+  CONSTRAINT customer_or_internal CHECK (
+    (is_internal AND customer_account_id IS NULL) OR
+    (NOT is_internal AND customer_account_id IS NOT NULL)
+  )
+  CONSTRAINT lifecycle_stage_valid CHECK (
+    lifecycle_stage IN ('rnd','poc','graduated','production','rejected','archived')
+  )
+  ...
+  -- partial index: archived project 排除常用查詢
+  -- CREATE INDEX idx_projects_active_per_line ON projects(product_line_id) WHERE lifecycle_stage <> 'archived'
+
+project_lifecycle_history    -- Y4 新表（S-5.5 狀態轉移 audit join 表）
+  id                  uuid pk
+  project_id          uuid fk projects(id) NOT NULL
+  from_stage          text                                 -- NULL = 新建
+  to_stage            text NOT NULL
+  changed_by          uuid fk users(id) NOT NULL
+  approved_by         uuid fk users(id)                   -- promote 雙簽（rnd→poc / graduated→production）
+  reason              text                                 -- 'poc_passed' / 'churned' / 'spec_change' 等
+  metadata            jsonb NOT NULL DEFAULT '{}'
+  changed_at          timestamptz NOT NULL
+  -- 給 customer 出歷史時走此表
+
+sop_definitions              -- 既有 R 系列表（S-4.5 已加 product_line_id、S-5 再加 project_id）
+  ...
+  project_id          uuid fk projects(id) NULL            -- S-5 加：NULL = line/tenant scope
+  ...
+  -- partial unique 增量：
+  -- UNIQUE (project_id, slug) WHERE project_id IS NOT NULL  AND archived_at IS NULL
+  -- 既有 line / tenant partial unique 保持
+
+sop_overrides                -- Y4 新表（S-5.4 inheritance mode 薄 override 表）
+  project_id          uuid fk projects(id) NOT NULL
+  parent_sop_id       uuid fk sop_definitions(id) NOT NULL  -- 指向 line / tenant SOP body
+  parameters          jsonb NOT NULL DEFAULT '{}'           -- override 部分參數
+  created_at          timestamptz NOT NULL
+  created_by          uuid fk users(id) NOT NULL
+  PRIMARY KEY (project_id, parent_sop_id)
+
+skill_packs                  -- 既有 R 系列表（S-4.5 已加 product_line_id、S-5 再加 project_id）
+  ...
+  project_id          uuid fk projects(id) NULL            -- S-5 加
+  ...
+
+audit_log                    -- 既有表（S-3 已加 actor_external_tenant_id + share_id；S-4 加 product_line_id；S-5 再加）
+  ...
+  project_id          uuid NULL fk projects(id)            -- S-5 新增：project scope filter
+  customer_account_id uuid NULL fk customer_accounts(id)   -- S-5 新增：customer-level chain join key
+  ...
+  -- partial index 加速 project / customer scoped 查詢
+```
+
+**S-5.6 設計斷言**：
+1. **新表 3 張**（`customer_accounts` + `project_lifecycle_history` + `sop_overrides`） + **既有表加欄位 4 張**（`projects` + `sop_definitions` + `skill_packs` + `audit_log`）— 維持「擴充既有 schema、不另起平行表」的 Y 系列共識（S-3.5 / S-4.6 已建立模式）。理由：sop_overrides 是必要新表（schema 結構與 sop_definitions 完全不同 — 一個是 thin override、一個是 full body）、不適合塞進 sop_definitions 用 nullable 欄位。
+2. **`projects.lifecycle_stage` 用 text + CHECK 而非 PG enum type** — 避免 enum migration 痛點（PG enum value add 是 ALTER TYPE 但 remove / rename 困難）；CHECK constraint 給同樣強型別保證 + migration 可走標準 ALTER TABLE；Y1 / Y4 一律用此模式（與 S-4.6 / S-3.5 既有 CHECK 設計一致）。
+3. **`sop_overrides` 走「parameters jsonb merge」而非「整個 SOP body deep merge」** — 結構簡單、reviewer 可一眼看出 override 改了什麼；deep merge 容易出 bug（哪些 list 該 replace 哪些該 append）。Y4 落地時 SOP runtime 在 invoke 時做：line SOP body + project override parameters → final config（簡單 dict update、不遞迴）。
+4. **`project_lifecycle_history` 與 `audit_log` 並存、不取代** — audit_log 是 cross-cutting / append-only / chain hash 的事件流；lifecycle_history 是 typed 領域表（with `approved_by` 雙簽欄位、可寫複合 query「列出 acme 過去 12 個月 poc → production 的 project」），兩者是 first-class 副本（呼應 S-3.5 share 與 audit 並存設計）。
+5. **`audit_log.customer_account_id` partial index** — `WHERE customer_account_id IS NOT NULL`；Customer A 出 audit export 時 backend 走此 index 不 scan 全 tenant audit row（呼應 S-4.6 設計斷言 5）。
+6. **`projects.llm_cap_tokens` 為 nullable bigint** — NULL 表「共用 line budget 剩餘額度」（S-5.2 設計斷言 6）；非 NULL 是顯式設定值；Y6 atomic decrement 對 NULL cap project 自動 skip 第三層。
+7. **既有 `projects.product_line_id NOT NULL`** + **新加 `customer_account_id` nullable**（互斥約束）— S-4.6 設計斷言 3 已要求 `product_line_id NOT NULL`、不放鬆；S-5 加的 customer_account_id 是 project 額外屬性、與 product_line_id orthogonal（同 customer 的 project 可跨 line：例 customer A 在 Doorbell 與 IPCam 各有 project）。
+
+### S-5.7 Operator 工作流 — Doorbell 從 1 project 變 3 project 的 7 步演進
+
+從 Doorbell 線只有 V1 一 project（S-4.7 落地後）演進到 V1 / V2 / V3 三 project 並行：
+
+1. **Day 0 — Doorbell 線既有狀況（S-4.7 落地後）**  
+   `pl-doorbell` 內只有 `firmware-doorbell` 一個 project（從 S-4.7 Day 14 移過來）；無 customer_account 概念（既有 project `is_internal=true` + `lifecycle_stage='production'`）；line budget 35M 全給此 project。
+
+2. **Day 1 — Bob 建立 Customer A 帳號 + 把既有 firmware-doorbell project 綁定 Customer A**  
+   Bob 走 `POST /api/v1/tenants/t-acme/customer-accounts { display_name: "Customer A 連鎖物流商", external_ref: "acme-erp-7841", billing_email: "billing-cust-a@cust.com" }`。  
+   再走 `PATCH /api/v1/projects/firmware-doorbell { customer_account_id: "<cust-a-id>", is_internal: false }`（**強制 tenant admin step-up MFA**，S-5.3 設計斷言 3）；audit 雙寫 acme tenant chain + customer-A chain。  
+   project 從 internal R&D（`rnd` 時期遺留）走特例升 `production` 路徑（`is_internal=false` 後第一次 promote、tenant admin override 跳階規則 + audit 寫 `lifecycle_promoted_with_admin_override`）。
+
+3. **Day 1+10min — Doris rename project 為 V1**  
+   為了與後續 V2 / V3 區分、Doris 走 `PATCH /projects/firmware-doorbell { slug: "firmware-doorbell-v1-customer-a" }`；寫 audit `project.slug_renamed`；URL 自動 redirect（30d 過渡期保留舊 slug → 新 slug 的 308）。
+
+4. **Day 7 — Doris 開 V2（Customer B POC）**  
+   先建 customer B：`POST /customer-accounts { display_name: "Customer B Tier-1 安防經銷", ... }`。  
+   再開 project：`POST /api/v1/tenants/t-acme/projects { product_line_id: pl-doorbell, slug: "firmware-doorbell-v2-customer-b", customer_account_id: <cust-b-id>, is_internal: false, lifecycle_stage: "poc", llm_cap_tokens: 10000000 }`。  
+   backend 算 Σ(project cap)：V1 20M + V2 10M = 30M ≤ line budget 35M、通過；audit 寫 `project.created` + `project.lifecycle_promoted_to_poc`。  
+   Doris 加 Rita 為 V2 owner：`POST /projects/firmware-doorbell-v2-customer-b/members { user_id: rita, role: owner }`。
+
+5. **Day 30 — Doris 開 V3（內部 R&D）**  
+   `POST /projects { product_line_id: pl-doorbell, slug: "firmware-doorbell-v3-internal-rnd", is_internal: true, customer_account_id: NULL, lifecycle_stage: "rnd", llm_cap_tokens: 5000000 }`。  
+   Σ(project cap)：V1 20M + V2 10M + V3 5M = 35M = line budget、剛好 fit；通過。  
+   加 Sam 為 V3 owner；audit 雙鏈寫 acme tenant chain（無 customer chain — `is_internal=true` 不寫 customer chain，呼應 S-5.3 設計斷言 5 partial index）。
+
+6. **Day 60 — V2 POC 通過、Rita 走 graduated 流程**  
+   Rita 申請 promote：`POST /projects/firmware-doorbell-v2-customer-b/lifecycle-transition { to_stage: "graduated", reason: "poc_passed" }`。  
+   backend 檢查白名單：`poc → graduated` 允許、且需 project owner（Rita）+ tenant admin（Bob）雙簽 + step-up MFA。  
+   Bob 在 admin notification 點 Approve（呼應 S-3.6 設計斷言 4 雙簽 MFA）；audit 寫 `project_lifecycle_history(from='poc', to='graduated', changed_by=rita, approved_by=bob, reason='poc_passed')` + 雙鏈 audit。  
+   cap 維持 10M 不動（呼應 S-5.5 設計斷言 3 + S-5.2 設計斷言 7）；30d 觀察窗開始。
+
+7. **Day 90 — V2 觀察窗過、Bob 升 production + 自動調 cap**  
+   Bob 走 `POST /projects/firmware-doorbell-v2-customer-b/lifecycle-transition { to_stage: "production" }`。  
+   backend 檢查 30d 觀察窗（看 `project_lifecycle_history` 最新 graduated row 的 changed_at）+ tenant admin role；通過。  
+   cap 自動升 10M → 20M（前提：line budget 容許 — 此時 V1 20M + V2 20M + V3 5M = 45M > 35M line budget 必須先擴 line budget）。  
+   workflow：Doris 先升 line budget 從 35M 升到 45M（需 tenant ceiling 容許 — 100M 仍 OK，呼應 S-4.7 設計斷言 4）；audit 寫 `product_line.budget_changed` + `project.lifecycle_promoted_to_production` + `project.cap_auto_adjusted`（三條同 transaction）。
+
+**S-5.7 設計斷言**：
+1. **既有 project 升外部客戶綁定走特例 admin override**（呼應 S-5.5 狀態機嚴格） — 既有 `firmware-doorbell` 是 production 但 `is_internal=true`、要綁 customer A 等於從「無客戶 production」進入「有客戶 production」、跨越 customer attribution 邊界；走 tenant admin override 走「特例升階」+ 加倍 audit 加 `with_admin_override` flag 是 forensic 對帳時必要。
+2. **3 project 同時 fit line budget = 緊邊界**（呼應 S-5.2 設計斷言 1） — Day 30 Σ(cap) = 35M 剛好 = line budget；後續任何升 cap 必觸發「先升 line budget OR 先降其他 project」決策；UI 在 PATCH 時帶上下文提示。
+3. **`graduated` 30d 觀察窗 + 自動 cap 調整**（呼應 S-5.5 設計斷言 7） — `graduated → production` 在 backend 自動算 30d 觀察窗（不夠 reject 422 + 提示「再等 X 天」）；cap 升級走「先 PATCH line budget → 再 PATCH project cap」兩段、避免 atomic 違反 invariant。
+4. **Rename slug 走 308 redirect 保護**（呼應 S-2 / S-3 已建立的 graceful migration） — 改 slug 是 URL-visible 變更、舊 URL 30d 過渡期 308 redirect、避免外部書籤 / chatops 連結爆。
+
+### S-5.8 邊界 / 退化情境
+
+| 邊界場景 | 預期行為 | 驗收條件 |
+|---|---|---|
+| Quinn（V1 owner、非 tenant admin）想改 V1 的 customer_account_id 到其他 customer | 403 — 改 customer 是合約 / 計費邊界動作（S-5.3 設計斷言 3）、tenant admin only | Y4 PATCH `/projects/{id}` 對 customer_account_id 欄位 require tenant admin + step-up MFA |
+| Doris 把 V1 的 cap 從 20M 升到 30M、但 Σ(project cap) > line budget | 409 + 提示「合計 35M+ 超過 35M line budget；請先降 V2 / V3 cap、或先升 line budget（需 tenant ceiling 容許）」+ 顯示可降空間 | Y4 PATCH endpoint 算 SUM(cap) + 比對 line budget；backend invariant，UI 預先提示 |
+| Sam 想把 V3（rnd / is_internal=true）直接升 production 跳過 poc 中介 | 422 — 狀態機白名單只允許 `rnd → poc` 不允許 `rnd → production`；UI 引導「先綁 customer + tenant admin 簽 + 升 poc」 | Y4 lifecycle-transition endpoint 嚴格白名單檢查 |
+| Customer B churn 把 customer_accounts(B).status 設 'churned' | V2 不自動 archive；改成 banner 警告 + 阻擋 lifecycle 升階；Doris / Bob 顯式決定 archive / 重綁 / 重歸 internal R&D（必走 PATCH customer_account_id 流程）| Y4 customer status 變更觸發 SSE 推 project owner + 在 dashboard 顯紅色警告 banner |
+| Quinn fork SOP（用 Clone mode）後 Doorbell line SOP 升版 | V1 clone SOP 不受影響（顯式 fork 已斷代、S-5.4 設計斷言 5）；UI 在 `/projects/{id}/sops` 頁顯示「此 SOP 為 clone、line 升版不會自動帶入；若想同步請手動 reapply」 | Y4 SOP detail page banner + audit `sop.cloned_cross_project` 留下祖先指標 |
+| V2 graduated 觀察窗未滿 30d、Bob 想升 production | 422 + 提示「再等 X 天」；強制等滿（避免「升階就燒爆預算」+ 客戶法務簽合約緩衝）| Y4 lifecycle-transition endpoint 算 from `project_lifecycle_history` 最新 graduated row 的 changed_at |
+| Sam 想跑 V3 內部試驗 LLM call、但 V3 cap 已用完 | Throttle 該 project 但不影響 V1 / V2（呼應 S-5.2 設計斷言 2）；SSE 推 V3 owner Sam；audit 寫 `llm_quota_exceeded(scope=project)` | Y6 token meter 三層 atomic decrement 第一層 fail → 立即拒絕該 LLM call |
+| 同一 user 同時是 V1 owner + V3 viewer + V2 contributor | 完全允許（N:N relation、S-4.8 同模型）；UI 在 project picker 顯示三 project + 各自 capability badge | Y8 frontend：sidebar 內 project picker subordinate 於 line picker、依 active project 切 capability set |
+| V1 量產 Customer A 期間需要與 Customer C 共用一份 firmware artifact | 走 S-3 cross-tenant share（不用 cross-project 機制 — 兩個 customer 是不同 cobalt-tenant 級、不是 acme tenant 內部 project 切分）；S-5 不涵蓋 cross-project artifact share | S-3 既有路徑、S-5 不延伸 |
+| V1 archive 後 5d，Customer A 回來談合約延長 | tenant admin 走 `POST /projects/{id}/un-archive`；90d 內可逆（S-5.5 設計斷言 4）；workspace path 還在（GC 在 90d 後）；recover lifecycle 為 archive 前狀態（production）| Y4 endpoint require tenant admin + step-up MFA + audit 寫 `project.unarchived(reason=...)` |
+| V2 archive 之後 91d cron 跑、自動清 workspace | Cron 跑 `archive_after_90d_cleanup()`：從 disk GC `.agent_workspaces/` 對應 workspace + 寫 audit `project.workspace_gc_completed`；DB row 仍保留（forensic + 計費 export 需要）| Y4 cron job + Y6 workspace path GC（呼應 S-7） |
+
+### S-5.9 Open Questions（標記給 Y1～Y10 後續勾選）
+
+1. **「Customer 跨 tenant 結合 — Customer A 自己是 OmniSight tenant」如何模擬** — Customer A 若也是 OmniSight tenant、acme 的 V1 project 想直接給 Customer A 看 — 走 S-3 cross-tenant share 還是另起 `customer_tenant_link` 表？目前傾向「兩條獨立路徑共存」（內部 customer_accounts 是 acme 私有對帳簿；S-3 share 是雙向 grant），但兩者 status 同步是個複雜問題。等 M-export / 合規系列落地時定。
+2. **「V1 / V2 / V3 共用同一份 Doorbell git repo 還是各自 fork」** — 既有 S-4.3 git resolver 走 line-default、所有 Doorbell project push 到同一個 `acme-doorbell` git org；但 V1 量產 / V2 POC / V3 R&D 可能想用不同 branch 策略（V1 主線 + V2 customer-b-fork branch + V3 internal/* branch）— S-6（多分支同專案）會處理 branch 切分、S-5 暫不延伸。
+3. **「Project lifecycle 自動觸發 cap 縮減 vs 維持」** — V2 從 graduated 升 production cap 自動升（S-5.5 設計斷言 7）；但 production → archived 是否該立刻 cap 歸 0？目前傾向「立刻 0」但要 SSE 通知 + 30d 內可 un-archive 自動恢復。等 Y4 / Y6 落地時測試 production-to-archive 邊界。
+4. **「Skill_pack 跨 project caller pays 的細粒度」** — line-level skill_pack 被 V2 觸發、token 計 V2；但若 skill_pack 內部分步驟用 LLM 各自做不同事（步驟 A 算 BSP code、步驟 B 算 customer-specific tuning）— 兩步是否該分開計？目前傾向「skill_pack invoke 整體計到 caller」、子步驟不細分（避免太細粒度的 attribution 引發 dashboard 噪音）。等 R 系列 skill_pack runtime 重寫時定。
+5. **「Customer churn 後保留期 vs 立即 archive」** — Customer B churn 後 V2 banner 警告但不自動 archive — 但若 acme 90d 都沒動 V2 是否該 cron 自動 archive？目前傾向「不自動 archive、強迫人類決策」（archive 影響 customer audit chain finalization、不該在無人 review 下發生）；但 dashboard 應有「churned 客戶遺留 project」名單 nag UI。等 Y8 dashboard 落地時實。
+
+### S-5.10 既有實作的對照表
+
+S-5 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
+
+| S-5 invariant | 目前狀況 | 缺口 |
+|---|---|---|
+| `projects` 表 | ❌ — 完全不存在；只有 `backend/alembic/versions/0006_project_runs.py:21-27` 既有 `project_runs` 表（groups workflow_runs）以 `project_id` text 字串作為弱 FK；`backend/project_runs.py:25-30` 的 `ProjectRun` dataclass 把 `project_id: str` 視作 logical label | Y1 新建（S-1.6 / S-4.6 已規格化、S-5.6 再加 customer_account_id / is_internal / lifecycle_stage / llm_cap_tokens 4 欄）|
+| `customer_accounts` 表 | ❌ — 不存在 | Y1 新建（S-5.6 第 1 表）|
+| `project_lifecycle_history` 表 | ❌ | Y4 新建（S-5.6 第 2 表）|
+| `sop_overrides` 表 | ❌ | Y4 新建（S-5.6 第 3 表，inheritance mode 薄表）|
+| `projects.lifecycle_stage` typed enum | ❌ — 既有 `project_runs` 並無 lifecycle 概念 | Y1 加 column + CHECK constraint 5 值 |
+| `projects.customer_account_id` + `is_internal` 互斥 | ❌ | Y1 加 column + CHECK constraint |
+| `projects.llm_cap_tokens` per-project cap | ❌ — `backend/alembic/versions/0024_token_usage_cache.py:22-32` 既有 `token_usage` 表 only indexed on `model`、無 project 維度；`backend/tenant_quota.py` 是 disk quota；`backend/llm_secrets.py:106-216` 是全域 in-memory cache | Y1 加 column；Y6 `llm_token_meter.py` 雙層 atomic decrement（S-4.10 row 1120）擴成三層（tenant + line + project）|
+| Three-tier LLM atomic decrement | ❌ — 既有 atomic decrement 不存在（將由 Y6 實作雙層、S-5 擴三層）| Y6：`atomic_decrement_n` PG `SELECT FOR UPDATE` 鎖 N row（tenant + line + project）一次 |
+| SOP / skill_pack `project_id` 欄位 + project-level resolver | ❌ — `backend/skill_registry.py` + `backend/skill_manifest.py` 只走 flat manifest walker、無階層 resolver | Y4 / R 系列：sop_definitions / skill_packs 加 nullable `project_id` + resolver 從 S-4.5 兩層擴成三層（project → line → tenant → system，呼應 S-5.4 偽碼）|
+| SOP inheritance vs clone 兩 mode | ❌ — 完全不存在 | Y4：sop_overrides 表 + `POST /projects/{id}/sops` 兩 mode endpoint + UI 預設 inheritance |
+| Per-project audit filter | ❌ — `backend/alembic/versions/0003_audit_log.py:23-34` 既有 audit_log 無 `project_id` 欄位（也無 product_line_id、share_id）| Y4 加 `project_id` + `customer_account_id` 兩欄（S-3 已加 actor_external_tenant_id + share_id、S-4 已加 product_line_id、S-5 再加兩欄）|
+| Customer-level audit chain | ❌ | Y9 加 partial index `WHERE customer_account_id IS NOT NULL` + customer audit export endpoint |
+| Lifecycle 狀態機 transition table | ❌ | Y4：`POST /projects/{id}/lifecycle-transition` endpoint + transition 白名單 + double-sign for `rnd→poc` 與 `graduated→production` |
+| Frontend project picker | ❌ — `lib/tenant-context.tsx` 只有 `useTenant()`；無 `useProject()` / `ProjectContext`；`components/omnisight/tenant-switcher.tsx` 切 tenant、不切 project；`app/workspace/[type]/types.ts:11-18` `WORKSPACE_TYPES` 是 UX 變體、不是 project | Y8 新增 `lib/project-context.tsx`：`useProject()` + sidebar project picker（subordinate to line picker subordinate to tenant switcher，呼應 S-4.10 row 1122）|
+| Per-customer dashboard | ❌ | Y8 新增 `/customers/{id}` 頁、跨 line 列出 customer 名下所有 project（呼應 S-5.3 設計斷言 6） |
+| Customer churn banner / lifecycle nag | ❌ | Y8 dashboard：customer status='churned' 觸發紅色 banner；「churned 客戶遺留 project」名單 nag UI（呼應 S-5.9 Q5）|
+| Workspace path layout | `backend/workspace.py:29, 98` 既有 `.agent_workspaces/{safe_agent_id}/agent/{agent}/{task}` — agent-scoped、無 tenant / line / project 巢狀 | S-5 不直接動（屬 S-6 / Y6 範圍）；S-5 假設 V1 / V2 / V3 在 workspace path 上的隔離由 S-6 解決 |
+| `git_resolve_account()` 含 project scope | ❌ — 既有 backend/git_credentials.py 走 (tenant_id, platform)、S-4 加 product_line scope、S-5 不要求再加 project scope（git resolver 對 project 透明、project 共用 line default git account）| Y6 不擴；S-5 default 是「project 共用 line git account」（與 SOP 三層繼承反方向、與 git resolver 兩層一致 — git account 是運營資源、不該每 project 各設）|
+
+**S-5.10 對 Y1 / Y4 / Y6 / Y8 / Y9 的關鍵 deliverable**：
+1. **Y1 新增 1 表 + 4 欄位** — `customer_accounts`(10 欄) + `projects.customer_account_id` nullable + `projects.is_internal` not null default false + `projects.lifecycle_stage` not null default 'rnd' + `projects.llm_cap_tokens` nullable bigint；外加 2 條 CHECK（互斥 / lifecycle enum）+ 1 條 partial index（active per line）。
+2. **Y4 新增 2 表 + endpoint 集合** — `project_lifecycle_history`(8 欄) + `sop_overrides`(5 欄) + `POST /customer-accounts` + `PATCH /projects/{id} { customer_account_id }` 走 admin step-up + `POST /projects/{id}/lifecycle-transition` 嚴格白名單 + `POST /sops/{id}/clone` cross-project + `POST /projects/{id}/un-archive` 90d 內可逆 + `GET /customers/{id}` 跨 line project 列表 endpoint。
+3. **Y6 token meter 擴三層** — `llm_token_meter.check_budget()` 從 S-4.2 雙層 (tenant + line) atomic decrement 擴成三層（tenant + line + project，project_id 為 NULL 時 skip 第三層）；`atomic_decrement_n` PG `SELECT FOR UPDATE` 鎖 N row 一次。
+4. **Y4 / R 系列 SOP / skill_pack resolver 擴三層** — `resolve_sop()` 從 S-4.5 兩層（line → tenant → system）擴成三層（project → line → tenant → system）；inheritance mode（sop_overrides 薄表）vs clone mode（sop_definitions 完整 row）兩種共存；UI 預設 inheritance。
+5. **Y8 frontend** — `lib/project-context.tsx` + sidebar project picker subordinate to line picker + `/customers/{id}` 跨 line 列表頁 + churn banner + lifecycle stage badge + project-level cap usage breakdown 頁 + `/projects/{id}/sops` SOP 模式選擇 UI。
+6. **Y9 audit 路徑改寫** — `audit_log.project_id` + `audit_log.customer_account_id` 雙 partial index；customer-level audit export endpoint（出 customer A 名下所有 project 的 audit）；project lifecycle 變更必雙鏈寫入 acme tenant chain + customer chain（呼應 S-3.3 + S-5.5 設計斷言 5）。
 
 ## S-6 多分支同專案
 
@@ -1215,4 +1626,5 @@ S-1.3 / S-1.4 已給出 secret + project 部分。完整矩陣（涵蓋 audit / 
 | 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | S-2 章節展開（10 子節 + 5-persona Bridge MSP + Maya 7 步 onboarding + middleware 升級偽碼 + resolve_role 二維解析 + audit hygiene 4 種查詢 + schema 增量 5 欄 + 8 邊界 + 5 open questions + 16 行對照表）；S-1 row 標完成（2026-04-25）；S-3 ～ S-9 維持 skeleton；共用區段不收尾。 |
 | 2026-04-25 | TODO 第 3 勾選（跨租戶協作） | S-3 章節展開（9 子節 + 6-persona host/guest 雙視角 Acme/Cobalt + Joint Firmware 9 步 onboarding + resolve_role 三維合成偽碼 + audit 雙鏈寫入對照表 + cross-tenant secret 隔離 6 場景 + schema 增量 2 表 2 欄 + 9 邊界 + 5 open questions + 16 行對照表）；S-2 row 標完成（2026-04-25）；S-4 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 4 勾選（多產品線） | S-4 章節展開（10 子節 + 6-persona Acme 三線（IPCam Pam / Doorbell Doris / Intercom Ian + Alice/Bob/Carol 對照組）+ LLM 雙層預算階層偽碼 + git resolver 階層偽碼 + on-call routing 階層偽碼 + SOP/skill_pack 共享範圍 + schema 增量 3 表 5 欄 + Acme 1→3 線 7 步演進時間軸 + 9 邊界 + 5 open questions + 16 行對照表）；S-3 row 標完成（2026-04-25）；S-5 ～ S-9 維持 skeleton；共用區段仍 stub。|
+| 2026-04-25 | TODO 第 5 勾選（多專案同產品線） | S-5 章節展開（10 子節 + 6-persona Doorbell 三 project（V1 客戶 A 量產 Quinn / V2 客戶 B POC Rita / V3 內部 R&D Sam + Doris/Carol/Bob 對照組）+ 三層 LLM 預算階層偽碼（tenant ceiling × line budget × project cap）+ customer attribution 模型（customer_accounts 表 + is_internal 互斥 CHECK）+ SOP/skill_pack 三層繼承解析 + inheritance vs clone 雙 mode + lifecycle 狀態機 6 stage 嚴格白名單轉移 + schema 增量 3 表 4 欄（customer_accounts + project_lifecycle_history + sop_overrides + projects 4 欄）+ Doorbell 1→3 project 7 步演進時間軸 + 11 邊界 + 5 open questions + 17 行對照表）；S-4 row 標完成（2026-04-25）；S-6 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | 完整 S-2 章節（10 子節 + Bridge MSP × Acme/Blossom/Cobalt 5-persona 矩陣 + tenant switcher UX 4 步流程 + middleware 升級偽碼 + RBAC `resolve_role(user, tenant, project)` 二維解析 + audit cross-contamination 4 條 invariant + Y1 新增欄位（`is_super_admin` / `last_active_tenant_id` / `sessions.active_tenant_id` / `impersonation_*` / `is_primary` partial unique index）+ Maya 7 步 onboarding 時間軸 + 8 邊界場景 + 5 open questions + 16 行對照表盤點 Y2/Y3/Y8 缺口）；S-3 ～ S-9 仍留 skeleton；共用區段不動。 |
