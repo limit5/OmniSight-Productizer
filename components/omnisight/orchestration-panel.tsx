@@ -293,15 +293,17 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
         )}
       </div>
 
-      {/* R22.1 (2026-04-25 follow-up): three stacked bars — wider
-          value column (4rem) so "100.0%" never clips on narrow
-          panels, taller bars (h-3 vs h-2) with a vertical gradient
-          fill for depth, brighter inset highlight + outer glow on
-          non-zero bars, bolder percentage numbers with a matching
-          glow so they pop instead of looking washed-out. Column
-          template uses min/auto sizing as a defence-in-depth against
-          future label-length changes — the value column is now
-          shrink-0 via flex shrink:0 inside the grid cell. */}
+      {/* R22.2 (2026-04-25 follow-up): switch from fixed-track grid
+          to flex layout. The earlier `grid-cols-[7rem_1fr_4rem]`
+          set a hard minimum of ~12rem; on narrow viewports + 2-col
+          parent grid the row's content overflowed into the LOCKS
+          cell. Flex with explicit `shrink-0` on the value, `flex-1
+          min-w-0` on the bar, and `min-w-0 + truncate` on the label
+          gives a deterministic squeeze order under tight space:
+          first the bar shrinks (it's the visual filler, not the
+          critical info), then the label truncates. The percentage
+          number is the most important data on the row, so it never
+          shrinks. */}
       <div className="space-y-2">
         {rows.map((row) => {
           const pct = Math.max(0, Math.min(1, row.rate))
@@ -310,17 +312,17 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
           return (
             <div
               key={row.label}
-              className="grid grid-cols-[7rem_1fr_4rem] items-center gap-2"
+              className="flex items-center gap-2 min-w-0"
               data-testid={`merger-row-${row.label.toLowerCase().replace(/\s+/g, "-")}`}
             >
               <span
-                className="font-mono text-[9.5px] tracking-[0.12em] text-[var(--muted-foreground,#94a3b8)] truncate"
+                className="font-mono text-[9.5px] tracking-[0.12em] text-[var(--muted-foreground,#94a3b8)] truncate basis-24 shrink min-w-0"
                 title={row.label}
               >
                 {row.label}
               </span>
               <div
-                className="relative h-3 rounded-full overflow-hidden border border-[var(--neural-border,rgba(148,163,184,0.25))]"
+                className="relative h-3 rounded-full overflow-hidden border border-[var(--neural-border,rgba(148,163,184,0.25))] flex-1 min-w-0"
                 style={{
                   background: `color-mix(in srgb, ${row.track} 6%, transparent)`,
                   boxShadow: "inset 0 1px 2px rgba(0,0,0,0.4)",
@@ -354,7 +356,7 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
                 </div>
               </div>
               <span
-                className="font-mono text-[12px] font-bold tabular-nums text-right shrink-0 leading-none"
+                className="font-mono text-[12px] font-bold tabular-nums text-right shrink-0 leading-none whitespace-nowrap"
                 style={{
                   color: row.color,
                   textShadow: isActive
@@ -484,8 +486,16 @@ const TONE_CLASS: Record<Tone, string> = {
 function BlockShell({
   icon: Icon, title, children,
 }: { icon: typeof Activity; title: string; children: React.ReactNode }) {
+  // R22.2 (2026-04-25): ``min-w-0`` is critical here. Parent dashboard
+  // grid is ``grid-cols-1 md:grid-cols-2`` (each child is ``1fr``),
+  // and CSS Grid items default to ``min-width: auto`` — i.e. they
+  // refuse to shrink below their min-content. Without ``min-w-0``,
+  // any block whose content has a wide intrinsic min-width (the
+  // MERGER bars: label + bar + percent) overflowed into the
+  // neighbouring column (LOCKS). Adding ``min-w-0`` lets the cell
+  // shrink and the inner flex layout decide who absorbs the squeeze.
   return (
-    <div className="flex flex-col gap-1.5 p-2 rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.25))] bg-white/[0.02]">
+    <div className="flex flex-col gap-1.5 p-2 rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.25))] bg-white/[0.02] min-w-0">
       <div className="flex items-center gap-1 font-mono text-[10px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)]">
         <Icon className="w-3 h-3" aria-hidden />
         {title}
