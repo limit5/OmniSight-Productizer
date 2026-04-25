@@ -399,31 +399,118 @@ function LocksBlock({ snap }: { snap: OrchestrationSnapshot }) {
   // Use the snapshot moment as the reference instant — pure within
   // render and refreshes naturally on every poll.
   const now = snap.checked_at
+  const isActive = l.total_tasks > 0
+
+  // R23 (2026-04-25): meta-stats so the populated case has a meta
+  // header (OLDEST / WIDEST) above the task list, matching MERGER's
+  // visual weight and giving operators an at-a-glance "is anything
+  // stuck?" answer without reading the per-task rows.
+  const oldestTask = useMemo(() => {
+    let best: (typeof tasks)[number] | null = null
+    for (const t of tasks) {
+      if (!best || t.oldest_acquired_at < best.oldest_acquired_at) best = t
+    }
+    return best
+  }, [tasks])
+  const oldestAge = oldestTask
+    ? Math.max(0, now - oldestTask.oldest_acquired_at)
+    : 0
+  const widestTask = useMemo(() => {
+    let best: (typeof tasks)[number] | null = null
+    for (const t of tasks) {
+      if (!best || t.paths.length > best.paths.length) best = t
+    }
+    return best
+  }, [tasks])
+
+  // Tone for OLDEST: green when fresh (< 1 min), info when normal,
+  // warn when stuck for > 5 min.
+  const oldestToneClass =
+    oldestAge >= 300
+      ? TONE_CLASS.warn
+      : oldestAge >= 60
+        ? TONE_CLASS.info
+        : TONE_CLASS.ok
+
   return (
     <BlockShell icon={Lock} title="LOCKS">
       <div className="grid grid-cols-2 gap-1.5">
-        <Kpi label="TASKS" value={String(l.total_tasks)} tone={l.total_tasks > 0 ? "info" : "ok"} />
-        <Kpi label="PATHS" value={String(l.total_paths)} tone={l.total_paths > 50 ? "warn" : "info"} />
+        <Kpi
+          label="TASKS"
+          value={String(l.total_tasks)}
+          tone={isActive ? "info" : "ok"}
+        />
+        <Kpi
+          label="PATHS"
+          value={String(l.total_paths)}
+          tone={l.total_paths > 50 ? "warn" : isActive ? "info" : "ok"}
+        />
       </div>
-      {tasks.length > 0 && (
-        <ul className="mt-2 max-h-24 overflow-y-auto font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] space-y-0.5">
-          {tasks.slice(0, 5).map((t) => {
-            const ageS = Math.max(0, now - t.oldest_acquired_at)
-            return (
-              <li key={t.task_id} className="flex items-center justify-between gap-2">
-                <span className="truncate" title={t.paths.join("\n")}>
-                  {t.task_id}
-                </span>
-                <span className="text-[var(--foreground,#e2e8f0)] tabular-nums">
-                  {t.paths.length}p · {fmtAge(ageS)}
-                </span>
-              </li>
-            )
-          })}
-          {tasks.length > 5 && (
-            <li className="opacity-70">+{tasks.length - 5} more…</li>
-          )}
-        </ul>
+
+      {!isActive ? (
+        // R23: ALL CLEAR empty state. Previously the panel just sat
+        // showing two "0" tiles next to a much taller MERGER block,
+        // which made it look broken / unfinished. The green-tinted
+        // status row + helper line balance the vertical weight and
+        // make the "nothing is wrong" state read as intentional.
+        <div
+          className="mt-2 flex flex-col gap-1 p-2 rounded-sm border border-[var(--validation-emerald,#10b981)]/25 bg-[var(--validation-emerald,#10b981)]/[0.05]"
+          data-testid="locks-all-clear"
+        >
+          <div className="flex items-center gap-1.5 font-mono text-[10px] tracking-[0.18em] text-[var(--validation-emerald,#10b981)] font-semibold">
+            <CheckCircle2 size={11} aria-hidden />
+            ALL CLEAR
+          </div>
+          <div className="font-mono text-[9px] text-[var(--muted-foreground,#94a3b8)] leading-snug">
+            No path contention right now — every workspace is free to
+            acquire any file path. Bars populate the moment two tasks
+            try to write the same path.
+          </div>
+        </div>
+      ) : (
+        // R23: populated state — meta header above the task list so
+        // the operator sees the headline ("oldest 4m ago, widest holds
+        // 12 paths") without scanning every row.
+        <>
+          <div className="mt-2 grid grid-cols-2 gap-1.5 font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)]">
+            <div className="flex items-center justify-between gap-1 px-1.5 py-0.5 rounded-sm bg-white/[0.03]">
+              <span className="tracking-wider">OLDEST</span>
+              <span className={`tabular-nums font-semibold ${oldestToneClass}`}>
+                {oldestTask ? fmtAge(oldestAge) : "—"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-1 px-1.5 py-0.5 rounded-sm bg-white/[0.03]">
+              <span className="tracking-wider">WIDEST</span>
+              <span className="tabular-nums font-semibold text-[var(--foreground,#e2e8f0)]">
+                {widestTask ? `${widestTask.paths.length}p` : "—"}
+              </span>
+            </div>
+          </div>
+          <ul className="mt-1.5 max-h-24 overflow-y-auto font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] space-y-0.5 pr-0.5">
+            {tasks.slice(0, 5).map((t) => {
+              const ageS = Math.max(0, now - t.oldest_acquired_at)
+              return (
+                <li
+                  key={t.task_id}
+                  className="flex items-center justify-between gap-2 min-w-0"
+                >
+                  <span
+                    className="truncate min-w-0"
+                    title={t.paths.join("\n")}
+                  >
+                    {t.task_id}
+                  </span>
+                  <span className="text-[var(--foreground,#e2e8f0)] tabular-nums shrink-0 whitespace-nowrap">
+                    {t.paths.length}p · {fmtAge(ageS)}
+                  </span>
+                </li>
+              )
+            })}
+            {tasks.length > 5 && (
+              <li className="opacity-70">+{tasks.length - 5} more…</li>
+            )}
+          </ul>
+        </>
       )}
     </BlockShell>
   )
