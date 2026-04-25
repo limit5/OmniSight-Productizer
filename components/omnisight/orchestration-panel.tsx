@@ -204,34 +204,153 @@ function WorkerBlock({ snap }: { snap: OrchestrationSnapshot }) {
   )
 }
 
+// R22 (2026-04-25): MERGER block redesigned from a cramped 3-col KPI
+// tile grid (`+2 / ABSTAIN / SEC REF` with percentage values) into
+// stacked horizontal bars. The old layout had three issues:
+//   1. Labels were inconsistent length (+2 / ABSTAIN / SEC REF) and
+//      cryptic ("SEC REF" took two glances to parse).
+//   2. All three values rendered as percentages, so the eye couldn't
+//      separate them visually — three identical-looking tiles.
+//   3. Sibling blocks (QUEUE / WORKERS) use Kpi tiles for raw counts,
+//      where the tile grid pattern works. Merger data is rate-shaped
+//      (each value is a fraction of total_votes), which is what
+//      stacked bars are designed for — proportion + comparison at a
+//      glance.
 function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
   const m = snap.merger
   const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`
   // High +2 rate without much abstain MAY indicate LLM over-confidence;
   // ops uses this with the alert rule, but we also nudge here.
   const overconfident = m.total_votes >= 10 && m.plus_two_rate > 0.85
+  const totalVotes = Math.round(m.total_votes)
+
+  // Per-row colour comes from semantic meaning, not a generic Tone:
+  //   - +2 APPROVAL      → emerald (good outcome) / warn-orange when
+  //                        over-confident (too-easy approvals)
+  //   - ABSTAIN          → muted (neutral) / warn-orange when > 50%
+  //                        (merger is confused too often)
+  //   - SECURITY REFUSAL → red whenever > 0 (notable signal of
+  //                        risky-change attempts) / muted at 0
+  const rows: Array<{
+    label: string
+    rate: number
+    color: string
+    track: string
+  }> = [
+    {
+      label: "+2 APPROVAL",
+      rate: m.plus_two_rate,
+      color: overconfident
+        ? "var(--fui-orange,#f59e0b)"
+        : "var(--validation-emerald,#10b981)",
+      track: overconfident
+        ? "var(--fui-orange,#f59e0b)"
+        : "var(--validation-emerald,#10b981)",
+    },
+    {
+      label: "ABSTAIN",
+      rate: m.abstain_rate,
+      color: m.abstain_rate > 0.5
+        ? "var(--fui-orange,#f59e0b)"
+        : "var(--muted-foreground,#94a3b8)",
+      track: m.abstain_rate > 0.5
+        ? "var(--fui-orange,#f59e0b)"
+        : "var(--muted-foreground,#94a3b8)",
+    },
+    {
+      label: "SECURITY REFUSAL",
+      rate: m.security_refusal_rate,
+      color: m.security_refusal_rate > 0
+        ? "var(--critical-red,#ef4444)"
+        : "var(--muted-foreground,#94a3b8)",
+      track: m.security_refusal_rate > 0
+        ? "var(--critical-red,#ef4444)"
+        : "var(--muted-foreground,#94a3b8)",
+    },
+  ]
+
   return (
     <BlockShell icon={GitMerge} title="MERGER">
-      <div className="grid grid-cols-3 gap-1.5">
-        <Kpi label="+2"
-             value={fmtPct(m.plus_two_rate)}
-             tone={overconfident ? "warn" : m.plus_two_rate > 0 ? "ok" : "info"} />
-        <Kpi label="ABSTAIN"
-             value={fmtPct(m.abstain_rate)}
-             tone={m.abstain_rate > 0.5 ? "warn" : "info"} />
-        <Kpi label="SEC REF"
-             value={fmtPct(m.security_refusal_rate)}
-             tone={m.security_refusal_rate > 0 ? "warn" : "ok"} />
-      </div>
-      <div className="mt-2 font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] flex items-center gap-3">
-        <span>TOTAL: <span className="text-[var(--foreground,#e2e8f0)]">{Math.round(m.total_votes)}</span></span>
+      {/* Headline row: total votes is the denominator everything else
+          is a fraction of, so it leads the block. Right-aligned warn
+          chip when over-confidence threshold is hit so operators see
+          the alarm next to the data that triggered it. */}
+      <div className="flex items-center justify-between font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] mb-2">
+        <span>
+          TOTAL VOTES:{" "}
+          <span className="text-[var(--foreground,#e2e8f0)] tabular-nums font-semibold">
+            {totalVotes}
+          </span>
+        </span>
         {overconfident && (
-          <span className="text-[var(--fui-orange,#f59e0b)] flex items-center gap-1">
+          <span
+            className="text-[var(--fui-orange,#f59e0b)] flex items-center gap-1 shrink-0"
+            title="+2 rate above 85% with ≥10 votes — possible LLM over-confidence"
+          >
             <AlertTriangle size={10} aria-hidden />
             +2 RATE HIGH
           </span>
         )}
       </div>
+
+      {/* Three stacked bars. Grid: label / track / value. Track is
+          a thin pill background with a coloured fill scaled by rate;
+          the value is right-aligned tabular-nums so 0.0% / 100.0%
+          line up cleanly. Bars use ``Math.max(2, pct)`` for non-zero
+          rates so a tiny 0.5% sliver is still visually visible. */}
+      <div className="space-y-1.5">
+        {rows.map((row) => {
+          const pct = Math.max(0, Math.min(1, row.rate))
+          const widthPct = pct === 0 ? 0 : Math.max(2, pct * 100)
+          return (
+            <div
+              key={row.label}
+              className="grid grid-cols-[7.5rem_1fr_3rem] items-center gap-2"
+              data-testid={`merger-row-${row.label.toLowerCase().replace(/\s+/g, "-")}`}
+            >
+              <span
+                className="font-mono text-[9.5px] tracking-[0.12em] text-[var(--muted-foreground,#94a3b8)] truncate"
+                title={row.label}
+              >
+                {row.label}
+              </span>
+              <div
+                className="relative h-2 rounded-full overflow-hidden border border-[var(--neural-border,rgba(148,163,184,0.2))]"
+                style={{
+                  background: `color-mix(in srgb, ${row.track} 8%, transparent)`,
+                }}
+              >
+                <div
+                  className="h-full rounded-full transition-[width] duration-300"
+                  style={{
+                    width: `${widthPct}%`,
+                    background: row.color,
+                    boxShadow:
+                      pct > 0
+                        ? `0 0 6px color-mix(in srgb, ${row.color} 50%, transparent)`
+                        : undefined,
+                  }}
+                />
+              </div>
+              <span
+                className="font-mono text-[10px] tabular-nums text-right"
+                style={{ color: row.color }}
+              >
+                {fmtPct(row.rate)}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Empty-state nudge when there have been zero votes — keeps
+          three blank bars from looking like a bug. */}
+      {totalVotes === 0 && (
+        <div className="mt-2 font-mono text-[9px] text-[var(--muted-foreground,#94a3b8)] italic">
+          No merger votes recorded yet — bars populate after the first
+          conflict-resolution patchset.
+        </div>
+      )}
     </BlockShell>
   )
 }
