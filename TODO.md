@@ -2700,7 +2700,7 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
   - [x] 左 sidebar：project tree + language/framework selector + build target selector
   - [x] 中 pane：terminal output viewer（agent bash tool output 即時 stream：build log / test output / deploy log）+ OpenAPI/Swagger interactive docs viewer
   - [x] 右 pane：code viewer + workspace chat
-- [ ] Multi-platform release dashboard：各平台 build 狀態 grid（Docker ✅ / Helm ✅ / .deb ⏳ / .msi ❌ / .dmg ✅）+ 每個 artifact 的 download link
+- [x] Multi-platform release dashboard：各平台 build 狀態 grid（Docker ✅ / Helm ✅ / .deb ⏳ / .msi ❌ / .dmg ✅）+ 每個 artifact 的 download link  <!-- V8 #2 — components/omnisight/software-release-dashboard.tsx + test/components/software-release-dashboard.test.tsx 58 tests green; SSE namespace `software_workspace.release.*` 8 events. -->
 - [ ] Test coverage viewer：coverage report 渲染（per-file coverage bar + uncovered line highlight）
 - 預估：**4 day**
 
