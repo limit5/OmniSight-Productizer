@@ -2136,6 +2136,282 @@ MCP_TOOLS = [android_skill_search]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  13. Image generation tool (V9 #325 row 2708)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Cap on how long a single image-gen API call may take. Image APIs are
+# synchronous from the caller's perspective; 120s matches SIMULATION_TIMEOUT.
+IMAGE_GEN_TIMEOUT = int(os.environ.get("OMNISIGHT_IMAGE_GEN_TIMEOUT", "120"))
+
+# Allowed size strings — narrow regex prevents weird inputs that the
+# OpenAI API would reject anyway, and gives a clean error message.
+_IMAGE_SIZE_RE = re.compile(r"^[1-9]\d{1,4}x[1-9]\d{1,4}$")
+_IMAGE_EXT_OK = (".png", ".jpg", ".jpeg", ".webp")
+
+
+@tool
+async def image_generate(
+    prompt: str,
+    output_path: str = "",
+    size: str = "1024x1024",
+    provider: str = "openai",
+    model: str = "",
+    register_artifact: bool = True,
+    task_id: str = "",
+) -> str:
+    """Generate an image from a text prompt and save it into the workspace.
+
+    Calls OpenAI's Images API (default: ``gpt-image-1``). The returned
+    bytes are written to ``output_path`` inside the active workspace and
+    — when ``register_artifact=True`` — also copied to the artifact store
+    so the workspace preview pane can render it via the existing
+    ``GET /artifacts/{id}/download`` route.
+
+    The agent should call this in coding flows that need an icon, banner,
+    placeholder hero image, etc. Prefer concrete, art-direction-style
+    prompts ("flat icon, single-color rocket, transparent bg, 256px") —
+    they survive the round-trip far better than vague ones.
+
+    Args:
+        prompt: Description of the image to generate.
+        output_path: Workspace-relative path. Defaults to
+            ``public/generated/<sha8>.png`` so Vite/Next dev servers
+            pick it up via the public/ static-asset convention.
+        size: Image dimensions, e.g. ``1024x1024`` (default), ``1024x1536``,
+              ``1536x1024``, ``512x512``.
+        provider: ``"openai"`` (default). ``"anthropic"`` returns an
+            explicit error — Anthropic does not currently expose a hosted
+            image-generation endpoint (only image *input* / vision).
+        model: Override model id. Default: ``gpt-image-1`` for openai.
+        register_artifact: If True (default), also register as a
+            downloadable artifact (``image`` type) so the preview pane
+            can ``<img src="/artifacts/<id>/download" />`` it.
+        task_id: Optional task id for artifact attribution.
+    """
+    import base64 as _base64
+    import hashlib as _hashlib
+    import uuid as _uuid
+    import json as _json
+    from datetime import datetime as _dt
+
+    provider = (provider or "openai").strip().lower()
+    if provider not in {"openai", "anthropic"}:
+        return (
+            f"[ERROR] image_generate: unknown provider {provider!r}. "
+            f"Use 'openai' or 'anthropic'."
+        )
+    if provider == "anthropic":
+        return (
+            "[ERROR] image_generate: Anthropic does not expose a hosted "
+            "image-generation API (only vision input). Re-call with "
+            "provider='openai' (default)."
+        )
+
+    if os.environ.get("OMNISIGHT_IMAGE_GEN_DISABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        return "[BLOCKED] image_generate is disabled (OMNISIGHT_IMAGE_GEN_DISABLED is set)."
+
+    if not prompt or not prompt.strip():
+        return "[ERROR] image_generate: prompt is required."
+    if len(prompt) > 4000:
+        return "[ERROR] image_generate: prompt must be ≤ 4000 chars."
+
+    if not _IMAGE_SIZE_RE.match(size):
+        return f"[ERROR] image_generate: invalid size {size!r}. Use e.g. '1024x1024'."
+
+    model = (model or "").strip() or "gpt-image-1"
+
+    prompt_hash = _hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
+    if not output_path:
+        output_path = f"public/generated/{prompt_hash}.png"
+    elif not output_path.lower().endswith(_IMAGE_EXT_OK):
+        output_path = output_path.rstrip("/") + f"/{prompt_hash}.png"
+
+    try:
+        target = _safe_path(output_path)
+    except PermissionError as exc:
+        return f"[BLOCKED] {exc}"
+
+    # CODEOWNERS check (best-effort, like write_file).
+    agent_id = get_active_agent_id()
+    if agent_id:
+        try:
+            from backend.codeowners import check_file_permission
+            from backend.routers.agents import _agents
+            agent = _agents.get(agent_id)
+            if agent:
+                allowed, reason = check_file_permission(
+                    output_path, agent.type.value, agent.sub_type,
+                )
+                if not allowed:
+                    return f"[BLOCKED] {reason}"
+        except Exception:
+            pass
+
+    # Resolve the OpenAI API key via the standard credential chain.
+    try:
+        from backend.llm_credential_resolver import (
+            get_llm_credential,
+            LLMCredentialMissingError,
+        )
+        cred = await get_llm_credential("openai")
+    except Exception as exc:  # LLMCredentialMissingError or import/resolve issue
+        cls = type(exc).__name__
+        return f"[ERROR] image_generate: failed to resolve OpenAI credential ({cls}): {exc}"
+    if not cred.api_key:
+        return "[ERROR] image_generate: OpenAI API key is empty."
+
+    # Lazy import keeps the openai SDK out of the import-time graph and
+    # lets tests monkey-patch `sys.modules['openai']` cleanly.
+    try:
+        from openai import AsyncOpenAI  # type: ignore
+    except ImportError:
+        return "[ERROR] image_generate: 'openai' SDK not installed in this image."
+
+    client = AsyncOpenAI(api_key=cred.api_key)
+
+    try:
+        resp = await asyncio.wait_for(
+            client.images.generate(
+                model=model,
+                prompt=prompt,
+                size=size,
+                n=1,
+            ),
+            timeout=IMAGE_GEN_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return f"[TIMEOUT] image_generate: OpenAI image API call exceeded {IMAGE_GEN_TIMEOUT}s."
+    except Exception as exc:
+        # Don't leak the API key — `cred.api_key` is only in the local client.
+        return f"[ERROR] image_generate: OpenAI call failed: {type(exc).__name__}: {exc}"
+
+    data = getattr(resp, "data", None) or []
+    if not data:
+        return "[ERROR] image_generate: empty response from OpenAI."
+    first = data[0]
+    b64 = getattr(first, "b64_json", None)
+    if b64 is None and isinstance(first, dict):
+        b64 = first.get("b64_json")
+    url = getattr(first, "url", None)
+    if url is None and isinstance(first, dict):
+        url = first.get("url")
+
+    image_bytes: bytes | None = None
+    if b64:
+        try:
+            image_bytes = _base64.b64decode(b64)
+        except Exception as exc:
+            return f"[ERROR] image_generate: failed to decode b64 data: {exc}"
+    elif url:
+        if not isinstance(url, str) or not url.startswith("https://"):
+            return "[ERROR] image_generate: refusing non-HTTPS URL from provider."
+        try:
+            import urllib.request as _urlreq
+            loop = asyncio.get_event_loop()
+            image_bytes = await loop.run_in_executor(
+                None,
+                lambda: _urlreq.urlopen(url, timeout=30).read(),  # noqa: S310 (https-only above)
+            )
+        except Exception as exc:
+            return f"[ERROR] image_generate: failed to download URL: {type(exc).__name__}: {exc}"
+    if not image_bytes:
+        return "[ERROR] image_generate: no image data in response."
+    if len(image_bytes) > 25 * 1024 * 1024:  # 25 MB sanity ceiling
+        return f"[ERROR] image_generate: returned image is too large ({len(image_bytes)} bytes)."
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(image_bytes)
+    size_bytes = len(image_bytes)
+
+    # Best-effort artifact registration so the preview pane can fetch
+    # the image via /artifacts/<id>/download. Failures here are
+    # non-fatal — the file already lives in the workspace.
+    artifact_id = ""
+    artifact_url = ""
+    if register_artifact:
+        try:
+            import shutil as _shutil
+            from backend import db as _db
+            from backend.routers.artifacts import get_artifacts_root
+            from backend.db_pool import get_pool
+
+            artifacts_root = get_artifacts_root()
+            task_dir = artifacts_root / (task_id or "general")
+            task_dir.mkdir(parents=True, exist_ok=True)
+            dest = task_dir / target.name
+            if dest.exists():
+                dest = task_dir / f"{dest.stem}_{_uuid.uuid4().hex[:4]}{dest.suffix}"
+            _shutil.copy2(target, dest)
+            checksum = _hashlib.sha256(image_bytes).hexdigest()
+            artifact_id = f"art-{_uuid.uuid4().hex[:12]}"
+            artifact_data = {
+                "id": artifact_id,
+                "task_id": task_id,
+                "agent_id": agent_id or "",
+                "name": target.name,
+                "type": "image",
+                "file_path": str(dest),
+                "size": size_bytes,
+                "created_at": _dt.now().isoformat(),
+                "version": "",
+                "checksum": checksum,
+            }
+            try:
+                async with get_pool().acquire() as _conn:
+                    await _db.insert_artifact(_conn, artifact_data)
+                artifact_url = f"/artifacts/{artifact_id}/download"
+            except Exception as db_exc:
+                logger.info(
+                    "image_generate: artifact DB registration skipped (%s) — "
+                    "file still saved at %s",
+                    type(db_exc).__name__, output_path,
+                )
+                try:
+                    dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                artifact_id = ""
+        except Exception as exc:
+            logger.info(
+                "image_generate: artifact registration failed (%s) — non-fatal",
+                type(exc).__name__,
+            )
+            artifact_id = ""
+
+    # SSE — let the preview pane subscribe to `image_generated` and
+    # render the new asset without polling the artifact list.
+    try:
+        from backend.events import bus
+        bus.publish("image_generated", {
+            "agent_id": agent_id or "",
+            "task_id": task_id,
+            "prompt": prompt[:200],
+            "path": output_path,
+            "size_bytes": size_bytes,
+            "artifact_id": artifact_id,
+            "artifact_url": artifact_url,
+            "model": model,
+            "provider": "openai",
+            "image_size": size,
+        })
+    except Exception:
+        pass
+
+    lines = [
+        f"[OK] image_generate: saved {size_bytes} bytes to {output_path}",
+        f"  Provider: openai · Model: {model} · Size: {size}",
+    ]
+    if artifact_id:
+        lines.append(f"  Artifact: {artifact_id} (preview: {artifact_url})")
+    return "\n".join(lines)
+
+
+IMAGE_TOOLS = [image_generate]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Tool registry
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2151,16 +2427,16 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
     "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
-    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS,
+    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS,
     "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
     "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
     "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment] + MEMORY_TOOLS,
-    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS,
-    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS,
+    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS,
+    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS,
     "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
     "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
     "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
