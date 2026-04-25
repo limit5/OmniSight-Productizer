@@ -814,3 +814,277 @@ async def list_invites(
             "invites": invites,
         },
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y3 (#279) row 3 — DELETE /api/v1/tenants/{tid}/invites/{id}
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Revoke a previously-issued invite. The admin clicks "revoke" in the
+# console; the row is flipped from ``status='pending'`` to
+# ``status='revoked'`` and the embedded one-time token is rendered
+# inert (the acceptance route refuses to consume non-pending rows).
+#
+# Status transitions accepted by this endpoint
+# ──────────────────────────────────────────────
+#   pending  → revoked   ← happy path, atomic UPDATE … RETURNING
+#   revoked  → revoked   ← idempotent no-op (admin double-click /
+#                           operator retry); 200 with ``already_revoked
+#                           =True`` discriminator so a UI can suppress
+#                           a "revoked!" toast on the second click.
+#   accepted → (refuse)  ← 409: the invite already became a membership
+#                           row; revoking the invite row would not
+#                           remove the membership. The admin must
+#                           instead take the membership-management
+#                           path (Y3 row 6 PATCH/DELETE membership) to
+#                           rescind access.
+#   expired  → (refuse)  ← 409: distinct terminal state. The admin
+#                           should see "this invite already expired"
+#                           rather than silently turning it into
+#                           "revoked", because the difference matters
+#                           in the audit trail.
+#
+# Defence-in-depth note: a row whose persisted ``status='pending'``
+# but whose wall-clock has passed ``expires_at`` is *functionally*
+# expired (the housekeeping sweep has not yet run). On the
+# ``pending`` revoke path we accept this — flipping a stale-pending
+# to ``revoked`` is harmless and is what the admin asked for; the
+# alternative (refusing with "this is already expired, sweep just
+# hasn't caught up") would be confusing UX.
+#
+# Atomic check-and-flip
+# ─────────────────────
+# We use ``UPDATE … WHERE id = $1 AND tenant_id = $2 AND status =
+# 'pending' RETURNING id, status`` to avoid a SELECT-then-UPDATE
+# TOCTOU. A concurrent ``POST /accept`` (Y3 row 4) will lose the
+# race deterministically: PG row-locks the row on UPDATE, the second
+# transaction sees the new status on its retry / reread. We DO need a
+# second SELECT *only* to disambiguate "row not found" from "row
+# found but not pending" — both produce 0 rows on the UPDATE
+# RETURNING — but we issue it AFTER the UPDATE missed, so the common
+# happy path is one round-trip.
+#
+# Module-global state audit (SOP Step 1)
+# ──────────────────────────────────────
+# Two new module-level SQL constants (``_REVOKE_INVITE_SQL`` +
+# ``_FETCH_INVITE_FOR_REVOKE_SQL``). Both immutable; every uvicorn
+# worker derives the same value from the same source — qualifying
+# answer #1. DB state shared via PG (qualifying answer #2). No new
+# in-memory cache.
+#
+# Read-after-write timing audit (SOP Step 1)
+# ──────────────────────────────────────────
+# Single-statement UPDATE … RETURNING serialised by PG row-lock; the
+# follow-up SELECT (only on UPDATE-miss) is a read-committed lookup
+# that may see the just-committed row from a concurrent accept /
+# revoke, which is the standard PG behaviour and not a regression.
+# Idempotent revoke is intentional — repeating the call from the
+# same admin produces the same terminal state.
+
+# Invite id pattern — same convention as the POST handler's
+# ``inv-<hex>`` shape. Validated at the route layer so a malformed
+# id returns 422 cleanly rather than leaking into FK probes / SQL
+# strings.
+INVITE_ID_PATTERN = r"^inv-[a-z0-9]{4,64}$"
+_INVITE_ID_RE = re.compile(INVITE_ID_PATTERN)
+
+
+def _is_valid_invite_id(iid: str) -> bool:
+    return bool(iid) and bool(_INVITE_ID_RE.match(iid))
+
+
+# Atomic check-and-flip: only ``pending`` rows scoped to the named
+# tenant transition. Returns the row on success, no row on miss.
+_REVOKE_INVITE_SQL = """
+UPDATE tenant_invites
+SET status = 'revoked'
+WHERE id = $1
+  AND tenant_id = $2
+  AND status = 'pending'
+RETURNING id, email, role, status, created_at, expires_at
+"""
+
+# Disambiguate UPDATE-miss: was the row absent, or present but in a
+# non-pending state? Read-only; ``token_hash`` deliberately omitted —
+# revoke decisions never need the hash.
+_FETCH_INVITE_FOR_REVOKE_SQL = """
+SELECT id, email, role, status, created_at, expires_at
+FROM tenant_invites
+WHERE id = $1 AND tenant_id = $2
+"""
+
+
+@router.delete("/tenants/{tenant_id}/invites/{invite_id}")
+async def revoke_invite(
+    tenant_id: str,
+    invite_id: str,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Revoke a pending invite for ``tenant_id``.
+
+    Returns 200 with::
+
+        {
+            "invite_id": "inv-...",
+            "tenant_id": "t-acme",
+            "status": "revoked",
+            "already_revoked": false,   # true on idempotent re-revoke
+            "email": "alice@example.com",
+            "role": "admin",
+            "created_at": "2026-04-25 12:00:00",
+            "expires_at": "2026-05-02 12:00:00"
+        }
+
+    Errors: 403 RBAC · 404 invite/tenant unknown · 409 invite is in
+    a terminal state that cannot be revoked (accepted / expired) ·
+    422 malformed id.
+    """
+    # 1. Path-id validation. Both the tenant id and the invite id go
+    #    through their respective regex source-of-truth before any DB
+    #    work so a malformed id can't leak into FK probes / SQL strings.
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"invalid tenant id: {tenant_id!r}; "
+                               f"must match {TENANT_ID_PATTERN}"},
+        )
+    if not _is_valid_invite_id(invite_id):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"invalid invite id: {invite_id!r}; "
+                               f"must match {INVITE_ID_PATTERN}"},
+        )
+
+    # 2. RBAC — same trust boundary as POST/GET. Done before existence
+    #    so a guess-the-id scan can't enumerate which invites exist via
+    #    timing.
+    if not await _user_can_invite_into(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin or above on {tenant_id!r}; "
+                f"caller has no qualifying membership / role"
+            ),
+        )
+
+    # 3. Tenant existence probe → clean 404. Done after RBAC.
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    # 4. Atomic check-and-flip. Only pending rows scoped to the named
+    #    tenant transition. UPDATE-miss falls through to a follow-up
+    #    SELECT to disambiguate "row absent" from "row present but
+    #    non-pending".
+    async with get_pool().acquire() as conn:
+        flipped = await conn.fetchrow(
+            _REVOKE_INVITE_SQL, invite_id, tenant_id,
+        )
+
+    if flipped is not None:
+        # Happy path: pending → revoked. Audit + return 200 with the
+        # post-flip state. We log the *transition*, never the token
+        # plaintext (which is not in the row anyway — only token_hash
+        # was persisted, and revoke does not project it).
+        try:
+            from backend import audit as _audit
+            await _audit.log(
+                action="tenant_invite_revoked",
+                entity_kind="tenant_invite",
+                entity_id=invite_id,
+                before={
+                    "invite_id": invite_id,
+                    "tenant_id": tenant_id,
+                    "status": "pending",
+                },
+                after={
+                    "invite_id": invite_id,
+                    "tenant_id": tenant_id,
+                    "status": "revoked",
+                    "email": flipped["email"],
+                    "role": flipped["role"],
+                },
+                actor=actor.email,
+            )
+        except Exception as exc:  # pragma: no cover — audit.log already swallows
+            logger.warning("tenant_invite_revoked audit emit failed: %s", exc)
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "invite_id": flipped["id"],
+                "tenant_id": tenant_id,
+                "status": flipped["status"],
+                "already_revoked": False,
+                "email": flipped["email"],
+                "role": flipped["role"],
+                "created_at": flipped["created_at"],
+                "expires_at": flipped["expires_at"],
+            },
+        )
+
+    # 5. UPDATE-miss disambiguation. Either the invite never existed
+    #    on this tenant, or it exists but is in a terminal state.
+    async with get_pool().acquire() as conn:
+        existing = await conn.fetchrow(
+            _FETCH_INVITE_FOR_REVOKE_SQL, invite_id, tenant_id,
+        )
+    if existing is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"invite not found: {invite_id!r} on tenant "
+                    f"{tenant_id!r}"
+                ),
+            },
+        )
+
+    cur_status = existing["status"]
+    if cur_status == "revoked":
+        # Idempotent: the same admin double-clicked or an operator
+        # retry-loop hit us twice. Return 200 with the already_revoked
+        # discriminator so a UI can suppress a duplicate "revoked!"
+        # toast on the second click.
+        return JSONResponse(
+            status_code=200,
+            content={
+                "invite_id": existing["id"],
+                "tenant_id": tenant_id,
+                "status": "revoked",
+                "already_revoked": True,
+                "email": existing["email"],
+                "role": existing["role"],
+                "created_at": existing["created_at"],
+                "expires_at": existing["expires_at"],
+            },
+        )
+
+    # accepted / expired → 409, distinct terminal state. The detail
+    # text echoes back the actual current state so the admin sees
+    # *why* the revoke was refused.
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": (
+                f"cannot revoke invite {invite_id!r}: current status is "
+                f"{cur_status!r}, not 'pending'. "
+                + (
+                    "The invite has already been accepted; remove the "
+                    "resulting membership via the membership management "
+                    "endpoints instead."
+                    if cur_status == "accepted"
+                    else "The invite already expired; no revoke is needed."
+                )
+            ),
+            "invite_id": existing["id"],
+            "tenant_id": tenant_id,
+            "current_status": cur_status,
+        },
+    )
