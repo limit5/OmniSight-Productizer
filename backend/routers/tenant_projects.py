@@ -1,4 +1,4 @@
-"""Y4 (#280) row 1 + row 2 + row 3 — tenant-scoped project REST surface.
+"""Y4 (#280) row 1 + row 2 + row 3 + row 4 — tenant-scoped project REST surface.
 
 Row 1 — POST /api/v1/tenants/{tid}/projects: create a project under a
 tenant.  Row 2 — GET /api/v1/tenants/{tid}/projects: list projects in
@@ -7,7 +7,14 @@ admin → full; member / viewer → only projects with explicit
 ``project_members`` rows).  Row 3 — PATCH
 /api/v1/tenants/{tid}/projects/{pid}: partial update of name,
 plan_override, disk_budget_bytes, parent_id (with cycle detection
-for sub-project trees).
+for sub-project trees).  Row 4 — POST
+/api/v1/tenants/{tid}/projects/{pid}/archive + .../restore: soft-
+archive a project (workspaces / agents / crons should treat the row
+as inert while the data is retained for ``OMNISIGHT_PROJECT_GC_RETENTION_DAYS``
+days, default 90); restore lifts the archive within the retention
+window.  After the retention window the background GC helper
+``gc_archived_projects`` permanently removes the row and emits a
+billing audit event so accounting can reconcile the freed quota.
 
 A project is the unit at which budgets / quotas / sharing get bound
 (Y1 row 2 schema lives in ``alembic/versions/0033_projects.py``); a
@@ -1350,3 +1357,552 @@ async def patch_project(
     project = _row_to_project_dict(new_row)
     project["no_change"] = False
     return JSONResponse(status_code=200, content=project)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y4 (#280) row 4 — POST /api/v1/tenants/{tid}/projects/{pid}/archive
+#                  + POST /api/v1/tenants/{tid}/projects/{pid}/restore
+#                  + ``gc_archived_projects`` background helper
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Soft-archive lifecycle for a project. Three moving parts:
+#
+#   1. ``POST .../archive``  → flips ``archived_at`` from NULL to a
+#      ``YYYY-MM-DD HH:MM:SS`` UTC stamp. Idempotent — a second archive
+#      of an already-archived project returns 200 with ``no_change``
+#      and emits no audit row. The TODO row literal says "workspace /
+#      agent / cron 全部停工" — the policy decision is encoded as a
+#      single boolean column on ``projects``; downstream surfaces
+#      (workspace open, agent dispatch, cron tick) consult
+#      ``archived_at IS NULL`` independently. This handler owns the
+#      archive bit ONLY — it does not chase down the dozens of
+#      enforcement sites, those are tracked under their own TODO rows.
+#
+#   2. ``POST .../restore`` → flips ``archived_at`` back to NULL,
+#      provided the project still exists (ie. has not yet been
+#      hard-removed by the GC). Idempotent — restoring a live project
+#      returns 200 with ``no_change`` and emits no audit row. Once the
+#      GC has fired the row is gone and a restore returns 404 (no row
+#      to flip); the TODO row literal calls this out as the design
+#      ("90 days 後背景 GC 正式刪除").
+#
+#   3. ``gc_archived_projects(*, retention_days=None, conn=None)`` →
+#      background-callable helper (no FastAPI context required). Walks
+#      ``projects WHERE archived_at IS NOT NULL AND archived_at <
+#      <utc-now - retention_days>`` and DELETEs each row inside the
+#      same transaction, emitting a ``tenant_project_billing_gc``
+#      audit event per deletion. The audit event is the billing event
+#      surface — accounting reconciles freed quota by querying
+#      ``audit_log WHERE action = 'tenant_project_billing_gc'``.
+#      Returns the list of removed project rows (id + tenant_id +
+#      product_line + slug + disk_budget_bytes + archived_at) so a
+#      caller / cron can log a one-line summary.
+#
+# Retention config
+# ────────────────
+# Knob: ``OMNISIGHT_PROJECT_GC_RETENTION_DAYS`` (env var, integer, > 0).
+# Default ``90`` per the TODO row literal. Resolved per-call (not a
+# module-level constant) so an operator can edit ``.env`` and bounce
+# uvicorn without code change AND so test fixtures can override per
+# test.  An invalid value (non-integer, ≤ 0) falls back to the default
+# with a warning — best-effort knob, not a gate.
+#
+# Why audit-row-as-billing-event (not a separate billing.emit module)
+# ───────────────────────────────────────────────────────────────────
+# This codebase does not (yet) have a dedicated billing-event emit
+# surface; the existing ``audit.log`` pipeline already provides
+# tamper-evident, tenant-scoped, time-ordered, queryable records.
+# Folding the billing event into the same hash chain means accounting
+# inherits the per-tenant integrity guarantee for free, and downstream
+# (when a real billing pipeline lands) the migration is a single
+# ``audit.query(action='tenant_project_billing_gc')`` projection.
+#
+# Module-global state audit (SOP Step 1)
+# ──────────────────────────────────────
+# New module-level constants: ``_PROJECT_GC_RETENTION_DAYS_ENV``
+# (str env-var name), ``_PROJECT_GC_RETENTION_DAYS_DEFAULT`` (int),
+# ``_ARCHIVE_PROJECT_SQL`` / ``_RESTORE_PROJECT_SQL`` /
+# ``_LIST_GC_ELIGIBLE_PROJECTS_SQL`` / ``_DELETE_PROJECT_SQL`` (str).
+# All immutable; every uvicorn worker derives the same value from
+# source — qualifying answer #1. ``_resolve_archive_retention_days``
+# reads the env var per-call so a hot-edit propagates as soon as the
+# next handler / GC tick runs (no per-worker cache to invalidate).
+# DB state is shared via PG; archive / restore are single-row UPDATEs
+# guarded by ``WHERE id=$1 AND tenant_id=$2 AND archived_at <pred>``
+# so a concurrent archive + restore race resolves to one winner via
+# RETURNING None on the loser — qualifying answer #2.
+#
+# Read-after-write timing audit (SOP Step 1)
+# ──────────────────────────────────────────
+# Archive / restore are single-statement UPDATEs with a precondition
+# in WHERE. RETURNING None means "no row matched the precondition"
+# which the handler interprets as either (a) idempotent no-change
+# (already in target state) or (b) row vanished (404). Concurrent
+# archive + restore on the same project: PG row-level locks serialise
+# them; the loser's WHERE precondition (``archived_at IS NULL`` for
+# archive / ``IS NOT NULL`` for restore) no longer holds and the
+# loser sees no_change=True. No new timing-visible behaviour relative
+# to the existing PATCH endpoint.
+
+_PROJECT_GC_RETENTION_DAYS_ENV = "OMNISIGHT_PROJECT_GC_RETENTION_DAYS"
+_PROJECT_GC_RETENTION_DAYS_DEFAULT = 90
+
+
+def _resolve_archive_retention_days() -> int:
+    """Resolve ``OMNISIGHT_PROJECT_GC_RETENTION_DAYS`` to a positive
+    int, falling back to the 90-day default on any parse failure."""
+    import os
+    raw = os.environ.get(_PROJECT_GC_RETENTION_DAYS_ENV, "").strip()
+    if not raw:
+        return _PROJECT_GC_RETENTION_DAYS_DEFAULT
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not an integer; falling back to %d-day default",
+            _PROJECT_GC_RETENTION_DAYS_ENV, raw,
+            _PROJECT_GC_RETENTION_DAYS_DEFAULT,
+        )
+        return _PROJECT_GC_RETENTION_DAYS_DEFAULT
+    if n <= 0:
+        logger.warning(
+            "%s=%d must be positive; falling back to %d-day default",
+            _PROJECT_GC_RETENTION_DAYS_ENV, n,
+            _PROJECT_GC_RETENTION_DAYS_DEFAULT,
+        )
+        return _PROJECT_GC_RETENTION_DAYS_DEFAULT
+    return n
+
+
+# Archive: flip archived_at NULL → now() iff currently NULL.  The
+# ``AND archived_at IS NULL`` precondition in the WHERE means RETURNING
+# None signals "already archived" → idempotent no-change branch in
+# the handler.  ``to_char(now() at time zone 'utc', ...)`` matches the
+# format used by ``created_at`` and the ``_archive_project`` helper in
+# the existing test_tenant_projects_list.py — a single sortable text
+# format keeps the GC's text-comparison cutoff correct.
+_ARCHIVE_PROJECT_SQL = """
+UPDATE projects
+SET archived_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')
+WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL
+RETURNING id, tenant_id, product_line, name, slug,
+          parent_id, plan_override, disk_budget_bytes,
+          llm_budget_tokens, created_by, created_at, archived_at
+"""
+
+# Restore: flip archived_at non-NULL → NULL iff currently archived.
+_RESTORE_PROJECT_SQL = """
+UPDATE projects
+SET archived_at = NULL
+WHERE id = $1 AND tenant_id = $2 AND archived_at IS NOT NULL
+RETURNING id, tenant_id, product_line, name, slug,
+          parent_id, plan_override, disk_budget_bytes,
+          llm_budget_tokens, created_by, created_at, archived_at
+"""
+
+# GC: enumerate projects whose archive has aged past the retention
+# window. ``$1`` is the cutoff string in ``YYYY-MM-DD HH24:MI:SS`` UTC
+# form; archived_at is text in the same shape so a plain text
+# comparison sorts correctly.
+_LIST_GC_ELIGIBLE_PROJECTS_SQL = """
+SELECT id, tenant_id, product_line, name, slug,
+       parent_id, plan_override, disk_budget_bytes,
+       llm_budget_tokens, created_by, created_at, archived_at
+FROM projects
+WHERE archived_at IS NOT NULL
+  AND archived_at < $1
+ORDER BY archived_at ASC, id ASC
+"""
+
+# Hard delete a single project. The ON DELETE CASCADE on
+# project_members.project_id (alembic 0034) drops member grants;
+# the ON DELETE SET NULL on projects.parent_id (alembic 0033) promotes
+# any sub-projects to top-level rather than cascading them out.
+_DELETE_PROJECT_SQL = "DELETE FROM projects WHERE id = $1 AND tenant_id = $2"
+
+
+# Same role gate as POST/GET/PATCH — owner / admin tenant membership
+# or platform super_admin.
+_PROJECT_ARCHIVE_ALLOWED_MEMBERSHIP_ROLES = frozenset({"owner", "admin"})
+
+
+@router.post("/tenants/{tenant_id}/projects/{project_id}/archive")
+async def archive_project(
+    tenant_id: str,
+    project_id: str,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Soft-archive a project.
+
+    Sets ``archived_at`` to the current UTC timestamp. The row stays in
+    the table for ``OMNISIGHT_PROJECT_GC_RETENTION_DAYS`` days (default
+    90) before the background GC permanently deletes it; restore is
+    available throughout that window.
+
+    Idempotent: a second archive returns 200 with ``no_change=True``
+    and emits no audit row.
+
+    Status codes
+    ────────────
+    * 200 — archived (or no_change=True if already archived).
+    * 403 — caller is not tenant admin / owner and not super_admin.
+    * 404 — well-formed ids but no such tenant or no such project in
+            this tenant.
+    * 422 — malformed tenant_id / project_id pattern.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+
+    if not await _user_can_create_project_in(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin or above on {tenant_id!r}; "
+                f"caller has no qualifying membership / role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            # FOR UPDATE to serialise concurrent archive/restore on the
+            # same row; the precondition lives in the UPDATE WHERE so
+            # this SELECT only exists to distinguish 404 (no row) from
+            # 200 no_change (row exists but already archived).
+            cur_row = await conn.fetchrow(
+                _FETCH_PROJECT_FOR_UPDATE_SQL, project_id, tenant_id,
+            )
+            if cur_row is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "detail": (
+                            f"project not found: {project_id!r} on "
+                            f"tenant {tenant_id!r}"
+                        ),
+                    },
+                )
+
+            new_row = await conn.fetchrow(
+                _ARCHIVE_PROJECT_SQL, project_id, tenant_id,
+            )
+
+    if new_row is None:
+        # Already archived — idempotent no-change. Return current row
+        # state with no_change=True; no audit emit.
+        project = _row_to_project_dict(cur_row)
+        project["no_change"] = True
+        return JSONResponse(status_code=200, content=project)
+
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_project_archived",
+            entity_kind="project",
+            entity_id=project_id,
+            before={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "archived_at": None,
+            },
+            after={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "archived_at": new_row["archived_at"],
+                "retention_days": _resolve_archive_retention_days(),
+            },
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "tenant_project_archived audit emit failed (tenant=%s "
+            "project=%s): %s", tenant_id, project_id, exc,
+        )
+
+    project = _row_to_project_dict(new_row)
+    project["no_change"] = False
+    return JSONResponse(status_code=200, content=project)
+
+
+@router.post("/tenants/{tenant_id}/projects/{project_id}/restore")
+async def restore_project(
+    tenant_id: str,
+    project_id: str,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Restore a soft-archived project to live.
+
+    Clears ``archived_at`` back to NULL, available throughout the
+    retention window. Once the GC has hard-deleted the row, restore
+    returns 404 (no row to flip).
+
+    Idempotent: restoring a row that is already live returns 200 with
+    ``no_change=True`` and emits no audit row.
+
+    Status codes
+    ────────────
+    * 200 — restored (or no_change=True if already live).
+    * 403 — caller is not tenant admin / owner and not super_admin.
+    * 404 — well-formed ids but no such tenant or no such project in
+            this tenant (eg. already GC'd).
+    * 422 — malformed tenant_id / project_id pattern.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+
+    if not await _user_can_create_project_in(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin or above on {tenant_id!r}; "
+                f"caller has no qualifying membership / role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            cur_row = await conn.fetchrow(
+                _FETCH_PROJECT_FOR_UPDATE_SQL, project_id, tenant_id,
+            )
+            if cur_row is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "detail": (
+                            f"project not found: {project_id!r} on "
+                            f"tenant {tenant_id!r}"
+                        ),
+                    },
+                )
+
+            new_row = await conn.fetchrow(
+                _RESTORE_PROJECT_SQL, project_id, tenant_id,
+            )
+
+    if new_row is None:
+        # Already live — idempotent no-change.
+        project = _row_to_project_dict(cur_row)
+        project["no_change"] = True
+        return JSONResponse(status_code=200, content=project)
+
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_project_restored",
+            entity_kind="project",
+            entity_id=project_id,
+            before={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "archived_at": cur_row["archived_at"],
+            },
+            after={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "archived_at": None,
+            },
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "tenant_project_restored audit emit failed (tenant=%s "
+            "project=%s): %s", tenant_id, project_id, exc,
+        )
+
+    project = _row_to_project_dict(new_row)
+    project["no_change"] = False
+    return JSONResponse(status_code=200, content=project)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Background GC helper — called from cron / manual ops, NOT a route
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def gc_archived_projects(
+    *,
+    retention_days: int | None = None,
+    now_utc=None,
+) -> list[dict]:
+    """Hard-delete projects whose archive has aged past the retention
+    window. Emits a ``tenant_project_billing_gc`` audit row per
+    deletion (the audit chain doubles as the billing event surface
+    until a dedicated billing pipeline lands; see module docstring
+    for the rationale).
+
+    Parameters
+    ──────────
+    retention_days
+        Override the resolved retention window. Defaults to
+        ``_resolve_archive_retention_days()`` (env var or 90).
+    now_utc
+        Inject a ``datetime`` for tests. Defaults to
+        ``datetime.utcnow()``.
+
+    Returns
+    ───────
+    A list of dicts (``project_id`` / ``tenant_id`` / ``product_line``
+    / ``slug`` / ``disk_budget_bytes`` / ``archived_at``) for each
+    project removed. The shape doubles as the operator-facing summary
+    when a cron / ops script logs the GC tick.
+
+    Concurrency
+    ───────────
+    The enumeration + per-row delete is intentionally not held in a
+    single transaction so a long-running GC tick (thousands of rows)
+    does not pin the table. Each delete is its own UPDATE-then-audit
+    pair; the WHERE matches at most one row per tick so concurrent
+    GC ticks across workers cannot double-delete (the loser's DELETE
+    affects 0 rows and is silently dropped).
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    if retention_days is None:
+        retention_days = _resolve_archive_retention_days()
+    if not isinstance(retention_days, int) or retention_days <= 0:
+        raise ValueError(
+            f"retention_days must be a positive int; got {retention_days!r}"
+        )
+
+    if now_utc is None:
+        now_utc = _dt.utcnow()
+    cutoff = (now_utc - _td(days=retention_days)).strftime(
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        eligible_rows = await conn.fetch(
+            _LIST_GC_ELIGIBLE_PROJECTS_SQL, cutoff,
+        )
+
+    removed: list[dict] = []
+    for row in eligible_rows:
+        pid = row["id"]
+        tid = row["tenant_id"]
+        async with get_pool().acquire() as conn:
+            async with conn.transaction():
+                # DELETE returns the affected-row count via execute()
+                # status string ("DELETE N"); a concurrent GC worker
+                # may have removed the row between our list and our
+                # delete, in which case status is "DELETE 0" and we
+                # skip emitting a duplicate billing event.
+                status = await conn.execute(
+                    _DELETE_PROJECT_SQL, pid, tid,
+                )
+        # asyncpg returns the PG command tag (eg ``"DELETE 1"``).
+        try:
+            affected = int(status.split(" ")[-1])
+        except (AttributeError, ValueError):
+            affected = 0
+        if affected == 0:
+            continue
+
+        billed = {
+            "project_id": pid,
+            "tenant_id": tid,
+            "product_line": row["product_line"],
+            "slug": row["slug"],
+            "disk_budget_bytes": row["disk_budget_bytes"],
+            "archived_at": row["archived_at"],
+            "retention_days": retention_days,
+            "gc_at": _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        try:
+            from backend import audit as _audit
+            from backend.db_context import set_tenant_id, current_tenant_id
+            prev_tid = current_tenant_id()
+            try:
+                # The GC runs without a request context so the
+                # tenant_id contextvar is unset; pin it to the deleted
+                # project's tenant so the audit row lands in the right
+                # per-tenant chain.
+                set_tenant_id(tid)
+                await _audit.log(
+                    action="tenant_project_billing_gc",
+                    entity_kind="project",
+                    entity_id=pid,
+                    before={
+                        "tenant_id": tid,
+                        "project_id": pid,
+                        "archived_at": row["archived_at"],
+                    },
+                    after=billed,
+                    actor="system:gc",
+                )
+            finally:
+                set_tenant_id(prev_tid)
+        except Exception as exc:  # pragma: no cover
+            logger.warning(
+                "tenant_project_billing_gc audit emit failed "
+                "(tenant=%s project=%s): %s", tid, pid, exc,
+            )
+
+        removed.append(billed)
+
+    if removed:
+        logger.info(
+            "gc_archived_projects: removed %d project(s) past %d-day "
+            "retention (cutoff=%s)",
+            len(removed), retention_days, cutoff,
+        )
+
+    return removed
