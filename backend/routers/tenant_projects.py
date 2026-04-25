@@ -1,10 +1,15 @@
-"""Y4 (#280) row 1 — POST /api/v1/tenants/{tid}/projects.
+"""Y4 (#280) row 1 + row 2 — tenant-scoped project REST surface.
 
-Create a project under a tenant. A project is the unit at which budgets
-/ quotas / sharing get bound (Y1 row 2 schema lives in
-``alembic/versions/0033_projects.py``); a tenant typically owns several
-projects across one or more product lines (embedded / web / mobile /
-software / custom).
+Row 1 — POST /api/v1/tenants/{tid}/projects: create a project under a
+tenant.  Row 2 — GET /api/v1/tenants/{tid}/projects: list projects in
+a tenant, scoped by the caller's visibility (super_admin / tenant
+admin → full; member / viewer → only projects with explicit
+``project_members`` rows).
+
+A project is the unit at which budgets / quotas / sharing get bound
+(Y1 row 2 schema lives in ``alembic/versions/0033_projects.py``); a
+tenant typically owns several projects across one or more product
+lines (embedded / web / mobile / software / custom).
 
 Endpoint contract
 ─────────────────
@@ -100,7 +105,7 @@ import re
 import secrets
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -501,3 +506,338 @@ async def create_project(
         )
 
     return JSONResponse(status_code=201, content=project)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y4 (#280) row 2 — GET /api/v1/tenants/{tid}/projects
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# List the projects a caller may see inside one tenant. Two query
+# params (per the TODO row literal):
+#
+#   ?product_line=embedded|web|mobile|software|custom   (optional)
+#   ?archived=false|true|all                            (default false)
+#
+# Visibility rule (per the TODO row + alembic 0034 default-resolution
+# semantics):
+#
+#   • Platform ``super_admin`` → sees every project of the tenant.
+#   • Tenant membership role ∈ {owner, admin}            → sees every
+#     project of the tenant. The 0034 docstring documents that an
+#     admin/owner membership row is treated as ``contributor`` on
+#     every project of that tenant by default; "contributor on every
+#     project" implies "can list every project".
+#   • Tenant membership role ∈ {member, viewer}          → sees only
+#     projects with an explicit ``project_members`` row for them.
+#     The 0034 docstring is explicit: "member and viewer fall through
+#     to no project access by default" — the default-resolution does
+#     NOT promote them to contributor; they need an explicit per-
+#     project grant.
+#   • No active membership AND not super_admin           → 403. List
+#     does not enumerate (project ids + slugs would otherwise leak
+#     the tenant's product portfolio to a non-member).
+#
+# Auth wording note: a *suspended* membership row is treated as no
+# membership for visibility — the same way Y3 row 6 PATCH/DELETE
+# membership treats it.
+#
+# SQL design — single template, three archived branches
+# ──────────────────────────────────────────────────────
+# Visibility is collapsed to a boolean ``$caller_has_full_visibility``
+# that the handler computes once before issuing the query. The SQL
+# then uses ``$2::bool OR EXISTS (SELECT 1 FROM project_members ...)``
+# to short-circuit the per-row membership probe for full-visibility
+# callers, leaving a single planner-friendly EXISTS for the explicit-
+# only branch. Three SQL constants (live / archived / all) cover the
+# archived predicate, since ``archived_at IS NULL`` vs ``IS NOT NULL``
+# vs no filter is a column-shape concern, not a value concern, and
+# can't be parameterised cleanly.
+#
+# The ``idx_projects_tenant_active`` partial index (alembic 0033)
+# is the hot-path index for the live branch; the archived + all
+# branches walk the UNIQUE composite index with a tenant_id leading
+# column (also from 0033).
+#
+# Module-global state audit (SOP Step 1)
+# ──────────────────────────────────────
+# Three new module-level SQL constants + ``LISTABLE_PROJECT_ARCHIVED_FILTERS``
+# tuple + ``PROJECTS_LIST_*_LIMIT`` ints + ``_PROJECT_LIST_FULL_VISIBILITY_MEMBERSHIP_ROLES``
+# frozenset. All immutable; every uvicorn worker derives the same
+# value from the same source — qualifying answer #1. DB state is
+# shared via PG (qualifying answer #2). No new in-memory cache.
+#
+# Read-after-write timing audit (SOP Step 1)
+# ──────────────────────────────────────────
+# Pure read endpoint — no writes. Under concurrent POST + GET the
+# GET caller may either see or miss a freshly-inserted project
+# depending on which transaction commits first; standard read-
+# committed behaviour, not a regression.
+
+# The full set of values the ``?archived=`` query parameter accepts.
+# ``false`` is the default if the caller omits the param — the most
+# common UI need is "show me my live projects". ``all`` is the
+# audit-style "show everything"; ``true`` returns archived-only.
+LISTABLE_PROJECT_ARCHIVED_FILTERS = ("false", "true", "all")
+
+# Hard cap on rows projected per call. Keeps the response bounded
+# under a tenant that has accumulated thousands of projects over
+# years; the admin console paginates client-side. Same shape as the
+# Y3 invite-list cap.
+PROJECTS_LIST_DEFAULT_LIMIT = 100
+PROJECTS_LIST_MAX_LIMIT = 500
+
+# Membership roles that get full visibility into the tenant's
+# project list. ``member`` / ``viewer`` fall through to explicit-only
+# (per alembic 0034 default-resolution semantics).
+_PROJECT_LIST_FULL_VISIBILITY_MEMBERSHIP_ROLES = frozenset({"owner", "admin"})
+
+
+# Three SQL templates — same SELECT shape, different archived predicate.
+# Placeholder layout is identical across all three so the handler can
+# pick a constant by branch and pass the same args:
+#   $1 = tenant_id (text)
+#   $2 = caller_has_full_visibility (bool)
+#   $3 = caller_user_id (text)            -- used only when $2 is FALSE
+#   $4 = product_line filter (text|NULL)
+#   $5 = limit (int)
+_LIST_PROJECTS_LIVE_SQL = """
+SELECT p.id, p.tenant_id, p.product_line, p.name, p.slug,
+       p.parent_id, p.plan_override, p.disk_budget_bytes,
+       p.llm_budget_tokens, p.created_by, p.created_at, p.archived_at
+FROM projects p
+WHERE p.tenant_id = $1
+  AND p.archived_at IS NULL
+  AND ($2::bool
+       OR EXISTS (
+         SELECT 1 FROM project_members pm
+         WHERE pm.project_id = p.id AND pm.user_id = $3
+       ))
+  AND ($4::text IS NULL OR p.product_line = $4)
+ORDER BY p.created_at DESC, p.id DESC
+LIMIT $5
+"""
+
+_LIST_PROJECTS_ARCHIVED_SQL = """
+SELECT p.id, p.tenant_id, p.product_line, p.name, p.slug,
+       p.parent_id, p.plan_override, p.disk_budget_bytes,
+       p.llm_budget_tokens, p.created_by, p.created_at, p.archived_at
+FROM projects p
+WHERE p.tenant_id = $1
+  AND p.archived_at IS NOT NULL
+  AND ($2::bool
+       OR EXISTS (
+         SELECT 1 FROM project_members pm
+         WHERE pm.project_id = p.id AND pm.user_id = $3
+       ))
+  AND ($4::text IS NULL OR p.product_line = $4)
+ORDER BY p.created_at DESC, p.id DESC
+LIMIT $5
+"""
+
+_LIST_PROJECTS_ALL_SQL = """
+SELECT p.id, p.tenant_id, p.product_line, p.name, p.slug,
+       p.parent_id, p.plan_override, p.disk_budget_bytes,
+       p.llm_budget_tokens, p.created_by, p.created_at, p.archived_at
+FROM projects p
+WHERE p.tenant_id = $1
+  AND ($2::bool
+       OR EXISTS (
+         SELECT 1 FROM project_members pm
+         WHERE pm.project_id = p.id AND pm.user_id = $3
+       ))
+  AND ($4::text IS NULL OR p.product_line = $4)
+ORDER BY p.created_at DESC, p.id DESC
+LIMIT $5
+"""
+
+
+async def _resolve_list_visibility(
+    user: auth.User,
+    tenant_id: str,
+) -> tuple[bool, bool]:
+    """Return ``(may_list, has_full_visibility)``.
+
+    ``may_list`` is True iff the caller is allowed to see *any* row
+    of the tenant's project list (super_admin, or any active
+    membership of any role — explicit-only callers still get a
+    response, possibly empty).
+
+    ``has_full_visibility`` is True iff the caller can see every
+    project regardless of explicit ``project_members`` rows —
+    super_admin or membership role ∈ {owner, admin}.
+    """
+    if auth.role_at_least(user.role, "super_admin"):
+        return True, True
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT role, status FROM user_tenant_memberships "
+            "WHERE user_id = $1 AND tenant_id = $2",
+            user.id, tenant_id,
+        )
+    if row is None or row["status"] != "active":
+        return False, False
+    full = row["role"] in _PROJECT_LIST_FULL_VISIBILITY_MEMBERSHIP_ROLES
+    return True, full
+
+
+@router.get("/tenants/{tenant_id}/projects")
+async def list_projects(
+    tenant_id: str,
+    _request: Request,
+    product_line: str | None = Query(
+        default=None,
+        description=(
+            "Filter to one product line. Must be one of "
+            "(embedded, web, mobile, software, custom) or omitted. "
+            "Other values 422 with the allowed list."
+        ),
+    ),
+    archived: str = Query(
+        default="false",
+        description=(
+            "Filter by archived state. ``false`` (default) returns "
+            "only live projects (archived_at IS NULL); ``true`` "
+            "returns only archived ones; ``all`` returns both. "
+            "Other values 422 with the allowed list."
+        ),
+    ),
+    limit: int = Query(
+        default=PROJECTS_LIST_DEFAULT_LIMIT,
+        ge=1,
+        le=PROJECTS_LIST_MAX_LIMIT,
+        description=(
+            f"Max rows to return (1..{PROJECTS_LIST_MAX_LIMIT}). "
+            f"Default {PROJECTS_LIST_DEFAULT_LIMIT}."
+        ),
+    ),
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """List projects for ``tenant_id`` filtered by the caller's
+    visibility.
+
+    Returns 200 with::
+
+        {
+            "tenant_id": "t-acme",
+            "product_line_filter": "embedded" | None,
+            "archived_filter": "false" | "true" | "all",
+            "count": 3,
+            "projects": [
+                {
+                    "project_id": "p-...",
+                    "tenant_id": "t-acme",
+                    "product_line": "embedded",
+                    "name": "ISP Tuning",
+                    "slug": "isp-tuning",
+                    "parent_id": null,
+                    "plan_override": null,
+                    "disk_budget_bytes": null,
+                    "llm_budget_tokens": null,
+                    "created_by": "u-...",
+                    "created_at": "YYYY-MM-DD HH:MM:SS",
+                    "archived_at": null
+                },
+                ...
+            ]
+        }
+    """
+    # 1. Path-id validation. Same regex source-of-truth as POST.
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+
+    # 2. ``product_line`` enum check. Done in handler (not Pydantic
+    #    Literal on Query) to surface a clear 422 detail listing the
+    #    allowed values rather than the FastAPI default wording.
+    if product_line is not None and product_line not in PRODUCT_LINE_ENUM:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid product_line filter: {product_line!r}; "
+                    f"must be one of {PRODUCT_LINE_ENUM} or omitted"
+                ),
+            },
+        )
+
+    # 3. ``archived`` enum check. Same pattern.
+    if archived not in LISTABLE_PROJECT_ARCHIVED_FILTERS:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid archived filter: {archived!r}; "
+                    f"must be one of {LISTABLE_PROJECT_ARCHIVED_FILTERS}"
+                ),
+            },
+        )
+
+    # 4. Visibility resolution (RBAC + explicit/full discrimination).
+    #    Done before the tenant existence probe so a guess-the-id
+    #    scan can't enumerate which tenants exist via timing.
+    may_list, has_full_visibility = await _resolve_list_visibility(
+        actor, tenant_id,
+    )
+    if not may_list:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires active membership on {tenant_id!r} or "
+                f"platform super_admin; caller has no qualifying role"
+            ),
+        )
+
+    # 5. Tenant existence probe — clean 404 if the tenant is missing.
+    #    Super-admin reaches here even for non-existent tenants, so
+    #    the explicit probe is necessary even for that branch. (For
+    #    members, ``may_list=True`` guarantees the membership row
+    #    exists and FK-points at the tenant — but the explicit probe
+    #    is cheap and keeps the failure mode uniform.)
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    # 6. Pick the SQL by archived branch and run.
+    if archived == "false":
+        sql = _LIST_PROJECTS_LIVE_SQL
+    elif archived == "true":
+        sql = _LIST_PROJECTS_ARCHIVED_SQL
+    else:  # archived == "all"
+        sql = _LIST_PROJECTS_ALL_SQL
+
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            sql,
+            tenant_id,
+            has_full_visibility,
+            actor.id,
+            product_line,
+            limit,
+        )
+
+    projects = [_row_to_project_dict(r) for r in rows]
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "tenant_id": tenant_id,
+            "product_line_filter": product_line,
+            "archived_filter": archived,
+            "count": len(projects),
+            "projects": projects,
+        },
+    )
