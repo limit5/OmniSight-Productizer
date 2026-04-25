@@ -149,10 +149,19 @@ async def _dispatch_external(notif: Notification) -> None:
     Severity-aware payload variants are picked up inside the per-channel
     senders (Slack adds ``@everyone`` mention for Discord; Jira adds the
     ``severity-P1`` label + severity to description).
+
+    R9 row 2939 (#315) — adds the P2 sub-bullet leg: severity ``P2``
+    activates ``L3_JIRA`` (severity-P2 + ``blocked`` label inside
+    :func:`_send_jira`) and ``L2_CHATOPS_INTERACTIVE`` which spawns
+    :func:`_dispatch_chatops_severity` as fire-and-forget against the
+    R1 (#307) ChatOps bridge with default channel ``"*"`` (broadcast to
+    every configured adapter) and a default ack / inject-hint / view-logs
+    button set so on-call can act directly from chat.
     """
     from backend import db
     from backend.db_pool import get_pool
     from backend.severity import (
+        L2_CHATOPS_INTERACTIVE,
         L2_IM_WEBHOOK,
         L3_JIRA,
         L4_PAGERDUTY,
@@ -183,6 +192,11 @@ async def _dispatch_external(notif: Notification) -> None:
         or level == "critical"
     )
     fire_sms = L4_SMS in severity_tiers
+    # R9 row 2939: ChatOps interactive is *severity-only* — there is no
+    # level-driven activation. The R1 (#307) bridge is the durable
+    # operator-action surface for P2 (任務卡死) — Jira tracks the
+    # ticket, ChatOps surfaces it for live triage with default buttons.
+    fire_chatops = L2_CHATOPS_INTERACTIVE in severity_tiers
 
     # L2+: IM (Slack/Teams/Discord — the webhook URL is opaque to us;
     # P1 mention text uses both Slack ``<!channel>`` and Discord
@@ -216,6 +230,15 @@ async def _dispatch_external(notif: Notification) -> None:
         ok = await _send_with_retry(notif, _send_sms, "sms")
         if not ok:
             errors.append("sms")
+
+    # R9 row 2939: ChatOps severity-driven leg. Fire-and-forget — the
+    # bridge handles per-adapter unconfigured / failure gracefully and
+    # the durable record (Jira ticket) carries the P2 audit trail.
+    # We do NOT count it toward ``any_required`` / ``errors`` so a
+    # transient bridge hiccup doesn't mark the whole notification as
+    # ``dispatch_status=failed`` (Jira leg already covers durability).
+    if fire_chatops:
+        asyncio.create_task(_dispatch_chatops_severity(notif))
 
     if not any_required:
         # No external channels configured for this level
@@ -280,6 +303,57 @@ async def _dispatch_chatops(
         )
     except Exception as exc:
         logger.warning("ChatOps mirror dispatch failed for %s: %s", notif.id, exc)
+
+
+async def _dispatch_chatops_severity(notif: Notification) -> None:
+    """Severity-driven ChatOps interactive dispatch (R9 row 2939, #315).
+
+    Activated by ``L2_CHATOPS_INTERACTIVE`` in
+    :data:`backend.severity.SEVERITY_TIER_MAPPING` — currently only the
+    ``P2`` (任務卡死) tier maps to this leg.
+
+    Differs from :func:`_dispatch_chatops` in that the channel and
+    buttons are *severity-derived* (caller didn't have to pre-wire any
+    R1 plumbing) — broadcast to ``"*"`` (every configured adapter) with
+    a default Acknowledge / Inject Hint / View Logs button set so the
+    on-call has a one-click triage surface inside the chat client.
+
+    Fire-and-forget: bridge errors are swallowed (logged as warning) —
+    Jira ticket creation is the durable record for P2; ChatOps is the
+    live triage surface and a transient bridge hiccup must not mark the
+    whole notification as ``dispatch_status=failed``.
+    """
+    try:
+        from backend import chatops_bridge as bridge
+        sev = notif.severity.value if notif.severity is not None else None
+        sev_tag = f"[severity:{sev}] " if sev else ""
+        title = f"{sev_tag}[{notif.level.upper()}] {notif.title}"
+        body = notif.message or notif.title
+        buttons = [
+            bridge.Button(
+                id="ack", label="Acknowledge", style="primary", value=notif.id,
+            ),
+            bridge.Button(
+                id="inject_hint", label="Inject Hint", style="secondary",
+                value=notif.id,
+            ),
+            bridge.Button(
+                id="view_logs", label="View Logs", style="secondary",
+                value=notif.id,
+            ),
+        ]
+        await bridge.send_interactive(
+            "*", body, title=title, buttons=buttons,
+            meta={
+                "notification_id": notif.id,
+                "source": notif.source,
+                "severity": sev,
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "ChatOps severity-driven dispatch failed for %s: %s", notif.id, exc,
+        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -456,9 +530,13 @@ async def _send_jira(notif: Notification) -> None:
     R9 row 2936 (#315) — when ``notif.severity`` is set the issue
     carries (a) a ``severity-<P1|P2|P3>`` label, (b) the severity tag
     in the description prefix, and (c) the priority is forced to
-    ``Highest`` for P1 regardless of ``notif.level``. The
-    ``severity:P2`` / ``label:blocked`` combo for P2 is row 2937 scope
-    and not handled here.
+    ``Highest`` for P1 regardless of ``notif.level``.
+
+    R9 row 2939 (#315) — P2 attaches an additional ``blocked`` label
+    (the row 2939 sub-bullet locks "L3 Jira (severity: P2, label:
+    blocked)" verbatim) so Jira filters for ``labels = "blocked"`` pull
+    every P2 task-deadlock ticket independently of the
+    ``severity-P2`` query.
     """
     url = settings.notification_jira_url
     token = settings.notification_jira_token
@@ -480,7 +558,14 @@ async def _send_jira(notif: Notification) -> None:
         },
     }
     if sev:
-        fields["labels"] = [f"severity-{sev}"]
+        labels = [f"severity-{sev}"]
+        if sev == "P2":
+            # R9 row 2939: P2 (任務卡死) carries the ``blocked`` label
+            # so Jira's existing "blocked work" filters / sprint board
+            # swimlanes pick up the ticket without an extra severity
+            # query.
+            labels.append("blocked")
+        fields["labels"] = labels
     payload = json.dumps({"fields": fields})
     api_url = f"{url}/rest/api/2/issue"
     proc = await asyncio.create_subprocess_exec(
