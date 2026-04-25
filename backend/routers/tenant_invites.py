@@ -97,7 +97,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -582,5 +582,235 @@ async def create_invite(
             "invite_id": invite_id,
             "token_plaintext": token_plaintext,
             "expires_at": row["expires_at"],
+        },
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y3 (#279) row 2 — GET /api/v1/tenants/{tid}/invites?status=pending
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# List the tenant's invites for an admin console. Default surface is
+# ``status=pending``: the literal phrasing in the TODO row is "列當前
+# 待接受" — currently waiting to be accepted. A row whose persisted
+# ``status='pending'`` but whose wall-clock has passed ``expires_at``
+# is functionally expired (the housekeeping sweep will eventually flip
+# it; we don't want an admin clicking "revoke" on something already
+# dead). Defence-in-depth: when the caller asks for ``pending`` we
+# add ``AND expires_at > now`` to the WHERE so the response only
+# contains live rows. Other status values (``accepted``, ``revoked``,
+# ``expired``) pass through verbatim, and a sentinel ``all`` skips
+# the filter entirely (audit-style "show everything for this tenant").
+#
+# Auth: same trust boundary as POST — tenant admin / owner on the
+# target tenant or a platform super_admin. A plain ``member`` /
+# ``viewer`` membership cannot enumerate pending invites because the
+# email addresses themselves are PII and disclose the admin's
+# recruitment pipeline.
+#
+# Token plaintext is never persisted, so this endpoint cannot leak it.
+# ``token_hash`` is also withheld from the response — it has no
+# operator value (admin uses ``invite_id`` to revoke / resend) and
+# returning it broadens the blast radius of any future logging
+# accident.
+
+# Module-global state audit (SOP Step 1)
+# ──────────────────────────────────────
+# Two new module-level constants (``_LIST_INVITES_BASE_SQL`` +
+# ``LISTABLE_INVITE_STATUSES``). Both immutable; every uvicorn worker
+# derives the same value from the same source — qualifying answer #1.
+# DB state is shared via PG (qualifying answer #2). No new in-memory
+# cache.
+#
+# Read-after-write timing audit (SOP Step 1)
+# ──────────────────────────────────────────
+# Pure read endpoint — no writes. The ``expires_at > $N`` filter uses
+# the request-time clock; under concurrent POST + GET the GET caller
+# may either see or miss a freshly-inserted invite depending on which
+# transaction commits first, which is the standard read-committed
+# behaviour and not a regression.
+
+# The full set of values the ``?status=`` query parameter accepts.
+# Mirrors the DB CHECK on ``tenant_invites.status`` plus a sentinel
+# ``all`` that skips the WHERE filter entirely. ``pending`` is the
+# default if the caller omits the param.
+LISTABLE_INVITE_STATUSES = (
+    "pending", "accepted", "revoked", "expired", "all",
+)
+
+# Hard cap on how many rows we'll project per call. Keeps the response
+# bounded under a tenant that has issued thousands of invites over
+# years — the admin console paginates on the client; the server-side
+# default is the same conservative shape used by ``DETAIL`` audit
+# events. Caller may lower it via ``?limit=`` but cannot exceed.
+INVITES_LIST_DEFAULT_LIMIT = 100
+INVITES_LIST_MAX_LIMIT = 500
+
+# SQL: project exactly the columns an admin console needs. ``token_hash``
+# is deliberately omitted (no operator value, broadens leak surface).
+# ``ORDER BY created_at DESC, id DESC`` gives a stable newest-first
+# ordering even when two invites share a created_at second.
+_LIST_INVITES_PENDING_SQL = """
+SELECT id, email, role, invited_by, status, created_at, expires_at
+FROM tenant_invites
+WHERE tenant_id = $1
+  AND status = 'pending'
+  AND expires_at > $2
+ORDER BY created_at DESC, id DESC
+LIMIT $3
+"""
+
+_LIST_INVITES_BY_STATUS_SQL = """
+SELECT id, email, role, invited_by, status, created_at, expires_at
+FROM tenant_invites
+WHERE tenant_id = $1
+  AND status = $2
+ORDER BY created_at DESC, id DESC
+LIMIT $3
+"""
+
+_LIST_INVITES_ALL_SQL = """
+SELECT id, email, role, invited_by, status, created_at, expires_at
+FROM tenant_invites
+WHERE tenant_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT $2
+"""
+
+
+@router.get("/tenants/{tenant_id}/invites")
+async def list_invites(
+    tenant_id: str,
+    _request: Request,
+    status: str = Query(
+        default="pending",
+        description=(
+            "Filter by invite status. One of "
+            "(pending, accepted, revoked, expired, all). Default "
+            "is 'pending', which also excludes rows whose "
+            "wall-clock has passed expires_at (the housekeeping "
+            "sweep flips them later). 'all' returns every status."
+        ),
+    ),
+    limit: int = Query(
+        default=INVITES_LIST_DEFAULT_LIMIT,
+        ge=1,
+        le=INVITES_LIST_MAX_LIMIT,
+        description=(
+            f"Max rows to return (1..{INVITES_LIST_MAX_LIMIT}). "
+            f"Default {INVITES_LIST_DEFAULT_LIMIT}."
+        ),
+    ),
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """List invites for a tenant.
+
+    Returns 200 with::
+
+        {
+            "tenant_id": "t-acme",
+            "status_filter": "pending",
+            "count": 3,
+            "invites": [
+                {
+                    "invite_id": "inv-...",
+                    "email": "alice@example.com",
+                    "role": "admin",
+                    "status": "pending",
+                    "invited_by": "u-...",
+                    "created_at": "2026-04-25 12:00:00",
+                    "expires_at": "2026-05-02 12:00:00"
+                },
+                ...
+            ]
+        }
+
+    The plaintext token is **never** included — it exists only at
+    POST time and is not persisted. ``token_hash`` is also omitted;
+    the admin uses ``invite_id`` for revoke / resend.
+    """
+    # 1. Path-id validation. Same regex source-of-truth as POST.
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"invalid tenant id: {tenant_id!r}; "
+                               f"must match {TENANT_ID_PATTERN}"},
+        )
+
+    # 2. Status enum check. Done in handler (not Pydantic Literal on
+    #    Query) to surface a clear 422 detail listing the allowed
+    #    values rather than the FastAPI-default "value is not a valid
+    #    enumeration member" wording.
+    if status not in LISTABLE_INVITE_STATUSES:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid status filter: {status!r}; must be one of "
+                    f"{LISTABLE_INVITE_STATUSES}"
+                ),
+            },
+        )
+
+    # 3. RBAC. Same trust boundary as POST: tenant-admin-or-above on
+    #    the target tenant, or platform super_admin. Done before the
+    #    existence probe so a guess-the-id scan can't enumerate which
+    #    tenants exist via timing.
+    if not await _user_can_invite_into(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin or above on {tenant_id!r}; "
+                f"caller has no qualifying membership / role"
+            ),
+        )
+
+    # 4. Existence probe → clean 404 if the tenant doesn't exist.
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    # 5. Project rows. ``pending`` gets the live-only filter
+    #    (defence in depth); other statuses match verbatim; ``all``
+    #    skips the status filter.
+    async with get_pool().acquire() as conn:
+        if status == "pending":
+            rows = await conn.fetch(
+                _LIST_INVITES_PENDING_SQL, tenant_id, _now_iso(), limit,
+            )
+        elif status == "all":
+            rows = await conn.fetch(
+                _LIST_INVITES_ALL_SQL, tenant_id, limit,
+            )
+        else:
+            rows = await conn.fetch(
+                _LIST_INVITES_BY_STATUS_SQL, tenant_id, status, limit,
+            )
+
+    invites = [
+        {
+            "invite_id": r["id"],
+            "email": r["email"],
+            "role": r["role"],
+            "status": r["status"],
+            "invited_by": r["invited_by"],
+            "created_at": r["created_at"],
+            "expires_at": r["expires_at"],
+        }
+        for r in rows
+    ]
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "tenant_id": tenant_id,
+            "status_filter": status,
+            "count": len(invites),
+            "invites": invites,
         },
     )
