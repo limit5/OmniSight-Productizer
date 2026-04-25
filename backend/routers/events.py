@@ -113,12 +113,28 @@ async def event_stream(request: Request):
             pass
         finally:
             bus.unsubscribe(queue)
-            if presence is not None:
-                try:
-                    from backend.shared_state import session_presence
-                    session_presence.drop(*presence)
-                except Exception:
-                    pass
+            # R19 (2026-04-25, operator-reported): do NOT drop the
+            # presence record on disconnect. Original Q.5 #299 design
+            # called drop() here to "forget the device on logout/close",
+            # but in practice EventSource connections frequently cycle
+            # (CF tunnel buffering pre-`open`-event, browser tab
+            # backgrounding, transient network blips — Caddy access logs
+            # showed 0.01–0.9 s connection durations on the live host).
+            # Each cycle hit:
+            #     SSE connect → record_heartbeat (ts=now)
+            #     → 200 OK → first byte → abort within < 1s
+            #     → CancelledError → drop()  ← record gone
+            #     → reconnect → repeat
+            # Net: the presence hash was empty ~95% of the time and
+            # /auth/sessions/presence kept returning active_count=0
+            # even though SSE was constantly subscribing. Removing the
+            # drop lets the 60 s _PRESENCE_DEFAULT_WINDOW_SECONDS lazy-
+            # prune handle stale entries naturally — reconnects within
+            # the window keep the device "active", and a genuinely-gone
+            # session falls off after 60 s of silence (which is what the
+            # Q.5 spec actually wants — the SSE handler can't reliably
+            # distinguish "user closed tab" from "browser background-
+            # throttled the SSE connection for 30s").
 
     return EventSourceResponse(generator())
 
