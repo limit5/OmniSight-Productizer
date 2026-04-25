@@ -431,24 +431,34 @@ export function SessionHeatmap({
       )}
 
       {hoverCell && (
+        // 2026-04-25 UX fix: tooltip was a single-row `flex items-center
+        // gap-3` with 5 atomic spans + 3 `·` separators (day · hour ·
+        // tokens · cost). On narrow orchestrator panels the trailing
+        // orange `cost` clipped past the right edge — operator-reported
+        // "橘色的字會超出版面". Switched to `flex flex-wrap gap-x-3
+        // gap-y-1` so under width pressure the row wraps naturally
+        // (typically tokens/cost drop to a 2nd line under day/hour),
+        // preserving the dot-separated visual rhythm without clipping.
+        // Each span gets `whitespace-nowrap` so individual values never
+        // mid-break — the wrap point is always between fields.
         <div
-          className="mx-4 mb-3 p-2 rounded bg-[var(--secondary)] border border-[var(--border)] flex items-center gap-3 text-[10px] font-mono"
+          className="mx-4 mb-3 p-2 rounded bg-[var(--secondary)] border border-[var(--border)] flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] font-mono"
           role="status"
           data-testid="session-heatmap-tooltip"
         >
-          <span className="text-[var(--foreground)]" data-testid="session-heatmap-tooltip-day">
+          <span className="text-[var(--foreground)] whitespace-nowrap" data-testid="session-heatmap-tooltip-day">
             {formatDayLabel(hoverCell.dayKey)}
           </span>
           <span className="text-[var(--muted-foreground)]">·</span>
-          <span className="text-[var(--muted-foreground)]" data-testid="session-heatmap-tooltip-hour">
+          <span className="text-[var(--muted-foreground)] whitespace-nowrap" data-testid="session-heatmap-tooltip-hour">
             {formatHourRange(hoverCell.hour)}
           </span>
           <span className="text-[var(--muted-foreground)]">·</span>
-          <span className="text-[var(--validation-emerald)]" data-testid="session-heatmap-tooltip-tokens">
+          <span className="text-[var(--validation-emerald)] tabular-nums whitespace-nowrap" data-testid="session-heatmap-tooltip-tokens">
             {formatTokens(hoverCell.tokens)} tokens
           </span>
           <span className="text-[var(--muted-foreground)]">·</span>
-          <span className="text-[var(--hardware-orange)]" data-testid="session-heatmap-tooltip-cost">
+          <span className="text-[var(--hardware-orange)] tabular-nums whitespace-nowrap" data-testid="session-heatmap-tooltip-cost">
             {formatCost(hoverCell.cost)}
           </span>
         </div>
