@@ -1012,7 +1012,7 @@ from backend.routers import admin_super_admins as _admin_super_admins_router  # 
 app.include_router(_admin_super_admins_router.router, prefix=settings.api_prefix)
 from backend.routers import tenant_members as _tenant_members_router  # Y3 (#279) row 6 — tenant membership management
 app.include_router(_tenant_members_router.router, prefix=settings.api_prefix)
-from backend.routers import tenant_projects as _tenant_projects_router  # Y4 (#280) row 1 + row 2 + row 3 + row 4 + row 5 — project create / list / patch / archive+restore / member POST+PATCH+DELETE
+from backend.routers import tenant_projects as _tenant_projects_router  # Y4 (#280) row 1 + row 2 + row 3 + row 4 + row 5 + row 6 — project create / list / patch / archive+restore / member POST+PATCH+DELETE / cross-tenant share POST
 app.include_router(_tenant_projects_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.

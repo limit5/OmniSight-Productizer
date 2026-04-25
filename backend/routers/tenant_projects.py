@@ -2756,3 +2756,450 @@ async def delete_project_member(
     )
 
     return removed
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y4 (#280) row 6 — POST /api/v1/tenants/{tid}/projects/{pid}/shares
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Cross-tenant project share. Tenant A (the project's owning tenant)
+# grants tenant B (the guest tenant) read- or write-level access to one
+# of A's projects, without materialising membership rows on either side
+# and without B paying A's egress / quota costs. Recorded in
+# ``project_shares`` (alembic 0036).
+#
+# The TODO row literal:
+#   POST /.../projects/{pid}/shares
+#   body : { guest_tenant_id, role, expires_at? }
+#   effect: project_shares row inserted; guest tenant sees this project
+#           in its admin console under the "Guest" tab
+#
+# Design decisions (mirroring 0036 docstring contract)
+# ────────────────────────────────────────────────────
+# * **Role enum is ``viewer`` / ``contributor`` only — NOT ``owner``**.
+#   A guest tenant fundamentally cannot own a project belonging to a
+#   different tenant. The DB CHECK enforces this server-side; the
+#   pydantic Literal mirrors it so 422 fires before any DB I/O.
+# * **``guest_tenant_id <> tenant_id``** guard at the application layer
+#   per the migration's deferred CHECK note. A tenant cannot share a
+#   project to itself — this is a 422 (caller body malformed) not 403.
+# * **Atomic INSERT with ``ON CONFLICT (project_id, guest_tenant_id)
+#   DO NOTHING RETURNING …``** — the UNIQUE composite from migration
+#   0036 makes RETURNING None unambiguously signal "this guest tenant
+#   already has an active share row on this project". On the duplicate
+#   branch the handler re-fetches the existing row to surface its id +
+#   role in the 409 body so the operator can choose: PATCH role (Y4
+#   row-7+) / DELETE revoke / leave alone.
+# * **``share_id`` shape ``psh-<16 hex chars>``** matches the convention
+#   from migration 0036's docstring (``psh-`` prefix; same minting
+#   pattern as ``p-`` projects, ``inv-`` invites).
+# * **``granted_by`` FK ``ON DELETE SET NULL``** — anonymous (open-mode
+#   dev fallback) and api-key callers do not have rows in ``users``;
+#   the existing ``_resolve_created_by`` helper already handles this
+#   FK-clean (returns NULL for those callers). audit row still pins
+#   the actor email.
+# * **``expires_at`` semantics** — NULLable means "permanent share"
+#   (the granter explicitly opts in to no TTL). Non-null must be a
+#   ``YYYY-MM-DD HH:MM:SS`` UTC string strictly in the future of
+#   ``now() at time zone 'utc'``; an expires_at already in the past
+#   is a 422 (caller body malformed — granting an already-expired
+#   share is meaningless). The format mirrors ``created_at`` /
+#   ``archived_at`` so audit-side text comparisons remain correct.
+# * **RBAC reuses ``_user_can_create_project_in``** — sharing a project
+#   to another tenant is a tenant-level operation (it transfers some
+#   degree of project control to a guest tenant) and matches the trust
+#   boundary of project CRUD itself: super_admin / tenant
+#   admin+owner only. Project owner is deliberately NOT a privilege
+#   gate here — share grants change the project's exposure surface
+#   beyond the owning tenant, and only an owning-tenant admin should
+#   make that call. Member / viewer / contributor / project-owner
+#   without tenant-admin: 403.
+#
+# Status codes
+# ────────────
+#   201 — share inserted; ``project_shares`` row created
+#   403 — caller is not tenant admin / owner on the *owning* tenant
+#         (the {tid} in the URL) and not platform super_admin
+#   404 — well-formed ids but no such tenant / no such project on
+#         this tenant / no such guest tenant
+#   409 — share already exists for (project, guest_tenant); body
+#         carries ``existing_share_id`` + ``existing_role`` so the
+#         operator can decide PATCH (change role) vs DELETE (revoke)
+#         vs no-op
+#   422 — malformed tenant_id / project_id / guest_tenant_id pattern,
+#         unknown role, guest_tenant_id == tenant_id (self-share),
+#         malformed expires_at, expires_at in the past
+#
+# Module-global state audit (SOP Step 1)
+# ──────────────────────────────────────
+# New module-level constants:
+#   * ``PROJECT_SHARE_ROLE_ENUM`` — DB-CHECK-aligned tuple (drift-guard
+#     test enforces: not 'owner')
+#   * ``SHARE_ID_PATTERN`` / ``_SHARE_ID_RE`` — minted-by-handler shape
+#   * ``EXPIRES_AT_FORMAT`` — string-comparison-safe UTC text format
+#   * ``_PROJECT_SHARE_CREATE_ALLOWED_MEMBERSHIP_ROLES`` — frozenset of
+#     tenant roles that may grant shares
+#   * 2 SQL constants — ``_INSERT_PROJECT_SHARE_SQL``,
+#     ``_FETCH_EXISTING_PROJECT_SHARE_SQL`` (existing
+#     ``_FETCH_TENANT_SQL`` reused for both owner-tenant and guest-
+#     tenant existence probes; ``_FETCH_PROJECT_TENANT_SCOPED_SQL``
+#     reused for the project ownership scope check)
+# All immutable; every uvicorn worker derives the same value from
+# source — qualifying answer #1. DB state is shared via PG; the
+# composite UNIQUE ``(project_id, guest_tenant_id)`` serialises
+# concurrent INSERTs via ``ON CONFLICT DO NOTHING`` — qualifying
+# answer #2. No new in-memory cache.
+#
+# Read-after-write timing audit (SOP Step 1)
+# ──────────────────────────────────────────
+# POST is a single ``INSERT … ON CONFLICT (project_id, guest_tenant_id)
+# DO NOTHING RETURNING`` — concurrent admins racing the same
+# (project, guest) target resolve to one winner (RETURNING populated)
+# and one loser (RETURNING None → 409 with the existing row surfaced).
+# No new timing-visible behaviour.
+
+# Project-scope role enum for cross-tenant shares.  Mirrors the DB
+# CHECK on ``project_shares.role`` from alembic 0036 — drift here
+# would let a regressed POST set a role the DB then rejects.
+# Deliberately distinct from PROJECT_MEMBER_ROLE_ENUM (which includes
+# 'owner') because a guest tenant cannot own the host's project.
+PROJECT_SHARE_ROLE_ENUM = ("viewer", "contributor")
+
+# Share id — minted by this handler; ``psh-<16 hex chars>`` matches
+# the migration 0036 docstring's prefix convention.
+SHARE_ID_PATTERN = r"^psh-[a-z0-9]{4,64}$"
+_SHARE_ID_RE = re.compile(SHARE_ID_PATTERN)
+
+# String-comparison-safe UTC text format.  Same shape as
+# ``projects.created_at`` / ``projects.archived_at`` — keeps
+# ``expires_at < $now`` lexicographic comparisons correct without
+# dialect-specific date arithmetic.
+EXPIRES_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _is_valid_share_id(sid: str) -> bool:
+    return bool(sid) and bool(_SHARE_ID_RE.match(sid))
+
+
+def _mint_share_id() -> str:
+    """``psh-`` + 16 hex chars (64 random bits).  Distinct enough to
+    make collisions a non-event over the lifetime of the platform."""
+    return f"psh-{secrets.token_hex(8)}"
+
+
+# Same admin-tier gate as project CRUD.  Sharing a project to another
+# tenant is a tenant-level operation (changes the project's exposure
+# surface beyond the owning tenant) and lives at the tenant admin
+# trust boundary.
+_PROJECT_SHARE_CREATE_ALLOWED_MEMBERSHIP_ROLES = frozenset({"owner", "admin"})
+
+
+class CreateProjectShareRequest(BaseModel):
+    """Body for ``POST /api/v1/tenants/{tid}/projects/{pid}/shares``."""
+
+    guest_tenant_id: str = Field(
+        pattern=TENANT_ID_PATTERN,
+        description=(
+            "Tenant id of the guest that should receive this share. "
+            "Must NOT equal the URL's {tid} — a tenant cannot share a "
+            "project to itself (handler 422)."
+        ),
+    )
+    role: Literal["viewer", "contributor"] = Field(
+        description=(
+            "Project-scope role granted to members of the guest tenant. "
+            "Must be one of (viewer, contributor) — 'owner' is "
+            "deliberately rejected because a guest tenant cannot own a "
+            "project belonging to a different tenant (alembic 0036 "
+            "DB CHECK enforces this server-side)."
+        ),
+    )
+    expires_at: str | None = Field(
+        default=None,
+        description=(
+            "Optional UTC expiry timestamp in ``YYYY-MM-DD HH:MM:SS`` "
+            "format.  ``None`` means the share is permanent (the "
+            "granter explicitly opts in to no TTL).  Non-null values "
+            "must be strictly in the future of ``now() at time zone "
+            "'utc'``; an already-expired ``expires_at`` is a 422."
+        ),
+    )
+
+
+# Atomic INSERT with ``ON CONFLICT (project_id, guest_tenant_id) DO
+# NOTHING`` — the UNIQUE composite from migration 0036 makes RETURNING
+# None signal "this guest tenant already has a share row on this
+# project".  RETURNING the full row gives the response body and audit
+# blob a single source of truth.
+_INSERT_PROJECT_SHARE_SQL = """
+INSERT INTO project_shares (
+    id, project_id, guest_tenant_id, role, granted_by, expires_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6
+)
+ON CONFLICT (project_id, guest_tenant_id) DO NOTHING
+RETURNING id, project_id, guest_tenant_id, role,
+          granted_by, created_at, expires_at
+"""
+
+# Read the existing share row when the INSERT lost the dup race.
+# Surfaces existing_share_id + existing_role so the operator can pick
+# PATCH (role change) vs DELETE (revoke) vs no-op.
+_FETCH_EXISTING_PROJECT_SHARE_SQL = """
+SELECT id, project_id, guest_tenant_id, role,
+       granted_by, created_at, expires_at
+FROM project_shares
+WHERE project_id = $1 AND guest_tenant_id = $2
+"""
+
+
+def _row_to_project_share_dict(row) -> dict:
+    """Project a project_shares row to the JSON response body."""
+    return {
+        "share_id": row["id"],
+        "project_id": row["project_id"],
+        "guest_tenant_id": row["guest_tenant_id"],
+        "role": row["role"],
+        "granted_by": row["granted_by"],
+        "created_at": row["created_at"],
+        "expires_at": row["expires_at"],
+    }
+
+
+def _validate_expires_at(raw: str) -> tuple[bool, str]:
+    """Return ``(ok, normalized_or_reason)``.
+
+    On success: ``(True, raw)`` — the caller-supplied string is valid
+    UTC ``YYYY-MM-DD HH:MM:SS`` format and strictly in the future of
+    ``datetime.utcnow()``.
+
+    On failure: ``(False, "<reason>")`` — caller surfaces a 422 with
+    the reason in the detail.
+    """
+    from datetime import datetime as _dt
+
+    if not isinstance(raw, str) or not raw:
+        return False, "expires_at must be a non-empty string"
+    try:
+        parsed = _dt.strptime(raw, EXPIRES_AT_FORMAT)
+    except ValueError:
+        return False, (
+            f"expires_at {raw!r} is not in 'YYYY-MM-DD HH:MM:SS' UTC "
+            f"format"
+        )
+    now = _dt.utcnow()
+    if parsed <= now:
+        return False, (
+            f"expires_at {raw!r} is not strictly in the future of "
+            f"the current UTC time"
+        )
+    return True, raw
+
+
+@router.post(
+    "/tenants/{tenant_id}/projects/{project_id}/shares",
+    status_code=201,
+)
+async def create_project_share(
+    tenant_id: str,
+    project_id: str,
+    body: CreateProjectShareRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Grant a guest tenant cross-tenant access to a project.
+
+    Status codes
+    ────────────
+    * 201 — share row inserted; guest tenant now sees this project in
+            its admin console under the "Guest" tab.
+    * 403 — caller is not tenant admin / owner on the *owning* tenant
+            and not platform super_admin.
+    * 404 — well-formed ids but no such tenant / no such project on
+            this tenant / no such guest tenant.
+    * 409 — share already exists for ``(project, guest_tenant)``.
+            Body carries ``existing_share_id`` + ``existing_role`` so
+            the caller can pick PATCH / DELETE / no-op.
+    * 422 — malformed tenant_id / project_id / guest_tenant_id /
+            unknown role / guest_tenant_id == tenant_id / malformed
+            expires_at / expires_at not in the future.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+
+    # Self-share guard — a tenant cannot grant guest access on its own
+    # project (the project is already in that tenant's namespace; the
+    # guest tab would always show its own projects, which is nonsense).
+    # 422 because this is a body validation concern, not RBAC.
+    if body.guest_tenant_id == tenant_id:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"guest_tenant_id {body.guest_tenant_id!r} must "
+                    f"not equal the owning tenant_id; a tenant cannot "
+                    f"share a project to itself"
+                ),
+                "tenant_id": tenant_id,
+                "guest_tenant_id": body.guest_tenant_id,
+            },
+        )
+
+    # Optional expires_at — must parse + be strictly in the future.
+    if body.expires_at is not None:
+        ok, reason = _validate_expires_at(body.expires_at)
+        if not ok:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": reason,
+                    "tenant_id": tenant_id,
+                    "project_id": project_id,
+                    "expires_at": body.expires_at,
+                },
+            )
+
+    # RBAC — done before the existence probe so a guess-the-id scan
+    # can't enumerate via timing.
+    if not await _user_can_create_project_in(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin or above on {tenant_id!r}; "
+                f"caller has no qualifying membership / role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    # Owning tenant existence — 404.
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    # Project existence + tenant-scope — 404 covers both "no such
+    # project" and "project belongs to another tenant" by design
+    # (caller has no business probing cross-tenant existence).
+    async with get_pool().acquire() as conn:
+        project_row = await conn.fetchrow(
+            _FETCH_PROJECT_TENANT_SCOPED_SQL, project_id, tenant_id,
+        )
+    if project_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"project not found: {project_id!r} on "
+                    f"tenant {tenant_id!r}"
+                ),
+            },
+        )
+
+    # Guest tenant existence — 404. Distinct lookup from the owning
+    # tenant probe; uses the same SQL constant.
+    async with get_pool().acquire() as conn:
+        guest_tenant_row = await conn.fetchrow(
+            _FETCH_TENANT_SQL, body.guest_tenant_id,
+        )
+    if guest_tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"guest tenant not found: {body.guest_tenant_id!r}"
+                ),
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "guest_tenant_id": body.guest_tenant_id,
+            },
+        )
+
+    # Atomic INSERT — duplicate (project, guest_tenant) lands on the
+    # 409 branch with the existing share id + role surfaced.
+    share_id = _mint_share_id()
+    granted_by = _resolve_created_by(actor)
+
+    async with get_pool().acquire() as conn:
+        new_row = await conn.fetchrow(
+            _INSERT_PROJECT_SHARE_SQL,
+            share_id, project_id, body.guest_tenant_id, body.role,
+            granted_by, body.expires_at,
+        )
+
+    if new_row is None:
+        # Duplicate share branch — surface the existing row's id +
+        # role so UI can decide PATCH (change role) vs DELETE (revoke).
+        async with get_pool().acquire() as conn:
+            existing = await conn.fetchrow(
+                _FETCH_EXISTING_PROJECT_SHARE_SQL,
+                project_id, body.guest_tenant_id,
+            )
+        existing_id = existing["id"] if existing else None
+        existing_role = existing["role"] if existing else None
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": (
+                    f"guest tenant {body.guest_tenant_id!r} already "
+                    f"has a share row on project {project_id!r}; "
+                    f"PATCH the share to change role or DELETE to "
+                    f"revoke"
+                ),
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "guest_tenant_id": body.guest_tenant_id,
+                "existing_share_id": existing_id,
+                "existing_role": existing_role,
+            },
+        )
+
+    share = _row_to_project_share_dict(new_row)
+    share["tenant_id"] = tenant_id
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_project_shared",
+            entity_kind="project_share",
+            entity_id=share_id,
+            before=None,
+            after={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "share_id": share_id,
+                "guest_tenant_id": body.guest_tenant_id,
+                "role": body.role,
+                "expires_at": body.expires_at,
+                "granted_by": granted_by,
+            },
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "tenant_project_shared audit emit failed (tenant=%s "
+            "project=%s share=%s): %s",
+            tenant_id, project_id, share_id, exc,
+        )
+
+    return JSONResponse(status_code=201, content=share)
