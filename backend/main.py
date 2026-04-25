@@ -1006,6 +1006,8 @@ from backend.routers import llm_balance as _llm_balance_router  # Z.2 (#291) pro
 app.include_router(_llm_balance_router.router, prefix=settings.api_prefix)
 from backend.routers import admin_tenants as _admin_tenants_router  # Y2 (#278) tenant CRUD admin REST
 app.include_router(_admin_tenants_router.router, prefix=settings.api_prefix)
+from backend.routers import tenant_invites as _tenant_invites_router  # Y3 (#279) row 1 — invite issuance
+app.include_router(_tenant_invites_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import
