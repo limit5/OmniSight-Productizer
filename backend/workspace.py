@@ -619,6 +619,214 @@ async def discard_and_recreate(
     return info
 
 
+async def cleanup_orphan_worktrees() -> list[dict[str, str]]:
+    """R8 #314 row 2875 — startup orphan worktree scan.
+
+    Walks ``git worktree list --porcelain`` (against ``_MAIN_REPO``) **and**
+    ``_WORKSPACES_ROOT`` on disk, then removes any worktree that isn't
+    backed by a live entry in the in-process ``_workspaces`` registry.
+    Two-source scan (admin block + filesystem) so we catch both classes
+    of orphan: (a) ``git worktree list`` knows about it but the working
+    tree was rm'd (admin block dangling), (b) the dir is on disk but
+    git's admin block was dropped (the inverse — typically a half-
+    completed cleanup). Either way the subdir is a leftover from a
+    prior crashed/restarted process and must go before this process
+    starts handing out workspaces with the same paths.
+
+    Designed for startup, called from ``_startup_cleanup`` in
+    ``main.py``. At that moment ``_workspaces`` is empty (in-process
+    dict, fresh per worker) so by definition every subdir under
+    ``_WORKSPACES_ROOT`` is orphan. After startup the same function
+    becomes a no-op (it'd be unsafe to call mid-flight: anything
+    provisioned by a peer worker on the same host wouldn't appear in
+    *our* ``_workspaces`` dict — see the cross-worker note below).
+
+    Per ``docs/design/r8-idempotent-retry-worktree.md`` §7 row 4:
+    each orphan removed is recorded as an
+    ``audit_log.action="workspace.orphan_cleanup"`` row (best-effort,
+    per ``audit.log``'s own swallowing contract) + a
+    ``workspace.orphan_cleanup`` SSE event so operators can correlate
+    boot-time recovery with the prior incident that left the
+    orphan behind.
+
+    Module-global state audit (SOP Step 1): reads ``_workspaces``
+    (in-process module-global). The decision is type-3 "intentionally
+    per-worker" — at startup-of-this-worker the dict is empty, so
+    every ``.agent_workspaces/<name>/`` is treated as orphan
+    regardless of what other workers might know. If two workers boot
+    simultaneously and both scan the same orphan, ``git worktree
+    remove --force`` is naturally idempotent (the slower worker sees
+    a missing path, falls back to ``rmtree`` which is also a no-op).
+    The race that *isn't* handled is "worker A is mid-startup-scan
+    while worker B has already finished startup and provisioned a
+    fresh agent" — but ``provision()`` only runs after ``lifespan``
+    completes, and ``cleanup_orphan_worktrees`` runs inside
+    ``_startup_cleanup`` *before* agent provisioning is reachable, so
+    that ordering invariant covers the gap. No PG/Redis coordination
+    is added because the upstream invariant suffices.
+
+    Returns a list of records (one per orphan), each shaped::
+
+        {
+            "path": "/abs/path/to/orphan/worktree",
+            "agent": "safe_agent_name_or_empty",
+            "method": "worktree_remove" | "rmtree" | "worktree_remove+rmtree",
+            "status": "removed" | "failed",
+        }
+
+    Caller treats the return as observability/telemetry; failures are
+    already logged + audit'd, so the caller usually just counts the
+    list size.
+    """
+    if not _WORKSPACES_ROOT.exists():
+        return []
+
+    # Snapshot of agent_ids whose workspaces are live in *this*
+    # process. We compare against the safe-form path component
+    # because that's what's on disk (provision() does
+    # ``re.sub(r'[^a-zA-Z0-9_-]', '_', agent_id)`` to derive the
+    # subdir name; we cannot reverse the mapping, so we mirror it).
+    import re as _re
+    active_safe_names = {
+        _re.sub(r'[^a-zA-Z0-9_-]', '_', info.agent_id)
+        for info in _workspaces.values()
+    }
+
+    # Step 1: gather candidate orphan paths from BOTH sources.
+    # ``git worktree list --porcelain`` output is a series of records
+    # separated by blank lines; the first line of each is
+    # ``worktree <abs_path>``. We only care about paths under
+    # ``_WORKSPACES_ROOT`` (the main repo's worktree at the project
+    # root is *not* an orphan candidate — it's the host of the admin
+    # block).
+    candidate_paths: dict[Path, str] = {}  # path → source label
+
+    rc, listing, _ = await _run(
+        "git worktree list --porcelain", cwd=_MAIN_REPO,
+    )
+    if rc == 0 and listing:
+        for line in listing.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            wt_path = Path(line[len("worktree "):].strip())
+            try:
+                wt_path.relative_to(_WORKSPACES_ROOT)
+            except ValueError:
+                continue  # not under our managed root
+            candidate_paths[wt_path] = "git"
+
+    # Filesystem walk catches dirs that exist on disk but no longer
+    # have an admin block (the "ghost" case — usually means a prior
+    # ``git worktree prune`` ran but the dir wasn't deleted).
+    for child in _WORKSPACES_ROOT.iterdir():
+        if not child.is_dir():
+            continue
+        candidate_paths.setdefault(child, "fs")
+
+    # Step 2: filter against active set, then remove each orphan.
+    removed: list[dict[str, str]] = []
+    for wt_path, source in candidate_paths.items():
+        safe_name = wt_path.name
+        if safe_name in active_safe_names:
+            continue  # live workspace, leave alone
+
+        # Step 2a: try ``git worktree remove --force`` first — it
+        # removes both the working dir AND the
+        # ``.git/worktrees/<name>/`` admin block. Tolerate failure
+        # (admin block may already be gone if this is a fs-only
+        # ghost — the ``rmtree`` fallback handles that).
+        method = ""
+        rm_rc, _, rm_err = await _run(
+            f'git worktree remove --force "{wt_path}" 2>&1',
+            cwd=_MAIN_REPO,
+        )
+        if rm_rc == 0:
+            method = "worktree_remove"
+
+        # Step 2b: filesystem fallback. Even if ``git worktree
+        # remove`` succeeded, the dir might be a ghost so step 2b
+        # is also our only path for the fs-source candidates. Best-
+        # effort — if rmtree fails we still record the orphan as
+        # ``failed`` rather than silently swallowing.
+        rmtree_failed_exc: Exception | None = None
+        if wt_path.exists():
+            try:
+                shutil.rmtree(wt_path)
+                method = (method + "+rmtree") if method else "rmtree"
+            except OSError as exc:
+                rmtree_failed_exc = exc
+                logger.warning(
+                    "cleanup_orphan_worktrees: rmtree failed for %s: %s",
+                    wt_path, exc,
+                )
+
+        status = "removed" if not wt_path.exists() else "failed"
+        record = {
+            "path": str(wt_path),
+            "agent": safe_name,
+            "method": method or "noop",
+            "status": status,
+            "source": source,
+        }
+        removed.append(record)
+
+        # Per design §7 row 4: SSE event + audit row per orphan.
+        try:
+            emit_workspace(
+                safe_name, "orphan_cleanup",
+                f"path={wt_path}, source={source}, method={method or 'noop'}, "
+                f"status={status}",
+            )
+        except Exception as exc:  # pragma: no cover — bus is best-effort
+            logger.debug("emit_workspace orphan_cleanup failed: %s", exc)
+
+        # Audit chain. Lazy-import keeps ``backend.workspace`` import-
+        # time decoupled from ``backend.audit``'s asyncpg graph (mirror
+        # of ``discard_and_recreate``'s pattern). Outer try/except is
+        # defence-in-depth: this is recovery code, an audit outage
+        # must not derail boot.
+        try:
+            from backend import audit as _audit
+            await _audit.log(
+                action="workspace.orphan_cleanup",
+                entity_kind="workspace",
+                entity_id=safe_name,
+                before={"worktree_path": str(wt_path), "source": source},
+                after={
+                    "method": method or "noop",
+                    "status": status,
+                    "error": (
+                        str(rmtree_failed_exc) if rmtree_failed_exc
+                        else (rm_err if rm_rc != 0 else "")
+                    ),
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "audit.log failed for workspace.orphan_cleanup %s: %s",
+                safe_name, exc,
+            )
+
+        if status == "removed":
+            logger.warning(
+                "Orphan worktree removed: %s (source=%s, method=%s)",
+                wt_path, source, method or "noop",
+            )
+        else:
+            logger.warning(
+                "Orphan worktree FAILED to remove: %s (source=%s)",
+                wt_path, source,
+            )
+
+    # Step 3: prune dangling ``.git/worktrees/<name>/`` admin entries
+    # that the per-orphan ``git worktree remove`` calls couldn't
+    # touch (e.g. the fs-source ghosts). Idempotent + cheap.
+    if removed:
+        await _run("git worktree prune", cwd=_MAIN_REPO)
+
+    return removed
+
+
 async def cleanup_stale_locks():
     """Remove .git/index.lock files left from interrupted operations.
 

@@ -49,6 +49,27 @@ async def _startup_cleanup(log):
         await cleanup_stale_locks()
     except Exception:
         pass
+    # 5. R8 #314 row 2875: scan + remove orphan worktrees left over
+    # from a prior crashed/restarted process. ``_workspaces`` is empty
+    # at this point in lifespan (in-process dict, fresh per worker)
+    # so any subdir under ``.agent_workspaces/`` is by definition
+    # orphan; the helper ``git worktree remove --force`` + ``shutil.
+    # rmtree`` fallback per orphan, emits ``workspace.orphan_cleanup``
+    # SSE + audit row per design §7 row 4. Best-effort — boot must
+    # not block on it (workspace recovery is observability, not a
+    # gate).
+    try:
+        from backend.workspace import cleanup_orphan_worktrees
+        orphans = await cleanup_orphan_worktrees()
+        if orphans:
+            log.warning(
+                "Startup cleanup: removed %d orphan worktree(s) "
+                "(paths=%s)",
+                len(orphans),
+                ", ".join(o["path"] for o in orphans),
+            )
+    except Exception as exc:
+        log.warning("Startup cleanup: orphan worktree scan failed: %s", exc)
 
 
 @asynccontextmanager
