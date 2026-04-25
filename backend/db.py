@@ -151,6 +151,10 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("notifications", "dispatch_status", "TEXT NOT NULL DEFAULT 'pending'"),
         ("notifications", "send_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("notifications", "last_error", "TEXT"),
+        # R9 row 2935 (#315) — operational-priority tag (P1/P2/P3).
+        # NULLable so legacy callers without severity awareness keep
+        # working unchanged; dispatcher consumes this in row 2939.
+        ("notifications", "severity", "TEXT"),
         # Artifact version/checksum (Phase 39)
         ("artifacts", "version", "TEXT NOT NULL DEFAULT ''"),
         ("artifacts", "checksum", "TEXT NOT NULL DEFAULT ''"),
@@ -449,7 +453,9 @@ CREATE TABLE IF NOT EXISTS notifications (
     auto_resolved   INTEGER NOT NULL DEFAULT 0,
     dispatch_status TEXT NOT NULL DEFAULT 'pending',
     send_attempts   INTEGER NOT NULL DEFAULT 0,
-    last_error      TEXT
+    last_error      TEXT,
+    -- R9 row 2935 (#315): P1/P2/P3 severity tag (orthogonal to level).
+    severity        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -1585,10 +1591,18 @@ async def list_handoffs(conn) -> list[dict]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def insert_notification(conn, data: dict) -> None:
+    # R9 row 2935 (#315): severity is the new tag column. Older callers
+    # that don't pass it land NULL — `data.get("severity")` returns
+    # None which asyncpg / aiosqlite both bind to SQL NULL. We do not
+    # validate the value here against the Severity enum because
+    # ``Notification`` (the Pydantic model used by ``notify()``) already
+    # validates on construction; persisting whatever the caller already
+    # serialised keeps this function symmetric with how level is
+    # treated (also stored as TEXT, also not re-validated here).
     await conn.execute(
         """INSERT INTO notifications (id, level, title, message, source, timestamp,
-             read, action_url, action_label, auto_resolved)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             read, action_url, action_label, auto_resolved, severity)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         """,
         data["id"],
         data["level"],
@@ -1600,6 +1614,7 @@ async def insert_notification(conn, data: dict) -> None:
         data.get("action_url"),
         data.get("action_label"),
         1 if data.get("auto_resolved") else 0,
+        data.get("severity"),
     )
 
 

@@ -321,6 +321,16 @@ class NotificationLevel(str, Enum):
     critical = "critical"  # L4: fullscreen + pager
 
 
+# R9 row 2935 (#315): operational-priority tag attached to existing
+# L1-L4 notifications. *Not* a parallel routing tier — see
+# :mod:`backend.severity` for the design rationale and the spec
+# constant :data:`backend.severity.SEVERITY_TIER_MAPPING`. Re-exported
+# from this module so Pydantic models (the canonical wire-format
+# definition spot) can reference it without callers needing two
+# imports; the source of truth is :class:`backend.severity.Severity`.
+from backend.severity import Severity  # noqa: E402  (re-export at point of use)
+
+
 class Notification(BaseModel):
     id: str
     level: NotificationLevel
@@ -335,6 +345,10 @@ class Notification(BaseModel):
     dispatch_status: str = "pending"  # pending, sent, failed, skipped
     send_attempts: int = 0
     last_error: Optional[str] = None
+    # R9 row 2935: optional operational-priority tag. None = legacy
+    # caller without severity awareness; the dispatcher falls back to
+    # plain level routing in that case.
+    severity: Optional[Severity] = None
 
 
 # ---------- Simulations ----------

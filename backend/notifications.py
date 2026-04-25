@@ -16,7 +16,7 @@ from datetime import datetime
 
 from backend.config import settings
 from backend.events import bus
-from backend.models import Notification, NotificationLevel
+from backend.models import Notification, NotificationLevel, Severity
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ async def notify(
     interactive: bool = False,
     interactive_buttons: list[dict] | None = None,
     interactive_channel: str = "*",
+    severity: Severity | str | None = None,
     conn=None,
 ) -> Notification:
     """Create and route a notification through the tiered system.
@@ -45,8 +46,25 @@ async def notify(
     orchestration) call without conn and the function borrows one
     from the pool just for the insert. Matches the
     routers/tasks.py::_persist pattern.
+
+    R9 row 2935 (#315): ``severity`` is the new orthogonal P1/P2/P3
+    tag (see :mod:`backend.severity`). When ``None`` (the legacy
+    case) the tag column persists as NULL and the dispatcher behaves
+    exactly as before — falling back to plain level routing. When set
+    it is persisted + re-broadcast on the SSE bus so the frontend
+    notification-center can render the per-card severity badge (UI
+    delivery is a separate row in R9). The actual tier-fan-out logic
+    that consumes the tag (PagerDuty / Jira / ChatOps interactive
+    diff per severity) lives in row 2939's ``send_notification(tier,
+    severity, payload, interactive=False)`` extension; this row
+    establishes the data path so row 2939 has the field to read.
     """
     level_str = level.value if hasattr(level, "value") else level
+    severity_str: str | None
+    if severity is None:
+        severity_str = None
+    else:
+        severity_str = severity.value if hasattr(severity, "value") else str(severity)
     notif = Notification(
         id=f"notif-{uuid.uuid4().hex[:8]}",
         level=level_str,
@@ -56,6 +74,7 @@ async def notify(
         timestamp=datetime.now().isoformat(),
         action_url=action_url,
         action_label=action_label,
+        severity=severity_str,
     )
 
     # 1. Always persist to DB (best-effort — a failed DB write still
@@ -83,6 +102,10 @@ async def notify(
         "timestamp": notif.timestamp,
         "action_url": action_url,
         "action_label": action_label,
+        # R9 row 2935: severity tag rides alongside level so the
+        # frontend can render per-card P1/P2/P3 badges without an
+        # extra round-trip. None for legacy callers.
+        "severity": severity_str,
     })
 
     # 3. Route to external channels based on level
