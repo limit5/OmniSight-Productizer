@@ -408,8 +408,9 @@ async def discard_and_recreate(
         reason: Free-form short label ("retry", "rollback", ...) —
             surfaced on the ``workspace.retried`` SSE event so
             operators can tell scheduled retries from operator-driven
-            ChatOps rollbacks. Audit-log persistence is row 2874's
-            scope, not this row's.
+            ChatOps rollbacks, and persisted into the
+            ``retry.worktree_recreated`` audit row's ``after.reason``
+            field for forensics (R8 row 2874).
 
     Returns:
         Same ``WorkspaceInfo`` instance with ``commit_count`` reset to
@@ -573,6 +574,44 @@ async def discard_and_recreate(
         agent_id, "running",
         f"Workspace recreated from anchor {anchor_sha[:12]}",
     )
+
+    # R8 #314 row 2874: audit trail. ``audit.log`` is best-effort
+    # internally — exceptions are caught and logged as warnings — so a
+    # missing DB pool / chain-write outage cannot derail the retry
+    # primitive. The outer try/except is defence-in-depth: this is
+    # itself a recovery path (the retry of a failed task), and failing
+    # recovery on a failed receipt would be a worst-case escalation.
+    # The ``before`` block carries the pre-discard branch tip we
+    # snapshotted at function entry plus the soon-to-be-abandoned
+    # worktree path; ``after`` carries the anchor SHA HEAD now points
+    # at, the reason label, and the same logical worktree path (same-
+    # path-reuse design — docs/design/r8-idempotent-retry-worktree.md
+    # §7 row 2). Lazy import avoids tying ``backend.workspace`` import-
+    # time to ``backend.audit``'s dependency graph.
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="retry.worktree_recreated",
+            entity_kind="workspace",
+            entity_id=agent_id,
+            before={
+                "worktree_path": str(ws_path),
+                "branch_tip": old_branch_tip,
+                "branch": branch,
+            },
+            after={
+                "worktree_path": str(ws_path),
+                "anchor_sha": anchor_sha,
+                "branch": branch,
+                "reason": reason,
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "audit.log failed for retry.worktree_recreated %s: %s",
+            agent_id, exc,
+        )
+
     logger.info(
         "Workspace discarded+recreated: %s → %s (anchor=%s, reason=%s)",
         agent_id, ws_path, anchor_sha[:12], reason,

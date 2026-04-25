@@ -13,10 +13,12 @@ Per ``docs/design/r8-idempotent-retry-worktree.md`` §7 row 2:
     git worktree add -b from anchor SHA
     emit ``workspace.retried`` SSE event
 
-Audit-log persistence is row 2874 — out of scope here. Startup orphan
-scan is row 2875. Integration test that wires retry orchestrator → this
-function → audit is row 2876. This file rigorously locks the contract
-of the helper itself.
+Row 2874 (audit trail — ``retry.worktree_recreated`` chain row with
+``old_worktree_path`` / ``anchor_sha`` / ``reason``) is also locked
+in this file (``TestAuditTrail`` class at the bottom) — it's the
+same code path's downstream contract. Startup orphan scan is row
+2875. Integration test that wires retry orchestrator → this
+function → audit is row 2876.
 """
 
 from __future__ import annotations
@@ -423,3 +425,205 @@ def test_source_repo_worktree_list_shows_recreated(provisioned, fake_repo):
     assert len(matching) == 1, (
         f"expected 1 worktree entry for {info.path}, got: {listing!r}"
     )
+
+
+# ===========================================================================
+# R8 row 2874 — Audit trail contract
+# ===========================================================================
+#
+# "Audit trail：每次 retry 寫入 audit_log（retry.worktree_recreated，
+#  附 old_worktree_path / anchor_sha / reason）"
+#
+# These tests spy on ``backend.audit.log`` (the canonical async write
+# entry — see backend/audit.py:142) instead of the DB layer, because:
+#
+#   1. The unit-test environment has no asyncpg pool. ``audit.log``
+#      itself is best-effort and would silently no-op against a pool-
+#      less environment, so a DB-level assertion would always pass for
+#      the wrong reason.
+#   2. The contract this row owns is "we *call* audit with the right
+#      shape" — the DB row + hash-chain integrity is owned by
+#      backend/tests/test_audit.py (Phase 53 / I8 chain tests) which
+#      hammer the persistence layer with a real PG.
+#
+# The pattern mirrors ``test_emits_retried_event_on_bus`` above —
+# monkeypatch the module attribute, capture call args, assert payload
+# shape. Lazy-import in the production code (``from backend import
+# audit as _audit`` inside discard_and_recreate) means the patch on
+# ``backend.audit.log`` is picked up at call time.
+
+
+def _spy_audit_log(monkeypatch, *, raise_exc: Exception | None = None):
+    """Install a spy on ``backend.audit.log`` and return the capture list.
+
+    Each entry in the list is the kwargs dict the production code passed
+    to ``audit.log``. If ``raise_exc`` is given, the spy raises it after
+    capturing — used to prove ``discard_and_recreate`` survives audit
+    failures (best-effort contract)."""
+    from backend import audit as _audit
+    captured: list[dict] = []
+
+    async def _spy(action, entity_kind, entity_id, before=None, after=None,
+                   actor="system", session_id=None, conn=None):
+        captured.append({
+            "action": action,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+            "before": before,
+            "after": after,
+            "actor": actor,
+            "session_id": session_id,
+        })
+        if raise_exc is not None:
+            raise raise_exc
+        return None  # match real signature: row id or None
+
+    monkeypatch.setattr(_audit, "log", _spy, raising=True)
+    return captured
+
+
+# ---------------------------------------------------------------------------
+# 14) Audit row is emitted on every successful recreate
+# ---------------------------------------------------------------------------
+
+
+def test_audit_log_emitted_on_recreate(provisioned, monkeypatch):
+    captured = _spy_audit_log(monkeypatch)
+
+    asyncio.run(ws_mod.discard_and_recreate(
+        agent_id="agent-r8",
+        anchor_sha=provisioned.anchor_sha,
+        reason="ai-timeout",
+    ))
+
+    matching = [c for c in captured if c["action"] == "retry.worktree_recreated"]
+    assert len(matching) == 1, (
+        f"expected exactly one retry.worktree_recreated audit row, "
+        f"got {captured}"
+    )
+    row = matching[0]
+    assert row["entity_kind"] == "workspace"
+    assert row["entity_id"] == "agent-r8"
+
+
+# ---------------------------------------------------------------------------
+# 15) Audit payload carries old_worktree_path / anchor_sha / reason
+# ---------------------------------------------------------------------------
+
+
+def test_audit_log_payload_includes_old_path_anchor_reason(
+    provisioned, monkeypatch,
+):
+    """TODO row 2874 contract: '附 old_worktree_path / anchor_sha / reason'.
+    All three must be retrievable from the audit row's before/after
+    payload (so a forensics query against ``audit_log`` can answer
+    'which workspace path was discarded, what anchor was it rebuilt at,
+    and why')."""
+    captured = _spy_audit_log(monkeypatch)
+    info = provisioned
+    anchor = info.anchor_sha
+    expected_path = str(info.path)
+    # Make agent commits past the anchor so old_branch_tip != anchor —
+    # proves the snapshot captures the *pre-discard* tip, not the post-
+    # recreate HEAD.
+    old_tip = _agent_commit(info.path)
+
+    asyncio.run(ws_mod.discard_and_recreate(
+        agent_id="agent-r8",
+        anchor_sha=anchor,
+        reason="operator-rollback",
+    ))
+
+    row = next(c for c in captured if c["action"] == "retry.worktree_recreated")
+    before = row["before"] or {}
+    after = row["after"] or {}
+
+    # `before` must surface the discarded worktree's path + the SHA the
+    # branch tip was at *before* discard (so audit history can answer
+    # "what was on that branch when we threw it away").
+    assert before.get("worktree_path") == expected_path
+    assert before.get("branch_tip") == old_tip
+    assert before.get("branch") == info.branch
+
+    # `after` must carry the anchor SHA HEAD now points at + the reason
+    # label + the same logical worktree path (same-path-reuse design).
+    assert after.get("worktree_path") == expected_path
+    assert after.get("anchor_sha") == anchor
+    assert after.get("branch") == info.branch
+    assert after.get("reason") == "operator-rollback"
+
+
+# ---------------------------------------------------------------------------
+# 16) Default reason (no kwarg) lands in the audit payload as "retry"
+# ---------------------------------------------------------------------------
+
+
+def test_audit_log_default_reason_is_retry_in_payload(provisioned, monkeypatch):
+    captured = _spy_audit_log(monkeypatch)
+
+    asyncio.run(ws_mod.discard_and_recreate(
+        agent_id="agent-r8", anchor_sha=provisioned.anchor_sha,
+    ))
+
+    row = next(c for c in captured if c["action"] == "retry.worktree_recreated")
+    assert (row["after"] or {}).get("reason") == "retry"
+
+
+# ---------------------------------------------------------------------------
+# 17) Audit row is written *after* the worktree exists at the anchor
+# ---------------------------------------------------------------------------
+
+
+def test_audit_log_emitted_only_after_recreate_succeeds(provisioned, monkeypatch):
+    """Audit semantics: 'retry.worktree_recreated' means the recreate
+    *succeeded*. If we wrote it before ``git worktree add`` finished we'd
+    be lying when the add failed. Spy proves the call site happens after
+    HEAD == anchor."""
+    seen_head_at_audit_time: list[str] = []
+    from backend import audit as _audit
+
+    async def _spy(action, entity_kind, entity_id, **_):
+        if action == "retry.worktree_recreated":
+            head = _git("rev-parse", "HEAD", cwd=provisioned.path)
+            seen_head_at_audit_time.append(head)
+        return None
+
+    monkeypatch.setattr(_audit, "log", _spy, raising=True)
+
+    _agent_commit(provisioned.path)
+    asyncio.run(ws_mod.discard_and_recreate(
+        agent_id="agent-r8", anchor_sha=provisioned.anchor_sha,
+    ))
+
+    assert seen_head_at_audit_time == [provisioned.anchor_sha]
+
+
+# ---------------------------------------------------------------------------
+# 18) Audit failures must NOT break the retry primitive (best-effort)
+# ---------------------------------------------------------------------------
+
+
+def test_audit_log_failure_does_not_break_recreate(provisioned, monkeypatch):
+    """``audit.log`` swallows its own exceptions internally (audit.py:179),
+    but if a future maintainer accidentally lifts that try/except (or a
+    new caller wraps audit in something synchronous that re-raises),
+    discard_and_recreate must still succeed — the retry path is itself
+    a recovery path; failing recovery on a failed receipt is the worst-
+    case escalation. We force the spy to raise to prove the contract.
+
+    Note: the production call site relies on audit.log's *own* internal
+    swallowing. This test simulates a regression where that swallowing
+    was lost, and asserts our outer code path is robust."""
+    _spy_audit_log(monkeypatch, raise_exc=RuntimeError("simulated audit outage"))
+
+    # If discard_and_recreate doesn't survive audit failure, this raises.
+    # We don't explicitly catch — pytest.raises would also fail this test
+    # because we're asserting the *opposite*.
+    info = asyncio.run(ws_mod.discard_and_recreate(
+        agent_id="agent-r8", anchor_sha=provisioned.anchor_sha,
+    ))
+
+    # Recreate side effects must all be in place even though audit failed.
+    assert info.status == "active"
+    assert info.commit_count == 0
+    assert _git("rev-parse", "HEAD", cwd=info.path) == provisioned.anchor_sha
