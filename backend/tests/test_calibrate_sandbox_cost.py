@@ -20,6 +20,7 @@ Test surface:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -1148,3 +1149,289 @@ class TestCliBaselineWiring:
         ns = p.parse_args([])
         assert ns.baseline is None
         assert ns.no_baseline is False
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  H4b row 2592 — Audit hash-chain row contract
+# ─────────────────────────────────────────────────────────────────────
+#
+# The chain row is the immutable receipt of every ``--apply`` run. The
+# tests below pin the canonical payload schema (entity_kind / entity_id
+# / before / after / actor) so downstream queriers
+# (``audit.query(action="sandbox_cost_calibration")``) have a stable
+# contract — and so a future renderer change to the diff report can't
+# silently widen / narrow the audit row without triggering a test diff.
+#
+# We exercise both the pure-function payload builder
+# (``build_audit_payload``) AND the async wrapper (``emit_audit_row``)
+# via a monkeypatched ``audit.log`` spy — the spy approach lets us
+# prove the wrapper passes the right kwargs, returns True/False
+# correctly, and survives audit-side failures, without standing up an
+# asyncpg pool. The pure-function tests pin the schema; the spy tests
+# pin the wiring.
+
+
+def _build_calibrated_result(now: float = 1_700_000_000.0) -> cal.CalibrationResult:
+    """Build a CalibrationResult with one drifted + one zero-data class.
+
+    Uses the same shape as TestRecommendAction's helpers — a
+    lightweight class with ample samples (reference, pinned to 1.0),
+    plus a heavier compile class with enough samples to clear
+    MIN_SAMPLES_FOR_CONFIDENCE so the drift status surfaces.
+    """
+    rows: list[cal.AuditRow] = []
+    # 6 lightweight launches (1 token × 20s = 20 cpu_token_s each).
+    for i in range(6):
+        rows.append(_row(2 * i + 1, now - 1000 + i, "sandbox_launched", f"lt{i}",
+                         tier="t1", tenant_budget=1.0, memory="512m"))
+        rows.append(_row(2 * i + 2, now - 980 + i, "sandbox_killed", f"lt{i}",
+                         tier="t1", reason="lifetime"))
+    # 6 compile launches (4 tokens × 100s = 400 cpu_token_s each).
+    for i in range(6):
+        rows.append(_row(100 + 2 * i + 1, now - 900 + i, "sandbox_launched",
+                         f"cc{i}", tier="t3-local", tenant_budget=4.0,
+                         memory="2048m"))
+        rows.append(_row(100 + 2 * i + 2, now - 800 + i, "sandbox_killed",
+                         f"cc{i}", tier="t3-local", reason="lifetime"))
+    return cal.calibrate(rows, window_days=7, now=now)
+
+
+class TestBuildAuditPayload:
+    """Pure-function schema lock — no DB / no monkeypatch needed."""
+
+    OUT = Path("/tmp/sandbox_cost_weights.yaml")
+
+    def test_before_records_baseline_weights_for_every_class(self):
+        result = _build_calibrated_result()
+        before, _ = cal.build_audit_payload(result, self.OUT)
+        # Every canonical class must have a baseline entry — the chain
+        # row's `before.weights` is what downstream consumers read to
+        # know the pre-apply state, so missing entries silently break
+        # the diff query.
+        for name in result.classes:
+            assert name in before["weights"]
+            assert isinstance(before["weights"][name], float)
+
+    def test_before_baseline_source_propagates_from_result(self):
+        result = _build_calibrated_result()
+        result.baseline_source = "configs/sandbox_cost_weights.yaml " \
+                                 "(last calibrated 2026-04-25T00:00:00+00:00)"
+        before, _ = cal.build_audit_payload(result, self.OUT)
+        assert before["baseline_source"] == result.baseline_source
+
+    def test_before_records_config_path(self):
+        result = _build_calibrated_result()
+        before, after = cal.build_audit_payload(result, self.OUT)
+        assert before["config_path"] == str(self.OUT)
+        assert after["config_path"] == str(self.OUT)
+
+    def test_after_records_post_apply_weights(self):
+        result = _build_calibrated_result()
+        _, after = cal.build_audit_payload(result, self.OUT)
+        # gvisor pinned to 1.0 (lightest reference); compile drifts
+        # 4.0 → 20.0 (5× the reference's mean cpu_token_s).
+        assert after["weights"]["gvisor_lightweight"] == pytest.approx(1.0)
+        assert after["weights"]["phase64c_local_compile"] == pytest.approx(20.0)
+
+    def test_after_records_window_and_observation_counts(self):
+        result = _build_calibrated_result()
+        _, after = cal.build_audit_payload(result, self.OUT)
+        assert after["window_days"] == 7
+        assert after["window_start_ts"] == result.window_start_ts
+        assert after["window_end_ts"] == result.window_end_ts
+        assert after["total_paired"] == 12
+        assert after["total_orphaned"] == 0
+        assert after["host_ring_size"] == result.host_ring_size
+
+    def test_after_weights_detail_includes_drift_and_status(self):
+        result = _build_calibrated_result()
+        _, after = cal.build_audit_payload(result, self.OUT)
+        # Compile is drifted (4 → 20 = 400% drift) AND has 6 samples
+        # → must appear with full drill-down fields.
+        d = after["weights_detail"]["phase64c_local_compile"]
+        assert d["old_tokens"] == pytest.approx(4.0)
+        assert d["new_tokens"] == pytest.approx(20.0)
+        assert d["sample_count"] == 6
+        assert d["status"] == cal.STATUS_LARGE
+        assert d["drift_pct"] == pytest.approx(4.0)  # (20-4)/4
+        # Mean-CPU·s recorded per class so audit query can rebuild
+        # the calibration math without re-fetching audit_log rows.
+        assert d["mean_cpu_token_s"] == pytest.approx(400.0)
+
+    def test_after_weights_detail_omits_unsampled_unchanged_classes(self):
+        # qemu / ssh_remote weren't sampled and stay at H4a values →
+        # neither evidence nor delta → drop from detail to keep the
+        # row size sub-5KB even with future per-class field growth.
+        result = _build_calibrated_result()
+        _, after = cal.build_audit_payload(result, self.OUT)
+        assert "phase64c_qemu_aarch64" not in after["weights_detail"]
+        assert "phase64c_ssh_remote" not in after["weights_detail"]
+
+    def test_after_includes_summary_buckets(self):
+        result = _build_calibrated_result()
+        _, after = cal.build_audit_payload(result, self.OUT)
+        # summary surface must always include all 5 status keys so
+        # downstream consumers can read positionally.
+        for status in (cal.STATUS_OK, cal.STATUS_REVIEW, cal.STATUS_LARGE,
+                       cal.STATUS_LOW_DATA, cal.STATUS_NO_DATA):
+            assert status in after["summary"]
+        # Compile drift is LARGE; gvisor is OK (pinned ref); the 3
+        # unsampled classes are NO-DATA.
+        assert after["summary"][cal.STATUS_LARGE] == 1
+        assert after["summary"][cal.STATUS_OK] == 1
+        assert after["summary"][cal.STATUS_NO_DATA] == 3
+
+    def test_after_includes_recommendation_verdict(self):
+        result = _build_calibrated_result()
+        _, after = cal.build_audit_payload(result, self.OUT)
+        rec = after["recommendation"]
+        assert rec["verdict"] == cal.VERDICT_REVIEW
+        assert isinstance(rec["reason"], str) and rec["reason"]
+
+    def test_payload_is_json_serialisable(self):
+        # The audit module canonicalises to JSON for the chain hash.
+        # If a non-JSON-safe field (Path, set, dataclass, datetime)
+        # ever leaks in, the chain write would silently fall back to
+        # str() and corrupt forensic queries that try to round-trip.
+        result = _build_calibrated_result()
+        before, after = cal.build_audit_payload(result, self.OUT)
+        json.dumps(before)
+        json.dumps(after)
+
+    def test_baseline_yaml_overrides_old_tokens_in_before(self):
+        # Post-first-apply: yaml is now the source of truth → the
+        # chain row's `before.weights` must reflect the yaml (not the
+        # H4a hardcode) so the next calibration re-run records the
+        # actual pre-apply state, not a constant.
+        result = _build_calibrated_result()
+        result.baseline_weights = {"phase64c_local_compile": 19.5}
+        before, after = cal.build_audit_payload(result, self.OUT)
+        assert before["weights"]["phase64c_local_compile"] == pytest.approx(19.5)
+        # Detail's old_tokens uses the same baseline so drift_pct is
+        # measured against live yaml, not against the hardcode.
+        d = after["weights_detail"]["phase64c_local_compile"]
+        assert d["old_tokens"] == pytest.approx(19.5)
+        # 20.0 vs 19.5 = 2.5% drift → OK status (post-first-apply
+        # behaviour: re-running calibration shouldn't keep flagging
+        # already-applied weights as LARGE).
+        assert d["status"] == cal.STATUS_OK
+
+    def test_empty_window_payload_still_well_formed(self):
+        # No paired launches → calibration produced no actionable
+        # signal (verdict SKIP). The audit row should still be
+        # well-formed (CI cron may invoke `--apply` defensively even
+        # when SKIP) — the chain row then proves "we ran, found
+        # nothing, did nothing".
+        result = cal.calibrate([], window_days=7, now=1_700_000_000.0)
+        before, after = cal.build_audit_payload(result, self.OUT)
+        assert before["weights"]  # all 5 H4a classes recorded
+        assert after["total_paired"] == 0
+        assert after["weights_detail"] == {}
+        assert after["recommendation"]["verdict"] == cal.VERDICT_SKIP
+
+
+def _spy_audit_log(monkeypatch, *, raise_exc: Exception | None = None):
+    """Install a spy on ``backend.audit.log`` and return the capture list.
+
+    Each entry is the kwargs dict the production code passed to
+    ``audit.log``. If ``raise_exc`` is given, the spy raises after
+    capturing — used to prove ``emit_audit_row`` survives audit
+    failures (best-effort contract). Mirrors the spy pattern in
+    ``test_workspace_discard_recreate.py`` so future readers don't
+    need to learn two idioms.
+    """
+    from backend import audit as _audit
+    captured: list[dict] = []
+
+    async def _spy(action, entity_kind, entity_id, before=None, after=None,
+                   actor="system", session_id=None, conn=None):
+        captured.append({
+            "action": action,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+            "before": before,
+            "after": after,
+            "actor": actor,
+            "session_id": session_id,
+        })
+        if raise_exc is not None:
+            raise raise_exc
+        return None
+
+    monkeypatch.setattr(_audit, "log", _spy, raising=True)
+    return captured
+
+
+class TestEmitAuditRow:
+    """Async wrapper contract — wiring + best-effort failure path."""
+
+    OUT = Path("/tmp/sandbox_cost_weights.yaml")
+
+    def test_emits_row_with_canonical_action_kind_entity(self, monkeypatch):
+        captured = _spy_audit_log(monkeypatch)
+        result = _build_calibrated_result()
+        ok = asyncio.run(cal.emit_audit_row(result, self.OUT))
+        assert ok is True
+        assert len(captured) == 1
+        row = captured[0]
+        # Three canonical fields downstream forensic queries pivot on.
+        assert row["action"] == "sandbox_cost_calibration"
+        assert row["entity_kind"] == "config"
+        assert row["entity_id"] == "sandbox_cost_weights.yaml"
+
+    def test_emits_actor_identifies_calibrator(self, monkeypatch):
+        captured = _spy_audit_log(monkeypatch)
+        asyncio.run(cal.emit_audit_row(
+            _build_calibrated_result(), self.OUT,
+        ))
+        # Actor distinguishes scripted calibration from human edits in
+        # forensic queries; the "system:" prefix matches the existing
+        # convention used by other background-task audit rows.
+        assert captured[0]["actor"] == "system:calibrate_sandbox_cost"
+
+    def test_payload_matches_build_audit_payload(self, monkeypatch):
+        # The async wrapper must not re-shape the payload — schema
+        # lives in build_audit_payload() so contract changes happen in
+        # one place.
+        captured = _spy_audit_log(monkeypatch)
+        result = _build_calibrated_result()
+        asyncio.run(cal.emit_audit_row(result, self.OUT))
+        expected_before, expected_after = cal.build_audit_payload(result, self.OUT)
+        assert captured[0]["before"] == expected_before
+        assert captured[0]["after"] == expected_after
+
+    def test_returns_false_when_audit_log_raises(self, monkeypatch):
+        # audit.py already swallows exceptions internally (returns
+        # None), but the calibrator catches anything that escapes too
+        # — yaml is the operator-visible truth, the chain row is best-
+        # effort. A blown audit infra must NOT block --apply.
+        captured = _spy_audit_log(
+            monkeypatch, raise_exc=RuntimeError("simulated audit outage"),
+        )
+        ok = asyncio.run(cal.emit_audit_row(
+            _build_calibrated_result(), self.OUT,
+        ))
+        assert ok is False
+        # Spy still captured the call — proves we attempted the write
+        # before the failure path kicked in.
+        assert len(captured) == 1
+
+    def test_returns_false_when_audit_module_unimportable(self, monkeypatch):
+        # Simulate the dev-box / fresh-install scenario where the
+        # backend package isn't installed at all. The calibrator
+        # should log + return False, never crash the --apply.
+        import builtins
+        real_import = builtins.__import__
+
+        def _no_audit(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "backend" and fromlist and "audit" in fromlist:
+                raise ImportError("backend.audit not installed")
+            if name == "backend.audit":
+                raise ImportError("backend.audit not installed")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", _no_audit)
+        ok = asyncio.run(cal.emit_audit_row(
+            _build_calibrated_result(), self.OUT,
+        ))
+        assert ok is False

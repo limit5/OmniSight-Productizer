@@ -1161,37 +1161,107 @@ def write_yaml(result: CalibrationResult, path: Path) -> None:
     os.replace(tmp, path)
 
 
+def build_audit_payload(
+    result: CalibrationResult, out_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Construct the ``before`` / ``after`` dicts written into the chain row.
+
+    Split out from :func:`emit_audit_row` so unit tests can pin the
+    schema without spinning up an asyncpg pool. The split also lets a
+    future ``--dry-run-audit`` flag reuse the same canonical shape.
+
+    ``before`` captures the live state the apply will overwrite:
+        ``config_path`` / ``baseline_source`` / ``weights`` (the
+        per-class tokens that downstream consumers were reading until
+        this row commits).
+
+    ``after`` captures the new state plus the forensic context that
+    justifies the change so an auditor reading the chain row alone can
+    reconstruct *why*: window bounds, paired/orphan counts, host_ring
+    depth, post-apply weights, per-sampled-class drill-down (samples,
+    mean duration / CPU·s / Δmem_peak, status, drift_pct), the
+    Summary-section bucket counts, and the advisory verdict.
+    """
+    weights_before: dict[str, float] = {
+        name: float(baseline_for(name, result)) for name in result.classes
+    }
+    weights_after: dict[str, float] = {
+        name: float(result.new_weights.get(name, result.classes[name].old_tokens))
+        for name in result.classes
+    }
+    weights_detail: dict[str, dict[str, Any]] = {}
+    for name, s in result.classes.items():
+        old_t = weights_before[name]
+        new_t = weights_after[name]
+        # Skip rows that are both unsampled AND unchanged — they're
+        # neither evidence nor delta. Sampled-but-unchanged rows DO
+        # land here so the chain row still shows "we looked, we saw N
+        # paired launches, no change warranted".
+        if s.sample_count == 0 and abs(new_t - old_t) <= 1e-6:
+            continue
+        weights_detail[name] = {
+            "old_tokens": old_t,
+            "new_tokens": new_t,
+            "drift_pct": drift_pct(old_t, new_t),
+            "status": classify_drift(s, old_t, new_t),
+            "sample_count": s.sample_count,
+            "mean_duration_s": round(s.mean_duration_s, 3),
+            "mean_cpu_token_s": round(s.mean_cpu_token_s, 3),
+            "mean_delta_mem_peak_mb": round(s.mean_delta_mem_peak_mb, 1),
+            "delta_mem_sample_count": s.delta_mem_sample_count,
+            "peak_mem_mb": round(s.peak_mem_mb, 1),
+            "oom_count": s.oom_count,
+        }
+    verdict, reason = recommend_action(result)
+    before: dict[str, Any] = {
+        "config_path": str(out_path),
+        "baseline_source": result.baseline_source,
+        "weights": weights_before,
+    }
+    after: dict[str, Any] = {
+        "config_path": str(out_path),
+        "window_days": result.window_days,
+        "window_start_ts": result.window_start_ts,
+        "window_end_ts": result.window_end_ts,
+        "total_paired": result.total_paired,
+        "total_orphaned": result.total_orphaned,
+        "host_ring_size": result.host_ring_size,
+        "weights": weights_after,
+        "weights_detail": weights_detail,
+        "summary": summarise_calibration(result),
+        "recommendation": {"verdict": verdict, "reason": reason},
+    }
+    return before, after
+
+
 async def emit_audit_row(result: CalibrationResult, out_path: Path) -> bool:
     """Append a ``sandbox_cost_calibration`` row to the audit hash chain.
+
+    The chain row is the immutable forensic record of "operator (or
+    cron) flipped the live cost weights from X to Y at time T because
+    the N-day window had P paired launches"; it complements the yaml
+    file (which is the operator-visible truth) by being tamper-evident
+    and queryable via ``audit.query(action="sandbox_cost_calibration")``.
+
+    Payload shape comes from :func:`build_audit_payload` — ``before``
+    snapshots the live weights + provenance; ``after`` snapshots the
+    new weights + window stats + per-class drill-down + advisory
+    verdict so a single chain row reproduces the diff report.
 
     Best-effort: if the audit module isn't reachable (no DB pool, fresh
     install, dev box without PG running) we log + return False rather
     than refusing the apply — the yaml is the operator-visible truth,
-    audit is the secondary integrity record.
+    audit is the secondary integrity record. Mirrors the
+    decision_engine / llm_credentials philosophy of "state mutation
+    must succeed even if the receipt printer is offline" (see
+    ``audit.py`` Phase-50-Fix note).
     """
     try:
         from backend import audit
     except Exception as exc:
         logger.warning("audit module import failed; skipping chain row: %s", exc)
         return False
-    diff: dict[str, Any] = {}
-    for name, s in result.classes.items():
-        new = result.new_weights.get(name, s.old_tokens)
-        if abs(new - s.old_tokens) > 1e-6 or s.sample_count > 0:
-            diff[name] = {
-                "old_tokens": s.old_tokens,
-                "new_tokens": new,
-                "sample_count": s.sample_count,
-                "mean_duration_s": round(s.mean_duration_s, 3),
-                "peak_mem_mb": round(s.peak_mem_mb, 1),
-            }
-    after = {
-        "config_path": str(out_path),
-        "window_days": result.window_days,
-        "total_paired": result.total_paired,
-        "total_orphaned": result.total_orphaned,
-        "weights": diff,
-    }
+    before, after = build_audit_payload(result, out_path)
     try:
         # Audit module needs a PG pool; init one from the env DSN if the
         # caller hasn't already.
@@ -1200,7 +1270,7 @@ async def emit_audit_row(result: CalibrationResult, out_path: Path) -> bool:
             action="sandbox_cost_calibration",
             entity_kind="config",
             entity_id="sandbox_cost_weights.yaml",
-            before=None,
+            before=before,
             after=after,
             actor="system:calibrate_sandbox_cost",
         )
