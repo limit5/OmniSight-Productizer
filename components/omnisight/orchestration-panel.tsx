@@ -293,19 +293,24 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
         )}
       </div>
 
-      {/* Three stacked bars. Grid: label / track / value. Track is
-          a thin pill background with a coloured fill scaled by rate;
-          the value is right-aligned tabular-nums so 0.0% / 100.0%
-          line up cleanly. Bars use ``Math.max(2, pct)`` for non-zero
-          rates so a tiny 0.5% sliver is still visually visible. */}
-      <div className="space-y-1.5">
+      {/* R22.1 (2026-04-25 follow-up): three stacked bars — wider
+          value column (4rem) so "100.0%" never clips on narrow
+          panels, taller bars (h-3 vs h-2) with a vertical gradient
+          fill for depth, brighter inset highlight + outer glow on
+          non-zero bars, bolder percentage numbers with a matching
+          glow so they pop instead of looking washed-out. Column
+          template uses min/auto sizing as a defence-in-depth against
+          future label-length changes — the value column is now
+          shrink-0 via flex shrink:0 inside the grid cell. */}
+      <div className="space-y-2">
         {rows.map((row) => {
           const pct = Math.max(0, Math.min(1, row.rate))
           const widthPct = pct === 0 ? 0 : Math.max(2, pct * 100)
+          const isActive = pct > 0
           return (
             <div
               key={row.label}
-              className="grid grid-cols-[7.5rem_1fr_3rem] items-center gap-2"
+              className="grid grid-cols-[7rem_1fr_4rem] items-center gap-2"
               data-testid={`merger-row-${row.label.toLowerCase().replace(/\s+/g, "-")}`}
             >
               <span
@@ -315,26 +320,47 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
                 {row.label}
               </span>
               <div
-                className="relative h-2 rounded-full overflow-hidden border border-[var(--neural-border,rgba(148,163,184,0.2))]"
+                className="relative h-3 rounded-full overflow-hidden border border-[var(--neural-border,rgba(148,163,184,0.25))]"
                 style={{
-                  background: `color-mix(in srgb, ${row.track} 8%, transparent)`,
+                  background: `color-mix(in srgb, ${row.track} 6%, transparent)`,
+                  boxShadow: "inset 0 1px 2px rgba(0,0,0,0.4)",
                 }}
               >
                 <div
-                  className="h-full rounded-full transition-[width] duration-300"
+                  className="relative h-full rounded-full transition-[width] duration-500 ease-out"
                   style={{
                     width: `${widthPct}%`,
-                    background: row.color,
-                    boxShadow:
-                      pct > 0
-                        ? `0 0 6px color-mix(in srgb, ${row.color} 50%, transparent)`
-                        : undefined,
+                    background: isActive
+                      ? `linear-gradient(180deg, color-mix(in srgb, ${row.color} 70%, white) 0%, ${row.color} 50%, color-mix(in srgb, ${row.color} 80%, black) 100%)`
+                      : "transparent",
+                    boxShadow: isActive
+                      ? `0 0 10px color-mix(in srgb, ${row.color} 70%, transparent), inset 0 1px 0 color-mix(in srgb, ${row.color} 40%, white)`
+                      : undefined,
                   }}
-                />
+                >
+                  {/* Top sheen — adds the dimensional "wet pill" look so
+                      the bar reads as a 3D filled capsule, not a flat
+                      rectangle. Only on non-zero bars. */}
+                  {isActive && (
+                    <div
+                      aria-hidden
+                      className="absolute inset-x-0 top-0 h-1/2 rounded-full opacity-40"
+                      style={{
+                        background:
+                          "linear-gradient(180deg, rgba(255,255,255,0.55) 0%, transparent 100%)",
+                      }}
+                    />
+                  )}
+                </div>
               </div>
               <span
-                className="font-mono text-[10px] tabular-nums text-right"
-                style={{ color: row.color }}
+                className="font-mono text-[12px] font-bold tabular-nums text-right shrink-0 leading-none"
+                style={{
+                  color: row.color,
+                  textShadow: isActive
+                    ? `0 0 8px color-mix(in srgb, ${row.color} 60%, transparent)`
+                    : undefined,
+                }}
               >
                 {fmtPct(row.rate)}
               </span>
