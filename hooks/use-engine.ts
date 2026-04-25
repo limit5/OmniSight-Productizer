@@ -183,37 +183,71 @@ export function useEngine() {
       fetchSystemData()
       sysInterval = setInterval(fetchSystemData, 10000)
 
+      // ── 2026-04-25 critical UX fix (R16) ──
+      // Original control flow nested SSE subscribe + chat-history seed
+      // INSIDE the same try-block as `Promise.all([listAgents, listTasks])`.
+      // If either of those threw (transient 401, 503 cold-boot race, CF
+      // tunnel blip, alembic-pending readyz fail) the catch at line ~712
+      // swallowed the failure — and SSE was NEVER subscribed for the
+      // lifetime of the page.
+      //
+      // Symptom: Q.5 ACTIVE DEVICE indicator stuck at 0 because no
+      // EventSource → no /api/v1/events traffic → no record_heartbeat
+      // backend write → /auth/sessions/presence returns active_count=0.
+      // Operator-reported 2026-04-25.
+      //
+      // Fix: split init() into three INDEPENDENT phases. Each phase has
+      // its own try/catch so a failure in agents/tasks fetch (which is
+      // optional initial state seed) cannot block SSE (which is the
+      // critical real-time stream) or chat-history seed (independent UX).
+      // Order doesn't matter; previously they were sequential because
+      // `connectSSE` referenced `lastEventTimestamp` (set by replay below)
+      // — that's now handled inside connectSSE itself.
+
+      // Phase 1: agents + tasks initial seed (best-effort)
       try {
         const [agentsRes, tasksRes] = await Promise.all([
           api.listAgents(),
           api.listTasks(),
         ])
-        setAgents(agentsRes.map(mapAgent))
-        setTasks(tasksRes.map(mapTask))
-        setConnected(true)
-
-        // Q.3-SUB-6 (#297): seed chat history on mount so a freshly
-        // opened device picks up the last N messages the server has
-        // persisted for this user. Failure is swallowed — the default
-        // in-component "system online" boilerplate messages still
-        // render and the SSE stream continues to deliver new lines.
-        try {
-          if (!cancelled) {
-            const history = await api.getChatHistory()
-            if (!cancelled && Array.isArray(history) && history.length > 0) {
-              setMessages(prev => {
-                const have = new Set(prev.map(m => m.id))
-                const incoming = history
-                  .map(mapChatMessage)
-                  .filter(m => !have.has(m.id))
-                return incoming.length ? [...prev, ...incoming] : prev
-              })
-            }
-          }
-        } catch {
-          /* history endpoint unavailable — continue with ephemeral state */
+        if (!cancelled) {
+          setAgents(agentsRes.map(mapAgent))
+          setTasks(tasksRes.map(mapTask))
+          setConnected(true)
         }
+      } catch {
+        console.warn("[Engine] initial agents/tasks seed failed — falling back to SSE-driven state")
+        if (!cancelled) setConnected(false)
+      }
 
+      // Phase 2: chat history seed (best-effort, independent of phase 1)
+      // Q.3-SUB-6 (#297): seed chat history on mount so a freshly
+      // opened device picks up the last N messages the server has
+      // persisted for this user.
+      try {
+        if (!cancelled) {
+          const history = await api.getChatHistory()
+          if (!cancelled && Array.isArray(history) && history.length > 0) {
+            setMessages(prev => {
+              const have = new Set(prev.map(m => m.id))
+              const incoming = history
+                .map(mapChatMessage)
+                .filter(m => !have.has(m.id))
+              return incoming.length ? [...prev, ...incoming] : prev
+            })
+          }
+        }
+      } catch {
+        /* history endpoint unavailable — continue with ephemeral state */
+      }
+
+      // Phase 3: SSE subscribe (CRITICAL — independent of phases 1+2)
+      // This is the real-time event stream that drives ALL push-based
+      // UX (agent updates, task updates, presence heartbeat for Q.5
+      // ACTIVE DEVICE, semantic-entropy events, scratchpad saves, etc.).
+      // Wrap in its own try/catch so an unexpected error during
+      // initial subscribe attempt doesn't kill the stream wiring.
+      try {
         // Subscribe to persistent SSE for real-time state changes (with auto-reconnect)
         let reconnectAttempts = 0
         function connectSSE() {
@@ -709,9 +743,8 @@ export function useEngine() {
           eventSourceRef.current = eventSource
         }
         connectSSE()
-      } catch {
-        console.warn("[Engine] Backend unavailable, using offline mode")
-        if (!cancelled) setConnected(false)
+      } catch (err) {
+        console.warn("[Engine] SSE subscribe failed — real-time updates unavailable", err)
       }
     }
     init()
