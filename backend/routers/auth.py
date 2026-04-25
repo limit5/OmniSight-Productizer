@@ -473,6 +473,17 @@ async def create_user(req: CreateUserRequest,
                       _: auth.User = Depends(auth.require_admin)) -> dict:
     if req.role not in auth.ROLES:
         return JSONResponse(status_code=422, content={"detail": f"unknown role: {req.role}"})
+    # Y2 (#278) 2026-04-25: super-admin assignment must NOT flow through
+    # the tenant-admin /users endpoint. Y3 will land POST /admin/super-
+    # admins as the canonical bootstrap path; until then any caller of
+    # this endpoint (including a tenant admin) must be blocked from
+    # promoting a user to super_admin or it's a privilege-escalation.
+    if req.role == "super_admin":
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "super_admin role must be assigned via "
+                               "POST /api/v1/admin/super-admins (Y3 #279)"},
+        )
     existing = await auth.get_user_by_email(req.email)
     if existing:
         return JSONResponse(status_code=409, content={"detail": "email already exists"})
@@ -496,6 +507,15 @@ async def patch_user(user_id: str, req: PatchUserRequest,
     if req.role is not None:
         if req.role not in auth.ROLES:
             return JSONResponse(status_code=422, content={"detail": f"unknown role: {req.role}"})
+        # Y2 (#278): same guard as POST /users — promotion to super_admin
+        # must go through Y3's POST /admin/super-admins, not this
+        # tenant-admin patch endpoint.
+        if req.role == "super_admin":
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "super_admin role must be assigned via "
+                                   "POST /api/v1/admin/super-admins (Y3 #279)"},
+            )
         params.append(req.role)
         sets.append(f"role = ${len(params)}")
     if req.enabled is not None:

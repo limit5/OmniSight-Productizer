@@ -44,7 +44,15 @@ logger = logging.getLogger(__name__)
 #  Roles + helpers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROLES = ("viewer", "operator", "admin")
+# Y2 (#278) 2026-04-25: ``super_admin`` is the platform-operator tier
+# above tenant ``admin``. Introduced for the Y2 admin-REST API row 1
+# (POST /api/v1/admin/tenants) — only super-admins may create / mutate
+# tenants. The role is purely additive: rank is computed from the tuple
+# index so existing callers (``role_at_least(have, "admin")``) keep
+# working unchanged. Y3 (#279) will own the user-facing super-admin
+# bootstrap (POST /admin/super-admins); Y2 only needs the dependency
+# in place.
+ROLES = ("viewer", "operator", "admin", "super_admin")
 _RANK = {r: i for i, r in enumerate(ROLES)}
 
 
@@ -1661,8 +1669,15 @@ async def _validate_api_key(req: Request) -> "ApiKey | None":  # noqa: F821
     return None
 
 
+# Y2 (#278) 2026-04-25: anonymous synthetic user is granted the new
+# top role ``super_admin``. ``OMNISIGHT_AUTH_MODE=open`` is the dev
+# default — every request gets this user — so without this bump the
+# new admin-REST endpoints would 403 in local dev / pytest, breaking
+# the pre-Y2 contract that "open mode == do everything". Real users
+# in session/strict modes still need an explicit ``role='super_admin'``
+# row in the users table; this only governs the dev fallback.
 _ANON_ADMIN = User(id="anonymous", email="anonymous@local", name="(anonymous)",
-                   role="admin", enabled=True, tenant_id="t-default")
+                   role="super_admin", enabled=True, tenant_id="t-default")
 
 
 def _legacy_bearer_matches(req: Request) -> bool:
@@ -1847,6 +1862,10 @@ async def require_viewer(user: User = Depends(current_user)) -> User:
 
 require_operator = require_role("operator")
 require_admin = require_role("admin")
+# Y2 (#278): platform-tier gate for admin REST API (tenant CRUD,
+# super-admin self-service). Strict superset of require_admin —
+# tenant admins MUST 403 against these endpoints.
+require_super_admin = require_role("super_admin")
 
 
 async def require_tenant(user: User = Depends(current_user)) -> User:
