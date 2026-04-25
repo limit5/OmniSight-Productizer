@@ -358,6 +358,284 @@ class TestSpikeRecoveryCycle:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Simulated CPU spike — comprehensive (TODO H4a row 2584)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestCpuSpikeSimulation:
+    """Realistic CPU-spike scenario coverage for TODO H4a row 2584.
+
+    Verifies in one place that a host going through *grow → spike →
+    halve → cool → grow back* keeps the AIMD controller well-formed:
+
+    * MD halves at every persisted spike until the floor is reached.
+    * Once at floor, sustained pressure keeps emitting ``FLOOR``, not
+      ``MD`` (no double-counting in metrics, no negative budgets).
+    * On cool-down, AI grows the budget back monotonically up to
+      ``CAPACITY_MAX`` and then emits ``CAP`` for any further green
+      tick.
+    * The trace deque records each transition in chronological order
+      and never contains a ``HOLD`` entry (those are silent).
+
+    Mirrors the production sampling cadence (5 s ticks, 30 s AI window,
+    10 s MD persistence) but uses synthetic ``now=`` values so the run
+    is deterministic and finishes in ~milliseconds. No psutil sampling,
+    no host signal, no DB I/O.
+    """
+
+    # The reference rig is 16c/64GB → CAPACITY_MAX=12, INIT_BUDGET=6,
+    # FLOOR_BUDGET=2. ``conftest.py`` pins ``OMNISIGHT_CAPACITY_MAX=12``
+    # for every backend test so this class can hard-code the math.
+
+    def _spike_until_persisted_md(
+        self, t: float, *, cpu: float = 95.0, mem: float = 10.0,
+    ) -> tuple[ab.AdjustReason, float]:
+        """Drive two ticks 10 s apart so the second one fires MD/FLOOR.
+
+        Returns the (final_reason, t_after) pair. The first tick starts
+        the persistence clock (HOLD); the second tick at t+10 satisfies
+        ``MD_PERSISTENCE_S`` and either halves (MD) or stays (FLOOR).
+        """
+        first = ab.tick(cpu_percent=cpu, mem_percent=mem, deferred_count=0, now=t)
+        assert first == ab.AdjustReason.HOLD
+        second = ab.tick(
+            cpu_percent=cpu, mem_percent=mem, deferred_count=0, now=t + 10.0,
+        )
+        return second, t + 10.0
+
+    def test_full_lifecycle_grow_spike_halve_cool_grow_back(self):
+        """End-to-end CPU-spike scenario.
+
+        Phase 1: cold start at INIT_BUDGET=6 → 90 s green → grows 6→9.
+        Phase 2: 10 s CPU spike → MD halves 9→4.
+        Phase 3: cool, ``AI_INTERVAL_S`` cadence → grows 4→...→12.
+        Phase 4: one more green tick at CAP → emits ``CAP`` no overflow.
+        Phase 5: a second spike halves 12→6 (proves controller is
+            re-armable after a full recovery, not stuck in some
+            terminal state).
+        """
+        ab.reset(initial_budget=6, now=0.0)
+
+        # Phase 1 — green grow.
+        for t in (30.0, 60.0, 90.0):
+            r = ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=t)
+            assert r == ab.AdjustReason.AI
+        assert ab.current_budget() == 9
+
+        # Phase 2 — spike → MD halve.
+        reason, t_md = self._spike_until_persisted_md(t=95.0)
+        assert reason == ab.AdjustReason.MD
+        assert ab.current_budget() == 4  # 9 // 2
+
+        # Phase 3 — cool grow back to CAPACITY_MAX.
+        # MD reset ``last_ai_at`` to t_md=105.0, so AI eligible at
+        # t_md + AI_INTERVAL_S * k.
+        for k, expected in enumerate([5, 6, 7, 8, 9, 10, 11, 12], start=1):
+            t = t_md + 30.0 * k
+            r = ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=t)
+            assert r == ab.AdjustReason.AI, f"k={k} t={t}: {r}"
+            assert ab.current_budget() == expected
+
+        # Phase 4 — at CAP, next green tick must emit CAP not overflow.
+        t_cap = t_md + 30.0 * 9
+        r = ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=t_cap)
+        assert r == ab.AdjustReason.CAP
+        assert ab.current_budget() == CAPACITY_MAX
+
+        # Phase 5 — another spike re-arms MD path; not stuck at CAP.
+        reason2, _ = self._spike_until_persisted_md(t=t_cap + 5.0)
+        assert reason2 == ab.AdjustReason.MD
+        assert ab.current_budget() == CAPACITY_MAX // 2  # 12 // 2 = 6
+
+    def test_repeated_spikes_walk_down_to_floor(self):
+        """Successive spikes (each ≥ 10 s persistence) halve until floor.
+
+        Walks the budget 12 → 6 → 3 → 2 (clamped) and proves the third
+        halving still returns ``MD`` because 3//2=1 was clamped to 2 —
+        the budget *did* shrink so the reason is MD, not FLOOR. The
+        fourth spike at floor returns ``FLOOR`` because the budget did
+        not change.
+        """
+        ab.reset(initial_budget=CAPACITY_MAX, now=0.0)
+
+        # Spike #1: 12 → 6.
+        reason, t = self._spike_until_persisted_md(t=0.0)
+        assert reason == ab.AdjustReason.MD
+        assert ab.current_budget() == 6
+
+        # Cool gap large enough that the next spike's persistence clock
+        # restarts cleanly, but small enough not to fire AI.
+        ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=t + 5.0)
+
+        # Spike #2: 6 → 3.
+        reason, t = self._spike_until_persisted_md(t=t + 10.0)
+        assert reason == ab.AdjustReason.MD
+        assert ab.current_budget() == 3
+
+        ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=t + 5.0)
+
+        # Spike #3: 3 → 2 (clamped from 1; still a real shrink, so MD).
+        reason, t = self._spike_until_persisted_md(t=t + 10.0)
+        assert reason == ab.AdjustReason.MD
+        assert ab.current_budget() == 2
+
+        ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=t + 5.0)
+
+        # Spike #4: at floor → no shrink → FLOOR reason.
+        reason, _ = self._spike_until_persisted_md(t=t + 10.0)
+        assert reason == ab.AdjustReason.FLOOR
+        assert ab.current_budget() == ab.FLOOR_BUDGET
+
+    def test_floor_boundary_clamps_under_sustained_pressure(self):
+        """Sustained spike from arbitrary budget never breaches floor.
+
+        Iterates 30 ticks at 10 s cadence with hot CPU+mem; each
+        persisted halving must stay ≥ ``FLOOR_BUDGET``. After the run
+        the controller is at floor and emits ``FLOOR`` on the next
+        persisted tick (no negative drift, no zero budget).
+        """
+        ab.reset(initial_budget=CAPACITY_MAX, now=0.0)
+
+        # Walk forward 300 s of sustained spike at 10 s cadence.
+        for i in range(30):
+            t = i * 10.0
+            ab.tick(cpu_percent=99, mem_percent=99, deferred_count=0, now=t)
+            assert ab.current_budget() >= ab.FLOOR_BUDGET, (
+                f"breached floor at i={i} t={t} budget={ab.current_budget()}"
+            )
+
+        assert ab.current_budget() == ab.FLOOR_BUDGET
+
+        # The loop's last hot tick (i=29, t=290) re-armed
+        # ``pressure_first_seen`` to 290. The next hot tick 10 s later
+        # already satisfies ``MD_PERSISTENCE_S`` and fires immediately
+        # — at floor, halving 2 → max(2, 1) = 2 is a no-op shrink, so
+        # the reason is ``FLOOR`` (not ``MD``).
+        r = ab.tick(cpu_percent=99, mem_percent=99, deferred_count=0, now=300.0)
+        assert r == ab.AdjustReason.FLOOR
+        assert ab.current_budget() == ab.FLOOR_BUDGET
+
+    def test_cap_boundary_clamps_under_sustained_calm(self):
+        """AI grows monotonically to CAP and saturates there.
+
+        Starts at CAPACITY_MAX-1 to keep the test fast; 30 s of green
+        grows it to CAPACITY_MAX, then 4 more 30 s windows must each
+        emit ``CAP`` with no overflow.
+        """
+        ab.reset(initial_budget=CAPACITY_MAX - 1, now=0.0)
+
+        # First green tick at AI_INTERVAL_S — fills the cap.
+        r = ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=30.0)
+        assert r == ab.AdjustReason.AI
+        assert ab.current_budget() == CAPACITY_MAX
+
+        # Subsequent green ticks at AI cadence saturate at CAP.
+        for k in range(1, 5):
+            t = 30.0 + 30.0 * k
+            r = ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=t)
+            assert r == ab.AdjustReason.CAP, f"k={k} t={t}: {r}"
+            assert ab.current_budget() == CAPACITY_MAX
+
+    def test_recovery_from_floor_grows_all_the_way_back(self):
+        """After being driven to FLOOR by a spike, sustained cool fully
+        recovers the budget back to ``CAPACITY_MAX``.
+
+        This is the operator-visible "did the host actually recover"
+        property — important because metric trends rely on the budget
+        coming back, not just stopping the bleed.
+        """
+        ab.reset(initial_budget=ab.FLOOR_BUDGET, now=0.0)
+        # Drop to floor quickly via a single sustained spike.
+        reason, t = self._spike_until_persisted_md(t=0.0)
+        assert reason == ab.AdjustReason.FLOOR
+        assert ab.current_budget() == ab.FLOOR_BUDGET
+
+        # Walk green at AI_INTERVAL_S; budget should grow exactly one
+        # token per tick from FLOOR_BUDGET (=2) up to CAPACITY_MAX (=12),
+        # i.e. 10 AI events.
+        steps = CAPACITY_MAX - ab.FLOOR_BUDGET
+        for k in range(1, steps + 1):
+            tick_t = t + 30.0 * k
+            r = ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=tick_t)
+            assert r == ab.AdjustReason.AI
+            assert ab.current_budget() == ab.FLOOR_BUDGET + k
+
+        assert ab.current_budget() == CAPACITY_MAX
+
+    def test_trace_chronicles_full_spike_cycle(self):
+        """The trace deque records every state-changing tick of the
+        spike cycle in chronological order, with no HOLD pollution.
+
+        Useful for the row-2583 UI sparkline: operators see the AI
+        ramp + MD drop + AI ramp again on a single timeline.
+        """
+        ab.reset(initial_budget=6, now=0.0)
+        # AI ×3 (6→9), MD ×1 (9→4), AI ×3 (4→7).
+        for t in (30.0, 60.0, 90.0):
+            ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=t)
+        # Spike persisted.
+        ab.tick(cpu_percent=95, mem_percent=10, deferred_count=0, now=95.0)
+        ab.tick(cpu_percent=95, mem_percent=10, deferred_count=0, now=105.0)
+        # Cool again.
+        for t in (135.0, 165.0, 195.0):
+            ab.tick(cpu_percent=10, mem_percent=10, deferred_count=0, now=t)
+
+        entries = ab.trace(now=195.0)
+        # INIT, AI, AI, AI, MD, AI, AI, AI — eight entries, no HOLD.
+        reasons = [e.reason for e in entries]
+        assert reasons == [
+            ab.AdjustReason.INIT,
+            ab.AdjustReason.AI,
+            ab.AdjustReason.AI,
+            ab.AdjustReason.AI,
+            ab.AdjustReason.MD,
+            ab.AdjustReason.AI,
+            ab.AdjustReason.AI,
+            ab.AdjustReason.AI,
+        ]
+        budgets = [e.budget for e in entries]
+        assert budgets == [6, 7, 8, 9, 4, 5, 6, 7]
+        # Timestamps must be monotonically non-decreasing.
+        timestamps = [e.timestamp for e in entries]
+        assert timestamps == sorted(timestamps)
+
+    def test_aimd_does_not_skid_below_floor_when_starting_at_three(self):
+        """Edge case: starting at budget=3 with sustained spike.
+
+        ``3 // 2 = 1`` — clamped to 2. Reason should be ``MD`` because
+        the budget *did* shrink (3 → 2). Without the clamp this would
+        leave budget=1, below the operator-defined floor.
+        """
+        ab.reset(initial_budget=3, now=0.0)
+        reason, _ = self._spike_until_persisted_md(t=0.0)
+        assert reason == ab.AdjustReason.MD
+        assert ab.current_budget() == ab.FLOOR_BUDGET  # = 2
+
+    def test_brief_cool_during_spike_resets_persistence_clock(self):
+        """A momentary cool during a sustained-spike window cancels
+        the in-progress MD persistence accumulator.
+
+        Operationally important: a 5 s "blip" of healthy CPU between
+        two hot ticks should not be summable across the gap to fire MD
+        early — that would punish the host for transient noise rather
+        than a real sustained spike.
+        """
+        ab.reset(initial_budget=8, now=0.0)
+        # Hot for 5 s then cool — clock should clear.
+        ab.tick(cpu_percent=90, mem_percent=10, deferred_count=0, now=0.0)
+        ab.tick(cpu_percent=20, mem_percent=10, deferred_count=0, now=5.0)
+        # Hot again, but only 9 s of fresh pressure (not 10) → still HOLD.
+        ab.tick(cpu_percent=90, mem_percent=10, deferred_count=0, now=8.0)
+        r = ab.tick(cpu_percent=90, mem_percent=10, deferred_count=0, now=17.0)
+        assert r == ab.AdjustReason.HOLD
+        assert ab.current_budget() == 8
+        # 18 s — second hot tick is now 10 s after the fresh pressure
+        # started at t=8 → fires MD.
+        r = ab.tick(cpu_percent=90, mem_percent=10, deferred_count=0, now=18.0)
+        assert r == ab.AdjustReason.MD
+        assert ab.current_budget() == 4
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Mode multiplier (TODO H4a row 2580)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
