@@ -1,10 +1,13 @@
-"""Y4 (#280) row 1 + row 2 — tenant-scoped project REST surface.
+"""Y4 (#280) row 1 + row 2 + row 3 — tenant-scoped project REST surface.
 
 Row 1 — POST /api/v1/tenants/{tid}/projects: create a project under a
 tenant.  Row 2 — GET /api/v1/tenants/{tid}/projects: list projects in
 a tenant, scoped by the caller's visibility (super_admin / tenant
 admin → full; member / viewer → only projects with explicit
-``project_members`` rows).
+``project_members`` rows).  Row 3 — PATCH
+/api/v1/tenants/{tid}/projects/{pid}: partial update of name,
+plan_override, disk_budget_bytes, parent_id (with cycle detection
+for sub-project trees).
 
 A project is the unit at which budgets / quotas / sharing get bound
 (Y1 row 2 schema lives in ``alembic/versions/0033_projects.py``); a
@@ -841,3 +844,509 @@ async def list_projects(
             "projects": projects,
         },
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y4 (#280) row 3 — PATCH /api/v1/tenants/{tid}/projects/{pid}
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Partial update of name / plan_override / disk_budget_bytes /
+# parent_id. The TODO row literal calls out exactly these four fields;
+# product_line / slug / created_by are deliberately NOT patchable
+# because:
+#   * product_line + slug make up the URL-stable identity (the
+#     UNIQUE composite from migration 0033). Mutating them would
+#     break URLs / bookmarks / cached project_id-by-slug lookups.
+#     If a project genuinely needs a different slug, the operator
+#     creates a new project + migrates artifacts.
+#   * created_by is an audit-only field; rewriting it would forge
+#     authorship history.
+#   * archived_at is owned by the separate archive / restore endpoint
+#     (Y4 row 4).
+#
+# Tri-state body semantics (the JSON-PATCH problem)
+# ─────────────────────────────────────────────────
+# Three distinct caller intents per nullable column:
+#   1. field absent from body                → leave the column alone
+#   2. field present with non-null value     → set the column to that
+#   3. field present with explicit JSON null → clear the column (set
+#      it to NULL ⇒ "inherit from tenant" for plan_override /
+#      budget; "promote to top-level" for parent_id)
+#
+# Pydantic v2 distinguishes (1) from (2)/(3) via ``model_fields_set``
+# — a frozenset of names the caller *explicitly* supplied. The handler
+# uses that to build the SET clause; columns absent from
+# ``fields_set`` are left untouched.
+#
+# ``name`` is non-nullable in the DB (CHECK length(name) >= 1). An
+# explicit JSON null on ``name`` is rejected as 422 in the handler;
+# Pydantic alone permits ``str | None`` so the explicit-null guard
+# lives in the handler.
+#
+# Cycle detection (sub-project trees)
+# ───────────────────────────────────
+# Migration 0033 documents that "deeper cycle detection is application-
+# layer (a tree walk on insert in Y3's POST /projects)". For POST the
+# new project's id is freshly minted so it cannot already appear in
+# any chain, but PATCH can re-parent an existing project anywhere in
+# the tenant — including under one of its own descendants. The cycle
+# check uses a recursive CTE that walks the ancestor chain starting
+# from the *proposed* new parent; if the project being patched ever
+# appears, the change would create a cycle and is refused with 422.
+# A trivial self-loop (``parent_id == project_id``) is caught earlier
+# without round-tripping the CTE.
+#
+# Concurrent re-parent race protection
+# ────────────────────────────────────
+# Worker A patches P1.parent_id = P2; Worker B patches P2.parent_id =
+# P1. Each individual cycle probe says "no cycle" before either
+# transaction commits, then both commit — leaving P1 ↔ P2. To
+# serialise re-parent operations on the same tenant we take a
+# per-tenant ``pg_advisory_xact_lock`` on
+# ``hashtext('omnisight_project_patch:' || tenant_id)`` whenever the
+# patch may affect ``parent_id`` (caller set the field). Per-tenant
+# (not platform-wide) so traffic across tenants does not collide.
+# PATCHes that do not touch ``parent_id`` skip the lock entirely.
+#
+# Module-global state audit (SOP Step 1)
+# ──────────────────────────────────────
+# New module-level constants: ``_PROJECT_PATCH_LOCK_PREFIX`` (str),
+# ``_PROJECT_PATCH_ALLOWED_MEMBERSHIP_ROLES`` (frozenset),
+# ``_PATCHABLE_PROJECT_FIELDS`` (frozenset),
+# ``_FETCH_PROJECT_FOR_UPDATE_SQL`` / ``_CYCLE_DETECT_SQL`` /
+# ``_PATCH_PROJECT_SQL`` (str). All immutable; every uvicorn worker
+# derives the same value from source — qualifying answer #1. DB
+# state is shared via PG; per-tenant advisory lock is PG-coordinated
+# across workers — qualifying answer #2.
+#
+# Read-after-write timing audit (SOP Step 1)
+# ──────────────────────────────────────────
+# Single-transaction PATCH: SELECT ... FOR UPDATE → optional cycle
+# probe → UPDATE ... RETURNING. The advisory lock (when parent_id
+# changes) further serialises the cross-row part of the cycle check.
+# Concurrent same-row PATCHes are also serialised by FOR UPDATE on
+# the projects row itself. No new timing-visible behaviour relative
+# to the existing PATCH endpoints (admin_tenants / tenant_members).
+
+# Per-tenant advisory lock prefix — taken inside the PATCH transaction
+# whenever ``parent_id`` is being set, to serialise re-parent races
+# within one tenant. Per-tenant key (not platform-wide) so cross-
+# tenant traffic does not collide.
+_PROJECT_PATCH_LOCK_PREFIX = "omnisight_project_patch:"
+
+# Same role gate as POST/GET — owner / admin tenant membership or
+# platform super_admin. Member / viewer get 403.
+_PROJECT_PATCH_ALLOWED_MEMBERSHIP_ROLES = frozenset({"owner", "admin"})
+
+# Whitelist of body fields the PATCH actually applies. Drift-guarded:
+# any new pydantic field on PatchProjectRequest must be added here AND
+# wired into _PATCH_PROJECT_SQL, otherwise the handler silently drops
+# the value (test ``test_patchable_fields_match_pydantic_schema``
+# enforces the alignment).
+_PATCHABLE_PROJECT_FIELDS = frozenset({
+    "name", "plan_override", "disk_budget_bytes", "parent_id",
+})
+
+
+class PatchProjectRequest(BaseModel):
+    """Body for ``PATCH /api/v1/tenants/{tid}/projects/{pid}``.
+
+    All four fields are optional; at least one must be supplied. The
+    schema accepts ``None`` for each field at the type level — the
+    handler distinguishes "absent" from "explicit null" via
+    ``model_fields_set`` (Pydantic v2 only contains the names the
+    caller actually supplied) and rejects ``name=null`` explicitly
+    because the underlying column is NOT NULL.
+    """
+
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "New display name. Omit to keep current. Explicit JSON "
+            "null is rejected (422) because the underlying column is "
+            "NOT NULL — to drop a name use a DELETE on the project."
+        ),
+    )
+    plan_override: Literal[
+        "free", "starter", "pro", "enterprise",
+    ] | None = Field(
+        default=None,
+        description=(
+            "New per-project plan override. Omit to keep current; "
+            "explicit JSON null clears the override (project then "
+            "inherits the tenant's plan). Must match the migration's "
+            "CHECK enum."
+        ),
+    )
+    disk_budget_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "New per-project disk quota in bytes. Omit to keep current; "
+            "explicit JSON null clears the override (project then "
+            "inherits the tenant's PLAN quota). Must be non-negative; "
+            "the DB CHECK is defence in depth."
+        ),
+    )
+    parent_id: str | None = Field(
+        default=None,
+        pattern=PROJECT_ID_PATTERN,
+        description=(
+            "New parent project id for sub-project trees. Omit to keep "
+            "current; explicit JSON null promotes the project back to "
+            "top-level. Parent must belong to the same tenant; cycles "
+            "(self-loop or new parent is a descendant) are refused."
+        ),
+    )
+
+
+# Read the current row inside the transaction with FOR UPDATE so a
+# concurrent PATCH on the same project blocks rather than racing on
+# stale state. Same SELECT shape as the POST RETURNING / GET response
+# so ``_row_to_project_dict`` works against either.
+_FETCH_PROJECT_FOR_UPDATE_SQL = """
+SELECT id, tenant_id, product_line, name, slug,
+       parent_id, plan_override, disk_budget_bytes,
+       llm_budget_tokens, created_by, created_at, archived_at
+FROM projects
+WHERE id = $1 AND tenant_id = $2
+FOR UPDATE
+"""
+
+# Recursive ancestor walk starting from $1 (the proposed new parent).
+# Returns at most one row — the row whose id matches $2 (the project
+# being patched) iff the project being patched is itself an ancestor
+# of the proposed new parent (i.e. assigning $2.parent_id = $1 would
+# create a cycle). The ``WHERE c.parent_id IS NOT NULL`` short-
+# circuits the walk at the root; PG's recursion engine is finite-
+# guard via the FK shape but we still bound iterations cleanly.
+_CYCLE_DETECT_SQL = """
+WITH RECURSIVE ancestor_chain AS (
+    SELECT id, parent_id FROM projects WHERE id = $1
+    UNION ALL
+    SELECT p.id, p.parent_id
+    FROM projects p
+    JOIN ancestor_chain c ON p.id = c.parent_id
+    WHERE c.parent_id IS NOT NULL
+)
+SELECT 1 FROM ancestor_chain WHERE id = $2 LIMIT 1
+"""
+
+# Single static UPDATE template using ``CASE WHEN $flag THEN $value
+# ELSE col END`` per column. The boolean flags ($3, $5, $7, $9) are
+# True iff the caller explicitly set that field in the body —
+# letting the handler distinguish "leave alone" from "set to NULL"
+# without dynamic SQL. The casts (``::text`` / ``::bigint``) are
+# necessary because asyncpg infers parameter types from first non-
+# NULL use, and a column may legitimately receive NULL on the very
+# first call (then asyncpg has nothing to infer from). RETURNING
+# gives the post-update row in one round-trip so the response body
+# and the audit ``after`` payload share a single source of truth.
+_PATCH_PROJECT_SQL = """
+UPDATE projects
+SET name              = CASE WHEN $3  THEN $4::text    ELSE name              END,
+    plan_override     = CASE WHEN $5  THEN $6::text    ELSE plan_override     END,
+    disk_budget_bytes = CASE WHEN $7  THEN $8::integer ELSE disk_budget_bytes END,
+    parent_id         = CASE WHEN $9  THEN $10::text   ELSE parent_id         END
+WHERE id = $1 AND tenant_id = $2
+RETURNING id, tenant_id, product_line, name, slug,
+          parent_id, plan_override, disk_budget_bytes,
+          llm_budget_tokens, created_by, created_at, archived_at
+"""
+
+
+@router.patch("/tenants/{tenant_id}/projects/{project_id}")
+async def patch_project(
+    tenant_id: str,
+    project_id: str,
+    body: PatchProjectRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Partial-update a project.
+
+    Body accepts any subset of ``{name, plan_override,
+    disk_budget_bytes, parent_id}``; at least one field must be
+    present. Explicit JSON ``null`` on ``plan_override`` /
+    ``disk_budget_bytes`` / ``parent_id`` clears that column (project
+    then inherits from tenant / becomes top-level). Explicit ``null``
+    on ``name`` is rejected as 422.
+
+    Returns 200 with the post-update project row plus a ``no_change``
+    flag for callers that PATCH'd the row to its current values
+    (skips the audit emit).
+
+    Status codes
+    ────────────
+    * 200 — applied successfully (or no_change=True with no audit).
+    * 403 — caller is not a tenant admin / owner on this tenant and
+            not platform super_admin.
+    * 404 — well-formed ids but no such tenant or no such project in
+            this tenant.
+    * 422 — id format fails the pattern, body has no settable field,
+            ``name`` is explicitly null, ``parent_id`` would create a
+            self-loop / refers to a non-existent project / refers to
+            a project in a different tenant / would create a cycle.
+    """
+    # 1. Path-id validation. Same regex source-of-truth as POST/GET.
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+
+    # 2. Body must include at least one settable field. Same posture
+    #    as Y2 PatchTenantRequest — empty PATCH wastes a round-trip
+    #    and an audit row, plus the caller probably meant something.
+    set_fields = body.model_fields_set & _PATCHABLE_PROJECT_FIELDS
+    if not set_fields:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    "PATCH body must include at least one of "
+                    "'name', 'plan_override', 'disk_budget_bytes', "
+                    "or 'parent_id'."
+                ),
+            },
+        )
+
+    # 3. Reject explicit ``name: null`` — column is NOT NULL; pydantic
+    #    accepts the union but the DB CHECK would otherwise fire after
+    #    a bunch of work. Cleaner to fail fast at the boundary.
+    if "name" in set_fields and body.name is None:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    "name cannot be set to null; the underlying column "
+                    "is NOT NULL"
+                ),
+            },
+        )
+
+    # 4. Trivial self-loop guard — ``parent_id == project_id``. Cheaper
+    #    than the recursive CTE; same outcome (422). Done before any
+    #    DB I/O.
+    if "parent_id" in set_fields and body.parent_id == project_id:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"parent_id cannot equal project_id "
+                    f"({project_id!r}); a project cannot be its own "
+                    f"parent"
+                ),
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+            },
+        )
+
+    # 5. RBAC — done before any tenant/project existence probe so a
+    #    guess-the-id scan can't enumerate via timing.
+    if not await _user_can_create_project_in(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin or above on {tenant_id!r}; "
+                f"caller has no qualifying membership / role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    # 6. Tenant existence probe — clean 404. Done outside the patch
+    #    transaction so a 404 caller does not hold a write lock.
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    # 7. Cross-tenant + non-existent parent guard for the *new* parent
+    #    if the body sets one. Done before opening the patch
+    #    transaction so 422 callers don't hold the per-tenant lock.
+    #    The cycle check happens INSIDE the transaction (after the lock)
+    #    because cycles are a function of state that other writers can
+    #    mutate concurrently.
+    if "parent_id" in set_fields and body.parent_id is not None:
+        async with get_pool().acquire() as conn:
+            parent_row = await conn.fetchrow(
+                _FETCH_PARENT_PROJECT_SQL, body.parent_id,
+            )
+        if parent_row is None:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": (
+                        f"parent_id {body.parent_id!r} does not exist"
+                    ),
+                    "tenant_id": tenant_id,
+                    "project_id": project_id,
+                    "parent_id": body.parent_id,
+                },
+            )
+        if parent_row["tenant_id"] != tenant_id:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": (
+                        f"parent_id {body.parent_id!r} belongs to a "
+                        f"different tenant; cross-tenant parent links "
+                        f"are not permitted"
+                    ),
+                    "tenant_id": tenant_id,
+                    "project_id": project_id,
+                    "parent_id": body.parent_id,
+                    "parent_tenant_id": parent_row["tenant_id"],
+                },
+            )
+
+    # 8. The patch transaction. Take the per-tenant advisory lock only
+    #    when ``parent_id`` is being set (the only field that needs
+    #    cross-row coordination); other fields touch only the single
+    #    project row, which FOR UPDATE on the SELECT below already
+    #    serialises.
+    parent_id_is_changing = "parent_id" in set_fields
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            if parent_id_is_changing:
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))",
+                    _PROJECT_PATCH_LOCK_PREFIX + tenant_id,
+                )
+
+            cur_row = await conn.fetchrow(
+                _FETCH_PROJECT_FOR_UPDATE_SQL, project_id, tenant_id,
+            )
+            if cur_row is None:
+                # 404 — well-formed ids but no such project IN THIS
+                # tenant. Note: a project that exists under a different
+                # tenant returns 404 here (not 403 / not the parent
+                # tenant id) because the caller has no business knowing
+                # whether the id exists elsewhere.
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "detail": (
+                            f"project not found: {project_id!r} on "
+                            f"tenant {tenant_id!r}"
+                        ),
+                    },
+                )
+
+            # 9. Cycle check — only when parent_id is being set to a
+            #    non-null value AND it's actually changing AND that
+            #    non-null value is not the current value already.
+            if (
+                parent_id_is_changing
+                and body.parent_id is not None
+                and body.parent_id != cur_row["parent_id"]
+            ):
+                cycle_hit = await conn.fetchrow(
+                    _CYCLE_DETECT_SQL, body.parent_id, project_id,
+                )
+                if cycle_hit is not None:
+                    return JSONResponse(
+                        status_code=422,
+                        content={
+                            "detail": (
+                                f"parent_id {body.parent_id!r} would "
+                                f"create a cycle: project "
+                                f"{project_id!r} is already an "
+                                f"ancestor of the proposed parent"
+                            ),
+                            "tenant_id": tenant_id,
+                            "project_id": project_id,
+                            "parent_id": body.parent_id,
+                        },
+                    )
+
+            # 10. Compute change-detection. If every field the caller
+            #     supplied already matches the current row value,
+            #     short-circuit to ``no_change=True`` without writing.
+            no_change = all(
+                getattr(body, f) == cur_row[f] for f in set_fields
+            )
+            if no_change:
+                # Same-state PATCH — 200 with no_change=True, no UPDATE,
+                # no audit row.  Returns the current row state (which
+                # is ALSO the would-be post-state).
+                project = _row_to_project_dict(cur_row)
+                project["no_change"] = True
+                return JSONResponse(status_code=200, content=project)
+
+            # 11. Apply the UPDATE. Boolean flags + value pairs let
+            #     ONE static SQL handle every subset of fields.
+            new_row = await conn.fetchrow(
+                _PATCH_PROJECT_SQL,
+                project_id, tenant_id,
+                "name" in set_fields, body.name,
+                "plan_override" in set_fields, body.plan_override,
+                "disk_budget_bytes" in set_fields, body.disk_budget_bytes,
+                "parent_id" in set_fields, body.parent_id,
+            )
+            # ``new_row`` cannot be None here: we held FOR UPDATE on
+            # the row inside the same transaction so no concurrent
+            # DELETE could intervene. assert documents the invariant.
+            assert new_row is not None, (
+                "FOR UPDATE invariant breached — projects row vanished "
+                "between SELECT FOR UPDATE and UPDATE inside the same "
+                "transaction"
+            )
+
+    # 12. Audit emission — best-effort. ``before`` / ``after`` capture
+    #     ONLY the changed fields (with project_id + tenant_id always
+    #     present for context). Restricting to changed fields keeps
+    #     the audit blob tight and makes the diff obvious without
+    #     loading the full row.
+    before_blob: dict = {
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+    }
+    after_blob: dict = {
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+    }
+    for field in set_fields:
+        before_blob[field] = cur_row[field]
+        after_blob[field] = new_row[field]
+
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_project_updated",
+            entity_kind="project",
+            entity_id=project_id,
+            before=before_blob,
+            after=after_blob,
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "tenant_project_updated audit emit failed (tenant=%s "
+            "project=%s): %s", tenant_id, project_id, exc,
+        )
+
+    project = _row_to_project_dict(new_row)
+    project["no_change"] = False
+    return JSONResponse(status_code=200, content=project)
