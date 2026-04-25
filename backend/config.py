@@ -132,6 +132,13 @@ class Settings(BaseSettings):
     jira_intake_label: str = ""           # Default ``omnisight-intake`` if empty
     jira_done_statuses: str = ""          # CSV; default ``Done,Closed`` if empty
     notification_pagerduty_key: str = ""  # PagerDuty Events API v2 routing key
+    # R9 row 2936 (#315) — L4_SMS leg for P1 (系統崩潰) fan-out. Empty
+    # disables the SMS leg (PagerDuty alone covers the paging tier in
+    # that case). Generic HTTP webhook URL (Twilio Programmable SMS
+    # gateway, AWS SNS HTTP endpoint, or operator-side SMS bridge);
+    # ``_send_sms`` POSTs ``{to, message, severity, source}`` JSON.
+    notification_sms_webhook: str = ""    # SMS gateway webhook URL (P1)
+    notification_sms_to: str = ""         # SMS destination (CSV; on-call phone number(s))
     notification_max_retries: int = 3     # Max retry attempts for failed dispatches
     notification_retry_backoff: int = 30  # Seconds between retry attempts (exponential)
 
