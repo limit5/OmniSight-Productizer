@@ -4,14 +4,21 @@ Replaces the legacy "operator runs raw SQL against the tenants table"
 hack workflow with a proper super-admin-gated REST surface. Currently
 implemented:
 
-  POST /api/v1/admin/tenants       — create a new tenant.
-  GET  /api/v1/admin/tenants       — list tenants + aggregated usage.
-  GET  /api/v1/admin/tenants/{id}  — single-tenant detail (plan, quota
-                                     usage, members, projects, recent
-                                     audit events).
+  POST   /api/v1/admin/tenants       — create a new tenant.
+  GET    /api/v1/admin/tenants       — list tenants + aggregated usage.
+  GET    /api/v1/admin/tenants/{id}  — single-tenant detail (plan, quota
+                                       usage, members, projects, recent
+                                       audit events).
+  PATCH  /api/v1/admin/tenants/{id}  — partial update (rename, change
+                                       plan, enable / disable). Plan
+                                       downgrade is refused with 409 if
+                                       the tenant's current disk usage
+                                       would exceed the new plan's hard
+                                       quota — never silently force-
+                                       deletes data.
 
-Subsequent rows (PATCH / DELETE) extend this router; they are out of
-scope here and will be added by their own TODO rows.
+Subsequent rows (DELETE) extend this router; they are out of scope here
+and will be added by their own TODO rows.
 
 Auth model (Y2 spec)
 ────────────────────
@@ -104,6 +111,36 @@ class CreateTenantRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     plan: Literal["free", "starter", "pro", "enterprise"] = "free"
     enabled: bool = True
+
+
+class PatchTenantRequest(BaseModel):
+    """Partial update: every field optional, but at least one required.
+
+    PATCH semantics: ``None`` means "leave this column alone", a present
+    value (incl. ``False`` for ``enabled``) means "set the column to
+    this". Empty body / all-None body is a 422 — operator probably
+    meant something else and an empty UPDATE wastes an audit row.
+    """
+    name: str | None = Field(
+        default=None, min_length=1, max_length=200,
+        description="New display name; omit to keep current.",
+    )
+    plan: Literal["free", "starter", "pro", "enterprise"] | None = Field(
+        default=None,
+        description="New plan tier; omit to keep current. A downgrade is "
+                    "refused (409) if current disk usage exceeds the new "
+                    "plan's hard quota.",
+    )
+    enabled: bool | None = Field(
+        default=None,
+        description="True → enable, False → disable, omit → keep current.",
+    )
+
+    def has_any_field(self) -> bool:
+        return any(
+            v is not None
+            for v in (self.name, self.plan, self.enabled)
+        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -707,5 +744,218 @@ async def get_tenant_detail(
             "members": members,
             "projects": projects,
             "recent_audit_events": recent_audit_events,
+        },
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  PATCH /admin/tenants/{tenant_id} — rename / change plan / toggle
+#  enabled  (Y2 #278 row 4)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Read the current row before mutating so we can:
+#   (a) decide whether the plan field is actually changing (skip the
+#       expensive disk-usage walk if it isn't), and
+#   (b) hand the audit log a faithful ``before`` snapshot.
+# Not wrapped in FOR UPDATE: two concurrent super-admins racing on the
+# same tenant is benign — last-writer-wins, both events land in audit
+# in commit order, and the disk-quota check protects each writer from
+# the only outcome we actually care about (data loss from forced
+# eviction).
+_FETCH_TENANT_FOR_PATCH_SQL = """
+SELECT id, name, plan, enabled, created_at
+FROM tenants
+WHERE id = $1
+"""
+
+# Single-statement partial UPDATE. ``COALESCE($N, col)`` keeps the
+# existing column value when the parameter is NULL — i.e. "field
+# omitted from the PATCH body". Crucially this also lets us pass
+# ``enabled`` as ``None`` for "no change" while still distinguishing
+# from ``0`` ("disable"): None → COALESCE keeps current, 0 → write 0.
+# RETURNING gives us the post-update row in one round-trip so the
+# response body and the audit ``after`` payload share a single source
+# of truth.
+_PATCH_TENANT_SQL = """
+UPDATE tenants
+SET name    = COALESCE($2, name),
+    plan    = COALESCE($3, plan),
+    enabled = COALESCE($4, enabled)
+WHERE id = $1
+RETURNING id, name, plan, enabled, created_at
+"""
+
+
+@router.patch("/tenants/{tenant_id}")
+async def patch_tenant(
+    tenant_id: str,
+    body: PatchTenantRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.require_super_admin),
+) -> JSONResponse:
+    """Partial-update a tenant.
+
+    Body accepts any subset of ``{name, plan, enabled}``; at least one
+    field must be present. Returns 200 with the updated tenant row::
+
+        {
+            "id": "t-acme",
+            "name": "Acme Corp (renamed)",
+            "plan": "starter",
+            "enabled": false,
+            "created_at": "2026-01-15 12:34:56"
+        }
+
+    Status codes
+    ────────────
+    * 200 — applied successfully.
+    * 403 — caller is not a super-admin (handled by dependency).
+    * 404 — well-formed id but no such tenant.
+    * 409 — plan downgrade refused because current ``disk_used_bytes``
+      exceeds the new plan's ``hard_bytes``. The response includes
+      ``current_plan`` / ``requested_plan`` / ``disk_used_bytes`` /
+      ``new_hard_bytes`` so the operator (or UI) can render the gap
+      directly. **No data is force-deleted** — the spec is explicit
+      that downgrading must never silently reclaim storage; the
+      operator must run an LRU sweep, mark-keep, or pick a higher
+      plan.
+    * 422 — id fails ``TENANT_ID_PATTERN``, body has no settable
+      field, or any field violates its Pydantic constraints.
+
+    Plan-downgrade quota guard
+    ──────────────────────────
+    If ``plan`` is in the body AND it differs from the current plan,
+    the handler measures live disk usage (filesystem walk; same
+    helper as the LIST / GET handlers) and compares it against the
+    *new* plan's default ``hard_bytes`` from ``PLAN_DISK_QUOTAS``.
+    The yaml override file (``data/tenants/<id>/quota.yaml``) is
+    intentionally not consulted here — it represents the *current*
+    operator-granted budget and a plan change implies that override
+    will be re-materialised by the next sweep with the new plan's
+    defaults. Comparing against the override would let an over-
+    provisioned tenant sneak through a downgrade that would then
+    immediately violate its own plan.
+
+    Module-global state
+    ───────────────────
+    None introduced. SQL constants are module-level immutable
+    strings (each worker derives the same value); the asyncpg pool
+    is shared via PG; the audit chain serialises through
+    ``pg_advisory_xact_lock`` inside ``audit._log_impl``.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"invalid tenant id: {tenant_id!r}; "
+                               f"must match {TENANT_ID_PATTERN}"},
+        )
+    if not body.has_any_field():
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "PATCH body must include at least one of "
+                               "'name', 'plan', or 'enabled'."},
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        cur_row = await conn.fetchrow(
+            _FETCH_TENANT_FOR_PATCH_SQL, tenant_id,
+        )
+        if cur_row is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"tenant not found: {tenant_id!r}"},
+            )
+
+        # Plan-change quota guard. Run *before* the UPDATE so a doomed
+        # downgrade leaves the row untouched (no half-applied state to
+        # roll back). We only walk the filesystem when the plan field
+        # is actually changing — a no-op plan PATCH (e.g. rename only,
+        # or rename + plan=current_plan) skips the I/O.
+        if body.plan is not None and body.plan != cur_row["plan"]:
+            new_quota = PLAN_DISK_QUOTAS[body.plan]
+            disk_used = await asyncio.to_thread(
+                _measure_disk_safely, tenant_id,
+            )
+            if disk_used > new_quota.hard_bytes:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": (
+                            f"plan change refused: tenant {tenant_id!r} "
+                            f"is currently using {disk_used} bytes "
+                            f"which exceeds the requested plan "
+                            f"{body.plan!r} hard quota of "
+                            f"{new_quota.hard_bytes} bytes. Free up "
+                            f"storage or pick a higher plan; this "
+                            f"endpoint never force-deletes tenant data."
+                        ),
+                        "tenant_id": tenant_id,
+                        "current_plan": cur_row["plan"],
+                        "requested_plan": body.plan,
+                        "disk_used_bytes": int(disk_used),
+                        "new_hard_bytes": int(new_quota.hard_bytes),
+                    },
+                )
+
+        # ``enabled`` is stored as INTEGER (0/1). Translate the tri-state
+        # (None / True / False) → (None / 1 / 0) so the UPDATE COALESCE
+        # can distinguish "leave alone" from "set to false".
+        enabled_int = (
+            None if body.enabled is None
+            else (1 if body.enabled else 0)
+        )
+
+        new_row = await conn.fetchrow(
+            _PATCH_TENANT_SQL,
+            tenant_id, body.name, body.plan, enabled_int,
+        )
+
+    if new_row is None:
+        # Race: tenant was deleted between the read and the UPDATE.
+        # 404 keeps the contract honest — the resource does not exist
+        # at the moment the caller wanted it patched.
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    before = {
+        "id": cur_row["id"],
+        "name": cur_row["name"],
+        "plan": cur_row["plan"],
+        "enabled": bool(cur_row["enabled"]),
+    }
+    after = {
+        "id": new_row["id"],
+        "name": new_row["name"],
+        "plan": new_row["plan"],
+        "enabled": bool(new_row["enabled"]),
+    }
+    # Best-effort audit; ``audit.log`` swallows its own failures so the
+    # caller still sees the successful 200 even if the chain is briefly
+    # unavailable — the row is in the DB regardless.
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_updated",
+            entity_kind="tenant",
+            entity_id=new_row["id"],
+            before=before,
+            after=after,
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning("tenant_updated audit emit failed: %s", exc)
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "id": new_row["id"],
+            "name": new_row["name"],
+            "plan": new_row["plan"],
+            "enabled": bool(new_row["enabled"]),
+            "created_at": new_row["created_at"],
         },
     )
