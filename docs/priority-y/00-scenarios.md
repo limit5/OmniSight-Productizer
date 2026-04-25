@@ -2,7 +2,7 @@
 
 > 文件起點：2026-04-25  
 > 對應 TODO：`Y0. Multi-user × Multi-project 情境盤點 + 架構文件 (#276)`  
-> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-3（跨租戶協作 — guest 模型）**，承接 S-1 / S-2 已落地章節；其餘 S-4～S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
+> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-4（多產品線 — 一個 tenant 下三條獨立產品線各有 LLM 預算 / git 整合目標 / on-call）**，承接 S-1 / S-2 / S-3 已落地章節；其餘 S-5～S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
 
 ---
 
@@ -12,8 +12,8 @@
 |---|---|---|
 | [S-1 單租戶多用戶](#s-1-單租戶多用戶) | `[x]` 第 1 勾選 | 完成（2026-04-25） |
 | [S-2 多租戶單用戶](#s-2-多租戶單用戶) | `[x]` 第 2 勾選 | 完成（2026-04-25） |
-| [S-3 跨租戶協作](#s-3-跨租戶協作) | `[x]` 第 3 勾選（本 row） | **本次完成** |
-| [S-4 多產品線](#s-4-多產品線) | `[ ]` 第 4 勾選 | Skeleton |
+| [S-3 跨租戶協作](#s-3-跨租戶協作) | `[x]` 第 3 勾選 | 完成（2026-04-25） |
+| [S-4 多產品線](#s-4-多產品線) | `[x]` 第 4 勾選（本 row） | **本次完成** |
 | [S-5 多專案同產品線](#s-5-多專案同產品線) | `[ ]` 第 5 勾選 | Skeleton |
 | [S-6 多分支同專案](#s-6-多分支同專案) | `[ ]` 第 6 勾選 | Skeleton |
 | [S-7 消失用戶回收](#s-7-消失用戶回收) | `[ ]` 第 7 勾選 | Skeleton |
@@ -777,9 +777,363 @@ S-3 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
 
 ## S-4 多產品線
 
-> **Skeleton — TBD by future row** (TODO 第 4 勾選)。
-> 一個 tenant 下「相機 IPCam / 門鈴 Doorbell / 對講機 Intercom」三條獨立產品線，各自有 LLM 預算 / 各自有 git 整合目標 / 各自有 on-call。
-> 預定章節：S-4.1 product_line 列舉與擴充、S-4.2 per-product-line budget override、S-4.3 on-call routing。
+> 一家硬體公司在同一個 tenant 下同時養多條產品線（IPCam / Doorbell / Intercom）。產品線之間**業務上獨立但共用公司資源**（同一份 LLM 計費合約、同一個法人 git org 名下、同一個合規邊界）— 但**運營細節必須隔離**：每條線各有 LLM 月預算上限、各自接到不同 git 倉庫 / 不同 default platform、各自 on-call rotation 不互通。
+
+> **與 S-1 / S-2 / S-3 的差異邊界**：S-1 / S-2 / S-3 處理的是「user × tenant」的 RBAC 邊界；S-4 是首次出現「**tenant 內部資源垂直切分**」的情境 — 同一 tenant 內的所有 user 都還是同一個 RBAC 對象（沿用 S-1 / S-2 的 membership 模型不變），但「project / artifact / quota / secret / on-call」這層**資源繼承 / override 階層**多了一個中介層 `product_line`（`tenants → product_lines → projects → workflow_runs / artifacts`）。S-4 不引入新的 user 角色、不修改 share 模型；它純粹是把「tenant」一層的「LLM 預算 / git 整合 / on-call routing / SOP / skill pack」四類設定**再切片一次**，讓單一 tenant 也能 model 真實多產品線運營的隔離度。
+
+### S-4.1 角色 Persona — Acme Cameras 三產品線
+
+接續 S-1 的 Acme Cameras（`t-acme`）。Acme 從單純做 IPCam 起家、後來新增了 Doorbell（智能門鈴）與 Intercom（對講機）兩條產品線；公司不打算為這三線各開一個 OmniSight tenant（HR / 合約 / 合規邊界都是同一家公司、開三 tenant 過度切割）— 但運營上每條線必須有獨立的 LLM 月預算（避免某條線狂燒預算把另外兩條線餓死）、獨立的 git 整合目標（IPCam 走 GitHub Enterprise `acme/ipcam-*`、Doorbell 走 GitHub Cloud `acme-doorbell/*`、Intercom 走 內部 Gerrit `gerrit.acme.local/intercom/*`）、獨立的 on-call rotation（IPCam 線 PagerDuty schedule_id 不同於 Doorbell 線）。
+
+| Persona | 主 tenant | tenant role | product line scope | 該 do | 該 not do |
+|---|---|---|---|---|---|
+| **Alice** | `t-acme` | owner | 全 3 條線（無 product_line scope） | 開新 product line、設 product line 預算、改 product line on-call key、跨 line 看用量 dashboard | （無上限。但 cross-line LLM 預算合計受 tenant plan ceiling 約束） |
+| **Bob** | `t-acme` | admin | 全 3 條線（owner 預設賦權） | 開 / 關 product line 內 project、調 line-level git account、看 line audit | 不能 promote 自己為 product-line-owner（owner-only 動作）；不能改 tenant plan |
+| **Pam** | `t-acme` | member | `pl-ipcam` (product-line owner) | 在 IPCam line 內開 project、改 IPCam line 的 LLM 預算（cap by tenant ceiling）、IPCam 的 git account default 切換、IPCam 的 on-call 排班 | 不能進 Doorbell / Intercom line；不能跨 line 看用量；不能改 tenant 級設定 |
+| **Doris** | `t-acme` | member | `pl-doorbell` (product-line owner) | 在 Doorbell line 內開 project、改 Doorbell line 的 LLM 預算 / git account default / on-call schedule | 不能進 IPCam / Intercom line；不能跨 line 看用量 |
+| **Ian** | `t-acme` | member | `pl-intercom` (product-line owner) | 在 Intercom line 內所有對應動作 | 不能進 IPCam / Doorbell line |
+| **Carol**（S-1 韌體工程師） | `t-acme` | member | `pl-ipcam` (line member) → IPCam 內 `firmware-ipcam` project contributor | 在 IPCam line 內跑 workflow_run、push branch、看 IPCam line 的 LLM 用量 dashboard（read-only） | 不能讀 Doorbell / Intercom line 的 artifact / SOP / audit；不能改 IPCam line 的預算 / on-call |
+
+**S-4.1 設計斷言**：
+1. **`product_line` 不是 user 的角色屬性、是 user 在某 tenant 內 membership 的「scope filter」** — Pam 在 `t-acme` 仍然只有一個 `user_tenant_memberships` row（role=member），`product_line` 訪問權限走另一張表 `product_line_members(product_line_id, user_id, role)`。理由：(a) 同一 user 加入新 product line 不需要動 tenant membership row；(b) tenant role（owner/admin）天然繼承所有 product line 權限、無需在 product_line_members 重複寫 row；(c) S-1 既有 RBAC 階層不破壞。
+2. **Tenant owner / admin 預設訪問所有 product line** — Alice / Bob 不需要在 `product_line_members` 各 line 寫 row；middleware fallback「tenant role ≥ admin → 任意 product_line OK」。`product_line_members` row 的存在意義是「member 級 user 被授權進入特定 line」。
+3. **Product-line owner 不是新 RBAC 階層、是 product_line_members.role 的一個值** — `product_line_members.role ∈ ('owner','contributor','viewer')`、與 `project_members.role` 同 vocabulary；想真正在 IPCam line 內動 budget / on-call，必須是 `product_line_members(pam, pl-ipcam, role='owner')` + tenant role ≥ member。Y4 endpoint 在改 line-level 設定時 require `(tenant_role ≥ admin) OR (product_line_role == 'owner')`。
+4. **Project 必屬於恰好一條 product_line** — 不允許「null product_line」/「跨 line project」（會破壞預算 / git / on-call 繼承的 deterministic 性）；遺留 `t-default` project 在 Y4 migration 時會被指派到 `pl-default` (見 S-9 範圍)。Y1 `projects.product_line_id` 必設 `NOT NULL`（Y4 落地時兩階段：先 NULL 允許 + backfill + 再 NOT NULL）。
+5. **「product_line 等於 frontend `WORKSPACE_TYPES`（web/mobile/software）」是錯誤類比** — 既有 frontend `app/workspace/[type]/types.ts` 的 `WORKSPACE_TYPES = ('web','mobile','software')` 是**UX 視角的 workspace 變體**（不同產品線的 chrome 不同），與 S-4 的 product_line 是**business 維度的資源切分**完全不同層；S-4 不替換 / 不延伸 WORKSPACE_TYPES；同一個 product_line `pl-ipcam` 可能對應 `software` workspace、`pl-doorbell` 也可能、與 S-4 schema 完全 orthogonal。
+
+### S-4.2 LLM 預算階層 — Tenant Ceiling × Product-Line Override
+
+S-4 引入「**雙層 LLM 預算模型**」：tenant 級 ceiling 仍是 hard constraint（同 S-1.2 設計斷言 1），但每條 product_line 可在 ceiling 內**獨立配額**，避免單一 line 把全 tenant 預算燒光。
+
+**配額模型**（Acme enterprise plan = 100M tokens / 30d 為例）：
+
+```
+tenant t-acme:           ceiling = 100M tokens / 30d
+├── pl-ipcam:            budget  =  50M tokens / 30d   (override of tenant)
+├── pl-doorbell:         budget  =  35M tokens / 30d   (override of tenant)
+├── pl-intercom:         budget  =  10M tokens / 30d   (override of tenant)
+└── 未分配 (pl-default): budget  =   5M tokens / 30d   (fallback / cross-line tooling)
+                                  ─────────
+                                   100M tokens   ← Σ(all line budgets) ≤ tenant ceiling
+```
+
+**配額檢查偽碼**（Y6 落地時實作，依靠 PG 原生 atomic counter）：
+
+```python
+# 偽碼，Y6 / Y10 落地時實作
+async def check_llm_budget(tenant_id, product_line_id, tokens_to_consume):
+    # 1) 先查 product_line 級配額（atomic counter）
+    pl_remaining = await fetch_atomic("llm_meter:pl:" + product_line_id, "tokens_30d")
+    if pl_remaining < tokens_to_consume:
+        raise LLMQuotaExceeded(scope="product_line", id=product_line_id)
+
+    # 2) 再查 tenant 級 ceiling（防止 Σ(line budgets) > ceiling 的 race；見設計斷言 4）
+    tenant_remaining = await fetch_atomic("llm_meter:t:" + tenant_id, "tokens_30d")
+    if tenant_remaining < tokens_to_consume:
+        raise LLMQuotaExceeded(scope="tenant", id=tenant_id)
+
+    # 3) 雙層 atomic decrement（同 transaction、要嘛同成功要嘛同失敗）
+    await atomic_decrement_both(
+        ("llm_meter:pl:" + product_line_id, tokens_to_consume),
+        ("llm_meter:t:" + tenant_id, tokens_to_consume),
+    )
+```
+
+**S-4.2 設計斷言**：
+1. **Σ(product_line.budget) ≤ tenant.ceiling 是 backend invariant、不是 UI 約束** — Pam 想把 IPCam budget 從 50M 升到 60M，若三線合計超 100M 必須 reject + 提示「需先降 doorbell / intercom 或升 plan」。Y4 `PATCH /product_lines/{id}` endpoint 在 backend 走 `SELECT SUM(budget) FROM product_lines WHERE tenant_id=?` + 比對 ceiling、超則 409。
+2. **Product-line 預算超用優先 throttle 該 line、不影響其他 line** — IPCam 燒到 50M tokens 觸發 throttle，Doorbell / Intercom 仍可正常用各自配額。理由：避免單一 line 把全公司預算燒光是 S-4 的核心 raison d'être；若降為「全 tenant 軟降級」，S-4 就退化為 S-1.2 的 cosmetic 版本。
+3. **tenant 級 ceiling 仍是 hard gate**（呼應 S-1.2 設計斷言 1） — 即使 Σ(line budget) < ceiling，跨 line 的 audit 工具 / chatops bot / shared LLM call（屬 `pl-default`）也計入 tenant 級 counter。任何 line 的 atomic decrement 都會同步寫 tenant 級 row、防止「未分配 line」變成 quota 漏洞。
+4. **雙層 atomic decrement 必同 transaction** — Race scenario：IPCam 與 Doorbell 同時各觸發 5M tokens call、tenant ceiling 剩 8M。若雙寫不同 transaction，可能兩邊 line counter 各 -5M 成功（line 各還剩 45M / 30M）但 tenant counter 變成 -2M（超 ceiling）。`atomic_decrement_both` 必走 PG `SELECT ... FOR UPDATE` 兩 row 一次鎖 + 任一不足則整批 rollback。Y6 落地時 SOP Step 1 必寫「合格答案 #2 — 透過 PG 序列化」釋因。
+5. **Per-line budget 改動立即生效、不等下次 reset** — 與 cron / monthly reset 解耦：Pam 從 50M 改為 30M、若該 line 已用 35M 立刻進入 throttle 狀態（current_used 不歸零、只是 budget 降）；Y4 endpoint 寫 audit + 推 SSE notification 給該 line 的 owner。
+6. **`pl-default` 不可被刪、為 fallback bucket** — 跨 line 工具（cross-line dashboard、tenant 級 audit observer、bootstrap wizard 自動觸發的 LLM call）走 `pl-default` 帳；Y1 schema enforce `pl-default` `is_system=true` + `DELETE` reject。
+
+### S-4.3 Git 整合目標階層 — Per-Product-Line Default
+
+S-4 的第二個切片維度：每條 product_line 各自的「**預設 git platform / org / 認證**」。
+
+**現況**（既有 `git_accounts` 表，`backend/alembic/versions/0027_git_accounts.py:88-110`）：
+- 唯一 unique index 是 `(tenant_id, platform)`、`(tenant_id, platform) WHERE is_default=true`；**沒有 product_line 維度**。
+- Resolver 走 `WHERE tenant_id = ? AND platform = ? ORDER BY is_default DESC`、取第一筆。
+- 結果：Acme 的 IPCam 工程師 push 到 `git@github.com:acme/ipcam-*`、Doorbell 工程師 push 到 `git@github.com:acme-doorbell/*` — **無法分開 default**，只能讓某一條線手動每次選 git account。
+
+**S-4 要求的階層解析路徑**：
+
+```python
+# 偽碼，Y4 / Y6 落地時實作
+def resolve_git_account(tenant_id, product_line_id, platform, *, prefer_label=None):
+    # 1) 若 caller 顯式指名 label、先 try product_line scope
+    if prefer_label:
+        a = fetch_one(
+            "SELECT * FROM git_accounts "
+            "WHERE tenant_id=? AND product_line_id=? AND platform=? AND label=? AND enabled",
+            tenant_id, product_line_id, platform, prefer_label,
+        )
+        if a: return a
+        # 2) 否則 fallthrough 到 tenant scope（product_line_id IS NULL = tenant-wide）
+        a = fetch_one(
+            "SELECT * FROM git_accounts "
+            "WHERE tenant_id=? AND product_line_id IS NULL AND platform=? AND label=? AND enabled",
+            tenant_id, platform, prefer_label,
+        )
+        if a: return a
+
+    # 3) 取 product_line 內預設
+    a = fetch_one(
+        "SELECT * FROM git_accounts "
+        "WHERE tenant_id=? AND product_line_id=? AND platform=? AND is_default AND enabled",
+        tenant_id, product_line_id, platform,
+    )
+    if a: return a
+
+    # 4) 否則 fallback 到 tenant 級預設（既有路徑、不破壞 backward compat）
+    a = fetch_one(
+        "SELECT * FROM git_accounts "
+        "WHERE tenant_id=? AND product_line_id IS NULL AND platform=? AND is_default AND enabled",
+        tenant_id, platform,
+    )
+    if a: return a
+
+    return None  # 由 caller 處理（提示「請設 git account」）
+```
+
+**S-4.3 設計斷言**：
+1. **`git_accounts.product_line_id` 為 nullable、NULL 意義 = tenant-wide** — 既有所有 row 在 Y4 migration 時保持 `product_line_id IS NULL`、不破壞既有 resolver 行為。新 row 可選擇 (a) per-product-line（指 specific id）或 (b) tenant-wide（NULL）；resolver 走 line-scoped → tenant-wide fallback。
+2. **同一 (tenant, product_line, platform) 至多一個 default** — partial unique index `WHERE is_default=true AND product_line_id IS NOT NULL`；既有 partial unique `WHERE is_default=true AND product_line_id IS NULL` 保持不變（共用同 column 不同 partial filter）。Y4 落地時兩個 partial index 並存。
+3. **Resolver 順序: line-default → tenant-default**（不是 line-default → line-any → tenant-default → tenant-any）— 簡化推導：若 Pam 在 IPCam line 設了 GitHub default 帳 `acme-bot`、所有 IPCam workflow 一致用 `acme-bot`；line 內若沒 default、fallthrough 到 tenant-wide default；不允許「line 內任意非-default 帳被自動選用」（會引發無法預期的 push 目標）。
+4. **Cross-line git account 不允許「leak」** — Doorbell line 的 git account 不能從 IPCam workflow 內被 resolve 到（即使 prefer_label 命中）；resolver 必檢 `product_line_id` 與 caller 的 `product_line_id` 相符 OR 為 NULL。Y5 落地時把 `(tenant_id, product_line_id)` tuple 帶進 git resolver context。
+5. **`product_line.metadata->>git_org_hint` 是 UI 提示、不是 RBAC enforcement** — 例：IPCam line 在 metadata 寫 `git_org_hint='acme/ipcam-*'`、UI 在新建 git account 時 pre-fill；但 backend 不驗證 url_pattern 與 hint 一致（人類可能臨時用其他 org 做 POC）— hint 是 UX、enforcement 走 url_patterns 既有欄位（`git_accounts.url_patterns`）。
+6. **Git account 是 secret 容器** — `git_accounts.encrypted_token / encrypted_ssh_key` 沿用 S-1.3 設計斷言 1-6 的 secret RBAC（read 明文 owner-only + step-up MFA + audit decrypt），不因為「per-line」而降級；line owner 想 rotate token 仍走 owner 雙簽路徑（line owner 是 product_line scope 但 secret rotate 跨進 tenant secret RBAC 邊界）。
+
+### S-4.4 On-Call Routing — Per-Product-Line PagerDuty Schedule
+
+S-4 的第三個切片維度：每條 product_line 各自的 on-call schedule。
+
+**現況**（既有 `backend/notifications.py:1207-1246` `_send_pagerduty()` + `backend/routers/integration.py:117-134` settings）：
+- `settings.notification_pagerduty_key` 是 **system-wide global** integration key（單一 PagerDuty integration、單一 routing key）。
+- 所有 L4 critical event 都打到同一個 PagerDuty service / 同一個 schedule。
+- Acme 的痛點：IPCam line 半夜出事、目前 page 到「整 acme 平均 on-call」、不一定是會看 IPCam codebase 的人；Doorbell on-call 早起被 IPCam P1 吵醒卻不能解。
+
+**S-4 要求的 routing 階層**：
+
+```
+Notification.fire(severity=L4, tenant=t-acme, product_line=pl-ipcam, ...)
+  ↓
+fetch_oncall_routing(t-acme, pl-ipcam)
+  → 1) product_line_oncall(pl-ipcam) → integration_key = "abc123" + schedule_id "PD-IPCam-NoC"
+  → 2) 若 None: fallthrough tenant_oncall(t-acme) → 既有 settings.notification_pagerduty_key
+  → 3) 若 None: fallthrough system default（既有 settings 全域 key、為了 t-default 既有用例）
+  ↓
+PagerDuty Events API V2 routing_key = "abc123"
+  ↓
+PagerDuty 內部 schedule "PD-IPCam-NoC" 派遣到 IPCam 線 on-call
+```
+
+**S-4.4 設計斷言**：
+1. **On-call routing 解析走「最具體 → 最 generic」階層** — `product_line.routing → tenant.routing → system default`、與 git resolver 同模型；NULL 邊界明確（找不到時 fallthrough、不報錯）。理由：t-default 既有 user 不該因為 S-4 落地而需要強制設定 product_line 級 PagerDuty key。
+2. **Routing key 是 secret、走 tenant_secrets / product_line_secrets**（**不**直接存 `product_line_oncall.encrypted_key` column） — 統一 secret 管理：所有 PagerDuty / Slack webhook / SMTP credentials 都走 `tenant_secrets` 既有表 + 新加 `product_line_id` nullable 欄位（同 S-4.3 git_accounts 模式）；`product_line_oncall_routing` 表只存「指向哪個 secret」+ schedule_id 等 non-secret metadata。理由：(a) 避免兩個 secret 倉庫；(b) 既有 secret RBAC + audit + MFA step-up 自動套用。
+3. **Severity-tag → product_line tag 注入 PagerDuty payload** — 既有 `_send_pagerduty()` 的 `custom_details` 裡多加 `product_line: pl-ipcam`、`product_line_label: IPCam`、PagerDuty incident title prefix `[IPCam P1]` 取代既有 `[Acme P1]`；on-call 看 incident 一眼知道是哪條線出事。Y9 落地時改 notification_pagerduty 的 payload composer。
+4. **Severity escalation 不跨 line** — IPCam P1 升級 P0、自動 escalate 到 IPCam line owner（Pam）+ tenant owner（Alice）；**不會** escalate 到 Doris / Ian。Y9 escalation graph 必帶 product_line scope；fallthrough 到 tenant owner 的條件嚴格（line owner 30min 沒 ack + tenant owner ack 後才能解開 incident）。
+5. **on-call schedule_id 可空、payload 仍能送達** — 若 line 沒設 schedule_id（小公司只配 routing_key、靠 PagerDuty 內部固定 service routing），系統不該 reject；schedule_id 純 metadata、用於 audit 與 UI 顯示「誰是這條 line 當班」。Y9 落地時 schedule_id 是 nullable text。
+6. **routing 變更走 audit + 通知舊 on-call** — Pam 把 IPCam line 的 on-call key 從 PagerDuty 換到 Opsgenie，audit 寫 `product_line.oncall_routing_changed(actor=pam, old_provider=pagerduty, new_provider=opsgenie)` + 立即 page 舊 / 新 on-call 一條測試 alert（避免 silent breakage：改了 key 卻沒測、下次真出事才發現新 key 配錯）。
+
+### S-4.5 SOP / Skill Pack 共享範圍 — Tenant 全 vs Product-Line scoped
+
+S-4 不直接動 SOP / skill pack 的 schema（屬 R 系列範圍），但 S-5（多專案同產品線）要求「Doorbell 下三 project 共用 Doorbell 的 SOP」、所以 S-4 需要先把「**SOP 在哪一層**」釐清。
+
+**設計選擇**：SOP / skill pack 的 owning scope 是**可選的層** — 既可以 attach 在 tenant 層（全 acme 通用、跨 line）、也可以 attach 在 product_line 層（Doorbell 特化）、也可以在 project 層（單一 project 特化）。**繼承走 specific → generic**（與 LLM budget 相反方向）：
+
+```
+project firmware-doorbell-v2 想用「壓力測試 SOP」？
+  → 先查 sop_resolver(project_id=fw-db-v2)         → null
+  → 再查 sop_resolver(product_line_id=pl-doorbell) → 找到「Doorbell 標準壓測 SOP」 → 用之
+  → 否則 fallthrough sop_resolver(tenant=t-acme)   → 找到 acme 全公司「壓測通用 SOP」
+  → 否則 system default (R 系列既有 ROM SOP 庫)
+```
+
+**S-4.5 設計斷言**：
+1. **SOP / skill_pack 表加 nullable `product_line_id` 欄位**（與 `git_accounts` 同模式） — 既有 R 系列 SOP 表 `sop_definitions(tenant_id, ...)` Y4 加 `product_line_id NULLABLE`；NULL 表 tenant-wide。Y4 落地時不 force migrate 既有 SOP 進入 line scope（保 backward compat）。
+2. **Resolver 走 specific-first**（與 git account / on-call 路徑相反） — 因為 SOP 是「行為標準」，越具體的越精準（project SOP > line SOP > tenant SOP）；on-call / git 是「資源指派」，越 generic 越 fallback safety。本斷言預防 reviewer 誤把所有 resolver 設成同方向。
+3. **Skill pack 同模型** — `skill_packs.product_line_id` nullable、預設 tenant-wide；但「LLM token 用量計帳」必跟著 caller 的 product_line（呼應 S-4.2 設計斷言 3）— skill pack 是被誰呼叫就計誰帳，不是 skill pack owner 的 line 計帳。
+4. **跨 line copy SOP 是顯式動作、不是 inheritance** — Doorbell line owner 想用 IPCam line 的「韌體燒錄前流程」SOP — 必走 `POST /sops/{id}/clone {target_product_line: pl-doorbell}`；audit 寫 `sop.cloned_cross_line` + 新 row 在 doorbell line 內生成獨立版本（避免「同一份 SOP 跨 line 共享、IPCam 改一改 doorbell 跟著爆」的耦合）。
+5. **Tenant-wide SOP 改動需 tenant admin / owner 簽** — line owner 不能改 tenant-wide SOP（會影響其他 line）；Y4 endpoint 強制 RBAC：(a) 改 tenant-wide SOP 需 tenant role ≥ admin、(b) 改 line-scoped SOP 需 product_line_role == owner OR tenant role ≥ admin。
+
+### S-4.6 schema 衝擊（與 Y1 對齊）
+
+S-4 在 Y1 / Y4 / Y6 落地時對 schema 的增量（在 S-1.6 + S-2.6 + S-3.5 既有設計上加）：
+
+```
+product_lines               -- Y1 新表（S-4 權威來源）
+  id                  uuid pk
+  tenant_id           text fk tenants(id) NOT NULL
+  slug                text NOT NULL                       -- 'ipcam' / 'doorbell' / 'intercom' / 'default'
+  display_name        text NOT NULL                       -- 'IPCam' / 'Doorbell' / 'Intercom' / 'Default'
+  description         text
+  llm_budget_tokens   bigint                              -- 30d budget; NULL = 不獨立 cap，依 tenant ceiling
+  is_system           boolean NOT NULL DEFAULT false      -- 'pl-default' = true (S-4.2 設計斷言 6 防刪)
+  archived_at         timestamptz
+  created_at          timestamptz NOT NULL
+  metadata            jsonb NOT NULL DEFAULT '{}'         -- e.g. {"git_org_hint":"acme/ipcam-*","color":"#0EA5E9"}
+  CONSTRAINT no_default_archive CHECK (NOT (is_system AND archived_at IS NOT NULL))
+  UNIQUE (tenant_id, slug)
+  -- partial index: 一個 tenant 至多一個 is_system=true 的 line（pl-default）
+  -- CREATE UNIQUE INDEX uq_product_line_default_per_tenant ON product_lines(tenant_id) WHERE is_system
+
+product_line_members        -- Y1 新表（S-4 RBAC 補充表）
+  product_line_id    uuid fk product_lines(id)
+  user_id            uuid fk users(id)
+  role               text NOT NULL                        -- 'owner' / 'contributor' / 'viewer'
+  added_by           uuid fk users(id)
+  added_at           timestamptz NOT NULL
+  PRIMARY KEY (product_line_id, user_id)
+
+product_line_oncall_routing -- Y1 新表（S-4.4 routing 階層）
+  product_line_id    uuid fk product_lines(id) PRIMARY KEY
+  provider           text NOT NULL                        -- 'pagerduty' / 'opsgenie' / 'slack' / 'none'
+  secret_id          uuid fk tenant_secrets(id)           -- routing_key 存在 tenant_secrets，本表只指
+  schedule_id        text                                 -- nullable; e.g. 'PD-IPCam-NoC'
+  escalation_minutes integer NOT NULL DEFAULT 30          -- line owner 多久沒 ack 升級到 tenant owner
+  metadata           jsonb NOT NULL DEFAULT '{}'
+  updated_at         timestamptz NOT NULL
+  updated_by         uuid fk users(id)
+
+projects                    -- 既有 Y1 草圖（S-1.6 / Y1 row 1669）加欄位
+  ...
+  product_line_id    uuid fk product_lines(id) NOT NULL    -- S-4 加：每 project 必屬一 line
+  ...
+  -- partial unique index 既有: UNIQUE (tenant_id, product_line, slug)（Y1 row 1669 既已寫 `product_line` 為 string column）
+  -- S-4 落地時把 Y1 row 1669 的 `product_line text` 改為 `product_line_id uuid fk`、Y1 row 1669 的 UNIQUE 也改為 (tenant_id, product_line_id, slug)
+
+git_accounts                -- 既有 Alembic 0027 表加欄位
+  ...
+  product_line_id    uuid fk product_lines(id) NULL        -- S-4 加：NULL = tenant-wide（保 backward compat）
+  ...
+  -- partial unique 增量：
+  -- CREATE UNIQUE INDEX uq_git_accounts_default_per_line_platform
+  --   ON git_accounts(tenant_id, product_line_id, platform)
+  --   WHERE is_default AND product_line_id IS NOT NULL
+  -- 既有 uq_git_accounts_default_per_platform partial index 修改為:
+  --   ... WHERE is_default AND product_line_id IS NULL（tenant-wide default）
+
+llm_credentials             -- 既有 Alembic 0029 表加欄位（同 git_accounts 模式）
+  ...
+  product_line_id    uuid fk product_lines(id) NULL        -- NULL = tenant-wide
+  ...
+
+tenant_secrets              -- 既有 Alembic 0013 表加欄位（同 git_accounts 模式）
+  ...
+  product_line_id    uuid fk product_lines(id) NULL        -- NULL = tenant-wide
+  ...
+  -- 既有 UNIQUE (tenant_id, secret_type, key_name) 改為:
+  -- UNIQUE (tenant_id, product_line_id, secret_type, key_name)
+  -- 注意：UNIQUE 包含 NULL 列在 PG 預設視為「NULL ≠ NULL」、需用 partial unique 兩條:
+  --   UNIQUE WHERE product_line_id IS NULL
+  --   UNIQUE WHERE product_line_id IS NOT NULL
+
+audit_log                   -- 既有表（S-3 已加欄位、S-4 再加）
+  ...
+  product_line_id    uuid NULL fk product_lines(id)       -- S-4 新增：line scope filter（Y9 partial index）
+  ...
+```
+
+**S-4.6 設計斷言**：
+1. **新表 3 張**（`product_lines` + `product_line_members` + `product_line_oncall_routing`）+ **既有表加欄位 5 張**（`projects` / `git_accounts` / `llm_credentials` / `tenant_secrets` / `audit_log`）— 用 nullable column + partial unique index 而非「另起平行表」（如 `product_line_secrets`），維持 secret RBAC 路徑只有一條（S-1.3 既有 audit / MFA step-up 不需重複實作）。
+2. **`product_lines.is_system` partial unique 保證每 tenant 恰一個 `pl-default`** — `CREATE UNIQUE INDEX ... ON product_lines(tenant_id) WHERE is_system`；遺留 `t-default` migration 時建立 `pl-default(t-default, slug='default', is_system=true)`，所有既有 row 對應到此 line（S-9 範圍）。
+3. **`projects.product_line_id NOT NULL`，但 Y4 兩階段落地** — 第一階段 nullable + backfill（既有 project → `pl-default`）+ 第二階段加 NOT NULL；同 Y1 既有 `tenant_id` 兩階段策略（TODO row 1674）。
+4. **`tenant_secrets.product_line_id` 加欄位 = 跨 line secret 沿用同表** — 不再為 line-scoped secret 另建表；secret RBAC（S-1.3）+ audit 路徑（既有 `tenant.secret_*` 事件）+ MFA step-up（K MFA 系列）一律繼承；只在 `_check_secret_rbac()` dependency 加 product_line scope 比對。
+5. **`audit_log.product_line_id` partial index 加速 line-scoped 查詢** — `CREATE INDEX ... WHERE product_line_id IS NOT NULL`；Pam 在 IPCam line dashboard 看 audit 時 backend 走此 index、不 scan 全 tenant audit row。
+6. **既有 `users.tenant_id` 與 `product_line` 完全 orthogonal** — `users.tenant_id` 是 S-1 / S-2 設計的「主 tenant 快取」、與 product_line 無關（user 在某 line 的角色查 `product_line_members`）；防 Y4 reviewer 誤把 product_line 寫成 user 屬性。
+
+### S-4.7 Operator 工作流 — Acme 從 1 線變 3 線的 7 步演進
+
+從 acme 只有 IPCam 一條線（既有狀況）演進到 IPCam + Doorbell + Intercom 三線並行的時間軸：
+
+1. **Day 0 — Acme 既有狀況（S-1.7 落地後）**  
+   `t-acme` 內所有 project 都隸屬於唯一 line `pl-default`（is_system=true，Y4 migration 自動建立）；單一 LLM 預算 100M / 30d 全給 default line（無 override）；單一 GitHub default git account；單一 PagerDuty key（system-wide）。
+
+2. **Day 1 — Alice 開新 product line `pl-ipcam`、把既有 firmware project 移過去**  
+   Alice 走 `POST /api/v1/tenants/t-acme/product-lines { slug: "ipcam", display_name: "IPCam", llm_budget_tokens: 50000000 }` + `PATCH /api/v1/tenants/t-acme/projects/firmware-ipcam { product_line_id: "<pl-ipcam-id>" }`。  
+   backend 寫 `product_lines` row + 寫 audit `tenant.product_line_created` + 寫 audit `project.moved_to_product_line`；既有 LLM atomic counter 從 `pl-default` 切過 50M 額度到 `pl-ipcam`。
+
+3. **Day 1+15min — Pam 升任 IPCam line owner**  
+   Alice 走 `POST /api/v1/tenants/t-acme/product-lines/pl-ipcam/members { user_id: pam, role: "owner" }`。Pam 在 sidebar 看到 `IPCam` line entry、點進去看到 firmware-ipcam project；audit 寫 `product_line.member_added`。
+
+4. **Day 3 — Pam 設 IPCam line 的 git default**  
+   Pam 走 `POST /api/v1/tenants/t-acme/git-accounts { product_line_id: pl-ipcam, platform: github, label: "acme-ipcam-bot", encrypted_token: ..., url_patterns: ["acme/ipcam-*"], is_default: true }`。  
+   Resolver 之後對 IPCam line 的 push 自動用 `acme-ipcam-bot`（既有 tenant-wide default 仍用於非 IPCam workflow）。
+
+5. **Day 5 — Pam 設 IPCam on-call routing**  
+   Pam 先存 PagerDuty integration key 為 secret：`POST /api/v1/tenants/t-acme/secrets { product_line_id: pl-ipcam, secret_type: "pagerduty_key", key_name: "main", encrypted_value: ... }` (走 owner-only step-up MFA 沿 S-1.3 設計斷言 6)。  
+   再走 `POST /api/v1/tenants/t-acme/product-lines/pl-ipcam/oncall-routing { provider: "pagerduty", secret_id: "<sec-id>", schedule_id: "PD-IPCam-NoC", escalation_minutes: 30 }`。  
+   backend 立即 send 一條 test alert 到 IPCam on-call（S-4.4 設計斷言 6 silent-breakage 預防）；Pam 確認後該 routing 進入 active。
+
+6. **Day 14 — Doris 開 Doorbell line**  
+   Alice 走同樣流程開 `pl-doorbell` (35M budget)、加 Doris 為 owner、Doris 設 GitHub Cloud `acme-doorbell` git default、設 Doorbell PagerDuty schedule_id。  
+   `tenant_quota` ceiling check 觸發：50M (ipcam) + 35M (doorbell) + 5M (default) = 90M ≤ 100M ceiling、通過。
+
+7. **Day 30 — Ian 開 Intercom line + 突發預算超用**  
+   Alice 走流程開 `pl-intercom` (10M budget)。三線總和 = 50 + 35 + 10 + 5 = 100M、剛好觸 ceiling、Y4 endpoint 預算驗算通過。  
+   IPCam 線當週密集驗證新 ISP，Day 33 月中已用 47M tokens；Pam 想升 IPCam budget 到 60M、走 `PATCH /product_lines/pl-ipcam { llm_budget_tokens: 60000000 }`，但 backend 算總和 = 60+35+10+5=110M > 100M、return 409 + 「請先降 doorbell 或升 plan」。Pam 與 Doris 協調暫時 doorbell 降到 25M、ipcam 升 60M、總和 100M、通過。
+   audit 雙寫 `product_line.budget_changed(actor=pam,old=50M,new=60M)` + `product_line.budget_changed(actor=doris,old=35M,new=25M)`。
+
+**S-4.7 設計斷言**：
+1. **加新 line 是 owner-only 動作** — 開 line 是公司治理層級的決策（影響 budget allocation + 法務責任邊界）、不該下放給 admin 級。Y4 endpoint 走 `require_role("owner")` dependency。
+2. **遺留 project 自動進 `pl-default`、不 force migration**（呼應 S-9 範圍） — 既有 acme 在 Y4 migration 時所有 project 進 `pl-default`、Pam 想搬到 `pl-ipcam` 是顯式 PATCH 動作、不是被動發生；migration 不破壞既有 LLM counter / git account / on-call 路由（既有路徑 product_line_id IS NULL、走 fallback path 仍工作）。
+3. **Per-line budget 改動立即生效**（呼應 S-4.2 設計斷言 5） — Pam 改 budget 從 50M 到 30M 不等下次 30d reset、立即進入新 cap；若已超用、立即進入 throttle、SSE 推 IPCam line owner notification。
+4. **Routing 變更 send test alert** （呼應 S-4.4 設計斷言 6） — 改 on-call key / schedule_id 後 backend send 一條測試 PagerDuty incident 到新路徑；Pam 收到後 ack、舊路徑收到 cleanup ping。
+
+### S-4.8 邊界 / 退化情境
+
+| 邊界場景 | 預期行為 | 驗收條件 |
+|---|---|---|
+| Pam（IPCam line owner，非 tenant admin）想刪 `pl-ipcam` line | 403 — 刪 line 是 tenant owner 動作（可能影響其他 line 的 budget 重分配）；line owner 只能 archive 該 line（settings 隱藏 + 維持 budget cap=0、project 仍存在） | Y4 `DELETE /product-lines/{id}` require tenant role=owner |
+| Alice 想刪 `pl-default` system line | 409 + 「Cannot delete system default line; archive other lines instead」 | Y1 schema CHECK + Y4 endpoint 雙重 reject |
+| 三 line 預算總和恰好等於 tenant ceiling，pam 想再升 1M | 409 + 提示「合計超過 100M ceiling」 + UI 顯示「您可從 Doorbell / Intercom / Default line 各降 X / Y / Z M」 | Y4 PATCH endpoint 算 SUM + 比對 + reject 帶上下文 |
+| Alice 把 tenant plan 從 enterprise 降到 pro（ceiling 從 100M 降到 30M），但既有 line 預算總和 = 100M | Y2 endpoint 在 plan 降級時驗算當前 Σ(line budget)、超過新 ceiling 時走「**強制按比例縮減**」（每 line 按既有比例壓縮、寫雙鏈 audit）+ banner 警告 owner 1 個 30d 週期內回審 | Y2 PATCH plan endpoint 帶 `auto_rebalance_lines` flag、預設 true（呼應 S-1.8 plan 過期降級） |
+| IPCam line 的 PagerDuty key 失效（rotated 但 secret 未更新） | `_send_pagerduty()` retry 3 次失敗、fallthrough 到 tenant-level routing；同時寫 audit `oncall_routing.delivery_failed(scope=line, line_id=pl-ipcam, fallback=tenant)` + SSE 推 line owner Pam | Y9 notification fallback：line key 失敗 → tenant key → system default、層層 fallback；不直接 drop alert |
+| Carol（IPCam line member，非 line owner）想看 Doorbell line 的 audit | 403 — 跨 line 看 audit 走 tenant-admin 級權限；line member 看到的 audit 自然按 product_line_id 過濾 | Y9 audit observable：require `product_line_role >= viewer` OR `tenant_role >= admin` per row |
+| 想把 firmware-ipcam project 從 IPCam line 搬到 Doorbell line | 允許（線間 project 移動），但同 transaction 重新計算累積 LLM 用量歸屬（30d 滾動統計按搬遷時刻 cutoff、舊 line 計到 cutoff、新 line 從 cutoff 起算）；audit 寫 `project.moved_between_product_lines` | Y4 PATCH endpoint：require tenant admin OR (source line owner AND target line owner)；30d counter 雙寫 |
+| 同 user 同時是 IPCam owner 與 Doorbell viewer | 完全允許（N:N relation） — Pam 在 IPCam sidebar 看到 owner 視角、切到 Doorbell sidebar 看 viewer 視角；UI 自動切換 capability | Y8 frontend：sidebar 內 product_line picker、依 active product_line 切 capability set |
+| `pl-default` 的 budget 設成 0（不允許未分類 LLM call） | Y4 endpoint 允許設 0；但若 Σ(其他 line) < tenant ceiling、剩餘額度進入 `pl-default`（避免 ceiling lower 邊界 throttle）— Y6 atomic counter 對 `pl-default` 做 dynamic credit | Y6 token meter：default line counter 動態算 = ceiling - Σ(其他 line current_used) |
+
+### S-4.9 Open Questions（標記給 Y1～Y10 後續勾選）
+
+1. **「Product-line 拆 tenant 的退路」** — Acme 之後決定把 IPCam 完全獨立成子公司、要把 `pl-ipcam` 切出來成 `t-acme-ipcam` 新 tenant — schema migration 工具需要？目前傾向「PATCH project_line 不能跨 tenant、必走 export → 新 tenant import 流（M-export 系列範圍）」；但 audit 鏈拆分是個複雜問題。等 M-export 落地時定。
+2. **「Cross-line LLM call attribution」邊界** — 跨 line 的工具（如 chatops bot 在 IPCam channel 觸發但執行邏輯涉及 doorbell 的 SOP）—  caller_product_line 算 IPCam 還是 doorbell？目前傾向「caller 是觸發 user 當下 active 的 line（IPCam）」、callee resource 不影響 attribution；但若 chatops 是 system actor、無 user context、走 `pl-default`。Y6 落地時實做需在 SOP / skill_pack call site 帶 product_line context。
+3. **「Per-line on-call rotation 內部成員」是否該寫進 OmniSight schema** — 目前 S-4.4 只存 PagerDuty schedule_id；rotation 細節（誰 primary / 誰 secondary）由 PagerDuty 自管。但若想在 OmniSight 內 dashboard 顯示「IPCam 此刻 on-call: Pam」、需要從 PagerDuty API pull schedule。等 Y9 dashboard 落地時決定。
+4. **「Line archive 的 cascade 行為」** — Alice archive `pl-doorbell`、line 內 project 怎麼辦？目前傾向「archive line ≠ archive project；line archive 後 budget 凍結、project 仍可看 / 不可改、新 workflow_run 拒絕」；想徹底清理就先把 project 搬到其他 line 再 archive。Y4 落地時定 archive cascade 範圍。
+5. **「Product-line 是否該支援 nested hierarchy（line 內再分 sub-line）」** — IPCam 線之下「室內 IPCam」+「室外 IPCam」是否該獨立切？目前傾向**不支援 nested**（複雜度爆炸、用 metadata.tags 即可），但若 enterprise 客戶剛性需求、Y10 再考慮。S-4.6 的 schema 不預留 parent_id 欄位（YAGNI）。
+
+### S-4.10 既有實作的對照表
+
+S-4 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
+
+| S-4 invariant | 目前狀況 | 缺口 |
+|---|---|---|
+| `product_lines` 表 | ❌ — 完全不存在；frontend `app/workspace/[type]/types.ts:11` 有 `WORKSPACE_TYPES` 但屬 UX 變體不是 RBAC scope | Y1 新建（S-4.6 第 1 表） |
+| `product_line_members` 表 | ❌ | Y1 新建（S-4.6 第 2 表） |
+| `product_line_oncall_routing` 表 | ❌ | Y1 新建（S-4.6 第 3 表） |
+| `projects.product_line_id` NOT NULL fk | ⚠️ Y1 既有草圖（TODO row 1669）已寫 `product_line` 為 string column（`UNIQUE (tenant_id, product_line, slug)`）、但是 string 而非 fk | Y1 修：把 string `product_line` 換成 `product_line_id uuid fk`、UNIQUE 改用 fk |
+| `git_accounts.product_line_id` NULL fk | ❌ — `backend/alembic/versions/0027_git_accounts.py:88-110` 既有 unique index 是 `(tenant_id, platform)`、無 product_line 維度 | Y4 加欄位 + 加 partial unique `WHERE is_default AND product_line_id IS NOT NULL` + 改既有 partial unique 加 `WHERE product_line_id IS NULL` 約束 |
+| `llm_credentials.product_line_id` NULL fk | ❌ — `backend/alembic/versions/0029_llm_credentials.py:97-123` 既有 unique 是 `(tenant_id, provider)`、無 product_line 維度 | Y4 加欄位 + 加 partial unique（同 git_accounts 模式） |
+| `tenant_secrets.product_line_id` NULL fk | ❌ — `backend/alembic/versions/0013_tenant_secrets.py` 既有 UNIQUE `(tenant_id, secret_type, key_name)` | Y4 加欄位 + UNIQUE 拆兩條 partial（含 NULL / 不含 NULL） |
+| `audit_log.product_line_id` NULL fk | ❌ — S-3 已加 `actor_external_tenant_id` + `share_id`、本 row 加第三個 nullable scope filter | Y4 加欄位 + partial index `WHERE product_line_id IS NOT NULL` |
+| Per-line LLM atomic counter | ❌ — 既有 `backend/llm_secrets.py:106-216` 是全域 in-memory cache、`backend/tenant_quota.py` 是 per-tenant disk quota（與 LLM 無關）、`backend/adaptive_budget.py` 是 adaptive token budget 但不分 line | Y6 新建：`llm_token_meter.py` 雙層 atomic decrement（PG `SELECT FOR UPDATE` 鎖 (tenant_row, product_line_row) 兩 row）|
+| Per-line PagerDuty routing | ❌ — `backend/notifications.py:1207` `_send_pagerduty()` 用 `settings.notification_pagerduty_key`（system-wide）；`backend/routers/integration.py:128` 既有 `notification_pagerduty_key` 是 SharedKV 全域欄位 | Y9 改 `_send_pagerduty()`：先查 `product_line_oncall_routing` → fallback tenant → fallback system；payload composer 加 `product_line` custom_details |
+| Frontend product_line picker | ❌ — `lib/tenant-context.tsx` 只有 `currentTenantId`；`components/omnisight/tenant-switcher.tsx` 切 tenant，不切 line | Y8 新增 `lib/product-line-context.tsx`：`useProductLine()` + sidebar 內 line picker（subordinate 於 tenant switcher） |
+| `git_resolve_account()` 含 product_line scope | ❌ — `backend/git_credentials.py` / `backend/routers/git_accounts.py` 走 `WHERE tenant_id=? AND platform=?` | Y6 改 resolver：`WHERE tenant_id=? AND product_line_id IN (caller_line, NULL) AND platform=? ORDER BY product_line_id NULLS LAST, is_default DESC` |
+| LLM provider resolver 含 product_line scope | ❌ — `backend/llm_secrets.py:186` `get_provider_credentials()` 走全域 in-memory（不分 tenant、更不分 line） | Y6 改：query `llm_credentials WHERE tenant_id=? AND product_line_id IN (caller_line, NULL) AND provider=?` 取 line-first |
+| SOP / skill_pack `product_line_id` 欄位 | ❌ — R 系列 SOP 表既有 schema 屬 R 系列範圍、Y0 不直接動 | Y4 / R 系列 落地時加（S-4.5 設計斷言 1）|
+| Per-line dashboard usage breakdown | ❌ | Y8 新增：`/dashboard/product-lines` 頁、顯示三 line 的 LLM tokens / git account count / on-call status |
+| Bootstrap wizard 創建 `pl-default` | ❌ | Y4 / Y10：每個新 tenant bootstrap 時自動建 `pl-default(tenant_id, slug='default', is_system=true)`；既有 t-default + 5 enterprise tenant 在 Y4 migration 時 backfill |
+
+**S-4.10 對 Y1 / Y4 / Y6 / Y8 / Y9 的關鍵 deliverable**：
+1. **Y1 新增 3 表 + 5 欄位** — `product_lines`(11 欄) + `product_line_members`(5 欄) + `product_line_oncall_routing`(7 欄) + `projects.product_line_id` 兩階段 NOT NULL + `git_accounts.product_line_id` nullable + `llm_credentials.product_line_id` nullable + `tenant_secrets.product_line_id` nullable + `audit_log.product_line_id` nullable；外加 partial unique index 4 條（pl-default per tenant、git default per line+platform、llm default per line+provider、tenant_secrets per line+type+name）。
+2. **Y4 endpoint 集合** — `POST/PATCH/DELETE/archive /product-lines` + `POST/DELETE /product-lines/{id}/members` + `PATCH /product-lines/{id}/oncall-routing` + `PATCH /projects/{id} { product_line_id }` 跨 line 搬遷 + tenant plan 降級 auto_rebalance；budget 變更時的 `Σ(line budget) ≤ tenant.ceiling` invariant 檢查在 endpoint 強制。
+3. **Y6 resolver 重寫** — `git_resolve_account()` / `get_provider_credentials()` / `secret_store.read()` 三條都要支援 `product_line_id IN (caller_line, NULL)` ordered fallback；新建 `llm_token_meter.check_budget()` 雙層 atomic decrement (PG SELECT FOR UPDATE)。
+4. **Y8 frontend** — `lib/product-line-context.tsx` + sidebar product_line picker subordinate to tenant switcher + `/dashboard/product-lines` 三 line 用量 breakdown 頁 + 新建 line 時 bootstrap wizard step 寫 git default + on-call routing。
+5. **Y9 notification 路徑改寫** — `_send_pagerduty()` / `_send_slack()` 階層 fallback (line → tenant → system)、payload 內加 product_line custom_details + fallback delivery 失敗時自動寫 audit + SSE 推 line owner。
+
+---
 
 ## S-5 多專案同產品線
 
@@ -860,4 +1214,5 @@ S-1.3 / S-1.4 已給出 secret + project 部分。完整矩陣（涵蓋 audit / 
 | 2026-04-25 | TODO 第 1 勾選（單租戶多用戶） | 初次落地。完整 S-1 章節（10 子節 + 6-persona 矩陣 + secret/project RBAC 表 + Acme 7 步落地時間軸 + 8 邊界 + 5 open questions + 對照表）；S-2 ～ S-9 留 skeleton；共用區段（ER / 權限矩陣 / migration）留 stub。 |
 | 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | S-2 章節展開（10 子節 + 5-persona Bridge MSP + Maya 7 步 onboarding + middleware 升級偽碼 + resolve_role 二維解析 + audit hygiene 4 種查詢 + schema 增量 5 欄 + 8 邊界 + 5 open questions + 16 行對照表）；S-1 row 標完成（2026-04-25）；S-3 ～ S-9 維持 skeleton；共用區段不收尾。 |
 | 2026-04-25 | TODO 第 3 勾選（跨租戶協作） | S-3 章節展開（9 子節 + 6-persona host/guest 雙視角 Acme/Cobalt + Joint Firmware 9 步 onboarding + resolve_role 三維合成偽碼 + audit 雙鏈寫入對照表 + cross-tenant secret 隔離 6 場景 + schema 增量 2 表 2 欄 + 9 邊界 + 5 open questions + 16 行對照表）；S-2 row 標完成（2026-04-25）；S-4 ～ S-9 維持 skeleton；共用區段仍 stub。|
+| 2026-04-25 | TODO 第 4 勾選（多產品線） | S-4 章節展開（10 子節 + 6-persona Acme 三線（IPCam Pam / Doorbell Doris / Intercom Ian + Alice/Bob/Carol 對照組）+ LLM 雙層預算階層偽碼 + git resolver 階層偽碼 + on-call routing 階層偽碼 + SOP/skill_pack 共享範圍 + schema 增量 3 表 5 欄 + Acme 1→3 線 7 步演進時間軸 + 9 邊界 + 5 open questions + 16 行對照表）；S-3 row 標完成（2026-04-25）；S-5 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | 完整 S-2 章節（10 子節 + Bridge MSP × Acme/Blossom/Cobalt 5-persona 矩陣 + tenant switcher UX 4 步流程 + middleware 升級偽碼 + RBAC `resolve_role(user, tenant, project)` 二維解析 + audit cross-contamination 4 條 invariant + Y1 新增欄位（`is_super_admin` / `last_active_tenant_id` / `sessions.active_tenant_id` / `impersonation_*` / `is_primary` partial unique index）+ Maya 7 步 onboarding 時間軸 + 8 邊界場景 + 5 open questions + 16 行對照表盤點 Y2/Y3/Y8 缺口）；S-3 ～ S-9 仍留 skeleton；共用區段不動。 |
