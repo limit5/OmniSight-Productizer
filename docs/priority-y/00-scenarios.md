@@ -2,7 +2,7 @@
 
 > 文件起點：2026-04-25  
 > 對應 TODO：`Y0. Multi-user × Multi-project 情境盤點 + 架構文件 (#276)`  
-> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-8（熱點撞牆 — 單 project 打爆 tenant quota → 其他 project 被餓死還是 project 間 DRF 公平分配？）**，承接 S-1 ～ S-7 已落地章節；其餘 S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
+> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-9（遺留相容 — 所有 `t-default` 現存資料怎麼對應到新階層、預設 product_line="default" / project="default"）**，承接 S-1 ～ S-8 已落地章節；至此 9 個情境章節全部成型，共用區段（ER diagram / 權限矩陣 / migration 策略）改為「下一輪 row 彙整」狀態（不在本 row 落地、避免提前收斂）。
 
 ---
 
@@ -17,9 +17,9 @@
 | [S-5 多專案同產品線](#s-5-多專案同產品線) | `[x]` 第 5 勾選 | 完成（2026-04-25） |
 | [S-6 多分支同專案](#s-6-多分支同專案) | `[x]` 第 6 勾選 | 完成（2026-04-25） |
 | [S-7 消失用戶回收](#s-7-消失用戶回收) | `[x]` 第 7 勾選 | 完成（2026-04-25） |
-| [S-8 熱點撞牆](#s-8-熱點撞牆) | `[x]` 第 8 勾選（本 row） | **本次完成** |
-| [S-9 遺留相容](#s-9-遺留相容) | `[ ]` 第 9 勾選 | Skeleton |
-| [共用區段：ER / 權限矩陣 / migration](#共用區段) | 全九勾選成型後彙整 | Stub |
+| [S-8 熱點撞牆](#s-8-熱點撞牆) | `[x]` 第 8 勾選 | 完成（2026-04-25） |
+| [S-9 遺留相容](#s-9-遺留相容) | `[x]` 第 9 勾選（本 row） | **本次完成** |
+| [共用區段：ER / 權限矩陣 / migration](#共用區段) | 9 勾選全成型、彙整留下一輪 row | Stub |
 
 ---
 
@@ -2757,16 +2757,358 @@ S-8 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
 
 ## S-9 遺留相容
 
-> **Skeleton — TBD by future row** (TODO 第 9 勾選)。
-> 所有 `t-default` 現存資料怎麼對應到新階層（預設 product_line="default" / project="default"）。
-> 預定章節：S-9.1 migration 步驟、S-9.2 雙寫期、S-9.3 fallback 行為驗收。
+> 所有 `t-default` 現存資料（13 張表 × 已 backfill 的 `tenant_id DEFAULT 't-default'` 欄位 + 13 張表外的尚未 tenant 化的支援表 + frontend / migration / runtime 三處硬碼 fallback）如何對應到 S-1 ～ S-8 建立的新階層（tenant → product_line → project → branch）？本章鎖定 OmniSight 從「**單 tenant 平面 schema（截至 2026-04-25 即 alembic head 0029、實際 prod 已運行 ~1 個月**）**」演化到「多 tenant × 多 product_line × 多 project × 多 branch 階層 schema」的 **加性 migration（additive、never destructive）+ 雙寫期（dual-write window）+ fallback 鏈（三層 fallback）+ 灰度切換（feature flag gate）** 四件套；為 Y1（schema 落地）/ Y2（middleware 升級）/ Y4（endpoint set）/ Y6（resolver 三層階層）/ Y8（frontend context picker）的 reviewer 提供「既有資料如何不丟 / 不重新路由 / 不破壞 RBAC / 不破壞 audit chain」的單一事實來源。
+
+S-9 不是「新功能」、是「舊資料的存續契約」。違反 S-9 的任何斷言都會讓 S-1 ～ S-8 的設計在 prod 環境（已有 ~1 個月真實使用 + 1 個 t-default tenant + 5 ～ 10 個 user + 100 ～ 1000+ audit row + 0 ～ 100+ workflow_run + 1 ～ 20 tenant_secret）落地時違反 Priority Y 三紅線：「資料不可遺失」「不可重新路由」「migration 必須是加性」（見 TODO.md L1610 ~ L1620 不變量）。
+
+### S-9.1 角色 Persona — 「現存資料」的三類視角
+
+S-9 的 actor 不是新 user、是「**現存資料**」與「**讀取 / 寫入這些資料的既有 code path**」的對話：
+
+| Persona | 視角 | 場景 | 該 do | 該 not do |
+|---|---|---|---|---|
+| **既有 t-default tenant**（id=`t-default`、由 alembic 0012 baseline 建立、prod 已運行 ~1 個月、含 13 張表的 backfilled tenant_id 欄位）| 受影響資料 | Y1 / Y4 落地時、所有 13 張既有表的「`tenant_id='t-default'`」row 必須被 100% 對應到「`tenant_id='t-default'` × `product_line_id='pl-default'` × `project_id='p-default'`」三鍵組合上 | 全 row 自動關聯到 seed 出的 default product_line + default project；新階層欄位（product_line_id / project_id / branch_id）走 NULL → 雙寫 → NOT NULL 三階段 backfill | 不可 hard-delete 任何 row、不可 ALTER TYPE 既有 column、不可改 t-default 字串為其他值（會破壞 backfill 證據鏈）|
+| **既有 prod 用戶**（5 ～ 10 人、走 t-default、目前 0 人意識到「自己屬於 product_line=default」）| 受影響使用者 | 既有 user 在 Y1 / Y4 落地當天打開 dashboard、應看到「**Default Product Line / Default Project**」自動展開、不需要 onboarding；既有 workflow_run / artifact / chat_message 全部出現在 default project 下 | 對 user 來說 1 day 前 vs 1 day 後使用感受 = 0 差異（除了 sidebar 多一層 dropdown 預設選 default 自動隱藏）；user 完全不需要點任何「migration confirm」按鈕 | 不可看到「t-default」字串外露在 UI；不可讓 user 在 default 之外被「卡住」；不可在 user 沒授權場景下顯示其他 tenant |
+| **既有 backend code path**（13 張表 `tenant_id DEFAULT 't-default'` + `db_context.tenant_insert_value()` + `lib/tenant-context.tsx` + `lib/storage.ts` + 7 個 alembic migration 寫死字串、總共 ~30 處 t-default 引用）| 受影響執行路徑 | Y1 / Y4 落地後既有 hardcoded `'t-default'` fallback 必須仍然 work（不破壞 production stack）；新增的 `'pl-default'` / `'p-default'` 字串以同樣 idempotent 模式（INSERT OR IGNORE）出現 | 既有 13 個 `DEFAULT 't-default'` 欄位保留不動（alembic migration 是 immutable 歷史、不允許 ALTER COLUMN DROP DEFAULT 改寫過去）；新增欄位用同模式 `DEFAULT 'pl-default'` / `DEFAULT 'p-default'` + 對應 seed row | 不可在 Y1 落地時把 `'t-default'` 改名為「semantic 更好」的字串（如 `'tenant-default'`）— 改名 = breaking change = prod migration 風險爆炸 |
+
+**S-9.1 設計斷言**：
+1. **加性是不可協商的紅線** — 對應 TODO.md L1612「最小驚訝原則：既有 `t-default` tenant 下的所有資料不可因為 Y 的架構變更而遺失或重新路由 — migration 必須是加性的，shard 成多 tenant 是 operator 主動動作」；S-9 把這條 invariant 從 TODO 文字延伸到「Y1 ～ Y8 任何 PR 不允許 ALTER TABLE DROP COLUMN / RENAME COLUMN / 改 DEFAULT / 改 enum value 在 t-default 層」具體可驗收條件（Y1 reviewer 對 alembic migration 必跑 `--sql` dry-run grep `DROP|RENAME|ALTER COLUMN.*TYPE` → 命中即 reject）。
+2. **「default product_line / project」不是 NULL 而是 first-class row** — 不允許「product_line_id NULL = default」這種 implicit fallback 模式（會讓 query 兩條 path：`WHERE product_line_id IS NULL OR product_line_id = ?`、雙倍 index、雙倍 forensic 複雜度）；改採「seed 一行 product_line(`pl-default`) per tenant、id 寫死、`is_system=true` 不可刪、所有 legacy row backfill 為該 id」、同 S-4.6 既有「pl-default 不可被刪是 fallback bucket」設計斷言一致。
+3. **「default」字串前綴與 `t-default` 字串前綴對齊** — `t-default`（tenant）/ `pl-default`（product_line）/ `p-default`（project）/ `b-default`（branch）四級前綴、可一眼從字串判讀層級；避免短字串如 `default` 跨層共用造成 forensic / audit 訊息誤讀（log 看到「default」分不清是 tenant 還是 project）。
+4. **fallback 是「優雅退化」不是「沉默忽略」** — 當 frontend 收到 row 沒有 product_line_id（dual-write 期間 fresh INSERT 但舊 code path 沒填）→ 必走「assume pl-default + 寫 audit warning + dashboard amber banner 提示 reviewer」三步、不可 silent assume；理由：silent fallback 會讓 dual-write 期的 bug 被隱藏到下個 release 才被發現（既有 Phase-3 G4 dev-green-but-not-prod-ready 教訓）。
+5. **既有 `t-default` 字串保留不改** — 即使「`tenant-default` 命名更好」也不改；alembic migration 0012 ～ 0029 是 immutable 歷史、改名 = breaking change = production 層需要走 ALTER TABLE 改 DEFAULT 改 backfilled row + 改 frontend hardcoded fallback + 改 migration 靜態列表（`scripts/migrate_sqlite_to_pg.py:223,339,...`）= 高風險 prod migration、ROI < 0；只有「可避免風險」的命名清理才在 Y10 考慮、S-9 不做。
+
+### S-9.2 13 張既有 tenant_id 表的 backfill 對應表
+
+每張表 backfill 路徑：「（`tenant_id='t-default'`、新欄位 `product_line_id` / `project_id` / `branch_id` 補上 default）」。**沒有任何一張表需要 hard-delete row、ALTER TYPE、或改既有 t-default 字串值**。
+
+| 既有表 | 截至 2026-04-25 row 數 | 既有 tenant_id 狀況 | S-9 backfill 動作 | 備註 |
+|---|---|---|---|---|
+| `tenants` | 1 | id='t-default' alembic 0012 seed | 不動（不需加新欄位）+ Y1 加 `lifecycle_stage`（S-7.7） | 仍是 1 row 直到 Y3 邀請新 tenant |
+| `users` | 5 ～ 10 | 全 `tenant_id='t-default'` | 不動既有欄位 + Y1 加 `is_super_admin`（S-2.6）/ S-7.7 加 `disabled_*` | 既有 5 ～ 10 user 全是 t-default 內 |
+| `workflow_runs` | 0 ～ 100+（dev / prod 累積） | 全 `tenant_id='t-default'` | Y4 加 `product_line_id NOT NULL DEFAULT 'pl-default'` + `project_id NOT NULL DEFAULT 'p-default'` + `branch NULL`（S-6.6） | 兩階段 NOT NULL：Y4-A NULL allowed → Y4-B 1 release 後加 NOT NULL |
+| `artifacts` | 0 ～ 50（generate by workflow_run） | 全 `tenant_id='t-default'` | Y4 加 `product_line_id` / `project_id` / `branch` 三欄、與 workflow_runs 走同模式 | 透過 `run_id` FK 推導 product_line_id 進 backfill SQL |
+| `audit_log` | 100 ～ 1000+ | 全 `tenant_id='t-default'` | Y4 加 `product_line_id NULL`（S-4.6）+ `project_id NULL`（S-5.6）+ `branch NULL`（S-6.6）+ S-3.5 加 `actor_external_tenant_id` / `share_id` + S-7.7 加 `redacted_*` 三欄 | partial index `WHERE product_line_id / project_id / branch IS NOT NULL` 加速 line / project / branch 切片；既有 chain hash invariant 不破（hash 不重算、僅加新 column） |
+| `event_log` | 100 ～ 10k+ | 全 `tenant_id='t-default'` | Y4 加 `product_line_id NULL`（attribution-only、與 audit_log 同模式） | 高頻寫入、partial index 必加 |
+| `debug_findings` | 0 ～ 100 | 全 `tenant_id='t-default'` | Y4 加 `product_line_id NULL` + `project_id NULL` | finding 是 task-scoped、繼承 task 的 project_id |
+| `decision_rules` | 5 ～ 20 | 全 `tenant_id='t-default'` | Y4 加 `product_line_id NULL` | rule 通常 tenant-wide、留 NULL = 全 line 適用、與 SOP resolver specific-first 對齊 |
+| `user_preferences` | 5 ～ 50 | 全 `tenant_id='t-default'` | 不動 | preferences 是 user × pref_key、不入 product_line / project 維度 |
+| `chat_messages` | 0 ～ 1000 | 全 `tenant_id='t-default'` DEFAULT | Y4 加 `project_id NULL`（chat 通常 project-scoped） | NULL = 「全 tenant chat」、有值 = 「該 project 內 chat」 |
+| `chat_sessions` | 0 ～ 100 | 全 `tenant_id='t-default'` PK 一部分 | Y4 加 `project_id NULL`（同 chat_messages） | session PK = (tenant_id, session_id)、不擴 PK |
+| `user_drafts` | 0 ～ 100 | 全 `tenant_id='t-default'` DEFAULT | 不動 | draft 是 per-user 暫存、不入 product_line / project 維度 |
+| `tenant_secrets` | 1 ～ 20 | 全 `tenant_id='t-default'` DEFAULT | Y4 加 `product_line_id NULL fk`（S-4.6 設計斷言 — line 級 secret 繼承既有 tenant secret RBAC） | NULL = tenant-wide secret（既有所有 secret 自然落入此桶）、明示 line override 才有值 |
+| `api_keys` | 1 ～ 10 | 全 `tenant_id='t-default'` DEFAULT | 不動既有 + S-7.7 加 `revoked_*` 三欄 | service token 不擴 line / project 維度（S-1.1 設計斷言 3） |
+| `git_accounts` | 0 ～ 5 | 全 `tenant_id='t-default'`（alembic 0027） | Y4 加 `product_line_id NULL fk`（S-4.6 git resolver line→tenant fallback） | NULL = tenant-default（既有所有 git account 自然落入）、line override 才有值；既有 (tenant_id, platform) UNIQUE → partial unique 兩條並存 |
+| `llm_credentials` | 1 ～ 3 | 全 `tenant_id='t-default'`（alembic 0029） | Y4 加 `product_line_id NULL fk`（與 git_accounts 同模式） | NULL = tenant-default、line override 才有值 |
+| `tenant_egress_policies` | 1 | 全 `tenant_id='t-default'` PK | 不動（policy 是 tenant-wide、不擴 line / project 維度） | policy 升 line / project 級是 Y10 範疇 |
+| `tenant_egress_requests` | 0 ～ 10 | 全 `tenant_id='t-default'`（alembic 0015） | 不動 | 同 policy、不擴維 |
+
+**S-9.2 設計斷言**：
+1. **「沒有任何一張表需要 ALTER COLUMN 改既有 DEFAULT」** — 對應 S-9.1 設計斷言 5；既有 `tenant_id DEFAULT 't-default'` 13 處 alembic migration 全部保留、新欄位用「ADD COLUMN ... DEFAULT 'pl-default' / 'p-default'」同模式追加；理由：避免「先 DROP DEFAULT 再 ADD DEFAULT」兩步在 alembic 中變成兩個 migration、production 升級時間窗口期 row 寫入帶錯 default。
+2. **partial unique index 解決「既有 (tenant_id, X) UNIQUE」與「新 (tenant_id, line_id, X) UNIQUE」並存** — 對齊 S-4.6 設計斷言 1 既有設計、不重複；具體：既有 `git_accounts (tenant_id, platform) UNIQUE` 在 Y4 後變「`WHERE product_line_id IS NULL` partial unique（保 tenant default）+ `WHERE product_line_id IS NOT NULL` partial unique on (tenant_id, product_line_id, platform)」；既有 row 全進「NULL partial unique 桶」、不需要任何 backfill 動作。
+3. **`audit_log` chain hash 不重算** — 對齊 S-7.5 設計斷言 1（chain hash 不重算是 chain 完整性核心）；新增 `product_line_id` / `project_id` / `branch` 欄位**不入 chain hash 計算**（hash 算法基於既有 column subset、加新欄位是 schema-side concern、與 hash invariant 解耦）；理由：既有 100 ～ 1000+ row 重算 hash = 1 ～ 10 秒 PG load + chain hash 算法已被外部 SIEM forensic 工具引用、改 hash 等於毀掉所有外部 forensic claim。
+4. **legacy `t-default` row 全部進「pl-default × p-default × null branch」三鍵組合** — Y1 / Y4 落地時的 backfill SQL 必走 `UPDATE workflow_runs SET product_line_id='pl-default', project_id='p-default' WHERE tenant_id='t-default' AND product_line_id IS NULL`；不允許 `null product_line_id` 與 `null project_id` 兩個 path 同時存在（會雙倍 index）；branch 可 NULL（既有 row 沒 branch 概念、進 NULL 桶 = 「unscoped main」）。
+5. **沒有「資料 deletion」這條路** — 即使 `tenants.lifecycle_stage='terminated'`（S-7.3）也不刪 row（S-7.5 audit retention L1 永久保留）；S-9 重申這條 invariant 對 13 張表全部適用、Y1 ～ Y8 任何 PR 不允許 hard-delete 任何 t-default 既有 row（即使「測試資料」「孤兒 row」也不允許自動清理、必走 admin 顯式 redaction 流程）。
+
+### S-9.3 4-phase migration 策略 — Y1 / Y4 / Y6 / Y10 對齊
+
+對應 SOP「Production Readiness Gate」與 TODO 共用區段「Migration 策略 占位」既有 3 步，本子節展開為 4 階段（每階段獨立 PR、可獨立 rollback）：
+
+```
+Phase A (Y1)   schema 加新表 + 新欄位 NULL 允許 + seed pl-default / p-default row
+       ──→  既有 code path 完全不動、prod 0 行為改變
+       ──→  新欄位全 NULL（無 default 寫入）、既有 default fallback 仍走 t-default
+
+Phase B (Y4)   middleware 升級到「contextvar 寫 product_line_id / project_id」
+       ──→  新 INSERT 開始填 product_line_id='pl-default' / project_id='p-default'
+       ──→  舊既有 row 仍 NULL、雙寫期觀察「new INSERT 走新 path、old SELECT 走 fallback」
+       ──→  讀路徑加 fallback：SELECT WHERE (product_line_id = ? OR product_line_id IS NULL)
+
+Phase C (Y4 後 1 release)   backfill 既有 row + 加 NOT NULL constraint
+       ──→  UPDATE ... WHERE product_line_id IS NULL SET product_line_id='pl-default'
+       ──→  ALTER TABLE ... ALTER COLUMN product_line_id SET NOT NULL
+       ──→  讀路徑去 fallback OR 分支、改成單 path index hit
+
+Phase D (Y10)   清理 legacy hardcoded fallback（移除 lib/tenant-context.tsx:34 / lib/storage.ts:16 / db_context.py:90 三處 't-default' 硬碼）
+       ──→  改成「contextvar 必填、未填即 401」
+       ──→  測試：grep -rn 't-default' backend/ lib/ → 預期僅 alembic migration 內留存（immutable 歷史、不動）
+```
+
+**S-9.3 設計斷言**：
+1. **每 Phase 獨立 rollback** — Phase A 加表加欄位、rollback 走 `git revert + alembic downgrade -1`；Phase B 改 middleware、rollback 走 frontend env feature flag `OMNISIGHT_HIERARCHY_DUAL_WRITE=false` 退回 t-default-only；Phase C 加 NOT NULL、rollback 走 `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL` + 補回 fallback；Phase D 清 hardcoded、rollback 走 `git revert`；4 個 rollback path 各自 ≤ 5 min。
+2. **Phase B 「new INSERT 走新 path、old SELECT 走 fallback」是 dual-write 期 invariant** — 對齊 SOP「Read-after-write timing」(2026-04-21 納入)；具體 timing 邊界：「Phase B 啟動 t=0 → t=0+30s 新 row 已寫 product_line_id='pl-default' / 既有 row 仍 NULL → 任何 dashboard query 走 `WHERE product_line_id = 'pl-default' OR product_line_id IS NULL` 兩條 path UNION → 全 row 仍見」；不允許 Phase B 啟動瞬間有 row 既不在新 path 也不在舊 path（會看不見）。
+3. **Phase C backfill 必走 background batch、不阻 prod 寫** — 既有 prod 100 ～ 1000+ audit_log row、若 Phase C `UPDATE ... SET product_line_id='pl-default'` 一次跑、會 lock 整表 ≥ 1 秒；改走「per 1000 row commit、5 min 批次」+ 跑 cron `backfill_legacy_t_default_rows`、prod 寫入完全不影響；對齊既有 Y6 cron 設計模式。
+4. **Phase D 是 1 release 後的 hygiene 動作、可 deferred** — Phase D 不影響功能正確性、純為「移除 dead fallback code」；若 Phase C 後仍有 prod 不確定性（如 SIEM forensic 工具仍 query t-default 字串）、Phase D 可 push 到 Y10 後再做、不 block Y4 ～ Y8 落地；對齊既有 G4 「dev-green 不等於 prod-ready」教訓。
+5. **每 Phase 必跑 drift guard test**（對齊 SOP Step 4）— Phase A 跑「`tests/test_y_phase_a_schema_drift.py` 對照 alembic 新欄位 vs 既有 row count」、Phase B 跑「`tests/test_y_phase_b_dual_write_visibility.py` 對 race scenario 模擬 t=0 / t=10s / t=30s 三點 query」、Phase C 跑「`tests/test_y_phase_c_backfill_completeness.py` SELECT COUNT(*) WHERE product_line_id IS NULL → 預期 0」、Phase D 跑「`tests/test_y_phase_d_hardcode_grep.py` grep 't-default' backend/ lib/ → 預期僅 alembic 內留存」；4 條 drift guard 對齊 SOP 「靜態列表 vs 實際資料源」對齊原則。
+
+### S-9.4 Default 階層 seed 模式
+
+「`pl-default` × `p-default` × null branch」三鍵組合的具體 seed SQL（Y1 落地時的 alembic migration 內容）：
+
+```sql
+-- Y1 alembic migration 0030_y1_hierarchy_seed.py（規格化、本 row 不寫實作）
+
+-- 1. 為每個既有 tenant 建一個 default product_line（idempotent INSERT OR IGNORE）
+INSERT INTO product_lines (id, tenant_id, name, slug, is_system, created_at)
+SELECT 'pl-default', t.id, 'Default Product Line', 'default', TRUE, NOW()
+FROM tenants t
+ON CONFLICT (id, tenant_id) DO NOTHING;
+
+-- 2. 為每個 (tenant, product_line) 建一個 default project
+INSERT INTO projects (id, tenant_id, product_line_id, name, slug, lifecycle_stage, is_internal, created_at)
+SELECT 'p-default', t.id, 'pl-default', 'Default Project', 'default', 'production', TRUE, NOW()
+FROM tenants t
+ON CONFLICT (id, tenant_id) DO NOTHING;
+
+-- 3. 為每個 (tenant, product_line, project) 不建 default branch（branch 走 ephemeral 模型 + NULL = 'unscoped main' 模式）
+-- branch 不需要 seed default row、保 NULL 即可
+```
+
+**`is_system` 旗標的特殊性**：
+- `pl-default.is_system=TRUE` + `p-default.is_internal=TRUE` 兩個旗標代表「本 row 不可被 user 刪除 / 改名 / archive」
+- 對應 S-4.6 既有設計斷言「is_system partial unique 保證每 tenant 恰一個 pl-default」+ S-5.5 既有設計斷言「graduated 強制中介狀態」；S-9 把這兩個 invariant 在 t-default tenant 內具體化
+- DELETE / archive `pl-default` 或 `p-default` 必 reject 422 + 引導「請建立其他 product_line / project 後再 reassign t-default 內容、不可刪 fallback bucket」
+
+**S-9.4 設計斷言**：
+1. **`pl-default` / `p-default` 字串 ID 是穩定 PK 不是 UUID** — 對應 S-4.6 既有設計斷言 4「pl-default 不可被刪是 fallback bucket」+ S-5.6 既有設計斷言 4「lifecycle_stage 用 text + CHECK」；具體：legacy backfill 用「字串 PK」可以 deterministic、不依賴 UUID 生成順序、forensic 查詢「為什麼這個 row 沒填 product_line_id」可一眼看出「fall through 到 default 桶」；Y10 改 UUID PK 屬於 hygiene、不在 S-9 範圍。
+2. **`p-default.lifecycle_stage='production'`**（不是 `rnd` 或 `poc`）— 對應 S-5.5 既有設計斷言 6「rejected 與 archived 顯式分兩 enum」；既有 t-default 內容是「真實 prod 用戶在跑」、不是 R&D / POC、設成 `production` 才能讓 quota / fairness 設計（S-8.2 / S-8.3）一致對待 default project；若設成 `rnd` 會走 5M default cap（S-5.5 lifecycle 預設 LLM cap 表）→ 對既有 prod 用戶造成 throttle 災難。
+3. **default 階層的 `customer_account_id`=NULL + `is_internal=TRUE`** — 對應 S-5.3 既有設計斷言 2「customer_account_id 與 is_internal 互斥 CHECK」+ 設計斷言 4「customer churn 不級聯 archive project」；既有 t-default 內容沒有真實對外客戶、必須是 `is_internal=TRUE`（自燒 LLM cap、不對外計費 export）；當 operator 將某 project 升為「對 customer 計費」時走 admin 雙簽 + S-5.3 既有「project 升 customer 走 admin override 特例升階」path、不影響 default。
+4. **既有 row 沒有 created_at 對齊 default seed 的 created_at**（因為 default 是 Y1 落地當天才存在）— 既有 row 的 created_at 仍保留原始時間（如 2026-03-15）；default product_line / project 的 created_at = Y1 migration 跑的當下；audit forensic 查詢「該 workflow_run 屬於哪個 product_line」可看到「product_line.created_at > workflow_run.created_at」這個 anachronism、是預期狀態（不是 bug）；audit_log 寫一條 `tenant.legacy_data_assigned_to_default` event 留 trace（與 S-7.5 既有 audit retention L1 永久保留對齊）。
+
+### S-9.5 雙寫期（Phase B）的 read / write 路徑對照
+
+Phase B 啟動後、prod 同時運行兩條路徑：
+
+| 操作 | t=0 ～ t=Phase C 之間 | Phase C 之後 |
+|---|---|---|
+| **新 INSERT** | `INSERT INTO workflow_runs (tenant_id, product_line_id, project_id, branch, ...) VALUES ('t-default', 'pl-default', 'p-default', NULL, ...)` | 同左、走 NOT NULL constraint enforce |
+| **舊既有 row 的 SELECT**（dashboard 列表） | `SELECT * FROM workflow_runs WHERE tenant_id = 't-default' AND (product_line_id = 'pl-default' OR product_line_id IS NULL)` | `SELECT * FROM workflow_runs WHERE tenant_id = 't-default' AND product_line_id = 'pl-default'`（去 OR fallback）|
+| **舊 t-default 內 row 的 UPDATE**（admin 改 metadata） | UPDATE 不動 product_line_id / project_id 欄位（保留 NULL）；其他欄位正常更新 | UPDATE 自動填 product_line_id（trigger / app 層補 default）|
+| **dashboard 跨 product_line 查詢**（S-4 的 line breakdown） | 不適用 — Phase B 期間 product_line 只有 pl-default 一個 + 既有 row 部分 NULL；breakdown panel hide 掉 | 啟用 — Phase C 後可信地按 product_line 切片 |
+| **audit chain hash 計算** | 不變 — chain hash 不入 product_line_id / project_id（S-9.2 設計斷言 3）| 不變 |
+| **frontend useTenant() / useProductLine() / useProject()** | useTenant() 走既有 contextvar；useProductLine() / useProject() 在 dual-write 期 fallback to `'pl-default'` / `'p-default'` 字串常數 | useProductLine() / useProject() 走真實 contextvar（從 user.last_active_product_line_id / .last_active_project_id 推導）|
+| **既有 frontend hardcoded fallback `lib/tenant-context.tsx:34 user.tenant_id \|\| "t-default"`** | 不動 | Phase D 移除（變 `user.tenant_id ?? throw new Error('tenant required')`）|
+
+**S-9.5 設計斷言**：
+1. **雙寫期讀路徑必含 `OR product_line_id IS NULL`** — 違反這個 invariant 會讓既有 t-default row 在 dashboard 看不見（嚴重 prod incident）；Phase B middleware 升級的 SQL composer（如 `backend/db_context.py:90` 升級版）必加這條 OR、Y2 reviewer 對 100% PR 跑 grep `WHERE.*product_line_id = .*[^L]` 命中即 reject（除非 PR 顯示在 Phase C 後）。
+2. **新 INSERT 必填 default**、不允許「省略 product_line_id 走 schema DEFAULT」— 違反 invariant 1 的反例；schema DEFAULT 是 fallback safety、應用層必顯式填入；理由：相依於 schema DEFAULT 會讓 `db_context.tenant_insert_value()` 之外的所有 INSERT call site（如 app 層直接拼 SQL、第三方 contributor）忘記填入 → 走 schema DEFAULT → Phase C ALTER NOT NULL 時看似 OK、但實際應用層尚未升級、Phase C+1 出現 「INSERT 失敗 NULL violates NOT NULL」prod incident。
+3. **dashboard 跨 product_line panel 在 Phase B 期間 hide** — 對應 S-4 既有「product_line breakdown panel」設計；既有 t-default 內容只屬一個 product_line（pl-default）、breakdown 顯示一條 100% bar 沒有資訊量；Phase B 期間 frontend 加 feature flag `NEXT_PUBLIC_HIERARCHY_BREAKDOWN_ENABLED=false`、Phase C 後切 true。
+4. **frontend hardcoded fallback 在 Phase D 才移除** — `lib/tenant-context.tsx:34` `user.tenant_id || "t-default"` + `lib/storage.ts:16` `tid || "t-default"` 兩處、Phase A ～ C 期間保留不動；理由：移除這兩個 fallback 會讓「user 物件還沒 load 完成 → tenant_id undefined → 走 fallback to 't-default'」這個既有 grace period 路徑斷裂、frontend 渲染 race；Phase D 由「user 物件強制 await load 完才 render」配套移除這兩 fallback。
+5. **既有 alembic migration 0012 ～ 0029 寫死的 `'t-default'` 字串永遠不動** — 對應 S-9.1 設計斷言 5；alembic migration 是 immutable 歷史、改它等於改既有 prod schema 升級路徑、會讓「`alembic upgrade head` 從 baseline 跑」的 disaster recovery 路徑失敗；S-9 / Y10 hygiene 動作只清「runtime / frontend hardcoded fallback」、不清 migration 字串。
+
+### S-9.6 Fallback 行為的三層降級鏈
+
+當 dual-write 期間（Phase B）或之後（Phase C+）某個 row 仍找不到 product_line_id / project_id（dual-write race / 第三方 importer 沒升級 / SIEM 查歷史 row）→ 走三層 fallback：
+
+```
+Layer 1 (應用層 explicit default)
+  - INSERT 預設帶 'pl-default' / 'p-default'（Phase B+ 新 row 走這層）
+  - UPDATE 不動既有 NULL（Phase B 期間保留、Phase C backfill 填）
+
+Layer 2 (DB schema DEFAULT)
+  - ALTER COLUMN ... DEFAULT 'pl-default' / 'p-default'
+  - 第三方 INSERT 漏填欄位、走這層 fallback safety
+  - Phase C 加 NOT NULL 後仍保留 DEFAULT、雙保險
+
+Layer 3 (read 路徑 OR 補 fallback)
+  - Phase B 期間：SELECT ... WHERE (product_line_id = ? OR product_line_id IS NULL)
+  - Phase C 後：去 OR、改單 path
+```
+
+**Fallback 鏈在 4 個關鍵 code path 的具體展開**：
+
+1. **`backend/db_context.py:90` `tenant_insert_value()`** — Phase B 升級為 `tenant_insert_value() + product_line_insert_value() + project_insert_value()` 三 fn、各自走 contextvar → fallback chain；contextvar 沒設時 fallback to default 字串 + 寫 audit warning「caller 沒設 product_line context」（forensic 抓出哪個 call site 漏設）。
+
+2. **`lib/api.ts setCurrentTenantId / getCurrentTenantId`** — Phase B 升級加 `setCurrentProductLineId / setCurrentProjectId`、frontend 切換 sidebar picker 時自動 set；既有 `X-Tenant-Id` header 加 `X-Product-Line-Id` / `X-Project-Id` 兩 header、middleware 端 fallback 走 user.last_active_*。
+
+3. **`backend/main.py:625 _tenant_header_gate`** — Phase B 升級為「product_line / project header gate + RBAC 檢查」、未設 header 時走 user.last_active_product_line_id / .last_active_project_id；對應 S-2.3 既有 middleware 升級偽碼設計 + S-2.6 既有 schema 增量。
+
+4. **`backend/alembic/versions/0030_y1_hierarchy_seed.py` ON CONFLICT DO NOTHING** — idempotent re-run safety；同一 migration 跑 N 次 = 跑 1 次的效果（既有 t-default seed 0012 已是這個模式）；對應 S-9.4 既有 SQL pattern。
+
+**S-9.6 設計斷言**：
+1. **Layer 1 是權威、Layer 2 / 3 是 safety net** — 應用層必顯式填 product_line_id（不依賴 schema DEFAULT 填）；理由：對應 SOP「Module-global state 稽核」既有合格答案 #2「透過 PG / Redis 協調」原則、應用層顯式填 = 推導路徑可追蹤；Layer 2 schema DEFAULT 是「應用層忘填的 last-mile safety」、不該被視為主路徑（避免 silent fallback 隱藏 bug）。
+2. **Layer 3 read OR fallback 在 Phase C 後必移除** — 違反這個會讓 query path 永遠帶 OR 分支、無法走純 index hit、prod query plan 變慢 2-5x；Phase C 完成後跑 drift guard test「PR diff grep `OR product_line_id IS NULL` 命中即 reject」（除非 PR 標記 「Phase B legacy compat」）。
+3. **Fallback 寫 audit warning 不寫 audit error** — Phase B 期間 fallback 是「預期路徑」（既有 row NULL / 第三方 importer 未升級）、寫 error 會讓 Y8 dashboard amber banner 永久亮起，意義稀釋；改寫 warning level + 限頻 1 / 5 min（既有 `backend/notifications.py` 限頻機制可重用）。
+4. **三層 fallback 鏈不對稱於 read / write** — write path 走 Layer 1 → Layer 2（schema DEFAULT）；read path 走 Layer 3（OR fallback）只在 Phase B 啟用；對應 S-9.5 既有設計斷言 1 + 2 的雙重 invariant；reviewer 在 Phase B 結束時跑 `grep -n "product_line_id IS NULL"` → 預期僅在 Layer 3 read path 出現、不在 write path。
+5. **Frontend fallback 限定在 user 物件未 load 階段** — `lib/tenant-context.tsx:34` `user.tenant_id || "t-default"` 是 React 初次 render 時 user 還在 fetch 的 grace；Phase D 移除前需先確認 frontend 已加「`<Suspense fallback={<LoadingScreen />}>` 包 user fetch」、否則 user undefined → tenant 字串成為 `undefined` → API 401 連環錯。
+
+### S-9.7 Schema 增量（與 S-1.6 ～ S-8.6 對齊、不重複）
+
+S-9 不另起新表、不新增欄位 — 全靠既有 S-4.6 / S-5.6 / S-6.6 schema 增量加上「`is_system` / `is_internal` 旗標 + seed row」實現；本子節僅展開 seed migration 的具體 row：
+
+```sql
+-- 既有 t-default 唯一 tenant 的 seed（alembic 0012 既有、不動）
+-- INSERT INTO tenants (id, name, plan, enabled) VALUES ('t-default', 'Default', 'starter', 1)
+-- ON CONFLICT (id) DO NOTHING;
+
+-- Y1 alembic 0030 新增（規格化、本 row 不寫實作）：
+-- 1. 為 t-default 建一個 pl-default product_line
+INSERT INTO product_lines (id, tenant_id, name, slug, is_system, drf_weight, token_cap_30d)
+VALUES ('pl-default', 't-default', 'Default Product Line', 'default', TRUE, 1.0, NULL)
+ON CONFLICT (id, tenant_id) DO NOTHING;
+-- token_cap_30d=NULL 走 tenant ceiling（S-4.2 設計斷言 1：Σ(line) ≤ ceiling）
+
+-- 2. 為 (t-default, pl-default) 建一個 p-default project
+INSERT INTO projects (
+  id, tenant_id, product_line_id, name, slug,
+  lifecycle_stage, is_internal, customer_account_id,
+  drf_weight, token_cap_30d
+)
+VALUES (
+  'p-default', 't-default', 'pl-default', 'Default Project', 'default',
+  'production', TRUE, NULL,    -- is_internal=TRUE 對應 S-9.4 設計斷言 3
+  1.0, NULL                     -- token_cap_30d=NULL 共用 line budget 剩餘（S-5.2 設計斷言 6）
+)
+ON CONFLICT (id, tenant_id) DO NOTHING;
+
+-- 3. 不建 default branch（branch=NULL 即「unscoped main」、對應 S-6.6 既有設計）
+```
+
+**未來 tenant 自動建立 default 階層**：當 Y3 邀請新 tenant 時（除了 t-default 之外）、tenant onboard transaction 內必同 transaction seed 該 tenant 自己的 pl-default + p-default：
+
+```python
+# Y3 invite_tenant() 偽碼（規格化、本 row 不實作）
+async def create_tenant(name: str, owner_user_id: str) -> Tenant:
+    async with conn.transaction():
+        new_tenant_id = generate_tenant_id()
+        await conn.execute("INSERT INTO tenants (id, name, ...) VALUES ($1, $2, ...)", new_tenant_id, name)
+        # 自動 seed default product_line + project（與 t-default 同模式）
+        await conn.execute(
+            "INSERT INTO product_lines (id, tenant_id, name, slug, is_system) "
+            "VALUES ('pl-default', $1, 'Default Product Line', 'default', TRUE)",
+            new_tenant_id,
+        )
+        await conn.execute(
+            "INSERT INTO projects (id, tenant_id, product_line_id, name, slug, lifecycle_stage, is_internal) "
+            "VALUES ('p-default', $1, 'pl-default', 'Default Project', 'default', 'production', TRUE)",
+            new_tenant_id,
+        )
+        # ... 同 transaction 寫 audit「tenant.created」+「tenant.default_hierarchy_seeded」
+```
+
+**S-9.7 設計斷言**：
+1. **不另起新表是 deliberate 選擇** — 對應 SOP「Module-global state 稽核」+「擴充既有 schema、避免提前優化」既有設計哲學；S-9 純粹是「既有資料 + 既有 schema 增量 → seed 兩個 row」的組合、不是「新功能需要新表」。
+2. **`pl-default` / `p-default` PK 字串寫死 + ON CONFLICT DO NOTHING** — 對應 S-9.4 設計斷言 1 字串 PK 穩定 + 既有 t-default seed (alembic 0012) 既有 ON CONFLICT pattern；idempotent migration（多次跑 = 跑一次效果）讓 disaster recovery 不擔心重複跑。
+3. **未來 tenant 的 default 階層在 tenant 創建 transaction 內 seed** — 不能 lazy seed（user 第一次打開 dashboard 才建）；理由：lazy seed 會讓 RBAC 檢查路徑出現「該 tenant 沒 default project → fallthrough 到？」邊界、easy to bug；同 transaction seed 保證 tenant 一存在就有完整階層、所有 query 走 deterministic path。
+4. **新 tenant 的 default seed 寫 audit「tenant.default_hierarchy_seeded」** — 對應 S-7.5 audit retention 永久保留 + S-9.4 設計斷言 4「audit_log 寫一條 `tenant.legacy_data_assigned_to_default` event 留 trace」對稱；新 tenant 路徑需要與 t-default legacy 路徑明顯區分（different action enum）便於 forensic 「這個 default 是 legacy 還是新建」。
+5. **既有 t-default 的 default seed 跑 1 次後永不再跑** — Y1 alembic 0030 跑 1 次落地、之後 alembic head 即 0030+；既有 tenant t-default 的 seed 是「migration history」、不該因應用重啟重跑（idempotent ON CONFLICT 已確保不重複插入但避免不必要的 query）；Y3 邀請新 tenant 走獨立 endpoint、不重用 alembic seed path。
+
+### S-9.8 Operator 工作流時間軸 — Y1 / Y4 兩階段切換
+
+**情境**：2026-05-XX Y1 第一階段落地後、繼續 Y4 第二階段、總共 ~2 weeks 的 4 phase 演進。
+
+```
+Day 0 (Y1 PR merged) — Phase A: schema + seed
+  - alembic upgrade head 自動跑 0030_y1_hierarchy_seed.py
+  - product_lines 表新增 1 row（pl-default for t-default）
+  - projects 表新增 1 row（p-default for t-default × pl-default）
+  - product_line_id / project_id / branch 三欄在 workflow_runs / artifacts / audit_log / event_log 等 13 表中新增、全部 NULL
+  - 既有 frontend / backend code 完全不動、prod 0 行為改變
+  - 用戶側：看不到任何差異（dashboard sidebar 仍 t-default-only）
+  - 5 ~ 10 既有 user 0 onboarding 動作
+
+Day 1 ~ 7 (Y2 / Y4 reviewer 對 Phase B 開發)
+  - middleware 升級開發中（contextvar 寫 product_line_id / project_id）
+  - frontend 開發 sidebar product_line picker（dim 灰、Phase C 才啟用）
+  - 開發 backfill cron `backfill_legacy_t_default_rows`
+  - drift guard test 開發中（4 條：schema / dual-write visibility / backfill completeness / hardcode grep）
+
+Day 8 (Y4-A PR merged) — Phase B 啟動 dual-write
+  - middleware 升級到「contextvar 寫 product_line_id」
+  - 新 INSERT 開始填 'pl-default' / 'p-default'
+  - 既有 row 仍 NULL
+  - read 路徑加 OR fallback：SELECT ... WHERE (product_line_id = ? OR product_line_id IS NULL)
+  - frontend feature flag NEXT_PUBLIC_HIERARCHY_BREAKDOWN_ENABLED=false（hide breakdown panel）
+  - Y8 dashboard amber banner「Migration in progress: 87% rows backfilled」（從 audit_log 讀進度）
+  - 5 ~ 10 既有 user 看到 banner、無需動作
+
+Day 9 ~ 14 (Phase B 觀察 + backfill cron 跑)
+  - 觀察 dual-write race scenario 在 audit_log 的 warning 數
+  - cron `backfill_legacy_t_default_rows` 每 5 min 跑、每次 1000 row、~10 ~ 100 cycle 跑完（取決於 prod row 量）
+  - 觀察 query plan：read 路徑 OR fallback 是否拖慢 dashboard（>200ms p95 即 escalate）
+  - backfill 進度 dashboard banner 動態更新
+
+Day 15 (Y4-B PR merged) — Phase C 加 NOT NULL
+  - SELECT COUNT(*) WHERE product_line_id IS NULL → 預期 0、否則 PR reject
+  - ALTER TABLE ... ALTER COLUMN product_line_id SET NOT NULL
+  - 讀路徑去 OR fallback、改成單 path index hit
+  - frontend feature flag NEXT_PUBLIC_HIERARCHY_BREAKDOWN_ENABLED=true（啟用 breakdown panel）
+  - Y8 dashboard amber banner 改 green badge「Migration complete」並 7 day 後自動 hide
+  - 5 ~ 10 既有 user 看到 sidebar 多一層 dropdown 預設選 default、可選擇切換到其他 product_line（仍只有 pl-default）
+
+Day 30 (Phase C 後 1 release)
+  - Y10 hygiene PR：移除 lib/tenant-context.tsx:34 / lib/storage.ts:16 / db_context.py:90 三處 't-default' 硬碼
+  - drift guard test「`grep -rn 't-default' backend/ lib/`」預期僅 alembic migration 內留存
+  - 對應 S-9.3 Phase D（可 deferred 到 Y10、不 block）
+```
+
+**S-9.8 設計斷言**：
+1. **Phase B → Phase C 之間 7 天觀察窗** — 對應 SOP「Production Readiness Gate」既有 24h 觀察窗 × 7（為 backfill cron 跑滿 + 多時段邊界 case 觀察）；觀察期內若有 prod incident（query 變慢 / SSE 斷流 / dual-write race 出現 silent data loss）走 rollback feature flag → 回 Phase A；觀察期 0 incident 才允許 Phase C。
+2. **drift guard test 跑在 Phase C 之前**（不是之後）— Phase C 加 NOT NULL 是「point of no return」（rollback 需 ALTER COLUMN DROP NOT NULL + 補 fallback、~30 min）；test fail = Phase C PR reject；對應 SOP Step 4「Test fixture blast radius」+ Phase A 階段已開發好 4 條 drift guard test。
+3. **新 user 教育成本 ≈ 0** — 既有 5 ~ 10 個 user 在 default product_line × default project 內的所有資料看起來與 Day 0 完全一樣；唯一差異是 sidebar 多一層 dropdown（預設選 default、可 hide）；對應 S-9.1 Persona 2「對 user 來說 1 day 前 vs 1 day 後使用感受 = 0 差異」設計斷言。
+4. **Phase D 不 block 任何下游** — Y4 ～ Y8 ～ Y10 任何 PR 落地不依賴 hardcoded fallback 已被移除；對應 S-9.3 設計斷言 4；理由：`'t-default'` / `'pl-default'` / `'p-default'` 字串在 dual-path code 中是 idempotent fallback、保留它們不會破壞新功能、只是「讓 dead code 殘留」hygiene 問題、可 deferred。
+5. **operator 動作 0** — 整個 Phase A → D migration 全部走 alembic migration / cron / feature flag 自動切換、operator 不需要：手動跑 SQL backfill / 手動編 seed row / 手動切 frontend flag / 手動關 dashboard banner；唯一的 operator 動作是「PR review + merge」+「24h 觀察 dashboard」+「rollback decision (if needed)」；對應 SOP「Production status: deployed-active」+「Next gate: deployed-observed」既有定義。
+
+### S-9.9 邊界 / 退化情境
+
+| 邊界場景 | 預期行為 | 驗收條件 |
+|---|---|---|
+| Phase A migration 失敗 alembic 回滾 | `alembic downgrade -1` 走 0030 → 0029、product_lines / projects seed row 自動刪除（idempotent migration downgrade）；既有 13 表的新欄位（product_line_id / project_id / branch）也回滾消失 | alembic 0030 必含 downgrade 函式、SQL 走 DROP TABLE / DROP COLUMN |
+| Phase B middleware 升級瞬間有 in-flight INSERT | 同 transaction commit 完才升級 contextvar、新 contextvar 0 ms 後新 INSERT 走 default；in-flight INSERT（middleware 升級前 t<0 進 transaction）走舊 path（schema DEFAULT 'pl-default' / 'p-default' fallback safety）；不丟 row | Layer 2 schema DEFAULT 是 last-mile safety net、保 race scenario 也 OK |
+| Phase B 期間 dashboard query 走 OR fallback 變慢 | partial index `WHERE product_line_id IS NOT NULL` 加速 NOT NULL 部分、NULL 部分透過小表 scan（既有 row 100 ~ 1000+ 可接受）；p95 latency < 200ms acceptable | Y8 dashboard 監控 p95、>200ms 走 rollback feature flag |
+| 第三方 importer (如 SIEM forensic 工具) 在 Phase C 後仍 query t-default | 既有 `tenants WHERE id='t-default'` query 仍 work（既有 row 不動）；SIEM 不一定理解 product_line_id 但 forensic 場景無需理解（只查 tenant_id 級 audit chain） | tenant_id 級查詢 100% backward compatible |
+| backfill cron 跑到一半 prod 重啟 | cron 走 idempotent UPDATE（WHERE product_line_id IS NULL 是「only update those still NULL」、跑兩次 = 跑一次效果）；重啟後下個 cycle 接續跑、不重複 update 已 backfill row | cron checkpoint 走 PG row count 不靠 in-memory state（合格答案 #2） |
+| ALTER NOT NULL 失敗（仍有 NULL row） | Phase C ALTER 走 transaction、若 NULL row > 0 → ALTER fail → rollback；PR reject、回 Phase B 補跑 backfill；不會出現「半 NOT NULL 半 NULL」中間態 | drift guard test`SELECT COUNT(*) WHERE product_line_id IS NULL` 在 Phase C PR pre-merge 跑一次、預期 0 |
+| 既有 alembic 0012 在 disaster recovery 重跑 | `INSERT OR IGNORE INTO tenants (id, name) VALUES ('t-default', ...)` 跑兩次 = 跑一次效果；alembic 0030 後續 ON CONFLICT DO NOTHING 也是 idempotent；disaster recovery 不會重建 phantom row | 既有 alembic 0012 既有 ON CONFLICT pattern + 0030 沿用 |
+| Phase D 移除 hardcoded fallback 後第三方 user fetch fail (frontend race) | `<Suspense fallback={<LoadingScreen />}>` 包 user fetch + 「user undefined → 不 render dashboard」配套；不會出現 `tenant_id=undefined` → API 401 連環錯 | Phase D 配套 Suspense wrapper 設計、預先 frontend 整合測試覆蓋 |
+| 新 tenant 邀請（Y3）但未 seed default 階層 | Y3 invite endpoint 同 transaction seed pl-default / p-default、不允許 partial state；若 transaction 失敗 → tenant 也不創建（atomic）；不會出現「tenant 存在但無 default」邊界 | Y3 PR review 必檢查 transaction 含 3 個 INSERT（tenants + product_lines + projects） |
+| 既有 user 試圖 archive `pl-default` 或 `p-default` | 422 reject + 引導「請建立其他 product_line / project 後再 reassign t-default 內容、不可刪 fallback bucket」；對應 S-9.4 既有設計（is_system=TRUE / is_internal=TRUE 雙旗標） | Y4 endpoint `DELETE /product_lines/{id}` / `DELETE /projects/{id}` 必檢查 is_system flag、422 reject |
+| user.last_active_product_line_id 指向已刪除 product_line（user 在 Y3 跨 tenant 切換留下 stale FK）| middleware 走 fallback chain：user.last_active_product_line_id → tenant.default product_line（'pl-default'）→ 仍有效；不會 crash | S-2.3 既有 middleware fallback chain 設計 + S-9.6 三層 fallback |
+| 既有 audit_log row 100 ～ 1000+ 重算 chain hash？| 不重算（S-9.2 設計斷言 3）；新欄位（product_line_id / project_id / branch）不入 chain hash 計算；既有 hash 永遠維持 + SIEM forensic 工具可繼續使用 | chain hash 算法 base column subset 不變、新 column 是 schema-side 與 hash invariant 解耦 |
+| 既有 frontend `lib/storage.ts:16` localStorage prefix 是否升級加 product_line_id？| Phase A ～ C 不升級 localStorage prefix（保 backward compat、避免 user 升級 frontend 後既有 chat draft 看不見）；Phase D 升級時走遷移 helper（讀舊 prefix → 寫新 prefix → 刪舊）| Phase D 配套 localStorage migration helper、user 不感知 |
+| 跨 product_line 搬遷 t-default 既有資料（如 admin 想把 firmware-doorbell 移出 default）| 走 S-5 既有「project 跨 line 搬遷」endpoint（已有 30d counter 雙寫設計、S-4.8 既有 row）；不需 S-9 新增路徑 | S-5 既有 endpoint 不重設計 |
+
+### S-9.10 Open Questions（標記給 Y4 / Y10 後續勾選）
+
+1. **「既有 t-default 內 5 ~ 10 個 user 是否該 prompt 自願升級到非 default product_line？」** — 目前傾向「不 prompt、保 default forever、operator 想分時主動建新 product_line + 邀 user 加入」（最小驚訝原則對 prod user）；但部分 user 可能想用 product_line 切片自己的 personal project vs work project，留 Y10 「user-level product_line preference」endpoint 落地。
+2. **「Phase D 移除 hardcoded fallback 的時機是 Y10 還是 Y4 後 1 release？」** — 目前傾向 Y10（hygiene 集中做、不 block 中間勾選）；但 Y4 reviewer 落地時可能想「順手清掉」、若 prod 已穩定運行 Phase C 1 個月、Phase D 可提前；具體決議留 Y4 後 retro 評估。
+3. **「pl-default / p-default 字串 PK 是否該支援 UUID 升級路徑？」** — 目前傾向「不支援、字串 PK 永久」（與 t-default 字串 PK 對齊）；但 Y6 落地時若客戶要求「UUID 看起來更專業」、留 Y10 hygiene 升級路徑（migration script 改字串 PK 為 UUID + dual-key 過渡 6 month）；具體決議留 Y10。
+4. **「跨 tenant `pl-default` PK collision 邊界是否該 namespace 化？」** — 目前 PK = (id='pl-default', tenant_id) composite、不 collision；但 Y3 跨 tenant 顯示時 frontend 看到「acme/pl-default」+「cobalt/pl-default」兩個都叫「Default Product Line」可能誤導；留 Y8 frontend 落地時加 tenant breadcrumb 區分（不需改 schema PK 結構）。
+5. **「t-default 的 owner 識別」** — 目前 t-default tenant 沒有「真實 owner user_id」（既有 `users.role='owner'` 是 t-default 內 admin、不是 tenant owner persona）；Y1 schema 落地（S-1.6 + S-2.6）的 user_tenant_memberships 表落地時、必同時為 t-default 補一個「primary owner」（從既有 `users WHERE role='owner' AND tenant_id='t-default'` 取最早建立的一個）；留 Y1 落地時補 seed 細節。
+
+### S-9.11 既有實作對照表 — t-default 引用點完整盤點
+
+S-9 設計與 codebase 既有 t-default 引用點對齊狀況（截至 2026-04-25 alembic head 0029）：
+
+| t-default 引用點 | 檔案 / 行 | 類型 | S-9 動作 |
+|---|---|---|---|
+| Tenant id 字串常數 | `backend/alembic/versions/0012_tenants_multi_tenancy.py:20,50-51` | alembic seed | 不動（immutable 歷史） |
+| Tenant id default value（13 張表）| `backend/alembic/versions/0013_tenant_secrets.py:31,57,60` / `0021_chat_messages.py:29,81` / `0022_user_drafts.py:28,74,95` / `0026_chat_sessions.py:11,55,77` / `0027_git_accounts.py:61,119` / `0029_llm_credentials.py:97,152` | alembic ALTER TABLE | 不動（immutable 歷史） |
+| `_SCHEMA` literal `DEFAULT 't-default'` | `backend/db.py:440,518,550,565,578,609,658,824,834,905,923,944,961,1009`（13 處）| dev SQLite bootstrap schema | 不動（dev path、與 alembic 對齊）|
+| Bootstrap migration table list | `backend/db.py:187-196,240-241,245-256` | TABLES_NEEDING_TENANT_ID 陣列 | 不動（既有 list、Y1 加新欄位 list 不重用此） |
+| Runtime fallback `tenant_insert_value()` | `backend/db_context.py:90` | runtime contextvar fallback | Phase B 升級 + Phase D 移除 fallback、改 throw |
+| Frontend hardcoded fallback | `lib/tenant-context.tsx:34` `user.tenant_id || "t-default"` | React fallback | Phase D 移除（配 Suspense wrapper） |
+| Frontend localStorage prefix | `lib/storage.ts:16` `tid || "t-default"` | localStorage key | Phase D 移除（配 migration helper）|
+| Migration script seed | `scripts/migrate_sqlite_to_pg.py:223,339,425,653,788,798,958` | SQLite → PG migrator | 不動（既有 SQLite → PG migration 仍用 t-default seed）|
+| Tests | `backend/tests/test_bootstrap_*.py`（多處）/ `test/integration/tenant-aware.test.ts` | test fixtures | Phase D hygiene 改用 helper `LEGACY_DEFAULT_TENANT` 常數 |
+| 既有 13 張表的 row count（截至 2026-04-25）| tenants × 1 / users × 5 ~ 10 / workflow_runs × 0 ~ 100+ / artifacts × 0 ~ 50 / audit_log × 100 ~ 1000+ / event_log × 100 ~ 10k+ / 其餘 7 張表各 0 ~ 100 | prod row data | 100% 走 Phase B / C backfill 入 'pl-default' / 'p-default' |
+
+**S-9.11 對 Y1 / Y4 / Y8 / Y10 的關鍵 deliverable**：
+1. **Y1 schema** — 新增 `alembic/versions/0030_y1_hierarchy_seed.py`：建 product_lines / projects 兩張新表（schema 在 S-4.6 + S-5.6 已規格化）+ 13 既有表加 product_line_id / project_id / branch 三欄（NULL allowed、Y4 後 1 release 加 NOT NULL）+ 既有 t-default tenant 自動 seed pl-default / p-default 兩 row（idempotent ON CONFLICT DO NOTHING）+ Y3 邀請新 tenant 路徑同 transaction seed default 階層；Phase A migration 落地 ≤ 30 min、prod 0 行為改變。
+2. **Y2 middleware 升級** — `_tenant_header_gate` 升級為「product_line / project header gate」（含 X-Product-Line-Id / X-Project-Id 兩 header + user.last_active_* fallback + RBAC 檢查升二維 → 三維）；對應 S-2.3 + S-9.6 既有 middleware 升級偽碼。
+3. **Y4 endpoint set** — 新增 `GET /tenants/{id}/product_lines` / `GET /tenants/{id}/product_lines/{id}/projects` 兩級列表 + `POST /product_lines` / `POST /projects` 創建（is_system / is_internal 標記預設）+ 422 拒刪 default 階層；middleware 升級對應 X-Product-Line-Id / X-Project-Id header 寫入 contextvar；對應 S-9.5 既有 dual-write 期 read / write 路徑表。
+4. **Y4 backfill cron** — `backend/cron/backfill_legacy_t_default_rows.py`：每 5 min 跑一次、每次 1000 row、跑 13 張表的 product_line_id / project_id NULL → default 字串補；checkpoint 走 PG row count 不靠 in-memory state（合格答案 #2）；對應 S-9.3 Phase C 既有設計。
+5. **Y4 drift guard test** — `tests/test_y_phase_a_schema_drift.py` / `test_y_phase_b_dual_write_visibility.py` / `test_y_phase_c_backfill_completeness.py` / `test_y_phase_d_hardcode_grep.py` 共 4 條；對應 S-9.3 既有設計 + SOP Step 4「靜態列表 vs 實際資料源」對齊原則。
+6. **Y8 frontend** — `lib/tenant-context.tsx` 升級加 `useProductLine() / useProject()` 兩 hook + sidebar 加 product_line picker（subordinate to tenant）+ project picker（subordinate to product_line）共三層 picker；feature flag `NEXT_PUBLIC_HIERARCHY_BREAKDOWN_ENABLED` 控制 dashboard 跨 line breakdown panel 顯隱；amber banner「Migration in progress: {pct}% rows backfilled」+ green badge「Migration complete」配 7 day 自動 hide；對應 S-9.5 + S-9.8 既有設計。
+7. **Y10 hygiene** — 移除 `lib/tenant-context.tsx:34` / `lib/storage.ts:16` / `db_context.py:90` 三處 't-default' 硬碼 + tests fixtures 改用 LEGACY_DEFAULT_TENANT 常數；對應 S-9.3 Phase D + S-9.10 Open Q2「具體決議留 Y4 後 retro 評估」。
+8. **Y10 文件** — `docs/ops/y_migration_runbook.md`（含 4 phase 詳細步驟 + rollback 路徑 + drift guard test pass criteria + operator 觀察 dashboard 步驟）+ `docs/priority-y/migration-readiness-checklist.md`（每個 Y row 落地前的 sanity check 5 個問題、對應 SOP「給 AI 助手 / 未來自己的提醒」）；對應 S-9.3 + S-9.8 既有設計。
 
 ---
 
 ## 共用區段
 
-> **Stub — 待 S-2 ～ S-9 完成後彙整**（TODO 末段「ER diagram、權限矩陣、migration 策略」要求）。
-> 本段只在 9 個情境章節都成型後落筆，避免在情境未盡時提早收斂出錯誤抽象。
+> **Stub — 9 章節（S-1 ～ S-9）全部成型於 2026-04-25**；本段彙整工作（ER diagram mermaid 落筆 + 權限矩陣彙整 + migration 步驟收尾）作為「下一輪 row」獨立工作項目（預估 0.5 ～ 1 day，不在 Y0 9 個勾選範圍內）。
+> 本段只在 9 個情境章節都成型後落筆、且 reviewer 對齊「以 9 章節為單一事實來源做彙整」共識；避免在 S-9 同 PR 內順手收尾造成本 row scope 失控。
 
 ### ER Diagram（占位）
 
@@ -2816,3 +3158,4 @@ S-1.3 / S-1.4 已給出 secret + project 部分。完整矩陣（涵蓋 audit / 
 | 2026-04-25 | TODO 第 7 勾選（消失用戶回收） | S-7 章節展開（10 子節 + 5-persona 三條 offboarding 路徑視角矩陣（Carol 離職 / Bob admin actor / Alice owner-churn / Pat platform super-admin / Cher guest survivor × do/not-do）+ user 離職 graceful offboarding 5 步偽碼（handover-plan → disable transaction → ownership migration → quota release → 28d grace + 永久 audit-actor 保留）+ tenant 退訂 4-state lifecycle 狀態機（active → suspended → wind_down → terminated）含 4 stage 行為矩陣（quota / LLM / data / audit / guest 視角）+ Cobalt 退訂 60d + 90d 端到端時間軸 + project archive cascade 6 軸對照表（LLM cap / disk artifact / workflow_run / project_members / customer_account / 統計）+ audit retention 4 層模型（永久保留 / PII redactable / business payload / ephemeral cache）+ chain hash 不重算的 GDPR Art.17 redaction 框架 + quota 釋放 vs 凍結三場景 6-row 行為差異表（user 離職 / tenant suspended / wind_down / terminated / project archived / purged）+ schema 增量（既有 6 表加 18 欄 + 2 新表（ownership_migrations 10 欄 + redaction_requests 11 欄）+ 4 條 partial index + 2 條 CHECK）+ 三條 7 步 operator 時間軸（Carol 離職 / Cobalt 退訂 / V2 archive）+ 16 邊界 + 5 open questions + 14 行對照表（含既有 backend/auth.py:486-549 disable user 路徑 + backend/api_keys.py:48-151 revoke_key fn + backend/alembic/0019_session_revocations 7d retention + backend/audit.py:80-84 隱式永久保留的延伸路徑））；S-6 row 標完成（2026-04-25）；S-8 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 8 勾選（熱點撞牆） | S-8 章節展開（10 子節 + 6-persona 「資源燒手 vs 被餓死鄰居」雙端矩陣（Pam IPCam line owner culprit / Doris Doorbell line owner victim / Quinn V1 project owner victim / Cher cobalt guest cross-tenant 旁觀 / Pat platform 仲裁 / Bob acme tenant admin 仲裁 × do/not-do）+ 三類撞牆訊號 × fairness 對照表（host CPU/mem hotspot / tenant LLM token ceiling / per-request concurrent slot）+ DRF (Dominant Resource Fairness) 模型選擇 4 candidate 對比（hard cap / priority queue / strict isolation / DRF）+ 三層 cycle 偽碼（host / tenant / line 各自獨立 30s + 結果是 multiplier 累乘 + floor max 0.1 不餓死）+ throttle vs reject 兩類降級行為 7 場景 dispatch 表（402 quota exhausted vs 429 rate limit vs 503 provider unavailable vs 200 throttle）+ token meter SharedCounter 5-key 設計（tenant / line / project / user / share）+ check_and_reserve / commit_actual_tokens / release_reservation 三階段偽碼 + 5 min reservation TTL + estimation drift > 50% audit warning + sliding window 30d Redis ZADD/ZREMRANGEBYSCORE + schema 增量（既有 3 表加 11 欄 + 2 新表（drf_state 6 欄、emergency_burst_requests 12 欄）+ 1 條 partial unique index + audit_log 加 8 個 action enum 值不加欄位）+ IPCam line 撞牆 8 步 operator 時間軸（fuzzing batch → DRF cycle culprit detect → throttle → emergency burst 雙簽 → cap 升 → recover）+ 17 邊界 + 5 open questions + 17 行對照表（含既有 backend/tenant_aimd.py:42-228 完整 AIMD 控制律 + backend/host_metrics.py:805-845 get_culprit_tenant 1-outlier 規則 + backend/rate_limit.py:111-147 Lua-atomic token bucket + backend/shared_state.py:90-148 SharedCounter / SharedKV + backend/circuit_breaker.py:154-235 per-tenant-per-key 熔斷 + backend/agents/llm.py:117-246 ratelimit header parser + backend/adaptive_budget.py:1-148 host AIMD + MODE_MULTIPLIER + backend/budget_strategy.py:51-148 4 strategy 全局 + backend/llm_balance.py + backend/quota.py:99-127 PLAN_QUOTAS 4 plan 是 HTTP request 級不是 LLM token 級的釐清 + backend/routers/invoke.py:75-115 _invoke_slot 全 tenant 共池 FIFO 缺 per-tenant queue 缺口））；S-7 row 標完成（2026-04-25）；S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | 完整 S-2 章節（10 子節 + Bridge MSP × Acme/Blossom/Cobalt 5-persona 矩陣 + tenant switcher UX 4 步流程 + middleware 升級偽碼 + RBAC `resolve_role(user, tenant, project)` 二維解析 + audit cross-contamination 4 條 invariant + Y1 新增欄位（`is_super_admin` / `last_active_tenant_id` / `sessions.active_tenant_id` / `impersonation_*` / `is_primary` partial unique index）+ Maya 7 步 onboarding 時間軸 + 8 邊界場景 + 5 open questions + 16 行對照表盤點 Y2/Y3/Y8 缺口）；S-3 ～ S-9 仍留 skeleton；共用區段不動。 |
+| 2026-04-25 | TODO 第 9 勾選（遺留相容） | S-9 章節展開（11 子節 + 「3 類受影響資料」persona 矩陣（既有 t-default tenant / 既有 prod 5 ～ 10 user / 既有 backend code path 13 表 30 處 t-default 引用 × do/not-do）+ 13 既有 tenant_id 表的 backfill 對應表 + 4-phase migration 策略（Phase A schema 加表加欄位 NULL → Phase B middleware dual-write read-OR fallback → Phase C backfill cron + ALTER NOT NULL → Phase D 移除 hardcoded fallback）+ Default 階層 seed SQL 模式（pl-default + p-default 字串 PK + ON CONFLICT DO NOTHING + is_system/is_internal 雙旗標 + lifecycle_stage='production' / customer_account_id=NULL）+ 雙寫期 read/write 路徑對照表 + 三層 fallback 降級鏈（應用層 explicit → schema DEFAULT → read OR fallback）+ schema 增量 0 新表 0 新欄位（純 seed 2 row 重用 S-4.6 + S-5.6 既有 schema）+ Y1/Y4 兩階段切換 30 day 時間軸（含 Phase B → C 7d 觀察窗 + drift guard test pre-merge gate + operator 0 動作）+ 12 邊界（alembic downgrade / in-flight INSERT / OR fallback p95 / 第三方 SIEM 工具 / backfill cron 重啟 / ALTER NOT NULL fail / disaster recovery 重跑 / Phase D Suspense wrapper / Y3 新 tenant atomic seed / 422 拒刪 default / stale FK / chain hash 不重算 / localStorage prefix migration / S-5 跨 line 搬遷不重設計）+ 5 open questions（user 自願升級 / Phase D 時機 / UUID PK / 跨 tenant pl-default collision / t-default owner 識別）+ 既有實作對照表（盤點 alembic 0012 ～ 0029 寫死 't-default' 13 處 + db.py:440-1009 _SCHEMA literal 13 處 + db_context.py:90 runtime fallback + lib/tenant-context.tsx:34 frontend fallback + lib/storage.ts:16 localStorage prefix + scripts/migrate_sqlite_to_pg.py:223,339,425,653,788,798,958 migrator + tests fixtures + 13 表 row count 估算）；S-8 row 標完成（2026-04-25）；至此 S-1 ～ S-9 全 9 章節成型；共用區段（ER mermaid + 權限矩陣 + migration 收尾）改標「下一輪 row 彙整」狀態。 |
