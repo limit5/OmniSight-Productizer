@@ -316,12 +316,22 @@ export function SessionHeatmap({
       className={`border-t border-[var(--border)] ${className}`}
       data-testid="session-heatmap"
     >
-      <div className="px-4 py-2 flex items-center justify-between text-xs font-mono text-[var(--muted-foreground)]">
+      {/* 2026-04-25 UX fix: header was `flex items-center
+        * justify-between` with model-select (max-w 160 px) + 7d/30d
+        * tab group (≈70 px) on the right. On narrow orchestrator
+        * panels (typical 350-400 px wide) the right cluster pushed
+        * past the panel edge — operator-reported "7d/30d 超出版面".
+        * Switched to `flex flex-wrap gap-y-2` so on tight widths the
+        * controls drop to a second line under the SESSION HEATMAP
+        * label instead of clipping. `gap-x-3` between controls + ml-
+        * auto on the right group keeps right-alignment when there's
+        * enough room. */}
+      <div className="px-4 py-2 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs font-mono text-[var(--muted-foreground)]">
         <div className="flex items-center gap-2">
           <BarChart3 size={12} className="text-[var(--neural-blue)] shrink-0" />
           <span>SESSION HEATMAP</span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 ml-auto">
           {/* ZZ.C2 #305-2 checkbox 4 (2026-04-24): per-model filter.
               ``<select>`` is deliberately a native element rather than
               a styled popover — screen readers + keyboard-only

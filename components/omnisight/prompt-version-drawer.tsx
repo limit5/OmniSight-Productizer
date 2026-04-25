@@ -45,6 +45,7 @@
 // match the on-disk filenames the snapshot capture produces.
 
 import { useState, useEffect, useMemo, useCallback, useRef } from "react"
+import { createPortal } from "react-dom"
 import {
   X,
   History,
@@ -518,7 +519,22 @@ export function PromptVersionDrawer({
 
   if (!open) return null
 
-  return (
+  // 2026-04-25 UX fix: portal the drawer into document.body to escape
+  // the orchestrator panel's `.holo-glass` ancestor. `.holo-glass` sets
+  // both `backdrop-filter: blur(10px)` AND `clip-path: polygon(...)` —
+  // either one alone is enough to make the panel a *containing block
+  // for fixed descendants* (CSS spec). Without portal, the drawer's
+  // `fixed inset-0` was pinned to the orchestrator panel's bounding
+  // box (≈half the viewport), which is why the operator saw "排版壞
+  // 掉了，也沒辦法選擇跟復原" — backdrop and panel were clipped to
+  // the orchestrator area, controls were unreachable. Portaling to
+  // document.body ensures `fixed` is viewport-relative again.
+  // SSR safety: `typeof document` guard so Next.js server render
+  // doesn't crash; it returns null on the server (drawer is
+  // operator-interactive only, no SEO/initial-render need).
+  if (typeof document === "undefined") return null
+
+  const drawer = (
     <div
       role="dialog"
       aria-modal="true"
@@ -1015,6 +1031,8 @@ function DiffPanel({
       )}
     </div>
   )
+
+  return createPortal(drawer, document.body)
 }
 
 function DiffTableRow({
