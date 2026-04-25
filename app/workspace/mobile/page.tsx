@@ -118,6 +118,7 @@ import {
 
 import { PersistentWorkspaceProvider } from "@/components/omnisight/persistent-workspace-provider"
 import { WorkspaceShell } from "@/components/omnisight/workspace-shell"
+import { WorkspaceOnboardingTour } from "@/components/omnisight/workspace-onboarding-tour"
 import {
   WorkspaceChat,
   type WorkspaceChatAnnotation,
@@ -1195,6 +1196,7 @@ export default function MobileWorkspacePage() {
   return (
     <PersistentWorkspaceProvider type="mobile">
       <MobileWorkspacePageContents />
+      <WorkspaceOnboardingTour type="mobile" />
     </PersistentWorkspaceProvider>
   )
 }
