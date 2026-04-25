@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
-  Activity, AlertTriangle, DollarSign, Flame, Radio, Shield, Clock3, Cpu, Brain,
+  Activity, AlertTriangle, DollarSign, Flame, Radio, Shield, ShieldAlert, Clock3, Cpu, Brain,
   Layers, TimerReset, Gauge, Zap, TrendingUp,
 } from "lucide-react"
 import { getOpsSummary, forceTurboOverride, type OpsSummary } from "@/lib/api"
@@ -383,33 +383,114 @@ function DerateBadge({ entry }: {
  * point of view (audit row still written with before==after so the
  * trail of "someone pressed the button" survives).
  */
+// R21 (2026-04-25) — FORCE TURBO redesign.
+//
+// Operator-reported: the original 10-px text pill was visually cramped
+// (sat half-stuck on the left of the COORDINATOR section, easy to
+// miss when actively derated, easy to fat-finger). Worse, the
+// anti-misclick was a native ``window.confirm`` modal which is jarring
+// + easy to dismiss-then-misclick.
+//
+// New design:
+//   1. Full-width banner-style button so it sits cleanly at the bottom
+//      of the COORDINATOR section instead of awkwardly half-occupying
+//      the row.
+//   2. Three visual states with different drama levels:
+//        - dormant   (coordinator NOT derated): muted red outline, no
+//          animation; "FORCE TURBO" label + safety subtitle
+//        - actionable (coordinator derated):    soft red breathing
+//          pulse via ``.pulse-red`` so the operator's eye is drawn
+//          to the available remediation
+//        - armed      (clicked once, awaiting confirm): aggressive
+//          ``.force-turbo-armed`` heartbeat, ``.force-turbo-hazard-
+//          overlay`` industrial caution-tape stripes behind the
+//          content, big tabular-nums countdown digit on the right,
+//          label flips to "TAP AGAIN TO CONFIRM"
+//   3. Two-step arm/confirm REPLACES the native ``window.confirm``:
+//        - First click → arm + start 5-second auto-disarm timer
+//        - Second click within window → fire
+//        - ESC or 5-second timeout → disarm
+//      This keeps the warning IN-CONTEXT (subtitle stays visible the
+//      whole time) and the countdown gives the operator a natural
+//      "wait, did I really want to do this?" reconsider window.
+
+const ARM_WINDOW_S = 5
+
+type ForceTurboPhase = "dormant" | "armed" | "applying" | "done"
+
 function ForceTurboControl({
   entry, onApplied,
 }: {
   entry: NonNullable<OpsSummary["coordinator"]>
   onApplied: () => void
 }) {
-  const [busy, setBusy] = useState(false)
+  const [phase, setPhase] = useState<ForceTurboPhase>("dormant")
+  const [countdown, setCountdown] = useState(0)
   const [message, setMessage] = useState<{ tone: "ok" | "bad"; text: string } | null>(null)
+  const armedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const messageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const onClick = useCallback(async () => {
-    if (busy) return
-    const warnBody = entry.derated
-      ? `Coordinator is currently auto-derated${entry.derate_reason ? ` (${entry.derate_reason})` : ""}.`
-      : "Coordinator is NOT derated — forcing turbo now bypasses the safety net."
-    const ok = typeof window !== "undefined" && window.confirm(
-      `⚠ Force turbo override\n\n${warnBody}\n\n` +
-      "Forcing turbo lifts the H2 auto-derate and the DRF capacity " +
-      "derate. Under sustained high CPU / memory pressure this may " +
-      "cause the host to OOM and kill running sandboxes.\n\n" +
-      "An audit trail row will be written under " +
-      "`coordinator.force_turbo_override` with your operator identity.\n\n" +
-      "Proceed?",
-    )
-    if (!ok) {
-      return
+  const disarm = useCallback(() => {
+    if (armedTimerRef.current) {
+      clearInterval(armedTimerRef.current)
+      armedTimerRef.current = null
     }
-    setBusy(true)
+    setPhase("dormant")
+    setCountdown(0)
+  }, [])
+
+  // Tick the armed countdown once a second; auto-disarm at zero.
+  useEffect(() => {
+    if (phase !== "armed") return
+    armedTimerRef.current = setInterval(() => {
+      setCountdown((c) => {
+        if (c <= 1) {
+          if (armedTimerRef.current) {
+            clearInterval(armedTimerRef.current)
+            armedTimerRef.current = null
+          }
+          setPhase("dormant")
+          return 0
+        }
+        return c - 1
+      })
+    }, 1000)
+    return () => {
+      if (armedTimerRef.current) {
+        clearInterval(armedTimerRef.current)
+        armedTimerRef.current = null
+      }
+    }
+  }, [phase])
+
+  // ESC disarms while armed. Only listens during armed state so we
+  // don't fight other ESC handlers in the rest of the dashboard.
+  useEffect(() => {
+    if (phase !== "armed") return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault()
+        disarm()
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [phase, disarm])
+
+  // Auto-fade success/failure message after 6s so the row doesn't get
+  // stuck reading "Force turbo applied" 20 minutes later.
+  useEffect(() => {
+    if (!message) return
+    if (messageTimerRef.current) clearTimeout(messageTimerRef.current)
+    messageTimerRef.current = setTimeout(() => setMessage(null), 6000)
+    return () => {
+      if (messageTimerRef.current) clearTimeout(messageTimerRef.current)
+    }
+  }, [message])
+
+  const fire = useCallback(async () => {
+    setPhase("applying")
+    setCountdown(0)
     setMessage(null)
     try {
       const result = await forceTurboOverride({ confirm: true })
@@ -423,42 +504,169 @@ function ForceTurboControl({
       const text = exc instanceof Error ? exc.message : String(exc)
       setMessage({ tone: "bad", text: `Force turbo failed: ${text}` })
     } finally {
-      setBusy(false)
+      setPhase("dormant")
     }
-  }, [busy, entry.derated, entry.derate_reason, onApplied])
+  }, [onApplied])
+
+  const onClick = useCallback(() => {
+    if (phase === "applying") return
+    if (phase === "armed") {
+      // Second click — actually fire.
+      if (armedTimerRef.current) {
+        clearInterval(armedTimerRef.current)
+        armedTimerRef.current = null
+      }
+      void fire()
+      return
+    }
+    // First click — arm + start auto-disarm countdown.
+    setPhase("armed")
+    setCountdown(ARM_WINDOW_S)
+  }, [phase, fire])
+
+  const isArmed = phase === "armed"
+  const isApplying = phase === "applying"
+  const isActive = entry.derated
+  // Heading + subtitle vary by phase. Subtitle stays an explicit risk
+  // disclosure during arm so the warning lives WITH the button, not
+  // in a transient modal.
+  const heading = isApplying
+    ? "OVERRIDING…"
+    : isArmed
+      ? "TAP AGAIN TO CONFIRM"
+      : "FORCE TURBO OVERRIDE"
+  const subtitle = isApplying
+    ? "writing audit row & broadcasting override…"
+    : isArmed
+      ? `auto-cancel in ${countdown}s · press ESC to abort · second tap fires the override`
+      : isActive
+        ? `Coordinator auto-derated${entry.derate_reason ? ` (${entry.derate_reason})` : ""} — bypasses safety net, OOM risk under load`
+        : "bypass H2 auto-derate & DRF capacity-derate · OOM risk under sustained load"
+
+  // Visual treatment per phase. Borders + glows are stacked via the
+  // animation classes from globals.css.
+  const buttonClasses = [
+    "relative w-full overflow-hidden rounded-md border-2 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--critical-red,#ef4444)]",
+    isApplying
+      ? "border-[var(--neural-cyan,#67e8f9)] bg-[var(--neural-cyan,#67e8f9)]/10 cursor-wait"
+      : isArmed
+        ? "border-[var(--critical-red,#ef4444)] bg-gradient-to-r from-[var(--critical-red,#ef4444)]/35 via-[var(--critical-red,#ef4444)]/45 to-[var(--critical-red,#ef4444)]/35 force-turbo-armed"
+        : isActive
+          ? "border-[var(--critical-red,#ef4444)]/70 bg-[var(--critical-red,#ef4444)]/10 hover:border-[var(--critical-red,#ef4444)] hover:bg-[var(--critical-red,#ef4444)]/20 pulse-red"
+          : "border-[var(--critical-red,#ef4444)]/30 bg-[var(--critical-red,#ef4444)]/[0.04] hover:border-[var(--critical-red,#ef4444)]/60 hover:bg-[var(--critical-red,#ef4444)]/10",
+  ].join(" ")
 
   return (
-    <div className="mt-2 flex items-center gap-2 flex-wrap" data-testid="ops-force-turbo-row">
+    <div className="mt-3" data-testid="ops-force-turbo-row">
       <button
         type="button"
         onClick={onClick}
-        disabled={busy}
+        disabled={isApplying}
         data-testid="ops-force-turbo-btn"
-        aria-label="Force turbo override — bypasses auto-derate (may OOM)"
-        title="Force turbo override — bypasses auto-derate (may OOM). Confirm dialog + audit row required."
-        className={
-          "inline-flex items-center gap-1 px-2 py-0.5 rounded-sm font-mono text-[10px] uppercase tracking-[0.12em] border transition-colors " +
-          (busy
-            ? "text-[var(--muted-foreground,#94a3b8)] border-[var(--neural-border,rgba(148,163,184,0.35))] cursor-wait"
-            : "text-[var(--critical-red,#ef4444)] border-[var(--critical-red,#ef4444)]/40 bg-[color-mix(in_srgb,var(--critical-red,#ef4444)_12%,transparent)] hover:bg-[color-mix(in_srgb,var(--critical-red,#ef4444)_20%,transparent)]")
+        data-phase={phase}
+        aria-label={
+          isArmed
+            ? "Force turbo armed — tap again to confirm or press Escape to abort"
+            : "Force turbo override — bypasses auto-derate (may OOM)"
         }
+        aria-pressed={isArmed}
+        title={
+          isArmed
+            ? "Tap again to confirm — ESC to abort"
+            : "Force turbo override — bypasses auto-derate (may OOM). Two-tap confirm + audit row."
+        }
+        className={buttonClasses}
       >
-        <Zap size={10} aria-hidden />
-        <span>{busy ? "Applying…" : "Force turbo"}</span>
+        {/* Industrial caution-tape hazard stripes during armed state. */}
+        {isArmed && (
+          <div
+            aria-hidden
+            className="absolute inset-0 pointer-events-none force-turbo-hazard-overlay opacity-60"
+          />
+        )}
+
+        <div className="relative flex items-center gap-3 px-3 py-2.5">
+          <Zap
+            size={isArmed ? 20 : 16}
+            aria-hidden
+            className={
+              isApplying
+                ? "text-[var(--neural-cyan,#67e8f9)] animate-pulse shrink-0"
+                : isArmed
+                  ? "text-[var(--critical-red,#ef4444)] animate-pulse shrink-0 drop-shadow-[0_0_6px_rgba(239,68,68,0.85)]"
+                  : isActive
+                    ? "text-[var(--critical-red,#ef4444)] shrink-0"
+                    : "text-[var(--critical-red,#ef4444)]/70 shrink-0"
+            }
+          />
+          <div className="flex-1 min-w-0 text-left">
+            <div
+              className={
+                "font-mono font-bold tracking-[0.18em] " +
+                (isArmed
+                  ? "text-[12px] text-[var(--critical-red,#ef4444)]"
+                  : isApplying
+                    ? "text-[11px] text-[var(--neural-cyan,#67e8f9)]"
+                    : "text-[11px] text-[var(--critical-red,#ef4444)]")
+              }
+            >
+              {heading}
+            </div>
+            <div
+              className={
+                "font-mono text-[9.5px] tracking-wide leading-tight mt-0.5 " +
+                (isArmed
+                  ? "text-[var(--foreground,#e2e8f0)]"
+                  : "text-[var(--muted-foreground,#94a3b8)]")
+              }
+            >
+              {subtitle}
+            </div>
+          </div>
+
+          {/* Right-side affordance: countdown digit when armed,
+              status icon otherwise. Tabular-nums so the digit doesn't
+              wobble between 5/4/3/2/1. */}
+          {isArmed ? (
+            <div
+              data-testid="ops-force-turbo-countdown"
+              className="font-mono text-[26px] leading-none font-bold tabular-nums text-[var(--critical-red,#ef4444)] drop-shadow-[0_0_8px_rgba(239,68,68,0.7)] shrink-0 w-7 text-center"
+              aria-live="polite"
+            >
+              {countdown}
+            </div>
+          ) : isApplying ? (
+            <div className="w-3 h-3 rounded-full bg-[var(--neural-cyan,#67e8f9)] animate-ping shrink-0" aria-hidden />
+          ) : (
+            <ShieldAlert
+              size={14}
+              aria-hidden
+              className={
+                isActive
+                  ? "text-[var(--critical-red,#ef4444)]/80 shrink-0"
+                  : "text-[var(--critical-red,#ef4444)]/40 shrink-0"
+              }
+            />
+          )}
+        </div>
       </button>
+
+      {/* Status message — fades out after 6s so the row doesn't keep
+          reading "applied" forever. */}
       {message && (
-        <span
+        <div
           data-testid="ops-force-turbo-msg"
+          role="status"
           className={
-            "font-mono text-[10px] truncate max-w-[18rem] " +
+            "mt-1.5 px-2 py-1 rounded-sm font-mono text-[10px] border " +
             (message.tone === "ok"
-              ? "text-[var(--validation-emerald,#10b981)]"
-              : "text-[var(--critical-red,#ef4444)]")
+              ? "text-[var(--validation-emerald,#10b981)] border-[var(--validation-emerald,#10b981)]/30 bg-[var(--validation-emerald,#10b981)]/[0.06]"
+              : "text-[var(--critical-red,#ef4444)] border-[var(--critical-red,#ef4444)]/30 bg-[var(--critical-red,#ef4444)]/[0.06]")
           }
           title={message.text}
         >
           {message.text}
-        </span>
+        </div>
       )}
     </div>
   )

@@ -316,6 +316,54 @@ html {
   animation: breathing-pulse-red 2s ease-in-out infinite;
 }
 
+/* R21 (2026-04-25) — FORCE TURBO armed-state animations.
+ * `force-turbo-armed-pulse` is the aggressive heartbeat used when the
+ * button is one click away from firing — faster + stronger than
+ * `pulse-red` so it visually screams "you've armed something dangerous,
+ * commit or back out". `force-turbo-hazard-stripes` is the moving
+ * yellow/black diagonal stripe overlay (industrial caution-tape look)
+ * that sits BEHIND the button content during the armed window. Both
+ * stop firing the moment the button transitions back to idle / busy /
+ * done, so they don't burn CPU on a panel the operator isn't looking
+ * at. */
+@keyframes force-turbo-armed-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 8px rgba(239, 68, 68, 0.55),
+      0 0 24px rgba(239, 68, 68, 0.35),
+      inset 0 0 14px rgba(239, 68, 68, 0.18);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow:
+      0 0 22px rgba(239, 68, 68, 0.85),
+      0 0 56px rgba(239, 68, 68, 0.55),
+      inset 0 0 28px rgba(239, 68, 68, 0.35);
+    transform: scale(1.012);
+  }
+}
+
+.force-turbo-armed {
+  animation: force-turbo-armed-pulse 0.85s ease-in-out infinite;
+}
+
+@keyframes force-turbo-hazard-stripes {
+  0%   { background-position: 0   0; }
+  100% { background-position: 32px 0; }
+}
+
+.force-turbo-hazard-overlay {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(251, 191, 36, 0.18) 0px,
+    rgba(251, 191, 36, 0.18) 8px,
+    transparent 8px,
+    transparent 16px
+  );
+  background-size: 32px 32px;
+  animation: force-turbo-hazard-stripes 1.2s linear infinite;
+}
+
 /* R2 (#308) — FUI scan-line overlay for cognitively-deadlocked agents.
  * Rides on top of the existing pulse-red so the card still breathes,
  * but adds a horizontal sweep to make it obvious the agent is stuck. */
