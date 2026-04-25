@@ -255,6 +255,28 @@ async def lifespan(app: FastAPI):
                 _log.info("prompt_registry bootstrap: registered %d", len(reg))
         except Exception as exc:
             _log.debug("prompt_registry bootstrap failed (non-fatal): %s", exc)
+        # H4a row 2582: prime the AIMD budget controller from the
+        # last-known-good DB row so a restart keeps the previous
+        # process's calibration instead of dropping to the static
+        # INIT_BUDGET=6. Best-effort — failure silently keeps the
+        # cold-start default. PG-gated like the other pool-backed
+        # startup hooks (SQLite dev mode has no pool).
+        if _pg_dsn:
+            try:
+                from backend import adaptive_budget as _ab
+                loaded = await _ab.prime_from_db()
+                if loaded is not None:
+                    _log.info(
+                        "[adaptive_budget] primed from DB, budget=%d "
+                        "(replaces INIT_BUDGET=%d)",
+                        loaded, _ab.INIT_BUDGET,
+                    )
+            except Exception as exc:
+                _log.debug(
+                    "[adaptive_budget] prime_from_db failed "
+                    "(non-fatal): %s",
+                    exc,
+                )
     except Exception as exc:
         _log.error("Startup failed: %s", exc, exc_info=True)
         raise

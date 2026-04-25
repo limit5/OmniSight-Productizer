@@ -1028,6 +1028,20 @@ CREATE INDEX IF NOT EXISTS idx_llm_credentials_last_used
 CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_credentials_default_per_provider
     ON llm_credentials(tenant_id, provider)
     WHERE is_default = 1;
+
+-- H4a row 2582: last-known-good AIMD budget for cold-start carry-over.
+-- Singleton row keyed by id='global'; upserted on every budget-
+-- changing tick so a ``uvicorn`` restart can re-seed the AIMD
+-- controller with the previous run's calibration instead of the
+-- static ``OMNISIGHT_AIMD_INIT_BUDGET=6`` default. See alembic 0030
+-- for the PG mirror and backend/adaptive_budget.py for the load/save
+-- hooks.
+CREATE TABLE IF NOT EXISTS adaptive_budget_state (
+    id           TEXT PRIMARY KEY,
+    budget       INTEGER NOT NULL,
+    last_reason  TEXT NOT NULL DEFAULT 'init',
+    updated_at   REAL NOT NULL
+);
 """
 
 
@@ -1110,6 +1124,72 @@ async def replace_decision_rules(conn, rules: list[dict]) -> None:
                 (r.get("note") or "")[:240],
                 tid,
             )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Adaptive-budget state (H4a row 2582)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+#: Fixed primary-key value for the host-level AIMD budget row — the
+#: table is semantically a singleton (budget is per-host, not
+#: per-tenant). Centralised here so the loader and saver can't
+#: disagree on spelling.
+ADAPTIVE_BUDGET_SINGLETON_ID = "global"
+
+
+async def load_adaptive_budget_state(conn) -> dict | None:
+    """Return the last-persisted AIMD budget row or None if unset.
+
+    Called once at lifespan startup (see
+    :func:`backend.adaptive_budget.load_last_known_good`) to seed the
+    controller with whatever the previous ``uvicorn`` process
+    converged on — replaces the static ``OMNISIGHT_AIMD_INIT_BUDGET=6``
+    default on warm restarts. Row shape:
+    ``{budget: int, last_reason: str, updated_at: float}``.
+    """
+    row = await conn.fetchrow(
+        "SELECT budget, last_reason, updated_at "
+        "FROM adaptive_budget_state WHERE id = $1",
+        ADAPTIVE_BUDGET_SINGLETON_ID,
+    )
+    if row is None:
+        return None
+    return {
+        "budget": int(row["budget"]),
+        "last_reason": row["last_reason"] or "init",
+        "updated_at": float(row["updated_at"]),
+    }
+
+
+async def save_adaptive_budget_state(
+    conn,
+    *,
+    budget: int,
+    last_reason: str,
+    updated_at: float,
+) -> None:
+    """Upsert the singleton ``adaptive_budget_state`` row.
+
+    Multi-worker races write "last writer wins" semantics which is
+    benign — every worker observes the same host CPU / mem, so the
+    candidate budgets differ by at most one AIMD step. The caller
+    should only invoke this on a state-changing tick (AI / MD);
+    HOLD / CAP / FLOOR leave the budget unchanged and would be noise.
+    """
+    await conn.execute(
+        """
+        INSERT INTO adaptive_budget_state (id, budget, last_reason, updated_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (id) DO UPDATE SET
+            budget      = EXCLUDED.budget,
+            last_reason = EXCLUDED.last_reason,
+            updated_at  = EXCLUDED.updated_at
+        """,
+        ADAPTIVE_BUDGET_SINGLETON_ID,
+        int(budget),
+        str(last_reason),
+        float(updated_at),
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

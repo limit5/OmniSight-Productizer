@@ -169,11 +169,12 @@ async def test_migrator_does_not_list_non_existent_tables(
 def test_identity_subset_only_contains_integer_pk_tables():
     """Introspect the alembic/CREATE-TABLE comment hint rather than
     hitting the DB — this is a pure contract assertion. Locking:
-    bootstrap_state (TEXT PK ``step``) and user_mfa (TEXT PK
-    app-generated) must NEVER be in TABLES_WITH_IDENTITY_ID, because
+    bootstrap_state (TEXT PK ``step``), user_mfa (TEXT PK
+    app-generated), and adaptive_budget_state (TEXT PK singleton
+    ``'global'``) must NEVER be in TABLES_WITH_IDENTITY_ID, because
     the sequence-reset logic assumes INTEGER PK and would crash on
     a TEXT id."""
-    non_integer_pks = {"bootstrap_state", "user_mfa"}
+    non_integer_pks = {"bootstrap_state", "user_mfa", "adaptive_budget_state"}
     for t in non_integer_pks:
         assert t in mig.TABLES_IN_ORDER, (
             f"sanity: {t} should be covered by migrator"

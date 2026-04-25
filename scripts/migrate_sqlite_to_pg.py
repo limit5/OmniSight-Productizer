@@ -190,6 +190,12 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # (same convention as tenant_secrets / git_accounts); NOT in
     # TABLES_WITH_IDENTITY_ID. Empty until rows 5b-2 / 5b-5 land.
     "llm_credentials",
+    # H4a row 2582 (alembic 0030): singleton last-known-good AIMD
+    # budget for cold-start carry-over. PK is the fixed TEXT id
+    # ``'global'`` (NOT an INTEGER IDENTITY); one row max — no FK.
+    # Placed last because it has no dependencies and carrying its
+    # row is non-load-bearing (missing row falls back to INIT_BUDGET).
+    "adaptive_budget_state",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY

@@ -228,6 +228,12 @@ class _State:
     pressure_first_seen: float | None = None
     last_reason: AdjustReason = AdjustReason.INIT
     trace: deque[BudgetTraceEntry] = field(default_factory=deque)
+    #: Set True whenever ``tick()`` actually mutates ``budget`` (AI with
+    #: room / MD that shrinks). Cleared by
+    #: :func:`persist_current_budget_if_dirty` after a successful write.
+    #: HOLD / CAP / no-op FLOOR leave this False — we only hit the DB on
+    #: real state changes. H4a row 2582.
+    dirty: bool = False
 
 
 _lock = threading.Lock()
@@ -287,6 +293,11 @@ def reset(initial_budget: int | None = None, *, now: float | None = None) -> Non
         _state.pressure_first_seen = None
         _state.last_reason = AdjustReason.INIT
         _state.trace.clear()
+        # Reset never triggers a DB write — either we just loaded from
+        # DB (dirty would overwrite a fresh read with the same value)
+        # or we are in a test / cold-start default (no persistence
+        # desired for a transient seed). H4a row 2582.
+        _state.dirty = False
         _append_trace_locked(t, AdjustReason.INIT, 0.0, 0.0)
 
 
@@ -337,6 +348,7 @@ def tick(
                 halved = max(FLOOR_BUDGET, _state.budget // 2)
                 if halved < old:
                     _state.budget = halved
+                    _state.dirty = True  # persist the new last-known-good
                     reason = AdjustReason.MD
                 else:
                     reason = AdjustReason.FLOOR
@@ -364,6 +376,7 @@ def tick(
                 _append_trace_locked(t, AdjustReason.CAP, cpu_percent, mem_percent)
                 return AdjustReason.CAP
             _state.budget = min(CAPACITY_MAX, _state.budget + 1)
+            _state.dirty = True  # persist the new last-known-good
             _state.last_reason = AdjustReason.AI
             _append_trace_locked(t, AdjustReason.AI, cpu_percent, mem_percent)
             return AdjustReason.AI
@@ -450,6 +463,122 @@ def evaluate_from_host_snapshot(snap=None, *, now: float | None = None) -> Adjus
         deferred_count=deferred,
         now=now,
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Last-known-good persistence (TODO H4a row 2582)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def load_last_known_good() -> int | None:
+    """Return the last-persisted budget, or None if unavailable.
+
+    Best-effort read from the ``adaptive_budget_state`` singleton row
+    (see alembic 0030 + :func:`backend.db.load_adaptive_budget_state`).
+    Swallows any DB error (pool not up, table empty on first boot,
+    SQLite dev mode with no pool) and returns None — the caller
+    falls back to the static ``INIT_BUDGET`` default.
+    """
+    try:
+        from backend.db_pool import get_pool
+        from backend import db
+        async with get_pool().acquire() as conn:
+            row = await db.load_adaptive_budget_state(conn)
+    except Exception as exc:
+        logger.debug("adaptive_budget: load_last_known_good failed: %s", exc)
+        return None
+    if row is None:
+        return None
+    # Always re-clamp through the live envelope — the row may be
+    # from a different-sized host (operator moved the database) or
+    # from before the operator tightened ``CAPACITY_MAX``. Out-of-
+    # envelope seeds are clamped, never rejected.
+    return _clamp(int(row["budget"]))
+
+
+async def prime_from_db() -> int | None:
+    """Bootstrap the controller from the persisted last-known-good.
+
+    Called once at lifespan startup (see ``backend/main.py`` after
+    ``db_pool.init_pool`` opens the pool). On success, returns the
+    loaded budget (which has also been applied via :func:`reset`);
+    on any failure returns None and leaves the existing cold-start
+    default in place.
+
+    Idempotent: safe to call twice. The second call either reloads
+    the same row or hits the same DB error and returns None. Tests
+    call :func:`_reset_for_tests` to reset between cases.
+    """
+    loaded = await load_last_known_good()
+    if loaded is None:
+        return None
+    reset(initial_budget=loaded)
+    logger.info(
+        "adaptive_budget: primed from DB — last-known-good budget=%d "
+        "(replaces INIT_BUDGET=%d)",
+        loaded,
+        INIT_BUDGET,
+    )
+    return loaded
+
+
+async def persist_current_budget_if_dirty() -> bool:
+    """Best-effort upsert of the current budget if it changed since
+    the last persist.
+
+    Returns True on a successful write, False if nothing was dirty
+    or the DB write failed (both outcomes are non-fatal — the in-
+    memory budget is the source of truth for the live system, the
+    DB row is only load-bearing at cold start).
+
+    Called from the host sampling loop after each
+    :func:`evaluate_from_host_snapshot` so that AI / MD transitions
+    carry over a restart. HOLD / CAP / no-op FLOOR leave the dirty
+    flag untouched so we do not hit the DB every 5 s on an idle host.
+    """
+    # Read + clear the dirty flag under the lock so we never miss or
+    # double-write a concurrent ``tick()``. If the DB write fails we
+    # leave the flag cleared — the next AI / MD will re-arm it, and
+    # writing a stale "still 7" on top of a subsequent "still 7" is
+    # a no-op anyway.
+    with _lock:
+        if not _state.dirty:
+            return False
+        snapshot_budget = _state.budget
+        snapshot_reason = _state.last_reason.value
+        _state.dirty = False
+
+    try:
+        from backend.db_pool import get_pool
+        from backend import db
+        async with get_pool().acquire() as conn:
+            await db.save_adaptive_budget_state(
+                conn,
+                budget=snapshot_budget,
+                last_reason=snapshot_reason,
+                updated_at=_now(),
+            )
+    except Exception as exc:
+        logger.debug(
+            "adaptive_budget: persist_current_budget_if_dirty failed: %s",
+            exc,
+        )
+        return False
+    return True
+
+
+async def evaluate_and_persist_from_host_snapshot(
+    snap=None, *, now: float | None = None,
+) -> AdjustReason:
+    """Wire helper: run one control cycle, then persist if it changed.
+
+    Mirrors :func:`evaluate_from_host_snapshot` but adds the
+    best-effort DB write. Intended for the production host sampling
+    loop; tests keep the cheaper sync ``evaluate_from_host_snapshot``
+    + ``tick`` for deterministic timing.
+    """
+    reason = evaluate_from_host_snapshot(snap=snap, now=now)
+    await persist_current_budget_if_dirty()
+    return reason
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
