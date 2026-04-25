@@ -660,6 +660,29 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_provider, oidc_subject);
 
+-- Y1 row 1 (#277): N-to-M users <-> tenants. ``users.tenant_id`` is
+-- demoted to a "primary / most-recent tenant" cache; this table is
+-- the authoritative source of "which tenants can this user act in".
+-- Mirrors alembic 0032_user_tenant_memberships.py — keep in sync.
+CREATE TABLE IF NOT EXISTS user_tenant_memberships (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL DEFAULT 'member',
+    status          TEXT NOT NULL DEFAULT 'active',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    last_active_at  TEXT,
+    PRIMARY KEY (user_id, tenant_id),
+    CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
+    CHECK (status IN ('active', 'suspended'))
+);
+CREATE INDEX IF NOT EXISTS idx_user_tenant_memberships_user
+    ON user_tenant_memberships(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_tenant_memberships_tenant
+    ON user_tenant_memberships(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_user_tenant_memberships_active
+    ON user_tenant_memberships(tenant_id, user_id)
+    WHERE status = 'active';
+
 CREATE TABLE IF NOT EXISTS sessions (
     token           TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL,

@@ -145,6 +145,12 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "iq_runs",
     # Phase 55 users/sessions/GitHub app.
     "users",
+    # Y1 row 1 (#277, alembic 0032): N-to-M users <-> tenants. FKs
+    # ``user_id → users.id`` and ``tenant_id → tenants.id`` (both
+    # ON DELETE CASCADE) so it MUST replay after both parents. PK is
+    # composite ``(user_id, tenant_id)`` — both TEXT — so NOT in
+    # TABLES_WITH_IDENTITY_ID.
+    "user_tenant_memberships",
     # MFA tables — all have FK ``user_id → users.id`` so they MUST
     # come after users in the replay order.
     "user_mfa",
