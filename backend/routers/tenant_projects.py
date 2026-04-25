@@ -1,4 +1,5 @@
-"""Y4 (#280) row 1 + row 2 + row 3 + row 4 — tenant-scoped project REST surface.
+"""Y4 (#280) row 1 + row 2 + row 3 + row 4 + row 5 — tenant-scoped project
+REST surface.
 
 Row 1 — POST /api/v1/tenants/{tid}/projects: create a project under a
 tenant.  Row 2 — GET /api/v1/tenants/{tid}/projects: list projects in
@@ -15,6 +16,14 @@ days, default 90); restore lifts the archive within the retention
 window.  After the retention window the background GC helper
 ``gc_archived_projects`` permanently removes the row and emits a
 billing audit event so accounting can reconcile the freed quota.
+Row 5 — POST /api/v1/tenants/{tid}/projects/{pid}/members + PATCH
+/.../members/{user_id} + DELETE /.../members/{user_id}: project-level
+membership grants overlaying the tenant default. Roles are the
+``project_members`` enum (``owner / contributor / viewer``); see
+``alembic/versions/0034_project_members.py`` for the table schema and
+the default-resolution semantics (admin/owner tenant membership →
+contributor on every project of the tenant; member/viewer → no
+project access without an explicit row).
 
 A project is the unit at which budgets / quotas / sharing get bound
 (Y1 row 2 schema lives in ``alembic/versions/0033_projects.py``); a
@@ -1904,5 +1913,846 @@ async def gc_archived_projects(
             "retention (cutoff=%s)",
             len(removed), retention_days, cutoff,
         )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y4 (#280) row 5 — project-level membership management
+#                   POST   /api/v1/tenants/{tid}/projects/{pid}/members
+#                   PATCH  /api/v1/tenants/{tid}/projects/{pid}/members/{uid}
+#                   DELETE /api/v1/tenants/{tid}/projects/{pid}/members/{uid}
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Explicit per-(user, project) role binding overlaying the tenant
+# default-resolution semantics from alembic 0034. The TODO row literal
+# enumerates exactly three roles: ``owner / contributor / viewer`` —
+# deliberately distinct from the tenant-level enum (``owner / admin /
+# member / viewer``) so a project owner is not confused with a tenant
+# owner. The DB CHECK on ``project_members.role`` enforces the same
+# whitelist server-side.
+#
+# RBAC for these endpoints
+# ────────────────────────
+# A caller may add / patch / remove project members iff they are one
+# of:
+#   1. Platform ``super_admin`` — universal trust boundary.
+#   2. Tenant membership role ∈ {owner, admin} on the target tenant
+#      — admin/owner of the tenant inherits "manage everything in the
+#      tenant" by the default-resolution semantics (alembic 0034
+#      docstring: "admin/owner tenant membership is treated as
+#      contributor on every project of that tenant by default" — and
+#      tenant admin is the operator who creates projects + assigns
+#      ownership in the first place).
+#   3. Project-level ``owner`` row — the project owner is empowered
+#      to manage their own project's roster without escalating to
+#      tenant admin every time. This is the asymmetric privilege that
+#      makes the ``owner`` project role meaningful (otherwise the
+#      enum's only differentiating value over ``contributor`` would be
+#      semantic).
+#
+# Note that ``contributor`` and ``viewer`` project rows do NOT confer
+# member-management. Suspended / non-existent tenant membership also
+# blocks management (suspension at the tenant layer revokes every
+# project capability simultaneously).
+#
+# Soft-delete semantics
+# ─────────────────────
+# Per alembic 0034 docstring: "Suspension at the project layer is
+# achieved by deleting the row, which falls back to the tenant
+# default." There is no ``status`` column on ``project_members``;
+# DELETE is the soft-delete equivalent. A second DELETE on a row that
+# was never explicitly added (or was already removed) returns 200 with
+# ``already_removed=True`` and emits no audit row — same idempotent
+# posture as Y4 row 4 archive/restore.
+#
+# Tenant-membership precondition for the target user
+# ──────────────────────────────────────────────────
+# Adding a project_members row for a user without an active tenant
+# membership on the same tenant is rejected with 422 ("user is not an
+# active tenant member; invite them first"). Without this guard the
+# project grant would dangle: the auth surface checks tenant
+# membership before evaluating project capability, so a project_member
+# row for a non-tenant-member user is meaningless. Suspended tenant
+# memberships are also rejected — re-activate the tenant membership
+# (PATCH /tenants/{tid}/members/{uid}) before granting project
+# capability.
+#
+# Distinct from POST /tenants/{tid}/invites: that surface invites a
+# new user (no users row yet) into the tenant; this surface promotes
+# an existing tenant member to an explicit project role. Both flows
+# are intentionally separate — the operator first uses the invite
+# flow to onboard the user, then uses this row's POST to grant project
+# scope.
+#
+# Module-global state audit (SOP Step 1)
+# ──────────────────────────────────────
+# New module-level constants:
+#   * ``PROJECT_MEMBER_ROLE_ENUM`` — DB-CHECK-aligned tuple
+#   * ``USER_ID_PATTERN`` / ``_USER_ID_RE`` — same shape as Y3 row 5
+#     ``admin_super_admins.USER_ID_PATTERN`` (drift-guard test enforces)
+#   * ``_PROJECT_MEMBER_MGMT_TENANT_ROLES`` — frozenset of tenant roles
+#     that may manage project members ({"owner", "admin"})
+#   * ``_PROJECT_MEMBER_MGMT_PROJECT_ROLES`` — frozenset of project
+#     roles that may manage project members ({"owner"})
+#   * 6 SQL constants — ``_FETCH_PROJECT_TENANT_SCOPED_SQL``,
+#     ``_FETCH_TARGET_USER_TENANT_MEMBERSHIP_SQL``,
+#     ``_FETCH_PROJECT_MEMBER_SQL``, ``_INSERT_PROJECT_MEMBER_SQL``,
+#     ``_UPDATE_PROJECT_MEMBER_ROLE_SQL``,
+#     ``_DELETE_PROJECT_MEMBER_SQL``
+# All immutable; every uvicorn worker derives the same value from
+# source — qualifying answer #1. DB state is shared via PG; the
+# composite PK ``(user_id, project_id)`` serialises concurrent INSERTs
+# via ``ON CONFLICT DO NOTHING`` and the row lock implicit in PG's
+# UPDATE / DELETE serialises row-level mutations — qualifying answer
+# #2. No new in-memory cache.
+#
+# Read-after-write timing audit (SOP Step 1)
+# ──────────────────────────────────────────
+# POST is a single ``INSERT … ON CONFLICT (user_id, project_id) DO
+# NOTHING RETURNING`` — concurrent admins racing the same target
+# resolve to one winner (RETURNING populated) and one loser (RETURNING
+# None → 409 with the existing role surfaced). PATCH is a single
+# UPDATE … RETURNING — the row lock serialises concurrent PATCHes on
+# the same row; concurrent PATCH + DELETE on the same row resolve to
+# one winner and one ``RETURNING None`` (the DELETE may be the
+# winner; the PATCH loser observes None and falls through to 404 /
+# already-removed depending on shape). DELETE is a single ``DELETE …
+# RETURNING`` — RETURNING None signals "row already gone" → idempotent
+# already_removed branch.
+
+# Membership roles allowed on a ``project_members`` row. Mirrors the
+# DB CHECK on ``project_members.role`` from alembic 0034 — drift here
+# would let a regressed POST/PATCH set a role the DB will then reject.
+# Deliberately distinct from MEMBERSHIP_ROLE_ENUM (tenant-level) — a
+# project owner is NOT a tenant owner.
+PROJECT_MEMBER_ROLE_ENUM = ("owner", "contributor", "viewer")
+
+# User id — same shape as Y3 row 5 admin_super_admins / Y3 row 6
+# tenant_members. Drift-guard test imports from admin_super_admins to
+# enforce the alignment.
+USER_ID_PATTERN = r"^u-[a-z0-9]{4,64}$"
+_USER_ID_RE = re.compile(USER_ID_PATTERN)
+
+
+def _is_valid_user_id(uid: str) -> bool:
+    return bool(uid) and bool(_USER_ID_RE.match(uid))
+
+
+# Tenant-level roles whose holders may manage project members on a
+# given tenant. Same set as the project-CRUD allowlist — admin/owner
+# of the tenant are the operators who provision project ownership in
+# the first place.
+_PROJECT_MEMBER_MGMT_TENANT_ROLES = frozenset({"owner", "admin"})
+
+# Project-level roles whose holders may manage other members on the
+# same project. Only ``owner`` qualifies — ``contributor`` and
+# ``viewer`` get capability on the project but not authority over
+# the roster.
+_PROJECT_MEMBER_MGMT_PROJECT_ROLES = frozenset({"owner"})
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Pydantic bodies
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class CreateProjectMemberRequest(BaseModel):
+    """Body for ``POST /api/v1/tenants/{tid}/projects/{pid}/members``."""
+
+    user_id: str = Field(
+        pattern=USER_ID_PATTERN,
+        description=(
+            "Target user id. Must already exist in ``users`` and have "
+            "an active ``user_tenant_memberships`` row on the same "
+            "tenant — this surface promotes an existing tenant member "
+            "to a project role; new-user onboarding goes through "
+            "POST /tenants/{tid}/invites."
+        ),
+    )
+    role: Literal["owner", "contributor", "viewer"] = Field(
+        description=(
+            "Project-scope role to grant. Must be one of "
+            "(owner, contributor, viewer). Pydantic returns 422 on "
+            "anything else before the handler runs."
+        ),
+    )
+
+
+class PatchProjectMemberRequest(BaseModel):
+    """Body for ``PATCH /api/v1/tenants/{tid}/projects/{pid}/members/{uid}``.
+
+    Only ``role`` is patchable — ``user_id`` and ``project_id`` are
+    the composite PK and not user-mutable; ``created_at`` is audit-
+    only. The schema requires the field; a missing role is a 422.
+    """
+
+    role: Literal["owner", "contributor", "viewer"] = Field(
+        description=(
+            "New project-scope role. Must be one of "
+            "(owner, contributor, viewer)."
+        ),
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Authorisation — tenant admin / owner OR project owner
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def _user_can_manage_project_members(
+    user: auth.User,
+    tenant_id: str,
+    project_id: str,
+) -> bool:
+    """True iff ``user`` may add / patch / delete project_members
+    rows on ``(tenant_id, project_id)``.
+
+    Order of checks (cheap → expensive):
+      1. Platform ``super_admin`` — always allowed.
+      2. Active tenant membership role ∈ {owner, admin}.
+      3. Explicit ``project_members`` row with role='owner' on the
+         target project.
+
+    Suspended tenant memberships do NOT confer management — suspending
+    the tenant membership revokes every project capability at once.
+    A pending suspension during a write tx is fine: the per-(user,
+    project) row lookup re-runs each call.
+    """
+    if auth.role_at_least(user.role, "super_admin"):
+        return True
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        tm_row = await conn.fetchrow(
+            "SELECT role, status FROM user_tenant_memberships "
+            "WHERE user_id = $1 AND tenant_id = $2",
+            user.id, tenant_id,
+        )
+    if (
+        tm_row is not None
+        and tm_row["status"] == "active"
+        and tm_row["role"] in _PROJECT_MEMBER_MGMT_TENANT_ROLES
+    ):
+        return True
+
+    # Project-owner branch — only consulted if tenant-level admin path
+    # did not qualify. A user who is "project owner on P1" but only
+    # "viewer on tenant T" can manage P1's members but no other
+    # project; the per-project query enforces that.
+    async with get_pool().acquire() as conn:
+        pm_row = await conn.fetchrow(
+            "SELECT role FROM project_members "
+            "WHERE user_id = $1 AND project_id = $2",
+            user.id, project_id,
+        )
+    if (
+        pm_row is not None
+        and pm_row["role"] in _PROJECT_MEMBER_MGMT_PROJECT_ROLES
+    ):
+        return True
+
+    return False
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SQL — project membership write paths
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Tenant-scoped project existence probe — distinguishes "no such
+# project on this tenant" (row is None) from "project belongs to
+# another tenant" (also row is None — by intent: the caller has no
+# business knowing the project lives elsewhere). Used by all three
+# member-management handlers as the 404 gate.
+_FETCH_PROJECT_TENANT_SCOPED_SQL = (
+    "SELECT id FROM projects WHERE id = $1 AND tenant_id = $2"
+)
+
+# Verify the TARGET user has an active membership on the tenant
+# before granting project capability. The roles are NOT filtered —
+# any active tenant member can be promoted to any project role
+# (member viewer → project owner is a valid state if a tenant admin
+# wills it; the tenant-side suspension is the kill switch).
+_FETCH_TARGET_USER_TENANT_MEMBERSHIP_SQL = (
+    "SELECT role, status FROM user_tenant_memberships "
+    "WHERE user_id = $1 AND tenant_id = $2"
+)
+
+# Read-only fetch of a single project_members row. Used to surface
+# the existing role on a 409 conflict body and to short-circuit
+# no_change branches on PATCH.
+_FETCH_PROJECT_MEMBER_SQL = (
+    "SELECT user_id, project_id, role, created_at "
+    "FROM project_members WHERE user_id = $1 AND project_id = $2"
+)
+
+# Atomic INSERT with ``ON CONFLICT (user_id, project_id) DO NOTHING
+# RETURNING`` — the composite PK from alembic 0034 makes RETURNING
+# None mean "this user already has an explicit grant on this project".
+# On the duplicate branch the handler re-SELECTs the existing row to
+# surface its current role in the 409 body so the operator can
+# decide between PATCH (change role) and DELETE (revoke).
+_INSERT_PROJECT_MEMBER_SQL = """
+INSERT INTO project_members (user_id, project_id, role)
+VALUES ($1, $2, $3)
+ON CONFLICT (user_id, project_id) DO NOTHING
+RETURNING user_id, project_id, role, created_at
+"""
+
+# Atomic role update. ``RETURNING None`` here means the row vanished
+# between the FOR-UPDATE-less precheck and the UPDATE — handler treats
+# it as 404 (concurrent DELETE won the race).
+_UPDATE_PROJECT_MEMBER_ROLE_SQL = """
+UPDATE project_members
+SET role = $3
+WHERE user_id = $1 AND project_id = $2
+RETURNING user_id, project_id, role, created_at
+"""
+
+# DELETE … RETURNING projects the soon-to-be-gone row so the audit
+# blob can capture the prior role in one round-trip. RETURNING None
+# means "row already gone" → idempotent already_removed branch.
+_DELETE_PROJECT_MEMBER_SQL = """
+DELETE FROM project_members
+WHERE user_id = $1 AND project_id = $2
+RETURNING user_id, project_id, role, created_at
+"""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Helpers
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _row_to_project_member_dict(row) -> dict:
+    """Project a project_members row to the JSON response body."""
+    return {
+        "user_id": row["user_id"],
+        "project_id": row["project_id"],
+        "role": row["role"],
+        "created_at": row["created_at"],
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  POST /tenants/{tid}/projects/{pid}/members
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.post(
+    "/tenants/{tenant_id}/projects/{project_id}/members",
+    status_code=201,
+)
+async def create_project_member(
+    tenant_id: str,
+    project_id: str,
+    body: CreateProjectMemberRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Grant an existing tenant member an explicit project role.
+
+    Status codes
+    ────────────
+    * 201 — granted; ``project_members`` row inserted.
+    * 403 — caller is not tenant admin / owner, not super_admin, and
+            not project owner.
+    * 404 — well-formed ids but no such tenant or no such project on
+            this tenant.
+    * 409 — target user already has an explicit row on this project;
+            response body carries ``existing_role`` so the operator
+            can PATCH (change) or DELETE (revoke) instead.
+    * 422 — malformed tenant_id / project_id / user_id / role; or the
+            target user has no active tenant membership on this
+            tenant (operator must invite + accept first).
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+
+    # RBAC ahead of any existence probe so a guess-the-id scan can't
+    # enumerate via timing alone.
+    if not await _user_can_manage_project_members(
+        actor, tenant_id, project_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin / owner on {tenant_id!r}, "
+                f"platform super_admin, or project owner on "
+                f"{project_id!r}; caller has no qualifying role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    # Tenant existence — clean 404.
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    # Project existence + tenant-scope — 404 covers both
+    # "no such project" and "project belongs to another tenant" by
+    # design (caller has no business probing cross-tenant existence).
+    async with get_pool().acquire() as conn:
+        project_row = await conn.fetchrow(
+            _FETCH_PROJECT_TENANT_SCOPED_SQL, project_id, tenant_id,
+        )
+    if project_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"project not found: {project_id!r} on "
+                    f"tenant {tenant_id!r}"
+                ),
+            },
+        )
+
+    # Target-user-must-be-active-tenant-member precondition.
+    async with get_pool().acquire() as conn:
+        tm_row = await conn.fetchrow(
+            _FETCH_TARGET_USER_TENANT_MEMBERSHIP_SQL,
+            body.user_id, tenant_id,
+        )
+    if tm_row is None:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"user {body.user_id!r} is not a member of "
+                    f"tenant {tenant_id!r}; invite the user first via "
+                    f"POST /tenants/{tenant_id}/invites"
+                ),
+                "tenant_id": tenant_id,
+                "user_id": body.user_id,
+            },
+        )
+    if tm_row["status"] != "active":
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"user {body.user_id!r} has membership on "
+                    f"tenant {tenant_id!r} but it is not active "
+                    f"(status={tm_row['status']!r}); reactivate the "
+                    f"tenant membership before granting project role"
+                ),
+                "tenant_id": tenant_id,
+                "user_id": body.user_id,
+                "tenant_membership_status": tm_row["status"],
+            },
+        )
+
+    # Atomic INSERT — duplicate (user_id, project_id) lands on the
+    # 409 branch with the existing role surfaced so the operator can
+    # decide between PATCH and DELETE.
+    async with get_pool().acquire() as conn:
+        new_row = await conn.fetchrow(
+            _INSERT_PROJECT_MEMBER_SQL,
+            body.user_id, project_id, body.role,
+        )
+
+    if new_row is None:
+        async with get_pool().acquire() as conn:
+            existing = await conn.fetchrow(
+                _FETCH_PROJECT_MEMBER_SQL, body.user_id, project_id,
+            )
+        existing_role = existing["role"] if existing else None
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": (
+                    f"user {body.user_id!r} already has an explicit "
+                    f"role on project {project_id!r}; PATCH to change "
+                    f"or DELETE to revoke"
+                ),
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "user_id": body.user_id,
+                "existing_role": existing_role,
+            },
+        )
+
+    member = _row_to_project_member_dict(new_row)
+    member["tenant_id"] = tenant_id
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_project_member_added",
+            entity_kind="project_member",
+            entity_id=f"{project_id}:{body.user_id}",
+            before=None,
+            after={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "user_id": body.user_id,
+                "role": body.role,
+            },
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "tenant_project_member_added audit emit failed (tenant=%s "
+            "project=%s user=%s): %s",
+            tenant_id, project_id, body.user_id, exc,
+        )
+
+    return JSONResponse(status_code=201, content=member)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  PATCH /tenants/{tid}/projects/{pid}/members/{user_id}
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.patch(
+    "/tenants/{tenant_id}/projects/{project_id}/members/{user_id}",
+)
+async def patch_project_member(
+    tenant_id: str,
+    project_id: str,
+    user_id: str,
+    body: PatchProjectMemberRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Update an existing project_members row's role.
+
+    Idempotent: re-PATCHing to the same role returns 200 with
+    ``no_change=True`` and emits no audit row.
+
+    Status codes
+    ────────────
+    * 200 — updated (or no_change=True if same-state PATCH).
+    * 403 — caller is not tenant admin / owner, not super_admin, and
+            not project owner on this project.
+    * 404 — well-formed ids but no such tenant / no such project on
+            this tenant / no explicit project_members row for this
+            (user, project) pair (use POST to grant).
+    * 422 — malformed ids / unknown role.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_user_id(user_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid user id: {user_id!r}; must match "
+                    f"{USER_ID_PATTERN}"
+                ),
+            },
+        )
+
+    if not await _user_can_manage_project_members(
+        actor, tenant_id, project_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin / owner on {tenant_id!r}, "
+                f"platform super_admin, or project owner on "
+                f"{project_id!r}; caller has no qualifying role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    async with get_pool().acquire() as conn:
+        project_row = await conn.fetchrow(
+            _FETCH_PROJECT_TENANT_SCOPED_SQL, project_id, tenant_id,
+        )
+    if project_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"project not found: {project_id!r} on "
+                    f"tenant {tenant_id!r}"
+                ),
+            },
+        )
+
+    async with get_pool().acquire() as conn:
+        cur_row = await conn.fetchrow(
+            _FETCH_PROJECT_MEMBER_SQL, user_id, project_id,
+        )
+    if cur_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"no explicit project membership for user "
+                    f"{user_id!r} on project {project_id!r}; use POST "
+                    f"to grant"
+                ),
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "user_id": user_id,
+            },
+        )
+
+    # Same-state short-circuit. No UPDATE, no audit row.
+    if cur_row["role"] == body.role:
+        member = _row_to_project_member_dict(cur_row)
+        member["tenant_id"] = tenant_id
+        member["no_change"] = True
+        return JSONResponse(status_code=200, content=member)
+
+    async with get_pool().acquire() as conn:
+        new_row = await conn.fetchrow(
+            _UPDATE_PROJECT_MEMBER_ROLE_SQL,
+            user_id, project_id, body.role,
+        )
+
+    if new_row is None:
+        # Concurrent DELETE removed the row between our precheck and
+        # our UPDATE. Fall through to 404 — same outcome the caller
+        # would have got if they had hit DELETE → PATCH ordering.
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"project membership disappeared mid-PATCH for "
+                    f"user {user_id!r} on project {project_id!r}; "
+                    f"likely a concurrent DELETE — re-fetch and retry"
+                ),
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "user_id": user_id,
+            },
+        )
+
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_project_member_updated",
+            entity_kind="project_member",
+            entity_id=f"{project_id}:{user_id}",
+            before={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "user_id": user_id,
+                "role": cur_row["role"],
+            },
+            after={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "user_id": user_id,
+                "role": new_row["role"],
+            },
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "tenant_project_member_updated audit emit failed "
+            "(tenant=%s project=%s user=%s): %s",
+            tenant_id, project_id, user_id, exc,
+        )
+
+    member = _row_to_project_member_dict(new_row)
+    member["tenant_id"] = tenant_id
+    member["no_change"] = False
+    return JSONResponse(status_code=200, content=member)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  DELETE /tenants/{tid}/projects/{pid}/members/{user_id}
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.delete(
+    "/tenants/{tenant_id}/projects/{project_id}/members/{user_id}",
+)
+async def delete_project_member(
+    tenant_id: str,
+    project_id: str,
+    user_id: str,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Remove the explicit project_members row for ``(user, project)``.
+
+    Per alembic 0034 docstring this IS the project-layer suspension —
+    once the row is gone the user falls back to the tenant default
+    (admin/owner → contributor; member/viewer → no project access).
+    There is no ``status`` column to soft-flip.
+
+    Idempotent: a second DELETE on a row that was never granted (or
+    was already removed) returns 200 with ``already_removed=True`` and
+    emits no audit row — matches Y4 row 4 archive/restore posture.
+
+    Status codes
+    ────────────
+    * 200 — removed (or already_removed=True if no row to delete).
+    * 403 — caller is not tenant admin / owner, not super_admin, and
+            not project owner on this project.
+    * 404 — well-formed ids but no such tenant or no such project on
+            this tenant.
+    * 422 — malformed ids.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_user_id(user_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid user id: {user_id!r}; must match "
+                    f"{USER_ID_PATTERN}"
+                ),
+            },
+        )
+
+    if not await _user_can_manage_project_members(
+        actor, tenant_id, project_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin / owner on {tenant_id!r}, "
+                f"platform super_admin, or project owner on "
+                f"{project_id!r}; caller has no qualifying role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    async with get_pool().acquire() as conn:
+        project_row = await conn.fetchrow(
+            _FETCH_PROJECT_TENANT_SCOPED_SQL, project_id, tenant_id,
+        )
+    if project_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"project not found: {project_id!r} on "
+                    f"tenant {tenant_id!r}"
+                ),
+            },
+        )
+
+    async with get_pool().acquire() as conn:
+        deleted_row = await conn.fetchrow(
+            _DELETE_PROJECT_MEMBER_SQL, user_id, project_id,
+        )
+
+    if deleted_row is None:
+        # Already absent — idempotent already_removed branch. No audit.
+        return JSONResponse(
+            status_code=200,
+            content={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "user_id": user_id,
+                "already_removed": True,
+            },
+        )
+
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_project_member_removed",
+            entity_kind="project_member",
+            entity_id=f"{project_id}:{user_id}",
+            before={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "user_id": user_id,
+                "role": deleted_row["role"],
+            },
+            after=None,
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "tenant_project_member_removed audit emit failed "
+            "(tenant=%s project=%s user=%s): %s",
+            tenant_id, project_id, user_id, exc,
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "user_id": user_id,
+            "role": deleted_row["role"],
+            "already_removed": False,
+        },
+    )
 
     return removed
