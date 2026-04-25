@@ -78,8 +78,40 @@ function _formatActionMessage(action: api.InvokeAction): string | null {
       return action.summary || null
     case "health":
       return `[HEALTH] ${action.agent_count} agents | ${action.running} running | ${action.idle} idle | ${action.pending} pending tasks`
+    case "coach":
+      // R20-B: orchestrator coaching message rendered as a regular
+      // orchestrator chat bubble (no [BRACKET] prefix on purpose so
+      // it reads like dialogue, not a system log).
+      return action.message || null
     default:
       return null
+  }
+}
+
+// R20-B: sessionStorage key holding triggers the operator has already
+// been coached about this session. Reset on tab close / new session.
+const _COACH_SUPPRESS_KEY = "omnisight:coached_triggers"
+
+function _readCoachSuppress(): string[] {
+  if (typeof window === "undefined") return []
+  try {
+    const raw = window.sessionStorage.getItem(_COACH_SUPPRESS_KEY) || ""
+    return raw ? raw.split(",").filter(Boolean) : []
+  } catch {
+    return []
+  }
+}
+
+function _addCoachSuppress(triggers: readonly string[]): void {
+  if (typeof window === "undefined" || triggers.length === 0) return
+  try {
+    const current = new Set(_readCoachSuppress())
+    for (const t of triggers) current.add(t)
+    window.sessionStorage.setItem(
+      _COACH_SUPPRESS_KEY, Array.from(current).join(","),
+    )
+  } catch {
+    /* sessionStorage unavailable (private mode etc.) — coach more often, no crash */
   }
 }
 
@@ -996,7 +1028,10 @@ export function useEngine() {
 
     try {
       setIsStreaming(true)
-      for await (const event of api.streamInvoke(command)) {
+      // R20-B: pass already-coached trigger keys so backend planner
+      // skips re-coaching the operator on the same triggers this session.
+      const suppress = _readCoachSuppress()
+      for await (const event of api.streamInvoke(command, suppress)) {
         if (event.event === "analysis") {
           const a = event.data as api.InvokeAnalysis
           setMessages(prev => [...prev, {
@@ -1031,6 +1066,12 @@ export function useEngine() {
               status: "running",
               thoughtChain: "Auto-retry initiated by INVOKE sync.",
             })
+          } else if (action.type === "coach" && action.triggers) {
+            // R20-B: mark these triggers as already-coached this session
+            // so the next INVOKE press doesn't re-coach about the same
+            // condition (suppression list passed back to backend on
+            // subsequent streamInvoke() calls).
+            _addCoachSuppress(action.triggers)
           }
 
           // Add action result as message

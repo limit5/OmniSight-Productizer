@@ -3646,7 +3646,7 @@ export async function getUnreadCount() {
 // ─── Invoke (Singularity Sync) ───
 
 export interface InvokeAction {
-  type: "command" | "assign" | "retry" | "report" | "health"
+  type: "command" | "assign" | "retry" | "report" | "health" | "coach"
   // assign
   task_id?: string
   task_title?: string
@@ -3663,6 +3663,15 @@ export interface InvokeAction {
   running?: number
   idle?: number
   pending?: number
+  // R20-B (2026-04-25): coach action — orchestrator-led guidance when
+  // the planner has nothing real to do (empty workspace / stale PEP
+  // HOLDs). `message` is the rendered text (LLM-generated or templated
+  // fallback); `triggers` is the set of keys the frontend should mark
+  // as already-coached in sessionStorage so the same triggers are
+  // suppressed on the next INVOKE this session.
+  message?: string
+  triggers?: string[]
+  pending_count?: number
   // error
   error?: string
 }
@@ -3697,13 +3706,20 @@ export async function resumeInvoke(): Promise<{ status: string }> {
 }
 
 export async function* streamInvoke(
-  command?: string
+  command?: string,
+  /** R20-B: trigger keys already coached this session (sessionStorage-backed). */
+  suppressCoach?: readonly string[],
 ): AsyncGenerator<InvokeEvent> {
-  const params = command ? `?command=${encodeURIComponent(command)}` : ""
-  const res = await fetch(`${API_V1}/invoke/stream${params}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-  })
+  const qs = new URLSearchParams()
+  if (command) qs.set("command", command)
+  if (suppressCoach && suppressCoach.length > 0) {
+    qs.set("suppress_coach", suppressCoach.join(","))
+  }
+  const params = qs.toString()
+  const res = await fetch(
+    `${API_V1}/invoke/stream${params ? `?${params}` : ""}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+  )
   if (!res.ok || !res.body) throw new Error(`Invoke error: ${res.status}`)
 
   const reader = res.body.getReader()

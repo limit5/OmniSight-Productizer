@@ -799,12 +799,58 @@ def _analyze_state() -> dict:
     }
 
 
-def _plan_actions(state: dict, command: str | None) -> list[dict]:
+# R20-B (2026-04-25): orchestrator coaching for empty / pending-only
+# states. When INVOKE fires with no command and the planner has nothing
+# real to do (priorities 1-3 yield zero actions), we used to fall back
+# to a `[health]` action that just echoed agent/task counts. Operators
+# reported that when the workspace is empty (or there are stale PEP
+# HOLDs and nothing else), the system should *coach* them on what to
+# do next — using the lead-architect/orchestrator persona that already
+# exists in the LangGraph pipeline. Coach replaces health in the
+# priority-4 slot. If priorities 1-3 produced real work (assigns,
+# retries, reports), we don't coach — the operator can see what's
+# happening from the action stream itself.
+def _detect_coaching_triggers(
+    state: dict, suppress: frozenset[str],
+) -> tuple[list[str], int]:
+    """Return ``(trigger_keys, pending_count)`` for the orchestrator coach.
+
+    Trigger keys are short tokens the prompt builder maps to operator-
+    facing language. ``suppress`` lets the frontend tell the planner
+    "I already showed coaching for X this session" so the operator
+    isn't re-coached on every INVOKE press (frontend tracks via
+    sessionStorage; see ``hooks/use-engine.ts`` invoke()).
+    """
+    triggers: list[str] = []
+    if (not state["agents"] and not state["tasks"]
+            and "empty_workspace" not in suppress):
+        triggers.append("empty_workspace")
+    pending_count = 0
+    try:
+        from backend import decision_engine as _de
+        pending_count = len(_de.list_pending())
+    except Exception:
+        pass
+    if pending_count > 0 and "stale_pep" not in suppress:
+        triggers.append("stale_pep")
+    return triggers, pending_count
+
+
+def _plan_actions(
+    state: dict, command: str | None,
+    *, suppress_coach: frozenset[str] = frozenset(),
+) -> list[dict]:
     """Decide what actions to take based on current state.
 
     Returns a list of action dicts, each with:
-      - type: "assign" | "retry" | "report" | "health" | "command"
+      - type: "assign" | "retry" | "report" | "health" | "command" | "coach"
       - detail fields depending on type
+
+    R20-B: when the planner would otherwise return only ``[health]``
+    (i.e. nothing real to do), it instead emits ``[coach]`` if the
+    orchestrator has something to say (empty workspace / stale PEP
+    HOLDs). ``suppress_coach`` is the set of trigger keys the operator
+    has already been coached about in this session.
     """
     actions: list[dict] = []
 
@@ -857,16 +903,29 @@ def _plan_actions(state: dict, command: str | None) -> list[dict]:
             "tasks": [t.title for t in state["completed"]],
         })
 
-    # Priority 4: Nothing to do → health check
+    # Priority 4: Nothing to do → coach (if orchestrator has something to
+    # say) or fall back to a passive health check. R20-B replaced the
+    # bare health echo with an orchestrator-led coaching step when the
+    # workspace is empty / has stale PEP HOLDs.
     if not actions:
-        actions.append({
-            "type": "health",
-            "agent_count": len(state["agents"]),
-            "task_count": len(state["tasks"]),
-            "running": len(state["running_agents"]),
-            "idle": len(state["idle_agents"]),
-            "pending": len(state["unassigned"]),
-        })
+        triggers, pending_count = _detect_coaching_triggers(state, suppress_coach)
+        if triggers:
+            actions.append({
+                "type": "coach",
+                "triggers": triggers,
+                "pending_count": pending_count,
+                "agent_count": len(state["agents"]),
+                "task_count": len(state["tasks"]),
+            })
+        else:
+            actions.append({
+                "type": "health",
+                "agent_count": len(state["agents"]),
+                "task_count": len(state["tasks"]),
+                "running": len(state["running_agents"]),
+                "idle": len(state["idle_agents"]),
+                "pending": len(state["unassigned"]),
+            })
 
     return actions
 
@@ -1115,6 +1174,27 @@ async def _execute_actions(actions: list[dict], state: dict):
             }
             results.append("Health check complete")
 
+        elif action["type"] == "coach":
+            # R20-B: orchestrator-led coaching for empty / stale-PEP states.
+            yield {
+                "event": "phase",
+                "data": json.dumps({
+                    "phase": "coach",
+                    "message": "Orchestrator coaching mode",
+                }),
+            }
+            coach_msg = await _generate_coach_message(action)
+            yield {
+                "event": "action",
+                "data": json.dumps({
+                    "type": "coach",
+                    "message": coach_msg,
+                    "triggers": list(action.get("triggers") or []),
+                    "pending_count": int(action.get("pending_count") or 0),
+                }),
+            }
+            results.append("Orchestrator coached operator")
+
     # Final summary
     yield {
         "event": "done",
@@ -1136,18 +1216,128 @@ def _build_report(action: dict) -> str:
     return "\n".join(lines)
 
 
+# R20-B (2026-04-25): orchestrator coach prompt + content generation.
+#
+# When the planner emits a ``coach`` action (priority-4 fallback when
+# the workspace is empty or there are stale PEP HOLDs), we route the
+# trigger context through the orchestrator persona to produce a short,
+# action-oriented message. The LLM call is bounded (single round-trip,
+# no tool use) and falls back to a hard-coded templated message when
+# the LLM is unavailable / fails / returns empty — operators in zero-
+# credit / offline-LLM environments still get useful guidance instead
+# of a bare [HEALTH] echo.
+_COACH_SYSTEM_PROMPT = """You are the OmniSight Orchestrator — the lead-architect / coordinator persona of an embedded AI camera development platform.
+
+The operator just pressed INVOKE but the system is in a state that needs guidance from you. Your job:
+1. Acknowledge what you see in 1 short sentence (friendly, slightly playful, never condescending).
+2. Offer 2-3 SPECIFIC, ACTIONABLE next steps as a tight markdown list (each item one short line).
+
+Triggers tell you what to coach about. Translate them to operator-facing language — never repeat the trigger key verbatim:
+- empty_workspace: 0 agents / 0 tasks. Suggest: ` + AGENT ` button, `/help`, `/tour`, or "tell me what you're building and I'll route it".
+- stale_pep:N: there are N PEP HOLD decisions waiting from earlier. Suggest: review them via the bottom-right toasts (each has a WHY? button now), or APPROVE / REJECT in bulk.
+
+Match the operator's recent message language (CJK or English; default CJK if no recent operator messages). Do not apologise, do not over-explain, do not repeat what's already in the toast — your job is meta-narration + action prompts. Keep total length under 6 lines."""
+
+
+def _build_coach_context(triggers: list[str], pending_count: int) -> str:
+    parts = ["Triggers detected by the planner:"]
+    for t in triggers:
+        if t == "empty_workspace":
+            parts.append("- empty_workspace: workspace has 0 agents and 0 tasks")
+        elif t == "stale_pep":
+            parts.append(
+                f"- stale_pep: {pending_count} PEP HOLD "
+                f"decision{'s' if pending_count != 1 else ''} "
+                "waiting for operator approve/reject"
+            )
+        else:
+            parts.append(f"- {t}")
+    return "\n".join(parts)
+
+
+def _build_templated_coach_message(
+    triggers: list[str], pending_count: int,
+) -> str:
+    """LLM-unavailable fallback. CJK-default to match the operator base.
+
+    Hard-coded but still vastly better than ``[HEALTH] check complete``.
+    Phrasing mirrors what the LLM would produce so the UX stays
+    consistent across LLM-on / LLM-off environments.
+    """
+    has_empty = "empty_workspace" in triggers
+    has_pep = "stale_pep" in triggers
+    lines: list[str] = []
+    if has_empty and has_pep:
+        lines.append(
+            f"工作台目前是空的，但右下角還有 {pending_count} 個 PEP HOLD "
+            "決定從之前留下來等你處理。"
+        )
+        lines.append(
+            "- 處理待審決定：點 toast 上的 **WHY?** 看細節，再 APPROVE / REJECT"
+        )
+        lines.append("- 開始新工作：點右上角 ` + AGENT ` 建立第一個 agent")
+        lines.append("- 或直接告訴我你想做什麼，我幫你 route 到對的 specialist")
+    elif has_empty:
+        lines.append("工作台是空的喔。要怎麼開始？")
+        lines.append("- 試試 `/tour` 看一遍 5 步驟介紹")
+        lines.append("- 點右上角 ` + AGENT ` 建立第一個 agent")
+        lines.append("- 或直接打字告訴我你想做什麼，我幫你 routing")
+    elif has_pep:
+        lines.append(
+            f"有 {pending_count} 個 PEP HOLD 決定從之前留下來還沒處理。"
+        )
+        lines.append(
+            "- 點右下 toast 的 **WHY?** 看 What / Why / If approve / If reject"
+        )
+        lines.append("- 確認 OK 就 APPROVE，不確定就先 REJECT，agent 會走別的路徑")
+    else:
+        lines.append("一切看起來都正常 — 隨時告訴我你想做什麼。")
+    return "\n".join(lines)
+
+
+async def _generate_coach_message(action: dict) -> str:
+    """Compose the coach message: LLM-driven if available, templated fallback."""
+    triggers = list(action.get("triggers") or [])
+    pending = int(action.get("pending_count") or 0)
+    fallback = _build_templated_coach_message(triggers, pending)
+    try:
+        from backend.agents.nodes import _get_llm
+        from langchain_core.messages import HumanMessage, SystemMessage
+        llm = _get_llm(bind_tools_for=None)
+        if not llm:
+            return fallback
+        sys = SystemMessage(content=_COACH_SYSTEM_PROMPT)
+        ctx = HumanMessage(content=_build_coach_context(triggers, pending))
+        resp = llm.invoke([sys, ctx])
+        out = (resp.content or "").strip() if hasattr(resp, "content") else ""  # type: ignore[union-attr]
+        return out or fallback
+    except Exception as exc:
+        logger.debug("coach LLM failed (%s) — using templated fallback", exc)
+        return fallback
+
+
 # ─── Endpoint ───
 
 @router.post("/stream")
 async def invoke_stream(
     command: str | None = None,
+    suppress_coach: str | None = None,
     _user=Depends(_auth.check_llm_quota),  # auth + M4 per-user LLM rate limit
 ):
     """SSE streaming invoke — analyses state, plans, executes, reports.
 
     Query param `command` is optional; if provided, it takes priority
     and is routed through the LangGraph pipeline.
+
+    R20-B: ``suppress_coach`` is a comma-separated list of coaching
+    trigger keys the frontend has already shown the operator this
+    session (tracked in sessionStorage). Planner skips coaching for
+    those triggers so the operator isn't re-coached on every INVOKE
+    press. Recognised keys: ``empty_workspace`` / ``stale_pep``.
     """
+    suppress_set: frozenset[str] = frozenset(
+        t.strip() for t in (suppress_coach or "").split(",") if t.strip()
+    )
     # Phase 47A: parallelism is capped by OperationMode via a Semaphore.
     # Reject at the door only when every slot is taken AND we're in Manual
     # (preserve the old "one-at-a-time" UX for Manual). Other modes block
@@ -1174,7 +1364,7 @@ async def invoke_stream(
                     await _persist_task(task)
 
     state = _analyze_state()
-    actions = _plan_actions(state, command)
+    actions = _plan_actions(state, command, suppress_coach=suppress_set)
 
     async def event_generator():
         async with sema:
