@@ -47,6 +47,13 @@ class WorkspaceInfo:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     commit_count: int = 0
     status: str = "active"  # active | finalized | cleaned
+    # R8 #314: anchor commit SHA captured immediately after `git worktree add`.
+    # This is the immutable "clean anchor" — even if the agent commits new work
+    # on its branch, retry recreates the worktree branched off this SHA, so the
+    # reset target is always the start-of-task state. None on external clones
+    # where HEAD-after-clone equals the source HEAD (still valid, but legacy
+    # workspaces predating this field also serialise as None).
+    anchor_sha: str | None = None
 
 
 # Registry of active workspaces
@@ -190,6 +197,23 @@ async def provision(
         await _run(f'git checkout -b "{branch}"', cwd=ws_path)
         logger.info("Workspace provisioned (clone): %s → %s", agent_id, ws_path)
 
+    # R8 #314: capture anchor commit SHA *before* any agent activity touches
+    # the worktree. This is the immutable retry target — see
+    # docs/design/r8-idempotent-retry-worktree.md §4. Done before user.name /
+    # user.email config so we cannot accidentally drift the anchor by commits
+    # that this provision path itself emits.
+    rc, anchor_sha, _ = await _run("git rev-parse HEAD", cwd=ws_path)
+    anchor_sha = anchor_sha.strip() if rc == 0 else ""
+    if not anchor_sha:
+        # Repo with no commits (rare; new clone with detached HEAD allowed).
+        # We log and continue — anchor stays None and retry falls back to
+        # legacy clean+checkout per the migration policy.
+        logger.warning(
+            "Could not resolve anchor commit SHA for %s (rc=%d); retry will fall back",
+            agent_id, rc,
+        )
+        anchor_sha = None
+
     # Configure git user for this workspace. H9: agent_id reaches a shell
     # via _run() so use safe_agent (already sanitized to [A-Za-z0-9_-]).
     await _run(f'git config user.name "Agent-{safe_agent}"', cwd=ws_path)
@@ -237,10 +261,15 @@ async def provision(
         path=ws_path,
         repo_source=source,
         repo_id=_repo_id,
+        anchor_sha=anchor_sha,
     )
     _workspaces[agent_id] = info
 
-    emit_workspace(agent_id, "provisioned", f"branch={branch}, path={ws_path}")
+    emit_workspace(
+        agent_id,
+        "provisioned",
+        f"branch={branch}, path={ws_path}, anchor={anchor_sha or 'none'}",
+    )
     emit_agent_update(agent_id, "running", f"Workspace ready: branch={branch}")
     return info
 

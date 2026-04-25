@@ -55,6 +55,7 @@ async def provision_workspace(body: ProvisionRequest):
         task_id=info.task_id,
         remote_name=body.remote_name,
         repo_url=body.repo_url,
+        anchor_sha=info.anchor_sha,
     )
 
     return {
@@ -63,6 +64,7 @@ async def provision_workspace(body: ProvisionRequest):
         "branch": info.branch,
         "path": str(info.path),
         "task_id": info.task_id,
+        "anchor_sha": info.anchor_sha,
     }
 
 

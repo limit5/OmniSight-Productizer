@@ -66,6 +66,12 @@ class AgentWorkspace(BaseModel):
     task_id: Optional[str] = None
     remote_name: str = "origin"
     repo_url: Optional[str] = None
+    # R8 #314: anchor commit SHA — the retry target for
+    # WorkspaceManager.discard_and_recreate (see
+    # docs/design/r8-idempotent-retry-worktree.md). Captured at provision
+    # time and never mutated. Optional so legacy rows in the agents table
+    # (workspace JSON without this key) still deserialise.
+    anchor_sha: Optional[str] = None
 
 
 class Agent(BaseModel):

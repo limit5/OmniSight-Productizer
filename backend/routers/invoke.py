@@ -1044,6 +1044,7 @@ async def _execute_actions(actions: list[dict], state: dict):
                         path=str(ws_info.path),
                         status="active",
                         task_id=ws_info.task_id,
+                        anchor_sha=ws_info.anchor_sha,
                     )
                     agent.thought_chain = f"Workspace ready on branch {ws_info.branch}. Processing task..."
                     workspace_branch = ws_info.branch
@@ -1339,6 +1340,7 @@ async def invoke_sync(
                         agent.workspace = AgentWorkspace(
                             branch=ws_info.branch, path=str(ws_info.path),
                             status="active", task_id=ws_info.task_id,
+                            anchor_sha=ws_info.anchor_sha,
                         )
                         ws_branch = ws_info.branch
                         agent.thought_chain = f"Workspace ready: {ws_info.branch}. Processing..."

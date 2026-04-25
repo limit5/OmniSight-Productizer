@@ -42,6 +42,23 @@ class ImpactScope(BaseModel):
 class Navigation(BaseModel):
     entry_point: str = Field(..., min_length=1)
     impact_scope: ImpactScope
+    # R8 #314: anchor commit SHA captured at task provision time. Retry path
+    # discards the worktree and recreates a fresh one branched off this SHA,
+    # guaranteeing a clean reset to the start-of-task state. Optional during
+    # the 30-day migration window (legacy CATC rows have None) — when None,
+    # the retry path falls back to the legacy clean+checkout reset. Once the
+    # legacy fallback is removed (per docs/design/r8-idempotent-retry-worktree.md
+    # §5), this field becomes required.
+    anchor_commit_sha: str | None = Field(default=None)
+
+    @field_validator("anchor_commit_sha")
+    @classmethod
+    def _sha_format(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not re.fullmatch(r"[0-9a-f]{7,40}", v):
+            raise ValueError("anchor_commit_sha must be a hex git SHA (7-40 chars)")
+        return v
 
 
 class TaskCard(BaseModel):
