@@ -3,13 +3,24 @@
 import { useState } from "react"
 import { createPortal } from "react-dom"
 import { X, Bell, AlertTriangle, AlertOctagon, Info, ExternalLink, Zap } from "lucide-react"
-import { injectAgentHint, type NotificationItem } from "@/lib/api"
+import { injectAgentHint, type NotificationItem, type NotificationSeverity } from "@/lib/api"
 
 const LEVEL_CONFIG = {
   info:     { icon: Info,           color: "var(--muted-foreground)", bg: "var(--secondary)",          label: "INFO" },
   warning:  { icon: AlertTriangle,  color: "#eab308",                bg: "rgba(234,179,8,0.1)",       label: "WARNING" },
   action:   { icon: AlertOctagon,   color: "var(--critical-red)",    bg: "rgba(239,68,68,0.1)",       label: "ACTION" },
   critical: { icon: AlertOctagon,   color: "#dc2626",                bg: "rgba(220,38,38,0.2)",       label: "CRITICAL" },
+}
+
+// R9 row 2946 (#315): orthogonal P1/P2/P3 severity tag (see
+// backend.severity).  Sits next to the level chip so operators can
+// distinguish "system-down" (P1) from "task-blocked" (P2) from
+// "auto-recovery in flight" (P3) at a glance, even when two events
+// share the same ``level``.
+const SEVERITY_CONFIG: Record<NotificationSeverity, { color: string; bg: string; label: string }> = {
+  P1: { color: "#dc2626", bg: "rgba(220,38,38,0.18)", label: "P1" },
+  P2: { color: "#f59e0b", bg: "rgba(245,158,11,0.18)", label: "P2" },
+  P3: { color: "var(--muted-foreground)", bg: "var(--secondary)", label: "P3" },
 }
 
 interface NotificationCenterProps {
@@ -74,12 +85,18 @@ function InlineInject({ agentId }: { agentId: string }) {
 
 export function NotificationCenter({ open, onClose, notifications, onMarkRead }: NotificationCenterProps) {
   const [filter, setFilter] = useState<string>("all")
+  // R9 row 2946 (#315): severity dropdown filter — orthogonal to the
+  // level tabs above, ANDed when filtering. "all" pass-through covers
+  // legacy notifications without a severity tag.
+  const [severityFilter, setSeverityFilter] = useState<string>("all")
 
   if (!open) return null
 
-  const filtered = filter === "all"
-    ? notifications
-    : notifications.filter(n => n.level === filter)
+  const filtered = notifications.filter(n => {
+    if (filter !== "all" && n.level !== filter) return false
+    if (severityFilter !== "all" && n.severity !== severityFilter) return false
+    return true
+  })
 
   const unreadCount = notifications.filter(n => !n.read).length
 
@@ -112,7 +129,7 @@ export function NotificationCenter({ open, onClose, notifications, onMarkRead }:
         </div>
 
         {/* Filter tabs */}
-        <div className="px-3 py-2 border-b border-[var(--border)] flex gap-1">
+        <div className="px-3 py-2 border-b border-[var(--border)] flex items-center gap-1">
           {["all", "warning", "action", "critical"].map(f => (
             <button
               key={f}
@@ -126,6 +143,17 @@ export function NotificationCenter({ open, onClose, notifications, onMarkRead }:
               {f.toUpperCase()}
             </button>
           ))}
+          <select
+            aria-label="Filter by severity"
+            value={severityFilter}
+            onChange={e => setSeverityFilter(e.target.value)}
+            className="ml-auto px-1.5 py-0.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-[9px] text-[var(--foreground)]"
+          >
+            <option value="all">SEV: ALL</option>
+            <option value="P1">P1</option>
+            <option value="P2">P2</option>
+            <option value="P3">P3</option>
+          </select>
         </div>
 
         {/* Notification list */}
@@ -158,6 +186,19 @@ export function NotificationCenter({ open, onClose, notifications, onMarkRead }:
                           <span className="font-mono text-[9px] px-1 py-0.5 rounded" style={{ backgroundColor: cfg.bg, color: cfg.color }}>
                             {cfg.label}
                           </span>
+                          {n.severity && SEVERITY_CONFIG[n.severity] && (
+                            <span
+                              data-testid={`severity-badge-${n.severity}`}
+                              aria-label={`severity ${n.severity}`}
+                              className="font-mono text-[9px] px-1 py-0.5 rounded font-semibold"
+                              style={{
+                                backgroundColor: SEVERITY_CONFIG[n.severity].bg,
+                                color: SEVERITY_CONFIG[n.severity].color,
+                              }}
+                            >
+                              {SEVERITY_CONFIG[n.severity].label}
+                            </span>
+                          )}
                           {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-[var(--neural-blue)]" />}
                           <span className="font-mono text-[9px] text-[var(--muted-foreground)] ml-auto shrink-0">
                             {n.timestamp.includes("T") ? n.timestamp.split("T")[1]?.slice(0, 8) : n.timestamp}

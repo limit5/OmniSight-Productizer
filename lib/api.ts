@@ -37,7 +37,7 @@ export type SSEEvent =
   | { event: "container"; data: { agent_id: string; action: string; detail: string; timestamp: string } }
   | { event: "invoke"; data: { action_type: string; detail: string; timestamp: string } }
   | { event: "token_warning"; data: { level: string; message: string; usage: number; budget: number; timestamp: string } }
-  | { event: "notification"; data: { id: string; level: string; title: string; message: string; source: string; timestamp: string; action_url?: string; action_label?: string } }
+  | { event: "notification"; data: { id: string; level: string; title: string; message: string; source: string; timestamp: string; action_url?: string; action_label?: string; severity?: string | null } }
   | { event: "artifact_created"; data: { id: string; name: string; type: string; task_id: string; agent_id: string; size: number } }
   | { event: "simulation"; data: { sim_id: string; action: "start" | "progress" | "result"; detail: string; status?: string; track?: string; module?: string; tests_total?: number; tests_passed?: number; tests_failed?: number; timestamp: string } }
   | { event: "debug_finding"; data: { id: string; task_id: string; agent_id: string; finding_type: string; severity: string; message: string; timestamp: string } }
@@ -3612,6 +3612,8 @@ export async function resetTokenFreeze() {
 
 // ─── Notifications ───
 
+export type NotificationSeverity = "P1" | "P2" | "P3"
+
 export interface NotificationItem {
   id: string
   level: "info" | "warning" | "action" | "critical"
@@ -3622,6 +3624,9 @@ export interface NotificationItem {
   read: boolean
   action_url?: string
   action_label?: string
+  // R9 row 2935 / 2946 (#315): orthogonal P1/P2/P3 tag from
+  // backend.severity. ``null`` / absent for legacy callers.
+  severity?: NotificationSeverity | null
 }
 
 export async function getNotifications(limit: number = 50, level?: string) {

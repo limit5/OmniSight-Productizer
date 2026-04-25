@@ -316,13 +316,18 @@ export function useEngine() {
               logMsg = `[NOTIFY:${level.toUpperCase()}] ${d.title}`
               if (d.message) logMsg += `: ${(d.message as string).slice(0, 60)}`
               logLevel = level === "critical" || level === "action" ? "error" : level === "warning" ? "warn" : "info"
-              // Add to notifications list and increment unread
+              // Add to notifications list and increment unread.
+              // R9 row 2946 (#315): forward optional ``severity`` so
+              // the notification-center can render its per-card badge
+              // and apply the severity dropdown filter.
+              const sev = d.severity as string | null | undefined
               setNotifications(prev => [{
                 id: d.id as string, level: level as api.NotificationItem["level"],
                 title: d.title as string, message: (d.message as string) || "",
                 source: (d.source as string) || "", timestamp: ts,
                 read: false, action_url: d.action_url as string | undefined,
                 action_label: d.action_label as string | undefined,
+                severity: (sev === "P1" || sev === "P2" || sev === "P3") ? sev : null,
               }, ...prev.slice(0, 49)])
               setUnreadCount(prev => prev + 1)
             } else if (event.event === "notification.read") {
