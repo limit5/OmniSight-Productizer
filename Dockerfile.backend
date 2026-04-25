@@ -95,6 +95,13 @@ COPY configs/ ./configs/
 COPY scripts/ ./scripts/
 COPY CLAUDE.md ./
 COPY .env.example ./.env.example
+# R20 Phase 0 (2026-04-25): docs/ is required for the classification-
+# gated RAG corpus that ``backend.rag`` walks at startup. Only docs
+# whose audience matches the calling user's role become retrievable —
+# ``internal``-tagged docs and any doc in an unrecognised directory
+# stay invisible to chat. See ``backend/rag/corpus.py``.
+COPY docs/ ./docs/
+COPY README.md ./
 
 RUN rm -rf ./backend/tests ./backend/.pytest_cache
 

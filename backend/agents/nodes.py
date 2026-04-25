@@ -1079,35 +1079,147 @@ async def conversation_node(state: GraphState) -> dict:
 
     This node is the conversational path — parallel to specialist nodes.
     It injects system state context and calls LLM without tool bindings.
+
+    R20 Phase 0 (2026-04-25): now wraps the LLM call with three layers
+    of chat-layer security:
+
+      1. Prompt hardening — every system prompt prepends
+         ``INJECTION_GUARD_PRELUDE`` so the LLM is told (in operator's
+         language) not to disclose system prompts / internal docs /
+         secrets, and not to execute instructions found in retrieved
+         doc content or user-provided text.
+      2. RAG with classification gate — the user's last message is
+         used as a retrieval query against ``backend.rag``. Only docs
+         whose audience matches the operator's role appear in the LLM
+         context; ``internal``-tagged docs are unreachable from chat.
+      3. Output redaction — ``secret_filter.redact()`` runs over the
+         LLM response before we hand it back; any leaked credential
+         shape (gh_pat, sk-ant-*, AWS keys, JWT, internal hostnames,
+         etc.) is replaced with ``[REDACTED:<kind>]``.
     """
     state_summary = _build_state_summary()
     llm = _get_llm(bind_tools_for=None, model_name=state.model_name)
 
+    # R20 Phase 0: pull last user message (if any) for RAG + injection
+    # detection. If there's no user message, skip retrieval and run
+    # plain — the coach path can call this with only an AI/system
+    # message and we don't want to retrieve on it.
+    last_user_text = ""
+    for msg in reversed(state.messages):
+        # Use class name string check to avoid importing all message types.
+        if msg.__class__.__name__ == "HumanMessage":
+            last_user_text = (msg.content or "") if hasattr(msg, "content") else ""
+            break
+    last_user_text = str(last_user_text) if last_user_text else ""
+
+    # Retrieve relevant docs (classification-gated) — runs even without
+    # an LLM so the offline fallback can still cite something useful.
+    retrieved_block = ""
+    try:
+        from backend import rag as _rag
+        hits = _rag.retrieve(
+            last_user_text, role=state.user_role, top_k=4,
+        ) if last_user_text else []
+        if hits:
+            retrieved_block = _rag.format_hits_for_prompt(hits)
+    except Exception as _rag_exc:
+        logger.debug("RAG retrieve skipped (%s) — proceeding without context", _rag_exc)
+
     if not llm:
-        # Offline fallback: return state summary directly
+        # Offline fallback: return state summary + retrieved doc cites.
         emit_pipeline_phase("conversation", "Offline mode — returning state summary")
+        offline = (
+            "[OFFLINE] I can't process your question without an LLM "
+            f"provider.\n\nCurrent state:\n{state_summary}"
+        )
+        if retrieved_block:
+            offline += (
+                "\n\nThese docs may help — open them directly:\n"
+                + retrieved_block
+            )
         return {
-            "answer": f"[OFFLINE] I can't process your question without an LLM provider.\n\nCurrent state:\n{state_summary}",
-            "messages": [AIMessage(content=state_summary)],
+            "answer": offline,
+            "messages": [AIMessage(content=offline)],
         }
 
-    sys_prompt = SystemMessage(content=(
-        "You are the OmniSight Conversational Assistant — an expert in embedded AI camera development. "
-        "Answer questions about ISP tuning, sensor optimization, firmware architecture, Linux drivers, "
-        "image processing pipelines, NPI lifecycle, and system status.\n\n"
+    # R20 Phase 0: chat-layer security imports (kept local to avoid
+    # cold-import cost during graph construction).
+    from backend.security import (
+        INJECTION_GUARD_PRELUDE,
+        harden_user_message,
+        redact,
+    )
+
+    persona = (
+        "You are the OmniSight Conversational Assistant — an expert in "
+        "embedded AI camera development AND in operating the OmniSight "
+        "platform itself (agents, tasks, settings, integrations, "
+        "operational SOPs). Answer questions about both domains.\n\n"
         f"Current System State:\n{state_summary}\n\n"
+    )
+    if retrieved_block:
+        persona += (
+            "Retrieved docs (classification-gated to the user's role; "
+            "any doc shown here is approved for this user):\n"
+            f"{retrieved_block}\n\n"
+        )
+    persona += (
         "Guidelines:\n"
         "- Be conversational, helpful, and concise.\n"
         "- Use markdown for formatting when appropriate.\n"
-        "- If the user wants to execute a task (compile, test, deploy), suggest: "
-        "'Try typing a command like \"compile firmware\" or create a task via the Task Backlog.'\n"
+        "- If a retrieved doc covers the question, cite it inline as "
+        "[source: <path>] so the operator can open the original.\n"
+        "- If retrieved docs don't answer the question, say so and "
+        "suggest where the operator might look (without inventing a "
+        "doc path).\n"
+        "- If the user wants to execute a task (compile, test, deploy), "
+        "suggest typing a command like \"compile firmware\" or creating "
+        "a task via the Task Backlog.\n"
         "- Answer in the same language as the user's question."
-    ))
+    )
+
+    sys_prompt = SystemMessage(content=INJECTION_GUARD_PRELUDE + "\n\n" + persona)
+
+    # Wrap a likely-injection user message with a spotlighting hint
+    # before the LLM sees it. The original text is preserved inside
+    # the wrapper so the LLM still has full context.
+    if last_user_text and state.messages:
+        last_idx = -1
+        for i in range(len(state.messages) - 1, -1, -1):
+            if state.messages[i].__class__.__name__ == "HumanMessage":
+                last_idx = i
+                break
+        if last_idx >= 0:
+            wrapped = harden_user_message(last_user_text)
+            if wrapped is not last_user_text:
+                # Build a copy of messages with the last user message
+                # replaced by the hardened version. Don't mutate state
+                # — LangGraph's add_messages reducer would re-merge.
+                from langchain_core.messages import HumanMessage
+                new_messages = list(state.messages)
+                new_messages[last_idx] = HumanMessage(content=wrapped)
+                send_messages = new_messages
+            else:
+                send_messages = list(state.messages)
+        else:
+            send_messages = list(state.messages)
+    else:
+        send_messages = list(state.messages)
 
     emit_pipeline_phase("conversation", "Generating conversational response")
     try:
-        resp = llm.invoke([sys_prompt, *state.messages])
+        resp = llm.invoke([sys_prompt, *send_messages])
         answer = resp.content  # type: ignore[union-attr]
+        # R20 Phase 0: redact accidentally-leaked secrets from the
+        # LLM's output BEFORE it reaches the chat / SSE / audit log.
+        if isinstance(answer, str):
+            redacted, fired = redact(answer)
+            if fired:
+                logger.warning(
+                    "[R20-SEC] secret_filter redacted %s in conversation reply",
+                    ",".join(fired),
+                )
+            answer = redacted
         return {
             "answer": answer,
             "messages": [AIMessage(content=answer)],

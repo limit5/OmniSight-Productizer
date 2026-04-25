@@ -1296,21 +1296,45 @@ def _build_templated_coach_message(
 
 
 async def _generate_coach_message(action: dict) -> str:
-    """Compose the coach message: LLM-driven if available, templated fallback."""
+    """Compose the coach message: LLM-driven if available, templated fallback.
+
+    R20 Phase 0 (2026-04-25): wraps the LLM call with the shared
+    chat-layer security stack — ``INJECTION_GUARD_PRELUDE`` prepended
+    to the persona prompt so the coach respects the same rules as
+    ``conversation_node``, and ``secret_filter.redact()`` over the
+    output. The coach prompt itself never includes user-controlled
+    text in its system message (it's driven entirely by the planner-
+    generated ``triggers`` list), so injection risk here is lower
+    than ``conversation_node`` — but layering the same guards keeps
+    the security model uniform across every chat-facing LLM call.
+    """
     triggers = list(action.get("triggers") or [])
     pending = int(action.get("pending_count") or 0)
     fallback = _build_templated_coach_message(triggers, pending)
     try:
         from backend.agents.nodes import _get_llm
+        from backend.security import INJECTION_GUARD_PRELUDE, redact
         from langchain_core.messages import HumanMessage, SystemMessage
         llm = _get_llm(bind_tools_for=None)
         if not llm:
             return fallback
-        sys = SystemMessage(content=_COACH_SYSTEM_PROMPT)
+        sys = SystemMessage(
+            content=INJECTION_GUARD_PRELUDE + "\n\n" + _COACH_SYSTEM_PROMPT,
+        )
         ctx = HumanMessage(content=_build_coach_context(triggers, pending))
         resp = llm.invoke([sys, ctx])
         out = (resp.content or "").strip() if hasattr(resp, "content") else ""  # type: ignore[union-attr]
-        return out or fallback
+        if not out:
+            return fallback
+        # Redact any accidentally-leaked secrets/internal hosts before
+        # the message reaches the operator's chat.
+        redacted, fired = redact(out)
+        if fired:
+            logger.warning(
+                "[R20-SEC] secret_filter redacted %s in coach reply",
+                ",".join(fired),
+            )
+        return redacted
     except Exception as exc:
         logger.debug("coach LLM failed (%s) — using templated fallback", exc)
         return fallback

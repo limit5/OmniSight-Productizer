@@ -71,6 +71,13 @@ class GraphState(BaseModel):
     task_skill_context: str = ""  # Anthropic SKILL.md content for task-specific guidance
     is_conversational: bool = False  # True = conversation mode (no tools), False = task execution
 
+    # R20 Phase 0 (2026-04-25): role of the user driving this graph run.
+    # Threaded into ``conversation_node``'s RAG retrieval so the
+    # classification gate filters by this role. Defaults to ``operator``
+    # — the most common case — because anonymous LangGraph runs only
+    # happen in admin-driven tooling. Values: anonymous / operator / admin.
+    user_role: str = "operator"
+
     # Gerrit Code Review context
     gerrit_change_id: str = ""
     gerrit_commit: str = ""
