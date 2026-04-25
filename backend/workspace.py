@@ -377,6 +377,209 @@ async def finalize(agent_id: str) -> dict:
     return result
 
 
+async def discard_and_recreate(
+    agent_id: str,
+    anchor_sha: str,
+    reason: str = "retry",
+) -> WorkspaceInfo:
+    """R8 #314 retry primitive — reset workspace to its anchor commit.
+
+    Replaces the whitepaper §三.2 ``git clean -fd`` + ``git checkout .``
+    recipe with a *fresh-from-anchor* worktree per
+    ``docs/design/r8-idempotent-retry-worktree.md``: destroy the old
+    worktree (``git worktree remove --force`` then ``shutil.rmtree``
+    fallback so a half-removed dir cannot block the recreate), drop the
+    branch ref, then ``git worktree add -b <branch> <ws_path>
+    <anchor_sha>`` to materialise a brand-new working tree at the
+    immutable retry target. Agent commits made past the anchor are
+    abandoned by design — the whole point of retry is "back to the
+    pristine starting state".
+
+    Same logical path is reused (``info.path``) so the registry entry,
+    SSE subscribers, and any path-bound consumers stay coherent across
+    retry — only the working-tree contents change.
+
+    Args:
+        agent_id: Owner of an active workspace already in the registry.
+        anchor_sha: Immutable commit SHA captured by ``provision()``
+            (``WorkspaceInfo.anchor_sha``). Required; transitional
+            legacy NULL-fallback per design §5 is the *caller's*
+            responsibility, not this function's.
+        reason: Free-form short label ("retry", "rollback", ...) —
+            surfaced on the ``workspace.retried`` SSE event so
+            operators can tell scheduled retries from operator-driven
+            ChatOps rollbacks. Audit-log persistence is row 2874's
+            scope, not this row's.
+
+    Returns:
+        Same ``WorkspaceInfo`` instance with ``commit_count`` reset to
+        0 and ``status`` back to "active". ``path``, ``branch`` and
+        ``anchor_sha`` are unchanged so callers' references stay valid.
+
+    Raises:
+        KeyError: ``agent_id`` not in the active workspace registry.
+        ValueError: ``anchor_sha`` is empty/whitespace.
+        RuntimeError: ``git worktree add`` failed (anchor SHA not in
+            object store, branch ref still locked, disk full, or the
+            old worktree dir could not be cleared and now blocks the
+            recreate).
+    """
+    info = _workspaces.get(agent_id)
+    if info is None:
+        raise KeyError(f"No active workspace for {agent_id}")
+    if not anchor_sha or not anchor_sha.strip():
+        raise ValueError(
+            f"anchor_sha required for discard_and_recreate({agent_id!r}); "
+            "legacy CATC payloads predating R8 must use the transitional "
+            "fallback path before calling (see r8 design doc §5)."
+        )
+
+    anchor_sha = anchor_sha.strip()
+    ws_path = info.path
+    branch = info.branch
+    source = info.repo_source
+
+    # Snapshot the old branch tip *before* destroying anything so
+    # downstream callers (audit row 2874) get a meaningful before-state.
+    # Failures to read are expected (worktree may already be broken —
+    # that's why we're here) and are silently squashed.
+    old_branch_tip = ""
+    if ws_path.exists():
+        rc, out, _ = await _run("git rev-parse HEAD 2>/dev/null", cwd=ws_path)
+        if rc == 0:
+            old_branch_tip = out.strip()
+
+    is_local = (
+        not source.startswith("http")
+        and not source.startswith("ssh://")
+        and not source.startswith("git@")
+    )
+    src_repo = Path(source) if is_local and Path(source).is_dir() else _MAIN_REPO
+
+    emit_pipeline_phase(
+        "workspace_recreate",
+        f"Discarding {agent_id} workspace, recreating from anchor {anchor_sha[:12]} ({reason})",
+    )
+
+    # Step 1: ``git worktree remove --force`` is preferred — it not
+    # only deletes the working tree but also drops the
+    # ``.git/worktrees/<name>/`` admin block. Failures (worktree
+    # metadata already gone, lockfile present, dir externally rm'd)
+    # are tolerated; Step 2 covers the dir-still-exists case.
+    if ws_path.exists():
+        await _run(
+            f'git worktree remove --force "{ws_path}" 2>/dev/null',
+            cwd=src_repo,
+        )
+
+    # Step 2: rmtree fallback. If git refused or the dir was orphaned
+    # (no admin block, plain dir), we still need it gone before
+    # ``git worktree add`` can re-create at the same path. Best-effort
+    # — if rmtree itself fails the next step's add will surface a
+    # clean RuntimeError instead of us masking it here.
+    if ws_path.exists():
+        try:
+            shutil.rmtree(ws_path)
+        except OSError as exc:
+            logger.warning(
+                "discard_and_recreate: rmtree fallback failed for %s: %s",
+                ws_path, exc,
+            )
+
+    # Step 3: prune dangling ``.git/worktrees/`` admin entries that
+    # don't have a working tree on disk anymore (covers the case where
+    # someone rm -rf'd the workspace dir but git still thinks it
+    # exists).
+    await _run("git worktree prune", cwd=src_repo)
+
+    # Step 4: drop the agent branch in the source repo. Without this
+    # ``git worktree add -b <branch>`` would refuse with "already
+    # exists". Agent commits past the anchor are abandoned by design;
+    # they remain unreachable in the object store until ``git gc``.
+    await _run(f'git branch -D "{branch}" 2>/dev/null', cwd=src_repo)
+
+    # Step 5: materialise the fresh worktree branched at anchor_sha.
+    if is_local and src_repo.is_dir():
+        rc, out, err = await _run(
+            f'git worktree add -b "{branch}" "{ws_path}" "{anchor_sha}"',
+            cwd=src_repo,
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"discard_and_recreate({agent_id!r}): worktree add from "
+                f"anchor {anchor_sha[:12]} failed: {err or out}"
+            )
+    else:
+        # External clone path — re-clone, then check out the anchor on
+        # the agent branch. Anchor was the post-clone HEAD originally,
+        # so it is normally still reachable from origin/HEAD; ``fetch
+        # origin <sha>`` is a defensive no-op when already present.
+        if any(c in source for c in ('`', '$', ';', '|', '&', '\n')):
+            raise ValueError(f"Invalid characters in repo source URL: {source}")
+        from backend.git_auth import get_auth_env
+        auth_env = get_auth_env(source)
+        rc, out, err = await _run(
+            f'git clone "{source}" "{ws_path}"', extra_env=auth_env,
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"discard_and_recreate({agent_id!r}): re-clone failed: "
+                f"{err or out}"
+            )
+        await _run(
+            f'git fetch origin "{anchor_sha}" 2>/dev/null || true',
+            cwd=ws_path, extra_env=auth_env,
+        )
+        rc, out, err = await _run(
+            f'git checkout -b "{branch}" "{anchor_sha}"', cwd=ws_path,
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"discard_and_recreate({agent_id!r}): checkout anchor "
+                f"{anchor_sha[:12]} failed: {err or out}"
+            )
+
+    # Restore the per-workspace git identity that ``provision()`` set up.
+    # Without this an immediate ``git commit`` from the agent would
+    # inherit the host's global identity (or fail under strict-ident
+    # mode). H9 sanitisation: agent_id reaches a shell so use safe_agent.
+    import re as _re
+    safe_agent = _re.sub(r'[^a-zA-Z0-9_-]', '_', agent_id)
+    await _run(f'git config user.name "Agent-{safe_agent}"', cwd=ws_path)
+    await _run(f'git config user.email "{safe_agent}@omnisight.local"', cwd=ws_path)
+
+    # Restore the ``/test_assets/`` gitignore line so accidental
+    # ``git add -A`` over a sandbox bind-mount doesn't try to track
+    # the read-only ground-truth tree (CLAUDE.md Safety Rule).
+    gitignore = ws_path / ".gitignore"
+    existing = gitignore.read_text().splitlines() if gitignore.exists() else []
+    additions = [e for e in ["/test_assets/"] if e not in existing]
+    if additions:
+        with open(gitignore, "a") as f:
+            f.write("\n".join([""] + additions + [""]))
+
+    # Registry update — same path/branch/anchor, fresh contents. The
+    # agent's prior commit_count is gone with the discarded branch.
+    info.commit_count = 0
+    info.status = "active"
+
+    emit_workspace(
+        agent_id,
+        "retried",
+        f"branch={branch}, anchor={anchor_sha[:12]}, "
+        f"old_tip={old_branch_tip[:12] or 'none'}, reason={reason}",
+    )
+    emit_agent_update(
+        agent_id, "running",
+        f"Workspace recreated from anchor {anchor_sha[:12]}",
+    )
+    logger.info(
+        "Workspace discarded+recreated: %s → %s (anchor=%s, reason=%s)",
+        agent_id, ws_path, anchor_sha[:12], reason,
+    )
+    return info
+
+
 async def cleanup_stale_locks():
     """Remove .git/index.lock files left from interrupted operations.
 
