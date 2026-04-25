@@ -151,6 +151,19 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # composite ``(user_id, tenant_id)`` — both TEXT — so NOT in
     # TABLES_WITH_IDENTITY_ID.
     "user_tenant_memberships",
+    # Y1 row 2 (#277, alembic 0033): project layer. FKs
+    # ``tenant_id → tenants.id`` (CASCADE), ``parent_id → projects.id``
+    # (SET NULL, self-FK), ``created_by → users.id`` (SET NULL) so it
+    # MUST replay after both ``tenants`` and ``users``.  Self-FK on
+    # ``parent_id`` means rows must be ordered topologically within
+    # the table dump (parent before children); the migrator's per-row
+    # batched insert mode honours sqlite ROWID order — we rely on the
+    # backfill row to insert default top-level projects first, which
+    # gets natural-order inserted before any nested child.  PK is
+    # TEXT (``p-*``) — NOT in TABLES_WITH_IDENTITY_ID.  Placed before
+    # ``project_runs`` so the eventual hard FK ``project_runs.project_id
+    # → projects.id`` (added in a later Y1 row) replays cleanly.
+    "projects",
     # MFA tables — all have FK ``user_id → users.id`` so they MUST
     # come after users in the replay order.
     "user_mfa",

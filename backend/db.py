@@ -683,6 +683,47 @@ CREATE INDEX IF NOT EXISTS idx_user_tenant_memberships_active
     ON user_tenant_memberships(tenant_id, user_id)
     WHERE status = 'active';
 
+-- Y1 row 2 (#277): project layer between tenants and per-workload
+-- business tables. plan_override / disk_budget_bytes / llm_budget_tokens
+-- are NULL ⇒ inherit from the parent tenant. parent_id self-FK uses
+-- ON DELETE SET NULL so a deleted parent promotes its children to
+-- top-level rather than cascading away their attached workloads.
+-- Mirrors alembic 0033_projects.py — keep in sync.
+CREATE TABLE IF NOT EXISTS projects (
+    id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    product_line        TEXT NOT NULL DEFAULT 'default',
+    name                TEXT NOT NULL,
+    slug                TEXT NOT NULL,
+    parent_id           TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    plan_override       TEXT,
+    disk_budget_bytes   INTEGER,
+    llm_budget_tokens   INTEGER,
+    created_by          TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    archived_at         TEXT,
+    UNIQUE (tenant_id, product_line, slug),
+    CHECK (parent_id IS NULL OR parent_id <> id),
+    CHECK (
+        plan_override IS NULL
+        OR plan_override IN ('free', 'starter', 'pro', 'enterprise')
+    ),
+    CHECK (disk_budget_bytes IS NULL OR disk_budget_bytes >= 0),
+    CHECK (llm_budget_tokens IS NULL OR llm_budget_tokens >= 0),
+    CHECK (length(name) >= 1 AND length(name) <= 200),
+    CHECK (length(slug) >= 1 AND length(slug) <= 64),
+    CHECK (length(product_line) >= 1 AND length(product_line) <= 64)
+);
+CREATE INDEX IF NOT EXISTS idx_projects_parent
+    ON projects(parent_id)
+    WHERE parent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_projects_tenant_active
+    ON projects(tenant_id)
+    WHERE archived_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_projects_created_by
+    ON projects(created_by)
+    WHERE created_by IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS sessions (
     token           TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL,
