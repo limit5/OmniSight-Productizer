@@ -319,6 +319,11 @@ async def lifespan(app: FastAPI):
     # Phase 52: Webhook DLQ retry worker
     from backend import notifications as _notif
     dlq_task = asyncio.create_task(_notif.run_dlq_loop())
+    # R9 row 2940 (#315): P3 → L1 log + email digest periodic flusher.
+    # Singleton-guarded; when SMTP is unconfigured the loop still runs
+    # (it falls back to a structured log line per flush) so the sweep
+    # is always cleanly drained on shutdown.
+    digest_task = asyncio.create_task(_notif.run_email_digest_loop())
     # Phase 63-D: Daily IQ benchmark loop (opt-in L3, gated by env).
     from backend import iq_nightly as _iq
     iq_task = asyncio.create_task(_iq.run_nightly_loop())
@@ -375,7 +380,7 @@ async def lifespan(app: FastAPI):
         _log.info("[lifecycle] graceful_shutdown result: %s", result)
     except Exception as exc:
         _log.warning("[lifecycle] graceful_shutdown raised: %s", exc)
-    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, balance_task, drf_task, quota_task, drafts_gc_task, host_metrics_task, host_ringbuf_task):
+    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task, iq_task, ft_task, md_task, balance_task, drf_task, quota_task, drafts_gc_task, host_metrics_task, host_ringbuf_task):
         t.cancel()
         try:
             await t

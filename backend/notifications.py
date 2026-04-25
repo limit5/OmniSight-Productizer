@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
+from collections import deque
 from datetime import datetime
 
 from backend.config import settings
@@ -19,6 +21,54 @@ from backend.events import bus
 from backend.models import Notification, NotificationLevel, Severity
 
 logger = logging.getLogger(__name__)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  R9 row 2940 (#315): L1 log + email digest module-global state
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Module-global state audit (SOP Step 1, qualifying answer #3 —
+# **deliberately per-worker**):
+#
+# ``_DIGEST_BUFFER`` is a per-process bounded deque that aggregates P3
+# (auto-recovery) notifications between flush ticks. Multi-worker prod
+# (``uvicorn --workers N``) gives each worker its own buffer + own
+# ``run_email_digest_loop`` background task — so the operator may
+# receive up to N digest emails per interval (one per worker).
+#
+# Why **NOT** Redis-coordinated like RateLimiter / SharedState:
+#
+#   1. P3 is informational — auto-recovery confirmed, no human action
+#      required. Email duplication across workers is benign noise; the
+#      Subject: line carries the worker PID so operator can mentally
+#      dedupe if it matters.
+#   2. P3 volume is bounded per-worker (a single worker can only
+#      auto-recover so many tasks per hour). The digest cap (default
+#      500 events) is far above realistic load.
+#   3. Adding Redis coordination doubles the failure surface of the
+#      digest path (Redis down → digest stops → operator stops getting
+#      summaries). Per-worker state degrades gracefully — one worker
+#      restarts and only loses its own pending events.
+#   4. SMTP itself is an external service whose failure modes already
+#      dominate the digest reliability budget. Adding a second hop
+#      doesn't move the needle.
+#
+# Compare to the SMS / PagerDuty / Slack / Jira legs which carry
+# durable / action-required content (dispatch_status three-state =
+# {sent, failed, dead}); those *do* need the DLQ retry worker. P3
+# digest is best-effort by design — a missed digest is recoverable by
+# the operator running ``SELECT * FROM notifications WHERE
+# severity='P3' AND created_at > ...`` (the row is persisted on the
+# ``notify()`` path before this leg ever fires).
+#
+# Buffer size is capped at ``settings.notification_email_digest_max_
+# buffer`` via ``deque(maxlen=...)`` — overflow silently drops oldest;
+# a single-line warning is logged on first overflow per interval to
+# tip off the operator without spamming the log.
+
+_DIGEST_BUFFER: "deque[Notification]" = deque(maxlen=500)
+_DIGEST_OVERFLOW_WARNED = False
+_DIGEST_RUNNING = False
 
 
 async def notify(
@@ -108,8 +158,15 @@ async def notify(
         "severity": severity_str,
     })
 
-    # 3. Route to external channels based on level
-    if level_str in ("warning", "action", "critical"):
+    # 3. Route to external channels based on level OR severity tag.
+    #    R9 row 2940 (#315) — adding ``severity_str`` to the gate so a P3
+    #    caller passing ``level="info"`` (the default) still reaches
+    #    ``_dispatch_external``, where the new ``L1_LOG_EMAIL`` fan-out
+    #    leg appends the event to the digest buffer. P1/P2 already
+    #    reached the dispatcher via their natural ``critical``/``action``
+    #    levels, but P3 is informational and would otherwise be dropped
+    #    by the legacy level-only gate.
+    if level_str in ("warning", "action", "critical") or severity_str:
         asyncio.create_task(_dispatch_external(notif))
 
     # R1 (#307): interactive mirror to ChatOps bridge. Non-fatal if
@@ -119,10 +176,13 @@ async def notify(
             notif, interactive_channel, interactive_buttons or [],
         ))
 
-    # 4. Log
+    # 4. Log — R9 row 2940 (#315) attaches ``[severity:P*]`` tag inline
+    #    so log scrapers / SIEM rules can filter on it without needing
+    #    to join against the notifications table.
     from backend.routers.system import add_system_log
     log_level = {"info": "info", "warning": "warn", "action": "error", "critical": "error"}.get(level_str, "info")
-    add_system_log(f"[NOTIFY:{level_str.upper()}] {title}", log_level)
+    sev_tag = f"[severity:{severity_str}]" if severity_str else ""
+    add_system_log(f"[NOTIFY:{level_str.upper()}]{sev_tag} {title}", log_level)
 
     return notif
 
@@ -161,6 +221,7 @@ async def _dispatch_external(notif: Notification) -> None:
     from backend import db
     from backend.db_pool import get_pool
     from backend.severity import (
+        L1_LOG_EMAIL,
         L2_CHATOPS_INTERACTIVE,
         L2_IM_WEBHOOK,
         L3_JIRA,
@@ -197,6 +258,11 @@ async def _dispatch_external(notif: Notification) -> None:
     # operator-action surface for P2 (任務卡死) — Jira tracks the
     # ticket, ChatOps surfaces it for live triage with default buttons.
     fire_chatops = L2_CHATOPS_INTERACTIVE in severity_tiers
+    # R9 row 2940: L1 log + email digest is *severity-only* (currently
+    # only ``P3`` activates it via SEVERITY_TIER_MAPPING). Best-effort,
+    # never counted toward dispatch_status — the durable record is the
+    # ``notifications`` row already persisted in ``notify()``.
+    fire_log_email = L1_LOG_EMAIL in severity_tiers
 
     # L2+: IM (Slack/Teams/Discord — the webhook URL is opaque to us;
     # P1 mention text uses both Slack ``<!channel>`` and Discord
@@ -239,6 +305,15 @@ async def _dispatch_external(notif: Notification) -> None:
     # ``dispatch_status=failed`` (Jira leg already covers durability).
     if fire_chatops:
         asyncio.create_task(_dispatch_chatops_severity(notif))
+
+    # R9 row 2940: L1 log + email digest. Synchronous (microseconds —
+    # appends to a deque + emits one log line); not counted toward
+    # ``any_required`` / ``errors`` because the durable record is the
+    # ``notifications`` row already persisted by ``notify()``. The
+    # ``_flush_email_digest`` background loop drains the buffer on a
+    # configurable interval (default 1h).
+    if fire_log_email:
+        _dispatch_log_email(notif)
 
     if not any_required:
         # No external channels configured for this level
@@ -354,6 +429,258 @@ async def _dispatch_chatops_severity(notif: Notification) -> None:
         logger.warning(
             "ChatOps severity-driven dispatch failed for %s: %s", notif.id, exc,
         )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  R9 row 2940 (#315): P3 → L1 log + email digest
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _dispatch_log_email(notif: Notification) -> None:
+    """L1 log + email digest leg for ``severity=P3`` (auto-recovery).
+
+    Two synchronous side-effects per call:
+
+      1. Emit a structured log line (`logger.info` + `add_system_log`)
+         tagged ``[severity:P3]`` so SIEM rules / log scrapers can pick
+         the event up without reading the SSE bus or DB.
+      2. Append the notification to the per-process digest buffer; the
+         background ``run_email_digest_loop`` flushes the buffer either
+         on its interval tick or when an explicit flush is requested.
+
+    Synchronous (no ``async``) because both side-effects are trivial
+    in-memory operations — appending to a deque + writing a log line —
+    and forcing this through ``asyncio.create_task`` would burn a task
+    object per P3 event for no benefit. The actual SMTP send is
+    deferred to ``_flush_email_digest`` which IS async (network I/O).
+
+    Buffer overflow policy: ``_DIGEST_BUFFER`` is a bounded deque
+    (``maxlen=settings.notification_email_digest_max_buffer``);
+    ``deque(maxlen=...)`` silently drops oldest on overflow. We log a
+    one-line warning the first time per interval so an operator who
+    just had a flood of P3 events knows their digest may be lossy
+    without spamming the log on every subsequent event.
+    """
+    global _DIGEST_OVERFLOW_WARNED
+    sev = notif.severity.value if notif.severity is not None else None
+
+    # Log leg: structured one-liner, severity-tagged so log filters can
+    # pick it up. We log at INFO regardless of notif.level — P3 is the
+    # "informational" tier and P3 events shouldn't pollute warning/error
+    # log streams even if the underlying caller passed level=critical.
+    logger.info(
+        "P3 auto-recovery: %s — %s (source=%s, id=%s)",
+        notif.title, notif.message or "", notif.source or "(unknown)", notif.id,
+    )
+    try:
+        from backend.routers.system import add_system_log
+        add_system_log(
+            f"[L1_LOG_EMAIL][severity:{sev}] {notif.title}", "info",
+        )
+    except Exception as exc:
+        # add_system_log is best-effort — the logger.info above already
+        # captured the event. Don't propagate.
+        logger.debug("add_system_log unavailable for digest log leg: %s", exc)
+
+    # Resize buffer if config changed since module-load (operator may
+    # have raised the cap without restarting). Cheap O(1) check.
+    cap = max(1, int(settings.notification_email_digest_max_buffer or 500))
+    if _DIGEST_BUFFER.maxlen != cap:
+        _resize_digest_buffer(cap)
+
+    overflow = len(_DIGEST_BUFFER) >= (_DIGEST_BUFFER.maxlen or cap)
+    _DIGEST_BUFFER.append(notif)
+    if overflow and not _DIGEST_OVERFLOW_WARNED:
+        logger.warning(
+            "P3 digest buffer at cap (%d) — oldest events being dropped "
+            "until next flush. Raise OMNISIGHT_NOTIFICATION_EMAIL_DIGEST_"
+            "MAX_BUFFER or shorten OMNISIGHT_NOTIFICATION_EMAIL_DIGEST_"
+            "INTERVAL_S if this persists.",
+            _DIGEST_BUFFER.maxlen,
+        )
+        _DIGEST_OVERFLOW_WARNED = True
+
+
+def _resize_digest_buffer(new_cap: int) -> None:
+    """Replace the module-global buffer with one of a different cap,
+    preserving events already collected. Called when the operator
+    raises ``notification_email_digest_max_buffer`` without restarting.
+    """
+    global _DIGEST_BUFFER
+    keep = list(_DIGEST_BUFFER)[-new_cap:]
+    _DIGEST_BUFFER = deque(keep, maxlen=new_cap)
+
+
+def _drain_digest_buffer() -> list[Notification]:
+    """Atomically drain the buffer, returning what was there. Done in
+    one ``while`` loop because deque.popleft is thread-safe but the
+    ``len() + clear()`` pattern would race with a concurrent ``append``.
+    """
+    global _DIGEST_OVERFLOW_WARNED
+    drained: list[Notification] = []
+    while _DIGEST_BUFFER:
+        try:
+            drained.append(_DIGEST_BUFFER.popleft())
+        except IndexError:
+            break
+    _DIGEST_OVERFLOW_WARNED = False
+    return drained
+
+
+def _format_digest_email(events: list[Notification], pid: int) -> tuple[str, str]:
+    """Build (subject, body) for a P3 digest email covering ``events``.
+
+    Subject carries the worker PID so an operator with multi-worker
+    deployment can mentally dedupe identical-content digests arriving
+    from different workers — see the module-global state audit in the
+    file header for why per-worker digests are deliberate.
+    """
+    n = len(events)
+    subject = f"[OmniSight] P3 auto-recovery digest — {n} event(s) (worker pid={pid})"
+    lines = [
+        f"OmniSight P3 (auto-recovery) digest — {n} event(s) since last flush.",
+        f"Worker PID: {pid}",
+        "",
+        "Each entry below corresponds to a notification with severity=P3",
+        "(auto-recovery confirmed; no human action required). The full",
+        "record is in the notifications table.",
+        "",
+        "─" * 72,
+    ]
+    for ev in events:
+        sev = ev.severity.value if ev.severity is not None else "P3"
+        lines.append(f"[{ev.timestamp}] [severity:{sev}] {ev.title}")
+        lines.append(f"  source: {ev.source or '(unknown)'}")
+        if ev.message:
+            lines.append(f"  detail: {ev.message}")
+        lines.append(f"  id:     {ev.id}")
+        lines.append("")
+    body = "\n".join(lines)
+    return subject, body
+
+
+async def _flush_email_digest() -> dict[str, int]:
+    """Drain the digest buffer and ship its contents — either via SMTP
+    if configured, or as a single structured log line otherwise.
+
+    Returns ``{"events": N, "sent": 0|1, "fallback_logged": 0|1}`` so
+    the loop / tests can observe which path was taken without reading
+    log output.
+
+    SMTP send runs on a worker thread (``asyncio.to_thread``) so a slow
+    SMTP server doesn't pin the event loop; if SMTP fails we log a
+    warning and fall back to the log-only path so the digest is never
+    silently lost.
+    """
+    events = _drain_digest_buffer()
+    if not events:
+        return {"events": 0, "sent": 0, "fallback_logged": 0}
+
+    pid = os.getpid()
+    subject, body = _format_digest_email(events, pid)
+
+    smtp_host = (settings.notification_email_smtp_host or "").strip()
+    to_csv = (settings.notification_email_to or "").strip()
+    if not smtp_host or not to_csv:
+        # Log-only fallback — emit one digest summary log line that an
+        # operator's log aggregator can pipe to email if they didn't
+        # want to configure SMTP here. Body includes all events so the
+        # log stream IS the digest.
+        logger.info("P3 digest (log-only fallback, no SMTP configured): %s\n%s", subject, body)
+        try:
+            from backend.routers.system import add_system_log
+            add_system_log(
+                f"[DIGEST] {subject} — {len(events)} P3 event(s)", "info",
+            )
+        except Exception as exc:
+            logger.debug("add_system_log unavailable for digest fallback: %s", exc)
+        return {"events": len(events), "sent": 0, "fallback_logged": 1}
+
+    # SMTP send — runs on a worker thread, never blocks the event loop.
+    try:
+        await asyncio.to_thread(_smtp_send_digest, subject, body, to_csv)
+    except Exception as exc:
+        logger.warning(
+            "P3 digest SMTP send failed (events=%d): %s — falling back to log",
+            len(events), exc,
+        )
+        logger.info("P3 digest (SMTP fallback): %s\n%s", subject, body)
+        return {"events": len(events), "sent": 0, "fallback_logged": 1}
+    return {"events": len(events), "sent": 1, "fallback_logged": 0}
+
+
+def _smtp_send_digest(subject: str, body: str, to_csv: str) -> None:
+    """Blocking SMTP send — called via ``asyncio.to_thread``. Stdlib
+    ``smtplib`` + ``email.mime.text`` to avoid pulling a third-party
+    dependency for a leaf-level feature.
+
+    Recipients are CSV-split (matching the ``notification_sms_to``
+    pattern) so a single env knob handles single + multi-recipient
+    deployments.
+    """
+    import smtplib
+    from email.mime.text import MIMEText
+
+    host = settings.notification_email_smtp_host
+    port = int(settings.notification_email_smtp_port or 587)
+    user = settings.notification_email_smtp_user or ""
+    password = settings.notification_email_smtp_password or ""
+    use_tls = bool(settings.notification_email_smtp_use_tls)
+    sender = (settings.notification_email_from or user or "").strip()
+    if not sender:
+        raise RuntimeError(
+            "P3 digest: notification_email_from + notification_email_smtp_user "
+            "both empty; cannot derive From: header.",
+        )
+    recipients = [a.strip() for a in to_csv.split(",") if a.strip()]
+    if not recipients:
+        raise RuntimeError("P3 digest: notification_email_to has no addresses.")
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = ", ".join(recipients)
+
+    with smtplib.SMTP(host, port, timeout=30) as smtp:
+        smtp.ehlo()
+        if use_tls:
+            smtp.starttls()
+            smtp.ehlo()
+        if user and password:
+            smtp.login(user, password)
+        smtp.sendmail(sender, recipients, msg.as_string())
+
+
+async def run_email_digest_loop() -> None:
+    """Background coroutine that periodically flushes the P3 digest.
+
+    Interval = ``settings.notification_email_digest_interval_s`` (default
+    3600s = 1h), capped at [60s, 24h]. Singleton-guarded by
+    ``_DIGEST_RUNNING`` to mirror :func:`run_dlq_loop`'s second-start
+    no-op semantics.
+    """
+    global _DIGEST_RUNNING
+    if _DIGEST_RUNNING:
+        return
+    _DIGEST_RUNNING = True
+    interval = max(60, min(86400, int(settings.notification_email_digest_interval_s or 3600)))
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await _flush_email_digest()
+            except Exception as exc:
+                logger.warning("P3 digest sweep failed: %s", exc)
+    except asyncio.CancelledError:
+        # Drain final buffer on graceful shutdown so events queued in
+        # the last interval window aren't lost on restart.
+        try:
+            await _flush_email_digest()
+        except Exception as exc:
+            logger.warning("P3 digest final flush on shutdown failed: %s", exc)
+        raise
+    finally:
+        _DIGEST_RUNNING = False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

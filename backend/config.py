@@ -141,6 +141,19 @@ class Settings(BaseSettings):
     notification_sms_to: str = ""         # SMS destination (CSV; on-call phone number(s))
     notification_max_retries: int = 3     # Max retry attempts for failed dispatches
     notification_retry_backoff: int = 30  # Seconds between retry attempts (exponential)
+    # R9 row 2940 (#315) — L1_LOG_EMAIL leg for P3 (自動修復中) digest.
+    # All empty = digest still fires but only emits a structured summary
+    # log line (no SMTP send). Operators piping log aggregator → email
+    # can still get a digest without configuring SMTP here.
+    notification_email_smtp_host: str = ""     # SMTP hostname (empty = log-only fallback)
+    notification_email_smtp_port: int = 587    # SMTP port (587=submission/STARTTLS; 465=SMTPS; 25=plain)
+    notification_email_smtp_user: str = ""     # SMTP auth user (empty = no auth)
+    notification_email_smtp_password: str = "" # SMTP auth password
+    notification_email_smtp_use_tls: bool = True  # STARTTLS on port 587
+    notification_email_from: str = ""          # From: header (defaults to smtp_user when empty)
+    notification_email_to: str = ""            # CSV list of recipient addresses
+    notification_email_digest_interval_s: int = 3600  # 1h default — P3 is informational
+    notification_email_digest_max_buffer: int = 500   # Cap buffer; drop oldest on overflow
 
     # ── R1 (#307) ChatOps Interactive Integration ──
     chatops_discord_webhook: str = ""     # Discord Incoming Webhook URL (outbound)
