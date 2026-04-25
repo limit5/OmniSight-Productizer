@@ -23,6 +23,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -186,8 +187,260 @@ def cost_estimate(weight: SandboxCostWeight) -> CostEstimate:
     Convenience accessor so callers don't need to import the dict.
     Raises ``KeyError`` if a new enum member is added without a matching
     ``COST_WEIGHT_ESTIMATES`` row — caught by the drift-guard test.
+
+    Returns the **H4a hardcoded** value. Callers that want the
+    operator-calibrated value (when ``configs/sandbox_cost_weights.yaml``
+    has been ``--apply``\\ -ed by ``scripts/calibrate_sandbox_cost.py``)
+    should use :func:`effective_cost_estimate` instead.
     """
     return COST_WEIGHT_ESTIMATES[weight]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H4b row 2591 — Config-driven cost weights
+#
+#  The H4a values above are the *initial* design-time estimates. After
+#  the operator runs ``scripts/calibrate_sandbox_cost.py --apply``,
+#  ``configs/sandbox_cost_weights.yaml`` becomes the source of truth.
+#  This block adds an mtime-keyed loader so live runtime callers
+#  picking ``effective_*`` see the calibrated values without a process
+#  restart, and a per-field overlay so a partial yaml (e.g. tokens-only)
+#  still falls back to H4a metadata for memory_mb / cpu_cores.
+#
+#  Module-global state audit (SOP Step 1):
+#    * ``_overrides_cache`` is a tuple ``(mtime, parsed_dict)`` keyed
+#      by file mtime. Cross-worker safety: every uvicorn worker reads
+#      the same yaml file from disk → same parsed dict per worker
+#      (合格答案 #1 — "不共享，因為每 worker 從同樣來源推導出同樣的值").
+#      The calibrator writes via ``tmp + os.replace`` (atomic), so
+#      readers either see old mtime + old cache or new mtime + re-read,
+#      never a torn file.
+#    * ``_overrides_lock`` is a ``threading.Lock`` covering the cache
+#      read/write — sandbox_capacity is sometimes hit from sync paths
+#      (try_acquire) and sometimes from async paths, so a stdlib lock
+#      is the lowest-friction option.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_CONFIG_PATH: Path = (
+    Path(__file__).resolve().parent.parent / "configs" / "sandbox_cost_weights.yaml"
+)
+"""Default location operator's ``--apply`` writes to. Override via
+``OMNISIGHT_SANDBOX_COST_WEIGHTS_PATH`` for tests / non-default layouts."""
+
+_overrides_lock = threading.Lock()
+_overrides_cache: tuple[float, dict[str, dict[str, Any]]] | None = None
+"""``(mtime, parsed)`` pair. ``None`` until the first load attempt; an
+explicit ``(0.0, {})`` after a missing-file load so subsequent calls
+short-circuit until the file appears."""
+
+
+def _config_path() -> Path:
+    """Resolve the live yaml path — env override wins, then default."""
+    raw = os.environ.get("OMNISIGHT_SANDBOX_COST_WEIGHTS_PATH", "").strip()
+    return Path(raw) if raw else _CONFIG_PATH
+
+
+def _parse_weights_yaml(body: str) -> dict[str, dict[str, Any]]:
+    """Parse the calibrator's yaml. PyYAML preferred, scanner fallback.
+
+    Returns a dict keyed by class name with per-class fields the runtime
+    cares about (``tokens`` / ``memory_mb`` / ``cpu_cores``). Anything
+    else in the yaml (sample_count, mean_duration_s, …) is metadata for
+    the operator and is intentionally ignored here so a future yaml
+    schema bump only breaks the audit trail, not admission.
+    """
+    try:
+        import yaml  # type: ignore[import-not-found]
+        loaded = yaml.safe_load(body)
+    except ImportError:
+        return _parse_weights_via_scanner(body)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("sandbox_cost_weights.yaml: parse failed (%s); "
+                       "falling back to H4a hardcode", exc)
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    weights = loaded.get("weights")
+    if not isinstance(weights, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for name, payload in weights.items():
+        if not isinstance(payload, dict):
+            continue
+        entry: dict[str, Any] = {}
+        for key in ("tokens", "memory_mb", "cpu_cores"):
+            v = payload.get(key)
+            if v is None:
+                continue
+            try:
+                entry[key] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if "memory_mb" in entry:
+            entry["memory_mb"] = int(entry["memory_mb"])
+        if entry:
+            out[str(name)] = entry
+    return out
+
+
+def _parse_weights_via_scanner(body: str) -> dict[str, dict[str, Any]]:
+    """Stdlib-only fallback when PyYAML is missing.
+
+    Understands only the shape ``scripts/calibrate_sandbox_cost.py``
+    writes — two-space indent, ``weights:`` block, ``tokens`` /
+    ``memory_mb`` / ``cpu_cores`` per class. Hand-edits outside that
+    shape get silently dropped (operator falls back to H4a, which is
+    safer than crashing admission on a typo).
+    """
+    out: dict[str, dict[str, Any]] = {}
+    in_weights = False
+    current_name: str | None = None
+    for raw in body.splitlines():
+        line = raw.rstrip("\n")
+        if not in_weights:
+            if line.strip() == "weights:":
+                in_weights = True
+            continue
+        if line and not line.startswith(" ") and not line.startswith("\t"):
+            in_weights = False
+            current_name = None
+            continue
+        if line.startswith("  ") and not line.startswith("    "):
+            stripped = line[2:].rstrip(":").strip()
+            if stripped and not stripped.startswith("#"):
+                current_name = stripped
+                out.setdefault(current_name, {})
+            continue
+        if not current_name or not line.startswith("    "):
+            continue
+        for key in ("tokens", "memory_mb", "cpu_cores"):
+            prefix = f"    {key}:"
+            if line.startswith(prefix):
+                try:
+                    raw_val = line.split(":", 1)[1].strip()
+                    val = float(raw_val)
+                except (IndexError, ValueError):
+                    continue
+                out[current_name][key] = (
+                    int(val) if key == "memory_mb" else val
+                )
+                break
+    # Drop class entries that yielded no parseable fields.
+    return {k: v for k, v in out.items() if v}
+
+
+def _load_yaml_overrides() -> dict[str, dict[str, Any]]:
+    """Return the parsed yaml-overrides dict (mtime-cached).
+
+    Returns an empty dict when the yaml is absent or yields no
+    parseable entries — caller treats that as "no overrides, use H4a".
+    """
+    global _overrides_cache
+    path = _config_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        with _overrides_lock:
+            _overrides_cache = (0.0, {})
+        return {}
+    with _overrides_lock:
+        cached = _overrides_cache
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        body = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("sandbox_cost_weights.yaml: read failed (%s); "
+                       "falling back to H4a hardcode", exc)
+        with _overrides_lock:
+            _overrides_cache = (mtime, {})
+        return {}
+    parsed = _parse_weights_yaml(body)
+    with _overrides_lock:
+        _overrides_cache = (mtime, parsed)
+    return parsed
+
+
+def reload_cost_overrides() -> dict[str, dict[str, Any]]:
+    """Force a re-read of the yaml override file.
+
+    Used by ``scripts/calibrate_sandbox_cost.py`` immediately after
+    ``--apply`` writes the yaml, so the same-process backend (when the
+    calibrator runs in-process) sees the new values without waiting
+    for the mtime check on the next call. Other workers pick up the
+    new values automatically through the mtime cache.
+    """
+    global _overrides_cache
+    with _overrides_lock:
+        _overrides_cache = None
+    return _load_yaml_overrides()
+
+
+def cost_overrides_source() -> str:
+    """Human-readable provenance — used by ops UI / audit logging.
+
+    Returns ``"h4a-hardcode"`` when no yaml overrides are loaded,
+    otherwise the absolute path of the yaml file. The string is the
+    *active* source — a yaml that fails to parse falls back to
+    ``h4a-hardcode``.
+    """
+    overrides = _load_yaml_overrides()
+    if not overrides:
+        return "h4a-hardcode"
+    return str(_config_path())
+
+
+def effective_cost_estimate(
+    weight: SandboxCostWeight | str,
+) -> CostEstimate:
+    """Return the **calibrated** :class:`CostEstimate` for *weight*.
+
+    Resolution order per field (tokens, memory_mb, cpu_cores):
+        1. yaml override at ``configs/sandbox_cost_weights.yaml``
+        2. H4a hardcoded value in :data:`COST_WEIGHT_ESTIMATES`
+
+    ``burst`` and ``use_case`` always come from the H4a metadata —
+    those are workload-classification facts, not calibration outputs,
+    so the yaml has nothing to say about them.
+
+    Accepts either a ``SandboxCostWeight`` enum member or its string
+    name (so callers reading from the audit log's ``tier`` / class-name
+    field can resolve without an enum import).
+
+    Raises ``KeyError`` for an unknown class name. Unknown enum members
+    can't happen at type-check time, but we handle them defensively
+    in case a forward-compat caller widens the type.
+    """
+    if isinstance(weight, SandboxCostWeight):
+        member = weight
+    else:
+        try:
+            member = SandboxCostWeight[str(weight)]
+        except KeyError as exc:
+            raise KeyError(
+                f"Unknown sandbox class: {weight!r}"
+            ) from exc
+    base = COST_WEIGHT_ESTIMATES[member]
+    overrides = _load_yaml_overrides().get(member.name, {})
+    if not overrides:
+        return base
+    return CostEstimate(
+        tokens=float(overrides.get("tokens", base.tokens)),
+        memory_mb=int(overrides.get("memory_mb", base.memory_mb)),
+        cpu_cores=float(overrides.get("cpu_cores", base.cpu_cores)),
+        burst=base.burst,
+        use_case=base.use_case,
+    )
+
+
+def effective_tokens(weight: SandboxCostWeight | str) -> float:
+    """Shorthand for ``effective_cost_estimate(weight).tokens``.
+
+    Callers picking the DRF cost for ``acquire(cost=...)`` should
+    prefer this over ``SandboxCostWeight.X`` (which always returns the
+    H4a hardcode regardless of operator calibration).
+    """
+    return effective_cost_estimate(weight).tokens
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

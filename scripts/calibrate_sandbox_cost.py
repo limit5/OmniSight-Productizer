@@ -1364,6 +1364,16 @@ async def _async_main(argv: list[str] | None = None) -> int:
 
     if args.apply:
         write_yaml(result, args.out)
+        # Refresh the same-process backend's mtime-cached overrides so
+        # an in-process calibrator run picks up the new weights without
+        # waiting for the next mtime check. Best-effort — out-of-process
+        # callers (operator running this from a shell) get no backend;
+        # other workers pick up via mtime check on their next call.
+        try:
+            from backend import sandbox_capacity as _sc
+            _sc.reload_cost_overrides()
+        except Exception as exc:
+            logger.debug("backend cache refresh skipped: %s", exc)
         ok = await emit_audit_row(result, args.out)
         await _close_pg_pool_if_open()
         sys.stdout.write(

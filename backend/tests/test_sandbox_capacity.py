@@ -592,3 +592,205 @@ class TestCoordinatorTransparency:
         assert depth_during == 1
         assert result is False
         assert sc.queue_depth() == 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H4b row 2591 — Config-driven cost weights
+#
+#  Locks the contract that calibrator's `--apply` flips actual runtime
+#  behavior: backend reads configs/sandbox_cost_weights.yaml when present
+#  and falls back to H4a hardcode otherwise. Per-field overlay so a
+#  partial yaml (tokens-only) still inherits H4a memory_mb / cpu_cores.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+import os  # noqa: E402  (kept local to this block to avoid disturbing existing imports)
+
+
+class TestEffectiveCostEstimate:
+    """``effective_cost_estimate()`` / ``effective_tokens()`` — the
+    surface callers should use instead of the H4a-fixed enum value."""
+
+    def _set_yaml_path(self, monkeypatch, path):
+        monkeypatch.setenv("OMNISIGHT_SANDBOX_COST_WEIGHTS_PATH", str(path))
+        sc.reload_cost_overrides()
+
+    def _clear_yaml_path(self, monkeypatch):
+        monkeypatch.delenv(
+            "OMNISIGHT_SANDBOX_COST_WEIGHTS_PATH", raising=False,
+        )
+        sc.reload_cost_overrides()
+
+    def test_falls_back_to_h4a_when_yaml_missing(self, tmp_path, monkeypatch):
+        # Point at a nonexistent file — every class returns the H4a value.
+        self._set_yaml_path(monkeypatch, tmp_path / "no_such.yaml")
+        for member in sc.SandboxCostWeight:
+            base = sc.cost_estimate(member)
+            eff = sc.effective_cost_estimate(member)
+            assert eff == base, (
+                f"{member.name} should fall back to H4a when yaml absent"
+            )
+        assert sc.cost_overrides_source() == "h4a-hardcode"
+
+    def test_yaml_override_replaces_tokens(self, tmp_path, monkeypatch):
+        path = tmp_path / "weights.yaml"
+        path.write_text(
+            "weights:\n"
+            "  gvisor_lightweight:\n"
+            "    tokens: 0.7\n"
+            "    memory_mb: 256\n"
+            "    cpu_cores: 0.5\n"
+            "  phase64c_local_compile:\n"
+            "    tokens: 19.5\n"
+            "    memory_mb: 4096\n"
+            "    cpu_cores: 8.0\n",
+            encoding="utf-8",
+        )
+        self._set_yaml_path(monkeypatch, path)
+        # gvisor: every field overridden.
+        gv = sc.effective_cost_estimate(sc.SandboxCostWeight.gvisor_lightweight)
+        assert gv.tokens == pytest.approx(0.7)
+        assert gv.memory_mb == 256
+        assert gv.cpu_cores == pytest.approx(0.5)
+        # H4a-only fields (burst, use_case) preserved.
+        assert gv.burst is True
+        assert "unit test" in gv.use_case or "lint" in gv.use_case
+        # compile: every field overridden.
+        cc = sc.effective_cost_estimate("phase64c_local_compile")
+        assert cc.tokens == pytest.approx(19.5)
+        assert cc.memory_mb == 4096
+        assert cc.cpu_cores == pytest.approx(8.0)
+
+    def test_partial_yaml_falls_back_per_field_to_h4a(self, tmp_path, monkeypatch):
+        # tokens-only yaml — memory_mb / cpu_cores must inherit from H4a.
+        path = tmp_path / "weights.yaml"
+        path.write_text(
+            "weights:\n"
+            "  phase64c_local_compile:\n"
+            "    tokens: 7.0\n",
+            encoding="utf-8",
+        )
+        self._set_yaml_path(monkeypatch, path)
+        cc = sc.effective_cost_estimate("phase64c_local_compile")
+        assert cc.tokens == pytest.approx(7.0)
+        # H4a defaults survived for un-overridden fields.
+        assert cc.memory_mb == 2048
+        assert cc.cpu_cores == pytest.approx(4.0)
+        assert cc.burst is False
+
+    def test_classes_absent_from_yaml_use_h4a(self, tmp_path, monkeypatch):
+        # Yaml only mentions gvisor — every other class falls through.
+        path = tmp_path / "weights.yaml"
+        path.write_text(
+            "weights:\n"
+            "  gvisor_lightweight:\n"
+            "    tokens: 0.5\n",
+            encoding="utf-8",
+        )
+        self._set_yaml_path(monkeypatch, path)
+        # gvisor overridden.
+        assert sc.effective_tokens("gvisor_lightweight") == pytest.approx(0.5)
+        # qemu absent from yaml → H4a value (3.0).
+        assert sc.effective_tokens("phase64c_qemu_aarch64") == pytest.approx(3.0)
+        # ssh_remote absent from yaml → H4a value (0.5).
+        assert sc.effective_tokens("phase64c_ssh_remote") == pytest.approx(0.5)
+
+    def test_effective_tokens_accepts_string_name(self, tmp_path, monkeypatch):
+        # Audit log writes class names as strings — the helper must
+        # round-trip those without forcing callers to import the enum.
+        self._clear_yaml_path(monkeypatch)
+        assert sc.effective_tokens("phase64c_qemu_aarch64") == pytest.approx(3.0)
+
+    def test_effective_tokens_raises_on_unknown_class(self, tmp_path, monkeypatch):
+        self._clear_yaml_path(monkeypatch)
+        with pytest.raises(KeyError):
+            sc.effective_tokens("does_not_exist")
+
+    def test_corrupt_yaml_falls_back_silently_to_h4a(self, tmp_path, monkeypatch):
+        # A garbage yaml should NOT crash admission — admission
+        # halting on a typo'd weights file is worse than running on
+        # H4a defaults until the operator notices.
+        path = tmp_path / "weights.yaml"
+        path.write_text("not valid yaml at all :::\n", encoding="utf-8")
+        self._set_yaml_path(monkeypatch, path)
+        # All classes pin back to H4a hardcode.
+        for member in sc.SandboxCostWeight:
+            assert sc.effective_tokens(member) == sc.cost_estimate(member).tokens
+
+    def test_reload_picks_up_mtime_change(self, tmp_path, monkeypatch):
+        path = tmp_path / "weights.yaml"
+        path.write_text(
+            "weights:\n"
+            "  gvisor_lightweight:\n"
+            "    tokens: 0.3\n",
+            encoding="utf-8",
+        )
+        self._set_yaml_path(monkeypatch, path)
+        assert sc.effective_tokens("gvisor_lightweight") == pytest.approx(0.3)
+        # Operator re-runs --apply with new values → file mtime bumps.
+        # Bump mtime explicitly so the test isn't subject to filesystem
+        # mtime-resolution races (some filesystems coalesce sub-second
+        # writes into the same mtime tick).
+        new_mtime = path.stat().st_mtime + 5.0
+        path.write_text(
+            "weights:\n"
+            "  gvisor_lightweight:\n"
+            "    tokens: 0.9\n",
+            encoding="utf-8",
+        )
+        os.utime(path, (new_mtime, new_mtime))
+        # No reload call — the mtime check inside _load_yaml_overrides
+        # picks the new values up automatically on the next read.
+        assert sc.effective_tokens("gvisor_lightweight") == pytest.approx(0.9)
+
+    def test_cost_overrides_source_reports_path_when_loaded(self, tmp_path, monkeypatch):
+        path = tmp_path / "weights.yaml"
+        path.write_text(
+            "weights:\n  gvisor_lightweight:\n    tokens: 0.5\n",
+            encoding="utf-8",
+        )
+        self._set_yaml_path(monkeypatch, path)
+        assert sc.cost_overrides_source() == str(path)
+
+    def test_scanner_fallback_parses_two_space_indent(self, tmp_path):
+        # Force scanner path (mirrors what render_yaml writes).
+        body = (
+            "# operator notes\n"
+            "weights:\n"
+            "  gvisor_lightweight:\n"
+            "    tokens: 0.6\n"
+            "    memory_mb: 384\n"
+            "    cpu_cores: 0.5\n"
+            "  phase64c_local_compile:\n"
+            "    tokens: 12.5\n"
+            "trailing_top_level: ignored\n"
+        )
+        out = sc._parse_weights_via_scanner(body)
+        assert out == {
+            "gvisor_lightweight": {
+                "tokens": pytest.approx(0.6),
+                "memory_mb": 384,
+                "cpu_cores": pytest.approx(0.5),
+            },
+            "phase64c_local_compile": {
+                "tokens": pytest.approx(12.5),
+            },
+        }
+
+    def test_acquire_with_effective_tokens_charges_calibrated_cost(
+        self, tmp_path, monkeypatch,
+    ):
+        # End-to-end: yaml override + effective_tokens() → acquire()
+        # actually charges the calibrated cost (not H4a).
+        path = tmp_path / "weights.yaml"
+        path.write_text(
+            "weights:\n"
+            "  phase64c_local_compile:\n"
+            "    tokens: 6.0\n",
+            encoding="utf-8",
+        )
+        self._set_yaml_path(monkeypatch, path)
+        cost = sc.effective_tokens("phase64c_local_compile")
+        assert cost == pytest.approx(6.0)
+        assert sc.try_acquire("t-x", cost=cost) is True
+        # 6 tokens charged (calibrated value), not the H4a 4.0.
+        assert sc.snapshot()["total_used"] == pytest.approx(6.0)
