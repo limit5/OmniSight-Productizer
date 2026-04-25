@@ -187,6 +187,302 @@ async def notify(
     return notif
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  R9 row 2941 (#315): tier-explicit dispatcher
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def send_notification(
+    tier: "str | list[str] | tuple[str, ...] | set[str] | frozenset[str] | None" = None,
+    severity: "Severity | str | None" = None,
+    payload: "dict | Notification | None" = None,
+    interactive: bool = False,
+    conn=None,
+) -> Notification:
+    """Tier-explicit notification dispatcher (R9 row 2941, #315).
+
+    Companion to :func:`notify` — same persistence + SSE behaviour, but
+    the caller picks the destination tier(s) explicitly instead of
+    relying on severity-driven implicit fan-out via
+    :data:`backend.severity.SEVERITY_TIER_MAPPING`.
+
+    Used by R9's watchdog event taxonomy (row 2942) where each event
+    name (``watchdog.p1_system_down`` / ``watchdog.p2_cognitive_
+    deadlock`` / ``watchdog.p3_auto_recovery``) maps to a specific set
+    of tiers — that code calls
+    ``send_notification(tier={...}, severity="P1", payload={...})``
+    instead of relying on severity-driven implicit fan-out from
+    :func:`notify`. Both API surfaces co-exist by design: one for
+    severity-driven additive routing (``notify``), one for tier-
+    explicit precise routing (``send_notification``).
+
+    ``interactive=True`` adds the R1 ChatOps interactive bridge to the
+    fan-out set; when the payload includes ``interactive_buttons`` /
+    ``interactive_channel`` they are forwarded verbatim through R1's
+    explicit :func:`_dispatch_chatops` surface so caller-supplied
+    button sets / target channels survive. When ``interactive=True``
+    but no explicit buttons are supplied, the default ack /
+    inject-hint / view-logs button set from
+    :func:`_dispatch_chatops_severity` is reused (broadcast to ``"*"``).
+
+    Args:
+        tier: One or more tier identifiers from :mod:`backend.severity`
+            (``L1_LOG_EMAIL`` / ``L2_IM_WEBHOOK`` /
+            ``L2_CHATOPS_INTERACTIVE`` / ``L3_JIRA`` / ``L4_PAGERDUTY``
+            / ``L4_SMS``). Accepts a single string or any iterable of
+            strings. ``None`` falls back to the severity-driven mapping
+            from :func:`backend.severity.tiers_for` if a ``severity``
+            is provided, otherwise no fan-out runs (notification still
+            persists + SSEs).
+        severity: Operational priority tag — persisted on the
+            notification row and forwarded to the per-channel senders
+            (Slack adds ``[severity:P*]`` tag, Jira adds the
+            ``severity-P*`` label, PagerDuty adds ``custom_details``,
+            SMS adds the tag to its body envelope).
+        payload: Either a pre-built :class:`Notification` (in which case
+            ``severity`` overrides any value already on the model) or a
+            dict with at least ``title``; other keys (``message``,
+            ``source``, ``level``, ``action_url``, ``action_label``,
+            ``interactive_buttons``, ``interactive_channel``) are
+            optional and default to a P3-style informational shape.
+        interactive: When True, also surface the notification as an R1
+            ChatOps interactive card — ``L2_CHATOPS_INTERACTIVE`` is
+            implicitly added to the requested tier set.
+        conn: Optional DB connection — polymorphic with :func:`notify`.
+
+    Returns:
+        The persisted :class:`Notification`.
+
+    Module-global state: this function does not introduce any new
+    module-level mutable state. Tier set normalisation, payload-to-
+    model construction, and dispatch routing are all per-call.
+    """
+    from backend import db
+    from backend.db_pool import get_pool
+    from backend.severity import (
+        L1_LOG_EMAIL,
+        L2_CHATOPS_INTERACTIVE,
+        L2_IM_WEBHOOK,
+        L3_JIRA,
+        L4_PAGERDUTY,
+        L4_SMS,
+        tiers_for,
+    )
+
+    known_tiers = frozenset({
+        L1_LOG_EMAIL, L2_IM_WEBHOOK, L2_CHATOPS_INTERACTIVE,
+        L3_JIRA, L4_PAGERDUTY, L4_SMS,
+    })
+
+    # ── Normalise tier set ───────────────────────────────────────
+    if tier is None:
+        tier_set: set[str] = set()
+    elif isinstance(tier, str):
+        tier_set = {tier}
+    else:
+        tier_set = {str(t) for t in tier}
+
+    # ``interactive=True`` is shorthand for "also send via the R1
+    # ChatOps bridge". Adding the tier here lets the dispatch loop
+    # below handle the channel uniformly with the rest of the fan-out.
+    if interactive:
+        tier_set.add(L2_CHATOPS_INTERACTIVE)
+
+    # No explicit tier + a severity tag → fall back to the severity-
+    # driven mapping so a caller using only ``severity="P1"`` still
+    # gets a sensible default fan-out (mirrors notify() semantics).
+    if not tier_set and severity is not None:
+        tier_set = set(tiers_for(severity))
+
+    unknown = tier_set - known_tiers
+    if unknown:
+        raise ValueError(
+            f"send_notification: unknown tier(s): {sorted(unknown)}",
+        )
+
+    # ── Normalise severity ───────────────────────────────────────
+    severity_str: str | None
+    if severity is None:
+        severity_str = None
+    else:
+        severity_str = severity.value if hasattr(severity, "value") else str(severity)
+
+    # ── Build / accept Notification ──────────────────────────────
+    interactive_buttons: list[dict] = []
+    interactive_channel: str = "*"
+
+    if isinstance(payload, Notification):
+        notif = payload
+        if severity_str is not None:
+            # Coerce back to Severity enum so model_copy preserves the
+            # field's declared type (Pydantic skips validation on
+            # model_copy; passing the raw string would land on the
+            # field as ``str`` and trigger a serializer warning).
+            try:
+                sev_enum = Severity(severity_str)
+            except ValueError:
+                sev_enum = severity_str  # unknown — let model fail at use
+            notif = notif.model_copy(update={"severity": sev_enum})
+    else:
+        if payload is None:
+            payload = {}
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise ValueError("send_notification: payload.title is required")
+        message = str(payload.get("message") or "")
+        source = str(payload.get("source") or "")
+        level_raw = payload.get("level") or "info"
+        level_str = level_raw.value if hasattr(level_raw, "value") else str(level_raw)
+        notif = Notification(
+            id=f"notif-{uuid.uuid4().hex[:8]}",
+            level=level_str,
+            title=title,
+            message=message,
+            source=source,
+            timestamp=datetime.now().isoformat(),
+            action_url=payload.get("action_url"),
+            action_label=payload.get("action_label"),
+            severity=severity_str,
+        )
+        interactive_buttons = list(payload.get("interactive_buttons") or [])
+        interactive_channel = str(payload.get("interactive_channel") or "*")
+
+    notif_level_str = (
+        notif.level.value if hasattr(notif.level, "value") else str(notif.level)
+    )
+
+    # ── Persist + SSE (same path as notify) ──────────────────────
+    try:
+        if conn is None:
+            async with get_pool().acquire() as owned_conn:
+                await db.insert_notification(owned_conn, notif.model_dump())
+        else:
+            await db.insert_notification(conn, notif.model_dump())
+    except Exception as exc:
+        logger.warning(
+            "send_notification: persist failed for %s: %s", notif.id, exc,
+        )
+
+    bus.publish("notification", {
+        "id": notif.id,
+        "level": notif_level_str,
+        "title": notif.title,
+        "message": notif.message,
+        "source": notif.source,
+        "timestamp": notif.timestamp,
+        "action_url": notif.action_url,
+        "action_label": notif.action_label,
+        "severity": severity_str,
+    })
+
+    # ── Tier-explicit dispatch ──────────────────────────────────
+    # Each leg checks its own config knob and skips if unconfigured;
+    # ``any_required`` tracks whether at least one durable channel was
+    # supposed to fire so the dispatch_status update can distinguish
+    # ``skipped`` (no destination wired) from ``sent`` / ``failed``.
+    errors: list[str] = []
+    any_required = False
+
+    if L2_IM_WEBHOOK in tier_set and settings.notification_slack_webhook:
+        any_required = True
+        ok = await _send_with_retry(notif, _send_slack, "slack")
+        if not ok:
+            errors.append("slack")
+
+    if L3_JIRA in tier_set and settings.notification_jira_url:
+        any_required = True
+        ok = await _send_with_retry(notif, _send_jira, "jira")
+        if not ok:
+            errors.append("jira")
+
+    if L4_PAGERDUTY in tier_set and settings.notification_pagerduty_key:
+        any_required = True
+        ok = await _send_with_retry(notif, _send_pagerduty, "pagerduty")
+        if not ok:
+            errors.append("pagerduty")
+
+    if L4_SMS in tier_set and settings.notification_sms_webhook:
+        any_required = True
+        ok = await _send_with_retry(notif, _send_sms, "sms")
+        if not ok:
+            errors.append("sms")
+
+    # ChatOps interactive — best-effort, NOT counted toward
+    # dispatch_status (mirrors row 2939's _dispatch_chatops_severity
+    # contract: the durable record is the persisted notification row +
+    # any Jira ticket; the chat surface is live triage, transient
+    # bridge failures must not mark the whole notification ``failed``).
+    if L2_CHATOPS_INTERACTIVE in tier_set:
+        if interactive and interactive_buttons:
+            # R1 explicit surface — caller-supplied buttons + channel.
+            asyncio.create_task(_dispatch_chatops(
+                notif, interactive_channel, interactive_buttons,
+            ))
+        else:
+            # Default surface — broadcast w/ ack/hint/logs button set.
+            asyncio.create_task(_dispatch_chatops_severity(notif))
+
+    # L1 log + email digest — synchronous (deque.append + log line);
+    # NOT counted toward dispatch_status for the same best-effort
+    # reason as ChatOps (durable record is the persisted notification
+    # row; SMTP send happens out-of-band via ``run_email_digest_loop``).
+    if L1_LOG_EMAIL in tier_set:
+        _dispatch_log_email(notif)
+
+    # ── Update dispatch_status ──────────────────────────────────
+    if not any_required:
+        try:
+            async with get_pool().acquire() as _conn:
+                await db.update_notification_dispatch(
+                    _conn, notif.id, "skipped",
+                )
+        except Exception as exc:
+            logger.warning(
+                "send_notification: persist skipped status for %s failed: %s",
+                notif.id, exc,
+            )
+            from backend import metrics as _m
+            _m.persist_failure_total.labels(module="notifications").inc()
+    else:
+        try:
+            async with get_pool().acquire() as _conn:
+                if errors:
+                    await db.update_notification_dispatch(
+                        _conn, notif.id, "failed",
+                        attempts=settings.notification_max_retries,
+                        error=f"Failed channels: {', '.join(errors)}",
+                    )
+                else:
+                    await db.update_notification_dispatch(
+                        _conn, notif.id, "sent", attempts=1,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "send_notification: dispatch status update for %s failed: %s",
+                notif.id, exc,
+            )
+
+    # ── Log line (severity-tagged, parallels notify()) ──────────
+    try:
+        from backend.routers.system import add_system_log
+        log_level = {
+            "info": "info", "warning": "warn",
+            "action": "error", "critical": "error",
+        }.get(notif_level_str, "info")
+        sev_tag = f"[severity:{severity_str}]" if severity_str else ""
+        add_system_log(
+            f"[NOTIFY:{notif_level_str.upper()}]{sev_tag} {notif.title}",
+            log_level,
+        )
+    except Exception as exc:
+        # add_system_log is best-effort — durable record is the row.
+        logger.debug(
+            "send_notification: add_system_log unavailable: %s", exc,
+        )
+
+    return notif
+
+
 async def _dispatch_external(notif: Notification) -> None:
     """Send notification to external channels with retry on failure.
 
