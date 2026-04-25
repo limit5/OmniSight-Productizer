@@ -751,6 +751,28 @@ export function useEngine() {
       } catch (err) {
         console.warn("[Engine] SSE subscribe failed — real-time updates unavailable", err)
       }
+
+      // Phase 4: notifications seed (best-effort, independent of 1-3)
+      // Operator-reported 2026-04-25: header bell badge showed an unread
+      // count (sourced from /dashboard-summary.notificationsUnread.count
+      // which is server-authoritative) but opening the panel showed
+      // "No notifications" because the local `notifications` array was
+      // only ever populated from SSE pushes that arrive AFTER mount.
+      // Any unread items predating page load (previous session, events
+      // received while the user was offline) were invisible. Seed the
+      // existing list here so badge ↔ panel agree on first paint.
+      try {
+        const existing = await api.getNotifications(50)
+        if (!cancelled && Array.isArray(existing) && existing.length > 0) {
+          setNotifications(prev => {
+            const have = new Set(prev.map(n => n.id))
+            const incoming = existing.filter(n => !have.has(n.id))
+            return incoming.length ? [...incoming, ...prev] : prev
+          })
+        }
+      } catch {
+        /* notifications endpoint unavailable — badge will be wrong but no crash */
+      }
     }
     init()
     fetchNPI()
