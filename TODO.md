@@ -295,6 +295,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] **BP.W3.11 Phase P δ** L2 Toolmaking + Human Review（**2026-04-25 D' Window 3**）— 補完 `agentic-self-improvement.md` §L2；agent 自寫 script → staging area `data/skill_tools/staging/` → Architect 評估 + Auditor 安全審 → human review 才 promote 到 `scripts/agent_authored/` + register 全域；PEP Gateway 套最嚴 T1 sandbox tier；audit chain 紀錄 author/reviewer；~2 週；風險 🟡 中（exec code 比 markdown skill 高一階、human-gate 收斂）
 - [ ] **BP.W3.12 Phase T** Hardware Bridge Daemon (Tier 3 RPC)（**2026-04-25 D' Window 3**）— 補完 `tiered-sandbox-architecture.md` Tier 3；FastAPI daemon 部署於 EVK 連接機，提供 `flash_board / read_uart / capture_signal` JSON-only API；解 Risk R13；~2 週；風險 🟡 中
 - [ ] **BP.W3.13 Phase U** gVisor Production Adoption (Tier 1)（**2026-04-25 D' Window 3**）— 補完 `tiered-sandbox-architecture.md` Tier 1；現況只有 cost weight 定義（Risk R12）；正式上 prod gVisor runtime + benchmark 對比 docker default；~2-3 週；風險 🟡 中（性能 + 相容性）
+- [ ] **BP.W3.14** Frontend Stale-Bundle CI Detector + Bootstrap L7 Freshness Check（**2026-04-25 R15 mitigation (b)+(c)**）— (i) GitHub Action job `frontend-stale-detector` 對比 `master HEAD` 自 last frontend deploy 起的 commits、若 > 5 顆 frontend file 變動而沒 redeploy 紀錄 → CI fail + Slack alert；(ii) Prometheus metric `omnisight_frontend_build_lag_commits` 暴露 master HEAD vs prod build commit 差距、Grafana 告警 ≥ 10；(iii) Bootstrap Wizard L7 加 frontend image freshness check（顯示 prod build commit hash vs master HEAD、operator 一眼看見）；~3-4 day；風險 🟢 低
 
 ### BP.W4 — 延後到 v1.0 後
 - [ ] BP.E GraphRAG / Neo4j（藍圖 §3.4 + §4.1）
@@ -325,6 +326,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] **R12** gVisor cost-weight only 不是 actual runtime → 誤導 claim（implements: BP.S.5 文件警告 + BP.W3.13 真正 prod adoption）
 - [ ] **R13** Hardware Bridge daemon (Tier 3) 缺失（implements: BP.W3.12 ship FastAPI daemon）
 - [ ] **R14** self-improvement L1-L4 設計-實作 gap 數月未追（implements: BP.M L1 主線 + BP.W3.10/11 L2/L3 + BP.W4 L4）
+- [ ] **R15** Operator Deploy SOP 漏 `build frontend` 步驟（**2026-04-25 prod live forensic 發現** — frontend image 自 ZZ 38 commits 起 stale，累計 25+ frontend commits 沒 surface：ZZ TurnTimeline / BurnRate / SessionHeatmap / PromptVersion / Z.4 ProviderRollup / 5b-4 LLMCredentialManager / V7-V9 workspace / H3/H4a Ops panel）；三層 mitigation：(a) ADR §7.3 SOP 強制 deploy gate 必含 `build frontend` + rolling recreate `frontend` service ✅ **已 ship 2026-04-25**；(b) BP.W3.14 stale-bundle CI detector；(c) Bootstrap Wizard L7 freshness check
 
 ---
 

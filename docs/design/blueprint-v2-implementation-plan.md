@@ -736,6 +736,41 @@ OMNISIGHT_SELF_HEALING_DOCS=off|on                # Phase J
 OMNISIGHT_GUILD_ALIAS_MODE=dual-write|guild-only  # Phase B 遷移期
 ```
 
+### 7.3 Operator Deploy SOP — Frontend Image Rebuild Discipline（2026-04-25 新增 from R15）
+
+> 紀錄 2026-04-25 prod live forensic 發現：自 2026-04-23 ZZ 38 commits 起、frontend image 因 deploy SOP 漏寫 `build frontend` 步驟，**累積 25+ frontend commits 全部沒 surface 到 prod**（ZZ TurnTimeline / BurnRate / SessionHeatmap / PromptVersion / Z.4 ProviderRollup / 5b-4 LLMCredentialManager / V7-V9 workspace / H3/H4a Ops panel）。R15 三層 mitigation 落地。
+
+**強制 deploy gate（取代以前只寫 backend 的版本）**：
+
+```bash
+# 1. Pull master
+git pull origin master
+
+# 2. 同時 rebuild backend-a / backend-b / frontend 三個 image（不可漏！）
+docker compose -f docker-compose.prod.yml build backend-a backend-b frontend
+
+# 3. Rolling recreate（順序：frontend 先、backend 後 — 因前端會 fetch 後端 API、後端先換可能短暫 schema mismatch）
+docker compose -f docker-compose.prod.yml up -d --no-deps frontend
+docker compose -f docker-compose.prod.yml up -d --no-deps backend-a
+sleep 10  # wait for backend-a healthy
+docker compose -f docker-compose.prod.yml up -d --no-deps backend-b
+
+# 4. 驗證
+curl -sI https://ai.sora-dev.app/api/v1/runtime/info | grep '^HTTP'  # 應 200 / 401 (auth_baseline expected)
+curl -s https://ai.sora-dev.app/ | grep -oE '/_next/static/chunks/[^"]+' | head -3  # 確認 build hash 變更
+
+# 5. Operator browser 必做：Ctrl+Shift+R hard refresh（清 service worker / client cache）
+```
+
+**為何 frontend 必須在每次 deploy gate 重建**：Next.js 的 chunk hash 是 build-time 決定（無法 runtime hot-reload）；任何 `components/` 或 `app/` 變動都需要 rebuild image 才能 surface 到 client browser。
+
+**驗證 SOP 落實的自動化（BP.W3.14）**：
+- CI 加 `frontend-stale-detector` job — 對比 `master HEAD` 自 last frontend deploy 起的 commits，若 > N（建議 5）顆 frontend file 變動而沒 redeploy 紀錄，CI fail + alert
+- Prometheus metric `omnisight_frontend_build_lag_commits` — 暴露 master HEAD vs prod build 的 commit 差距、Grafana 告警 ≥ 10
+- Bootstrap Wizard L7 加 frontend image freshness check（顯示 prod build commit hash vs master HEAD）
+
+---
+
 ### 7.2 Backward-compat 策略
 
 | 項目 | 策略 | 期限 |
@@ -766,6 +801,7 @@ OMNISIGHT_GUILD_ALIAS_MODE=dual-write|guild-only  # Phase B 遷移期
 | R12 | gVisor 在 `sandbox_capacity.py` 是 cost weight 而非 actual runtime — 文件聲稱有但 prod 跑 docker default → **誤導性安全 claim** | 🔴 高 | 🟢 低 | Phase S 文件化此事實 + Risk R12 explicit warning「合規 claim 不可引用 gVisor」；正式 gVisor adoption 留 Phase U Window 3；防止 Phase D 第三方 legal review 被誤導 |
 | R13 | Hardware Bridge Daemon (Tier 3 RPC `flash_board`) 只在 test enum 字串、無實際 daemon 服務 → 自動化燒錄韌體不可能、所有「flash 韌體」task 仍需 operator 手動 | 🟠 中 | 🟡 中 | Phase T (Window 3) ship FastAPI daemon；在此之前 Priority A1 prod hardware 驗證走 operator 手動 SOP（已記錄於 docs/ops/）|
 | R14 | self-improvement L1-L4 設計 vs 實作 gap 已存在數月、未被當作風險追蹤 | 🟡 低 | 🟢 低 | Phase M (主線) 補 L1、Phase O/P (W3) 補 L3/L2、Phase Q (Post-v1.0) 補 L4；Appendix C 紀錄 surveillance lesson-learned |
+| **R15** | **Operator Deploy SOP 漏 frontend rebuild 步驟**（**2026-04-25 prod live forensic 發現**）— Phase-3-Runtime-v2 deploy gate 寫的是 `docker compose ... build backend-a backend-b` 只 rebuild 兩個 backend replica；自 2026-04-23 ZZ 38 commits 起、frontend image 一直 stale，prod bundle 30 chunks **0 hits** TurnTimeline / BurnRate / SessionHeatmap / PromptVersion；後續 Z.4 / 5b-4 / V7-V9 / H3/H4a 共 ~25+ frontend commits 也全沒 surface | 🔴 高 | 🟡 中（已發生過）| **三層 mitigation**：(a) ADR §7.3 SOP 強制 deploy gate 必含 `build frontend` + rolling recreate `frontend` service（**2026-04-25 落地**）；(b) BP.W3.14 frontend stale-bundle CI detector（master HEAD vs prod build-id 差距 > N commits 自動告警）；(c) Bootstrap Wizard L7 加 frontend image freshness check |
 
 ---
 
