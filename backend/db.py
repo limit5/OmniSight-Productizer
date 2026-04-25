@@ -200,6 +200,21 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("npi_state", "version", "INTEGER NOT NULL DEFAULT 0"),
         ("tenant_secrets", "version", "INTEGER NOT NULL DEFAULT 0"),
         ("project_runs", "version", "INTEGER NOT NULL DEFAULT 0"),
+        # Y1 row 7 (#277): project_id on business tables. NULLable,
+        # FK to projects(id) ON DELETE SET NULL — same set as alembic
+        # 0038's _TABLES_NEEDING_PROJECT_ID. Backfill is *not* done
+        # here (the CREATE TABLE in _SCHEMA already includes
+        # project_id on a fresh DB; existing dev DBs that pre-date
+        # this column rely on the alembic 0038 backfill UPDATE — which
+        # this in-process migrator does NOT run because dev SQLite
+        # doesn't go through alembic). The next-release NOT NULL flip
+        # will need a parallel UPDATE here when it lands.
+        ("workflow_runs", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
+        ("debug_findings", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
+        ("decision_rules", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
+        ("event_log", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
+        ("artifacts", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
+        ("user_preferences", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -242,6 +257,46 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     except Exception as exc:
         logger.warning("Default tenant seed failed: %s", exc)
 
+    # Y1 row 6 (#277, alembic 0037): seed default project for the
+    # default tenant. Mirrors the alembic backfill's deterministic id
+    # projection (``p-<tenant-suffix>-default``) for the single
+    # ``t-default`` tenant the dev SQLite path always carries — keeps
+    # FK targets present so Y1 row 7 backfill (``project_id`` on
+    # business tables) and any downstream Y2/Y3 reader sees a
+    # populated projects table on a fresh dev DB.
+    try:
+        await conn.execute(
+            "INSERT OR IGNORE INTO projects "
+            "(id, tenant_id, product_line, name, slug) "
+            "VALUES ('p-default-default', 't-default', 'default', "
+            "'Default', 'default')"
+        )
+    except Exception as exc:
+        logger.warning("Default project seed failed: %s", exc)
+
+    # Y1 row 7 (#277, alembic 0038): backfill project_id on existing
+    # business rows that pre-date the column. Bounded to the
+    # ``t-default`` tenant because dev SQLite is single-tenant by
+    # construction (operators creating a new tenant in dev would
+    # also create a corresponding project before pointing rows at
+    # it). Idempotent via the ``project_id IS NULL`` predicate.
+    _project_backfill_tables = [
+        "workflow_runs", "debug_findings", "decision_rules",
+        "event_log", "artifacts", "user_preferences",
+    ]
+    for t in _project_backfill_tables:
+        try:
+            await conn.execute(
+                f"UPDATE {t} SET project_id = 'p-default-default' "
+                f"WHERE project_id IS NULL AND tenant_id = 't-default'"
+            )
+        except Exception as exc:
+            # The column may not exist yet on a DB that just bumped
+            # SQLite schema before the ALTER TABLE in this same
+            # _migrate() call lands — swallow and let the next boot
+            # retry. Same pattern as the index-create blocks below.
+            logger.warning("project_id backfill on %s failed: %s", t, exc)
+
     _tenant_tables = [
         "users", "artifacts", "event_log", "debug_findings",
         "decision_rules", "workflow_runs", "audit_log", "user_preferences",
@@ -254,6 +309,23 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
             )
         except Exception as exc:
             logger.warning("idx_%s_tenant create failed: %s", t, exc)
+
+    # Y1 row 7 (#277): project_id indexes on business tables. Mirrors
+    # alembic 0038's per-table ``idx_<table>_project ON <table>(project_id)``
+    # so dev SQLite bootstraps see the same query plan as production PG.
+    # Subset of _tenant_tables — audit_log / users / api_keys are
+    # tenant-scoped only (no project_id).
+    _project_tables = [
+        "workflow_runs", "debug_findings", "decision_rules",
+        "event_log", "artifacts", "user_preferences",
+    ]
+    for t in _project_tables:
+        try:
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{t}_project ON {t}(project_id)"
+            )
+        except Exception as exc:
+            logger.warning("idx_%s_project create failed: %s", t, exc)
 
     # Verify every REQUIRED column ended up present (defends against a YAML
     # typo or partial schema rebuild).
@@ -437,7 +509,14 @@ CREATE TABLE IF NOT EXISTS artifacts (
     file_path   TEXT NOT NULL,
     size        INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    tenant_id   TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
+    tenant_id   TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    -- Y1 row 7 (#277): project_id added by alembic 0038. NULLable
+    -- until the next-release NOT NULL flip; FK target ``projects``
+    -- is created later in this _SCHEMA — SQLite resolves FK
+    -- references at insert time, not CREATE time, so the forward
+    -- reference is safe on the SQLite-only dev path (PG production
+    -- never executes _SCHEMA; alembic 0038 owns the FK there).
+    project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -515,7 +594,10 @@ CREATE TABLE IF NOT EXISTS event_log (
     event_type      TEXT NOT NULL,
     data_json       TEXT NOT NULL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    -- Y1 row 7 (#277): project_id (alembic 0038). See artifacts above
+    -- for the forward-reference rationale.
+    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL
 );
 
 -- L3 Episodic Memory: long-term knowledge base for cross-project learning
@@ -547,7 +629,10 @@ CREATE TABLE IF NOT EXISTS debug_findings (
     status          TEXT NOT NULL DEFAULT 'open',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at     TEXT,
-    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    -- Y1 row 7 (#277): project_id (alembic 0038). See artifacts above
+    -- for the forward-reference rationale.
+    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS decision_rules (
@@ -562,7 +647,12 @@ CREATE TABLE IF NOT EXISTS decision_rules (
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     negative            INTEGER NOT NULL DEFAULT 0,
     undo_count          INTEGER NOT NULL DEFAULT 0,
-    tenant_id           TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
+    tenant_id           TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    -- Y1 row 7 (#277): project_id (alembic 0038).  TODO row says
+    -- "decisions"; the actual table name has always been
+    -- decision_rules (matches I1 0012's TABLES_NEEDING_TENANT_ID).
+    -- See artifacts above for the forward-reference rationale.
+    project_id          TEXT REFERENCES projects(id) ON DELETE SET NULL
 );
 
 -- Phase 56: durable workflow checkpointing
@@ -575,7 +665,10 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     last_step_id    TEXT,
     metadata        TEXT NOT NULL DEFAULT '{}',
     version         INTEGER NOT NULL DEFAULT 0,
-    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    -- Y1 row 7 (#277): project_id (alembic 0038). See artifacts above
+    -- for the forward-reference rationale.
+    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
@@ -959,6 +1052,10 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     value       TEXT NOT NULL DEFAULT '',
     updated_at  REAL NOT NULL DEFAULT (strftime('%s', 'now')),
     tenant_id   TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    -- Y1 row 7 (#277): project_id (alembic 0038). NULLable; the
+    -- composite PK is (user_id, pref_key) so adding project_id is
+    -- independent of the PK structure.
+    project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL,
     PRIMARY KEY (user_id, pref_key)
 );
 CREATE INDEX IF NOT EXISTS idx_user_prefs_user ON user_preferences(user_id);
