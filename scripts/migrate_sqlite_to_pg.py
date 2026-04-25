@@ -172,6 +172,13 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # TABLES_WITH_IDENTITY_ID. Empty until Y3 admin REST starts
     # writing project-level role overrides.
     "project_members",
+    # Y1 row 4 (#277, alembic 0035): email-keyed tenant invites. FKs
+    # ``tenant_id → tenants.id`` (CASCADE) and ``invited_by →
+    # users.id`` (SET NULL) so it MUST replay after both ``tenants``
+    # and ``users``. PK is the app-generated TEXT ``id`` (``inv-*``);
+    # NOT in TABLES_WITH_IDENTITY_ID. Empty until Y2 admin REST
+    # ``POST /api/v1/admin/invites`` starts inserting.
+    "tenant_invites",
     # MFA tables — all have FK ``user_id → users.id`` so they MUST
     # come after users in the replay order.
     "user_mfa",

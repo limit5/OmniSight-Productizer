@@ -742,6 +742,37 @@ CREATE TABLE IF NOT EXISTS project_members (
 CREATE INDEX IF NOT EXISTS idx_project_members_project
     ON project_members(project_id);
 
+-- Y1 row 4 (#277): email-keyed tenant invites. ``token_hash`` stores
+-- only the hash of the random plaintext token; the plaintext is
+-- returned ONCE in the create-invite API response and never persisted
+-- (same pattern as api_keys.key_hash / mfa_backup_codes.code_hash).
+-- Role enum matches user_tenant_memberships (the tenant-level enum)
+-- because acceptance materialises a membership row with this role.
+-- Mirrors alembic 0035_tenant_invites.py — keep in sync.
+CREATE TABLE IF NOT EXISTS tenant_invites (
+    id          TEXT PRIMARY KEY,
+    tenant_id   TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    email       TEXT NOT NULL,
+    role        TEXT NOT NULL DEFAULT 'member',
+    invited_by  TEXT REFERENCES users(id) ON DELETE SET NULL,
+    token_hash  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (token_hash),
+    CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
+    CHECK (status IN ('pending', 'accepted', 'revoked', 'expired')),
+    CHECK (length(email) >= 1 AND length(email) <= 320),
+    CHECK (length(token_hash) >= 16)
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_invites_tenant_status
+    ON tenant_invites(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_tenant_invites_email_status
+    ON tenant_invites(email, status);
+CREATE INDEX IF NOT EXISTS idx_tenant_invites_expiry_sweep
+    ON tenant_invites(expires_at)
+    WHERE status = 'pending';
+
 CREATE TABLE IF NOT EXISTS sessions (
     token           TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL,
