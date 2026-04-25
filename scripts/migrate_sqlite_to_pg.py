@@ -164,6 +164,14 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # ``project_runs`` so the eventual hard FK ``project_runs.project_id
     # → projects.id`` (added in a later Y1 row) replays cleanly.
     "projects",
+    # Y1 row 3 (#277, alembic 0034): per-project explicit role
+    # bindings. FKs ``user_id → users.id`` (CASCADE) and
+    # ``project_id → projects.id`` (CASCADE) so it MUST replay after
+    # both ``users`` and ``projects``. Composite PK
+    # ``(user_id, project_id)`` is TEXT — NOT in
+    # TABLES_WITH_IDENTITY_ID. Empty until Y3 admin REST starts
+    # writing project-level role overrides.
+    "project_members",
     # MFA tables — all have FK ``user_id → users.id`` so they MUST
     # come after users in the replay order.
     "user_mfa",

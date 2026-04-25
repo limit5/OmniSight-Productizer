@@ -724,6 +724,24 @@ CREATE INDEX IF NOT EXISTS idx_projects_created_by
     ON projects(created_by)
     WHERE created_by IS NOT NULL;
 
+-- Y1 row 3 (#277): per-project explicit role bindings. Missing row ⇒
+-- tenant-level role acts as default (resolver lives in Y3 application
+-- code: tenant admin defaults to 'contributor' on every project, etc).
+-- Roles deliberately distinct from user_tenant_memberships
+-- (owner/admin/member/viewer) so tenant-admin and project-contributor
+-- are not confused at the schema layer.
+-- Mirrors alembic 0034_project_members.py — keep in sync.
+CREATE TABLE IF NOT EXISTS project_members (
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    role        TEXT NOT NULL DEFAULT 'viewer',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, project_id),
+    CHECK (role IN ('owner', 'contributor', 'viewer'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_members_project
+    ON project_members(project_id);
+
 CREATE TABLE IF NOT EXISTS sessions (
     token           TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL,
