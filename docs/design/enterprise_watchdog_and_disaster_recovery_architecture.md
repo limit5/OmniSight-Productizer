@@ -59,6 +59,12 @@
 * **工作區清理**：重試前，系統強制執行 `git clean -fd` 與 `git checkout .`。
 * **狀態回滾**：確保工作目錄恢復到任務開始前的「純淨錨點 (Clean Anchor)」，防止髒程式碼干擾下一次嘗試。
 
+> **⚠️ 設計覆寫（2026-04-25，R8 task #314 第一 row）**：OmniSight 已演進為 per-agent `git worktree` 模型（見 `backend/workspace.py::provision`）。在此架構下「`git clean -fd` + `git checkout .`」在 `:ro` bind / `.gitignore` 白名單 / git 中介狀態（`index.lock` / `MERGE_HEAD`）/ submodule / LFS / chmod 過的檔案等情境下無法完整回到純淨錨點，且易違反 CLAUDE.md Safety Rule（`test_assets/` read-only）。
+>
+> 本架構改採「**discard current worktree + `git worktree add` create fresh worktree from anchor commit**」機制：`WorkspaceManager.discard_and_recreate(agent_id, anchor_sha)` → `git worktree remove --force` + `shutil.rmtree` fallback → 從 CATC `anchor_commit_sha` 重建 → `audit_log` 寫 `retry.worktree_recreated`。完整理由、風險矩陣、取捨、驗收契約見 [`r8-idempotent-retry-worktree.md`](r8-idempotent-retry-worktree.md)。
+>
+> 本段其餘內容（「狀態回滾」目的、「純淨錨點」語意、「消除副作用」原則）**仍有效**，只是實作由 `git clean + checkout` 切換為 worktree-based reset。
+
 ### 3. 語意與假死監控 (Semantic UX Monitor)
 * **語意熵值檢測 (Entropy Check)**：偵測輸出內容。若重複率過高或連續幾輪無實質產出，判定為「認知死結」。
 * **物理資源隔離 (Cgroups)**：限制 Agent 的 CPU/RAM 上限，確保宿主機不被單一錯誤容器拖垮。

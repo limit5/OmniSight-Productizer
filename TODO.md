@@ -2868,7 +2868,7 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
 - 預估：**2.5 day**（backend 1d + UI 1.5d）
 
 ### R8. Idempotent Retry 正規化（worktree-based，覆寫白皮書 §三.2 的 git clean 設計）(#314)
-- [ ] **設計決策（明確覆寫白皮書）**：不使用 `git clean -fd` + `git checkout .`；改用「discard current worktree + `git worktree add` create fresh worktree from anchor commit」
+- [x] **設計決策（明確覆寫白皮書）**：不使用 `git clean -fd` + `git checkout .`；改用「discard current worktree + `git worktree add` create fresh worktree from anchor commit」——決策落地於 `docs/design/r8-idempotent-retry-worktree.md`（2026-04-25，AI completed）；白皮書 §三.2 段落已加 override 指標；下方 5 個 sub-bullet（anchor commit 寫入 CATC、`WorkspaceManager.discard_and_recreate()` 實作、audit trail、startup orphan scan、整合測試）為此決策的實作範疇
 - [ ] Anchor commit 機制：task 開始前記錄 `anchor_commit_sha`（寫入 CATC metadata）；retry 時 fresh worktree 從此 SHA 分支
 - [ ] WorkspaceManager 擴充：`discard_and_recreate(agent_id, anchor_sha)` → 刪除舊 worktree dir（安全刪除，先 `git worktree remove --force`）→ 新建 worktree → 回傳新 path
 - [ ] Audit trail：每次 retry 寫入 `audit_log`（`retry.worktree_recreated`，附 old_worktree_path / anchor_sha / reason）
