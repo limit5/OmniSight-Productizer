@@ -338,3 +338,348 @@ class TestWriteYaml:
         assert loaded["sample_count"] == 1
         assert "weights" in loaded
         assert loaded["weights"]["gvisor_lightweight"]["tokens"] == 1.0
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  H4b row 2589 — Δmem_peak from host_metrics ring per sandbox window
+# ─────────────────────────────────────────────────────────────────────
+
+class _FakeHost:
+    """Minimal duck-type for ``HostSnapshot.host`` — just exposes
+    ``mem_used_gb``. ``calibrate()`` uses ``getattr(...)`` paths so
+    we don't need to import the real ``HostSample`` dataclass here."""
+
+    def __init__(self, mem_used_gb: float) -> None:
+        self.mem_used_gb = mem_used_gb
+
+
+class _FakeSnap:
+    """Minimal duck-type for ``HostSnapshot`` itself."""
+
+    def __init__(self, ts: float, mem_used_gb: float) -> None:
+        self.sampled_at = ts
+        self.host = _FakeHost(mem_used_gb)
+
+
+def _snap(ts: float, mem_gb: float) -> _FakeSnap:
+    return _FakeSnap(ts, mem_gb)
+
+
+class TestDeltaMemPeakWindow:
+    """Direct coverage of the per-window helper — pinning the contract
+    callers depend on (None when no ring coverage; clamp negatives;
+    GB→MB unit conversion)."""
+
+    def test_returns_none_when_ring_empty(self):
+        assert cal._delta_mem_peak_mb(0.0, 100.0, []) is None
+        assert cal._delta_mem_peak_mb(0.0, 100.0, None) is None
+
+    def test_returns_none_when_no_samples_in_window(self):
+        snaps = [_snap(50.0, 4.0), _snap(60.0, 5.0)]
+        # Window ends before first sample.
+        assert cal._delta_mem_peak_mb(10.0, 30.0, snaps) is None
+        # Window starts after last sample.
+        assert cal._delta_mem_peak_mb(70.0, 90.0, snaps) is None
+
+    def test_computes_peak_minus_baseline_in_mb(self):
+        snaps = [
+            _snap(100.0, 4.0),  # baseline (first in window)
+            _snap(110.0, 5.5),  # peak inside window
+            _snap(120.0, 4.2),
+        ]
+        # 5.5 - 4.0 = 1.5 GB = 1536 MB
+        result = cal._delta_mem_peak_mb(100.0, 130.0, snaps)
+        assert result == pytest.approx(1.5 * 1024.0)
+
+    def test_clamps_negative_delta_to_zero(self):
+        # Other workload exited mid-window, freeing host RAM. Sandbox
+        # contributed no upward pressure → 0.0, not negative.
+        snaps = [_snap(100.0, 8.0), _snap(110.0, 5.0)]
+        result = cal._delta_mem_peak_mb(100.0, 120.0, snaps)
+        assert result == 0.0
+
+    def test_window_filtering_is_inclusive_at_both_ends(self):
+        snaps = [_snap(100.0, 4.0), _snap(150.0, 6.0)]
+        result = cal._delta_mem_peak_mb(100.0, 150.0, snaps)
+        assert result == pytest.approx(2.0 * 1024.0)
+
+    def test_orders_unsorted_input_before_picking_baseline(self):
+        # If callers pass an unordered list, we still pick the
+        # earliest sample inside the window as baseline.
+        snaps = [_snap(150.0, 7.0), _snap(100.0, 4.0), _snap(120.0, 6.0)]
+        result = cal._delta_mem_peak_mb(100.0, 150.0, snaps)
+        # Earliest in window = 100/4.0; peak = 7.0; Δ = 3 GB.
+        assert result == pytest.approx(3.0 * 1024.0)
+
+    def test_returns_none_on_malformed_snapshot(self):
+        # A snapshot missing ``host.mem_used_gb`` shouldn't crash —
+        # the calibrator's defence is "drop the signal, continue
+        # without it" so a single bad ring entry doesn't poison the
+        # whole calibration.
+        class _Broken:
+            sampled_at = 100.0
+            # No .host attribute at all.
+
+        assert cal._delta_mem_peak_mb(50.0, 200.0, [_Broken()]) is None
+
+
+class TestCalibrateWithDeltaMem:
+    """End-to-end Δmem_peak accumulation through ``calibrate()``."""
+
+    NOW = 1_700_000_000.0
+
+    def test_accumulates_per_class_delta_mem_when_ring_covers_window(self):
+        rows = [
+            _row(1, self.NOW - 200, "sandbox_launched", "c1",
+                 tier="t1", tenant_budget=1.0, memory="512m"),
+            _row(2, self.NOW - 100, "sandbox_killed", "c1",
+                 tier="t1", reason="lifetime"),
+        ]
+        snaps = [
+            _snap(self.NOW - 200, 4.0),
+            _snap(self.NOW - 150, 5.0),
+            _snap(self.NOW - 110, 4.8),
+        ]
+        r = cal.calibrate(rows, window_days=7, now=self.NOW,
+                          host_snapshots=snaps)
+        gv = r.classes["gvisor_lightweight"]
+        assert gv.delta_mem_sample_count == 1
+        # 5.0 - 4.0 = 1 GB = 1024 MB
+        assert gv.mean_delta_mem_peak_mb == pytest.approx(1024.0)
+
+    def test_no_host_snapshots_falls_back_to_cpu_only_path(self):
+        rows = [
+            _row(1, self.NOW - 100, "sandbox_launched", "c1",
+                 tier="t1", tenant_budget=1.0, memory="512m"),
+            _row(2, self.NOW - 60, "sandbox_killed", "c1",
+                 tier="t1", reason="lifetime"),
+        ]
+        # Default host_snapshots=None — Δmem stays at zero, weight
+        # derivation works exactly like before this row landed.
+        r = cal.calibrate(rows, window_days=7, now=self.NOW)
+        gv = r.classes["gvisor_lightweight"]
+        assert gv.delta_mem_sample_count == 0
+        assert gv.mean_delta_mem_peak_mb == 0.0
+        # Lightest sampled class still pinned to 1.0.
+        assert r.new_weights["gvisor_lightweight"] == 1.0
+
+    def test_window_without_ring_coverage_does_not_dilute_mean(self):
+        # Two paired launches, only the first inside the ring window.
+        # The ring-uncovered launch must NOT count as a zero-Δmem
+        # sample (would halve the mean).
+        rows = [
+            _row(1, self.NOW - 1000, "sandbox_launched", "c1",
+                 tier="t1", tenant_budget=1.0, memory="512m"),
+            _row(2, self.NOW - 980, "sandbox_killed", "c1",
+                 tier="t1", reason="lifetime"),
+            _row(3, self.NOW - 200, "sandbox_launched", "c2",
+                 tier="t1", tenant_budget=1.0, memory="512m"),
+            _row(4, self.NOW - 100, "sandbox_killed", "c2",
+                 tier="t1", reason="lifetime"),
+        ]
+        snaps = [
+            # Only covers the SECOND launch's window.
+            _snap(self.NOW - 200, 4.0),
+            _snap(self.NOW - 150, 6.0),
+            _snap(self.NOW - 110, 5.0),
+        ]
+        r = cal.calibrate(rows, window_days=7, now=self.NOW,
+                          host_snapshots=snaps)
+        gv = r.classes["gvisor_lightweight"]
+        # CPU samples: 2 (both paired); Δmem samples: 1 (only second
+        # was ring-covered) — the 6-4=2 GB observation isn't averaged
+        # against a phantom 0 GB from the uncovered first launch.
+        assert gv.sample_count == 2
+        assert gv.delta_mem_sample_count == 1
+        assert gv.mean_delta_mem_peak_mb == pytest.approx(2.0 * 1024.0)
+
+
+class TestNormalisationWithMemAxis:
+    """Weight derivation: mem axis takes max() with cpu axis when both
+    are available, falls back gracefully when mem signal is missing."""
+
+    NOW = 1_700_000_000.0
+
+    def test_mem_dominated_class_gets_up_weighted(self):
+        # A class with low CPU×time but big Δmem peak should be
+        # weighted by its memory pressure, not its CPU footprint —
+        # because that's the resource that binds AIMD admission.
+        rows = [
+            # gvisor: 1 token x 20s = 20 cpu_token_s, +1 GB mem.
+            _row(1, self.NOW - 1000, "sandbox_launched", "lt",
+                 tier="t1", tenant_budget=1.0, memory="512m"),
+            _row(2, self.NOW - 980, "sandbox_killed", "lt",
+                 tier="t1", reason="lifetime"),
+            # local_compile: 4 tokens x 100s = 400 cpu_token_s,
+            # +8 GB Δmem (eats most of the host RAM headroom).
+            _row(3, self.NOW - 900, "sandbox_launched", "cc",
+                 tier="t3-local", tenant_budget=4.0, memory="2048m"),
+            _row(4, self.NOW - 800, "sandbox_killed", "cc",
+                 tier="t3-local", reason="lifetime"),
+        ]
+        snaps = [
+            # gvisor window: 4.0 → 5.0 GB (Δ = 1024 MB)
+            _snap(self.NOW - 1000, 4.0),
+            _snap(self.NOW - 990, 5.0),
+            _snap(self.NOW - 980, 4.8),
+            # compile window: 4.0 → 12.0 GB (Δ = 8192 MB)
+            _snap(self.NOW - 900, 4.0),
+            _snap(self.NOW - 850, 12.0),
+            _snap(self.NOW - 800, 11.5),
+        ]
+        r = cal.calibrate(rows, window_days=7, now=self.NOW,
+                          host_snapshots=snaps)
+        # Reference is gvisor (lightest mean_cpu_token_s).
+        assert r.new_weights["gvisor_lightweight"] == 1.0
+        # cpu_score for compile = 400 / 20 = 20.0
+        # mem_score for compile = 8192 / 1024 = 8.0
+        # max() picks 20.0 — CPU wins here.
+        assert r.new_weights["phase64c_local_compile"] == pytest.approx(20.0)
+
+    def test_mem_axis_wins_when_cpu_score_is_lower(self):
+        # Construct a case where mem_score > cpu_score so the mem
+        # axis is the deciding factor (proves max() actually fires).
+        # gvisor: 1 token x 200s = 200 cpu_token_s, +1 GB mem.
+        # compile: 4 tokens x 100s = 400 cpu_token_s, +20 GB mem.
+        # cpu ratio = 2.0; mem ratio = 20.0 → mem wins.
+        rows = [
+            _row(1, self.NOW - 1000, "sandbox_launched", "lt",
+                 tier="t1", tenant_budget=1.0, memory="512m"),
+            _row(2, self.NOW - 800, "sandbox_killed", "lt",
+                 tier="t1", reason="lifetime"),
+            _row(3, self.NOW - 700, "sandbox_launched", "cc",
+                 tier="t3-local", tenant_budget=4.0, memory="2048m"),
+            _row(4, self.NOW - 600, "sandbox_killed", "cc",
+                 tier="t3-local", reason="lifetime"),
+        ]
+        snaps = [
+            # gvisor window: 4.0 → 5.0 GB (Δ = 1024 MB)
+            _snap(self.NOW - 1000, 4.0),
+            _snap(self.NOW - 900, 5.0),
+            _snap(self.NOW - 800, 4.8),
+            # compile window: 4.0 → 24.0 GB (Δ = 20480 MB)
+            _snap(self.NOW - 700, 4.0),
+            _snap(self.NOW - 650, 24.0),
+            _snap(self.NOW - 600, 23.5),
+        ]
+        r = cal.calibrate(rows, window_days=7, now=self.NOW,
+                          host_snapshots=snaps)
+        assert r.new_weights["gvisor_lightweight"] == 1.0
+        # max(cpu=2.0, mem=20.0) = 20.0
+        assert r.new_weights["phase64c_local_compile"] == pytest.approx(20.0)
+
+    def test_mem_axis_dropped_when_reference_class_has_no_signal(self):
+        # Reference class (gvisor) has no host_snapshots coverage —
+        # mem axis must drop entirely (else divide-by-zero); CPU-only
+        # path takes over.
+        rows = [
+            _row(1, self.NOW - 1000, "sandbox_launched", "lt",
+                 tier="t1", tenant_budget=1.0, memory="512m"),
+            _row(2, self.NOW - 980, "sandbox_killed", "lt",
+                 tier="t1", reason="lifetime"),
+            _row(3, self.NOW - 900, "sandbox_launched", "cc",
+                 tier="t3-local", tenant_budget=4.0, memory="2048m"),
+            _row(4, self.NOW - 800, "sandbox_killed", "cc",
+                 tier="t3-local", reason="lifetime"),
+        ]
+        snaps = [
+            # Only covers the compile window, not gvisor's.
+            _snap(self.NOW - 900, 4.0),
+            _snap(self.NOW - 850, 12.0),
+        ]
+        r = cal.calibrate(rows, window_days=7, now=self.NOW,
+                          host_snapshots=snaps)
+        # Falls back to CPU-only normalisation (400 / 20 = 20.0).
+        assert r.new_weights["gvisor_lightweight"] == 1.0
+        assert r.new_weights["phase64c_local_compile"] == pytest.approx(20.0)
+
+
+class TestRenderersWithDeltaMem:
+    """Renderers must surface Δmem_peak so operators see why a class
+    got re-weighted (CPU vs mem axis)."""
+
+    NOW = 1_700_000_000.0
+
+    def _result_with_delta_mem(self):
+        rows = [
+            _row(1, self.NOW - 200, "sandbox_launched", "c1",
+                 tier="t1", tenant_budget=1.0, memory="512m"),
+            _row(2, self.NOW - 100, "sandbox_killed", "c1",
+                 tier="t1", reason="lifetime"),
+        ]
+        snaps = [
+            _snap(self.NOW - 200, 4.0),
+            _snap(self.NOW - 150, 5.5),
+            _snap(self.NOW - 110, 4.8),
+        ]
+        return cal.calibrate(rows, window_days=7, now=self.NOW,
+                             host_snapshots=snaps)
+
+    def test_text_renderer_includes_mean_delta_mem_column(self):
+        text = cal.render_text(self._result_with_delta_mem())
+        # Header column appears.
+        assert "Mean Δmem (MB)" in text
+        # Numeric value (1.5 GB → 1536 MB) renders.
+        assert "1536" in text
+
+    def test_text_renderer_shows_dash_for_classes_without_signal(self):
+        # gvisor sampled with mem; compile sampled but no ring coverage
+        # → compile shows "—" in the Δmem column.
+        rows = [
+            _row(1, self.NOW - 200, "sandbox_launched", "c1",
+                 tier="t1", tenant_budget=1.0, memory="512m"),
+            _row(2, self.NOW - 100, "sandbox_killed", "c1",
+                 tier="t1", reason="lifetime"),
+            _row(3, self.NOW - 1000, "sandbox_launched", "c2",
+                 tier="t3-local", tenant_budget=4.0, memory="2048m"),
+            _row(4, self.NOW - 900, "sandbox_killed", "c2",
+                 tier="t3-local", reason="lifetime"),
+        ]
+        snaps = [
+            _snap(self.NOW - 200, 4.0),
+            _snap(self.NOW - 150, 5.5),
+        ]
+        r = cal.calibrate(rows, window_days=7, now=self.NOW,
+                          host_snapshots=snaps)
+        text = cal.render_text(r)
+        # Find the compile row by name and assert its Δmem cell is "—".
+        compile_line = [
+            ln for ln in text.splitlines()
+            if "phase64c_local_compile" in ln
+        ]
+        assert compile_line, "compile row missing from text render"
+        # 11 columns (Class .. OOMs) — Δmem is the 9th cell.
+        cells = [c.strip() for c in compile_line[0].split("|")[1:-1]]
+        assert cells[8] == "—"
+
+    def test_json_renderer_exposes_mean_delta_mem_peak(self):
+        payload = json.loads(cal.render_json(self._result_with_delta_mem()))
+        gv = payload["classes"]["gvisor_lightweight"]
+        assert gv["mean_delta_mem_peak_mb"] == pytest.approx(1536.0)
+        assert gv["delta_mem_sample_count"] == 1
+
+    def test_yaml_renderer_writes_mean_delta_mem_peak(self):
+        yaml_text = cal.render_yaml(self._result_with_delta_mem())
+        # The sampled class records its observation count and mean Δ.
+        assert "mean_delta_mem_peak_mb: 1536.0" in yaml_text
+        assert "delta_mem_sample_count: 1" in yaml_text
+
+
+class TestHostRingSnapshotsWiring:
+    """CLI helper duck-types host_metrics — verify it tolerates a
+    missing backend module without raising (operator running the
+    script on a machine without the backend pip-installed)."""
+
+    def test_returns_empty_when_backend_unimportable(self, monkeypatch):
+        # Force the import to fail; helper must return [] not raise.
+        import builtins
+        real_import = builtins.__import__
+
+        def _broken_import(name, *args, **kwargs):
+            if name == "backend" or name.startswith("backend."):
+                raise ModuleNotFoundError("simulated missing backend")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _broken_import)
+        assert cal.host_ring_snapshots() == []
+        assert cal.host_ring_depth() == 0

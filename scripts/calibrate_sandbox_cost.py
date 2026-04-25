@@ -153,6 +153,14 @@ class ClassStats:
     cpu_token_s_total: float = 0.0  # tenant_budget * duration_s
     peak_mem_mb: float = 0.0        # max observed memory (limit or OOM)
     oom_count: int = 0
+    # Δmem_peak — observed host-level mem growth during each sandbox's
+    # [launch, end] window, summed across paired launches that had at
+    # least one host_metrics ring sample inside their window. Sample
+    # count is tracked separately because not every paired launch will
+    # have ring coverage (the ring rotates every ~5 minutes; long-tail
+    # historical launches in a 7-day window won't).
+    delta_mem_peak_mb_total: float = 0.0
+    delta_mem_sample_count: int = 0
 
     @property
     def mean_duration_s(self) -> float:
@@ -161,6 +169,13 @@ class ClassStats:
     @property
     def mean_cpu_token_s(self) -> float:
         return self.cpu_token_s_total / self.sample_count if self.sample_count else 0.0
+
+    @property
+    def mean_delta_mem_peak_mb(self) -> float:
+        return (
+            self.delta_mem_peak_mb_total / self.delta_mem_sample_count
+            if self.delta_mem_sample_count else 0.0
+        )
 
 
 @dataclass
@@ -391,16 +406,58 @@ async def _fetch_from_sqlite(since_ts: float) -> list[AuditRow]:
 #  Core calibration
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _delta_mem_peak_mb(window_start: float, window_end: float,
+                       host_snapshots: list[Any] | None) -> float | None:
+    """Compute Δmem_peak (MB) for one sandbox window from host samples.
+
+    Walks ``host_snapshots`` (a list of ``HostSnapshot`` — duck-typed so
+    tests can pass plain objects with ``.host.mem_used_gb`` /
+    ``.sampled_at``) and returns ``max(mem_used) - first(mem_used)``
+    over snapshots whose ``sampled_at`` falls in
+    ``[window_start, window_end]``. Returns ``None`` when no snapshots
+    fall in the window (caller treats as "no Δmem signal for this run"
+    and skips Δmem accumulation — *not* zero, which would dilute the
+    mean of classes that *did* observe growth).
+
+    Negative deltas (other workloads exited during the window, freeing
+    host memory) clamp to 0.0: the calibrator measures *upward
+    pressure* this sandbox added, not downward swings driven by
+    unrelated processes.
+    """
+    if not host_snapshots:
+        return None
+    in_window = [
+        s for s in host_snapshots
+        if window_start <= getattr(s, "sampled_at", 0.0) <= window_end
+    ]
+    if not in_window:
+        return None
+    in_window.sort(key=lambda s: s.sampled_at)
+    try:
+        baseline_gb = float(in_window[0].host.mem_used_gb)
+        peak_gb = max(float(s.host.mem_used_gb) for s in in_window)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    delta_gb = peak_gb - baseline_gb
+    if delta_gb < 0.0:
+        delta_gb = 0.0
+    return delta_gb * 1024.0
+
+
 def calibrate(rows: list[AuditRow], *, window_days: int,
               now: float | None = None,
-              host_ring_size: int = 0) -> CalibrationResult:
+              host_ring_size: int = 0,
+              host_snapshots: list[Any] | None = None) -> CalibrationResult:
     """Produce a :class:`CalibrationResult` from raw audit rows.
 
-    Pure function — host_metrics ring size is passed in by the caller
-    so tests can drive deterministically without touching the live
-    sampler. The ring size is reported in the diff so operators can
-    sanity-check whether the same backend was actively sampling
-    during the window.
+    Pure function — host_metrics ring size + the snapshot list itself
+    are passed in by the caller so tests can drive deterministically
+    without touching the live sampler. The ring size is reported in
+    the diff so operators can sanity-check whether the same backend
+    was actively sampling during the window. ``host_snapshots`` (when
+    provided, typically from ``host_metrics.get_host_history()``)
+    enables Δmem_peak accumulation per class — see
+    :func:`_delta_mem_peak_mb`.
     """
     canonical = canonical_class_table()
     classes: dict[str, ClassStats] = {
@@ -473,6 +530,14 @@ def calibrate(rows: list[AuditRow], *, window_days: int,
             )
             if oom_mem_mb > stats.peak_mem_mb:
                 stats.peak_mem_mb = oom_mem_mb
+        # Δmem_peak — only accumulate when the host_metrics ring
+        # actually covers this sandbox's window; otherwise the mean
+        # would be diluted by zero-deltas from launches that the
+        # sampler never saw.
+        delta_mb = _delta_mem_peak_mb(launch.ts, chosen.ts, host_snapshots)
+        if delta_mb is not None:
+            stats.delta_mem_peak_mb_total += delta_mb
+            stats.delta_mem_sample_count += 1
         paired += 1
 
     new_weights = _normalise_weights(classes, canonical)
@@ -494,8 +559,25 @@ def calibrate(rows: list[AuditRow], *, window_days: int,
 
 def _normalise_weights(classes: dict[str, ClassStats],
                        canonical: dict[str, dict[str, Any]]) -> dict[str, float]:
-    """Pick the lightest class with samples as the 1.0 reference and
-    scale the rest by ``mean_cpu_token_s`` ratio.
+    """Derive new tokens from BOTH mean CPU×time AND mean Δmem_peak.
+
+    The H4a hardcoded values weight a class by whichever resource
+    binds AIMD admission first (CPU cores OR memory). Calibration
+    keeps that property by computing two normalised scores per
+    sampled class and taking the **max**:
+
+        cpu_score = mean_cpu_token_s    / ref_mean_cpu_token_s
+        mem_score = mean_delta_mem_peak / ref_mean_delta_mem_peak
+        new_tokens = round(max(cpu_score, mem_score), 2)
+
+    The reference class is the one with the lowest ``mean_cpu_token_s``
+    among sampled classes — same as before so the lightest class
+    always pins to 1.0 (callers that hardcode "1 token" against the
+    lightweight envelope keep working). When the reference class has
+    no Δmem signal (no host_metrics ring coverage in any of its
+    windows), the mem axis is dropped entirely and we fall back to
+    the original CPU-only path: this is the conservative behaviour
+    when the sampler wasn't running, not a silent under-weighting.
 
     Classes with zero samples keep their old token value — calibration
     is silent on classes the operator hasn't exercised in the window
@@ -511,12 +593,17 @@ def _normalise_weights(classes: dict[str, ClassStats],
     out: dict[str, float] = {n: classes[n].old_tokens for n in classes}
     if not sampled:
         return out
-    # Reference = class with the lowest mean CPU x time. That class
-    # becomes the new 1.0 token; everything else scales relative to it.
     ref_name, ref_stats = min(sampled, key=lambda kv: kv[1].mean_cpu_token_s)
-    ref = ref_stats.mean_cpu_token_s
+    cpu_ref = ref_stats.mean_cpu_token_s
+    mem_ref = ref_stats.mean_delta_mem_peak_mb
+    use_mem_axis = mem_ref > 0.0
     for n, s in sampled:
-        out[n] = round(s.mean_cpu_token_s / ref, 2)
+        cpu_score = s.mean_cpu_token_s / cpu_ref
+        if use_mem_axis and s.mean_delta_mem_peak_mb > 0.0:
+            mem_score = s.mean_delta_mem_peak_mb / mem_ref
+            out[n] = round(max(cpu_score, mem_score), 2)
+        else:
+            out[n] = round(cpu_score, 2)
     # Pin the ref explicitly — float division might produce 0.999...
     out[ref_name] = 1.0
     return out
@@ -556,7 +643,8 @@ def render_text(result: CalibrationResult) -> str:
 
     headers = (
         "Class", "Tier", "Old", "New", "Δ", "Samples",
-        "Mean dur (s)", "Mean CPU·s", "Peak mem (MB)", "OOMs",
+        "Mean dur (s)", "Mean CPU·s", "Mean Δmem (MB)",
+        "Peak mem (MB)", "OOMs",
     )
     lines.append("| " + " | ".join(headers) + " |")
     lines.append("|" + "|".join(["---"] * len(headers)) + "|")
@@ -566,9 +654,14 @@ def render_text(result: CalibrationResult) -> str:
         delta = new - s.old_tokens
         sign = "+" if delta > 0 else ("−" if delta < 0 else " ")
         delta_str = f"{sign}{abs(delta):.2f}" if delta else "—"
+        dmem_str = (
+            f"{s.mean_delta_mem_peak_mb:.0f}"
+            if s.delta_mem_sample_count else "—"
+        )
         lines.append(
             "| {name} | {tier} | {old:.2f} | {new:.2f} | {delta} | "
-            "{count} | {dur:.2f} | {cs:.2f} | {mem:.0f} | {oom} |".format(
+            "{count} | {dur:.2f} | {cs:.2f} | {dmem} | {mem:.0f} | "
+            "{oom} |".format(
                 name=name,
                 tier=s.tier,
                 old=s.old_tokens,
@@ -577,6 +670,7 @@ def render_text(result: CalibrationResult) -> str:
                 count=s.sample_count,
                 dur=s.mean_duration_s,
                 cs=s.mean_cpu_token_s,
+                dmem=dmem_str,
                 mem=s.peak_mem_mb,
                 oom=s.oom_count,
             )
@@ -605,6 +699,8 @@ def render_json(result: CalibrationResult) -> str:
                 "sample_count": s.sample_count,
                 "mean_duration_s": s.mean_duration_s,
                 "mean_cpu_token_s": s.mean_cpu_token_s,
+                "mean_delta_mem_peak_mb": s.mean_delta_mem_peak_mb,
+                "delta_mem_sample_count": s.delta_mem_sample_count,
                 "peak_mem_mb": s.peak_mem_mb,
                 "oom_count": s.oom_count,
             }
@@ -660,6 +756,13 @@ def render_yaml(result: CalibrationResult) -> str:
         lines.append(f"    use_case: '{use_case}'")
         lines.append(f"    sample_count: {s.sample_count}")
         lines.append(f"    mean_duration_s: {round(s.mean_duration_s, 3)}")
+        lines.append(
+            f"    mean_delta_mem_peak_mb: "
+            f"{round(s.mean_delta_mem_peak_mb, 1)}"
+        )
+        lines.append(
+            f"    delta_mem_sample_count: {s.delta_mem_sample_count}"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -761,6 +864,22 @@ def host_ring_depth() -> int:
         return 0
 
 
+def host_ring_snapshots() -> list[Any]:
+    """Return a copy of the live ``host_metrics`` ring (oldest first).
+
+    Used by the CLI to feed Δmem_peak computation. Returns an empty
+    list when the backend module isn't importable or the sampler
+    hasn't produced anything yet — calibrate() then skips Δmem
+    accumulation rather than feeding it zeros.
+    """
+    try:
+        from backend import host_metrics  # type: ignore[no-redef]
+        return list(host_metrics.get_host_history())
+    except Exception as exc:
+        logger.debug("host_metrics ring fetch failed: %s", exc)
+        return []
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  CLI
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -813,11 +932,13 @@ async def _async_main(argv: list[str] | None = None) -> int:
     finally:
         await _close_pg_pool_if_open()
 
+    snaps = host_ring_snapshots()
     result = calibrate(
         rows,
         window_days=args.days,
         now=now,
-        host_ring_size=host_ring_depth(),
+        host_ring_size=len(snaps),
+        host_snapshots=snaps,
     )
 
     if args.format == "json":
