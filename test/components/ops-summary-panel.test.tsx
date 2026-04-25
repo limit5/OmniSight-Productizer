@@ -382,3 +382,147 @@ describe("OpsSummaryPanel — H3 row 1527 force turbo override", () => {
     confirmSpy.mockRestore()
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────
+// H4a row 2583 — Adaptive (AIMD) budget transparency.
+// New section in OpsSummaryPanel that surfaces the current host-level
+// AIMD budget plus a 5-min trace of state-changing events (init / AI / MD
+// / hard_cap / floor / hold) so operators see the rise/fall history at a
+// glance instead of having to tail audit logs.
+// ─────────────────────────────────────────────────────────────────────────
+describe("OpsSummaryPanel — H4a row 2583 AIMD budget + 5min trace", () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  const aimdBase = (): NonNullable<OpsSummary["aimd"]> => ({
+    budget: 8,
+    capacity_max: 12,
+    floor: 2,
+    init_budget: 6,
+    last_reason: "additive_increase",
+    last_ai_at: 1700000000,
+    pressure_clock_started_at: null,
+    thresholds: {
+      cpu_ai_pct: 70, mem_ai_pct: 70,
+      cpu_md_pct: 85, mem_md_pct: 85,
+      ai_interval_s: 30, md_persistence_s: 10,
+    },
+    trace: [
+      { timestamp: 1, budget: 6, reason: "init",              cpu_percent: 0,  mem_percent: 0  },
+      { timestamp: 31, budget: 7, reason: "additive_increase", cpu_percent: 10, mem_percent: 12 },
+      { timestamp: 61, budget: 8, reason: "additive_increase", cpu_percent: 11, mem_percent: 14 },
+    ],
+  })
+
+  it("renders the AIMD section with current budget, last-reason pill, and trace", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      aimd: aimdBase(),
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-aimd-section")).toBeInTheDocument()
+    })
+    expect(screen.getByText("AIMD BUDGET")).toBeInTheDocument()
+    // Budget tile shows current / capacity_max
+    expect(screen.getByTestId("ops-aimd-budget").textContent).toContain("8/12")
+    // Last-reason pill colors the current state — additive_increase = green tag.
+    const pill = screen.getByTestId("ops-aimd-reason")
+    expect(pill.getAttribute("data-reason")).toBe("additive_increase")
+    expect(pill.textContent).toContain("AI+")
+    // Trace sparkline rendered with the right number of points.
+    const trace = screen.getByTestId("ops-aimd-trace")
+    expect(trace.getAttribute("data-points")).toBe("3")
+    expect(trace.tagName.toLowerCase()).toBe("svg")
+  })
+
+  it("shows MD½ pill and warn tone on 5m AI/MD counters when budget halved", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      aimd: {
+        ...aimdBase(),
+        budget: 3,
+        last_reason: "multiplicative_decrease",
+        trace: [
+          { timestamp: 1, budget: 6, reason: "init",                    cpu_percent: 0,  mem_percent: 0  },
+          { timestamp: 31, budget: 7, reason: "additive_increase",       cpu_percent: 10, mem_percent: 12 },
+          { timestamp: 61, budget: 3, reason: "multiplicative_decrease", cpu_percent: 95, mem_percent: 30 },
+        ],
+      },
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-aimd-section")).toBeInTheDocument()
+    })
+    const pill = screen.getByTestId("ops-aimd-reason")
+    expect(pill.getAttribute("data-reason")).toBe("multiplicative_decrease")
+    expect(pill.textContent).toContain("MD")
+    // Counters tile reports +1 AI and -1 MD over the 5-min window.
+    const counts = screen.getByTestId("ops-aimd-counts")
+    expect(counts.textContent).toContain("+1/-1")
+    // MD ≥ 1 → warn tone (orange) so the operator notices the halving.
+    const valueSpan = counts.querySelector("div.font-mono.font-semibold") as HTMLElement
+    expect(valueSpan.className).toContain("fui-orange")
+  })
+
+  it("renders a budget=floor tile with 'bad' tone after a sustained MD spiral", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      aimd: {
+        ...aimdBase(),
+        budget: 2,                  // == floor
+        last_reason: "floor",
+        trace: [
+          { timestamp: 1, budget: 6, reason: "init",                    cpu_percent: 0,  mem_percent: 0  },
+          { timestamp: 30, budget: 3, reason: "multiplicative_decrease", cpu_percent: 95, mem_percent: 50 },
+          { timestamp: 60, budget: 2, reason: "multiplicative_decrease", cpu_percent: 95, mem_percent: 50 },
+          { timestamp: 90, budget: 2, reason: "floor",                   cpu_percent: 95, mem_percent: 50 },
+        ],
+      },
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-aimd-section")).toBeInTheDocument()
+    })
+    const tile = screen.getByTestId("ops-aimd-budget")
+    expect(tile.textContent).toContain("2/12")
+    // budget at floor → bad tone (red).
+    const valueSpan = tile.querySelector("div.font-mono.font-semibold") as HTMLElement
+    expect(valueSpan.className).toContain("critical-red")
+  })
+
+  it("renders an empty-state placeholder when fewer than 2 trace points exist", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      aimd: {
+        ...aimdBase(),
+        // Only the cold-start INIT entry — sparkline can't draw a line.
+        trace: [
+          { timestamp: 1, budget: 6, reason: "init", cpu_percent: 0, mem_percent: 0 },
+        ],
+      },
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-aimd-section")).toBeInTheDocument()
+    })
+    const trace = screen.getByTestId("ops-aimd-trace")
+    expect(trace.getAttribute("data-empty")).toBe("true")
+  })
+
+  it("hides the AIMD section entirely when the backend omits it (older API)", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByText("OPS SUMMARY")).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId("ops-aimd-section")).toBeNull()
+    expect(screen.queryByText("AIMD BUDGET")).toBeNull()
+  })
+})

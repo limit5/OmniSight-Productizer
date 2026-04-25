@@ -2935,6 +2935,35 @@ export interface OpsSummary {
     derated: boolean
     derate_reason?: string | null
   } | null
+  /** H4a row 2583: Adaptive (AIMD) budget transparency. ``budget`` is
+   * the current host-level concurrency token count derived by the AIMD
+   * controller; ``trace`` is the last 5 min of state-changing events
+   * (init / additive_increase / multiplicative_decrease / hard_cap /
+   * floor / hold) so the UI can render the rise/fall history. */
+  aimd?: {
+    budget: number
+    capacity_max: number
+    floor: number
+    init_budget: number
+    last_reason: string
+    last_ai_at: number
+    pressure_clock_started_at: number | null
+    thresholds: {
+      cpu_ai_pct: number
+      mem_ai_pct: number
+      cpu_md_pct: number
+      mem_md_pct: number
+      ai_interval_s: number
+      md_persistence_s: number
+    }
+    trace: Array<{
+      timestamp: number
+      budget: number
+      reason: string
+      cpu_percent: number
+      mem_percent: number
+    }>
+  } | null
 }
 
 export async function getOpsSummary(): Promise<OpsSummary> {

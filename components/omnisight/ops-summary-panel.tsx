@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   Activity, AlertTriangle, DollarSign, Flame, Radio, Shield, Clock3, Cpu, Brain,
-  Layers, TimerReset, Gauge, Zap,
+  Layers, TimerReset, Gauge, Zap, TrendingUp,
 } from "lucide-react"
 import { getOpsSummary, forceTurboOverride, type OpsSummary } from "@/lib/api"
 
@@ -121,6 +121,25 @@ export function OpsSummaryPanel() {
             entry={data.coordinator}
             onApplied={() => void refresh()}
           />
+        </div>
+      )}
+
+      {/* H4a row 2583: Adaptive (AIMD) budget — current token budget plus
+          5-min rolling trace of state-changing events. Hidden when the
+          backend omits the snapshot so older backends degrade gracefully.
+          Sits next to COORDINATOR because the AIMD-shaped budget is
+          composed with the per-mode multiplier into the effective
+          admission ceiling — ops staring at "EFF BUDGET 6/12" should
+          immediately see whether the AIMD controller is the throttle
+          (and how it has been moving). */}
+      {data && data.aimd && (
+        <div className="px-3 pb-2 -mt-1" data-testid="ops-aimd-section">
+          <div className="font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)] mb-1 flex items-center gap-1 flex-wrap">
+            <TrendingUp size={10} aria-hidden />
+            AIMD BUDGET
+            <AimdReasonPill reason={data.aimd.last_reason} />
+          </div>
+          <AimdRow entry={data.aimd} />
         </div>
       )}
 
@@ -452,6 +471,206 @@ function RunnerPill({ label, value, accent }: { label: string; value: number; ac
       <span className="w-1.5 h-1.5 rounded-full" style={{ background: accent }} />
       {label}: <span className="text-[var(--foreground,#e2e8f0)]">{value}</span>
     </span>
+  )
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  H4a row 2583 — AIMD budget transparency (current + 5-min trace)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+type AimdReason =
+  | "init"
+  | "additive_increase"
+  | "multiplicative_decrease"
+  | "hold"
+  | "hard_cap"
+  | "floor"
+
+const REASON_COLOR: Record<string, string> = {
+  init:                    "var(--muted-foreground,#94a3b8)",
+  additive_increase:       "var(--validation-emerald,#10b981)",
+  multiplicative_decrease: "var(--critical-red,#ef4444)",
+  hold:                    "var(--muted-foreground,#94a3b8)",
+  hard_cap:                "var(--neural-cyan,#67e8f9)",
+  floor:                   "var(--fui-orange,#f59e0b)",
+}
+
+const REASON_SHORT: Record<string, string> = {
+  init:                    "INIT",
+  additive_increase:       "AI+",
+  multiplicative_decrease: "MD½",
+  hold:                    "HOLD",
+  hard_cap:                "CAP",
+  floor:                   "FLOOR",
+}
+
+function reasonColor(reason: string): string {
+  return REASON_COLOR[reason] ?? REASON_COLOR.hold
+}
+
+function reasonShort(reason: string): string {
+  return REASON_SHORT[reason] ?? reason.toUpperCase()
+}
+
+function AimdReasonPill({ reason }: { reason: string }) {
+  const color = reasonColor(reason)
+  return (
+    <span
+      data-testid="ops-aimd-reason"
+      data-reason={reason}
+      className="inline-flex items-center px-1 rounded-sm font-mono text-[8px] tracking-[0.12em]"
+      style={{
+        color,
+        backgroundColor: `color-mix(in srgb, ${color} 18%, transparent)`,
+      }}
+      title={`Last AIMD cycle outcome: ${reason}`}
+    >
+      {reasonShort(reason)}
+    </span>
+  )
+}
+
+function AimdRow({ entry }: { entry: NonNullable<OpsSummary["aimd"]> }) {
+  // Tone the budget tile by where the budget sits in its envelope:
+  //   • at the FLOOR → bad (the AIMD controller has collapsed the budget)
+  //   • at the CAPACITY_MAX → ok (running with full host envelope)
+  //   • otherwise → info (mid-envelope, normal AIMD oscillation)
+  let budgetTone: Tone = "info"
+  if (entry.budget <= entry.floor) budgetTone = "bad"
+  else if (entry.budget >= entry.capacity_max) budgetTone = "ok"
+
+  // Count AI / MD events in the trace so the operator can see at a
+  // glance "5 increases, 1 halving in the last 5 min" — handy in
+  // post-incident review without leaving the panel.
+  const aiCount = entry.trace.filter(
+    (e) => e.reason === "additive_increase",
+  ).length
+  const mdCount = entry.trace.filter(
+    (e) => e.reason === "multiplicative_decrease",
+  ).length
+
+  const budgetTitle =
+    `AIMD budget: ${entry.budget} / ${entry.capacity_max} tokens ` +
+    `(floor=${entry.floor}, init=${entry.init_budget}). ` +
+    `Last reason: ${entry.last_reason}. ` +
+    `Last 5 min: +${aiCount} additive increase / -${mdCount} multiplicative decrease.`
+
+  return (
+    <div className="grid grid-cols-3 gap-2" data-testid="ops-aimd-row">
+      <Kpi
+        icon={Gauge}
+        label="BUDGET"
+        value={`${entry.budget}/${entry.capacity_max}`}
+        tone={budgetTone}
+        title={budgetTitle}
+        testId="ops-aimd-budget"
+      />
+      <Kpi
+        icon={Activity}
+        label="5m AI/MD"
+        value={`+${aiCount}/-${mdCount}`}
+        tone={mdCount > 0 ? "warn" : aiCount > 0 ? "ok" : "info"}
+        title={`Additive-increase events: ${aiCount}; Multiplicative-decrease events: ${mdCount} (last 5 min).`}
+        testId="ops-aimd-counts"
+      />
+      <div
+        className="flex flex-col items-start gap-0.5 p-2 rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.2))] bg-white/5"
+        title={`5-min budget trace (${entry.trace.length} events). Floor=${entry.floor}, capacity_max=${entry.capacity_max}.`}
+        data-testid="ops-aimd-trace-tile"
+      >
+        <div className="flex items-center gap-1 font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)]">
+          <TrendingUp className="w-3 h-3" aria-hidden />
+          5m TRACE
+        </div>
+        <AimdTrace
+          trace={entry.trace}
+          floor={entry.floor}
+          capacityMax={entry.capacity_max}
+        />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Pure SVG sparkline of the AIMD budget over the last 5 min, with a
+ * coloured dot for each state-changing cycle (green = AI+, red = MD½,
+ * orange = FLOOR, cyan = CAP, grey = INIT/HOLD).
+ *
+ * Y-axis is anchored to ``[floor, capacity_max]`` so two snapshots taken
+ * minutes apart can be compared visually — auto-fitting the y-axis to
+ * the trace's own min/max would lie about how much headroom the
+ * controller actually has.
+ */
+function AimdTrace({
+  trace,
+  floor,
+  capacityMax,
+  width = 96,
+  height = 22,
+}: {
+  trace: Array<{ timestamp: number; budget: number; reason: string }>
+  floor: number
+  capacityMax: number
+  width?: number
+  height?: number
+}) {
+  if (trace.length < 2) {
+    return (
+      <div
+        data-testid="ops-aimd-trace"
+        data-empty="true"
+        className="opacity-30 font-mono text-[9px] flex items-center justify-end mt-0.5"
+        style={{ width, height }}
+      >
+        —
+      </div>
+    )
+  }
+  // X positions are time-proportional so a long calm followed by a
+  // burst of AI events doesn't get visually compressed into a single
+  // tick — operators reading the sparkline should see "calm, then a
+  // cluster", not an artificially even cadence.
+  const t0 = trace[0].timestamp
+  const tN = trace[trace.length - 1].timestamp
+  const span = Math.max(0.001, tN - t0)
+  const range = Math.max(0.001, capacityMax - floor)
+  const xs = trace.map((e) => ((e.timestamp - t0) / span) * width)
+  const ys = trace.map((e) => {
+    const clamped = Math.max(floor, Math.min(capacityMax, e.budget))
+    return height - ((clamped - floor) / range) * height
+  })
+  const pts = xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(" ")
+  return (
+    <svg
+      data-testid="ops-aimd-trace"
+      data-points={trace.length}
+      width={width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="xMidYMid meet"
+      className="shrink-0 mt-0.5"
+      aria-label={`AIMD budget trace, ${trace.length} events over last 5 min`}
+      role="img"
+    >
+      <polyline
+        fill="none"
+        stroke="var(--neural-cyan,#67e8f9)"
+        strokeWidth={1.2}
+        points={pts}
+      />
+      {trace.map((e, i) => (
+        <circle
+          key={`${e.timestamp}-${i}`}
+          cx={xs[i].toFixed(1)}
+          cy={ys[i].toFixed(1)}
+          r={e.reason === "additive_increase" || e.reason === "multiplicative_decrease" ? 1.8 : 1.1}
+          fill={reasonColor(e.reason)}
+          data-reason={e.reason}
+        />
+      ))}
+    </svg>
   )
 }
 

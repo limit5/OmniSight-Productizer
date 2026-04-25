@@ -282,12 +282,27 @@ async def ops_summary() -> dict:
     except Exception as exc:
         logger.debug("ops_summary: coordinator lookup failed: %s", exc)
 
+    # H4a row 2583: Adaptive budget transparency — current AIMD budget
+    # plus a 5-min rolling trace of state-changing events so the UI
+    # can render the rise/fall history. Module-global state per
+    # uvicorn worker: every worker derives its own AIMD curve from
+    # the same host CPU/mem signal (SOP Step 1 answer #1) — last-
+    # known-good is persisted to PG and primed at lifespan boot, so
+    # cold-starts converge across workers.
+    aimd_snap: dict[str, Any] | None = None
+    try:
+        from backend import adaptive_budget as _ab
+        aimd_snap = _ab.snapshot()
+    except Exception as exc:
+        logger.debug("ops_summary: adaptive_budget lookup failed: %s", exc)
+
     return {
         "checked_at": time.time(),
         "uptime_s": uptime,
         "t3_runners": t3_runners,
         "highest_entropy_agent": highest_entropy,
         "coordinator": coordinator_snap,
+        "aimd": aimd_snap,
         # Spend
         "daily_cost_usd": _sys.get_daily_cost(),
         "hourly_cost_usd": _sys.get_hourly_cost()
