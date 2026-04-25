@@ -179,6 +179,15 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # NOT in TABLES_WITH_IDENTITY_ID. Empty until Y2 admin REST
     # ``POST /api/v1/admin/invites`` starts inserting.
     "tenant_invites",
+    # Y1 row 5 (#277, alembic 0036): cross-tenant project share.
+    # FKs ``project_id → projects.id`` (CASCADE), ``guest_tenant_id
+    # → tenants.id`` (CASCADE), ``granted_by → users.id`` (SET NULL)
+    # so it MUST replay after ``projects``, ``tenants`` and ``users``.
+    # PK is the app-generated TEXT ``id`` (``psh-*``); NOT in
+    # TABLES_WITH_IDENTITY_ID. UNIQUE (project_id, guest_tenant_id)
+    # forbids two concurrent role grants on the same (project, guest
+    # tenant) pair. Empty until Y3 admin REST starts inserting.
+    "project_shares",
     # MFA tables — all have FK ``user_id → users.id`` so they MUST
     # come after users in the replay order.
     "user_mfa",

@@ -773,6 +773,30 @@ CREATE INDEX IF NOT EXISTS idx_tenant_invites_expiry_sweep
     ON tenant_invites(expires_at)
     WHERE status = 'pending';
 
+-- Y1 row 5 (#277): cross-tenant project share. Owning tenant A grants
+-- guest tenant B project-level access (viewer / contributor — never
+-- owner; cross-tenant ownership is not a sane operation). ``expires_at``
+-- NULL ⇒ permanent share. ``granted_by`` SET NULL on user delete so
+-- the share survives admin rotation. UNIQUE (project_id,
+-- guest_tenant_id) — at most one share per (project, guest tenant) pair.
+-- Mirrors alembic 0036_project_shares.py — keep in sync.
+CREATE TABLE IF NOT EXISTS project_shares (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    guest_tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL DEFAULT 'viewer',
+    granted_by      TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at      TEXT,
+    UNIQUE (project_id, guest_tenant_id),
+    CHECK (role IN ('viewer', 'contributor'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_shares_guest_tenant
+    ON project_shares(guest_tenant_id);
+CREATE INDEX IF NOT EXISTS idx_project_shares_expiry_sweep
+    ON project_shares(expires_at)
+    WHERE expires_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS sessions (
     token           TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL,
