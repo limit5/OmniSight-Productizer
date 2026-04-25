@@ -2585,7 +2585,7 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
 - 預估：**1.5 day**
 
 ### H4b. Sandbox cost calibration（H1 上線 1 週後）
-- [ ] `scripts/calibrate_sandbox_cost.py`：讀取過去 N 天 sandbox 執行紀錄（start/end timestamp + 同期 host_metrics ring）
+- [x] `scripts/calibrate_sandbox_cost.py`：讀取過去 N 天 sandbox 執行紀錄（start/end timestamp + 同期 host_metrics ring）— 落地 `scripts/calibrate_sandbox_cost.py` (~530 行) 從 `audit_log` 取 `sandbox_launched`/`sandbox.oom`/`sandbox_killed`，按 `entity_id` 配對 start↔end，best-effort 讀 `host_metrics.get_host_history()` ring 深度納入 diff，骨架同時也順手把 H4b 後三 row 的設施落齊（CPU×time/peak-mem 計算、文字+JSON+YAML diff 三 renderer、`--apply` 寫 `configs/sandbox_cost_weights.yaml` 並透過 `backend.audit.log` 補 `sandbox_cost_calibration` row 進 hash-chain）。33 顆 unit test (`backend/tests/test_calibrate_sandbox_cost.py`) 全綠 0.14s。後三 row 仍留 `[ ]` 等 H1 上線 1 週累積真實 audit 資料後跑 `--apply` 才正式 flip。
 - [ ] 計算每類 sandbox 的平均 CPU×time / Δmem_peak → 產新權重表
 - [ ] 輸出 diff report（舊權重 vs 新權重）供人工審核
 - [ ] 支援 `--apply` 旗標寫回 `configs/sandbox_cost_weights.yaml`（改 H4a hardcode 為 config 驅動）
