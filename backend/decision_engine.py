@@ -166,6 +166,15 @@ H2_REASON_CPU = "host_cpu_high"
 H2_REASON_MEM = "host_mem_high"
 H2_REASON_CONTAINER = "container_cap"
 
+# H4a row 2581: queue-wait reasons. Emitted when the slot cannot be
+# granted because the per-mode cap (composed with the AIMD-shaped
+# budget) is saturated, or because the DRF per-tenant bucket is full.
+# Unlike the H2 reasons above — which describe physical host pressure —
+# these describe logical admission-control pressure and are fired once
+# per acquire on entry to the queue wait (not per wakeup).
+H4A_REASON_MODE_CAP = "mode_cap_saturated"
+H4A_REASON_DRF = "drf_saturated"
+
 # Exponential backoff schedule while the precondition is breached.
 # Starts at H2_BACKOFF_BASE_S, doubles on every failed attempt, caps
 # at H2_BACKOFF_CAP_S. Overridable via env for ops tuning + tests.
@@ -436,6 +445,36 @@ def _effective_budget(mode: OperationMode) -> int:
     return _PARALLEL_BUDGET[mode]
 
 
+def _compose_effective_cap(mode: OperationMode) -> int:
+    """H4a row 2581 — compose the mode cap with the AIMD-shaped budget.
+
+    The mode-cap path honours three ceilings at once:
+
+    * ``_effective_budget(mode)`` — the static per-mode parallelism
+      budget, with an active turbo-derate override.
+    * :func:`backend.adaptive_budget.effective_budget` — the mode's
+      multiplier (row 2580) against ``CAPACITY_MAX``, further floored
+      by the live AIMD budget (row 2575).
+
+    ``min()`` of the two is the admission ceiling. Whichever governor
+    is tighter right now wins — typically the static ``_PARALLEL_BUDGET``
+    on a quiet host (supervised=2, turbo=8), but the AIMD-derived
+    ``effective_budget`` takes over after sustained CPU/mem pressure
+    halves the global budget. Floored at 1 so the tightest composition
+    still grants at least one slot (matches the anti-deadlock floor in
+    ``sandbox_capacity._effective_capacity_max_locked`` and
+    ``adaptive_budget.effective_budget``).
+    """
+    mode_cap = _effective_budget(mode)
+    try:
+        from backend import adaptive_budget as _ab
+        aimd_cap = _ab.effective_budget(mode)
+    except Exception as exc:
+        logger.debug("adaptive_budget unavailable, using mode cap: %s", exc)
+        return mode_cap
+    return max(1, min(mode_cap, aimd_cap))
+
+
 def _h2_backoff_delay(attempt: int) -> float:
     """Exponential backoff: base * 2^(attempt-1), capped at H2_BACKOFF_CAP_S.
 
@@ -489,6 +528,56 @@ def _emit_sandbox_deferred(
         )
     except Exception as exc:
         logger.debug("sandbox.deferred audit log failed: %s", exc)
+
+
+def _emit_capacity_deferred(
+    reason: str,
+    *,
+    cost: int,
+    cap: int,
+    in_flight: int,
+    tenant_id: str | None,
+    session_token: str | None,
+) -> None:
+    """H4a row 2581 — emit ``sandbox.deferred`` when a token-based acquire
+    is queued behind admission-control (mode-cap or DRF), as distinct
+    from the H2 host-precondition path (:func:`_emit_sandbox_deferred`).
+
+    Fires once on entry to the wait — *not* on every condvar wakeup —
+    so the audit trail records "caller A blocked for C tokens because
+    the pool had U/cap" without thundering-herd spam when many waiters
+    exist.
+
+    Reuses the ``sandbox.deferred`` SSE event name so existing
+    consumers (ops dashboard, UI toast) surface mode-cap/DRF waits
+    alongside host-pressure waits — callers discriminate via
+    ``payload["reason"]``.
+    """
+    payload = {
+        "reason": reason,
+        "cost": int(cost),
+        "cap": int(cap),
+        "in_flight": int(in_flight),
+        "tenant_id": tenant_id or "",
+        "session_id": session_token[:8] if session_token else "",
+    }
+    try:
+        from backend.events import bus as _bus
+        _bus.publish("sandbox.deferred", payload, tenant_id=tenant_id)
+    except Exception as exc:
+        logger.debug("sandbox.deferred (capacity) publish failed: %s", exc)
+    try:
+        from backend import audit as _audit
+        _audit.log_sync(
+            action="sandbox.deferred",
+            entity_kind="sandbox_slot",
+            entity_id=reason,
+            before=None,
+            after=payload,
+            session_id=session_token,
+        )
+    except Exception as exc:
+        logger.debug("sandbox.deferred (capacity) audit failed: %s", exc)
 
 
 def _host_snapshot_summary() -> dict[str, Any] | None:
@@ -574,20 +663,65 @@ class _ModeSlot:
     DRF-based per-tenant token budgeting. The mode cap still applies
     as a parallel session-level ceiling, but the global token pool is
     managed by the DRF module.
+
+    H4a row 2581: the mode-cap path is now *token-based* — :attr:`_cost`
+    is the number of slots this acquire consumes against the shared
+    counter, and the cap is composed with
+    :func:`backend.adaptive_budget.effective_budget` so AIMD host-load
+    shaping bites even on non-tenant acquires. When the first peek shows
+    the request would block, a ``sandbox.deferred`` event fires (reason
+    ``mode_cap_saturated`` / ``drf_saturated``) so the ops dashboard can
+    surface admission queueing alongside H2 host-pressure deferrals.
     """
 
     def __init__(
         self,
         session_token: str | None = None,
         tenant_id: str | None = None,
-        cost: float = 1.0,
+        cost: int | float = 1,
     ) -> None:
         self._session_token = session_token
         self._tenant_id = tenant_id
         self._cost = cost
         self._drf_acquired = False
+        # H4a row 2581: remember the per-acquire integer token counts
+        # actually charged to ``_shared_parallel`` so every ``release``
+        # decrements by the same amount even if the caller mutated
+        # ``_cost`` between acquire and release. A stack (not a scalar)
+        # because ``_mode_slot_singleton`` is re-entered by multiple
+        # callers in the non-tenant path — concurrent/overlapping
+        # acquires must each reserve and un-reserve their own cost
+        # without trampling each other.
+        self._reservations: list[int] = []
+
+    def _mode_cap_tokens(self) -> int:
+        """Integer token count this acquire consumes on the mode-cap path.
+
+        Floors at 1 (an acquire must consume at least one token or it's
+        a no-op; and ``ssh_remote=0.5`` would otherwise round to 0),
+        and integer-casts fractional costs up so a 0.5-cost acquire
+        still accounts for one token on the per-worker shared counter.
+        """
+        c = self._cost
+        if c is None:
+            return 1
+        if isinstance(c, float):
+            # Round up — half a token still occupies one shared-counter
+            # slot because the counter is integer and the cost < 1
+            # weights exist to under-charge the DRF float pool, not the
+            # per-worker parallel-slot gauge.
+            return max(1, int(c + 0.5)) if c > 0 else 1
+        return max(1, int(c))
 
     def _get_cap(self) -> int:
+        """Return the *mode-level* admission cap (turbo-derate aware).
+
+        Does **not** fold in the AIMD-shaped ceiling from
+        :mod:`backend.adaptive_budget` — that composition happens only
+        inside :meth:`__aenter__`'s admission loop so external callers
+        (tests, ops UI) can still read "what does the mode allow"
+        independently of the live host-pressure shaping.
+        """
         mode = get_session_mode(self._session_token) if self._session_token else get_mode()
         # Refresh the turbo-derate state machine so a sustained high-CPU
         # window tightens the cap even if the sampling loop hasn't had
@@ -596,12 +730,32 @@ class _ModeSlot:
         return _effective_budget(mode)
 
     async def _get_cap_async(self) -> int:
+        """Async variant of :meth:`_get_cap` — same mode-level-only
+        semantics. The H4a composition with ``adaptive_budget`` happens
+        inside :meth:`__aenter__` on the shared-cap path."""
         if self._session_token:
             mode = await get_session_mode_async(self._session_token)
         else:
             mode = get_mode()
         evaluate_turbo_derate()
         return _effective_budget(mode)
+
+    async def _admission_cap_async(self) -> int:
+        """Composed admission ceiling — ``min(mode-cap, AIMD budget)``.
+
+        Called inside :meth:`__aenter__` to compute the effective
+        token-bucket ceiling. H4a row 2581 widens this beyond the
+        static mode budget by narrowing further with
+        :func:`backend.adaptive_budget.effective_budget` so AIMD
+        pressure tightens admission without touching the turbo-derate
+        state machine (which has its own cooldown semantics).
+        """
+        if self._session_token:
+            mode = await get_session_mode_async(self._session_token)
+        else:
+            mode = get_mode()
+        evaluate_turbo_derate()
+        return _compose_effective_cap(mode)
 
     def _is_turbo(self) -> bool:
         mode = get_session_mode(self._session_token) if self._session_token else get_mode()
@@ -638,27 +792,63 @@ class _ModeSlot:
 
         if self._tenant_id is not None:
             from backend import sandbox_capacity as _sc
-            ok = await _sc.acquire_with_reclaim(
-                tenant_id=self._tenant_id,
-                cost=self._cost,
-                is_turbo=self._is_turbo(),
-                timeout_s=60.0,
-            )
-            if not ok:
-                raise CapacityExhausted(
-                    f"DRF capacity exhausted for tenant {self._tenant_id}"
+            # H4a row 2581: peek once so we can emit sandbox.deferred
+            # exactly on entry to the DRF wait, without polluting the
+            # audit log for instant-success acquires.
+            if not _sc.try_acquire(self._tenant_id, self._cost, self._is_turbo()):
+                _emit_capacity_deferred(
+                    H4A_REASON_DRF,
+                    cost=int(self._cost) if isinstance(self._cost, int) else max(1, int(float(self._cost) + 0.5)),
+                    cap=int(_sc.effective_capacity_max()),
+                    in_flight=_shared_parallel.get(),
+                    tenant_id=self._tenant_id,
+                    session_token=self._session_token,
                 )
+                ok = await _sc.acquire_with_reclaim(
+                    tenant_id=self._tenant_id,
+                    cost=self._cost,
+                    is_turbo=self._is_turbo(),
+                    timeout_s=60.0,
+                )
+                if not ok:
+                    raise CapacityExhausted(
+                        f"DRF capacity exhausted for tenant {self._tenant_id}"
+                    )
             self._drf_acquired = True
+            # The DRF path tracks slot-sessions on the cross-worker
+            # counter at cost=1 (tokens are already enforced by
+            # sandbox_capacity._buckets). The mode-cap path uses the
+            # counter as the token-bucket itself — see below.
             _shared_parallel.increment()
+            self._reservations.append(1)
             return self
 
+        # ─── H4a row 2581: token-based mode-cap admission ────
+        # Token cost for this acquire; clamp to the current cap so a
+        # cost > cap can't deadlock (classic anti-deadlock rule for
+        # fixed-window schedulers — an oversize request is treated as
+        # "take the whole cap" rather than "wait forever").
+        tokens = self._mode_cap_tokens()
+        deferred_emitted = False
         while True:
             async with _parallel_async_cond:
-                cap = await self._get_cap_async()
+                cap = await self._admission_cap_async()
+                tokens_clamped = max(1, min(tokens, cap))
                 current = _shared_parallel.get()
-                if current < cap:
-                    _shared_parallel.increment()
+                if current + tokens_clamped <= cap:
+                    _shared_parallel.increment(tokens_clamped)
+                    self._reservations.append(tokens_clamped)
                     return self
+                if not deferred_emitted:
+                    _emit_capacity_deferred(
+                        H4A_REASON_MODE_CAP,
+                        cost=tokens_clamped,
+                        cap=cap,
+                        in_flight=current,
+                        tenant_id=self._tenant_id,
+                        session_token=self._session_token,
+                    )
+                    deferred_emitted = True
                 await _parallel_async_cond.wait()
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -669,7 +859,8 @@ class _ModeSlot:
             _sc.release(self._tenant_id, self._cost)
             self._drf_acquired = False
 
-        _shared_parallel.decrement()
+        if self._reservations:
+            _shared_parallel.decrement(self._reservations.pop())
         if _parallel_async_cond is not None:
             async with _parallel_async_cond:
                 _parallel_async_cond.notify_all()
@@ -677,10 +868,35 @@ class _ModeSlot:
     def locked(self) -> bool:
         if self._tenant_id is not None:
             from backend import sandbox_capacity as _sc
-            return not _sc.try_acquire(self._tenant_id, self._cost, self._is_turbo())
-        return _shared_parallel.get() >= self._get_cap()
+            # Non-destructive probe: try_acquire mutates the bucket on
+            # success, so we roll back immediately — tests + UI read
+            # `locked()` without taking a slot.
+            if _sc.try_acquire(self._tenant_id, self._cost, self._is_turbo()):
+                _sc.release(self._tenant_id, self._cost)
+                return False
+            return True
+        # ``locked()`` is a peek for callers (UI / pre-check) — reflect
+        # the same composed admission ceiling as ``__aenter__`` so
+        # "not locked" really means "acquire will not queue".
+        mode = get_session_mode(self._session_token) if self._session_token else get_mode()
+        evaluate_turbo_derate()
+        cap = _compose_effective_cap(mode)
+        tokens = self._mode_cap_tokens()
+        return _shared_parallel.get() + max(1, min(tokens, cap)) > cap
 
-    async def acquire(self) -> bool:
+    async def acquire(self, cost: int | None = None) -> bool:
+        """H4a row 2581 — token-based acquire.
+
+        When *cost* is given, overrides the constructor-supplied cost
+        for this single acquire/release cycle so callers who know the
+        per-invocation workload size (e.g. ``4`` tokens for a
+        local-compile sandbox) can size their admission without
+        re-instantiating the slot. The cost the caller asked for is
+        clamped to the current mode/AIMD cap inside ``__aenter__`` to
+        prevent a cost>cap deadlock.
+        """
+        if cost is not None:
+            self._cost = cost
         await self.__aenter__()
         return True
 
@@ -689,7 +905,8 @@ class _ModeSlot:
             from backend import sandbox_capacity as _sc
             _sc.release(self._tenant_id, self._cost)
             self._drf_acquired = False
-        _shared_parallel.decrement()
+        if self._reservations:
+            _shared_parallel.decrement(self._reservations.pop())
 
 
 _mode_slot_singleton = _ModeSlot()
@@ -1260,6 +1477,13 @@ def _reset_for_tests() -> None:
     _shared_parallel.set(0)
     _shared_mode.set("current_mode", "supervised")
     _parallel_async_cond = None
+    # H4a row 2581: the singleton carries per-acquire token state
+    # across tests that re-use ``parallel_slot()`` without a fresh
+    # instance; clear it so a prior test's abort can't leak a reserved
+    # cost into the next test's shared-counter view.
+    _mode_slot_singleton._reservations.clear()
+    _mode_slot_singleton._drf_acquired = False
+    _mode_slot_singleton._cost = 1
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
