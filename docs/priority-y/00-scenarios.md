@@ -2,7 +2,7 @@
 
 > 文件起點：2026-04-25  
 > 對應 TODO：`Y0. Multi-user × Multi-project 情境盤點 + 架構文件 (#276)`  
-> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-6（多分支同專案 — Doorbell V1 客戶 A 量產期下 main / staging / v2.1-hotfix / customer-x-fork 四 branch 並行開發、workspace 要能同時保有）**，承接 S-1 / S-2 / S-3 / S-4 / S-5 已落地章節；其餘 S-7～S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
+> 撰寫策略：每個 TODO 子勾選對應一個 `S-x` 情境章節。本提交完成 **S-7（消失用戶回收 — user 離職 / tenant 退訂 / project 封存時的 graceful offboarding：migrate ownership、保留 audit、釋放 quota）**，承接 S-1 / S-2 / S-3 / S-4 / S-5 / S-6 已落地章節；其餘 S-8 ～ S-9 章節仍留「Skeleton — TBD by future row」標記，等該勾選排到時再展開。共用區段（ER diagram / 權限矩陣 / migration 策略）在所有情境章節成型後彙整。
 
 ---
 
@@ -15,8 +15,8 @@
 | [S-3 跨租戶協作](#s-3-跨租戶協作) | `[x]` 第 3 勾選 | 完成（2026-04-25） |
 | [S-4 多產品線](#s-4-多產品線) | `[x]` 第 4 勾選 | 完成（2026-04-25） |
 | [S-5 多專案同產品線](#s-5-多專案同產品線) | `[x]` 第 5 勾選 | 完成（2026-04-25） |
-| [S-6 多分支同專案](#s-6-多分支同專案) | `[x]` 第 6 勾選（本 row） | **本次完成** |
-| [S-7 消失用戶回收](#s-7-消失用戶回收) | `[ ]` 第 7 勾選 | Skeleton |
+| [S-6 多分支同專案](#s-6-多分支同專案) | `[x]` 第 6 勾選 | 完成（2026-04-25） |
+| [S-7 消失用戶回收](#s-7-消失用戶回收) | `[x]` 第 7 勾選（本 row） | **本次完成** |
 | [S-8 熱點撞牆](#s-8-熱點撞牆) | `[ ]` 第 8 勾選 | Skeleton |
 | [S-9 遺留相容](#s-9-遺留相容) | `[ ]` 第 9 勾選 | Skeleton |
 | [共用區段：ER / 權限矩陣 / migration](#共用區段) | 全九勾選成型後彙整 | Stub |
@@ -1919,9 +1919,447 @@ S-6 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
 
 ## S-7 消失用戶回收
 
-> **Skeleton — TBD by future row** (TODO 第 7 勾選)。
-> user 離職 / tenant 退訂 / project 封存時的 graceful offboarding：migrate ownership、保留 audit、釋放 quota。
-> 預定章節：S-7.1 ownership migration、S-7.2 audit 保留期、S-7.3 quota 釋放。
+> user 離職 / tenant 退訂 / project 封存三條 offboarding 路徑共享一組核心 invariant：**audit chain 永不斷裂、ownership 顯式 migrate、quota 釋放 vs 凍結兩種策略**；三者差異在「資料是否該留 / 留多久 / 怎麼釋放配額」三軸上展開、本章為 Y3 / Y4 / Y6 / Y9 / Y10 落地時的單一事實來源。
+
+### S-7.1 角色 Persona — 三條 offboarding 路徑下的 5 persona
+
+承接 S-1 ～ S-6 既有 Acme / Cobalt / Bridge 樣本；S-7 把 offboarding 的 actor 與 victim 兩端都列出：
+
+| Persona | Offboarding 場景 | 在 OmniSight 內的角色 | 該 do | 該 not do |
+|---|---|---|---|---|
+| **Carol（離職）** | user 離職 | V1 contributor + IPCam line member | 在離職前自願 transfer 自己 own 的 project artifact 到接手人；走 admin assisted handover | 不能自己 hard-delete 自己（保留 audit-actor 身份）；離職後不能登入但 audit 內 actor=Carol 永久保留 |
+| **Bob（admin actor）** | user 離職 + project 封存執行人 | Acme tenant admin | 執行 `disable user` + 觸發 ownership migration 流程 + 封存 V2 POC 專案 | 不能 hard-delete 任何 audit row（chain hash 不可斷）；不能在 Carol 還未轉移 ownership 前 disable 她 |
+| **Alice（owner / churn 決策者）** | tenant 退訂 + 重大 offboarding 簽核 | Acme tenant owner | 簽 plan 降級 / cancel subscription、批准 wind_down 進入 / 批准 audit redaction | 不能在 wind_down 期間擴 LLM cap / 不能繞過 60d export window 強迫 immediate purge（合規違規） |
+| **Pat（platform super-admin）** | tenant 退訂 → terminated 終態執行 + 跨 tenant forensic | OmniSight 廠商 platform 維運 | 在 wind_down 60d 後執行 terminate、把 acme business data scrub 但留 audit chain；對退費糾紛保留 90d 緩衝 | 不能 bypass tenant owner 簽核強制 terminate；不能對 audit 動 hard delete（即使 super-admin） |
+| **Cher（guest survivor）** | 跨 tenant share 來源 tenant 退訂後的 guest | Cobalt 端 guest user（在 acme 有 active share） | 看到 SSE 警示「來源 tenant 已退訂」、share 自動進 read-only frozen、export window 內可下載 artifact 副本 | 不能在 frozen 後對 share 加 comment / mutator；export 後不可重新 access（呼應 S-3.4 設計斷言 1） |
+
+**S-7.1 設計斷言**：
+1. **Offboarding 不是 RBAC 子集而是 lifecycle 子集** — Carol 離職 / Cobalt 退訂 / V2 archive 三種行為的權限決策仍走 S-1 ～ S-6 既有 RBAC（disable user 走 admin、cancel subscription 走 owner、archive project 走 admin）；S-7 不擴 RBAC 階層、只擴 user / tenant / project 三實體的 `lifecycle_stage` enum + 配套狀態機。
+2. **「graceful」的核心是「audit-actor 永不消失」** — Carol 離職後她 row 仍 enabled=0 留在 `users` 表、`audit_log.actor_user_id=Carol.id` 永遠可解析（不 cascade null、不 hard delete）；如果未來 Carol 名字 GDPR 申請 redact、走 S-7.5 redaction 框架（覆蓋 user.full_name / user.email 為 hash 但保留 user.id）— 永遠不刪 row。
+3. **三條路徑共享 4 invariant、差異在 4 軸** — 共享：(a) audit chain hash 不斷、(b) ownership 顯式 migrate（不 silent reassign）、(c) quota 改變必雙寫 audit、(d) external receivers（webhook / chatops mirror / SSE listener）必收到 SSE `lifecycle_changed` 事件。差異：(a) audit redaction policy 不同（user 級 vs tenant 級）、(b) data 保留期不同（90d / 60d / immediate frozen）、(c) quota 釋放 vs 凍結不同、(d) ownership migrate 終點不同（接手人 / platform / null）。
+4. **service token 走自己的 offboarding 路徑** — `MachineKey`（CI service token）的「offboarding」即 `api_keys.enabled=0` + `revoked_at` 戳記、無 ownership migration（service token 沒有 audit-actor 識別期待、它是一個 capability bearer）；user-bound 與 service-bound API key 的 offboarding 行為差異留 S-7.2 細寫。
+5. **Cher（guest survivor）視角是 cross-tenant offboarding 的盲點** — Cobalt（host tenant）退訂時、acme（guest tenant）端的 share 必須從 acme tenant 的 lifecycle 推導為 frozen + export window；S-3.4 跨 tenant secret 隔離設計為這個盲點預留「caller pays」與「資料只進不出」的 invariant、S-7 把 lifecycle 對 share 的衝擊明確化（呼應 S-3.6 三段式狀態機在 host 退訂時的退化路徑）。
+
+### S-7.2 User 離職 — graceful offboarding 完整流程
+
+**情境**：Carol（V1 contributor + IPCam line member、有 1 個 owned project + 3 個 active session + 2 個 active API key + 5 個 outstanding workflow_run）2026-05-15 離職 Acme。Bob 收到 HR ticket 後執行 offboarding。
+
+**現況**（S-7.11 row 1 ～ 4）：`users.enabled=0` flag 已存在、admin 改為 false 後 `routers/auth.py:542-546` 立即輪換所有 active session（grace 期 ROTATION_GRACE_S）、寫 `audit_log` trigger='account_disabled'。但缺：(a) ownership migration（Carol owned project 怎麼處理）、(b) API key 級聯撤銷（user disable 不自動 revoke api_keys）、(c) outstanding workflow_run 處理、(d) `disabled_at / disabled_by / disabled_reason / offboarded` 欄位（目前只 0/1 旗標、無 forensic context）。
+
+**S-7 後的完整流程**（5 步 + 28d grace + 永久 audit-actor 保留）：
+
+```
+Step 1 — pre-offboarding handover（Day -7 ～ Day 0、人類動作）
+  ─ Carol 把自己 own 的 V1 project 透過 UI「Transfer ownership」轉給 Quinn
+  ─ Carol 把自己 outstanding workflow_run 標 abandon / 改 owner=Quinn
+  ─ 觸發 endpoint：POST /api/v1/users/{carol}/handover-plan
+    ↳ 列出 Carol 所有 owned entity（projects / branches / sop_overrides / sessions / api_keys / outstanding workflow_runs / pending invites）
+    ↳ Bob 在 UI 看到 checklist + 為每項指派「migrate to: Quinn」或「skip / transfer to admin」
+
+Step 2 — Bob 執行 disable（Day 0、原子操作）
+  ─ PATCH /api/v1/users/{carol} { enabled: false, disabled_reason: 'left_company', offboarded: true }
+  ─ backend transaction：
+    (a) users.enabled=0 + disabled_at=now() + disabled_by=Bob.id + disabled_reason + offboarded=true
+    (b) sessions：對 Carol 全部 active session 走 ROTATION_GRACE_S（既有路徑）
+    (c) api_keys：所有 owner_user_id=Carol 的 row 級聯 enabled=0 + revoked_at=now() + revoked_reason='user_offboarded'
+    (d) outstanding workflow_runs：對 status IN ('queued','running') 的 row 觸發 graceful_abandon
+        - queued: 直接 status='abandoned' + reason='owner_offboarded'
+        - running: 標 abandon_requested + worker 收 SSE 後 finalize 當前 step 退出
+    (e) project_members / product_line_members / user_tenant_memberships 對 Carol 全 status='offboarded'（不刪 row、保留 audit chain）
+    (f) audit_log 雙寫：actor=Bob、target=Carol、action='user.offboarded'、context={ owned_handed_over_to: Quinn.id, api_keys_revoked: 2, sessions_rotated: 3 }
+
+Step 3 — ownership migration（Day 0、跟 Step 2 同 transaction 或 background job）
+  ─ 對 Step 1 handover-plan 內每項：
+    (a) projects.owner_user_id 從 Carol 改 Quinn → 寫 ownership_migrations row（migrated_at, from=Carol, to=Quinn, entity_type='project', entity_id=V1）
+    (b) sop_overrides / project_branches / agent_workspaces 等子實體不改 created_by（保留歷史 actor 不竄改）、僅改 owner_user_id（如有）
+    (c) Quinn 收 SSE 通知「你接手了 V1 project」+ inbox banner 24h
+  ─ 沒分配的 entity（無人接手）走「轉給 tenant admin」fallback：
+    (d) projects 無 owner 時、owner_user_id=Bob.id（執行 offboarding 的 admin）+ projects.metadata.owner_pending_assignment=true
+    (e) UI 在 dashboard 顯示「<N> orphan projects need owner assignment」banner
+
+Step 4 — quota 釋放 + frontend 通知（Day 0、即時）
+  ─ Carol 個人 daily LLM cap（projects.metadata.daily_token_cap[Carol]）釋放回 project pool
+  ─ disk quota：Carol owned artifact 不立即刪（保 28d grace 防誤判）、artifact lifecycle stage 標 'orphaned'、Y9 cron 在 28d 後若仍 orphan 走 LRU GC
+  ─ frontend：所有 active session 在 SSE event 後 redirect to /login + flash「您的帳號已被停用」
+  ─ chatops mirror：對 Carol 在 mirror channel 的最後 N 則訊息加 footer 「actor offboarded 2026-05-15」（保留訊息、不刪）
+
+Step 5 — 28d grace + audit-actor 永久保留（Day 0+28d 與此後）
+  ─ 28d grace window：Bob 可 PATCH /api/v1/users/{carol} { enabled: true, undo_offboarding: true } 復原
+    （給「Carol 原來不是真離職、是 HR 誤觸」場景一個雙簽 admin step-up MFA 路徑）
+  ─ Day 0+28d：
+    (a) auto_purge_grace cron 對「offboarded=true AND disabled_at < now()-28d」的 user：
+        - artifact orphan 走 LRU GC（呼應 S-7.6）
+        - api_keys row keep（不 hard delete，FK 仍指 user_id）
+        - sessions row keep（已 expired 自然不可用、保 forensic）
+    (b) Carol 的 user row 永久留在 users 表、enabled=0、所有外鍵指 Carol.id 仍解析有效
+    (c) 若 Carol 申請 GDPR right-to-erasure 走 S-7.5 redaction（覆蓋 PII、保留 row）
+```
+
+**S-7.2 設計斷言**：
+1. **disable user 不可繞過 ownership 檢查** — Step 1 handover-plan 是強制前置；UI 在 admin 點「disable user」時若 user 仍有 owned entity 必須先 resolve（每筆指派 migrate to）；後端 endpoint POST /users/{id}/disable 在 owned_count > 0 + force_param ≠ true 時 400 reject。Force 路徑（Bob 可選 force=true 把所有 owned 轉給自己）走 step-up MFA + audit 雙寫雙倍 reviewer。
+2. **API key 級聯撤銷是 commit 動作的同 transaction 子操作** — 不允許 race（user disable 完成後若 api_keys 還在 enabled=1 1 秒、就有 token 可繞 disabled user 仍打 API 的窗）；既有 `backend/api_keys.py:151 revoke_key()` fn 已存在、Step 2.c 必在同 transaction 呼叫 `revoke_user_api_keys(user_id)` 批次撤銷；該 fn 為 S-7 新增。
+3. **outstanding workflow_run 必走 graceful_abandon 不可硬殺** — running step 中可能有「Carol 已寫一半的 commit」「Carol 已 acquire 的 git lock」等 partial state；硬殺會 leak 資源；走 SSE 通知 worker → finalize current step → exit → 寫 abandon reason。Y6 落地時實作。
+4. **ownership migration 走獨立 audit row 而非 inline 改 created_by** — `created_by` / `last_modified_by` 是歷史事實（誰當初建的）、永不改寫；ownership 是「現在誰負責」、可改；`ownership_migrations` 表記每筆 (entity_type, entity_id, from_user_id, to_user_id, migrated_at, migrated_by, reason)、forensic 完整；「誰建的」與「誰現在 own」分軌。
+5. **28d grace 是「誤觸復原」緩衝、不是 retention 期** — 28d 內 Bob / Alice 雙簽可 undo（含 enabled=1 + 從 ownership_migrations 反向 rollback、並寫雙倍 audit）；過 28d 後復原走另起新 user row + 顯式 transfer 不再走 undo path（避免 audit 「同 user disable 又 enable 反覆」造成 forensic 混亂）。
+6. **「offboarded」是不同於「disabled」的 first-class 旗標** — `enabled=0` 可能是「暫時鎖帳號」（K MFA 系列鎖卡 / 安全事件鎖）；`offboarded=true` 是「永久離職」明確標記；UI / audit / handover 流程只對 offboarded=true 觸發；既有 `enabled=0` 路徑保留向後相容（API endpoint 內部設 offboarded=false default）。
+7. **service token 與 user-bound token 的 offboarding 不同** — `api_keys.owner_user_id=NULL + service_account_id` 路徑是 service token、不走 Carol 的 user offboarding 級聯；service token 自己有 rotation cron + 獨立 audit；防止「Carol 離職」級聯撤銷了 CI 用的 service token 導致 build 中斷（呼應 S-1.1 設計斷言 3 service token 不另起角色）。
+
+### S-7.3 Tenant 退訂 — 4-state lifecycle 狀態機
+
+**情境**：Cobalt 從 acme 接 firmware POC 6 個月（S-3.6 跨 tenant 路徑）、Q3 預算砍導致 2026-08-01 cancel subscription。Pat（platform）收到 churn ticket、走 4-state lifecycle 退訂流程。
+
+```
+       ┌──────────────────────────────────────────────────────────────┐
+       │   Tenant Lifecycle 狀態機（與 user / project 不同維度）       │
+       └──────────────────────────────────────────────────────────────┘
+
+  active ──────► suspended ──────► wind_down ──────► terminated
+   │                │                  │                  │
+   │                │                  │ (60d hard cap)   │ (永久終態)
+   │                │ (人類復原         │                  │
+   │                │  paid back)       └────► purged_business_data + audit 永久保留
+   │                ▼                                       (90d 退費糾紛緩衝後)
+   │              active
+   │
+   └─────────► (skip 直接 wind_down — 平台方強制下架、合規 / 安全事件)
+```
+
+**4 stage 行為矩陣**：
+
+| Stage | 觸發 | 持續期 | 內部 user 看到 | guest（cross-tenant）看到 | quota | LLM | data | audit |
+|---|---|---|---|---|---|---|---|---|
+| `active` | 新建 | 不限 | 全功能 | 完整 share | 正常 | 正常 | 完整 | 累積 |
+| `suspended` | 過期未付 / 安全事件 / Alice 主動暫停 | ≤ 30d | UI banner「帳單未結 / 暫停中」、唯讀 | share 唯讀 + banner | 凍結（不釋放 disk quota、不接受新請求） | 阻擋（all LLM call → 402 quota_frozen） | 完整保留 | 累積 + suspended trigger row |
+| `wind_down` | suspended 30d 過、或 Alice 主動 cancel、或 Pat 強制下架 | 60d hard cap | UI banner「將於 X 天後 terminate、export 期內」、可下載 artifact | share frozen + export window 警示 | 凍結 | 阻擋 | 開放 export download + 業務功能停 | 累積 + wind_down trigger row |
+| `terminated` | wind_down 60d 過 | 永久終態 | login 直接 403「tenant terminated」 | share 全 revoke | 釋放 | 阻擋 | business data scrubbed（artifact / workflow_run payload / sop body）、audit 永久保留 | 永久保留 + terminated trigger row |
+
+**Cobalt 退訂的端到端 60d + 90d 時間軸**：
+
+```
+Day 0   — Alice (acme owner) 點 cancel subscription、tenant.lifecycle_stage=wind_down
+        — wind_down_deadline = now() + 60d、wind_down_reason='owner_cancelled_subscription'
+        — Pat 收 platform notification「acme 進入 wind_down」
+Day 0   — backend 立即：
+        (a) 對所有 acme 內 active workflow_run 走 graceful_abandon（呼應 S-7.2 Step 2.d）
+        (b) 對所有 acme 對外 active project_shares 寫 share.host_lifecycle_changed event、guest tenant 收 SSE → share UI 變 frozen
+        (c) tenant_quota 凍結（既有 row 仍存、checker 走 lifecycle gate 直接拒新請求；不刪 row）
+        (d) audit_log 寫 tenant.wind_down_started + 全 acme tenant member 收 inbox 通知 + email「您的 tenant 將於 60d 後 terminate、export 期內可下載資料」
+Day 1～60 — export window：
+        (a) acme owner / admin 可走 GET /tenants/{id}/export 下載 artifact bundle（Y10 落地）
+        (b) cross-tenant guest（如 Cher in cobalt 對 acme V1 fork share）可走 GET /shares/{id}/export 下載自己 access 過的 artifact 副本
+        (c) audit_log 寫 export download trail
+Day 60  — wind_down_deadline 到、auto_terminate cron 跑：
+        (a) tenant.lifecycle_stage=terminated + terminated_at=now()
+        (b) business data scrub：對 artifacts / workflow_runs.metadata / sop_definitions.body 走 redaction（覆蓋 payload 為 NULL、保留 row 與 hash chain）
+        (c) tenant 內 user.enabled=0 + offboarded=true（級聯走 S-7.2 路徑）
+        (d) audit_log 寫 tenant.terminated + 永久保留
+        (e) tenant_quota 釋放（disk row 從統計 view 移除、實際 row 留）
+Day 60+90 — billing-dispute window 到、purge_business_data_after_dispute_window cron 跑：
+        (a) 對 terminated tenant：disk artifact bytes 真正 unlink（hash chain 不依 disk artifact 仍 ok）
+        (b) audit_log 仍永久保留、user row 仍永久保留
+```
+
+**S-7.3 設計斷言**：
+1. **`suspended` 與 `wind_down` 是兩個獨立 stage 不可合併** — `suspended` 是「可逆暫停」（付款補繳即恢復、合規事件解除即恢復）、`wind_down` 是「線性倒數退訂」（人類已決定 cancel、60d 倒數無回頭）；兩者 UI 訊息不同、計費歸屬不同（suspended 仍計累計用量供補繳對帳、wind_down 不再計）、權限不同（suspended 走 owner / admin 簽核、wind_down 進入後僅 platform super-admin 可干預）。
+2. **wind_down 60d 是 hard cap、不可延長** — 與 S-3.5 / S-5.5 設計一致：跨重大邊界必有強制 cap；60d 涵蓋一般合規 export 需求 + 法務合約結束緩衝；想延長必須先 PATCH lifecycle_stage 回 suspended（Pat 動作 + 雙簽 + audit）。
+3. **`terminated` 是不可逆終態** — 進 terminated 後 business data 已 scrub、unscrub 不可能（UI 不展示 unterminate 按鈕）；想復活的 tenant 必須走「Pat 開新 tenant + 對齊 acme 既有 audit chain pointer」（極罕見、留 S-7.10 open question）。
+4. **`audit_log` 永遠不刪、即使 terminated** — terminated 後 90d billing-dispute window 結束後 disk artifact 被 unlink、但 audit_log row 永久保留；理由：合規（SOC2 / ISO27001 要求 audit 留 ≥ 7 年）、跨 tenant forensic（cobalt 退訂後 acme 想查「cobalt 在 share 期間做了什麼」必須能查）、internal forensic（金錢糾紛調查）。disk 占用估算：audit_log row 每 ~500 bytes、Cobalt 6 個月用量 ≤ 10MB、永久保留可接受。
+5. **business data scrub 走 redaction 而非 hard delete**（呼應 S-7.5 + GDPR right-to-erasure） — `artifacts.body` 設 NULL、`artifacts.path` unlink + 設 NULL、`artifacts.id / artifacts.created_at / artifacts.created_by_user_id` 保留；`workflow_runs.metadata` 走欄位級 redaction（payload bytes 設 NULL 但 status / started_at / actor 保留）；`sop_definitions.body` 同模式。維持外鍵 + audit chain 完整性。
+6. **suspended 不釋放 disk quota** — 暫停期間若 quota 釋放、後續 reactivate 時 disk 已被別人占用（disk LRU GC 跨 tenant 競爭）；suspended 凍結保留是 reactivate 友善設計。但 LLM cap 凍結（不釋放也不允許用）— 反正暫停期 LLM 0 用量、是否釋放沒差。
+7. **wind_down 期間 cross-tenant share 變 frozen 而非 revoked** — 立即 revoke 會讓 guest 還沒下載完的 artifact 失效（合規舉證材料）、走 frozen 讓 guest 在 export window 內下載完後再 revoke；wind_down_deadline + share.host_lifecycle_changed event 是 guest tenant 端的單一事實來源、Cher 走 SSE 看到 banner 主動下載。
+8. **platform super-admin 強制下架（合規事件 / 安全事件）skip suspended 直入 wind_down** — 例：Cobalt 被舉報嚴重違規平台政策、Pat 評估後強制下架、跳 suspended 直 wind_down + reason='platform_enforcement'；走 platform-side 雙簽 + step-up MFA + email tenant owner notice。
+
+### S-7.4 Project 封存 — soft archive 90d 可逆 + cascade 規則
+
+**情境**：V2 客戶 B POC（S-5 場景，Rita owner、lifecycle=poc）試 60d 後客戶決定不續、走 archive 流程。
+
+**接續 S-5.5 lifecycle 狀態機**（已建立 6 stage：rnd / poc / graduated / production / rejected / archived；S-7 不重定義、把 archive 的 cascade 細節展開）：
+
+```
+Project lifecycle (from S-5.5):
+  rnd ──► poc ──► graduated ──► production ──► archived
+                ▼
+                rejected ──► archived
+                                  ▼
+                                un-archive (90d 內可逆)
+                                  ▼
+                                archived (final)
+                                  ▼ (90d hard cap)
+                                purged (cron, ephemeral data only)
+```
+
+**archive 觸發 cascade 6 軸**（每軸獨立決策、不一刀切）：
+
+| Cascade 軸 | archived 行為 | 90d 內 un-archive 行為 | purged 行為（仍未實作、留 Y10） |
+|---|---|---|---|
+| **LLM cap** | 立即釋放 project cap 回 line budget；後續再開新 project 直接可重分配 | 從 line budget 拿回原 cap（如果 line budget 仍夠）、否則拿到「現在剩多少給多少」+ banner | 不適用（archived 已釋放） |
+| **disk artifact** | LRU GC marker 標記、不立即刪（保 90d 緩衝防誤判 + un-archive 友善）；新 push commit reject | 90d 內未 GC 命中時、un-archive 全部 artifact 復活；命中時 partial 復活 + banner | archived 90d 後 ephemeral artifact（task workspace 內 binary、retry artifact）走 cron 真正刪 |
+| **workflow_run / branch** | running run 走 graceful_abandon、queued run reject；branch 全 freeze（push_policy=reject_all）但 ref 留 | un-archive 後 branch lifecycle_stage 從 frozen 改回 active（除非該 branch 自身已 frozen）、past run row 不變 | branch ref 走 S-6.4 ephemeral 90d cron purge |
+| **project_members** | 全 status='offboarded_from_project'（不刪 row、保 audit）、user 仍能看 read-only audit | un-archive 後 status 自動恢復 active | 不適用（user row 不刪） |
+| **customer_account 綁定** | 保留（projects.customer_account_id 不清）；若客戶後續想看歷史可以從 customer detail page 看到 archived project | un-archive 不影響 | archived 90d 後仍保留（customer attribution 不該被 archive 影響） |
+| **product_line / tenant 統計** | 從「active project 計數」中移除、進入「archived project 計數」；S-4.2 line LLM 用量 30d 視窗仍包含 archived 期內用量、進 forensic 切片 | un-archive 後重回 active 計數 | 不適用 |
+
+**S-7.4 設計斷言**：
+1. **archive 是 admin 級決策、purge 是 cron 級決策** — `POST /projects/{id}/archive` 走 admin（與 S-5.7 archive admin 一致）；`auto_purge_after_90d` cron 是 system 級、不走人類動作（避免 admin 點錯把資料一鍵真刪）；想加速 purge（提前刪）走「先 PATCH metadata.allow_early_purge=true + 額外 owner step-up MFA」example endpoint。
+2. **un-archive 90d 是 project 預設、長於 branch 的 30d**（呼應 S-6.4 設計斷言 3） — project 影響範圍大（整個 project 內多 branch / 多 customer / 多 user）、90d 是合規常見 export 期；branch 影響範圍小（單 branch）、30d 較短可。S-7 不重定義既有期限。
+3. **archive cascade 對 cross-tenant share 是 frozen 不是 revoke** — V2 若有對 cobalt 的 share、archive 後 share 變 frozen + UI banner「來源 project 已 archived」、guest 走 export window 內下載；若 90d 後仍未 un-archive，share 走 S-7.3 wind_down 終態 revoke 路徑。
+4. **archive 立即釋放 LLM cap 不是「等 90d 觀察期」** — 與 S-7.6 quota 釋放規則一致：cap 是 schedule 動作、釋放對 line budget 立即可見、un-archive 時若 line budget 還有夠就拿回；釋放比留著更友善（不阻擋其他 project 上線）。
+5. **archive 的 actor 永遠記錄、purge 的 actor 是「system」**（cron 觸發） — `audit_log.action='project.archived'` actor=Bob、`audit_log.action='project.purged'` actor=NULL（system）；UI 顯示「archived by Bob 2026-08-01」「purged by system 2026-11-01」分兩 row。
+6. **archive 與 ownership migration 兩條路徑可組合** — V2 owner Rita 也離職時、order 是 step 1 owner migrate Rita→Bob、step 2 archive V2；不允許「Rita 還是 owner 時直接 archive V2」（archive 動作必走 active owner）；UI 在離職 + archive 同時情境引導正確 order。
+7. **archived project 的 audit 對 viewer 仍可見** — Carol（前 V2 viewer）即使在 V2 archive 後仍能看 V2 archived 期間的 audit（read-only）；archive 不關 audit 視窗（呼應 S-1.5 viewer 自我中心過濾）；UI 在 archived banner 旁加「audit 仍可查、X 天後（90d 倒數）將與 project metadata 一併 purge」。
+
+### S-7.5 Audit Retention + Redaction 框架（合規與 GDPR 對齊）
+
+**核心矛盾**：合規（SOC2 / ISO27001 / GDPR Art.30）要 audit 永久保留 + chain hash 不可竄改、但 GDPR Art.17 right-to-erasure 要 user 申請後刪除個資；兩者表面衝突、實作上以 **redaction + chain hash recompute pointer** 解決。
+
+**四層 retention 模型**：
+
+| 層 | 對象 | 保留期 | 刪除策略 | 適用情境 |
+|---|---|---|---|---|
+| **L1 永久保留** | `audit_log` row（id / action / actor_user_id / target_id / chain_hash / timestamp） | 永久 | 永不 hard delete | 所有合規查詢、forensic、跨 tenant 對帳 |
+| **L2 PII redactable** | `audit_log.context` jsonb 內可能含的 user 名 / email / IP / freeform note | 預設永久；GDPR 申請後可 redact | 走 redaction（覆蓋 NULL + redacted_at + redacted_reason）、保留 row | GDPR Art.17 / 用戶申請刪除個資 |
+| **L3 business payload** | `artifacts.body` / `workflow_runs.metadata` / `sop_definitions.body` | tenant active 期間 + 90d billing-dispute window | tenant terminated 後 unlink + 設 NULL | tenant 退訂、project archive purge 觸發 |
+| **L4 ephemeral cache** | `token_usage` 30d view、 `sessions`、 `request_log` | 30d ～ 7d | TTL purge cron | 既有 cache / log retention |
+
+**Audit chain hash 與 redaction 的相容方案**：
+
+```
+原始 chain （永遠不動）：
+  row N:    hash_n = sha256(action_n || actor_n || target_n || context_n || hash_{n-1})
+
+redaction 後（對 row N 的 context 做 redact）：
+  row N:    hash_n  保留原值（永遠不重算、保 chain 連續性）
+            context = NULL  （payload 被覆蓋）
+            redacted_at = now()
+            redacted_by = user_id（執行 redact 的 actor）
+            redacted_reason = 'gdpr_art17_request'
+
+驗證 chain 時：
+  - 順序驗證 hash_{n+1}, hash_{n+2}, ...
+  - 對 redacted row 跳過內容驗證、僅驗 hash_{n-1} → hash_n 鏈接性（hash_n 已存所以仍可驗）
+  - audit-export 工具輸出時、redacted row 顯示「[REDACTED at <ts> by <user> reason=<r>]」
+```
+
+**S-7.5 設計斷言**：
+1. **Hash 不重算是 chain 完整性的核心** — 一旦 redaction 重算 hash、整個 chain 必須跟著重算 + 之前的「我看過 chain hash X」forensic 證據全部失效；不重算則 redacted row 的「曾經 hash 過 context Y」永遠可被驗證、只是 context Y 已不可讀。這是 SOC2 / 合規友善的設計、行業標準（如 AWS CloudTrail Log File Integrity Validation 同模式）。
+2. **redaction 不是 hard delete 替代** — redaction 永遠保留 row + 外鍵 + 時間戳；hard delete 才動 row 本身。OmniSight 的 audit_log 永遠不 hard delete（即 L1 = 永久）；其他 user-facing 表（artifacts / workflow_runs.metadata）的 hard delete 走 L3 unlink、但仍保 row 與 audit chain 對應 row 不動。
+3. **GDPR Art.17 right-to-erasure 的 surface 是 PII column 級而非 row 級** — Carol 申請刪除自己個資、執行：(a) `users.full_name = sha256(users.id || 'redacted_name')`、(b) `users.email = sha256(...)`、(c) 對所有 `audit_log.context` 內含 Carol 名 / email 的 row 走 jsonb path redact。執行 actor=Pat（platform）+ Pat 雙簽 step-up + 寫 `redaction_requests` 表 + 寫 `audit_log.action='user.pii_redacted'`（這條 audit row 本身是 forensic、永不被 redact）。
+4. **`redaction_requests` 表是 first-class entity** — 每筆 GDPR 申請寫一 row（requested_at, requested_by_user_id, target_user_id, redaction_scope（PII / contextual / both）, executed_at, executed_by_user_id（Pat）, status）；user 可以查自己的 redaction status、平台可以審計 redaction history。
+5. **audit-export 工具輸出 redaction marker 而非 silent skip** — `GET /audits/export?tenant=acme&from=...&to=...` 輸出 csv / ndjson 時、對 redacted row 輸出顯式 marker `{"id":..., "action":..., "context":"[REDACTED 2026-09-01 by Pat reason=gdpr_art17]"}`、不是跳過該 row（跳過會讓 export 看似 chain 不連續、誤判為 corruption）。
+6. **L3 business payload scrub 不影響 chain hash** — `artifacts.body` 設 NULL 是 column-level 動作、`audit_log` 內提到「artifact_id=X 被建」的 row 不變、chain hash 不變；scrub 只動 user-facing 表 row 的 body / payload column，不動該 row 在 audit 內的歷史記錄。
+7. **redaction 必雙鏈寫**（呼應 S-3 / S-5 / S-6 雙鏈設計） — 對 cross-tenant 的 actor（如 Cher 在 acme 內 audit row 含 Cher.email）做 redaction 時、acme 端 redaction record + cobalt 端 redaction record 雙寫；guest tenant 端 owner 應該知道「自己 user 的某 PII 在 host tenant 端被 redact 了」（合規透明性）。
+
+### S-7.6 Quota 釋放 vs 凍結 — 三場景行為差異表
+
+S-7.2 / S-7.3 / S-7.4 三條路徑對 quota（disk + LLM）的處理不同；本子節是單一行為差異對照表 + 設計斷言。
+
+| 場景 | disk quota（tenant_quota.bytes） | LLM cap（30d window） | 何時釋放 / 凍結 | 動作 actor |
+|---|---|---|---|---|
+| **user 離職（S-7.2）** | 個人 disk 計數移出（如 daily_token_cap[Carol] 釋放）、tenant total disk 不變 | Carol 個人 LLM cap 釋放回 project pool（若有設） | 立即（Step 2 transaction 內） | admin (Bob) |
+| **tenant suspended（S-7.3）** | 凍結（既有 row 留、不算入 LRU GC 候選、新請求 reject 但不釋放） | 凍結（reject 新請求、不釋放給其他 tenant） | suspended 進入時 | admin (Alice) / platform (Pat) |
+| **tenant wind_down（S-7.3）** | 凍結（同 suspended） | 凍結 | wind_down 進入時 | owner (Alice) / platform (Pat) |
+| **tenant terminated（S-7.3）** | 釋放（disk row 從統計移除、實際 row 留 forensic）；90d 後 disk artifact unlink | 釋放（30d window 自然滑出） | terminated 進入時 disk view 移除、wind_down 60d + 90d billing dispute 後 disk unlink | platform (Pat) + cron |
+| **project archived（S-7.4）** | 凍結（disk row 留、不算 GC 候選 90d）；90d 後 LRU GC 對 ephemeral artifact | 立即釋放 project cap 回 line budget | archive 進入時 LLM 釋放、archived 90d 後 disk GC | admin (Bob) |
+| **project purged（S-7.4 終態）** | 釋放（disk artifact unlink） | 不適用（已釋放） | archived 90d cron | system |
+
+**S-7.6 設計斷言**：
+1. **「立即釋放」與「凍結再釋放」二分而非三分** — 沒有「先觀察 30d 再釋放」中間態（會讓 cap re-allocation 路徑爆炸）；只有兩個模式：(a) 立即釋放 = 後續可重分配給他人、(b) 凍結保留 = 不算自己也不給別人 + 觸發某條件後再釋放。簡化 reviewer 心智模型。
+2. **LLM cap 偏向釋放、disk 偏向凍結** — LLM cap 是時間窗（30d 滑出）、釋放後重分配很自然；disk artifact 是儲存（重 pull 一次成本高 + 客戶法務舉證可能要回頭看 6 個月前 artifact）、凍結期間不算 GC 才有合規緩衝。S-7.6 設計斷言 1 二分中、LLM 偏 (a)、disk 偏 (b)。
+3. **suspended 與 terminated 的 disk 行為不同** — suspended 期間 disk 仍 quota 計（tenant 還在）；terminated 後 disk view 移除（tenant 從統計切出）；理由：suspended 是可逆、disk row 留著等補繳；terminated 不可逆、disk view 移除避免 platform-wide quota 統計被殭屍 tenant 占用。
+4. **LRU GC 90d 緩衝對應「合規舉證」需求** — 90d 是常見合規期（金融行業 90d 交易記錄保存、GDPR 30 ～ 90d 申訴期）；archived 90d 緩衝 + LRU GC 不立即刪是合規友善設計；緊急情境（如客戶 demand「立即刪除我的資料」）走 S-7.5 redaction（個資刪、其餘留）+ 加速 purge endpoint（雙簽 owner + step-up MFA）。
+5. **freeze 期間 LLM call 必 402 而非 429** — 402 是「需要付費 / 計費資源不足」HTTP 標準、429 是「請求頻率超限」；suspended / wind_down 是計費狀態凍結、應回 402 + clear 訊息「您的 tenant 已暫停、請聯繫管理員恢復」；429 用於正常 tenant 的 quota 用盡。
+6. **quota 變更必雙寫 audit + SSE event** — `quota_changed(scope=user|tenant|project, action=release|freeze|unfreeze, before=X, after=Y, reason=...)` 是 first-class audit event；SSE 推 dashboard 即時 update、不靠 polling 看到 quota 變化。
+7. **terminated 後 90d billing-dispute window 是 disk 真正刪的緩衝** — disk 在 terminated 進入時 view 移除、但 row 留 90d；90d 內若退費糾紛走 platform 仲裁、Pat 可以從 row 推導當時用量；90d 過後 cron 跑 unlink + row 進「永久 frozen」（不再可查、但 audit 仍引用得到 metadata）。
+
+### S-7.7 Schema 增量（與 Y4 / Y9 / Y10 對齊）
+
+S-7 在既有 S-1 ～ S-6 schema 上加：
+
+```
+users                                -- 既有表 + S-7 加欄位
+  ...
+  enabled              integer NOT NULL DEFAULT 1  -- 既有
+  disabled_at          timestamptz                  -- S-7 加：disabled 觸發時間（NULL = 從未 disable）
+  disabled_by          uuid fk users(id)            -- S-7 加：執行 disable 的 actor
+  disabled_reason      text                          -- S-7 加：'left_company' / 'security_event' / 'mfa_locked' / ...
+  offboarded           boolean NOT NULL DEFAULT false -- S-7 加：永久離職旗標 vs 暫時 disable
+  offboarded_at        timestamptz                  -- S-7 加
+  -- partial index: WHERE offboarded = true（加速 28d grace cron 掃 offboarded user）
+
+tenants                              -- 既有表 + S-7 加欄位
+  ...
+  enabled              integer NOT NULL DEFAULT 1  -- 既有
+  plan                 text                          -- 既有 (free / starter / pro / enterprise)
+  lifecycle_stage      text NOT NULL DEFAULT 'active'  -- S-7 加：CHECK IN ('active','suspended','wind_down','terminated')
+  status_changed_at    timestamptz                  -- S-7 加：最後一次 lifecycle 變更時間
+  status_changed_by    uuid fk users(id)            -- S-7 加：執行 lifecycle 變更的 actor（platform super-admin 時走 nullable）
+  wind_down_deadline   timestamptz                  -- S-7 加：60d hard cap（lifecycle=wind_down 時 NOT NULL）
+  churn_reason         text                          -- S-7 加：'price' / 'consolidation' / 'platform_enforcement' / 'paid_back' / NULL
+  -- CHECK：lifecycle_stage='wind_down' AND wind_down_deadline IS NULL → reject
+
+projects                             -- 既有表（S-5 已加 lifecycle_stage 等）
+  ...
+  archived_at          timestamptz                  -- S-7 加（與 S-5.5 archived stage 對齊）
+  archived_by          uuid fk users(id)            -- S-7 加
+  un_archive_deadline  timestamptz                  -- S-7 加：archived_at + 90d、cron 用
+  archive_reason       text                          -- S-7 加：'poc_rejected' / 'production_eol' / 'customer_churn' / ...
+  ...
+
+api_keys                             -- 既有表 + S-7 加欄位
+  ...
+  enabled              integer NOT NULL DEFAULT 1  -- 既有
+  revoked_at           timestamptz                  -- S-7 加
+  revoked_by           uuid fk users(id)            -- S-7 加：執行 revoke 的 actor（NULL = system 級聯）
+  revoked_reason       text                          -- S-7 加：'user_offboarded' / 'rotation' / 'security' / 'manual'
+
+ownership_migrations                 -- S-7 新表（S-7.2 設計斷言 4）
+  id                  uuid pk
+  entity_type         text NOT NULL                -- CHECK IN ('project','sop_override','project_branch','workflow_run','agent_workspace')
+  entity_id           uuid NOT NULL
+  from_user_id        uuid fk users(id) NOT NULL   -- 永遠保留、不 cascade null
+  to_user_id          uuid fk users(id) NOT NULL
+  migrated_by         uuid fk users(id) NOT NULL   -- admin 執行 offboarding 的 actor
+  migrated_at         timestamptz NOT NULL
+  reason              text                          -- 'user_offboarding' / 'admin_reassign' / 'auto_to_admin_fallback'
+  metadata            jsonb NOT NULL DEFAULT '{}'   -- 含 handover_plan_id、original_owner_was 等 forensic 欄
+  -- index: (entity_type, entity_id, migrated_at DESC) 查特定 entity ownership 演進
+  -- index: (from_user_id, migrated_at DESC) 查 user offboarding 時 transferred 哪些 entity
+
+redaction_requests                   -- S-7 新表（S-7.5 設計斷言 4）
+  id                  uuid pk
+  target_user_id      uuid fk users(id) NOT NULL   -- 被 redact 的 user（PII subject）
+  target_tenant_id    uuid fk tenants(id)           -- 若是 tenant 級 redaction、非 NULL
+  scope               text NOT NULL                 -- CHECK IN ('user_pii','tenant_business','contextual','both')
+  requested_at        timestamptz NOT NULL
+  requested_by_user_id uuid fk users(id) NOT NULL
+  request_source      text NOT NULL                 -- 'gdpr_art17' / 'platform_enforcement' / 'user_self_request'
+  status              text NOT NULL DEFAULT 'pending'  -- CHECK IN ('pending','approved','executed','rejected')
+  approved_at         timestamptz
+  approved_by_user_id uuid fk users(id)             -- 雙簽 approver（若 status='approved'+ executed）
+  executed_at         timestamptz
+  executed_by_user_id uuid fk users(id)             -- platform super-admin（Pat）
+  rejected_reason     text
+  metadata            jsonb NOT NULL DEFAULT '{}'   -- 含 affected_audit_row_count 等 forensic
+  -- partial unique: WHERE status IN ('pending','approved')（同 user 同 scope 不能同時 2 個 pending）
+
+audit_log                            -- 既有表（S-3 / S-4 / S-5 / S-6 已加多欄、S-7 再加）
+  ...
+  redacted_at         timestamptz                  -- S-7 加：context 欄位被 redact 的時間（NULL = 未 redact）
+  redacted_by_user_id uuid fk users(id)             -- S-7 加
+  redaction_request_id uuid fk redaction_requests(id) -- S-7 加：對應的 redaction request、forensic
+  -- partial index: WHERE redacted_at IS NOT NULL（加速 redaction-only export query）
+
+tenant_quota                         -- 既有表 + S-7 加欄位
+  ...
+  frozen_at           timestamptz                  -- S-7 加：suspended / wind_down 進入時凍結戳記（NULL = 正常）
+  released_at         timestamptz                  -- S-7 加：terminated / project archive 釋放戳記
+```
+
+**S-7.7 設計斷言**：
+1. **`users` 表加 4 欄而非另起 `user_offboardings` 表** — `disabled_at / disabled_by / disabled_reason / offboarded` 是 user 1:1 屬性、加在 user 表內 row 級 query 簡單；ownership migration 是 user 1:N 多筆事件、才另起表。
+2. **`tenants.lifecycle_stage` 用 text + CHECK 而非 PG enum**（沿用 S-3.5 / S-4.6 / S-5.6 / S-6.6 既有 CHECK 設計） — 一致性 + migration 友善。
+3. **`ownership_migrations` 是 append-only audit-style 表** — 永遠不 update、永遠不 delete row（與 audit_log 同模式、但不需要 chain hash 因為其完整性靠 audit_log 雙寫保證）；所有變更走新 row。
+4. **`redaction_requests.scope` 4 值（user_pii / tenant_business / contextual / both）對應 4 種 GDPR / 合規路徑** — `user_pii` 對應 Carol 申請刪除自己個資（S-7.5 設計斷言 3）；`tenant_business` 對應 tenant terminated 後 business data scrub（S-7.5 設計斷言 6）；`contextual` 對應 audit_log.context jsonb 內 PII 提及；`both` 對應 user 既申請刪 PII 又是該 tenant 唯一 user（複合場景）。
+5. **`audit_log.redacted_at` partial index 不影響 hot path** — `WHERE redacted_at IS NOT NULL` 是 sparse condition（絕大多數 row redacted_at IS NULL）、partial index 只 cover ~0.1% rows；既有 audit insert hot path 不受影響、forensic-only export query 加速 ~10x。
+6. **`tenants.lifecycle_stage` 不重用 `tenants.enabled`** — `enabled=0` 既有路徑可能對應「短期維護」（platform 重啟）、不是 lifecycle 變更；新 `lifecycle_stage` 是業務 / 合規維度；兩者並存（一個 tenant 可能 enabled=1 + lifecycle=suspended、表示「平台層 tenant available 但業務層暫停」）。
+7. **`api_keys.revoked_*` 三欄與既有 `enabled` 共存** — 寫入規約：`enabled=0` 同時必填 `revoked_at`；既有路徑 `enabled=0` 但無 revoked_*（過渡）走 backfill `revoked_at = updated_at` + `revoked_reason='legacy_backfill'`；新路徑強制三欄寫齊。
+
+### S-7.8 Operator 工作流 — 三條 offboarding 時間軸
+
+**A. Carol 離職 7 步**：
+
+1. **Day -7** — Carol 提離職、HR 開 ticket
+2. **Day -3** — Bob 走 `GET /users/{carol}/handover-plan` 看 owned entity 列表（V1 owner、3 個 sop_overrides、5 個 outstanding workflow_run）
+3. **Day -3 + 1h** — Bob + Carol 走 UI checklist 為每筆指派接手人（V1 → Quinn、sop_overrides 全 → Quinn、outstanding run → abandon）
+4. **Day 0 09:00** — Carol 最後一天上班、Bob 執行 `PATCH /users/{carol} { enabled: false, disabled_reason: 'left_company', offboarded: true }`（要 step-up MFA）
+5. **Day 0 09:00 + 1s** — backend 走 transaction：disable + 級聯 revoke api_keys（2 條）+ rotate sessions（3 條）+ ownership_migrations 寫 8 row（V1 + 3 sop + 4 task） + audit `user.offboarded` 雙寫
+6. **Day 0 + 28d** — `auto_purge_grace cron` 跑、Carol 個人 daily_token_cap 釋放回 V1 pool、artifact orphan 走 LRU GC 候選
+7. **Day 0 + 28d ～ 永久** — Carol user row + audit-actor 永久保留；若 Carol 後續 GDPR 申請走 S-7.5 redaction（執行者 Pat）
+
+**B. Cobalt 退訂 7 步**：
+
+1. **Day -30** — Alice (cobalt owner) 收到 acme 寄的 churn warning email「您的 trial 期將於 30d 後到期、請續訂或 cancel」
+2. **Day 0** — Alice 點 cancel subscription、走 `POST /tenants/{cobalt}/cancel { reason: 'consolidation' }`
+3. **Day 0 + 1s** — backend 走 transaction：tenants.lifecycle_stage='wind_down' + wind_down_deadline=now()+60d + 級聯 graceful_abandon 全 active workflow_run + cross-tenant share 標 host_lifecycle_changed + tenant_quota.frozen_at=now() + audit 雙寫
+4. **Day 0 + 1h** — Cher（acme guest 對 cobalt 某 share）收 SSE event「來源 tenant 已退訂、export window 60d 倒數」+ inbox banner
+5. **Day 1 ～ 60** — cobalt user / acme guest 走 export window 下載 artifact 副本
+6. **Day 60** — `auto_terminate cron` 跑、tenants.lifecycle_stage='terminated' + business data redaction + cobalt 內所有 user enabled=0 + offboarded=true（級聯 S-7.2 路徑）
+7. **Day 60 + 90** — `purge_business_data_after_dispute_window cron` 跑、disk artifact unlink + row 進「永久 frozen」狀態；audit_log 永久保留
+
+**C. V2 POC archive + 90d → purge 7 步**：
+
+1. **Day -7** — V2 客戶 B POC 結束、客戶決定不續、Rita（V2 owner）做了 final review
+2. **Day -3** — Rita 寫 archive_reason 給 Bob（admin）、Bob 評估 cap 是否可早釋（line budget 緊）
+3. **Day 0** — Bob 執行 `POST /projects/{V2}/archive { reason: 'poc_rejected' }`
+4. **Day 0 + 1s** — backend transaction：projects.lifecycle_stage='archived' + archived_at=now() + un_archive_deadline=now()+90d + 立即釋放 LLM cap 回 line budget + branch 全 freeze + project_members 全 status='offboarded_from_project' + audit 雙寫
+5. **Day 0 + 1d** — Rita 收 SSE「V2 已 archived、cap 已釋放、90d 內可 un-archive」
+6. **Day 30** — 緊急情境：客戶反悔想恢復、Rita 走 `POST /projects/{V2}/un-archive`（90d 內可逆）+ admin step-up MFA → V2 active 復活
+7. **Day 90**（無 un-archive）— `auto_purge_after_90d cron` 跑、V2 ephemeral artifact unlink + workflow_runs.metadata redact + branch ref purge（呼應 S-6.4 ephemeral 90d cron）；project row 永久保留 lifecycle='archived' 不變
+
+**S-7.8 設計斷言**：
+1. **三條時間軸 7 步是「真實人類動作 + cron 自動」混合** — 強制每一步明標「人類動作」vs「cron 自動」；reviewer 一眼看出哪些步驟需要 UI / endpoint、哪些走 background job。
+2. **三條時間軸都至少含一個「可逆 / 緩衝期」** — Carol 28d undo grace、Cobalt 60d wind_down + 90d billing dispute、V2 90d un-archive；都是 graceful 設計、預防誤觸 + 合規友善。
+3. **時間軸跨 tenant / 跨資源 cascade 必走 SSE 通知** — Cobalt 退訂的 Cher 端通知、V2 archive 的 Rita 通知、Carol 離職的 Quinn 通知都走 SSE 即時 push、不靠 polling。
+
+### S-7.9 邊界 / 退化情境
+
+| 邊界場景 | 預期行為 | 驗收條件 |
+|---|---|---|
+| Carol 離職前忘了 transfer ownership、Bob 直接走 `disable` | 400 reject + 列表「Carol 仍 own N entity、請先 handover」；UI 引導走 handover-plan endpoint | Y4 disable user endpoint 強制 owned_count=0 OR force=true |
+| Bob 走 force=true 強制 disable Carol | 允許但 step-up MFA + 雙簽（Bob + Alice）+ 所有 owned entity 自動轉給 Bob、metadata.owner_pending_assignment=true、audit 雙倍寫 | Y4 force endpoint + admin double-sign |
+| Carol 離職 28d 內 HR 確認誤判、Bob 走 undo | 允許（Bob + Alice 雙簽 step-up）；走 `PATCH /users/{carol} { enabled: true, undo_offboarding: true }`；ownership_migrations 反向 rollback；雙倍 audit 寫「offboarding_undone」 | Y4 undo endpoint + 28d 內可逆 + step-up |
+| Carol 離職 28d+1d、Bob 想復原 | 422 + 引導「請走『新建 user + 顯式 transfer』路徑」；不再 inline undo | Y4 endpoint check disabled_at + 28d window |
+| Cobalt 在 wind_down 期 Alice 反悔、想 reactivate | 走 `POST /tenants/{cobalt}/reactivate`（platform Pat 簽 + Alice 雙簽 + 補繳 wind_down 期全部費用）；lifecycle 回 active；wind_down_deadline 清除 | Y4 reactivate endpoint + platform-side double-sign |
+| Cobalt terminated 後 Alice 想要拿 audit 回去（合規舉證） | 走 `GET /audit/historical-export`（platform Pat + Alice owner-of-record 雙簽 step-up）；export ndjson 包含 redacted marker | Y4 historical export endpoint + Pat 簽 |
+| Carol 走 GDPR Art.17 申請刪除個資 | 走 `POST /redaction-requests { scope: 'user_pii' }`、Pat 簽 + 28d 通知期 + 執行 redaction（覆蓋 PII 不刪 row） | Y4 redaction endpoint + 28d compliance notice |
+| Acme 在 V2 archive 後 30d 反悔想恢復 | 走 `POST /projects/{V2}/un-archive`（admin step-up MFA、90d 內可逆）；un_archive 觸發 LLM cap 重分配（從 line budget 拿回原 cap、若不夠走 partial restore + banner） | Y4 un-archive endpoint + 90d window |
+| V2 archive 90d+1d、想恢復 | 422 + 引導「project 已 purged ephemeral data、無法 un-archive；可開新 project + import 殘留 audit」 | Y4 endpoint check archived_at + 90d window |
+| Carol 是 V1 唯一 owner、Carol 離職、Quinn 也 unavailable（休假） | 走 `auto_to_admin_fallback`：V1 owner_user_id=Bob.id + projects.metadata.owner_pending_assignment=true + dashboard banner「<N> orphan projects need owner assignment」+ Bob 後續手動 reassign | S-7.2 Step 3.d + Y4 banner |
+| Cobalt 退訂、有 active cross-tenant share 對 acme | acme 端收 SSE「來源 tenant 已退訂」、share 變 frozen + export window 60d；60d 後 share 自動 revoke；guest 端 audit chain 永久保留 export 紀錄 | S-7.3 Day 0 + S-3.4 設計斷言 1 |
+| terminated tenant 內含 platform billing 糾紛、Pat 想 90d 後仍延長保留期 | 走 `POST /tenants/{id}/extend-billing-dispute-window`（platform 內部、Pat + platform finance 雙簽）；90d window 可延長 ≤ 180d hard cap；超過必走法務流程 | Y4 platform admin endpoint + 180d cap |
+| 多筆 redaction request 對同 user 同 scope 同時 pending | partial unique index reject 第 2 筆；走 「先處理第一筆 pending、再開第二筆」流程；UI 引導 | partial unique index `WHERE status IN ('pending','approved')` |
+| user 離職時 outstanding workflow_run 在 customer-x-fork（私有分支） | graceful_abandon 雙鏈寫（acme tenant chain + customer-A chain）+ 通知 customer A admin（Cher）「該 run 因 owner 離職已 abandon」；artifact 走 export window 不立即刪 | S-3 雙鏈 + S-7.2 graceful_abandon + customer-A SSE |
+| GDPR redaction 對含「Carol 名字」的 audit context、但該 row 是 cross-tenant share（acme + cobalt 雙鏈）| 雙鏈雙寫 redaction row、acme + cobalt 各寫一筆 redaction 紀錄；guest tenant owner 收 SSE「您 tenant 內 user 的 PII 已在 host tenant 端 redact」 | S-7.5 設計斷言 7 + S-3 雙鏈 |
+| audit-export 包含已 redacted row、export 工具該怎麼處理 | 輸出 redaction marker 不 silent skip：`{"id":..., "context":"[REDACTED 2026-09-01 by Pat reason=gdpr_art17_request_id=<rid>]"}`；export consumer 看得到「這 row 曾經有 context 但已 redact」 | S-7.5 設計斷言 5 |
+
+### S-7.10 Open Questions（標記給 Y1 ～ Y10 後續勾選）
+
+1. **「ownership 接手人 unavailable 時的 fallback chain」** — S-7.2 Step 3.d 寫「fallback 到執行 offboarding 的 admin」、但若該 admin 同時離職（雙離職 race）？目前傾向「fallback chain：原 owner → 接手人指派 → 執行 admin → tenant owner → platform super-admin」、5 層；但雙人 race 的 transaction 鎖定策略需在 Y4 落地時定（advisory lock keyed by (entity_type, entity_id)）。
+2. **「audit 永久保留 vs 7-year compliance default」** — S-7.5 L1 設計為「永久保留」、但有些行業（金融）要 7 年強制保留 + 7 年後可選刪除；OmniSight 是否該支援「configurable retention 7 / 永久 / 自訂」？目前傾向「永久 default、operator 顯式覆寫成 7 年才刪」、避免 default 隱式刪除誤判；但 Y10 落地時可能需 per-tenant configurable。
+3. **「redacted hash chain 對 cross-platform export 的相容性」** — 客戶想把 audit log 匯到外部 SIEM（Splunk / Datadog）、redacted row 的 hash 是否該重新編碼讓外部 SIEM 仍可驗 chain？目前傾向「不重新編碼、export 包含原 hash + redacted marker、外部 SIEM 看到 marker 跳過內容驗證但仍驗 chain 連續性」；但跨工具相容性需 Y10 SIEM integration 落地時驗。
+4. **「user 離職 28d undo grace 是否該 per-user / per-tenant 可配」** — 28d 是 OmniSight 預設、但合規嚴的 tenant 可能想 14d（縮短 attack surface）、HR 流程慢的可能想 60d（趕不上 batch processing）；目前傾向「tenant-level setting 可配 14 ～ 90d、預設 28d、超出範圍 reject」；但 RBAC 誰能改該設定（owner only？）需 Y3 / Y4 落地時定。
+5. **「terminated tenant 是否該允許『新建 tenant + import audit chain pointer』復活路徑」** — Cobalt terminated 後 Alice 想用同 email / 同 plan 開新 tenant、新 tenant 是否該 inherit cobalt 的 audit chain 為「歷史記錄」？目前傾向「不 inherit、新 tenant 全新 chain、舊 tenant audit 走 historical-export 拿（呼應 S-7.9 row 6）」、避免 chain 混淆 + 合規上「Cobalt v1 與 Cobalt v2 是兩個法律實體」；但實作需 Y4 / Y10 落地時最終決議。
+
+### S-7.11 既有實作對照表
+
+S-7 設計與目前 codebase（截至 2026-04-25）的對齊狀況：
+
+| S-7 invariant | 目前狀況 | 缺口 |
+|---|---|---|
+| `users.enabled` flag + login gate | ✅ — `backend/alembic/versions/0005_users_sessions_github_app.py:33` 既有 `enabled INTEGER`；`backend/auth.py:760` 登入時檢 enabled；`backend/routers/auth.py:486-549` PATCH /users/{id} 改 enabled 立即輪換 sessions（grace `ROTATION_GRACE_S`） + 寫 audit trigger='account_disabled' | Y1 加 4 欄（`disabled_at` / `disabled_by` / `disabled_reason` / `offboarded`）；既有 `enabled=0` 路徑 backfill `disabled_at=updated_at` + `disabled_reason='legacy_backfill'` |
+| Ownership migration on user offboarding | ❌ — 完全不存在；`projects` 既有無 `owner_user_id` first-class column（仍待 S-5 落地）；user disable 不自動處理 owned entity | Y1 加 `ownership_migrations` 表（10 欄）+ Y4 `GET /users/{id}/handover-plan` + `POST /users/{id}/disable` 強制 owned_count=0 OR force=true 雙簽 + Y4 `POST /users/{id}/disable/undo`（28d 內可逆） |
+| API key 級聯撤銷 on user disable | ❌ — `backend/api_keys.py:48-151` 既有 `revoke_key()` fn 但僅 manual；user `enabled=0` 不自動撤銷 owner 的 api_keys | Y4 加 `revoke_user_api_keys(user_id)` fn + 在 disable user transaction 內呼叫；`api_keys` 加 3 欄（`revoked_at` / `revoked_by` / `revoked_reason`）+ existing enabled=0 backfill `revoked_at=updated_at` |
+| Outstanding workflow_run 處理 on user disable | ❌ — 既有 `backend/routers/auth.py:486-549` disable user 不檢 outstanding run；run 仍在 queue / running、可能 reference 已 disable 的 actor | Y6 加 `graceful_abandon_runs_for_user(user_id)` fn + queued status='abandoned' + running 走 SSE worker abandon flow + 在 disable user transaction 觸發 |
+| `tenants.enabled` + lifecycle 4-state | ⚠️ 部分 — `backend/alembic/versions/0012_tenants_multi_tenancy.py:42-44` 既有 `enabled INTEGER` + `plan TEXT`；`backend/routers/auth.py:293-306` GET /auth/tenants 已 expose `enabled`；但無 `lifecycle_stage` enum、無 wind_down deadline、無 cancel endpoint | Y1 加 `lifecycle_stage` + `status_changed_at` + `status_changed_by` + `wind_down_deadline` + `churn_reason` 5 欄；Y4 `POST /tenants/{id}/cancel` + `POST /tenants/{id}/reactivate` + cron `auto_terminate_after_60d` + cron `purge_business_data_after_dispute_window` |
+| Tenant lifecycle middleware gate（active vs suspended/wind_down/terminated）| ❌ — 既有 `backend/main.py` _tenant_header_gate（S-2.3 升級點）只檢 X-Tenant-Id 是否 valid + user membership；不檢 `lifecycle_stage`；suspended / wind_down 期應 reject 新 mutation | Y2 middleware 加 lifecycle gate：`active` 通過 / `suspended` + `wind_down` 對 mutator endpoint 回 402 quota_frozen / `terminated` 全 reject 403 |
+| Project lifecycle archive | ⚠️ S-5 規格化但未實作 — S-5.5 規格 6 stage（rnd / poc / graduated / production / rejected / archived）；既有 `backend/alembic/versions/...` 無 `lifecycle_stage` 欄 | Y1 / Y4（與 S-5 同 milestone）加 `archived_at` + `archived_by` + `un_archive_deadline` + `archive_reason` 4 欄；Y4 `POST /projects/{id}/archive` + `POST /projects/{id}/un-archive`（90d 內可逆）+ cron `auto_purge_after_90d` |
+| Audit log 永久保留 + 不 hard delete | ✅ 隱式 — `backend/audit.py:80-84` 既有 audit_log 表 + 既無 cron 刪 row；但無顯式「永不刪」斷言 + 無 retention policy 文件化 | Y9 顯式落地 retention 文件 + 加 `redacted_at` / `redacted_by_user_id` / `redaction_request_id` 3 欄 partial index `WHERE redacted_at IS NOT NULL` |
+| GDPR right-to-erasure / redaction 框架 | ❌ — 完全不存在；無 `redaction_requests` 表、無 PII redact endpoint | Y1 加 `redaction_requests` 表（11 欄）+ Y4 `POST /redaction-requests` + Y9 `redact_user_pii(user_id)` fn 走 jsonb path redact + audit_log marker output |
+| Quota 釋放 on offboarding（user / tenant / project）| ❌ — `backend/tenant_quota.py:64-69` 既有 `PLAN_DISK_QUOTAS` map + LRU GC、但無 release / freeze hook；user disable / tenant suspend / project archive 都不觸發 quota 變化 | Y6 加 `release_user_quota(user_id)` / `freeze_tenant_quota(tenant_id)` / `release_project_cap(project_id)` 3 fn；`tenant_quota` 加 `frozen_at` / `released_at` 2 欄 |
+| Sessions revocation on user disable | ✅ — `backend/auth.py:1294 cleanup_expired_sessions()` + `routers/auth.py:542-546` disable 時 rotate + grace `ROTATION_GRACE_S`；`backend/alembic/versions/0019_session_revocations.py` 7d retention | 無缺口；S-7 直接沿用 |
+| SSE event for lifecycle changes（user / tenant / project / share）| ❌ — 既有 SSE channel 不含 `lifecycle_changed` event；frontend 不知何時 redirect / banner | Y8 加 SSE event types: `user.offboarded` / `tenant.lifecycle_changed` / `project.lifecycle_changed` / `share.host_lifecycle_changed`；frontend `lib/lifecycle-listener.tsx` + redirect / banner |
+| Cross-tenant share frozen on host wind_down | ❌ — 既有 `backend/routers/report.py:97` signed URL share 不 lifecycle-aware；S-3 規格 share path 仍待 Y4 落地 | Y4 share endpoint 加 lifecycle gate（host tenant 在 wind_down / terminated 時 share 變 frozen + export window banner） |
+| Frontend offboarding UI（handover plan checklist / disable wizard / archive wizard / cancel-subscription wizard） | ❌ — 完全不存在 | Y8 加 `/admin/users/{id}/handover` page + `/tenant/billing/cancel` page + `/projects/{id}/archive` modal；含 owned entity checklist、impact preview、雙簽 confirmation |
+
+**S-7.11 對 Y1 / Y4 / Y6 / Y8 / Y9 / Y10 的關鍵 deliverable**：
+1. **Y1 schema** — `users` 加 4 欄 + `tenants` 加 5 欄 + `projects` 加 4 欄 + `api_keys` 加 3 欄 + `audit_log` 加 3 欄 + `tenant_quota` 加 2 欄 + 2 新表（`ownership_migrations` 10 欄、`redaction_requests` 11 欄）+ 4 條 partial index（offboarded users / lifecycle wind_down tenants / redacted audit / pending redaction requests）+ 2 條 CHECK（tenants lifecycle wind_down_deadline NOT NULL、redaction_requests scope enum）。
+2. **Y2 middleware** — `_tenant_header_gate` 加 lifecycle gate（active 通過 / suspended + wind_down 對 mutator 402 / terminated 403）；對 user-bound endpoint 加 `offboarded=true` reject。
+3. **Y4 endpoint set** — `GET /users/{id}/handover-plan` + `POST /users/{id}/disable`（強制 owned_count=0 OR force=true 雙簽）+ `POST /users/{id}/disable/undo`（28d 可逆）+ `POST /tenants/{id}/cancel` + `POST /tenants/{id}/reactivate` + `POST /tenants/{id}/extend-billing-dispute-window`（platform-side、最多 180d）+ `POST /projects/{id}/archive` + `POST /projects/{id}/un-archive`（90d 可逆）+ `POST /redaction-requests` + `POST /redaction-requests/{id}/approve` + `POST /redaction-requests/{id}/execute`（platform Pat 雙簽）+ `GET /audit/historical-export`（terminated tenant 用、Pat + Alice 雙簽）。
+4. **Y6 background jobs + fns** — `graceful_abandon_runs_for_user(user_id)` + `revoke_user_api_keys(user_id)` + `release_user_quota(user_id)` + `freeze_tenant_quota(tenant_id)` + `release_project_cap(project_id)` + `redact_user_pii(user_id, scope)`（jsonb path redact）；3 條 cron（`auto_purge_user_grace_after_28d` + `auto_terminate_tenant_after_60d` + `purge_business_data_after_dispute_window` + `auto_purge_project_after_90d`）。
+5. **Y8 frontend** — `lib/lifecycle-listener.tsx`（SSE 監聽全 lifecycle event）+ `/admin/users/{id}/handover` page（owned entity checklist + 接手人指派 dropdown + impact preview） + `/admin/users/{id}/disable` modal（force=true 警告 + 雙簽輸入框）+ `/tenant/billing/cancel` page（60d wind_down 倒數 + export download 按鈕） + `/projects/{id}/archive` modal（cap 釋放 preview + 90d 倒數 banner） + `/admin/redactions/{id}` page（GDPR redaction request 流程） + `/dashboard/orphan-projects` banner（owner_pending_assignment）。
+6. **Y9 audit + cron** — audit_log redaction marker output（export 工具）+ `audit_log.redacted_at` partial index + `redaction_requests` audit 雙寫（acme + 跨 tenant 涉及時雙鏈）+ cron `auto_terminate_tenant_after_60d` 與 cron `purge_business_data_after_dispute_window` 的雙鏈寫入規則。
+7. **Y10 retention policy 文件 + per-tenant configurable** — `docs/ops/audit_retention_policy.md` 落地（永久保留 + redaction-only path）+ tenant-level setting 28d undo grace configurable（14 ～ 90d）+ historical-export cross-platform format（NDJSON + redaction marker spec）。
+
 
 ## S-8 熱點撞牆
 
@@ -1987,4 +2425,5 @@ S-1.3 / S-1.4 已給出 secret + project 部分。完整矩陣（涵蓋 audit / 
 | 2026-04-25 | TODO 第 4 勾選（多產品線） | S-4 章節展開（10 子節 + 6-persona Acme 三線（IPCam Pam / Doorbell Doris / Intercom Ian + Alice/Bob/Carol 對照組）+ LLM 雙層預算階層偽碼 + git resolver 階層偽碼 + on-call routing 階層偽碼 + SOP/skill_pack 共享範圍 + schema 增量 3 表 5 欄 + Acme 1→3 線 7 步演進時間軸 + 9 邊界 + 5 open questions + 16 行對照表）；S-3 row 標完成（2026-04-25）；S-5 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 5 勾選（多專案同產品線） | S-5 章節展開（10 子節 + 6-persona Doorbell 三 project（V1 客戶 A 量產 Quinn / V2 客戶 B POC Rita / V3 內部 R&D Sam + Doris/Carol/Bob 對照組）+ 三層 LLM 預算階層偽碼（tenant ceiling × line budget × project cap）+ customer attribution 模型（customer_accounts 表 + is_internal 互斥 CHECK）+ SOP/skill_pack 三層繼承解析 + inheritance vs clone 雙 mode + lifecycle 狀態機 6 stage 嚴格白名單轉移 + schema 增量 3 表 4 欄（customer_accounts + project_lifecycle_history + sop_overrides + projects 4 欄）+ Doorbell 1→3 project 7 步演進時間軸 + 11 邊界 + 5 open questions + 17 行對照表）；S-4 row 標完成（2026-04-25）；S-6 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 6 勾選（多分支同專案） | S-6 章節展開（10 子節 + 4-branch persona 矩陣（main / staging / v2.1-hotfix / customer-x-fork × push policy × reviewer × 工程角色）+ workspace 路徑 nested 模型（tenant/line/project/_branches/_tasks 4 段 + sanitize 規約 + legacy symlink 過渡）+ git worktree 策略偽碼（per-project bare clone × N worktree 共享 object store + ensure_project_bare / provision_branch_worktree / provision_agent_task_worktree 三 fn + PG advisory lock keyed (project, branch)）+ branch lifecycle 狀態機 4 stage（active / frozen / archived / purged）+ long-lived vs ephemeral typed enum + workflow_run × branch attribution（branch / branch_kind / base_branch 3 欄兩階段 NOT NULL）+ schema 增量 2 新表 + 1 表升 durable + 3 表加欄位（project_branches + branch_lifecycle_history + agent_workspaces 升 PG + workflow_runs/artifacts/audit_log 各加 branch）+ Doorbell V1 1→4 branch 7 步演進時間軸（含 release v2.0 / v2.1-hotfix from tag / customer-x-fork 雙鏈 audit / auto-freeze 30d）+ 13 邊界 + 5 open questions + 14 行對照表（含既有 backend/workspace.py module-global state 升 PG 表合格答案 #2 的具體實作路徑））；S-5 row 標完成（2026-04-25）；S-7 ～ S-9 維持 skeleton；共用區段仍 stub。|
+| 2026-04-25 | TODO 第 7 勾選（消失用戶回收） | S-7 章節展開（10 子節 + 5-persona 三條 offboarding 路徑視角矩陣（Carol 離職 / Bob admin actor / Alice owner-churn / Pat platform super-admin / Cher guest survivor × do/not-do）+ user 離職 graceful offboarding 5 步偽碼（handover-plan → disable transaction → ownership migration → quota release → 28d grace + 永久 audit-actor 保留）+ tenant 退訂 4-state lifecycle 狀態機（active → suspended → wind_down → terminated）含 4 stage 行為矩陣（quota / LLM / data / audit / guest 視角）+ Cobalt 退訂 60d + 90d 端到端時間軸 + project archive cascade 6 軸對照表（LLM cap / disk artifact / workflow_run / project_members / customer_account / 統計）+ audit retention 4 層模型（永久保留 / PII redactable / business payload / ephemeral cache）+ chain hash 不重算的 GDPR Art.17 redaction 框架 + quota 釋放 vs 凍結三場景 6-row 行為差異表（user 離職 / tenant suspended / wind_down / terminated / project archived / purged）+ schema 增量（既有 6 表加 18 欄 + 2 新表（ownership_migrations 10 欄 + redaction_requests 11 欄）+ 4 條 partial index + 2 條 CHECK）+ 三條 7 步 operator 時間軸（Carol 離職 / Cobalt 退訂 / V2 archive）+ 16 邊界 + 5 open questions + 14 行對照表（含既有 backend/auth.py:486-549 disable user 路徑 + backend/api_keys.py:48-151 revoke_key fn + backend/alembic/0019_session_revocations 7d retention + backend/audit.py:80-84 隱式永久保留的延伸路徑））；S-6 row 標完成（2026-04-25）；S-8 ～ S-9 維持 skeleton；共用區段仍 stub。|
 | 2026-04-25 | TODO 第 2 勾選（多租戶單用戶） | 完整 S-2 章節（10 子節 + Bridge MSP × Acme/Blossom/Cobalt 5-persona 矩陣 + tenant switcher UX 4 步流程 + middleware 升級偽碼 + RBAC `resolve_role(user, tenant, project)` 二維解析 + audit cross-contamination 4 條 invariant + Y1 新增欄位（`is_super_admin` / `last_active_tenant_id` / `sessions.active_tenant_id` / `impersonation_*` / `is_primary` partial unique index）+ Maya 7 步 onboarding 時間軸 + 8 邊界場景 + 5 open questions + 16 行對照表盤點 Y2/Y3/Y8 缺口）；S-3 ～ S-9 仍留 skeleton；共用區段不動。 |
