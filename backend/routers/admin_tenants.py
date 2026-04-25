@@ -16,9 +16,14 @@ implemented:
                                        would exceed the new plan's hard
                                        quota — never silently force-
                                        deletes data.
-
-Subsequent rows (DELETE) extend this router; they are out of scope here
-and will be added by their own TODO rows.
+  DELETE /api/v1/admin/tenants/{id}  — cascade delete every row /
+                                       artifact owned by the tenant.
+                                       Requires ``?confirm=<tenant_id>``
+                                       second-handshake; ``t-default``
+                                       is protected. Runs in the
+                                       background and emits SSE
+                                       ``tenant_delete_progress`` per
+                                       phase.
 
 Auth model (Y2 spec)
 ────────────────────
@@ -62,9 +67,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
+import time
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -957,5 +964,469 @@ async def patch_tenant(
             "plan": new_row["plan"],
             "enabled": bool(new_row["enabled"]),
             "created_at": new_row["created_at"],
+        },
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  DELETE /admin/tenants/{tenant_id} — cascade delete  (Y2 #278 row 5)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Tenants that the platform itself depends on and which must NEVER be
+# deleted, even by a super-admin. ``t-default`` is the seed row that
+# every default-tenant write path falls back to (db.py seeds it on
+# init); removing it would break every subsequent INSERT that omits
+# ``tenant_id`` and rely on the column DEFAULT, plus the artifact /
+# audit / event_log columns that point at it. Treated as a hard policy
+# — returns 403 (not 404) so the operator can see exactly why.
+PROTECTED_TENANT_IDS: frozenset[str] = frozenset({"t-default"})
+
+# Single-row fetch used by the DELETE handler to (a) decide between
+# 404 and 202, and (b) snapshot the tenant for the audit log before
+# the row is gone. Read-only.
+_FETCH_TENANT_FOR_DELETE_SQL = """
+SELECT id, name, plan, enabled, created_at
+FROM tenants
+WHERE id = $1
+"""
+
+# Cascade DELETE phases, in dependency-safe order: rows in tables that
+# REFERENCE ``tenants(id)`` *without* ``ON DELETE CASCADE`` must be
+# removed before the tenants row itself, otherwise the final delete
+# trips an FK violation. The list mirrors every ``REFERENCES tenants``
+# call site that lacks ``ON DELETE CASCADE`` in ``backend/db.py`` plus
+# the three FK-less ``tenant_id`` columns (chat_messages, chat_sessions,
+# user_drafts) — when one of these tables is added in the future the
+# drift guard test ``test_delete_phases_cover_all_tenant_id_tables``
+# will fail at module-load until the new table is appended here.
+#
+# Tables that already have ``ON DELETE CASCADE`` on their tenants FK
+# (``user_tenant_memberships`` / ``projects`` / ``tenant_invites`` /
+# ``project_shares.guest_tenant_id`` / ``git_accounts`` /
+# ``llm_credentials``) and the user-scoped child rows that hang off
+# ``users`` (``sessions`` / ``user_mfa`` / ``mfa_backup_codes`` /
+# ``password_history`` — all CASCADE on ``users.id``) fall away on
+# their own when the ``users`` and final ``tenants`` deletes fire.
+_DELETE_PHASES_PG: tuple[tuple[str, str], ...] = (
+    ("artifacts",
+        "DELETE FROM artifacts WHERE tenant_id = $1"),
+    ("event_log",
+        "DELETE FROM event_log WHERE tenant_id = $1"),
+    ("debug_findings",
+        "DELETE FROM debug_findings WHERE tenant_id = $1"),
+    ("decision_rules",
+        "DELETE FROM decision_rules WHERE tenant_id = $1"),
+    ("workflow_runs",
+        "DELETE FROM workflow_runs WHERE tenant_id = $1"),
+    ("user_preferences",
+        "DELETE FROM user_preferences WHERE tenant_id = $1"),
+    ("tenant_secrets",
+        "DELETE FROM tenant_secrets WHERE tenant_id = $1"),
+    ("tenant_egress_requests",
+        "DELETE FROM tenant_egress_requests WHERE tenant_id = $1"),
+    ("tenant_egress_policies",
+        "DELETE FROM tenant_egress_policies WHERE tenant_id = $1"),
+    ("chat_messages",
+        "DELETE FROM chat_messages WHERE tenant_id = $1"),
+    ("chat_sessions",
+        "DELETE FROM chat_sessions WHERE tenant_id = $1"),
+    ("user_drafts",
+        "DELETE FROM user_drafts WHERE tenant_id = $1"),
+    # audit_log is the deleted tenant's audit chain. The super-admin's
+    # chain (typically ``t-default``) is untouched because audit row
+    # ``tenant_id`` is set from the request context, not from the
+    # entity being acted upon (see ``audit._log_impl``).
+    ("audit_log",
+        "DELETE FROM audit_log WHERE tenant_id = $1"),
+    # ``users`` last among the explicit deletes so the user-scoped
+    # CASCADE children (sessions, mfa, password_history) are still in
+    # place when audit_log rows referencing them are removed above.
+    ("users",
+        "DELETE FROM users WHERE tenant_id = $1"),
+    # Final row removal. PG cascades fan out to user_tenant_memberships,
+    # projects (+ project_members + project_shares), tenant_invites,
+    # project_shares.guest_tenant_id, git_accounts, llm_credentials.
+    ("tenants",
+        "DELETE FROM tenants WHERE id = $1"),
+)
+
+# Filesystem cleanup is the (N+1)-th phase — emitted after the SQL
+# DELETEs so subscribers see a single linear stream of phases ending
+# with ``filesystem``.
+DELETE_TOTAL_PHASES = len(_DELETE_PHASES_PG) + 1
+
+# SSE event type used for both per-phase progress and terminal
+# done / failed events. A single event type with a ``status`` field
+# (rather than three event types) keeps SSE subscribers simple.
+DELETE_PROGRESS_EVENT = "tenant_delete_progress"
+
+# Public phase-name list — used by the frontend to render a progress
+# bar with stable labels and by the drift-guard tests to assert phase
+# coverage. Defined once at module scope so both the response payload
+# and the test surface read the same source of truth.
+DELETE_PHASE_NAMES: tuple[str, ...] = tuple(
+    name for name, _sql in _DELETE_PHASES_PG
+) + ("filesystem",)
+
+# Strong references to in-flight cascade tasks. ``asyncio.create_task``
+# only weakly references its task — without this set, a pending task
+# can be garbage-collected mid-flight, silently aborting the cascade.
+# Tests use this set to ``await`` the bg task before asserting
+# post-state. Module-global state #3 answer ("intentionally per-worker"):
+# each uvicorn worker owns its own in-flight tasks, exactly the same
+# scope as the asyncio event loop running them.
+_pending_delete_tasks: set[asyncio.Task] = set()
+
+
+def _emit_delete_progress(
+    tenant_id: str,
+    phase: str,
+    status: str,
+    **extra: Any,
+) -> None:
+    """Push one ``tenant_delete_progress`` SSE event to all subscribers.
+
+    Status values: ``started`` / ``running`` / ``done`` / ``completed``
+    / ``failed``. ``broadcast_scope='global'`` because the event is for
+    super-admins watching the global admin pane — it must NOT be scoped
+    to the tenant being deleted (subscribers of that tenant's stream
+    are about to vanish).
+    """
+    try:
+        from backend.events import bus
+        bus.publish(
+            DELETE_PROGRESS_EVENT,
+            {
+                "tenant_id": tenant_id,
+                "phase": phase,
+                "status": status,
+                **extra,
+            },
+            broadcast_scope="global",
+            tenant_id=None,
+        )
+    except Exception as exc:  # pragma: no cover — best-effort SSE
+        logger.warning(
+            "tenant_delete_progress emit failed (tenant=%s phase=%s): %s",
+            tenant_id, phase, exc,
+        )
+
+
+def _delete_tenant_filesystem_sync(tenant_id: str) -> int:
+    """Remove the tenant's on-disk data dirs synchronously. Returns the
+    pre-delete byte total (best-effort; 0 on measurement / removal
+    failure of any subdir). Runs inside ``asyncio.to_thread``.
+
+    Two roots are removed:
+      * ``data/tenants/<tenant_id>/`` — artifacts / workflow_runs /
+        backups / quota.yaml
+      * ``/tmp/omnisight_ingest/<tenant_id>/`` — staged ingest payloads
+
+    ``ignore_errors=True`` on rmtree because partial cleanup is better
+    than an exception that aborts the cascade — orphaned bytes are
+    cosmetic, an aborted cascade leaves the operator with half-deleted
+    DB state. Any per-tree failure is logged at warning so an operator
+    can manually finish the sweep.
+    """
+    from backend.tenant_fs import tenant_data_root, tenant_ingest_root
+    bytes_freed = 0
+    for path_fn in (tenant_data_root, tenant_ingest_root):
+        try:
+            p = path_fn(tenant_id)
+            if not p.exists():
+                continue
+            try:
+                bytes_freed += sum(
+                    f.stat().st_size for f in p.rglob("*") if f.is_file()
+                )
+            except Exception as exc:
+                logger.debug(
+                    "filesystem size measurement failed for %s: %s", p, exc,
+                )
+            shutil.rmtree(p, ignore_errors=True)
+        except Exception as exc:
+            logger.warning(
+                "filesystem delete failed for tenant=%s helper=%s: %s",
+                tenant_id, path_fn.__name__, exc,
+            )
+    return bytes_freed
+
+
+async def _run_tenant_cascade_delete(
+    tenant_id: str,
+    before_snapshot: dict[str, Any],
+    actor_email: str,
+) -> dict[str, Any]:
+    """Background worker — execute the cascade and emit SSE per phase.
+
+    Runs OUTSIDE the request lifecycle (no request-scoped tenant
+    contextvar; ``audit.log`` falls back to ``t-default`` for the
+    audit chain, which is correct: the audit row belongs to the
+    super-admin's chain, not the chain we just wiped).
+
+    Returns the per-phase row counts so callers / tests can introspect
+    the cascade outcome without re-querying.
+    """
+    from backend import audit as _audit
+    from backend.db_pool import get_pool
+
+    deleted_counts: dict[str, int] = {}
+    started = time.time()
+    try:
+        async with get_pool().acquire() as conn:
+            for idx, (table, sql) in enumerate(_DELETE_PHASES_PG, start=1):
+                _emit_delete_progress(
+                    tenant_id, phase=table, status="running",
+                    step=idx, total=DELETE_TOTAL_PHASES,
+                )
+                tag = await conn.execute(sql, tenant_id)
+                # asyncpg returns 'DELETE <n>'; parse defensively.
+                count = 0
+                try:
+                    count = int(tag.rsplit(" ", 1)[-1])
+                except (ValueError, IndexError):
+                    pass
+                deleted_counts[table] = count
+                _emit_delete_progress(
+                    tenant_id, phase=table, status="done",
+                    step=idx, total=DELETE_TOTAL_PHASES,
+                    rows_deleted=count,
+                )
+
+        _emit_delete_progress(
+            tenant_id, phase="filesystem", status="running",
+            step=DELETE_TOTAL_PHASES, total=DELETE_TOTAL_PHASES,
+        )
+        bytes_freed = await asyncio.to_thread(
+            _delete_tenant_filesystem_sync, tenant_id,
+        )
+        _emit_delete_progress(
+            tenant_id, phase="filesystem", status="done",
+            step=DELETE_TOTAL_PHASES, total=DELETE_TOTAL_PHASES,
+            bytes_freed=int(bytes_freed),
+        )
+
+        # Final summary audit row written under the super-admin's chain
+        # (``audit.tenant_insert_value`` falls back to ``t-default`` for
+        # contexts without a tenant — exactly what we want here).
+        try:
+            await _audit.log(
+                action="tenant_deleted",
+                entity_kind="tenant",
+                entity_id=tenant_id,
+                before=before_snapshot,
+                after=None,
+                actor=actor_email,
+            )
+        except Exception as exc:  # pragma: no cover — audit swallows
+            logger.warning("tenant_deleted audit emit failed: %s", exc)
+
+        elapsed = time.time() - started
+        _emit_delete_progress(
+            tenant_id, phase="all", status="completed",
+            elapsed_seconds=round(elapsed, 3),
+            deleted_counts=deleted_counts,
+            bytes_freed=int(bytes_freed),
+        )
+        return {
+            "tenant_id": tenant_id,
+            "status": "completed",
+            "deleted_counts": deleted_counts,
+            "bytes_freed": int(bytes_freed),
+            "elapsed_seconds": round(elapsed, 3),
+        }
+    except Exception as exc:
+        logger.exception(
+            "tenant cascade delete failed for tenant=%s", tenant_id,
+        )
+        _emit_delete_progress(
+            tenant_id, phase="all", status="failed",
+            error=str(exc),
+            deleted_counts=deleted_counts,
+        )
+        try:
+            await _audit.log(
+                action="tenant_delete_failed",
+                entity_kind="tenant",
+                entity_id=tenant_id,
+                before=before_snapshot,
+                after={"error": str(exc), "deleted_counts": deleted_counts},
+                actor=actor_email,
+            )
+        except Exception as audit_exc:  # pragma: no cover
+            logger.warning(
+                "tenant_delete_failed audit emit failed: %s", audit_exc,
+            )
+        return {
+            "tenant_id": tenant_id,
+            "status": "failed",
+            "error": str(exc),
+            "deleted_counts": deleted_counts,
+        }
+
+
+@router.delete("/tenants/{tenant_id}", status_code=202)
+async def delete_tenant(
+    tenant_id: str,
+    _request: Request,
+    confirm: str | None = Query(
+        default=None,
+        description="Must equal the path tenant_id; second-handshake "
+                    "guard so a stray DELETE URL cannot wipe a tenant.",
+    ),
+    actor: auth.User = Depends(auth.require_super_admin),
+) -> JSONResponse:
+    """Cascade-delete a tenant and every owned row / artifact.
+
+    The actual delete runs in the background (``asyncio.create_task``)
+    and emits one ``tenant_delete_progress`` SSE event per phase via
+    the global event bus. The HTTP response returns ``202 Accepted``
+    immediately so the caller doesn't block on a tenant with millions
+    of rows / many GiB of artifacts.
+
+    Status codes
+    ────────────
+    * 202 — accepted; cascade started, watch SSE for progress.
+    * 403 — caller is not a super-admin (handled by dependency), OR
+      ``tenant_id`` is in ``PROTECTED_TENANT_IDS`` (``t-default``).
+    * 404 — well-formed id but no such tenant.
+    * 422 — id fails ``TENANT_ID_PATTERN``, OR the ``?confirm=`` query
+      param is missing or doesn't match the path id.
+
+    Confirm handshake
+    ─────────────────
+    A misconfigured client / shell history replay must not be able to
+    delete a tenant by accidentally re-sending a stored URL. The caller
+    is required to echo the tenant id in ``?confirm=<id>`` — same kind
+    of two-step guard GitHub uses for ``DELETE`` of repos / orgs. The
+    check is exact-equal, case-sensitive.
+
+    SSE channel
+    ───────────
+    Event type: ``tenant_delete_progress``. Per-event payload::
+
+        {
+            "tenant_id": "t-acme",
+            "phase": "<table_name|filesystem|all>",
+            "status": "started|running|done|completed|failed",
+            "step": <int>,                  # 1..N (per-phase)
+            "total": <int>,                 # N (constant)
+            "rows_deleted": <int>,          # only on table phases
+            "bytes_freed": <int>,           # only on filesystem
+            "elapsed_seconds": <float>,     # only on completed
+            "deleted_counts": {table:int},  # only on completed/failed
+            "error": "...",                 # only on failed
+            "timestamp": "...iso..."
+        }
+
+    Audit
+    ─────
+    Three audit actions are written under the super-admin's chain:
+      * ``tenant_delete_requested`` — synchronous, before kickoff
+      * ``tenant_deleted`` — after successful cascade
+      * ``tenant_delete_failed`` — if the cascade aborts mid-flight
+
+    Module-global state
+    ───────────────────
+    SQL constants are module-level immutable strings (each worker
+    derives the same value). The asyncpg pool is shared via PG.
+    ``_pending_delete_tasks`` is intentionally per-worker (see its
+    docstring) — each uvicorn worker tracks only the cascades it
+    started, which matches the asyncio event-loop ownership semantics.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"invalid tenant id: {tenant_id!r}; "
+                               f"must match {TENANT_ID_PATTERN}"},
+        )
+    if confirm is None or confirm != tenant_id:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    "DELETE requires ?confirm=<tenant_id> matching the "
+                    "path id. This second handshake prevents accidental "
+                    "deletion via a replayed URL."
+                ),
+                "tenant_id": tenant_id,
+                "confirm_received": confirm,
+            },
+        )
+    if tenant_id in PROTECTED_TENANT_IDS:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    f"tenant {tenant_id!r} is protected and cannot be "
+                    f"deleted. The platform default tenant backs every "
+                    f"un-tenanted write path and the seeded audit chain."
+                ),
+                "tenant_id": tenant_id,
+            },
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        cur_row = await conn.fetchrow(
+            _FETCH_TENANT_FOR_DELETE_SQL, tenant_id,
+        )
+    if cur_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    before = {
+        "id": cur_row["id"],
+        "name": cur_row["name"],
+        "plan": cur_row["plan"],
+        "enabled": bool(cur_row["enabled"]),
+    }
+
+    # Best-effort synchronous audit BEFORE we kick off the cascade —
+    # we want a record of "operator X requested delete of tenant Y at
+    # time T" even if the cascade later aborts. ``audit.log`` swallows
+    # its own failures so a transient chain outage doesn't 5xx the
+    # caller (the cascade still runs).
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_delete_requested",
+            entity_kind="tenant",
+            entity_id=tenant_id,
+            before=before,
+            after=None,
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning("tenant_delete_requested audit emit failed: %s", exc)
+
+    # Emit the "started" event BEFORE kickoff so that subscribers who
+    # connect after the 202 response can still see at least one event
+    # confirming the cascade is in flight.
+    started_at = time.time()
+    _emit_delete_progress(
+        tenant_id, phase="all", status="started",
+        step=0, total=DELETE_TOTAL_PHASES,
+        actor=actor.email,
+    )
+
+    task = asyncio.create_task(
+        _run_tenant_cascade_delete(tenant_id, before, actor.email),
+    )
+    _pending_delete_tasks.add(task)
+    task.add_done_callback(_pending_delete_tasks.discard)
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "tenant_id": tenant_id,
+            "status": "deleting",
+            "started_at": started_at,
+            "sse_event": DELETE_PROGRESS_EVENT,
+            "total_phases": DELETE_TOTAL_PHASES,
+            "phases": list(DELETE_PHASE_NAMES),
         },
     )
