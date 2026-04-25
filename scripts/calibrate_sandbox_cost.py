@@ -87,6 +87,35 @@ MIN_DURATION_S = 0.5
 """Drop launches with end - start < 0.5s — almost certainly a docker
 race / immediate failure that doesn't represent real workload cost."""
 
+# ── Drift classification thresholds — used by the diff report only ──
+# Calibration math itself doesn't care; these are *operator-review*
+# heuristics that bucket each class into a severity tag so a human
+# scanning the report can tell at a glance which rows need scrutiny.
+
+MIN_SAMPLES_FOR_CONFIDENCE = 5
+"""Below this sample count a class is flagged LOW-DATA in the diff —
+even a 'dramatic' Δ on 1-2 samples is statistical noise, not signal.
+Operators should NOT --apply a calibration where critical classes have
+< MIN_SAMPLES_FOR_CONFIDENCE; review-only."""
+
+MODERATE_DRIFT_PCT = 0.10
+"""|new - old| / max(old, ε) ≥ this → REVIEW status. The 10% floor is
+an "above-noise" cutoff — token weights round to 2 decimals so anything
+below 10% drift on a small token (e.g. 0.5 → 0.55) is well within the
+representational granularity and usually means "no real change"."""
+
+LARGE_DRIFT_PCT = 0.50
+"""|new - old| / max(old, ε) ≥ this → LARGE status. A 50%+ swing in a
+sandbox class's token weight changes admission geometry materially —
+operator MUST sanity-check the per-class math (mean dur, mean CPU·s,
+sample count) before --apply or a benign-looking calibration could
+halve effective concurrency for that workload class overnight."""
+
+# Recommendation verdicts (also embedded in JSON output for CI tooling).
+VERDICT_APPLY = "APPLY"
+VERDICT_REVIEW = "REVIEW"
+VERDICT_SKIP = "SKIP"
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Memory-limit parsing (mirrors host_metrics CLI parser)
@@ -191,6 +220,16 @@ class CalibrationResult:
     host_ring_size: int                # current host_metrics ring depth
     classes: dict[str, ClassStats] = field(default_factory=dict)
     new_weights: dict[str, float] = field(default_factory=dict)
+    # ── Diff-report only ─────────────────────────────────────────────
+    # When the operator runs the calibrator after at least one prior
+    # ``--apply``, ``configs/sandbox_cost_weights.yaml`` is the live
+    # source of truth — not the H4a hardcode. The CLI loads that file
+    # (when present) into ``baseline_weights`` so the report compares
+    # *what's currently running* against *what calibration would
+    # produce*. ``baseline_source`` is a human-readable provenance
+    # string ("H4a hardcode" or the yaml path + its generated_at).
+    baseline_weights: dict[str, float] | None = None
+    baseline_source: str = "H4a hardcode (backend.sandbox_capacity)"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -610,14 +649,290 @@ def _normalise_weights(classes: dict[str, ClassStats],
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Diff-report classification (human-review surface)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Status labels — short ASCII tags so the markdown table renders the
+# same in plain text dumps, terminal pagers, and PR comments. Keep them
+# aligned to a single column width so the report scans cleanly.
+STATUS_OK = "OK"
+STATUS_REVIEW = "REVIEW"
+STATUS_LARGE = "LARGE"
+STATUS_LOW_DATA = "LOW-DATA"
+STATUS_NO_DATA = "NO-DATA"
+
+
+def baseline_for(name: str, result: CalibrationResult) -> float:
+    """Return the comparison baseline for ``name``.
+
+    Prefers ``result.baseline_weights[name]`` when the CLI loaded a
+    persisted yaml (post-first-``--apply`` state); otherwise falls back
+    to the ClassStats' ``old_tokens`` (H4a hardcode). When the loaded
+    yaml is missing a class entirely (e.g. operator hand-edited it) we
+    also fall back so the diff doesn't silently become "new vs 0".
+    """
+    if result.baseline_weights is not None:
+        val = result.baseline_weights.get(name)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    stats = result.classes.get(name)
+    return stats.old_tokens if stats is not None else 0.0
+
+
+def drift_pct(old: float, new: float) -> float:
+    """Signed relative drift, ``(new - old) / max(|old|, ε)``.
+
+    Returns 0.0 for any pair where both are zero (degenerate
+    unweighted class). The ε floor prevents infinite blow-up when an
+    operator hand-edits a class to 0 in the yaml.
+    """
+    denom = max(abs(old), 1e-9)
+    return (new - old) / denom
+
+
+def classify_drift(stats: ClassStats, old: float, new: float) -> str:
+    """Bucket a class into one of the five status tags.
+
+    Order of precedence is intentional:
+        1. ``NO-DATA`` — no paired observations at all → diff is meaningless
+        2. ``LOW-DATA`` — under MIN_SAMPLES_FOR_CONFIDENCE → noisy
+        3. ``LARGE`` — drift ≥ LARGE_DRIFT_PCT → operator MUST review
+        4. ``REVIEW`` — drift ≥ MODERATE_DRIFT_PCT → above-noise change
+        5. ``OK`` — within representational granularity (≤ 10%)
+
+    Sample-count gates fire BEFORE drift gates because a 200% swing
+    based on 1 sample is statistical noise — labeling it LARGE would
+    panic the reviewer over nothing.
+    """
+    if stats.sample_count == 0:
+        return STATUS_NO_DATA
+    if stats.sample_count < MIN_SAMPLES_FOR_CONFIDENCE:
+        return STATUS_LOW_DATA
+    pct = abs(drift_pct(old, new))
+    if pct >= LARGE_DRIFT_PCT:
+        return STATUS_LARGE
+    if pct >= MODERATE_DRIFT_PCT:
+        return STATUS_REVIEW
+    return STATUS_OK
+
+
+def summarise_calibration(result: CalibrationResult) -> dict[str, int]:
+    """Bucket counts per status — drives the report's Summary section.
+
+    Returns a dict with one int per STATUS_* constant; keys are stable
+    so JSON consumers (a future CI gate) can read it positionally.
+    """
+    counts: dict[str, int] = {
+        STATUS_OK: 0, STATUS_REVIEW: 0, STATUS_LARGE: 0,
+        STATUS_LOW_DATA: 0, STATUS_NO_DATA: 0,
+    }
+    for name, stats in result.classes.items():
+        old = baseline_for(name, result)
+        new = result.new_weights.get(name, stats.old_tokens)
+        counts[classify_drift(stats, old, new)] += 1
+    return counts
+
+
+def recommend_action(result: CalibrationResult) -> tuple[str, str]:
+    """Top-level operator verdict — APPLY / REVIEW / SKIP + reason.
+
+    Heuristic (intentionally conservative — false-positive REVIEW is
+    cheap, false-negative APPLY is expensive):
+        * SKIP  → no paired launches OR ALL classes are NO-DATA
+                 (calibration ran but contributed nothing actionable)
+        * REVIEW → any class is LARGE OR LOW-DATA (≥1 row needs human
+                  eyeballs before flipping the live config)
+        * APPLY → all sampled classes within MODERATE_DRIFT_PCT and
+                 every class meets MIN_SAMPLES_FOR_CONFIDENCE (or is
+                 unsampled, which keeps its prior value untouched)
+
+    The verdict is *advisory*; the ``--apply`` flag still works
+    regardless. Operators with out-of-band context (e.g. running a
+    one-shot calibration on a known stress-test workload) can override.
+    """
+    if result.total_paired == 0:
+        return VERDICT_SKIP, "no paired sandbox launches in window"
+    counts = summarise_calibration(result)
+    sampled_total = sum(
+        1 for s in result.classes.values() if s.sample_count > 0
+    )
+    if sampled_total == 0:
+        return VERDICT_SKIP, "no sampled classes (window contained only orphans)"
+    if counts[STATUS_LARGE] > 0:
+        return (
+            VERDICT_REVIEW,
+            f"{counts[STATUS_LARGE]} class(es) drifted ≥ "
+            f"{int(LARGE_DRIFT_PCT * 100)}% — verify per-class math first"
+        )
+    if counts[STATUS_LOW_DATA] > 0:
+        return (
+            VERDICT_REVIEW,
+            f"{counts[STATUS_LOW_DATA]} class(es) below "
+            f"{MIN_SAMPLES_FOR_CONFIDENCE}-sample confidence floor"
+        )
+    if counts[STATUS_REVIEW] > 0:
+        return (
+            VERDICT_APPLY,
+            f"{counts[STATUS_REVIEW]} class(es) drifted ≥ "
+            f"{int(MODERATE_DRIFT_PCT * 100)}% but stayed within "
+            f"{int(LARGE_DRIFT_PCT * 100)}% — safe to apply"
+        )
+    return VERDICT_APPLY, "all sampled classes within ±10% of current weights"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Persisted-yaml baseline load (best-effort)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def load_baseline_weights(path: Path) -> tuple[dict[str, float] | None, str]:
+    """Best-effort load of an existing ``sandbox_cost_weights.yaml``.
+
+    Returns ``(weights_dict, source_label)``. When the file doesn't
+    exist or can't be parsed, returns ``(None, label)`` so the
+    operator still sees in the report header *why* the baseline fell
+    back to the H4a hardcode.
+
+    Parser strategy:
+        1. Try PyYAML if importable (canonical, handles every edge case
+           the writer might emit).
+        2. Fall back to a tiny indent-aware scanner that reads only the
+           ``weights.<name>.tokens`` paths we control — sufficient for
+           any file produced by ``render_yaml`` in this same script.
+        3. Either path returning an empty mapping → treat as "no
+           baseline" (an empty yaml is operationally identical to a
+           missing one for our purposes).
+    """
+    if not path.exists():
+        return None, f"H4a hardcode (no {path.name} found at {path.parent})"
+    try:
+        body = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"H4a hardcode (failed to read {path}: {exc})"
+    weights = _parse_weights_via_pyyaml(body)
+    if weights is None:
+        weights = _parse_weights_via_scanner(body)
+    if not weights:
+        return None, f"H4a hardcode (no weights parsed from {path})"
+    # Prefer the file's stamped generated_at if present, else fall back
+    # to the file's mtime. Either way the operator sees freshness.
+    stamp = _extract_generated_at(body) or _format_mtime(path)
+    return weights, f"{path} (last calibrated {stamp})"
+
+
+def _parse_weights_via_pyyaml(body: str) -> dict[str, float] | None:
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        loaded = yaml.safe_load(body)
+    except Exception:
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    weights = loaded.get("weights")
+    if not isinstance(weights, dict):
+        return None
+    out: dict[str, float] = {}
+    for name, payload in weights.items():
+        if not isinstance(payload, dict):
+            continue
+        tokens = payload.get("tokens")
+        try:
+            out[str(name)] = float(tokens)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _parse_weights_via_scanner(body: str) -> dict[str, float]:
+    """Last-resort regex-y scanner — only understands what we wrote.
+
+    Looks for the pattern produced by ``render_yaml``:
+
+        weights:
+          <name>:
+            tokens: <number>
+            ...
+
+    Indent is two-space (we control the writer). Anything that doesn't
+    match this exact shape is silently skipped — better to surface as
+    "no baseline" in the report than to crash on hand-edits.
+    """
+    out: dict[str, float] = {}
+    in_weights = False
+    current_name: str | None = None
+    for raw in body.splitlines():
+        line = raw.rstrip("\n")
+        if not in_weights:
+            if line.strip() == "weights:":
+                in_weights = True
+            continue
+        # Top-level key after weights: → exit
+        if line and not line.startswith(" ") and not line.startswith("\t"):
+            in_weights = False
+            current_name = None
+            continue
+        # Class header at 2-space indent: "  <name>:"
+        if line.startswith("  ") and not line.startswith("    "):
+            stripped = line[2:].rstrip(":").strip()
+            if stripped and not stripped.startswith("#"):
+                current_name = stripped
+            continue
+        # tokens line at 4-space indent under current class
+        if current_name and line.startswith("    tokens:"):
+            try:
+                value = line.split(":", 1)[1].strip()
+                out[current_name] = float(value)
+            except (IndexError, ValueError):
+                continue
+    return out
+
+
+def _extract_generated_at(body: str) -> str | None:
+    for raw in body.splitlines():
+        if raw.startswith("generated_at:"):
+            try:
+                return raw.split(":", 1)[1].strip().strip("'\"")
+            except IndexError:
+                return None
+    return None
+
+
+def _format_mtime(path: Path) -> str:
+    try:
+        return datetime.fromtimestamp(
+            path.stat().st_mtime, timezone.utc,
+        ).isoformat(timespec="seconds")
+    except OSError:
+        return "mtime unknown"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Reporting
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def render_text(result: CalibrationResult) -> str:
     """Markdown-flavoured diff table — the default human view.
 
-    Columns: Class | Tier | Old | New | Δ | Samples | Mean dur (s) |
-    Mean CPU x s | Peak mem (MB) | OOMs.
+    Layout (top-to-bottom):
+        1. Window / paired-launch / host_ring header lines
+        2. Comparison-baseline provenance line (yaml-or-hardcode)
+        3. Summary section — bucket counts per status tag
+        4. Per-class table: Class | Tier | Old | New | Δ | Samples |
+           Mean dur (s) | Mean CPU·s | Mean Δmem (MB) | Peak mem (MB) |
+           OOMs | Status. Sorted by drift magnitude (descending) so
+           the rows demanding scrutiny float to the top.
+        5. Recommendation footer — APPLY / REVIEW / SKIP + reason
+        6. Apply hint pointing at ``--apply``
+
+    The Status column uses short tags (OK / REVIEW / LARGE / LOW-DATA /
+    NO-DATA) so the table renders identically in terminals, PR
+    comments, and email previews — no glyphs that depend on font
+    fallback.
     """
     lines: list[str] = []
     started = datetime.fromtimestamp(result.window_start_ts, timezone.utc)
@@ -636,7 +951,31 @@ def render_text(result: CalibrationResult) -> str:
             f"_host_metrics ring size at calibration time:_ "
             f"{result.host_ring_size} snapshots"
         )
+    lines.append(f"_Comparison baseline:_ {result.baseline_source}")
     lines.append("")
+
+    # ── Summary section — drift-bucket counts at a glance ──
+    counts = summarise_calibration(result)
+    verdict, reason = recommend_action(result)
+    lines.append("## Summary")
+    lines.append(
+        f"- **Recommendation:** `{verdict}` — {reason}"
+    )
+    lines.append(
+        f"- Classes by status: "
+        f"`{STATUS_OK}={counts[STATUS_OK]}`, "
+        f"`{STATUS_REVIEW}={counts[STATUS_REVIEW]}`, "
+        f"`{STATUS_LARGE}={counts[STATUS_LARGE]}`, "
+        f"`{STATUS_LOW_DATA}={counts[STATUS_LOW_DATA]}`, "
+        f"`{STATUS_NO_DATA}={counts[STATUS_NO_DATA]}`"
+    )
+    lines.append(
+        f"- Drift thresholds: REVIEW ≥ {int(MODERATE_DRIFT_PCT * 100)}%, "
+        f"LARGE ≥ {int(LARGE_DRIFT_PCT * 100)}%; "
+        f"LOW-DATA when samples < {MIN_SAMPLES_FOR_CONFIDENCE}"
+    )
+    lines.append("")
+
     if result.total_paired == 0:
         lines.append("> **No paired sandbox launches in window — nothing to calibrate.**")
         return "\n".join(lines) + "\n"
@@ -644,14 +983,26 @@ def render_text(result: CalibrationResult) -> str:
     headers = (
         "Class", "Tier", "Old", "New", "Δ", "Samples",
         "Mean dur (s)", "Mean CPU·s", "Mean Δmem (MB)",
-        "Peak mem (MB)", "OOMs",
+        "Peak mem (MB)", "OOMs", "Status",
     )
     lines.append("| " + " | ".join(headers) + " |")
     lines.append("|" + "|".join(["---"] * len(headers)) + "|")
-    for name in sorted(result.classes.keys()):
+
+    # Pre-compute per-row data so we can sort by drift magnitude.
+    # Tiebreak alphabetically so output stays deterministic across
+    # identical inputs (important for diff-of-diffs in PR review).
+    row_data: list[tuple[float, str, ClassStats, float, float, str]] = []
+    for name in result.classes.keys():
         s = result.classes[name]
+        old = baseline_for(name, result)
         new = result.new_weights.get(name, s.old_tokens)
-        delta = new - s.old_tokens
+        status = classify_drift(s, old, new)
+        magnitude = abs(drift_pct(old, new))
+        row_data.append((magnitude, name, s, old, new, status))
+    row_data.sort(key=lambda r: (-r[0], r[1]))
+
+    for _magnitude, name, s, old, new, status in row_data:
+        delta = new - old
         sign = "+" if delta > 0 else ("−" if delta < 0 else " ")
         delta_str = f"{sign}{abs(delta):.2f}" if delta else "—"
         dmem_str = (
@@ -661,10 +1012,10 @@ def render_text(result: CalibrationResult) -> str:
         lines.append(
             "| {name} | {tier} | {old:.2f} | {new:.2f} | {delta} | "
             "{count} | {dur:.2f} | {cs:.2f} | {dmem} | {mem:.0f} | "
-            "{oom} |".format(
+            "{oom} | {status} |".format(
                 name=name,
                 tier=s.tier,
-                old=s.old_tokens,
+                old=old,
                 new=new,
                 delta=delta_str,
                 count=s.sample_count,
@@ -673,16 +1024,62 @@ def render_text(result: CalibrationResult) -> str:
                 dmem=dmem_str,
                 mem=s.peak_mem_mb,
                 oom=s.oom_count,
+                status=status,
             )
         )
     lines.append("")
-    lines.append("> Run with `--apply` to persist the new weights to "
-                 "`configs/sandbox_cost_weights.yaml` and append a "
-                 "`sandbox_cost_calibration` row to the audit hash chain.")
+    if verdict == VERDICT_APPLY:
+        lines.append("> ✅ Safe to run with `--apply` — persists the new weights to "
+                     "`configs/sandbox_cost_weights.yaml` and appends a "
+                     "`sandbox_cost_calibration` row to the audit hash chain.")
+    elif verdict == VERDICT_REVIEW:
+        lines.append("> ⚠ Review the rows tagged `LARGE` / `LOW-DATA` above before "
+                     "running with `--apply`. Operators with out-of-band context "
+                     "(e.g. known stress-test workload) may override.")
+    else:  # VERDICT_SKIP
+        lines.append("> ⏸ Calibration produced no actionable signal — re-run after "
+                     "more sandbox traffic has accumulated. Do **not** `--apply`.")
     return "\n".join(lines) + "\n"
 
 
 def render_json(result: CalibrationResult) -> str:
+    """JSON form of the diff report — mirrors the text view's data.
+
+    Adds three top-level keys consumers (CI gates, dashboards) read:
+        * ``baseline_source`` — provenance of the comparison baseline
+        * ``summary`` — bucket counts per status tag
+        * ``recommendation`` — ``{verdict, reason}`` advisory
+
+    Each per-class block adds:
+        * ``baseline_tokens`` — what the calibrator compared against
+          (yaml value if present, H4a hardcode otherwise)
+        * ``status`` — one of OK / REVIEW / LARGE / LOW-DATA / NO-DATA
+        * ``drift_pct`` — signed (new - baseline) / |baseline|
+
+    ``old_tokens`` is preserved for backwards compatibility with the
+    skeleton consumers; new code should prefer ``baseline_tokens``.
+    """
+    counts = summarise_calibration(result)
+    verdict, reason = recommend_action(result)
+    classes_payload: dict[str, Any] = {}
+    for name, s in result.classes.items():
+        baseline_t = baseline_for(name, result)
+        new_t = result.new_weights.get(name, s.old_tokens)
+        classes_payload[name] = {
+            "tier": s.tier,
+            "old_tokens": s.old_tokens,
+            "baseline_tokens": baseline_t,
+            "new_tokens": new_t,
+            "drift_pct": drift_pct(baseline_t, new_t),
+            "status": classify_drift(s, baseline_t, new_t),
+            "sample_count": s.sample_count,
+            "mean_duration_s": s.mean_duration_s,
+            "mean_cpu_token_s": s.mean_cpu_token_s,
+            "mean_delta_mem_peak_mb": s.mean_delta_mem_peak_mb,
+            "delta_mem_sample_count": s.delta_mem_sample_count,
+            "peak_mem_mb": s.peak_mem_mb,
+            "oom_count": s.oom_count,
+        }
     payload: dict[str, Any] = {
         "generated_at": result.generated_at,
         "window_days": result.window_days,
@@ -691,21 +1088,10 @@ def render_json(result: CalibrationResult) -> str:
         "total_paired": result.total_paired,
         "total_orphaned": result.total_orphaned,
         "host_ring_size": result.host_ring_size,
-        "classes": {
-            name: {
-                "tier": s.tier,
-                "old_tokens": s.old_tokens,
-                "new_tokens": result.new_weights.get(name, s.old_tokens),
-                "sample_count": s.sample_count,
-                "mean_duration_s": s.mean_duration_s,
-                "mean_cpu_token_s": s.mean_cpu_token_s,
-                "mean_delta_mem_peak_mb": s.mean_delta_mem_peak_mb,
-                "delta_mem_sample_count": s.delta_mem_sample_count,
-                "peak_mem_mb": s.peak_mem_mb,
-                "oom_count": s.oom_count,
-            }
-            for name, s in result.classes.items()
-        },
+        "baseline_source": result.baseline_source,
+        "summary": counts,
+        "recommendation": {"verdict": verdict, "reason": reason},
+        "classes": classes_payload,
     }
     return json.dumps(payload, indent=2, sort_keys=True)
 
@@ -904,6 +1290,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "configs/sandbox_cost_weights.yaml + audit row")
     p.add_argument("--out", type=Path, default=DEFAULT_OUT_PATH,
                    help=f"yaml output path (default: {DEFAULT_OUT_PATH})")
+    p.add_argument("--baseline", type=Path, default=None,
+                   help="compare new weights against this yaml instead of "
+                        "the H4a hardcode (defaults to --out path when it "
+                        "exists, so re-runs after the first --apply diff "
+                        "against what's actually live)")
+    p.add_argument("--no-baseline", action="store_true",
+                   help="force comparison against the H4a hardcode even "
+                        "when a persisted yaml exists (rare; useful for "
+                        "auditing how far live weights have drifted from "
+                        "the original code defaults)")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="enable debug logging")
     return p
@@ -940,6 +1336,21 @@ async def _async_main(argv: list[str] | None = None) -> int:
         host_ring_size=len(snaps),
         host_snapshots=snaps,
     )
+
+    # Resolve comparison baseline. Precedence:
+    #   --no-baseline     → force H4a hardcode
+    #   --baseline PATH   → load from explicit path (warns if missing)
+    #   default           → load from --out if it exists, else hardcode
+    if not args.no_baseline:
+        baseline_path: Path | None = None
+        if args.baseline is not None:
+            baseline_path = args.baseline
+        elif args.out.exists():
+            baseline_path = args.out
+        if baseline_path is not None:
+            weights, source = load_baseline_weights(baseline_path)
+            result.baseline_weights = weights
+            result.baseline_source = source
 
     if args.format == "json":
         sys.stdout.write(render_json(result) + "\n")
