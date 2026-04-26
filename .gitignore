@@ -60,6 +60,7 @@ coverage-*.xml
 # Playwright
 /test-results/
 /playwright-report/
+/playwright-report-nightly/
 /playwright/.cache/
 
 # agent isolated workspaces
