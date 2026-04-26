@@ -1,0 +1,78 @@
+# OmniSight upstream catalog — Mobile family
+#
+# These entries seed catalog_entries with source='shipped' via alembic
+# migration 0052_catalog_seed. Operator UI never edits this file
+# directly — operators write source='operator' / source='override'
+# rows through POST /catalog/entries / PATCH /catalog/entries/{id}.
+#
+# Schema: configs/embedded_catalog/_schema.yaml (BS.1.3, frozen later)
+# Drift guard: backend/tests/test_catalog_schema.py (BS.1.5) cross-checks
+# this file against alembic 0052 — keep them in sync.
+family: mobile
+schema_version: 1
+entries:
+  - id: android-sdk-platform-tools
+    vendor: google
+    display_name: Android SDK Platform Tools
+    version: "35.0.2"
+    install_method: shell_script
+    install_url: https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+    size_bytes: 14680064
+    metadata:
+      sdk_root_relative: platform-tools
+      tools: [adb, fastboot]
+
+  - id: android-ndk-r26d
+    vendor: google
+    display_name: Android NDK r26d
+    version: "26.3.11579264"
+    install_method: shell_script
+    install_url: https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+    size_bytes: 1932735283
+    depends_on: [android-sdk-platform-tools]
+    metadata:
+      api_level_min: 21
+      abi_targets: [arm64-v8a, armeabi-v7a, x86_64]
+
+  - id: ios-xcode-cli
+    vendor: apple
+    display_name: Xcode Command Line Tools
+    version: "15.4"
+    install_method: vendor_installer
+    install_url: https://developer.apple.com/download/all/?q=command%20line%20tools
+    size_bytes: 692060160
+    metadata:
+      requires_apple_id: true
+      host_os: darwin
+
+  - id: flutter-stable
+    vendor: google
+    display_name: Flutter SDK (stable)
+    version: "3.24.3"
+    install_method: shell_script
+    install_url: https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.24.3-stable.tar.xz
+    size_bytes: 754974720
+    depends_on: [android-sdk-platform-tools]
+    metadata:
+      channel: stable
+      dart_version_bundled: "3.5.3"
+
+  - id: react-native-cli
+    vendor: meta
+    display_name: React Native CLI
+    version: "14.1.0"
+    install_method: shell_script
+    install_url: https://registry.npmjs.org/@react-native-community/cli
+    metadata:
+      install_via: npm
+      requires_runtime: nodejs-lts-20
+
+  - id: capacitor-cli
+    vendor: ionic
+    display_name: Capacitor CLI
+    version: "6.1.2"
+    install_method: shell_script
+    install_url: https://registry.npmjs.org/@capacitor/cli
+    metadata:
+      install_via: npm
+      requires_runtime: nodejs-lts-20

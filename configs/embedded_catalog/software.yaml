@@ -1,0 +1,61 @@
+# OmniSight upstream catalog — Software family
+# See configs/embedded_catalog/mobile.yaml for the source-of-truth note.
+family: software
+schema_version: 1
+entries:
+  - id: python-uv
+    vendor: astral
+    display_name: uv (Python toolchain installer)
+    version: "0.4.20"
+    install_method: shell_script
+    install_url: https://astral.sh/uv/install.sh
+    size_bytes: 12582912
+    metadata:
+      install_via: curl_pipe_sh
+      script_sha256_required: true
+
+  - id: rust-stable
+    vendor: rust-lang
+    display_name: Rust (stable channel via rustup)
+    version: "1.81.0"
+    install_method: shell_script
+    install_url: https://sh.rustup.rs
+    size_bytes: 838860800
+    metadata:
+      install_via: rustup
+      channel: stable
+      components: [cargo, rustc, rust-std]
+
+  - id: go-1-22
+    vendor: google
+    display_name: Go 1.22
+    version: "1.22.8"
+    install_method: shell_script
+    install_url: https://go.dev/dl/go1.22.8.linux-amd64.tar.gz
+    size_bytes: 73400320
+    metadata:
+      gopath_default: $HOME/go
+      proxy_default: https://proxy.golang.org
+
+  - id: docker-engine
+    vendor: docker
+    display_name: Docker Engine (CE)
+    version: "27.3.1"
+    install_method: shell_script
+    install_url: https://get.docker.com
+    size_bytes: 209715200
+    metadata:
+      install_via: get_docker_script
+      requires_root: true
+      systemd_unit: docker.service
+
+  - id: git-lfs
+    vendor: github
+    display_name: Git LFS
+    version: "3.5.1"
+    install_method: shell_script
+    install_url: https://github.com/git-lfs/git-lfs/releases/download/v3.5.1/git-lfs-linux-amd64-v3.5.1.tar.gz
+    size_bytes: 7340032
+    metadata:
+      install_via: tarball
+      hooks: [pre-push, post-checkout, post-commit, post-merge]

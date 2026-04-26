@@ -1,0 +1,99 @@
+# OmniSight upstream catalog — Embedded family
+# See configs/embedded_catalog/mobile.yaml for the source-of-truth note.
+family: embedded
+schema_version: 1
+entries:
+  - id: nxp-mcuxpresso-imxrt1170
+    vendor: nxp
+    display_name: NXP MCUXpresso (i.MX RT1170)
+    version: "11.10.0"
+    install_method: vendor_installer
+    install_url: https://www.nxp.com/design/software/development-software/mcuxpresso-software-and-tools-/mcuxpresso-integrated-development-environment-ide:MCUXpresso-IDE
+    size_bytes: 1610612736
+    depends_on: [arm-gnu-toolchain-13]
+    metadata:
+      board_reference: MIMXRT1170-EVKB
+      sdk_version_bundled: "2.16.000"
+      requires_login: true
+
+  - id: st-stm32cubeide
+    vendor: st
+    display_name: STM32CubeIDE
+    version: "1.16.1"
+    install_method: vendor_installer
+    install_url: https://www.st.com/en/development-tools/stm32cubeide.html
+    size_bytes: 1395864371
+    depends_on: [arm-gnu-toolchain-13]
+    metadata:
+      bundled_compiler: gcc-arm-none-eabi
+      requires_login: true
+
+  - id: nordic-nrf-connect-sdk
+    vendor: nordic
+    display_name: Nordic nRF Connect SDK
+    version: "2.7.0"
+    install_method: vendor_installer
+    install_url: https://www.nordicsemi.com/Products/Development-software/nrf-connect-sdk/download
+    size_bytes: 2147483648
+    depends_on: [zephyr-rtos-3-7, arm-gnu-toolchain-13]
+    metadata:
+      west_manifest: https://github.com/nrfconnect/sdk-nrf
+      requires_segger_jlink: true
+
+  - id: espressif-esp-idf-v5
+    vendor: espressif
+    display_name: ESP-IDF v5.3
+    version: "5.3.1"
+    install_method: shell_script
+    install_url: https://github.com/espressif/esp-idf.git
+    size_bytes: 524288000
+    depends_on: [xtensa-esp-elf-gcc-13]
+    metadata:
+      tools_install_cmd: "./install.sh esp32,esp32s3,esp32c3"
+      branch: release/v5.3
+
+  - id: raspberrypi-imager
+    vendor: raspberrypi
+    display_name: Raspberry Pi Imager
+    version: "1.8.5"
+    install_method: vendor_installer
+    install_url: https://downloads.raspberrypi.org/imager/imager_latest_amd64.deb
+    size_bytes: 73400320
+    metadata:
+      package_format: deb
+      host_os: [linux, darwin, windows]
+
+  - id: beaglebone-debian-image
+    vendor: beagleboard
+    display_name: BeagleBone Debian 12 Image
+    version: "12.7-2024-09-02"
+    install_method: noop
+    install_url: https://www.beagleboard.org/distros/am335x-12-7-2024-09-02-4gb-microsd-iot
+    size_bytes: 4294967296
+    metadata:
+      board: beaglebone-black
+      flash_target: microsd
+      manual_step: true
+
+  - id: yocto-kirkstone
+    vendor: yoctoproject
+    display_name: Yocto Project (kirkstone LTS)
+    version: "4.0.21"
+    install_method: shell_script
+    install_url: https://git.yoctoproject.org/poky
+    size_bytes: 314572800
+    depends_on: [arm-gnu-toolchain-13]
+    metadata:
+      branch: kirkstone
+      lts_until: "2026-04"
+
+  - id: buildroot-2024-02
+    vendor: buildroot
+    display_name: Buildroot 2024.02 LTS
+    version: "2024.02.6"
+    install_method: shell_script
+    install_url: https://buildroot.org/downloads/buildroot-2024.02.6.tar.gz
+    size_bytes: 12582912
+    metadata:
+      lts: true
+      cross_compile: true

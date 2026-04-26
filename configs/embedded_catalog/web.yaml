@@ -1,0 +1,48 @@
+# OmniSight upstream catalog — Web family
+# See configs/embedded_catalog/mobile.yaml for the source-of-truth note.
+family: web
+schema_version: 1
+entries:
+  - id: nodejs-lts-20
+    vendor: openjs
+    display_name: Node.js LTS 20 (Iron)
+    version: "20.18.0"
+    install_method: docker_pull
+    install_url: docker.io/library/node:20-bookworm-slim
+    metadata:
+      lts_codename: iron
+      runtime_for: [react-native-cli, capacitor-cli, vite-7, nextjs-cli, pnpm-9]
+
+  - id: pnpm-9
+    vendor: pnpm
+    display_name: pnpm 9
+    version: "9.12.1"
+    install_method: shell_script
+    install_url: https://github.com/pnpm/pnpm/releases/download/v9.12.1/pnpm-linux-x64
+    size_bytes: 25165824
+    depends_on: [nodejs-lts-20]
+    metadata:
+      install_via: standalone
+      package_manager_for: [react-native-cli, capacitor-cli]
+
+  - id: vite-7
+    vendor: vite
+    display_name: Vite 7
+    version: "7.0.0"
+    install_method: shell_script
+    install_url: https://registry.npmjs.org/vite
+    depends_on: [nodejs-lts-20, pnpm-9]
+    metadata:
+      install_via: npm
+      framework_kind: build_tool
+
+  - id: nextjs-cli
+    vendor: vercel
+    display_name: Next.js CLI
+    version: "15.0.2"
+    install_method: shell_script
+    install_url: https://registry.npmjs.org/create-next-app
+    depends_on: [nodejs-lts-20, pnpm-9]
+    metadata:
+      install_via: npm
+      framework_kind: meta_framework

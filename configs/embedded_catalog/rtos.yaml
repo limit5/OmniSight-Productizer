@@ -1,0 +1,40 @@
+# OmniSight upstream catalog — RTOS family
+# See configs/embedded_catalog/mobile.yaml for the source-of-truth note.
+family: rtos
+schema_version: 1
+entries:
+  - id: zephyr-rtos-3-7
+    vendor: linuxfoundation
+    display_name: Zephyr RTOS 3.7 LTS
+    version: "3.7.0"
+    install_method: shell_script
+    install_url: https://github.com/zephyrproject-rtos/zephyr.git
+    size_bytes: 943718400
+    depends_on: [arm-gnu-toolchain-13]
+    metadata:
+      branch: v3.7-branch
+      west_init_required: true
+      lts_until: "2026-07"
+
+  - id: freertos-kernel-v11
+    vendor: amazon
+    display_name: FreeRTOS Kernel V11
+    version: "11.1.0"
+    install_method: noop
+    install_url: https://github.com/FreeRTOS/FreeRTOS-Kernel.git
+    metadata:
+      install_via: git_submodule
+      header_only: true
+      license: MIT
+
+  - id: nuttx-12
+    vendor: apache
+    display_name: Apache NuttX 12
+    version: "12.6.0"
+    install_method: shell_script
+    install_url: https://github.com/apache/nuttx.git
+    size_bytes: 314572800
+    depends_on: [arm-gnu-toolchain-13]
+    metadata:
+      branch: releases/12.6
+      configure_required: true

@@ -1,0 +1,50 @@
+# OmniSight upstream catalog — Cross-toolchain family
+# See configs/embedded_catalog/mobile.yaml for the source-of-truth note.
+family: cross-toolchain
+schema_version: 1
+entries:
+  - id: arm-gnu-toolchain-13
+    vendor: arm
+    display_name: Arm GNU Toolchain 13.3.Rel1 (aarch64-none-linux-gnu)
+    version: "13.3.rel1"
+    install_method: vendor_installer
+    install_url: https://developer.arm.com/-/media/Files/downloads/gnu/13.3.rel1/binrel/arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz
+    size_bytes: 322961408
+    metadata:
+      target_triple: aarch64-none-linux-gnu
+      gcc_version: "13.3.0"
+      bundled_libc: glibc
+
+  - id: linaro-aarch64-gcc-13
+    vendor: linaro
+    display_name: Linaro aarch64 GCC 13
+    version: "13.0-2024.06"
+    install_method: vendor_installer
+    install_url: https://snapshots.linaro.org/gnu-toolchain/13.0-2024.06-1/aarch64-linux-gnu/gcc-linaro-13.0.1-2024.06-x86_64_aarch64-linux-gnu.tar.xz
+    size_bytes: 188743680
+    metadata:
+      target_triple: aarch64-linux-gnu
+      flavour: linaro_release_branch
+
+  - id: riscv-gnu-toolchain
+    vendor: riscv-international
+    display_name: RISC-V GNU Toolchain (multilib)
+    version: "2024.09.03"
+    install_method: shell_script
+    install_url: https://github.com/riscv-collab/riscv-gnu-toolchain.git
+    size_bytes: 1073741824
+    metadata:
+      target_triples: [riscv64-unknown-elf, riscv32-unknown-elf]
+      requires_build_from_source: true
+      configure_args: "--enable-multilib"
+
+  - id: xtensa-esp-elf-gcc-13
+    vendor: espressif
+    display_name: Xtensa ESP-ELF GCC 13
+    version: "13.2.0_20240530"
+    install_method: vendor_installer
+    install_url: https://github.com/espressif/crosstool-NG/releases/download/esp-13.2.0_20240530/xtensa-esp-elf-13.2.0_20240530-x86_64-linux-gnu.tar.xz
+    size_bytes: 188743680
+    metadata:
+      target_triple: xtensa-esp-elf
+      paired_with: espressif-esp-idf-v5
