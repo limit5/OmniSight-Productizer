@@ -246,6 +246,22 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # observability tables; replay order vs ``token_usage`` doesn't
     # matter since neither table FKs the other.
     "billing_usage_events",
+    # BS.1.1 (alembic 0051) — catalog DB schema. Three tables ship
+    # together; all three FK ``tenant_id → tenants(id)`` (CASCADE) so
+    # they MUST replay after ``tenants``. ``install_jobs.requested_by
+    # → users(id)`` (SET NULL) so it ALSO needs ``users`` ahead — both
+    # parents are already listed early in this tuple. ``catalog_entries``
+    # has NO single-column PK (uniqueness comes from the partial UNIQUE
+    # index ``uq_catalog_entries_visible``); ``install_jobs`` and
+    # ``catalog_subscriptions`` use TEXT PKs (``ij-…`` / ``sub-…``
+    # prefixes) — none are INTEGER IDENTITY, so NOT in
+    # TABLES_WITH_IDENTITY_ID below. ``catalog_entries`` replays first
+    # because ``install_jobs.entry_id`` references its ``id`` (logical,
+    # not enforced as FK) so cutover ordering matches the read-after-
+    # write expectation of the BS.7 install pipeline.
+    "catalog_entries",
+    "install_jobs",
+    "catalog_subscriptions",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY

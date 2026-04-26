@@ -1282,6 +1282,164 @@ CREATE TABLE IF NOT EXISTS adaptive_budget_state (
     last_reason  TEXT NOT NULL DEFAULT 'init',
     updated_at   REAL NOT NULL
 );
+
+-- Y9 #285 row 3 (alembic 0039): per-(tenant_id, project_id) billing
+-- usage fact table. Append-only; emitter writes one row per LLM call
+-- / workflow_run completion / workspace-GC sweep. PG side has BIGINT
+-- IDENTITY id; SQLite uses ``INTEGER PRIMARY KEY AUTOINCREMENT`` (the
+-- rowid alias) so a fresh dev DB matches the alembic-PG shape and the
+-- migrator drift guard in ``test_migrator_schema_coverage`` stays
+-- green. CHECK on ``kind`` mirrors the alembic CHECK constraint and is
+-- pinned by ``test_billing_usage_y9_row3.test_kind_check_constraint_
+-- matches_module_constants``. Mirror added BS.1.4 (#TBD) — fixing the
+-- pre-existing Y9-row-3 oversight in the same row that lands the
+-- catalog tables below.
+CREATE TABLE IF NOT EXISTS billing_usage_events (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at         REAL NOT NULL,
+    tenant_id           TEXT NOT NULL DEFAULT 't-default',
+    project_id          TEXT NOT NULL DEFAULT 'p-default-default',
+    kind                TEXT NOT NULL,
+    model               TEXT,
+    input_tokens        INTEGER,
+    output_tokens       INTEGER,
+    cache_read_tokens   INTEGER,
+    cache_create_tokens INTEGER,
+    workflow_run_id     TEXT,
+    workflow_kind       TEXT,
+    workflow_status     TEXT,
+    cost_usd            REAL NOT NULL DEFAULT 0.0,
+    quantity            REAL NOT NULL DEFAULT 1.0,
+    metadata_json       TEXT NOT NULL DEFAULT '{}',
+    CHECK (kind IN ('llm_call', 'workflow_run', 'workspace_gb_hour'))
+);
+CREATE INDEX IF NOT EXISTS idx_billing_usage_events_tenant_project_time
+    ON billing_usage_events(tenant_id, project_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_billing_usage_events_tenant_kind_time
+    ON billing_usage_events(tenant_id, kind, occurred_at);
+
+-- BS.1.1 (alembic 0051): three-source catalog of installable platforms
+-- (``shipped`` / ``operator`` / ``override`` / ``subscription``).
+-- Resolver picks ``override > operator > shipped`` per (id, tenant);
+-- ``id`` is shared across the source layers by design — this table
+-- has NO single TEXT PK, uniqueness comes from the partial UNIQUE
+-- index ``uq_catalog_entries_visible`` below. The dialect-shifted
+-- SQLite mirror follows the alembic 0027 / 0029 / 0051 pattern:
+-- JSONB → TEXT-of-JSON, TIMESTAMPTZ → REAL (epoch seconds via
+-- strftime), BOOLEAN → INTEGER 0/1. Hidden tombstone rows are
+-- allowed by the partial-unique exclusion (``WHERE hidden = 0``) so
+-- soft-retiring an operator/override row keeps audit history
+-- without colliding with its replacement. CHECK constraints lock
+-- the source / family / install_method enums to the same closed
+-- sets the alembic CHECKs use.
+CREATE TABLE IF NOT EXISTS catalog_entries (
+    id              TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    schema_version  INTEGER NOT NULL DEFAULT 1,
+    tenant_id       TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+    vendor          TEXT NOT NULL,
+    family          TEXT NOT NULL,
+    display_name    TEXT NOT NULL,
+    version         TEXT NOT NULL,
+    install_method  TEXT NOT NULL,
+    install_url     TEXT,
+    sha256          TEXT,
+    size_bytes      INTEGER,
+    depends_on      TEXT NOT NULL DEFAULT '[]',
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    hidden          INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at      REAL NOT NULL DEFAULT (strftime('%s','now')),
+    CHECK (source IN ('shipped','operator','override','subscription')),
+    CHECK (family IN ('mobile','embedded','web','software',
+                      'rtos','cross-toolchain','custom')),
+    CHECK (install_method IN ('noop','docker_pull',
+                              'shell_script','vendor_installer')),
+    CHECK (hidden IN (0, 1)),
+    CHECK (
+        (source = 'shipped'  AND tenant_id IS NULL)
+        OR
+        (source IN ('operator','override','subscription')
+            AND tenant_id IS NOT NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_catalog_entries_visible
+    ON catalog_entries(id, source, COALESCE(tenant_id, ''))
+    WHERE hidden = 0;
+CREATE INDEX IF NOT EXISTS idx_catalog_entries_family
+    ON catalog_entries(family);
+CREATE INDEX IF NOT EXISTS idx_catalog_entries_tenant
+    ON catalog_entries(tenant_id)
+    WHERE tenant_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_catalog_entries_source
+    ON catalog_entries(source);
+
+-- BS.1.1 (alembic 0051): one row per install attempt. The
+-- ``omnisight-installer`` sidecar long-poll-claims rows via
+-- ``SELECT … FOR UPDATE SKIP LOCKED`` on PG; SQLite dev path doesn't
+-- have skip-locked but the partial idx on ``state IN ('queued',
+-- 'running')`` keeps the claimable set tight. ``idempotency_key``
+-- is UNIQUE for ``INSERT … ON CONFLICT DO NOTHING`` double-click
+-- protection (R27). State machine ``queued → running →
+-- {completed | failed | cancelled}`` enforced by the CHECK below.
+CREATE TABLE IF NOT EXISTS install_jobs (
+    id                TEXT PRIMARY KEY,
+    tenant_id         TEXT NOT NULL DEFAULT 't-default'
+                            REFERENCES tenants(id) ON DELETE CASCADE,
+    entry_id          TEXT NOT NULL,
+    state             TEXT NOT NULL DEFAULT 'queued',
+    idempotency_key   TEXT NOT NULL,
+    sidecar_id        TEXT,
+    protocol_version  INTEGER NOT NULL DEFAULT 1,
+    bytes_done        INTEGER NOT NULL DEFAULT 0,
+    bytes_total       INTEGER,
+    eta_seconds       INTEGER,
+    log_tail          TEXT NOT NULL DEFAULT '',
+    result_json       TEXT,
+    error_reason      TEXT,
+    pep_decision_id   TEXT,
+    requested_by      TEXT REFERENCES users(id) ON DELETE SET NULL,
+    queued_at         REAL NOT NULL DEFAULT (strftime('%s','now')),
+    claimed_at        REAL,
+    started_at        REAL,
+    completed_at      REAL,
+    UNIQUE (idempotency_key),
+    CHECK (state IN ('queued','running','completed','failed','cancelled'))
+);
+CREATE INDEX IF NOT EXISTS idx_install_jobs_state_queued
+    ON install_jobs(state, queued_at)
+    WHERE state IN ('queued','running');
+CREATE INDEX IF NOT EXISTS idx_install_jobs_tenant_queued
+    ON install_jobs(tenant_id, queued_at DESC);
+CREATE INDEX IF NOT EXISTS idx_install_jobs_sidecar
+    ON install_jobs(sidecar_id, state)
+    WHERE sidecar_id IS NOT NULL;
+
+-- BS.1.1 (alembic 0051): per-tenant URL feed of third-party catalogs
+-- (BS.8.5). ``auth_secret_ref`` is a key into the existing tenant
+-- secret store, never the secret value itself. UNIQUE (tenant_id,
+-- feed_url) so a tenant can't subscribe to the same feed twice.
+-- Empty until BS.8.5 admin REST starts inserting.
+CREATE TABLE IF NOT EXISTS catalog_subscriptions (
+    id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL DEFAULT 't-default'
+                              REFERENCES tenants(id) ON DELETE CASCADE,
+    feed_url            TEXT NOT NULL,
+    auth_method         TEXT NOT NULL DEFAULT 'none',
+    auth_secret_ref     TEXT,
+    refresh_interval_s  INTEGER NOT NULL DEFAULT 86400,
+    last_synced_at      REAL,
+    last_sync_status    TEXT,
+    enabled             INTEGER NOT NULL DEFAULT 1,
+    created_at          REAL NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at          REAL NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE (tenant_id, feed_url),
+    CHECK (auth_method IN ('none','basic','bearer','signed_url')),
+    CHECK (enabled IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS idx_catalog_subscriptions_due
+    ON catalog_subscriptions(last_synced_at, refresh_interval_s)
+    WHERE enabled = 1;
 """
 
 
