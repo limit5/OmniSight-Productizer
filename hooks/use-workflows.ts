@@ -21,6 +21,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import * as api from "@/lib/api"
+import { onTenantChange } from "@/lib/tenant-context"
 
 const DEFAULT_POLL_MS = 15_000
 
@@ -96,10 +97,21 @@ export function useWorkflows(opts: UseWorkflowsOptions = {}): UseWorkflowsResult
 
     const t = pollMs > 0 ? setInterval(() => void refresh(), pollMs) : null
 
+    // Y8 row 1: drop the cached list and refetch when the operator
+    // switches tenant. The X-Tenant-Id header is already flipped by
+    // tenant-context.switchTenant() before _notifyTenantChange fires,
+    // so the refresh() call below hits the new tenant.
+    const unsubTenant = onTenantChange(() => {
+      if (!mountedRef.current) return
+      setRuns(null)
+      void refresh()
+    })
+
     return () => {
       mountedRef.current = false
       es.close()
       if (t) clearInterval(t)
+      unsubTenant()
     }
   }, [refresh, status, pollMs, enabled])
 

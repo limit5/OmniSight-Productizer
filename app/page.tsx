@@ -25,6 +25,7 @@ import { UserMenu } from "@/components/omnisight/user-menu"
 import { TenantSwitcher } from "@/components/omnisight/tenant-switcher"
 import { PresenceBadge } from "@/components/omnisight/presence-badge"
 import { useAuth } from "@/lib/auth-context"
+import { useTenant } from "@/lib/tenant-context"
 import { useRouter } from "next/navigation"
 import { ToastCenter } from "@/components/omnisight/toast-center"
 import { BurnRateFreezeToastCenter } from "@/components/omnisight/burn-rate-freeze-toast-center"
@@ -85,6 +86,11 @@ export default function Home() {
   }, [auth.loading, auth.user, auth.authMode, router])
 
   const engine = useEngine()
+  // Y8 row 1: tenant-switch refetch trigger. Bumping `tenantChangeEpoch`
+  // re-runs the providers / workflow refetch effects below so the
+  // dashboard never shows the previous tenant's data after the operator
+  // flips the TenantSwitcher.
+  const { tenantChangeEpoch } = useTenant()
   const [syncCount, setSyncCount] = useState(0)
   // R2-#21: always hydrate with the same value as the server
   // (`orchestrator`). Apply the URL-derived panel in a mount effect so
@@ -114,6 +120,13 @@ export default function Home() {
     })
   }, [])
   useEffect(() => {
+    // Y8 row 1: clear stale list before refetch so the operator sees
+    // a brief "loading" state instead of the previous tenant's rows
+    // bleeding into the new tenant view.
+    if (tenantChangeEpoch > 0) {
+      setProviderData(null)
+      setProviderHealth(null)
+    }
     refetchProviders()
     const healthInterval = setInterval(() => {
       api.getProviderHealth().then(setProviderHealth).catch((e) => {
@@ -121,7 +134,7 @@ export default function Home() {
       })
     }, 10000)
     return () => clearInterval(healthInterval)
-  }, [refetchProviders])
+  }, [refetchProviders, tenantChangeEpoch])
   // Sync provider data when switched from any source (Settings or Orchestrator)
   useEffect(() => {
     engine.setProviderSwitchCallback(refetchProviders)

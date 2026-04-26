@@ -5,6 +5,7 @@ import type { Agent, AgentStatus } from "@/components/omnisight/agent-matrix-wal
 import type { Task } from "@/components/omnisight/task-backlog"
 import type { OrchestratorMessage } from "@/components/omnisight/orchestrator-ai"
 import * as api from "@/lib/api"
+import { onTenantChange } from "@/lib/tenant-context"
 
 // ─── Mappers (snake_case API → camelCase frontend) ───
 
@@ -857,6 +858,73 @@ export function useEngine() {
     return () => {
       cancelled = true
       clearInterval(interval)
+    }
+  }, [])
+
+  // Y8 row 1: drop the previous tenant's snapshot and re-seed when the
+  // operator flips the TenantSwitcher. Module-global audit: this hook
+  // owns no cross-worker state — `onTenantChange` is a per-tab listener
+  // set populated by `lib/tenant-context.tsx` and the refetched data is
+  // what the backend filter (X-Tenant-Id header, set BEFORE this
+  // listener fires) authorises for the new tenant. SSE stays connected
+  // because `_shouldDeliverEvent` reads `_currentTenantId` per event,
+  // so newly arriving cross-tenant pushes are dropped client-side
+  // without needing an EventSource reconnect.
+  useEffect(() => {
+    let cancelled = false
+    const unsub = onTenantChange(() => {
+      if (cancelled) return
+      // Clear in-memory state so the dashboard doesn't briefly render
+      // the previous tenant's rows under the new tenant header.
+      setAgents([])
+      setTasks([])
+      setMessages([])
+      setArtifacts([])
+      setSimulations([])
+      setNotifications([])
+      setUnreadCount(0)
+      setProviderBalances(null)
+      // Re-seed agents + tasks from the new tenant's authoritative state.
+      // listTasks / listAgents already include X-Tenant-Id via
+      // tenant-context.switchTenant() flipping the module-global before
+      // this listener fires, so the requests below land on the new
+      // tenant's rows without a manual header argument.
+      Promise.all([api.listAgents(), api.listTasks()])
+        .then(([agentsRes, tasksRes]) => {
+          if (cancelled) return
+          setAgents(agentsRes.map(mapAgent))
+          setTasks(tasksRes.map(mapTask))
+        })
+        .catch((e) => { console.warn("[Engine] Tenant switch refetch failed:", e) })
+      // Re-seed the dashboard summary panels (devices, repos, spec,
+      // logs, token budget, …). Single aggregator call mirrors the
+      // existing 10 s sweep so the new tenant's panels populate
+      // immediately instead of waiting up to a tick.
+      api.getDashboardSummary().then((summary) => {
+        if (cancelled) return
+        if (summary.systemStatus.ok) setSystemStatus(summary.systemStatus.data)
+        if (summary.systemInfo.ok) setSystemInfo(summary.systemInfo.data)
+        if (summary.devices.ok) setDevices(summary.devices.data)
+        if (summary.spec.ok) setSpec(summary.spec.data)
+        if (summary.repos.ok) setRepos(summary.repos.data)
+        if (summary.logs.ok) setLogs(summary.logs.data)
+        if (summary.tokenUsage.ok) setTokenUsage(summary.tokenUsage.data)
+        if (summary.tokenBudget.ok) setTokenBudget(summary.tokenBudget.data)
+        if (summary.notificationsUnread.ok) setUnreadCount(summary.notificationsUnread.data.count)
+        if (summary.compression.ok) setCompressionStats(summary.compression.data)
+        if (summary.simulations.ok) setSimulations(summary.simulations.data)
+      }).catch((e) => { console.warn("[Engine] Tenant switch summary refetch failed:", e) })
+      // Provider balances live on a separate cadence; refresh once now
+      // so the CredentialManager card under the new tenant shows the
+      // right per-tenant balance instead of the prior tenant's value.
+      api.getProvidersBalance().then((batch) => {
+        if (cancelled) return
+        setProviderBalances(batch.providers)
+      }).catch(() => { /* keep null until next 60 s tick */ })
+    })
+    return () => {
+      cancelled = true
+      unsub()
     }
   }, [])
 
