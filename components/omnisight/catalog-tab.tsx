@@ -9,6 +9,20 @@
  *          panel; the panel's `onClose` callback flips back. Hook order
  *          stays stable (selection state is always mounted) so motion
  *          hooks land on the same nodes regardless of selection.
+ * BS.6.5 — windowed virtualization via `@tanstack/react-virtual`'s
+ *          `useVirtualizer`. When the visible-after-filter list grows
+ *          past `CATALOG_VIRTUALIZATION_THRESHOLD` rows the grid swaps
+ *          to a scoped scroll container (`max-h-[70vh] overflow-auto`)
+ *          and only the rows whose `translateY` falls inside the
+ *          container's viewport (+ overscan) get rendered into the DOM.
+ *          The outer testid `catalog-tab-grid` is preserved for both
+ *          the virtualized and the static path so existing selectors
+ *          keep resolving; the per-card `catalog-tab-card-slot-{id}`
+ *          testid is also preserved (just nested an extra row level).
+ *          A `disableVirtualization` opt-out prop keeps BS.6.8 tests
+ *          and any preview / Storybook host able to force the static
+ *          DOM when jsdom's missing layout engine would otherwise hide
+ *          every card.
  *
  * Outer container for the `?tab=catalog` panel inside
  * `app/settings/platforms/page.tsx`. This row owns the toolbar surface
@@ -70,8 +84,10 @@ import {
   type ChangeEvent,
   type ReactNode,
   useCallback,
+  useEffect,
   useId,
   useMemo,
+  useRef,
   useState,
 } from "react"
 import {
@@ -85,6 +101,7 @@ import {
   Search,
   X,
 } from "lucide-react"
+import { useVirtualizer } from "@tanstack/react-virtual"
 
 import { CategoryStrip } from "@/components/omnisight/category-strip"
 import { useEffectiveMotionLevel } from "@/hooks/use-zero-g"
@@ -269,6 +286,97 @@ const DENSITY_GRID: Record<CatalogDensity, string> = {
   spacious: "grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3",
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// BS.6.5 — virtualization tuning. The catalog grid switches to a
+// row-windowed layout once the post-filter visible count crosses the
+// threshold; below that, the static `display: grid` layout still wins
+// (zero overhead, simplest DOM, kindest to BS.6.8 RTL queries).
+// ─────────────────────────────────────────────────────────────────────
+
+/** Visible-row count at which we engage `useVirtualizer`. Tuned so the
+ *  static path stays cheap for short catalogs (operator demos, shipped-
+ *  only feed) and the windowed path kicks in once a real subscription
+ *  feed lands hundreds of entries. The number is a row count — at the
+ *  widest breakpoint each row holds 3..5 cards depending on density,
+ *  so this is roughly "more than 10..16 cards". */
+export const CATALOG_VIRTUALIZATION_THRESHOLD = 4
+
+/** Rows to keep mounted above + below the visible viewport so quick
+ *  scrolls don't flash a one-frame gap. Four rows is the sweet spot
+ *  measured in BS.3 motion benchmarks; higher overscan negates the
+ *  savings, lower causes hover-scroll flicker. */
+export const CATALOG_VIRTUALIZATION_OVERSCAN = 4
+
+/** Row-height seed (px) used until `measureElement` reports the real
+ *  height. BS.6.2 cards measure ~96/156/220px in compact / comfortable /
+ *  spacious — using the right seed minimises the post-mount jump. */
+const VIRTUAL_ROW_HEIGHT_ESTIMATE: Record<CatalogDensity, number> = {
+  compact: 96,
+  comfortable: 156,
+  spacious: 220,
+}
+
+/** Tailwind `gap-{n}` mapping in pixels — has to mirror `DENSITY_GRID`
+ *  so the virtual row's bottom-padding matches the static grid's row
+ *  gap and the visual spacing stays identical across both paths. */
+const VIRTUAL_ROW_GAP: Record<CatalogDensity, number> = {
+  compact: 8,
+  comfortable: 12,
+  spacious: 16,
+}
+
+/** Tailwind v4 default breakpoints — column count breakpoints below.
+ *  Hard-coded mirror of `DENSITY_GRID` literals so a viewport-width
+ *  measurement maps to the column count the CSS grid would render. */
+const TAILWIND_BREAKPOINT_PX = {
+  sm: 640,
+  lg: 1024,
+  xl: 1280,
+} as const
+
+const COLUMNS_BY_DENSITY: Record<
+  CatalogDensity,
+  { base: number; sm: number; lg: number; xl: number }
+> = {
+  compact: { base: 1, sm: 3, lg: 4, xl: 5 },
+  comfortable: { base: 1, sm: 2, lg: 3, xl: 4 },
+  spacious: { base: 1, sm: 2, lg: 2, xl: 3 },
+}
+
+/** Map a viewport width (px) to the column count the CSS grid would
+ *  render at that width for the given density. Pure helper exported
+ *  for BS.6.8 unit tests so the row→card slicing contract is locked
+ *  without a real DOM. */
+export function columnsForViewport(
+  density: CatalogDensity,
+  viewportWidth: number,
+): number {
+  const map = COLUMNS_BY_DENSITY[density]
+  if (viewportWidth >= TAILWIND_BREAKPOINT_PX.xl) return map.xl
+  if (viewportWidth >= TAILWIND_BREAKPOINT_PX.lg) return map.lg
+  if (viewportWidth >= TAILWIND_BREAKPOINT_PX.sm) return map.sm
+  return map.base
+}
+
+/** React hook — tracks the live column count for the active density.
+ *  Defaults to 1 on the first render so SSR + client first-render agree
+ *  (no hydration mismatch); a `useEffect` mounted resize listener then
+ *  flips it to the real width-derived value. The 1-column initial pass
+ *  also keeps the virtualizer's `count` deterministic during hydration. */
+function useResponsiveColumnCount(density: CatalogDensity): number {
+  const [columns, setColumns] = useState<number>(1)
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const update = () => {
+      setColumns(columnsForViewport(density, window.innerWidth))
+    }
+    update()
+    window.addEventListener("resize", update)
+    return () => window.removeEventListener("resize", update)
+  }, [density])
+  return columns
+}
+
 const DENSITY_CARD_PADDING: Record<CatalogDensity, string> = {
   compact: "p-2 text-[11px]",
   comfortable: "p-3 text-xs",
@@ -360,6 +468,13 @@ export interface CatalogTabProps {
   /** Override the empty-state node (e.g. for first-run / loading
    *  shimmers). Defaults to a small "no matches" message. */
   emptyState?: ReactNode
+  /** Force the static `display: grid` layout regardless of the visible-
+   *  row count. BS.6.8 unit tests pass `true` to bypass the windowed
+   *  path so jsdom's missing layout engine doesn't hide every card;
+   *  preview / Storybook hosts may also want the static DOM for visual
+   *  regression. Defaults to `false`: virtualization engages whenever
+   *  the visible row count crosses `CATALOG_VIRTUALIZATION_THRESHOLD`. */
+  disableVirtualization?: boolean
   className?: string
 }
 
@@ -379,6 +494,7 @@ export function CatalogTab({
   renderCard,
   renderDetail,
   emptyState,
+  disableVirtualization = false,
   className,
 }: CatalogTabProps) {
   const searchInputId = useId()
@@ -474,6 +590,56 @@ export function CatalogTab({
   const gridAnimClass = reducedMotion
     ? "animate-in fade-in-0 duration-150"
     : "animate-in slide-in-from-left-8 fade-in-0 duration-300"
+
+  // BS.6.5 — windowed virtualization. Hooks are mounted unconditionally
+  // (column-count tracker, scroll-element ref, virtualizer) so React
+  // hook order stays stable when the visible row count crosses the
+  // threshold mid-session. The virtualizer is fed `count: 0` whenever
+  // virtualization is disabled (caller opt-out, SSR / pre-mount, detail
+  // panel open, no visible entries) so the underlying scheduler does
+  // no work. The `hasMounted` flag keeps SSR + the first client render
+  // on the static path; once `useEffect` fires we swap to the windowed
+  // path. That matches server / client HTML during hydration so React
+  // never warns about a mismatch and avoids the "0 cards rendered while
+  // the virtualizer is measuring" flash that a naive always-on virtual
+  // path would cause.
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null)
+  const columnCount = useResponsiveColumnCount(density)
+  const [hasMounted, setHasMounted] = useState(false)
+  useEffect(() => {
+    setHasMounted(true)
+  }, [])
+  const virtualizationActive =
+    hasMounted &&
+    !disableVirtualization &&
+    !detailOpen &&
+    visibleCount > 0 &&
+    Math.ceil(visibleCount / Math.max(1, columnCount)) >=
+      CATALOG_VIRTUALIZATION_THRESHOLD
+  const virtualRowCount = virtualizationActive
+    ? Math.ceil(visibleCount / Math.max(1, columnCount))
+    : 0
+  const rowEstimate = VIRTUAL_ROW_HEIGHT_ESTIMATE[density]
+  const rowGap = VIRTUAL_ROW_GAP[density]
+  // React Compiler flags `useVirtualizer` as an incompatible library
+  // because the hook returns ad-hoc closures (`measureElement`,
+  // `getVirtualItems`) that cannot be auto-memoised. The disable is
+  // scoped to this single hook call — Compiler just skips memoising
+  // values returned by it, which is the documented expected behaviour
+  // for TanStack Virtual under React 19.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const rowVirtualizer = useVirtualizer({
+    count: virtualRowCount,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => rowEstimate + rowGap,
+    overscan: CATALOG_VIRTUALIZATION_OVERSCAN,
+  })
+  const virtualRows = virtualizationActive
+    ? rowVirtualizer.getVirtualItems()
+    : []
+  const virtualTotalSize = virtualizationActive
+    ? rowVirtualizer.getTotalSize()
+    : 0
 
   return (
     <div
@@ -646,10 +812,88 @@ export function CatalogTab({
             ? "No catalog entries yet — BS.6.5 + BS.7 will plumb live data."
             : "No entries match the current filters.")}
         </div>
+      ) : virtualizationActive ? (
+        // BS.6.5 — windowed grid. The outer wrapper is the scroll
+        // container the `useVirtualizer` reads viewport bounds from
+        // (`max-h-[70vh] overflow-auto` keeps the chrome anchored — page
+        // breadcrumb + hero + tab nav stay above, only the cards
+        // scroll). Each rendered row absolutely-positions itself at
+        // `translateY(virtualRow.start)` inside an inner spacer whose
+        // height matches the total measured size so the scrollbar
+        // tracks the full list. Cards are sliced into the row inline so
+        // `<CatalogCard />` motion / hover behaviour is unchanged.
+        <div
+          ref={scrollContainerRef}
+          data-testid="catalog-tab-grid"
+          data-grid-density={density}
+          data-grid-virtualized="true"
+          data-grid-column-count={columnCount}
+          data-grid-row-count={virtualRowCount}
+          data-grid-rendered-rows={virtualRows.length}
+          data-grid-overscan={CATALOG_VIRTUALIZATION_OVERSCAN}
+          className={[
+            "max-h-[70vh] overflow-auto",
+            gridAnimClass,
+          ].join(" ")}
+        >
+          <div
+            data-testid="catalog-tab-virtual-spacer"
+            style={{
+              height: `${virtualTotalSize}px`,
+              position: "relative",
+              width: "100%",
+            }}
+          >
+            {virtualRows.map((virtualRow) => {
+              const rowStart = virtualRow.index * Math.max(1, columnCount)
+              const slice = visible.slice(
+                rowStart,
+                rowStart + Math.max(1, columnCount),
+              )
+              return (
+                <div
+                  key={virtualRow.key}
+                  ref={rowVirtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  data-testid={`catalog-tab-virtual-row-${virtualRow.index}`}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${virtualRow.start}px)`,
+                    paddingBottom: `${rowGap}px`,
+                  }}
+                  className={["grid", gridClass].join(" ")}
+                >
+                  {slice.map((entry) => (
+                    <div
+                      key={entry.id}
+                      data-testid={`catalog-tab-card-slot-${entry.id}`}
+                      data-entry-id={entry.id}
+                      data-entry-family={coerceFamily(entry.family)}
+                    >
+                      {renderEntryCard({
+                        entry,
+                        density,
+                        cardPaddingClass,
+                        onSelect: detailEnabled
+                          ? () => handleSelectEntry(entry)
+                          : undefined,
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )
+            })}
+          </div>
+        </div>
       ) : (
         <div
           data-testid="catalog-tab-grid"
           data-grid-density={density}
+          data-grid-virtualized="false"
+          data-grid-column-count={columnCount}
           className={["grid", gridClass, gridAnimClass].join(" ")}
         >
           {visible.map((entry) => (
