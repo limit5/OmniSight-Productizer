@@ -97,12 +97,17 @@ def test_patchable_fields_match_pydantic_schema():
 def test_patchable_fields_match_todo_row_literal():
     """The TODO row literal calls out exactly four fields:
     ``name / plan_override / budget / parent_id``. The schema
-    materialises ``budget`` as ``disk_budget_bytes``. Drift here
-    would either expand the patch surface beyond the contract or
-    drop a field the operator is supposed to be able to mutate."""
+    materialises ``budget`` as ``disk_budget_bytes``. Y4 row 7
+    extends the patchable surface to also include
+    ``llm_budget_tokens`` (the per-project LLM token quota override
+    promised by row 7's "disk_budget_bytes / llm_budget_tokens"
+    pair). Drift here would either expand the patch surface beyond
+    the contract or drop a field the operator is supposed to be
+    able to mutate."""
     from backend.routers.tenant_projects import _PATCHABLE_PROJECT_FIELDS
     assert _PATCHABLE_PROJECT_FIELDS == frozenset({
-        "name", "plan_override", "disk_budget_bytes", "parent_id",
+        "name", "plan_override", "disk_budget_bytes",
+        "llm_budget_tokens", "parent_id",
     })
 
 

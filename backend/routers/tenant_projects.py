@@ -230,7 +230,20 @@ class CreateProjectRequest(BaseModel):
         description=(
             "Per-project disk quota override in bytes. ``None`` means "
             "inherit from tenant. Must be non-negative; the DB CHECK "
-            "is defence in depth."
+            "is defence in depth. Non-NULL values are subject to the "
+            "Y4 row 7 oversell guard: Σ(non-NULL project budgets on "
+            "this tenant) must not exceed the tenant's plan ceiling."
+        ),
+    )
+    llm_budget_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Per-project LLM token override. ``None`` means inherit "
+            "from the tenant's plan ceiling (see "
+            "``backend.project_quota.PLAN_LLM_TOKEN_QUOTAS``). Must "
+            "be non-negative. Subject to the same Σ ≤ tenant total "
+            "oversell guard as ``disk_budget_bytes``."
         ),
     )
     parent_id: str | None = Field(
@@ -250,6 +263,18 @@ class CreateProjectRequest(BaseModel):
 # Membership roles that may create projects. ``member`` and ``viewer``
 # may NOT (read-write-non-admin / read-only).
 _PROJECT_CREATE_ALLOWED_MEMBERSHIP_ROLES = frozenset({"owner", "admin"})
+
+# Y4 row 7 — per-tenant advisory lock prefix taken inside the POST /
+# PATCH transaction whenever a project budget override is being set
+# (non-NULL ``disk_budget_bytes`` or ``llm_budget_tokens``). Serialises
+# concurrent POSTs / PATCHes within a tenant so two concurrent admins
+# cannot each see the budget "fits" sum independently and then both
+# commit (which together would breach the tenant cap). Per-tenant key
+# (not platform-wide) so cross-tenant traffic does not collide. This
+# is distinct from ``_PROJECT_PATCH_LOCK_PREFIX`` (re-parent
+# serialisation) — the two contend on different surfaces and a single
+# PATCH may take both.
+_PROJECT_QUOTA_LOCK_PREFIX = "omnisight_project_quota:"
 
 
 async def _user_can_create_project_in(
@@ -291,7 +316,10 @@ async def _user_can_create_project_in(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # Tenant existence probe — clean 404 ahead of the FK validation.
-_FETCH_TENANT_SQL = "SELECT id FROM tenants WHERE id = $1"
+# ``plan`` is projected so the Y4 row 7 oversell guard can resolve the
+# tenant's plan ceiling without a second round-trip; existing call
+# sites that only check existence may discard the plan column.
+_FETCH_TENANT_SQL = "SELECT id, plan FROM tenants WHERE id = $1"
 
 # Parent existence + same-tenant probe. We project ``tenant_id`` so the
 # handler can distinguish "parent does not exist" (row is None) from
@@ -309,10 +337,12 @@ _FETCH_PARENT_PROJECT_SQL = (
 _INSERT_PROJECT_SQL = """
 INSERT INTO projects (
     id, tenant_id, product_line, name, slug,
-    parent_id, plan_override, disk_budget_bytes, created_by
+    parent_id, plan_override, disk_budget_bytes,
+    llm_budget_tokens, created_by
 ) VALUES (
     $1, $2, $3, $4, $5,
-    $6, $7, $8, $9
+    $6, $7, $8,
+    $9, $10
 )
 ON CONFLICT (tenant_id, product_line, slug) DO NOTHING
 RETURNING id, tenant_id, product_line, name, slug,
@@ -453,21 +483,62 @@ async def create_project(
                 },
             )
 
-    # 5. Mint the project id + INSERT atomically. ON CONFLICT DO
-    #    NOTHING + RETURNING resolves "insert-or-detect-duplicate" in
-    #    one round-trip; RETURNING None unambiguously signals slug
-    #    duplicate (PG's UNIQUE constraint owns the contention).
+    # 5. Mint the project id + run the oversell guard + INSERT inside a
+    #    single transaction. The per-tenant ``pg_advisory_xact_lock`` is
+    #    taken whenever the body sets a non-NULL budget override so that
+    #    concurrent POSTs / PATCHes on the same tenant cannot each
+    #    independently see a "fits" sum and then both commit (which
+    #    together would exceed the tenant cap). NULL-budget POSTs skip
+    #    the lock + the SUM round-trip entirely, keeping the common
+    #    "inherit from tenant" path lock-free.
     project_id = _mint_project_id()
     created_by = _resolve_created_by(actor)
+    tenant_plan = tenant_row["plan"]
+    needs_quota_lock = (
+        body.disk_budget_bytes is not None
+        or body.llm_budget_tokens is not None
+    )
+
+    from backend import project_quota as _pq
 
     async with get_pool().acquire() as conn:
-        row = await conn.fetchrow(
-            _INSERT_PROJECT_SQL,
-            project_id, tenant_id, body.product_line,
-            body.name, body.slug,
-            body.parent_id, body.plan_override, body.disk_budget_bytes,
-            created_by,
-        )
+        async with conn.transaction():
+            if needs_quota_lock:
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))",
+                    _PROJECT_QUOTA_LOCK_PREFIX + tenant_id,
+                )
+                try:
+                    # POST has no existing row to exclude (the project
+                    # is being minted in this transaction; its budget
+                    # is not yet in the SUM).
+                    await _pq.check_disk_budget_oversell(
+                        conn,
+                        tenant_id=tenant_id,
+                        tenant_plan=tenant_plan,
+                        exclude_project_id=None,
+                        new_value=body.disk_budget_bytes,
+                    )
+                    await _pq.check_llm_budget_oversell(
+                        conn,
+                        tenant_id=tenant_id,
+                        tenant_plan=tenant_plan,
+                        exclude_project_id=None,
+                        new_value=body.llm_budget_tokens,
+                    )
+                except _pq.ProjectBudgetOversell as exc:
+                    return JSONResponse(
+                        status_code=409,
+                        content=exc.to_response_body(),
+                    )
+
+            row = await conn.fetchrow(
+                _INSERT_PROJECT_SQL,
+                project_id, tenant_id, body.product_line,
+                body.name, body.slug,
+                body.parent_id, body.plan_override, body.disk_budget_bytes,
+                body.llm_budget_tokens, created_by,
+            )
 
     if row is None:
         # 6a. Duplicate slug branch — surface the existing row's id so
@@ -514,6 +585,7 @@ async def create_project(
                 "parent_id": body.parent_id,
                 "plan_override": body.plan_override,
                 "disk_budget_bytes": body.disk_budget_bytes,
+                "llm_budget_tokens": body.llm_budget_tokens,
                 "created_by": created_by,
             },
             actor=actor.email,
@@ -960,7 +1032,8 @@ _PROJECT_PATCH_ALLOWED_MEMBERSHIP_ROLES = frozenset({"owner", "admin"})
 # the value (test ``test_patchable_fields_match_pydantic_schema``
 # enforces the alignment).
 _PATCHABLE_PROJECT_FIELDS = frozenset({
-    "name", "plan_override", "disk_budget_bytes", "parent_id",
+    "name", "plan_override", "disk_budget_bytes",
+    "llm_budget_tokens", "parent_id",
 })
 
 
@@ -1003,7 +1076,19 @@ class PatchProjectRequest(BaseModel):
             "New per-project disk quota in bytes. Omit to keep current; "
             "explicit JSON null clears the override (project then "
             "inherits the tenant's PLAN quota). Must be non-negative; "
-            "the DB CHECK is defence in depth."
+            "the DB CHECK is defence in depth. Non-NULL values are "
+            "subject to the Y4 row 7 oversell guard (Σ over the "
+            "tenant's other live projects ≤ tenant plan ceiling)."
+        ),
+    )
+    llm_budget_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "New per-project LLM token override. Omit to keep current; "
+            "explicit JSON null clears the override (project then "
+            "inherits the tenant's plan ceiling). Must be non-negative. "
+            "Subject to the same Σ ≤ tenant total oversell guard."
         ),
     )
     parent_id: str | None = Field(
@@ -1065,7 +1150,8 @@ UPDATE projects
 SET name              = CASE WHEN $3  THEN $4::text    ELSE name              END,
     plan_override     = CASE WHEN $5  THEN $6::text    ELSE plan_override     END,
     disk_budget_bytes = CASE WHEN $7  THEN $8::integer ELSE disk_budget_bytes END,
-    parent_id         = CASE WHEN $9  THEN $10::text   ELSE parent_id         END
+    llm_budget_tokens = CASE WHEN $9  THEN $10::integer ELSE llm_budget_tokens END,
+    parent_id         = CASE WHEN $11 THEN $12::text   ELSE parent_id         END
 WHERE id = $1 AND tenant_id = $2
 RETURNING id, tenant_id, product_line, name, slug,
           parent_id, plan_override, disk_budget_bytes,
@@ -1139,7 +1225,7 @@ async def patch_project(
                 "detail": (
                     "PATCH body must include at least one of "
                     "'name', 'plan_override', 'disk_budget_bytes', "
-                    "or 'parent_id'."
+                    "'llm_budget_tokens', or 'parent_id'."
                 ),
             },
         )
@@ -1237,18 +1323,45 @@ async def patch_project(
                 },
             )
 
-    # 8. The patch transaction. Take the per-tenant advisory lock only
-    #    when ``parent_id`` is being set (the only field that needs
-    #    cross-row coordination); other fields touch only the single
-    #    project row, which FOR UPDATE on the SELECT below already
-    #    serialises.
+    # 8. The patch transaction. Two distinct per-tenant advisory locks
+    #    may apply:
+    #      * ``_PROJECT_PATCH_LOCK_PREFIX`` — taken when ``parent_id`` is
+    #        being set, to serialise re-parent races within one tenant.
+    #      * ``_PROJECT_QUOTA_LOCK_PREFIX`` (Y4 row 7) — taken when a
+    #        non-NULL budget override is being set, to serialise the
+    #        oversell SUM-then-UPDATE race within one tenant.
+    #    Both are per-tenant (cross-tenant traffic does not collide).
+    #    A PATCH that touches neither parent_id nor a non-NULL budget
+    #    skips both locks; the row-level FOR UPDATE on the SELECT below
+    #    serialises same-row PATCHes.
     parent_id_is_changing = "parent_id" in set_fields
+    disk_budget_is_changing = "disk_budget_bytes" in set_fields
+    llm_budget_is_changing = "llm_budget_tokens" in set_fields
+    needs_quota_lock = (
+        (disk_budget_is_changing and body.disk_budget_bytes is not None)
+        or (llm_budget_is_changing and body.llm_budget_tokens is not None)
+    )
+
+    from backend import project_quota as _pq
+
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             if parent_id_is_changing:
                 await conn.execute(
                     "SELECT pg_advisory_xact_lock(hashtext($1))",
                     _PROJECT_PATCH_LOCK_PREFIX + tenant_id,
+                )
+            if needs_quota_lock:
+                # Distinct lock key from the parent-patch lock so the
+                # two surfaces don't deadlock when a single PATCH
+                # exercises both. PG advisory locks are reentrant per-
+                # session; ordering parent-then-quota matches the
+                # alphabetical ordering of the prefixes ("patch" <
+                # "quota") so concurrent PATCHes always grab them in
+                # the same order — no ABBA deadlock.
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))",
+                    _PROJECT_QUOTA_LOCK_PREFIX + tenant_id,
                 )
 
             cur_row = await conn.fetchrow(
@@ -1297,6 +1410,37 @@ async def patch_project(
                         },
                     )
 
+            # 9b. Y4 row 7 oversell guard — only when a non-NULL budget
+            #     override is being set. Excludes the project being
+            #     patched from the SUM so its old value doesn't double-
+            #     count against the new value (effectively a "swap"
+            #     instead of an "add"). NULL clears short-circuit
+            #     inside the helper.
+            if needs_quota_lock:
+                tenant_plan = tenant_row["plan"]
+                try:
+                    if disk_budget_is_changing:
+                        await _pq.check_disk_budget_oversell(
+                            conn,
+                            tenant_id=tenant_id,
+                            tenant_plan=tenant_plan,
+                            exclude_project_id=project_id,
+                            new_value=body.disk_budget_bytes,
+                        )
+                    if llm_budget_is_changing:
+                        await _pq.check_llm_budget_oversell(
+                            conn,
+                            tenant_id=tenant_id,
+                            tenant_plan=tenant_plan,
+                            exclude_project_id=project_id,
+                            new_value=body.llm_budget_tokens,
+                        )
+                except _pq.ProjectBudgetOversell as exc:
+                    return JSONResponse(
+                        status_code=409,
+                        content=exc.to_response_body(),
+                    )
+
             # 10. Compute change-detection. If every field the caller
             #     supplied already matches the current row value,
             #     short-circuit to ``no_change=True`` without writing.
@@ -1319,6 +1463,7 @@ async def patch_project(
                 "name" in set_fields, body.name,
                 "plan_override" in set_fields, body.plan_override,
                 "disk_budget_bytes" in set_fields, body.disk_budget_bytes,
+                "llm_budget_tokens" in set_fields, body.llm_budget_tokens,
                 "parent_id" in set_fields, body.parent_id,
             )
             # ``new_row`` cannot be None here: we held FOR UPDATE on
@@ -1870,6 +2015,7 @@ async def gc_archived_projects(
             "product_line": row["product_line"],
             "slug": row["slug"],
             "disk_budget_bytes": row["disk_budget_bytes"],
+            "llm_budget_tokens": row["llm_budget_tokens"],
             "archived_at": row["archived_at"],
             "retention_days": retention_days,
             "gc_at": _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
