@@ -106,7 +106,7 @@ import secrets as _secrets
 import time
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -714,7 +714,7 @@ async def get_job(
 async def cancel_job(
     job_id: str,
     request: Request,
-    body: InstallJobCancelBody | None = None,
+    body: InstallJobCancelBody | None = Body(default=None),
     user: _au.User = Depends(_au.require_operator),
 ) -> JSONResponse:
     """Cancel a queued or running install job.
