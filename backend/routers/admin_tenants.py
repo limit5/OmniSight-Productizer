@@ -228,6 +228,22 @@ async def create_tenant(
     except Exception as exc:  # pragma: no cover — audit.log already swallows
         logger.warning("tenant_created audit emit failed: %s", exc)
 
+    # Y9 #285 row 1 — canonical dot-notation event. Fires alongside the
+    # legacy ``tenant_created`` row for backward-compat with existing
+    # readers; new readers (T-series billing aggregator, Y9 audit
+    # query surface) key on ``tenant.created``.
+    try:
+        from backend import audit_events as _audit_events
+        await _audit_events.emit_tenant_created(
+            tenant_id=row["id"],
+            name=row["name"],
+            plan=row["plan"],
+            enabled=bool(row["enabled"]),
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning("tenant.created audit emit failed: %s", exc)
+
     return JSONResponse(
         status_code=201,
         content={
@@ -955,6 +971,28 @@ async def patch_tenant(
         )
     except Exception as exc:  # pragma: no cover — audit.log already swallows
         logger.warning("tenant_updated audit emit failed: %s", exc)
+
+    # Y9 #285 row 1 — derived dot-notation events. A single PATCH may
+    # change plan AND/OR enabled; fan out to one canonical event per
+    # field-level transition. Re-enabling does NOT fire ``tenant.disabled``
+    # (only the disable transition is event-worthy; re-enable is covered
+    # by the legacy ``tenant_updated`` row alongside).
+    try:
+        from backend import audit_events as _audit_events
+        if before["plan"] != after["plan"]:
+            await _audit_events.emit_tenant_plan_changed(
+                tenant_id=new_row["id"],
+                old_plan=before["plan"],
+                new_plan=after["plan"],
+                actor=actor.email,
+            )
+        if before["enabled"] is True and after["enabled"] is False:
+            await _audit_events.emit_tenant_disabled(
+                tenant_id=new_row["id"],
+                actor=actor.email,
+            )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning("tenant.plan_changed/disabled audit emit failed: %s", exc)
 
     return JSONResponse(
         status_code=200,

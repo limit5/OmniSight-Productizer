@@ -596,6 +596,23 @@ async def create_project(
             "project=%s): %s", tenant_id, project_id, exc,
         )
 
+    # Y9 #285 row 1 — canonical dot-notation event ``project.created``.
+    try:
+        from backend import audit_events as _audit_events
+        await _audit_events.emit_project_created(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            name=body.name,
+            slug=body.slug,
+            product_line=body.product_line,
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "project.created audit emit failed (tenant=%s project=%s): %s",
+            tenant_id, project_id, exc,
+        )
+
     return JSONResponse(status_code=201, content=project)
 
 
@@ -1798,6 +1815,22 @@ async def archive_project(
     except Exception as exc:  # pragma: no cover — audit.log already swallows
         logger.warning(
             "tenant_project_archived audit emit failed (tenant=%s "
+            "project=%s): %s", tenant_id, project_id, exc,
+        )
+
+    # Y9 #285 row 1 — canonical dot-notation event ``project.archived``.
+    try:
+        from backend import audit_events as _audit_events
+        await _audit_events.emit_project_archived(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            archived_at=new_row["archived_at"],
+            retention_days=_resolve_archive_retention_days(),
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "project.archived audit emit failed (tenant=%s "
             "project=%s): %s", tenant_id, project_id, exc,
         )
 
@@ -3346,6 +3379,32 @@ async def create_project_share(
             "tenant_project_shared audit emit failed (tenant=%s "
             "project=%s share=%s): %s",
             tenant_id, project_id, share_id, exc,
+        )
+
+    # Y9 #285 row 1 — canonical dot-notation event
+    # ``project_share.granted``. Cross-tenant share events are written
+    # to BOTH the host tenant's chain (``tenant_id`` — the project's
+    # owner) AND the guest tenant's chain (``body.guest_tenant_id`` —
+    # the recipient). Each chain ends up with its own row so a
+    # ``/admin/audit/tenants/{tid}`` query against either side surfaces
+    # the share without needing to peek into the other tenant's chain.
+    try:
+        from backend import audit_events as _audit_events
+        await _audit_events.emit_project_share_granted(
+            host_tenant_id=tenant_id,
+            guest_tenant_id=body.guest_tenant_id,
+            project_id=project_id,
+            share_id=share_id,
+            role=body.role,
+            expires_at=body.expires_at,
+            granted_by=granted_by,
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "project_share.granted audit emit failed (host=%s guest=%s "
+            "project=%s share=%s): %s",
+            tenant_id, body.guest_tenant_id, project_id, share_id, exc,
         )
 
     return JSONResponse(status_code=201, content=share)

@@ -951,3 +951,23 @@ async def _emit_member_updated_audit(
             "tenant_member_updated audit emit failed (tenant=%s "
             "user=%s): %s", tenant_id, user_id, exc,
         )
+
+    # Y9 #285 row 1 — canonical dot-notation event
+    # ``membership.role_changed``. Only fires when the role actually
+    # changes; status-only PATCHes (suspend / reactivate) are still
+    # captured by the legacy ``tenant_member_updated`` row alongside.
+    try:
+        if before["role"] != after["role"]:
+            from backend import audit_events as _audit_events
+            await _audit_events.emit_membership_role_changed(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                old_role=before["role"],
+                new_role=after["role"],
+                actor=actor.email,
+            )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "membership.role_changed audit emit failed (tenant=%s "
+            "user=%s): %s", tenant_id, user_id, exc,
+        )

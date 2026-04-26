@@ -567,6 +567,23 @@ async def create_invite(
     except Exception as exc:  # pragma: no cover — audit.log already swallows
         logger.warning("tenant_invite_created audit emit failed: %s", exc)
 
+    # Y9 #285 row 1 — canonical dot-notation event ``invite.sent``.
+    # Routes the row into the *target tenant's* chain (the recipient's
+    # tenant) regardless of where the operator is acting from.
+    try:
+        from backend import audit_events as _audit_events
+        await _audit_events.emit_invite_sent(
+            tenant_id=tenant_id,
+            invite_id=invite_id,
+            email=raw_email,
+            role=body.role,
+            expires_at=row["expires_at"],
+            invited_by=invited_by_id,
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning("invite.sent audit emit failed: %s", exc)
+
     # 9. Fire the email. Best-effort (failures already logged).
     await _send_invite_email(
         tenant_id=tenant_id,
@@ -1604,6 +1621,25 @@ async def accept_invite(
         )
     except Exception as exc:  # pragma: no cover — audit.log already swallows
         logger.warning("tenant_invite_accepted audit emit failed: %s", exc)
+
+    # Y9 #285 row 1 — canonical dot-notation event ``invite.accepted``.
+    # The accept endpoint is public and lacks a request-scoped tenant
+    # context; the helper sources the chain from ``invite_tenant`` (the
+    # tenant_id stored on the invite row itself) rather than from the
+    # contextvar fallback.
+    try:
+        from backend import audit_events as _audit_events
+        await _audit_events.emit_invite_accepted(
+            tenant_id=invite_tenant,
+            invite_id=invite_id,
+            user_id=target_user_id,
+            role=invite_role,
+            user_was_created=user_was_created,
+            already_member=already_member,
+            actor=actor_label,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning("invite.accepted audit emit failed: %s", exc)
 
     return JSONResponse(
         status_code=200,

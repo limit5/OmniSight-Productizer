@@ -663,6 +663,24 @@ async def sweep_once(
         await _sweep_quota_evict(summary=summary)
     except Exception as exc:
         logger.warning("workspace_gc: quota eviction failed: %s", exc)
+
+    # Y9 #285 row 1 — aggregate sweep-completion audit row. Per-leaf
+    # ``workspace.gc_trashed`` / ``workspace.gc_purged`` /
+    # ``workspace.gc_quota_evicted`` rows continue to fire alongside;
+    # this single ``workspace.gc_executed`` row gives downstream
+    # consumers (T-series billing rollup, ops dashboard) one record per
+    # sweep without scanning thousands of per-leaf rows. Best-effort —
+    # the sweep itself has already happened, so an audit failure must
+    # not regress the on-disk state.
+    try:
+        from backend import audit_events as _audit_events
+        await _audit_events.emit_workspace_gc_executed(
+            summary=summary.as_dict(),
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.debug(
+            "workspace.gc_executed audit emit failed: %s", exc,
+        )
     return summary
 
 
