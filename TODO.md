@@ -1736,7 +1736,7 @@ multi-user 的管理面：邀請進 tenant、調整 role、踢人、跨 tenant m
 
 把前面 audit 列出來的所有 workspace 坑（扁平路徑、無 tenant 分組、無 GC、無 quota、同名 collision）一次收掉。
 
-- [ ] 新路徑：`{OMNISIGHT_WORKSPACE_ROOT}/{tenant_id}/{product_line}/{project_id}/{agent_id}/{repo_url_hash}/` 五層階層。`repo_url_hash = sha256(remote_url)[:16]` 防同 agent clone 多個同名 repo 互相覆蓋。
+- [x] 新路徑：`{OMNISIGHT_WORKSPACE_ROOT}/{tenant_id}/{product_line}/{project_id}/{agent_id}/{repo_url_hash}/` 五層階層。`repo_url_hash = sha256(remote_url)[:16]` 防同 agent clone 多個同名 repo 互相覆蓋。
 - [ ] `backend/config.py` 新增：`OMNISIGHT_WORKSPACE_ROOT`（預設 `./data/workspaces`）/ `OMNISIGHT_WORKSPACE_QUOTA_MB_DEFAULT`.
 - [ ] `backend/workspace.py` 改 `provision()` 接受 `tenant_id / product_line / project_id / agent_id / remote_url` 五個參數，從 ContextVar 預設讀取。舊 callsite 相容 shim 標記 deprecated 並記 log（下個 release 刪）。
 - [ ] Migration script：把現有 `.agent_workspaces/{agent_id}/` 都搬到 `data/workspaces/t-default/default/default/{agent_id}/legacy-hash/`；保留 symlink 一個 release，之後移除。

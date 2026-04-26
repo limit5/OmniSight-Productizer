@@ -14,8 +14,10 @@ Lifecycle:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import re as _re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,6 +35,106 @@ _WORKSPACES_ROOT.mkdir(exist_ok=True)
 _MAIN_REPO = Path(__file__).resolve().parent.parent
 
 PROVISION_TIMEOUT = 30  # seconds
+
+# Y6 #282 row 1 — five-layer workspace hierarchy.
+# Layout: {_WORKSPACES_ROOT}/{tenant_id}/{product_line}/{project_id}/{agent_id}/{repo_url_hash}/
+# The repo_url_hash leaf prevents the long-standing collision bug where one
+# agent cloning two different repos that share a basename (e.g. github.com/A/foo
+# and gitlab.com/B/foo) silently overwrote each other's worktree.
+# Defaults below are the transitional fallback for callers that have not yet
+# been wired through the per-request ContextVars (rows 2–3 of the same epic).
+_DEFAULT_TENANT_ID = "t-default"
+_DEFAULT_PRODUCT_LINE = "default"
+_DEFAULT_PROJECT_ID = "default"
+# Sentinel hash used when a workspace is provisioned without an external
+# remote URL (in-repo worktree of _MAIN_REPO). Stable so a single agent_id
+# keeps a single in-repo worktree across retries (matches legacy behaviour).
+_SELF_REPO_HASH = "self"
+
+
+def _safe_path_component(value: str | None, *, fallback: str) -> str:
+    """Sanitise an arbitrary string into a safe single path component.
+
+    Restricts to ``[A-Za-z0-9_-]`` so a pathological tenant slug or agent_id
+    cannot escape ``_WORKSPACES_ROOT`` via ``..`` or shell metacharacters.
+    Empty / falsy values collapse to ``fallback``.
+    """
+    if not value:
+        return fallback
+    cleaned = _re.sub(r"[^a-zA-Z0-9_-]", "_", value)
+    return cleaned or fallback
+
+
+def _repo_url_hash(remote_url: str | None) -> str:
+    """Y6 #282 row 1 — collision-free leaf sub-dir name for a remote URL.
+
+    Returns ``sha256(remote_url)[:16]`` for any non-empty external URL, and
+    the ``"self"`` sentinel for the in-repo worktree case. 16 hex chars =
+    64 bits of distinguishing entropy, far past the practical collision
+    horizon for "different repos one agent might clone in its lifetime".
+    """
+    if not remote_url:
+        return _SELF_REPO_HASH
+    return hashlib.sha256(remote_url.encode("utf-8")).hexdigest()[:16]
+
+
+def _iter_workspace_leaves(top: Path, *, max_depth: int = 5) -> list[Path]:
+    """Yield leaf workspace dirs under a tenant-level top dir.
+
+    Y6 #282 row 1 layout: ``{tid}/{pl}/{pid}/{agent_id}/{hash}/`` — the
+    leaf workspace dir sits 5 levels below ``_WORKSPACES_ROOT``, which
+    means it is at depth 5 counting the tenant level as depth 1. From
+    the tenant-level ``top`` we descend up to ``max_depth`` levels and
+    emit any dir that contains a ``.git`` entry (file or directory —
+    git worktrees produce a ``.git`` *file* with a ``gitdir:`` pointer
+    while plain clones produce a ``.git`` directory; both shapes mean
+    "this is a workspace"). Top-level non-tenant noise (stray files,
+    operational sidecars) are filtered by the caller; this helper just
+    walks the conforming hierarchy.
+    """
+    leaves: list[Path] = []
+
+    def _walk(node: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if (node / ".git").exists() and depth >= 2:
+            leaves.append(node)
+            return
+        try:
+            children = list(node.iterdir())
+        except OSError:
+            return
+        for child in children:
+            if child.is_dir():
+                _walk(child, depth + 1)
+
+    _walk(top, 1)
+    return leaves
+
+
+def _workspace_path_for(
+    *,
+    tenant_id: str | None,
+    product_line: str | None,
+    project_id: str | None,
+    agent_id: str,
+    remote_url: str | None,
+) -> Path:
+    """Resolve the five-layer workspace path for an agent's clone.
+
+    All components are sanitised before joining; missing tenant / product_line
+    / project_id collapse to the ``_DEFAULT_*`` constants so legacy callers
+    that have not been wired through Y6 rows 2–3 keep working transparently
+    under ``_WORKSPACES_ROOT/t-default/default/default/{agent_id}/{hash}/``.
+    """
+    return (
+        _WORKSPACES_ROOT
+        / _safe_path_component(tenant_id, fallback=_DEFAULT_TENANT_ID)
+        / _safe_path_component(product_line, fallback=_DEFAULT_PRODUCT_LINE)
+        / _safe_path_component(project_id, fallback=_DEFAULT_PROJECT_ID)
+        / _safe_path_component(agent_id, fallback="agent")
+        / _repo_url_hash(remote_url)
+    )
 
 
 @dataclass
@@ -91,11 +193,9 @@ async def provision(
     or git clone for external repos.
     """
     # Sanitize IDs for safe use in branch names and shell commands
-    import re as _re
     safe_agent = _re.sub(r'[^a-zA-Z0-9_-]', '_', agent_id)
     safe_task = _re.sub(r'[^a-zA-Z0-9_-]', '_', task_id)
     branch = f"agent/{safe_agent}/{safe_task}"
-    ws_path = _WORKSPACES_ROOT / safe_agent
 
     # Clean up existing workspace if any
     if agent_id in _workspaces:
@@ -157,6 +257,24 @@ async def provision(
         gerrit_url = f"ssh://{_settings.gerrit_ssh_host}:{_settings.gerrit_ssh_port}/{_settings.gerrit_project}"
         source = gerrit_url
         is_local = False
+
+    # Y6 #282 row 1 — resolve the five-layer hierarchical path. Tenant /
+    # product_line / project_id default to the transitional ``_DEFAULT_*``
+    # constants until rows 2–3 wire ContextVar lookups through. The leaf
+    # ``repo_url_hash`` is computed from the FINAL ``source`` (post-gerrit
+    # override) so two different remote URLs assigned to the same agent do
+    # not collide on the same on-disk dir. In-repo worktrees (``source ==
+    # str(_MAIN_REPO)``) collapse to the ``_SELF_REPO_HASH`` sentinel and
+    # keep the legacy "one workspace per agent" footprint.
+    _remote_for_hash = None if (is_local and Path(source).resolve() == _MAIN_REPO.resolve()) else source
+    ws_path = _workspace_path_for(
+        tenant_id=None,
+        product_line=None,
+        project_id=None,
+        agent_id=agent_id,
+        remote_url=_remote_for_hash,
+    )
+    ws_path.parent.mkdir(parents=True, exist_ok=True)
 
     if is_local and Path(source).is_dir():
         # Use git worktree (fast, shares object store)
@@ -499,6 +617,12 @@ async def discard_and_recreate(
     # they remain unreachable in the object store until ``git gc``.
     await _run(f'git branch -D "{branch}" 2>/dev/null', cwd=src_repo)
 
+    # Y6 #282 row 1 — ensure the parent of the leaf hash dir exists.
+    # Step 1+2 above may have removed the leaf, but the four-deep
+    # ancestor chain ({tid}/{pl}/{pid}/{agent_id}/) must still be in
+    # place for ``git worktree add`` / ``git clone`` to succeed.
+    ws_path.parent.mkdir(parents=True, exist_ok=True)
+
     # Step 5: materialise the fresh worktree branched at anchor_sha.
     if is_local and src_repo.is_dir():
         rc, out, err = await _run(
@@ -681,15 +805,19 @@ async def cleanup_orphan_worktrees() -> list[dict[str, str]]:
     if not _WORKSPACES_ROOT.exists():
         return []
 
-    # Snapshot of agent_ids whose workspaces are live in *this*
-    # process. We compare against the safe-form path component
-    # because that's what's on disk (provision() does
-    # ``re.sub(r'[^a-zA-Z0-9_-]', '_', agent_id)`` to derive the
-    # subdir name; we cannot reverse the mapping, so we mirror it).
-    import re as _re
-    active_safe_names = {
-        _re.sub(r'[^a-zA-Z0-9_-]', '_', info.agent_id)
-        for info in _workspaces.values()
+    # Y6 #282 row 1 — workspaces live under
+    # ``{root}/{tid}/{pl}/{pid}/{agent_id}/{repo_url_hash}/`` (5 nested
+    # components). The legacy flat layout (``{root}/{agent_id}/``) also
+    # still exists for any pre-Y6 workspace dir that wasn't migrated yet
+    # and for the ad-hoc 1-level ghost dir produced by the test harness.
+    # Path-based active-set matching covers both layouts uniformly: we
+    # snapshot resolved full paths of live workspaces in this process
+    # rather than just the leaf name, so the nested + flat dirs
+    # disambiguate naturally without us having to reverse-engineer the
+    # safe-name mapping back to an agent_id.
+    active_paths = {
+        info.path.resolve() for info in _workspaces.values()
+        if info.path.exists()
     }
 
     # Step 1: gather candidate orphan paths from BOTH sources.
@@ -717,18 +845,58 @@ async def cleanup_orphan_worktrees() -> list[dict[str, str]]:
 
     # Filesystem walk catches dirs that exist on disk but no longer
     # have an admin block (the "ghost" case — usually means a prior
-    # ``git worktree prune`` ran but the dir wasn't deleted).
-    for child in _WORKSPACES_ROOT.iterdir():
-        if not child.is_dir():
+    # ``git worktree prune`` ran but the dir wasn't deleted). Walks
+    # the new 5-layer hierarchy AND the legacy flat layout: any leaf
+    # dir that contains a ``.git`` entry (file or dir, both are valid
+    # — worktrees produce a ``.git`` *file* pointing back to the host
+    # admin block) is treated as a candidate workspace; otherwise we
+    # also keep the depth-1 fallback so a "stray dir at root level"
+    # (the ghost-fs test case) still gets flagged.
+    for top in _WORKSPACES_ROOT.iterdir():
+        if not top.is_dir():
             continue
-        candidate_paths.setdefault(child, "fs")
+        # Skip operational sidecar dirs reserved for future Y6 rows
+        # (``_prewarm`` already exists in routers/dag.py for sandbox
+        # speculation; ``_trash`` is reserved for the GC reaper in
+        # row 5). They're not workspaces; their lifecycle is owned
+        # by other modules.
+        if top.name.startswith("_"):
+            continue
+        leaves = list(_iter_workspace_leaves(top))
+        if leaves:
+            for leaf in leaves:
+                candidate_paths.setdefault(leaf, "fs")
+        else:
+            # Either pre-Y6 flat layout or a non-conforming stray dir —
+            # treat the top-level dir itself as the orphan candidate.
+            candidate_paths.setdefault(top, "fs")
 
     # Step 2: filter against active set, then remove each orphan.
     removed: list[dict[str, str]] = []
     for wt_path, source in candidate_paths.items():
-        safe_name = wt_path.name
-        if safe_name in active_safe_names:
+        # Resolve to handle symlinks / relative components consistently
+        # with how active_paths was built.
+        try:
+            resolved = wt_path.resolve()
+        except OSError:
+            resolved = wt_path
+        if resolved in active_paths:
             continue  # live workspace, leave alone
+
+        # Surface the agent_id for telemetry. Under the nested layout
+        # the agent_id sits one level above the leaf hash dir; under
+        # the legacy flat layout (or stray dir) it equals the leaf.
+        # We pick whichever name is recognisable as the agent_id; if
+        # the candidate is deeper than 1 level under root, the agent
+        # segment is the parent of the leaf.
+        try:
+            rel_parts = wt_path.relative_to(_WORKSPACES_ROOT).parts
+        except ValueError:
+            rel_parts = (wt_path.name,)
+        if len(rel_parts) >= 5:
+            safe_name = rel_parts[3]  # tenant/pl/pid/agent_id/hash
+        else:
+            safe_name = wt_path.name
 
         # Step 2a: try ``git worktree remove --force`` first — it
         # removes both the working dir AND the
