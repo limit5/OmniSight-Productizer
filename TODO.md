@@ -1724,7 +1724,7 @@ multi-user 的管理面：邀請進 tenant、調整 role、踢人、跨 tenant m
 
 把 I2 的 `current_tenant_id()` context var 擴充成 `(tenant_id, project_id, user_role)` 三元，讓 RLS + RBAC 自動生效。
 
-- [ ] `backend/db_context.py`：加 `current_project_id()` / `current_user_role()` 兩個 ContextVar。
+- [x] `backend/db_context.py`：加 `current_project_id()` / `current_user_role()` 兩個 ContextVar。
 - [ ] 新 dependency `require_project_member(project_id, min_role="viewer")`：路由從 URL path 取 project_id，驗 user 對 project 的有效 role（project_members 直接查 + tenant membership fallback）。
 - [ ] SQLAlchemy event listener（沿 I2 擴充）：所有 SELECT 自動注入 `WHERE tenant_id = :current AND (project_id = :current OR project_id IS NULL)`；INSERT 自動填 `(tenant_id, project_id) = (current, current)`.
 - [ ] Frontend middleware：API client 除了 `X-Tenant-Id` 再加 `X-Project-Id`。和 I7 一樣後端中介層雙重驗證。
