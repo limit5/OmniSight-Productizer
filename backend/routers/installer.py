@@ -268,6 +268,22 @@ def _coerce_json(v: Any, default: Any) -> Any:
     return default
 
 
+def _ts_to_iso(v: Any) -> Any:
+    """Coerce a PG TIMESTAMPTZ (datetime) or SQLite REAL epoch into a
+    JSON-serialisable representation. ``starlette.responses.JSONResponse``
+    uses plain ``json.dumps`` which cannot serialise ``datetime`` —
+    passing the object through raises ``TypeError`` at response time.
+    Mirrors the same helper in catalog.py."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    isoformat = getattr(v, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+    return v
+
+
 def _row_to_install_job(row: Any) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -289,10 +305,10 @@ def _row_to_install_job(row: Any) -> dict[str, Any]:
         "error_reason": row["error_reason"],
         "pep_decision_id": row["pep_decision_id"],
         "requested_by": row["requested_by"],
-        "queued_at": row["queued_at"],
-        "claimed_at": row["claimed_at"],
-        "started_at": row["started_at"],
-        "completed_at": row["completed_at"],
+        "queued_at": _ts_to_iso(row["queued_at"]),
+        "claimed_at": _ts_to_iso(row["claimed_at"]),
+        "started_at": _ts_to_iso(row["started_at"]),
+        "completed_at": _ts_to_iso(row["completed_at"]),
     }
 
 

@@ -281,6 +281,26 @@ def _new_subscription_id() -> str:
     return f"sub-{_secrets.token_hex(8)}"
 
 
+def _ts_to_iso(v: Any) -> Any:
+    """Coerce a PG TIMESTAMPTZ (datetime) or SQLite REAL epoch into
+    a JSON-serialisable representation.
+
+    ``starlette.responses.JSONResponse`` calls plain ``json.dumps``
+    which cannot serialise ``datetime``; passing the object through
+    raises ``TypeError`` at response time. ISO 8601 with timezone is
+    the contract the frontend already consumes for every other
+    timestamp column in the API.
+    """
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    isoformat = getattr(v, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+    return v
+
+
 def _row_to_entry(row: Any) -> dict[str, Any]:
     """Marshal an ``asyncpg.Record`` from ``catalog_entries`` into the
     JSON-friendly shape the API contract returns.
@@ -322,8 +342,8 @@ def _row_to_entry(row: Any) -> dict[str, Any]:
         "depends_on": _coerce_json(row["depends_on"], []),
         "metadata": _coerce_json(row["metadata"], {}),
         "hidden": bool(row["hidden"]),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "created_at": _ts_to_iso(row["created_at"]),
+        "updated_at": _ts_to_iso(row["updated_at"]),
     }
 
 
@@ -550,6 +570,12 @@ async def get_entry(
         )
     tid = _ensure_tenant(user)
 
+    # NOTE: deliberately NO ``hidden = FALSE`` filter here. A hidden
+    # override row is a TOMBSTONE — it has to reach ``_resolve`` so the
+    # propagation rule (override.hidden=TRUE → resolved.hidden=TRUE)
+    # can fire and the handler can 404. Filtering at SQL would make the
+    # resolver see only the shipped base and merge to a non-hidden
+    # row — which is exactly the bug BS.2.4 caught.
     sql = (
         "SELECT id, source, schema_version, tenant_id, vendor, family, "
         "display_name, version, install_method, install_url, sha256, "
@@ -557,7 +583,6 @@ async def get_entry(
         "created_at, updated_at "
         "FROM catalog_entries "
         "WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2) "
-        "  AND hidden = FALSE "
         "ORDER BY CASE source "
         "  WHEN 'override' THEN 0 "
         "  WHEN 'operator' THEN 1 "
@@ -953,11 +978,11 @@ def _row_to_subscription(row: Any) -> dict[str, Any]:
         "auth_method": row["auth_method"],
         "auth_secret_ref": row["auth_secret_ref"],
         "refresh_interval_s": int(row["refresh_interval_s"]),
-        "last_synced_at": row["last_synced_at"],
+        "last_synced_at": _ts_to_iso(row["last_synced_at"]),
         "last_sync_status": row["last_sync_status"],
         "enabled": bool(row["enabled"]),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "created_at": _ts_to_iso(row["created_at"]),
+        "updated_at": _ts_to_iso(row["updated_at"]),
     }
 
 
