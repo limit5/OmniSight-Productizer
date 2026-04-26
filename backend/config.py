@@ -283,6 +283,42 @@ class Settings(BaseSettings):
     # 0 = disabled. Default 10 KB matches the design spec.
     sandbox_max_output_bytes: int = 10_000
 
+    # ── Y6 #282 row 2 — Workspace hierarchy root + per-tenant default quota ──
+    # Promoted to Settings so operators can re-target the on-disk layout
+    # away from the legacy ``./.agent_workspaces/`` tree without touching
+    # source. ``workspace_root`` is the parent of the row-1 five-layer
+    # hierarchy ``{root}/{tenant_id}/{product_line}/{project_id}/
+    # {agent_id}/{repo_url_hash}/`` — change it once and all of provision,
+    # cleanup_orphan_worktrees, the row-4 migration script and the row-6
+    # GC reaper follow. The default ``./data/workspaces`` aligns with the
+    # rest of the runtime data dir (`data/omnisight.db`,
+    # `data/audit_chain/...`) so a single bind-mount in compose covers
+    # everything stateful, while the legacy `.agent_workspaces` dir is
+    # left untouched until the row-4 migrator moves it. Resolved relative
+    # to the process CWD when not absolute (matches the existing
+    # ``database_path`` semantic). Read at module import via
+    # ``backend.workspace`` only — never re-read at request time, so a
+    # mid-flight change requires a restart (the on-disk hierarchy itself
+    # is the authoritative state, not the env knob).
+    #
+    # ``workspace_quota_mb_default`` is the per-tenant **default** soft
+    # cap that row-5 (`tenant_quota.check_hard_quota`) consults when a
+    # tenant has no explicit override row in `tenant_quota_overrides`.
+    # 0 = unlimited (current behaviour, preserved as default until row-5
+    # ships the actual enforcement so flipping just this row cannot
+    # silently start denying writes). Operators set it non-zero once
+    # they want fleet-wide enforcement; per-tenant overrides remain the
+    # finer-grained knob. Unit is MB (not bytes) to match how operators
+    # think about disk and how the Tenants UI surfaces quota.
+    #
+    # Module-global state audit (per implement_phase_step.md Step 1,
+    # type-1 answer): both fields are immutable Settings literals
+    # derived once at process boot from env / .env — every uvicorn
+    # worker computes the same value from the same source so cross-
+    # worker consistency is automatic.
+    workspace_root: str = "./data/workspaces"
+    workspace_quota_mb_default: int = 0
+
     # O8 (#271): orchestration execution mode. "monolith" keeps every
     # agent run going through the LangGraph StateGraph in-process (legacy
     # path since v0.1.0). "distributed" routes the same run through

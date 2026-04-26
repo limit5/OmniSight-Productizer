@@ -74,3 +74,37 @@ def test_get_model_name_unknown_provider_falls_back_to_anthropic_default(monkeyp
     from backend.config import Settings
     s = Settings()
     assert s.get_model_name() == "claude-sonnet-4-20250514"
+
+
+# ── Y6 #282 row 2 — workspace_root / workspace_quota_mb_default ──
+
+def test_workspace_root_default_is_data_workspaces(monkeypatch):
+    monkeypatch.delenv("OMNISIGHT_WORKSPACE_ROOT", raising=False)
+    from backend.config import Settings
+    s = Settings()
+    assert s.workspace_root == "./data/workspaces"
+
+
+def test_workspace_quota_mb_default_default_is_zero_unlimited(monkeypatch):
+    """Default 0 = unlimited, preserves pre-Y6 behaviour until row 5
+    enforcement lands so flipping just this row cannot silently start
+    rejecting writes."""
+    monkeypatch.delenv("OMNISIGHT_WORKSPACE_QUOTA_MB_DEFAULT", raising=False)
+    from backend.config import Settings
+    s = Settings()
+    assert s.workspace_quota_mb_default == 0
+
+
+def test_workspace_root_env_override(monkeypatch):
+    monkeypatch.setenv("OMNISIGHT_WORKSPACE_ROOT", "/srv/omnisight/workspaces")
+    from backend.config import Settings
+    s = Settings()
+    assert s.workspace_root == "/srv/omnisight/workspaces"
+
+
+def test_workspace_quota_mb_default_env_override_coerces_int(monkeypatch):
+    monkeypatch.setenv("OMNISIGHT_WORKSPACE_QUOTA_MB_DEFAULT", "8192")
+    from backend.config import Settings
+    s = Settings()
+    assert s.workspace_quota_mb_default == 8192
+    assert isinstance(s.workspace_quota_mb_default, int)
