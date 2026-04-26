@@ -236,6 +236,46 @@ class InstallJobRetryBody(BaseModel):
     idempotency_key: str = Field(pattern=IDEMPOTENCY_KEY_PATTERN)
 
 
+# BS.4.4 — sidecar progress emit. Same wire shape that
+# ``installer/progress.py::make_progress_cb`` POSTs every time the
+# install method ticks. ``log_tail`` is bounded server-side at the same
+# 4 KiB cap the sidecar trims at; an oversize tail is rejected at 422
+# rather than silently truncated so a misconfigured sidecar fails loud.
+PROGRESS_LOG_TAIL_MAX_BYTES = 4 * 1024
+# Stage label is free-form within the sidecar (each install method picks
+# its own labels — ``downloading`` / ``verifying`` / ``running`` /
+# ``promoting`` / ``finalizing``). We cap the length so a buggy method
+# can't write a megabyte of garbage into the SSE payload.
+PROGRESS_STAGE_MAX_LEN = 64
+
+
+class InstallJobProgress(BaseModel):
+    """Sidecar → backend progress payload. BS.4.4.
+
+    Fields mirror :data:`installer.progress.ProgressEmitterConfig` /
+    :func:`installer.progress.make_progress_cb`'s POST body. Validation
+    matches what the install_jobs schema can hold:
+
+    * ``bytes_done`` — non-negative; bigint column, no upper cap.
+    * ``bytes_total`` — None (unknown — vendor URL didn't send a
+      Content-Length) or non-negative.
+    * ``eta_seconds`` — None or non-negative.
+    * ``log_tail`` — text, max 4 KiB (sidecar trims; we still validate).
+    * ``stage`` — free-form short string the UI shows under the bar.
+    * ``sidecar_id`` — for audit only; we already know it from claim,
+      but accepting it makes log lines easier to correlate.
+    """
+
+    stage: str = Field(min_length=1, max_length=PROGRESS_STAGE_MAX_LEN)
+    bytes_done: int = Field(ge=0)
+    bytes_total: int | None = Field(default=None, ge=0)
+    eta_seconds: int | None = Field(default=None, ge=0)
+    log_tail: str = Field(default="", max_length=PROGRESS_LOG_TAIL_MAX_BYTES)
+    sidecar_id: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=SIDECAR_ID_PATTERN,
+    )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Helpers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -719,6 +759,179 @@ async def get_job(
     if row is None:
         raise HTTPException(status_code=404, detail="install job not found")
     return JSONResponse(status_code=200, content=_row_to_install_job(row))
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  POST /installer/jobs/{id}/progress — sidecar (BS.4.4)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.post("/jobs/{job_id}/progress")
+async def report_progress(
+    job_id: str,
+    body: InstallJobProgress,
+    user: _au.User = Depends(_au.require_admin),
+) -> JSONResponse:
+    """Sidecar progress emit. BS.4.4.
+
+    Updates the in-flight install_jobs row's
+    ``bytes_done / bytes_total / eta_seconds / log_tail`` and (on first
+    progress tick of a job) stamps ``started_at = now()``. Then emits an
+    SSE ``installer_progress`` event so the operator UI's progress bar
+    refreshes without polling. Returns the row's current ``state`` so the
+    sidecar can detect operator cancel (state flipped to ``cancelled`` →
+    sidecar's ``progress_cb`` raises :class:`InstallCancelled` and the
+    in-flight install method runs its kill-and-reap path).
+
+    Auth surface: same as ``/jobs/poll`` — ``require_admin`` because the
+    sidecar process is operator-managed infrastructure (per BS.2.3
+    notes); a per-sidecar service token is on the BS-future roadmap.
+
+    State invariants:
+
+    * ``running`` → accept and update; this is the steady-state path.
+    * ``queued`` → accept (gives the UI a head-start hint) but flip to
+      ``running`` since the sidecar wouldn't ticker progress for a
+      job it hasn't claimed; rare race during the brief window between
+      ``UPDATE … SET state='running'`` and the first progress emit
+      (network latency + the install method's first stage). The
+      transition mirrors what claim's UPDATE would do, so it is safe.
+    * ``completed`` / ``failed`` / ``cancelled`` → return 200 + the
+      terminal state without mutating; the sidecar's emitter sees the
+      response, raises :class:`InstallCancelled`, and the method aborts.
+      Refusing here (e.g. 409) would leave a hung subprocess.
+
+    Cross-tenant note: the sidecar's bearer token authenticates as
+    ``admin``, which today has cross-tenant visibility. We stamp
+    ``set_tenant_id`` from the row's ``tenant_id`` so any audit emit
+    correlates to the right tenant context. SSE broadcast is scoped to
+    the row's tenant.
+    """
+    if not _INSTALL_JOB_ID_RE.match(job_id):
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid job id: {job_id!r}; must match "
+                   f"{INSTALL_JOB_ID_PATTERN}",
+        )
+
+    log_tail_bytes = body.log_tail.encode("utf-8", errors="replace")
+    if len(log_tail_bytes) > PROGRESS_LOG_TAIL_MAX_BYTES:
+        # Defence in depth: pydantic's max_length counts characters; a
+        # 4-byte UTF-8 codepoint with `len(str) <= 4096` could still
+        # blow the byte budget. Reject loudly so misbehaving sidecars
+        # surface during smoke instead of silently overflowing the
+        # bus payload.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"log_tail exceeds {PROGRESS_LOG_TAIL_MAX_BYTES} bytes "
+                f"after utf-8 encoding ({len(log_tail_bytes)} bytes); "
+                "trim to LOG_TAIL_MAX_BYTES on the sidecar before posting"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            existing = await conn.fetchrow(
+                "SELECT id, tenant_id, state, started_at, entry_id, "
+                "       sidecar_id "
+                "FROM install_jobs "
+                "WHERE id = $1 FOR UPDATE",
+                job_id,
+            )
+            if existing is None:
+                raise HTTPException(
+                    status_code=404, detail="install job not found",
+                )
+
+            # Pin tenant context for any nested audit / SSE emit.
+            set_tenant_id(existing["tenant_id"])
+
+            current_state = existing["state"]
+            # Terminal — return the state, do NOT mutate. Sidecar uses
+            # this as the cancel / abort signal.
+            if current_state in TERMINAL_STATES:
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "id": job_id,
+                        "state": current_state,
+                        "tenant_id": existing["tenant_id"],
+                        "ignored": True,
+                    },
+                )
+
+            # Active: queued (rare race) → flip to running with this
+            # progress tick as the first proof-of-life. running → just
+            # update the metrics columns. We always stamp started_at
+            # idempotently on first progress tick.
+            new_state = "running" if current_state == "queued" else current_state
+            started_at_clause = (
+                "started_at = COALESCE(started_at, now())"
+            )
+
+            row = await conn.fetchrow(
+                "UPDATE install_jobs "
+                "SET state = $1, "
+                "    bytes_done = $2, "
+                "    bytes_total = COALESCE($3, bytes_total), "
+                "    eta_seconds = $4, "
+                "    log_tail = $5, "
+                f"   {started_at_clause} "
+                "WHERE id = $6 "
+                f"RETURNING {_INSTALL_JOB_RETURNING_COLS}",
+                new_state,
+                int(body.bytes_done),
+                None if body.bytes_total is None else int(body.bytes_total),
+                None if body.eta_seconds is None else int(body.eta_seconds),
+                body.log_tail,
+                job_id,
+            )
+
+    # SSE broadcast — scope=tenant so the operator UI of the right
+    # tenant sees the live tick. Best-effort; never propagate emit
+    # failures back to the sidecar.
+    try:
+        from backend import events as _events
+        _events.emit_installer_progress(
+            job_id,
+            state=row["state"],
+            stage=body.stage,
+            bytes_done=int(row["bytes_done"]),
+            bytes_total=(
+                int(row["bytes_total"])
+                if row["bytes_total"] is not None else None
+            ),
+            eta_seconds=(
+                int(row["eta_seconds"])
+                if row["eta_seconds"] is not None else None
+            ),
+            log_tail=row["log_tail"] or "",
+            sidecar_id=row["sidecar_id"],
+            entry_id=row["entry_id"],
+            broadcast_scope="tenant",
+            tenant_id=existing["tenant_id"],
+        )
+    except Exception as exc:  # pragma: no cover — bus already swallows
+        logger.warning(
+            "installer_progress SSE emit failed for job %s: %s",
+            job_id, exc,
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "id": job_id,
+            "state": row["state"],
+            "tenant_id": existing["tenant_id"],
+            "bytes_done": int(row["bytes_done"]),
+            "bytes_total": (
+                int(row["bytes_total"])
+                if row["bytes_total"] is not None else None
+            ),
+        },
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

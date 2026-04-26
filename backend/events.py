@@ -1147,3 +1147,56 @@ def emit_new_device_login(
         f"[SECURITY] new device login user={user_id} ip={ip} ua={user_agent[:60]}",
         "warn",
     )
+
+
+def emit_installer_progress(
+    job_id: str,
+    *,
+    state: str,
+    stage: str,
+    bytes_done: int,
+    bytes_total: int | None,
+    eta_seconds: int | None,
+    log_tail: str,
+    sidecar_id: str | None = None,
+    entry_id: str | None = None,
+    session_id: str | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+) -> None:
+    """BS.4.4: broadcast a sidecar-reported install progress tick to operator UIs.
+
+    Fires from ``backend/routers/installer.py::report_progress`` after the
+    install_jobs row has been UPDATEd with the latest bytes/eta/log_tail.
+    Operator dashboards subscribed to the SSE stream consume this event
+    to refresh the live progress bar + log-tail panel without polling.
+
+    The event is tagged ``broadcast_scope='tenant'`` because the
+    install_jobs row is tenant-scoped (catalog installs are per-tenant
+    artefacts). Cross-tenant operators do not see another tenant's
+    install progress — frontend already filters by tenant context, but
+    the bus enforces it at the wire level.
+
+    ``log_tail`` is sent as-is (caller is responsible for trimming to
+    the schema cap, today 4 KiB per :data:`installer.methods.base.LOG_TAIL_MAX_BYTES`).
+    """
+    broadcast_scope = _resolve_scope(
+        "emit_installer_progress", broadcast_scope, "tenant",
+    )
+    bus.publish("installer_progress", {
+        "job_id": job_id,
+        "state": state,
+        "stage": stage,
+        "bytes_done": bytes_done,
+        "bytes_total": bytes_total,
+        "eta_seconds": eta_seconds,
+        "log_tail": log_tail,
+        "sidecar_id": sidecar_id,
+        "entry_id": entry_id,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[INSTALLER] {job_id} stage={stage} bytes={bytes_done}"
+        f"/{bytes_total if bytes_total is not None else '?'}"
+        f" state={state}",
+    )

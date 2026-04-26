@@ -50,6 +50,7 @@ def test_route_registration_full_set():
         ("GET", "/installer/jobs/{job_id}"),
         ("POST", "/installer/jobs/{job_id}/cancel"),
         ("POST", "/installer/jobs/{job_id}/retry"),
+        ("POST", "/installer/jobs/{job_id}/progress"),
         ("GET", "/installer/jobs/poll"),
     ])
     assert pairs == expected

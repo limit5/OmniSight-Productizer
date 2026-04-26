@@ -412,7 +412,7 @@ def _handle_claimed_job(cfg: Config, job: dict[str, Any]) -> None:
     for k in ("install_method", "install_url", "sha256", "metadata"):
         enriched[k] = entry.get(k)
 
-    progress_cb = _build_local_progress_cb(job_id)
+    progress_cb = _build_progress_cb(cfg, str(job_id))
 
     from installer import methods as _methods  # local import to keep
     # main.py importable without methods (for early smoke / unit tests
@@ -492,31 +492,33 @@ def _fetch_catalog_entry(
     return payload
 
 
-def _build_local_progress_cb(job_id: Any) -> "Any":
-    """BS.4.3 progress callback — logs only. BS.4.4 swaps this for an
-    HTTP POST to the backend's progress bus.
+def _build_progress_cb(cfg: Config, job_id: str) -> "Any":
+    """BS.4.4 progress callback — POSTs to the backend progress bus.
 
-    Throttles INFO logs so a download with 5000 chunks doesn't spam.
-    Stage transitions and the final tail are always logged.
+    Each tick is sent to ``POST /installer/jobs/{job_id}/progress`` (see
+    ``backend/routers/installer.py::report_progress``); the backend
+    updates the install_jobs row and fans out an SSE
+    ``installer_progress`` event to operator UIs scoped to the tenant.
+    The emitter throttles to ~1 post/s OR every 256 KiB of byte-delta
+    (whichever first) so a tight-loop install method doesn't drown the
+    backend, and stage transitions always send so the UI stage label
+    updates immediately. The emitter raises :class:`InstallCancelled`
+    when the backend reports a terminal state — which the install
+    methods handle in their ``run_in_process_group`` cancel path.
     """
-    state = {"last_stage": None, "last_log_at": 0.0}
+    from installer.progress import (
+        ProgressEmitterConfig,
+        make_progress_cb,
+    )
 
-    def _cb(*, stage: str, bytes_done: int, bytes_total: int | None,
-            eta_seconds: int | None, log_tail: str) -> None:
-        now = time.monotonic()
-        first_in_stage = stage != state["last_stage"]
-        long_enough = now - state["last_log_at"] >= 1.0
-        if first_in_stage or long_enough:
-            logger.info(
-                "job %s progress: stage=%s bytes=%s/%s eta=%s",
-                job_id, stage, bytes_done,
-                bytes_total if bytes_total is not None else "?",
-                eta_seconds if eta_seconds is not None else "?",
-            )
-            state["last_stage"] = stage
-            state["last_log_at"] = now
-
-    return _cb
+    return make_progress_cb(
+        ProgressEmitterConfig(
+            backend_url=cfg.backend_url,
+            token=cfg.token,
+            sidecar_id=cfg.sidecar_id,
+        ),
+        job_id,
+    )
 
 
 def _log_protocol_handshake_failure(cfg: Config, payload: dict[str, Any]) -> None:
