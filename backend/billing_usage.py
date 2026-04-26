@@ -128,6 +128,52 @@ KIND_WORKFLOW_RUN = "workflow_run"
 KIND_WORKSPACE_GB_HOUR = "workspace_gb_hour"
 
 
+# Y9 #285 row 4 — heuristic model-prefix → provider mapping. Used by the
+# Prometheus metric fan-out when the caller (``track_tokens``) doesn't
+# pass an explicit provider. This is intentionally lightweight (a single
+# pass over the well-known prefixes) — anything that doesn't match falls
+# through to ``"unknown"`` and Grafana can still slice by ``model``.
+# The mapping is deliberately NOT exhaustive: production paths that
+# care about the provider label should pass it explicitly via
+# ``record_llm_call(provider=...)``.
+_MODEL_PROVIDER_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("claude", "anthropic"),
+    ("anthropic/", "anthropic"),
+    ("gpt-", "openai"),
+    ("o1-", "openai"),
+    ("o3-", "openai"),
+    ("o4-", "openai"),
+    ("openai/", "openai"),
+    ("gemini", "google"),
+    ("google/", "google"),
+    ("mixtral", "mistral"),
+    ("mistral", "mistral"),
+    ("llama", "meta"),
+    ("deepseek", "deepseek"),
+    ("qwen", "qwen"),
+    ("openrouter/", "openrouter"),
+)
+
+
+def _infer_provider(model: str | None) -> str:
+    """Best-effort model → provider tag for metric labelling.
+
+    Returns ``"unknown"`` if the model is empty or doesn't match any
+    known prefix. The metric label is then bucketed through
+    ``backend.metrics_labels.bucket_*`` (no separate cap for provider
+    since the inferable set is already small). Operators who want
+    accurate provider labelling for a custom adapter pass the value
+    explicitly via the ``provider=`` kwarg.
+    """
+    if not model:
+        return "unknown"
+    lo = model.lower()
+    for prefix, provider in _MODEL_PROVIDER_PREFIXES:
+        if lo.startswith(prefix):
+            return provider
+    return "unknown"
+
+
 # Tuple of all canonical usage kinds — used by the migration-0039
 # drift guard test and by anything that needs to enumerate the
 # closed set of valid ``kind`` values without re-listing the three
@@ -182,6 +228,125 @@ def _resolve_project(
     if ctx is not None:
         return ctx
     return _project_id_from_tenant(tenant_id)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y9 #285 row 4 — Prometheus metric fan-out
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _publish_llm_metrics(
+    *,
+    tenant_id: str,
+    project_id: str,
+    product_line: str | None,
+    provider: str | None,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+) -> None:
+    """Fan one LLM call into the per-(tenant, project, product_line)
+    Prometheus counters. Best-effort — a metric publish failure (e.g.
+    prometheus_client uninstalled, label arity mismatch from a future
+    refactor that didn't sync the labelnames) must never tear down the
+    LLM call.
+
+    Cardinality: every label is funnelled through
+    ``backend.metrics_labels.bucket_*`` so an attacker who can spawn
+    arbitrary tenant_ids cannot use this path to explode the registry.
+    """
+    try:
+        from backend import metrics as _m
+        from backend import metrics_labels as _ml
+        tid_lbl = _ml.bucket_tenant_id(tenant_id)
+        pid_lbl = _ml.bucket_project_id(project_id)
+        pl_lbl = _ml.bucket_product_line(product_line)
+        prov_lbl = provider or _infer_provider(model)
+        labels = {
+            "tenant_id": tid_lbl,
+            "project_id": pid_lbl,
+            "product_line": pl_lbl,
+            "provider": prov_lbl,
+            "model": model or "unknown",
+        }
+        _m.billing_llm_calls_total.labels(**labels).inc()
+        if input_tokens:
+            _m.billing_llm_input_tokens_total.labels(**labels).inc(input_tokens)
+        if output_tokens:
+            _m.billing_llm_output_tokens_total.labels(**labels).inc(output_tokens)
+        if cost_usd:
+            _m.billing_llm_cost_usd_total.labels(**labels).inc(cost_usd)
+        _publish_cap_status_safe()
+    except Exception as exc:  # pragma: no cover — best-effort
+        logger.debug("billing llm metric publish failed: %s", exc)
+
+
+def _publish_workflow_metrics(
+    *,
+    tenant_id: str,
+    project_id: str,
+    product_line: str | None,
+    workflow_kind: str,
+    workflow_status: str,
+) -> None:
+    """Fan one workflow_run finish into the per-(tenant, project,
+    product_line) Prometheus counter. Best-effort, see
+    :func:`_publish_llm_metrics` for the bucketing contract."""
+    try:
+        from backend import metrics as _m
+        from backend import metrics_labels as _ml
+        _m.billing_workflow_runs_total.labels(
+            tenant_id=_ml.bucket_tenant_id(tenant_id),
+            project_id=_ml.bucket_project_id(project_id),
+            product_line=_ml.bucket_product_line(product_line),
+            workflow_kind=workflow_kind or "unknown",
+            workflow_status=workflow_status or "unknown",
+        ).inc()
+        _publish_cap_status_safe()
+    except Exception as exc:  # pragma: no cover — best-effort
+        logger.debug("billing workflow metric publish failed: %s", exc)
+
+
+def _publish_workspace_gb_hour_metrics(
+    *,
+    tenant_id: str,
+    project_id: str,
+    product_line: str | None,
+    gb_hours: float,
+) -> None:
+    """Fan one workspace-GB-hour sample into the per-(tenant, project,
+    product_line) Prometheus counter. Best-effort, see
+    :func:`_publish_llm_metrics` for the bucketing contract."""
+    if not gb_hours:
+        return
+    try:
+        from backend import metrics as _m
+        from backend import metrics_labels as _ml
+        _m.billing_workspace_gb_hours_total.labels(
+            tenant_id=_ml.bucket_tenant_id(tenant_id),
+            project_id=_ml.bucket_project_id(project_id),
+            product_line=_ml.bucket_product_line(product_line),
+        ).inc(float(gb_hours))
+        _publish_cap_status_safe()
+    except Exception as exc:  # pragma: no cover — best-effort
+        logger.debug("billing workspace metric publish failed: %s", exc)
+
+
+def _publish_cap_status_safe() -> None:
+    """Refresh ``omnisight_metrics_label_cap_used`` so operators can
+    alert on cap saturation before new tenants/projects start
+    collapsing into ``"other"``."""
+    try:
+        from backend import metrics as _m
+        from backend import metrics_labels as _ml
+        status = _ml.cap_status()
+        for dim, info in status.items():
+            cap = max(1, int(info.get("cap", 1)))
+            seen = int(info.get("seen", 0))
+            _m.metrics_label_cap_used.labels(dimension=dim).set(seen / cap)
+    except Exception:  # pragma: no cover — diagnostic only
+        pass
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -273,6 +438,8 @@ async def record_llm_call(
     cache_create_tokens: int = 0,
     tenant_id: str | None = None,
     project_id: str | None = None,
+    product_line: str | None = None,
+    provider: str | None = None,
     occurred_at: float | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Optional[int]:
@@ -292,6 +459,20 @@ async def record_llm_call(
     """
     tid = _resolve_tenant(tenant_id)
     pid = _resolve_project(project_id, tenant_id=tid)
+    # Y9 row 4 — Prometheus fan-out runs alongside the DB write so
+    # operators get real-time per-(tenant, project, product_line) rate
+    # graphs without waiting for the T4 daily rollup. Cardinality is
+    # bucketed (see ``_publish_llm_metrics``); failures swallow.
+    _publish_llm_metrics(
+        tenant_id=tid,
+        project_id=pid,
+        product_line=product_line,
+        provider=provider,
+        model=model,
+        input_tokens=int(input_tokens or 0),
+        output_tokens=int(output_tokens or 0),
+        cost_usd=float(cost_usd or 0.0),
+    )
     return await _write_event(
         occurred_at=occurred_at if occurred_at is not None else time.time(),
         tenant_id=tid,
@@ -316,6 +497,7 @@ async def record_workflow_run(
     duration_ms: int | None = None,
     tenant_id: str | None = None,
     project_id: str | None = None,
+    product_line: str | None = None,
     occurred_at: float | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Optional[int]:
@@ -333,6 +515,14 @@ async def record_workflow_run(
     md = dict(metadata or {})
     if duration_ms is not None:
         md.setdefault("duration_ms", int(duration_ms))
+    # Y9 row 4 — Prometheus fan-out (best-effort, see _publish_workflow_metrics).
+    _publish_workflow_metrics(
+        tenant_id=tid,
+        project_id=pid,
+        product_line=product_line,
+        workflow_kind=workflow_kind,
+        workflow_status=workflow_status,
+    )
     return await _write_event(
         occurred_at=occurred_at if occurred_at is not None else time.time(),
         tenant_id=tid,
@@ -352,6 +542,7 @@ async def record_workspace_gb_hour(
     gb_hours: float,
     tenant_id: str | None = None,
     project_id: str | None = None,
+    product_line: str | None = None,
     occurred_at: float | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Optional[int]:
@@ -372,6 +563,13 @@ async def record_workspace_gb_hour(
     tid = _resolve_tenant(tenant_id)
     pid = _resolve_project(project_id, tenant_id=tid)
     qty = float(gb_hours or 0.0)
+    # Y9 row 4 — Prometheus fan-out (best-effort).
+    _publish_workspace_gb_hour_metrics(
+        tenant_id=tid,
+        project_id=pid,
+        product_line=product_line,
+        gb_hours=qty,
+    )
     return await _write_event(
         occurred_at=occurred_at if occurred_at is not None else time.time(),
         tenant_id=tid,

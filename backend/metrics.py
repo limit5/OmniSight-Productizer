@@ -683,6 +683,63 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics.
+    # Cardinality is bucketed via ``backend.metrics_labels.bucket_*``
+    # (tenant ≤ 1000, project ≤ 10000, product_line ≤ 50 per worker;
+    # overflow → "other"; None / "" → "unknown"). Counters mirror the
+    # ``billing_usage_events`` rows that ``backend.billing_usage`` writes
+    # so PromQL ``rate(...)`` queries align with PG ``SUM(...)`` rollups
+    # at the same time-window for cross-checking T4 / T6 dashboards.
+    billing_llm_calls_total = Counter(
+        "omnisight_billing_llm_calls_total",
+        "LLM calls fan-outed to billing, by tenant/project/product_line/provider/model",
+        labelnames=("tenant_id", "project_id", "product_line", "provider", "model"),
+        registry=REGISTRY,
+    )
+    billing_llm_input_tokens_total = Counter(
+        "omnisight_billing_llm_input_tokens_total",
+        "LLM input tokens recorded in billing fan-out",
+        labelnames=("tenant_id", "project_id", "product_line", "provider", "model"),
+        registry=REGISTRY,
+    )
+    billing_llm_output_tokens_total = Counter(
+        "omnisight_billing_llm_output_tokens_total",
+        "LLM output tokens recorded in billing fan-out",
+        labelnames=("tenant_id", "project_id", "product_line", "provider", "model"),
+        registry=REGISTRY,
+    )
+    billing_llm_cost_usd_total = Counter(
+        "omnisight_billing_llm_cost_usd_total",
+        "LLM cost (USD) recorded in billing fan-out",
+        labelnames=("tenant_id", "project_id", "product_line", "provider", "model"),
+        registry=REGISTRY,
+    )
+    billing_workflow_runs_total = Counter(
+        "omnisight_billing_workflow_runs_total",
+        "Workflow runs fan-outed to billing, by tenant/project/product_line/kind/status",
+        labelnames=(
+            "tenant_id", "project_id", "product_line",
+            "workflow_kind", "workflow_status",
+        ),
+        registry=REGISTRY,
+    )
+    billing_workspace_gb_hours_total = Counter(
+        "omnisight_billing_workspace_gb_hours_total",
+        "Workspace GB-hours recorded by GC sweep, by tenant/project/product_line",
+        labelnames=("tenant_id", "project_id", "product_line"),
+        registry=REGISTRY,
+    )
+    # Cap exhaustion gauge — flips when any of the three caps fills up.
+    # Lets operators alert on `omnisight_metrics_label_cap_used > 0.9`
+    # before the next new tenant / project starts collapsing into
+    # ``other`` and silently breaking the per-slice dashboard.
+    metrics_label_cap_used = Gauge(
+        "omnisight_metrics_label_cap_used",
+        "Fraction (0..1) of the per-worker label cap consumed by tracked values",
+        labelnames=("dimension",),  # tenant | project | product_line
+        registry=REGISTRY,
+    )
+
 else:
     # No-op stubs so callers don't have to guard every increment.
     class _NoOp:
@@ -774,6 +831,14 @@ else:
     replica_lag_seconds = _NoOp()  # type: ignore
     readyz_latency_seconds = _NoOp()  # type: ignore
     readyz_migrations_pending = _NoOp()  # type: ignore
+    # Y9 #285 row 4 — billing metrics with (tenant, project, product_line)
+    billing_llm_calls_total = _NoOp()  # type: ignore
+    billing_llm_input_tokens_total = _NoOp()  # type: ignore
+    billing_llm_output_tokens_total = _NoOp()  # type: ignore
+    billing_llm_cost_usd_total = _NoOp()  # type: ignore
+    billing_workflow_runs_total = _NoOp()  # type: ignore
+    billing_workspace_gb_hours_total = _NoOp()  # type: ignore
+    metrics_label_cap_used = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1231,5 +1296,55 @@ def reset_for_tests() -> None:
     readyz_migrations_pending = Gauge(
         "omnisight_readyz_migrations_pending",
         "1 if alembic head on disk > applied revision, 0 if aligned",
+        registry=REGISTRY,
+    )
+    # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics
+    global billing_llm_calls_total, billing_llm_input_tokens_total
+    global billing_llm_output_tokens_total, billing_llm_cost_usd_total
+    global billing_workflow_runs_total, billing_workspace_gb_hours_total
+    global metrics_label_cap_used
+    billing_llm_calls_total = Counter(
+        "omnisight_billing_llm_calls_total",
+        "LLM calls fan-outed to billing, by tenant/project/product_line/provider/model",
+        labelnames=("tenant_id", "project_id", "product_line", "provider", "model"),
+        registry=REGISTRY,
+    )
+    billing_llm_input_tokens_total = Counter(
+        "omnisight_billing_llm_input_tokens_total",
+        "LLM input tokens recorded in billing fan-out",
+        labelnames=("tenant_id", "project_id", "product_line", "provider", "model"),
+        registry=REGISTRY,
+    )
+    billing_llm_output_tokens_total = Counter(
+        "omnisight_billing_llm_output_tokens_total",
+        "LLM output tokens recorded in billing fan-out",
+        labelnames=("tenant_id", "project_id", "product_line", "provider", "model"),
+        registry=REGISTRY,
+    )
+    billing_llm_cost_usd_total = Counter(
+        "omnisight_billing_llm_cost_usd_total",
+        "LLM cost (USD) recorded in billing fan-out",
+        labelnames=("tenant_id", "project_id", "product_line", "provider", "model"),
+        registry=REGISTRY,
+    )
+    billing_workflow_runs_total = Counter(
+        "omnisight_billing_workflow_runs_total",
+        "Workflow runs fan-outed to billing, by tenant/project/product_line/kind/status",
+        labelnames=(
+            "tenant_id", "project_id", "product_line",
+            "workflow_kind", "workflow_status",
+        ),
+        registry=REGISTRY,
+    )
+    billing_workspace_gb_hours_total = Counter(
+        "omnisight_billing_workspace_gb_hours_total",
+        "Workspace GB-hours recorded by GC sweep, by tenant/project/product_line",
+        labelnames=("tenant_id", "project_id", "product_line"),
+        registry=REGISTRY,
+    )
+    metrics_label_cap_used = Gauge(
+        "omnisight_metrics_label_cap_used",
+        "Fraction (0..1) of the per-worker label cap consumed by tracked values",
+        labelnames=("dimension",),
         registry=REGISTRY,
     )

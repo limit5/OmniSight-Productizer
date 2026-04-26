@@ -638,30 +638,40 @@ async def _sweep_quota_evict(
 _WORKSPACE_GB_HOUR_LOCK_KEY = "billing-workspace-gb-hour-sampler"
 
 
-def _list_projects_per_tenant() -> dict[str, list[tuple[str, float]]]:
-    """Walk the workspace tree and return ``{tenant_id: [(project_id,
-    size_bytes), ...]}``.
+def _list_projects_per_tenant() -> dict[str, list[tuple[str, str, float]]]:
+    """Walk the workspace tree and return ``{tenant_id: [(product_line,
+    project_id, size_bytes), ...]}``.
 
     The size is the sum of leaf bytes under each
     ``{root}/{tid}/{product_line}/{project_id}/`` slice (per the row 1
     five-layer layout). Best-effort: per-leaf ``stat()`` errors are
     swallowed and that leaf's bytes are dropped from the sum — the
     billing sample is meant to be approximate, not byte-exact.
+
+    Y9 #285 row 4 — the tuple is now ``(product_line, project_id, size)``
+    instead of ``(project_id, size)`` so the downstream Prometheus
+    metric fan-out can label samples with the originating ``product_line``
+    (one of ``embedded`` / ``web`` / ``mobile`` / ``software`` /
+    ``default`` per ``projects.product_line``). Aggregation is keyed on
+    ``(product_line, project_id)`` so a project that somehow appears
+    under two product_line dirs (legacy migration corner case) is
+    correctly attributed per directory rather than collapsed.
     """
     from backend.workspace import _WORKSPACES_ROOT
-    out: dict[str, list[tuple[str, float]]] = {}
+    out: dict[str, list[tuple[str, str, float]]] = {}
     if not _WORKSPACES_ROOT.is_dir():
         return out
     for tenant_dir in _WORKSPACES_ROOT.iterdir():
         if not tenant_dir.is_dir() or tenant_dir.name.startswith("_"):
             continue
         tid = tenant_dir.name
-        # Per-project size accumulator. Layout:
+        # Per-(product_line, project) size accumulator. Layout:
         # {root}/{tid}/{product_line}/{project_id}/{agent_id}/{hash}/
-        per_project: dict[str, float] = {}
+        per_slice: dict[tuple[str, str], float] = {}
         for product_line_dir in tenant_dir.iterdir():
             if not product_line_dir.is_dir():
                 continue
+            pl = product_line_dir.name
             for project_dir in product_line_dir.iterdir():
                 if not project_dir.is_dir():
                     continue
@@ -676,9 +686,12 @@ def _list_projects_per_tenant() -> dict[str, list[tuple[str, float]]]:
                             continue
                 except OSError:
                     pass
-                per_project[pid] = per_project.get(pid, 0.0) + size
-        if per_project:
-            out[tid] = sorted(per_project.items())
+                key = (pl, pid)
+                per_slice[key] = per_slice.get(key, 0.0) + size
+        if per_slice:
+            out[tid] = sorted(
+                ((pl, pid, sz) for (pl, pid), sz in per_slice.items()),
+            )
     return out
 
 
@@ -732,7 +745,7 @@ async def _emit_workspace_gb_hour_samples(
                 # block lock release on the long-held conn we hold here.
                 from backend import billing_usage as _billing
                 for tid, projects in per_tenant.items():
-                    for pid, size_bytes in projects:
+                    for product_line, pid, size_bytes in projects:
                         gb = float(size_bytes) / (1024.0 ** 3)
                         gb_hours = round(gb * hours, 6)
                         if gb_hours <= 0.0:
@@ -741,9 +754,11 @@ async def _emit_workspace_gb_hour_samples(
                             gb_hours=gb_hours,
                             tenant_id=tid,
                             project_id=pid,
+                            product_line=product_line,
                             metadata={
                                 "sample_window_s": float(sample_window_s),
                                 "size_bytes": float(size_bytes),
+                                "product_line": product_line,
                             },
                         )
     except Exception as exc:

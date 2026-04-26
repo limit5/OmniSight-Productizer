@@ -360,11 +360,20 @@ async def finish(run_id: str, status: RunStatus = "completed",
     try:
         from backend import billing_usage as _billing
         from backend.db_pool import get_pool as _get_pool
+        # Y9 #285 row 4 — LEFT JOIN ``projects`` so the billing fan-out
+        # carries ``product_line`` (column lives on projects, not
+        # workflow_runs). NULL ``project_id`` (legacy pre-Y1 rows) +
+        # missing project row both yield ``product_line = None`` which
+        # buckets to ``"unknown"`` in the Prometheus label without
+        # crashing the JOIN — LEFT JOIN keeps the workflow_run row even
+        # when the project is unknown / archived.
         async with _get_pool().acquire() as _conn:
             row = await _conn.fetchrow(
-                "SELECT kind, started_at, completed_at, "
-                "tenant_id, project_id "
-                "FROM workflow_runs WHERE id = $1",
+                "SELECT wr.kind, wr.started_at, wr.completed_at, "
+                "wr.tenant_id, wr.project_id, p.product_line "
+                "FROM workflow_runs wr "
+                "LEFT JOIN projects p ON p.id = wr.project_id "
+                "WHERE wr.id = $1",
                 run_id,
             )
         if row is not None:
@@ -383,6 +392,7 @@ async def finish(run_id: str, status: RunStatus = "completed",
                 duration_ms=duration_ms,
                 tenant_id=row["tenant_id"],
                 project_id=row["project_id"],
+                product_line=row["product_line"],
             )
     except Exception as exc:
         logger.warning(
