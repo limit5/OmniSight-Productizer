@@ -46,6 +46,7 @@ import {
   Rss,
 } from "lucide-react"
 
+import { CatalogTab } from "@/components/omnisight/catalog-tab"
 import {
   PLATFORM_COUNTERS_ZERO,
   PlatformHero,
@@ -222,17 +223,29 @@ function PlatformsPageInner() {
           data-testid={`platforms-panel-${tab}`}
           className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-6"
         >
-          <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+          <div className="mb-3 flex items-center gap-2 text-sm font-medium">
             <PanelIcon size={14} />
             {panelMeta.label}
           </div>
-          <p className="text-xs text-[var(--muted-foreground)]">
-            {panelMeta.description}
-          </p>
-          <p className="mt-3 font-mono text-[10px] text-[var(--muted-foreground)]">
-            （內容由後續 BS.5 / BS.6 / BS.7 row 進駐；本 row 僅 ship route shell
-            + tab routing。）
-          </p>
+          {tab === "catalog" ? (
+            // BS.6.1 — catalog toolbar shell. Entries default to empty
+            // until BS.6.5's `useCatalog()` hook lands; the toolbar
+            // (filter / search / sort / density) renders unconditionally
+            // so operators see the surface they'll be using once the
+            // data hook plumbs real entries through. BS.6.2 swaps the
+            // placeholder card for the polished 5-state `<CatalogCard />`.
+            <CatalogTab />
+          ) : (
+            <>
+              <p className="text-xs text-[var(--muted-foreground)]">
+                {panelMeta.description}
+              </p>
+              <p className="mt-3 font-mono text-[10px] text-[var(--muted-foreground)]">
+                （內容由後續 BS.6 / BS.7 row 進駐；本 row 僅 ship route shell
+                + tab routing。）
+              </p>
+            </>
+          )}
         </section>
       </div>
     </main>
