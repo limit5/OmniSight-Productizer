@@ -1224,6 +1224,8 @@ from backend.routers import tenant_members as _tenant_members_router  # Y3 (#279
 app.include_router(_tenant_members_router.router, prefix=settings.api_prefix)
 from backend.routers import tenant_projects as _tenant_projects_router  # Y4 (#280) row 1 + row 2 + row 3 + row 4 + row 5 + row 6 — project create / list / patch / archive+restore / member POST+PATCH+DELETE / cross-tenant share POST
 app.include_router(_tenant_projects_router.router, prefix=settings.api_prefix)
+from backend.routers import catalog as _catalog_router  # BS.2.1 — catalog entries + sources CRUD
+app.include_router(_catalog_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import
