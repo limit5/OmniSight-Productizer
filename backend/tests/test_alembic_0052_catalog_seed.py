@@ -20,11 +20,10 @@ Locks the load-bearing properties of the BS.1.2 first-batch seed:
     shipped row to ``hidden=true``, or wrote a ``source='operator'``
     sibling) are preserved.
 
-5.  **Yaml mirror sanity** — the union of ids in ``configs/
-    embedded_catalog/*.yaml`` matches the alembic seed exactly.  This
-    is a fast cross-check; the full BS.1.5 ``test_yaml_seed_matches_
-    alembic_seed`` will go deeper (per-field equality) when that row
-    lands.
+5.  **Yaml mirror sanity** — moved out to
+    ``backend/tests/test_catalog_schema.py`` (BS.1.5).  See the
+    docstring there: the drift guard runs schema validation +
+    per-field equality between yaml and alembic seed.
 
 Pre-existing chain issue
 ────────────────────────
@@ -46,18 +45,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = BACKEND_ROOT.parent
 MIGRATION_0051 = (
     BACKEND_ROOT / "alembic" / "versions" / "0051_catalog_tables.py"
 )
 MIGRATION_0052 = (
     BACKEND_ROOT / "alembic" / "versions" / "0052_catalog_seed.py"
 )
-EMBEDDED_CATALOG = PROJECT_ROOT / "configs" / "embedded_catalog"
 
 
 def _load_module(path: Path, name: str):
@@ -378,52 +374,13 @@ class TestDowngradeRemovesShippedSeed:
 
 
 # ─── Group 5: yaml mirror sanity ──────────────────────────────────────────
-
-
-class TestYamlMirrorMatchesSeed:
-    def _yaml_ids(self) -> set[str]:
-        ids: set[str] = set()
-        for path in sorted(EMBEDDED_CATALOG.glob("*.yaml")):
-            doc = yaml.safe_load(path.read_text())
-            if not isinstance(doc, dict):
-                continue
-            for entry in doc.get("entries", []) or []:
-                ids.add(entry["id"])
-        return ids
-
-    def test_yaml_id_set_equals_alembic_id_set(self, m0052) -> None:
-        yaml_ids = self._yaml_ids()
-        seed_ids = {e["id"] for e in m0052.SEED_ENTRIES}
-        only_yaml = yaml_ids - seed_ids
-        only_alembic = seed_ids - yaml_ids
-        assert not only_yaml, f"yaml only: {only_yaml}"
-        assert not only_alembic, f"alembic only: {only_alembic}"
-
-    def test_yaml_family_files_match_split(self) -> None:
-        # six family files, names matching the family enum.
-        files = sorted(p.name for p in EMBEDDED_CATALOG.glob("*.yaml"))
-        assert files == [
-            "cross-toolchain.yaml",
-            "embedded.yaml",
-            "mobile.yaml",
-            "rtos.yaml",
-            "software.yaml",
-            "web.yaml",
-        ]
-
-    def test_yaml_per_family_count(self) -> None:
-        expected = {
-            "mobile.yaml": 6,
-            "embedded.yaml": 8,
-            "web.yaml": 4,
-            "software.yaml": 5,
-            "rtos.yaml": 3,
-            "cross-toolchain.yaml": 4,
-        }
-        for name, want in expected.items():
-            doc = yaml.safe_load((EMBEDDED_CATALOG / name).read_text())
-            got = len(doc.get("entries", []) or [])
-            assert got == want, f"{name}: expected {want}, got {got}"
+# Moved to backend/tests/test_catalog_schema.py (BS.1.5).  The drift guard
+# there does per-field equality between every yaml entry and every
+# alembic 0052 _SEED_ENTRIES row, plus schema-validation against
+# configs/embedded_catalog/_schema.yaml — superset of what this group
+# previously asserted.  Tests deleted (not skipped) because keeping
+# them here would require duplicated _schema.yaml-exclusion logic and
+# would mask drift if BS.1.5 contracts loosen.
 
 
 # ─── Group 6: PG dialect branch executes ──────────────────────────────────
