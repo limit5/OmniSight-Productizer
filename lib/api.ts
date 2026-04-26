@@ -407,6 +407,10 @@ const _sseErrorListeners = new Set<ErrorListener>()
 
 let _currentSessionId: string | null = null
 let _currentTenantId: string | null = null
+// Y5 (#281) row 4 — current project id, paired with X-Project-Id
+// header on every request when set. Validated server-side by
+// backend.main._project_header_gate (mirror of I7 _tenant_header_gate).
+let _currentProjectId: string | null = null
 let _currentWorkspaceType: WorkspaceType | null = null
 let _sseFilterMode: SSEFilterMode = "this_session"
 const _filterModeListeners = new Set<(mode: SSEFilterMode) => void>()
@@ -422,6 +426,12 @@ export function setCurrentTenantId(tid: string | null): void {
 }
 export function getCurrentTenantId(): string | null {
   return _currentTenantId
+}
+export function setCurrentProjectId(pid: string | null): void {
+  _currentProjectId = pid
+}
+export function getCurrentProjectId(): string | null {
+  return _currentProjectId
 }
 export function setCurrentWorkspaceType(type: WorkspaceType | null): void {
   _currentWorkspaceType = type
@@ -832,6 +842,14 @@ async function request<T>(
       }
       if (_currentTenantId) {
         baseHeaders["X-Tenant-Id"] = _currentTenantId
+      }
+      // Y5 (#281) row 4 — paired with X-Tenant-Id for project-scoped
+      // requests. Backend ``_project_header_gate`` double-verifies the
+      // caller has membership; the SQLAlchemy listener (Y5 row 3) then
+      // injects ``WHERE project_id = :p OR project_id IS NULL`` on
+      // every SELECT.
+      if (_currentProjectId) {
+        baseHeaders["X-Project-Id"] = _currentProjectId
       }
       if (typeof document !== "undefined"
           && !["GET", "HEAD", "OPTIONS"].includes(methodUpper)) {

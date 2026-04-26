@@ -661,6 +661,181 @@ async def _tenant_header_gate(request, call_next):
     return await call_next(request)
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y5 (#281) row 4 — Project-header double-verification gate
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Mirrors I7's _tenant_header_gate but for the X-Project-Id header.
+# When the frontend api client (lib/api.ts) emits X-Project-Id
+# alongside X-Tenant-Id, this middleware validates the caller has
+# membership in that project — same resolution chain as
+# require_project_member (super_admin → project_members row →
+# tenant_membership active owner/admin → 403). On success the
+# request-scoped (tenant_id, project_id, user_role) ContextVars are
+# pinned so the Y5 row 3 SQLAlchemy listener auto-injects
+# WHERE tenant_id=:t AND (project_id=:p OR project_id IS NULL).
+#
+# Why a middleware AND a dependency:
+#   * Middleware = early gate that blocks header-driven cross-project
+#     probes BEFORE the route handler runs. Defence-in-depth: even if
+#     a route forgets to declare Depends(require_project_member), an
+#     attacker cannot use X-Project-Id to point a generic handler at
+#     someone else's project rows because the listener filter is
+#     pinned by this middleware.
+#   * Dependency = authoritative gate when the URL itself declares
+#     {project_id} (e.g. /projects/{pid}/runs). Re-resolves and
+#     re-pins ContextVars so handler code can trust them.
+#
+# Pass-through cases (NOT 403 — let the route handler / current_user
+# dep decide):
+#   * No X-Project-Id header → no project context to validate.
+#   * auth_mode == "open" → dev mode, header is honoured at face value
+#     (matches I7 tenant gate behaviour).
+#   * No session cookie / invalid session / unknown user → request is
+#     anonymous; auth-required routes will 401 via Depends(current_user)
+#     anyway, public routes (login, healthz) should not be blocked.
+#
+# 403 / 404 cases (the gate has decided):
+#   * 400 if X-Project-Id is malformed (regex check).
+#   * 404 if the project does not exist.
+#   * 403 if X-Tenant-Id is also present and points at a different
+#     tenant than the project belongs to (defence in depth — listener
+#     would otherwise rewrite WHERE tenant_id=$X but the project
+#     actually lives in tenant Y).
+#   * 403 if the user has no project_members row AND no active
+#     tenant_membership with role ∈ {owner, admin} (the alembic 0034
+#     default-resolution rule mirrored from require_project_member).
+
+# Compile once at module level — middleware runs on every request,
+# so re-compiling the regex per-call is wasteful. Imported lazily to
+# avoid a circular import (backend.main → routers → tenant_projects
+# → backend.main during startup).
+import re as _re_for_project_gate  # noqa: E402
+
+_PROJECT_ID_HEADER_PATTERN = _re_for_project_gate.compile(
+    r"^p-[a-z0-9][a-z0-9-]{2,63}$"
+)
+
+
+@app.middleware("http")
+async def _project_header_gate(request, call_next):
+    """Y5 row 4: validate X-Project-Id header against caller membership.
+
+    See module-level rationale above for the full state machine.
+    """
+    header_pid = request.headers.get("x-project-id")
+    if not header_pid:
+        return await call_next(request)
+
+    from starlette.responses import JSONResponse as StarletteJSON
+
+    if not _PROJECT_ID_HEADER_PATTERN.match(header_pid):
+        return StarletteJSON(
+            status_code=400,
+            content={"detail": "X-Project-Id is malformed"},
+        )
+
+    from backend import auth as _auth
+    from backend import db_context
+
+    # Open mode: dev convenience — pin the contextvar at face value
+    # (matches I7 tenant-gate behaviour for OMNISIGHT_AUTH_MODE=open).
+    if _auth.auth_mode() == "open":
+        db_context.set_project_id(header_pid)
+        return await call_next(request)
+
+    cookie = request.cookies.get(_auth.SESSION_COOKIE) or ""
+    if not cookie:
+        return await call_next(request)
+    sess = await _auth.get_session(cookie)
+    if not sess:
+        return await call_next(request)
+    user = await _auth.get_user(sess.user_id)
+    if not user:
+        return await call_next(request)
+
+    # Resolve the project's tenant from DB. If the pool isn't ready
+    # (smoke test / dependency-light boot) treat as pass-through so
+    # we don't 500 a request the rest of the stack would have served.
+    from backend.db_pool import get_pool
+    try:
+        pool = get_pool()
+    except RuntimeError:
+        return await call_next(request)
+
+    async with pool.acquire() as conn:
+        project_row = await conn.fetchrow(
+            _auth._FETCH_PROJECT_BY_ID_FOR_AUTHZ_SQL,
+            header_pid,
+        )
+    if project_row is None:
+        return StarletteJSON(
+            status_code=404,
+            content={"detail": f"Project {header_pid} not found"},
+        )
+    resolved_tenant_id = project_row["tenant_id"]
+
+    # Defence in depth: if X-Tenant-Id is also present, it MUST agree
+    # with the project's tenant. Otherwise the listener would pin the
+    # tenant filter to the wrong value and silently mask rows.
+    header_tid = request.headers.get("x-tenant-id")
+    if header_tid and header_tid != resolved_tenant_id:
+        return StarletteJSON(
+            status_code=403,
+            content={
+                "detail": (
+                    f"X-Project-Id {header_pid} belongs to a different "
+                    f"tenant than X-Tenant-Id {header_tid}"
+                ),
+            },
+        )
+
+    # super_admin short-circuit — pin role="super_admin" so the Y5
+    # row 3 listener can recognise the bypass when paired with the
+    # X-Admin-Cross-Project header. No DB membership lookup needed.
+    if _auth.role_at_least(user.role, "super_admin"):
+        db_context.set_tenant_id(resolved_tenant_id)
+        db_context.set_project_id(header_pid)
+        db_context.set_user_role("super_admin")
+        return await call_next(request)
+
+    # Resolution chain (cheap → expensive), mirror of
+    # require_project_member: project_members direct → active
+    # tenant_membership owner/admin → 403.
+    async with pool.acquire() as conn:
+        pm_row = await conn.fetchrow(
+            _auth._FETCH_PROJECT_MEMBER_FOR_AUTHZ_SQL,
+            user.id, header_pid,
+        )
+
+    effective_role = None
+    if pm_row is not None:
+        effective_role = pm_row["role"]
+    else:
+        async with pool.acquire() as conn:
+            tm_row = await conn.fetchrow(
+                _auth._FETCH_TENANT_MEMBERSHIP_FOR_AUTHZ_SQL,
+                user.id, resolved_tenant_id,
+            )
+        if tm_row is not None and tm_row["status"] == "active":
+            effective_role = _auth._TENANT_ROLE_DEFAULT_PROJECT_ROLE.get(
+                tm_row["role"]
+            )
+
+    if effective_role is None:
+        return StarletteJSON(
+            status_code=403,
+            content={
+                "detail": f"Project {header_pid} not accessible",
+            },
+        )
+
+    db_context.set_tenant_id(resolved_tenant_id)
+    db_context.set_project_id(header_pid)
+    db_context.set_user_role(effective_role)
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def _must_change_password_gate(request, call_next):
     from starlette.responses import JSONResponse as StarletteJSON
