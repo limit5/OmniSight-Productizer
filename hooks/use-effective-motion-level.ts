@@ -81,8 +81,11 @@ import {
  * R25.1 mitigation — without it the hook only ever reads the
  * first value and goes stale when the user flips the OS toggle
  * mid-session.
+ *
+ * Exported so the BS.3.6 Display Settings page can render the OS
+ * flag as a read-only indicator next to the user's preference.
  */
-function usePrefersReducedMotion(): boolean {
+export function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState<boolean>(false)
 
   useEffect(() => {
