@@ -513,6 +513,165 @@ services:
     cap_add:
       - NET_BIND_SERVICE   # quic client may bind low source ports
 
+  # ──────────────────────────────────────────────────────────────────
+  # BS.4.6 — omnisight-installer sidecar (epic 6/7).
+  #
+  # Long-poll worker that owns the `install_method ∈ {noop, docker_pull,
+  # shell_script, vendor_installer}` execution surface (BS.4.3) on
+  # behalf of backend-a. Isolates "install storms" — a 5 GB `docker
+  # pull` or a runaway vendor `bash install.sh` cannot starve the
+  # backend's request loop because all of it runs inside this
+  # container with strict cgroup limits (§4.7) and a cap-stripped
+  # security profile (§4.4).
+  #
+  # Contract sources (do NOT drift without a paired update):
+  #   - docs/security/bs-installer-threat-model.md §4 (every hardening
+  #     knob below maps to a §4.x section + a row in §11's CI table)
+  #   - docs/design/bs-bootstrap-vertical-aware.md §4 (sidecar ADR)
+  #   - installer/main.py docstring (env-var contract)
+  #
+  # Image tag pinning rationale (BS.0.3 R26 + BS.4.6 row spec):
+  #   ``:bs-v1`` is HARD-PINNED here, NOT ``${OMNISIGHT_IMAGE_TAG}``
+  #   like backend / frontend. The wire-protocol version (sidecar ↔
+  #   backend's /installer/jobs/poll handshake, ADR §4.3) is bumped
+  #   only via a deliberate ``omnisight-installer:bs-vN`` re-tag —
+  #   coupling sidecar deployment to the global image tag would let a
+  #   release that bumps backend-only quietly drag the sidecar to a
+  #   protocol revision the operator hasn't validated. Operator opts
+  #   in to v2 by hand-editing ``bs-v1`` → ``bs-v2`` here; until then,
+  #   ``docker compose pull`` only re-resolves the bs-v1 digest within
+  #   the v1 protocol family.
+  #
+  # depends_on backend-a (NOT both replicas): the sidecar long-polls
+  #   ONE backend; ``FOR UPDATE SKIP LOCKED`` in
+  #   ``backend/routers/installer.py::poll_for_job`` makes the choice
+  #   irrelevant to correctness, and depending on backend-a alone
+  #   keeps the wait-for-healthy gate single-source. Backend-b can be
+  #   restarting (rolling deploy) without bouncing the sidecar.
+  #
+  # restart unless-stopped (NOT always): operator-initiated stop
+  #   (``docker compose stop omnisight-installer`` during catalog
+  #   freeze / maintenance) MUST persist across daemon restarts;
+  #   ``always`` would silently re-up the sidecar at the next host
+  #   reboot. ``unless-stopped`` honours operator intent.
+  #
+  # Bind-mount host-prep (one-time, REQUIRED before first ``up``):
+  #   sudo install -d -o 10001 -g 10001 -m 0755 /var/lib/omnisight/toolchains
+  #   sudo install -d -o 10001 -g 10001 -m 0755 /var/lib/omnisight/airgap
+  #   Compose auto-creates missing bind-mount sources as ROOT-owned;
+  #   the sidecar (USER 10001) cannot then write toolchains/ → every
+  #   install fails EACCES on its first scratch dir create. Pre-chown
+  #   is the documented contract (threat model §4.3).
+  #
+  # docker-socket-proxy reuse (defense-in-depth follow-up TODO):
+  #   sidecar talks to the EXISTING ``docker-socket-proxy`` service
+  #   above (CONTAINERS=1 + IMAGES=1 + EXEC=1 + POST=1 ACL — broader
+  #   than the threat model §4.6 ideal of IMAGES=1 + INFO=1 only).
+  #   Acceptable because no installer method exercises CONTAINERS /
+  #   EXEC verbs (only POST /images/create + GET /images/json), and
+  #   adding a second proxy is its own multi-line refactor with
+  #   coordinated ACL drift-guard. Tracked: future row to fork a
+  #   dedicated ``installer-docker-socket-proxy`` with the §4.6 ACL.
+  # ──────────────────────────────────────────────────────────────────
+  omnisight-installer:
+    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-installer:bs-v1
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: Dockerfile.installer
+    # No host port published — health endpoint is for compose-internal
+    # ``HEALTHCHECK`` + future watchdog only (BS.4.5 emits :9090/health).
+    # Exposing it would let an attacker who reaches the host network
+    # query install state without tenant scoping.
+    expose:
+      - "9090"
+    environment:
+      # See installer/main.py docstring for the full env contract.
+      - OMNISIGHT_INSTALLER_BACKEND_URL=http://backend-a:8000
+      - OMNISIGHT_INSTALLER_PROTOCOL_VERSION=1
+      - OMNISIGHT_INSTALLER_POLL_TIMEOUT_S=30
+      - OMNISIGHT_INSTALLER_AIRGAP=0
+      - OMNISIGHT_INSTALLER_HEALTH_HOST=0.0.0.0
+      - OMNISIGHT_INSTALLER_HEALTH_PORT=9090
+      # Threat model §4.6: docker_pull goes through the proxy, never
+      # /var/run/docker.sock (NOT bind-mounted on this service).
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      # Bearer token reuse path (BS-future ships per-sidecar token).
+      # OMNISIGHT_INSTALLER_TOKEN comes from .env (mirrors
+      # OMNISIGHT_DECISION_BEARER for the legacy bearer fallback in
+      # backend/auth.py::_legacy_bearer_matches).
+    env_file:
+      - .env
+    volumes:
+      # Threat model §4.5 — ONLY two bind-mounts allowed.
+      # Toolchains: rw — install methods write here (atomic rename
+      # from <root>/.scratch-<entry>-<job>/payload → <root>/<entry>/).
+      - /var/lib/omnisight/toolchains:/var/lib/omnisight/toolchains:rw
+      # Air-gap bundle store: ro — operator pre-stages tarballs here
+      # in air-gap mode; sidecar reads file:// URLs from this tree.
+      - /var/lib/omnisight/airgap:/var/lib/omnisight/airgap:ro
+    depends_on:
+      backend-a:
+        condition: service_healthy
+      docker-socket-proxy:
+        condition: service_healthy
+    restart: unless-stopped
+    # Threat model §4.2 — read-only rootfs + sized tmpfs.
+    # ``/tmp`` is noexec/nosuid/nodev: vendor installers that try to
+    # self-extract a binary into /tmp and exec it are blocked by
+    # design — install methods (BS.4.3) explicitly cwd into the
+    # toolchains scratch dir (NOT noexec) so legitimate
+    # ``./install.sh`` paths still work.
+    read_only: true
+    tmpfs:
+      - /tmp:size=512M,mode=1777,noexec,nosuid,nodev
+      - /run:size=64M,mode=755,noexec,nosuid,nodev
+    # Threat model §4.4 — full cap drop, explicit empty cap_add.
+    # ``cap_add: []`` is intentional (NOT omitted): the drift-guard
+    # test asserts both ``cap_drop: [ALL]`` AND an explicit empty
+    # ``cap_add`` so "forgot to write cap_drop" and "deliberately no
+    # extra caps" are distinguishable in code review.
+    cap_drop:
+      - ALL
+    cap_add: []
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=unconfined  # docker-default seccomp + apparmor are
+                            # implicit when no explicit profile is
+                            # named; explicit ``seccomp=default`` is
+                            # not a valid value (engine wants either
+                            # a path or ``unconfined``). The default
+                            # profile applies here because we omit
+                            # any per-syscall override; the line is
+                            # documentation-only that we considered.
+    # Threat model §4.7 — cgroup limits.
+    # NOTE: ``mem_limit / cpus / pids_limit`` are the compose-v3
+    # top-level keys honoured by ``docker compose up`` (the
+    # ``deploy.resources`` block under v3 is swarm-only). Effects:
+    #   memory ceiling 2G  → OOM-kill before host memory pressure
+    #   CPUs cap   2.0     → ``make -j$(nproc)`` is bounded
+    #   pids       512     → fork-bomb hits EAGAIN at 512
+    mem_limit: 2g
+    mem_reservation: 256m
+    cpus: 2.0
+    pids_limit: 512
+    # Threat model §4.7 — rootfs+tmpfs disk ceiling. ``storage_opt``
+    # is daemon-storage-driver-dependent: overlay2 (the default on
+    # most prod hosts) silently ignores ``size``; devicemapper /
+    # btrfs honour it. Listed unconditionally so audit + future
+    # storage-driver migrations get the cap for free.
+    storage_opt:
+      size: "10G"
+    healthcheck:
+      # BS.4.5 ``installer/health.py`` returns 200 when
+      # heartbeat_age_s ≤ stale_threshold_s, 503 otherwise — paired
+      # with restart:unless-stopped this auto-recovers a stuck loop.
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
   # Phase 52 — Observability sidecars. Enable with `--profile observability`.
   prometheus:
     image: prom/prometheus:v2.54.1
