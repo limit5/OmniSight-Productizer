@@ -239,11 +239,22 @@ function PlatformsPageInner() {
             // so any entries that flow through (BS.6.5 hook, future
             // demo / dev seed) immediately get the polished treatment.
             <CatalogTab
-              renderCard={({ entry, density, cardPaddingClass, onSelect }) => (
+              renderCard={({
+                entry,
+                density,
+                cardPaddingClass,
+                floatVariantIndex,
+                onSelect,
+              }) => (
                 <CatalogCard
                   entry={entry}
                   density={density}
                   cardPaddingClass={cardPaddingClass}
+                  // BS.6.6 — stable per-position float variant cycling
+                  // (a/b/c/d) so adjacent cards land on different idle-
+                  // drift keyframe phases without the catalog growing a
+                  // shared counter.
+                  floatVariantIndex={floatVariantIndex}
                   // BS.6.3 — propagate the tab's selection callback so
                   // a card click flips `<CatalogTab />`'s selection
                   // state and the detail panel slides in. Without

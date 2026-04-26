@@ -104,7 +104,10 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual"
 
 import { CategoryStrip } from "@/components/omnisight/category-strip"
-import { useEffectiveMotionLevel } from "@/hooks/use-zero-g"
+import {
+  useEffectiveMotionLevel,
+  useScrollParallax,
+} from "@/hooks/use-zero-g"
 import { useUserStorage } from "@/lib/storage"
 
 // ─────────────────────────────────────────────────────────────────────
@@ -440,6 +443,14 @@ export interface CatalogTabRenderContext {
    *  the placeholder card and by BS.6.2's `<CatalogCard />` so density
    *  affects every card variant uniformly. */
   cardPaddingClass: string
+  /** BS.6.6 — stable index passed to `<CatalogCard />` so its idle-drift
+   *  Layer-1 `useFloatingCard` variant (a/b/c/d) cycles deterministically
+   *  with the visible card position. The catalog tab assigns this from
+   *  the visible entries' index in both the static and virtualized
+   *  paths so adjacent cards always land on different keyframe phases.
+   *  Card-level fallback (entry-id hash) still applies if a custom
+   *  renderCard ignores this field. */
+  floatVariantIndex: number
   /** Card click handler — present when BS.6.3's detail panel is wired
    *  via `renderDetail`, omitted otherwise. The page wrapper plumbs
    *  this into `<CatalogCard onSelect={...} />` so clicking a card
@@ -511,6 +522,20 @@ export function CatalogTab({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const motionLevel = useEffectiveMotionLevel()
   const reducedMotion = motionLevel === "off" || motionLevel === "subtle"
+  // BS.6.6 — group-breathe (Layer 5) is normal+ only per BS.3.6
+  // LAYER_AVAILABILITY. Gating in JS rather than CSS keeps the
+  // animation off the GPU layer at subtle / off levels (no `transform`
+  // property change → no compositor work).
+  const groupBreatheEnabled =
+    motionLevel === "normal" || motionLevel === "dramatic"
+  // BS.6.6 — scroll parallax (Layer 2) drives the whole catalog-tab
+  // section to drift as the page scrolls. Speed kept low so the tab
+  // stays anchored while still reading as motion. Hook self-disables
+  // at level === "off". Note: the inner grid scroll container has its
+  // own `overflow-auto` so virtualizer's translateY (driven by the
+  // container scroll, not window scroll) is independent of this layer.
+  const { ref: parallaxRef, style: parallaxStyle } =
+    useScrollParallax<HTMLDivElement>({ speed: 0.05, maxOffsetPx: 20 })
 
   const detailEnabled = Boolean(renderDetail)
   const handleSelectEntry = useCallback(
@@ -643,6 +668,7 @@ export function CatalogTab({
 
   return (
     <div
+      ref={parallaxRef}
       data-testid="catalog-tab"
       data-catalog-density={density}
       data-catalog-family={familyFilter}
@@ -652,6 +678,9 @@ export function CatalogTab({
       data-catalog-detail-open={detailOpen ? "true" : "false"}
       data-catalog-selected-id={selectedEntry?.id ?? ""}
       data-catalog-motion-level={motionLevel}
+      data-motion-parallax={parallaxStyle.transform ? "on" : "off"}
+      data-motion-group-breathe={groupBreatheEnabled ? "on" : "off"}
+      style={parallaxStyle}
       className={["flex flex-col gap-4", className ?? ""]
         .filter(Boolean)
         .join(" ")}
@@ -822,6 +851,11 @@ export function CatalogTab({
         // height matches the total measured size so the scrollbar
         // tracks the full list. Cards are sliced into the row inline so
         // `<CatalogCard />` motion / hover behaviour is unchanged.
+        // BS.6.6 — `.group-breathe` (Layer 5) is applied to the inner
+        // spacer rather than the outer scroll container so the breath
+        // happens inside the scroll viewport (no scrollbar jitter from
+        // a scaling overflow:auto wrapper). Gated to normal+ levels via
+        // `groupBreatheEnabled`.
         <div
           ref={scrollContainerRef}
           data-testid="catalog-tab-grid"
@@ -831,6 +865,7 @@ export function CatalogTab({
           data-grid-row-count={virtualRowCount}
           data-grid-rendered-rows={virtualRows.length}
           data-grid-overscan={CATALOG_VIRTUALIZATION_OVERSCAN}
+          data-grid-group-breathe={groupBreatheEnabled ? "on" : "off"}
           className={[
             "max-h-[70vh] overflow-auto",
             gridAnimClass,
@@ -843,6 +878,7 @@ export function CatalogTab({
               position: "relative",
               width: "100%",
             }}
+            className={groupBreatheEnabled ? "group-breathe" : undefined}
           >
             {virtualRows.map((virtualRow) => {
               const rowStart = virtualRow.index * Math.max(1, columnCount)
@@ -866,7 +902,7 @@ export function CatalogTab({
                   }}
                   className={["grid", gridClass].join(" ")}
                 >
-                  {slice.map((entry) => (
+                  {slice.map((entry, columnIndex) => (
                     <div
                       key={entry.id}
                       data-testid={`catalog-tab-card-slot-${entry.id}`}
@@ -877,6 +913,7 @@ export function CatalogTab({
                         entry,
                         density,
                         cardPaddingClass,
+                        floatVariantIndex: rowStart + columnIndex,
                         onSelect: detailEnabled
                           ? () => handleSelectEntry(entry)
                           : undefined,
@@ -889,14 +926,27 @@ export function CatalogTab({
           </div>
         </div>
       ) : (
+        // BS.6.6 — static grid path also carries `.group-breathe` (Layer
+        // 5) when motion level is normal+. Because there is no inner
+        // spacer here, we apply the class directly to the grid root —
+        // safe because the static path's grid has no virtualizer
+        // translateY transform competing for the `transform` property.
         <div
           data-testid="catalog-tab-grid"
           data-grid-density={density}
           data-grid-virtualized="false"
           data-grid-column-count={columnCount}
-          className={["grid", gridClass, gridAnimClass].join(" ")}
+          data-grid-group-breathe={groupBreatheEnabled ? "on" : "off"}
+          className={[
+            "grid",
+            gridClass,
+            gridAnimClass,
+            groupBreatheEnabled ? "group-breathe" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
         >
-          {visible.map((entry) => (
+          {visible.map((entry, index) => (
             <div
               key={entry.id}
               data-testid={`catalog-tab-card-slot-${entry.id}`}
@@ -907,6 +957,7 @@ export function CatalogTab({
                 entry,
                 density,
                 cardPaddingClass,
+                floatVariantIndex: index,
                 onSelect: detailEnabled
                   ? () => handleSelectEntry(entry)
                   : undefined,

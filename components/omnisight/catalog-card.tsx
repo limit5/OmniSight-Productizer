@@ -2,6 +2,20 @@
 
 /**
  * BS.6.2 — Catalog card, 5 install-state visuals.
+ * BS.6.6 — extended with the BS.3 zero-gravity motion library. The
+ *          existing visual root is wrapped by four motion layers
+ *          (outer-to-inner: cursor magnetic tilt → idle floating drift
+ *          → glass reflection → cursor-distance glow), a Layer-3
+ *          orbital-rotate decoration on the `available` state Sparkles
+ *          icon (dramatic only), and Layer-8 spring-press feedback on
+ *          every footer call-to-action button. Each layer self-gates
+ *          via `useEffectiveMotionLevel()` so reduced-motion / battery-
+ *          critical / `motion: off` users see no listeners attached
+ *          and no GPU layer cost. Hook order is stable across all five
+ *          install states because the motion hooks live on the outer
+ *          shell — the per-state visual variant (installing's conic
+ *          gradient wrapper vs the plain card root) lives inside the
+ *          motion layers and does not perturb the ref/listener graph.
  *
  * The polished card body that the catalog tab renders for each
  * `CatalogEntry`. Replaces BS.6.1's `<CatalogCardPlaceholder />` so
@@ -41,31 +55,35 @@
  *
  * Out of scope for this row (deferred to later BS.6.x):
  *   • BS.6.3 — detail panel slide-out (this row only fires `onSelect`).
- *   • BS.6.6 — BS.3 8-layer motion (this row keeps motion to per-state
- *     CSS animations only: `.pulse-purple`, `.force-turbo-armed`,
- *     `.ring-spin`, `.force-turbo-hazard-overlay`. The card root is a
- *     `relative` block so BS.6.6 can wrap with the motion hooks
- *     without restructuring the DOM.)
  *   • BS.6.7 — wires real `onInstall` / disabled-state tooltip text.
  *
  * Module-global state audit
  * ─────────────────────────
  * No module-level mutable state. All visuals derive from props +
- * immutable look-up tables (`STATE_PALETTE`, `STATE_ICON`, `STATE_LABEL`,
- * `STATE_PULSE`, `STATE_BORDER`, `STATE_FOOTER_LABEL`). Pure render
- * function, no `useState` / `useEffect` / `useRef` — this row stays
- * stateless on purpose so BS.6.6 can wrap motion hooks externally
- * without hook-order surprises. SSR-safe (deterministic, no
- * `Math.random` / `Date.now`). Browser-only render — uvicorn
- * `--workers N` model does not apply (answer #1: each browser tab
- * derives the same view from the same Next.js build artifact).
+ * immutable look-up tables (`STATE_PALETTE`, `STATE_ICON`, `FAMILY_LABEL`,
+ * `FAMILY_ACCENT`). The motion hooks added by BS.6.6
+ * (`useCursorMagneticTilt` / `useFloatingCard` / `useGlassReflection` /
+ * `useCursorDistanceGlow` / `useSpringPress`) are per-component-instance:
+ * each owns its own `ref` + `useEffect` cleanup, so unmounting a card
+ * (virtualizer scrolls it out, density toggle remounts the grid)
+ * detaches every listener and clears the CSS variables it wrote.
+ * Float-variant assignment is a deterministic hash of `entry.id` so
+ * SSR + the first client render agree, and adjacent cards land on
+ * different keyframe phases without a shared counter. Browser-only
+ * render — uvicorn `--workers N` model does not apply (answer #1:
+ * each browser tab derives the same view from the same Next.js build
+ * artifact).
  *
  * Read-after-write timing audit
  * ─────────────────────────────
  * N/A — pure presentation. Install progress flows through the `entry`
  * prop (or `installProgressPercent` override); BS.7's SSE wiring will
  * just re-render the card with a fresh percent. No API calls, no
- * cross-worker race at this layer.
+ * cross-worker race at this layer. The motion hooks read
+ * `useEffectiveMotionLevel()` synchronously off the same context the
+ * rest of the page consumes, so a level downgrade (battery rule fires,
+ * user toggles `motion: off`) propagates on the next React tick with
+ * no cross-tab race.
  */
 
 import {
@@ -94,6 +112,16 @@ import {
   type CatalogInstallState,
   coerceFamily,
 } from "@/components/omnisight/catalog-tab"
+import {
+  type FloatVariant,
+  type MotionLevel,
+  useCursorDistanceGlow,
+  useCursorMagneticTilt,
+  useEffectiveMotionLevel,
+  useFloatingCard,
+  useGlassReflection,
+  useSpringPress,
+} from "@/hooks/use-zero-g"
 
 // ─────────────────────────────────────────────────────────────────────
 // Public types — exported so BS.6.8 tests + BS.6.6 motion wrapper +
@@ -125,6 +153,13 @@ export interface CatalogCardProps {
   /** "View log" handler for `failed` state. Wired by BS.7.6 via the
    *  log-tail modal. */
   onViewLog?: (entry: CatalogEntry) => void
+  /** Override the BS.6.6 idle-drift float variant (a/b/c/d). When
+   *  omitted the card derives a deterministic variant from `entry.id`
+   *  so adjacent cards in the grid land on different keyframe phases
+   *  without sharing a counter. The catalog tab can pass an explicit
+   *  index to keep variant cycling stable across re-orders (sort key
+   *  changes, search-driven shrink/regrow). */
+  floatVariantIndex?: number
   className?: string
 }
 
@@ -167,6 +202,34 @@ export function coerceInstallState(
     default:
       return "available"
   }
+}
+
+/** BS.6.6 — pick an idle-drift keyframe variant (a/b/c/d) based on a
+ *  numeric seed. Pure cycle so identical seeds map to the same variant
+ *  on SSR + client (no hydration mismatch) and adjacent indices land on
+ *  different phases (no synced wave across the grid). Exported so BS.6.8
+ *  tests can lock the cycle without inspecting CSS. */
+export const CATALOG_CARD_FLOAT_VARIANTS = ["a", "b", "c", "d"] as const
+
+export function pickCatalogCardFloatVariant(
+  seed: number | string,
+): FloatVariant {
+  let n: number
+  if (typeof seed === "number") {
+    n = Number.isFinite(seed) ? Math.trunc(seed) : 0
+  } else {
+    // FNV-1a-ish accumulator over the id string. Cheap (no allocation,
+    // no hash function dependency), and deterministic — same id always
+    // returns the same variant so SSR HTML matches the client render.
+    let acc = 2166136261
+    for (let i = 0; i < seed.length; i++) {
+      acc ^= seed.charCodeAt(i)
+      acc = (acc * 16777619) >>> 0
+    }
+    n = acc
+  }
+  const idx = Math.abs(n) % CATALOG_CARD_FLOAT_VARIANTS.length
+  return CATALOG_CARD_FLOAT_VARIANTS[idx]
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -306,6 +369,7 @@ export function CatalogCard({
   onInstall,
   onRetry,
   onViewLog,
+  floatVariantIndex,
   className,
 }: CatalogCardProps) {
   const state = coerceInstallState(entry.installState)
@@ -356,6 +420,46 @@ export function CatalogCard({
     [onSelect, entry],
   )
 
+  // ─── BS.6.6 — motion layers ─────────────────────────────────────
+  // Outer-to-inner stack mirrors `<MotionPreview />` (BS.3.6) so each
+  // hook owns its own ref + listener and the layers compose without
+  // hook-order surprises:
+  //   tilt  → wraps everything, applies perspective + rotateX/Y
+  //           (Layer 6, normal + dramatic only).
+  //   float → idle drift keyframe (Layer 1, all non-off levels).
+  //   reflect → glass `::after` reflection (Layer 7, dramatic only).
+  //   glow  → cursor-distance box-shadow (Layer 4, all non-off levels).
+  // Each hook self-gates via `useEffectiveMotionLevel()`, so users
+  // with `prefers-reduced-motion: reduce` / battery critical /
+  // `motion: off` see no animation, no listeners, no GPU layer cost.
+  // We surface the effective level + per-layer on/off on the outermost
+  // wrapper so BS.6.8 tests can verify the resolver chain is plumbed
+  // without inspecting computed CSS.
+  const motionLevel = useEffectiveMotionLevel()
+  // Variant cycles a/b/c/d — defaults to a deterministic hash of the
+  // entry id so adjacent cards land on different keyframe phases
+  // without a shared counter. Caller may override with an explicit
+  // index (e.g. visible-row index) when stable cycling is required.
+  const floatVariant = useMemo(
+    () =>
+      typeof floatVariantIndex === "number"
+        ? CATALOG_CARD_FLOAT_VARIANTS[
+            Math.abs(Math.trunc(floatVariantIndex)) %
+              CATALOG_CARD_FLOAT_VARIANTS.length
+          ]
+        : pickCatalogCardFloatVariant(entry.id),
+    [floatVariantIndex, entry.id],
+  )
+  const { ref: tiltRef, style: tiltStyle } =
+    useCursorMagneticTilt<HTMLDivElement>({ maxTiltDeg: 6 })
+  const { className: floatClassName, style: floatStyle } = useFloatingCard(
+    floatVariant,
+  )
+  const { ref: reflectRef, className: reflectClassName } =
+    useGlassReflection<HTMLDivElement>()
+  const { ref: glowRef, className: glowClassName } =
+    useCursorDistanceGlow<HTMLDivElement>({ maxDistancePx: 240 })
+
   // Body content shared by all states — name / vendor / version /
   // description / family chip / state chip / footer.
   const body = (
@@ -370,6 +474,7 @@ export function CatalogCard({
       progress={progress}
       nextVersion={nextVersion}
       failureReason={failureReason}
+      motionLevel={motionLevel}
       onInstall={onInstall}
       onRetry={onRetry}
       onViewLog={onViewLog}
@@ -377,7 +482,17 @@ export function CatalogCard({
   )
 
   const interactive = Boolean(onSelect)
-  const rootProps = interactive
+  // Click + keyboard handlers live on the outer-most motion wrapper so
+  // the entire card area (including the motion-driven outer perimeter)
+  // is the click target. `data-testid={catalog-card-{id}}` + entry/state
+  // data-* + aria-label also sit here so BS.6.8 / BS.5 deep-link tests
+  // continue to find the card by the same testid contract introduced in
+  // BS.6.2 — only the wrapping element's role is now "motion shell"
+  // instead of "visual shell". The visual root inside keeps every
+  // existing visual class graph (border, padding, conic-gradient
+  // shell for installing) and gets `data-card-visual` so tests can
+  // distinguish the inner from the outer when needed.
+  const interactiveProps = interactive
     ? {
         role: "button" as const,
         tabIndex: 0,
@@ -386,29 +501,22 @@ export function CatalogCard({
       }
     : {}
 
-  // The installing state wraps in a conic-gradient shell. Other states
-  // skip the wrapper to avoid a redundant DOM node.
+  // The installing state still wraps in a conic-gradient shell so the
+  // 2-px ring continues to render the live progress arc. Other states
+  // skip the inner wrapper to avoid a redundant DOM node.
+  let visual: ReactNode
   if (state === "installing") {
     const gradientStyle: CSSProperties = {
       background: buildInstallProgressGradient(progress),
     }
-    return (
+    visual = (
       <div
-        data-testid={`catalog-card-${entry.id}`}
-        data-entry-id={entry.id}
-        data-entry-family={family}
-        data-state={state}
-        data-progress={progress.toFixed(2)}
-        aria-label={`${entry.displayName} — ${palette.statusText}`}
+        data-card-visual="installing"
         className={[
-          "group relative rounded-md p-[2px]",
+          "group relative h-full rounded-md p-[2px]",
           "transition-shadow duration-200",
-          className ?? "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
+        ].join(" ")}
         style={gradientStyle}
-        {...rootProps}
       >
         {/* Hazard stripe overlay sits above the conic ring but below
          *  the card body so the stripes feel like they belong to the
@@ -427,28 +535,76 @@ export function CatalogCard({
         {body}
       </div>
     )
+  } else {
+    visual = (
+      <div
+        data-card-visual={state}
+        className={[
+          "group relative flex h-full flex-col rounded-md border bg-[var(--card)]",
+          "transition-colors duration-200",
+          palette.borderClass,
+          palette.rootAnimationClass,
+          cardPaddingClass,
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
+        {body}
+      </div>
+    )
   }
 
+  // Outer-most wrapper carries the click target + tilt transform. The
+  // `rounded-md` is repeated on every motion layer so cursor-distance
+  // glow / glass reflection clip to the card's pill shape rather than
+  // the wrapper's bounding rectangle (would otherwise show a square
+  // halo around a rounded card).
   return (
     <div
+      ref={tiltRef}
       data-testid={`catalog-card-${entry.id}`}
       data-entry-id={entry.id}
       data-entry-family={family}
       data-state={state}
+      data-motion-level={motionLevel}
+      data-motion-float-variant={floatVariant}
+      data-motion-float={floatClassName ? "on" : "off"}
+      data-motion-tilt={tiltStyle.transform ? "on" : "off"}
+      data-motion-reflect={reflectClassName ? "on" : "off"}
+      data-motion-glow={glowClassName ? "on" : "off"}
+      {...(state === "installing"
+        ? { "data-progress": progress.toFixed(2) }
+        : {})}
       aria-label={`${entry.displayName} — ${palette.statusText}`}
-      className={[
-        "group relative flex h-full flex-col rounded-md border bg-[var(--card)]",
-        "transition-colors duration-200",
-        palette.borderClass,
-        palette.rootAnimationClass,
-        cardPaddingClass,
-        className ?? "",
-      ]
+      style={tiltStyle}
+      className={["relative h-full rounded-md", className ?? ""]
         .filter(Boolean)
         .join(" ")}
-      {...rootProps}
+      {...interactiveProps}
     >
-      {body}
+      <div
+        data-testid="catalog-card-motion-float"
+        style={floatStyle}
+        className={["h-full rounded-md", floatClassName].filter(Boolean).join(" ")}
+      >
+        <div
+          ref={reflectRef}
+          data-testid="catalog-card-motion-reflect"
+          className={["h-full rounded-md", reflectClassName]
+            .filter(Boolean)
+            .join(" ")}
+        >
+          <div
+            ref={glowRef}
+            data-testid="catalog-card-motion-glow"
+            className={["h-full rounded-md", glowClassName]
+              .filter(Boolean)
+              .join(" ")}
+          >
+            {visual}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -470,6 +626,11 @@ interface CardBodyProps {
   progress: number
   nextVersion: string | undefined
   failureReason: string | undefined
+  /** Effective BS.3 motion level — drives Layer-3 orbital-rotate
+   *  decoration on the available state's Sparkles icon (dramatic only,
+   *  per ADR §5.7). All other visuals are level-agnostic; reduced-motion
+   *  / battery rule already handled by the per-layer hooks. */
+  motionLevel: MotionLevel
   onInstall?: (entry: CatalogEntry) => void
   onRetry?: (entry: CatalogEntry) => void
   onViewLog?: (entry: CatalogEntry) => void
@@ -486,6 +647,7 @@ function CardBody({
   progress,
   nextVersion,
   failureReason,
+  motionLevel,
   onInstall,
   onRetry,
   onViewLog,
@@ -513,6 +675,9 @@ function CardBody({
           <StateIcon
             data-testid="catalog-card-state-icon"
             data-state-icon={state}
+            data-state-icon-orbital={
+              state === "available" && motionLevel === "dramatic" ? "on" : "off"
+            }
             size={14}
             aria-hidden
             className={
@@ -524,7 +689,18 @@ function CardBody({
                     ? "shrink-0 text-[var(--artifact-purple)]"
                     : state === "failed"
                       ? "shrink-0 text-[var(--critical-red)]"
-                      : "shrink-0 text-[var(--neural-blue)]/70"
+                      : motionLevel === "dramatic"
+                        ? // BS.6.6 Layer 3 — slow orbital rotation on the
+                          // available state's Sparkles icon at dramatic
+                          // level only. ADR §5.7 reserves orbital-rotate
+                          // for the dramatic tier; subtle/normal/off keep
+                          // the icon static. The class self-stops via
+                          // R25.2's global prefers-reduced-motion fallback
+                          // (animation-duration: 0.01ms !important) so OS
+                          // reduce-motion users see the icon at rest even
+                          // if their motion-pref is dramatic.
+                          "orbital-rotate shrink-0 text-[var(--neural-blue)]/70"
+                        : "shrink-0 text-[var(--neural-blue)]/70"
             }
           />
           <h3
@@ -662,6 +838,18 @@ function FooterAction({
 }: FooterActionProps) {
   const stop = (e: ReactMouseEvent<HTMLButtonElement>) => e.stopPropagation()
 
+  // BS.6.6 Layer 8 — spring-press click feedback on every footer call-
+  // to-action button. Independent of motion level (operator always
+  // wants click acknowledgement); the keyframe itself becomes a no-op
+  // via the global `prefers-reduced-motion` fallback at globals.css
+  // line ~1590, so OS reduce-motion users still get the visual press
+  // state without the overshoot. We mount one hook per button slot;
+  // hook order is stable per-state branch.
+  const installPress = useSpringPress()
+  const updatePress = useSpringPress()
+  const retryPress = useSpringPress()
+  const viewLogPress = useSpringPress()
+
   switch (state) {
     case "available":
       return (
@@ -674,7 +862,11 @@ function FooterAction({
             stop(e)
             if (onInstall) onInstall(entry)
           }}
-          className="inline-flex items-center gap-1 rounded border border-[var(--neural-blue)]/40 px-1.5 py-0.5 font-mono text-[10px] text-[var(--neural-blue)] hover:border-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+          className={[
+            installPress.className,
+            "inline-flex items-center gap-1 rounded border border-[var(--neural-blue)]/40 px-1.5 py-0.5 font-mono text-[10px] text-[var(--neural-blue)] hover:border-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
+          ].join(" ")}
+          {...installPress.pressProps}
         >
           <Download size={10} />
           {palette.footerLabel}
@@ -711,7 +903,11 @@ function FooterAction({
             stop(e)
             if (onInstall) onInstall(entry)
           }}
-          className="inline-flex items-center gap-1 rounded border border-[var(--artifact-purple)]/55 px-1.5 py-0.5 font-mono text-[10px] text-[var(--artifact-purple)] hover:border-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+          className={[
+            updatePress.className,
+            "inline-flex items-center gap-1 rounded border border-[var(--artifact-purple)]/55 px-1.5 py-0.5 font-mono text-[10px] text-[var(--artifact-purple)] hover:border-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
+          ].join(" ")}
+          {...updatePress.pressProps}
         >
           <ArrowUpCircle size={10} />
           {palette.footerLabel}
@@ -729,7 +925,11 @@ function FooterAction({
               stop(e)
               if (onRetry) onRetry(entry)
             }}
-            className="inline-flex items-center gap-1 rounded border border-[var(--critical-red)]/55 px-1.5 py-0.5 font-mono text-[10px] text-[var(--critical-red)] hover:border-[var(--critical-red)] hover:bg-[var(--critical-red)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+            className={[
+              retryPress.className,
+              "inline-flex items-center gap-1 rounded border border-[var(--critical-red)]/55 px-1.5 py-0.5 font-mono text-[10px] text-[var(--critical-red)] hover:border-[var(--critical-red)] hover:bg-[var(--critical-red)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
+            ].join(" ")}
+            {...retryPress.pressProps}
           >
             <RefreshCw size={10} />
             {palette.footerLabel}
@@ -743,7 +943,11 @@ function FooterAction({
               stop(e)
               if (onViewLog) onViewLog(entry)
             }}
-            className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-60"
+            className={[
+              viewLogPress.className,
+              "inline-flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-60",
+            ].join(" ")}
+            {...viewLogPress.pressProps}
           >
             <ScrollText size={10} />
             log
