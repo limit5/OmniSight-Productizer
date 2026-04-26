@@ -139,18 +139,40 @@ def _dir_size_bytes(p: Path) -> int:
     return total
 
 
+def _tenant_workspaces_root(tenant_id: str) -> Path:
+    """Y6 #282 row 5 — per-tenant slice of the workspace hierarchy.
+
+    Returns ``{_WORKSPACES_ROOT}/{tid}/`` — the parent of the four-deep
+    ``{product_line}/{project_id}/{agent_id}/{repo_url_hash}/`` subtree
+    that ``backend.workspace.provision`` materialises. ``_WORKSPACES_ROOT``
+    is imported lazily so this module stays load-order independent of
+    ``backend.workspace`` (which pulls events/git plumbing) — at quota-
+    measure time the workspace module is always already imported via the
+    fastapi lifespan, but tests that exercise tenant_quota without the
+    full app stack should not have to drag the workspace module in.
+    """
+    from backend.workspace import _WORKSPACES_ROOT  # type: ignore[attr-defined]
+    return _WORKSPACES_ROOT / tenant_id
+
+
 def measure_tenant_usage(tenant_id: str) -> dict[str, int]:
-    """Per-subdir byte usage. Includes both the tenant data root and /tmp."""
+    """Per-subdir byte usage. Includes both the tenant data root, /tmp,
+    and Y6 #282 row 5's ``{workspace_root}/{tid}/**`` slice — agent
+    workspaces are tenant-attributable disk and must count against the
+    hard quota so a runaway clone-storm in tenant A cannot eat tenant
+    B's headroom (the bug audit row 5 was opened to close)."""
     artifacts = _dir_size_bytes(tenant_artifacts_root(tenant_id))
     workflow_runs = _dir_size_bytes(tenant_workflow_runs_root(tenant_id))
     backups = _dir_size_bytes(tenant_data_root(tenant_id) / "backups")
     ingest_tmp = _dir_size_bytes(tenant_ingest_root(tenant_id))
-    total = artifacts + workflow_runs + backups + ingest_tmp
+    workspaces = _dir_size_bytes(_tenant_workspaces_root(tenant_id))
+    total = artifacts + workflow_runs + backups + ingest_tmp + workspaces
     return {
         "artifacts_bytes": artifacts,
         "workflow_runs_bytes": workflow_runs,
         "backups_bytes": backups,
         "ingest_tmp_bytes": ingest_tmp,
+        "workspaces_bytes": workspaces,
         "total_bytes": total,
     }
 
@@ -365,6 +387,7 @@ def _emit_warning(tenant_id: str, usage: dict, quota: DiskQuota,
                 "workflow_runs": usage["workflow_runs_bytes"],
                 "backups": usage["backups_bytes"],
                 "ingest_tmp": usage["ingest_tmp_bytes"],
+                "workspaces": usage.get("workspaces_bytes", 0),
             },
         }, broadcast_scope="tenant", tenant_id=tenant_id)
     except Exception as exc:

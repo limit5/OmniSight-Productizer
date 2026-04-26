@@ -338,6 +338,40 @@ async def provision(
     if free_bytes < 100 * 1024 * 1024:  # 100MB minimum
         raise RuntimeError(f"Insufficient disk space: {free_bytes // 1024 // 1024}MB free")
 
+    # Y6 #282 row 5 — per-tenant disk quota enforcement.
+    # ``tenant_quota.check_hard_quota`` measures the tenant's footprint
+    # (artifacts + workflow_runs + backups + ingest_tmp + workspaces) and
+    # raises ``QuotaExceeded`` when the total has already breached
+    # ``hard_bytes``. We gate provision *before* allocating the worktree
+    # so a runaway clone-storm in tenant A cannot consume tenant B's
+    # headroom (the audit row 5 was opened to close). The container.py
+    # sandbox-create gate uses the same primitive — same shape, same
+    # tenant resolution path — so quota errors show up uniformly across
+    # write-paths and the storage REST API.
+    _quota_tenant_id = tenant_id or _DEFAULT_TENANT_ID
+    try:
+        from backend import tenant_quota as _tq
+        _tq.check_hard_quota(_quota_tenant_id)
+    except Exception as exc:
+        if exc.__class__.__name__ == "QuotaExceeded":
+            try:
+                from backend import audit as _audit
+                await _audit.log(
+                    action="workspace_quota_exceeded",
+                    entity_kind="workspace",
+                    entity_id=agent_id,
+                    after={
+                        "tenant_id": _quota_tenant_id,
+                        "task_id": task_id,
+                        "used_bytes": getattr(exc, "used", 0),
+                        "hard_bytes": getattr(exc, "hard", 0),
+                    },
+                    actor=f"agent:{agent_id}",
+                )
+            except Exception:
+                pass
+            raise
+
     source = remote_url or str(_MAIN_REPO)
 
     # Clean stale git lock before worktree operations.
