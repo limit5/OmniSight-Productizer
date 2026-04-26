@@ -46,6 +46,13 @@ import {
   Rss,
 } from "lucide-react"
 
+import {
+  PLATFORM_COUNTERS_ZERO,
+  PlatformHero,
+  type PlatformCounters,
+} from "@/components/omnisight/platform-hero"
+import { useHostMetricsTick } from "@/hooks/use-host-metrics-tick"
+
 // ─────────────────────────────────────────────────────────────────────
 // Sub-tab contract — exported so BS.5.x tests + future deep-link
 // builders share the same source of truth.
@@ -121,6 +128,22 @@ function PlatformsPageInner() {
   const panelMeta = TAB_META[tab]
   const PanelIcon = panelMeta.icon
 
+  // Live disk-usage feeds the hero's right-side ENERGY CORE bar via
+  // the existing `host.metrics.tick` SSE stream (5s cadence). Catalog /
+  // installed / installing counters land in BS.6 / BS.7 — they default
+  // to zero here so the hero renders cleanly today.
+  const { latest: hostTick, baseline: hostBaseline } = useHostMetricsTick()
+  const heroCounters = useMemo<PlatformCounters>(() => {
+    const diskUsedGb = hostTick?.host.disk_used_gb ?? 0
+    const diskTotalGb =
+      hostTick?.host.disk_total_gb ?? hostBaseline?.disk_total_gb ?? 0
+    return {
+      ...PLATFORM_COUNTERS_ZERO,
+      diskUsedGb,
+      diskTotalGb,
+    }
+  }, [hostTick, hostBaseline])
+
   return (
     <main
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
@@ -152,18 +175,10 @@ function PlatformsPageInner() {
           </p>
         </header>
 
-        {/* ── Hero panel placeholder (BS.5.2 owns) ────────────────── */}
-        <section
-          data-testid="platforms-hero-placeholder"
-          className="mb-6 rounded-lg border border-dashed border-[var(--border)] bg-[var(--card)]/40 p-6 text-center font-mono text-[11px] text-[var(--muted-foreground)]"
-        >
-          <Layers size={16} className="mx-auto mb-2 opacity-50" />
-          <div>Hero panel placeholder</div>
-          <div className="mt-1 text-[10px]">
-            BS.5.2 將於此處渲染 `&lt;PlatformHero /&gt;`（軌道圖 + counter +
-            disk-usage bar）
-          </div>
-        </section>
+        {/* ── Hero panel (BS.5.2) ─────────────────────────────────── */}
+        <div className="mb-6">
+          <PlatformHero counters={heroCounters} />
+        </div>
 
         {/* ── Sub-tab nav ──────────────────────────────────────────── */}
         <nav
