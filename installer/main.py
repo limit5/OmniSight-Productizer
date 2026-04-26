@@ -371,28 +371,152 @@ def _poll_once(cfg: Config) -> PollOutcome:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _handle_claimed_job(job: dict[str, Any]) -> None:
-    """BS.4.2 placeholder: log the claim + leave dispatch to BS.4.3.
+def _handle_claimed_job(cfg: Config, job: dict[str, Any]) -> None:
+    """BS.4.3: fetch the catalog entry, merge with the install_jobs row,
+    and dispatch through ``installer.methods``.
 
-    BS.4.3 will replace this with method dispatch
-    (``installer/methods/{noop,docker_pull,shell_script,vendor_installer}.py``)
-    + ``POST /installer/jobs/{id}/result`` on terminal state. The job
-    already lives in ``state='running'`` server-side (claim happened in
-    the same transaction as the SELECT FOR UPDATE) — it stays there
-    until BS.4.3 reports a terminal state. That is acceptable for the
-    BS.4.2-only window because BS.4.6 has not wired the sidecar into
-    compose; no operator-facing deployment can reach this code path
-    until BS.4 epic 7/7 is green.
+    BS.4.4 will extend this to POST progress/result back to the backend.
+    For now ``progress_cb`` only logs; the terminal :class:`InstallResult`
+    is logged at INFO (success) or WARNING (failed/cancelled). The job
+    row stays in ``state='running'`` server-side until BS.4.4 ships the
+    ``POST /installer/jobs/{id}/result`` round trip.
+
+    Why it's safe to leave the row in ``running`` during the BS.4.3
+    window: the sidecar is NOT wired into ``docker-compose.yml`` until
+    BS.4.6 — no operator-facing deployment can reach this code path
+    while the epic is mid-rollout. Any local ``docker run`` smoke is
+    against a dev queue / dev row, not prod.
     """
+    job_id = job.get("id")
+    entry_id = job.get("entry_id")
+    tenant_id = job.get("tenant_id")
     logger.info(
-        "claimed install job id=%s entry_id=%s tenant=%s state=%s "
-        "(BS.4.2: dispatch lands in BS.4.3 — job will sit in 'running' "
-        "until then; this is expected during BS.4 epic mid-rollout)",
-        job.get("id"),
-        job.get("entry_id"),
-        job.get("tenant_id"),
-        job.get("state"),
+        "claimed install job id=%s entry_id=%s tenant=%s state=%s — "
+        "resolving catalog entry + dispatching",
+        job_id, entry_id, tenant_id, job.get("state"),
     )
+
+    entry = _fetch_catalog_entry(cfg, str(entry_id), str(tenant_id))
+    if entry is None:
+        logger.error(
+            "could not resolve catalog entry %s for job %s — "
+            "leaving job in 'running' for operator inspection",
+            entry_id, job_id,
+        )
+        return
+
+    enriched = dict(job)
+    # Catalog entry fields override the (possibly empty) install_jobs
+    # placeholders; BS.0.1 §7.1 schema keeps install_method / install_url
+    # / sha256 / metadata only on catalog_entries.
+    for k in ("install_method", "install_url", "sha256", "metadata"):
+        enriched[k] = entry.get(k)
+
+    progress_cb = _build_local_progress_cb(job_id)
+
+    from installer import methods as _methods  # local import to keep
+    # main.py importable without methods (for early smoke / unit tests
+    # that may stub the dispatch surface).
+
+    result = _methods.dispatch(enriched, progress_cb)
+
+    log_args = (
+        job_id, entry_id, result.state, result.error_reason,
+        result.bytes_done,
+    )
+    if result.state == "completed":
+        logger.info(
+            "install job %s (entry=%s) terminal: state=%s reason=%s "
+            "bytes=%d (BS.4.4 will POST result back; local-only for now)",
+            *log_args,
+        )
+    else:
+        logger.warning(
+            "install job %s (entry=%s) terminal: state=%s reason=%s "
+            "bytes=%d (BS.4.4 will POST result back)",
+            *log_args,
+        )
+
+
+def _fetch_catalog_entry(
+    cfg: Config, entry_id: str, tenant_id: str,
+) -> dict[str, Any] | None:
+    """Resolve the catalog entry for *entry_id* in *tenant_id* via the
+    backend. Returns the JSON dict on 200, None otherwise (logged).
+
+    The endpoint shape mirrors ``backend/routers/catalog.py``'s GET-by-id
+    surface (BS.2.1). Tenant scoping is performed server-side by the
+    backend's auth middleware, so we don't pass tenant_id in the URL —
+    the bearer token already encodes the actor's tenant. We pass it as
+    a query string anyway so backend logs link the resolution to the
+    job's tenant; the backend ignores extras.
+    """
+    qs = urlencode({"tenant_id": tenant_id, "for_install": "1"})
+    url = f"{cfg.backend_url}/api/v1/catalog/entries/{entry_id}?{qs}"
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Accept", "application/json")
+    if cfg.token:
+        req.add_header("Authorization", f"Bearer {cfg.token}")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read()
+            if resp.status != 200:
+                logger.warning(
+                    "catalog entry fetch %s: HTTP %d", entry_id, resp.status,
+                )
+                return None
+    except urllib.error.HTTPError as exc:
+        logger.warning(
+            "catalog entry fetch %s: HTTP %d", entry_id, exc.code,
+        )
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        logger.warning(
+            "catalog entry fetch %s: network error %s",
+            entry_id, exc.__class__.__name__,
+        )
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8") or "{}")
+    except (ValueError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "catalog entry fetch %s: bad JSON (%s)",
+            entry_id, exc.__class__.__name__,
+        )
+        return None
+    if not isinstance(payload, dict):
+        logger.warning(
+            "catalog entry fetch %s: payload is not an object", entry_id,
+        )
+        return None
+    return payload
+
+
+def _build_local_progress_cb(job_id: Any) -> "Any":
+    """BS.4.3 progress callback — logs only. BS.4.4 swaps this for an
+    HTTP POST to the backend's progress bus.
+
+    Throttles INFO logs so a download with 5000 chunks doesn't spam.
+    Stage transitions and the final tail are always logged.
+    """
+    state = {"last_stage": None, "last_log_at": 0.0}
+
+    def _cb(*, stage: str, bytes_done: int, bytes_total: int | None,
+            eta_seconds: int | None, log_tail: str) -> None:
+        now = time.monotonic()
+        first_in_stage = stage != state["last_stage"]
+        long_enough = now - state["last_log_at"] >= 1.0
+        if first_in_stage or long_enough:
+            logger.info(
+                "job %s progress: stage=%s bytes=%s/%s eta=%s",
+                job_id, stage, bytes_done,
+                bytes_total if bytes_total is not None else "?",
+                eta_seconds if eta_seconds is not None else "?",
+            )
+            state["last_stage"] = stage
+            state["last_log_at"] = now
+
+    return _cb
 
 
 def _log_protocol_handshake_failure(cfg: Config, payload: dict[str, Any]) -> None:
@@ -458,7 +582,7 @@ def run_loop(cfg: Config, flag: _ShutdownFlag) -> int:
                 logger.info("handshake OK (got 200 + claimed job on first poll)")
                 is_first_connect = False
             backoff = _BACKOFF_INITIAL_S
-            _handle_claimed_job(outcome.job)
+            _handle_claimed_job(cfg, outcome.job)
             continue
 
         if outcome.no_content:
