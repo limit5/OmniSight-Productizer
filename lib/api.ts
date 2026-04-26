@@ -2819,6 +2819,51 @@ export async function revokeTenantInvite(
   )
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Y8 row 7 — POST /api/v1/invites/{invite_id}/accept (open endpoint)
+// Single backend call serves both flows:
+//   • anon caller → name/password are consulted; user row created
+//     unless an account with the invite's email already exists
+//   • authenticated caller → name/password ignored; session.email
+//     must match invite.email or backend returns 409
+// See backend/routers/tenant_invites.py::accept_invite for the
+// full two-branch contract + error map (404/403/409/410/422/429).
+// ─────────────────────────────────────────────────────────────────
+
+export interface AcceptInviteRequest {
+  token: string
+  name?: string
+  password?: string | null
+}
+
+export interface AcceptInviteResponse {
+  invite_id: string
+  tenant_id: string
+  user_id: string
+  user_email: string
+  role: TenantMemberRole
+  status: "accepted"
+  user_was_created: boolean
+  already_member: boolean
+}
+
+export async function acceptInvite(
+  inviteId: string,
+  body: AcceptInviteRequest,
+): Promise<AcceptInviteResponse> {
+  return request<AcceptInviteResponse>(
+    `/invites/${encodeURIComponent(inviteId)}/accept`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+    // The accept flow is intentionally usable by anonymous callers
+    // (no session cookie). Suppress the global 401 redirect — the
+    // page below decides how to surface failures inline.
+    { skipGlobalErrorHandler: true },
+  )
+}
+
 export type ProductLine = "embedded" | "web" | "mobile" | "software" | "custom"
 
 export interface CreateTenantProjectRequest {
