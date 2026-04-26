@@ -46,6 +46,7 @@ import {
   Rss,
 } from "lucide-react"
 
+import { CatalogCard } from "@/components/omnisight/catalog-card"
 import { CatalogTab } from "@/components/omnisight/catalog-tab"
 import {
   PLATFORM_COUNTERS_ZERO,
@@ -232,9 +233,19 @@ function PlatformsPageInner() {
             // until BS.6.5's `useCatalog()` hook lands; the toolbar
             // (filter / search / sort / density) renders unconditionally
             // so operators see the surface they'll be using once the
-            // data hook plumbs real entries through. BS.6.2 swaps the
-            // placeholder card for the polished 5-state `<CatalogCard />`.
-            <CatalogTab />
+            // data hook plumbs real entries through. BS.6.2 wires the
+            // polished 5-state `<CatalogCard />` here via `renderCard`
+            // so any entries that flow through (BS.6.5 hook, future
+            // demo / dev seed) immediately get the polished treatment.
+            <CatalogTab
+              renderCard={({ entry, density, cardPaddingClass }) => (
+                <CatalogCard
+                  entry={entry}
+                  density={density}
+                  cardPaddingClass={cardPaddingClass}
+                />
+              )}
+            />
           ) : (
             <>
               <p className="text-xs text-[var(--muted-foreground)]">
