@@ -1,35 +1,32 @@
 "use client"
 
 /**
- * BS.5.2 — Platforms hero panel.
+ * BS.5.2 + BS.5.3 — Platforms hero panel.
  *
  * Three-column hero that anchors `/settings/platforms`:
- *   • Left   — orbital diagram (SVG: 3 concentric rings + a small
- *              fixed dot fan, rings rotate via `.orbital-rotate`
- *              keyframes at differing speeds). BS.5.3 will swap this
- *              minimal placeholder for the rich `<OrbitalDiagram />`
- *              with per-entry dots, hover tooltips, click-through.
+ *   • Left   — `<OrbitalDiagram />` (3 concentric rings, 8/10/12 dot
+ *              capacity, status-coloured per-entry dots, hover tooltip,
+ *              click → catalog deep-link). Lives in
+ *              `components/omnisight/orbital-diagram.tsx`.
  *   • Centre — live counter strip: 4 tiles for installed / available
  *              / installing / disk-used.
  *   • Right  — ENERGY CORE: vertical disk-usage bar with
  *              `entropy-scan-sweep` red sweep layered on top.
  *
  * Scope split inside the BS.5 epic:
- *   BS.5.2 (this file) — visual structure + counter wiring.
- *   BS.5.3            — per-entry orbital dots + tooltips
- *                        (replaces the inline `<HeroOrbitalShell />`).
- *   BS.5.4            — BS.3 motion library (idle drift + cursor
- *                        magnetic tilt + glass reflection) layered on
- *                        top of this hero.
- *   BS.5.5            — vitest unit tests (~10 cases hero + 6
- *                        orbital).
+ *   BS.5.2 — visual structure + counter wiring.
+ *   BS.5.3 — per-entry orbital dots + tooltips + click-through
+ *            (`<OrbitalDiagram />` swapped in here, replacing the
+ *            previous file-private `<HeroOrbitalShell />` placeholder).
+ *   BS.5.4 — BS.3 motion library (idle drift + cursor magnetic tilt +
+ *            glass reflection) layered on top of this hero.
+ *   BS.5.5 — vitest unit tests (~10 cases hero + 6 orbital).
  *
- * Data inputs: pure props (`PlatformCounters`).
- *   Counters default to zeros so the hero renders cleanly before BS.6
- *   (catalog) / BS.7 (install pipeline) wire real numbers in. Disk
- *   values default to zero — caller plumbs live data from
- *   `useHostMetricsTick()` (or a future storage-quota endpoint) once
- *   those hooks land.
+ * Data inputs: pure props (`PlatformCounters` + `entries`).
+ *   Both default so the hero renders cleanly before BS.6 (catalog) /
+ *   BS.7 (install pipeline) wire real numbers in. Disk values default
+ *   to zero — caller plumbs live data from `useHostMetricsTick()` (or a
+ *   future storage-quota endpoint) once those hooks land.
  *
  * Module-global state audit
  * ─────────────────────────
@@ -48,6 +45,11 @@
 
 import { useMemo } from "react"
 import { Boxes, CheckCircle2, Download, HardDrive } from "lucide-react"
+
+import {
+  OrbitalDiagram,
+  type InstalledPlatformEntry,
+} from "@/components/omnisight/orbital-diagram"
 
 // ─────────────────────────────────────────────────────────────────────
 // Counter contract — exported so BS.5.5 tests + BS.6/BS.7 wiring share
@@ -77,6 +79,10 @@ export const PLATFORM_COUNTERS_ZERO: PlatformCounters = {
 
 export interface PlatformHeroProps {
   counters?: PlatformCounters
+  /** Installed-platform entries that drive the orbital dots. Default
+   *  empty so the hero renders cleanly before BS.6 / BS.7 wire real
+   *  data; the orbital then shows placeholder dots only. */
+  entries?: ReadonlyArray<InstalledPlatformEntry>
   className?: string
 }
 
@@ -122,137 +128,9 @@ const PRESSURE_GLOW: Record<DiskPressure, string> = {
   critical: "shadow-[0_0_22px_rgba(244,63,94,0.55)]",
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Inline orbital placeholder — three concentric rings + 6 fixed dots
-// per ring. Rings rotate at different speeds via inline
-// `animation-duration` (the `.orbital-rotate` keyframe is shared with
-// BS.5.3). Sized at 200×200 with a faint glow center.
-//
-// BS.5.3 will replace this with a richer `<OrbitalDiagram />` that
-// drives dots from real installed-entry data + hover tooltips; the
-// public `<PlatformHero />` API does not change.
-// ─────────────────────────────────────────────────────────────────────
-
-interface RingSpec {
-  radius: number
-  dots: number
-  durationS: number
-  reverse: boolean
-}
-
-const ORBITAL_RINGS: ReadonlyArray<RingSpec> = [
-  { radius: 30, dots: 4, durationS: 18, reverse: false },
-  { radius: 55, dots: 6, durationS: 32, reverse: true },
-  { radius: 85, dots: 8, durationS: 48, reverse: false },
-]
-
-interface OrbitalDot {
-  cx: number
-  cy: number
-}
-
-function dotsForRing(spec: RingSpec): OrbitalDot[] {
-  const out: OrbitalDot[] = []
-  for (let i = 0; i < spec.dots; i += 1) {
-    const angle = (i / spec.dots) * Math.PI * 2
-    out.push({
-      cx: Math.cos(angle) * spec.radius,
-      cy: Math.sin(angle) * spec.radius,
-    })
-  }
-  return out
-}
-
-function HeroOrbitalShell() {
-  // Geometry is static (no per-render randomness) so we precompute
-  // once; useMemo isolates the cost from re-renders that only change
-  // counters on the right.
-  const rings = useMemo(
-    () =>
-      ORBITAL_RINGS.map((spec) => ({
-        ...spec,
-        dots: dotsForRing(spec),
-      })),
-    [],
-  )
-
-  return (
-    <svg
-      viewBox="-100 -100 200 200"
-      width="100%"
-      height="100%"
-      role="img"
-      aria-label="Platforms orbital diagram"
-      data-testid="platform-hero-orbital"
-      className="select-none"
-    >
-      {/* Faint axes — give the orbital a subtle FUI cross-hair. */}
-      <line
-        x1="-95"
-        x2="95"
-        y1="0"
-        y2="0"
-        stroke="rgba(56,189,248,0.12)"
-        strokeWidth="0.5"
-      />
-      <line
-        x1="0"
-        x2="0"
-        y1="-95"
-        y2="95"
-        stroke="rgba(56,189,248,0.12)"
-        strokeWidth="0.5"
-      />
-
-      {/* Static centre core — pulses via shared breathing-pulse. */}
-      <circle
-        cx="0"
-        cy="0"
-        r="6"
-        fill="var(--neural-blue)"
-        opacity="0.85"
-        className="breathing-pulse"
-        data-testid="platform-hero-orbital-core"
-      />
-
-      {rings.map((ring, idx) => (
-        <g
-          key={ring.radius}
-          className="orbital-rotate"
-          data-testid={`platform-hero-orbital-ring-${idx}`}
-          data-ring-index={idx}
-          data-ring-radius={ring.radius}
-          data-ring-dots={ring.dots.length}
-          style={{
-            animationDuration: `${ring.durationS}s`,
-            animationDirection: ring.reverse ? "reverse" : "normal",
-          }}
-        >
-          {/* Ring itself — thin stroke, no fill. */}
-          <circle
-            cx="0"
-            cy="0"
-            r={ring.radius}
-            fill="none"
-            stroke="rgba(56,189,248,0.25)"
-            strokeWidth="0.6"
-            strokeDasharray="2 4"
-          />
-          {ring.dots.map((dot, dotIdx) => (
-            <circle
-              key={`${ring.radius}-${dotIdx}`}
-              cx={dot.cx}
-              cy={dot.cy}
-              r="2.4"
-              fill="var(--neural-blue)"
-              opacity={0.55 + 0.15 * (idx % 2)}
-            />
-          ))}
-        </g>
-      ))}
-    </svg>
-  )
-}
+/** Stable empty array so `entries={EMPTY_ENTRIES}` does not invalidate
+ *  the orbital's `useMemo` on every parent re-render. */
+const EMPTY_ENTRIES: ReadonlyArray<InstalledPlatformEntry> = []
 
 // ─────────────────────────────────────────────────────────────────────
 // Counter tile — single stat with icon + value + label.
@@ -292,6 +170,7 @@ function CounterTile({ testid, icon: Icon, label, value, accentClass }: CounterT
 
 export function PlatformHero({
   counters = PLATFORM_COUNTERS_ZERO,
+  entries = EMPTY_ENTRIES,
   className,
 }: PlatformHeroProps) {
   const { installed, available, installing, diskUsedGb, diskTotalGb } = counters
@@ -328,9 +207,13 @@ export function PlatformHero({
         {/* ── Left: orbital diagram ─────────────────────────────── */}
         <div
           data-testid="platform-hero-orbital-frame"
-          className="flex aspect-square items-center justify-center rounded-md border border-[var(--border)]/60 bg-black/20 p-2"
+          className="relative flex aspect-square items-center justify-center rounded-md border border-[var(--border)]/60 bg-black/20 p-2"
         >
-          <HeroOrbitalShell />
+          <OrbitalDiagram
+            entries={entries}
+            testIdPrefix="platform-hero-orbital"
+            ariaLabel="Platforms orbital diagram"
+          />
         </div>
 
         {/* ── Centre: live counters ──────────────────────────────── */}
