@@ -112,3 +112,11 @@ export function useTenant(): TenantContextValue {
   if (!v) throw new Error("useTenant must be used inside <TenantProvider>")
   return v
 }
+
+// Y8 row 6 — non-throwing variant for components that may render outside
+// the provider (notably IntegrationSettings rendered directly in vitest
+// without the app shell). Returns null when no <TenantProvider> ancestor
+// is mounted; consumers must handle that case explicitly.
+export function useTenantOptional(): TenantContextValue | null {
+  return useContext(Ctx)
+}

@@ -145,3 +145,11 @@ export function useProject(): ProjectContextValue {
   if (!v) throw new Error("useProject must be used inside <ProjectProvider>")
   return v
 }
+
+// Y8 row 6 — non-throwing variant for components that may render outside
+// the provider (notably IntegrationSettings rendered directly in vitest
+// without the app shell). Returns null when no <ProjectProvider> ancestor
+// is mounted; consumers must handle that case explicitly.
+export function useProjectOptional(): ProjectContextValue | null {
+  return useContext(Ctx)
+}

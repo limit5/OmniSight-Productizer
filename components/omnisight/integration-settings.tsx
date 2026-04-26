@@ -5,6 +5,8 @@ import { createPortal } from "react-dom"
 import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy, Users, ShieldCheck, Webhook } from "lucide-react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import * as api from "@/lib/api"
+import { useTenantOptional } from "@/lib/tenant-context"
+import { useProjectOptional } from "@/lib/project-context"
 
 interface IntegrationSettingsProps {
   open: boolean
@@ -3631,6 +3633,19 @@ function JiraWebhookSecretRotateDialog({
 }
 
 export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps) {
+  // Y8 row 6 — surface the active tenant + project in the modal header so
+  // operators can see which scope a save will land against. Optional
+  // hooks: standalone test renders (no <Providers>) get null and the
+  // scope strip is omitted.
+  const tenantCtx = useTenantOptional()
+  const projectCtx = useProjectOptional()
+  const tenantName = tenantCtx
+    ? (tenantCtx.tenants.find(t => t.id === tenantCtx.currentTenantId)?.name ?? null)
+    : null
+  const projectName = projectCtx
+    ? (projectCtx.projects.find(p => p.project_id === projectCtx.currentProjectId)?.name ?? null)
+    : null
+
   const [settingsData, setSettingsData] = useState<Record<string, Record<string, unknown>>>({})
   const [dirty, setDirty] = useState<Record<string, string | number | boolean>>({})
   const [saving, setSaving] = useState(false)
@@ -3852,12 +3867,52 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
       {/* Modal */}
       <div className="relative z-10 w-full max-w-lg max-h-[80vh] m-4 bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-2xl flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)] bg-[var(--secondary)]">
-          <div className="flex items-center gap-2">
-            <Settings size={14} className="text-[var(--neural-blue)]" />
-            <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--neural-blue)]">SYSTEM INTEGRATIONS</h2>
+        <div className="flex items-start justify-between px-4 py-3 border-b border-[var(--border)] bg-[var(--secondary)]">
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <div className="flex items-center gap-2">
+              <Settings size={14} className="text-[var(--neural-blue)] shrink-0" />
+              <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--neural-blue)]">SYSTEM INTEGRATIONS</h2>
+            </div>
+            {/* Y8 row 6 — scope strip. Tenant is always shown when the
+                provider is mounted (current tenant is non-null after
+                login). Project is shown when an active project is
+                selected; otherwise we surface a "no project" hint so
+                operators know project-scoped settings (tenant secrets
+                shown elsewhere are tenant-only and unaffected) will
+                land against the tenant default rather than a project.
+                Hidden entirely outside the provider tree (test harness,
+                pre-login). */}
+            {tenantCtx && tenantCtx.currentTenantId && (
+              <div
+                data-testid="integration-settings-scope-label"
+                className="font-mono text-[9px] text-[var(--muted-foreground)] flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-[22px]"
+              >
+                <span data-testid="integration-settings-scope-tenant">
+                  tenant:{" "}
+                  <span className="text-[var(--neural-blue)]">
+                    {tenantName ? `${tenantName} (${tenantCtx.currentTenantId})` : tenantCtx.currentTenantId}
+                  </span>
+                </span>
+                <span aria-hidden="true">·</span>
+                {projectCtx && projectCtx.currentProjectId ? (
+                  <span data-testid="integration-settings-scope-project">
+                    project:{" "}
+                    <span className="text-[var(--neural-blue)]">
+                      {projectName ? `${projectName} (${projectCtx.currentProjectId})` : projectCtx.currentProjectId}
+                    </span>
+                  </span>
+                ) : (
+                  <span
+                    data-testid="integration-settings-scope-project-empty"
+                    className="italic opacity-70"
+                  >
+                    no project selected
+                  </span>
+                )}
+              </div>
+            )}
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--background)] transition-colors">
+          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--background)] transition-colors shrink-0">
             <X size={14} className="text-[var(--muted-foreground)]" />
           </button>
         </div>
