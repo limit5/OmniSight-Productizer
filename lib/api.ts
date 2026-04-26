@@ -2674,6 +2674,211 @@ export async function adminPatchTenant(
   )
 }
 
+// ─── Tenant settings page (Y8 row 4) ───────────────────────────
+//
+// REST surface used by ``/tenants/{tid}/settings`` (tenant-admin
+// scoped). Backend routers already ship the contracts:
+//   • Y3 (#279) — tenant_invites router (POST/GET/DELETE invites)
+//   • Y4 (#280) — tenant_members router (GET/PATCH/DELETE members)
+//                 + tenant_projects router (POST/PATCH/archive/restore)
+// Server-side gating is ``_user_can_manage_members`` /
+// ``_user_can_invite_into`` / ``_user_can_create_project_in`` —
+// platform super_admin OR active membership with role ∈ {owner,admin}.
+
+export type TenantMemberRole = "owner" | "admin" | "member" | "viewer"
+export type TenantMemberStatus = "active" | "suspended"
+
+export interface TenantMemberRow {
+  user_id: string
+  email: string
+  name: string
+  role: TenantMemberRole
+  status: TenantMemberStatus
+  user_enabled: boolean
+  joined_at: string
+  last_active_at: string | null
+}
+
+export interface ListTenantMembersResponse {
+  tenant_id: string
+  status_filter: "active" | "suspended" | "all"
+  count: number
+  members: TenantMemberRow[]
+}
+
+export async function listTenantMembers(
+  tenantId: string,
+  opts?: { status?: "active" | "suspended" | "all"; limit?: number },
+): Promise<ListTenantMembersResponse> {
+  const params = new URLSearchParams()
+  if (opts?.status) params.set("status", opts.status)
+  if (opts?.limit) params.set("limit", String(opts.limit))
+  const qs = params.toString() ? `?${params.toString()}` : ""
+  return request<ListTenantMembersResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/members${qs}`,
+  )
+}
+
+export interface PatchTenantMemberRequest {
+  role?: TenantMemberRole
+  status?: TenantMemberStatus
+}
+
+export async function patchTenantMember(
+  tenantId: string,
+  userId: string,
+  body: PatchTenantMemberRequest,
+): Promise<TenantMemberRow & { tenant_id: string; no_change: boolean }> {
+  return request<TenantMemberRow & { tenant_id: string; no_change: boolean }>(
+    `/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(userId)}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  )
+}
+
+export async function deleteTenantMember(
+  tenantId: string,
+  userId: string,
+): Promise<TenantMemberRow & { tenant_id: string; already_suspended?: boolean }> {
+  return request<
+    TenantMemberRow & { tenant_id: string; already_suspended?: boolean }
+  >(
+    `/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+  )
+}
+
+export type TenantInviteStatus =
+  | "pending"
+  | "accepted"
+  | "revoked"
+  | "expired"
+
+export interface TenantInviteRow {
+  invite_id: string
+  email: string
+  role: TenantMemberRole
+  status: TenantInviteStatus
+  invited_by: string | null
+  created_at: string
+  expires_at: string
+}
+
+export interface ListTenantInvitesResponse {
+  tenant_id: string
+  status_filter: "pending" | "accepted" | "revoked" | "expired" | "all"
+  count: number
+  invites: TenantInviteRow[]
+}
+
+export async function listTenantInvites(
+  tenantId: string,
+  opts?: {
+    status?: "pending" | "accepted" | "revoked" | "expired" | "all"
+    limit?: number
+  },
+): Promise<ListTenantInvitesResponse> {
+  const params = new URLSearchParams()
+  if (opts?.status) params.set("status", opts.status)
+  if (opts?.limit) params.set("limit", String(opts.limit))
+  const qs = params.toString() ? `?${params.toString()}` : ""
+  return request<ListTenantInvitesResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/invites${qs}`,
+  )
+}
+
+export interface CreateTenantInviteRequest {
+  email: string
+  role?: TenantMemberRole
+}
+
+export interface CreatedTenantInvite {
+  invite_id: string
+  token_plaintext: string
+  expires_at: string
+}
+
+export async function createTenantInvite(
+  tenantId: string,
+  body: CreateTenantInviteRequest,
+): Promise<CreatedTenantInvite> {
+  return request<CreatedTenantInvite>(
+    `/tenants/${encodeURIComponent(tenantId)}/invites`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
+export async function revokeTenantInvite(
+  tenantId: string,
+  inviteId: string,
+): Promise<TenantInviteRow & { tenant_id: string; already_revoked?: boolean }> {
+  return request<
+    TenantInviteRow & { tenant_id: string; already_revoked?: boolean }
+  >(
+    `/tenants/${encodeURIComponent(tenantId)}/invites/${encodeURIComponent(inviteId)}`,
+    { method: "DELETE" },
+  )
+}
+
+export type ProductLine = "embedded" | "web" | "mobile" | "software" | "custom"
+
+export interface CreateTenantProjectRequest {
+  product_line: ProductLine
+  name: string
+  slug: string
+  plan_override?: TenantPlan | null
+  disk_budget_bytes?: number | null
+  llm_budget_tokens?: number | null
+}
+
+export async function createTenantProject(
+  tenantId: string,
+  body: CreateTenantProjectRequest,
+): Promise<TenantProjectInfo> {
+  return request<TenantProjectInfo>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
+export async function archiveTenantProject(
+  tenantId: string,
+  projectId: string,
+): Promise<TenantProjectInfo & { no_change?: boolean }> {
+  return request<TenantProjectInfo & { no_change?: boolean }>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/archive`,
+    { method: "POST" },
+  )
+}
+
+export async function restoreTenantProject(
+  tenantId: string,
+  projectId: string,
+): Promise<TenantProjectInfo & { no_change?: boolean }> {
+  return request<TenantProjectInfo & { no_change?: boolean }>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/restore`,
+    { method: "POST" },
+  )
+}
+
+// Y8 row 4 — list-with-archived variant for the Projects tab. The
+// dashboard ProjectSwitcher (Y8 row 2) only wants live rows, so the
+// existing ``listTenantProjects`` defaults ``archived=false``. The
+// settings page surfaces archived rows so a tenant admin can restore
+// them — we expose a separate wrapper that pins ``archived=all``
+// rather than re-shaping the row 2 contract.
+export async function listAllTenantProjects(
+  tenantId: string,
+): Promise<TenantProjectInfo[]> {
+  const res = await request<{
+    tenant_id: string
+    product_line_filter: string | null
+    archived_filter: "false" | "true" | "all"
+    count: number
+    projects: TenantProjectInfo[]
+  }>(`/tenants/${encodeURIComponent(tenantId)}/projects?archived=all`)
+  return res.projects
+}
+
 // ─── Session management (J3) ─────────────────────────────────
 
 export interface SessionItem {
