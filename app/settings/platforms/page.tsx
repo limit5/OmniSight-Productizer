@@ -47,6 +47,7 @@ import {
 } from "lucide-react"
 
 import { CatalogCard } from "@/components/omnisight/catalog-card"
+import { CatalogDetailPanel } from "@/components/omnisight/catalog-detail-panel"
 import { CatalogTab } from "@/components/omnisight/catalog-tab"
 import {
   PLATFORM_COUNTERS_ZERO,
@@ -238,12 +239,21 @@ function PlatformsPageInner() {
             // so any entries that flow through (BS.6.5 hook, future
             // demo / dev seed) immediately get the polished treatment.
             <CatalogTab
-              renderCard={({ entry, density, cardPaddingClass }) => (
+              renderCard={({ entry, density, cardPaddingClass, onSelect }) => (
                 <CatalogCard
                   entry={entry}
                   density={density}
                   cardPaddingClass={cardPaddingClass}
+                  // BS.6.3 — propagate the tab's selection callback so
+                  // a card click flips `<CatalogTab />`'s selection
+                  // state and the detail panel slides in. Without
+                  // `onSelect` the card is non-interactive (BS.6.2
+                  // standalone preview behaviour).
+                  onSelect={onSelect ? () => onSelect() : undefined}
                 />
+              )}
+              renderDetail={({ entry, onClose }) => (
+                <CatalogDetailPanel entry={entry} onBack={onClose} />
               )}
             />
           ) : (

@@ -2,6 +2,13 @@
 
 /**
  * BS.6.1 — Platforms catalog tab shell.
+ * BS.6.3 — extended with selection state + slide-out-left/slide-in-right
+ *          to host `<CatalogDetailPanel />` inline (without leaving the
+ *          tab). When the page wrapper supplies `renderDetail`, card
+ *          clicks flip `selectedId` and the grid is replaced with the
+ *          panel; the panel's `onClose` callback flips back. Hook order
+ *          stays stable (selection state is always mounted) so motion
+ *          hooks land on the same nodes regardless of selection.
  *
  * Outer container for the `?tab=catalog` panel inside
  * `app/settings/platforms/page.tsx`. This row owns the toolbar surface
@@ -79,6 +86,7 @@ import {
   X,
 } from "lucide-react"
 
+import { useEffectiveMotionLevel } from "@/hooks/use-zero-g"
 import { useUserStorage } from "@/lib/storage"
 
 // ─────────────────────────────────────────────────────────────────────
@@ -323,6 +331,13 @@ export interface CatalogTabRenderContext {
    *  the placeholder card and by BS.6.2's `<CatalogCard />` so density
    *  affects every card variant uniformly. */
   cardPaddingClass: string
+  /** Card click handler — present when BS.6.3's detail panel is wired
+   *  via `renderDetail`, omitted otherwise. The page wrapper plumbs
+   *  this into `<CatalogCard onSelect={...} />` so clicking a card
+   *  flips selection state in `<CatalogTab />` and slides the panel
+   *  in. Optional so BS.6.1/6.2 preview hosts (no detail panel) leave
+   *  the card non-interactive without writing extra glue. */
+  onSelect?: () => void
 }
 
 export interface CatalogTabProps {
@@ -334,10 +349,22 @@ export interface CatalogTabProps {
    *  real `<CatalogCard />`; the default is a placeholder skeleton so
    *  the toolbar can be exercised before the card lands. */
   renderCard?: (ctx: CatalogTabRenderContext) => ReactNode
+  /** Optional override for the detail panel. BS.6.3 lands
+   *  `<CatalogDetailPanel />` here via this prop so when the page
+   *  wrapper provides it, clicking a card slides the grid out and
+   *  swaps in the panel. When omitted (BS.6.1/6.2 preview), card
+   *  clicks are no-ops and the grid stays mounted. The `onClose`
+   *  callback dismisses the panel and re-mounts the grid. */
+  renderDetail?: (ctx: CatalogTabDetailRenderContext) => ReactNode
   /** Override the empty-state node (e.g. for first-run / loading
    *  shimmers). Defaults to a small "no matches" message. */
   emptyState?: ReactNode
   className?: string
+}
+
+export interface CatalogTabDetailRenderContext {
+  entry: CatalogEntry
+  onClose: () => void
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -349,6 +376,7 @@ const EMPTY_ENTRIES: ReadonlyArray<CatalogEntry> = []
 export function CatalogTab({
   entries = EMPTY_ENTRIES,
   renderCard,
+  renderDetail,
   emptyState,
   className,
 }: CatalogTabProps) {
@@ -358,6 +386,24 @@ export function CatalogTab({
   const [familyFilter, setFamilyFilter] = useState<CatalogFamily | "all">("all")
   const [search, setSearch] = useState("")
   const [sort, setSort] = useState<CatalogSortKey>(CATALOG_DEFAULT_SORT)
+
+  // BS.6.3 — selection state. Hook is mounted unconditionally so hook
+  // order stays stable; when `renderDetail` is omitted (BS.6.1/6.2
+  // preview), card clicks are wired to a no-op so the selection state
+  // never flips — the grid stays mounted.
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const motionLevel = useEffectiveMotionLevel()
+  const reducedMotion = motionLevel === "off" || motionLevel === "subtle"
+
+  const detailEnabled = Boolean(renderDetail)
+  const handleSelectEntry = useCallback(
+    (entry: CatalogEntry) => {
+      if (!detailEnabled) return
+      setSelectedId(entry.id)
+    },
+    [detailEnabled],
+  )
+  const handleCloseDetail = useCallback(() => setSelectedId(null), [])
 
   // Density is the only piece of state we persist across reloads.
   // `useUserStorage` returns a `[value, setter]` keyed by the
@@ -406,6 +452,28 @@ export function CatalogTab({
       />
     ))
 
+  // BS.6.3 — resolve the currently-selected entry against the live
+  // entries list. We resolve by id (not by holding the entry object)
+  // so when the parent re-fetches entries with fresh metadata
+  // (progress%, audit timeline, etc.) the panel re-renders against
+  // the latest snapshot without needing to re-pin the selection.
+  const selectedEntry = useMemo(
+    () =>
+      selectedId == null
+        ? null
+        : entries.find((e) => e.id === selectedId) ?? null,
+    [entries, selectedId],
+  )
+  const detailOpen = Boolean(selectedEntry && renderDetail)
+
+  // Slide animation classes. `tw-animate-css` (already imported in
+  // app/globals.css) ships `animate-in slide-in-from-left-8` and
+  // `animate-out slide-out-to-left-8`. Reduced-motion users get an
+  // instant cross-fade to honour BS ADR §6.
+  const gridAnimClass = reducedMotion
+    ? "animate-in fade-in-0 duration-150"
+    : "animate-in slide-in-from-left-8 fade-in-0 duration-300"
+
   return (
     <div
       data-testid="catalog-tab"
@@ -414,6 +482,9 @@ export function CatalogTab({
       data-catalog-sort={sort}
       data-catalog-visible={visibleCount}
       data-catalog-total={totalCount}
+      data-catalog-detail-open={detailOpen ? "true" : "false"}
+      data-catalog-selected-id={selectedEntry?.id ?? ""}
+      data-catalog-motion-level={motionLevel}
       className={["flex flex-col gap-4", className ?? ""]
         .filter(Boolean)
         .join(" ")}
@@ -559,11 +630,27 @@ export function CatalogTab({
         <span>density · {DENSITY_LABEL[density]}</span>
       </div>
 
-      {/* ── Card grid (BS.6.2 fills the cards; placeholder until then) */}
-      {visibleCount === 0 ? (
+      {/* ── Body: detail panel (when an entry is selected) OR card grid */}
+      {detailOpen && selectedEntry && renderDetail ? (
+        <div
+          data-testid="catalog-tab-detail-slot"
+          data-entry-id={selectedEntry.id}
+          // The panel itself owns its slide-in-right + fade animation
+          // (see `<CatalogDetailPanel />` BS.6.3). The slot only needs
+          // a stable wrapper so React keeps the panel re-mounted when
+          // the selected id changes — keying by id forces a remount on
+          // selection swap so the slide replays each time.
+          key={selectedEntry.id}
+        >
+          {renderDetail({ entry: selectedEntry, onClose: handleCloseDetail })}
+        </div>
+      ) : visibleCount === 0 ? (
         <div
           data-testid="catalog-tab-empty"
-          className="flex min-h-[140px] items-center justify-center rounded-md border border-dashed border-[var(--border)] bg-[var(--card)]/30 p-6 font-mono text-xs text-[var(--muted-foreground)]"
+          className={[
+            "flex min-h-[140px] items-center justify-center rounded-md border border-dashed border-[var(--border)] bg-[var(--card)]/30 p-6 font-mono text-xs text-[var(--muted-foreground)]",
+            gridAnimClass,
+          ].join(" ")}
         >
           {emptyState ?? (totalCount === 0
             ? "No catalog entries yet — BS.6.5 + BS.7 will plumb live data."
@@ -573,7 +660,7 @@ export function CatalogTab({
         <div
           data-testid="catalog-tab-grid"
           data-grid-density={density}
-          className={["grid", gridClass].join(" ")}
+          className={["grid", gridClass, gridAnimClass].join(" ")}
         >
           {visible.map((entry) => (
             <div
@@ -582,7 +669,14 @@ export function CatalogTab({
               data-entry-id={entry.id}
               data-entry-family={coerceFamily(entry.family)}
             >
-              {renderEntryCard({ entry, density, cardPaddingClass })}
+              {renderEntryCard({
+                entry,
+                density,
+                cardPaddingClass,
+                onSelect: detailEnabled
+                  ? () => handleSelectEntry(entry)
+                  : undefined,
+              })}
             </div>
           ))}
         </div>
