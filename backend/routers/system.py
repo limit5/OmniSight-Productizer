@@ -1227,6 +1227,31 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int,
         loop = asyncio.get_running_loop()
         loop.create_task(_persist_token_usage(u.copy()))
         loop.create_task(_safe_check_budget())
+        # Y9 #285 row 3 — per-(tenant_id, project_id) billing fan-out.
+        # Reads request-scope ContextVars (set by ``require_tenant`` /
+        # ``require_project_member``) so the billing event picks up
+        # the active tenant + project automatically; falls through to
+        # the deterministic ``(t-default, p-default-default)`` bucket
+        # for system-issued / cron LLM calls without a request scope
+        # (Y9 row 5 acceptance criterion: "走 'default' project 歸因").
+        # Best-effort — a billing-emit failure must never regress the
+        # LLM call that triggered it; ``billing_usage._write_event``
+        # logs and swallows.  ``loop.create_task`` snapshots the current
+        # contextvars so the fan-out runs against the same tenant /
+        # project tuple even if the parent task tears down before the
+        # task is scheduled.
+        try:
+            from backend import billing_usage as _billing
+            loop.create_task(_billing.record_llm_call(
+                model=model,
+                input_tokens=int(input_tokens or 0),
+                output_tokens=int(output_tokens or 0),
+                cost_usd=float(this_call_cost),
+                cache_read_tokens=int(cache_read_tokens or 0),
+                cache_create_tokens=int(cache_create_tokens or 0),
+            ))
+        except Exception as exc:  # pragma: no cover — best-effort
+            logger.debug("billing_usage.record_llm_call schedule failed: %s", exc)
     except RuntimeError:
         pass  # No event loop — skip persistence (e.g. during tests)
 

@@ -619,6 +619,140 @@ async def _sweep_quota_evict(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y9 #285 row 3 — workspace-GB-hour billing sample
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+# PG advisory-lock key for the workspace-GB-hour billing sampler.
+# ``pg_try_advisory_xact_lock`` returns False if any other transaction
+# already holds the lock; we use that to guarantee at most one worker
+# emits the per-sweep samples even when N uvicorn workers each have
+# their own GC loop running. The numeric key is hashed from a fixed
+# string to avoid collision with ad-hoc advisory-lock users.
+#
+# Module-global state audit (per implement_phase_step.md Step 1):
+# the constant is immutable — every uvicorn worker derives the same
+# value (audit answer #1). The lock itself is a PG-side serialisation
+# mechanism that is shared across all workers (audit answer #2 —
+# coordinated via PG).
+_WORKSPACE_GB_HOUR_LOCK_KEY = "billing-workspace-gb-hour-sampler"
+
+
+def _list_projects_per_tenant() -> dict[str, list[tuple[str, float]]]:
+    """Walk the workspace tree and return ``{tenant_id: [(project_id,
+    size_bytes), ...]}``.
+
+    The size is the sum of leaf bytes under each
+    ``{root}/{tid}/{product_line}/{project_id}/`` slice (per the row 1
+    five-layer layout). Best-effort: per-leaf ``stat()`` errors are
+    swallowed and that leaf's bytes are dropped from the sum — the
+    billing sample is meant to be approximate, not byte-exact.
+    """
+    from backend.workspace import _WORKSPACES_ROOT
+    out: dict[str, list[tuple[str, float]]] = {}
+    if not _WORKSPACES_ROOT.is_dir():
+        return out
+    for tenant_dir in _WORKSPACES_ROOT.iterdir():
+        if not tenant_dir.is_dir() or tenant_dir.name.startswith("_"):
+            continue
+        tid = tenant_dir.name
+        # Per-project size accumulator. Layout:
+        # {root}/{tid}/{product_line}/{project_id}/{agent_id}/{hash}/
+        per_project: dict[str, float] = {}
+        for product_line_dir in tenant_dir.iterdir():
+            if not product_line_dir.is_dir():
+                continue
+            for project_dir in product_line_dir.iterdir():
+                if not project_dir.is_dir():
+                    continue
+                pid = project_dir.name
+                size = 0.0
+                try:
+                    for f in project_dir.rglob("*"):
+                        try:
+                            if f.is_file():
+                                size += float(f.stat().st_size)
+                        except OSError:
+                            continue
+                except OSError:
+                    pass
+                per_project[pid] = per_project.get(pid, 0.0) + size
+        if per_project:
+            out[tid] = sorted(per_project.items())
+    return out
+
+
+async def _emit_workspace_gb_hour_samples(
+    *, sample_window_s: float,
+) -> None:
+    """Emit one ``billing_usage_events.workspace_gb_hour`` row per
+    ``(tenant_id, project_id)`` slice with non-zero disk usage.
+
+    Cross-worker dedupe
+    ───────────────────
+    Wraps the emit loop in ``pg_try_advisory_xact_lock`` keyed on
+    ``billing-workspace-gb-hour-sampler``. If the lock is already held
+    (another uvicorn worker's GC loop is in the same window) we silently
+    skip the emit — this guarantees exactly-one-sample-per-sweep across
+    workers without depending on per-worker process state. Same pattern
+    as the audit-chain advisory lock in ``backend.audit._log_impl``.
+
+    GB-hour computation
+    ───────────────────
+    Each emit row carries ``gb_hours = current_gb × hours_in_window``
+    where ``hours_in_window = sample_window_s / 3600``. Caller passes
+    ``sample_window_s = settings.workspace_gc_interval_s`` so a
+    sweep-per-hour cadence yields one row per hour with
+    ``gb_hours ≈ current_gb``. T4 sums these across the billing period.
+    """
+    per_tenant = _list_projects_per_tenant()
+    if not per_tenant:
+        return
+    hours = max(0.0, float(sample_window_s) / 3600.0)
+    if hours == 0.0:
+        return
+
+    from backend.db_pool import get_pool
+    try:
+        async with get_pool().acquire() as conn:
+            async with conn.transaction():
+                got = await conn.fetchval(
+                    "SELECT pg_try_advisory_xact_lock(hashtext($1))",
+                    _WORKSPACE_GB_HOUR_LOCK_KEY,
+                )
+                if not got:
+                    logger.debug(
+                        "workspace_gb_hour sampler: lock already held by "
+                        "another worker, skipping emit this sweep"
+                    )
+                    return
+                # Hold the lock for the duration of the emit loop. The
+                # billing emitter borrows its own conn from the pool
+                # for each row; that's intentional so a slow row can't
+                # block lock release on the long-held conn we hold here.
+                from backend import billing_usage as _billing
+                for tid, projects in per_tenant.items():
+                    for pid, size_bytes in projects:
+                        gb = float(size_bytes) / (1024.0 ** 3)
+                        gb_hours = round(gb * hours, 6)
+                        if gb_hours <= 0.0:
+                            continue
+                        await _billing.record_workspace_gb_hour(
+                            gb_hours=gb_hours,
+                            tenant_id=tid,
+                            project_id=pid,
+                            metadata={
+                                "sample_window_s": float(sample_window_s),
+                                "size_bytes": float(size_bytes),
+                            },
+                        )
+    except Exception as exc:
+        logger.warning(
+            "workspace_gb_hour sampler outer transaction failed: %s", exc,
+        )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public sweep entry + loop
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -681,6 +815,25 @@ async def sweep_once(
         logger.debug(
             "workspace.gc_executed audit emit failed: %s", exc,
         )
+
+    # Y9 #285 row 3 — per-(tenant_id, project_id) workspace-GB-hour
+    # billing sample fan-out. Best-effort — billing emit failure must
+    # never regress the on-disk GC state. See
+    # ``_emit_workspace_gb_hour_samples`` for the multi-worker dedupe
+    # contract (PG advisory-lock, exactly-one-emitter-per-sweep).
+    try:
+        from backend.config import settings
+        sweep_interval_s = float(getattr(
+            settings, "workspace_gc_interval_s", 3600.0,
+        ))
+        await _emit_workspace_gb_hour_samples(
+            sample_window_s=sweep_interval_s,
+        )
+    except Exception as exc:  # pragma: no cover — billing already swallows
+        logger.debug(
+            "workspace_gb_hour billing emit failed: %s", exc,
+        )
+
     return summary
 
 

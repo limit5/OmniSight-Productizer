@@ -1,0 +1,466 @@
+"""Y9 #285 row 3 — per-(tenant_id, project_id) billing usage emitter.
+
+Single source of truth for writing rows into ``billing_usage_events``
+(alembic 0039). Three event kinds, three emitter helpers; each helper
+takes the ``(tenant_id, project_id)`` tuple explicitly OR reads the
+current request-scope ContextVar (``backend.db_context``). This is the
+T4-side fan-out hook for "every workflow_run / LLM call /
+workspace-GB-hour goes to T4 with the (tenant_id, project_id) tuple".
+
+Why this module exists
+──────────────────────
+Pre-Y9 the LLM callback (``backend/agents/llm.py::on_llm_end``) +
+``track_tokens`` wrote into ``token_usage`` keyed by ``model`` only —
+the per-tenant + per-project provenance was never recorded. Workflow
+runs landed in ``workflow_runs`` (tenant + project columns since Y1
+0038) but no separate billing event fired on completion.
+Workspace-GB-hour was not measured at all — the existing
+``host_metrics`` accumulator tracks ``cpu_seconds`` / ``mem_gb_seconds``
+per tenant but not per project, and disk usage was only sampled at GC
+sweep time without a billing fan-out.
+
+Y9 row 3 closes the gap with a single fact table + a thin emitter
+module so:
+
+* The T4 aggregator can ``SUM(cost_usd) GROUP BY tenant_id, project_id,
+  date_trunc('day', to_timestamp(occurred_at))`` and bill correctly.
+* The T6 pricing page can ``SUM(...) GROUP BY project_id`` and render a
+  per-project breakdown.
+* The Y9 row 5 acceptance criterion ("billing 用量聚合與 workflow_run
+  對齊不會漏掉 project_id IS NULL 的舊資料") holds because the schema
+  default + the ``_resolve_project`` helper here both fall through to
+  the deterministic ``p-{suffix}-default`` projection.
+
+The three event kinds — frozen contract
+────────────────────────────────────────
+* ``llm_call``         — :func:`record_llm_call`
+* ``workflow_run``     — :func:`record_workflow_run`
+* ``workspace_gb_hour`` — :func:`record_workspace_gb_hour`
+
+``ALL_USAGE_KINDS`` is the immutable tuple of all three. Migration
+0039's CHECK constraint and the drift test both key on this tuple, so
+adding a new kind requires a coordinated schema change + this tuple +
+a new helper — there is no path to inserting an unknown ``kind``
+silently.
+
+Tenant / project resolution
+───────────────────────────
+* If the caller passes ``tenant_id`` / ``project_id`` explicitly they
+  win.
+* Otherwise the helper reads ``backend.db_context.current_tenant_id()``
+  / ``current_project_id()`` (the request-scope ContextVars set by
+  ``require_tenant`` / ``require_project_member`` Depends).
+* If the project is still ``None`` after both checks, fall through to
+  the deterministic ``p-<tenant_suffix>-default`` projection (mirrors
+  alembic 0037's projection so a row that lands here can always be
+  joined back to a real ``projects`` row that backfill created).
+
+This three-tier resolution means:
+
+* Request-scope code (router handlers) never has to thread the tuple
+  manually — the emitter pulls it from the contextvar.
+* Background workers (workspace GC) pass the tuple explicitly — they
+  already know which tenant / project they are sweeping.
+* Legacy code paths that lose the tuple (LLM call from a system cron
+  with no request scope, a pre-Y1 row whose project_id is NULL) still
+  attribute to a known ``p-default-default`` bucket rather than
+  silently dropping the cost on the floor.
+
+Module-global state audit (per implement_phase_step.md Step 1)
+────────────────────────────────────────────────────────────────
+* ``ALL_USAGE_KINDS`` — immutable tuple. Each uvicorn worker derives
+  the same value from this source file (audit answer #1 — same shape
+  as ``audit_events.ALL_EVENT_TYPES``).
+* No in-memory caches, locks, counters, or singleton state. The
+  helpers are stateless functions that borrow a connection from
+  ``backend.db_pool.get_pool()`` (already shared across workers via
+  asyncpg's connection pool), open a single-statement transaction
+  (asyncpg auto-commits per ``execute``), and return.
+* The ContextVar reads in :func:`_resolve_tenant` / :func:`_resolve_project`
+  are per-asyncio-Task (audit answer #3 — intentionally per-request
+  state), not module-globals.
+
+Read-after-write timing audit (per implement_phase_step.md Step 1)
+────────────────────────────────────────────────────────────────
+N/A — ``billing_usage_events`` is append-only. The helpers do not
+read prior rows before writing; the breakdown reader at
+``/api/v1/admin/usage/breakdown`` is a pure ``SELECT`` with no
+prior-state-dependent UPDATE. Concurrent inserters from multiple
+workers cannot collide because (a) ``BIGINT GENERATED BY DEFAULT AS
+IDENTITY`` allocates ids per-row from a PG sequence (no advisory
+lock needed), and (b) order between rows from different writers is
+inherently observation-time ordered by ``occurred_at`` which the
+emitter captures with ``time.time()`` at function entry.
+
+Best-effort policy
+──────────────────
+Every helper wraps the DB write in a try/except that logs at
+``warning`` and swallows the exception. The point of these emitters
+is observability — a flaky DB must not regress the LLM call /
+workflow completion / GC sweep that triggered the emit. The Y9 row 5
+acceptance criterion's drift test catches the case where the schema
+and the writer diverge, so silent loss is constrained to transient
+DB unavailability (which the operator dashboard surfaces via the
+``billing_usage_emit_failed`` warning log in any case).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from typing import Any, Optional
+
+from backend.db_context import (
+    current_project_id,
+    current_tenant_id,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Event kind constants — single source of truth
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+KIND_LLM_CALL = "llm_call"
+KIND_WORKFLOW_RUN = "workflow_run"
+KIND_WORKSPACE_GB_HOUR = "workspace_gb_hour"
+
+
+# Tuple of all canonical usage kinds — used by the migration-0039
+# drift guard test and by anything that needs to enumerate the
+# closed set of valid ``kind`` values without re-listing the three
+# constants in every assertion.
+ALL_USAGE_KINDS: tuple[str, ...] = (
+    KIND_LLM_CALL,
+    KIND_WORKFLOW_RUN,
+    KIND_WORKSPACE_GB_HOUR,
+)
+
+
+# Default fall-through bucket — matches alembic 0037 / 0038's
+# deterministic projection. Used when neither the explicit arg nor
+# the contextvar yield a project_id.
+_DEFAULT_TENANT_ID = "t-default"
+_DEFAULT_PROJECT_ID = "p-default-default"
+
+
+def _resolve_tenant(explicit: str | None) -> str:
+    """Return the explicit value, fall back to ContextVar, then default."""
+    if explicit is not None:
+        return explicit
+    ctx = current_tenant_id()
+    if ctx is not None:
+        return ctx
+    return _DEFAULT_TENANT_ID
+
+
+def _project_id_from_tenant(tenant_id: str) -> str:
+    """Mirror the alembic 0037 projection so a row that ends up in the
+    fall-through bucket still references the real default project that
+    the Y1 backfill created for that tenant.
+
+    Worked examples::
+
+        tenant_id = 't-default'  →  project_id = 'p-default-default'
+        tenant_id = 't-acme'     →  project_id = 'p-acme-default'
+        tenant_id = 'legacy'     →  project_id = 'p-legacy-default'
+    """
+    suffix = tenant_id[2:] if tenant_id.startswith("t-") else tenant_id
+    return f"p-{suffix}-default"
+
+
+def _resolve_project(
+    explicit: str | None, *, tenant_id: str,
+) -> str:
+    """Return the explicit value, fall back to ContextVar, then to the
+    deterministic ``p-<suffix>-default`` projection."""
+    if explicit is not None:
+        return explicit
+    ctx = current_project_id()
+    if ctx is not None:
+        return ctx
+    return _project_id_from_tenant(tenant_id)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Core writer
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+_INSERT_SQL = (
+    "INSERT INTO billing_usage_events ("
+    "occurred_at, tenant_id, project_id, kind, "
+    "model, input_tokens, output_tokens, "
+    "cache_read_tokens, cache_create_tokens, "
+    "workflow_run_id, workflow_kind, workflow_status, "
+    "cost_usd, quantity, metadata_json"
+    ") VALUES ("
+    "$1, $2, $3, $4, "
+    "$5, $6, $7, $8, $9, "
+    "$10, $11, $12, "
+    "$13, $14, $15"
+    ") RETURNING id"
+)
+
+
+async def _write_event(
+    *,
+    occurred_at: float,
+    tenant_id: str,
+    project_id: str,
+    kind: str,
+    model: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_create_tokens: int | None = None,
+    workflow_run_id: str | None = None,
+    workflow_kind: str | None = None,
+    workflow_status: str | None = None,
+    cost_usd: float = 0.0,
+    quantity: float = 1.0,
+    metadata: dict[str, Any] | None = None,
+) -> Optional[int]:
+    """Insert one event. Best-effort — logs and swallows on failure
+    (``billing_usage_emit_failed`` warning) so the triggering activity
+    is not regressed by a flaky DB.
+    """
+    try:
+        from backend.db_pool import get_pool
+
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                _INSERT_SQL,
+                float(occurred_at),
+                tenant_id,
+                project_id,
+                kind,
+                model,
+                None if input_tokens is None else int(input_tokens),
+                None if output_tokens is None else int(output_tokens),
+                None if cache_read_tokens is None else int(cache_read_tokens),
+                None if cache_create_tokens is None else int(cache_create_tokens),
+                workflow_run_id,
+                workflow_kind,
+                workflow_status,
+                float(cost_usd or 0.0),
+                float(quantity if quantity is not None else 1.0),
+                json.dumps(metadata or {}, ensure_ascii=False),
+            )
+        return int(row["id"]) if row else None
+    except Exception as exc:
+        logger.warning(
+            "billing_usage_emit_failed kind=%s tenant=%s project=%s: %s",
+            kind, tenant_id, project_id, exc,
+        )
+        return None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Public emitters — one per kind
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def record_llm_call(
+    *,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+    cache_read_tokens: int = 0,
+    cache_create_tokens: int = 0,
+    tenant_id: str | None = None,
+    project_id: str | None = None,
+    occurred_at: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Optional[int]:
+    """Record one LLM call into ``billing_usage_events``.
+
+    ``cost_usd`` is the dollar amount the caller has computed at the
+    pricing-table-snapshot in effect at write time — the row freezes it
+    so a later ``config/llm_pricing.yaml`` update doesn't retroactively
+    re-bill historical events (mirrors the ``token_usage.cost`` policy
+    locked in by Z.3 #292 checkbox 7).
+
+    ``tenant_id`` / ``project_id`` resolution: explicit arg → ContextVar
+    → ``(t-default, p-default-default)`` fall-through. The fall-through
+    is the Y9 row 5 acceptance criterion's "走 'default' project 歸因"
+    contract — a system / cron-issued LLM call without a request scope
+    still attributes to a known bucket rather than silently dropping.
+    """
+    tid = _resolve_tenant(tenant_id)
+    pid = _resolve_project(project_id, tenant_id=tid)
+    return await _write_event(
+        occurred_at=occurred_at if occurred_at is not None else time.time(),
+        tenant_id=tid,
+        project_id=pid,
+        kind=KIND_LLM_CALL,
+        model=model,
+        input_tokens=int(input_tokens or 0),
+        output_tokens=int(output_tokens or 0),
+        cache_read_tokens=int(cache_read_tokens or 0),
+        cache_create_tokens=int(cache_create_tokens or 0),
+        cost_usd=float(cost_usd or 0.0),
+        quantity=1.0,
+        metadata=metadata,
+    )
+
+
+async def record_workflow_run(
+    *,
+    workflow_run_id: str,
+    workflow_kind: str,
+    workflow_status: str,
+    duration_ms: int | None = None,
+    tenant_id: str | None = None,
+    project_id: str | None = None,
+    occurred_at: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Optional[int]:
+    """Record one completed workflow_run into ``billing_usage_events``.
+
+    Cost is 0.0 — the LLM calls inside the run already wrote their own
+    ``llm_call`` rows; the ``workflow_run`` row is the run-count +
+    duration billing signal only and never double-counts spend.
+
+    ``duration_ms`` (if provided) goes into ``metadata_json`` so the
+    schema stays narrow (no new column for one optional field).
+    """
+    tid = _resolve_tenant(tenant_id)
+    pid = _resolve_project(project_id, tenant_id=tid)
+    md = dict(metadata or {})
+    if duration_ms is not None:
+        md.setdefault("duration_ms", int(duration_ms))
+    return await _write_event(
+        occurred_at=occurred_at if occurred_at is not None else time.time(),
+        tenant_id=tid,
+        project_id=pid,
+        kind=KIND_WORKFLOW_RUN,
+        workflow_run_id=workflow_run_id,
+        workflow_kind=workflow_kind,
+        workflow_status=workflow_status,
+        cost_usd=0.0,
+        quantity=1.0,
+        metadata=md,
+    )
+
+
+async def record_workspace_gb_hour(
+    *,
+    gb_hours: float,
+    tenant_id: str | None = None,
+    project_id: str | None = None,
+    occurred_at: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Optional[int]:
+    """Record one workspace-GB-hour sample into ``billing_usage_events``.
+
+    ``gb_hours`` is the integral of GB × hours since the prior sample
+    for this ``(tenant, project)`` slice — caller computes it from
+    (current_size_gb × hours_since_prior_sweep). Cost is 0.0 (storage
+    is plan-tier billed; the per-hour multiplier × rate happens in T4
+    aggregation, not here).
+
+    ``quantity`` mirrors ``gb_hours`` so a downstream
+    ``SUM(quantity) GROUP BY (tenant, project, month)`` yields the
+    GB-hour total in one place. ``cost_usd`` stays 0.0 so the same
+    aggregation can ``SUM(cost_usd)`` without conflating LLM dollars
+    with storage hours.
+    """
+    tid = _resolve_tenant(tenant_id)
+    pid = _resolve_project(project_id, tenant_id=tid)
+    qty = float(gb_hours or 0.0)
+    return await _write_event(
+        occurred_at=occurred_at if occurred_at is not None else time.time(),
+        tenant_id=tid,
+        project_id=pid,
+        kind=KIND_WORKSPACE_GB_HOUR,
+        cost_usd=0.0,
+        quantity=qty,
+        metadata=metadata,
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Read-side aggregator — per-project breakdown for T6 pricing page
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def breakdown_by_project(
+    *,
+    tenant_id: str,
+    since: float | None = None,
+    until: float | None = None,
+) -> list[dict[str, Any]]:
+    """Group ``billing_usage_events`` by ``project_id`` for ``tenant_id``.
+
+    Returns one dict per project with::
+
+        {
+            "project_id": "p-acme-firmware",
+            "llm_calls": 1024,
+            "llm_input_tokens": 245_000,
+            "llm_output_tokens": 91_000,
+            "llm_cost_usd": 14.32,
+            "workflow_runs": 53,
+            "workspace_gb_hours": 17.6
+        }
+
+    Sorted by ``llm_cost_usd DESC`` then ``project_id ASC`` so the
+    pricing-page UI shows the spend hot-spots first. Y9 row 5
+    acceptance criterion: pre-Y1 rows whose ``project_id`` was NULL
+    on ``workflow_runs`` (alembic 0038 left the column nullable) are
+    NOT a problem here because the emitter resolves them to
+    ``p-<suffix>-default`` at write time, so this aggregator never
+    sees a NULL ``project_id``.
+
+    ``since`` / ``until`` are inclusive UNIX-second bounds. Pass
+    ``None`` for an open bound on either end.
+    """
+    conditions = ["tenant_id = $1"]
+    params: list[Any] = [tenant_id]
+    if since is not None:
+        conditions.append(f"occurred_at >= ${len(params) + 1}")
+        params.append(float(since))
+    if until is not None:
+        conditions.append(f"occurred_at <= ${len(params) + 1}")
+        params.append(float(until))
+
+    sql = (
+        "SELECT project_id, "
+        "SUM(CASE WHEN kind = 'llm_call' THEN 1 ELSE 0 END) AS llm_calls, "
+        "COALESCE(SUM(CASE WHEN kind = 'llm_call' "
+        "THEN input_tokens ELSE 0 END), 0) AS llm_input_tokens, "
+        "COALESCE(SUM(CASE WHEN kind = 'llm_call' "
+        "THEN output_tokens ELSE 0 END), 0) AS llm_output_tokens, "
+        "COALESCE(SUM(CASE WHEN kind = 'llm_call' "
+        "THEN cost_usd ELSE 0 END), 0.0) AS llm_cost_usd, "
+        "SUM(CASE WHEN kind = 'workflow_run' THEN 1 ELSE 0 END) "
+        "AS workflow_runs, "
+        "COALESCE(SUM(CASE WHEN kind = 'workspace_gb_hour' "
+        "THEN quantity ELSE 0 END), 0.0) AS workspace_gb_hours "
+        "FROM billing_usage_events "
+        "WHERE " + " AND ".join(conditions) + " "
+        "GROUP BY project_id "
+        "ORDER BY llm_cost_usd DESC, project_id ASC"
+    )
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append({
+            "project_id": r["project_id"],
+            "llm_calls": int(r["llm_calls"] or 0),
+            "llm_input_tokens": int(r["llm_input_tokens"] or 0),
+            "llm_output_tokens": int(r["llm_output_tokens"] or 0),
+            "llm_cost_usd": round(float(r["llm_cost_usd"] or 0.0), 6),
+            "workflow_runs": int(r["workflow_runs"] or 0),
+            "workspace_gb_hours": round(
+                float(r["workspace_gb_hours"] or 0.0), 6,
+            ),
+        })
+    return out

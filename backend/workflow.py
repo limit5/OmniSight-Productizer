@@ -346,6 +346,50 @@ async def finish(run_id: str, status: RunStatus = "completed",
     })
     _emit_workflow_updated_safe(run_id, status, new_version)
 
+    # Y9 #285 row 3 — fan one ``workflow_run`` billing event per
+    # finish() call into ``billing_usage_events`` so T4 can roll up
+    # run-counts + duration per ``(tenant_id, project_id)`` tuple.
+    # Cost is 0.0 — the LLM calls inside the run already wrote their
+    # own ``llm_call`` rows; this row is the run-count + duration
+    # billing signal only and never double-counts spend (Y9 row 3
+    # contract). Reads ``workflow_runs.tenant_id`` / ``project_id``
+    # directly off the row so we don't depend on the request-scope
+    # ContextVar still being set when ``finish`` is called from a
+    # background task. Best-effort — billing emit failure must never
+    # regress the workflow.finish contract.
+    try:
+        from backend import billing_usage as _billing
+        from backend.db_pool import get_pool as _get_pool
+        async with _get_pool().acquire() as _conn:
+            row = await _conn.fetchrow(
+                "SELECT kind, started_at, completed_at, "
+                "tenant_id, project_id "
+                "FROM workflow_runs WHERE id = $1",
+                run_id,
+            )
+        if row is not None:
+            duration_ms: int | None = None
+            try:
+                if row["completed_at"] is not None and row["started_at"] is not None:
+                    duration_ms = int(
+                        (float(row["completed_at"]) - float(row["started_at"])) * 1000
+                    )
+            except Exception:
+                duration_ms = None
+            await _billing.record_workflow_run(
+                workflow_run_id=run_id,
+                workflow_kind=row["kind"] or "",
+                workflow_status=status,
+                duration_ms=duration_ms,
+                tenant_id=row["tenant_id"],
+                project_id=row["project_id"],
+            )
+    except Exception as exc:
+        logger.warning(
+            "billing_usage.record_workflow_run failed for run=%s: %s",
+            run_id, exc,
+        )
+
     # Phase 62 hook: when a long / hard-fought run completes successfully
     # and OMNISIGHT_SELF_IMPROVE_LEVEL includes L1, distil it into a
     # skill candidate and file a Decision Engine proposal. Failures here

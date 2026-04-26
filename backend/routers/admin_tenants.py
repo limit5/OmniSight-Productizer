@@ -1881,3 +1881,183 @@ async def get_tenant_audit_events(
             "filtered_to_self": not is_cross_tenant,
         },
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y9 #285 row 3 — per-(tenant_id, project_id) usage breakdown for T6
+#  pricing page.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Reads ``billing_usage_events`` (alembic 0039) and returns one
+# row per ``project_id`` for the requested tenant + time window. The
+# T6 pricing page renders the breakdown table; the contract is the
+# read-side of the Y9 row 3 ``(tenant_id, project_id)`` tuple plumbing
+# (LLM call / workflow_run / workspace-GB-hour all tagged at write
+# time by ``backend.billing_usage``).
+#
+# Authorisation mirrors GET /admin/audit/tenants/{tid}: super-admin
+# may query any tenant; tenant owner / admin may query their own
+# tenant only; everyone else 403. We reuse
+# :func:`_user_can_query_tenant_audit` since the auth contract is
+# identical (admin-tier members of the target tenant see their own
+# data; cross-tenant view requires super-admin).
+#
+# Module-global state (SOP Step 1)
+# ────────────────────────────────
+# No new module-level state in this row. Re-uses the immutable
+# ``_AUDIT_QUERY_ALLOWED_MEMBERSHIP_ROLES`` frozenset already defined
+# above for the audit-query helper. Each uvicorn worker derives the
+# same value (audit answer #1).
+#
+# Read-after-write timing (SOP Step 1)
+# ────────────────────────────────────
+# Two reads (tenants existence + breakdown SUM/GROUP BY). No write.
+# Concurrent emitters (LLM callback / workflow.finish / workspace-GC
+# sweep) write rows that may or may not be visible depending on
+# commit ordering — the GROUP BY reads whatever has committed at
+# query time, which matches the eventual-consistency contract of
+# any append-only billing fact table.
+
+
+@router.get("/usage/breakdown")
+async def get_usage_breakdown_by_project(
+    _request: Request,
+    tenant_id: str = Query(
+        ...,
+        description="Tenant id to compute the breakdown for. Must "
+                    "match TENANT_ID_PATTERN.",
+    ),
+    since: float | None = Query(
+        default=None,
+        description="Lower bound (inclusive) on "
+                    "billing_usage_events.occurred_at (UNIX seconds).",
+    ),
+    until: float | None = Query(
+        default=None,
+        description="Upper bound (inclusive) on "
+                    "billing_usage_events.occurred_at (UNIX seconds).",
+    ),
+    user: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Per-(``tenant_id``, ``project_id``) usage breakdown — T6 pricing
+    page data source.
+
+    Authorisation
+    ─────────────
+    * ``super_admin`` may query any tenant.
+    * Tenant ``owner`` / ``admin`` may query their own tenant only,
+      where "own" means an *active* ``user_tenant_memberships`` row
+      with role ∈ {owner, admin} on the queried tenant.
+    * Anything else → 403.
+
+    Status codes
+    ────────────
+    * 200 — payload below.
+    * 403 — caller cannot query this tenant.
+    * 404 — tenant not found (returned *after* authz so non-super-admin
+      cannot enumerate via 404-vs-403 timing).
+    * 422 — ``tenant_id`` shape invalid.
+
+    Payload
+    ───────
+    ::
+
+        {
+            "tenant_id": "t-acme",
+            "since": 1745500000.0,
+            "until": null,
+            "breakdown": [
+                {
+                    "project_id": "p-acme-firmware",
+                    "llm_calls": 1024,
+                    "llm_input_tokens": 245000,
+                    "llm_output_tokens": 91000,
+                    "llm_cost_usd": 14.32,
+                    "workflow_runs": 53,
+                    "workspace_gb_hours": 17.6
+                },
+                ...
+            ],
+            "totals": {
+                "llm_calls": 4096,
+                "llm_input_tokens": 980000,
+                "llm_output_tokens": 364000,
+                "llm_cost_usd": 57.28,
+                "workflow_runs": 212,
+                "workspace_gb_hours": 70.4
+            }
+        }
+
+    Sort order
+    ──────────
+    Rows come back ordered by ``llm_cost_usd DESC`` then ``project_id
+    ASC`` (the spend hot-spots first) — matches what the T6 pricing
+    page wants for its breakdown table.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"invalid tenant id: {tenant_id!r}; "
+                               f"must match {TENANT_ID_PATTERN}"},
+        )
+
+    if not await _user_can_query_tenant_audit(user, tenant_id):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "usage breakdown forbidden: super_admin may query "
+                    "any tenant; tenant owner / admin may query their "
+                    "own tenant only."
+                ),
+                "tenant_id": tenant_id,
+                "your_role": user.role,
+                "your_home_tenant": user.tenant_id,
+            },
+        )
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        exists = await conn.fetchrow(
+            "SELECT id FROM tenants WHERE id = $1", tenant_id,
+        )
+    if exists is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    from backend import billing_usage as _billing
+    breakdown = await _billing.breakdown_by_project(
+        tenant_id=tenant_id,
+        since=since,
+        until=until,
+    )
+
+    totals = {
+        "llm_calls": sum(int(r["llm_calls"]) for r in breakdown),
+        "llm_input_tokens": sum(
+            int(r["llm_input_tokens"]) for r in breakdown
+        ),
+        "llm_output_tokens": sum(
+            int(r["llm_output_tokens"]) for r in breakdown
+        ),
+        "llm_cost_usd": round(
+            sum(float(r["llm_cost_usd"]) for r in breakdown), 6,
+        ),
+        "workflow_runs": sum(int(r["workflow_runs"]) for r in breakdown),
+        "workspace_gb_hours": round(
+            sum(float(r["workspace_gb_hours"]) for r in breakdown), 6,
+        ),
+    }
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "tenant_id": tenant_id,
+            "since": since,
+            "until": until,
+            "breakdown": breakdown,
+            "totals": totals,
+        },
+    )
