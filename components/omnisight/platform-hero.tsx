@@ -1,7 +1,7 @@
 "use client"
 
 /**
- * BS.5.2 + BS.5.3 — Platforms hero panel.
+ * BS.5.2 + BS.5.3 + BS.5.4 — Platforms hero panel.
  *
  * Three-column hero that anchors `/settings/platforms`:
  *   • Left   — `<OrbitalDiagram />` (3 concentric rings, 8/10/12 dot
@@ -18,8 +18,17 @@
  *   BS.5.3 — per-entry orbital dots + tooltips + click-through
  *            (`<OrbitalDiagram />` swapped in here, replacing the
  *            previous file-private `<HeroOrbitalShell />` placeholder).
- *   BS.5.4 — BS.3 motion library (idle drift + cursor magnetic tilt +
- *            glass reflection) layered on top of this hero.
+ *   BS.5.4 — BS.3 motion library layered on top, three effects:
+ *            • orbital frame `useFloatingCard("a")` — Layer 1 idle
+ *              drift, all non-off levels.
+ *            • outer section `useCursorMagneticTilt({maxTiltDeg: 4})` —
+ *              Layer 6 cursor magnet, normal + dramatic only.
+ *            • glass reflect wrapper `useGlassReflection()` — Layer 7
+ *              cursor-tracking reflection, dramatic-only per ADR §5.7.
+ *            All three self-gate via `useEffectiveMotionLevel()` so
+ *            users with `prefers-reduced-motion: reduce` / battery
+ *            critical / `motion: off` see no animation, no listeners,
+ *            no GPU layer cost.
  *   BS.5.5 — vitest unit tests (~10 cases hero + 6 orbital).
  *
  * Data inputs: pure props (`PlatformCounters` + `entries`).
@@ -28,19 +37,37 @@
  *   to zero — caller plumbs live data from `useHostMetricsTick()` (or a
  *   future storage-quota endpoint) once those hooks land.
  *
+ * Motion layering rationale (BS.5.4)
+ * ──────────────────────────────────
+ * Mirrors the `<MotionPreview />` reference in `components/omnisight/
+ * motion-preview.tsx`: each hook owns its own ref / listener so they
+ * compose via nested wrappers — outer-most carries the perspective +
+ * rotateX/Y for tilt, the next layer holds the glass `::after`, the
+ * innermost carries the float keyframe. Refs MUST be on distinct DOM
+ * nodes (React only allows one ref per element) and we destructure
+ * each hook's return value so `react-hooks/refs` does not flag the
+ * non-ref fields.
+ *
  * Module-global state audit
  * ─────────────────────────
  * No module-level mutable state. The component is a pure render of
  * its props with `useMemo` for derived geometry. Disk-usage percent
  * is clamped 0..100 to defend against transient upstream bugs where
- * `disk_used_gb > disk_total_gb`.
+ * `disk_used_gb > disk_total_gb`. The BS.3 motion hooks are
+ * per-component-instance — every `useEffect` cleanup detaches its
+ * pointer / scroll listener and resets the CSS variable it wrote.
+ * Browser-only render, uvicorn `--workers N` model does not apply
+ * (answer #1: each browser tab derives the same view from the same
+ * Next.js build artifact).
  *
  * Read-after-write timing audit
  * ─────────────────────────────
  * N/A — no API calls inside this component. Visual updates flow from
  * prop changes; the live SSE tick that callers subscribe to is itself
  * commit-ordered upstream (host_metrics.tick publishes after sample
- * commit), so the hero re-renders consistently on each tick.
+ * commit), so the hero re-renders consistently on each tick. BS.3
+ * motion hooks read `useEffectiveMotionLevel()` synchronously — no
+ * cross-request timing.
  */
 
 import { useMemo } from "react"
@@ -50,6 +77,12 @@ import {
   OrbitalDiagram,
   type InstalledPlatformEntry,
 } from "@/components/omnisight/orbital-diagram"
+import {
+  useCursorMagneticTilt,
+  useEffectiveMotionLevel,
+  useFloatingCard,
+  useGlassReflection,
+} from "@/hooks/use-zero-g"
 
 // ─────────────────────────────────────────────────────────────────────
 // Counter contract — exported so BS.5.5 tests + BS.6/BS.7 wiring share
@@ -182,6 +215,20 @@ export function PlatformHero({
   const fillClass = PRESSURE_FILL[pressure]
   const glowClass = PRESSURE_GLOW[pressure]
 
+  // BS.5.4 — BS.3 motion library applied to the hero. Each hook
+  // self-gates via `useEffectiveMotionLevel()`, so when the user
+  // (or OS / battery rule) downgrades motion the hooks return
+  // empty styles / classes / no-op listeners. We surface the
+  // effective level on the section itself so BS.5.5 tests can
+  // verify the resolver chain is plumbed without inspecting CSS.
+  const motionLevel = useEffectiveMotionLevel()
+  const { ref: tiltRef, style: tiltStyle } = useCursorMagneticTilt<HTMLElement>({
+    maxTiltDeg: 4,
+  })
+  const { ref: reflectRef, className: reflectClassName } =
+    useGlassReflection<HTMLDivElement>()
+  const { className: floatClassName, style: floatStyle } = useFloatingCard("a")
+
   // Display strings — `toLocaleString` keeps the counter strip readable
   // when an operator-tenant has many installed entries (commas / locale
   // grouping). Disk uses 1 fractional gigabyte to match
@@ -193,9 +240,12 @@ export function PlatformHero({
 
   return (
     <section
+      ref={tiltRef}
       data-testid="platform-hero"
       data-disk-pressure={pressure}
+      data-motion-level={motionLevel}
       aria-label="Platforms hero panel"
+      style={tiltStyle}
       className={[
         "relative overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--card)] p-4 md:p-6",
         className ?? "",
@@ -203,11 +253,24 @@ export function PlatformHero({
         .filter(Boolean)
         .join(" ")}
     >
+      <div
+        ref={reflectRef}
+        data-testid="platform-hero-glass"
+        data-motion-reflect={reflectClassName ? "on" : "off"}
+        className={["relative", reflectClassName].filter(Boolean).join(" ")}
+      >
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[200px_1fr_120px] md:items-stretch">
         {/* ── Left: orbital diagram ─────────────────────────────── */}
         <div
           data-testid="platform-hero-orbital-frame"
-          className="relative flex aspect-square items-center justify-center rounded-md border border-[var(--border)]/60 bg-black/20 p-2"
+          data-motion-float={floatClassName || "off"}
+          style={floatStyle}
+          className={[
+            "relative flex aspect-square items-center justify-center rounded-md border border-[var(--border)]/60 bg-black/20 p-2",
+            floatClassName,
+          ]
+            .filter(Boolean)
+            .join(" ")}
         >
           <OrbitalDiagram
             entries={entries}
@@ -323,6 +386,7 @@ export function PlatformHero({
             </div>
           </div>
         </div>
+      </div>
       </div>
     </section>
   )
