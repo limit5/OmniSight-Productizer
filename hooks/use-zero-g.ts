@@ -5,10 +5,9 @@
  *
  * Five hooks that drive the keyframes + utility classes shipped in
  * `app/globals.css` (BS.3.1). Each hook respects
- * `useEffectiveMotionLevel()` (BS.3.5 will replace the placeholder
- * defined at the bottom of this file with a fully-integrated version
- * that layers `prefers-reduced-motion` > `motion: off` > battery
- * heuristics > user preference).
+ * `useEffectiveMotionLevel()` (BS.3.5) which layers
+ * `prefers-reduced-motion` > `motion: off` > battery rule >
+ * user preference.
  *
  * Contract reminder (defaults = `dramatic`, see globals.css §BS.3):
  *   --motion-amplitude  1.5  (subtle 0.5 / normal 1.0 / off 0)
@@ -31,11 +30,20 @@ import {
   type RefObject,
 } from "react"
 
+import { useEffectiveMotionLevel } from "@/hooks/use-effective-motion-level"
+import type { MotionLevel } from "@/lib/motion-preferences"
+
 // ─────────────────────────────────────────────────────────────────────
 // MotionLevel contract
 // ─────────────────────────────────────────────────────────────────────
 
-export type MotionLevel = "off" | "subtle" | "normal" | "dramatic"
+// `MotionLevel` and `useEffectiveMotionLevel` are owned by
+// `@/lib/motion-preferences` (BS.3.3) and
+// `@/hooks/use-effective-motion-level` (BS.3.5) respectively. We
+// re-export them here so existing call sites that imported them
+// from this module keep working.
+export type { MotionLevel }
+export { useEffectiveMotionLevel }
 
 /** Multiplier applied to `--motion-amplitude` per level. Mirrors
  *  the CSS contract documented in `app/globals.css §BS.3`. */
@@ -377,47 +385,6 @@ export function useCursorDistanceGlow<T extends HTMLElement = HTMLDivElement>(
   }, [enabled, maxDistancePx])
 
   return { ref, className: enabled ? "cursor-distance-glow" : "" }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// useEffectiveMotionLevel — placeholder; BS.3.5 replaces this
-// ─────────────────────────────────────────────────────────────────────
-
-/**
- * Placeholder until BS.3.5 lands the integrated hook. Today it
- * returns `dramatic` (the documented default) but short-circuits
- * to `off` when the OS flag `prefers-reduced-motion: reduce` is
- * set — that behaviour is the R25.2 last-line-of-defence guarantee
- * and must hold regardless of which BS.3 sub-row is in flight.
- *
- * BS.3.5 will replace the body of this function with the layered
- * resolver `prefers-reduced-motion > motion: off > battery rule >
- * user preference`. Consumers (the five hooks above) should not
- * change — they read the return value, nothing else.
- */
-export function useEffectiveMotionLevel(): MotionLevel {
-  const [level, setLevel] = useState<MotionLevel>("dramatic")
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !window.matchMedia) return
-    const mql = window.matchMedia("(prefers-reduced-motion: reduce)")
-    const apply = () => setLevel(mql.matches ? "off" : "dramatic")
-    apply()
-    // Older Safari shipped only `addListener`; stick to the modern API
-    // and fall back if absent so jsdom + tests still wire up cleanly.
-    if (typeof mql.addEventListener === "function") {
-      mql.addEventListener("change", apply)
-      return () => mql.removeEventListener("change", apply)
-    }
-    const legacy = mql as unknown as {
-      addListener?: (cb: () => void) => void
-      removeListener?: (cb: () => void) => void
-    }
-    legacy.addListener?.(apply)
-    return () => legacy.removeListener?.(apply)
-  }, [])
-
-  return level
 }
 
 /** Reset hook for the `data-pressing` attribute used by the

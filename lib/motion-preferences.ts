@@ -74,7 +74,42 @@ export async function getMotionPreference(): Promise<MotionLevel> {
  * user-preferences API. Errors propagate to the caller so the
  * Display Settings page (BS.3.6) can surface a retry / toast;
  * silent swallowing belongs at the call site, not here.
+ *
+ * Emits a same-tab `omnisight:motion-pref-changed` `CustomEvent`
+ * after a successful write so subscribers (BS.3.5
+ * `useEffectiveMotionLevel`) can refresh without a full remount.
+ * Cross-tab propagation is out of scope (the user-preferences
+ * API is server-of-record; another tab will pick up the change
+ * on its next mount).
  */
 export async function setMotionPreference(level: MotionLevel): Promise<void> {
   await setUserPreference(MOTION_PREFERENCE_KEY, level)
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent<MotionLevel>(MOTION_PREF_CHANGE_EVENT, { detail: level }),
+    )
+  }
+}
+
+/** Same-tab event name used to broadcast motion-preference writes
+ *  to other components without a full remount. Exported for tests. */
+export const MOTION_PREF_CHANGE_EVENT = "omnisight:motion-pref-changed"
+
+/**
+ * Subscribe to `setMotionPreference()` writes within the same tab.
+ * Returns an unsubscribe function. SSR-safe: if `window` is not
+ * available the subscription is a no-op (the `useEffect` site is
+ * already gated, but this keeps the helper safe to call from
+ * non-component code too).
+ */
+export function subscribeMotionPreference(
+  callback: (level: MotionLevel) => void,
+): () => void {
+  if (typeof window === "undefined") return () => {}
+  const handler = (event: Event) => {
+    const detail = (event as CustomEvent<unknown>).detail
+    if (isMotionLevel(detail)) callback(detail)
+  }
+  window.addEventListener(MOTION_PREF_CHANGE_EVENT, handler)
+  return () => window.removeEventListener(MOTION_PREF_CHANGE_EVENT, handler)
 }
