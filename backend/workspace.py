@@ -421,6 +421,25 @@ async def provision(
     )
     ws_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Y6 #282 row 7 — explicit pre-clone url_hash log. The hash is what
+    # routes "two repos sharing a basename" (the audit bug) to distinct
+    # sub-dirs. Logging the (agent_id, source, url_hash, leaf) tuple
+    # *before* the clone/worktree command is what makes the collision-
+    # safety property auditable from operator logs: a forensic reader
+    # can grep for the hash leaf and see exactly which URL produced it.
+    # ``_remote_for_hash is None`` collapses to the ``_SELF_REPO_HASH``
+    # sentinel for in-repo worktrees — same agent always lands on the
+    # same self-leaf, by design.
+    _resolved_url_hash = _repo_url_hash(_remote_for_hash)
+    logger.info(
+        "Workspace url_hash assigned (Y6 #282 collision-safety leaf): "
+        "agent=%s remote=%s url_hash=%s leaf=%s",
+        agent_id,
+        source if _remote_for_hash else "<self-repo>",
+        _resolved_url_hash,
+        ws_path.name,
+    )
+
     if is_local and Path(source).is_dir():
         # Use git worktree (fast, shares object store)
         # First create the branch from current HEAD
@@ -531,7 +550,12 @@ async def provision(
     emit_workspace(
         agent_id,
         "provisioned",
-        f"branch={branch}, path={ws_path}, anchor={anchor_sha or 'none'}",
+        # Y6 #282 row 7 — embed url_hash in the SSE detail string so
+        # operators / dashboards subscribed to the workspace bus see the
+        # collision-safety leaf assignment without having to scrape the
+        # full path. Pre-clone log line above carries the same value.
+        f"branch={branch}, path={ws_path}, url_hash={_resolved_url_hash}, "
+        f"anchor={anchor_sha or 'none'}",
     )
     emit_agent_update(agent_id, "running", f"Workspace ready: branch={branch}")
     return info
