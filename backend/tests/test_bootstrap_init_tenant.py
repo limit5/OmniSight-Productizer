@@ -391,6 +391,86 @@ async def test_init_tenant_skip_path_keeps_only_t_default(
     assert ids == ["t-default"]
 
 
+@pytest.mark.asyncio
+async def test_init_tenant_skip_path_default_admin_unchanged_and_authenticates(
+    _init_tenant_client, pg_test_pool,
+):
+    """Y7 row 3 contract pin — backward-compat with single-tenant install.
+
+    When the operator clicks Skip on Step 2.5 (i.e. never calls
+    ``POST /api/v1/bootstrap/init-tenant``), the install must remain
+    indistinguishable from a pre-Y7 deployment:
+
+      * ``tenants`` contains exactly one row, ``t-default``.
+      * The default admin row is still present, still pinned to
+        ``t-default``, and still ``enabled=1``.
+      * The default admin can authenticate (after the standard Step 1
+        password rotation), proving the existing single-tenant login
+        flow is untouched by the new endpoint's mere existence.
+      * No ``user_tenant_memberships`` row was silently created for the
+        default admin — Step 2.5 is the only path that writes
+        memberships, so skipping it must leave the table empty.
+      * No ``projects`` row was created — default-tenant installs
+        continue to operate without a default project until a future
+        ``ensure_default_project`` op runs.
+    """
+    client = _init_tenant_client["client"]
+    default_admin = _init_tenant_client["admin"]
+
+    await _au.change_password(default_admin.id, "rotated-default-pw-xyz-789")
+
+    # Operator does not POST /api/v1/bootstrap/init-tenant.
+
+    async with pg_test_pool.acquire() as conn:
+        tenant_rows = await conn.fetch(
+            "SELECT id, enabled FROM tenants ORDER BY id"
+        )
+        admin_row = await conn.fetchrow(
+            "SELECT id, email, role, tenant_id, enabled "
+            "FROM users WHERE id = $1",
+            default_admin.id,
+        )
+        membership_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM user_tenant_memberships "
+            "WHERE user_id = $1",
+            default_admin.id,
+        )
+        project_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM projects WHERE tenant_id = $1",
+            "t-default",
+        )
+
+    assert [r["id"] for r in tenant_rows] == ["t-default"]
+    assert int(tenant_rows[0]["enabled"]) == 1
+
+    assert admin_row is not None
+    assert admin_row["email"] == default_admin.email
+    assert admin_row["tenant_id"] == "t-default"
+    assert int(admin_row["enabled"]) == 1
+
+    assert int(membership_count) == 0
+    assert int(project_count) == 0
+
+    refreshed = await _au.authenticate_password(
+        default_admin.email, "rotated-default-pw-xyz-789",
+    )
+    assert refreshed is not None
+    assert refreshed.id == default_admin.id
+    assert refreshed.tenant_id == "t-default"
+
+    # Sanity: the new endpoint exists but was not exercised — the
+    # subsequent test runs must observe the same clean baseline (the
+    # fixture TRUNCATE handles the teardown).  We do NOT assert against
+    # the audit_log here because Step 1 / fixture wiring may write
+    # benign entries; the audit-row contract is owned by the
+    # tenant_initialized test.
+
+    # Express the Y7 row 3 BC contract literally for grep-ability:
+    # ``no init-tenant call → tenants == [t-default] AND default admin
+    # login still works AND no membership/project rows leaked``.
+    pass
+
+
 # ─────────────────────────────────────────────────────────────────
 #  Validation / error paths
 # ─────────────────────────────────────────────────────────────────
