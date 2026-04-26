@@ -1725,3 +1725,168 @@ html {
   88% { background-color: rgba(255, 255, 255, 0.85); }
   100% { background-color: rgba(255, 255, 255, 1); }
 }
+
+/* ─────────────────────────────────────────────────────────────────
+ * BS.3 — Motion library (8 layers, ADR §5.1)
+ *
+ * Each utility class below pairs with a hook in `hooks/use-zero-g.ts`
+ * (BS.3.2). Hooks read `useEffectiveMotionLevel()` (BS.3.5) and write
+ * the CSS variables declared here to scale amplitude / disable layers.
+ * The R25.2 global `prefers-reduced-motion` fallback at line ~1590
+ * still applies as last line of defence.
+ *
+ * CSS-variable contract (defaults below = `dramatic`):
+ *   --motion-amplitude   1.5  (subtle 0.5 / normal 1.0 / off 0)
+ *   --motion-lift        5px  (subtle 1px / normal 3px / off 0)
+ *   --motion-tilt-x      0deg (cursor magnetic tilt, hook-set)
+ *   --motion-tilt-y      0deg
+ *   --glow-intensity     0    (cursor-distance glow, 0..1, hook-set)
+ *   --reflect-x          50%  (glass reflection cursor x, hook-set)
+ *   --reflect-y          50%
+ *   --group-breathe-delay 0ms (stagger, set inline per-element)
+ * ───────────────────────────────────────────────────────────────── */
+
+:root {
+  --motion-amplitude: 1.5;
+  --motion-lift: 5px;
+  --motion-tilt-x: 0deg;
+  --motion-tilt-y: 0deg;
+  --glow-intensity: 0;
+  --reflect-x: 50%;
+  --reflect-y: 50%;
+  --group-breathe-delay: 0ms;
+}
+
+/* Layer 1 — Idle drift (4 variants so adjacent cards never sync).
+ * Spec §5.1: 4-second loop, translate(±2px, ±3px), rotate(±0.5deg).
+ * Amplitude is multiplied by `--motion-amplitude` so motion-level
+ * scaling (subtle / normal / dramatic) happens without re-keyframing. */
+@keyframes float-drift-a {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  25%      { transform: translate(calc(2px * var(--motion-amplitude)), calc(-3px * var(--motion-amplitude))) rotate(calc(0.5deg * var(--motion-amplitude))); }
+  50%      { transform: translate(calc(-1px * var(--motion-amplitude)), calc(-2px * var(--motion-amplitude))) rotate(calc(-0.3deg * var(--motion-amplitude))); }
+  75%      { transform: translate(calc(-2px * var(--motion-amplitude)), calc(2px * var(--motion-amplitude))) rotate(calc(0.4deg * var(--motion-amplitude))); }
+}
+
+@keyframes float-drift-b {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  25%      { transform: translate(calc(-2px * var(--motion-amplitude)), calc(-2px * var(--motion-amplitude))) rotate(calc(-0.5deg * var(--motion-amplitude))); }
+  50%      { transform: translate(calc(2px * var(--motion-amplitude)), calc(-3px * var(--motion-amplitude))) rotate(calc(0.4deg * var(--motion-amplitude))); }
+  75%      { transform: translate(calc(1px * var(--motion-amplitude)), calc(2px * var(--motion-amplitude))) rotate(calc(-0.2deg * var(--motion-amplitude))); }
+}
+
+@keyframes float-drift-c {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  20%      { transform: translate(calc(1px * var(--motion-amplitude)), calc(2px * var(--motion-amplitude))) rotate(calc(0.3deg * var(--motion-amplitude))); }
+  55%      { transform: translate(calc(-2px * var(--motion-amplitude)), calc(-3px * var(--motion-amplitude))) rotate(calc(-0.5deg * var(--motion-amplitude))); }
+  80%      { transform: translate(calc(2px * var(--motion-amplitude)), calc(1px * var(--motion-amplitude))) rotate(calc(0.5deg * var(--motion-amplitude))); }
+}
+
+@keyframes float-drift-d {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  30%      { transform: translate(calc(-1px * var(--motion-amplitude)), calc(3px * var(--motion-amplitude))) rotate(calc(0.5deg * var(--motion-amplitude))); }
+  60%      { transform: translate(calc(2px * var(--motion-amplitude)), calc(-1px * var(--motion-amplitude))) rotate(calc(-0.4deg * var(--motion-amplitude))); }
+  85%      { transform: translate(calc(-2px * var(--motion-amplitude)), calc(-2px * var(--motion-amplitude))) rotate(calc(0.2deg * var(--motion-amplitude))); }
+}
+
+.float-card-a { animation: float-drift-a 4s ease-in-out infinite; will-change: transform; }
+.float-card-b { animation: float-drift-b 4s ease-in-out infinite; will-change: transform; }
+.float-card-c { animation: float-drift-c 4s ease-in-out infinite; will-change: transform; }
+.float-card-d { animation: float-drift-d 4s ease-in-out infinite; will-change: transform; }
+
+/* Layer 3 — Group breathe (chip strip / category group).
+ * Spec §5.1: 6-second loop, scale(1.0 → 1.015 → 1.0),
+ * opacity(0.95 → 1 → 0.95). Stagger 200ms via inline
+ * style="--group-breathe-delay: Nms" set by the hook. */
+@keyframes group-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.95; }
+  50%      { transform: scale(calc(1 + 0.015 * var(--motion-amplitude))); opacity: 1; }
+}
+
+.group-breathe {
+  animation: group-breathe 6s ease-in-out infinite;
+  animation-delay: var(--group-breathe-delay);
+  will-change: transform, opacity;
+}
+
+/* Layer 8 — Click inertia spring (install / cancel buttons).
+ * Spec §5.1: mousedown scale(0.96), mouseup overshoot scale(1.02),
+ * settle scale(1); total 350ms. `--motion-amplitude` scales overshoot
+ * (subtle 5% / normal 10% / dramatic 15% per §5.2). Triggered by the
+ * hook adding `data-pressing="true"` for the keyframe duration. */
+@keyframes spring-press {
+  0%   { transform: scale(0.96); }
+  60%  { transform: scale(calc(1 + 0.02 * var(--motion-amplitude))); }
+  100% { transform: scale(1); }
+}
+
+.spring-press[data-pressing="true"] {
+  animation: spring-press 350ms cubic-bezier(0.5, 1.5, 0.5, 1) forwards;
+}
+
+/* Hover lift baseline (Layer 5) layered on .spring-press; transform
+ * stays compositor-only per §5.5. */
+.spring-press {
+  transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.spring-press:hover:not([data-pressing="true"]) {
+  transform: translateY(calc(-1 * var(--motion-lift)));
+}
+
+/* Orbital rotation — used by orbital-diagram (BS.5.3) for concentric
+ * rings + dots. Speed varies per ring via inline `animation-duration`. */
+@keyframes orbital-rotate {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.orbital-rotate {
+  animation: orbital-rotate 24s linear infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+
+/* Layer 7 — Glass reflection (hero / detail panels, `dramatic` only).
+ * Radial gradient follows cursor via `--reflect-x` / `--reflect-y`
+ * (hook-driven, 1:0.05 ratio per §5.1). The keyframe drift gives a
+ * baseline shimmer for when the hook is not yet attached. */
+@keyframes holo-reflect-shimmer {
+  0%, 100% { background-position: 30% 30%; }
+  50%      { background-position: 70% 70%; }
+}
+
+.holo-reflect-glass {
+  position: relative;
+  isolation: isolate;
+}
+.holo-reflect-glass::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: radial-gradient(
+    circle at var(--reflect-x) var(--reflect-y),
+    rgba(255, 255, 255, 0.12) 0%,
+    rgba(255, 255, 255, 0.04) 25%,
+    transparent 60%
+  );
+  mix-blend-mode: screen;
+  opacity: calc(0.6 + 0.4 * var(--motion-amplitude));
+  animation: holo-reflect-shimmer 12s ease-in-out infinite;
+  will-change: background-position, opacity;
+}
+
+/* Layer 4 — Cursor-distance glow (catalog cards).
+ * `--glow-intensity` is 0..1, written by the hook based on the
+ * cursor's distance from the card centre. Per §5.5 the box-shadow
+ * itself is fixed-spread; only its alpha (encoded in
+ * `--glow-intensity`) changes to keep paint cost bounded. */
+.cursor-distance-glow {
+  --_glow: calc(var(--glow-intensity) * var(--motion-amplitude));
+  box-shadow:
+    0 0 calc(8px * var(--_glow)) rgba(56, 189, 248, calc(0.45 * var(--_glow))),
+    0 0 calc(20px * var(--_glow)) rgba(56, 189, 248, calc(0.25 * var(--_glow)));
+  transition: box-shadow 120ms linear;
+  will-change: box-shadow;
+}
