@@ -4600,6 +4600,165 @@ export const BOOTSTRAP_PROVIDER_KEY_URL: Record<string, string> = {
   azure: "https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/OpenAI",
 }
 
+// ─── Y7 #283 — Step 2.5 (initialize organization: tenant + super-admin) ───
+
+export type BootstrapInitTenantKind =
+  | "invalid_display_name"
+  | "invalid_slug"
+  | "enterprise_license_required"
+  | "password_too_short"
+  | "password_too_weak"
+  | "tenant_already_exists"
+  | "non_default_tenant_already_exists"
+  | "email_already_exists"
+  | "validation_error"
+
+export interface BootstrapInitTenantRequest {
+  display_name: string
+  plan: "free" | "starter" | "pro" | "enterprise"
+  license_key?: string
+  admin_email: string
+  admin_password: string
+  admin_name?: string
+}
+
+export interface BootstrapInitTenantResponse {
+  status: string
+  tenant_id: string
+  tenant_name: string
+  plan: string
+  super_admin_user_id: string
+  super_admin_email: string
+  project_id: string
+  env_write_warning: string
+}
+
+/**
+ * Typed error raised by {@link bootstrapInitTenant} on any backend error
+ * response. Carries the ``kind`` tag + server-supplied ``detail`` so the
+ * UI can pick a matching banner without parsing the detail string.
+ */
+export class BootstrapInitTenantError extends Error {
+  kind: BootstrapInitTenantKind
+  detail: string
+  status: number
+  constructor(kind: BootstrapInitTenantKind, detail: string, status: number) {
+    super(detail)
+    this.name = "BootstrapInitTenantError"
+    this.kind = kind
+    this.detail = detail
+    this.status = status
+  }
+}
+
+function _isInitTenantKind(v: unknown): v is BootstrapInitTenantKind {
+  return (
+    v === "invalid_display_name" ||
+    v === "invalid_slug" ||
+    v === "enterprise_license_required" ||
+    v === "password_too_short" ||
+    v === "password_too_weak" ||
+    v === "tenant_already_exists" ||
+    v === "non_default_tenant_already_exists" ||
+    v === "email_already_exists" ||
+    v === "validation_error"
+  )
+}
+
+export const BOOTSTRAP_INIT_TENANT_KIND_COPY: Record<
+  BootstrapInitTenantKind,
+  { title: string; hint: string }
+> = {
+  invalid_display_name: {
+    title: "Organization name not usable",
+    hint: "The name slugifies to an empty / too-short id. Use plain ASCII letters or digits — e.g. 'Acme Robotics' → t-acme-robotics.",
+  },
+  invalid_slug: {
+    title: "Generated tenant id rejected",
+    hint: "Pick a name whose slug starts with a letter or digit and is at least 2 chars. Hyphens are allowed; punctuation is stripped.",
+  },
+  enterprise_license_required: {
+    title: "Enterprise license key required",
+    hint: "The enterprise plan needs a license key (8-256 chars: letters, digits, dash, underscore). Pick a lower plan or paste your key.",
+  },
+  password_too_short: {
+    title: "Super-admin password too short",
+    hint: "Server enforces the 12-character minimum before hashing. Extend the password and submit again.",
+  },
+  password_too_weak: {
+    title: "Super-admin password too guessable",
+    hint: "Server re-ran zxcvbn and scored the password below the K7 threshold. Mix classes (upper/lower/digit/symbol), avoid dictionary words.",
+  },
+  tenant_already_exists: {
+    title: "Tenant id already exists",
+    hint: "Pick a different organization name — its slug collides with an existing tenant in the database.",
+  },
+  non_default_tenant_already_exists: {
+    title: "Wizard Step 2.5 already ran",
+    hint: "A non-default tenant already exists. Manage further tenants via /admin/tenants after finalize, not here.",
+  },
+  email_already_exists: {
+    title: "Email already in use",
+    hint: "A user row with this email already exists. Pick a different email for the super-admin, or use that account.",
+  },
+  validation_error: {
+    title: "Request rejected",
+    hint: "The wizard payload failed validation. Check the field shapes and try again.",
+  },
+}
+
+/**
+ * Y7 row 1 — initialize the operator's real tenant + super-admin during
+ * the bootstrap wizard's Step 2.5. Optional step; skipping leaves the
+ * install on ``t-default``. Side-effects on success: tenants row,
+ * super_admin user, owner membership, default project, and a best-effort
+ * ``OMNISIGHT_PRIMARY_TENANT_ID`` write into ``.env``.
+ */
+export async function bootstrapInitTenant(
+  req: BootstrapInitTenantRequest,
+): Promise<BootstrapInitTenantResponse> {
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+  }
+  if (_currentTenantId) baseHeaders["X-Tenant-Id"] = _currentTenantId
+  if (typeof document !== "undefined") {
+    const csrf = readCookie("omnisight_csrf")
+    if (csrf) baseHeaders["X-CSRF-Token"] = csrf
+  }
+  let res: Response
+  try {
+    res = await fetch(`${API_V1}/bootstrap/init-tenant`, {
+      method: "POST",
+      credentials: "include",
+      headers: baseHeaders,
+      body: JSON.stringify(req),
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    throw new Error(`Cannot reach OmniSight API: ${msg}`)
+  }
+  if (!res.ok) {
+    let kind: BootstrapInitTenantKind = "validation_error"
+    let detail = `API ${res.status}`
+    try {
+      const body = await res.json()
+      if (_isInitTenantKind(body?.kind)) kind = body.kind
+      if (typeof body?.detail === "string" && body.detail.trim()) {
+        detail = body.detail
+      }
+    } catch {
+      try {
+        const text = await res.text()
+        if (text.trim()) detail = text.trim()
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new BootstrapInitTenantError(kind, detail, res.status)
+  }
+  return (await res.json()) as BootstrapInitTenantResponse
+}
+
 // ─── L5 — Step 4 (parallel health check / 4 live ticks) ───────────
 
 export type BootstrapHealthCheckStatus = "green" | "red" | "skipped"

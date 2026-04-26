@@ -40,14 +40,17 @@ import {
 } from "lucide-react"
 import {
   BOOTSTRAP_ADMIN_PASSWORD_KIND_COPY,
+  BOOTSTRAP_INIT_TENANT_KIND_COPY,
   BOOTSTRAP_PROVIDER_KEY_URL,
   BOOTSTRAP_PROVISION_KIND_COPY,
   BOOTSTRAP_START_SERVICES_KIND_COPY,
   BootstrapAdminPasswordError,
+  BootstrapInitTenantError,
   BootstrapLlmProvisionError,
   BootstrapStartServicesError,
   bootstrapCfTunnelSkip,
   bootstrapDetectOllama,
+  bootstrapInitTenant,
   bootstrapLlmProvision,
   bootstrapParallelHealthCheck,
   bootstrapSetAdminPassword,
@@ -61,6 +64,9 @@ import {
   type BootstrapAdminPasswordKind,
   type BootstrapGates,
   type BootstrapHealthCheckResult,
+  type BootstrapInitTenantKind,
+  type BootstrapInitTenantRequest,
+  type BootstrapInitTenantResponse,
   type BootstrapLlmProvisionKind,
   type BootstrapLlmProvisionRequest,
   type BootstrapLlmProvisionResponse,
@@ -83,6 +89,7 @@ import { useCinemaMode } from "@/lib/use-cinema-mode"
 
 type StepId =
   | "admin_password"
+  | "init_tenant"
   | "llm_provider"
   | "cf_tunnel"
   | "git_forge"
@@ -118,6 +125,16 @@ const STEPS: StepDef[] = [
     subtitle: "Rotate the shipping default credential",
     icon: KeyRound,
     isGreen: (g) => !g.admin_password_default,
+  },
+  {
+    id: "init_tenant",
+    title: "Initialize your organization",
+    subtitle: "Create your real tenant + super-admin (or skip for t-default)",
+    icon: Database,
+    // Y7 #283 — optional step (not a finalize gate). Driven by
+    // localGreen so the pill flips green when the operator either
+    // creates the tenant or explicitly opts to keep t-default.
+    isGreen: (_g, _finalized, localGreen) => localGreen.init_tenant === true,
   },
   {
     id: "llm_provider",
@@ -1077,6 +1094,414 @@ function LlmProviderStep({
         {busy ? <Loader2 size={12} className="animate-spin" /> : <Shield size={12} />}
         Verify & save credential
       </button>
+    </form>
+  )
+}
+
+// ─── Y7 #283 — Step 2.5 (Initialize organization: tenant + super-admin) ───
+
+function _slugifyPreview(display: string): string {
+  return display
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
+function InitTenantErrorBanner({
+  kind,
+  detail,
+}: {
+  kind: BootstrapInitTenantKind
+  detail: string
+}) {
+  const copy = BOOTSTRAP_INIT_TENANT_KIND_COPY[kind]
+  return (
+    <div
+      role="alert"
+      data-testid="bootstrap-init-tenant-error"
+      data-kind={kind}
+      className="flex flex-col gap-1 p-3 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10"
+    >
+      <div className="flex items-center gap-2 font-mono text-[11px] font-semibold text-[var(--destructive)]">
+        <AlertCircle size={12} /> {copy.title}
+      </div>
+      <p className="font-mono text-[11px] text-[var(--destructive)] break-words">
+        {detail}
+      </p>
+      <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+        {copy.hint}
+      </p>
+    </div>
+  )
+}
+
+function InitTenantStep({
+  alreadyGreen,
+  onCompleted,
+  onSkipped,
+}: {
+  alreadyGreen: boolean
+  onCompleted: (resp: BootstrapInitTenantResponse) => void
+  onSkipped: () => void
+}) {
+  const [displayName, setDisplayName] = useState("")
+  const [plan, setPlan] = useState<"free" | "starter" | "pro" | "enterprise">("free")
+  const [licenseKey, setLicenseKey] = useState("")
+  const [adminEmail, setAdminEmail] = useState("")
+  const [adminName, setAdminName] = useState("")
+  const [adminPassword, setAdminPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [errKind, setErrKind] = useState<BootstrapInitTenantKind | null>(null)
+  const [errDetail, setErrDetail] = useState<string>("")
+  const [localError, setLocalError] = useState<string | null>(null)
+  const [okResult, setOkResult] = useState<BootstrapInitTenantResponse | null>(null)
+
+  const slugPreview = useMemo(() => _slugifyPreview(displayName), [displayName])
+  const tenantIdPreview = slugPreview ? `t-${slugPreview}` : ""
+
+  const strength = useMemo(
+    () => estimatePasswordStrength(adminPassword),
+    [adminPassword],
+  )
+  const mismatch =
+    confirmPassword.length > 0 && adminPassword !== confirmPassword
+  const tooShort =
+    adminPassword.length > 0 && adminPassword.length < PASSWORD_MIN_LENGTH
+  const tooWeak =
+    adminPassword.length >= PASSWORD_MIN_LENGTH && !strength.passes
+
+  const canSubmit =
+    !busy &&
+    displayName.trim().length > 0 &&
+    slugPreview.length >= 2 &&
+    adminEmail.trim().length > 0 &&
+    strength.passes &&
+    confirmPassword === adminPassword &&
+    (plan !== "enterprise" || licenseKey.trim().length >= 8)
+
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault()
+      if (!canSubmit) return
+      setBusy(true)
+      setErrKind(null)
+      setErrDetail("")
+      setLocalError(null)
+      setOkResult(null)
+      const req: BootstrapInitTenantRequest = {
+        display_name: displayName.trim(),
+        plan,
+        admin_email: adminEmail.trim(),
+        admin_password: adminPassword,
+      }
+      if (adminName.trim()) req.admin_name = adminName.trim()
+      if (plan === "enterprise" && licenseKey.trim()) {
+        req.license_key = licenseKey.trim()
+      }
+      try {
+        const result = await bootstrapInitTenant(req)
+        setOkResult(result)
+        // Clear the password fields once persisted — defence in depth
+        // against shoulder-surfing if the operator leaves the wizard up.
+        setAdminPassword("")
+        setConfirmPassword("")
+        onCompleted(result)
+      } catch (err) {
+        if (err instanceof BootstrapInitTenantError) {
+          setErrKind(err.kind)
+          setErrDetail(err.detail || err.message)
+        } else {
+          setLocalError(err instanceof Error ? err.message : String(err))
+        }
+      } finally {
+        setBusy(false)
+      }
+    },
+    [
+      canSubmit,
+      displayName,
+      plan,
+      licenseKey,
+      adminEmail,
+      adminName,
+      adminPassword,
+      onCompleted,
+    ],
+  )
+
+  const handleSkip = useCallback(() => {
+    if (busy) return
+    onSkipped()
+  }, [busy, onSkipped])
+
+  if (alreadyGreen && okResult) {
+    return (
+      <div
+        data-testid="bootstrap-init-tenant-complete"
+        className="flex flex-col gap-2 p-4 rounded border border-[var(--status-green)] bg-[var(--background)]"
+      >
+        <div className="flex items-center gap-2 font-mono text-xs text-[var(--status-green)]">
+          <Check size={14} /> Organization initialized
+        </div>
+        <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+          Tenant <code>{okResult.tenant_id}</code> ({okResult.tenant_name},{" "}
+          {okResult.plan}) is live with super-admin{" "}
+          <code>{okResult.super_admin_email}</code> and default project{" "}
+          <code>{okResult.project_id}</code>. Use that account to log in
+          after finalize.
+        </p>
+        {okResult.env_write_warning && (
+          <p
+            data-testid="bootstrap-init-tenant-env-warning"
+            className="font-mono text-[10px] text-[var(--status-yellow,#d97706)] leading-relaxed"
+          >
+            ⚠ {okResult.env_write_warning}
+          </p>
+        )}
+      </div>
+    )
+  }
+
+  if (alreadyGreen) {
+    return (
+      <div
+        data-testid="bootstrap-init-tenant-skipped"
+        className="flex flex-col gap-2 p-4 rounded border border-[var(--status-green)] bg-[var(--background)]"
+      >
+        <div className="flex items-center gap-2 font-mono text-xs text-[var(--status-green)]">
+          <Check size={14} /> Step 2.5 dismissed — keeping t-default
+        </div>
+        <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+          The wizard will continue using the seeded <code>t-default</code>{" "}
+          tenant and the rotated default admin. You can create more tenants
+          later via <code>/admin/tenants</code>.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <form
+      onSubmit={handleSubmit}
+      data-testid="bootstrap-init-tenant-form"
+      className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
+    >
+      <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+        <span>OPTIONAL</span>
+        <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
+          POST /bootstrap/init-tenant
+        </code>
+      </div>
+      <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+        Create your real organization tenant now so the install lands in
+        production multi-tenant shape instead of the seeded{" "}
+        <code>t-default</code>. We'll create the tenant row, your first
+        super-admin, an owner membership, and a default project — and pin{" "}
+        <code>OMNISIGHT_PRIMARY_TENANT_ID</code> in <code>.env</code> so
+        reboots default into the new tenant. Skip to keep using{" "}
+        <code>t-default</code>.
+      </p>
+
+      <label className="flex flex-col gap-1">
+        <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+          Organization display name
+        </span>
+        <input
+          type="text"
+          data-testid="bootstrap-init-tenant-display-name"
+          value={displayName}
+          onChange={(e) => setDisplayName(e.target.value)}
+          placeholder="Acme Robotics"
+          className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+        />
+        {tenantIdPreview && (
+          <span
+            data-testid="bootstrap-init-tenant-slug-preview"
+            className="font-mono text-[10px] text-[var(--muted-foreground)]"
+          >
+            tenant id will be <code>{tenantIdPreview}</code>
+          </span>
+        )}
+      </label>
+
+      <label className="flex flex-col gap-1">
+        <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+          Plan
+        </span>
+        <select
+          data-testid="bootstrap-init-tenant-plan"
+          value={plan}
+          onChange={(e) =>
+            setPlan(e.target.value as "free" | "starter" | "pro" | "enterprise")
+          }
+          className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+        >
+          <option value="free">free (default)</option>
+          <option value="starter">starter</option>
+          <option value="pro">pro</option>
+          <option value="enterprise">enterprise (license required)</option>
+        </select>
+      </label>
+
+      {plan === "enterprise" && (
+        <label className="flex flex-col gap-1">
+          <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+            Enterprise license key
+          </span>
+          <input
+            type="text"
+            data-testid="bootstrap-init-tenant-license-key"
+            value={licenseKey}
+            onChange={(e) => setLicenseKey(e.target.value)}
+            placeholder="OMNI-XXXXXXXX-XXXXXXXX"
+            className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+          />
+          <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+            8-256 chars, letters / digits / dash / underscore.
+          </span>
+        </label>
+      )}
+
+      <label className="flex flex-col gap-1">
+        <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+          Super-admin email
+        </span>
+        <input
+          type="email"
+          data-testid="bootstrap-init-tenant-admin-email"
+          value={adminEmail}
+          onChange={(e) => setAdminEmail(e.target.value)}
+          placeholder="founder@acme.example"
+          autoComplete="email"
+          className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+        />
+      </label>
+
+      <label className="flex flex-col gap-1">
+        <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+          Super-admin name (optional)
+        </span>
+        <input
+          type="text"
+          data-testid="bootstrap-init-tenant-admin-name"
+          value={adminName}
+          onChange={(e) => setAdminName(e.target.value)}
+          placeholder="Defaults to organization name"
+          className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+        />
+      </label>
+
+      <label className="flex flex-col gap-1">
+        <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+          Super-admin password (min 12 chars, zxcvbn ≥ {PASSWORD_MIN_SCORE})
+        </span>
+        <input
+          type="password"
+          data-testid="bootstrap-init-tenant-admin-password"
+          value={adminPassword}
+          onChange={(e) => setAdminPassword(e.target.value)}
+          autoComplete="new-password"
+          minLength={12}
+          className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+        />
+      </label>
+
+      <label className="flex flex-col gap-1">
+        <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+          Confirm password
+        </span>
+        <input
+          type="password"
+          data-testid="bootstrap-init-tenant-admin-password-confirm"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          autoComplete="new-password"
+          minLength={12}
+          className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+        />
+      </label>
+
+      {adminPassword.length > 0 && (
+        <div
+          data-testid="bootstrap-init-tenant-strength"
+          data-score={strength.score}
+          data-passes={strength.passes ? "true" : "false"}
+          className="flex items-center gap-2"
+        >
+          <div className="flex gap-1 flex-1" aria-hidden>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <span
+                key={i}
+                className={`h-1.5 flex-1 rounded ${
+                  i < strength.score
+                    ? strength.passes
+                      ? "bg-[var(--status-green)]"
+                      : "bg-[var(--status-yellow,#d97706)]"
+                    : "bg-[var(--muted)]"
+                }`}
+              />
+            ))}
+          </div>
+          <span
+            className={`font-mono text-[10px] uppercase tracking-wider ${
+              strength.passes
+                ? "text-[var(--status-green)]"
+                : "text-[var(--muted-foreground)]"
+            }`}
+          >
+            {strength.label} · {strength.score}/4
+          </span>
+        </div>
+      )}
+      {tooShort && (
+        <p className="font-mono text-[11px] text-[var(--destructive)]">
+          Password must be at least {PASSWORD_MIN_LENGTH} characters.
+        </p>
+      )}
+      {tooWeak && !tooShort && (
+        <p className="font-mono text-[11px] text-[var(--destructive)]">
+          Password is too guessable — score ≥ {PASSWORD_MIN_SCORE} required.
+        </p>
+      )}
+      {mismatch && (
+        <p className="font-mono text-[11px] text-[var(--destructive)]">
+          Password and confirmation do not match.
+        </p>
+      )}
+      {errKind && <InitTenantErrorBanner kind={errKind} detail={errDetail} />}
+      {!errKind && localError && (
+        <p
+          role="alert"
+          data-testid="bootstrap-init-tenant-error"
+          data-kind="unclassified"
+          className="font-mono text-[11px] text-[var(--destructive)] break-words"
+        >
+          {localError}
+        </p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        <button
+          type="submit"
+          data-testid="bootstrap-init-tenant-submit"
+          disabled={!canSubmit}
+          className="flex items-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Database size={12} />}
+          Create tenant + super-admin
+        </button>
+        <button
+          type="button"
+          data-testid="bootstrap-init-tenant-skip"
+          onClick={handleSkip}
+          disabled={busy}
+          className="flex items-center gap-2 px-3 py-2 rounded border border-[var(--border)] font-mono text-xs hover:bg-[var(--muted)]/40 disabled:opacity-40"
+        >
+          Skip — keep t-default
+        </button>
+      </div>
     </form>
   )
 }
@@ -3078,6 +3503,10 @@ function StepBodyPlaceholder({ step }: { step: StepDef }) {
       gate: "admin_password_default === false",
       todo: "L2 — force change of `omnisight-admin` + password strength check",
     },
+    init_tenant: {
+      gate: "optional (not a finalize gate)",
+      todo: "Y7 #283 — POST /bootstrap/init-tenant + super-admin seeding",
+    },
     llm_provider: {
       gate: "llm_provider_configured === true",
       todo: "L3 — provider picker + live `provider.ping()` with key validation",
@@ -3352,6 +3781,31 @@ export default function BootstrapPage() {
                 <AdminPasswordStep
                   alreadyGreen={!status.status.admin_password_default}
                   onRotated={reloadStatus}
+                />
+              ) : activeStep.id === "init_tenant" ? (
+                <InitTenantStep
+                  alreadyGreen={localGreen.init_tenant === true}
+                  onCompleted={() => {
+                    // Optional step — flip the local-green pill AND
+                    // advance the cursor so the operator sees visible
+                    // progress. Mirrors the GitForgeStep pattern.
+                    setLocalGreenFor("init_tenant", true)
+                    const idx = STEPS.findIndex((s) => s.id === "init_tenant")
+                    const next = STEPS[idx + 1]
+                    if (next) {
+                      setUserPinned(true)
+                      setActiveId(next.id)
+                    }
+                  }}
+                  onSkipped={() => {
+                    setLocalGreenFor("init_tenant", true)
+                    const idx = STEPS.findIndex((s) => s.id === "init_tenant")
+                    const next = STEPS[idx + 1]
+                    if (next) {
+                      setUserPinned(true)
+                      setActiveId(next.id)
+                    }
+                  }}
                 />
               ) : activeStep.id === "llm_provider" ? (
                 <LlmProviderStep

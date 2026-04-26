@@ -18,14 +18,16 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import time
+from pathlib import Path
 from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
 
 from backend import auth as _au
@@ -158,6 +160,425 @@ async def bootstrap_admin_password(req: AdminPasswordRequest) -> AdminPasswordRe
         status="password_changed",
         admin_password_default=False,
         user_id=target.id,
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y7 #283 — Step 2.5 (initialize organization: tenant + super-admin)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Optional wizard step inserted between Step 1 (admin password rotation
+# on the seeded ``t-default``) and Step 2 (LLM provider).  Lets the
+# operator land in a "Production multi-tenant" shape on first install:
+# a real tenant ``t-{slug}`` with their own super-admin, default
+# project, membership row, and the env knob ``OMNISIGHT_PRIMARY_TENANT_ID``
+# pinned in ``.env`` so subsequent boots default into the new tenant.
+#
+# Skipping the step is explicitly supported — the operator stays with
+# ``t-default`` + the rotated default admin and the wizard advances.
+# That preserves backward compat with every existing single-tenant
+# install and keeps Step 2.5 strictly additive.
+#
+# Side-effects (all wrapped in a single asyncpg transaction so a
+# failure halfway leaves zero half-built rows):
+#   1. INSERT into ``tenants`` with id ``t-{slug}`` + display ``name``
+#      + ``plan`` (free | starter | pro | enterprise).
+#   2. INSERT into ``users`` for the new super-admin (role = ``super_admin``,
+#      ``tenant_id`` = the new tenant) — calls ``auth.create_user`` so
+#      password hashing + uid generation matches the rest of the codebase.
+#   3. INSERT into ``user_tenant_memberships`` — owner role on the new
+#      tenant, status ``active``.
+#   4. INSERT into ``projects`` with the canonical default-project shape
+#      ``(product_line='default', slug='default', id='p-{slug}-default')``
+#      mirroring the Y1 backfill helper.
+#   5. Best-effort write of ``OMNISIGHT_PRIMARY_TENANT_ID={t-slug}`` to
+#      the resolved ``.env`` file so reboots default into the new tenant.
+#      File-IO failures (read-only fs, missing file in dev) are logged
+#      and surfaced in the response under ``env_write_warning`` rather
+#      than aborting — the DB state is the authoritative truth and an
+#      operator can hand-edit ``.env`` later.
+#   6. Audit row ``bootstrap.tenant_initialized`` (warning severity)
+#      so the trail records who created the new tenant + when.
+#
+# Auth posture: unauthenticated like every other ``/bootstrap/*``
+# endpoint.  Pre-finalize the gate middleware confines the route to the
+# wizard surface; post-finalize the route is unreachable.  A second
+# request-time guard refuses the call if any non-default tenant already
+# exists — a malicious post-Step-1 replay can't add a rogue tenant
+# alongside the operator's real one.
+
+# Slug shape: lowercase alphanumeric + ``-``, 2..62 chars, leading char
+# must be a-z or 0-9.  Mirrors the ``tenants.id`` regex in
+# ``backend.routers.admin_tenants`` (minus the ``t-`` prefix which the
+# init-tenant endpoint adds itself).
+_INIT_TENANT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}$")
+_INIT_TENANT_DISPLAY_RE = re.compile(r"\S")  # at least one non-whitespace char
+
+# Plans that don't require an enterprise license.  ``enterprise`` plan
+# is gated on a license-key string the operator pastes; the wizard only
+# checks shape (≥ 8 chars, alphanumeric + dash + underscore) so the
+# real validation can land in the licensing service later without
+# breaking the wizard contract.  Free / starter / pro install with no
+# extra ceremony.
+_INIT_TENANT_OPEN_PLANS = frozenset({"free", "starter", "pro"})
+_INIT_TENANT_LICENSE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,256}$")
+
+
+def _slugify_display_name(display: str) -> str:
+    """Convert a human display name to the kebab-case slug used for
+    ``tenants.id``.
+
+    Rules:
+      * lowercase
+      * non [a-z0-9] runs collapse to a single ``-``
+      * leading + trailing ``-`` stripped
+      * empty result → empty string (caller decides how to handle)
+    """
+    s = (display or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    return s
+
+
+class InitTenantRequest(BaseModel):
+    """Body for ``POST /bootstrap/init-tenant``.
+
+    ``display_name`` is the human-readable tenant title; ``id``/slug is
+    derived from it server-side via :func:`_slugify_display_name` so the
+    wizard UI doesn't need to know the slug rules.  ``plan`` defaults to
+    ``free``; ``enterprise`` requires a non-empty ``license_key``.
+    Super-admin email + password seed the first user under the new
+    tenant.
+    """
+
+    display_name: str = Field(min_length=1, max_length=200)
+    plan: Literal["free", "starter", "pro", "enterprise"] = "free"
+    license_key: str = Field(default="", max_length=256)
+    admin_email: str = Field(min_length=3, max_length=320)
+    admin_password: str = Field(min_length=12, max_length=512)
+    admin_name: str = Field(default="", max_length=200)
+
+    @field_validator("display_name")
+    @classmethod
+    def _display_shape(cls, v: str) -> str:
+        v = v.strip()
+        if not _INIT_TENANT_DISPLAY_RE.search(v):
+            raise ValueError("display_name must contain at least one non-whitespace char")
+        return v
+
+    @field_validator("admin_email")
+    @classmethod
+    def _email_shape(cls, v: str) -> str:
+        v = v.strip()
+        # Loose email check — same pattern used by tenant_invites; the
+        # MTA decides actual deliverability.
+        if "@" not in v or "." not in v.split("@", 1)[-1]:
+            raise ValueError("admin_email must contain '@' and a domain part with a dot")
+        return v
+
+
+class InitTenantResponse(BaseModel):
+    status: str
+    tenant_id: str
+    tenant_name: str
+    plan: str
+    super_admin_user_id: str
+    super_admin_email: str
+    project_id: str
+    env_write_warning: str = ""
+
+
+def _resolve_dotenv_path() -> Path:
+    """Resolve the ``.env`` file the running app reads.
+
+    Mirrors the resolution :class:`backend.config.Settings` performs —
+    honours ``OMNISIGHT_DOTENV_FILE`` so test harnesses don't clobber
+    the developer's ``.env``, and falls back to ``<repo>/.env``
+    relative to this module's parent dir.  Path is returned even if
+    the file does not yet exist; the writer creates it on first write.
+    """
+    explicit = os.environ.get("OMNISIGHT_DOTENV_FILE", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return (Path(__file__).resolve().parent.parent.parent / ".env").resolve()
+
+
+def _persist_primary_tenant_env(tenant_id: str) -> tuple[bool, str]:
+    """Best-effort write of ``OMNISIGHT_PRIMARY_TENANT_ID=<tid>`` into
+    the resolved ``.env`` file.
+
+    Behaviour:
+      * If the file does not exist, a new minimal one is created
+        carrying just the new line.
+      * If the key is already present, the existing line is replaced
+        in place; comments + other keys are preserved.
+      * Any write failure (read-only fs, perms, dev container without
+        a writable working dir) is captured into the returned warning
+        string — the caller surfaces it back to the wizard so the
+        operator knows to hand-edit if needed.
+
+    Returns ``(ok, warning_or_empty_string)``.
+
+    Why this is best-effort: the DB rows are the authoritative truth
+    for "which tenant to default to"; the env knob is a convenience so
+    the next process boot picks up the right tenant without manual
+    intervention.  A failed env write degrades to "operator must set
+    the var manually" — never to "tenant create failed".
+    """
+    path = _resolve_dotenv_path()
+    new_line = f"OMNISIGHT_PRIMARY_TENANT_ID={tenant_id}"
+    try:
+        existing = ""
+        if path.exists():
+            existing = path.read_text(encoding="utf-8")
+        lines = existing.splitlines()
+        replaced = False
+        out: list[str] = []
+        for line in lines:
+            stripped = line.lstrip()
+            if (
+                stripped.startswith("OMNISIGHT_PRIMARY_TENANT_ID=")
+                or stripped.startswith("# OMNISIGHT_PRIMARY_TENANT_ID=")
+            ):
+                out.append(new_line)
+                replaced = True
+            else:
+                out.append(line)
+        if not replaced:
+            if out and out[-1] != "":
+                out.append("")
+            out.append("# Y7 #283 — primary tenant pinned by /bootstrap/init-tenant")
+            out.append(new_line)
+        body = "\n".join(out)
+        if not body.endswith("\n"):
+            body += "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return True, ""
+    except OSError as exc:
+        warning = (
+            f"could not persist OMNISIGHT_PRIMARY_TENANT_ID to {path}: "
+            f"{type(exc).__name__}: {exc}. Tenant + super-admin were "
+            "created successfully — set the env var manually before next boot."
+        )
+        logger.warning("bootstrap init-tenant env write failed: %s", warning)
+        return False, warning
+
+
+@router.post("/init-tenant", response_model=InitTenantResponse)
+async def bootstrap_init_tenant(req: InitTenantRequest) -> InitTenantResponse:
+    """Y7 row 1 — create real tenant + super-admin + default project.
+
+    Inserted between Step 1 (admin password rotation) and Step 2 (LLM
+    provider) in the wizard.  Lets a fresh install land in
+    multi-tenant production shape rather than orphaned on
+    ``t-default``.  Skipping is allowed — the wizard advances and the
+    install keeps using ``t-default``.
+
+    Refusal contract (each carries a ``kind`` so the UI can pick a
+    matching banner without parsing ``detail``):
+
+      * 422 + ``kind=invalid_display_name`` — display_name slugifies
+        to empty (e.g. ``"-"`` / pure whitespace / unicode-only).
+      * 422 + ``kind=invalid_slug`` — slugified id fails
+        ``_INIT_TENANT_SLUG_RE`` (defensive — pydantic catches most).
+      * 422 + ``kind=enterprise_license_required`` — plan == enterprise
+        but license_key absent or shape-invalid.
+      * 422 + ``kind=password_too_weak`` / ``password_too_short`` —
+        same strength gate as Step 1.
+      * 409 + ``kind=tenant_already_exists`` — the slugified
+        ``t-{slug}`` already exists in the tenants table.
+      * 409 + ``kind=non_default_tenant_already_exists`` — at least
+        one tenant other than ``t-default`` already exists, so this
+        endpoint must not be called again.  Defends against replay /
+        misuse after a successful first run.
+      * 409 + ``kind=email_already_exists`` — the proposed
+        super-admin email collides with an existing user row.
+
+    On success, returns 200 + the created ids so the UI can render
+    a "go log in as <email>" banner.  ``env_write_warning`` is
+    non-empty when the ``.env`` patch failed and the operator must
+    set the var manually — DB state is authoritative either way.
+    """
+    display = req.display_name.strip()
+    slug = _slugify_display_name(display)
+    if not slug or not _INIT_TENANT_SLUG_RE.match(slug):
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=422,
+            content={
+                "detail": (
+                    f"display_name {display!r} does not slugify to a valid "
+                    "tenant id (need ≥2 chars, leading [a-z0-9], rest "
+                    "[a-z0-9-])"
+                ),
+                "kind": "invalid_display_name",
+            },
+        )
+    tenant_id = f"t-{slug}"
+
+    if req.plan == "enterprise":
+        license_key = (req.license_key or "").strip()
+        if not license_key or not _INIT_TENANT_LICENSE_KEY_RE.match(license_key):
+            return JSONResponse(  # type: ignore[return-value]
+                status_code=422,
+                content={
+                    "detail": (
+                        "enterprise plan requires a license_key "
+                        "(8-256 chars, alphanumeric + dash + underscore)"
+                    ),
+                    "kind": "enterprise_license_required",
+                },
+            )
+
+    strength_err = _au.validate_password_strength(req.admin_password)
+    if strength_err:
+        kind = (
+            "password_too_short"
+            if len(req.admin_password) < _au.PASSWORD_MIN_LENGTH
+            else "password_too_weak"
+        )
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=422,
+            content={"detail": strength_err, "kind": kind},
+        )
+
+    norm_email = req.admin_email.strip().lower()
+    admin_name = (req.admin_name or "").strip() or display
+
+    from backend.db_pool import get_pool
+    pool = get_pool()
+
+    async with pool.acquire() as conn:
+        # Defend against replay / re-run.  Once a non-default tenant
+        # exists, the wizard's Step 2.5 has already done its job; a
+        # second invocation would silently inflate the tenant catalog.
+        existing_non_default = await conn.fetchval(
+            "SELECT COUNT(*) FROM tenants WHERE id <> 't-default'",
+        )
+        if existing_non_default and int(existing_non_default) > 0:
+            return JSONResponse(  # type: ignore[return-value]
+                status_code=409,
+                content={
+                    "detail": (
+                        "wizard Step 2.5 has already run — at least one "
+                        "non-default tenant exists.  Manage further tenants "
+                        "via /api/v1/admin/tenants after finalize."
+                    ),
+                    "kind": "non_default_tenant_already_exists",
+                },
+            )
+
+        existing_id = await conn.fetchval(
+            "SELECT id FROM tenants WHERE id = $1", tenant_id,
+        )
+        if existing_id is not None:
+            return JSONResponse(  # type: ignore[return-value]
+                status_code=409,
+                content={
+                    "detail": f"tenant id already exists: {tenant_id!r}",
+                    "kind": "tenant_already_exists",
+                },
+            )
+
+        existing_email = await conn.fetchval(
+            "SELECT id FROM users WHERE email = $1", norm_email,
+        )
+        if existing_email is not None:
+            return JSONResponse(  # type: ignore[return-value]
+                status_code=409,
+                content={
+                    "detail": f"user email already exists: {norm_email!r}",
+                    "kind": "email_already_exists",
+                },
+            )
+
+        # All side-effects share one tx so a partial failure (e.g. PG
+        # connection drop mid-flow) leaves zero half-built rows.
+        # ``auth.create_user`` accepts a polymorphic ``conn`` so the
+        # password hashing happens inside the same tx.
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO tenants (id, name, plan, enabled) "
+                "VALUES ($1, $2, $3, 1)",
+                tenant_id, display, req.plan,
+            )
+
+            super_admin = await _au.create_user(
+                email=norm_email,
+                name=admin_name,
+                role="super_admin",
+                password=req.admin_password,
+                tenant_id=tenant_id,
+                conn=conn,
+            )
+
+            await conn.execute(
+                "INSERT INTO user_tenant_memberships "
+                "(user_id, tenant_id, role, status) "
+                "VALUES ($1, $2, 'owner', 'active') "
+                "ON CONFLICT (user_id, tenant_id) DO NOTHING",
+                super_admin.id, tenant_id,
+            )
+
+            project_id = f"p-{slug}-default"
+            await conn.execute(
+                "INSERT INTO projects "
+                "(id, tenant_id, product_line, name, slug, created_by) "
+                "VALUES ($1, $2, 'default', 'Default', 'default', $3) "
+                "ON CONFLICT (tenant_id, product_line, slug) DO NOTHING",
+                project_id, tenant_id, super_admin.id,
+            )
+
+    # ``.env`` write happens OUTSIDE the DB tx — file IO failure must
+    # not roll back the rows.  The DB is the source of truth; the env
+    # knob is a convenience so reboots default into the new tenant.
+    env_ok, env_warning = _persist_primary_tenant_env(tenant_id)
+    if env_ok:
+        # Mirror into the in-process settings so the rest of the app
+        # picks up the new primary tenant without a restart.  Best-
+        # effort: the attribute may not exist on every Settings build
+        # (env knob is read at boot in some paths).
+        try:
+            setattr(_settings, "primary_tenant_id", tenant_id)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug("settings.primary_tenant_id mirror failed: %s", exc)
+
+    try:
+        await audit.log(
+            action="bootstrap.tenant_initialized",
+            entity_kind="tenant",
+            entity_id=tenant_id,
+            before=None,
+            after={
+                "tenant_id": tenant_id,
+                "tenant_name": display,
+                "plan": req.plan,
+                "super_admin_user_id": super_admin.id,
+                "super_admin_email": norm_email,
+                "project_id": project_id,
+                "env_write_ok": env_ok,
+                "severity": "warning",
+            },
+            actor=norm_email,
+        )
+    except Exception as exc:
+        logger.debug("bootstrap.tenant_initialized audit emit failed: %s", exc)
+
+    logger.info(
+        "bootstrap: init-tenant created tenant=%s plan=%s super_admin=%s "
+        "project=%s env_ok=%s",
+        tenant_id, req.plan, norm_email, project_id, env_ok,
+    )
+
+    return InitTenantResponse(
+        status="initialized",
+        tenant_id=tenant_id,
+        tenant_name=display,
+        plan=req.plan,
+        super_admin_user_id=super_admin.id,
+        super_admin_email=norm_email,
+        project_id=project_id,
+        env_write_warning=env_warning,
     )
 
 
