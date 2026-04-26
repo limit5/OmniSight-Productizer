@@ -2552,6 +2552,41 @@ export async function listUserTenants(): Promise<TenantInfo[]> {
   return request<TenantInfo[]>("/auth/tenants")
 }
 
+// Y8 row 2 — project-switcher data source. Fetches the live project
+// list under ``tenantId`` from the Y4 row 2 endpoint
+// (``GET /api/v1/tenants/{tid}/projects``). The backend already
+// scopes the response to caller visibility (super_admin / tenant
+// admin → full; member / viewer → only ``project_members`` rows),
+// so the frontend renders whatever rows it gets without re-applying
+// RBAC. ``archived=false`` is the default — archived projects do
+// not show in the dashboard switcher (operator manages those from
+// the per-tenant settings page Y8 row 4 once it lands).
+export interface TenantProjectInfo {
+  project_id: string
+  tenant_id: string
+  product_line: "embedded" | "web" | "mobile" | "software" | "custom"
+  name: string
+  slug: string
+  parent_id: string | null
+  plan_override: string | null
+  disk_budget_bytes: number | null
+  llm_budget_tokens: number | null
+  created_by: string
+  created_at: string
+  archived_at: string | null
+}
+
+export async function listTenantProjects(tenantId: string): Promise<TenantProjectInfo[]> {
+  const res = await request<{
+    tenant_id: string
+    product_line_filter: string | null
+    archived_filter: "false" | "true" | "all"
+    count: number
+    projects: TenantProjectInfo[]
+  }>(`/tenants/${encodeURIComponent(tenantId)}/projects`)
+  return res.projects
+}
+
 export async function login(email: string, password: string): Promise<LoginResponse> {
   return request<LoginResponse>("/auth/login", {
     method: "POST",

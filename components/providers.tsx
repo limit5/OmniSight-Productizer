@@ -3,6 +3,7 @@
 import { I18nProvider } from "@/lib/i18n/context"
 import { AuthProvider } from "@/lib/auth-context"
 import { TenantProvider } from "@/lib/tenant-context"
+import { ProjectProvider } from "@/lib/project-context"
 import { StorageBridge } from "@/components/storage-bridge"
 import { ApiErrorToastCenter } from "@/components/omnisight/api-error-toast-center"
 import { Conflict409ToastCenter } from "@/components/omnisight/conflict-409-toast-center"
@@ -17,11 +18,13 @@ export function Providers({ children }: ProvidersProps) {
     <I18nProvider>
       <AuthProvider>
         <TenantProvider>
-          <StorageBridge />
-          {children}
-          <ApiErrorToastCenter />
-          <Conflict409ToastCenter />
-          <DraftSyncToastCenter />
+          <ProjectProvider>
+            <StorageBridge />
+            {children}
+            <ApiErrorToastCenter />
+            <Conflict409ToastCenter />
+            <DraftSyncToastCenter />
+          </ProjectProvider>
         </TenantProvider>
       </AuthProvider>
     </I18nProvider>

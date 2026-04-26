@@ -23,6 +23,7 @@ import { ChatOpsMirror } from "@/components/omnisight/chatops-mirror"
 import type { ParsedSpec } from "@/lib/api"
 import { UserMenu } from "@/components/omnisight/user-menu"
 import { TenantSwitcher } from "@/components/omnisight/tenant-switcher"
+import { ProjectSwitcher } from "@/components/omnisight/project-switcher"
 import { PresenceBadge } from "@/components/omnisight/presence-badge"
 import { useAuth } from "@/lib/auth-context"
 import { useTenant } from "@/lib/tenant-context"
@@ -655,6 +656,7 @@ export default function Home() {
             <span className="inline-flex items-center gap-1">
               <PresenceBadge />
               <TenantSwitcher />
+              <ProjectSwitcher />
               <UserMenu />
               <SettingsButton onClick={() => setShowSettings(true)} />
             </span>
