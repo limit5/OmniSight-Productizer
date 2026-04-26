@@ -1738,7 +1738,7 @@ multi-user 的管理面：邀請進 tenant、調整 role、踢人、跨 tenant m
 
 - [x] 新路徑：`{OMNISIGHT_WORKSPACE_ROOT}/{tenant_id}/{product_line}/{project_id}/{agent_id}/{repo_url_hash}/` 五層階層。`repo_url_hash = sha256(remote_url)[:16]` 防同 agent clone 多個同名 repo 互相覆蓋。
 - [x] `backend/config.py` 新增：`OMNISIGHT_WORKSPACE_ROOT`（預設 `./data/workspaces`）/ `OMNISIGHT_WORKSPACE_QUOTA_MB_DEFAULT`.
-- [ ] `backend/workspace.py` 改 `provision()` 接受 `tenant_id / product_line / project_id / agent_id / remote_url` 五個參數，從 ContextVar 預設讀取。舊 callsite 相容 shim 標記 deprecated 並記 log（下個 release 刪）。
+- [x] `backend/workspace.py` 改 `provision()` 接受 `tenant_id / product_line / project_id / agent_id / remote_url` 五個參數，從 ContextVar 預設讀取。舊 callsite 相容 shim 標記 deprecated 並記 log（下個 release 刪）。
 - [ ] Migration script：把現有 `.agent_workspaces/{agent_id}/` 都搬到 `data/workspaces/t-default/default/default/{agent_id}/legacy-hash/`；保留 symlink 一個 release，之後移除。
 - [ ] 納入 tenant_quota：`backend/tenant_quota.py` 的 `check_hard_quota()` 把 `data/workspaces/{tid}/**` 計入 `used_bytes`；workspace 寫入時自動 enforce。
 - [ ] 背景 GC reaper：新 `backend/workspace_gc.py` async task（lifespan 啟動），每 1 小時跑一次：

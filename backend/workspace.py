@@ -5,7 +5,15 @@ Worktrees share the same .git object store so they're fast to create
 and use minimal disk space.
 
 Lifecycle:
-  1. provision(agent_id, repo_url, task_id)  → creates worktree + branch
+  1. provision(agent_id, task_id, remote_url=None, *,
+               tenant_id=None, product_line=None, project_id=None)
+                                              → creates worktree + branch
+                                              under {root}/{tenant_id}/
+                                              {product_line}/{project_id}/
+                                              {agent_id}/{repo_url_hash}/
+                                              (Y6 #282). tenant_id /
+                                              project_id default to the
+                                              per-request ContextVars.
   2. Agent works inside its workspace (file/git/bash tools scoped to it)
   3. finalize(agent_id)                      → commits, generates diff summary
   4. cleanup(agent_id)                       → removes worktree + branch (optional)
@@ -19,6 +27,7 @@ import logging
 import os
 import re as _re
 import shutil
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -183,15 +192,115 @@ async def _run(cmd: str, cwd: Path | None = None, extra_env: dict[str, str] | No
 
 
 async def provision(
-    agent_id: str,
-    task_id: str,
+    agent_id: str | None = None,
+    task_id: str | None = None,
+    remote_url: str | None = None,
+    *,
+    tenant_id: str | None = None,
+    product_line: str | None = None,
+    project_id: str | None = None,
     repo_source: str | None = None,
 ) -> WorkspaceInfo:
     """Create an isolated workspace for an agent.
 
     Uses git worktree for instant provisioning from the main repo,
     or git clone for external repos.
+
+    Y6 #282 row 3 — five-context provision. The five identity keys
+    that select the on-disk path under
+    ``{root}/{tenant_id}/{product_line}/{project_id}/{agent_id}/{repo_url_hash}/``
+    map to function args as:
+
+    * ``tenant_id`` — defaults to ``backend.db_context.current_tenant_id()``
+      (set by ``require_tenant`` at auth-time). Falls through to
+      ``_DEFAULT_TENANT_ID`` when unset (CLI / chatops / cron).
+    * ``product_line`` — explicit caller value or the
+      ``_DEFAULT_PRODUCT_LINE`` fallback. No ContextVar yet (no
+      ``current_product_line()`` in db_context); future Y4/Y5 wiring
+      will pass it through from the resolved project row.
+    * ``project_id`` — defaults to ``backend.db_context.current_project_id()``
+      (set by ``require_project_member`` at routing-time). Falls
+      through to ``_DEFAULT_PROJECT_ID`` when unset.
+    * ``agent_id`` — caller-supplied; required (no ContextVar source).
+    * ``remote_url`` — git URL to clone, or ``None`` for an in-repo
+      worktree of ``_MAIN_REPO`` (collapses to ``_SELF_REPO_HASH``).
+
+    ``task_id`` is also required but is metadata (branch name + commit
+    message + retry plumbing), not a path key — it sits outside the
+    five-context list.
+
+    **Deprecation shim — ``repo_source=`` kwarg**: the legacy parameter
+    name is preserved as a keyword-only alias for ``remote_url`` so
+    pre-Y6 callsites keep working. Each call emits a
+    ``DeprecationWarning`` + a ``logger.warning`` so audit-line readers
+    can spot every remaining callsite. **The shim will be removed in
+    the next release** — open issues for any caller still surfacing in
+    the deprecation log before that release ships.
+
+    Module-global state audit (per
+    ``docs/sop/implement_phase_step.md`` Step 1): reads ``_workspaces``
+    (in-process module-global dict, intentionally per-worker per the
+    SOP case-3 rule — the registry is a fresh asyncio-scoped state per
+    process and never coordinated across workers) and
+    ``_WORKSPACES_ROOT`` (module-level Path constant, every worker
+    derives the same value from the same path-of-truth so they align
+    by construction). Reads from per-asyncio-Task ContextVars
+    (``current_tenant_id`` / ``current_project_id``) which are
+    intentionally request-scoped and are *not* module-global state.
     """
+    # ── Y6 #282 row 3 — legacy ``repo_source=`` kwarg shim. Pre-Y6
+    # callers used ``repo_source=...`` as the positional name for the
+    # third argument; Y6 renames the canonical name to ``remote_url``
+    # to match the five-context terminology. The kwarg form keeps
+    # working through the next release — every hit logs a warning so
+    # the deprecation backlog is visible in production logs.
+    if repo_source is not None:
+        warnings.warn(
+            "provision(repo_source=...) is deprecated; "
+            "use remote_url=... instead. The repo_source kwarg will be "
+            "removed in the next release (see TODO Y6 #282 row 3).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        logger.warning(
+            "DEPRECATED provision() shim: repo_source= kwarg "
+            "(agent_id=%s, task_id=%s) — migrate to remote_url= "
+            "before next release",
+            agent_id, task_id,
+        )
+        if remote_url is None:
+            remote_url = repo_source
+        # When both are passed the canonical ``remote_url`` wins —
+        # caller is mid-migration and the explicit canonical value is
+        # the more authoritative one.
+
+    # Required identity / task keys must always be supplied by the
+    # caller — no ContextVar exists for either, so a missing value
+    # would make the workspace registry incoherent.
+    if not agent_id:
+        raise TypeError("provision() requires agent_id")
+    if not task_id:
+        raise TypeError("provision() requires task_id")
+
+    # ── Y6 #282 row 3 — ContextVar defaults for tenant_id / project_id.
+    # ``backend.db_context`` exposes per-asyncio-Task ContextVars set by
+    # the ``require_tenant`` / ``require_project_member`` dependencies
+    # at request-scope. Lazy import keeps ``backend.workspace`` import-
+    # time independent of ``db_context`` (the module is imported during
+    # FastAPI lifespan + by chatops handlers + by tests, all of which
+    # already pull ``db_context`` indirectly — but the lazy form keeps
+    # the dependency edge explicit).
+    if tenant_id is None:
+        from backend.db_context import current_tenant_id as _current_tenant_id
+        tenant_id = _current_tenant_id()
+    if project_id is None:
+        from backend.db_context import current_project_id as _current_project_id
+        project_id = _current_project_id()
+    # ``product_line`` has no ContextVar source yet; explicit caller
+    # value or ``_DEFAULT_PRODUCT_LINE`` fallback in
+    # ``_workspace_path_for``. The `_safe_path_component` sanitiser
+    # catches a ``None`` / empty string and substitutes the default.
+
     # Sanitize IDs for safe use in branch names and shell commands
     safe_agent = _re.sub(r'[^a-zA-Z0-9_-]', '_', agent_id)
     safe_task = _re.sub(r'[^a-zA-Z0-9_-]', '_', task_id)
@@ -229,7 +338,7 @@ async def provision(
     if free_bytes < 100 * 1024 * 1024:  # 100MB minimum
         raise RuntimeError(f"Insufficient disk space: {free_bytes // 1024 // 1024}MB free")
 
-    source = repo_source or str(_MAIN_REPO)
+    source = remote_url or str(_MAIN_REPO)
 
     # Clean stale git lock before worktree operations.
     # Stale-lock guard: only remove if the lock is older than 60s — otherwise
@@ -253,24 +362,26 @@ async def provision(
     is_local = not source.startswith("http") and not source.startswith("ssh://") and not source.startswith("git@")
 
     # Gerrit mode: use fresh clone even for local repos (full isolation)
-    if _settings.gerrit_enabled and not repo_source:
+    if _settings.gerrit_enabled and not remote_url:
         gerrit_url = f"ssh://{_settings.gerrit_ssh_host}:{_settings.gerrit_ssh_port}/{_settings.gerrit_project}"
         source = gerrit_url
         is_local = False
 
-    # Y6 #282 row 1 — resolve the five-layer hierarchical path. Tenant /
-    # product_line / project_id default to the transitional ``_DEFAULT_*``
-    # constants until rows 2–3 wire ContextVar lookups through. The leaf
-    # ``repo_url_hash`` is computed from the FINAL ``source`` (post-gerrit
-    # override) so two different remote URLs assigned to the same agent do
-    # not collide on the same on-disk dir. In-repo worktrees (``source ==
-    # str(_MAIN_REPO)``) collapse to the ``_SELF_REPO_HASH`` sentinel and
-    # keep the legacy "one workspace per agent" footprint.
+    # Y6 #282 row 1 + row 3 — resolve the five-layer hierarchical path.
+    # Tenant / project_id default to the per-request ContextVars when
+    # called inside a request scope (resolved at the top of this
+    # function); product_line falls through to ``_DEFAULT_PRODUCT_LINE``
+    # absent an explicit caller value. The leaf ``repo_url_hash`` is
+    # computed from the FINAL ``source`` (post-gerrit override) so two
+    # different remote URLs assigned to the same agent do not collide
+    # on the same on-disk dir. In-repo worktrees (``source ==
+    # str(_MAIN_REPO)``) collapse to the ``_SELF_REPO_HASH`` sentinel
+    # and keep the legacy "one workspace per agent" footprint.
     _remote_for_hash = None if (is_local and Path(source).resolve() == _MAIN_REPO.resolve()) else source
     ws_path = _workspace_path_for(
-        tenant_id=None,
-        product_line=None,
-        project_id=None,
+        tenant_id=tenant_id,
+        product_line=product_line,
+        project_id=project_id,
         agent_id=agent_id,
         remote_url=_remote_for_hash,
     )
