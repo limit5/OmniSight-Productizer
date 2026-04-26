@@ -666,3 +666,152 @@ async def test_init_tenant_short_slug_rejected(_init_tenant_client):
     )
     assert r.status_code == 422, r.text
     assert r.json().get("kind") == "invalid_display_name"
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Y7 row 4 — full HTTP "wizard 完成後" acceptance test
+# ─────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_init_tenant_row4_full_wizard_acceptance(
+    _init_tenant_client, pg_test_pool, monkeypatch,
+):
+    """Y7 row 4 contract pin — the post-wizard HTTP surface.
+
+    Walks the full operator-visible flow that an init-tenant install
+    is supposed to deliver, end-to-end through the real ASGI stack:
+
+      1.  Default admin rotates its password (Step 1 happy path).
+      2.  Operator POSTs ``/api/v1/bootstrap/init-tenant`` (Step 2.5).
+      3.  After the wizard "completes", the bootstrap gate flips to
+          finalized so admin endpoints stop 503-ing.
+      4.  ``POST /api/v1/auth/login`` with the new super-admin's
+          credentials returns 200 + a session cookie + a response body
+          whose ``user.role == "super_admin"`` and ``user.tenant_id ==
+          "t-acme-robotics"``.
+      5.  ``POST /api/v1/auth/login`` with the rotated default admin's
+          credentials returns 200 + ``user.tenant_id == "t-default"``
+          — proving the new endpoint did NOT silently re-home or
+          delete the existing admin.
+      6.  ``GET /api/v1/admin/tenants`` with the super-admin's session
+          cookie returns 200 + the envelope contains both
+          ``t-default`` AND ``t-acme-robotics``.
+      7.  Direct PG cross-check confirms the default admin row in
+          ``users`` is still pinned to ``t-default`` (defence in depth
+          against the listing being a stale view).
+
+    Module-global state audit:
+      * ``ip_limiter`` / ``email_limiter`` / ``_LOGIN_ATTEMPTS`` are
+        per-process module-singletons. Two successful logins on
+        ``127.0.0.1`` stay well below the default IP cap (5/min) and
+        email cap (10/h), but we wipe them anyway so a prior test in
+        the same worker that left tokens consumed cannot poison this
+        one.
+      * ``_boot._gate_cache`` is reset before-and-after to avoid
+        leaking the finalized flag into adjacent tests.
+    """
+    client = _init_tenant_client["client"]
+    default_admin = _init_tenant_client["admin"]
+
+    # Wipe login rate-limit state so a prior test in the same worker
+    # can't 429 us. Both limiters are module-globals.
+    from backend.rate_limit import reset_limiters
+    from backend.routers import auth as auth_router
+
+    reset_limiters()
+    auth_router._LOGIN_ATTEMPTS.clear()
+
+    # ── Step 1: rotate default admin (clears must_change_password) ──
+    default_pw = "rotated-default-pw-xyz-789"
+    await _au.change_password(default_admin.id, default_pw)
+
+    # ── Step 2.5: operator runs the wizard's init-tenant ──
+    init_resp = await client.post(
+        "/api/v1/bootstrap/init-tenant",
+        json=_VALID_BODY,
+    )
+    assert init_resp.status_code == 200, init_resp.text
+    assert init_resp.json()["tenant_id"] == "t-acme-robotics"
+
+    # ── Wizard finishes → bootstrap gate flips green ──
+    # Mimic the real ``mark_bootstrap_finalized`` cache flip without
+    # touching the marker file (this test only cares about the gate
+    # middleware seeing "wizard done", not the persisted flag).
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    # ── Step 4: login as the new super-admin ──
+    super_login = await client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": _VALID_BODY["admin_email"],
+            "password": _VALID_BODY["admin_password"],
+        },
+    )
+    assert super_login.status_code == 200, super_login.text
+    super_body = super_login.json()
+    assert super_body["user"]["role"] == "super_admin"
+    assert super_body["user"]["email"] == _VALID_BODY["admin_email"]
+    assert super_body["user"]["tenant_id"] == "t-acme-robotics"
+    super_cookies = dict(super_login.cookies)
+    assert "omnisight_session" in super_cookies, (
+        "login response must set the session cookie so subsequent "
+        "admin calls can authenticate."
+    )
+
+    # ── Step 5: login as the original default admin ──
+    default_login = await client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": default_admin.email,
+            "password": default_pw,
+        },
+    )
+    assert default_login.status_code == 200, default_login.text
+    default_body = default_login.json()
+    assert default_body["user"]["email"] == default_admin.email
+    assert default_body["user"]["tenant_id"] == "t-default", (
+        "Step 2.5 must not silently re-home the default admin to the "
+        "newly-created tenant — it must stay on t-default."
+    )
+    assert default_body["user"]["role"] == "admin"
+
+    # ── Step 6: GET /admin/tenants returns both tenants ──
+    list_resp = await client.get(
+        "/api/v1/admin/tenants",
+        cookies=super_cookies,
+    )
+    assert list_resp.status_code == 200, list_resp.text
+    listing = list_resp.json()
+    assert "tenants" in listing and isinstance(listing["tenants"], list)
+    listed_ids = sorted(t["id"] for t in listing["tenants"])
+    assert listed_ids == ["t-acme-robotics", "t-default"], (
+        f"GET /admin/tenants must return exactly the two tenants the "
+        f"wizard produced; got {listed_ids!r}"
+    )
+    by_id = {t["id"]: t for t in listing["tenants"]}
+    # Sanity on the new tenant's metadata — proves the listing query
+    # is reading the same row init-tenant inserted.
+    assert by_id["t-acme-robotics"]["name"] == "Acme Robotics"
+    assert by_id["t-acme-robotics"]["plan"] == "free"
+    assert by_id["t-acme-robotics"]["enabled"] is True
+
+    # ── Step 7: defence-in-depth — PG row for default admin is intact ──
+    async with pg_test_pool.acquire() as conn:
+        admin_row = await conn.fetchrow(
+            "SELECT id, email, role, tenant_id, enabled "
+            "FROM users WHERE id = $1",
+            default_admin.id,
+        )
+    assert admin_row is not None
+    assert admin_row["tenant_id"] == "t-default"
+    assert int(admin_row["enabled"]) == 1
+    assert admin_row["role"] == "admin"
