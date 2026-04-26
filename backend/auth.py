@@ -1876,6 +1876,220 @@ async def require_tenant(user: User = Depends(current_user)) -> User:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y5 (#281) row 2 — project-scope authorisation dependency
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Allowed project roles in increasing rank order. Mirrors the
+# ``project_members.role`` CHECK from alembic 0034
+# (``IN ('owner', 'contributor', 'viewer')``); the ordered tuple
+# encodes the inclusion order so a ``min_role`` gate is a single
+# integer-rank compare, matching the ``ROLES`` / ``_RANK`` pattern
+# used by ``require_role`` for platform tiers above.
+PROJECT_ROLE_HIERARCHY = ("viewer", "contributor", "owner")
+_PROJECT_ROLE_RANK = {r: i for i, r in enumerate(PROJECT_ROLE_HIERARCHY)}
+
+# Tenant-membership role → effective project role default-resolution.
+# Per the alembic 0034 docstring: when no explicit ``project_members``
+# row exists, an *active* tenant membership with role admin / owner
+# acts as ``contributor`` on every project of that tenant. member /
+# viewer tenant roles intentionally fall through (key absent) → no
+# project access by default; they need an explicit grant via the
+# Y4 row 5 POST /tenants/{tid}/projects/{pid}/members surface.
+_TENANT_ROLE_DEFAULT_PROJECT_ROLE = {
+    "owner": "contributor",
+    "admin": "contributor",
+}
+
+# SQL constants pulled out as module-level for drift-guard tests
+# (consistent with the SQL-constant pattern in tenant_projects.py;
+# secret-leak grep + PG ``$N`` placeholder check are easier when the
+# query body is a single named symbol).
+_FETCH_PROJECT_TENANT_SCOPED_FOR_AUTHZ_SQL = (
+    "SELECT id, tenant_id FROM projects WHERE id = $1 AND tenant_id = $2"
+)
+_FETCH_PROJECT_BY_ID_FOR_AUTHZ_SQL = (
+    "SELECT id, tenant_id FROM projects WHERE id = $1"
+)
+_FETCH_PROJECT_MEMBER_FOR_AUTHZ_SQL = (
+    "SELECT role FROM project_members "
+    "WHERE user_id = $1 AND project_id = $2"
+)
+_FETCH_TENANT_MEMBERSHIP_FOR_AUTHZ_SQL = (
+    "SELECT role, status FROM user_tenant_memberships "
+    "WHERE user_id = $1 AND tenant_id = $2"
+)
+
+
+def project_role_at_least(have: Optional[str], need: str) -> bool:
+    """Compare project roles by rank (``viewer < contributor < owner``).
+
+    Returns ``False`` for ``have is None`` (no role resolved) or for
+    unknown role tokens. ``super_admin`` is NOT in the project-role
+    hierarchy — callers handle that platform-tier bypass before
+    consulting this comparator.
+    """
+    if have is None or have not in _PROJECT_ROLE_RANK:
+        return False
+    if need not in _PROJECT_ROLE_RANK:
+        return False
+    return _PROJECT_ROLE_RANK[have] >= _PROJECT_ROLE_RANK[need]
+
+
+def require_project_member(min_role: str = "viewer"):
+    """FastAPI dependency factory enforcing per-project RBAC.
+
+    Resolves the caller's effective role on the URL-path
+    ``{project_id}`` and refuses the request if it ranks below
+    ``min_role`` in :data:`PROJECT_ROLE_HIERARCHY`.
+
+    Resolution order (cheap → expensive):
+
+    1. Platform ``super_admin`` short-circuit — returns the user with
+       ``current_user_role`` pinned to ``"super_admin"``. The
+       SQLAlchemy listener (Y5 row 3) treats this as "no per-project
+       filter" when paired with the ``X-Admin-Cross-Project: 1``
+       header, and emits an audit row for cross-project access.
+    2. Direct ``project_members`` row for ``(user_id, project_id)``
+       — its role is the effective role.
+    3. Tenant-membership fallback (alembic 0034 default-resolution):
+       active ``user_tenant_memberships`` with role ∈ {owner, admin}
+       maps to ``contributor`` on every project of the tenant;
+       member / viewer tenant roles confer no project access.
+
+    On success the request-scoped ContextVars are populated:
+
+    * ``set_tenant_id`` ← project's tenant (defence in depth even if
+      the route forgot to depend on ``require_tenant`` first)
+    * ``set_project_id`` ← path param
+    * ``set_user_role`` ← effective project role
+
+    Status codes:
+
+    * 200 — role resolves and ranks ≥ ``min_role``
+    * 403 — authenticated, but no membership / role too low
+    * 404 — project does not exist (or, when the path also carries
+            ``{tenant_id}``, lives in a different tenant — by
+            intent: the caller has no business probing cross-tenant
+            existence by status code)
+
+    Why ``tenant_id`` is read from ``request.path_params`` rather
+    than the dependency signature
+    ────────────────────────────────────────────────────────────
+    The TODO row's primary input is ``project_id`` — but the
+    common route shape is ``/tenants/{tid}/projects/{pid}/...``.
+    Declaring ``tenant_id: str = None`` in the dependency signature
+    would make FastAPI bind it from the *query string* on routes
+    that nest ``project_id`` directly (e.g. ``/api/v1/projects/
+    {project_id}/...``), which is the wrong source. Reading from
+    ``request.path_params`` gives us "use the URL tenant when the
+    route declares one, otherwise derive from the project row" with
+    no false binding.
+
+    Module-global state audit (SOP Step 1)
+    ──────────────────────────────────────
+    Two role tuples + four SQL strings + the rank dict are all
+    module-level immutable; each uvicorn worker derives the same
+    values from source. The asyncpg pool is shared via PG. No new
+    in-memory cache.
+
+    Read-after-write timing audit (SOP Step 1)
+    ──────────────────────────────────────────
+    Three single-row reads (project, project_members, optional
+    tenant_membership). No writes, no transaction; concurrent
+    membership mutations land via PG row locks on their write paths.
+    """
+    if min_role not in _PROJECT_ROLE_RANK:
+        raise ValueError(
+            f"unknown project role: {min_role!r}; "
+            f"must be one of {PROJECT_ROLE_HIERARCHY}"
+        )
+
+    async def _dep(
+        project_id: str,
+        request: Request,
+        user: User = Depends(current_user),
+    ) -> User:
+        from backend.db_context import (
+            set_project_id,
+            set_tenant_id,
+            set_user_role,
+        )
+        from backend.db_pool import get_pool
+
+        # Optional ``{tenant_id}`` from the same path. ``path_params``
+        # is a plain dict; missing key → None (legitimate for routes
+        # that nest ``project_id`` directly).
+        path_tenant_id = request.path_params.get("tenant_id")
+
+        async with get_pool().acquire() as conn:
+            if path_tenant_id is not None:
+                project_row = await conn.fetchrow(
+                    _FETCH_PROJECT_TENANT_SCOPED_FOR_AUTHZ_SQL,
+                    project_id, path_tenant_id,
+                )
+            else:
+                project_row = await conn.fetchrow(
+                    _FETCH_PROJECT_BY_ID_FOR_AUTHZ_SQL,
+                    project_id,
+                )
+        if project_row is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"project not found: {project_id!r}",
+            )
+        resolved_tenant_id = project_row["tenant_id"]
+
+        # Platform-tier bypass — ``super_admin`` may read / write any
+        # project. The listener (Y5 row 3) is responsible for the
+        # cross-project audit trail; this dependency only pins the
+        # context vars so the listener can see "this is a super-admin
+        # request scoped to (tenant, project)".
+        if role_at_least(user.role, "super_admin"):
+            set_tenant_id(resolved_tenant_id)
+            set_project_id(project_id)
+            set_user_role("super_admin")
+            return user
+
+        async with get_pool().acquire() as conn:
+            pm_row = await conn.fetchrow(
+                _FETCH_PROJECT_MEMBER_FOR_AUTHZ_SQL,
+                user.id, project_id,
+            )
+
+        effective_role: Optional[str] = None
+        if pm_row is not None:
+            effective_role = pm_row["role"]
+        else:
+            async with get_pool().acquire() as conn:
+                tm_row = await conn.fetchrow(
+                    _FETCH_TENANT_MEMBERSHIP_FOR_AUTHZ_SQL,
+                    user.id, resolved_tenant_id,
+                )
+            if tm_row is not None and tm_row["status"] == "active":
+                effective_role = _TENANT_ROLE_DEFAULT_PROJECT_ROLE.get(
+                    tm_row["role"]
+                )
+            # else: anonymous / suspended / member / viewer → None
+            # → 403 below.
+
+        if not project_role_at_least(effective_role, min_role):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"requires project role {min_role} or higher on "
+                    f"project {project_id!r}"
+                ),
+            )
+
+        set_tenant_id(resolved_tenant_id)
+        set_project_id(project_id)
+        set_user_role(effective_role)
+        return user
+
+    return _dep
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Session listing / revocation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
