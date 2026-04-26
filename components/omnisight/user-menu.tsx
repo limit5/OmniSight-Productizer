@@ -11,7 +11,14 @@
 
 import { useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import { Key, LogOut, Monitor, Shield, User as UserIcon } from "lucide-react"
+import {
+  Key,
+  Layers,
+  LogOut,
+  Monitor,
+  Shield,
+  User as UserIcon,
+} from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/lib/auth-context"
 import { SessionManagerPanel } from "./session-manager-panel"
@@ -78,6 +85,16 @@ export function UserMenu() {
               role: {auth.user.role}
             </div>
           </div>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => { setOpen(false); router.push("/settings/platforms") }}
+            className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--secondary)] text-[var(--foreground)]"
+            data-testid="menu-platforms"
+          >
+            <Layers size={12} />
+            Platforms
+          </button>
           <button
             type="button"
             role="menuitem"
