@@ -319,6 +319,43 @@ class Settings(BaseSettings):
     workspace_root: str = "./data/workspaces"
     workspace_quota_mb_default: int = 0
 
+    # ── Y6 #282 row 6 — Background workspace GC reaper ──
+    # Hourly async task (lifespan-scoped, see ``backend/workspace_gc.py``)
+    # that walks the row-1 hierarchy and reclaims disk from agents that
+    # are long-finished but whose worktrees were never explicitly cleaned
+    # up. Three knobs:
+    #
+    # ``keep_recent_workspaces_stale_days`` — leaf workspaces whose
+    # ``mtime`` is older than this AND whose ``agent_id`` is not in the
+    # in-process active registry (``backend.workspace._workspaces``)
+    # AND whose ``.git/index.lock`` is missing-or-stale get moved into
+    # ``{workspace_root}/_trash/`` for cool-down.
+    #
+    # ``workspace_gc_trash_ttl_days`` — entries inside ``_trash/`` whose
+    # *own* ``mtime`` (= the move-to-trash time) is older than this get
+    # hard-deleted. Decoupled from the stale-days knob so operators can
+    # tune "how long until we touch you" and "how long after we trashed
+    # you we keep the remains" independently.
+    #
+    # ``workspace_gc_interval_s`` — sweep cadence. Default 3600s (1 h)
+    # matches the Y6 row-6 spec; lower bound is soft (the sweep itself
+    # is cheap, but running more often than once per minute offers no
+    # benefit because the staleness window is days).
+    #
+    # Module-global state audit (per implement_phase_step.md Step 1,
+    # type-1 answer): all three fields are immutable Settings literals
+    # derived once at process boot from env / .env — every uvicorn
+    # worker reads the same value from the same source. Per-worker GC
+    # loops racing on the same on-disk hierarchy is type-3 intentional
+    # (filesystem ops are idempotent — ``shutil.rmtree`` is naturally
+    # idempotent against missing paths, ``rename(src, dst)`` either
+    # wins or sees ENOENT and the loser quietly drops the file from
+    # its candidate set; see ``backend/workspace_gc.py`` module
+    # docstring).
+    keep_recent_workspaces_stale_days: int = 30
+    workspace_gc_trash_ttl_days: int = 7
+    workspace_gc_interval_s: float = 3600.0
+
     # O8 (#271): orchestration execution mode. "monolith" keeps every
     # agent run going through the LangGraph StateGraph in-process (legacy
     # path since v0.1.0). "distributed" routes the same run through

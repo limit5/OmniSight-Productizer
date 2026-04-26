@@ -352,6 +352,17 @@ async def lifespan(app: FastAPI):
     # need this explicit loop to prevent stale drafts from lingering.
     from backend import user_drafts_gc as _ud_gc
     drafts_gc_task = asyncio.create_task(_ud_gc.run_gc_loop())
+    # Y6 #282 row 6: hourly workspace GC reaper. Walks the row-1
+    # five-layer hierarchy, moves stale leaves (mtime older than
+    # ``keep_recent_workspaces_stale_days``, agent already finished,
+    # no fresh ``.git/index.lock``) to ``_trash/`` for cool-down,
+    # hard-deletes trash entries past ``workspace_gc_trash_ttl_days``,
+    # and pre-emptively LRU-evicts older workspaces when a tenant is
+    # over hard quota. Singleton-guarded per worker; cross-worker
+    # races are idempotent (rename / rmtree). See
+    # ``backend/workspace_gc.py`` module docstring for the audit.
+    from backend import workspace_gc as _ws_gc
+    workspace_gc_task = asyncio.create_task(_ws_gc.run_gc_loop())
     # M4: cgroup per-container sampler → per-tenant Prometheus gauges +
     # billing accumulator. Lifespan-scoped so it starts with the app
     # and stops cleanly at shutdown.
@@ -380,7 +391,7 @@ async def lifespan(app: FastAPI):
         _log.info("[lifecycle] graceful_shutdown result: %s", result)
     except Exception as exc:
         _log.warning("[lifecycle] graceful_shutdown raised: %s", exc)
-    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task, iq_task, ft_task, md_task, balance_task, drf_task, quota_task, drafts_gc_task, host_metrics_task, host_ringbuf_task):
+    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task, iq_task, ft_task, md_task, balance_task, drf_task, quota_task, drafts_gc_task, workspace_gc_task, host_metrics_task, host_ringbuf_task):
         t.cancel()
         try:
             await t
@@ -797,6 +808,30 @@ async def _project_header_gate(request, call_next):
         db_context.set_tenant_id(resolved_tenant_id)
         db_context.set_project_id(header_pid)
         db_context.set_user_role("super_admin")
+        # Y5 row 5 contract: when a super-admin opts into cross-project
+        # access via the explicit X-Admin-Cross-Project: 1 intent
+        # header, append a single audit row so security review and
+        # compliance always see the boundary crossing. The header is
+        # the operator's "I know I'm crossing project boundaries"
+        # signal — its presence is what triggers the audit, not
+        # whether the bypass actually fired (the listener does the
+        # bypass unconditionally for role="super_admin").
+        if request.headers.get("x-admin-cross-project") == "1":
+            from backend import audit as _audit
+            await _audit.log(
+                action="super_admin_cross_project_access",
+                entity_kind="project",
+                entity_id=header_pid,
+                actor=user.id,
+                session_id=sess.token,
+                after={
+                    "tenant_id": resolved_tenant_id,
+                    "project_id": header_pid,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "intent_header": "X-Admin-Cross-Project: 1",
+                },
+            )
         return await call_next(request)
 
     # Resolution chain (cheap → expensive), mirror of
