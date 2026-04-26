@@ -1226,6 +1226,8 @@ from backend.routers import tenant_projects as _tenant_projects_router  # Y4 (#2
 app.include_router(_tenant_projects_router.router, prefix=settings.api_prefix)
 from backend.routers import catalog as _catalog_router  # BS.2.1 — catalog entries + sources CRUD
 app.include_router(_catalog_router.router, prefix=settings.api_prefix)
+from backend.routers import installer as _installer_router  # BS.2.2 — install jobs CRUD + sidecar long-poll
+app.include_router(_installer_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import
