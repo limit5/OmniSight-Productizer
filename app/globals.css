@@ -1061,7 +1061,7 @@ html {
   content: '';
   position: absolute;
   inset: 0;
-  background: 
+  background:
     linear-gradient(var(--neural-blue), var(--neural-blue)) top left,
     linear-gradient(var(--neural-blue), var(--neural-blue)) top right,
     linear-gradient(var(--neural-blue), var(--neural-blue)) bottom left,
@@ -1070,6 +1070,98 @@ html {
   background-repeat: no-repeat;
   background-position: top left, top right, bottom left, bottom right;
   pointer-events: none;
+}
+
+/* BS.6.4 — Tintable corner brackets for category-strip active chip.
+ * Mirrors `.corner-brackets-full` 1:1 but reads `--cb-color` so each
+ * family can paint brackets in its OmniSight palette accent (mobile
+ * emerald, embedded amber, etc). `--cb-color` falls back to
+ * `--neural-blue` when no inline custom property is set so standalone
+ * use still works. */
+.corner-brackets-full-tinted {
+  position: relative;
+}
+
+.corner-brackets-full-tinted::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(var(--cb-color, var(--neural-blue)), var(--cb-color, var(--neural-blue))) top left,
+    linear-gradient(var(--cb-color, var(--neural-blue)), var(--cb-color, var(--neural-blue))) top right,
+    linear-gradient(var(--cb-color, var(--neural-blue)), var(--cb-color, var(--neural-blue))) bottom left,
+    linear-gradient(var(--cb-color, var(--neural-blue)), var(--cb-color, var(--neural-blue))) bottom right;
+  background-size: 10px 1.5px, 10px 1.5px, 10px 1.5px, 10px 1.5px;
+  background-repeat: no-repeat;
+  background-position: top left, top right, bottom left, bottom right;
+  pointer-events: none;
+}
+
+.corner-brackets-full-tinted::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(var(--cb-color, var(--neural-blue)), var(--cb-color, var(--neural-blue))) top left,
+    linear-gradient(var(--cb-color, var(--neural-blue)), var(--cb-color, var(--neural-blue))) top right,
+    linear-gradient(var(--cb-color, var(--neural-blue)), var(--cb-color, var(--neural-blue))) bottom left,
+    linear-gradient(var(--cb-color, var(--neural-blue)), var(--cb-color, var(--neural-blue))) bottom right;
+  background-size: 1.5px 10px, 1.5px 10px, 1.5px 10px, 1.5px 10px;
+  background-repeat: no-repeat;
+  background-position: top left, top right, bottom left, bottom right;
+  pointer-events: none;
+}
+
+/* BS.6.4 — Localised FUI scan-line sweep for the active category chip.
+ * Differs from `.fui-scan-sweep` (which is a viewport-wide overlay):
+ *   • `position: absolute` + `inset: 0` so it lives inside the chip,
+ *     not the document.
+ *   • Sweep duration is shorter (2.4s) since the chip is ~7px tall —
+ *     the bar would otherwise crawl.
+ *   • Gradient tint reads `--scan-sweep-color` so the sweep colour
+ *     tracks the active family's palette (defaults to neural-blue).
+ *   • `border-radius: inherit` makes the overlay clip to the chip's
+ *     pill silhouette without an explicit value.
+ *   • `prefers-reduced-motion: reduce` halts the animation +
+ *     hides the sweep — operators on the OS reduce-motion flag see
+ *     a static chip with corner brackets only. */
+@keyframes category-strip-scan-sweep {
+  0%   { transform: translateY(-110%); opacity: 0; }
+  10%  { opacity: 0.85; }
+  90%  { opacity: 0.85; }
+  100% { transform: translateY(110%);  opacity: 0; }
+}
+
+.category-strip-scan-sweep {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+.category-strip-scan-sweep::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 60%;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0) 0%,
+    var(--scan-sweep-color, rgba(56, 189, 248, 0.35)) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: category-strip-scan-sweep 2.4s linear infinite;
+  mix-blend-mode: screen;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .category-strip-scan-sweep::after {
+    animation: none;
+    opacity: 0;
+  }
 }
 
 /* Hexagonal Pattern Background */

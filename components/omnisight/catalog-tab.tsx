@@ -86,6 +86,7 @@ import {
   X,
 } from "lucide-react"
 
+import { CategoryStrip } from "@/components/omnisight/category-strip"
 import { useEffectiveMotionLevel } from "@/hooks/use-zero-g"
 import { useUserStorage } from "@/lib/storage"
 
@@ -494,31 +495,20 @@ export function CatalogTab({
         data-testid="catalog-tab-toolbar"
         className="flex flex-col gap-3 rounded-md border border-[var(--border)] bg-[var(--card)]/40 p-3 md:flex-row md:items-center md:justify-between"
       >
-        {/* Left: family chips */}
-        <div
-          data-testid="catalog-tab-family-chips"
-          role="group"
-          aria-label="Filter by family"
-          className="flex flex-wrap items-center gap-1"
-        >
-          <FamilyChip
-            id="all"
-            label="All"
-            active={familyFilter === "all"}
-            accentClass="border-[var(--neural-blue)]/60 text-[var(--neural-blue)]"
-            onSelect={() => setFamilyFilter("all")}
-          />
-          {CATALOG_FAMILIES.map((fam) => (
-            <FamilyChip
-              key={fam}
-              id={fam}
-              label={FAMILY_LABEL[fam]}
-              active={familyFilter === fam}
-              accentClass={FAMILY_ACCENT[fam]}
-              onSelect={() => setFamilyFilter(fam)}
-            />
-          ))}
-        </div>
+        {/* Left: family chips — BS.6.4 polished `<CategoryStrip />`.
+         *  Replaces BS.6.1's inline `<FamilyChip />` pills with corner-
+         *  brackets-full-tinted + localised scan-sweep treatment per
+         *  family. The `rootTestId` / `chipTestIdPrefix` overrides keep
+         *  BS.6.1's testid contract (`catalog-tab-family-chips` +
+         *  `catalog-tab-family-chip-{id}`) so any test or deep-link
+         *  written against BS.6.1 still resolves. Filter state stays
+         *  owned by CatalogTab (the chip strip is presentation only). */}
+        <CategoryStrip
+          family={familyFilter}
+          onSelect={(next) => setFamilyFilter(next)}
+          rootTestId="catalog-tab-family-chips"
+          chipTestIdPrefix="catalog-tab-family-chip"
+        />
 
         {/* Right: search + sort + density */}
         <div className="flex flex-wrap items-center gap-2 md:flex-nowrap">
@@ -688,35 +678,10 @@ export function CatalogTab({
 // ─────────────────────────────────────────────────────────────────────
 // Sub-components — file-private. The placeholder is intentionally
 // minimal so it can't be mistaken for the production card BS.6.2 ships.
+// (BS.6.4 retired the inline `<FamilyChip />` here in favour of the
+// polished `<CategoryStrip />` — the per-family palette + corner-
+// brackets-full-tinted + scan-sweep dressing now live there.)
 // ─────────────────────────────────────────────────────────────────────
-
-interface FamilyChipProps {
-  id: CatalogFamily | "all"
-  label: string
-  active: boolean
-  accentClass: string
-  onSelect: () => void
-}
-
-function FamilyChip({ id, label, active, accentClass, onSelect }: FamilyChipProps) {
-  return (
-    <button
-      type="button"
-      data-testid={`catalog-tab-family-chip-${id}`}
-      data-active={active}
-      aria-pressed={active}
-      onClick={onSelect}
-      className={[
-        "inline-flex h-7 items-center gap-1 rounded-full border px-2.5 font-mono text-[10px] uppercase tracking-wider transition-colors",
-        active
-          ? `${accentClass} bg-[var(--card)]`
-          : "border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
-      ].join(" ")}
-    >
-      {label}
-    </button>
-  )
-}
 
 interface CatalogCardPlaceholderProps {
   entry: CatalogEntry
