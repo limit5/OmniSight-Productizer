@@ -125,8 +125,11 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
+
+if TYPE_CHECKING:  # pragma: no cover — types only
+    from installer.health import HealthState as HealthStateLike
 
 logger = logging.getLogger("omnisight.installer")
 
@@ -371,21 +374,22 @@ def _poll_once(cfg: Config) -> PollOutcome:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _handle_claimed_job(cfg: Config, job: dict[str, Any]) -> None:
+def _handle_claimed_job(
+    cfg: Config, job: dict[str, Any], health: "HealthStateLike | None" = None,
+) -> None:
     """BS.4.3: fetch the catalog entry, merge with the install_jobs row,
     and dispatch through ``installer.methods``.
 
-    BS.4.4 will extend this to POST progress/result back to the backend.
-    For now ``progress_cb`` only logs; the terminal :class:`InstallResult`
-    is logged at INFO (success) or WARNING (failed/cancelled). The job
-    row stays in ``state='running'`` server-side until BS.4.4 ships the
-    ``POST /installer/jobs/{id}/result`` round trip.
+    BS.4.4 wired progress/result POST back to the backend; BS.4.5 threads
+    the ``HealthState`` through so the ``/health`` endpoint reports the
+    last claimed/terminal job and beats during the long install run.
 
-    Why it's safe to leave the row in ``running`` during the BS.4.3
-    window: the sidecar is NOT wired into ``docker-compose.yml`` until
-    BS.4.6 — no operator-facing deployment can reach this code path
-    while the epic is mid-rollout. Any local ``docker run`` smoke is
-    against a dev queue / dev row, not prod.
+    Why it's safe to leave the row in ``running`` after dispatch (the
+    eventual ``POST .../result`` is owned by a future row): the sidecar
+    is NOT wired into ``docker-compose.yml`` until BS.4.6 — no
+    operator-facing deployment can reach this code path while the epic
+    is mid-rollout. Any local ``docker run`` smoke is against a dev
+    queue / dev row, not prod.
     """
     job_id = job.get("id")
     entry_id = job.get("entry_id")
@@ -395,6 +399,8 @@ def _handle_claimed_job(cfg: Config, job: dict[str, Any]) -> None:
         "resolving catalog entry + dispatching",
         job_id, entry_id, tenant_id, job.get("state"),
     )
+    if health is not None and job_id:
+        health.record_job_claimed(str(job_id))
 
     entry = _fetch_catalog_entry(cfg, str(entry_id), str(tenant_id))
     if entry is None:
@@ -412,13 +418,16 @@ def _handle_claimed_job(cfg: Config, job: dict[str, Any]) -> None:
     for k in ("install_method", "install_url", "sha256", "metadata"):
         enriched[k] = entry.get(k)
 
-    progress_cb = _build_progress_cb(cfg, str(job_id))
+    progress_cb = _build_progress_cb(cfg, str(job_id), health=health)
 
     from installer import methods as _methods  # local import to keep
     # main.py importable without methods (for early smoke / unit tests
     # that may stub the dispatch surface).
 
     result = _methods.dispatch(enriched, progress_cb)
+
+    if health is not None and job_id:
+        health.record_job_terminal(str(job_id), result.state)
 
     log_args = (
         job_id, entry_id, result.state, result.error_reason,
@@ -492,7 +501,9 @@ def _fetch_catalog_entry(
     return payload
 
 
-def _build_progress_cb(cfg: Config, job_id: str) -> "Any":
+def _build_progress_cb(
+    cfg: Config, job_id: str, *, health: "HealthStateLike | None" = None,
+) -> "Any":
     """BS.4.4 progress callback — POSTs to the backend progress bus.
 
     Each tick is sent to ``POST /installer/jobs/{job_id}/progress`` (see
@@ -505,13 +516,19 @@ def _build_progress_cb(cfg: Config, job_id: str) -> "Any":
     updates immediately. The emitter raises :class:`InstallCancelled`
     when the backend reports a terminal state — which the install
     methods handle in their ``run_in_process_group`` cancel path.
+
+    BS.4.5: when *health* is provided, every tick (post-throttle) also
+    pings ``HealthState.heartbeat()`` so a long install (subprocess
+    holding the loop for minutes) keeps the ``/health`` ``ok`` flag
+    green. We hook *before* the inner emitter so even ticks that hit
+    the throttle gate (no POST) still register as proof-of-life.
     """
     from installer.progress import (
         ProgressEmitterConfig,
         make_progress_cb,
     )
 
-    return make_progress_cb(
+    inner = make_progress_cb(
         ProgressEmitterConfig(
             backend_url=cfg.backend_url,
             token=cfg.token,
@@ -519,6 +536,14 @@ def _build_progress_cb(cfg: Config, job_id: str) -> "Any":
         ),
         job_id,
     )
+    if health is None:
+        return inner
+
+    def _wrapped(**kwargs: Any) -> None:
+        health.heartbeat()
+        inner(**kwargs)
+
+    return _wrapped
 
 
 def _log_protocol_handshake_failure(cfg: Config, payload: dict[str, Any]) -> None:
@@ -538,7 +563,10 @@ def _log_protocol_handshake_failure(cfg: Config, payload: dict[str, Any]) -> Non
     )
 
 
-def run_loop(cfg: Config, flag: _ShutdownFlag) -> int:
+def run_loop(
+    cfg: Config, flag: _ShutdownFlag,
+    health: "HealthStateLike | None" = None,
+) -> int:
     """Long-poll loop. Returns process exit code.
 
     Exit conditions:
@@ -546,6 +574,11 @@ def run_loop(cfg: Config, flag: _ShutdownFlag) -> int:
     * ``flag.requested`` (SIGTERM/SIGINT) → return 0 cleanly. compose
       ``restart: unless-stopped`` will not restart on exit 0.
     * Anything else → loop forever. Backoff caps prevent CPU spin.
+
+    BS.4.5: when *health* is provided, ``health.heartbeat()`` is called
+    at the top of every iteration so the ``/health`` endpoint reports
+    a fresh ``heartbeat_age_s`` even when the long-poll is just sitting
+    on a 204 cycle.
     """
     logger.info(
         "omnisight-installer starting: backend=%s sidecar_id=%s "
@@ -570,6 +603,8 @@ def run_loop(cfg: Config, flag: _ShutdownFlag) -> int:
     backoff = _BACKOFF_INITIAL_S
 
     while not flag.requested:
+        if health is not None:
+            health.heartbeat()
         if is_first_connect:
             logger.info(
                 "first connect — performing protocol_version=%d handshake "
@@ -584,7 +619,7 @@ def run_loop(cfg: Config, flag: _ShutdownFlag) -> int:
                 logger.info("handshake OK (got 200 + claimed job on first poll)")
                 is_first_connect = False
             backoff = _BACKOFF_INITIAL_S
-            _handle_claimed_job(cfg, outcome.job)
+            _handle_claimed_job(cfg, outcome.job, health)
             continue
 
         if outcome.no_content:
@@ -643,11 +678,60 @@ def main() -> int:
     )
     flag = _ShutdownFlag()
     _install_signal_handlers(flag)
+
+    # BS.4.5: spin up the embedded /health endpoint in a daemon thread.
+    # If the bind fails (port in use), log + continue without it — a
+    # missing health endpoint should NOT prevent the long-poll loop
+    # from running. compose's HEALTHCHECK will mark the container
+    # unhealthy in that case, which is the right signal.
+    health = None
+    health_server = None
     try:
-        return run_loop(cfg, flag)
+        from installer.health import (
+            HealthState,
+            load_health_config,
+            load_health_listen,
+            start_health_server,
+        )
+        health_cfg = load_health_config(
+            sidecar_id=cfg.sidecar_id,
+            protocol_version=cfg.protocol_version,
+            poll_timeout_s=cfg.poll_timeout_s,
+        )
+        health = HealthState(health_cfg)
+        host, port = load_health_listen()
+        try:
+            health_server, _thread = start_health_server(
+                health, host=host, port=port,
+            )
+        except OSError as exc:
+            logger.warning(
+                "could not bind /health endpoint on %s:%d: %s — "
+                "continuing without it", host, port, exc,
+            )
+            health_server = None
+            # Keep the in-memory state so heartbeats/job records still
+            # work; just no HTTP exposure.
+    except Exception as exc:  # noqa: BLE001 — health is best-effort
+        logger.warning(
+            "health endpoint setup raised %s: %s — continuing without it",
+            exc.__class__.__name__, exc,
+        )
+        health = None
+        health_server = None
+
+    try:
+        return run_loop(cfg, flag, health)
     except Exception as exc:  # noqa: BLE001 — last-ditch logging
         logger.exception("uncaught exception in run_loop: %s", exc)
         return 2
+    finally:
+        if health_server is not None:
+            try:
+                health_server.shutdown()
+                health_server.server_close()
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.debug("health server shutdown raised: %s", exc)
 
 
 if __name__ == "__main__":
