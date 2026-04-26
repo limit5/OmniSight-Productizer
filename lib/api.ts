@@ -2879,6 +2879,206 @@ export async function listAllTenantProjects(
   return res.projects
 }
 
+// ─── Project settings page (Y8 row 5) ──────────────────────────
+//
+// REST surface for ``/projects/{pid}/settings`` (project-owner /
+// tenant-admin scoped). Covers three operation surfaces:
+//
+//   • Members → GET / POST / PATCH / DELETE
+//               /api/v1/tenants/{tid}/projects/{pid}/members[/{uid}]
+//   • Budget  → PATCH /api/v1/tenants/{tid}/projects/{pid}
+//               (tri-state body — null clears; project then inherits
+//               from the tenant). Read uses listTenantProjects.
+//   • Shares  → GET / POST / DELETE
+//               /api/v1/tenants/{tid}/projects/{pid}/shares[/{sid}]
+//
+// Tenant scope is supplied by the caller (the page resolves
+// tenant_id via lib/project-context's projects[] list); these
+// wrappers do not implicitly read ``_currentTenantId`` so two
+// concurrent settings pages on different tenants do not race the
+// header.
+
+export type ProjectMemberRole = "owner" | "contributor" | "viewer"
+
+export interface ProjectMemberRow {
+  user_id: string
+  email: string
+  name: string
+  project_id: string
+  role: ProjectMemberRole
+  created_at: string
+  user_enabled: boolean
+}
+
+export interface ListProjectMembersResponse {
+  tenant_id: string
+  project_id: string
+  count: number
+  members: ProjectMemberRow[]
+}
+
+export async function listProjectMembers(
+  tenantId: string,
+  projectId: string,
+  opts?: { limit?: number },
+): Promise<ListProjectMembersResponse> {
+  const params = new URLSearchParams()
+  if (opts?.limit) params.set("limit", String(opts.limit))
+  const qs = params.toString() ? `?${params.toString()}` : ""
+  return request<ListProjectMembersResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/members${qs}`,
+  )
+}
+
+export interface CreateProjectMemberRequest {
+  user_id: string
+  role: ProjectMemberRole
+}
+
+export async function createProjectMember(
+  tenantId: string,
+  projectId: string,
+  body: CreateProjectMemberRequest,
+): Promise<ProjectMemberRow & { tenant_id: string }> {
+  return request<ProjectMemberRow & { tenant_id: string }>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/members`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
+export interface PatchProjectMemberRequest {
+  role: ProjectMemberRole
+}
+
+export async function patchProjectMember(
+  tenantId: string,
+  projectId: string,
+  userId: string,
+  body: PatchProjectMemberRequest,
+): Promise<ProjectMemberRow & { tenant_id: string; no_change: boolean }> {
+  return request<
+    ProjectMemberRow & { tenant_id: string; no_change: boolean }
+  >(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  )
+}
+
+export async function deleteProjectMember(
+  tenantId: string,
+  projectId: string,
+  userId: string,
+): Promise<{ tenant_id: string; project_id: string; user_id: string; already_removed: boolean; role?: ProjectMemberRole }> {
+  return request<{
+    tenant_id: string
+    project_id: string
+    user_id: string
+    already_removed: boolean
+    role?: ProjectMemberRole
+  }>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+  )
+}
+
+// Project budget — uses the existing PATCH /tenants/{tid}/projects/{pid}
+// endpoint with the tri-state body (omit = leave alone; null = clear =
+// inherit from tenant; non-null = set). Wrapper accepts ``undefined`` to
+// signal "leave alone" and ``null`` to signal "clear", matching the
+// pydantic ``model_fields_set`` contract on the server.
+export interface PatchProjectBudgetRequest {
+  plan_override?: TenantPlan | null
+  disk_budget_bytes?: number | null
+  llm_budget_tokens?: number | null
+  name?: string
+  parent_id?: string | null
+}
+
+export async function patchProjectBudget(
+  tenantId: string,
+  projectId: string,
+  body: PatchProjectBudgetRequest,
+): Promise<TenantProjectInfo & { no_change?: boolean }> {
+  return request<TenantProjectInfo & { no_change?: boolean }>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  )
+}
+
+export type ProjectShareRole = "viewer" | "contributor"
+
+export interface ProjectShareRow {
+  share_id: string
+  project_id: string
+  guest_tenant_id: string
+  role: ProjectShareRole
+  granted_by: string | null
+  created_at: string
+  expires_at: string | null
+}
+
+export interface ListProjectSharesResponse {
+  tenant_id: string
+  project_id: string
+  count: number
+  shares: ProjectShareRow[]
+}
+
+export async function listProjectShares(
+  tenantId: string,
+  projectId: string,
+  opts?: { limit?: number },
+): Promise<ListProjectSharesResponse> {
+  const params = new URLSearchParams()
+  if (opts?.limit) params.set("limit", String(opts.limit))
+  const qs = params.toString() ? `?${params.toString()}` : ""
+  return request<ListProjectSharesResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/shares${qs}`,
+  )
+}
+
+export interface CreateProjectShareRequest {
+  guest_tenant_id: string
+  role: ProjectShareRole
+  expires_at?: string | null
+}
+
+export async function createProjectShare(
+  tenantId: string,
+  projectId: string,
+  body: CreateProjectShareRequest,
+): Promise<ProjectShareRow & { tenant_id: string }> {
+  return request<ProjectShareRow & { tenant_id: string }>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/shares`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
+export async function deleteProjectShare(
+  tenantId: string,
+  projectId: string,
+  shareId: string,
+): Promise<{
+  tenant_id: string
+  project_id: string
+  share_id: string
+  already_revoked: boolean
+  guest_tenant_id?: string
+  role?: ProjectShareRole
+}> {
+  return request<{
+    tenant_id: string
+    project_id: string
+    share_id: string
+    already_revoked: boolean
+    guest_tenant_id?: string
+    role?: ProjectShareRole
+  }>(
+    `/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/shares/${encodeURIComponent(shareId)}`,
+    { method: "DELETE" },
+  )
+}
+
 // ─── Session management (J3) ─────────────────────────────────
 
 export interface SessionItem {

@@ -3349,3 +3349,495 @@ async def create_project_share(
         )
 
     return JSONResponse(status_code=201, content=share)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Y8 (#284) row 5 — GET /tenants/{tid}/projects/{pid}/members
+#  Y8 (#284) row 5 — GET /tenants/{tid}/projects/{pid}/shares
+#  Y8 (#284) row 5 — DELETE /tenants/{tid}/projects/{pid}/shares/{sid}
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Read-side complement to the Y4 row 5 / row 6 write-only POST/PATCH/
+# DELETE member surface and POST share surface — needed by the Y8
+# row 5 ``/projects/{pid}/settings`` page (project owner only, three
+# tabs Members / Budget / Shares). Without the GET endpoints the
+# settings page would have no list to render; the DELETE share
+# endpoint completes the share lifecycle (granted → revoked) so the
+# operator can pull a share back without going through the DB.
+#
+# Module-global state audit (SOP Step 1)
+# ──────────────────────────────────────
+# New module-level constants:
+#   * 3 SQL constants — ``_LIST_PROJECT_MEMBERS_SQL`` (joins
+#     ``project_members`` to ``users`` for email/name surface),
+#     ``_LIST_PROJECT_SHARES_SQL`` (filtering tied to project_id),
+#     ``_DELETE_PROJECT_SHARE_SQL`` (DELETE ... RETURNING for audit
+#     payload).
+# All immutable; every uvicorn worker derives the same value from
+# source — qualifying answer #1. DB state is shared via PG; the
+# DELETE on the composite UNIQUE serialises naturally — qualifying
+# answer #2. No new in-memory cache.
+#
+# Read-after-write timing audit (SOP Step 1)
+# ──────────────────────────────────────────
+# GETs are read-only single-statement fetches; DELETE is a single
+# ``DELETE … RETURNING`` (idempotent: RETURNING None means "row
+# already gone" → ``already_revoked=True``, no audit emitted). No
+# new timing-visible behaviour.
+#
+# RBAC
+# ────
+# ``GET .../members`` — same gate as POST/PATCH/DELETE:
+#   ``_user_can_manage_project_members`` (super_admin / tenant
+#   admin/owner / explicit ``project_members.role='owner'``). A
+#   plain tenant member can NOT enumerate the project's roster
+#   (matches the ``GET /tenants/{tid}/members`` posture which is
+#   admin-only).
+# ``GET .../shares`` — same gate as POST share:
+#   ``_user_can_create_project_in`` (super_admin / tenant
+#   admin/owner). Sharing is a tenant-trust-boundary operation;
+#   project owners and below cannot enumerate cross-tenant grants.
+# ``DELETE .../shares/{sid}`` — same gate as POST share, mirroring
+#   the create surface. Idempotent: re-revoking a missing share
+#   returns 200 with ``already_revoked=True`` (no audit row, no
+#   side-effect — same posture as DELETE project_member).
+
+# Read-only list of explicit project member rows joined to the users
+# table for email + name surface. Sorted oldest-first to match the
+# tenant-members listing convention and give stable cursor ordering.
+_LIST_PROJECT_MEMBERS_SQL = """
+SELECT
+    pm.user_id     AS user_id,
+    u.email        AS email,
+    u.name         AS name,
+    pm.project_id  AS project_id,
+    pm.role        AS role,
+    pm.created_at  AS created_at,
+    u.enabled      AS user_enabled
+FROM project_members pm
+JOIN users u ON u.id = pm.user_id
+WHERE pm.project_id = $1
+ORDER BY pm.created_at ASC, u.email ASC
+LIMIT $2
+"""
+
+# Read-only list of project_shares for a single project. The router
+# filters by tenant scope BEFORE the SQL runs (404 if the project
+# does not belong to this tenant), so this query only needs the
+# project_id. ``expires_at`` is projected as-is — the frontend
+# decides how to render permanent (NULL) vs expiring shares.
+_LIST_PROJECT_SHARES_SQL = """
+SELECT id, project_id, guest_tenant_id, role,
+       granted_by, created_at, expires_at
+FROM project_shares
+WHERE project_id = $1
+ORDER BY created_at ASC, id ASC
+LIMIT $2
+"""
+
+# Delete by composite (share_id, project_id) — projecting the row
+# back via RETURNING so the audit payload captures the prior role +
+# guest tenant in one round-trip. RETURNING None means "share
+# already absent" → idempotent already_revoked branch.
+_DELETE_PROJECT_SHARE_SQL = """
+DELETE FROM project_shares
+WHERE id = $1 AND project_id = $2
+RETURNING id, project_id, guest_tenant_id, role,
+          granted_by, created_at, expires_at
+"""
+
+# Default + max page sizes for the two list endpoints. Tuned the
+# same way as the Y4 row-2 list_projects defaults (50 / 200) so
+# operators on a busy project don't get truncated unexpectedly.
+LIST_PROJECT_MEMBERS_DEFAULT_LIMIT = 50
+LIST_PROJECT_MEMBERS_MAX_LIMIT = 200
+LIST_PROJECT_SHARES_DEFAULT_LIMIT = 50
+LIST_PROJECT_SHARES_MAX_LIMIT = 200
+
+
+@router.get(
+    "/tenants/{tenant_id}/projects/{project_id}/members",
+)
+async def list_project_members(
+    tenant_id: str,
+    project_id: str,
+    _request: Request,
+    limit: int = Query(
+        default=LIST_PROJECT_MEMBERS_DEFAULT_LIMIT,
+        ge=1,
+        le=LIST_PROJECT_MEMBERS_MAX_LIMIT,
+        description=(
+            f"Max rows to return (1..{LIST_PROJECT_MEMBERS_MAX_LIMIT}). "
+            f"Default {LIST_PROJECT_MEMBERS_DEFAULT_LIMIT}."
+        ),
+    ),
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """List explicit project_members rows for ``(tenant_id, project_id)``.
+
+    Returns 200 with::
+
+        {
+            "tenant_id": "t-acme",
+            "project_id": "p-fw",
+            "count": 3,
+            "members": [
+                {"user_id": "u-alice", "email": "alice@x.io",
+                 "name": "Alice", "role": "owner",
+                 "created_at": "...", "user_enabled": true},
+                ...
+            ]
+        }
+
+    Status codes
+    ────────────
+    * 200 — happy path; ``members`` may be empty if no explicit
+      project_members rows exist (tenant admins / owners still have
+      project access via the tenant-default fallback documented in
+      alembic 0034 — those rows are NOT enumerated here because they
+      are not stored).
+    * 403 — caller is not tenant admin / owner, not super_admin, and
+            not project owner on this project (same gate as the write
+            surface).
+    * 404 — well-formed ids but no such tenant or no such project on
+            this tenant.
+    * 422 — malformed tenant_id / project_id.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+
+    if not await _user_can_manage_project_members(
+        actor, tenant_id, project_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin / owner on {tenant_id!r}, "
+                f"platform super_admin, or project owner on "
+                f"{project_id!r}; caller has no qualifying role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    async with get_pool().acquire() as conn:
+        project_row = await conn.fetchrow(
+            _FETCH_PROJECT_TENANT_SCOPED_SQL, project_id, tenant_id,
+        )
+    if project_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"project not found: {project_id!r} on "
+                    f"tenant {tenant_id!r}"
+                ),
+            },
+        )
+
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            _LIST_PROJECT_MEMBERS_SQL, project_id, limit,
+        )
+
+    members = [
+        {
+            "user_id": r["user_id"],
+            "email": r["email"],
+            "name": r["name"],
+            "project_id": r["project_id"],
+            "role": r["role"],
+            "created_at": r["created_at"],
+            "user_enabled": bool(r["user_enabled"]),
+        }
+        for r in rows
+    ]
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "count": len(members),
+            "members": members,
+        },
+    )
+
+
+@router.get(
+    "/tenants/{tenant_id}/projects/{project_id}/shares",
+)
+async def list_project_shares(
+    tenant_id: str,
+    project_id: str,
+    _request: Request,
+    limit: int = Query(
+        default=LIST_PROJECT_SHARES_DEFAULT_LIMIT,
+        ge=1,
+        le=LIST_PROJECT_SHARES_MAX_LIMIT,
+        description=(
+            f"Max rows to return (1..{LIST_PROJECT_SHARES_MAX_LIMIT}). "
+            f"Default {LIST_PROJECT_SHARES_DEFAULT_LIMIT}."
+        ),
+    ),
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """List cross-tenant share grants for ``(tenant_id, project_id)``.
+
+    Returns 200 with::
+
+        {
+            "tenant_id": "t-acme",
+            "project_id": "p-fw",
+            "count": 1,
+            "shares": [
+                {"share_id": "psh-...", "project_id": "p-fw",
+                 "guest_tenant_id": "t-bob", "role": "viewer",
+                 "granted_by": "u-alice",
+                 "created_at": "...", "expires_at": null},
+                ...
+            ]
+        }
+
+    Status codes
+    ────────────
+    * 200 — happy path; ``shares`` may be empty.
+    * 403 — caller is not tenant admin / owner on the *owning*
+            tenant and not platform super_admin.
+    * 404 — well-formed ids but no such tenant or no such project
+            on this tenant.
+    * 422 — malformed tenant_id / project_id.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+
+    if not await _user_can_create_project_in(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin or above on {tenant_id!r}; "
+                f"caller has no qualifying membership / role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    async with get_pool().acquire() as conn:
+        project_row = await conn.fetchrow(
+            _FETCH_PROJECT_TENANT_SCOPED_SQL, project_id, tenant_id,
+        )
+    if project_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"project not found: {project_id!r} on "
+                    f"tenant {tenant_id!r}"
+                ),
+            },
+        )
+
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            _LIST_PROJECT_SHARES_SQL, project_id, limit,
+        )
+
+    shares = [_row_to_project_share_dict(r) for r in rows]
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "count": len(shares),
+            "shares": shares,
+        },
+    )
+
+
+@router.delete(
+    "/tenants/{tenant_id}/projects/{project_id}/shares/{share_id}",
+)
+async def delete_project_share(
+    tenant_id: str,
+    project_id: str,
+    share_id: str,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """Revoke a cross-tenant share grant.
+
+    Idempotent: re-revoking a missing share returns 200 with
+    ``already_revoked=True`` and emits no audit row — matches the
+    DELETE project_member posture (Y4 row 5).
+
+    Status codes
+    ────────────
+    * 200 — share removed (or already_revoked=True).
+    * 403 — caller is not tenant admin / owner on the *owning*
+            tenant and not platform super_admin.
+    * 404 — well-formed ids but no such tenant or no such project
+            on this tenant.
+    * 422 — malformed tenant_id / project_id / share_id.
+    """
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; must match "
+                    f"{TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_project_id(project_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid project id: {project_id!r}; must match "
+                    f"{PROJECT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not _is_valid_share_id(share_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid share id: {share_id!r}; must match "
+                    f"{SHARE_ID_PATTERN}"
+                ),
+            },
+        )
+
+    if not await _user_can_create_project_in(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"requires tenant admin or above on {tenant_id!r}; "
+                f"caller has no qualifying membership / role"
+            ),
+        )
+
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
+    if tenant_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    async with get_pool().acquire() as conn:
+        project_row = await conn.fetchrow(
+            _FETCH_PROJECT_TENANT_SCOPED_SQL, project_id, tenant_id,
+        )
+    if project_row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"project not found: {project_id!r} on "
+                    f"tenant {tenant_id!r}"
+                ),
+            },
+        )
+
+    async with get_pool().acquire() as conn:
+        deleted_row = await conn.fetchrow(
+            _DELETE_PROJECT_SHARE_SQL, share_id, project_id,
+        )
+
+    if deleted_row is None:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "share_id": share_id,
+                "already_revoked": True,
+            },
+        )
+
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="tenant_project_share_revoked",
+            entity_kind="project_share",
+            entity_id=share_id,
+            before={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "share_id": share_id,
+                "guest_tenant_id": deleted_row["guest_tenant_id"],
+                "role": deleted_row["role"],
+                "expires_at": deleted_row["expires_at"],
+            },
+            after=None,
+            actor=actor.email,
+        )
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning(
+            "tenant_project_share_revoked audit emit failed "
+            "(tenant=%s project=%s share=%s): %s",
+            tenant_id, project_id, share_id, exc,
+        )
+
+    revoked = _row_to_project_share_dict(deleted_row)
+    revoked["tenant_id"] = tenant_id
+    revoked["already_revoked"] = False
+    return JSONResponse(status_code=200, content=revoked)
