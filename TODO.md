@@ -2542,7 +2542,7 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
 > **總範圍**：**~10 day**，11 phase，11 commit，可分 6 sprint 交付。詳細 phase 計畫見下；ADR 級別的設計決策見 `docs/design/bs-bootstrap-vertical-aware.md`（BS.0 寫入）。
 
 ### BS.0 — ADR + 規格落地（pre-coding）
-- [ ] BS.0.1 `docs/design/bs-bootstrap-vertical-aware.md` — 完整 ADR 文件記錄四大設計核心 + 8 層動畫 spec + sidecar protocol + catalog 三層 source 模型 + reduce-motion 合規邏輯
+- [x] BS.0.1 `docs/design/bs-bootstrap-vertical-aware.md` — 完整 ADR 文件記錄四大設計核心 + 8 層動畫 spec + sidecar protocol + catalog 三層 source 模型 + reduce-motion 合規邏輯
 - [ ] BS.0.2 `docs/security/bs-installer-threat-model.md` — sidecar privilege model + docker-socket-proxy ro 限制 + sha256 verify 鏈 + air-gap mode 規格
 - [ ] BS.0.3 R 系列風險登記新增：R24 catalog forward-compat / R25 motion accessibility / R26 sidecar protocol versioning / R27 install job idempotency
 - 預估：**0.5 day**

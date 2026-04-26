@@ -18,6 +18,7 @@ This directory contains all design specifications and architecture documents for
 | [tiered-memory-architecture.md](tiered-memory-architecture.md) | AI Agent 分層記憶（L1 核心規則 + L2 工作記憶 + L3 經驗向量 DB） | Phase 32 |
 | [edge-ai-npu-deploy.md](edge-ai-npu-deploy.md) | Edge AI NPU 模型部署自動化（Inference HAL + MLOps 第四軌 + AI Skill Kits + 精度閉環） | Phase 36 |
 | [r8-idempotent-retry-worktree.md](r8-idempotent-retry-worktree.md) | Retry 以 `git worktree` discard + recreate from anchor commit（覆寫白皮書 §三.2 的 `git clean` 指引） | R8 (#314) |
+| [bs-bootstrap-vertical-aware.md](bs-bootstrap-vertical-aware.md) | Bootstrap Vertical-Aware Setup & Platform Catalog（4 設計核心 + 8 層動畫 spec + sidecar protocol v1 + catalog 三層 source 模型 + reduce-motion 合規） | Priority BS (BS.0.1) |
 
 ## Adding New Documents
 
