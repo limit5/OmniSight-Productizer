@@ -2526,7 +2526,10 @@ export interface AuthUser {
   id: string
   email: string
   name: string
-  role: "viewer" | "operator" | "admin"
+  // Y2 (#278): backend ROLES tuple is ("viewer","operator","admin","super_admin").
+  // The platform-tier "super_admin" gates the /admin/tenants REST surface and
+  // (Y8 row 3) the matching frontend page.
+  role: "viewer" | "operator" | "admin" | "super_admin"
   enabled: boolean
   tenant_id: string
 }
@@ -2596,6 +2599,79 @@ export async function login(email: string, password: string): Promise<LoginRespo
 
 export async function logout(): Promise<void> {
   await request<{ status: string }>("/auth/logout", { method: "POST" })
+}
+
+// ─── Admin tenant CRUD (Y2 #278 / Y8 row 3 admin page) ───────
+
+export type TenantPlan = "free" | "starter" | "pro" | "enterprise"
+
+export interface AdminTenantUsage {
+  user_count: number
+  project_count: number
+  disk_used_bytes: number
+  llm_tokens_30d: number
+  rate_limit_hits_7d: number
+  last_activity_at: number | null
+}
+
+export interface AdminTenantRow {
+  id: string
+  name: string
+  plan: TenantPlan
+  enabled: boolean
+  created_at: string
+  usage: AdminTenantUsage
+}
+
+export interface AdminTenantListResponse {
+  tenants: AdminTenantRow[]
+}
+
+export async function adminListTenants(): Promise<AdminTenantListResponse> {
+  return request<AdminTenantListResponse>("/admin/tenants")
+}
+
+export interface AdminCreateTenantRequest {
+  id: string
+  name: string
+  plan?: TenantPlan
+  enabled?: boolean
+}
+
+export interface AdminTenantCreated {
+  id: string
+  name: string
+  plan: TenantPlan
+  enabled: boolean
+  created_at: string
+}
+
+export async function adminCreateTenant(
+  body: AdminCreateTenantRequest,
+): Promise<AdminTenantCreated> {
+  return request<AdminTenantCreated>("/admin/tenants", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export interface AdminPatchTenantRequest {
+  name?: string
+  plan?: TenantPlan
+  enabled?: boolean
+}
+
+export async function adminPatchTenant(
+  tenantId: string,
+  body: AdminPatchTenantRequest,
+): Promise<AdminTenantCreated> {
+  return request<AdminTenantCreated>(
+    `/admin/tenants/${encodeURIComponent(tenantId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    },
+  )
 }
 
 // ─── Session management (J3) ─────────────────────────────────
