@@ -170,6 +170,38 @@ jobs:
       - name: check llm_adapter firewall
         run: python3 scripts/check_llm_adapter_firewall.py
 
+  catalog-schema:
+    # BS.1.3 — JSON-Schema lint for `configs/embedded_catalog/*.yaml`.
+    # Validates every per-family yaml against `_schema.yaml`
+    # (Draft 2020-12 JSONSchema) and enforces three cross-file
+    # invariants the schema can't express on its own: filename ↔
+    # `family` agreement, catalog-wide id uniqueness, and
+    # `depends_on` reference resolution. Wired as a hard gate so
+    # an operator-edited yaml that drifts from the alembic 0051
+    # CHECK constraints lights up in the PR sidebar before the
+    # backend-tests shard would catch it minutes later.
+    #
+    # Dedicated job (vs. folding into `lint`) because: (a) the deps
+    # are different — pyyaml + jsonschema, not ruff — and pinning
+    # them inline keeps the lint job lean; (b) the catalog editor's
+    # mental model is "yaml file" not "backend Python", so a focused
+    # job name in the PR check list is easier to interpret. Runs in
+    # parallel with `lint` / `auth-coverage` / `llm-adapter-firewall`.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: install yaml + jsonschema
+        # Versions pinned to match the local dev environment that
+        # authored the schema (jsonschema>=4.10 supports Draft 2020-12
+        # via Draft202012Validator). PyYAML pinned to the same minor
+        # as `backend/requirements.txt` for parser-behaviour parity.
+        run: pip install "pyyaml==6.0.3" "jsonschema==4.23.0"
+      - name: validate configs/embedded_catalog/*.yaml
+        run: python3 scripts/check_catalog_schema.py
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 8

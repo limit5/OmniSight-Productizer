@@ -1,0 +1,221 @@
+# OmniSight upstream catalog — JSONSchema (BS.1.3)
+#
+# JSON Schema (Draft 2020-12) for every per-family yaml in this
+# directory.  Loaded by `scripts/check_catalog_schema.py` and wired
+# into CI as a hard gate (`.github/workflows/ci.yml` → catalog-schema)
+# so any drift between an entry's structure and the alembic-side
+# CHECK constraints (0051) lights up red before merge.
+#
+# Why this lives next to the data, not in `backend/`
+# ──────────────────────────────────────────────────
+# `configs/embedded_catalog/` is the human-curated source-of-truth
+# mirror of the alembic-frozen seed.  Operators who add a third-party
+# vendor entry edit yaml here, not python.  Pinning the schema next
+# to the data means the contract is visible to whoever's doing the
+# editing — no detour through `backend/` to figure out the shape.
+#
+# What this schema enforces (vs. what BS.1.5 will additionally check)
+# ──────────────────────────────────────────────────────────────────
+#
+# THIS schema enforces structural correctness of *one* yaml file:
+#   * top-level keys exist (family, schema_version, entries)
+#   * `family` is one of the seven CHECK-allowed values
+#   * `schema_version` is an integer >= 1
+#   * each entry has the alembic-required columns (id, vendor,
+#     display_name, version, install_method)
+#   * `install_method` is one of the four CHECK-allowed values
+#   * `id` is a kebab-case slug (the same shape as the alembic seed)
+#   * optional `sha256` is a 64-char hex string
+#   * optional `size_bytes` is a non-negative integer
+#   * optional `depends_on` is an array of entry-id slugs
+#   * optional `metadata` is a JSON object (open-list per ADR §3.2 —
+#     no inner property restrictions)
+#
+# What BS.1.5 (`backend/tests/test_catalog_schema.py`) ADDS on top:
+#   * yaml entry set == alembic 0052 _SEED_ENTRIES set (drift guard)
+#   * file-name-vs-`family` agreement (mobile.yaml carries family:
+#     mobile, etc.)
+#   * cross-file id uniqueness
+#   * every `depends_on` target resolves to a known entry id
+#
+# Those are *cross-file* invariants and don't fit JSON Schema cleanly.
+# This file is intentionally narrow — single-file structural shape —
+# so the lint can run incrementally on a single edited yaml.
+#
+# Forward-compat notes (R24 — third-party catalog feed)
+# ──────────────────────────────────────────────────────
+# `family` includes `'custom'` — the future BS.8.5 catalog feed lets
+# subscribers ship entries that don't fit the six built-in families.
+# `metadata` has no `additionalProperties: false` — vendor-specific
+# fields round-trip without rejection (the resolver code is the only
+# closed-list reader, and only on top-level columns).
+#
+# Schema dialect: JSON Schema Draft 2020-12 (the latest stable spec
+# supported by `jsonschema>=4.0`).  YAML is a strict superset of JSON
+# so authoring the schema in YAML is purely a readability win.
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://omnisight.local/schemas/embedded_catalog/v1
+title: OmniSight embedded-catalog family file
+description: >
+  Per-family yaml under configs/embedded_catalog/.  Mirrors the
+  catalog_entries rows that alembic 0052_catalog_seed.py freezes
+  with source='shipped'.
+
+type: object
+additionalProperties: false
+required: [family, schema_version, entries]
+
+properties:
+
+  family:
+    description: >
+      Catalog family this file covers.  Must equal the file's
+      stem (BS.1.5 cross-checks).  The 'custom' value is reserved
+      for the BS.8.5 third-party subscription feed and must not
+      appear in shipped yaml today.
+    type: string
+    enum: [mobile, embedded, web, software, rtos, cross-toolchain, custom]
+
+  schema_version:
+    description: >
+      Per-file schema version.  Bump when the entry shape changes
+      in a way readers must opt into.  Migration from v1 to v2 is
+      a separate alembic revision, never an in-place yaml edit.
+    type: integer
+    minimum: 1
+
+  entries:
+    description: >
+      Ordered list of catalog entries for this family.  Order is
+      not load-bearing — the alembic seed sorts by family then id.
+    type: array
+    minItems: 1
+    items:
+      $ref: "#/$defs/entry"
+
+$defs:
+
+  # An entry's `id` is the catalog-level primary key (alongside
+  # `source` + `tenant_id`).  Pattern: lowercase letters / digits
+  # / hyphens, must start and end with an alphanumeric, no
+  # consecutive hyphens.  Matches every shipped id today and is
+  # tight enough that a typo (e.g. "Android NDK" with a space)
+  # fails lint immediately.
+  entry-id:
+    type: string
+    minLength: 2
+    maxLength: 64
+    pattern: "^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9]))*$"
+
+  # install_method enum mirrors alembic 0051's CHECK constraint.
+  # Adding a new method here REQUIRES a same-PR alembic revision
+  # that relaxes the CHECK — otherwise an INSERT on PG / SQLite
+  # both fail at upgrade time.
+  install-method:
+    type: string
+    enum: [noop, docker_pull, shell_script, vendor_installer]
+
+  # SHA-256 hex digest, lowercase, exactly 64 chars.  All shipped
+  # entries currently carry sha256: null (BS.1.2 design decision —
+  # vendor digests get back-filled by BS.7's install pipeline once
+  # the verify-and-sign flow lands).  When present, the format is
+  # locked.
+  sha256-hex:
+    type: string
+    pattern: "^[0-9a-f]{64}$"
+
+  entry:
+    type: object
+    additionalProperties: false
+    required: [id, vendor, display_name, version, install_method]
+
+    properties:
+
+      id:
+        $ref: "#/$defs/entry-id"
+
+      vendor:
+        description: >
+          Upstream vendor / publisher slug.  Open list (the catalog
+          has no closed-list of legitimate vendors), but kebab-case
+          is enforced so a typo or a stray space fails lint.
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9]))*$"
+
+      display_name:
+        description: >
+          Human-readable name shown in the operator UI catalog
+          browser.  Free-form; vendor branding (capitalisation,
+          version suffix, parenthesised qualifier) flows through.
+        type: string
+        minLength: 1
+        maxLength: 200
+
+      version:
+        description: >
+          Vendor-published version string.  Free-form because
+          upstream conventions vary wildly (semver, calver,
+          release-tag-with-suffix, datestamp-with-revision).
+          Stored verbatim; the resolver never parses it.
+        type: string
+        minLength: 1
+        maxLength: 64
+
+      install_method:
+        $ref: "#/$defs/install-method"
+
+      install_url:
+        description: >
+          Source URL for the installer / image / repo.  Optional
+          because some entries (e.g. header-only RTOS kernels
+          shipped via git submodule) don't have a single download
+          URL.  HTTPS, git+https, or `docker.io/...` registry
+          paths all accepted; we don't whitelist schemes here
+          because R24 forward-compat may ship entries pointing
+          at file:// or s3:// URLs in air-gap deployments.
+        type: string
+        minLength: 1
+        maxLength: 1024
+
+      sha256:
+        description: >
+          Optional integrity digest.  Either a 64-char lowercase
+          hex string OR null (the explicit "no digest yet" marker
+          for BS.1.2 first-seed; back-filled in a later alembic
+          revision once BS.7's vendor-digest pipeline lands).
+        oneOf:
+          - $ref: "#/$defs/sha256-hex"
+          - type: "null"
+
+      size_bytes:
+        description: >
+          Approximate download size in bytes.  Used by the operator
+          UI to render disk-budget warnings.  Optional because some
+          entries (npm CLIs, docker pulls) don't have a stable
+          installed-size figure until install time.
+        type: integer
+        minimum: 0
+        maximum: 1099511627776   # 1 TiB sanity cap
+
+      depends_on:
+        description: >
+          Other catalog entry ids that must be installed before
+          this one.  Ids must be valid `entry-id` slugs (BS.1.5
+          additionally cross-checks they resolve to a known entry).
+        type: array
+        items:
+          $ref: "#/$defs/entry-id"
+        uniqueItems: true
+        maxItems: 16
+
+      metadata:
+        description: >
+          Vendor-specific structured key/value bag.  Open object —
+          no `additionalProperties: false`, no inner-property
+          restrictions — so a new vendor can ship a key the schema
+          doesn't know about and the lint stays green.  The
+          resolver code reads only top-level catalog_entries
+          columns (per ADR §3.2); metadata round-trips opaquely.
+        type: object
