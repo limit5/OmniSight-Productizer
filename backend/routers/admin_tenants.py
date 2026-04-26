@@ -1468,3 +1468,416 @@ async def delete_tenant(
             "phases": list(DELETE_PHASE_NAMES),
         },
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  GET /admin/audit/tenants/{tenant_id} — per-tenant audit query
+#  (Y9 #285 row 2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Why this endpoint exists
+# ────────────────────────
+# Y9 row 1 fanned 10 dot-notation event types into the audit chain
+# (``tenant.created`` etc.). Operators now need a way to read the
+# per-tenant slice of that stream without granting full ``role=admin``
+# unfiltered access to every row in ``audit_log`` (which the existing
+# /api/v1/audit endpoint gives — but only for the caller's own
+# tenant_id contextvar).
+#
+# The /admin/audit/tenants/{tid} surface targets two roles:
+#   * ``super_admin`` — may query ANY tenant's chain (cross-tenant
+#     forensic read).
+#   * tenant ``admin`` / ``owner`` — may query ONLY their own
+#     tenant's chain (i.e. the tenant where they hold an active
+#     membership row with role ∈ {owner, admin}). The legacy
+#     ``users.role='admin'`` cache is intentionally NOT consulted —
+#     a user who is admin on tenant A must not be able to read
+#     tenant B's audit just because their primary-tenant role is
+#     high. The Y3 / Y4 admin-tier helpers established this contract;
+#     this endpoint follows the same rule.
+#
+# Every successful query writes one ``audit.queried`` audit row INTO
+# THE QUERIED TENANT'S CHAIN so the queried tenant's own audit pane
+# carries a record of cross-tenant inspection by super-admins. This
+# is the "log 記 who-queried-which" requirement.
+#
+# Module-global state (SOP Step 1)
+# ────────────────────────────────
+# Two new module-level immutables: ``_AUDIT_QUERY_ALLOWED_MEMBERSHIP_ROLES``
+# (frozenset) + ``_QUERY_TENANT_AUDIT_SQL_BASE`` (str). Each uvicorn
+# worker derives the same value from this source file (audit answer #1).
+# The ContextVar swap inside the audit-row write follows the same
+# save-and-restore pattern as ``backend.audit_events._emit_single_chain``
+# — never mutates module state, restores on exception.
+#
+# Read-after-write timing (SOP Step 1)
+# ────────────────────────────────────
+# Two reads (tenants existence + audit_log fetch) followed by one
+# best-effort ``audit.log`` write. The audit write holds a
+# ``pg_advisory_xact_lock`` on its tenant chain; concurrent queries
+# on the same tenant serialise on the chain append. The query reads
+# do NOT take a lock — a concurrent writer's row may or may not be
+# visible depending on commit ordering, which matches the
+# "newest-first / id-descending / cursor=id<X" pagination contract
+# (cursor is monotone in id).
+
+# Membership roles that may query their own tenant's audit log.
+# Mirrors the Y3 / Y4 admin-tier helpers
+# (_INVITE_ALLOWED_MEMBERSHIP_ROLES, _user_can_manage_members) — if
+# Y rolls out a new "auditor" role in the future, the row goes here.
+_AUDIT_QUERY_ALLOWED_MEMBERSHIP_ROLES = frozenset({"owner", "admin"})
+
+# Hard cap so a buggy / hostile caller can't request a million rows.
+# Mirrors the cap on ``backend.routers._pagination.Limit`` defaults
+# used by the I8 audit endpoint (max_cap=500).
+_AUDIT_QUERY_HARD_MAX = 500
+_AUDIT_QUERY_DEFAULT_LIMIT = 200
+
+# Per-tenant audit fetch base. Filters / cursor / limit are appended
+# at request time via PG ``$N`` placeholders — every variable goes
+# through asyncpg parameter binding, never string-formatted into the
+# SQL body, so this is injection-safe even though the SQL string is
+# assembled dynamically.
+_QUERY_TENANT_AUDIT_SQL_BASE = (
+    "SELECT id, ts, actor, action, entity_kind, entity_id, "
+    "before_json, after_json, prev_hash, curr_hash, session_id, "
+    "tenant_id "
+    "FROM audit_log "
+    "WHERE tenant_id = $1"
+)
+
+
+async def _user_can_query_tenant_audit(
+    user: auth.User,
+    tenant_id: str,
+) -> bool:
+    """True iff ``user`` may query ``tenant_id``'s audit log.
+
+    Resolution order (cheap → expensive):
+      1. Platform ``super_admin`` — always allowed (cross-tenant).
+      2. Caller has an *active* ``user_tenant_memberships`` row with
+         role ∈ {owner, admin} on the target tenant. Membership row
+         is per-tenant; that is the correct authoritative.
+
+    The legacy ``users.role`` cache is **not** consulted: a user who
+    is "admin on their primary tenant" must not be allowed to query
+    a *different* tenant just because their primary-tenant role is
+    high.
+    """
+    if auth.role_at_least(user.role, "super_admin"):
+        return True
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT role, status FROM user_tenant_memberships "
+            "WHERE user_id = $1 AND tenant_id = $2",
+            user.id, tenant_id,
+        )
+    if row is None:
+        return False
+    if row["status"] != "active":
+        return False
+    return row["role"] in _AUDIT_QUERY_ALLOWED_MEMBERSHIP_ROLES
+
+
+def _build_audit_query_sql(
+    *,
+    has_since: bool,
+    has_until: bool,
+    has_actor: bool,
+    has_action: bool,
+    has_entity_kind: bool,
+    has_cursor: bool,
+) -> tuple[str, list[str]]:
+    """Construct WHERE conditions and matching ``$N`` placeholders.
+
+    Returns the assembled SQL string plus a list of slot names so the
+    caller can hand each value to asyncpg in the right order. The
+    only two table-shape inputs are the boolean flags; every actual
+    *value* still goes through a parameter slot.
+    """
+    sql = _QUERY_TENANT_AUDIT_SQL_BASE
+    slots: list[str] = ["tenant_id"]
+    nxt = 2
+    if has_since:
+        sql += f" AND ts >= ${nxt}"
+        slots.append("since")
+        nxt += 1
+    if has_until:
+        sql += f" AND ts <= ${nxt}"
+        slots.append("until")
+        nxt += 1
+    if has_actor:
+        sql += f" AND actor = ${nxt}"
+        slots.append("actor")
+        nxt += 1
+    if has_action:
+        sql += f" AND action = ${nxt}"
+        slots.append("action")
+        nxt += 1
+    if has_entity_kind:
+        sql += f" AND entity_kind = ${nxt}"
+        slots.append("entity_kind")
+        nxt += 1
+    if has_cursor:
+        sql += f" AND id < ${nxt}"
+        slots.append("cursor")
+        nxt += 1
+    sql += f" ORDER BY id DESC LIMIT ${nxt}"
+    slots.append("limit")
+    return sql, slots
+
+
+@router.get("/audit/tenants/{tenant_id}")
+async def get_tenant_audit_events(
+    tenant_id: str,
+    _request: Request,
+    since: float | None = Query(
+        default=None,
+        description="Lower bound (inclusive) on audit_log.ts (UNIX seconds).",
+    ),
+    until: float | None = Query(
+        default=None,
+        description="Upper bound (inclusive) on audit_log.ts (UNIX seconds).",
+    ),
+    actor: str | None = Query(
+        default=None,
+        description="Exact-match filter on audit_log.actor (typically email).",
+    ),
+    action: str | None = Query(
+        default=None,
+        description="Exact-match filter on audit_log.action — pass one of "
+                    "the canonical event types from "
+                    "``backend.audit_events.ALL_EVENT_TYPES`` or any legacy "
+                    "snake_case action.",
+    ),
+    entity_kind: str | None = Query(
+        default=None,
+        description="Exact-match filter on audit_log.entity_kind "
+                    "(``tenant`` / ``project`` / ``tenant_invite`` / ...).",
+    ),
+    limit: int = Query(
+        default=_AUDIT_QUERY_DEFAULT_LIMIT,
+        ge=1, le=_AUDIT_QUERY_HARD_MAX,
+        description="Max rows to return; hard-capped at 500.",
+    ),
+    cursor: int | None = Query(
+        default=None, ge=0,
+        description="Pagination cursor: only return rows with "
+                    "audit_log.id strictly less than this value. Use the "
+                    "smallest id in the previous page to fetch the next.",
+    ),
+    user: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    """List audit events scoped to a single tenant.
+
+    Authorisation
+    ─────────────
+    * ``super_admin`` may query any tenant.
+    * Tenant ``owner`` / ``admin`` may query their own tenant only,
+      where "own" means an *active* ``user_tenant_memberships`` row
+      with role ∈ {owner, admin} on the path-param tenant.
+    * Anything else → 403.
+
+    Status codes
+    ────────────
+    * 200 — payload below.
+    * 403 — caller cannot query this tenant. Body includes the
+      caller's role + the queried tenant id so the operator UI can
+      render an explanation.
+    * 404 — tenant id is well-formed but does not exist. Returned
+      *after* the authz check passes so a non-super-admin probing
+      arbitrary IDs cannot enumerate which tenants they would have
+      been allowed to query.
+    * 422 — ``tenant_id`` fails ``TENANT_ID_PATTERN``, or any query
+      param violates its Pydantic constraint (limit out of range,
+      negative cursor, ...).
+
+    Payload
+    ───────
+    ::
+
+        {
+            "tenant_id": "t-acme",
+            "items": [
+                {
+                    "id": 9876,
+                    "ts": 1745580000.0,
+                    "actor": "alice@acme.example",
+                    "action": "tenant.created",
+                    "entity_kind": "tenant",
+                    "entity_id": "t-acme",
+                    "before_json": "{...}",
+                    "after_json": "{...}",
+                    "prev_hash": "...",
+                    "curr_hash": "...",
+                    "session_id": "...",
+                    "tenant_id": "t-acme"
+                },
+                ...
+            ],
+            "count": 200,
+            "limit": 200,
+            "cursor": null,
+            "next_cursor": 9711,
+            "filtered_to_self": false
+        }
+
+    Pagination
+    ──────────
+    Rows come back newest-first (``ORDER BY id DESC``). To page,
+    pass the smallest ``id`` from the previous page as ``cursor``;
+    the next call returns rows with ``id < cursor``. ``next_cursor``
+    is the smallest id in the current response, or ``null`` if the
+    response was shorter than ``limit`` (i.e. end of stream).
+
+    Forensic audit row
+    ──────────────────
+    Every successful query (200) writes one ``audit.queried`` row
+    INTO THE QUERIED TENANT'S CHAIN so the queried tenant's own audit
+    pane carries a record of cross-tenant inspection by super-admins.
+    The row records actor (querier email), querier role, querier home
+    tenant, the ``cross_tenant`` flag, the filter shape, and the
+    result count. Best-effort: a chain-write failure logs at warning
+    but never 5xx's the read.
+    """
+    # Path-param shape check first — fail fast before authz / DB I/O.
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"invalid tenant id: {tenant_id!r}; "
+                               f"must match {TENANT_ID_PATTERN}"},
+        )
+
+    if not await _user_can_query_tenant_audit(user, tenant_id):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "audit query forbidden: super_admin may query any "
+                    "tenant; tenant owner / admin may query their own "
+                    "tenant only."
+                ),
+                "tenant_id": tenant_id,
+                "your_role": user.role,
+                "your_home_tenant": user.tenant_id,
+            },
+        )
+
+    from backend.db_pool import get_pool
+
+    # Tenant-existence probe. Done AFTER authz so a non-super-admin
+    # probing arbitrary ids cannot enumerate which tenants exist via
+    # 404-vs-403 timing.
+    async with get_pool().acquire() as conn:
+        exists = await conn.fetchrow(
+            "SELECT id FROM tenants WHERE id = $1", tenant_id,
+        )
+    if exists is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"tenant not found: {tenant_id!r}"},
+        )
+
+    sql, slot_names = _build_audit_query_sql(
+        has_since=since is not None,
+        has_until=until is not None,
+        has_actor=actor is not None,
+        has_action=action is not None,
+        has_entity_kind=entity_kind is not None,
+        has_cursor=cursor is not None,
+    )
+    slot_values: dict[str, Any] = {
+        "tenant_id": tenant_id,
+        "since": since,
+        "until": until,
+        "actor": actor,
+        "action": action,
+        "entity_kind": entity_kind,
+        "cursor": cursor,
+        "limit": int(limit),
+    }
+    params = [slot_values[name] for name in slot_names]
+
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    items = [
+        {
+            "id": int(r["id"]),
+            "ts": float(r["ts"]) if r["ts"] is not None else None,
+            "actor": r["actor"],
+            "action": r["action"],
+            "entity_kind": r["entity_kind"],
+            "entity_id": r["entity_id"],
+            "before_json": r["before_json"],
+            "after_json": r["after_json"],
+            "prev_hash": r["prev_hash"],
+            "curr_hash": r["curr_hash"],
+            "session_id": r["session_id"],
+            "tenant_id": r["tenant_id"],
+        }
+        for r in rows
+    ]
+
+    next_cursor = items[-1]["id"] if len(items) == int(limit) else None
+    is_cross_tenant = (user.tenant_id != tenant_id)
+
+    # Forensic "who queried which tenant" audit row. Goes into the
+    # QUERIED tenant's chain so the queried tenant's own audit pane
+    # carries the record. Pattern mirrors
+    # ``audit_events._emit_single_chain``: save the prior contextvar,
+    # set the override, write, restore on finally so an unrelated code
+    # path on the same task cannot inherit the override even on
+    # exception.
+    try:
+        from backend import audit as _audit
+        from backend.db_context import (
+            current_tenant_id as _ctv,
+            set_tenant_id as _stv,
+        )
+        saved = _ctv()
+        try:
+            _stv(tenant_id)
+            await _audit.log(
+                action="audit.queried",
+                entity_kind="tenant",
+                entity_id=tenant_id,
+                before=None,
+                after={
+                    "queried_tenant": tenant_id,
+                    "queried_by_user_id": user.id,
+                    "queried_by_role": user.role,
+                    "querier_home_tenant": user.tenant_id,
+                    "cross_tenant": is_cross_tenant,
+                    "filters": {
+                        "since": since,
+                        "until": until,
+                        "actor": actor,
+                        "action": action,
+                        "entity_kind": entity_kind,
+                        "cursor": cursor,
+                        "limit": int(limit),
+                    },
+                    "result_count": len(items),
+                },
+                actor=user.email,
+            )
+        finally:
+            _stv(saved)
+    except Exception as exc:  # pragma: no cover — audit.log already swallows
+        logger.warning("audit.queried emit failed: %s", exc)
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "tenant_id": tenant_id,
+            "items": items,
+            "count": len(items),
+            "limit": int(limit),
+            "cursor": cursor,
+            "next_cursor": next_cursor,
+            "filtered_to_self": not is_cross_tenant,
+        },
+    )
