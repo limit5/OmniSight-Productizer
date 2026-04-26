@@ -1,0 +1,87 @@
+# BS.4.1: omnisight-installer sidecar image.
+#
+# Per docs/security/bs-installer-threat-model.md §4.3:
+#   - Python 3.12 slim base (matches Dockerfile.backend's Python ABI so
+#     a future shared `pip install omnisight-installer` is a single
+#     wheelhouse build).
+#   - curl + tar + sha256sum (coreutils) — three legs of the §5.2
+#     vendor URL → checksum → payload verification chain.
+#   - docker CLI only (no dockerd, no containerd) — talks to
+#     `tecnativa/docker-socket-proxy` over `tcp://docker-socket-proxy:2375`
+#     using the proxy's IMAGES + INFO whitelist (§4.6). No /var/run/docker.sock
+#     bind-mount on this image; the compose service block (BS.4.6) wires
+#     DOCKER_HOST instead.
+#   - USER 10001:10001 (matches host /var/lib/omnisight/toolchains owner so
+#     bind-mount writes are read-back-able by the backend container without
+#     a separate chown dance — §4.3 rationale).
+#
+# Container-runtime hardening (cap_drop=ALL / read_only / tmpfs / pids /
+# memory / storage_opt / network) is the responsibility of the
+# `omnisight-installer` service block in docker-compose.yml (BS.4.6) —
+# Dockerfile owns image-layer concerns only.
+
+FROM python:3.12-slim AS base
+
+# Vendor artifact fetch + verify deps:
+#   ca-certificates : HTTPS trust anchors for vendor URL fetch
+#   curl            : Layer 1 vendor URL HTTPS GET (threat model §5.2)
+#   gnupg           : build-time only — dearmor Docker's signing key;
+#                     purged below so it does not ship in the runtime layer
+#   tar             : extract vendor tarballs (preinstalled in debian-slim
+#                     but listed for explicit intent + spec match with TODO row)
+#   coreutils       : provides sha256sum (Layer 3 verify); preinstalled in
+#                     debian-slim but listed for the same reason as tar
+#
+# Docker CLI install path: Docker's official Debian APT repo (`docker-ce-cli`
+# only). Static binary alternative (curl + sha256-verify the .tgz) was
+# rejected because we cannot regenerate Docker's release sha256 offline;
+# the APT route inherits authenticity from Docker's signed repo metadata
+# and `docker-ce-cli` is the smallest officially-supported CLI-only package
+# (~70 MB vs Debian's `docker.io` which drags in dockerd at ~250 MB).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        tar \
+        coreutils \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && apt-get purge -y --auto-remove gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Threat model §4.3: non-root + namespaced uid 10001.
+# /var/lib/omnisight/{toolchains,airgap} are created here so the chown
+# applies to the directory inode at image-build time. The host bind-mounts
+# (compose §4.5) overlay these at runtime; bind-mounts inherit the host
+# directory's existing ownership, so the host-side dir must also be
+# uid=10001:gid=10001 (operator runbook in BS.4.6 covers the
+# `chown 10001:10001 /var/lib/omnisight` one-time host setup).
+RUN groupadd -g 10001 installer \
+    && useradd -u 10001 -g 10001 -m -d /home/installer -s /usr/sbin/nologin installer \
+    && mkdir -p /var/lib/omnisight/toolchains /var/lib/omnisight/airgap \
+    && chown -R installer:installer /var/lib/omnisight
+
+WORKDIR /app
+
+# BS.4.2 will land the real installer/main.py long-poll loop;
+# BS.4.1 ships a stub so the image is buildable + runnable today.
+COPY installer/ /app/installer/
+RUN chown -R installer:installer /app
+
+USER 10001:10001
+
+# Note: DOCKER_HOST is intentionally NOT set here. The compose service
+# block (BS.4.6) sets `DOCKER_HOST=tcp://docker-socket-proxy:2375`.
+# Leaving it unset at image level means a bare `docker run` smoke test
+# of this image fails loudly on `docker info` (no daemon configured)
+# instead of silently masquerading as having one. Same rationale for
+# OMNISIGHT_INSTALLER_AIRGAP — consumed by installer/main.py (BS.4.2)
+# at compose layer per air-gap mode toggle (threat model §6).
+
+ENTRYPOINT ["/usr/local/bin/python3", "-m", "installer.main"]
