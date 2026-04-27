@@ -92,6 +92,10 @@ import {
 } from "@/components/omnisight/catalog-tab"
 import { InstallLogModal } from "@/components/omnisight/install-log-modal"
 import {
+  InstalledTab,
+  type InstalledEntry,
+} from "@/components/omnisight/installed-tab"
+import {
   PLATFORM_COUNTERS_ZERO,
   PlatformHero,
   type PlatformCounters,
@@ -371,6 +375,14 @@ function PlatformsPageInner() {
     setLogModalEntryName(undefined)
   }, [])
 
+  // BS.8.1 — installed entries source. The dedicated
+  // ``useInstalledEntries()`` hook lands in BS.8.2 alongside the
+  // 30-day idle scan; until then we feed the InstalledTab an empty
+  // array so the empty-state copy renders. Declared as a stable empty
+  // tuple via useMemo so React re-render churn does not allocate fresh
+  // arrays on every keystroke into the catalog tab's search box.
+  const installedEntries = useMemo<readonly InstalledEntry[]>(() => [], [])
+
   return (
     <main
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
@@ -453,7 +465,44 @@ function PlatformsPageInner() {
             <PanelIcon size={14} />
             {panelMeta.label}
           </div>
-          {tab === "catalog" ? (
+          {tab === "installed" ? (
+            // BS.8.1 — installed tab list view. Today the page wrapper
+            // does not yet have a ``useInstalledEntries()`` hook (lands
+            // in BS.8.2 alongside the cleanup-unused scan), so we pass
+            // the empty array and let the component render its
+            // empty-state copy. ``onUpdate`` / ``onReinstall`` reuse
+            // the BS.7.1 ``handleInstall`` path so the same R20-A PEP
+            // gate covers both flows; ``onViewLog`` opens the same
+            // modal the catalog card uses; ``onUninstall`` is left
+            // unwired until BS.8.4 lands the dependency-check gate.
+            <InstalledTab
+              entries={installedEntries}
+              onViewLog={(entry) => {
+                handleViewLog({
+                  id: entry.id,
+                  displayName: entry.displayName,
+                  vendor: entry.vendor,
+                  family: entry.family,
+                })
+              }}
+              onUpdate={(entry) => {
+                void handleInstall({
+                  id: entry.id,
+                  displayName: entry.displayName,
+                  vendor: entry.vendor,
+                  family: entry.family,
+                })
+              }}
+              onReinstall={(entry) => {
+                void handleInstall({
+                  id: entry.id,
+                  displayName: entry.displayName,
+                  vendor: entry.vendor,
+                  family: entry.family,
+                })
+              }}
+            />
+          ) : tab === "catalog" ? (
             // BS.6.1 — catalog toolbar shell. Entries default to empty
             // until BS.6.5's `useCatalog()` hook lands; the toolbar
             // (filter / search / sort / density) renders unconditionally
