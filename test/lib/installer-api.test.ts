@@ -38,11 +38,13 @@ import {
   getInstallJob,
   INSTALLED_ENTRY_IDLE_THRESHOLD_MS,
   isCleanupCandidate,
+  listEntryDependents,
   listInstalledEntries,
   retryInstallJob,
   type BulkUninstallResponse,
   type InstallJob,
   type InstalledEntryRow,
+  type ListEntryDependentsResponse,
   type ListInstalledEntriesResponse,
 } from "@/lib/api"
 
@@ -565,6 +567,85 @@ describe("BS.7.1 — installer API client", () => {
         usedByWorkspaceCount: 0,
       }
       expect(isCleanupCandidate(e, NOW)).toBe(true)
+    })
+  })
+
+  // ─── BS.8.4 — per-entry dependents lookup ─────────────────────────
+  describe("BS.8.4 — listEntryDependents()", () => {
+    const SAMPLE_DEP: InstalledEntryRow = {
+      entry_id: "android-sdk-platform-34",
+      display_name: "Android SDK Platform 34",
+      vendor: "Google",
+      family: "mobile",
+      version: "34",
+      description: null,
+      disk_usage_bytes: 256 * 1024 * 1024,
+      used_by_workspace_count: 0,
+      last_used_at: null,
+      installed_at: "2026-04-25T08:00:00Z",
+      update_available: false,
+      available_version: null,
+      source: "shipped",
+    }
+
+    it("GETs /api/v1/installer/installed/{entry_id}/dependents and returns the response payload", async () => {
+      const payload: ListEntryDependentsResponse = {
+        entry_id: "android-sdk-base",
+        items: [SAMPLE_DEP],
+        count: 1,
+      }
+      const spy = mockFetchOnce(200, payload)
+      const res = await listEntryDependents("android-sdk-base")
+      expect(res).toEqual(payload)
+      expect(spy).toHaveBeenCalledTimes(1)
+      const [url, init] = spy.mock.calls[0]!
+      expect(url).toBe(
+        "/api/v1/installer/installed/android-sdk-base/dependents",
+      )
+      expect((init as RequestInit).method).toBe("GET")
+    })
+
+    it("URL-encodes the entry_id path segment", async () => {
+      // Path encoding sanity: even though the backend regex disallows
+      // most special characters, the helper must still encode them so
+      // a malformed id doesn't break the fetch URL parser before the
+      // backend can return 422.
+      const spy = mockFetchOnce(200, {
+        entry_id: "weird/id",
+        items: [],
+        count: 0,
+      })
+      await listEntryDependents("weird/id")
+      const [url] = spy.mock.calls[0]!
+      expect(url).toBe(
+        "/api/v1/installer/installed/weird%2Fid/dependents",
+      )
+    })
+
+    it("returns an empty list when the entry has no dependents", async () => {
+      const payload: ListEntryDependentsResponse = {
+        entry_id: "stand-alone-tool",
+        items: [],
+        count: 0,
+      }
+      mockFetchOnce(200, payload)
+      const res = await listEntryDependents("stand-alone-tool")
+      expect(res.count).toBe(0)
+      expect(res.items).toEqual([])
+    })
+
+    it("throws ApiError on a 422 (malformed entry_id)", async () => {
+      mockFetchOnce(422, { detail: "invalid entry_id" })
+      await expect(
+        listEntryDependents("BAD ID"),
+      ).rejects.toBeInstanceOf(ApiError)
+    })
+
+    it("throws ApiError on a 403 (caller lacks operator role)", async () => {
+      mockFetchOnce(403, { detail: "operator role required" })
+      await expect(
+        listEntryDependents("any-entry"),
+      ).rejects.toBeInstanceOf(ApiError)
     })
   })
 })

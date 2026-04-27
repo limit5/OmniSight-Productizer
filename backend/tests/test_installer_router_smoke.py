@@ -55,6 +55,8 @@ def test_route_registration_full_set():
         # BS.8.2 — Cleanup-unused list + bulk uninstall.
         ("GET", "/installer/installed"),
         ("POST", "/installer/uninstall"),
+        # BS.8.4 — per-entry dependents lookup for the uninstall confirm gate.
+        ("GET", "/installer/installed/{entry_id}/dependents"),
     ])
     assert pairs == expected
 
@@ -478,6 +480,19 @@ def test_post_uninstall_uses_require_operator():
     from backend import auth as _au
     from backend.routers import installer
     deps = _route_dependencies(installer.router, "POST", "/installer/uninstall")
+    assert _au.require_operator in deps
+
+
+def test_get_dependents_uses_require_operator():
+    """BS.8.4 — per-entry dependents lookup is operator-only. The PG-live
+    suite exercises the JSONB containment query + uninstall filter; this
+    smoke test pins the auth gate so a future refactor that drops the
+    operator dep trips here loudly."""
+    from backend import auth as _au
+    from backend.routers import installer
+    deps = _route_dependencies(
+        installer.router, "GET", "/installer/installed/{entry_id}/dependents",
+    )
     assert _au.require_operator in deps
 
 

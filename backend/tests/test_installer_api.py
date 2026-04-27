@@ -1234,6 +1234,218 @@ async def test_post_uninstall_rejects_malformed_entry_id(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  BS.8.4 — GET /installer/installed/{entry_id}/dependents
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def _seed_shipped_with_depends_on(
+    pool, entry_id: str, *, depends_on: list[str],
+    family: str = "embedded", vendor: str = "test-vendor",
+    install_method: str = "noop",
+) -> None:
+    """Seed a shipped catalog entry with an explicit ``depends_on``
+    JSONB array. Used by BS.8.4 dependents tests."""
+    import json as _json
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO catalog_entries "
+            "  (id, source, tenant_id, vendor, family, display_name, "
+            "   version, install_method, depends_on) "
+            "VALUES ($1, 'shipped', NULL, $2, $3, $4, '1.0.0', $5, $6::jsonb) "
+            "ON CONFLICT DO NOTHING",
+            entry_id, vendor, family, f"Test {entry_id}",
+            install_method, _json.dumps(depends_on),
+        )
+
+
+@_requires_pg
+async def test_get_dependents_returns_installed_entries_that_depend_on_target(
+    bs24_client, pg_test_pool, seeded_anon_user,
+):
+    """An installed entry whose ``depends_on`` array contains the target
+    entry id surfaces in the dependents response."""
+    base = "bs84-base-sdk"
+    dep_a = "bs84-dep-a"
+    dep_b = "bs84-dep-b"
+    unrelated = "bs84-unrelated"
+    try:
+        # Seed catalog entries — base has no deps; dep_a + dep_b depend on base.
+        await _seed_shipped_with_depends_on(
+            pg_test_pool, base, depends_on=[],
+        )
+        await _seed_shipped_with_depends_on(
+            pg_test_pool, dep_a, depends_on=[base],
+        )
+        await _seed_shipped_with_depends_on(
+            pg_test_pool, dep_b, depends_on=[base, "some-other-dep"],
+        )
+        await _seed_shipped_with_depends_on(
+            pg_test_pool, unrelated, depends_on=["some-other-dep"],
+        )
+        # All four are installed.
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=base,
+        )
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=dep_a,
+        )
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=dep_b,
+        )
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=unrelated,
+        )
+        res = await bs24_client.get(
+            f"/api/v1/installer/installed/{base}/dependents",
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["entry_id"] == base
+        assert body["count"] == 2
+        ids = sorted(item["entry_id"] for item in body["items"])
+        assert ids == sorted([dep_a, dep_b])
+        # `unrelated` does NOT depend on base, so it is excluded.
+        assert all(item["entry_id"] != unrelated for item in body["items"])
+        # Self-reference is excluded — base is not its own dependent
+        # even if a malformed catalog row pointed back at itself.
+        assert all(item["entry_id"] != base for item in body["items"])
+    finally:
+        await _purge_jobs_and_entry(pg_test_pool, base)
+        await _purge_jobs_and_entry(pg_test_pool, dep_a)
+        await _purge_jobs_and_entry(pg_test_pool, dep_b)
+        await _purge_jobs_and_entry(pg_test_pool, unrelated)
+
+
+@_requires_pg
+async def test_get_dependents_returns_empty_when_no_dependents(
+    bs24_client, pg_test_pool, seeded_anon_user,
+):
+    """An entry with no dependents returns count=0 + empty items."""
+    base = "bs84-no-deps-base"
+    try:
+        await _seed_shipped_with_depends_on(
+            pg_test_pool, base, depends_on=[],
+        )
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=base,
+        )
+        res = await bs24_client.get(
+            f"/api/v1/installer/installed/{base}/dependents",
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["entry_id"] == base
+        assert body["count"] == 0
+        assert body["items"] == []
+    finally:
+        await _purge_jobs_and_entry(pg_test_pool, base)
+
+
+@_requires_pg
+async def test_get_dependents_excludes_uninstalled_dependents(
+    bs24_client, pg_test_pool, seeded_anon_user,
+):
+    """A dependent whose latest install_jobs row is an uninstall record
+    no longer counts — the entry was removed even if the catalog row
+    still declares depends_on."""
+    from backend.routers import installer
+    base = "bs84-uninstalled-dep-base"
+    dep = "bs84-uninstalled-dep"
+    monkeypatch_target = installer._pep
+    try:
+        await _seed_shipped_with_depends_on(
+            pg_test_pool, base, depends_on=[],
+        )
+        await _seed_shipped_with_depends_on(
+            pg_test_pool, dep, depends_on=[base],
+        )
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=base,
+        )
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=dep,
+            completed_at_offset_seconds=-100,
+        )
+        # Uninstall the dependent via the API with PEP auto-approve.
+        approve_stub = _make_pep_stub("auto_allow")
+        original_evaluate = monkeypatch_target.evaluate
+        monkeypatch_target.evaluate = approve_stub  # type: ignore[assignment]
+        try:
+            uninstall_res = await bs24_client.post(
+                "/api/v1/installer/uninstall",
+                json={"entry_ids": [dep]},
+            )
+        finally:
+            monkeypatch_target.evaluate = original_evaluate  # type: ignore[assignment]
+        assert uninstall_res.status_code == 200
+        # The uninstalled dependent must NOT surface as a dependent of
+        # base, since "currently installed" excludes uninstall records.
+        res = await bs24_client.get(
+            f"/api/v1/installer/installed/{base}/dependents",
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["count"] == 0, body
+    finally:
+        await _purge_jobs_and_entry(pg_test_pool, base)
+        await _purge_jobs_and_entry(pg_test_pool, dep)
+
+
+@_requires_pg
+async def test_get_dependents_rejects_malformed_entry_id_422(
+    bs24_client, pg_test_pool, seeded_anon_user,
+):
+    """A malformed entry_id in the path is 422'd before the PG SELECT
+    fires (mirrors the bulk-uninstall validator)."""
+    res = await bs24_client.get(
+        "/api/v1/installer/installed/BAD%20ID%20with%20spaces/dependents",
+    )
+    assert res.status_code == 422
+
+
+@_requires_pg
+async def test_get_dependents_excludes_pending_install_dependents(
+    bs24_client, pg_test_pool, seeded_anon_user,
+):
+    """A dependent whose latest install_jobs row is queued (not yet
+    completed) is NOT a dependent — the depends_on relationship is
+    materialised by the *currently installed* set, not the catalog
+    row alone."""
+    base = "bs84-pending-dep-base"
+    dep = "bs84-pending-dep"
+    try:
+        await _seed_shipped_with_depends_on(
+            pg_test_pool, base, depends_on=[],
+        )
+        await _seed_shipped_with_depends_on(
+            pg_test_pool, dep, depends_on=[base],
+        )
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=base,
+        )
+        # Insert a queued (not completed) row for `dep` — depends_on
+        # exists but the install hasn't finished, so dep is not yet
+        # "installed".
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO install_jobs "
+                "  (id, tenant_id, entry_id, state, idempotency_key, "
+                "   protocol_version, requested_by) "
+                "VALUES ($1, 't-default', $2, 'queued', $3, 1, 'anonymous')",
+                f"ij-{secrets.token_hex(6)}", dep, uuid.uuid4().hex,
+            )
+        res = await bs24_client.get(
+            f"/api/v1/installer/installed/{base}/dependents",
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["count"] == 0, body
+    finally:
+        await _purge_jobs_and_entry(pg_test_pool, base)
+        await _purge_jobs_and_entry(pg_test_pool, dep)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Self-fingerprint guard — pre-commit pattern
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

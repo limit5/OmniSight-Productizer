@@ -97,7 +97,9 @@ import { DiskBreakdownModal } from "@/components/omnisight/disk-breakdown-modal"
 import { InstallLogModal } from "@/components/omnisight/install-log-modal"
 import {
   InstalledTab,
+  type InstalledEntry,
 } from "@/components/omnisight/installed-tab"
+import { UninstallConfirmModal } from "@/components/omnisight/uninstall-confirm-modal"
 import {
   PLATFORM_COUNTERS_ZERO,
   PlatformHero,
@@ -424,6 +426,24 @@ function PlatformsPageInner() {
     setDiskBreakdownOpen(false)
   }, [])
 
+  // BS.8.4 — Per-row uninstall confirm modal with dependency-check gate.
+  // Opens when the operator clicks the per-row "Uninstall" overflow
+  // action; the modal fetches `listEntryDependents()` and forces an
+  // explicit second confirm if any other installed entry declares the
+  // target as a dependency. On success, `onCompleted` triggers
+  // `refreshInstalledEntries()` so the just-removed row falls out of the
+  // InstalledTab on the next render.
+  const [uninstallTarget, setUninstallTarget] = useState<InstalledEntry | null>(null)
+  const handleUninstallOpen = useCallback((entry: InstalledEntry) => {
+    setUninstallTarget(entry)
+  }, [])
+  const handleUninstallClose = useCallback(() => {
+    setUninstallTarget(null)
+  }, [])
+  const handleUninstallCompleted = useCallback(() => {
+    void refreshInstalledEntries()
+  }, [refreshInstalledEntries])
+
   return (
     <main
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
@@ -575,6 +595,7 @@ function PlatformsPageInner() {
                     family: entry.family,
                   })
                 }}
+                onUninstall={handleUninstallOpen}
               />
             </div>
           ) : tab === "catalog" ? (
@@ -733,6 +754,20 @@ function PlatformsPageInner() {
         open={diskBreakdownOpen}
         entries={installedEntries}
         onClose={handleDiskBreakdownClose}
+      />
+
+      {/* BS.8.4 — Per-row uninstall confirm modal with dependency-check
+          gate. Opens when the operator clicks "Uninstall" from the
+          InstalledTab ⋮ menu. The modal fetches `listEntryDependents`
+          on open and forces an explicit second confirm when any other
+          installed entry declares the target as a dependency. On
+          success, refresh the installed entries hook so the just-
+          uninstalled row falls out of the InstalledTab. */}
+      <UninstallConfirmModal
+        open={uninstallTarget !== null}
+        entry={uninstallTarget}
+        onClose={handleUninstallClose}
+        onCompleted={handleUninstallCompleted}
       />
     </main>
   )

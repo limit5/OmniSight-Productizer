@@ -5913,6 +5913,39 @@ export async function bulkUninstallEntries(
   })
 }
 
+/** Response shape for ``GET /installer/installed/{entry_id}/dependents``.
+ *  Every item shares the same ``InstalledEntryRow`` shape the
+ *  cleanup-unused list returns so the frontend can reuse the existing
+ *  snake→camel marshaller (``installedEntryFromRow``). */
+export interface ListEntryDependentsResponse {
+  entry_id: string
+  items: InstalledEntryRow[]
+  count: number
+}
+
+/** GET /installer/installed/{entry_id}/dependents — list currently-
+ *  installed entries that declare *entryId* as a dependency. Used by
+ *  BS.8.4's per-row uninstall confirm modal to surface a hard warning
+ *  when other installed entries still depend on the one the operator
+ *  is about to remove.
+ *
+ *  Empty list ⇒ no dependents ⇒ the modal proceeds without a warning.
+ *  Any non-empty list ⇒ the modal renders the dependents and forces
+ *  the operator to explicitly confirm the destructive action.
+ *
+ *  Throws :class:`ApiError` on:
+ *    • 422 — malformed entry_id (does not match
+ *      ``backend/routers/installer.ENTRY_ID_PATTERN``).
+ *    • 403 — caller lacks ``operator`` role. */
+export async function listEntryDependents(
+  entryId: string,
+): Promise<ListEntryDependentsResponse> {
+  return request<ListEntryDependentsResponse>(
+    `/installer/installed/${encodeURIComponent(entryId)}/dependents`,
+    { method: "GET" },
+  )
+}
+
 /** 30 days, in milliseconds. Anything idle longer than this surfaces in
  *  the cleanup-unused candidate list. The threshold lives next to the
  *  helper so tests can rely on a single source of truth, and so a

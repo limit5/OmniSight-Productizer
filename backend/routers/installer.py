@@ -9,6 +9,7 @@ Surface
 ``POST   /installer/jobs/{job_id}/retry`` — operator + PEP HOLD; clone failed/cancelled
 ``GET    /installer/jobs/poll``           — sidecar long-poll claim (FOR UPDATE SKIP LOCKED)
 ``GET    /installer/installed``           — operator; list currently-installed entries (BS.8.2)
+``GET    /installer/installed/{entry_id}/dependents`` — operator; list installed entries that depend on this (BS.8.4)
 ``POST   /installer/uninstall``           — operator + PEP HOLD; bulk uninstall (BS.8.2)
 
 PEP integration (ADR §7.4 + design §4.1)
@@ -1574,6 +1575,159 @@ async def bulk_uninstall(
             "approved_count": len(items),
             "denied_count": 0,
             "pep_decision_id": decision_id,
+        },
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  GET /installer/installed/{entry_id}/dependents — operator (BS.8.4)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.get("/installed/{entry_id}/dependents")
+async def list_entry_dependents(
+    entry_id: str,
+    user: _au.User = Depends(_au.require_operator),
+) -> JSONResponse:
+    """List currently-installed catalog entries that declare *entry_id*
+    as a dependency.
+
+    BS.8.4 dependency-check gate: before the per-row uninstall path
+    sends a job, the frontend opens a confirm modal that calls this
+    endpoint. When the response carries any items, the modal renders a
+    "N other installed entries depend on this — uninstall anyway?"
+    warning the operator must explicitly confirm; an empty list short-
+    circuits the warning and the modal lets the operator proceed
+    immediately.
+
+    Resolution semantics
+    ────────────────────
+    For every installed entry in the caller's tenant (same
+    DISTINCT-ON-latest-install-job derivation that powers
+    ``GET /installer/installed``), check whether the resolved
+    ``catalog_entries`` row's ``depends_on`` JSONB array contains
+    *entry_id*. Rows where the latest install_jobs row is NOT
+    state='completed' OR is an uninstall record are excluded — only
+    *currently installed* dependents matter; a soft-deleted /
+    queued / failed dependent should not block an uninstall.
+
+    Self-references are filtered out: an entry never lists itself as
+    its own dependent. The response shape mirrors the
+    ``InstalledEntryRow`` items wire format so the frontend can reuse
+    the existing snake→camel marshaller (less surface to drift).
+
+    Module-global / cross-worker state audit (SOP Step 1)
+    ─────────────────────────────────────────────────────
+    Pure read path; no shared in-memory state. Each tenant sees only
+    its own rows because the WHERE clause filters by ``tenant_id``.
+    Multi-worker safe — every worker acquires its own asyncpg conn and
+    sees the same PG snapshot via MVCC.
+
+    Read-after-write timing audit
+    ─────────────────────────────
+    Read-only endpoint, no race possible. Stale-dependents window: an
+    operator could install a new dependent between this GET and the
+    operator's confirm click — the uninstall still proceeds (PEP gate
+    still applies); the worst case is the operator confirms on
+    slightly stale information. Backend remains the source of truth.
+    """
+    # Validate the path param the same way the bulk-uninstall body
+    # validates each entry id; an invalid id can't have dependents and
+    # surfacing 422 here matches the rest of the router's idiom.
+    eid = entry_id.strip()
+    if not _ENTRY_ID_RE.match(eid) or len(eid) > ENTRY_ID_MAX_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid entry_id: {entry_id!r}; must match {ENTRY_ID_PATTERN}",
+        )
+
+    tid = _ensure_tenant(user)
+
+    # The query is a near-twin of `list_installed_entries` but adds an
+    # extra filter: only rows whose resolved catalog row's depends_on
+    # JSONB array includes *eid*. We use the JSONB containment operator
+    # `@>` plus a JSON-array literal so the planner can use a GIN index
+    # if one is later added to depends_on; today's small dataset is
+    # fine without one. Self-references are excluded so an entry never
+    # appears as its own dependent.
+    sql = """
+        SELECT DISTINCT ON (j.entry_id)
+            j.entry_id    AS entry_id,
+            j.state       AS state,
+            j.result_json AS result_json,
+            j.completed_at AS completed_at,
+            c.display_name AS display_name,
+            c.vendor       AS vendor,
+            c.family       AS family,
+            c.version      AS version,
+            c.metadata     AS metadata,
+            c.size_bytes   AS size_bytes,
+            c.source       AS source
+        FROM install_jobs j
+        JOIN LATERAL (
+            SELECT display_name, vendor, family, version,
+                   metadata, size_bytes, source, depends_on
+            FROM catalog_entries
+            WHERE id = j.entry_id
+              AND (tenant_id IS NULL OR tenant_id = $1)
+              AND hidden = FALSE
+              AND depends_on @> $2::jsonb
+            ORDER BY CASE source
+                       WHEN 'override'     THEN 0
+                       WHEN 'operator'     THEN 1
+                       WHEN 'subscription' THEN 2
+                       WHEN 'shipped'      THEN 3
+                       ELSE 4
+                     END
+            LIMIT 1
+        ) c ON TRUE
+        WHERE j.tenant_id = $1
+          AND j.entry_id <> $3
+        ORDER BY j.entry_id, j.queued_at DESC
+    """
+    depends_on_literal = json.dumps([eid])
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(sql, tid, depends_on_literal, eid)
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        if row["state"] != "completed":
+            continue
+        if _is_uninstall_record(row["result_json"]):
+            continue
+        meta = _coerce_json(row["metadata"], {}) if row["metadata"] is not None else {}
+        description: Any = None
+        if isinstance(meta, dict):
+            d = meta.get("description")
+            if isinstance(d, str):
+                description = d
+        size_bytes = (
+            int(row["size_bytes"]) if row["size_bytes"] is not None else None
+        )
+        items.append({
+            "entry_id": row["entry_id"],
+            "display_name": row["display_name"] or row["entry_id"],
+            "vendor": row["vendor"] or "",
+            "family": row["family"] or "custom",
+            "version": row["version"],
+            "description": description,
+            "disk_usage_bytes": size_bytes,
+            "used_by_workspace_count": 0,
+            "last_used_at": None,
+            "installed_at": _ts_to_iso(row["completed_at"]),
+            "update_available": False,
+            "available_version": None,
+            "source": row["source"],
+        })
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "entry_id": eid,
+            "items": items,
+            "count": len(items),
         },
     )
 
