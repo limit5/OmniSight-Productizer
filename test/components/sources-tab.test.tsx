@@ -278,3 +278,87 @@ describe("BS.8.5 — SourcesTab", () => {
     ).not.toBeNull()
   })
 })
+
+describe("BS.8.7 — SourcesTab supplementary contract", () => {
+  it("toolbar count is singular for 1 source, plural for 2+", () => {
+    const { rerender } = render(<SourcesTab sources={[SOURCE_OLDER]} />)
+    expect(screen.getByTestId("sources-tab-count").textContent).toMatch(
+      /^1 source$/,
+    )
+    rerender(<SourcesTab sources={[SOURCE_OLDER, SOURCE_NEWER]} />)
+    expect(screen.getByTestId("sources-tab-count").textContent).toMatch(
+      /^2 sources$/,
+    )
+  })
+
+  it("renders the loading copy in the toolbar count when loading=true", () => {
+    render(<SourcesTab sources={[]} loading />)
+    expect(screen.getByTestId("sources-tab-count").textContent).toMatch(
+      /Loading sources/,
+    )
+  })
+
+  it("status chip surfaces the last_sync_status with a data-status attr", () => {
+    render(<SourcesTab sources={[SOURCE_OLDER, SOURCE_NEWER]} />)
+    const okChip = screen.getByTestId(`sources-tab-row-status-${SOURCE_OLDER.id}`)
+    expect(okChip.getAttribute("data-status")).toBe("ok")
+    expect(okChip.textContent).toContain("ok")
+    // SOURCE_NEWER has last_sync_status=null → "never synced" copy + data-status=none.
+    const neverChip = screen.getByTestId(
+      `sources-tab-row-status-${SOURCE_NEWER.id}`,
+    )
+    expect(neverChip.getAttribute("data-status")).toBe("none")
+    expect(neverChip.textContent).toMatch(/never synced/)
+  })
+
+  it("disabled subscriptions render a 'disabled' chip in the metric row", () => {
+    render(<SourcesTab sources={[SOURCE_OLDER, SOURCE_NEWER]} />)
+    // SOURCE_NEWER has enabled=false, SOURCE_OLDER has enabled=true.
+    expect(
+      screen.getByTestId(`sources-tab-row-disabled-${SOURCE_NEWER.id}`),
+    ).toBeTruthy()
+    expect(
+      screen.queryByTestId(`sources-tab-row-disabled-${SOURCE_OLDER.id}`),
+    ).toBeNull()
+    const newerRow = screen.getByTestId(`sources-tab-row-${SOURCE_NEWER.id}`)
+    expect(newerRow.getAttribute("data-enabled")).toBe("false")
+  })
+
+  it("Sync button is disabled when onSync is omitted (no in-context handler)", () => {
+    render(<SourcesTab sources={[SOURCE_OLDER]} />)
+    const sync = screen.getByTestId(
+      `sources-tab-row-sync-${SOURCE_OLDER.id}`,
+    ) as HTMLButtonElement
+    expect(sync.disabled).toBe(true)
+  })
+
+  it("sync failure surfaces an inline error banner above the list", async () => {
+    const onSync = vi.fn().mockRejectedValue(new Error("503 upstream"))
+    render(<SourcesTab sources={[SOURCE_OLDER]} onSync={onSync} />)
+    fireEvent.click(
+      screen.getByTestId(`sources-tab-row-sync-${SOURCE_OLDER.id}`),
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId("sources-tab-error").textContent).toMatch(
+        /Sync failed/,
+      ),
+    )
+    expect(screen.getByTestId("sources-tab-error").textContent).toMatch(
+      /503 upstream/,
+    )
+  })
+
+  it("preset dropdown updates the refresh-interval input on change", () => {
+    render(<SourcesTab sources={[]} />)
+    fireEvent.click(screen.getByTestId("sources-tab-add-button"))
+    const interval = screen.getByTestId(
+      "sources-tab-form-refresh-interval",
+    ) as HTMLInputElement
+    expect(interval.value).toBe("86400")
+    const preset = screen.getByTestId(
+      "sources-tab-form-refresh-preset",
+    ) as HTMLSelectElement
+    fireEvent.change(preset, { target: { value: "3600" } })
+    expect(interval.value).toBe("3600")
+  })
+})

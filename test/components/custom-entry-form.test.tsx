@@ -550,6 +550,120 @@ describe("BS.8.6 — CustomEntryForm", () => {
     ).not.toBeNull()
   })
 
+  it("renders the loading copy in the toolbar count when loading=true", () => {
+    render(<CustomEntryForm entries={[]} allEntries={[]} loading />)
+    expect(screen.getByTestId("custom-entry-form-count").textContent).toMatch(
+      /Loading custom entries/,
+    )
+  })
+
+  it("editing a row submits via onPatch with the modified payload", async () => {
+    const onPatch = vi.fn().mockResolvedValue(ENTRY_NEWER)
+    render(
+      <CustomEntryForm
+        entries={[ENTRY_NEWER]}
+        allEntries={[ENTRY_NEWER]}
+        onPatch={onPatch}
+      />,
+    )
+    fireEvent.click(
+      screen.getByTestId(`custom-entry-form-row-edit-${ENTRY_NEWER.id}`),
+    )
+    // Edit mode disables the source dropdown — operator can't relabel a row.
+    const sourceSel = screen.getByTestId(
+      "custom-entry-form-field-source",
+    ) as HTMLSelectElement
+    expect(sourceSel.disabled).toBe(true)
+    // Tweak the version field and submit; onPatch should fire with the
+    // modified payload, not onCreate.
+    fireEvent.change(screen.getByTestId("custom-entry-form-field-version"), {
+      target: { value: "1.5.0" },
+    })
+    fireEvent.click(screen.getByTestId("custom-entry-form-form-submit"))
+    await waitFor(() => expect(onPatch).toHaveBeenCalledTimes(1))
+    expect(onPatch.mock.calls[0]![0]).toBe(ENTRY_NEWER.id)
+    const payload = onPatch.mock.calls[0]![1] as Record<string, unknown>
+    expect(payload.version).toBe("1.5.0")
+  })
+
+  it("URL ping short-circuits on a bad URL scheme without calling pingUrlFn", async () => {
+    const pingFn = vi.fn().mockResolvedValue({ kind: "ok", status: 200 })
+    render(
+      <CustomEntryForm entries={[]} allEntries={[]} pingUrlFn={pingFn} />,
+    )
+    fireEvent.click(screen.getByTestId("custom-entry-form-add-button"))
+    // Non-empty URL → ping button enabled, but bad scheme → handleUrlPing
+    // short-circuits with kind=error before calling pingFn.
+    fireEvent.change(
+      screen.getByTestId("custom-entry-form-field-install-url"),
+      { target: { value: "ftp://invalid.example/y" } },
+    )
+    fireEvent.click(screen.getByTestId("custom-entry-form-url-ping-button"))
+    const result = await waitFor(() =>
+      screen.getByTestId("custom-entry-form-url-ping-result"),
+    )
+    expect(result.getAttribute("data-ping-kind")).toBe("error")
+    expect(pingFn).not.toHaveBeenCalled()
+  })
+
+  it("size preset dropdown fills the size_bytes input with the picked value", () => {
+    render(<CustomEntryForm entries={[]} allEntries={[]} />)
+    fireEvent.click(screen.getByTestId("custom-entry-form-add-button"))
+    const sizeInput = screen.getByTestId(
+      "custom-entry-form-field-size-bytes",
+    ) as HTMLInputElement
+    expect(sizeInput.value).toBe("")
+    const preset = screen.getByTestId(
+      "custom-entry-form-field-size-preset",
+    ) as HTMLSelectElement
+    // SIZE_PRESETS uses binary units; "100 MB" preset = 100 * 1024 * 1024.
+    const HUNDRED_MB = 100 * 1024 * 1024
+    fireEvent.change(preset, { target: { value: String(HUNDRED_MB) } })
+    expect(sizeInput.value).toBe(String(HUNDRED_MB))
+  })
+
+  it("toggling a depends_on checkbox flips the data-checked attr", () => {
+    render(
+      <CustomEntryForm
+        entries={[]}
+        allEntries={[SHIPPED, ENTRY_OLDER]}
+      />,
+    )
+    fireEvent.click(screen.getByTestId("custom-entry-form-add-button"))
+    const option = screen.getByTestId(
+      `custom-entry-form-depends-on-option-${SHIPPED.id}`,
+    )
+    expect(option.getAttribute("data-checked")).toBe("false")
+    const checkbox = screen.getByTestId(
+      `custom-entry-form-depends-on-checkbox-${SHIPPED.id}`,
+    )
+    fireEvent.click(checkbox)
+    expect(option.getAttribute("data-checked")).toBe("true")
+    // Toggling again clears the selection.
+    fireEvent.click(checkbox)
+    expect(option.getAttribute("data-checked")).toBe("false")
+  })
+
+  it("override mode lets the operator submit with empty vendor/family/version", async () => {
+    const onCreate = vi.fn().mockResolvedValue(ENTRY_NEWER)
+    render(
+      <CustomEntryForm entries={[]} allEntries={[]} onCreate={onCreate} />,
+    )
+    fireEvent.click(screen.getByTestId("custom-entry-form-add-button"))
+    fireEvent.change(screen.getByTestId("custom-entry-form-field-id"), {
+      target: { value: "shipped-base" },
+    })
+    fireEvent.change(screen.getByTestId("custom-entry-form-field-source"), {
+      target: { value: "override" },
+    })
+    // Leave vendor / family / display_name / version / install_method blank.
+    fireEvent.click(screen.getByTestId("custom-entry-form-form-submit"))
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1))
+    const payload = onCreate.mock.calls[0]![0] as Record<string, unknown>
+    expect(payload.id).toBe("shipped-base")
+    expect(payload.source).toBe("override")
+  })
+
   it("validateCustomEntryFormFields skips the unique-id check in edit mode", () => {
     const fields = {
       id: "acme-sdk-old",
