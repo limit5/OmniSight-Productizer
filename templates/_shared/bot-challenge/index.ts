@@ -1313,17 +1313,97 @@ export async function verify(
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  Provider selection (AS.3.3 will replace this with the heuristic)
+//  Provider selection (AS.3.3 region + ecosystem heuristic)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/** Return the env-default provider.
+/** GDPR strict regions — ISO 3166-1 alpha-2 country codes for which
+ * `pickProvider` prefers hCaptcha by default. Mirrors the Python
+ * `GDPR_STRICT_REGIONS` frozenset byte-for-byte; cross-twin drift guard
+ * locks the codes.
  *
- * AS.3.2 placeholder — AS.3.3 will replace it with the region- and
- * ecosystem-aware heuristic (GDPR strict region → hCaptcha; existing
- * Google ecosystem → reCAPTCHA v3; default → Turnstile). Callers
- * should call this rather than hard-code `Provider.TURNSTILE` so AS.3.3
- * is a one-line change. */
-export function pickProvider(opts: { default?: Provider } = {}): Provider {
+ * Coverage:
+ *   * EU 27 member states (the GDPR's home jurisdiction).
+ *   * EEA additions (Iceland, Liechtenstein, Norway — bound by GDPR
+ *     via the EEA agreement).
+ *   * UK (post-Brexit "UK GDPR" mirrors EU GDPR substantively).
+ *   * Switzerland (FADP / nFADP closely tracks GDPR adequacy).
+ *
+ * Why hCaptcha for these regions: vendor publishes an EU data-residency
+ * option and is positioned as the privacy-first alternative to Google
+ * reCAPTCHA + Cloudflare Turnstile (both of which involve cross-border
+ * data transfers operators in these regions often need extra paperwork
+ * to defend). Operators can override per tenant via `pickProvider`'s
+ * `override` arg if they have a different vendor preference; this is a
+ * *default* heuristic, not a policy lock. */
+export const GDPR_STRICT_REGIONS: ReadonlySet<string> = Object.freeze(
+  new Set<string>([
+    // EU 27
+    "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES", "FI",
+    "FR", "GR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT",
+    "NL", "PL", "PT", "RO", "SE", "SI", "SK",
+    // EEA additions
+    "IS", "LI", "NO",
+    // UK + Switzerland
+    "GB", "CH",
+  ]),
+)
+
+/** Ecosystem hint that routes to reCAPTCHA v3 — caller passes the
+ * canonical lowercase string `"google"` when the principal already has
+ * a Google OAuth link or is signing in from a Google Workspace email
+ * domain. Keeping the hint vocabulary tiny + lowercase keeps the
+ * cross-twin parity guard simple (no case folding issues across Python
+ * `str.lower()` and TS `String.prototype.toLowerCase`). */
+export const ECOSYSTEM_HINT_GOOGLE = "google"
+
+/** Whether `region` is in the AS.3.3 GDPR-strict region list.
+ * Case-insensitive, surrounding whitespace tolerated. Returns `false`
+ * for empty / non-ISO inputs (caller doesn't have a region hint → fall
+ * through to the next axis of the heuristic). */
+export function isGdprStrictRegion(region: string | null | undefined): boolean {
+  if (!region) return false
+  return GDPR_STRICT_REGIONS.has(region.trim().toUpperCase())
+}
+
+/** Pick a captcha provider per AS.3.3 region + ecosystem heuristic.
+ *
+ * Precedence (highest first):
+ *
+ *   1. `override` — caller-supplied force value (e.g. per-tenant admin
+ *      pin loaded from `tenants.auth_features.captcha_provider`). Wins
+ *      unconditionally; lets ops override the heuristic without
+ *      modifying caller code.
+ *   2. **GDPR strict region** (`region` ∈ `GDPR_STRICT_REGIONS`) →
+ *      `Provider.HCAPTCHA`. Privacy-first vendor; sidesteps the
+ *      Cloudflare / Google cross-border data-transfer paperwork most
+ *      EU/EEA/UK/CH operators need to file.
+ *   3. **Google ecosystem hint** (`"google"` ∈ `ecosystemHints`) →
+ *      `Provider.RECAPTCHA_V3`. UX continuity: principal already
+ *      accepted Google's data-collection terms via OAuth, so routing
+ *      them through reCAPTCHA preserves the same vendor relationship
+ *      rather than introducing a second one.
+ *   4. **Default** → `default` (defaults to `Provider.TURNSTILE`).
+ *
+ * Module-global state audit (per implement_phase_step.md SOP §1):
+ * pure function — reads no mutable state, makes no IO, has no side
+ * effects. `GDPR_STRICT_REGIONS` is a frozen Set constant; no
+ * module-level mutable container. Cross-worker / cross-tab consistency:
+ * every Node worker / browser tab derives the same return value from
+ * the same input args. */
+export function pickProvider(opts: {
+  default?: Provider
+  region?: string | null
+  ecosystemHints?: readonly string[]
+  override?: Provider | null
+} = {}): Provider {
+  if (opts.override) return opts.override
+  if (opts.region && isGdprStrictRegion(opts.region)) return Provider.HCAPTCHA
+  const hints = opts.ecosystemHints ?? []
+  for (const h of hints) {
+    if (h && h.toLowerCase() === ECOSYSTEM_HINT_GOOGLE) {
+      return Provider.RECAPTCHA_V3
+    }
+  }
   return opts.default ?? Provider.TURNSTILE
 }
 

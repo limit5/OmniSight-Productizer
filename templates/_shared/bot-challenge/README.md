@@ -152,11 +152,56 @@ off must not break a script that re-classifies a stored response.
   workers).
 * Importing the module is free of side effects.
 
+## AS.3.3 provider-selection heuristic
+
+`pickProvider` consumes three optional inputs (`override` / `region` /
+`ecosystemHints`) and returns one of the four `Provider` values per the
+following precedence (highest first):
+
+1. `override` — caller-supplied force value (e.g. per-tenant admin pin
+   loaded from `tenants.auth_features.captcha_provider`). Wins
+   unconditionally; lets ops override the heuristic without modifying
+   caller code.
+2. **GDPR strict region** (`region` ∈ `GDPR_STRICT_REGIONS`) →
+   `Provider.HCAPTCHA`. Privacy-first vendor; sidesteps the Cloudflare
+   / Google cross-border data-transfer paperwork most EU/EEA/UK/CH
+   operators need to file.
+3. **Google ecosystem hint** (`"google"` ∈ `ecosystemHints`) →
+   `Provider.RECAPTCHA_V3`. UX continuity: principal already accepted
+   Google's data-collection terms via OAuth, so routing them through
+   reCAPTCHA preserves the same vendor relationship.
+4. **Default** → `default` (defaults to `Provider.TURNSTILE`).
+
+`GDPR_STRICT_REGIONS` covers EU 27 + Iceland + Liechtenstein + Norway +
+UK + Switzerland (32 ISO 3166-1 alpha-2 codes). The list is mirrored
+byte-for-byte by the Python twin and locked by a cross-twin drift guard
+(`backend/tests/test_bot_challenge_shape_drift.py::test_ts_gdpr_strict_regions_match_python`).
+Region matching is case-insensitive and whitespace-tolerant.
+
+```typescript
+import { pickProvider, Provider } from "./index"
+
+// Default — no hints → Turnstile.
+pickProvider() === Provider.TURNSTILE
+
+// EU strict-region request → hCaptcha.
+pickProvider({ region: "DE" }) === Provider.HCAPTCHA
+
+// Existing Google OAuth user (vendor continuity) → reCAPTCHA v3.
+pickProvider({ ecosystemHints: ["google"] }) === Provider.RECAPTCHA_V3
+
+// Region wins over ecosystem (privacy > UX continuity).
+pickProvider({ region: "FR", ecosystemHints: ["google"] }) === Provider.HCAPTCHA
+
+// Per-tenant operator pin overrides everything.
+pickProvider({
+  override: Provider.TURNSTILE,
+  region: "DE",
+}) === Provider.TURNSTILE
+```
+
 ## Out of scope (deferred to follow-up rows in the same epic)
 
-* AS.3.3 — Provider-selection logic (region / ecosystem heuristics).
-  This row exposes `pickProvider` as a plain helper that returns the
-  env-default provider; AS.3.3 will replace it with the heuristic.
 * AS.3.4 — Server-side score-verification + `score < 0.5` reject logic.
   The classifier here already returns `OUTCOME_BLOCKED_LOWSCORE`
   (`allow=false`) on Phase 3 + low score; AS.3.4 wires the audit /
@@ -183,7 +228,10 @@ off must not break a script that re-classifies a stored response.
 | `classify_outcome(resp, ...)`               | `classifyOutcome(resp, opts)`                           |
 | `verify_provider(...)`                      | `verifyProvider(opts)`                                  |
 | `verify(ctx)`                               | `verify(ctx, opts)`                                     |
-| `pick_provider(default=...)`                | `pickProvider({ default: ... })`                        |
+| `pick_provider(default=, region=, ecosystem_hints=, override=)` | `pickProvider({ default, region, ecosystemHints, override })` |
+| `GDPR_STRICT_REGIONS: frozenset[str]` (32 codes) | `GDPR_STRICT_REGIONS: ReadonlySet<string>` (32 codes) |
+| `ECOSYSTEM_HINT_GOOGLE = "google"`          | `ECOSYSTEM_HINT_GOOGLE = "google"`                      |
+| `is_gdpr_strict_region(region)`             | `isGdprStrictRegion(region)`                            |
 | `passthrough(reason=...)`                   | `passthrough(reason)`                                   |
 | `is_enabled()`                              | `isEnabled()`                                           |
 | `BotChallengeError` (base)                  | `BotChallengeError` (base)                              |

@@ -34,6 +34,9 @@ What this row ships (AS.3.1 scope, strict)
    axis-internal precedence (A api_key → C test-token → B ip-allowlist
    → D path/caller) and returns either a :class:`BypassReason` or
    ``None``; mid-orchestration callers stop on first hit.
+   :func:`pick_provider` (AS.3.3) implements the region + ecosystem
+   heuristic that picks a captcha vendor before :func:`verify` is
+   called.
 4. **Phase-aware classify** — :func:`classify_outcome` turns the
    provider's normalized score + (failure mode, phase) tuple into the
    final :class:`BotChallengeResult` per AS.0.5 §2 phase matrix
@@ -50,8 +53,10 @@ Out of scope (deferred to follow-up rows in the same epic)
 ──────────────────────────────────────────────────────────
 * AS.3.2 — TS twin under ``templates/_shared/bot-challenge/``.
 * AS.3.3 — Provider-selection logic (region / ecosystem heuristics).
-  This row exposes :func:`pick_provider` as a plain helper that returns
-  the env-default provider; AS.3.3 will replace it with the heuristic.
+  Landed: :func:`pick_provider` now consumes ``region`` +
+  ``ecosystem_hints`` + ``override`` to pick a vendor per the
+  heuristic doc-string. Cross-twin parity guard locks the
+  :data:`GDPR_STRICT_REGIONS` codes to the TS twin.
 * AS.3.4 — Wiring `verify()` into the four OmniSight self forms
   (login / signup / password-reset / contact) is AS.6.3.
 * AS.3.5 — Fallback chain (primary → secondary → tertiary on jsfail).
@@ -111,7 +116,7 @@ import logging
 import secrets
 import types
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
 
 import httpx
 
@@ -1201,19 +1206,142 @@ async def verify(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Provider selection (AS.3.3 will replace this with the heuristic)
+#  Provider selection (AS.3.3 region + ecosystem heuristic)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def pick_provider(*, default: Provider = Provider.TURNSTILE) -> Provider:
-    """Return the env-default provider.
+# GDPR strict regions — ISO 3166-1 alpha-2 country codes for which the
+# provider-selection heuristic prefers hCaptcha. The list covers:
+#
+#   * EU 27 member states (the GDPR's home jurisdiction).
+#   * EEA additions (Iceland, Liechtenstein, Norway — bound by GDPR via
+#     the EEA agreement).
+#   * UK (post-Brexit "UK GDPR" mirrors EU GDPR substantively).
+#   * Switzerland (FADP / nFADP closely tracks GDPR adequacy).
+#
+# Why hCaptcha for these regions: the vendor publishes an EU data-
+# residency option and is positioned as the privacy-first alternative
+# to Google reCAPTCHA + Cloudflare Turnstile (both of which involve
+# cross-border data transfers that operators in these regions often
+# need extra paperwork to defend). Operators can still override per
+# tenant via the ``override`` arg if they have a different vendor
+# preference; this is a *default* heuristic, not a policy lock.
+#
+# Frozen frozenset — module-level constant, no mutation possible at
+# runtime; satisfies SOP §1 "no module-level mutable containers"
+# invariant. Cross-twin parity guard locks the codes byte-for-byte
+# against the TS twin's same-named export.
+GDPR_STRICT_REGIONS: frozenset[str] = frozenset({
+    # EU 27
+    "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES", "FI",
+    "FR", "GR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT",
+    "NL", "PL", "PT", "RO", "SE", "SI", "SK",
+    # EEA additions
+    "IS", "LI", "NO",
+    # UK + Switzerland
+    "GB", "CH",
+})
 
-    This is the AS.3.1 placeholder.  AS.3.3 will replace it with the
-    region- and ecosystem-aware heuristic (GDPR strict region →
-    hCaptcha; existing Google ecosystem → reCAPTCHA v3; default →
-    Turnstile).  Callers should call this rather than hard-code
-    :data:`Provider.TURNSTILE` so AS.3.3 is a one-line change.
+
+# Ecosystem hint that routes to reCAPTCHA v3 — caller passes the
+# canonical lowercase string ``"google"`` when the principal already
+# has a Google OAuth link or is signing in from a Google Workspace
+# email domain. Keeping the hint vocabulary tiny + lowercase keeps the
+# cross-twin parity guard simple (no case folding issues across
+# Python's ``str.lower()`` and TS's ``String.prototype.toLowerCase``).
+ECOSYSTEM_HINT_GOOGLE: str = "google"
+
+
+def is_gdpr_strict_region(region: str) -> bool:
+    """Whether *region* is in the AS.3.3 GDPR-strict region list.
+
+    Case-insensitive, surrounding whitespace tolerated. Returns
+    ``False`` for empty / non-ISO inputs (the caller doesn't have a
+    region hint → fall through to the next axis of the heuristic).
     """
+    if not region:
+        return False
+    return region.strip().upper() in GDPR_STRICT_REGIONS
+
+
+def pick_provider(
+    *,
+    default: Provider = Provider.TURNSTILE,
+    region: Optional[str] = None,
+    ecosystem_hints: Iterable[str] = (),
+    override: Optional[Provider] = None,
+) -> Provider:
+    """Pick a captcha provider per AS.3.3 region + ecosystem heuristic.
+
+    Precedence (highest first):
+
+      1. ``override`` — caller-supplied force value (e.g. per-tenant
+         admin pin loaded from ``tenants.auth_features.captcha_provider``).
+         Wins unconditionally; lets ops override the heuristic without
+         modifying caller code.
+      2. **GDPR strict region** (``region`` ∈ :data:`GDPR_STRICT_REGIONS`)
+         → :data:`Provider.HCAPTCHA`. Privacy-first vendor; sidesteps
+         the Cloudflare / Google cross-border data-transfer paperwork
+         most EU/EEA/UK/CH operators need to file.
+      3. **Google ecosystem hint** (``"google"`` ∈ ``ecosystem_hints``)
+         → :data:`Provider.RECAPTCHA_V3`. UX continuity: the principal
+         already accepted Google's data-collection terms via OAuth, so
+         routing them through reCAPTCHA preserves the same vendor
+         relationship rather than introducing a second one.
+      4. **Default** → ``default`` (defaults to :data:`Provider.TURNSTILE`).
+
+    Parameters
+    ----------
+    default
+        The provider to fall back to when no heuristic axis fires.
+        Caller can override this per call to e.g. force Turnstile in
+        every non-EU tenant. Defaults to :data:`Provider.TURNSTILE` —
+        the AS.0.5 fail-open phased strategy chose Turnstile as the
+        family default because it's privacy-friendly without GDPR
+        paperwork burden and has the best CDN coverage outside China.
+    region
+        ISO 3166-1 alpha-2 country code derived from the request's
+        Cloudflare ``CF-IPCountry`` header (or any equivalent
+        geo-IP hint the caller has). Case-insensitive. ``None`` /
+        empty string → axis #2 doesn't fire.
+    ecosystem_hints
+        Iterable of canonical lowercase ecosystem strings the caller
+        knows about — currently only :data:`ECOSYSTEM_HINT_GOOGLE`
+        (``"google"``) is acted on. Caller passes ``("google",)`` when
+        the principal has an active Google OAuth link or is signing in
+        from a Google Workspace domain. Empty iterable → axis #3 doesn't
+        fire. Future ecosystem hints (e.g. ``"microsoft"`` →
+        Microsoft's bot-challenge) can be added without a signature
+        change.
+    override
+        Caller-supplied force value — wins unconditionally over every
+        heuristic axis. Use case: a tenant admin set a per-tenant
+        captcha_provider override in their auth_features row, and the
+        caller wants the heuristic to honour it without re-implementing
+        priority logic. ``None`` → axis #1 doesn't fire.
+
+    Returns
+    -------
+    Provider
+        The selected provider enum value.
+
+    Module-global state audit (per implement_phase_step.md SOP §1)
+    ──────────────────────────────────────────────────────────────
+    * Pure function — reads no mutable state, makes no IO, has no side
+      effects. Cross-worker consistency: every uvicorn worker derives
+      the same return value from the same input args (answer #1 of
+      SOP §1).
+    * :data:`GDPR_STRICT_REGIONS` is a frozenset constant; no
+      module-level mutable container. The TS twin's same-named export
+      mirrors the codes byte-for-byte (cross-twin drift guard locks).
+    """
+    if override is not None:
+        return override
+    if region and is_gdpr_strict_region(region):
+        return Provider.HCAPTCHA
+    for hint in ecosystem_hints:
+        if hint and hint.lower() == ECOSYSTEM_HINT_GOOGLE:
+            return Provider.RECAPTCHA_V3
     return default
 
 
@@ -1282,4 +1410,8 @@ __all__ = [
     "classify_outcome",
     "verify",
     "pick_provider",
+    # AS.3.3 provider-selection helpers
+    "GDPR_STRICT_REGIONS",
+    "ECOSYSTEM_HINT_GOOGLE",
+    "is_gdpr_strict_region",
 ]

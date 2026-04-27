@@ -1014,6 +1014,9 @@ def test_all_module_exports_present_in_dunder_all():
         "BotChallengeError", "ProviderConfigError", "InvalidProviderError",
         "ALL_BOT_CHALLENGE_EVENTS", "ALL_OUTCOMES", "event_for_outcome",
         "TEST_TOKEN_HEADER", "DEFAULT_SCORE_THRESHOLD",
+        # AS.3.3 provider-selection helpers
+        "GDPR_STRICT_REGIONS", "ECOSYSTEM_HINT_GOOGLE",
+        "is_gdpr_strict_region",
     }
     assert promised.issubset(set(bc.__all__))
 
@@ -1072,9 +1075,186 @@ def test_server_error_always_fail_open(phase):
 
 
 def test_pick_provider_default_turnstile():
-    """AS.3.1 placeholder — default Turnstile.  AS.3.3 will replace."""
+    """No hints → default Turnstile (AS.0.5 family default)."""
     assert bc.pick_provider() == bc.Provider.TURNSTILE
 
 
 def test_pick_provider_caller_override():
+    """Caller-supplied ``default`` falls through axes 2/3 cleanly."""
     assert bc.pick_provider(default=bc.Provider.HCAPTCHA) == bc.Provider.HCAPTCHA
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Family 16 — AS.3.3 provider-selection heuristic
+#
+#  Heuristic precedence (highest first):
+#    1. ``override`` — caller-supplied force value (per-tenant pin).
+#    2. GDPR strict region (EU/EEA/UK/CH) → hCaptcha.
+#    3. Google ecosystem hint → reCAPTCHA v3.
+#    4. ``default`` (Turnstile).
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def test_pick_provider_override_wins_unconditionally():
+    """``override`` beats every heuristic axis — even GDPR + ecosystem."""
+    assert bc.pick_provider(
+        override=bc.Provider.TURNSTILE,
+        region="DE",
+        ecosystem_hints=("google",),
+    ) == bc.Provider.TURNSTILE
+    assert bc.pick_provider(
+        override=bc.Provider.RECAPTCHA_V2,
+        region="FR",
+    ) == bc.Provider.RECAPTCHA_V2
+
+
+@pytest.mark.parametrize("region", sorted(bc.GDPR_STRICT_REGIONS))
+def test_pick_provider_every_gdpr_region_routes_to_hcaptcha(region):
+    """Every code in :data:`GDPR_STRICT_REGIONS` routes to hCaptcha
+    unconditionally (no ecosystem-hint short-circuit)."""
+    assert bc.pick_provider(region=region) == bc.Provider.HCAPTCHA
+
+
+def test_pick_provider_gdpr_region_case_insensitive():
+    """Region matching is case-insensitive + whitespace-tolerant —
+    real-world geo-IP hints arrive in mixed case (``cf-ipcountry`` is
+    upper-case but third-party libs sometimes lowercase)."""
+    assert bc.pick_provider(region="de") == bc.Provider.HCAPTCHA
+    assert bc.pick_provider(region="  fr  ") == bc.Provider.HCAPTCHA
+    assert bc.pick_provider(region="Gb") == bc.Provider.HCAPTCHA
+
+
+def test_pick_provider_non_gdpr_region_falls_through():
+    """Regions outside the GDPR-strict list don't touch axis 2."""
+    assert bc.pick_provider(region="US") == bc.Provider.TURNSTILE
+    assert bc.pick_provider(region="JP") == bc.Provider.TURNSTILE
+    assert bc.pick_provider(region="CN") == bc.Provider.TURNSTILE
+    assert bc.pick_provider(region="TW") == bc.Provider.TURNSTILE
+
+
+def test_pick_provider_empty_region_falls_through():
+    """Empty / whitespace-only region treated as no hint."""
+    assert bc.pick_provider(region="") == bc.Provider.TURNSTILE
+    assert bc.pick_provider(region="   ") == bc.Provider.TURNSTILE
+    assert bc.pick_provider(region=None) == bc.Provider.TURNSTILE
+
+
+def test_pick_provider_google_ecosystem_routes_to_recaptcha_v3():
+    """``"google"`` hint → reCAPTCHA v3 (vendor continuity)."""
+    assert bc.pick_provider(ecosystem_hints=("google",)) == bc.Provider.RECAPTCHA_V3
+
+
+def test_pick_provider_google_ecosystem_case_insensitive():
+    """Hint matching is case-insensitive."""
+    assert bc.pick_provider(ecosystem_hints=("Google",)) == bc.Provider.RECAPTCHA_V3
+    assert bc.pick_provider(ecosystem_hints=("GOOGLE",)) == bc.Provider.RECAPTCHA_V3
+
+
+def test_pick_provider_unknown_ecosystem_hint_falls_through():
+    """Unknown hint strings don't fire axis 3."""
+    assert bc.pick_provider(ecosystem_hints=("microsoft",)) == bc.Provider.TURNSTILE
+    assert bc.pick_provider(ecosystem_hints=("apple", "github")) == bc.Provider.TURNSTILE
+
+
+def test_pick_provider_google_anywhere_in_hint_iterable_fires():
+    """The ``"google"`` hint in any position triggers axis 3."""
+    assert bc.pick_provider(
+        ecosystem_hints=("microsoft", "apple", "google"),
+    ) == bc.Provider.RECAPTCHA_V3
+
+
+def test_pick_provider_gdpr_region_wins_over_google_ecosystem():
+    """Privacy > UX continuity — region trumps ecosystem hint."""
+    assert bc.pick_provider(
+        region="DE",
+        ecosystem_hints=("google",),
+    ) == bc.Provider.HCAPTCHA
+
+
+def test_pick_provider_default_arg_only_used_when_no_axis_fires():
+    """``default`` only consulted when axes 1/2/3 all miss."""
+    # Axis 1 wins.
+    assert bc.pick_provider(
+        default=bc.Provider.HCAPTCHA, override=bc.Provider.RECAPTCHA_V2,
+    ) == bc.Provider.RECAPTCHA_V2
+    # Axis 2 wins.
+    assert bc.pick_provider(
+        default=bc.Provider.TURNSTILE, region="FR",
+    ) == bc.Provider.HCAPTCHA
+    # Axis 3 wins.
+    assert bc.pick_provider(
+        default=bc.Provider.HCAPTCHA, ecosystem_hints=("google",),
+    ) == bc.Provider.RECAPTCHA_V3
+    # All miss → default.
+    assert bc.pick_provider(
+        default=bc.Provider.RECAPTCHA_V2,
+    ) == bc.Provider.RECAPTCHA_V2
+
+
+def test_pick_provider_is_pure_no_module_state_mutation():
+    """Calling pick_provider should not mutate any module-level state.
+    Locks SOP §1 invariant that the helper is referentially transparent.
+    """
+    before_regions = frozenset(bc.GDPR_STRICT_REGIONS)
+    for _ in range(5):
+        bc.pick_provider(region="DE", ecosystem_hints=("google",))
+        bc.pick_provider(override=bc.Provider.HCAPTCHA)
+        bc.pick_provider()
+    after_regions = frozenset(bc.GDPR_STRICT_REGIONS)
+    assert before_regions == after_regions
+
+
+def test_gdpr_strict_regions_count_is_32():
+    """27 EU + 3 EEA + UK + CH = 32. If you change this, also bump the
+    TS twin's `GDPR_STRICT_REGIONS` and the cross-twin drift guard."""
+    assert len(bc.GDPR_STRICT_REGIONS) == 32
+
+
+def test_gdpr_strict_regions_all_alpha2_uppercase():
+    """Every entry must be a 2-letter ISO 3166-1 alpha-2 uppercase code.
+    Catches typos / accidentally-mixed case that would defeat
+    case-insensitive lookup invariant."""
+    for code in bc.GDPR_STRICT_REGIONS:
+        assert isinstance(code, str)
+        assert len(code) == 2, f"{code!r} is not a 2-letter ISO code"
+        assert code.isalpha() and code.isupper(), (
+            f"{code!r} must be uppercase alpha"
+        )
+
+
+def test_gdpr_strict_regions_includes_eu27_and_uk_ch():
+    """Spot-check the 4 most operationally consequential codes — DE,
+    FR, GB, CH — to confirm the list isn't accidentally truncated."""
+    assert "DE" in bc.GDPR_STRICT_REGIONS
+    assert "FR" in bc.GDPR_STRICT_REGIONS
+    assert "GB" in bc.GDPR_STRICT_REGIONS
+    assert "CH" in bc.GDPR_STRICT_REGIONS
+
+
+def test_gdpr_strict_regions_excludes_us_jp_cn_etc():
+    """Negative spot-check: non-GDPR-strict regions must not appear.
+    Catches accidental inclusion of US / TW / JP / CN / IN / AU."""
+    for code in ("US", "JP", "CN", "TW", "IN", "AU", "BR", "MX"):
+        assert code not in bc.GDPR_STRICT_REGIONS
+
+
+def test_gdpr_strict_regions_is_frozen():
+    """SOP §1 invariant: no module-level mutable container."""
+    assert isinstance(bc.GDPR_STRICT_REGIONS, frozenset)
+
+
+def test_ecosystem_hint_google_constant_is_lowercase_canonical():
+    """The hint vocabulary is canonical lowercase on both twins."""
+    assert bc.ECOSYSTEM_HINT_GOOGLE == "google"
+
+
+def test_is_gdpr_strict_region_helper_matches_pick_provider_branch():
+    """``is_gdpr_strict_region`` is the same predicate
+    ``pick_provider`` consults — keep them in lock-step (one source of
+    truth, prevents drift from refactor)."""
+    for code in ("DE", "FR", "GB", "CH", "PL", "IS"):
+        assert bc.is_gdpr_strict_region(code) is True
+        assert bc.pick_provider(region=code) == bc.Provider.HCAPTCHA
+    for code in ("US", "JP", "CN", "TW"):
+        assert bc.is_gdpr_strict_region(code) is False
+        assert bc.pick_provider(region=code) == bc.Provider.TURNSTILE

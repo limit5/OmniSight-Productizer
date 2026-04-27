@@ -293,6 +293,58 @@ def test_ts_bypass_caller_kinds_match_python() -> None:
     )
 
 
+def test_ts_gdpr_strict_regions_match_python() -> None:
+    """AS.3.3 — every ISO code in `GDPR_STRICT_REGIONS` must agree
+    byte-for-byte across both twins. Drift here means a region's user
+    silently gets the wrong vendor.
+    """
+    src = _ts_source()
+    m = re.search(
+        r"GDPR_STRICT_REGIONS[^=]*=\s*Object\.freeze\(\s*\n?\s*new\s+Set<string>\(\s*\[(.*?)\]",
+        src,
+        re.DOTALL,
+    )
+    assert m is not None, "TS twin missing GDPR_STRICT_REGIONS literal"
+    raw = re.findall(r'"([^"]+)"', m.group(1))
+    ts_set = frozenset(raw)
+    py_set = frozenset(bc.GDPR_STRICT_REGIONS)
+    assert ts_set == py_set, (
+        f"GDPR_STRICT_REGIONS drift: "
+        f"Python={sorted(py_set)}, TS={sorted(ts_set)}"
+    )
+    # Belt-and-braces: same count.
+    assert len(ts_set) == 32, (
+        f"GDPR_STRICT_REGIONS count drift: TS={len(ts_set)}, expected 32"
+    )
+
+
+def test_ts_ecosystem_hint_google_matches_python() -> None:
+    """The single canonical ecosystem hint string must agree byte-for-
+    byte; case-insensitive matching on both sides relies on this."""
+    src = _ts_source()
+    m = re.search(
+        r'export\s+const\s+ECOSYSTEM_HINT_GOOGLE\s*=\s*"([^"]+)"', src
+    )
+    assert m is not None, "TS twin missing ECOSYSTEM_HINT_GOOGLE export"
+    assert m.group(1) == bc.ECOSYSTEM_HINT_GOOGLE, (
+        f"ECOSYSTEM_HINT_GOOGLE drift: "
+        f"Python={bc.ECOSYSTEM_HINT_GOOGLE!r}, TS={m.group(1)!r}"
+    )
+
+
+def test_ts_declares_pick_provider_and_helpers() -> None:
+    """AS.3.3 — TS twin must declare `pickProvider` + `isGdprStrictRegion`
+    exports. Catches partial-port regressions where Python ships the
+    heuristic but the TS twin still has the old placeholder."""
+    src = _ts_source()
+    assert re.search(
+        r"export\s+function\s+pickProvider\s*\(", src
+    ), "TS twin missing pickProvider export"
+    assert re.search(
+        r"export\s+function\s+isGdprStrictRegion\s*\(", src
+    ), "TS twin missing isGdprStrictRegion export"
+
+
 def test_ts_declares_three_typed_errors() -> None:
     """All three bot-challenge error classes must be declared on the TS
     side with the same names. Catches partial-port regressions."""
@@ -574,6 +626,102 @@ BEHAVIOUR_FIXTURES: Mapping[str, dict[str, Any]] = {
         "expect_outcome": "pass",
         "expect_allow": True,
     },
+    # ── pick_provider AS.3.3 region + ecosystem heuristic ──
+    # Heuristic precedence (highest first):
+    #   1. override (caller pin)
+    #   2. GDPR strict region → hCaptcha
+    #   3. Google ecosystem hint → reCAPTCHA v3
+    #   4. default (Turnstile by default)
+    "pick_default_no_hints": {
+        "kind": "pick_provider",
+        "opts": {},
+        "expect_provider": "turnstile",
+    },
+    "pick_default_caller_supplied": {
+        "kind": "pick_provider",
+        "opts": {"default": "hcaptcha"},
+        "expect_provider": "hcaptcha",
+    },
+    "pick_override_wins_over_all": {
+        "kind": "pick_provider",
+        "opts": {
+            "override": "turnstile",
+            "region": "DE",
+            "ecosystem_hints": ["google"],
+        },
+        "expect_provider": "turnstile",
+    },
+    "pick_gdpr_region_de": {
+        "kind": "pick_provider",
+        "opts": {"region": "DE"},
+        "expect_provider": "hcaptcha",
+    },
+    "pick_gdpr_region_fr_lowercase": {
+        "kind": "pick_provider",
+        "opts": {"region": "fr"},
+        "expect_provider": "hcaptcha",
+    },
+    "pick_gdpr_region_gb": {
+        "kind": "pick_provider",
+        "opts": {"region": "GB"},
+        "expect_provider": "hcaptcha",
+    },
+    "pick_gdpr_region_ch": {
+        "kind": "pick_provider",
+        "opts": {"region": "CH"},
+        "expect_provider": "hcaptcha",
+    },
+    "pick_non_gdpr_region_us": {
+        "kind": "pick_provider",
+        "opts": {"region": "US"},
+        "expect_provider": "turnstile",
+    },
+    "pick_non_gdpr_region_jp": {
+        "kind": "pick_provider",
+        "opts": {"region": "JP"},
+        "expect_provider": "turnstile",
+    },
+    "pick_empty_region": {
+        "kind": "pick_provider",
+        "opts": {"region": ""},
+        "expect_provider": "turnstile",
+    },
+    "pick_google_ecosystem": {
+        "kind": "pick_provider",
+        "opts": {"ecosystem_hints": ["google"]},
+        "expect_provider": "recaptcha_v3",
+    },
+    "pick_google_ecosystem_uppercase": {
+        "kind": "pick_provider",
+        "opts": {"ecosystem_hints": ["GOOGLE"]},
+        "expect_provider": "recaptcha_v3",
+    },
+    "pick_google_ecosystem_among_others": {
+        "kind": "pick_provider",
+        "opts": {"ecosystem_hints": ["microsoft", "apple", "google"]},
+        "expect_provider": "recaptcha_v3",
+    },
+    "pick_unknown_ecosystem_falls_through": {
+        "kind": "pick_provider",
+        "opts": {"ecosystem_hints": ["microsoft", "apple"]},
+        "expect_provider": "turnstile",
+    },
+    "pick_gdpr_region_wins_over_google_ecosystem": {
+        # Privacy > UX continuity — the EU-strict caller still gets
+        # hCaptcha even with a Google ecosystem signal.
+        "kind": "pick_provider",
+        "opts": {"region": "FR", "ecosystem_hints": ["google"]},
+        "expect_provider": "hcaptcha",
+    },
+    "pick_default_with_unknown_hints": {
+        "kind": "pick_provider",
+        "opts": {
+            "default": "recaptcha_v2",
+            "region": "US",
+            "ecosystem_hints": ["microsoft"],
+        },
+        "expect_provider": "recaptcha_v2",
+    },
     # ── event_for_outcome lookup table ──
     "lookup_pass": {
         "kind": "event_for_outcome",
@@ -669,6 +817,18 @@ def _python_run_fixture(fx: dict[str, Any]) -> dict[str, Any]:
         }
     if kind == "event_for_outcome":
         return {"event": bc.event_for_outcome(fx["outcome"])}
+    if kind == "pick_provider":
+        opts_raw = fx["opts"]
+        kwargs: dict[str, Any] = {}
+        if "default" in opts_raw and opts_raw["default"] is not None:
+            kwargs["default"] = bc.Provider(opts_raw["default"])
+        if "override" in opts_raw and opts_raw["override"] is not None:
+            kwargs["override"] = bc.Provider(opts_raw["override"])
+        if "region" in opts_raw:
+            kwargs["region"] = opts_raw["region"]
+        if "ecosystem_hints" in opts_raw:
+            kwargs["ecosystem_hints"] = tuple(opts_raw["ecosystem_hints"])
+        return {"provider": bc.pick_provider(**kwargs).value}
     raise AssertionError(f"unknown fixture kind: {kind!r}")
 
 
@@ -749,6 +909,14 @@ for (const [key, fx] of Object.entries(fixtures)) {
       }
     } else if (fx.kind === "event_for_outcome") {
       out[key] = { event: bc.eventForOutcome(fx.outcome) }
+    } else if (fx.kind === "pick_provider") {
+      const o = fx.opts ?? {}
+      const tsOpts = {}
+      if (o.default !== undefined && o.default !== null) tsOpts.default = o.default
+      if (o.override !== undefined && o.override !== null) tsOpts.override = o.override
+      if ("region" in o) tsOpts.region = o.region
+      if ("ecosystem_hints" in o) tsOpts.ecosystemHints = o.ecosystem_hints
+      out[key] = { provider: bc.pickProvider(tsOpts) }
     } else {
       out[key] = { __error: `unknown kind ${fx.kind}` }
     }
@@ -882,6 +1050,14 @@ def test_behaviour_parity_python_ts(
         )
         return
 
+    if fx["kind"] == "pick_provider":
+        assert py["provider"] == ts["provider"] == fx["expect_provider"], (
+            f"pick_provider {name!r}: "
+            f"Python={py['provider']!r}, TS={ts['provider']!r}, "
+            f"expected={fx['expect_provider']!r}"
+        )
+        return
+
     raise AssertionError(f"unhandled fixture kind: {fx['kind']!r}")
 
 
@@ -927,6 +1103,8 @@ def _normalise_outcome(d: Mapping[str, Any]) -> dict[str, Any]:
                 "passthroughReason", "event", "errorKind"):
         if key in d:
             out[key] = d[key]
+    # `pick_provider` returns {"provider": "<name>"} (no `outcome`),
+    # so the loop above already covers it via the shared `provider` key.
     if "score" in out and out["score"] is not None:
         out["score"] = float(out["score"])
     if "alsoMatched" in d:
@@ -1005,6 +1183,60 @@ def test_every_bypass_axis_exercised() -> None:
     assert not missing, (
         f"AS.3.2 drift guard missing bypass-axis fixture for: {sorted(missing)}"
     )
+
+
+def test_every_pick_provider_axis_exercised() -> None:
+    """AS.3.3 heuristic has 4 axes; every one must be exercised by at
+    least one fixture or the cross-twin parity guard goes blind to that
+    axis. Drift guard's own drift guard."""
+    pick_fxs = [fx for fx in BEHAVIOUR_FIXTURES.values() if fx["kind"] == "pick_provider"]
+    assert pick_fxs, "no pick_provider fixtures present — AS.3.3 parity blind"
+
+    # Axis 1 — override.
+    assert any("override" in fx["opts"] for fx in pick_fxs), (
+        "no override-axis fixture for pick_provider"
+    )
+    # Axis 2 — GDPR strict region (positive case).
+    assert any(
+        fx["expect_provider"] == "hcaptcha"
+        and fx["opts"].get("region")
+        for fx in pick_fxs
+    ), "no GDPR-region fixture for pick_provider"
+    # Axis 3 — Google ecosystem (positive case).
+    assert any(
+        fx["expect_provider"] == "recaptcha_v3"
+        and "google" in [h.lower() for h in fx["opts"].get("ecosystem_hints", [])]
+        for fx in pick_fxs
+    ), "no Google ecosystem fixture for pick_provider"
+    # Axis 4 — default (no hints).
+    assert any(
+        not fx["opts"].get("region")
+        and not fx["opts"].get("ecosystem_hints")
+        and "override" not in fx["opts"]
+        for fx in pick_fxs
+    ), "no default-axis fixture for pick_provider"
+
+
+def test_pick_provider_precedence_a_over_b_c_fixture_present() -> None:
+    """Per AS.3.3 doc: override (axis 1) wins over EVERY other axis,
+    and region (axis 2) wins over ecosystem (axis 3). The drift guard
+    must include both these multi-axis cases or a future regression
+    that swaps the precedence ordering goes undetected."""
+    pick_fxs = [fx for fx in BEHAVIOUR_FIXTURES.values() if fx["kind"] == "pick_provider"]
+    # Override beats region+ecosystem.
+    assert any(
+        "override" in fx["opts"]
+        and fx["opts"].get("region")
+        and fx["opts"].get("ecosystem_hints")
+        for fx in pick_fxs
+    ), "missing pick_provider precedence fixture: override beats region+ecosystem"
+    # Region beats Google ecosystem.
+    assert any(
+        fx["expect_provider"] == "hcaptcha"
+        and fx["opts"].get("region")
+        and "google" in [h.lower() for h in fx["opts"].get("ecosystem_hints", [])]
+        for fx in pick_fxs
+    ), "missing pick_provider precedence fixture: region beats Google ecosystem"
 
 
 def test_every_phase_exercised_in_classify() -> None:
