@@ -3227,6 +3227,78 @@ BP:                   0066+
 
 ---
 
+## 📅 Post-BS 排程偏好（Operator confirmed 2026-04-27）
+
+> Operator 偏好：**單 track 預設走路線 (b)，AS 先**；若有額外 capacity 可平行才升級到路線 (a) 雙 track。
+
+### 🟢 Primary path —— 路線 (b) 單 track，AS 先（production hygiene 優先）
+
+```
+BS（已完工）→ AS (~22d) → W11-W16 (~11d) → FS (~12d) → SC (~13.5d) → BP (~5.5w)
+
+單 track wall time: 22 + 11 + 12 + 13.5 + 38 = ~96.5d (~14 週)
+```
+
+**選此路線的 rationale**：
+1. **Production hygiene > feature add** — production 已上線、有真實 user，credential ad-hoc 實作（既有 git_credentials / Phase 5b LLM credentials）是 tech debt 累積中
+2. **AS 是 FS+SC 的 hard 前置** — AS 先做、後續 FS / SC 可立刻接、不會 idle
+3. **AS.6 dogfood + AS.7 浮誇 UI** — 對所有 operator 立刻可感的 first-impression upgrade，不限蓋網站者
+4. **W11-W16 是 feature-add，惠及子集**（蓋網站的 vertical），不是所有 operator 必要
+
+### 🟡 Alternative path —— 路線 (a) 雙 / 三 track 平行（有額外 capacity 才走）
+
+升級條件：**確認有額外 dev capacity**（多一條 AI agent track / 第二人手 / 其他 idle 時段）才考慮升級。
+
+```
+                          ┌─ Track A 後端 lib + integration ─┐
+                          │   AS.0 → 1 → 2 → 3-5 → 6 →        │
+                          │   W14 backend + W15 plugin → AS.8  │
+                          │   (~10d)                          │
+                          └───────────────────────────────────┘
+BS（完工）→               ┌─ Track B 前端 auth UI/UX 浮誇 ────┐ → FS → SC → BP
+                          │   AS.7.0 visual foundation →       │
+                          │   AS.7.1 → 7.2 (slot machine) →    │
+                          │   7.3-7.8 (含 8 視覺層)             │
+                          │   (~14d)                          │
+                          └───────────────────────────────────┘
+                          ┌─ Track C web vertical ────────────┐
+                          │   W12+W13 → W11 → W14 frontend →   │
+                          │   W16 整合 (~11d)                  │
+                          └───────────────────────────────────┘
+                          
+                          → Wall time max(10, 14, 11) = ~14d
+                          → 比單 track 22d 省 8d wall time
+
+雙/三 track wall time: 14 + 12 + 13.5 + 38 = ~77d (~11 週)
+```
+
+**升級時的同步點**（必須對齊才能往下）：
+- 同步點 1：**AS.6 ship 後** → Track B AS.7 才能接真實 endpoint（之前 Track B 用 mock）
+- 同步點 2：**W14 backend (Track A) + AS.7.0 motion foundation (Track B) ship 後** → Track C W14 frontend 才能組裝
+- 同步點 3：**所有 track 收尾後** → 一起進 FS
+
+**3 track 是 sweet spot，4+ track 不再縮短** — 因為 AS.7 / W16 frontend 都是同個 React 元件樹，平行寫 merge conflict 大於增量速度。
+
+### 切換規則
+
+- **預設走路線 (b)**：每次新 sprint 開始前不主動考慮平行
+- **檢視 capacity 觸發升級到 (a)**：以下任一發生才升級
+  - 額外 AI agent track 進場（Agent-software-beta 之外）
+  - operator 自身有 idle 時段（每週 > 4 小時）
+  - 上游 BS 落地產生 schedule slack（BS 提早完工）
+  - **OR** 有明確 demo / sales pitch deadline 需要 W11-W16 提早 ship
+- **升級不可逆** — 一旦進 track parallel，不要中途切回 single track（會有 in-flight branch context loss）
+- **升級時機點**：BS 完工 + AS.0（Compatibility & Migration Discipline）完工 後，才開始考慮 split tracks。AS.0 是 single point of truth、不可平行。
+
+### 排程獨立於路線都該做的事
+
+- **Migration 編號預留**已對齊（BS 0051-0055 / AS 0056-0058 / W11-W16 0059-0060 / FS 0061-0063 / SC 0064-0065 / BP 0066+）
+- **Single-knob rollback** — 每 priority 各自有 env knob (`OMNISIGHT_AS_ENABLED` / `OMNISIGHT_W_LOVABLE_ENABLED` / etc.) 可全套 disable
+- **Compat regression test 必過**才能 ship — 不論單 track 或平行
+- **每個 priority 完工後寫 commit 紀錄到 HANDOFF.md** — 切 track 時的 context handoff 用
+
+---
+
 ## 🅖 Priority G — Ops / Reliability（HA 補強）
 
 > 背景：目前為單機 systemd 原型，`scripts/deploy.sh` 以 `systemctl restart` 原地重啟，會有短暫中斷；SQLite 無複製；無負載均衡 / 多副本 / 藍綠 / rolling。Canary、備份、DLQ、watchdog 已具備，但欠缺真正 HA 與零停機。以下 Phase 為補強工作。
