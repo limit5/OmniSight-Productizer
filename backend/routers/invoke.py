@@ -1431,11 +1431,29 @@ The operator just pressed INVOKE but the system is in a state that needs guidanc
 Triggers tell you what to coach about. Translate them to operator-facing language — never repeat the trigger key verbatim:
 - empty_workspace: 0 agents / 0 tasks. Suggest: ` + AGENT ` button, `/help`, `/tour`, or "tell me what you're building and I'll route it".
 - stale_pep:N: there are N PEP HOLD decisions waiting from earlier. Suggest: review them via the bottom-right toasts (each has a WHY? button now), or APPROVE / REJECT in bulk.
+- missing_toolchain:<entry-id>: the operator's INVOKE command (and/or the backlog tasks they queued) will need a vendor toolchain that this machine has not installed yet. The context block hands you the human display name (e.g. "Android SDK Platform Tools", "ESP-IDF v5", "Node.js LTS 20", "Python toolchain (uv)", "ARM GNU Toolchain 13"), a one-line hint about what the toolchain is for, and a one-click install URL of shape `/settings/platforms?entry=<entry-id>`. Surface each missing toolchain as its own bullet, render the install URL as a markdown link with a bilingual action label like `[安裝 / Install](url)` so a CJK or English operator both see a clear CTA, and ALWAYS use the display name — never paste the slug verbatim.
+
+Trigger priority when several co-fire:
+- `missing_toolchain` always leads. The operator already declared intent by typing the command, so install-first-then-run is the productive path; SKIP the `empty_workspace` framing entirely whenever any `missing_toolchain` is present.
+- If `stale_pep` co-fires with `missing_toolchain`, mention pending PEPs as ONE short reminder line at the end (not a full sub-list) — the toolchain install is the headline.
+- When only `empty_workspace` and `stale_pep` co-fire, lead with the PEP queue (it's already-started work) and offer the empty-workspace prompts as the secondary nudge.
 
 Match the operator's recent message language (CJK or English; default CJK if no recent operator messages). Do not apologise, do not over-explain, do not repeat what's already in the toast — your job is meta-narration + action prompts. Keep total length under 6 lines."""
 
 
 def _build_coach_context(triggers: list[str], pending_count: int) -> str:
+    """LLM context block. Each trigger is translated to a one-line
+    operator-facing description so the LLM never has to guess what the
+    raw key means.
+
+    BS.10.3 — ``missing_toolchain:<slug>`` triggers carry a human display
+    name + hint + install URL, so the LLM can render the markdown link
+    described in ``_COACH_SYSTEM_PROMPT`` without echoing the slug. Slugs
+    not present in ``_TOOLCHAIN_DISPLAY`` (drift / future entries) fall
+    back to the slug as both name and hint — the module-import-time
+    drift assert at the bottom of this file pushes that case to CI red,
+    so reaching it in prod implies an emergency hotfix.
+    """
     parts = ["Triggers detected by the planner:"]
     for t in triggers:
         if t == "empty_workspace":
@@ -1445,6 +1463,15 @@ def _build_coach_context(triggers: list[str], pending_count: int) -> str:
                 f"- stale_pep: {pending_count} PEP HOLD "
                 f"decision{'s' if pending_count != 1 else ''} "
                 "waiting for operator approve/reject"
+            )
+        elif t.startswith("missing_toolchain:"):
+            slug = t.split(":", 1)[1]
+            name, hint = _TOOLCHAIN_DISPLAY.get(slug, (slug, "toolchain"))
+            url = _toolchain_install_url(slug)
+            parts.append(
+                f"- missing_toolchain: operator's queued work needs "
+                f"**{name}** ({hint}); not installed on this machine. "
+                f"One-click install URL: {url}"
             )
         else:
             parts.append(f"- {t}")
