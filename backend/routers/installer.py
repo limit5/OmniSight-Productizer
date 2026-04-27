@@ -8,6 +8,8 @@ Surface
 ``POST   /installer/jobs/{job_id}/cancel``— operator; cancel queued/running job
 ``POST   /installer/jobs/{job_id}/retry`` — operator + PEP HOLD; clone failed/cancelled
 ``GET    /installer/jobs/poll``           — sidecar long-poll claim (FOR UPDATE SKIP LOCKED)
+``GET    /installer/installed``           — operator; list currently-installed entries (BS.8.2)
+``POST   /installer/uninstall``           — operator + PEP HOLD; bulk uninstall (BS.8.2)
 
 PEP integration (ADR §7.4 + design §4.1)
 ────────────────────────────────────────
@@ -187,6 +189,52 @@ INSTALL_PEP_HOLD_TIMEOUT_S = 600.0
 # almost certainly noise.
 CANCEL_REASON_MAX_LEN = 256
 
+# BS.8.2 — Bulk uninstall (cleanup unused) constants.
+#
+# We reuse the existing ``install_jobs`` table for the audit + state
+# trail of an uninstall request rather than introducing a parallel
+# ``uninstall_jobs`` table. Two design notes:
+#
+# 1. **Sidecar long-poll isolation**: the sidecar's claim path filters
+#    on ``state='queued'``. Uninstall rows are inserted with
+#    ``state='completed'`` (PEP-approved) or ``state='cancelled'``
+#    (PEP-denied), so the sidecar will never claim them and try to run
+#    an install method on an uninstall row.
+# 2. **Discriminator lives in ``result_json``**: the row's
+#    ``result_json->>'kind' = 'uninstall'`` flags the record for the
+#    ``GET /installer/installed`` derivation. The list endpoint excludes
+#    entries whose latest install_jobs row is an uninstall, so the
+#    Installed tab and the Cleanup-unused modal stop showing the entry
+#    after a successful uninstall.
+#
+# The actual on-disk uninstall (toolchain dir removal, image GC, vendor
+# script tear-down) is deferred to a sidecar handler in a follow-up
+# row — today the PEP-approved record is the single source of truth
+# that the operator wanted the entry gone, and the InstalledTab honours
+# that even before the disk is reclaimed.
+INSTALL_KIND_UNINSTALL: str = "uninstall"
+
+# PEP tool name for catalog uninstall. Same shape as INSTALL_PEP_TOOL —
+# not on any tier whitelist, so ``classify`` returns HOLD via the
+# ``tier_unlisted`` rule and the operator must explicitly approve. The
+# decision card ToastCenter renders is the standard ``tier_unlisted``
+# coaching surface; a dedicated ``uninstall_intercept`` coaching card
+# can land alongside BS.8.4 dependency-check (where the operator
+# benefits most from the richer copy).
+UNINSTALL_PEP_TOOL: str = "uninstall_entry"
+
+# Same 10-minute HOLD ceiling as install. A bulk uninstall blocks on a
+# single PEP HOLD covering every entry in the batch; the operator gets
+# one coaching card listing the count + the entry ids and either
+# approves the whole batch or rejects it.
+UNINSTALL_PEP_HOLD_TIMEOUT_S = 600.0
+
+# Cap for a single bulk-uninstall payload. Operators picking 50+ idle
+# entries at once is plausible for a long-lived host, but 1000+ is
+# almost certainly noise / a misuse — we reject the request loudly so
+# pagination is forced.
+BULK_UNINSTALL_MAX_ENTRIES = 200
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Pydantic schemas
@@ -234,6 +282,25 @@ class InstallJobRetryBody(BaseModel):
     """
 
     idempotency_key: str = Field(pattern=IDEMPOTENCY_KEY_PATTERN)
+
+
+class BulkUninstallBody(BaseModel):
+    """POST body for ``/installer/uninstall`` (BS.8.2).
+
+    ``entry_ids`` is the list of catalog_entries the operator selected in
+    the cleanup-unused modal. The list is bounded at the
+    :data:`BULK_UNINSTALL_MAX_ENTRIES` ceiling so a single request never
+    blows the PEP coaching card out (and so a server-side typo can't
+    queue 100k uninstalls).
+
+    Each entry id must match the same ``ENTRY_ID_PATTERN`` the install
+    create body uses; duplicates in the list are deduplicated server-side
+    before the PEP HOLD fires (one entry = one row even if the operator
+    submitted it twice).
+    """
+
+    entry_ids: list[str] = Field(min_length=1, max_length=BULK_UNINSTALL_MAX_ENTRIES)
+    reason: str | None = Field(default=None, max_length=CANCEL_REASON_MAX_LEN)
 
 
 # BS.4.4 — sidecar progress emit. Same wire shape that
@@ -1123,6 +1190,392 @@ async def retry_job(
         idempotency_key=body.idempotency_key,
     )
     return await create_job(create_body, request, user)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  GET /installer/installed — operator (BS.8.2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _is_uninstall_record(result_json: Any) -> bool:
+    """Return True when ``result_json`` flags the row as an uninstall.
+
+    Uninstall rows are inserted by ``POST /installer/uninstall`` with
+    ``result_json = {"kind": "uninstall", ...}`` and ``state='completed'``
+    (PEP-approved) or ``state='cancelled'`` (PEP-denied). The list
+    endpoint excludes any entry whose latest install_jobs row is an
+    uninstall, so the InstalledTab and the Cleanup-unused modal both
+    stop showing the entry the moment the operator approves the
+    uninstall — even though the actual disk cleanup is deferred.
+    """
+    coerced = _coerce_json(result_json, None)
+    if not isinstance(coerced, dict):
+        return False
+    return coerced.get("kind") == INSTALL_KIND_UNINSTALL
+
+
+@router.get("/installed")
+async def list_installed_entries(
+    user: _au.User = Depends(_au.require_operator),
+) -> JSONResponse:
+    """List currently-installed catalog entries for the caller's tenant.
+
+    BS.8.2: derives the "installed" set from the install_jobs table —
+    for each ``entry_id`` in the tenant we pick the latest row by
+    ``queued_at DESC`` and treat the entry as installed when that row
+    is ``state='completed'`` AND its ``result_json`` is *not* an
+    uninstall record (see :func:`_is_uninstall_record`).
+
+    Each row in the response carries the post-install bookkeeping
+    fields the BS.8.1 ``InstalledTab`` consumes:
+
+    * ``entry_id`` / ``display_name`` / ``vendor`` / ``family`` /
+      ``version`` / ``description`` — pulled from ``catalog_entries``
+      via a LEFT JOIN. ``description`` lives in ``metadata.description``
+      following the BS.6 catalog convention.
+    * ``disk_usage_bytes`` — falls back to ``catalog_entries.size_bytes``
+      until BS.8.3 wires real on-disk measurement.
+    * ``used_by_workspace_count`` — defaults to ``0`` until the
+      workspace-platform link table lands; the field is surfaced today
+      so the UI doesn't need to skip a column when the data appears.
+    * ``last_used_at`` — null today (BS.8.x will read the workspace
+      activity timestamp); the cleanup modal currently treats null +
+      old ``installed_at`` as "idle since install", which is the
+      conservative interpretation.
+    * ``installed_at`` — install_jobs.completed_at on the latest
+      successful install.
+    * ``update_available`` / ``available_version`` — null today;
+      surfaced for forward-compat with the catalog feed lookahead
+      that BS.6.x will land.
+    * ``source`` — ``shipped`` / ``operator`` / ``override`` /
+      ``subscription`` from the resolved catalog row.
+
+    Module-global / cross-worker state audit
+    ────────────────────────────────────────
+    Pure SELECT path; no shared in-memory state. Each tenant's caller
+    sees only their own rows because every WHERE filters by tenant_id.
+    Multi-worker safe: each worker's pool acquires its own asyncpg
+    connection; the SELECT is repeatable-read by default and the
+    response is rendered from the snapshot.
+
+    Read-after-write timing audit
+    ─────────────────────────────
+    Operator just approved an uninstall via POST /installer/uninstall
+    → INSERT install_jobs (state='completed', kind='uninstall') →
+    HTTP 200 returns. A subsequent GET /installer/installed sees the
+    new row by PG MVCC (commit happened before HTTP 200), so the
+    optimistic frontend refresh stays consistent with the backend.
+    """
+    tid = _ensure_tenant(user)
+
+    # DISTINCT ON gets the latest install_jobs row per entry_id within
+    # the tenant. We don't filter by state here — instead we filter
+    # in Python so the "latest is uninstall" check has access to
+    # ``result_json``. Filtering on state in SQL would make the test
+    # "did the operator just uninstall it?" much harder to encode.
+    sql = """
+        SELECT DISTINCT ON (j.entry_id)
+            j.id          AS install_job_id,
+            j.entry_id    AS entry_id,
+            j.state       AS state,
+            j.result_json AS result_json,
+            j.queued_at   AS queued_at,
+            j.completed_at AS completed_at,
+            c.display_name AS display_name,
+            c.vendor       AS vendor,
+            c.family       AS family,
+            c.version      AS version,
+            c.metadata     AS metadata,
+            c.size_bytes   AS size_bytes,
+            c.source       AS source
+        FROM install_jobs j
+        LEFT JOIN LATERAL (
+            SELECT display_name, vendor, family, version,
+                   metadata, size_bytes, source
+            FROM catalog_entries
+            WHERE id = j.entry_id
+              AND (tenant_id IS NULL OR tenant_id = $1)
+              AND hidden = FALSE
+            ORDER BY CASE source
+                       WHEN 'override'     THEN 0
+                       WHEN 'operator'     THEN 1
+                       WHEN 'subscription' THEN 2
+                       WHEN 'shipped'      THEN 3
+                       ELSE 4
+                     END
+            LIMIT 1
+        ) c ON TRUE
+        WHERE j.tenant_id = $1
+        ORDER BY j.entry_id, j.queued_at DESC
+    """
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(sql, tid)
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        if row["state"] != "completed":
+            # Latest row for this entry isn't a successful install —
+            # entry isn't installed (still pending / failed / cancelled).
+            continue
+        if _is_uninstall_record(row["result_json"]):
+            # Latest row is the operator-approved uninstall — the entry
+            # has been "uninstalled" from a state-of-truth perspective
+            # even if the disk cleanup is deferred.
+            continue
+        # Catalog row may be missing (operator-installed entry whose
+        # catalog row was later removed). Keep the row visible so the
+        # operator can still uninstall it; populate fields with safe
+        # fallbacks so the frontend doesn't blow up on null display_name.
+        meta = _coerce_json(row["metadata"], {}) if row["metadata"] is not None else {}
+        description: Any = None
+        if isinstance(meta, dict):
+            d = meta.get("description")
+            if isinstance(d, str):
+                description = d
+        size_bytes = (
+            int(row["size_bytes"]) if row["size_bytes"] is not None else None
+        )
+        items.append({
+            "entry_id": row["entry_id"],
+            "display_name": row["display_name"] or row["entry_id"],
+            "vendor": row["vendor"] or "",
+            "family": row["family"] or "custom",
+            "version": row["version"],
+            "description": description,
+            "disk_usage_bytes": size_bytes,
+            "used_by_workspace_count": 0,
+            "last_used_at": None,
+            "installed_at": _ts_to_iso(row["completed_at"]),
+            "update_available": False,
+            "available_version": None,
+            "source": row["source"],
+        })
+
+    return JSONResponse(
+        status_code=200,
+        content={"items": items, "count": len(items)},
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  POST /installer/uninstall — operator + PEP HOLD (BS.8.2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _new_uninstall_idempotency_key() -> str:
+    """Generate a fresh idempotency_key for an uninstall row.
+
+    Pattern matches ``IDEMPOTENCY_KEY_PATTERN`` so the row's UNIQUE
+    constraint is honoured. Uninstall rows are short-lived audit
+    artefacts — duplicate POSTs from the cleanup modal are guarded
+    by the modal's "Uninstall in progress" disabled state, so a
+    server-side dedupe is unnecessary; each row gets its own key.
+    """
+    return _secrets.token_hex(16)
+
+
+@router.post("/uninstall", status_code=200)
+async def bulk_uninstall(
+    body: BulkUninstallBody,
+    request: Request,
+    user: _au.User = Depends(_au.require_operator),
+) -> JSONResponse:
+    """Bulk uninstall a list of catalog entries; HOLD via PEP gateway.
+
+    BS.8.2 cleanup-unused flow. The operator picks N idle entries in the
+    Cleanup-unused modal and clicks "Uninstall N selected". One PEP
+    HOLD fires for the whole batch (``tool='uninstall_entry'`` with
+    arguments listing the entry ids and counts). On approve, every
+    entry id gets an install_jobs row with ``state='completed'`` and
+    ``result_json = {"kind": "uninstall", ...}``; on deny, every entry
+    id gets a row with ``state='cancelled'`` and ``error_reason =
+    'pep_<rule>'`` so the operator can see in the audit log that the
+    bulk operation was rejected.
+
+    Why one HOLD instead of N? Bulk-cleanup is a single intent ("get
+    rid of all of these"); presenting the operator with N coaching
+    cards is hostile UX — they'd approve them all anyway. The audit
+    trail still shows N rows, one per uninstalled entry, so per-entry
+    forensics is preserved.
+
+    Sidecar interaction
+    ───────────────────
+    Uninstall rows are inserted with ``state='completed'`` /
+    ``state='cancelled'`` (NOT ``state='queued'``), so the sidecar's
+    long-poll claim — ``WHERE state='queued'`` — never sees them. The
+    actual on-disk cleanup is deferred to a follow-up sidecar handler;
+    today the row is the audit + state-of-truth marker that the
+    operator approved removing the entry.
+
+    Read-after-write timing audit (SOP Step 1)
+    ──────────────────────────────────────────
+    Two transactions: (1) PEP HOLD evaluate in a separate tx so the
+    pool conn is released during the wait; (2) bulk INSERT in a
+    single tx after the HOLD resolves. A frontend GET
+    ``/installer/installed`` between (1) and (2) sees the entry as
+    still installed (no uninstall row exists yet); a GET *after* (2)
+    sees the entry filtered out. Optimistic frontend remove-then-poll
+    is therefore safe: the optimistic state matches the backend the
+    instant (2) commits.
+    """
+    tid = _ensure_tenant(user)
+
+    # Dedupe + validate every entry_id matches the documented pattern.
+    # Pydantic's ``Field(max_length=BULK_UNINSTALL_MAX_ENTRIES)`` already
+    # caps the list; we still need per-id regex enforcement (Pydantic
+    # validates list length, not per-item shape unless we use a constr).
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for raw in body.entry_ids:
+        eid = raw.strip()
+        if not _ENTRY_ID_RE.match(eid) or len(eid) > ENTRY_ID_MAX_LEN:
+            raise HTTPException(
+                status_code=422,
+                detail=f"invalid entry_id: {raw!r}; must match {ENTRY_ID_PATTERN}",
+            )
+        if eid in seen:
+            continue
+        seen.add(eid)
+        deduped.append(eid)
+    if not deduped:
+        raise HTTPException(
+            status_code=422,
+            detail="entry_ids must contain at least one unique id",
+        )
+
+    # PEP HOLD — outside any pool conn so the conn isn't held for the
+    # 10-minute (worst-case) operator decision wait. The arguments dict
+    # carries enough context for the coaching card to render a useful
+    # summary even before the dedicated ``uninstall_intercept`` card
+    # ships in BS.8.4.
+    pep_decision = None
+    pep_error: str | None = None
+    try:
+        pep_decision = await _pep.evaluate(
+            tool=UNINSTALL_PEP_TOOL,
+            arguments={
+                "tenant_id": tid,
+                "entry_ids": deduped,
+                "count": len(deduped),
+                "actor": user.email,
+                "reason": body.reason,
+            },
+            agent_id=f"operator:{user.email}",
+            tier="t1",
+            hold_timeout_s=UNINSTALL_PEP_HOLD_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 — gateway breaker handles
+        pep_error = f"pep_gateway_error:{exc.__class__.__name__}"
+        logger.warning(
+            "pep evaluate raised for bulk uninstall (tenant=%s, count=%d): %s",
+            tid, len(deduped), exc,
+        )
+
+    approved = (
+        pep_decision is not None
+        and pep_decision.action is _pep.PepAction.auto_allow
+    )
+    if approved:
+        new_state = "completed"
+        decision_id = pep_decision.decision_id  # type: ignore[union-attr]
+        error_reason: str | None = None
+    else:
+        new_state = "cancelled"
+        decision_id = (
+            pep_decision.decision_id if pep_decision is not None else None
+        )
+        if pep_decision is None:
+            error_reason = pep_error or "pep_gateway_unknown_error"
+        else:
+            error_reason = f"pep_{pep_decision.rule or 'denied'}"
+
+    # Insert one row per (deduped) entry id. Each row carries:
+    #   • a fresh ``ij-`` id + idempotency_key
+    #   • result_json discriminator so GET /installer/installed filters
+    #   • state='completed' on approve, 'cancelled' on deny
+    items: list[dict[str, Any]] = []
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            for eid in deduped:
+                row_id = _new_install_job_id()
+                idem = _new_uninstall_idempotency_key()
+                payload = {
+                    "kind": INSTALL_KIND_UNINSTALL,
+                    "entry_id": eid,
+                    "actor": user.email,
+                }
+                if body.reason:
+                    payload["reason"] = body.reason
+                inserted = await conn.fetchrow(
+                    "INSERT INTO install_jobs "
+                    "  (id, tenant_id, entry_id, state, idempotency_key, "
+                    "   protocol_version, requested_by, result_json, "
+                    "   error_reason, pep_decision_id, completed_at) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, "
+                    "        $8::jsonb, $9, $10, now()) "
+                    f"RETURNING {_INSTALL_JOB_RETURNING_COLS}",
+                    row_id, tid, eid, new_state, idem,
+                    DEFAULT_SIDECAR_PROTOCOL_VERSION, user.id,
+                    json.dumps(payload),
+                    error_reason, decision_id,
+                )
+                items.append({
+                    "entry_id": eid,
+                    "job_id": row_id,
+                    "action": "approved" if approved else "denied",
+                    "state": inserted["state"],
+                    "reason": error_reason,
+                    "pep_decision_id": decision_id,
+                })
+
+    # Audit emit — one row per uninstall, mirroring the install audit
+    # convention. The bus is best-effort; a failure here doesn't change
+    # the response.
+    audit_action = (
+        "installer.entry_uninstalled" if approved
+        else "installer.entry_uninstall_denied"
+    )
+    for it in items:
+        _emit_audit_safely(
+            action=audit_action,
+            entity_id=it["job_id"],
+            actor=user.email,
+            before=None,
+            after={
+                "entry_id": it["entry_id"],
+                "state": it["state"],
+                "kind": INSTALL_KIND_UNINSTALL,
+                "pep_decision_id": decision_id,
+                "reason": error_reason,
+            },
+        )
+
+    if not approved:
+        # PEP rejected the bulk request. Surface the same shape
+        # ``create_job`` does for the single-entry deny path so the
+        # frontend's <ApiErrorToastCenter /> can apply uniform parsing.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "pep_denied",
+                "reason": error_reason,
+                "count": len(items),
+                "items": items,
+            },
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "items": items,
+            "approved_count": len(items),
+            "denied_count": 0,
+            "pep_decision_id": decision_id,
+        },
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

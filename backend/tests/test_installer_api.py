@@ -1034,6 +1034,206 @@ async def test_viewer_role_denied_on_post_jobs(bs24_client, monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  BS.8.2 — GET /installer/installed + POST /installer/uninstall
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def _seed_completed_install(
+    pool, *, tid: str, entry_id: str, job_id: str | None = None,
+    requested_by: str = "anonymous",
+    completed_at_offset_seconds: int = 0,
+) -> str:
+    """Insert a directly-completed install_jobs row so the entry
+    surfaces in ``GET /installer/installed`` without going through the
+    HOLD path. Mirrors what a real install would write after the
+    sidecar finishes; bypasses the sidecar layer entirely.
+
+    Returns the row's id so the test can purge it.
+    """
+    import secrets as _sec
+    job_id = job_id or f"ij-{_sec.token_hex(6)}"
+    idem = uuid.uuid4().hex
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO install_jobs "
+            "  (id, tenant_id, entry_id, state, idempotency_key, "
+            "   protocol_version, requested_by, completed_at) "
+            "VALUES ($1, $2, $3, 'completed', $4, 1, $5, "
+            "        now() + ($6 || ' seconds')::interval)",
+            job_id, tid, entry_id, idem, requested_by,
+            str(completed_at_offset_seconds),
+        )
+    return job_id
+
+
+@_requires_pg
+async def test_get_installed_lists_completed_entries(
+    bs24_client, pg_test_pool, seeded_anon_user,
+):
+    """A tenant with one completed install sees the entry in
+    ``/installer/installed``; the response shape carries the bookkeeping
+    fields the BS.8.1 InstalledTab consumes."""
+    entry_id = "bs82-installed-basic"
+    try:
+        await _seed_shipped(pg_test_pool, entry_id, family="mobile")
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=entry_id,
+        )
+        res = await bs24_client.get("/api/v1/installer/installed")
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["count"] == 1
+        item = body["items"][0]
+        assert item["entry_id"] == entry_id
+        assert item["display_name"] == f"Test {entry_id}"
+        assert item["family"] == "mobile"
+        assert item["installed_at"] is not None
+        # Today these are placeholders (workspace-link table lands later).
+        assert item["used_by_workspace_count"] == 0
+        assert item["last_used_at"] is None
+        assert item["update_available"] is False
+    finally:
+        await _purge_jobs_and_entry(pg_test_pool, entry_id)
+
+
+@_requires_pg
+async def test_get_installed_excludes_uninstalled_entries(
+    bs24_client, pg_test_pool, seeded_anon_user,
+):
+    """Once the operator has approved an uninstall (latest install_jobs
+    row is the uninstall record), the entry no longer appears in
+    ``/installer/installed`` even though older completed rows survive
+    in the audit trail."""
+    from backend.routers import installer
+    entry_id = "bs82-installed-uninstalled"
+    monkeypatch_target = installer._pep
+    try:
+        await _seed_shipped(pg_test_pool, entry_id, family="embedded")
+        # Older install — entry IS installed at this point.
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=entry_id,
+            completed_at_offset_seconds=-100,
+        )
+        # Issue an uninstall via the API with PEP auto-approve.
+        approve_stub = _make_pep_stub("auto_allow")
+        original_evaluate = monkeypatch_target.evaluate
+        monkeypatch_target.evaluate = approve_stub  # type: ignore[assignment]
+        try:
+            res = await bs24_client.post(
+                "/api/v1/installer/uninstall",
+                json={"entry_ids": [entry_id]},
+            )
+        finally:
+            monkeypatch_target.evaluate = original_evaluate  # type: ignore[assignment]
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["approved_count"] == 1
+        assert body["denied_count"] == 0
+        # GET /installer/installed must now exclude the entry.
+        res2 = await bs24_client.get("/api/v1/installer/installed")
+        assert res2.status_code == 200, res2.text
+        items_now = res2.json()["items"]
+        assert all(it["entry_id"] != entry_id for it in items_now), items_now
+    finally:
+        await _purge_jobs_and_entry(pg_test_pool, entry_id)
+
+
+@_requires_pg
+async def test_post_uninstall_pep_deny_403_records_cancelled_rows(
+    bs24_client, pg_test_pool, monkeypatch, seeded_anon_user,
+):
+    """PEP deny → 403; the uninstall row is recorded with
+    ``state='cancelled'`` + ``error_reason='pep_<rule>'`` so the
+    audit log captures the rejection."""
+    from backend.routers import installer
+    entry_id = "bs82-uninstall-deny"
+    monkeypatch.setattr(
+        installer._pep, "evaluate",
+        _make_pep_stub("deny", rule="tier_unlisted"),
+    )
+    try:
+        await _seed_shipped(pg_test_pool, entry_id)
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=entry_id,
+        )
+        res = await bs24_client.post(
+            "/api/v1/installer/uninstall",
+            json={"entry_ids": [entry_id]},
+        )
+        assert res.status_code == 403, res.text
+        # The cancelled uninstall row exists.
+        async with pg_test_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT state, error_reason, result_json::text "
+                "FROM install_jobs "
+                "WHERE entry_id = $1 AND state = 'cancelled'",
+                entry_id,
+            )
+        assert row is not None
+        assert row["state"] == "cancelled"
+        assert row["error_reason"].startswith("pep_")
+        assert "uninstall" in row["result_json"]
+    finally:
+        await _purge_jobs_and_entry(pg_test_pool, entry_id)
+
+
+@_requires_pg
+async def test_post_uninstall_dedupes_repeated_entry_ids(
+    bs24_client, pg_test_pool, monkeypatch, seeded_anon_user,
+):
+    """Duplicate entry_ids in the body are collapsed to a single row
+    (operator's accidental double-click in the modal does not produce
+    duplicate uninstall rows)."""
+    from backend.routers import installer
+    entry_id = "bs82-uninstall-dedupe"
+    monkeypatch.setattr(
+        installer._pep, "evaluate",
+        _make_pep_stub("auto_allow"),
+    )
+    try:
+        await _seed_shipped(pg_test_pool, entry_id)
+        await _seed_completed_install(
+            pg_test_pool, tid="t-default", entry_id=entry_id,
+        )
+        res = await bs24_client.post(
+            "/api/v1/installer/uninstall",
+            json={"entry_ids": [entry_id, entry_id, entry_id]},
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["approved_count"] == 1
+        # Only ONE uninstall row — the dedupe happens before INSERT.
+        async with pg_test_pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM install_jobs "
+                "WHERE entry_id = $1 AND result_json::text LIKE '%uninstall%'",
+                entry_id,
+            )
+        assert count == 1
+    finally:
+        await _purge_jobs_and_entry(pg_test_pool, entry_id)
+
+
+@_requires_pg
+async def test_post_uninstall_rejects_malformed_entry_id(
+    bs24_client, pg_test_pool, monkeypatch, seeded_anon_user,
+):
+    """Bad entry_id in the list → 422 before the PEP HOLD fires; no
+    rows inserted, no PEP evaluate call."""
+    from backend.routers import installer
+
+    async def _should_not_be_called(*a, **k):
+        raise AssertionError("PEP must not run when entry_ids fail validation")
+
+    monkeypatch.setattr(installer._pep, "evaluate", _should_not_be_called)
+    res = await bs24_client.post(
+        "/api/v1/installer/uninstall",
+        json={"entry_ids": ["BAD ID with spaces"]},
+    )
+    assert res.status_code == 422
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Self-fingerprint guard — pre-commit pattern
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

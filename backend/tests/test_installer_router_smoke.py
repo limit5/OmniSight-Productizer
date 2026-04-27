@@ -37,7 +37,7 @@ def test_router_prefix_and_tags():
 
 
 def test_route_registration_full_set():
-    """Every endpoint in the BS.2.2 spec is registered exactly once."""
+    """Every endpoint in the BS.2.2 + BS.8.2 spec is registered once."""
     from backend.routers import installer
     pairs = sorted(
         (sorted(r.methods)[0], r.path)
@@ -52,6 +52,9 @@ def test_route_registration_full_set():
         ("POST", "/installer/jobs/{job_id}/retry"),
         ("POST", "/installer/jobs/{job_id}/progress"),
         ("GET", "/installer/jobs/poll"),
+        # BS.8.2 — Cleanup-unused list + bulk uninstall.
+        ("GET", "/installer/installed"),
+        ("POST", "/installer/uninstall"),
     ])
     assert pairs == expected
 
@@ -326,6 +329,74 @@ def test_install_job_retry_body_validates_idempotency_key_pattern():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Pydantic schemas — BulkUninstallBody (BS.8.2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def test_bulk_uninstall_body_accepts_minimal_list():
+    from backend.routers.installer import BulkUninstallBody
+    body = BulkUninstallBody(entry_ids=["foo-bar"])
+    assert body.entry_ids == ["foo-bar"]
+    assert body.reason is None
+
+
+def test_bulk_uninstall_body_rejects_empty_list():
+    import pydantic
+    from backend.routers.installer import BulkUninstallBody
+    with pytest.raises(pydantic.ValidationError):
+        BulkUninstallBody(entry_ids=[])
+
+
+def test_bulk_uninstall_body_rejects_oversized_list():
+    import pydantic
+    from backend.routers.installer import (
+        BULK_UNINSTALL_MAX_ENTRIES, BulkUninstallBody,
+    )
+    with pytest.raises(pydantic.ValidationError):
+        BulkUninstallBody(
+            entry_ids=[f"id-{i}" for i in range(BULK_UNINSTALL_MAX_ENTRIES + 1)],
+        )
+
+
+def test_bulk_uninstall_body_rejects_oversized_reason():
+    import pydantic
+    from backend.routers.installer import (
+        BulkUninstallBody, CANCEL_REASON_MAX_LEN,
+    )
+    with pytest.raises(pydantic.ValidationError):
+        BulkUninstallBody(
+            entry_ids=["foo"],
+            reason="x" * (CANCEL_REASON_MAX_LEN + 1),
+        )
+
+
+def test_uninstall_pep_tool_constant_is_stable():
+    """The PEP tool string must stay stable — pep_gateway's `tier_unlisted`
+    branch + a future `uninstall_intercept` coaching card both key off
+    this exact string."""
+    from backend.routers import installer
+    assert installer.UNINSTALL_PEP_TOOL == "uninstall_entry"
+    assert installer.INSTALL_KIND_UNINSTALL == "uninstall"
+
+
+def test_is_uninstall_record_recognises_kind_field():
+    from backend.routers.installer import _is_uninstall_record
+
+    # dict with kind=uninstall → True
+    assert _is_uninstall_record({"kind": "uninstall"}) is True
+    # dict but kind is something else → False
+    assert _is_uninstall_record({"kind": "install"}) is False
+    # dict but no kind key → False
+    assert _is_uninstall_record({"entry_id": "foo"}) is False
+    # None / empty / wrong type → False
+    assert _is_uninstall_record(None) is False
+    assert _is_uninstall_record("") is False
+    assert _is_uninstall_record([]) is False
+    # JSON string also recognised (defence-in-depth for asyncpg without codec)
+    assert _is_uninstall_record('{"kind": "uninstall"}') is True
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Auth dependency wiring (mirrors test_catalog_router_smoke pattern)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -389,6 +460,25 @@ def test_poll_uses_require_admin_until_sidecar_token_lands():
         installer.router, "GET", "/installer/jobs/poll",
     )
     assert _au.require_admin in deps
+
+
+def test_get_installed_uses_require_operator():
+    """BS.8.2 — the cleanup-unused list is operator-only (no admin gate
+    needed because every row is already tenant-scoped + read-only)."""
+    from backend import auth as _au
+    from backend.routers import installer
+    deps = _route_dependencies(installer.router, "GET", "/installer/installed")
+    assert _au.require_operator in deps
+
+
+def test_post_uninstall_uses_require_operator():
+    """BS.8.2 — bulk uninstall must run through the operator role + the
+    PEP HOLD path. This test pins the operator gate; the PEP HOLD lives
+    inside the handler body, exercised by the PG-live integration suite."""
+    from backend import auth as _au
+    from backend.routers import installer
+    deps = _route_dependencies(installer.router, "POST", "/installer/uninstall")
+    assert _au.require_operator in deps
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -5814,6 +5814,149 @@ export async function getInstallJob(jobId: string): Promise<InstallJob> {
   )
 }
 
+// ─── BS.8.2 — Installed entries + Cleanup unused ──────────────────────────
+//
+// The Installed tab (`<InstalledTab />`) needs a server-derived list of
+// "currently installed" catalog entries — i.e. entries where the latest
+// install_jobs row is state='completed' AND not flagged as an uninstall
+// record. The backend's `GET /installer/installed` does that derivation
+// (see `backend/routers/installer.py::list_installed_entries`); this client
+// helper just unwraps the response.
+//
+// Bulk uninstall flows through the same R20-A PEP gateway HOLD path the
+// install side uses, with `tool="uninstall_entry"` (also tier_unlisted →
+// HOLD). One POST per click — backend dedupes the entry_ids and runs ONE
+// PEP HOLD covering the whole batch, so the operator sees a single
+// coaching card listing all selected entries instead of N cards.
+
+/** A single installed catalog entry, as derived by the backend from the
+ *  install_jobs table. Mirrors the `InstalledEntry` UI surface in
+ *  `components/omnisight/installed-tab.tsx` (snake_case wire ↔ camelCase
+ *  UI bridge happens in `useInstalledEntries`). */
+export interface InstalledEntryRow {
+  entry_id: string
+  display_name: string
+  vendor: string
+  family: string
+  version: string | null
+  description: string | null
+  disk_usage_bytes: number | null
+  used_by_workspace_count: number
+  last_used_at: string | null
+  installed_at: string | null
+  update_available: boolean
+  available_version: string | null
+  source: "shipped" | "operator" | "override" | "subscription" | null
+}
+
+export interface ListInstalledEntriesResponse {
+  items: InstalledEntryRow[]
+  count: number
+}
+
+/** GET /installer/installed — list installed catalog entries for the
+ *  caller's tenant. Tenant scope + RBAC are handled by the request
+ *  layer. */
+export async function listInstalledEntries(): Promise<ListInstalledEntriesResponse> {
+  return request<ListInstalledEntriesResponse>("/installer/installed", {
+    method: "GET",
+  })
+}
+
+/** Per-entry result returned by the bulk-uninstall endpoint. ``action``
+ *  is ``"approved"`` when the PEP HOLD resolved to allow + the row was
+ *  inserted with ``state='completed'``; ``"denied"`` when PEP rejected
+ *  the batch (every entry in the batch shares the same denial reason);
+ *  ``"error"`` for the future case where a per-entry validation fails
+ *  even though the batch was approved (today the dedupe + regex check
+ *  happens before the HOLD so this code path is reserved). */
+export interface BulkUninstallResultItem {
+  entry_id: string
+  job_id: string
+  action: "approved" | "denied" | "error"
+  state: "completed" | "cancelled" | "failed"
+  reason: string | null
+  pep_decision_id: string | null
+}
+
+export interface BulkUninstallResponse {
+  items: BulkUninstallResultItem[]
+  approved_count: number
+  denied_count: number
+  pep_decision_id: string | null
+}
+
+export interface BulkUninstallOptions {
+  /** Optional free-text justification recorded on every audit row +
+   *  surfaced to the PEP coaching card. Capped at 256 chars on the
+   *  backend (BulkUninstallBody.reason). */
+  reason?: string | null
+}
+
+/** POST /installer/uninstall — one PEP HOLD covering every entry id in
+ *  the batch. On approve → 200 + per-entry approved rows. On deny → 403
+ *  with the PEP rule on every entry's ``reason`` so the
+ *  ``<ApiErrorToastCenter />`` can surface a single denial card. */
+export async function bulkUninstallEntries(
+  entryIds: ReadonlyArray<string>,
+  options?: BulkUninstallOptions,
+): Promise<BulkUninstallResponse> {
+  const body: { entry_ids: string[]; reason?: string } = {
+    entry_ids: [...entryIds],
+  }
+  if (typeof options?.reason === "string" && options.reason.length > 0) {
+    body.reason = options.reason
+  }
+  return request<BulkUninstallResponse>("/installer/uninstall", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+/** 30 days, in milliseconds. Anything idle longer than this surfaces in
+ *  the cleanup-unused candidate list. The threshold lives next to the
+ *  helper so tests can rely on a single source of truth, and so a
+ *  future "configurable per tenant" rollout has a single migration
+ *  point. */
+export const INSTALLED_ENTRY_IDLE_THRESHOLD_MS = 30 * 24 * 60 * 60 * 1000
+
+/** Predicate used by the cleanup-unused modal to decide whether an
+ *  installed entry is a 30-day-idle candidate.
+ *
+ *  An entry is a candidate when:
+ *    1. ``usedByWorkspaceCount`` is zero (or unknown) — entries with
+ *       active dependants are never candidates regardless of when they
+ *       were last touched. BS.8.4 layers a hard "depends-on" gate on
+ *       top of this for the per-row uninstall path; the cleanup modal
+ *       conservatively excludes them too.
+ *    2. ``lastUsedAt`` is older than 30 days, OR is missing AND
+ *       ``installedAt`` is older than 30 days, OR both are missing
+ *       (operator-installed before BS.8 started recording timestamps,
+ *       so we err on the side of "show it so the operator can decide").
+ *
+ *  ``now`` is injectable so unit tests can pin the clock. */
+export function isCleanupCandidate(
+  entry: {
+    lastUsedAt?: string | null
+    installedAt?: string | null
+    usedByWorkspaceCount?: number
+  },
+  now: Date = new Date(),
+): boolean {
+  const used = entry.usedByWorkspaceCount ?? 0
+  if (used > 0) return false
+  const ref = entry.lastUsedAt || entry.installedAt
+  if (!ref) {
+    // No timestamps at all — surface as a candidate so the operator
+    // can make the call manually.
+    return true
+  }
+  const t = Date.parse(ref)
+  if (!Number.isFinite(t)) return true
+  const idleMs = now.getTime() - t
+  return idleMs >= INSTALLED_ENTRY_IDLE_THRESHOLD_MS
+}
+
 /** BS.7.7 — POST /installer/jobs/{id}/cancel — flip a queued / running
  *  install job's PG row to ``state='cancelled'``. The sidecar's next
  *  ``report_progress`` round-trip sees the new state and the in-flight

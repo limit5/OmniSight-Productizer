@@ -31,12 +31,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   ApiError,
+  bulkUninstallEntries,
   cancelInstallJob,
   createInstallJob,
   generateInstallIdempotencyKey,
   getInstallJob,
+  INSTALLED_ENTRY_IDLE_THRESHOLD_MS,
+  isCleanupCandidate,
+  listInstalledEntries,
   retryInstallJob,
+  type BulkUninstallResponse,
   type InstallJob,
+  type InstalledEntryRow,
+  type ListInstalledEntriesResponse,
 } from "@/lib/api"
 
 const ENDPOINT = "/api/v1/installer/jobs"
@@ -384,6 +391,180 @@ describe("BS.7.1 — installer API client", () => {
       await expect(cancelInstallJob("not!valid")).rejects.toBeInstanceOf(
         ApiError,
       )
+    })
+  })
+
+  // ─── BS.8.2 — installed list + bulk uninstall + cleanup predicate ─────
+  describe("BS.8.2 — listInstalledEntries()", () => {
+    it("GETs /api/v1/installer/installed and returns the response payload", async () => {
+      const sample: InstalledEntryRow = {
+        entry_id: "neural-blur-sdk",
+        display_name: "Neural Blur SDK",
+        vendor: "Acme",
+        family: "mobile",
+        version: "1.2.3",
+        description: null,
+        disk_usage_bytes: 1024,
+        used_by_workspace_count: 0,
+        last_used_at: null,
+        installed_at: "2026-04-25T08:00:00Z",
+        update_available: false,
+        available_version: null,
+        source: "operator",
+      }
+      const payload: ListInstalledEntriesResponse = {
+        items: [sample],
+        count: 1,
+      }
+      const spy = mockFetchOnce(200, payload)
+      const res = await listInstalledEntries()
+      expect(res).toEqual(payload)
+      expect(spy).toHaveBeenCalledTimes(1)
+      const [url, init] = spy.mock.calls[0]!
+      expect(url).toBe("/api/v1/installer/installed")
+      expect((init as RequestInit).method).toBe("GET")
+    })
+
+    it("throws ApiError on a 403 (caller lacks operator role)", async () => {
+      mockFetchOnce(403, { detail: "operator role required" })
+      await expect(listInstalledEntries()).rejects.toBeInstanceOf(ApiError)
+    })
+  })
+
+  describe("BS.8.2 — bulkUninstallEntries()", () => {
+    const SAMPLE: BulkUninstallResponse = {
+      items: [
+        {
+          entry_id: "neural-blur-sdk",
+          job_id: "ij-aaaaaaaaaaaa",
+          action: "approved",
+          state: "completed",
+          reason: null,
+          pep_decision_id: "de-deadbeefcafe",
+        },
+      ],
+      approved_count: 1,
+      denied_count: 0,
+      pep_decision_id: "de-deadbeefcafe",
+    }
+
+    it("POSTs to /api/v1/installer/uninstall with the entry_ids array", async () => {
+      const spy = mockFetchOnce(200, SAMPLE)
+      const res = await bulkUninstallEntries(["neural-blur-sdk"])
+      expect(res).toEqual(SAMPLE)
+      const [url, init] = spy.mock.calls[0]!
+      expect(url).toBe("/api/v1/installer/uninstall")
+      expect((init as RequestInit).method).toBe("POST")
+      expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+        entry_ids: ["neural-blur-sdk"],
+      })
+    })
+
+    it("forwards a non-empty reason as JSON body", async () => {
+      const spy = mockFetchOnce(200, SAMPLE)
+      await bulkUninstallEntries(["a"], { reason: "long idle" })
+      const body = JSON.parse(
+        (spy.mock.calls[0]![1] as RequestInit).body as string,
+      )
+      expect(body).toEqual({ entry_ids: ["a"], reason: "long idle" })
+    })
+
+    it("omits the reason field when null / undefined / empty string", async () => {
+      const spyA = mockFetchOnce(200, SAMPLE)
+      await bulkUninstallEntries(["a"], { reason: null })
+      expect(
+        JSON.parse((spyA.mock.calls[0]![1] as RequestInit).body as string).reason,
+      ).toBeUndefined()
+
+      const spyB = mockFetchOnce(200, SAMPLE)
+      await bulkUninstallEntries(["a"], { reason: undefined })
+      expect(
+        JSON.parse((spyB.mock.calls[0]![1] as RequestInit).body as string).reason,
+      ).toBeUndefined()
+
+      const spyC = mockFetchOnce(200, SAMPLE)
+      await bulkUninstallEntries(["a"], { reason: "" })
+      expect(
+        JSON.parse((spyC.mock.calls[0]![1] as RequestInit).body as string).reason,
+      ).toBeUndefined()
+    })
+
+    it("snapshots the entry_ids array (caller-side mutation does not bleed into the body)", async () => {
+      const spy = mockFetchOnce(200, SAMPLE)
+      const ids = ["a", "b"]
+      await bulkUninstallEntries(ids)
+      ids.push("c")  // operator side-effect
+      const body = JSON.parse((spy.mock.calls[0]![1] as RequestInit).body as string)
+      expect(body.entry_ids).toEqual(["a", "b"])
+    })
+
+    it("throws ApiError on a 403 PEP-deny response (whole batch rejected)", async () => {
+      mockFetchOnce(403, {
+        detail: {
+          error: "pep_denied",
+          reason: "pep_tier_unlisted",
+          count: 1,
+          items: [{ entry_id: "a", action: "denied", state: "cancelled" }],
+        },
+      })
+      await expect(bulkUninstallEntries(["a"])).rejects.toBeInstanceOf(ApiError)
+    })
+
+    it("throws ApiError on a 422 (empty list / oversized payload / malformed entry_id)", async () => {
+      mockFetchOnce(422, { detail: "entry_ids must not be empty" })
+      await expect(bulkUninstallEntries([])).rejects.toBeInstanceOf(ApiError)
+    })
+  })
+
+  describe("BS.8.2 — isCleanupCandidate()", () => {
+    const NOW = new Date("2026-04-27T12:00:00Z")
+    const idle = (deltaMs: number): string =>
+      new Date(NOW.getTime() - deltaMs).toISOString()
+
+    it("treats lastUsedAt > 30d ago as a candidate (zero workspace dependants)", () => {
+      const e = { lastUsedAt: idle(31 * 24 * 60 * 60 * 1000), usedByWorkspaceCount: 0 }
+      expect(isCleanupCandidate(e, NOW)).toBe(true)
+    })
+
+    it("excludes entries with at least one workspace dependant regardless of idle time", () => {
+      const e = { lastUsedAt: idle(60 * 24 * 60 * 60 * 1000), usedByWorkspaceCount: 1 }
+      expect(isCleanupCandidate(e, NOW)).toBe(false)
+    })
+
+    it("excludes entries used within the last 30 days", () => {
+      const e = { lastUsedAt: idle(20 * 24 * 60 * 60 * 1000), usedByWorkspaceCount: 0 }
+      expect(isCleanupCandidate(e, NOW)).toBe(false)
+    })
+
+    it("falls back to installedAt when lastUsedAt is null", () => {
+      const e = {
+        lastUsedAt: null,
+        installedAt: idle(31 * 24 * 60 * 60 * 1000),
+        usedByWorkspaceCount: 0,
+      }
+      expect(isCleanupCandidate(e, NOW)).toBe(true)
+    })
+
+    it("treats both timestamps missing as a candidate (operator can decide)", () => {
+      const e = { lastUsedAt: null, installedAt: null, usedByWorkspaceCount: 0 }
+      expect(isCleanupCandidate(e, NOW)).toBe(true)
+    })
+
+    it("treats malformed timestamps as a candidate (defence-in-depth)", () => {
+      const e = { lastUsedAt: "not-a-date", usedByWorkspaceCount: 0 }
+      expect(isCleanupCandidate(e, NOW)).toBe(true)
+    })
+
+    it("INSTALLED_ENTRY_IDLE_THRESHOLD_MS equals 30 days in ms", () => {
+      expect(INSTALLED_ENTRY_IDLE_THRESHOLD_MS).toBe(30 * 24 * 60 * 60 * 1000)
+    })
+
+    it("locks the boundary: exactly 30 days ago is a candidate (>=, not >)", () => {
+      const e = {
+        lastUsedAt: idle(INSTALLED_ENTRY_IDLE_THRESHOLD_MS),
+        usedByWorkspaceCount: 0,
+      }
+      expect(isCleanupCandidate(e, NOW)).toBe(true)
     })
   })
 })
