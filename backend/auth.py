@@ -430,16 +430,30 @@ async def _create_user_impl(
     tenant_id: str,
 ) -> User:
     from backend.db_context import tenant_insert_value
+    from backend.account_linking import (
+        encode_methods_for_insert,
+        initial_methods_for_new_user,
+    )
     tid = tenant_id or tenant_insert_value()
     uid = f"u-{uuid.uuid4().hex[:10]}"
     pw_hash = hash_password(password) if password else ""
     norm_email = email.lower().strip()
+    # AS.0.3 — seed auth_methods at user-creation time.  password →
+    # ["password"]; password-less invite (where the user later sets
+    # one via /auth/change-password) starts at "[]".  No OAuth method
+    # is ever seeded here — AS.1 OAuth-first signup will route
+    # through link_oauth_after_verification which both verifies the
+    # IdP token and writes the method tag in one place.
+    auth_methods_json = encode_methods_for_insert(
+        initial_methods_for_new_user(password=password)
+    )
     await conn.execute(
         "INSERT INTO users (id, email, name, role, password_hash, "
-        " oidc_provider, oidc_subject, enabled, tenant_id) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8)",
+        " oidc_provider, oidc_subject, enabled, tenant_id, "
+        " auth_methods) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9)",
         uid, norm_email, name, role, pw_hash,
-        oidc_provider, oidc_subject, tid,
+        oidc_provider, oidc_subject, tid, auth_methods_json,
     )
     return User(id=uid, email=norm_email, name=name, role=role, tenant_id=tid)
 
@@ -542,6 +556,15 @@ async def _change_password_impl(
         "WHERE id = $2",
         pw_hash, user_id,
     )
+    # AS.0.3 — keep auth_methods in lock-step with the password column.
+    # An invited-but-not-completed user starts at ``[]``; when they
+    # set their first password here, the methods array must gain
+    # ``"password"`` so future link-flow guards (which key off the
+    # presence of ``"password"`` in this column) see the truth.
+    # Already-password users are a no-op via ``add_auth_method``'s
+    # idempotency.
+    from backend.account_linking import METHOD_PASSWORD, add_auth_method
+    await add_auth_method(conn, user_id, METHOD_PASSWORD)
 
 
 async def change_password(

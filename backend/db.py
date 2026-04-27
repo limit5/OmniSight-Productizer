@@ -218,6 +218,16 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         # AS.0.2 (alembic 0056): per-tenant auth feature gating. TEXT-of-JSON
         # on SQLite, JSONB on PG. Default '{}' = no AS opinion.
         ("tenants", "auth_features", "TEXT NOT NULL DEFAULT '{}'"),
+        # AS.0.3 (alembic 0058): per-user auth-methods array (account
+        # linking takeover-prevention).  TEXT-of-JSON on SQLite, JSONB
+        # on PG.  Default '[]' = no method recorded; the helper
+        # backend.account_linking writes the explicit value.  The
+        # backfill path that turns existing password users into
+        # ``["password"]`` lives in alembic 0058's UPDATE — not here,
+        # because the in-process SQLite migrator only adds columns and
+        # the dev DB is per-test ephemeral so seeded rows go through
+        # the AS-aware INSERT path (auth.py::_create_user_impl).
+        ("users", "auth_methods", "TEXT NOT NULL DEFAULT '[]'"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -744,6 +754,13 @@ CREATE INDEX IF NOT EXISTS idx_auto_decision_log_kind ON auto_decision_log(kind)
 CREATE INDEX IF NOT EXISTS idx_auto_decision_log_undone ON auto_decision_log(undone_at);
 
 -- Phase 54: users / sessions / GitHub App installations
+-- AS.0.3 (alembic 0058): auth_methods TEXT-of-JSON column drives the
+-- account-linking takeover-prevention rule.  Default '[]' = no method
+-- recorded yet; the helper module backend.account_linking owns the
+-- canonical add/remove path.  Existing prod users are backfilled to
+-- '["password"]' by alembic 0058 / _migrate ALTER pair.  AS.1 will
+-- start writing 'oauth_<provider>' tags after the takeover guard
+-- passes.
 CREATE TABLE IF NOT EXISTS users (
     id              TEXT PRIMARY KEY,
     email           TEXT NOT NULL UNIQUE,
@@ -758,7 +775,8 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at   TEXT,
     failed_login_count INTEGER NOT NULL DEFAULT 0,
     locked_until    REAL,
-    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    auth_methods    TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_provider, oidc_subject);

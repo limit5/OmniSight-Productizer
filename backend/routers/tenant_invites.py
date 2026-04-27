@@ -1563,14 +1563,31 @@ async def accept_invite(
                         if body.password
                         else ""
                     )
+                    # AS.0.3 — invite acceptance is a password-bootstrap
+                    # path (the user typed a password into the invite
+                    # form).  Seed ``auth_methods`` to ``["password"]``
+                    # if a password was actually supplied, else ``[]``
+                    # (no-password invite — the user must run
+                    # /auth/change-password to attach one).  Any future
+                    # OAuth attachment goes through
+                    # link_oauth_after_verification per AS.0.3 takeover
+                    # rule.
+                    from backend.account_linking import (
+                        encode_methods_for_insert,
+                        initial_methods_for_new_user,
+                    )
+                    invite_auth_methods_json = encode_methods_for_insert(
+                        initial_methods_for_new_user(password=body.password)
+                    )
                     await conn.execute(
                         "INSERT INTO users (id, email, name, role, "
                         "password_hash, oidc_provider, oidc_subject, "
-                        "enabled, tenant_id) "
-                        "VALUES ($1, $2, $3, 'viewer', $4, '', '', 1, $5)",
+                        "enabled, tenant_id, auth_methods) "
+                        "VALUES ($1, $2, $3, 'viewer', $4, '', '', 1, "
+                        "$5, $6)",
                         new_uid, invite_email_norm,
                         (body.name or "").strip()[:160],
-                        pw_hash, invite_tenant,
+                        pw_hash, invite_tenant, invite_auth_methods_json,
                     )
                     target_user_id = new_uid
                     target_user_email = invite_email_norm

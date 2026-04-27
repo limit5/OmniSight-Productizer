@@ -444,7 +444,7 @@ AS.8  Tests + Migration Runbook + ADR                         ~0.5d
 |---|---|---|
 | 0056 | `tenants.auth_features` JSONB 欄位 | AS.0.2 |
 | 0057 | `oauth_tokens` table | AS.2.2 |
-| 0058 | （buffer） | — |
+| 0058 | `users.auth_methods` JSONB 欄位 + account-linking takeover-prevention 政策 | AS.0.3 |
 
 開工前驗證指令：
 ```bash
