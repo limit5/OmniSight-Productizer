@@ -412,6 +412,66 @@ def test_ts_declares_should_reject_and_verify_and_enforce() -> None:
     ), "TS twin missing verifyAndEnforce export"
 
 
+def test_ts_declares_fallback_outcome_for_provider() -> None:
+    """AS.3.5 — TS twin must export `fallbackOutcomeForProvider` so
+    generated apps that wire their own fallback chain can reuse the
+    same provider → audit literal mapping the Python lib uses. Catches
+    partial-port regressions where Python ships the helper but the TS
+    twin forgets to mirror it."""
+    src = _ts_source()
+    assert re.search(
+        r"export\s+function\s+fallbackOutcomeForProvider\s*\(", src
+    ), "TS twin missing fallbackOutcomeForProvider export"
+
+
+def test_ts_declares_verify_with_fallback() -> None:
+    """AS.3.5 — TS twin must export `verifyWithFallback` async
+    orchestrator. Symmetric to Python's `verify_with_fallback`."""
+    src = _ts_source()
+    assert re.search(
+        r"export\s+async\s+function\s+verifyWithFallback\s*\(", src
+    ), "TS twin missing verifyWithFallback export"
+
+
+def test_ts_fallback_outcome_for_provider_mapping_matches_python() -> None:
+    """AS.3.5 — The internal `_FALLBACK_OUTCOME_FOR_PROVIDER` mapping
+    on the TS side must declare exactly the same provider → outcome
+    routing the Python `_FALLBACK_OUTCOME_FOR_PROVIDER` ships:
+
+      * RECAPTCHA_V2 → OUTCOME_JSFAIL_FALLBACK_RECAPTCHA
+      * RECAPTCHA_V3 → OUTCOME_JSFAIL_FALLBACK_RECAPTCHA
+      * HCAPTCHA     → OUTCOME_JSFAIL_FALLBACK_HCAPTCHA
+      * TURNSTILE    → null (no fallback-specific outcome)
+
+    Static-source regex extraction so the test runs without spawning
+    Node — behavioural parity is locked separately by the Family 2
+    `fallback_outcome_for_provider_*` fixtures."""
+    src = _ts_source()
+    m = re.search(
+        r"_FALLBACK_OUTCOME_FOR_PROVIDER[^=]*=\s*Object\.freeze\(\s*\{(.*?)\}\s*\)",
+        src,
+        re.DOTALL,
+    )
+    assert m is not None, (
+        "TS twin missing _FALLBACK_OUTCOME_FOR_PROVIDER literal"
+    )
+    body = m.group(1)
+    # Each entry: [Provider.X]: <const-or-null>
+    entries = re.findall(
+        r"\[Provider\.([A-Z0-9_]+)\]\s*:\s*(OUTCOME_[A-Z_]+|null)", body
+    )
+    actual = dict(entries)
+    expected = {
+        "RECAPTCHA_V2": "OUTCOME_JSFAIL_FALLBACK_RECAPTCHA",
+        "RECAPTCHA_V3": "OUTCOME_JSFAIL_FALLBACK_RECAPTCHA",
+        "HCAPTCHA": "OUTCOME_JSFAIL_FALLBACK_HCAPTCHA",
+        "TURNSTILE": "null",
+    }
+    assert actual == expected, (
+        f"_FALLBACK_OUTCOME_FOR_PROVIDER drift: TS={actual}, expected={expected}"
+    )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Family 2 — Behavioural parity via Node subprocess
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -838,6 +898,34 @@ BEHAVIOUR_FIXTURES: Mapping[str, dict[str, Any]] = {
                    "provider": "recaptcha_v3"},
         "expect_reject": False,
     },
+    # ── AS.3.5 fallback_outcome_for_provider pure mapping ──
+    # Cross-twin parity: both sides return the same audit literal (or
+    # None) for every Provider enum value. The fallback chain
+    # orchestrator (Python `verify_with_fallback` / TS
+    # `verifyWithFallback`) consumes this mapping to rewrite a fallback
+    # PASS into the canonical OUTCOME_JSFAIL_FALLBACK_*. Drift on either
+    # side would produce a different audit row on the same outage —
+    # silent dashboard split.
+    "fallback_outcome_recaptcha_v2": {
+        "kind": "fallback_outcome_for_provider",
+        "provider": "recaptcha_v2",
+        "expect_outcome": "jsfail_fallback_recaptcha",
+    },
+    "fallback_outcome_recaptcha_v3": {
+        "kind": "fallback_outcome_for_provider",
+        "provider": "recaptcha_v3",
+        "expect_outcome": "jsfail_fallback_recaptcha",
+    },
+    "fallback_outcome_hcaptcha": {
+        "kind": "fallback_outcome_for_provider",
+        "provider": "hcaptcha",
+        "expect_outcome": "jsfail_fallback_hcaptcha",
+    },
+    "fallback_outcome_turnstile_returns_null": {
+        "kind": "fallback_outcome_for_provider",
+        "provider": "turnstile",
+        "expect_outcome": None,
+    },
     # ── event_for_outcome lookup table ──
     "lookup_pass": {
         "kind": "event_for_outcome",
@@ -958,6 +1046,9 @@ def _python_run_fixture(fx: dict[str, Any]) -> dict[str, Any]:
         if "ecosystem_hints" in opts_raw:
             kwargs["ecosystem_hints"] = tuple(opts_raw["ecosystem_hints"])
         return {"provider": bc.pick_provider(**kwargs).value}
+    if kind == "fallback_outcome_for_provider":
+        provider = bc.Provider(fx["provider"])
+        return {"fallbackOutcome": bc.fallback_outcome_for_provider(provider)}
     raise AssertionError(f"unknown fixture kind: {kind!r}")
 
 
@@ -1058,6 +1149,8 @@ for (const [key, fx] of Object.entries(fixtures)) {
         error: null,
       }
       out[key] = { reject: Boolean(bc.shouldReject(tsResult)) }
+    } else if (fx.kind === "fallback_outcome_for_provider") {
+      out[key] = { fallbackOutcome: bc.fallbackOutcomeForProvider(fx.provider) }
     } else {
       out[key] = { __error: `unknown kind ${fx.kind}` }
     }
@@ -1207,6 +1300,19 @@ def test_behaviour_parity_python_ts(
         )
         return
 
+    if fx["kind"] == "fallback_outcome_for_provider":
+        assert (
+            py["fallbackOutcome"]
+            == ts["fallbackOutcome"]
+            == fx["expect_outcome"]
+        ), (
+            f"fallback_outcome_for_provider {name!r}: "
+            f"Python={py['fallbackOutcome']!r}, "
+            f"TS={ts['fallbackOutcome']!r}, "
+            f"expected={fx['expect_outcome']!r}"
+        )
+        return
+
     raise AssertionError(f"unhandled fixture kind: {fx['kind']!r}")
 
 
@@ -1249,7 +1355,8 @@ def _normalise_outcome(d: Mapping[str, Any]) -> dict[str, Any]:
         return {"__error": d["__error"]}
     out: dict[str, Any] = {}
     for key in ("outcome", "allow", "score", "auditEvent", "provider",
-                "passthroughReason", "event", "errorKind", "reject"):
+                "passthroughReason", "event", "errorKind", "reject",
+                "fallbackOutcome"):
         if key in d:
             out[key] = d[key]
     # `pick_provider` returns {"provider": "<name>"} (no `outcome`),
@@ -1399,6 +1506,40 @@ def test_every_phase_exercised_in_classify() -> None:
     }
     assert phases == {1, 2, 3}, (
         f"phase coverage drift: got {sorted(phases)}, expected {{1, 2, 3}}"
+    )
+
+
+def test_as_3_5_fallback_outcome_covers_every_provider() -> None:
+    """AS.3.5 — every Provider enum value must drive at least one
+    `fallback_outcome_for_provider` cross-twin fixture, otherwise
+    a future Provider addition (e.g. an experimental 5th vendor)
+    could land with no parity coverage and silent drift. Both the
+    rewrite branch (recaptcha v2/v3 + hcaptcha → non-None) AND the
+    pass-through branch (turnstile → None) must have at least one
+    fixture each — drift guard's own drift guard."""
+    fb_fxs = [
+        fx for fx in BEHAVIOUR_FIXTURES.values()
+        if fx["kind"] == "fallback_outcome_for_provider"
+    ]
+    assert fb_fxs, (
+        "no fallback_outcome_for_provider fixtures present — AS.3.5 "
+        "parity blind"
+    )
+    covered_providers = {fx["provider"] for fx in fb_fxs}
+    expected_providers = {p.value for p in bc.Provider}
+    missing = expected_providers - covered_providers
+    assert not missing, (
+        f"AS.3.5 fallback parity guard missing provider fixture: "
+        f"{sorted(missing)}"
+    )
+    # Both branches (rewrite to non-None vs pass-through None) covered.
+    assert any(fx["expect_outcome"] is not None for fx in fb_fxs), (
+        "no rewrite-branch fallback fixture (recaptcha / hcaptcha) "
+        "in cross-twin guard"
+    )
+    assert any(fx["expect_outcome"] is None for fx in fb_fxs), (
+        "no pass-through-branch fallback fixture (turnstile → None) "
+        "in cross-twin guard"
     )
 
 

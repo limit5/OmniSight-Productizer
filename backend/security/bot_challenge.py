@@ -69,10 +69,17 @@ Out of scope (deferred to follow-up rows in the same epic)
   is AS.6.3 — the primitives ship here so AS.6.3 can call a single
   `verify_and_enforce(ctx)` instead of re-implementing reject logic
   per route.
-* AS.3.5 — Fallback chain (primary → secondary → tertiary on jsfail).
-  This row exposes the primitives — :func:`verify_provider` per
-  provider — but the orchestrator that chains them on widget JS load
-  failure is AS.3.5.
+* AS.3.5 — Fallback chain (primary → secondary → tertiary on outage).
+  Landed: :func:`verify_with_fallback` walks (primary, *fallbacks) and
+  advances on :data:`OUTCOME_UNVERIFIED_SERVERERR` (vendor
+  outage / transport / 5xx / DNS / timeout / missing-secret).
+  :func:`fallback_outcome_for_provider` maps a fallback provider's
+  ``OUTCOME_PASS`` onto the canonical
+  :data:`OUTCOME_JSFAIL_FALLBACK_RECAPTCHA` /
+  :data:`OUTCOME_JSFAIL_FALLBACK_HCAPTCHA` audit literals so the
+  AS.5.2 dashboard records that a fallback was used. Caller composes
+  with :func:`should_reject` from AS.3.4 if it also wants HTTP 429
+  reject enforcement on the chain's terminal result.
 
 Module-global state audit (per implement_phase_step.md SOP §1)
 ──────────────────────────────────────────────────────────────
@@ -1364,6 +1371,212 @@ async def verify_and_enforce(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AS.3.5 — Fallback chain (primary → secondary → tertiary on outage)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Mapping from a fallback provider's identity onto the canonical
+# ``OUTCOME_JSFAIL_FALLBACK_*`` audit literal that the orchestrator
+# rewrites the fallback's :data:`OUTCOME_PASS` to. Two literals exist
+# (``recaptcha`` + ``hcaptcha``) — Turnstile has no
+# ``jsfail_fallback_turnstile`` peer because the AS.0.5 default chain
+# treats Turnstile as the primary, not a fallback.  Including Turnstile
+# here as ``None`` is intentional: it lets the caller still chain a
+# Turnstile retry (e.g. on transient transport failure) without the
+# orchestrator rewriting the outcome — a Turnstile fallback that
+# succeeds returns :data:`OUTCOME_PASS` with provider attribution
+# preserved.
+#
+# Frozen ``MappingProxyType`` — module-level constant, no mutation
+# possible at runtime.  SOP §1 invariant: no module-level mutable
+# container.  Cross-twin parity guard locks the keys + values
+# byte-for-byte against the TS twin.
+_FALLBACK_OUTCOME_FOR_PROVIDER: Mapping[Provider, Optional[str]] = types.MappingProxyType({
+    Provider.RECAPTCHA_V2: OUTCOME_JSFAIL_FALLBACK_RECAPTCHA,
+    Provider.RECAPTCHA_V3: OUTCOME_JSFAIL_FALLBACK_RECAPTCHA,
+    Provider.HCAPTCHA: OUTCOME_JSFAIL_FALLBACK_HCAPTCHA,
+    Provider.TURNSTILE: None,
+})
+
+
+def fallback_outcome_for_provider(provider: Provider) -> Optional[str]:
+    """Return the canonical ``OUTCOME_JSFAIL_FALLBACK_*`` literal that
+    :func:`verify_with_fallback` rewrites a successful fallback's
+    :data:`OUTCOME_PASS` to, or ``None`` when the provider has no
+    fallback-specific outcome (currently :data:`Provider.TURNSTILE`).
+
+    The two non-``None`` mappings:
+
+      * :data:`Provider.RECAPTCHA_V2` / :data:`Provider.RECAPTCHA_V3` →
+        :data:`OUTCOME_JSFAIL_FALLBACK_RECAPTCHA`
+      * :data:`Provider.HCAPTCHA` →
+        :data:`OUTCOME_JSFAIL_FALLBACK_HCAPTCHA`
+
+    A ``None`` return tells the orchestrator to leave the fallback's
+    outcome unrewritten — useful when the chain retries the same
+    provider (Turnstile → Turnstile) after a transient transport
+    failure: the caller wants the original ``pass`` semantics, not a
+    fabricated ``jsfail_fallback_*`` audit row.
+
+    Pure function: ``MappingProxyType`` lookup against an immutable
+    constant.  Cross-worker consistency: every uvicorn worker reads
+    the same compile-time mapping (answer #1 of SOP §1).
+    """
+    return _FALLBACK_OUTCOME_FOR_PROVIDER.get(provider)
+
+
+def _is_provider_outage(result: BotChallengeResult) -> bool:
+    """Whether *result* indicates the verify call hit a provider-side
+    outage and the fallback chain should advance to the next link.
+
+    Per AS.0.5 §2.4 row 3 — only :data:`OUTCOME_UNVERIFIED_SERVERERR`
+    is treated as outage.  The other 14 outcome literals are
+    conclusive answers from the primary chain:
+
+      * :data:`OUTCOME_PASS` — vendor verified the user.
+      * :data:`OUTCOME_BLOCKED_LOWSCORE` — Phase 3 confirmed bot.
+      * :data:`OUTCOME_UNVERIFIED_LOWSCORE` — Phase 1/2 fail-open low
+        score; vendor did respond (success=True), so not an outage.
+      * 7 ``OUTCOME_BYPASS_*`` — bypass axis fired before any vendor
+        call; never an outage.
+      * 4 ``OUTCOME_JSFAIL_*`` — fallback / honeypot orchestration
+        terminal results; not an outage.
+
+    Pure predicate.  No IO, no mutation.  Cross-worker deterministic.
+    """
+    return result.outcome == OUTCOME_UNVERIFIED_SERVERERR
+
+
+async def verify_with_fallback(
+    primary_ctx: VerifyContext,
+    *,
+    fallbacks: tuple[VerifyContext, ...] = (),
+    http_client: Optional["httpx.AsyncClient"] = None,
+) -> BotChallengeResult:
+    """End-to-end orchestrator: primary :func:`verify` → on outage,
+    walk *fallbacks* in order until one returns a conclusive result.
+
+    Order of evaluation:
+
+      1. Run :func:`verify` on *primary_ctx*.  If
+         :func:`_is_provider_outage` is False (any conclusive answer —
+         pass / blocked / bypass / passthrough / unverified_lowscore),
+         return the primary result unchanged.
+      2. Else iterate *fallbacks* in declared order.  For each
+         :class:`VerifyContext` ``fb_ctx``:
+           a. Run :func:`verify` on ``fb_ctx``.
+           b. If the fallback also returns
+              :data:`OUTCOME_UNVERIFIED_SERVERERR`, continue to the
+              next link.
+           c. If the fallback returns :data:`OUTCOME_PASS` AND
+              :func:`fallback_outcome_for_provider` produces a
+              non-``None`` mapping for the fallback's provider,
+              **rewrite** the result's ``outcome`` + ``audit_event``
+              to the matching ``OUTCOME_JSFAIL_FALLBACK_*`` literal.
+              Audit metadata gains ``primary_provider`` +
+              ``primary_error_kind`` so the AS.5.2 dashboard can
+              correlate the fallback fan-out with the upstream
+              outage.  ``allow`` / ``score`` / ``provider`` are
+              preserved.
+           d. Otherwise (fallback returned a conclusive non-``pass``
+              result like ``blocked_lowscore`` / a bypass / a
+              Turnstile-fallback ``pass``), return the fallback
+              result unmodified.
+      3. If every link returned :data:`OUTCOME_UNVERIFIED_SERVERERR`,
+         return the **primary** result (still fail-open per AS.0.5
+         §2.4 row 3 — the chain exhausted all options but never
+         locked the user out).
+
+    Parameters
+    ----------
+    primary_ctx
+        The :class:`VerifyContext` for the primary provider, including
+        the widget-issued token + per-provider site secret.
+    fallbacks
+        Ordered tuple of :class:`VerifyContext` for the secondary
+        / tertiary providers.  Each fallback carries its own token
+        (the corresponding widget rendered separately on the client)
+        and its own secret (per-provider env, see
+        :func:`secret_env_for`).  Empty tuple ⇒ behaves identically to
+        :func:`verify` (no fallback ever attempted).
+    http_client
+        Optional :class:`httpx.AsyncClient` shared across all chain
+        links (production: caller's per-request pool; tests: a
+        :class:`_FakeAsyncClient` that records the dispatched calls).
+
+    Returns
+    -------
+    BotChallengeResult
+        Either the primary's conclusive result, the rewritten
+        fallback ``OUTCOME_JSFAIL_FALLBACK_*`` result, the fallback's
+        own conclusive non-pass result, or the primary's
+        ``unverified_servererr`` result if the entire chain timed out.
+
+    AS.0.5 §2.4 row 3 invariant
+    ───────────────────────────
+    The chain NEVER returns ``allow=False`` for a vendor outage.
+    Every fallback's outage rewrites to ``unverified_servererr`` /
+    ``allow=True`` and advances the chain.  Only a confirmed
+    non-fallback ``blocked_lowscore`` (Phase 3 + score < threshold)
+    can flip ``allow`` to False.
+
+    AS.3.4 reject composition
+    ─────────────────────────
+    Caller can compose with :func:`should_reject` /
+    :class:`BotChallengeRejected` for HTTP 429 reject enforcement on
+    the chain's terminal result — :func:`verify_with_fallback` itself
+    never raises (apart from a :class:`ProviderConfigError` from
+    :func:`verify_provider` if a chain link's secret env is unset,
+    matching :func:`verify`'s contract).
+
+    Module-global state audit (per implement_phase_step.md SOP §1)
+    ──────────────────────────────────────────────────────────────
+    * Pure orchestration on top of :func:`verify`.  No new
+      module-global mutable state introduced.
+    * :data:`_FALLBACK_OUTCOME_FOR_PROVIDER` is a frozen
+      ``MappingProxyType`` constant.
+    * Cross-worker consistency: every uvicorn worker independently
+      walks the chain from the same input :class:`VerifyContext`
+      tuples and derives the same result (answer #1 of SOP §1).
+
+    Read-after-write timing audit (per implement_phase_step.md SOP §1)
+    ──────────────────────────────────────────────────────────────────
+    N/A — every chain link is a per-request stateless RPC to the
+    vendor's siteverify endpoint.  No DB write, no shared in-memory
+    state, no read-after-write race.  The orchestrator's ``for``
+    loop is sequential by design — the chain advances only after
+    the previous link's RPC has resolved, so no asyncio.gather race
+    can land between primary and fallback decision points.
+    """
+    primary_result = await verify(primary_ctx, http_client=http_client)
+    if not _is_provider_outage(primary_result):
+        return primary_result
+
+    primary_error_kind = primary_result.audit_metadata.get("error_kind", "unknown")
+
+    for fb_ctx in fallbacks:
+        fb_result = await verify(fb_ctx, http_client=http_client)
+        if _is_provider_outage(fb_result):
+            continue
+        rewrite_outcome = fallback_outcome_for_provider(fb_ctx.provider)
+        if rewrite_outcome is not None and fb_result.outcome == OUTCOME_PASS:
+            meta = dict(fb_result.audit_metadata)
+            meta["primary_provider"] = primary_ctx.provider.value
+            meta["primary_error_kind"] = primary_error_kind
+            return BotChallengeResult(
+                outcome=rewrite_outcome,
+                allow=fb_result.allow,
+                score=fb_result.score,
+                provider=fb_result.provider,
+                audit_event=event_for_outcome(rewrite_outcome),
+                audit_metadata=meta,
+                error=fb_result.error,
+            )
+        return fb_result
+
+    return primary_result
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Provider selection (AS.3.3 region + ecosystem heuristic)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1578,4 +1791,7 @@ __all__ = [
     "BOT_CHALLENGE_REJECTED_HTTP_STATUS",
     "should_reject",
     "verify_and_enforce",
+    # AS.3.5 fallback chain primitives
+    "fallback_outcome_for_provider",
+    "verify_with_fallback",
 ]

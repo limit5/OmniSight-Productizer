@@ -1431,6 +1431,146 @@ export async function verifyAndEnforce(
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  AS.3.5 — Fallback chain (primary → secondary → tertiary on outage)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/** Mapping from a fallback provider's identity onto the canonical
+ * `OUTCOME_JSFAIL_FALLBACK_*` audit literal that `verifyWithFallback`
+ * rewrites a successful fallback's `OUTCOME_PASS` to. Two literals exist
+ * (`recaptcha` + `hcaptcha`) — Turnstile has no
+ * `jsfail_fallback_turnstile` peer because the AS.0.5 default chain
+ * treats Turnstile as the primary, not a fallback. Including Turnstile
+ * here as `null` is intentional: it lets the caller chain a Turnstile
+ * retry (e.g. on transient transport failure) without the orchestrator
+ * rewriting the outcome.
+ *
+ * Frozen object — module-level constant, no mutation possible at
+ * runtime. Cross-twin parity guard locks the keys + values byte-for-byte
+ * against the Python twin. */
+const _FALLBACK_OUTCOME_FOR_PROVIDER: Readonly<Record<Provider, string | null>> =
+  Object.freeze({
+    [Provider.RECAPTCHA_V2]: OUTCOME_JSFAIL_FALLBACK_RECAPTCHA,
+    [Provider.RECAPTCHA_V3]: OUTCOME_JSFAIL_FALLBACK_RECAPTCHA,
+    [Provider.HCAPTCHA]: OUTCOME_JSFAIL_FALLBACK_HCAPTCHA,
+    [Provider.TURNSTILE]: null,
+  })
+
+/** Return the canonical `OUTCOME_JSFAIL_FALLBACK_*` literal that
+ * `verifyWithFallback` rewrites a successful fallback's `OUTCOME_PASS`
+ * to, or `null` when the provider has no fallback-specific outcome
+ * (currently `Provider.TURNSTILE`).
+ *
+ * The two non-`null` mappings:
+ *
+ *   * `Provider.RECAPTCHA_V2` / `Provider.RECAPTCHA_V3` →
+ *     `OUTCOME_JSFAIL_FALLBACK_RECAPTCHA`
+ *   * `Provider.HCAPTCHA` → `OUTCOME_JSFAIL_FALLBACK_HCAPTCHA`
+ *
+ * Pure function: frozen-object lookup against an immutable constant.
+ * Cross-worker / cross-tab consistency: every Node worker / browser tab
+ * reads the same compile-time mapping (answer #1 of SOP §1). */
+export function fallbackOutcomeForProvider(provider: Provider): string | null {
+  return _FALLBACK_OUTCOME_FOR_PROVIDER[provider] ?? null
+}
+
+/** Whether `result` indicates the verify call hit a provider-side
+ * outage and the fallback chain should advance to the next link.
+ *
+ * Per AS.0.5 §2.4 row 3 — only `OUTCOME_UNVERIFIED_SERVERERR` is
+ * treated as outage. The other 14 outcome literals are conclusive
+ * answers from the primary chain.
+ *
+ * Pure predicate. No IO, no mutation. Cross-worker deterministic. */
+function _isProviderOutage(result: BotChallengeResult): boolean {
+  return result.outcome === OUTCOME_UNVERIFIED_SERVERERR
+}
+
+/** End-to-end orchestrator: primary `verify()` → on outage, walk
+ * `fallbacks` in order until one returns a conclusive result.
+ *
+ * Order of evaluation:
+ *
+ *   1. Run `verify()` on `primaryCtx`. If `_isProviderOutage` is false
+ *      (any conclusive answer), return the primary result unchanged.
+ *   2. Else iterate `fallbacks` in declared order. For each
+ *      `VerifyContext` `fbCtx`:
+ *        a. Run `verify()` on `fbCtx`.
+ *        b. If the fallback also returns `OUTCOME_UNVERIFIED_SERVERERR`,
+ *           continue to the next link.
+ *        c. If the fallback returns `OUTCOME_PASS` AND
+ *           `fallbackOutcomeForProvider` produces a non-null mapping
+ *           for the fallback's provider, **rewrite** the result's
+ *           `outcome` + `auditEvent` to the matching
+ *           `OUTCOME_JSFAIL_FALLBACK_*` literal. Audit metadata gains
+ *           `primary_provider` + `primary_error_kind` for AS.5.2
+ *           dashboard correlation. `allow` / `score` / `provider` are
+ *           preserved.
+ *        d. Otherwise (fallback returned a conclusive non-`pass`
+ *           result, or a Turnstile-fallback `pass`), return the
+ *           fallback result unmodified.
+ *   3. If every link returned `OUTCOME_UNVERIFIED_SERVERERR`, return
+ *      the **primary** result (still fail-open per AS.0.5 §2.4 row 3).
+ *
+ * AS.0.5 §2.4 row 3 invariant: the chain NEVER returns `allow=false`
+ * for a vendor outage. Only a confirmed non-fallback `blocked_lowscore`
+ * (Phase 3 + score < threshold) can flip `allow` to false.
+ *
+ * AS.3.4 reject composition: caller can compose with `shouldReject` /
+ * `BotChallengeRejected` for HTTP 429 reject enforcement on the
+ * chain's terminal result — `verifyWithFallback` itself never throws
+ * apart from `ProviderConfigError` from a chain link's
+ * `verifyProvider`, matching `verify()`'s contract.
+ *
+ * Module-global state audit (per implement_phase_step.md SOP §1):
+ * pure orchestration on top of `verify()`. No new module-global
+ * mutable state introduced. Cross-worker / cross-tab consistency:
+ * every Node worker / browser tab independently walks the chain from
+ * the same input contexts and derives the same result.
+ *
+ * Read-after-write timing audit (per implement_phase_step.md SOP §1):
+ * N/A — every chain link is a per-request stateless RPC. Sequential
+ * `for ... of` loop ensures the chain advances only after the previous
+ * link's RPC has resolved; no `Promise.all` race possible. */
+export async function verifyWithFallback(
+  primaryCtx: VerifyContext,
+  opts: {
+    fallbacks?: readonly VerifyContext[]
+    fetchImpl?: HttpFetch
+  } = {},
+): Promise<BotChallengeResult> {
+  const fallbacks = opts.fallbacks ?? []
+  const primaryResult = await verify(primaryCtx, { fetchImpl: opts.fetchImpl })
+  if (!_isProviderOutage(primaryResult)) return primaryResult
+
+  const primaryMeta = primaryResult.auditMetadata as Record<string, unknown>
+  const primaryErrorKind =
+    typeof primaryMeta.error_kind === "string" ? primaryMeta.error_kind : "unknown"
+
+  for (const fbCtx of fallbacks) {
+    const fbResult = await verify(fbCtx, { fetchImpl: opts.fetchImpl })
+    if (_isProviderOutage(fbResult)) continue
+    const rewriteOutcome = fallbackOutcomeForProvider(fbCtx.provider)
+    if (rewriteOutcome !== null && fbResult.outcome === OUTCOME_PASS) {
+      const meta: Record<string, unknown> = { ...fbResult.auditMetadata }
+      meta.primary_provider = primaryCtx.provider
+      meta.primary_error_kind = primaryErrorKind
+      return Object.freeze({
+        outcome: rewriteOutcome,
+        allow: fbResult.allow,
+        score: fbResult.score,
+        provider: fbResult.provider,
+        auditEvent: eventForOutcome(rewriteOutcome),
+        auditMetadata: Object.freeze(meta),
+        error: fbResult.error,
+      })
+    }
+    return fbResult
+  }
+
+  return primaryResult
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  Provider selection (AS.3.3 region + ecosystem heuristic)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

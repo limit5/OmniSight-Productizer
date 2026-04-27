@@ -1628,3 +1628,526 @@ def test_verify_and_enforce_in_dunder_all():
         "verify_and_enforce",
     }
     assert expected.issubset(set(bc.__all__))
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Family 18 — AS.3.5 fallback chain primitives
+#
+#  Surface:
+#    * ``fallback_outcome_for_provider(provider)`` — pure mapping
+#      lookup (recaptcha v2/v3 → jsfail_fallback_recaptcha; hcaptcha →
+#      jsfail_fallback_hcaptcha; turnstile → None)
+#    * ``verify_with_fallback(primary_ctx, *, fallbacks=())`` — async
+#      orchestrator: primary verify → on outage walk fallback chain
+#      → first conclusive result wins, fallback PASS rewritten to
+#      OUTCOME_JSFAIL_FALLBACK_*
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class _MultiProviderFakeClient:
+    """A fake async HTTP client that dispatches POSTs to per-URL stub
+    responses.  Used by AS.3.5 fallback chain tests because each chain
+    link calls a different siteverify URL and we need to programme a
+    distinct response per provider.
+
+    ``responses`` maps the provider's siteverify URL to either a
+    :class:`_FakePoolResponse` (returned for every call to that URL) or
+    a list of :class:`_FakePoolResponse` consumed in order (so we can
+    test "primary returns 200 OK with low-score on retry" semantics).
+    Calls are recorded in :attr:`calls` for ordering assertions.
+    """
+
+    def __init__(self, responses: dict[str, Any]) -> None:
+        self._responses = responses
+        self.calls: list[tuple[str, dict]] = []
+
+    async def post(self, url, *, data=None, timeout=None):  # noqa: D401
+        self.calls.append((url, dict(data or {})))
+        if url not in self._responses:
+            raise httpx.ConnectError(f"unstubbed URL: {url}")
+        slot = self._responses[url]
+        if isinstance(slot, list):
+            if not slot:
+                raise httpx.ConnectError(f"slot exhausted for {url}")
+            return slot.pop(0)
+        if isinstance(slot, BaseException):
+            raise slot
+        return slot
+
+
+def test_fallback_outcome_for_provider_recaptcha_v2_maps_to_recaptcha():
+    """reCAPTCHA v2 fallback PASS → jsfail_fallback_recaptcha audit."""
+    assert (
+        bc.fallback_outcome_for_provider(bc.Provider.RECAPTCHA_V2)
+        == bc.OUTCOME_JSFAIL_FALLBACK_RECAPTCHA
+    )
+
+
+def test_fallback_outcome_for_provider_recaptcha_v3_maps_to_recaptcha():
+    """reCAPTCHA v3 fallback PASS → jsfail_fallback_recaptcha audit."""
+    assert (
+        bc.fallback_outcome_for_provider(bc.Provider.RECAPTCHA_V3)
+        == bc.OUTCOME_JSFAIL_FALLBACK_RECAPTCHA
+    )
+
+
+def test_fallback_outcome_for_provider_hcaptcha_maps_to_hcaptcha():
+    """hCaptcha fallback PASS → jsfail_fallback_hcaptcha audit."""
+    assert (
+        bc.fallback_outcome_for_provider(bc.Provider.HCAPTCHA)
+        == bc.OUTCOME_JSFAIL_FALLBACK_HCAPTCHA
+    )
+
+
+def test_fallback_outcome_for_provider_turnstile_returns_none():
+    """Turnstile is the family default; chaining Turnstile → Turnstile
+    on transient transport failure must NOT fabricate a fallback audit
+    row.  ``None`` tells the orchestrator to leave the outcome
+    unrewritten."""
+    assert bc.fallback_outcome_for_provider(bc.Provider.TURNSTILE) is None
+
+
+def test_fallback_outcome_for_provider_pure_function_no_side_effects():
+    """5 consecutive calls return the same value; mapping is immutable."""
+    for _ in range(5):
+        assert (
+            bc.fallback_outcome_for_provider(bc.Provider.HCAPTCHA)
+            == bc.OUTCOME_JSFAIL_FALLBACK_HCAPTCHA
+        )
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_empty_chain_behaves_like_verify():
+    """Empty fallbacks tuple ⇒ identical behaviour to ``verify``: caller
+    can adopt the new entry point without changing outputs on the
+    no-fallback default."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.85, "action": "login", "hostname": "x",
+    }))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="tok", secret="s" * 40,
+        phase=1, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(ctx, http_client=fake)
+    assert result.outcome == bc.OUTCOME_PASS
+    assert result.allow is True
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_primary_pass_skips_fallbacks():
+    """When primary returns PASS, no fallback link is touched."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.9, "action": "login", "hostname": "x",
+    }))
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="tok", secret="s" * 40,
+        phase=1, widget_action="login",
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.HCAPTCHA, token="hc-tok", secret="h" * 40,
+        phase=1, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_PASS
+    assert result.provider is bc.Provider.TURNSTILE
+    # Only the primary URL was hit.
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0] == bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_primary_blocked_skips_fallbacks():
+    """Phase 3 confirmed low-score is a conclusive bot signal — never
+    advance to fallback (otherwise a bot just rotates providers until
+    one passes)."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.1, "action": "login", "hostname": "x",
+    }))
+    primary = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3, token="tok", secret="s" * 40,
+        phase=3, widget_action="login",
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.HCAPTCHA, token="hc-tok", secret="h" * 40,
+        phase=3, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_BLOCKED_LOWSCORE
+    assert result.allow is False
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_primary_unverified_lowscore_skips_fallbacks():
+    """Phase 1/2 fail-open low score is conclusive (vendor responded);
+    no need to fall back."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.2, "action": "login", "hostname": "x",
+    }))
+    primary = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3, token="tok", secret="s" * 40,
+        phase=1, widget_action="login",
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.HCAPTCHA, token="hc-tok", secret="h" * 40,
+        phase=1, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_UNVERIFIED_LOWSCORE
+    assert result.allow is True
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_primary_bypass_skips_fallbacks():
+    """Bypass-axis match → never advance the chain (whole point of
+    bypass is short-circuit before any vendor RPC)."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {"success": True}))
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="tok", secret="s" * 40,
+        bypass=bc.BypassContext(caller_kind="apikey_omni", api_key_id="ak-1"),
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.HCAPTCHA, token="hc-tok", secret="h" * 40,
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_BYPASS_APIKEY
+    assert fake.calls == []  # bypass short-circuited before any RPC
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_outage_then_pass_rewrites_to_fallback_outcome():
+    """Primary 5xx (outage) + fallback hCaptcha PASS → outcome rewritten
+    to ``jsfail_fallback_hcaptcha`` with audit metadata recording the
+    primary's error kind so the AS.5.2 dashboard can correlate."""
+    primary_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb_url = bc.SITEVERIFY_URLS[bc.Provider.HCAPTCHA]
+    fake = _MultiProviderFakeClient({
+        primary_url: httpx.ConnectError("primary network down"),
+        fb_url: _FakePoolResponse(200, {
+            "success": True, "hostname": "x",
+        }),
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+        phase=1, widget_action="login",
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.HCAPTCHA, token="h", secret="h" * 40,
+        phase=1, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_JSFAIL_FALLBACK_HCAPTCHA
+    assert result.allow is True
+    assert result.score == 1.0  # hCaptcha binary
+    assert result.provider is bc.Provider.HCAPTCHA
+    assert result.audit_event == bc.EVENT_BOT_CHALLENGE_JSFAIL_FALLBACK_HCAPTCHA
+    # Audit metadata includes correlation back to primary outage.
+    assert result.audit_metadata["primary_provider"] == bc.Provider.TURNSTILE.value
+    assert "primary_error_kind" in result.audit_metadata
+    # Both URLs were hit, in order.
+    assert len(fake.calls) == 2
+    assert fake.calls[0][0] == primary_url
+    assert fake.calls[1][0] == fb_url
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_outage_then_recaptcha_v3_pass_rewrites():
+    """Primary outage + reCAPTCHA v3 fallback PASS →
+    ``jsfail_fallback_recaptcha`` (v2 + v3 share the same audit
+    literal)."""
+    primary_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb_url = bc.SITEVERIFY_URLS[bc.Provider.RECAPTCHA_V3]
+    fake = _MultiProviderFakeClient({
+        primary_url: _FakePoolResponse(503, {}),
+        fb_url: _FakePoolResponse(200, {
+            "success": True, "score": 0.85, "action": "login", "hostname": "x",
+        }),
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+        phase=1, widget_action="login",
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3, token="r", secret="r" * 40,
+        phase=1, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_JSFAIL_FALLBACK_RECAPTCHA
+    assert result.audit_event == bc.EVENT_BOT_CHALLENGE_JSFAIL_FALLBACK_RECAPTCHA
+    assert result.score == 0.85
+    assert result.provider is bc.Provider.RECAPTCHA_V3
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_outage_then_recaptcha_v2_pass_rewrites():
+    """Primary outage + reCAPTCHA v2 fallback PASS →
+    ``jsfail_fallback_recaptcha`` (binary score 1.0)."""
+    primary_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb_url = bc.SITEVERIFY_URLS[bc.Provider.RECAPTCHA_V2]
+    fake = _MultiProviderFakeClient({
+        primary_url: httpx.TimeoutException("primary timeout"),
+        fb_url: _FakePoolResponse(200, {"success": True, "hostname": "x"}),
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V2, token="r", secret="r" * 40,
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_JSFAIL_FALLBACK_RECAPTCHA
+    assert result.audit_metadata["primary_error_kind"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_turnstile_fallback_pass_not_rewritten():
+    """Turnstile → Turnstile retry on transient outage: when the second
+    Turnstile call returns PASS, the orchestrator preserves the
+    original ``OUTCOME_PASS`` (no ``jsfail_fallback_turnstile`` literal
+    exists; rewriting would fabricate an audit row)."""
+    primary_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fake = _MultiProviderFakeClient({
+        primary_url: [
+            _FakePoolResponse(503, {}),
+            _FakePoolResponse(200, {
+                "success": True, "score": 0.9, "action": "login", "hostname": "x",
+            }),
+        ],
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t1", secret="s" * 40,
+        phase=1, widget_action="login",
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t2", secret="s" * 40,
+        phase=1, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_PASS
+    assert result.provider is bc.Provider.TURNSTILE
+    # No primary_provider stamping when no rewrite happens.
+    assert "primary_provider" not in result.audit_metadata
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_outage_then_blocked_returns_blocked_no_rewrite():
+    """Primary outage + fallback Phase 3 blocked_lowscore → return the
+    fallback's blocked result unmodified (the rewrite path only
+    triggers on PASS; conclusive non-pass results pass through so
+    AS.3.4 reject enforcement still fires on the chain's terminal
+    decision)."""
+    primary_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb_url = bc.SITEVERIFY_URLS[bc.Provider.RECAPTCHA_V3]
+    fake = _MultiProviderFakeClient({
+        primary_url: httpx.ConnectError("primary down"),
+        fb_url: _FakePoolResponse(200, {
+            "success": True, "score": 0.1, "action": "login", "hostname": "x",
+        }),
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+        phase=3, widget_action="login",
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3, token="r", secret="r" * 40,
+        phase=3, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_BLOCKED_LOWSCORE
+    assert result.allow is False
+    assert result.provider is bc.Provider.RECAPTCHA_V3
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_chain_walks_until_first_conclusive():
+    """Primary outage + first fallback also outage + second fallback
+    PASS → walk skips the dead second link and rewrites on the third."""
+    p_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb1_url = bc.SITEVERIFY_URLS[bc.Provider.RECAPTCHA_V3]
+    fb2_url = bc.SITEVERIFY_URLS[bc.Provider.HCAPTCHA]
+    fake = _MultiProviderFakeClient({
+        p_url: httpx.ConnectError("primary down"),
+        fb1_url: httpx.ConnectError("fb1 down"),
+        fb2_url: _FakePoolResponse(200, {"success": True, "hostname": "x"}),
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+    )
+    fb1 = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3, token="r", secret="r" * 40,
+    )
+    fb2 = bc.VerifyContext(
+        provider=bc.Provider.HCAPTCHA, token="h", secret="h" * 40,
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb1, fb2), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_JSFAIL_FALLBACK_HCAPTCHA
+    assert result.provider is bc.Provider.HCAPTCHA
+    # All three URLs hit, in order.
+    assert [c[0] for c in fake.calls] == [p_url, fb1_url, fb2_url]
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_all_outages_returns_primary_unverified():
+    """Every link goes outage → return the primary's
+    unverified_servererr (still allow=True, fail-open per AS.0.5
+    §2.4 row 3 — the chain exhausted but never locked the user out)."""
+    p_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb_url = bc.SITEVERIFY_URLS[bc.Provider.HCAPTCHA]
+    fake = _MultiProviderFakeClient({
+        p_url: httpx.ConnectError("primary down"),
+        fb_url: httpx.TimeoutException("fb timeout"),
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+        phase=3,  # even at Phase 3, we don't lock out on chain-wide outage
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.HCAPTCHA, token="h", secret="h" * 40,
+        phase=3,
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.outcome == bc.OUTCOME_UNVERIFIED_SERVERERR
+    assert result.allow is True
+    assert result.provider is bc.Provider.TURNSTILE  # primary attribution
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_knob_off_passthrough_skips_fallbacks():
+    """AS.0.8 single-knob: knob-off ⇒ verify returns passthrough →
+    not an outage → fallback chain not walked."""
+    p_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb_url = bc.SITEVERIFY_URLS[bc.Provider.HCAPTCHA]
+    fake = _MultiProviderFakeClient({
+        p_url: _FakePoolResponse(200, {"success": True}),
+        fb_url: _FakePoolResponse(200, {"success": True}),
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.HCAPTCHA, token="h", secret="h" * 40,
+    )
+    with patch.object(bc, "is_enabled", return_value=False):
+        result = await bc.verify_with_fallback(
+            primary, fallbacks=(fb,), http_client=fake,
+        )
+    assert result.outcome == bc.OUTCOME_PASS
+    assert result.audit_metadata.get("passthrough_reason") == "knob_off"
+    assert fake.calls == []  # neither primary nor fallback called
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_outage_then_pass_preserves_fallback_score():
+    """Reject-rewrite preserves the fallback's score so AS.5.2
+    dashboard sees the actual confidence the fallback assigned, not a
+    fabricated 1.0."""
+    p_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb_url = bc.SITEVERIFY_URLS[bc.Provider.RECAPTCHA_V3]
+    fake = _MultiProviderFakeClient({
+        p_url: httpx.ConnectError("primary down"),
+        fb_url: _FakePoolResponse(200, {
+            "success": True, "score": 0.73, "action": "login", "hostname": "x",
+        }),
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+        phase=1, widget_action="login",
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3, token="r", secret="r" * 40,
+        phase=1, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert result.score == 0.73
+    assert result.outcome == bc.OUTCOME_JSFAIL_FALLBACK_RECAPTCHA
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_compose_with_should_reject():
+    """AS.3.4 ↔ AS.3.5 composition: caller can chain
+    ``verify_with_fallback`` → ``should_reject`` → raise without the
+    library implementing a separate ``verify_with_fallback_and_enforce``.
+    Locks the documented composition pattern."""
+    p_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb_url = bc.SITEVERIFY_URLS[bc.Provider.RECAPTCHA_V3]
+    fake = _MultiProviderFakeClient({
+        p_url: httpx.ConnectError("primary down"),
+        fb_url: _FakePoolResponse(200, {
+            "success": True, "score": 0.1, "action": "login", "hostname": "x",
+        }),
+    })
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+        phase=3, widget_action="login",
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3, token="r", secret="r" * 40,
+        phase=3, widget_action="login",
+    )
+    result = await bc.verify_with_fallback(
+        primary, fallbacks=(fb,), http_client=fake,
+    )
+    assert bc.should_reject(result) is True
+    # And caller can convert to BotChallengeRejected if they want.
+    with pytest.raises(bc.BotChallengeRejected):
+        if bc.should_reject(result):
+            raise bc.BotChallengeRejected(result)
+
+
+@pytest.mark.asyncio
+async def test_verify_with_fallback_no_double_audit_rewrite():
+    """A second call to ``verify_with_fallback`` with the same chain
+    must produce the same audit_event — orchestrator is pure
+    (no module-level mutation, no carry-over from previous call)."""
+    p_url = bc.SITEVERIFY_URLS[bc.Provider.TURNSTILE]
+    fb_url = bc.SITEVERIFY_URLS[bc.Provider.HCAPTCHA]
+
+    def fresh_fake() -> _MultiProviderFakeClient:
+        return _MultiProviderFakeClient({
+            p_url: httpx.ConnectError("primary down"),
+            fb_url: _FakePoolResponse(200, {"success": True, "hostname": "x"}),
+        })
+
+    primary = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="t", secret="s" * 40,
+    )
+    fb = bc.VerifyContext(
+        provider=bc.Provider.HCAPTCHA, token="h", secret="h" * 40,
+    )
+    r1 = await bc.verify_with_fallback(primary, fallbacks=(fb,), http_client=fresh_fake())
+    r2 = await bc.verify_with_fallback(primary, fallbacks=(fb,), http_client=fresh_fake())
+    assert r1.outcome == r2.outcome == bc.OUTCOME_JSFAIL_FALLBACK_HCAPTCHA
+    assert r1.audit_event == r2.audit_event
+    assert r1.score == r2.score
+
+
+def test_verify_with_fallback_in_dunder_all():
+    """AS.3.5 surface symbols are exported via ``__all__``."""
+    expected = {"fallback_outcome_for_provider", "verify_with_fallback"}
+    assert expected.issubset(set(bc.__all__))

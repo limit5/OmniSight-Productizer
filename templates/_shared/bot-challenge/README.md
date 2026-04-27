@@ -269,12 +269,44 @@ behavioural-parity `should_reject_*` fixtures + the
 `test_as_3_4_should_reject_covers_both_branches` coverage guard) locks
 both sides.
 
-## Out of scope (deferred to follow-up rows in the same epic)
+## AS.3.5 — Fallback chain (landed)
 
-* AS.3.5 — Fallback chain (primary → secondary → tertiary on jsfail).
-  This row exposes the primitives — `verifyProvider` per provider —
-  but the orchestrator that chains them on widget JS load failure is
-  AS.3.5.
+Primary → secondary → tertiary chain on provider outage. The
+orchestrator (`verifyWithFallback` on the TS side / `verify_with_fallback`
+on the Python side) walks the chain in declared order and advances on
+`OUTCOME_UNVERIFIED_SERVERERR` (transport / 5xx / DNS / timeout /
+missing-secret). The first conclusive answer wins. When the conclusive
+answer is `OUTCOME_PASS` from a non-Turnstile fallback, the outcome is
+rewritten to `OUTCOME_JSFAIL_FALLBACK_RECAPTCHA` (for reCAPTCHA v2/v3)
+or `OUTCOME_JSFAIL_FALLBACK_HCAPTCHA` (for hCaptcha) so the AS.5.2
+dashboard records that a fallback was used. The audit metadata also
+gains `primary_provider` + `primary_error_kind` for outage correlation.
+
+Symbol table:
+
+| Python                                  | TypeScript                              |
+| --------------------------------------- | --------------------------------------- |
+| `fallback_outcome_for_provider(p)`      | `fallbackOutcomeForProvider(p)`         |
+| `verify_with_fallback(primary, fallbacks=...)` | `verifyWithFallback(primary, { fallbacks })` |
+
+Composition with AS.3.4: `verify_with_fallback` itself never raises on
+the chain's terminal answer — the caller composes with `should_reject`
++ `BotChallengeRejected` on the result if HTTP 429 enforcement is wanted:
+
+```python
+result = await verify_with_fallback(
+    primary_ctx,
+    fallbacks=(secondary_ctx, tertiary_ctx),
+)
+if should_reject(result):
+    raise BotChallengeRejected(result)
+```
+
+Cross-twin drift guard: `_FALLBACK_OUTCOME_FOR_PROVIDER` mapping
+locked byte-for-byte
+(`backend/tests/test_bot_challenge_shape_drift.py::test_ts_fallback_outcome_for_provider_mapping_matches_python`
++ 4 behavioural-parity `fallback_outcome_*` fixtures +
+`test_as_3_5_fallback_outcome_covers_every_provider` coverage guard).
 
 ## Shape parity vs the Python side
 
@@ -307,6 +339,8 @@ both sides.
 | `BotChallengeRejected(result, code=, http_status=)` | `BotChallengeRejected(result, { code, httpStatus })` |
 | `should_reject(result)`                     | `shouldReject(result)`                                  |
 | `verify_and_enforce(ctx)`                   | `verifyAndEnforce(ctx, opts?)`                          |
+| `fallback_outcome_for_provider(p)`          | `fallbackOutcomeForProvider(p)`                         |
+| `verify_with_fallback(primary, fallbacks=)` | `verifyWithFallback(primary, { fallbacks })`            |
 
 Casing follows each language's idiom; the **string values** of the
 `Provider` enum, the 19 audit event names, and the 15 outcome literals
