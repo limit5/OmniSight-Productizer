@@ -5638,6 +5638,119 @@ export async function bootstrapCfTunnelSkip(
   })
 }
 
+// ─── BS.7.1 — Installer (POST /installer/jobs + PEP HOLD) ────────────────
+//
+// Wires the catalog-card "Install" button to the existing installer router
+// (backend/routers/installer.py). The POST runs through the existing R20-A
+// PEP gateway HOLD path automatically: ``tool="install_entry"`` is not on
+// any tier whitelist, so ``pep_gateway.classify`` returns ``hold`` via
+// the ``tier_unlisted`` rule and the request blocks until the operator
+// approves / rejects via the global ToastCenter coaching card. On approve
+// → 201 + queued job row. On deny / timeout → 403 ``pep_denied``. On
+// idempotency_key collision (operator double-clicked, or retried from a
+// stale tab) → 200 + the existing row (no second HOLD).
+//
+// The shape of ``InstallJob`` mirrors backend ``_row_to_install_job``
+// 1:1 so frontend tests can assert against the same field names that
+// ``backend/tests/test_installer_api.py`` does. ``createInstallJob``
+// generates an idempotency_key when the caller omits one — a UUID v4 is
+// 36 chars (matches the backend's 16..64 ASCII pattern).
+
+export type InstallJobState =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+
+export interface InstallJob {
+  id: string
+  tenant_id: string
+  entry_id: string
+  state: InstallJobState
+  idempotency_key: string
+  sidecar_id: string | null
+  protocol_version: number
+  bytes_done: number
+  bytes_total: number | null
+  eta_seconds: number | null
+  log_tail: string
+  result_json: Record<string, unknown> | null
+  error_reason: string | null
+  pep_decision_id: string | null
+  requested_by: string
+  queued_at: string
+  claimed_at: string | null
+  started_at: string | null
+  completed_at: string | null
+}
+
+export interface CreateInstallJobOptions {
+  /** Override the auto-generated idempotency_key. Pass the same value to
+   *  retry without producing a second PEP HOLD or a duplicate row.
+   *  Must match the backend's ``^[A-Za-z0-9_\-]{16,64}$`` pattern. */
+  idempotencyKey?: string
+  /** Optional ``bytes_total`` hint surfaced to the sidecar progress feed
+   *  before the real download size is known (BS.7.4 SSE will overwrite). */
+  bytesTotal?: number
+  /** Free-form metadata stored on the install_jobs row. Used by the BS.7
+   *  install pipeline to remember version-channel / vendor preferences. */
+  metadata?: Record<string, unknown>
+}
+
+/** Generate a fresh idempotency_key for an install POST. Uses
+ *  ``crypto.randomUUID`` when available (modern browsers + Node 19+);
+ *  falls back to a 32-hex-char timestamp+random concat when the crypto
+ *  binding is missing (jsdom test environment, very old browsers). */
+export function generateInstallIdempotencyKey(): string {
+  const c =
+    typeof globalThis !== "undefined"
+      ? (globalThis as { crypto?: Crypto }).crypto
+      : undefined
+  if (c && typeof c.randomUUID === "function") {
+    return c.randomUUID()
+  }
+  // Fallback: 32-hex chars (timestamp + Math.random pad). Deterministic
+  // entropy < UUID v4 but still well above the backend's 16-char floor.
+  const ts = Date.now().toString(16).padStart(12, "0")
+  const rand = Math.floor(Math.random() * 0xffffffffffff)
+    .toString(16)
+    .padStart(12, "0")
+  const tail = Math.floor(Math.random() * 0xffffffff)
+    .toString(16)
+    .padStart(8, "0")
+  return `${ts}${rand}${tail}`.slice(0, 32)
+}
+
+/** POST /installer/jobs — create an install job for the given catalog
+ *  entry. Blocks until the PEP HOLD resolves (operator approves /
+ *  rejects via the global ToastCenter, or the gateway times out at 10
+ *  min). Returns the queued job row on approve, throws ``ApiError`` on
+ *  PEP denial / timeout / idempotency_key cross-tenant collision. */
+export async function createInstallJob(
+  entryId: string,
+  options?: CreateInstallJobOptions,
+): Promise<InstallJob> {
+  const body: {
+    entry_id: string
+    idempotency_key: string
+    bytes_total?: number
+    metadata: Record<string, unknown>
+  } = {
+    entry_id: entryId,
+    idempotency_key:
+      options?.idempotencyKey ?? generateInstallIdempotencyKey(),
+    metadata: options?.metadata ?? {},
+  }
+  if (typeof options?.bytesTotal === "number") {
+    body.bytes_total = options.bytesTotal
+  }
+  return request<InstallJob>("/installer/jobs", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
 // ─── N3 — OpenAPI compile-time contract tripwire ──────────────────────────
 // These type aliases reach into `lib/generated/api-types.ts` (auto-generated
 // from the FastAPI app's OpenAPI schema). The moment any of the referenced

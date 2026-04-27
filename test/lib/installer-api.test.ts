@@ -1,0 +1,217 @@
+/**
+ * BS.7.1 — Unit tests for the installer API client in `lib/api.ts`.
+ *
+ * Locks the contract that the catalog-card "Install" button click flows
+ * to `POST /installer/jobs` with the right body shape (so it lands in
+ * the existing R20-A PEP gateway HOLD path on the backend without any
+ * extra client-side work).
+ *
+ * Specifically:
+ *   • `createInstallJob(entryId)` POSTs JSON `{ entry_id, idempotency_key,
+ *     metadata: {} }` to `/api/v1/installer/jobs` with the standard
+ *     CSRF / X-Tenant-Id headers the rest of `request()` emits.
+ *   • An auto-generated idempotency_key matches the backend's
+ *     `^[A-Za-z0-9_\-]{16,64}$` pattern (so the request can't 422 on
+ *     the field-level regex before reaching PEP).
+ *   • Caller-supplied options (`idempotencyKey`, `bytesTotal`, `metadata`)
+ *     are forwarded verbatim, so an idempotent retry from a stale tab
+ *     deduplicates server-side instead of producing a second HOLD.
+ *   • A 200 response (idempotency_key collision — backend's
+ *     "ON CONFLICT (idempotency_key) DO NOTHING" branch) is returned
+ *     unchanged, so the caller can show the already-running job.
+ *   • A 403 PEP-deny throws `ApiError`, so the global
+ *     `<ApiErrorToastCenter />` lights up without the caller having to
+ *     pattern-match on response bodies.
+ *   • `generateInstallIdempotencyKey()` is deterministic enough to
+ *     satisfy the backend pattern even when `crypto.randomUUID` is
+ *     missing (jsdom in some Node versions exposes a partial Crypto
+ *     binding without `randomUUID`).
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import {
+  ApiError,
+  createInstallJob,
+  generateInstallIdempotencyKey,
+  type InstallJob,
+} from "@/lib/api"
+
+const ENDPOINT = "/api/v1/installer/jobs"
+
+const SAMPLE_JOB: InstallJob = {
+  id: "ij-0123456789ab",
+  tenant_id: "t-abc",
+  entry_id: "neural-blur-sdk",
+  state: "queued",
+  idempotency_key: "sample-key-1234567890abcdef",
+  sidecar_id: null,
+  protocol_version: 1,
+  bytes_done: 0,
+  bytes_total: null,
+  eta_seconds: null,
+  log_tail: "",
+  result_json: null,
+  error_reason: null,
+  pep_decision_id: "de-abcdef012345",
+  requested_by: "u-operator",
+  queued_at: "2026-04-27T10:00:00Z",
+  claimed_at: null,
+  started_at: null,
+  completed_at: null,
+}
+
+function mockFetchOnce(
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+) {
+  const text = typeof body === "string" ? body : JSON.stringify(body)
+  const res = new Response(text, {
+    status,
+    headers: { "Content-Type": "application/json", ...headers },
+  })
+  const spy = vi.fn().mockResolvedValueOnce(res)
+  global.fetch = spy as unknown as typeof fetch
+  return spy
+}
+
+describe("BS.7.1 — installer API client", () => {
+  beforeEach(() => {
+    vi.useRealTimers()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  describe("generateInstallIdempotencyKey()", () => {
+    it("returns a string that matches the backend's idempotency_key regex", () => {
+      const key = generateInstallIdempotencyKey()
+      // Backend pattern (alembic 0051 + InstallJobCreate Field):
+      // ^[A-Za-z0-9_\-]{16,64}$
+      expect(key).toMatch(/^[A-Za-z0-9_-]{16,64}$/)
+    })
+
+    it("falls back to a 32-char hex token when crypto.randomUUID is unavailable", () => {
+      const original = (
+        globalThis as { crypto?: Crypto & { randomUUID?: () => string } }
+      ).crypto
+      try {
+        // Strip randomUUID to force the fallback branch.
+        Object.defineProperty(globalThis, "crypto", {
+          configurable: true,
+          value: {
+            getRandomValues: original?.getRandomValues?.bind(original),
+          } as Crypto,
+        })
+        const key = generateInstallIdempotencyKey()
+        expect(key).toMatch(/^[a-f0-9]{16,32}$/)
+        expect(key.length).toBeGreaterThanOrEqual(16)
+      } finally {
+        Object.defineProperty(globalThis, "crypto", {
+          configurable: true,
+          value: original,
+        })
+      }
+    })
+
+    it("produces distinct keys across consecutive calls", () => {
+      const a = generateInstallIdempotencyKey()
+      const b = generateInstallIdempotencyKey()
+      expect(a).not.toBe(b)
+    })
+  })
+
+  describe("createInstallJob()", () => {
+    it("POSTs to /api/v1/installer/jobs with entry_id + auto idempotency_key + empty metadata", async () => {
+      const spy = mockFetchOnce(201, SAMPLE_JOB)
+      const result = await createInstallJob("neural-blur-sdk")
+      expect(result).toEqual(SAMPLE_JOB)
+      expect(spy).toHaveBeenCalledTimes(1)
+      const [url, init] = spy.mock.calls[0]!
+      expect(url).toBe(ENDPOINT)
+      expect(init.method).toBe("POST")
+      const body = JSON.parse(init.body as string)
+      expect(body.entry_id).toBe("neural-blur-sdk")
+      expect(body.metadata).toEqual({})
+      expect(typeof body.idempotency_key).toBe("string")
+      // Same regex the backend enforces so a 422 can't fire on the
+      // field shape before classify() runs and decides HOLD.
+      expect(body.idempotency_key).toMatch(/^[A-Za-z0-9_-]{16,64}$/)
+      // bytes_total is omitted entirely (not null) when caller does
+      // not pass it, so the backend uses its default (`None`).
+      expect(body).not.toHaveProperty("bytes_total")
+    })
+
+    it("forwards caller-supplied idempotencyKey + bytesTotal + metadata verbatim", async () => {
+      const spy = mockFetchOnce(201, SAMPLE_JOB)
+      await createInstallJob("neural-blur-sdk", {
+        idempotencyKey: "operator-retry-key-0001",
+        bytesTotal: 1_073_741_824,
+        metadata: { vendor_channel: "stable", initiated_from: "platforms-tab" },
+      })
+      const [, init] = spy.mock.calls[0]!
+      const body = JSON.parse(init.body as string)
+      expect(body.idempotency_key).toBe("operator-retry-key-0001")
+      expect(body.bytes_total).toBe(1_073_741_824)
+      expect(body.metadata).toEqual({
+        vendor_channel: "stable",
+        initiated_from: "platforms-tab",
+      })
+    })
+
+    it("emits Content-Type: application/json on the request", async () => {
+      const spy = mockFetchOnce(201, SAMPLE_JOB)
+      await createInstallJob("neural-blur-sdk")
+      const [, init] = spy.mock.calls[0]!
+      const headers = init.headers as Record<string, string>
+      expect(headers["Content-Type"]).toBe("application/json")
+    })
+
+    it("returns the existing job row unchanged on a 200 idempotency-collision response", async () => {
+      // Backend: ``ON CONFLICT (idempotency_key) DO NOTHING`` → returns
+      // existing row at 200 (no second PEP HOLD). Frontend must surface
+      // that row as-is so the UI can show "already installing".
+      const existing: InstallJob = {
+        ...SAMPLE_JOB,
+        state: "running",
+        sidecar_id: "omnisight-installer-1",
+      }
+      mockFetchOnce(200, existing)
+      const result = await createInstallJob("neural-blur-sdk", {
+        idempotencyKey: "operator-retry-key-0001",
+      })
+      expect(result.state).toBe("running")
+      expect(result.sidecar_id).toBe("omnisight-installer-1")
+    })
+
+    it("throws ApiError on a 403 pep_denied response (PEP rejected the install)", async () => {
+      const denial = {
+        error: "pep_denied",
+        reason: "pep_tier_unlisted",
+        job_id: SAMPLE_JOB.id,
+        job: { ...SAMPLE_JOB, state: "cancelled", error_reason: "pep_tier_unlisted" },
+      }
+      mockFetchOnce(403, denial)
+      await expect(createInstallJob("neural-blur-sdk")).rejects.toBeInstanceOf(
+        ApiError,
+      )
+    })
+
+    it("throws ApiError on a 404 catalog-entry-not-found response", async () => {
+      mockFetchOnce(404, { detail: "catalog entry 'ghost' not found" })
+      await expect(createInstallJob("ghost")).rejects.toBeInstanceOf(ApiError)
+    })
+
+    it("does not send bytes_total when option is omitted", async () => {
+      const spy = mockFetchOnce(201, SAMPLE_JOB)
+      await createInstallJob("neural-blur-sdk", {
+        metadata: { foo: "bar" },
+      })
+      const [, init] = spy.mock.calls[0]!
+      const body = JSON.parse(init.body as string)
+      expect(body).not.toHaveProperty("bytes_total")
+      expect(body.metadata).toEqual({ foo: "bar" })
+    })
+  })
+})

@@ -9,6 +9,20 @@
  * sub-tab routing** contract; the actual hero / catalog / installed /
  * sources content lands in BS.5.2-BS.5.4 + BS.6.* + BS.7.* + BS.8.*.
  *
+ * BS.7.1 — install button wiring (this file owns the integration glue).
+ * Clicking ``Install`` on a `<CatalogCard />` (or ``Update`` on the
+ * `<CatalogDetailPanel />` primary CTA) calls
+ * ``createInstallJob(entry.id)``, which POSTs ``/installer/jobs``. The
+ * route runs through the existing R20-A PEP gateway HOLD by virtue of
+ * ``tool="install_entry"`` not being on any tier whitelist (see
+ * ``backend/routers/installer.py::INSTALL_PEP_TOOL``); the global
+ * ``<ToastCenter />`` already surfaces the ``decision_pending`` SSE
+ * event with approve / reject buttons. On approve → 201 + queued job;
+ * on deny / timeout → 403 surfaced via the global
+ * `<ApiErrorToastCenter />`. BS.6.7's `<PendingInstallTooltip />` flips
+ * to its passthrough branch the moment ``onInstall`` is wired, so this
+ * change activates the install affordance across both card and panel.
+ *
  * Sub-tab contract (frozen now so subsequent BS rows can deep-link in):
  *   ?tab=catalog    → catalog browse (BS.6 lands the cards + 5-state)
  *   ?tab=installed  → already-installed list (BS.6.x lands)
@@ -48,13 +62,17 @@ import {
 
 import { CatalogCard } from "@/components/omnisight/catalog-card"
 import { CatalogDetailPanel } from "@/components/omnisight/catalog-detail-panel"
-import { CatalogTab } from "@/components/omnisight/catalog-tab"
+import {
+  CatalogTab,
+  type CatalogEntry,
+} from "@/components/omnisight/catalog-tab"
 import {
   PLATFORM_COUNTERS_ZERO,
   PlatformHero,
   type PlatformCounters,
 } from "@/components/omnisight/platform-hero"
 import { useHostMetricsTick } from "@/hooks/use-host-metrics-tick"
+import { createInstallJob } from "@/lib/api"
 
 // ─────────────────────────────────────────────────────────────────────
 // Sub-tab contract — exported so BS.5.x tests + future deep-link
@@ -146,6 +164,36 @@ function PlatformsPageInner() {
       diskTotalGb,
     }
   }, [hostTick, hostBaseline])
+
+  // BS.7.1 — install button. Click flows directly to the existing
+  // ``POST /installer/jobs`` route (backend/routers/installer.py:409),
+  // which evaluates the request through the existing R20-A PEP gateway
+  // HOLD path: ``tool="install_entry"`` is not on any tier whitelist so
+  // ``classify`` returns HOLD via the ``tier_unlisted`` rule, and the
+  // request blocks until the operator approves / rejects via the
+  // global ToastCenter coaching card. The request resolves with the
+  // queued ``install_jobs`` row on approve, throws on deny / timeout —
+  // both paths are surfaced to the operator via the existing API
+  // error toast / decision_resolved SSE chain. The catalog card flips
+  // off its "pending tooltip" affordance the moment ``onInstall`` is
+  // wired, so this single line activates the BS.6.7 install + update
+  // affordance everywhere it is rendered.
+  //
+  // The catalog detail panel uses the same handler — BS.7 retry / view-
+  // log are deferred to BS.7.6, which will plumb dedicated
+  // ``onRetry`` / ``onViewLog`` handlers (and the failed-state log
+  // modal) once the install pipeline lands.
+  const handleInstall = useCallback(async (entry: CatalogEntry) => {
+    try {
+      await createInstallJob(entry.id)
+    } catch (err) {
+      // The request layer already surfaces the failure through the
+      // global ApiErrorToastCenter; we still log so dev consoles see
+      // the precise rejection reason (PEP deny vs timeout vs idempotency
+      // collision) without scraping the toast DOM.
+      console.error("[platforms] install job creation failed", err)
+    }
+  }, [])
 
   return (
     <main
@@ -261,10 +309,22 @@ function PlatformsPageInner() {
                   // `onSelect` the card is non-interactive (BS.6.2
                   // standalone preview behaviour).
                   onSelect={onSelect ? () => onSelect() : undefined}
+                  // BS.7.1 — wire the install button. The card's
+                  // BS.6.7 PendingInstallTooltip flips to its
+                  // passthrough branch (no wrapper span, no tab stop,
+                  // no portal mount) once the handler is non-undefined.
+                  onInstall={handleInstall}
                 />
               )}
               renderDetail={({ entry, onClose }) => (
-                <CatalogDetailPanel entry={entry} onBack={onClose} />
+                <CatalogDetailPanel
+                  entry={entry}
+                  onBack={onClose}
+                  // BS.7.1 — same handler powers the detail panel's
+                  // primary CTA (Install / Update). Retry + view-log
+                  // remain pending behind BS.7.6 + BS.7.8.
+                  onInstall={handleInstall}
+                />
               )}
             />
           ) : (
