@@ -51,13 +51,22 @@ vi.mock("@/hooks/use-effective-motion-level", () => ({
   usePrefersReducedMotion: () => mockOsReducedMotion,
 }))
 
-// `useUserStorage` hits the auth/tenant context tree. Stub to a
-// useState-style shim so density persistence still round-trips on
-// the catalog-tab surface without standing up the providers.
-vi.mock("@/lib/storage", () => ({
-  useUserStorage: (_key: string) => {
-    const [v, setV] = React.useState<string | null>(null)
-    return [v, setV]
+// BS.11.4 — density now flows through `useUserDensityPreference`
+// (J4 user_preferences API). Stub the hook so the reduce-motion
+// compliance tests don't have to mount the full Auth/Tenant/api
+// chain just to render `<CatalogTab />`.
+vi.mock("@/hooks/use-user-density-preference", () => ({
+  useUserDensityPreference: () => {
+    const [d, setD] = React.useState<"compact" | "comfortable" | "spacious">(
+      "comfortable",
+    )
+    return {
+      density: d,
+      setDensity: async (next: "compact" | "comfortable" | "spacious") => {
+        setD(next)
+      },
+      hydrated: true,
+    }
   },
 }))
 

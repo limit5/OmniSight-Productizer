@@ -37,8 +37,13 @@
  *     and `id` (case-insensitive).
  *   • sort dropdown — name asc/desc, vendor asc, recently-updated desc.
  *   • density toggle — compact / comfortable / spacious, persisted
- *     per-(tenant, user) via `useUserStorage` so operators see the same
- *     density across reloads + browser sessions on the same machine.
+ *     server-of-record via the J4 `user_preferences` API (BS.11.4
+ *     `useUserDensityPreference` hook) so operators see the same
+ *     density across reloads, browser sessions, AND devices. Same-tab
+ *     writes refresh sibling consumers via the
+ *     `omnisight:density-pref-changed` event bus; cross-device sync
+ *     flows through `preferences.updated` SSE emitted by the backend
+ *     router on PUT.
  *
  * The card grid itself is ship-empty for BS.6.1: the toolbar applies
  * filter / search / sort transforms to the entries prop, computes a
@@ -56,28 +61,38 @@
  *   • `CATALOG_FAMILIES` const tuple + `CatalogFamily` literal union.
  *   • `CATALOG_DENSITIES` + `CatalogDensity`.
  *   • `CATALOG_SORTS` + `CatalogSortKey`.
- *   • `CATALOG_DENSITY_STORAGE_KEY` — single source-of-truth for the
- *     `useUserStorage` key so BS.6.6 + BS.6.8 tests don't hardcode it.
+ *   • `CATALOG_DENSITY_STORAGE_KEY` — historic localStorage key
+ *     (kept exported for backward-compat with any caller still
+ *     reading the legacy entry). BS.11.4 moved the SoT to the J4
+ *     `user_preferences` row keyed `catalog_density`; the lib
+ *     `lib/density-preferences.ts` owns that key as
+ *     `DENSITY_PREFERENCE_KEY`.
  *   • `filterAndSortEntries()` — pure helper; BS.6.8 unit tests can
  *     lock the filter / sort behaviour without RTL.
  *
  * Module-global state audit
  * ─────────────────────────
  * No module-level mutable state. All filter / search / sort / density
- * lives in component-local React state (`useState` + `useUserStorage`).
- * `useUserStorage` writes to per-(tenant, user) prefixed `localStorage`
- * keys; cross-tab sync flows through the `storage` event handler that
- * `lib/storage.ts` already mounts. Browser-only — uvicorn `--workers N`
- * model does not apply (answer #1: each tab derives the same view from
- * the same Next.js build artifact + the same persisted preference).
+ * lives in component-local React state. BS.11.4 moved the density
+ * source-of-record to the J4 `user_preferences` API
+ * (`useUserDensityPreference` hook); cross-tab / cross-device sync
+ * flows through `preferences.updated` SSE emitted by the backend
+ * router on PUT, plus the same-tab `omnisight:density-pref-changed`
+ * event bus for instant in-tab refresh. Browser-only — uvicorn
+ * `--workers N` model does not apply (answer #1: each tab derives
+ * the same view from the same Next.js build artifact + the same
+ * persisted PG row).
  *
  * Read-after-write timing audit
  * ─────────────────────────────
- * Density writes call `setItem` synchronously and React state updates
- * via `useSyncExternalStore` on the next tick — no network round-trip,
- * no cross-worker race. Filter / search / sort are pure derivations of
- * state and the entries prop; no API calls inside this component (the
- * actual catalog fetch lands in BS.6.5/BS.7's `useCatalog()` hook).
+ * Density writes call `setUserPreference` (a single PG UPSERT
+ * wrapped in `setDensityPreference`) and apply optimistically to
+ * local React state before the await completes. On API rejection
+ * the hook restores the prior value — no race window where a
+ * sibling consumer sees a value the server later rejected. Filter
+ * / search / sort are pure derivations of state and the entries
+ * prop; no API calls inside this component (the actual catalog
+ * fetch lands in BS.6.5/BS.7's `useCatalog()` hook).
  */
 
 import {
@@ -109,7 +124,7 @@ import {
   useEffectiveMotionLevel,
   useScrollParallax,
 } from "@/hooks/use-zero-g"
-import { useUserStorage } from "@/lib/storage"
+import { useUserDensityPreference } from "@/hooks/use-user-density-preference"
 
 // ─────────────────────────────────────────────────────────────────────
 // Public types — frozen so BS.6.2..BS.6.7 + BS.6.8 share one contract.
@@ -187,9 +202,11 @@ export const CATALOG_SORTS = [
 export type CatalogSortKey = (typeof CATALOG_SORTS)[number]
 export const CATALOG_DEFAULT_SORT: CatalogSortKey = "name-asc"
 
-/** Storage key (un-prefixed) used by `useUserStorage`. The hook adds
- *  the `omnisight:{tenantId}:{userId}:` namespace so this string is
- *  the user-visible suffix only. */
+/** Historic `useUserStorage` key used before BS.11.4 migrated the
+ *  density source-of-record to the J4 `user_preferences` API. Kept
+ *  exported so any external caller still reading the legacy
+ *  localStorage entry resolves the same suffix. New code should use
+ *  `DENSITY_PREFERENCE_KEY` from `lib/density-preferences.ts`. */
 export const CATALOG_DENSITY_STORAGE_KEY = "settings:platforms:catalog:density"
 
 // ─────────────────────────────────────────────────────────────────────
@@ -649,20 +666,26 @@ export function CatalogTab({
   )
   const handleCloseDetail = useCallback(() => setSelectedId(null), [])
 
-  // Density is the only piece of state we persist across reloads.
-  // `useUserStorage` returns a `[value, setter]` keyed by the
-  // (tenant, user) tuple; we pass-through the raw string and coerce on
-  // read so corrupted / legacy values fall back to comfortable.
-  const [persistedDensity, persistDensity] = useUserStorage(
-    CATALOG_DENSITY_STORAGE_KEY,
-  )
-  const density = useMemo(() => coerceDensity(persistedDensity), [persistedDensity])
+  // BS.11.4 — density is persisted server-of-record via the J4
+  // `user_preferences` API (key `catalog_density`). Same-tab writes
+  // refresh sibling consumers via the
+  // `omnisight:density-pref-changed` event bus; cross-tab /
+  // cross-device sync flows through `preferences.updated` SSE
+  // emitted by the backend router on PUT. Until the first fetch
+  // resolves the hook returns `CATALOG_DEFAULT_DENSITY`
+  // (comfortable) so the toolbar never flashes an empty state.
+  const { density, setDensity } = useUserDensityPreference()
   const onSelectDensity = useCallback(
     (next: CatalogDensity) => {
       if (next === density) return
-      persistDensity(next)
+      // The J4 PUT happens inside `setDensity`; we intentionally
+      // do not surface the rejection here — the hook restores the
+      // prior value on failure and a future toast surface (BS.11.6
+      // perf budget row keeps the catalog tab presentational) can
+      // listen via the same event bus to prompt a retry.
+      void setDensity(next)
     },
-    [density, persistDensity],
+    [density, setDensity],
   )
 
   const onSearchChange = useCallback(

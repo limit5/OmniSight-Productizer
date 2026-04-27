@@ -102,3 +102,34 @@ class TestUserPreferences:
 
         resp = await _prefs_client.get("/api/v1/user-preferences/locale")
         assert resp.json()["value"] == "ja"
+
+    async def test_catalog_density_round_trip(self, _prefs_client: AsyncClient):
+        """BS.11.4 — `catalog_density` is the J4 key the BS.11 catalog
+        density toggle persists against. The router is generic, but
+        locking the literal here keeps frontend ↔ backend drift visible:
+        if either side renames the key the round-trip silently breaks.
+        Mirror test on the frontend side lives in
+        ``test/lib/density-preferences.test.ts`` (locks
+        ``DENSITY_PREFERENCE_KEY === "catalog_density"``).
+        """
+        for value in ("compact", "comfortable", "spacious"):
+            put = await _prefs_client.put(
+                "/api/v1/user-preferences/catalog_density",
+                json={"value": value},
+            )
+            assert put.status_code == 200
+            assert put.json() == {"key": "catalog_density", "value": value}
+
+            get = await _prefs_client.get(
+                "/api/v1/user-preferences/catalog_density",
+            )
+            assert get.status_code == 200
+            assert get.json()["value"] == value
+
+        # The list endpoint surfaces the upserted density alongside any
+        # other prefs the user has — second device that mounts after the
+        # first device wrote the density picks the value up here.
+        listed = await _prefs_client.get("/api/v1/user-preferences")
+        assert listed.status_code == 200
+        items = listed.json()["items"]
+        assert items["catalog_density"] == "spacious"
