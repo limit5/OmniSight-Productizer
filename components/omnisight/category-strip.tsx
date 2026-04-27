@@ -88,7 +88,7 @@ import {
 import {
   CATALOG_FAMILIES,
   type CatalogFamily,
-} from "@/components/omnisight/catalog-tab"
+} from "@/lib/catalog-families"
 
 // ─────────────────────────────────────────────────────────────────────
 // Public types — exported so BS.6.8 tests share one contract.

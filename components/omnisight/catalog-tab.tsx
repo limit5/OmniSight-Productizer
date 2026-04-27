@@ -134,15 +134,16 @@ import { useUserDensityPreference } from "@/hooks/use-user-density-preference"
  *  literal-union form keeps switch-cases exhaustive at compile time
  *  while allowing entries with unknown families (subscription feeds,
  *  legacy seeds) to render under the "custom" bucket without being
- *  silently dropped — `coerceFamily()` handles the fallback. */
-export const CATALOG_FAMILIES = [
-  "mobile",
-  "embedded",
-  "web",
-  "software",
-  "custom",
-] as const
-export type CatalogFamily = (typeof CATALOG_FAMILIES)[number]
+ *  silently dropped — `coerceFamily()` handles the fallback.
+ *
+ *  Defined in `lib/catalog-families.ts` (a leaf module with no other
+ *  imports) so `category-strip.tsx` can read the constant without
+ *  participating in the catalog-tab ↔ category-strip ESM evaluation
+ *  cycle. Re-exported here to preserve the historic
+ *  `import { CATALOG_FAMILIES } from "@/components/omnisight/catalog-tab"`
+ *  surface. */
+export { CATALOG_FAMILIES, type CatalogFamily } from "@/lib/catalog-families"
+import { CATALOG_FAMILIES, type CatalogFamily } from "@/lib/catalog-families"
 
 /** Lifecycle states the catalog card surfaces. The five states map 1:1
  *  to BS.6.2's visual contract; BS.6.1 only needs them to filter +
