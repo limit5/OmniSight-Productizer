@@ -194,6 +194,13 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "mfa_backup_codes",
     # Password-history K-series — same FK parent as above.
     "password_history",
+    # AS.2.2 (alembic 0057): per-(user, provider) OAuth credential vault.
+    # FK ``user_id → users.id`` (CASCADE) so it MUST replay after
+    # ``users``.  Composite PK ``(user_id, provider)`` is two TEXT
+    # columns — NOT in TABLES_WITH_IDENTITY_ID below.  Empty until
+    # AS.6.1 OAuth router starts writing rows; the table ships ahead
+    # of the router so dev-image schema is one Phase ahead of code.
+    "oauth_tokens",
     "sessions",
     "github_installations",
     # Project runs (alembic 0006).

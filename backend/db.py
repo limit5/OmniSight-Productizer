@@ -1473,6 +1473,37 @@ CREATE TABLE IF NOT EXISTS catalog_subscriptions (
 CREATE INDEX IF NOT EXISTS idx_catalog_subscriptions_due
     ON catalog_subscriptions(last_synced_at, refresh_interval_s)
     WHERE enabled = 1;
+
+-- AS.2.2 (alembic 0057): per-(user, provider) OAuth credential vault.
+-- Columns mirror alembic 0057's CREATE TABLE; see that file's docstring
+-- for the column-by-column rationale.  Composite PK ``(user_id, provider)``
+-- enforces the "one binding per user per provider" invariant at the
+-- database layer.  ``access_token_enc`` / ``refresh_token_enc`` round-trip
+-- through ``backend.security.token_vault`` (Fernet ciphertext, urlsafe-b64
+-- ASCII).  ``key_version`` reserved for the AS.0.4 §3.1 KMS rotation
+-- roadmap; today every row is written and read at
+-- ``token_vault.KEY_VERSION_CURRENT = 1``.  Provider CHECK clause MUST
+-- byte-equal ``token_vault.SUPPORTED_PROVIDERS`` and
+-- ``account_linking._AS1_OAUTH_PROVIDERS``; the cross-module drift
+-- guard tests fail red when the three diverge.  Empty until AS.6.1
+-- OAuth router starts writing rows.
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+    user_id            TEXT NOT NULL
+                            REFERENCES users(id) ON DELETE CASCADE,
+    provider           TEXT NOT NULL
+                            CHECK (provider IN ('apple','github','google','microsoft')),
+    access_token_enc   TEXT NOT NULL DEFAULT '',
+    refresh_token_enc  TEXT NOT NULL DEFAULT '',
+    expires_at         REAL,
+    scope              TEXT NOT NULL DEFAULT '',
+    key_version        INTEGER NOT NULL DEFAULT 1,
+    created_at         REAL NOT NULL,
+    updated_at         REAL NOT NULL,
+    version            INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, provider)
+);
+CREATE INDEX IF NOT EXISTS idx_oauth_tokens_provider_expires
+    ON oauth_tokens(provider, expires_at);
 """
 
 
