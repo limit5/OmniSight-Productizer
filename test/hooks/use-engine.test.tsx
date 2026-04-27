@@ -53,6 +53,16 @@ vi.mock("@/lib/api", () => {
     // invariant; the poll-contract suite below overrides via
     // mockImplementation to exercise the happy path + interval tick.
     getProvidersBalance: vi.fn(() => Promise.reject(new Error("offline-mock"))),
+    // R18 fix (commit 7e666454): useEngine.init() Phase 4 fetches
+    // existing notifications on mount to avoid badge/panel mismatch
+    // (badge shows N from /dashboard-summary but local notifications
+    // array was empty until SSE fired). Reject by default for offline
+    // suite; the R18 regression test below overrides via
+    // mockImplementation to verify the seed path.
+    getNotifications: vi.fn(() => Promise.reject(new Error("offline-mock"))),
+    // R20-B (commit 6fe414b0): streamInvoke accepts second arg
+    // suppressCoach (sessionStorage-backed). Mocked permissively.
+    streamInvoke: vi.fn(async function* () {}),
   }
 })
 
@@ -801,4 +811,128 @@ describe("useEngine — chat.message dispatcher + history seeding", () => {
     expect(result.current.tasks).toEqual(beforeTasks)
     expect(result.current.agents).toEqual(beforeAgents)
   })
+})
+
+
+// ── R16 / R18 regression tests (audit 2026-04-27 P1.2 + P1.3) ────────
+//
+// R16 fix (commit 5b5bb69b): useEngine.init() used to nest the SSE
+// subscribe + chat-history seed INSIDE the same try-block as
+// `Promise.all([listAgents, listTasks])`. If either of those threw
+// (transient 401, 503 cold-boot race, CF tunnel blip, alembic-pending
+// readyz fail), the catch swallowed the failure and SSE was NEVER
+// subscribed for the lifetime of the page. Symptom: ACTIVE_DEVICE
+// stuck at 0 because no SSE → no /events traffic → no presence
+// heartbeat write.
+//
+// Fix split init() into 3 independent phases. Each has its own
+// try/catch so a Phase-1 failure cannot block Phase-3 SSE subscribe.
+//
+// R18 fix (commit 7e666454): badge count came from
+// /dashboard-summary.notificationsUnread.count (server-authoritative,
+// fetched every 10s) but the local `notifications` array was only
+// populated by SSE pushes that arrived AFTER mount. Any unread items
+// predating page load (previous session, events received while user
+// offline, backend restarts re-emitting) were invisible — badge
+// showed N but panel was empty.
+//
+// Fix added Phase 4 to init() that calls api.getNotifications(50) once
+// on mount and merges into the local list (de-duped by id).
+
+describe("useEngine — R16 SSE subscribe independence (regression)", () => {
+  it("subscribes to SSE even when listAgents/listTasks both reject", async () => {
+    // Phase 1 (agents/tasks seed) fails — the original bug: this would
+    // also kill Phase 3 (SSE subscribe). The R16 fix separated phases.
+    vi.mocked(api.listAgents).mockImplementation(() =>
+      Promise.reject(new Error("R16 simulated 503"))
+    )
+    vi.mocked(api.listTasks).mockImplementation(() =>
+      Promise.reject(new Error("R16 simulated 503"))
+    )
+    primeSSE()
+
+    renderHook(() => useEngine())
+
+    // R16 invariant: SSE subscribe must still happen.
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+  })
+
+  it("subscribes to SSE even when getChatHistory rejects (Phase 2 isolation)", async () => {
+    // Phase 1 ok, Phase 2 (chat history) fails. R16 fix isolates Phase 2
+    // failure from Phase 3 SSE subscribe.
+    vi.mocked(api.listAgents).mockImplementation(() => Promise.resolve([]))
+    vi.mocked(api.listTasks).mockImplementation(() => Promise.resolve([]))
+    vi.mocked(api.getChatHistory).mockImplementation(() =>
+      Promise.reject(new Error("R16 simulated chat-history 500"))
+    )
+    primeSSE()
+
+    renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+  })
+})
+
+describe("useEngine — R18 notification seed on mount (regression)", () => {
+  it("seeds the notifications array from getNotifications(50) on mount", async () => {
+    // Mock the seed endpoint to return 2 unread notifications.
+    vi.mocked(api.getNotifications).mockImplementation(() =>
+      Promise.resolve([
+        {
+          id: "notif-1",
+          level: "warning",
+          title: "PEP HOLD waiting",
+          message: "run_simulation pending review",
+          source: "agent:software",
+          timestamp: "2026-04-25T14:30:00Z",
+          read: false,
+        },
+        {
+          id: "notif-2",
+          level: "info",
+          title: "Build completed",
+          message: "doorbell-firmware build success",
+          source: "system",
+          timestamp: "2026-04-25T14:31:00Z",
+          read: false,
+        },
+      ] as unknown as ReturnType<typeof api.getNotifications> extends Promise<infer U> ? U : never),
+    )
+    primeSSE()
+
+    const { result } = renderHook(() => useEngine())
+
+    // R18 invariant: notifications array gets populated on mount,
+    // even before any SSE event fires.
+    await waitFor(() => {
+      expect(result.current.notifications).toHaveLength(2)
+    })
+
+    const ids = result.current.notifications.map((n) => n.id)
+    expect(ids).toContain("notif-1")
+    expect(ids).toContain("notif-2")
+  })
+
+  it("survives getNotifications failure without breaking init", async () => {
+    // R18 Phase 4 is best-effort — endpoint failure must not break
+    // other init phases.
+    vi.mocked(api.getNotifications).mockImplementation(() =>
+      Promise.reject(new Error("R18 simulated 500"))
+    )
+    primeSSE()
+
+    const { result } = renderHook(() => useEngine())
+
+    // Init still completes (SSE subscribed) despite Phase 4 failing.
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+    // Notifications array stays empty (no seed + no SSE push).
+    expect(result.current.notifications).toEqual([])
+  })
+
+  // Note on de-dup direction: R18 fix's `setNotifications` callback
+  // de-dups seed-after-SSE (when seed runs and SSE has already pushed
+  // earlier) but the SSE handler itself doesn't de-dup against earlier
+  // seed entries. This asymmetry is intentional — Phase 4 runs once
+  // on mount, SSE runs continuously; the seed knows it's catching up
+  // so de-dups conservatively. SSE-after-seed de-dup would require a
+  // different fix and is out of R18's scope.
 })

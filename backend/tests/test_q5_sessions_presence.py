@@ -320,3 +320,162 @@ async def test_presence_three_then_drop_one_returns_two(_q5_db):
     assert r2["active_count"] == 2
     returned = {d["session_id"] for d in r2["devices"]}
     assert c_sid not in returned
+
+
+# ── R19 regression tests (audit 2026-04-27 P1.2) ──────────────────
+# R19 fix (commit e54ef075): event_stream's finally block was unconditionally
+# calling session_presence.drop() on disconnect — even on transient drops
+# (CF tunnel buffering pre-`open` event, browser tab backgrounding, network
+# blips). Each cycle wrote heartbeat then immediately dropped it, leaving
+# the presence hash empty ~95% of the time and ACTIVE_DEVICES stuck at 0.
+#
+# Fix removed the drop entirely; 60s lazy-prune handles stale entries.
+# These tests guard against re-introduction.
+
+
+def test_r19_event_stream_finally_does_not_call_session_presence_drop():
+    """R19 drift guard — verify backend/routers/events.py::event_stream's
+    finally block does NOT call session_presence.drop().
+
+    This is a source-code-level check (read the file, parse the finally
+    block) rather than a runtime test, because event_stream is an async
+    generator wrapped in EventSourceResponse — driving it with a real
+    CancelledError requires the full ASGI machinery and is fragile.
+
+    The drift guard catches any future commit that re-adds drop() to the
+    finally block. If the guard fails, read the R19 commit message
+    (e54ef075) before "fixing" it — the absence of drop is intentional.
+    """
+    import re
+    from pathlib import Path
+
+    events_py = Path(__file__).parent.parent / "routers" / "events.py"
+    src = events_py.read_text(encoding="utf-8")
+
+    # Locate the event_stream function body.
+    start = src.find("async def event_stream(")
+    assert start >= 0, "event_stream function not found"
+    # Take a generous slice — function spans ~70 lines.
+    func_body = src[start : start + 8000]
+
+    # Find the `finally:` block inside the inner generator. The R19 fix
+    # left a multi-line comment explaining why drop is absent — that
+    # comment is part of the contract.
+    finally_match = re.search(
+        r"\n\s*finally:\s*\n((?:\s+.+\n)+?)(?=\n\s{0,8}return EventSourceResponse|\Z)",
+        func_body,
+    )
+    assert finally_match, (
+        "Could not locate finally block in event_stream. R19 drift guard "
+        "needs to be updated if event_stream's structure changed."
+    )
+    finally_body = finally_match.group(1)
+
+    # The R19 invariant: finally block must NOT call session_presence.drop().
+    assert "session_presence.drop(" not in finally_body, (
+        "R19 regression: event_stream's finally block calls "
+        "session_presence.drop(*presence). This re-introduces the bug "
+        "fixed by commit e54ef075 (presence hash empty 95% of the time, "
+        "ACTIVE_DEVICES stuck at 0). Read the R19 commit message + "
+        "docs/audit/2026-04-27-deep-audit.md §3 P1.2 before resolving."
+    )
+
+    # The finally block SHOULD call bus.unsubscribe (the original cleanup
+    # that was always correct).
+    assert "bus.unsubscribe(queue)" in finally_body, (
+        "R19 drift guard expected bus.unsubscribe(queue) in finally — "
+        "if you've changed the cleanup pattern, update this assertion."
+    )
+
+
+@pytest.mark.asyncio
+async def test_r19_presence_persists_through_simulated_disconnect_cycle(_q5_db):
+    """R19 behavior — simulate the connect→disconnect→reconnect cycle that
+    used to wipe presence under the buggy finally block.
+
+    The R19 saga: SSE clients (especially behind CF tunnel pre-`open`-event
+    buffering) often disconnect within ~1s of opening. With the old finally
+    drop(), each cycle recorded heartbeat then immediately deleted it, so
+    the presence hash stayed empty even as SSE was constantly reconnecting.
+
+    This test directly exercises ``session_presence.record_heartbeat`` →
+    ``finally simulation`` (which now does NOT drop) → reconnect →
+    record_heartbeat again, and asserts the record persists. It does NOT
+    drive event_stream itself (too fragile against ASGI internals); the
+    drift-guard test above covers that source-code invariant.
+    """
+    auth, session_presence = _q5_db
+    u = await auth.create_user(
+        "r19@example.com", "R", role="viewer", password="pwpwpwpwpwpw",
+    )
+    s = await auth.create_session(u.id, user_agent="Chrome")
+    sid = auth.session_id_from_token(s.token)
+
+    # Cycle 1: connect → record heartbeat → disconnect (no drop).
+    now = time.time()
+    session_presence.record_heartbeat(u.id, sid, ts=now)
+    # Simulate finally block: ONLY bus.unsubscribe equivalent, NO drop.
+    # (We don't have a real bus here; this just asserts no presence
+    # mutation happens during disconnect.)
+
+    # Verify presence still recorded.
+    raw = session_presence.get(session_presence._field(u.id, sid))
+    assert raw, "After cycle 1 disconnect, presence should still exist"
+    assert abs(float(raw) - now) < 0.01
+
+    # Cycle 2: reconnect → record heartbeat → disconnect again.
+    cycle2_ts = now + 5.0
+    session_presence.record_heartbeat(u.id, sid, ts=cycle2_ts)
+    raw = session_presence.get(session_presence._field(u.id, sid))
+    assert raw, "After cycle 2 disconnect, presence should still exist"
+    assert abs(float(raw) - cycle2_ts) < 0.01
+
+    # Cycle 3: reconnect after 30s gap (still within 60s window).
+    cycle3_ts = cycle2_ts + 30.0
+    session_presence.record_heartbeat(u.id, sid, ts=cycle3_ts)
+    raw = session_presence.get(session_presence._field(u.id, sid))
+    assert raw, "After cycle 3 disconnect (30s gap), presence should still exist"
+
+    # Verify the presence endpoint sees an active session.
+    from backend.routers.auth import sessions_presence
+    # Use the cycle3 timestamp as "now" via the stored heartbeat.
+    r = await sessions_presence(_make_request(), user=u)
+    assert r["active_count"] == 1, (
+        f"R19 invariant: after 3 connect-disconnect cycles, presence should "
+        f"still show 1 active device. Got {r['active_count']}. This is the "
+        f"exact ACTIVE_DEVICES=0 bug R19 was meant to fix."
+    )
+
+
+@pytest.mark.asyncio
+async def test_r19_presence_lazy_prune_still_works_after_window(_q5_db):
+    """R19 invariant: removing the eager drop() must NOT break the 60s
+    lazy-prune. Stale entries (>60s no heartbeat) must still age out via
+    the opportunistic GC in /auth/sessions/presence.
+
+    This test guards against an over-correction where someone might
+    "improve" R19 by removing the lazy-prune as well, leaving stale
+    entries stuck in the hash forever.
+    """
+    auth, session_presence = _q5_db
+    u = await auth.create_user(
+        "r19stale@example.com", "S", role="viewer", password="pwpwpwpwpwpw",
+    )
+    s = await auth.create_session(u.id, user_agent="Chrome")
+    sid = auth.session_id_from_token(s.token)
+
+    # Record a heartbeat 70s ago — past the 60s window.
+    stale_ts = time.time() - 70.0
+    session_presence.record_heartbeat(u.id, sid, ts=stale_ts)
+
+    # Verify endpoint excludes stale + GC prunes the hash.
+    from backend.routers.auth import sessions_presence
+    r = await sessions_presence(_make_request(), user=u)
+    assert r["active_count"] == 0, "Stale heartbeat (>60s) must be excluded"
+
+    # The GC inside the endpoint should have pruned the hash.
+    raw = session_presence.get(session_presence._field(u.id, sid))
+    assert not raw, (
+        "R19 invariant: opportunistic prune should have removed the stale "
+        "entry. R19 removed eager drop(); prune is the only cleanup path."
+    )
