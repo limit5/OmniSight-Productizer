@@ -72,6 +72,21 @@ AS.2.5 (auth shared lib):
     Honours the AS.0.4 §6.2 "DSAR keeps working knob-off" invariant
     via the audit layer's silent-skip.
 
+AS.6.2 (OmniSight self-integration — credential vault expand phase):
+  - credential_vault — generalised binding-envelope vault that
+    extends the AS.2.1 token_vault pattern to git_accounts and
+    llm_credentials at-rest secrets. Pure expand-only per AS.0.4
+    §2 Track C / §6.1: no caller wired (``git_credentials.py`` /
+    ``llm_credentials.py`` still call ``secret_store.encrypt``
+    directly), no schema migration. The migrate-phase row will
+    dual-write through ``encrypt_git_secret`` /
+    ``encrypt_llm_credential``; a forward-reservation
+    ``migrate_legacy_secret_store_ciphertext`` helper rewraps a
+    legacy plain Fernet ciphertext into the binding envelope so
+    the migrate row has a single seam to call. Reuses
+    ``secret_store._fernet`` (single master Fernet key invariant
+    per AS.0.4 §3.1 — drift-guarded).
+
 AS.6.1 (OmniSight self-integration):
   - oauth_login_handler — backend handler that wires the AS.1 OAuth
     shared library to OmniSight's own login flow. Implements the
@@ -155,6 +170,7 @@ from .secret_filter import redact
 from . import auth_dashboard  # noqa: F401
 from . import auth_event  # noqa: F401
 from . import bot_challenge  # noqa: F401
+from . import credential_vault  # noqa: F401
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_login_handler  # noqa: F401
@@ -169,6 +185,7 @@ __all__ = [
     "auth_dashboard",
     "auth_event",
     "bot_challenge",
+    "credential_vault",
     "harden_user_message",
     "looks_like_injection",
     "oauth_audit",
