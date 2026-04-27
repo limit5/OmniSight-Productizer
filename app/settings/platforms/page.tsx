@@ -81,6 +81,7 @@ import {
   CheckCircle2,
   ChevronRight,
   Layers,
+  PieChart,
   Rss,
   Trash2,
 } from "lucide-react"
@@ -92,6 +93,7 @@ import {
   type CatalogEntry,
 } from "@/components/omnisight/catalog-tab"
 import { CleanupUnusedModal, pickCleanupCandidates } from "@/components/omnisight/cleanup-unused-modal"
+import { DiskBreakdownModal } from "@/components/omnisight/disk-breakdown-modal"
 import { InstallLogModal } from "@/components/omnisight/install-log-modal"
 import {
   InstalledTab,
@@ -409,6 +411,19 @@ function PlatformsPageInner() {
     void refreshInstalledEntries()
   }, [refreshInstalledEntries])
 
+  // BS.8.3 — Disk breakdown report modal. Opens when the operator
+  // clicks the "Disk breakdown" button in the InstalledTab toolbar.
+  // The modal aggregates `installedEntries` by family and renders a
+  // slice-and-dice treemap proportional to each entry's disk usage —
+  // pure derivation, no API round-trip.
+  const [diskBreakdownOpen, setDiskBreakdownOpen] = useState(false)
+  const handleDiskBreakdownOpen = useCallback(() => {
+    setDiskBreakdownOpen(true)
+  }, [])
+  const handleDiskBreakdownClose = useCallback(() => {
+    setDiskBreakdownOpen(false)
+  }, [])
+
   return (
     <main
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
@@ -505,9 +520,21 @@ function PlatformsPageInner() {
             // until BS.8.4 lands the dependency-check gate.
             <div className="flex flex-col gap-3">
               <div
-                className="flex items-center justify-end"
+                className="flex items-center justify-end gap-2"
                 data-testid="installed-tab-extras"
               >
+                <button
+                  type="button"
+                  onClick={handleDiskBreakdownOpen}
+                  disabled={installedEntries.length === 0}
+                  className="inline-flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 font-mono text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+                  data-testid="installed-tab-disk-breakdown-button"
+                  data-installed-entry-count={installedEntries.length}
+                  aria-label={`Open disk-breakdown modal — ${installedEntries.length} installed entries`}
+                >
+                  <PieChart size={12} aria-hidden />
+                  Disk breakdown
+                </button>
                 <button
                   type="button"
                   onClick={handleCleanupOpen}
@@ -696,6 +723,16 @@ function PlatformsPageInner() {
         entries={installedEntries}
         onClose={handleCleanupClose}
         onCompleted={handleCleanupCompleted}
+      />
+
+      {/* BS.8.3 — Disk breakdown report modal. Treemap visualisation of
+          the installed entries' disk usage, grouped by family. Pure
+          derivation from the same `useInstalledEntries()` snapshot —
+          no API round-trip. */}
+      <DiskBreakdownModal
+        open={diskBreakdownOpen}
+        entries={installedEntries}
+        onClose={handleDiskBreakdownClose}
       />
     </main>
   )
