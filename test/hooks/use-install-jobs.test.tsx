@@ -20,6 +20,29 @@
  *      SSE event does not carry (idempotency_key, requested_by, …).
  *  11. ``mergeInstallJobFromProgress`` keeps prev.bytes_total /
  *      prev.sidecar_id / prev.entry_id when the new event omits them.
+ *
+ * BS.7.9 deeper coverage (8 new cases):
+ *  12. ``removeJob`` is a no-op when the id doesn't match any row
+ *      (callers in BS.7.7 may hand a stale id from a stale catalog
+ *      snapshot — must not crash or churn state).
+ *  13. After ``removeJob`` a fresh SSE event for the same job_id
+ *      re-synthesizes the row (cancel-race recovery — SSE remains the
+ *      source of truth even after an optimistic local drop).
+ *  14. ``eta_seconds`` is NOT sticky — a follow-up tick with null
+ *      clears the prior estimate (sidecar lost its forecast).
+ *  15. ``log_tail`` is NOT sticky — a follow-up tick with empty
+ *      string overwrites prior multi-line content.
+ *  16. ``mergeInstallJobFromProgress`` returns a NEW object (immutable
+ *      update) and never mutates the prev row in place.
+ *  17. ``mergeInstallJobFromProgress`` preserves all "outside-SSE"
+ *      fields (idempotency_key / requested_by / queued_at / tenant_id /
+ *      protocol_version / claimed_at / started_at / completed_at) from
+ *      the prev row, since the SSE payload doesn't carry them.
+ *  18. ``mergeInstallJobFromProgress`` preserves prev.error_reason +
+ *      prev.pep_decision_id (BS.7.6 modal / audit needs them).
+ *  19. ``synthesizeInstallJobFromProgress`` accepts every
+ *      ``InstallJobState`` value verbatim (no implicit filtering or
+ *      remapping at the synthesize layer).
  */
 
 import { act, renderHook } from "@testing-library/react"
@@ -336,6 +359,110 @@ describe("useInstallJobs", () => {
     unmount()
     expect(sse.closeCount()).toBe(1)
   })
+
+  // ── BS.7.9 ───────────────────────────────────────────────────────
+
+  it("removeJob is a no-op when the id doesn't match any row", () => {
+    const sse = primeSSE()
+    const { result } = renderHook(() => useInstallJobs())
+
+    act(() => {
+      sse.emit(mkProgress({ job_id: "job-A" }))
+    })
+    const snapshot = result.current.jobs
+
+    // Stale id from a catalog snapshot the operator captured before the
+    // backend trimmed the row — must not crash and must not perturb the
+    // current jobs list.
+    act(() => {
+      result.current.removeJob("nonexistent-id")
+    })
+    expect(result.current.jobs).toHaveLength(1)
+    expect(result.current.jobs[0].id).toBe("job-A")
+    // Same content; React may or may not preserve the array identity
+    // (`filter` always returns a new array), so we only assert content.
+    expect(result.current.jobs[0]).toEqual(snapshot[0])
+  })
+
+  it("re-synthesizes the row when SSE arrives for a job_id after removeJob", () => {
+    const sse = primeSSE()
+    const { result } = renderHook(() => useInstallJobs())
+
+    // BS.7.7 cancel optimistic flow: operator clicks cancel → drawer
+    // hands the id to removeJob immediately → backend either confirms
+    // (state=cancelled) or rejects (409 already terminal) → SSE arrives
+    // anyway. The hook must rebuild the row from the SSE payload —
+    // never silently swallow it — so downstream consumers (catalog
+    // card pickInstallJobForEntry) see the authoritative state.
+    act(() => {
+      sse.emit(mkProgress({ job_id: "job-A", state: "running" }))
+    })
+    expect(result.current.jobs).toHaveLength(1)
+
+    act(() => {
+      result.current.removeJob("job-A")
+    })
+    expect(result.current.jobs).toHaveLength(0)
+
+    act(() => {
+      sse.emit(
+        mkProgress({
+          job_id: "job-A",
+          state: "cancelled",
+          stage: "cancel",
+          bytes_done: 0,
+          bytes_total: null,
+          log_tail: "",
+        }),
+      )
+    })
+    expect(result.current.jobs).toHaveLength(1)
+    expect(result.current.jobs[0].state).toBe("cancelled")
+  })
+
+  it("clears eta_seconds when a follow-up tick reports null (NOT sticky)", () => {
+    const sse = primeSSE()
+    const { result } = renderHook(() => useInstallJobs())
+
+    act(() => {
+      sse.emit(mkProgress({ job_id: "job-A", eta_seconds: 60 }))
+    })
+    expect(result.current.jobs[0].eta_seconds).toBe(60)
+
+    // Sidecar legitimately drops back to "unknown ETA" mid-install
+    // (e.g. layer extraction phase where docker doesn't expose a
+    // remaining-bytes estimate). bytes_total stays sticky; eta_seconds
+    // does not — UI must show "—" rather than a frozen stale ETA.
+    act(() => {
+      sse.emit(mkProgress({ job_id: "job-A", eta_seconds: null }))
+    })
+    expect(result.current.jobs[0].eta_seconds).toBeNull()
+  })
+
+  it("overwrites log_tail when a follow-up tick reports an empty string (NOT sticky)", () => {
+    const sse = primeSSE()
+    const { result } = renderHook(() => useInstallJobs())
+
+    act(() => {
+      sse.emit(
+        mkProgress({
+          job_id: "job-A",
+          log_tail: "Pulling layer 1/3\nPulling layer 2/3",
+        }),
+      )
+    })
+    expect(result.current.jobs[0].log_tail).toBe(
+      "Pulling layer 1/3\nPulling layer 2/3",
+    )
+
+    // Sidecar may legitimately clear the log_tail at completion — the
+    // hook must not "remember" the old multi-line content because the
+    // drawer's log row would then show stale content forever.
+    act(() => {
+      sse.emit(mkProgress({ job_id: "job-A", log_tail: "" }))
+    })
+    expect(result.current.jobs[0].log_tail).toBe("")
+  })
 })
 
 describe("synthesizeInstallJobFromProgress", () => {
@@ -366,6 +493,33 @@ describe("synthesizeInstallJobFromProgress", () => {
     expect(job.pep_decision_id).toBeNull()
     expect(job.result_json).toBeNull()
   })
+
+  // ── BS.7.9 ───────────────────────────────────────────────────────
+
+  it.each<InstallJobState>([
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+  ])(
+    "passes state '%s' through verbatim — synthesize never filters or remaps state",
+    (state) => {
+      const job = synthesizeInstallJobFromProgress({
+        job_id: `j-${state}`,
+        state,
+        stage: "any",
+        bytes_done: 0,
+        bytes_total: null,
+        eta_seconds: null,
+        log_tail: "",
+        sidecar_id: null,
+        entry_id: null,
+      })
+      expect(job.state).toBe(state)
+      expect(job.id).toBe(`j-${state}`)
+    },
+  )
 })
 
 describe("mergeInstallJobFromProgress", () => {
@@ -397,6 +551,135 @@ describe("mergeInstallJobFromProgress", () => {
     expect(merged.entry_id).toBe("e")
     expect(merged.bytes_done).toBe(50)
     expect(merged.eta_seconds).toBe(5)
+  })
+
+  // ── BS.7.9 ───────────────────────────────────────────────────────
+
+  it("returns a new object reference; does not mutate the prev row in place", () => {
+    const prev: InstallJob = synthesizeInstallJobFromProgress({
+      job_id: "j",
+      state: "running",
+      stage: "download",
+      bytes_done: 100,
+      bytes_total: 1000,
+      eta_seconds: 60,
+      log_tail: "tick A",
+      sidecar_id: "s",
+      entry_id: "e",
+    })
+    const prevSnapshot = { ...prev }
+
+    const merged = mergeInstallJobFromProgress(prev, {
+      job_id: "j",
+      state: "running",
+      stage: "download",
+      bytes_done: 500,
+      bytes_total: 1000,
+      eta_seconds: 30,
+      log_tail: "tick B",
+      sidecar_id: "s",
+      entry_id: "e",
+    })
+
+    // Different reference (immutable update — React relies on this so
+    // ``setJobs`` triggers a re-render via Object.is identity diff).
+    expect(merged).not.toBe(prev)
+    // prev untouched — every field still matches the snapshot.
+    expect(prev).toEqual(prevSnapshot)
+    // merged carries the new values.
+    expect(merged.bytes_done).toBe(500)
+    expect(merged.eta_seconds).toBe(30)
+    expect(merged.log_tail).toBe("tick B")
+  })
+
+  it("preserves all 'outside-SSE' fields from prev (idempotency_key/requested_by/queued_at/tenant_id/protocol_version/claimed_at/started_at/completed_at)", () => {
+    // Backend only ships eight fields in the SSE payload. Everything
+    // else on the InstallJob row (audit-relevant lifecycle timestamps,
+    // tenant binding, idempotency token) was set by the create / claim
+    // path and the SSE merger MUST preserve it. BS.7.6 install-log
+    // modal pulls these fields straight off the row; if the merger
+    // wiped them on every tick, the modal would show "(unknown)".
+    const prev: InstallJob = {
+      ...synthesizeInstallJobFromProgress({
+        job_id: "j-keep",
+        state: "running",
+        stage: "download",
+        bytes_done: 0,
+        bytes_total: 500,
+        eta_seconds: null,
+        log_tail: "",
+        sidecar_id: "s-1",
+        entry_id: "e-1",
+      }),
+      idempotency_key: "idem-XYZ",
+      requested_by: "user-42",
+      queued_at: "2026-04-27T01:00:00Z",
+      tenant_id: "t-prod",
+      protocol_version: 7,
+      claimed_at: "2026-04-27T01:00:05Z",
+      started_at: "2026-04-27T01:00:06Z",
+      completed_at: null,
+    }
+
+    const merged = mergeInstallJobFromProgress(prev, {
+      job_id: "j-keep",
+      state: "running",
+      stage: "download",
+      bytes_done: 250,
+      bytes_total: 500,
+      eta_seconds: 5,
+      log_tail: "Layer 1/2",
+      sidecar_id: "s-1",
+      entry_id: "e-1",
+    })
+
+    expect(merged.idempotency_key).toBe("idem-XYZ")
+    expect(merged.requested_by).toBe("user-42")
+    expect(merged.queued_at).toBe("2026-04-27T01:00:00Z")
+    expect(merged.tenant_id).toBe("t-prod")
+    expect(merged.protocol_version).toBe(7)
+    expect(merged.claimed_at).toBe("2026-04-27T01:00:05Z")
+    expect(merged.started_at).toBe("2026-04-27T01:00:06Z")
+    expect(merged.completed_at).toBeNull()
+  })
+
+  it("preserves prev.error_reason + prev.pep_decision_id (BS.7.6 modal needs them)", () => {
+    // The SSE payload doesn't carry error_reason; the modal pulls it
+    // from a one-shot ``GET /installer/jobs/{id}`` round-trip and
+    // stuffs it onto the row in the hook's state. A subsequent SSE
+    // tick (e.g. backend retry path emits state=queued before the new
+    // sidecar claim) must NOT clobber error_reason back to null.
+    const prev: InstallJob = {
+      ...synthesizeInstallJobFromProgress({
+        job_id: "j-err",
+        state: "failed",
+        stage: "verify",
+        bytes_done: 0,
+        bytes_total: 0,
+        eta_seconds: null,
+        log_tail: "exit code 1",
+        sidecar_id: "s-1",
+        entry_id: "e-1",
+      }),
+      error_reason: "sha256_layer1_mismatch",
+      pep_decision_id: "dec-abc-123",
+    }
+
+    const merged = mergeInstallJobFromProgress(prev, {
+      job_id: "j-err",
+      state: "queued",  // operator hit retry, backend re-queues
+      stage: "queued",
+      bytes_done: 0,
+      bytes_total: null,
+      eta_seconds: null,
+      log_tail: "",
+      sidecar_id: null,
+      entry_id: "e-1",
+    })
+
+    expect(merged.error_reason).toBe("sha256_layer1_mismatch")
+    expect(merged.pep_decision_id).toBe("dec-abc-123")
+    expect(merged.state).toBe("queued")
   })
 
   it("preserves result_json across merges (BS.7.5 enrichment lives outside this hook)", () => {

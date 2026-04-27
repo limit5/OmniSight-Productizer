@@ -21,6 +21,20 @@
  *   9. cancel button only renders when onCancel is wired; click fires it
  *   10. collapse button hides the panel back to the chip
  *   11. format helpers — formatInstallBytes / Speed / Eta + deriveInstallPercent
+ *
+ * BS.7.9 deeper coverage (10 new cases):
+ *   12. multiple in-flight rows render in stable order; chip count = total
+ *   13. queued + running both count toward the chip total (combined)
+ *   14. row drops from the panel on rerender when state flips to completed
+ *   15. multi-line log_tail surfaces only the last line in the log row
+ *   16. empty log_tail string suppresses the log row entirely
+ *   17. state pill aria-label reflects the job.state verbatim
+ *   18. cancel button wires onCancel for queued rows too (not running-only)
+ *   19. ETA derives from remaining/speed when backend eta_seconds is null
+ *   20. speed sample respects MIN_SAMPLE_INTERVAL_MS — sub-250ms tick keeps
+ *       the prior reading instead of producing a divide-by-near-zero spike
+ *   21. negative bytes_done delta (sidecar method retry from 0) yields
+ *       speed=0, not a negative number
  */
 
 import { describe, expect, it, vi } from "vitest"
@@ -274,5 +288,213 @@ describe("InstallProgressDrawer — format helpers (pure)", () => {
     expect(deriveInstallPercent(mkJob({ bytes_done: 250, bytes_total: 1000 }))).toBe(25)
     expect(deriveInstallPercent(mkJob({ bytes_done: 1500, bytes_total: 1000 }))).toBe(100)
     expect(deriveInstallPercent(mkJob({ bytes_done: -10, bytes_total: 1000 }))).toBe(0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// BS.7.9 — deeper coverage. The 17 cases above lock the surface
+// contract; the cases below pin the corner cases the BS.7.3/7.4/7.5
+// integration relied on but never had a regression net for.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("InstallProgressDrawer — BS.7.9 multi-row + lifecycle", () => {
+  it("renders a row per in-flight job and the chip count equals their sum", () => {
+    const jobs = [
+      mkJob({ id: "j-1", state: "running" }),
+      mkJob({ id: "j-2", state: "running" }),
+      mkJob({ id: "j-3", state: "running" }),
+    ]
+    render(<InstallProgressDrawer jobs={jobs} />)
+    expect(screen.getByTestId("install-drawer-chip-count")).toHaveTextContent("3")
+    fireEvent.click(screen.getByTestId("install-drawer-chip"))
+    expect(screen.getByTestId("install-drawer-row-j-1")).toBeInTheDocument()
+    expect(screen.getByTestId("install-drawer-row-j-2")).toBeInTheDocument()
+    expect(screen.getByTestId("install-drawer-row-j-3")).toBeInTheDocument()
+  })
+
+  it("counts queued AND running jobs toward the chip total", () => {
+    const jobs = [
+      mkJob({ id: "j-q", state: "queued" }),
+      mkJob({ id: "j-r", state: "running" }),
+      // a terminal row should NOT contribute to the count
+      mkJob({ id: "j-c", state: "completed" }),
+    ]
+    render(<InstallProgressDrawer jobs={jobs} />)
+    expect(screen.getByTestId("install-drawer-chip-count")).toHaveTextContent("2")
+  })
+
+  it("drops a row from the panel when state flips to a terminal value on rerender", () => {
+    const initial = [mkJob({ id: "j-flip", state: "running" })]
+    const { rerender } = render(<InstallProgressDrawer jobs={initial} initialOpen />)
+    expect(screen.getByTestId("install-drawer-row-j-flip")).toBeInTheDocument()
+
+    rerender(
+      <InstallProgressDrawer
+        jobs={[mkJob({ id: "j-flip", state: "completed" })]}
+        initialOpen
+      />,
+    )
+    // No more in-flight jobs → drawer renders nothing (collapsed or not).
+    expect(screen.queryByTestId("install-drawer-row-j-flip")).toBeNull()
+    expect(screen.queryByTestId("install-drawer-panel")).toBeNull()
+    expect(screen.queryByTestId("install-drawer-chip")).toBeNull()
+  })
+})
+
+describe("InstallProgressDrawer — BS.7.9 log_tail rendering", () => {
+  it("surfaces only the LAST line of a multi-line log_tail in the row", () => {
+    const jobs = [
+      mkJob({
+        id: "j-log",
+        state: "running",
+        log_tail: "Pulling layer 1/3\nPulling layer 2/3\nLayer 2/3 complete",
+      }),
+    ]
+    render(<InstallProgressDrawer jobs={jobs} initialOpen />)
+    const log = screen.getByTestId("install-drawer-log-j-log")
+    expect(log).toHaveTextContent("Layer 2/3 complete")
+    // Earlier lines must NOT be in the visible row text.
+    expect(log).not.toHaveTextContent("Pulling layer 1/3")
+    // The full multi-line tail is preserved in the title attribute so
+    // operators can hover for the whole context.
+    expect(log).toHaveAttribute(
+      "title",
+      "Pulling layer 1/3\nPulling layer 2/3\nLayer 2/3 complete",
+    )
+  })
+
+  it("suppresses the log row entirely when log_tail is an empty string", () => {
+    const jobs = [
+      mkJob({ id: "j-quiet", state: "running", log_tail: "" }),
+    ]
+    render(<InstallProgressDrawer jobs={jobs} initialOpen />)
+    expect(screen.queryByTestId("install-drawer-log-j-quiet")).toBeNull()
+  })
+})
+
+describe("InstallProgressDrawer — BS.7.9 state pill + cancel-for-queued", () => {
+  it("state pill aria-label echoes the job.state value verbatim", () => {
+    const jobs = [
+      mkJob({ id: "j-q", state: "queued" }),
+      mkJob({ id: "j-r", state: "running" }),
+    ]
+    render(<InstallProgressDrawer jobs={jobs} initialOpen />)
+    expect(screen.getByLabelText("state queued")).toBeInTheDocument()
+    expect(screen.getByLabelText("state running")).toBeInTheDocument()
+  })
+
+  it("cancel button is wired for QUEUED rows too (not just running)", () => {
+    const jobs = [mkJob({ id: "j-q", state: "queued" })]
+    const onCancel = vi.fn()
+    render(
+      <InstallProgressDrawer jobs={jobs} initialOpen onCancel={onCancel} />,
+    )
+    fireEvent.click(screen.getByTestId("install-drawer-cancel-j-q"))
+    expect(onCancel).toHaveBeenCalledWith("j-q")
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("InstallProgressDrawer — BS.7.9 ETA derivation + speed corner cases", () => {
+  it("derives ETA from remaining/speed when backend eta_seconds is null", () => {
+    let now = 5_000_000
+    const clock = () => now
+    const initial = [
+      mkJob({
+        id: "j-derived",
+        state: "running",
+        bytes_done: 0,
+        bytes_total: 1024 * 1024,  // 1 MiB
+        eta_seconds: null,
+      }),
+    ]
+    const { rerender } = render(
+      <InstallProgressDrawer jobs={initial} initialOpen nowMs={clock} />,
+    )
+    // First render seeds the speed sample at 0 — no derivation possible
+    // yet so the chip shows "ETA —".
+    expect(screen.getByTestId("install-drawer-eta-j-derived")).toHaveTextContent("ETA —")
+
+    // Advance 1s and push +128 KiB.  Speed = 128 KiB/s; remaining = 896
+    // KiB; derived ETA = 896 KiB / 128 KiB/s = 7s → "00:07".
+    act(() => {
+      now += 1000
+      rerender(
+        <InstallProgressDrawer
+          jobs={[
+            mkJob({
+              id: "j-derived",
+              state: "running",
+              bytes_done: 128 * 1024,
+              bytes_total: 1024 * 1024,
+              eta_seconds: null,
+            }),
+          ]}
+          initialOpen
+          nowMs={clock}
+        />,
+      )
+    })
+    expect(screen.getByTestId("install-drawer-eta-j-derived")).toHaveTextContent("ETA 00:07")
+  })
+
+  it("rate-limits speed samples — a sub-250ms tick keeps the prior reading", () => {
+    let now = 9_000_000
+    const clock = () => now
+    const initial = [
+      mkJob({ id: "j-rl", state: "running", bytes_done: 0, bytes_total: 1_000_000 }),
+    ]
+    const { rerender } = render(
+      <InstallProgressDrawer jobs={initial} initialOpen nowMs={clock} />,
+    )
+    // First seed: speed=0 → "—"
+    expect(screen.getByTestId("install-drawer-speed-j-rl")).toHaveTextContent("—")
+
+    // Advance only 100 ms (< MIN_SAMPLE_INTERVAL_MS=250).  The drawer
+    // should NOT compute a fresh speed from this tick — it would imply
+    // an absurd >>1 GB/s reading that misleads the operator.  Speed
+    // therefore remains the prior "—" value.
+    act(() => {
+      now += 100
+      rerender(
+        <InstallProgressDrawer
+          jobs={[mkJob({ id: "j-rl", state: "running", bytes_done: 50_000, bytes_total: 1_000_000 })]}
+          initialOpen
+          nowMs={clock}
+        />,
+      )
+    })
+    expect(screen.getByTestId("install-drawer-speed-j-rl")).toHaveTextContent("—")
+  })
+
+  it("treats a negative bytes_done delta (sidecar method retry from 0) as speed=0, not negative", () => {
+    let now = 12_000_000
+    const clock = () => now
+    const initial = [
+      mkJob({
+        id: "j-retry",
+        state: "running",
+        bytes_done: 256 * 1024,
+        bytes_total: 1024 * 1024,
+      }),
+    ]
+    const { rerender } = render(
+      <InstallProgressDrawer jobs={initial} initialOpen nowMs={clock} />,
+    )
+
+    // Sidecar restarts the layer from 0 — bytes_done collapses.  The
+    // speed sample must NOT show a negative value.
+    act(() => {
+      now += 1000
+      rerender(
+        <InstallProgressDrawer
+          jobs={[mkJob({ id: "j-retry", state: "running", bytes_done: 0, bytes_total: 1024 * 1024 })]}
+          initialOpen
+          nowMs={clock}
+        />,
+      )
+    })
+    // formatInstallSpeed maps speed<=0 → "—"
+    expect(screen.getByTestId("install-drawer-speed-j-retry")).toHaveTextContent("—")
   })
 })
