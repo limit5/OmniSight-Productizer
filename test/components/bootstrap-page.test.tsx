@@ -2154,4 +2154,170 @@ describe("BootstrapPage", () => {
       })
     })
   })
+
+  // ─── BS.9.2 — Step 5.5 (Vertical setup, optional) ────────────────────
+  //
+  // The wizard exposes an optional ``vertical_setup`` step between
+  // ``git_forge`` and ``services_ready``. BS.9.2 ships the shell only
+  // (title + OPTIONAL gate badge + BS.9.3+ placeholder + Skip button);
+  // the actual multi-pick lands in BS.9.3. These tests pin the
+  // wizard-shell contract so subsequent BS.9 rows can plug behaviour
+  // in without breaking the auto-advance / skip / finalize-gate
+  // invariants.
+
+  describe("BS.9.2 Vertical setup step", () => {
+    async function openVerticalSetupStep() {
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-step-vertical_setup"),
+        ).toBeInTheDocument()
+      })
+      fireEvent.click(screen.getByTestId("bootstrap-step-vertical_setup"))
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-vertical-setup-step"),
+        ).toBeInTheDocument()
+      })
+    }
+
+    it("renders the optional vertical setup pill alongside the existing wizard steps", async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      render(<BootstrapPage />)
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-step-vertical_setup"),
+        ).toBeInTheDocument()
+      })
+      // Pill renders pending until the operator commits or skips.
+      expect(
+        screen.getByTestId("bootstrap-step-vertical_setup"),
+      ).toHaveAttribute("data-state", "pending")
+    })
+
+    it("shows the OPTIONAL gate badge + BS.9.3+ placeholder + Skip CTA when opened", async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      render(<BootstrapPage />)
+      await openVerticalSetupStep()
+
+      // Step body badge confirms the step is not a finalize gate.
+      expect(
+        screen.getByTestId("bootstrap-vertical-setup-step"),
+      ).toHaveAttribute("data-already-green", "false")
+      expect(screen.getByText(/OPTIONAL/)).toBeInTheDocument()
+      expect(screen.getByText(/not a finalize gate/)).toBeInTheDocument()
+
+      // Placeholder enumerates the planned BS.9.3 / 9.4 / 9.5 sub-rows
+      // so future maintainers see the road-map.
+      const placeholder = screen.getByTestId(
+        "bootstrap-vertical-setup-placeholder",
+      )
+      expect(placeholder).toHaveTextContent(/BS\.9\.3/)
+      expect(placeholder).toHaveTextContent(/BS\.9\.4/)
+      expect(placeholder).toHaveTextContent(/BS\.9\.5/)
+
+      // Skip CTA is rendered + is not a backend call.
+      expect(
+        screen.getByTestId("bootstrap-vertical-setup-skip"),
+      ).toBeInTheDocument()
+    })
+
+    it("Skip flips the step to complete without touching finalize gates", async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      render(<BootstrapPage />)
+      await openVerticalSetupStep()
+
+      fireEvent.click(screen.getByTestId("bootstrap-vertical-setup-skip"))
+
+      // Local-green flips, the complete banner renders, and the
+      // pill in the sidebar reflects green state.
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-step-vertical_setup"),
+        ).toHaveAttribute("data-state", "green")
+      })
+
+      // Auto-advance moved the cursor to the next step (services_ready):
+      // re-open the vertical-setup step to assert the already-green
+      // banner is now rendered.
+      fireEvent.click(screen.getByTestId("bootstrap-step-vertical_setup"))
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-vertical-setup-step"),
+        ).toHaveAttribute("data-already-green", "true")
+      })
+      expect(
+        screen.getByTestId("bootstrap-vertical-setup-complete"),
+      ).toBeInTheDocument()
+
+      // Skipping is client-only; no finalize call occurred.
+      expect(mockedFinalize).not.toHaveBeenCalled()
+    })
+
+    it("Skip auto-advances the wizard cursor to the next step", async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      render(<BootstrapPage />)
+      await openVerticalSetupStep()
+
+      fireEvent.click(screen.getByTestId("bootstrap-vertical-setup-skip"))
+
+      // Cursor lands on ``services_ready`` (the next step in STEPS).
+      // The active aria-current attribute is the cleanest way to read
+      // the cursor without depending on the "STEP X / N" copy (which
+      // changes whenever the step total moves).
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-step-services_ready"),
+        ).toHaveAttribute("aria-current", "step")
+      })
+    })
+
+    it("does not appear on a finalized install — the wizard auto-redirects home before this step renders", async () => {
+      mockedGetStatus.mockResolvedValue({ ...greenStatus, finalized: true })
+      render(<BootstrapPage />)
+
+      // Wizard redirects out before the sidebar gets a chance to
+      // mount the vertical_setup pill — this is what guarantees
+      // existing prod sites that finalized pre-BS.9 never see it.
+      await waitFor(() => {
+        expect(routerReplace).toHaveBeenCalledWith("/")
+      })
+    })
+
+    it("does not appear in the missing_steps list because it is not a required gate", async () => {
+      // Backend never reports ``vertical_setup`` in ``missing_steps``
+      // (per BS.9.1: STEP_VERTICAL_SETUP is NOT in REQUIRED_STEPS).
+      // We cement that contract on the front-end side: even when every
+      // other gate is green, finalize stays unblocked without the
+      // operator visiting this step.
+      mockedGetStatus.mockResolvedValue(greenStatus)
+      mockedFinalize.mockResolvedValue({
+        finalized: true,
+        status: greenStatus.status,
+        actor_user_id: "admin-1",
+      })
+
+      render(<BootstrapPage />)
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-step-finalize"),
+        ).toBeInTheDocument()
+      })
+      fireEvent.click(screen.getByTestId("bootstrap-step-finalize"))
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-finalize-button"),
+        ).toBeInTheDocument()
+      })
+      // Finalize button enabled even though vertical_setup pill is red.
+      expect(
+        screen.getByTestId("bootstrap-finalize-button"),
+      ).not.toBeDisabled()
+      expect(
+        screen.getByTestId("bootstrap-step-vertical_setup"),
+      ).toHaveAttribute("data-state", "pending")
+    })
+  })
 })

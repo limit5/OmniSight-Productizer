@@ -24,6 +24,7 @@ import {
   CircleDashed,
   Database,
   Globe,
+  Layers,
   Loader2,
   RefreshCw,
   Rocket,
@@ -93,6 +94,7 @@ type StepId =
   | "llm_provider"
   | "cf_tunnel"
   | "git_forge"
+  | "vertical_setup"
   | "services_ready"
   | "smoke"
   | "finalize"
@@ -159,6 +161,23 @@ const STEPS: StepDef[] = [
     // pill flips green when the operator either configures a forge or
     // explicitly opts out via the "Skip" button.
     isGreen: (_g, _finalized, localGreen) => localGreen.git_forge === true,
+  },
+  {
+    id: "vertical_setup",
+    title: "Verticals (optional)",
+    subtitle:
+      "Pick platforms (Mobile / Embedded / Web / Software / Cross-toolchain) — or skip",
+    icon: Layers,
+    // BS.9.2 — optional intermediate step matching backend
+    // ``STEP_VERTICAL_SETUP`` (see ``backend/bootstrap.py``). NOT in
+    // ``REQUIRED_STEPS``: finalize never blocks on it, so existing
+    // installs that finalized pre-BS.9 stay green and the wizard
+    // auto-redirects them away from ``/bootstrap`` before this pill
+    // is ever rendered. New installs land here as an opt-in picker
+    // and either commit a payload (BS.9.3 ships the multi-pick) or
+    // dismiss via the Skip button — both flip ``localGreen``.
+    isGreen: (_g, _finalized, localGreen) =>
+      localGreen.vertical_setup === true,
   },
   {
     id: "services_ready",
@@ -2384,6 +2403,113 @@ function GerritSshForm({ onSaved }: { onSaved: () => void }) {
   )
 }
 
+// ─── BS.9.2 — Step 5.5 (Vertical setup, optional) ───────────────────
+//
+// Wizard-shell row matching backend ``STEP_VERTICAL_SETUP`` (see
+// ``backend/bootstrap.py`` and ``alembic/0054_bootstrap_state_metadata_jsonb``).
+// The step is *optional* — finalize never blocks on it, and existing
+// installs that finalized pre-BS.9 auto-redirect away from
+// ``/bootstrap`` before this pill ever renders, so they never see it.
+//
+// This row introduces the frame only — title, OPTIONAL gate badge,
+// description, BS.9.3+ placeholder, and a "Skip" button that flips
+// ``localGreen.vertical_setup=true`` and advances the wizard cursor.
+// The actual vertical multi-pick (D/W/P/S/X) ships in BS.9.3 inside
+// ``components/omnisight/bootstrap-vertical-step.tsx``; the Android
+// API selector ships in BS.9.4; BS.9.5 wires "Confirm picks" to a
+// batch enqueue against ``/installer/jobs`` so the BS.7 install
+// drawer surfaces progress.
+//
+// Skipping is a client-only flip (no backend call) — no payload is
+// recorded under ``bootstrap_state.metadata.verticals_selected``,
+// which means ``backend.bootstrap._verticals_chosen()`` continues to
+// return ``False`` after a Skip. That is intentional: the operator
+// can re-open the wizard later (before ``finalize``) and pick
+// verticals if they change their mind.
+
+function VerticalSetupStep({
+  alreadyGreen,
+  onCompleted,
+}: {
+  alreadyGreen: boolean
+  onCompleted: () => void
+}) {
+  return (
+    <div
+      data-testid="bootstrap-vertical-setup-step"
+      data-already-green={alreadyGreen ? "true" : "false"}
+      className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
+    >
+      {alreadyGreen && (
+        <div
+          data-testid="bootstrap-vertical-setup-complete"
+          className="flex items-center gap-2 p-2 rounded border border-[var(--status-green)] bg-[var(--status-green)]/10 font-mono text-[11px] text-[var(--status-green)]"
+        >
+          <Check size={12} />
+          Marked complete — skip applied. Verticals can be revisited
+          later from <code>Settings → Platforms</code>.
+        </div>
+      )}
+      <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+        <span>OPTIONAL</span>
+        <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
+          not a finalize gate
+        </code>
+      </div>
+      <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+        Pick which platform verticals you want OmniSight to provision
+        now — Mobile (Android / iOS), Embedded (RK / Allwinner / Aml),
+        Web, Software, Cross-toolchain. Each pick batch-enqueues an
+        install job into <code>/installer/jobs</code> and progress
+        surfaces in the install drawer. Skipping leaves nothing
+        installed; you can come back from{" "}
+        <code>Settings → Platforms</code> at any time without unlocking
+        the wizard again.
+      </p>
+
+      <div
+        data-testid="bootstrap-vertical-setup-placeholder"
+        className="flex flex-col gap-2 p-3 rounded border border-dashed border-[var(--border)] bg-[var(--muted)]/20 font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed"
+      >
+        <div className="flex items-center gap-2">
+          <Layers size={12} />
+          <span>BS.9 SUB-STEPS</span>
+        </div>
+        <ul className="list-disc pl-4 space-y-0.5">
+          <li>
+            BS.9.3 — vertical multi-pick chips (D/W/P/S/X) +
+            per-vertical sub-step trigger.
+          </li>
+          <li>
+            BS.9.4 — Android API range selector (compile target / min
+            API / emulator preset / GMS toggle + live disk estimate).
+          </li>
+          <li>
+            BS.9.5 — Confirm picks → batch enqueue{" "}
+            <code>/installer/jobs</code> → progress in BS.7 drawer.
+          </li>
+        </ul>
+        <p>
+          Wizard shell only — picking verticals lands in the BS.9.3
+          row.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-testid="bootstrap-vertical-setup-skip"
+          onClick={onCompleted}
+          className="flex items-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90"
+        >
+          <Check size={12} />
+          Skip — configure verticals later in Settings → Platforms
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ─── L5 — Step 4 (parallel health check: 4 live ticks) ──────────────
 //
 // Polls ``POST /api/v1/bootstrap/parallel-health-check`` every 3s and
@@ -3519,6 +3645,10 @@ function StepBodyPlaceholder({ step }: { step: StepDef }) {
       gate: "optional (not a finalize gate)",
       todo: "B14 Part A — GitHub / GitLab / Gerrit per-tab setup + Test Connection",
     },
+    vertical_setup: {
+      gate: "optional (not a finalize gate)",
+      todo: "BS.9.3+ — vertical multi-pick + Android API selector + batch enqueue",
+    },
     services_ready: {
       gate: "parallel-health-check.all_green === true",
       todo: "L5 — backend/frontend/DB/CF connector live ticks",
@@ -3832,6 +3962,27 @@ export default function BootstrapPage() {
                     setLocalGreenFor("git_forge", true)
                     const idx = STEPS.findIndex(
                       (s) => s.id === "git_forge",
+                    )
+                    const next = STEPS[idx + 1]
+                    if (next) {
+                      setUserPinned(true)
+                      setActiveId(next.id)
+                    }
+                  }}
+                />
+              ) : activeStep.id === "vertical_setup" ? (
+                <VerticalSetupStep
+                  alreadyGreen={localGreen.vertical_setup === true}
+                  onCompleted={() => {
+                    // BS.9.2 — same explicit-advance pattern as
+                    // GitForgeStep: flip ``localGreen`` AND advance
+                    // the cursor on Skip. Skipping issues no backend
+                    // call, so ``_verticals_chosen()`` stays False
+                    // and the operator can return to pick verticals
+                    // before finalize if they change their mind.
+                    setLocalGreenFor("vertical_setup", true)
+                    const idx = STEPS.findIndex(
+                      (s) => s.id === "vertical_setup",
                     )
                     const next = STEPS[idx + 1]
                     if (next) {
