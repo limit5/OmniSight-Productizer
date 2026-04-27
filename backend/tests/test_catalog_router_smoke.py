@@ -48,6 +48,7 @@ def test_route_registration_full_set():
         ("PATCH", "/catalog/sources/{sub_id}"),
         ("POST", "/catalog/entries"),
         ("POST", "/catalog/sources"),
+        ("POST", "/catalog/sources/{sub_id}/sync"),
     ]
     assert pairs == expected
 
@@ -350,6 +351,7 @@ def test_delete_entry_uses_require_admin():
     ("POST", "/catalog/sources"),
     ("PATCH", "/catalog/sources/{sub_id}"),
     ("DELETE", "/catalog/sources/{sub_id}"),
+    ("POST", "/catalog/sources/{sub_id}/sync"),
 ])
 def test_sources_endpoints_all_admin_only(method, path):
     """Source CRUD is admin-only across the board (BS.2.3 spec)."""
@@ -359,6 +361,12 @@ def test_sources_endpoints_all_admin_only(method, path):
     assert _au.require_admin in deps, (
         f"{method} {path} must be admin-only"
     )
+
+
+def test_source_sync_status_constant_pending_manual():
+    """BS.8.5 — sync route stamps a known status string."""
+    from backend.routers import catalog
+    assert catalog.SOURCE_SYNC_STATUS_PENDING_MANUAL == "pending_manual"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

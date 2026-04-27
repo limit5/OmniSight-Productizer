@@ -8,10 +8,11 @@ Surface
 ``PATCH  /catalog/entries/{id}``      — admin only (override-layer overlay)
 ``DELETE /catalog/entries/{id}``      — admin only (soft-delete custom / hide shipped)
 
-``GET    /catalog/sources``           — admin only — list catalog_subscriptions
-``POST   /catalog/sources``           — admin only — add catalog_subscription
-``PATCH  /catalog/sources/{sub_id}``  — admin only — patch catalog_subscription
-``DELETE /catalog/sources/{sub_id}``  — admin only — delete catalog_subscription
+``GET    /catalog/sources``                — admin only — list catalog_subscriptions
+``POST   /catalog/sources``                — admin only — add catalog_subscription
+``PATCH  /catalog/sources/{sub_id}``       — admin only — patch catalog_subscription
+``DELETE /catalog/sources/{sub_id}``       — admin only — delete catalog_subscription
+``POST   /catalog/sources/{sub_id}/sync``  — admin only — request immediate refresh
 
 Resolution semantics (ADR §3.2)
 ───────────────────────────────
@@ -1160,6 +1161,62 @@ async def delete_source(
         status_code=200,
         content={"status": "deleted", "id": sub_id, "tenant_id": tid},
     )
+
+
+SOURCE_SYNC_STATUS_PENDING_MANUAL = "pending_manual"
+
+
+@router.post("/sources/{sub_id}/sync")
+async def sync_source(
+    sub_id: str,
+    request: Request,
+    user: _au.User = Depends(_au.require_admin),
+) -> JSONResponse:
+    """Request an immediate catalog feed refresh for a single subscription.
+
+    BS.8.5 — "Sync now" button on the Sources tab. Stamps the row so the
+    feed-sync cron worker (separate row) picks it up on the next tick.
+    Pure SQL UPDATE — no synchronous feed fetch in the request path.
+
+    * ``last_sync_status`` ← ``"pending_manual"``
+    * ``last_synced_at`` ← NULL  (jumps row to front of
+      ``idx_catalog_subscriptions_due`` ``NULLS FIRST`` queue)
+    * ``updated_at`` ← ``now()``
+
+    Tenant-scoped: 404 if ``sub_id`` does not belong to the caller's
+    tenant. Subscribing / unsubscribing is already admin-only and
+    audit-logged; a manual refresh of an already-subscribed source is
+    a stamp + cron-priority bump, so no PEP HOLD here.
+
+    Module-global state audit: stateless SQL through ``db_pool.get_pool()``;
+    multi-worker safe via PG MVCC. Read-after-write: single UPDATE …
+    RETURNING in one tx; the response carries the post-commit row.
+    """
+    tid = _ensure_tenant(user)
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE catalog_subscriptions "
+            "SET last_sync_status = $1, "
+            "    last_synced_at = NULL, "
+            "    updated_at = now() "
+            "WHERE id = $2 AND tenant_id = $3 "
+            "RETURNING id, tenant_id, feed_url, auth_method, auth_secret_ref, "
+            "          refresh_interval_s, last_synced_at, last_sync_status, "
+            "          enabled, created_at, updated_at",
+            SOURCE_SYNC_STATUS_PENDING_MANUAL, sub_id, tid,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="subscription not found")
+
+    _emit_audit_safely(
+        action="catalog_source_sync_requested",
+        entity_id=sub_id,
+        actor=user.email,
+        before=None,
+        after={"id": sub_id, "tenant_id": tid, "status": SOURCE_SYNC_STATUS_PENDING_MANUAL},
+    )
+    return JSONResponse(status_code=200, content=_row_to_subscription(row))
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

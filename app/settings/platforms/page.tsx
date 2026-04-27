@@ -99,6 +99,10 @@ import {
   InstalledTab,
   type InstalledEntry,
 } from "@/components/omnisight/installed-tab"
+import {
+  SourcesTab,
+  type SourcesTabAddPayload,
+} from "@/components/omnisight/sources-tab"
 import { UninstallConfirmModal } from "@/components/omnisight/uninstall-confirm-modal"
 import {
   PLATFORM_COUNTERS_ZERO,
@@ -112,11 +116,16 @@ import {
   pickInstallJobForEntry,
   useInstallJobs,
 } from "@/hooks/use-install-jobs"
+import { useCatalogSources } from "@/hooks/use-catalog-sources"
 import { useInstalledEntries } from "@/hooks/use-installed-entries"
 import {
+  createCatalogSource,
   createInstallJob,
+  deleteCatalogSource,
   getInstallJob,
   retryInstallJob,
+  syncCatalogSource,
+  type CatalogSource,
   type InstallJob,
 } from "@/lib/api"
 
@@ -444,6 +453,54 @@ function PlatformsPageInner() {
     void refreshInstalledEntries()
   }, [refreshInstalledEntries])
 
+  // BS.8.5 — catalog sources (admin only). The hook fetches
+  // `GET /catalog/sources` on mount and exposes a manual `refresh()`
+  // we fire after every mutation so the table re-renders against the
+  // fresh PG state. The sources tab is rendered to all operators today
+  // (the page-level admin gate is BS.5.x) — `<ApiErrorToastCenter />`
+  // surfaces the 403 path automatically when a non-admin tries to act.
+  const {
+    sources: catalogSources,
+    loading: catalogSourcesLoading,
+    error: catalogSourcesError,
+    refresh: refreshCatalogSources,
+  } = useCatalogSources()
+
+  const handleSourcesAdd = useCallback(
+    async (payload: SourcesTabAddPayload): Promise<CatalogSource> => {
+      const created = await createCatalogSource({
+        feed_url: payload.feedUrl,
+        auth_method: payload.authMethod,
+        auth_secret_ref: payload.authSecretRef,
+        refresh_interval_s: payload.refreshIntervalS,
+      })
+      void refreshCatalogSources()
+      return created
+    },
+    [refreshCatalogSources],
+  )
+
+  const handleSourcesSync = useCallback(
+    async (source: CatalogSource): Promise<CatalogSource> => {
+      const updated = await syncCatalogSource(source.id)
+      void refreshCatalogSources()
+      return updated
+    },
+    [refreshCatalogSources],
+  )
+
+  const handleSourcesRemove = useCallback(
+    async (source: CatalogSource): Promise<void> => {
+      await deleteCatalogSource(source.id)
+      void refreshCatalogSources()
+    },
+    [refreshCatalogSources],
+  )
+
+  const handleSourcesRetry = useCallback(() => {
+    void refreshCatalogSources()
+  }, [refreshCatalogSources])
+
   return (
     <main
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
@@ -696,15 +753,20 @@ function PlatformsPageInner() {
               }}
             />
           ) : (
-            <>
-              <p className="text-xs text-[var(--muted-foreground)]">
-                {panelMeta.description}
-              </p>
-              <p className="mt-3 font-mono text-[10px] text-[var(--muted-foreground)]">
-                （內容由後續 BS.6 / BS.7 row 進駐；本 row 僅 ship route shell
-                + tab routing。）
-              </p>
-            </>
+            // BS.8.5 — Sources tab (admin only). Lists the per-tenant
+            // catalog feed subscriptions and exposes admin CRUD: add a
+            // new feed, sync now, or remove. Auth is `require_admin` on
+            // every backend route; non-admins see 403 surfaced via
+            // `<ApiErrorToastCenter />` after they attempt an action.
+            <SourcesTab
+              sources={catalogSources}
+              loading={catalogSourcesLoading}
+              fetchError={catalogSourcesError}
+              onAdd={handleSourcesAdd}
+              onSync={handleSourcesSync}
+              onRemove={handleSourcesRemove}
+              onRetry={handleSourcesRetry}
+            />
           )}
         </section>
       </div>

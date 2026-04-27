@@ -801,6 +801,82 @@ async def test_sources_get_operator_role_gets_403(bs24_client):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  BS.8.5 — POST /catalog/sources/{sub_id}/sync (admin only)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@_requires_pg
+async def test_sources_sync_now_stamps_pending_manual(
+    bs24_client, pg_test_pool,
+):
+    """BS.8.5 — POST /catalog/sources/{id}/sync stamps the row's
+    last_sync_status to ``pending_manual`` and clears last_synced_at so
+    the feed-sync cron worker picks it up on the next tick."""
+    feed_url = f"https://example.test/sync-{secrets.token_hex(4)}.xml"
+    sub_id: str | None = None
+    try:
+        post = await bs24_client.post(
+            "/api/v1/catalog/sources",
+            json={"feed_url": feed_url, "auth_method": "none"},
+        )
+        assert post.status_code == 201, post.text
+        sub_id = post.json()["id"]
+
+        # Set last_synced_at + last_sync_status so we can prove the
+        # sync route clears one and stamps the other.
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE catalog_subscriptions "
+                "SET last_synced_at = now(), last_sync_status = 'ok' "
+                "WHERE id = $1",
+                sub_id,
+            )
+
+        res = await bs24_client.post(
+            f"/api/v1/catalog/sources/{sub_id}/sync",
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["id"] == sub_id
+        assert body["last_sync_status"] == "pending_manual"
+        assert body["last_synced_at"] is None
+    finally:
+        if sub_id is not None:
+            async with pg_test_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM catalog_subscriptions WHERE id = $1", sub_id,
+                )
+
+
+@_requires_pg
+async def test_sources_sync_now_404_for_unknown_sub_id(bs24_client):
+    """BS.8.5 — Unknown sub_id (or wrong tenant) → 404."""
+    res = await bs24_client.post(
+        "/api/v1/catalog/sources/sub-deadbeefdeadbeef/sync",
+    )
+    assert res.status_code == 404, res.text
+
+
+@_requires_pg
+async def test_sources_sync_now_operator_role_gets_403(bs24_client):
+    """BS.8.5 — Sync is admin-only like every other /sources verb.
+    Operator role hitting POST /sources/{id}/sync → 403."""
+    from backend.main import app
+    from backend import auth as _au
+
+    app.dependency_overrides[_au.current_user] = (
+        _override_user_factory("operator")
+    )
+    try:
+        res = await bs24_client.post(
+            "/api/v1/catalog/sources/sub-anything/sync",
+        )
+        assert res.status_code == 403, res.text
+    finally:
+        app.dependency_overrides.pop(_au.current_user, None)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Tenant isolation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

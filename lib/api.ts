@@ -5990,6 +5990,216 @@ export function isCleanupCandidate(
   return idleMs >= INSTALLED_ENTRY_IDLE_THRESHOLD_MS
 }
 
+// ─── BS.8.5 — Catalog sources (catalog_subscriptions) admin CRUD ──────────
+//
+// The Sources tab (`<SourcesTab />`) needs admin-only CRUD over the
+// per-tenant feed of third-party catalogs:
+//   • GET    /catalog/sources               — list this tenant's subscriptions
+//   • POST   /catalog/sources               — add a new subscription
+//   • PATCH  /catalog/sources/{sub_id}      — patch (rename URL, toggle enabled,
+//                                             change refresh interval, …)
+//   • DELETE /catalog/sources/{sub_id}      — remove
+//   • POST   /catalog/sources/{sub_id}/sync — request immediate refresh
+//
+// Wire shape mirrors `_row_to_subscription()` on the backend
+// (backend/routers/catalog.py). Auth is `require_admin` on every route — the
+// global `<ApiErrorToastCenter />` handles the 403 path automatically.
+
+/** Auth method literal mirrors the alembic 0051 CHECK constraint
+ *  (`auth_method IN ('none','basic','bearer','signed_url')`). */
+export type CatalogSourceAuthMethod =
+  | "none"
+  | "basic"
+  | "bearer"
+  | "signed_url"
+
+/** Wire shape for `_row_to_subscription()`. Snake_case as returned by
+ *  FastAPI; the `<SourcesTab />` consumes this directly (no marshaller —
+ *  one shape, one consumer). */
+export interface CatalogSource {
+  id: string
+  tenant_id: string
+  feed_url: string
+  auth_method: CatalogSourceAuthMethod
+  auth_secret_ref: string | null
+  refresh_interval_s: number
+  last_synced_at: string | null
+  last_sync_status: string | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface ListCatalogSourcesResponse {
+  items: CatalogSource[]
+  count: number
+}
+
+/** Refresh-interval bounds mirror `SubscriptionCreate.refresh_interval_s`
+ *  on the backend (`Field(ge=60, le=30 * 86400)`). Exported so the form
+ *  validation in `<SourcesTab />` and its tests share one source of truth. */
+export const CATALOG_SOURCE_REFRESH_MIN_S = 60
+export const CATALOG_SOURCE_REFRESH_MAX_S = 30 * 86400  // 30 days
+export const CATALOG_SOURCE_REFRESH_DEFAULT_S = 86400  // 24 hours
+export const CATALOG_SOURCE_FEED_URL_MAX_LEN = 2048
+export const CATALOG_SOURCE_AUTH_SECRET_REF_MAX_LEN = 256
+export const CATALOG_SOURCE_AUTH_METHODS: ReadonlyArray<CatalogSourceAuthMethod> = [
+  "none",
+  "basic",
+  "bearer",
+  "signed_url",
+]
+
+export interface CreateCatalogSourceRequest {
+  feed_url: string
+  auth_method?: CatalogSourceAuthMethod
+  auth_secret_ref?: string | null
+  refresh_interval_s?: number
+  enabled?: boolean
+}
+
+export interface PatchCatalogSourceRequest {
+  feed_url?: string
+  auth_method?: CatalogSourceAuthMethod
+  auth_secret_ref?: string | null
+  refresh_interval_s?: number
+  enabled?: boolean
+}
+
+export interface DeleteCatalogSourceResponse {
+  status: "deleted"
+  id: string
+  tenant_id: string
+}
+
+/** GET /catalog/sources — list the caller's tenant's catalog
+ *  subscriptions. Pass ``enabledOnly=true`` to ask the backend to filter
+ *  rows where ``enabled = TRUE``; the default returns the full list so
+ *  the admin UI can render disabled rows greyed out instead of hiding
+ *  them. */
+export async function listCatalogSources(
+  options?: { enabledOnly?: boolean },
+): Promise<ListCatalogSourcesResponse> {
+  const qs = options?.enabledOnly ? "?enabled_only=true" : ""
+  return request<ListCatalogSourcesResponse>(`/catalog/sources${qs}`, {
+    method: "GET",
+  })
+}
+
+/** POST /catalog/sources — add a new subscription. Throws
+ *  :class:`ApiError` with ``status=409`` when the (tenant, feed_url)
+ *  unique constraint is violated, ``status=422`` when the body fails
+ *  validation (e.g. whitespace in ``auth_secret_ref``). */
+export async function createCatalogSource(
+  body: CreateCatalogSourceRequest,
+): Promise<CatalogSource> {
+  return request<CatalogSource>("/catalog/sources", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+/** PATCH /catalog/sources/{sub_id} — partial update. The backend
+ *  rejects an empty body with 422; the frontend should only call this
+ *  with at least one field set. */
+export async function patchCatalogSource(
+  subId: string,
+  body: PatchCatalogSourceRequest,
+): Promise<CatalogSource> {
+  return request<CatalogSource>(
+    `/catalog/sources/${encodeURIComponent(subId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+/** DELETE /catalog/sources/{sub_id} — hard-delete (no tombstone).
+ *  Throws :class:`ApiError` with ``status=404`` when the row does not
+ *  exist or belongs to a different tenant. */
+export async function deleteCatalogSource(
+  subId: string,
+): Promise<DeleteCatalogSourceResponse> {
+  return request<DeleteCatalogSourceResponse>(
+    `/catalog/sources/${encodeURIComponent(subId)}`,
+    { method: "DELETE" },
+  )
+}
+
+/** POST /catalog/sources/{sub_id}/sync — request an immediate refresh.
+ *  Backend stamps ``last_sync_status='pending_manual'`` and clears
+ *  ``last_synced_at`` so the row jumps to the top of the feed-sync cron
+ *  queue. The response is the updated subscription row. */
+export async function syncCatalogSource(
+  subId: string,
+): Promise<CatalogSource> {
+  return request<CatalogSource>(
+    `/catalog/sources/${encodeURIComponent(subId)}/sync`,
+    { method: "POST" },
+  )
+}
+
+/** Coerce a free-text feed URL input to a normalised string for
+ *  validation. Only trims surrounding whitespace — does not touch the
+ *  scheme / path / query so the backend sees the operator's exact intent.
+ *  Exported for unit tests + the form to share one definition. */
+export function normaliseCatalogSourceFeedUrl(raw: string): string {
+  return raw.trim()
+}
+
+/** Validate a candidate feed URL on the frontend so an obviously-bad
+ *  input fails before the round-trip. The backend still owns the final
+ *  word (length / uniqueness / scheme), but a free regex here keeps the
+ *  form responsive. Returns ``null`` when valid, or a short user-facing
+ *  message when not. */
+export function validateCatalogSourceFeedUrl(raw: string): string | null {
+  const v = normaliseCatalogSourceFeedUrl(raw)
+  if (v.length === 0) return "feed URL is required"
+  if (v.length > CATALOG_SOURCE_FEED_URL_MAX_LEN) {
+    return `feed URL must be ≤ ${CATALOG_SOURCE_FEED_URL_MAX_LEN} chars`
+  }
+  // Accept http(s):// only — the backend also accepts these in
+  // production; admins who need an exotic scheme can curl directly.
+  if (!/^https?:\/\//i.test(v)) {
+    return "feed URL must start with http:// or https://"
+  }
+  return null
+}
+
+/** Validate the auth_secret_ref input. The backend rejects whitespace
+ *  via a Pydantic field_validator; we mirror that here for instant
+ *  feedback. Empty / null values are allowed (no auth ref). */
+export function validateCatalogSourceAuthSecretRef(
+  raw: string | null | undefined,
+): string | null {
+  if (raw === null || raw === undefined) return null
+  if (raw.length === 0) return null
+  if (raw.length > CATALOG_SOURCE_AUTH_SECRET_REF_MAX_LEN) {
+    return `auth_secret_ref must be ≤ ${CATALOG_SOURCE_AUTH_SECRET_REF_MAX_LEN} chars`
+  }
+  if (/\s/.test(raw)) {
+    return "auth_secret_ref must be a secret-store reference, not a literal secret (no whitespace)"
+  }
+  return null
+}
+
+/** Validate the refresh_interval_s value. Mirrors the backend's
+ *  ``Field(ge=60, le=30 * 86400)`` so the form fails fast. */
+export function validateCatalogSourceRefreshInterval(
+  seconds: number,
+): string | null {
+  if (!Number.isFinite(seconds)) return "refresh interval must be a number"
+  if (!Number.isInteger(seconds)) return "refresh interval must be an integer"
+  if (seconds < CATALOG_SOURCE_REFRESH_MIN_S) {
+    return `refresh interval must be ≥ ${CATALOG_SOURCE_REFRESH_MIN_S}s (1 min)`
+  }
+  if (seconds > CATALOG_SOURCE_REFRESH_MAX_S) {
+    return `refresh interval must be ≤ ${CATALOG_SOURCE_REFRESH_MAX_S}s (30 days)`
+  }
+  return null
+}
+
 /** BS.7.7 — POST /installer/jobs/{id}/cancel — flip a queued / running
  *  install job's PG row to ``state='cancelled'``. The sidecar's next
  *  ``report_progress`` round-trip sees the new state and the in-flight
