@@ -72,6 +72,22 @@ AS.2.5 (auth shared lib):
     Honours the AS.0.4 §6.2 "DSAR keeps working knob-off" invariant
     via the audit layer's silent-skip.
 
+AS.5.2 (auth shared lib):
+  - auth_dashboard — per-tenant rollup + suspicious-pattern detection.
+    Pure-functional read-side companion to AS.5.1 ``auth_event``:
+    `summarise(rows, tenant_id=...)` reduces audit rows into a frozen
+    `DashboardSummary` (challenge pass/fail rate, auth-method
+    distribution, per-event counts + per-vocabulary breakdowns);
+    `detect_suspicious_patterns(rows, tenant_id=...)` runs six rules
+    (login_fail_burst / bot_challenge_fail_spike / token_refresh_storm
+    / honeypot_triggered / oauth_revoke_relink_loop /
+    distributed_login_fail) over the same rows and returns frozen
+    `SuspiciousPatternAlert` objects ready for the AS.7.x notification
+    surface. Async `compute_dashboard(tenant_id, since=..., until=...)`
+    orchestrator handles the AS.0.8 knob-off banner contract +
+    `audit_log` PG fetch + summarise + detect. TS twin lives at
+    `templates/_shared/auth-dashboard/index.ts`.
+
 AS.5.1 (auth shared lib):
   - auth_event — canonical AS.5 dashboard-rollup event family. Eight
     `EVENT_AUTH_*` constants (login_success / login_fail / oauth_connect
@@ -119,6 +135,7 @@ from .prompt_hardening import (
 from .secret_filter import redact
 
 # Re-export pure submodules by name (cheap — constants + functions, no IO).
+from . import auth_dashboard  # noqa: F401
 from . import auth_event  # noqa: F401
 from . import bot_challenge  # noqa: F401
 from . import oauth_audit  # noqa: F401
@@ -131,6 +148,7 @@ from . import token_vault  # noqa: F401
 
 __all__ = [
     "INJECTION_GUARD_PRELUDE",
+    "auth_dashboard",
     "auth_event",
     "bot_challenge",
     "harden_user_message",
