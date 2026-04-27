@@ -84,6 +84,7 @@ import {
   PASSWORD_MIN_SCORE,
 } from "@/lib/password_strength"
 import CloudflareTunnelSetup from "@/components/omnisight/cloudflare-tunnel-setup"
+import BootstrapVerticalStep from "@/components/omnisight/bootstrap-vertical-step"
 import { useCinemaMode } from "@/lib/use-cinema-mode"
 
 // ─── Step definitions ────────────────────────────────────────────────
@@ -2411,21 +2412,22 @@ function GerritSshForm({ onSaved }: { onSaved: () => void }) {
 // installs that finalized pre-BS.9 auto-redirect away from
 // ``/bootstrap`` before this pill ever renders, so they never see it.
 //
-// This row introduces the frame only — title, OPTIONAL gate badge,
-// description, BS.9.3+ placeholder, and a "Skip" button that flips
-// ``localGreen.vertical_setup=true`` and advances the wizard cursor.
-// The actual vertical multi-pick (D/W/P/S/X) ships in BS.9.3 inside
-// ``components/omnisight/bootstrap-vertical-step.tsx``; the Android
-// API selector ships in BS.9.4; BS.9.5 wires "Confirm picks" to a
-// batch enqueue against ``/installer/jobs`` so the BS.7 install
-// drawer surfaces progress.
+// BS.9.2 introduced the frame (OPTIONAL badge + Skip button +
+// placeholder); BS.9.3 plugged the multi-pick body in via
+// ``components/omnisight/bootstrap-vertical-step.tsx``. The placeholder
+// section now lists what's still pending (BS.9.4 Android API selector,
+// BS.9.5 batch enqueue against ``/installer/jobs``); BS.9.6 will deepen
+// the test coverage.
 //
-// Skipping is a client-only flip (no backend call) — no payload is
-// recorded under ``bootstrap_state.metadata.verticals_selected``,
-// which means ``backend.bootstrap._verticals_chosen()`` continues to
-// return ``False`` after a Skip. That is intentional: the operator
-// can re-open the wizard later (before ``finalize``) and pick
-// verticals if they change their mind.
+// Two paths flip the step green:
+//   * ``Confirm picks`` (in the BootstrapVerticalStep body) with ≥ 1
+//     selected vertical — fires ``onCommit`` which routes through the
+//     same ``onCompleted`` callback as Skip.
+//   * ``Skip`` — pure client-only flip (no backend call), so
+//     ``backend.bootstrap._verticals_chosen()`` continues to return
+//     False afterwards and re-opening the step still shows the picker.
+//     BS.9.5 will replace the Confirm path's no-op with the actual
+//     ``POST /installer/jobs`` batch.
 
 function VerticalSetupStep({
   alreadyGreen,
@@ -2467,6 +2469,18 @@ function VerticalSetupStep({
         the wizard again.
       </p>
 
+      <BootstrapVerticalStep
+        onCommit={() => {
+          // BS.9.3 — Confirm picks flips the step green and advances
+          // the wizard cursor. BS.9.5 will replace this with the
+          // actual batch ``POST /installer/jobs`` and only flip green
+          // once the enqueue resolves; for now the local-green flip
+          // mirrors the Skip path's UX so the operator sees the
+          // wizard advance immediately.
+          onCompleted()
+        }}
+      />
+
       <div
         data-testid="bootstrap-vertical-setup-placeholder"
         className="flex flex-col gap-2 p-3 rounded border border-dashed border-[var(--border)] bg-[var(--muted)]/20 font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed"
@@ -2478,7 +2492,7 @@ function VerticalSetupStep({
         <ul className="list-disc pl-4 space-y-0.5">
           <li>
             BS.9.3 — vertical multi-pick chips (D/W/P/S/X) +
-            per-vertical sub-step trigger.
+            per-vertical sub-step trigger (delivered above).
           </li>
           <li>
             BS.9.4 — Android API range selector (compile target / min
@@ -2490,8 +2504,8 @@ function VerticalSetupStep({
           </li>
         </ul>
         <p>
-          Wizard shell only — picking verticals lands in the BS.9.3
-          row.
+          Picks above flip the step green; backend wiring lands in
+          BS.9.5.
         </p>
       </div>
 
