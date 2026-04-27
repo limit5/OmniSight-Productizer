@@ -810,8 +810,174 @@ def _analyze_state() -> dict:
 # priority-4 slot. If priorities 1-3 produced real work (assigns,
 # retries, reports), we don't coach — the operator can see what's
 # happening from the action stream itself.
+
+# BS.10.1 (2026-04-27): lazy install coach hook. When the operator's
+# command (or any backlog/in-progress task text) hints at a toolchain
+# the tenant hasn't installed yet, the planner emits one
+# ``missing_toolchain:<slug>`` trigger per missing entry so the coach
+# can deeplink to ``Settings → Platforms?entry=<slug>`` and prompt the
+# operator to install it instead of letting the agent fail at compile
+# time.
+#
+# Keyword map is keyed by the canonical catalog ``entry_id`` (locked to
+# ``BOOTSTRAP_VERTICAL_PRIMARY_ENTRY`` in ``lib/api.ts`` so frontend +
+# backend stay in lock-step). Keywords are matched case-insensitively
+# as substrings against the combined text corpus (recent command +
+# pending-task title/description + running-agent thought_chain). Adding
+# a new toolchain row is a code change — we deliberately avoid pulling
+# the catalog at runtime so the coach doesn't gain a hard dependency on
+# PG availability for the "what could the operator install?" half of
+# the trigger (the "what HAS the operator installed?" half still needs
+# PG, but failure there degrades to "no missing_toolchain triggers
+# emitted" rather than crashing the whole planner).
+#
+# Module-global state audit (per docs/sop/implement_phase_step.md
+# Step 1): ``_TOOLCHAIN_KEYWORD_MAP`` is a module-level frozen mapping
+# — every uvicorn worker derives the same value from source code, no
+# cross-worker coordination needed (Answer #1).
+_TOOLCHAIN_KEYWORD_MAP: dict[str, tuple[str, ...]] = {
+    "android-sdk-platform-tools": (
+        "android", "adb", "fastboot", "apk", "aab", "android sdk",
+        "android studio", "google play",
+    ),
+    "espressif-esp-idf-v5": (
+        "esp32", "esp-idf", "espressif", "esp idf", "xtensa", "esp8266",
+        "esp32-s3", "esp32-c3",
+    ),
+    "nodejs-lts-20": (
+        "node.js", "nodejs", "node js", "npm", "yarn", "pnpm",
+        "react", "next.js", "nextjs", "vite", "typescript",
+    ),
+    "python-uv": (
+        "python", "pip ", "pip install", "uv pip", "venv", "pyproject",
+        "poetry", "pytest",
+    ),
+    "arm-gnu-toolchain-13": (
+        "arm-none-eabi", "cross-compile arm", "cross compile arm",
+        "stm32", "cortex-m", "cortex m", "gcc-arm", "gcc arm",
+        "arm gnu toolchain",
+    ),
+}
+
+
+def _collect_toolchain_hints(text: str) -> set[str]:
+    """Return catalog ``entry_id`` slugs hinted at by *text*.
+
+    Pure helper — case-insensitive substring scan over
+    :data:`_TOOLCHAIN_KEYWORD_MAP`. Empty / whitespace-only input
+    returns an empty set so callers can pipe arbitrary corpora through
+    without pre-filtering.
+    """
+    if not text:
+        return set()
+    haystack = text.lower()
+    hits: set[str] = set()
+    for slug, keywords in _TOOLCHAIN_KEYWORD_MAP.items():
+        for kw in keywords:
+            if kw in haystack:
+                hits.add(slug)
+                break
+    return hits
+
+
+def _build_coach_text_corpus(state: dict, command: str | None) -> str:
+    """Concatenate the operator's *current conversation* + *expected to
+    run* task surfaces into one lower-cased string for keyword scoring.
+
+    Sources, in priority order:
+      * the live INVOKE ``command`` (if any) — direct operator intent
+      * backlog / assigned / in-progress task titles + descriptions
+      * running agents' ``thought_chain`` (often quotes the task command
+        or describes the next planned step)
+
+    Completed / blocked tasks are excluded — the trigger is for work the
+    operator is *about to* run, not historical work. Truncated to a
+    sensible cap so a runaway description can't hog the keyword scan.
+    """
+    parts: list[str] = []
+    if command:
+        parts.append(command)
+    for t in state.get("tasks") or []:
+        try:
+            status = t.status
+            status_val = status.value if hasattr(status, "value") else str(status)
+        except Exception:
+            status_val = ""
+        if status_val not in {"backlog", "assigned", "in_progress"}:
+            continue
+        title = getattr(t, "title", "") or ""
+        desc = getattr(t, "description", "") or ""
+        if title:
+            parts.append(title)
+        if desc:
+            parts.append(desc)
+    for agent in state.get("running_agents") or []:
+        chain = getattr(agent, "thought_chain", "") or ""
+        if chain:
+            parts.append(chain)
+    blob = " ".join(parts)
+    if len(blob) > 8_000:
+        blob = blob[:8_000]
+    return blob
+
+
+async def _load_installed_entry_ids(tenant_id: str) -> frozenset[str]:
+    """Return the set of catalog ``entry_id`` values currently installed
+    for *tenant_id* (latest install_jobs row per entry is
+    ``state='completed'`` AND not an uninstall record).
+
+    Mirrors the filter used by ``GET /installer/installed`` so the coach
+    and the InstalledTab agree on what "installed" means. Errors (PG
+    unreachable, missing column, schema drift) degrade to an empty set
+    — the coach simply will not emit ``missing_toolchain`` triggers
+    rather than 500-ing the whole planner.
+
+    Module-global / cross-worker state audit: pure SELECT scoped by
+    tenant_id; multi-worker safe via PG MVCC (Answer #2).
+
+    Read-after-write timing: a freshly committed install_jobs row is
+    visible to the next worker by PG snapshot isolation, so the operator
+    finishing an install via the BS.7 drawer immediately stops seeing
+    the matching ``missing_toolchain`` coaching card on the next INVOKE.
+    """
+    if not tenant_id:
+        return frozenset()
+    sql = """
+        SELECT DISTINCT ON (entry_id)
+            entry_id, state, result_json
+        FROM install_jobs
+        WHERE tenant_id = $1
+        ORDER BY entry_id, queued_at DESC
+    """
+    try:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch(sql, tenant_id)
+    except Exception as exc:
+        logger.debug("[BS.10.1] installed-entries load failed: %s", exc)
+        return frozenset()
+    installed: set[str] = set()
+    for row in rows:
+        try:
+            if row["state"] != "completed":
+                continue
+            payload = row["result_json"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (ValueError, TypeError):
+                    payload = None
+            if isinstance(payload, dict) and payload.get("kind") == "uninstall":
+                continue
+            installed.add(str(row["entry_id"]))
+        except Exception:
+            continue
+    return frozenset(installed)
+
+
 def _detect_coaching_triggers(
     state: dict, suppress: frozenset[str],
+    *, command: str | None = None,
 ) -> tuple[list[str], int]:
     """Return ``(trigger_keys, pending_count)`` for the orchestrator coach.
 
@@ -820,6 +986,15 @@ def _detect_coaching_triggers(
     "I already showed coaching for X this session" so the operator
     isn't re-coached on every INVOKE press (frontend tracks via
     sessionStorage; see ``hooks/use-engine.ts`` invoke()).
+
+    BS.10.1 — also emits one ``missing_toolchain:<slug>`` trigger per
+    catalog entry the *current conversation* (``command``) or any
+    *expected-to-run* task hints at but the tenant has not installed
+    yet. ``state["installed_entries"]`` is the upstream-supplied
+    ``frozenset[str]`` of installed catalog ``entry_id`` values
+    (typically loaded via :func:`_load_installed_entry_ids`); when
+    absent the missing-toolchain detection is a no-op so unit tests can
+    drive the function without a PG round-trip.
     """
     triggers: list[str] = []
     if (not state["agents"] and not state["tasks"]
@@ -833,6 +1008,23 @@ def _detect_coaching_triggers(
         pass
     if pending_count > 0 and "stale_pep" not in suppress:
         triggers.append("stale_pep")
+
+    # BS.10.1 — missing toolchain detection. ``installed_entries`` is
+    # supplied by the caller (the INVOKE endpoint pre-loads it from
+    # ``install_jobs`` so the planner stays sync-pure). Skipped entirely
+    # when the upstream did not provide it (test isolation, sync code
+    # paths) so existing behaviour is unchanged.
+    installed_entries = state.get("installed_entries")
+    if installed_entries is not None:
+        corpus = _build_coach_text_corpus(state, command)
+        hinted = _collect_toolchain_hints(corpus)
+        for slug in sorted(hinted):
+            if slug in installed_entries:
+                continue
+            key = f"missing_toolchain:{slug}"
+            if key in suppress:
+                continue
+            triggers.append(key)
     return triggers, pending_count
 
 
@@ -906,9 +1098,13 @@ def _plan_actions(
     # Priority 4: Nothing to do → coach (if orchestrator has something to
     # say) or fall back to a passive health check. R20-B replaced the
     # bare health echo with an orchestrator-led coaching step when the
-    # workspace is empty / has stale PEP HOLDs.
+    # workspace is empty / has stale PEP HOLDs. BS.10.1 forwards the
+    # operator's ``command`` so the missing-toolchain detector can see
+    # the live INVOKE intent in addition to backlog task text.
     if not actions:
-        triggers, pending_count = _detect_coaching_triggers(state, suppress_coach)
+        triggers, pending_count = _detect_coaching_triggers(
+            state, suppress_coach, command=command,
+        )
         if triggers:
             actions.append({
                 "type": "coach",
@@ -1342,11 +1538,30 @@ async def _generate_coach_message(action: dict) -> str:
 
 # ─── Endpoint ───
 
+def _resolve_tenant_id(user) -> str:
+    """Best-effort caller tenant id (mirrors ``installer._ensure_tenant``).
+
+    BS.10.1 helper. The INVOKE router historically did not need a
+    tenant context, but the missing-toolchain coach trigger queries
+    ``install_jobs`` which is tenant-scoped. ``user`` may be a Pydantic
+    ``User`` model or a plain mapping in degraded auth modes — both
+    code paths converge on ``"t-default"`` when no tenant is
+    advertised, matching every other tenant-aware router.
+    """
+    try:
+        tid = getattr(user, "tenant_id", None)
+        if tid is None and isinstance(user, dict):
+            tid = user.get("tenant_id")
+        return str(tid) if tid else "t-default"
+    except Exception:
+        return "t-default"
+
+
 @router.post("/stream")
 async def invoke_stream(
     command: str | None = None,
     suppress_coach: str | None = None,
-    _user=Depends(_auth.check_llm_quota),  # auth + M4 per-user LLM rate limit
+    user=Depends(_auth.check_llm_quota),  # auth + M4 per-user LLM rate limit
 ):
     """SSE streaming invoke — analyses state, plans, executes, reports.
 
@@ -1388,6 +1603,14 @@ async def invoke_stream(
                     await _persist_task(task)
 
     state = _analyze_state()
+    # BS.10.1 — pre-load the tenant's installed catalog so the planner
+    # can emit ``missing_toolchain:<slug>`` coaching triggers when the
+    # operator's command (or an unassigned task) hints at a toolchain
+    # that has not been installed yet. Errors degrade silently — the
+    # coach simply will not emit missing-toolchain triggers.
+    state["installed_entries"] = await _load_installed_entry_ids(
+        _resolve_tenant_id(user),
+    )
     actions = _plan_actions(state, command, suppress_coach=suppress_set)
 
     async def event_generator():
@@ -1476,7 +1699,7 @@ async def invoke_resume():
 @router.post("")
 async def invoke_sync(
     command: str | None = None,
-    _user=Depends(_auth.check_llm_quota),  # auth + M4 per-user LLM rate limit
+    user=Depends(_auth.check_llm_quota),  # auth + M4 per-user LLM rate limit
 ):
     """Synchronous invoke — analyses, plans, executes, returns full result."""
     from backend import decision_engine as _de
@@ -1489,6 +1712,11 @@ async def invoke_sync(
 
     async with sema:
         state = _analyze_state()
+        # BS.10.1 — pre-load installed catalog so the planner can emit
+        # missing-toolchain coach triggers (parity with /invoke/stream).
+        state["installed_entries"] = await _load_installed_entry_ids(
+            _resolve_tenant_id(user),
+        )
         actions = _plan_actions(state, command)
         results: list[dict] = []
 
