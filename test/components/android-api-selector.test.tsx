@@ -445,3 +445,414 @@ describe("AndroidApiSelector — rendering + interaction", () => {
     expect(onChange).not.toHaveBeenCalled()
   })
 })
+
+// ─── BS.9.6 — deepening test deck ────────────────────────────────────
+//
+// BS.9.4 shipped 22 cases pinning the level catalog, the four pure
+// helpers, and the basic dropdown / preset radio / GMS toggle paths.
+// BS.9.5 then bolted the selector inside ``VerticalSetupStep`` (Mobile
+// vertical sub-step) without touching this file. BS.9.6 fills the
+// gaps below the BS.9.4/9.5 line:
+//   - drift guards on the ``ANDROID_API_LEVELS`` /
+//     ``ANDROID_EMULATOR_PRESETS`` catalogs (newest-first ordering,
+//     form-factor delta sign rules, complete operator copy);
+//   - explicit dropdown content invariants (compile target options
+//     count, min API options shrink with compile drop, summary footer
+//     mirrors all four selection facets);
+//   - integration-shape invariants the BS.9.5 batch enqueue depends
+//     on (onChange does not double-fire on rerender, clamp invariant
+//     holds across a sequence of edits, disk total chip mirrors the
+//     breakdown footer exactly).
+describe("AndroidApiSelector — BS.9.6 deepening", () => {
+  let onChange: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    onChange = vi.fn()
+  })
+
+  it("ANDROID_API_LEVELS levels are strictly descending and platform sizes monotone non-decreasing (drift guard)", () => {
+    // Level integers must be sorted strictly newest-first so the
+    // compile-target dropdown's first option doubles as the
+    // operator-default. A drift in either direction (re-order,
+    // duplicate level, off-by-one in the catalog seed) would silently
+    // break the "first option = latest stable" invariant the parent
+    // relies on.
+    for (let i = 1; i < ANDROID_API_LEVELS.length; i++) {
+      expect(ANDROID_API_LEVELS[i].level).toBeLessThan(
+        ANDROID_API_LEVELS[i - 1].level,
+      )
+    }
+    // Platform sizes monotone non-decreasing in level — i.e., older
+    // SDK platforms should not exceed newer ones (Google's catalog
+    // pattern). A future refactor that mis-types a row would surface
+    // here rather than at "operator sees 250 MB for Android 6.0 but
+    // 95 MB for Android 14".
+    for (let i = 1; i < ANDROID_API_LEVELS.length; i++) {
+      expect(ANDROID_API_LEVELS[i].platformSizeBytes).toBeLessThanOrEqual(
+        ANDROID_API_LEVELS[i - 1].platformSizeBytes,
+      )
+    }
+    // Every entry has full operator copy (versionName / codename /
+    // releasedYear) so the dropdown label and hint never render
+    // empty.
+    for (const def of ANDROID_API_LEVELS) {
+      expect(def.versionName.length).toBeGreaterThan(0)
+      expect(def.codename.length).toBeGreaterThan(0)
+      expect(def.releasedYear).toBeGreaterThan(2000)
+      expect(def.releasedYear).toBeLessThan(2100)
+    }
+  })
+
+  it("ANDROID_EMULATOR_PRESETS form-factor deltas have the right sign per preset (drift guard)", () => {
+    // pixel-8 is the baseline (delta = 0); pixel-6a is mid-tier so
+    // smaller (negative delta); tablet + foldable carry larger system
+    // images (positive delta); 'none' is the skip-the-image sentinel
+    // (delta = 0, validated separately in the BS.9.4 pure-helper
+    // test). A future refactor that flipped the tablet vs phone
+    // bytes would mis-report the disk estimate by ~150 MB on every
+    // tablet pick.
+    const byId = new Map(ANDROID_EMULATOR_PRESETS.map((p) => [p.id, p]))
+    expect(byId.get("pixel-8")?.formFactorDeltaBytes).toBe(0)
+    expect(byId.get("none")?.formFactorDeltaBytes).toBe(0)
+    expect(byId.get("pixel-6a")?.formFactorDeltaBytes ?? 0).toBeLessThan(0)
+    expect(byId.get("pixel-tablet")?.formFactorDeltaBytes ?? 0).toBeGreaterThan(
+      0,
+    )
+    expect(byId.get("pixel-fold")?.formFactorDeltaBytes ?? 0).toBeGreaterThan(0)
+    // Foldable should run heavier than tablet — both screens shipped.
+    expect(
+      (byId.get("pixel-fold")?.formFactorDeltaBytes ?? 0) >=
+        (byId.get("pixel-tablet")?.formFactorDeltaBytes ?? 0),
+    ).toBe(true)
+
+    // Every preset has full operator copy + an icon slot.
+    for (const p of ANDROID_EMULATOR_PRESETS) {
+      expect(p.label.length).toBeGreaterThan(0)
+      expect(p.hint.length).toBeGreaterThan(0)
+      expect(p.icon).toBeTruthy()
+    }
+  })
+
+  it("compile target dropdown lists exactly the supported set in newest-first order", () => {
+    // BS.9.5's batch enqueue / backend 422 guard validate the picked
+    // compile target against ``_ANDROID_API_LEVELS`` — the dropdown
+    // must never expose an unsupported option. Lock that shape here
+    // so a future option-filter / sort refactor can't silently leak
+    // levels.
+    render(<AndroidApiSelector onChange={onChange} />)
+    const select = screen.getByTestId(
+      "android-api-selector-compile-target",
+    ) as HTMLSelectElement
+    const offered = Array.from(select.options).map((o) => Number(o.value))
+    expect(offered).toEqual(ANDROID_API_LEVELS.map((d) => d.level))
+    expect(offered.length).toBe(11)
+    expect(offered[0]).toBe(ANDROID_LATEST_API_LEVEL)
+    expect(offered[offered.length - 1]).toBe(ANDROID_OLDEST_API_LEVEL)
+  })
+
+  it("min API dropdown option count shrinks dynamically with the compile target", () => {
+    // The dropdown filter is a render-time invariant — the BS.9.5
+    // backend 422 guard rejects min > compile so a stale dropdown
+    // option would mis-route an operator pick into a 422 error after
+    // the wizard already advanced. Pin the count for a couple of
+    // anchor compile targets to surface filter regressions early.
+    const totalLevels = ANDROID_API_LEVELS.length
+    const expectedAt = (compile: number) =>
+      ANDROID_API_LEVELS.filter((d) => d.level <= compile).length
+    const { rerender } = render(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={{
+          compile_target: 35,
+          min_api: 26,
+          emulator_preset: "pixel-8",
+          google_play_services: true,
+        }}
+      />,
+    )
+    let select = screen.getByTestId(
+      "android-api-selector-min-api",
+    ) as HTMLSelectElement
+    expect(select.options.length).toBe(totalLevels)
+    expect(select.options.length).toBe(expectedAt(35))
+
+    rerender(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={{
+          compile_target: 28,
+          min_api: 26,
+          emulator_preset: "pixel-8",
+          google_play_services: true,
+        }}
+      />,
+    )
+    select = screen.getByTestId(
+      "android-api-selector-min-api",
+    ) as HTMLSelectElement
+    expect(select.options.length).toBe(expectedAt(28))
+    // 30 / 31 / 32 / 33 / 34 / 35 are all dropped.
+    const offered = Array.from(select.options).map((o) => Number(o.value))
+    for (const blocked of [30, 31, 32, 33, 34, 35]) {
+      expect(offered).not.toContain(blocked)
+    }
+  })
+
+  it("summary footer reflects all four selection facets and updates on change", () => {
+    // The summary footer is the final readout the operator sees
+    // before BS.9.5's Confirm picks fires. Lock that all four facets
+    // surface (compile / min / preset / GMS-or-AOSP) so a copy
+    // refactor can't drop one of them.
+    const { rerender } = render(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={{
+          compile_target: 34,
+          min_api: 26,
+          emulator_preset: "pixel-fold",
+          google_play_services: true,
+        }}
+      />,
+    )
+    const summary1 = screen.getByTestId("android-api-selector-summary")
+    expect(summary1.textContent).toMatch(/API 34 compile/)
+    expect(summary1.textContent).toMatch(/API 26 min/)
+    expect(summary1.textContent).toMatch(/Pixel Fold/)
+    expect(summary1.textContent).toMatch(/GMS/)
+
+    rerender(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={{
+          compile_target: 30,
+          min_api: 26,
+          emulator_preset: "none",
+          google_play_services: true,
+        }}
+      />,
+    )
+    const summary2 = screen.getByTestId("android-api-selector-summary")
+    // 'none' preset must clear the GMS readout to "no emulator"
+    // (avoid the operator misreading the summary as "emulator + GMS"
+    // when nothing will be installed).
+    expect(summary2.textContent).toMatch(/no emulator/)
+    expect(summary2.textContent).not.toMatch(/\bGMS\b/)
+  })
+
+  it("disk total chip text matches the footer breakdown total exactly", () => {
+    // The header chip and the footer total render off the same
+    // ``totalBytes`` calculation. A future refactor that sourced one
+    // of them from the selection (e.g., re-derived without the
+    // formFactorDelta) would silently disagree. Lock byte-for-byte
+    // equality + the formatted-string equality.
+    render(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={{
+          compile_target: 34,
+          min_api: 28,
+          emulator_preset: "pixel-tablet",
+          google_play_services: false,
+        }}
+      />,
+    )
+    const root = screen.getByTestId("android-api-selector")
+    const totalBytes = Number(root.getAttribute("data-disk-bytes"))
+    const headerChip = screen.getByTestId("android-api-selector-disk-estimate")
+    const footerTotal = screen.getByTestId("android-api-selector-disk-total")
+    expect(Number(headerChip.getAttribute("data-bytes"))).toBe(totalBytes)
+    expect(headerChip.textContent?.trim()).toBe(
+      footerTotal.textContent?.trim(),
+    )
+    // The breakdown line bytes must sum to the same total.
+    const lineSum = Array.from(
+      screen.getAllByTestId(/android-api-selector-disk-line-/),
+    ).reduce((acc, el) => acc + Number(el.getAttribute("data-bytes") ?? 0), 0)
+    expect(lineSum).toBe(totalBytes)
+  })
+
+  it("picking pixel-tablet vs pixel-8 grows the system-image line by the form-factor delta", () => {
+    // The form-factor delta on the system-image line is what makes
+    // tablet / foldable picks heavier than the phone baseline. BS.9.5
+    // shows this number to the operator on the AndroidApiSelector
+    // sub-step — a future regression that ignored the delta would
+    // mis-bill the operator's disk by ~150 MB on every tablet pick.
+    const baseValue = {
+      compile_target: 34 as const,
+      min_api: 26 as const,
+      emulator_preset: "pixel-8" as const,
+      google_play_services: true,
+    }
+    const { rerender } = render(
+      <AndroidApiSelector onChange={onChange} value={baseValue} />,
+    )
+    const phoneSysBytes = Number(
+      screen
+        .getByTestId("android-api-selector-disk-line-system-image")
+        .getAttribute("data-bytes") ?? 0,
+    )
+
+    rerender(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={{ ...baseValue, emulator_preset: "pixel-tablet" }}
+      />,
+    )
+    const tabletSysBytes = Number(
+      screen
+        .getByTestId("android-api-selector-disk-line-system-image")
+        .getAttribute("data-bytes") ?? 0,
+    )
+    // Tablet system image carries the +150 MB form-factor delta.
+    expect(tabletSysBytes - phoneSysBytes).toBe(150 * 1024 * 1024)
+  })
+
+  it("min API hint surfaces the current min API codename and updates on change", () => {
+    // The hint copy under the Min API dropdown surfaces the codename
+    // for the current min API ("Currently API 26 · Oreo.") so the
+    // operator confirms the pick at a glance. Lock that the hint
+    // refreshes when the parent re-renders with a new min_api.
+    const { rerender } = render(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={{
+          compile_target: 34,
+          min_api: 26,
+          emulator_preset: "pixel-8",
+          google_play_services: true,
+        }}
+      />,
+    )
+    expect(
+      screen.getByTestId("android-api-selector-min-api-hint").textContent,
+    ).toMatch(/Oreo/)
+
+    rerender(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={{
+          compile_target: 34,
+          min_api: 33,
+          emulator_preset: "pixel-8",
+          google_play_services: true,
+        }}
+      />,
+    )
+    expect(
+      screen.getByTestId("android-api-selector-min-api-hint").textContent,
+    ).toMatch(/Tiramisu/)
+  })
+
+  it("onChange does not fire on initial mount (no spurious wizard-state thrash)", () => {
+    // The parent (``VerticalSetupStep`` from BS.9.5) holds
+    // ``androidApi`` state and only calls ``setAndroidApi`` from this
+    // callback. A spurious mount-time fire would re-render with the
+    // same value, triggering an extra ``selectedNow`` reflow / loop
+    // — defensible from a memoisation standpoint but a noisy waste
+    // here. Lock the no-fire-on-mount contract.
+    render(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={DEFAULT_ANDROID_API_SELECTION}
+      />,
+    )
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it("a sequence of compile-target edits keeps min_api ≤ compile_target on every emit", () => {
+    // BS.9.5's recordVerticalSetup body validates ``min_api ≤
+    // compile_target`` on the backend. The component's emit path must
+    // hold that invariant on every onChange so the parent never sends
+    // an invalid payload. Walk a non-trivial sequence — from the
+    // default (35/26) down to 28, then back up to 32, then down to
+    // 24 — and assert the invariant + the snap-down behaviour.
+    const value: AndroidApiSelection = {
+      compile_target: 35,
+      min_api: 33,
+      emulator_preset: "pixel-8",
+      google_play_services: true,
+    }
+    const { rerender } = render(
+      <AndroidApiSelector onChange={onChange} value={value} />,
+    )
+
+    // Drop compile to 28 — min_api 33 must clamp to 28.
+    fireEvent.change(
+      screen.getByTestId("android-api-selector-compile-target"),
+      { target: { value: "28" } },
+    )
+    const after1 = onChange.mock.calls[0][0] as AndroidApiSelection
+    expect(after1.compile_target).toBe(28)
+    expect(after1.min_api).toBe(28)
+    expect(after1.min_api).toBeLessThanOrEqual(after1.compile_target)
+    rerender(<AndroidApiSelector onChange={onChange} value={after1} />)
+
+    // Bump compile back to 32 — min_api stays at 28 (still ≤ 32).
+    fireEvent.change(
+      screen.getByTestId("android-api-selector-compile-target"),
+      { target: { value: "32" } },
+    )
+    const after2 = onChange.mock.calls[1][0] as AndroidApiSelection
+    expect(after2.compile_target).toBe(32)
+    expect(after2.min_api).toBe(28)
+    expect(after2.min_api).toBeLessThanOrEqual(after2.compile_target)
+    rerender(<AndroidApiSelector onChange={onChange} value={after2} />)
+
+    // Drop compile to 24 — min_api 28 must clamp to 24.
+    fireEvent.change(
+      screen.getByTestId("android-api-selector-compile-target"),
+      { target: { value: "24" } },
+    )
+    const after3 = onChange.mock.calls[2][0] as AndroidApiSelection
+    expect(after3.compile_target).toBe(24)
+    expect(after3.min_api).toBe(24)
+    expect(after3.min_api).toBeLessThanOrEqual(after3.compile_target)
+  })
+
+  it("switching from 'none' to a real preset re-enables the GMS toggle and re-introduces the system-image line", () => {
+    // BS.9.5's parent decides whether the operator's GMS pick matters
+    // by reading ``selection.emulator_preset`` and disabling the
+    // toggle when it is ``"none"``. Operator can flip the preset
+    // back to a real device at any point — the toggle must come
+    // alive again, the locked-hint must disappear, and the
+    // system-image / emulator-runtime breakdown lines must
+    // reappear in the disk footer.
+    const noneValue: AndroidApiSelection = {
+      compile_target: 34,
+      min_api: 26,
+      emulator_preset: "none",
+      google_play_services: true,
+    }
+    const { rerender } = render(
+      <AndroidApiSelector onChange={onChange} value={noneValue} />,
+    )
+    expect(screen.getByTestId("android-api-selector-gms-on")).toBeDisabled()
+    expect(
+      screen.getByTestId("android-api-selector-gms-locked-hint"),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByTestId("android-api-selector-disk-line-system-image"),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByTestId("android-api-selector-disk-line-emulator-runtime"),
+    ).not.toBeInTheDocument()
+
+    rerender(
+      <AndroidApiSelector
+        onChange={onChange}
+        value={{ ...noneValue, emulator_preset: "pixel-8" }}
+      />,
+    )
+    expect(screen.getByTestId("android-api-selector-gms-on")).not.toBeDisabled()
+    expect(screen.getByTestId("android-api-selector-gms-off")).not.toBeDisabled()
+    expect(
+      screen.queryByTestId("android-api-selector-gms-locked-hint"),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByTestId("android-api-selector-disk-line-system-image"),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByTestId("android-api-selector-disk-line-emulator-runtime"),
+    ).toBeInTheDocument()
+  })
+})

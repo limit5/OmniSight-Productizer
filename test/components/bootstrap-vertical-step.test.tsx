@@ -9,6 +9,7 @@ import BootstrapVerticalStep, {
   toggleVertical,
   verticalCodeFor,
   type BootstrapVerticalCommitPayload,
+  type BootstrapVerticalDef,
   type BootstrapVerticalId,
 } from "@/components/omnisight/bootstrap-vertical-step"
 
@@ -292,5 +293,215 @@ describe("BootstrapVerticalStep — rendering + interaction", () => {
     // doesn't accidentally enqueue an empty payload.
     fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-confirm"))
     expect(onCommit).not.toHaveBeenCalled()
+  })
+})
+
+// ─── BS.9.6 — deepening test deck ────────────────────────────────────
+//
+// BS.9.3 shipped 15 cases pinning the canonical D/W/P/S/X order, the
+// toggleVertical / coerceSelectedVerticals helpers, and the basic chip
+// rendering / Confirm / Reset / disabled paths. BS.9.5 then bolted on
+// the optional ``onSelectionChange`` prop (parent uses it to mount the
+// AndroidApiSelector when Mobile is checked) without touching the
+// existing 15 cases. BS.9.6 fills the gaps below the BS.9.3/9.5 line:
+//   - drift guard for the ``BOOTSTRAP_VERTICALS`` catalog so any future
+//     row-rename or reorder fails loudly here rather than silently
+//     mis-routing the per-vertical sub-step at runtime;
+//   - explicit coverage for the BS.9.5 ``onSelectionChange`` contract
+//     (fires on every selection change, optional, no crash without
+//     listener) which BS.9.5's wiring test exercises only indirectly;
+//   - aliasing / immutability invariants that BS.9.5's batch-enqueue
+//     loop relies on (Confirm payload is a fresh array, toggleVertical
+//     is idempotent under double-click).
+describe("BootstrapVerticalStep — BS.9.6 deepening", () => {
+  let onCommit: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    onCommit = vi.fn()
+  })
+
+  it("BOOTSTRAP_VERTICALS catalog has complete operator copy for every chip (drift guard)", () => {
+    // Each entry must carry: id (in BOOTSTRAP_VERTICAL_IDS), code (in
+    // BOOTSTRAP_VERTICAL_CODES), non-empty label, non-empty hint,
+    // non-empty subStepHint that explicitly references BS.9.4 so the
+    // operator knows where the per-vertical configurator lands, and a
+    // function-typed icon component (lucide-react). A future row that
+    // adds a new vertical must populate every field — this guard
+    // surfaces missing copy at compile-time-of-test rather than at
+    // first-install QA.
+    expect(BOOTSTRAP_VERTICALS.length).toBe(5)
+    for (const v of BOOTSTRAP_VERTICALS as readonly BootstrapVerticalDef[]) {
+      expect(BOOTSTRAP_VERTICAL_IDS).toContain(v.id)
+      expect(BOOTSTRAP_VERTICAL_CODES).toContain(v.code)
+      expect(v.label.length).toBeGreaterThan(0)
+      expect(v.hint.length).toBeGreaterThan(0)
+      expect(v.subStepHint.length).toBeGreaterThan(0)
+      expect(v.subStepHint).toMatch(/BS\.9\.4/)
+      // lucide-react icons render as React components — exposed as
+      // either function components or forwardRef objects depending on
+      // the icon. Either is acceptable; we just lock that the slot is
+      // populated with something React can render.
+      expect(["function", "object"]).toContain(typeof v.icon)
+      expect(v.icon).toBeTruthy()
+    }
+    // Code letters are unique and stable.
+    expect(new Set(BOOTSTRAP_VERTICAL_CODES).size).toBe(
+      BOOTSTRAP_VERTICAL_CODES.length,
+    )
+    expect(new Set(BOOTSTRAP_VERTICAL_IDS).size).toBe(
+      BOOTSTRAP_VERTICAL_IDS.length,
+    )
+  })
+
+  it("toggleVertical is idempotent under repeated identical clicks", () => {
+    // The chip click handler invokes toggleVertical on every press, so
+    // a double-click on the same chip must land back at the original
+    // selection (not stuck in a half-toggled state). BS.9.5's batch
+    // enqueue loop iterates the canonical-ordered selection — if a
+    // re-toggle leaked an extra entry the loop would enqueue a stale
+    // install job.
+    const start: BootstrapVerticalId[] = ["mobile", "web"]
+    const once = toggleVertical(start, "embedded")
+    const twice = toggleVertical(once, "embedded")
+    expect(once).toEqual(["mobile", "embedded", "web"])
+    expect(twice).toEqual(["mobile", "web"])
+    // Toggling an already-selected vertical removes it; toggling the
+    // resulting array with the same id again re-adds it — round-trip
+    // consistent.
+    const removed = toggleVertical(start, "mobile")
+    expect(removed).toEqual(["web"])
+    expect(toggleVertical(removed, "mobile")).toEqual(["mobile", "web"])
+  })
+
+  it("coerceSelectedVerticals accepts a readonly tuple input from typed callers", () => {
+    // initialSelected is typed ``readonly BootstrapVerticalId[]`` so a
+    // typed caller may pass a frozen tuple (e.g., a ``const`` import
+    // exported from a server-rendered payload). The helper must
+    // tolerate readonly arrays without ``.indexOf`` / ``.includes``
+    // type-narrowing churn and still emit a fresh mutable result.
+    const tuple = Object.freeze([
+      "cross-toolchain",
+      "mobile",
+    ]) as readonly BootstrapVerticalId[]
+    const result = coerceSelectedVerticals(tuple)
+    // Canonicalised + frozen-input not aliased into the result.
+    expect(result).toEqual(["mobile", "cross-toolchain"])
+    expect(result).not.toBe(tuple)
+    // Result is mutable so the parent can pass it to setState without
+    // hitting "object is not extensible" errors.
+    expect(() => result.push("web")).not.toThrow()
+  })
+
+  it("onSelectionChange fires once on mount + on every selection change with canonical order", () => {
+    // BS.9.5 contract: the optional callback must fire on mount with
+    // the initial selection, then again with the new canonical-ordered
+    // array on every toggle / reset. The parent's ``selectedNow``
+    // state hangs off this signal and decides whether to mount the
+    // ``<AndroidApiSelector />``; missing the mount-time tick would
+    // cause a partial Mobile pre-fill (initialSelected=["mobile"]) to
+    // render the wizard without the Android sub-step.
+    const onSelectionChange = vi.fn<(selected: readonly BootstrapVerticalId[]) => void>()
+    render(
+      <BootstrapVerticalStep
+        onCommit={onCommit}
+        initialSelected={["mobile"]}
+        onSelectionChange={onSelectionChange}
+      />,
+    )
+    expect(onSelectionChange).toHaveBeenCalledTimes(1)
+    expect(onSelectionChange.mock.calls[0][0]).toEqual(["mobile"])
+
+    // Click in non-canonical order: P then W. Each click fires the
+    // callback with the newest canonical-ordered array.
+    fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-web"))
+    fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-embedded"))
+    expect(onSelectionChange).toHaveBeenCalledTimes(3)
+    expect(onSelectionChange.mock.calls[1][0]).toEqual(["mobile", "web"])
+    expect(onSelectionChange.mock.calls[2][0]).toEqual([
+      "mobile",
+      "embedded",
+      "web",
+    ])
+
+    // Reset emits an empty array.
+    fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-reset"))
+    expect(onSelectionChange).toHaveBeenCalledTimes(4)
+    expect(onSelectionChange.mock.calls[3][0]).toEqual([])
+  })
+
+  it("onSelectionChange is optional — toggling without a listener does not crash", () => {
+    // Defence in depth on the BS.9.5 prop addition: BS.9.3 shipped 15
+    // tests rendering ``<BootstrapVerticalStep onCommit={onCommit} />``
+    // without the new prop, and they still pass — but a future
+    // refactor that turned the listener into a required prop would
+    // shift the regression to runtime ("Cannot call undefined as a
+    // function"). Lock the optional-prop path explicitly.
+    expect(() => {
+      render(<BootstrapVerticalStep onCommit={onCommit} />)
+      fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-mobile"))
+      fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-mobile"))
+    }).not.toThrow()
+  })
+
+  it("each chip exposes an aria-label containing both the long label and the code (a11y drift guard)", () => {
+    // Screen-reader copy renders "Mobile (Android / iOS) (D)" so
+    // assistive tech announces both the operator-facing slug and the
+    // chip shortcut. A future copy-only refactor could drop one half
+    // of the pattern — this guard locks both halves on every chip.
+    render(<BootstrapVerticalStep onCommit={onCommit} />)
+    for (const v of BOOTSTRAP_VERTICALS) {
+      const chip = screen.getByTestId(`bootstrap-vertical-pick-${v.id}`)
+      const aria = chip.getAttribute("aria-label") ?? ""
+      expect(aria).toContain(v.label)
+      expect(aria).toContain(`(${v.code})`)
+      expect(chip).toHaveAttribute("role", "checkbox")
+    }
+  })
+
+  it("Confirm payload is a fresh array (not aliased to internal state)", () => {
+    // BS.9.5's handleCommit sequentially awaits createInstallJob() per
+    // vertical; the loop reads ``payload.verticals_selected`` and
+    // mutating React state mid-await would corrupt the iteration order.
+    // The component must hand a defensive copy rather than the live
+    // ``selected`` array reference.
+    render(<BootstrapVerticalStep onCommit={onCommit} />)
+    fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-mobile"))
+    fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-web"))
+    fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-confirm"))
+
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    const firstPayload = onCommit.mock.calls[0][0] as BootstrapVerticalCommitPayload
+    const captured = [...firstPayload.verticals_selected]
+
+    // Toggle another chip after the commit — the captured payload
+    // must NOT reflect the post-commit state.
+    fireEvent.click(
+      screen.getByTestId("bootstrap-vertical-pick-cross-toolchain"),
+    )
+    expect(firstPayload.verticals_selected).toEqual(captured)
+    expect(firstPayload.verticals_selected).toEqual(["mobile", "web"])
+  })
+
+  it("empty hint disappears on first selection and re-appears after Reset (BS.9.5 commit-affordance UX)", () => {
+    // BS.9.3 already locks the empty-hint copy on first render; the
+    // round-trip "select → reset → empty hint back" path is what the
+    // operator actually sees during a Confirm-then-rethink. Lock that
+    // round-trip so a future refactor doesn't accidentally hide the
+    // empty hint after Reset (leaving the operator with disabled
+    // Confirm/Reset buttons and no copy explaining what to do).
+    render(<BootstrapVerticalStep onCommit={onCommit} />)
+    expect(
+      screen.getByTestId("bootstrap-vertical-pick-empty-hint"),
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-mobile"))
+    expect(
+      screen.queryByTestId("bootstrap-vertical-pick-empty-hint"),
+    ).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId("bootstrap-vertical-pick-reset"))
+    expect(
+      screen.getByTestId("bootstrap-vertical-pick-empty-hint"),
+    ).toBeInTheDocument()
   })
 })
