@@ -463,16 +463,19 @@ def test_ts_twin_path_reserved_in_docstring() -> None:
     assert "AS.2.3" in doc
 
 
-def test_ts_twin_directory_optional_today() -> None:
-    """The TS twin will land in AS.2.3; today the directory may or may
-    not exist. This test is informational — it documents the path but
-    does not assert presence."""
+def test_ts_twin_directory_present() -> None:
+    """The TS twin landed in AS.2.3 — assert the canonical path
+    exists with the expected ``index.ts`` + ``README.md`` artefacts.
+
+    Behavioural Python ↔ TS drift is enforced separately by
+    :mod:`backend.tests.test_token_vault_shape_drift` (AS.1.5-style
+    cross-twin parity matrix, gated on Node ≥22)."""
     twin_dir = (
         pathlib.Path(__file__).resolve().parent.parent.parent
         / "templates"
         / "_shared"
         / "token-vault"
     )
-    # Either condition is acceptable in this release.
-    _ = twin_dir.exists()
-    assert isinstance(twin_dir, pathlib.Path)
+    assert twin_dir.exists(), f"AS.2.3 TS twin directory missing at {twin_dir}"
+    assert (twin_dir / "index.ts").exists(), "AS.2.3 TS twin index.ts missing"
+    assert (twin_dir / "README.md").exists(), "AS.2.3 TS twin README.md missing"
