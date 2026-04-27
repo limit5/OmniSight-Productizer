@@ -71,6 +71,29 @@ AS.2.5 (auth shared lib):
     result so DSAR compliance survives an unreachable provider.
     Honours the AS.0.4 §6.2 "DSAR keeps working knob-off" invariant
     via the audit layer's silent-skip.
+
+AS.3.1 (auth shared lib):
+  - bot_challenge — unified bot-challenge interface across Turnstile,
+    reCAPTCHA v2, reCAPTCHA v3, and hCaptcha.  Provides:
+      * :class:`Provider` enum + :func:`verify_provider` per-provider
+        siteverify HTTP wrapper with score normalisation (Turnstile /
+        reCAPTCHA v3 → vendor float; reCAPTCHA v2 / hCaptcha → 1.0/0.0
+        binary).
+      * :class:`VerifyContext` + :func:`verify` end-to-end orchestrator
+        (knob → bypass → provider verify → phase-aware classify).
+      * :class:`BypassContext` + :func:`evaluate_bypass` walking the
+        AS.0.6 §4 axis-internal precedence (api_key → test_token →
+        ip_allowlist → path).
+      * 19 ``EVENT_BOT_CHALLENGE_*`` constants matching AS.0.5 §3 +
+        AS.0.6 §3 byte-for-byte (8 verify + 7 bypass + 4 phase).
+      * AS.0.5 §2 phase-aware classify_outcome (Phase 1/2 fail-open,
+        Phase 3 fail-closed only on confirmed low-score).
+      * AS.0.8 single-knob :func:`is_enabled` short-circuit via
+        :func:`passthrough`.
+    TS twin lives at `templates/_shared/bot-challenge/` (AS.3.2).
+    Provider-selection heuristic (AS.3.3), score-threshold rejection
+    wiring (AS.3.4), and fallback chain (AS.3.5) are follow-up rows
+    that build on this surface.
 """
 
 from .prompt_hardening import (
@@ -81,6 +104,7 @@ from .prompt_hardening import (
 from .secret_filter import redact
 
 # Re-export pure submodules by name (cheap — constants + functions, no IO).
+from . import bot_challenge  # noqa: F401
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_refresh_hook  # noqa: F401
@@ -91,6 +115,7 @@ from . import token_vault  # noqa: F401
 
 __all__ = [
     "INJECTION_GUARD_PRELUDE",
+    "bot_challenge",
     "harden_user_message",
     "looks_like_injection",
     "oauth_audit",

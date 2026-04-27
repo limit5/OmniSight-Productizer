@@ -2872,7 +2872,7 @@ ls backend/alembic/versions/ | tail -3
 - 預估：**1 day**
 
 ### AS.3 — Bot Challenge Lib
-- [ ] AS.3.1 `backend/security/bot_challenge.py` — Turnstile / reCAPTCHA v2/v3 / hCaptcha 統一 interface
+- [x] AS.3.1 `backend/security/bot_challenge.py` — Turnstile / reCAPTCHA v2/v3 / hCaptcha 統一 interface
 - [ ] AS.3.2 `templates/_shared/bot-challenge/` TS twin
 - [ ] AS.3.3 Provider-selection logic：預設 Turnstile / GDPR strict region → hCaptcha / 既有 Google ecosystem → reCAPTCHA v3
 - [ ] AS.3.4 Server-side score verification + 拒絕邏輯（score < 0.5 → 拒）
