@@ -746,20 +746,30 @@ OMNISIGHT_GUILD_ALIAS_MODE=dual-write|guild-only  # Phase B 遷移期
 # 1. Pull master
 git pull origin master
 
-# 2. 同時 rebuild backend-a / backend-b / frontend 三個 image（不可漏！）
+# 2. 【P0.1, 2026-04-27】TypeScript build gate — 在 docker build 之前先驗
+#     型別。next.config.mjs 已 flip `typescript.ignoreBuildErrors: false`、
+#     型別錯誤現在會 hard-fail docker build（不再 silent ship）。但 docker
+#     build 失敗回退成本高、本地 tsc 先 catch 較快。
+#     歷史教訓：commit c881bedf PromptVersionDrawer broken-bundle ship —
+#     TS2304 被 Next.js silent ignore、broken bundle 直送 prod、operator
+#     點按鈕無反應才發現。
+npx tsc --noEmit
+# 0 error 才繼續；非 0 → 修完再 deploy
+
+# 3. 同時 rebuild backend-a / backend-b / frontend 三個 image（不可漏！）
 docker compose -f docker-compose.prod.yml build backend-a backend-b frontend
 
-# 3. Rolling recreate（順序：frontend 先、backend 後 — 因前端會 fetch 後端 API、後端先換可能短暫 schema mismatch）
+# 4. Rolling recreate（順序：frontend 先、backend 後 — 因前端會 fetch 後端 API、後端先換可能短暫 schema mismatch）
 docker compose -f docker-compose.prod.yml up -d --no-deps frontend
 docker compose -f docker-compose.prod.yml up -d --no-deps backend-a
 sleep 10  # wait for backend-a healthy
 docker compose -f docker-compose.prod.yml up -d --no-deps backend-b
 
-# 4. 驗證
+# 5. 驗證
 curl -sI https://ai.sora-dev.app/api/v1/runtime/info | grep '^HTTP'  # 應 200 / 401 (auth_baseline expected)
 curl -s https://ai.sora-dev.app/ | grep -oE '/_next/static/chunks/[^"]+' | head -3  # 確認 build hash 變更
 
-# 5. Operator browser 必做：Ctrl+Shift+R hard refresh（清 service worker / client cache）
+# 6. Operator browser 必做：Ctrl+Shift+R hard refresh（清 service worker / client cache）
 ```
 
 **為何 frontend 必須在每次 deploy gate 重建**：Next.js 的 chunk hash 是 build-time 決定（無法 runtime hot-reload）；任何 `components/` 或 `app/` 變動都需要 rebuild image 才能 surface 到 client browser。

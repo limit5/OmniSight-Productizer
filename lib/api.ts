@@ -1887,6 +1887,15 @@ export interface GitForgeTokenTestResult {
   ssh_host?: string
   ssh_port?: number
   message?: string
+  // P0.1 (audit 2026-04-27): index signature for assignability with
+  // `TestResult` interface in `components/omnisight/integration-settings.tsx`
+  // (line 16) which carries `[key: string]: unknown`. Without this, passing
+  // `GitForgeTokenTestResult` to a `TestResult`-shaped onTest handler raises
+  // TS2322 — was masked by `next.config.mjs::typescript.ignoreBuildErrors`
+  // for months. Audit's P0.1 flips that flag, so this drift now blocks build.
+  // Forward-compatible: caller can attach extra debug fields without breaking
+  // the type contract.
+  [key: string]: unknown
 }
 
 export async function testGitForgeToken(args: {
