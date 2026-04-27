@@ -283,6 +283,28 @@ export type SSEEvent =
         timestamp?: string
       }
     }
+  // ─── BS.4.4 / BS.7.4 installer progress tick (broadcast_scope=tenant) ───
+  // Single channel emitted by ``backend/routers/installer.py::report_progress``
+  // after every sidecar progress UPDATE. The ``state`` field in the payload
+  // discriminates running / completed / failed / cancelled — there is no
+  // separate ``install.completed`` / ``install.failed`` channel even though
+  // the BS.7.4 row hint reads as if there were three. State-based dispatch
+  // in the consumer covers all three cases.
+  | {
+      event: "installer_progress"
+      data: {
+        job_id: string
+        state: InstallJobState
+        stage: string
+        bytes_done: number
+        bytes_total: number | null
+        eta_seconds: number | null
+        log_tail: string
+        sidecar_id: string | null
+        entry_id: string | null
+        timestamp: string
+      }
+    }
 
 export interface HostMetricsTickSample {
   cpu_percent: number
@@ -382,6 +404,8 @@ const SSE_EVENT_TYPES = [
   "chat.message",
   // ─── ZZ.B2 (#304-2) LLM-generated chat-session auto-title push ───
   "session.titled",
+  // ─── BS.4.4 / BS.7.4 installer sidecar progress tick ───
+  "installer_progress",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"
