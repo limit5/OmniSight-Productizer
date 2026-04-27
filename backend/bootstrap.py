@@ -42,6 +42,18 @@ STEP_CF_TUNNEL = "cf_tunnel_configured"
 STEP_SMOKE = "smoke_passed"
 STEP_FINALIZED = "finalized"
 
+# BS.9.1 — optional intermediate wizard step recording the operator's
+# vertical multi-pick (D/W/P/S/X) and any per-vertical sub-step output
+# (e.g. Android API range from BS.9.4). Stored under
+# ``bootstrap_state.metadata.verticals_selected``. Deliberately NOT in
+# ``REQUIRED_STEPS`` — finalize must succeed for installs that skip the
+# vertical-aware path entirely (existing prod sites that finalized
+# pre-BS.9 must still see a green wizard on next visit). The probe
+# :func:`_verticals_chosen` reports whether the row exists and whether
+# its payload is non-empty so the BS.9.2 wizard UI can decide whether
+# to render the step or skip directly to the next required gate.
+STEP_VERTICAL_SETUP = "vertical_setup"
+
 REQUIRED_STEPS: tuple[str, ...] = (
     STEP_ADMIN_PASSWORD,
     STEP_LLM_PROVIDER,
@@ -205,6 +217,41 @@ def _cf_tunnel_is_configured() -> bool:
 def _smoke_has_passed() -> bool:
     """True if a smoke run has been marked green in the bootstrap marker."""
     return bool(_read_marker().get("smoke_passed"))
+
+
+async def _verticals_chosen() -> bool:
+    """True if the operator has recorded a non-empty
+    ``verticals_selected`` payload under ``STEP_VERTICAL_SETUP``.
+
+    BS.9.1 — the ``vertical_setup`` step is *optional*; it does not
+    appear in :data:`REQUIRED_STEPS` and finalize never blocks on it.
+    This probe exists so the BS.9.2 wizard front-end can ask "did the
+    operator already pick verticals on a prior run?" and skip the
+    step (avoid re-asking) instead of forcing them through it again.
+
+    Truthiness is gated on the *payload*, not just the row's existence:
+
+    * No row → False (operator never opened the step).
+    * Row exists with ``metadata.verticals_selected`` empty / missing
+      → False (operator opened the step then explicitly skipped — the
+      wizard should re-render the picker to give them another chance).
+    * Row exists with ``metadata.verticals_selected = ["mobile", ...]``
+      → True (operator made a choice; wizard skips the step).
+
+    The ``verticals_selected`` payload is a JSON list of vertical IDs
+    drawn from the BS.9.3 multi-pick (D/W/P/S/X mapped to
+    ``mobile`` / ``embedded`` / ``web`` / ``software`` / ``cross-toolchain``
+    respectively) — kept liberal here (any non-empty truthy value) so
+    BS.9 sub-step refactors don't have to cascade-update this probe.
+    """
+    row = await get_bootstrap_step(STEP_VERTICAL_SETUP)
+    if row is None:
+        return False
+    metadata = row.get("metadata") or {}
+    selected = metadata.get("verticals_selected")
+    if not selected:
+        return False
+    return True
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -374,12 +421,18 @@ async def record_bootstrap_step(
     try:
         from backend.db_pool import get_pool
         async with get_pool().acquire() as conn:
+            # BS.9.1: $3::jsonb cast — alembic 0054 promoted
+            # ``metadata`` from TEXT to JSONB on PG. asyncpg binds
+            # python ``str`` as TEXT by default; the explicit cast
+            # makes PG parse the JSON string into a JSONB value at
+            # write time. The cast is a no-op on SQLite (which never
+            # runs this code path; the asyncpg pool is PG-only).
             await conn.execute(
                 "INSERT INTO bootstrap_state "
                 "(step, completed_at, actor_user_id, metadata) "
                 "VALUES ($1, "
                 " to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'), "
-                " $2, $3) "
+                " $2, $3::jsonb) "
                 "ON CONFLICT (step) DO UPDATE SET "
                 "  completed_at = EXCLUDED.completed_at, "
                 "  actor_user_id = EXCLUDED.actor_user_id, "

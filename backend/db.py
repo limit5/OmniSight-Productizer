@@ -1112,11 +1112,16 @@ CREATE INDEX IF NOT EXISTS idx_egress_req_status ON tenant_egress_requests(statu
 -- L1: bootstrap wizard step audit + finalize anchor
 -- Each row is one wizard step recorded as completed. `step` is the
 -- stable logical name (admin_password_set / llm_provider_configured /
--- cf_tunnel_configured / smoke_passed / finalized); `actor_user_id`
--- is the admin who advanced the wizard; `metadata` carries per-step
--- context (e.g. selected provider, tunnel id). Upsert-by-step keeps
--- the table idempotent so replaying a step refreshes its timestamp
+-- cf_tunnel_configured / smoke_passed / finalized / vertical_setup);
+-- `actor_user_id` is the admin who advanced the wizard; `metadata`
+-- carries per-step context (e.g. selected provider, tunnel id, the
+-- BS.9.1 ``verticals_selected`` payload). Upsert-by-step keeps the
+-- table idempotent so replaying a step refreshes its timestamp
 -- rather than piling up duplicate rows.
+-- BS.9.1 / alembic 0054: PG promotes ``metadata`` to JSONB to allow
+-- containment queries against ``metadata->'verticals_selected'``;
+-- SQLite stays TEXT-of-JSON (no native JSONB; python-layer parsing
+-- via :func:`backend.bootstrap._deserialise_metadata` is identical).
 CREATE TABLE IF NOT EXISTS bootstrap_state (
     step            TEXT PRIMARY KEY,
     completed_at    TEXT NOT NULL DEFAULT (datetime('now')),

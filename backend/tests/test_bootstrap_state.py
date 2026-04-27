@@ -423,3 +423,124 @@ async def test_is_bootstrap_finalized_honours_persisted_flag(_bootstrap_db, monk
     # Now even though the live gates are all red the middleware
     # must treat the app as finalized.
     assert await bootstrap.is_bootstrap_finalized() is True
+
+
+# ── BS.9.1 — STEP_VERTICAL_SETUP + _verticals_chosen + JSONB metadata ───
+
+
+@pytest.mark.asyncio
+async def test_step_vertical_setup_constant_is_not_required(_bootstrap_db):
+    """The vertical-setup step is an *optional* intermediate step —
+    BS.9 wizard renders it but finalize never blocks on it. Lock the
+    invariant so a future refactor cannot accidentally add it to
+    REQUIRED_STEPS and break existing prod sites that finalized
+    pre-BS.9 (those sites must still see a green wizard on next visit
+    without being asked to retro-pick verticals)."""
+    _, bootstrap = _bootstrap_db
+    assert bootstrap.STEP_VERTICAL_SETUP == "vertical_setup"
+    assert bootstrap.STEP_VERTICAL_SETUP not in bootstrap.REQUIRED_STEPS
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_state_metadata_column_is_jsonb_on_pg(_bootstrap_db):
+    """alembic 0054 promoted ``metadata`` from TEXT to JSONB on PG.
+    Lock the column type so a regressed migration order or a faulty
+    ALTER cannot silently revert the schema."""
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        col = await conn.fetchrow(
+            "SELECT data_type, udt_name "
+            "FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'bootstrap_state' "
+            "AND column_name = 'metadata'"
+        )
+    assert col is not None
+    # PG reports ``data_type='jsonb'`` and ``udt_name='jsonb'`` for the
+    # native JSONB type. Either is fine; we assert both so the test
+    # message names which one drifts.
+    assert col["data_type"] == "jsonb", f"data_type={col['data_type']!r}"
+    assert col["udt_name"] == "jsonb", f"udt_name={col['udt_name']!r}"
+
+
+@pytest.mark.asyncio
+async def test_record_bootstrap_step_writes_jsonb_metadata(_bootstrap_db):
+    """End-to-end: record_bootstrap_step now writes JSONB and PG-side
+    JSONB containment queries succeed against the persisted payload."""
+    _, bootstrap = _bootstrap_db
+    await bootstrap.record_bootstrap_step(
+        bootstrap.STEP_VERTICAL_SETUP,
+        actor_user_id="u-admin",
+        metadata={"verticals_selected": ["mobile", "embedded"]},
+    )
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        # JSONB containment — only works if the column is true JSONB.
+        # On the old TEXT column this query would 22P02 (invalid
+        # input syntax for type jsonb) at the parameter cast.
+        hit = await conn.fetchval(
+            "SELECT step FROM bootstrap_state "
+            "WHERE step = $1 "
+            "AND metadata @> $2::jsonb",
+            bootstrap.STEP_VERTICAL_SETUP,
+            '{"verticals_selected": ["mobile"]}',
+        )
+    assert hit == bootstrap.STEP_VERTICAL_SETUP
+
+
+@pytest.mark.asyncio
+async def test_verticals_chosen_false_when_step_missing(_bootstrap_db):
+    """Fresh install — no STEP_VERTICAL_SETUP row → probe returns False
+    so the BS.9.2 wizard renders the picker."""
+    _, bootstrap = _bootstrap_db
+    assert await bootstrap._verticals_chosen() is False
+
+
+@pytest.mark.asyncio
+async def test_verticals_chosen_false_when_payload_empty(_bootstrap_db):
+    """Operator opened the step then bailed without picking anything →
+    the row exists but ``verticals_selected`` is missing/empty.
+    Probe returns False so the wizard re-renders the picker (rather
+    than treating an empty intent as a positive signal)."""
+    _, bootstrap = _bootstrap_db
+    # Empty payload — vertically-empty (no verticals_selected key)
+    await bootstrap.record_bootstrap_step(
+        bootstrap.STEP_VERTICAL_SETUP,
+        actor_user_id="u-admin",
+        metadata={},
+    )
+    assert await bootstrap._verticals_chosen() is False
+    # Empty list — explicit empty selection
+    await bootstrap.record_bootstrap_step(
+        bootstrap.STEP_VERTICAL_SETUP,
+        actor_user_id="u-admin",
+        metadata={"verticals_selected": []},
+    )
+    assert await bootstrap._verticals_chosen() is False
+
+
+@pytest.mark.asyncio
+async def test_verticals_chosen_true_when_at_least_one_picked(_bootstrap_db):
+    """At least one vertical chosen → probe returns True so BS.9.2
+    can skip the picker on revisit."""
+    _, bootstrap = _bootstrap_db
+    await bootstrap.record_bootstrap_step(
+        bootstrap.STEP_VERTICAL_SETUP,
+        actor_user_id="u-admin",
+        metadata={"verticals_selected": ["mobile"]},
+    )
+    assert await bootstrap._verticals_chosen() is True
+
+
+@pytest.mark.asyncio
+async def test_vertical_setup_does_not_affect_missing_required_steps(_bootstrap_db):
+    """Recording STEP_VERTICAL_SETUP must NOT short-circuit
+    missing_required_steps: finalize still requires the four core
+    gates regardless of whether the optional vertical-setup row exists."""
+    _, bootstrap = _bootstrap_db
+    await bootstrap.record_bootstrap_step(
+        bootstrap.STEP_VERTICAL_SETUP,
+        metadata={"verticals_selected": ["mobile", "web"]},
+    )
+    missing = await bootstrap.missing_required_steps()
+    assert set(missing) == set(bootstrap.REQUIRED_STEPS)
