@@ -455,6 +455,49 @@ class Settings(BaseSettings):
     # entirely; any other value (including empty) leaves it active.
     llm_credential_migrate: str = ""
 
+    # ── AS.6.1 OmniSight self-login OAuth (Sign in with X) ──
+    # Per-vendor OAuth 2.0 client credentials for the four AS.6.1
+    # SSO buttons (Google / GitHub / Microsoft / Apple). Empty value
+    # ⇒ that provider's /authorize endpoint returns 501 "not
+    # configured" so operators can ship the binary without wiring
+    # any provider, then enable them one-by-one. The vendor catalog
+    # (authorize/token/userinfo URLs, default scopes, OIDC flag) is
+    # owned by ``backend.security.oauth_vendors`` — these knobs
+    # carry only the per-deployment caller identity.
+    #
+    # ``oauth_redirect_base_url`` is the public base URL OmniSight
+    # is reachable at (``https://omnisight.example.com``); the
+    # callback redirect_uri is ``{base}/api/v1/auth/oauth/{vendor}/
+    # callback``. Empty ⇒ /authorize falls back to the request's
+    # own host header, which works for local dev but NOT for prod
+    # deployments behind a reverse proxy because the forwarded
+    # Host may differ from what the OAuth provider has on file.
+    #
+    # ``oauth_flow_signing_key`` keys the HMAC-SHA256 signature on
+    # the in-flight FlowSession cookie that round-trips state +
+    # PKCE verifier + nonce between /authorize and /callback. Empty
+    # ⇒ derived from ``decision_bearer`` via SHA-256 so existing
+    # deployments don't need a new env var (decision_bearer is
+    # already required by L1 startup gate). Setting both means
+    # operators can rotate one without invalidating the other.
+    #
+    # Module-global state audit (per implement_phase_step.md SOP §1,
+    # type-1 answer): all 10 fields are immutable Settings literals
+    # derived once at process boot from env / .env — every uvicorn
+    # worker reads the same value from the same source so cross-
+    # worker FlowSession cookie verification is deterministic
+    # without any in-process cache.
+    oauth_google_client_id: str = ""
+    oauth_google_client_secret: str = ""
+    oauth_github_client_id: str = ""
+    oauth_github_client_secret: str = ""
+    oauth_microsoft_client_id: str = ""
+    oauth_microsoft_client_secret: str = ""
+    oauth_apple_client_id: str = ""
+    oauth_apple_client_secret: str = ""
+    oauth_redirect_base_url: str = ""
+    oauth_flow_signing_key: str = ""
+
     # Test harness sets OMNISIGHT_DOTENV_FILE=".env.test" (see
     # backend/tests/conftest.py) so pytest runs get the safe-default
     # credentials instead of the developer's real ``.env``. Prod /

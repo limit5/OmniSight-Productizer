@@ -4,6 +4,9 @@ POST   /auth/login        email + password → sets session cookie
 POST   /auth/logout       clears session
 GET    /auth/whoami       current user (or anonymous-admin in open mode)
 GET    /auth/oidc/{provider}    OIDC redirect stub (Google / GitHub)
+GET    /auth/oauth/{vendor}/authorize   AS.6.1 SSO start (Google /
+                                        GitHub / Microsoft / Apple)
+GET    /auth/oauth/{vendor}/callback    AS.6.1 SSO callback
 GET    /users             list users (admin)
 POST   /users             create user (admin)
 PATCH  /users/{id}        change role / enable / disable (admin)
@@ -433,6 +436,434 @@ async def oidc_redirect(provider: str) -> RedirectResponse:
             detail=f"OIDC for {provider} not configured (set {key})",
         )
     return RedirectResponse(url=url, status_code=302)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AS.6.1 — OmniSight self-login OAuth (Sign in with X)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Two endpoints reuse the AS.1 OAuth shared library + AS.0.3 account-
+# linking takeover-prevention to wire the four ``Sign in with Google /
+# GitHub / Microsoft / Apple`` SSO buttons on /login.
+#
+# /authorize:
+#   1. Build vendor authorize URL via begin_oauth_login (AS.1.3 vendor
+#      catalog + AS.1.1 PKCE/state/nonce primitives).
+#   2. Sign the in-flight FlowSession into a HttpOnly cookie (HMAC-
+#      SHA256 keyed by oauth_flow_signing_key or decision_bearer
+#      fallback).
+#   3. Emit oauth.login_init audit row (AS.1.4) + 302 redirect.
+#
+# /callback:
+#   1. Decode + verify the cookie (HMAC + TTL + state match).
+#   2. Exchange code → token at vendor token_endpoint (PKCE-bound).
+#   3. Fetch userinfo (or decode id_token claims for Apple).
+#   4. Resolve user identity → look up by (oidc_provider, oidc_subject)
+#      first, then by email; refuse silent link when password method
+#      already exists (AS.0.3); else create new user.
+#   5. Issue OmniSight session cookies (omnisight_session +
+#      omnisight_csrf) — same shape as POST /auth/login.
+#   6. Emit oauth.login_callback (AS.1.4) + auth.login_success +
+#      auth.oauth_connect (AS.5.1) audit rows.
+#   7. Clear the FlowSession cookie + 302 redirect to /.
+#
+# Module-global state audit (per implement_phase_step.md SOP §1):
+#   * Handler module is pure-functional (FlowSession in HttpOnly
+#     cookie, no in-process state). Per-worker signing key is
+#     derived from env so all workers verify the same cookie ⇒
+#     answer #1 (deterministic-by-construction across workers).
+#   * Existing brute-force window (_LOGIN_ATTEMPTS) is reused for
+#     OAuth callback failures so an attacker can't bypass the cap
+#     by switching from password to OAuth.
+
+
+_OAUTH_REDIRECT_AFTER_LOGIN = "/"
+
+
+def _oauth_resolve_redirect_base_url(request: Request) -> str:
+    """Resolve the public base URL for the OAuth callback.
+
+    Settings.oauth_redirect_base_url wins (must match what the
+    operator configured at the IdP); falls back to ``X-Forwarded-
+    Proto + Host`` (CF Tunnel sets these when terminating TLS in
+    front of OmniSight) and finally ``request.url`` for local dev.
+    """
+    from backend.config import settings as _settings
+    configured = (getattr(_settings, "oauth_redirect_base_url", "") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    proto = (
+        request.headers.get("x-forwarded-proto")
+        or request.url.scheme
+        or "http"
+    )
+    host = (
+        request.headers.get("x-forwarded-host")
+        or request.headers.get("host")
+        or request.url.netloc
+    )
+    return f"{proto}://{host}"
+
+
+def _oauth_log_audit_safe(coro_factory, *, label: str) -> None:
+    """Schedule an audit emit; swallow + log on failure.
+
+    The AS.1.4 / AS.5.1 emitters are async + best-effort. We don't
+    want a failed audit row to break the OAuth flow itself — the
+    audit chain has its own retry policy at backend.audit. Use
+    ``asyncio.ensure_future`` so the emit doesn't block the redirect
+    response."""
+    import asyncio
+    try:
+        coro = coro_factory()
+        if coro is None:
+            return
+        asyncio.ensure_future(coro)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[OAUTH] %s audit emit failed: %s", label, exc)
+
+
+@router.get("/auth/oauth/{provider}/authorize")
+async def oauth_authorize(
+    provider: str,
+    request: Request,
+    response: Response,
+) -> RedirectResponse:
+    """AS.6.1 — start the SSO flow for *provider*.
+
+    Returns 302 to the vendor authorize URL + sets the in-flight
+    ``omnisight_oauth_flow`` cookie. The cookie carries the PKCE
+    verifier, state, nonce, and redirect_uri so the /callback can
+    verify the response without server-side state.
+
+    Errors:
+      * 503 — AS feature family disabled (knob off).
+      * 404 — vendor slug not in SUPPORTED_PROVIDERS.
+      * 501 — vendor supported but client_id/secret unconfigured.
+    """
+    from backend.security import oauth_login_handler as _olh
+    from backend.security import oauth_audit as _oaudit
+
+    base_url = _oauth_resolve_redirect_base_url(request)
+
+    try:
+        start = _olh.begin_oauth_login(provider=provider, base_url=base_url)
+    except _olh.OAuthFeatureDisabled as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except _olh.ProviderNotSupportedError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"oauth provider {provider!r} not supported",
+        )
+    except _olh.ProviderNotConfiguredError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except _olh.SigningKeyUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    # Audit: oauth.login_init (AS.1.4 forensic family). Best-effort
+    # — failure shouldn't block the redirect.
+    _oauth_log_audit_safe(
+        lambda: _oaudit.emit_login_init(_oaudit.LoginInitContext(
+            provider=provider,
+            state=start.flow.state,
+            scope=start.flow.scope,
+            redirect_uri=start.flow.redirect_uri,
+            use_oidc_nonce=start.flow.nonce is not None,
+            state_ttl_seconds=int(start.flow.expires_at - start.flow.created_at),
+        )),
+        label="login_init",
+    )
+
+    response.set_cookie(
+        key=_olh.FLOW_COOKIE_NAME,
+        value=start.flow_cookie,
+        max_age=_olh.FLOW_COOKIE_TTL_SECONDS,
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="lax",
+        path=_olh.FLOW_COOKIE_PATH,
+    )
+    return RedirectResponse(url=start.authorize_url, status_code=302)
+
+
+@router.get("/auth/oauth/{provider}/callback")
+async def oauth_callback(
+    provider: str,
+    request: Request,
+    response: Response,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+) -> RedirectResponse:
+    """AS.6.1 — handle the vendor's callback POST.
+
+    On success:
+      * Look up / create the OmniSight user (AS.0.3 takeover guard).
+      * Issue session cookies (omnisight_session + omnisight_csrf).
+      * Emit auth.oauth_connect + auth.login_success rollup events.
+      * Clear the in-flight flow cookie.
+      * Redirect to /.
+
+    On failure: 4xx with the relevant detail string (state mismatch
+    / expired / vendor error / link conflict). The frontend's
+    /login page reads ``?oauth_error=...`` query in the redirect
+    fallback to surface the error inline.
+    """
+    from backend.security import oauth_login_handler as _olh
+    from backend.security import oauth_audit as _oaudit
+    from backend.security import auth_event as _aevent
+    from backend.security.oauth_client import (
+        StateMismatchError,
+        StateExpiredError,
+        TokenResponseError,
+    )
+    from backend import account_linking as _linking
+    from backend.db_pool import get_pool
+
+    client_ip = _client_key(request)
+    ua_header = request.headers.get("user-agent", "")
+
+    # Common-case error helpers ───────────────────────────────────────
+    def _emit_callback_failure(state_str: str, outcome: str, msg: str) -> None:
+        """Emit oauth.login_callback (forensic) + auth.login_fail
+        (rollup) for any callback failure mode."""
+        _oauth_log_audit_safe(
+            lambda: _oaudit.emit_login_callback(
+                _oaudit.LoginCallbackContext(
+                    provider=provider,
+                    state=state_str or "",
+                    outcome=outcome,
+                    error=msg,
+                )
+            ),
+            label="login_callback_fail",
+        )
+        # Map AS.1.4 outcome → AS.5.1 fail_reason vocabulary.
+        rollup_reason = (
+            _aevent.LOGIN_FAIL_OAUTH_STATE_INVALID
+            if outcome in (
+                _oaudit.OUTCOME_STATE_MISMATCH,
+                _oaudit.OUTCOME_STATE_EXPIRED,
+            )
+            else _aevent.LOGIN_FAIL_OAUTH_PROVIDER_ERROR
+        )
+        _oauth_log_audit_safe(
+            lambda: _aevent.emit_login_fail(_aevent.LoginFailContext(
+                attempted_user=f"oauth:{provider}",
+                auth_method=_aevent.AUTH_METHOD_OAUTH,
+                fail_reason=rollup_reason,
+                provider=provider,
+                ip=client_ip,
+                user_agent=ua_header,
+            )),
+            label="oauth_login_fail",
+        )
+
+    # Vendor-side error in the redirect (e.g. user clicked "deny") ──
+    if error:
+        msg = f"oauth provider error: {error}"
+        if error_description:
+            msg += f" ({error_description})"
+        _emit_callback_failure(state or "", _oaudit.OUTCOME_PROVIDER_ERROR, msg)
+        response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
+        raise HTTPException(status_code=400, detail=msg)
+
+    if not code or not state:
+        _emit_callback_failure(state or "", _oaudit.OUTCOME_CALLBACK_ERROR,
+                               "missing code or state")
+        response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
+        raise HTTPException(
+            status_code=400,
+            detail="oauth callback missing 'code' or 'state' query param",
+        )
+
+    flow_cookie = request.cookies.get(_olh.FLOW_COOKIE_NAME) or ""
+
+    try:
+        result = await _olh.complete_oauth_login(
+            provider=provider,
+            flow_cookie=flow_cookie,
+            returned_state=state,
+            code=code,
+        )
+    except _olh.OAuthFeatureDisabled as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except _olh.ProviderNotSupportedError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"oauth provider {provider!r} not supported",
+        )
+    except _olh.ProviderNotConfiguredError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except _olh.SigningKeyUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except _olh.FlowCookieMissingError as exc:
+        _emit_callback_failure(state, _oaudit.OUTCOME_CALLBACK_ERROR, str(exc))
+        raise HTTPException(status_code=400, detail=str(exc))
+    except _olh.FlowCookieInvalidError as exc:
+        _emit_callback_failure(state, _oaudit.OUTCOME_CALLBACK_ERROR, str(exc))
+        response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except StateExpiredError as exc:
+        _emit_callback_failure(state, _oaudit.OUTCOME_STATE_EXPIRED, str(exc))
+        response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except StateMismatchError as exc:
+        _emit_callback_failure(state, _oaudit.OUTCOME_STATE_MISMATCH, str(exc))
+        response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except TokenResponseError as exc:
+        _emit_callback_failure(state, _oaudit.OUTCOME_TOKEN_ERROR, str(exc))
+        response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
+        raise HTTPException(status_code=502, detail=str(exc))
+    except (
+        _olh.UserinfoFetchError,
+        _olh.IdTokenDecodeError,
+        _olh.IdentityFieldMissingError,
+    ) as exc:
+        _emit_callback_failure(state, _oaudit.OUTCOME_CALLBACK_ERROR, str(exc))
+        response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    identity = result.identity
+
+    # ─── User lookup / link / create ─────────────────────────────
+    # Pass the same conn through every read+write so the lookup-then-
+    # create race is bounded by PG row locks (the underlying
+    # ``users.email UNIQUE`` index is the final guard against a
+    # concurrent duplicate; the conn just keeps the audit + link
+    # in one tx).
+    oauth_method = f"{_linking.OAUTH_METHOD_PREFIX}{provider}"
+
+    user = None  # populated below
+    is_account_link = False
+    connect_outcome = _aevent.OAUTH_CONNECT_CONNECTED
+
+    async with get_pool().acquire() as conn:
+        # 1. Subject already linked → existing user.
+        existing_by_subject = await conn.fetchrow(
+            "SELECT id, email, name, role, enabled, must_change_password, "
+            "tenant_id FROM users "
+            "WHERE oidc_provider = $1 AND oidc_subject = $2 LIMIT 1",
+            provider, identity.subject,
+        )
+        if existing_by_subject:
+            user = auth._row_to_user(existing_by_subject)
+        else:
+            # 2. Same email exists → link or refuse per AS.0.3.
+            existing_by_email = await auth._get_user_by_email_impl(
+                conn, identity.email,
+            )
+            if existing_by_email:
+                methods = await _linking.get_auth_methods(conn, existing_by_email.id)
+                if _linking.METHOD_PASSWORD in methods:
+                    # Refuse silent link — takeover guard.
+                    masked = _olh.mask_email(identity.email)
+                    _emit_callback_failure(
+                        state, _oaudit.OUTCOME_CALLBACK_ERROR,
+                        f"account_link_conflict {masked}",
+                    )
+                    response.delete_cookie(
+                        _olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH,
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"an OmniSight account already exists for {masked} "
+                            f"with a password — sign in with your password "
+                            f"first, then link {provider} from "
+                            f"Settings → Connected Accounts"
+                        ),
+                    )
+                # OAuth-only existing user → bind the new provider.
+                await _linking.add_auth_method(
+                    conn, existing_by_email.id, oauth_method,
+                )
+                user = existing_by_email
+                is_account_link = True
+                connect_outcome = (
+                    _aevent.OAUTH_CONNECT_RELINKED
+                    if oauth_method in methods
+                    else _aevent.OAUTH_CONNECT_CONNECTED
+                )
+            else:
+                # 3. New user — create credential-less row tagged with
+                #    the OAuth subject, single auth_methods entry.
+                user = await auth.create_user(
+                    email=identity.email,
+                    name=identity.name,
+                    role="viewer",
+                    password=None,
+                    oidc_provider=provider,
+                    oidc_subject=identity.subject,
+                    conn=conn,
+                )
+                # ``create_user`` seeds auth_methods=[] when password is
+                # None — append the OAuth method explicitly so the
+                # account isn't credential-less.
+                await _linking.add_auth_method(conn, user.id, oauth_method)
+                connect_outcome = _aevent.OAUTH_CONNECT_CONNECTED
+
+    # ─── Session issuance — same shape as POST /auth/login ────────
+    sess = await auth.create_session(
+        user.id, ip=client_ip, user_agent=ua_header,
+    )
+
+    # ─── Audit emissions ──────────────────────────────────────────
+    _oauth_log_audit_safe(
+        lambda: _oaudit.emit_login_callback(_oaudit.LoginCallbackContext(
+            provider=provider,
+            state=state,
+            outcome=_oaudit.OUTCOME_SUCCESS,
+            actor=user.id,
+            granted_scope=tuple(result.token.scope),
+            has_refresh_token=result.token.refresh_token is not None,
+            expires_in_seconds=(
+                int(result.token.expires_at - time.time())
+                if result.token.expires_at is not None
+                else None
+            ),
+            is_oidc=result.token.id_token is not None,
+        )),
+        label="login_callback_success",
+    )
+    _oauth_log_audit_safe(
+        lambda: _aevent.emit_oauth_connect(_aevent.OAuthConnectContext(
+            user_id=user.id,
+            provider=provider,
+            outcome=connect_outcome,
+            scope=tuple(result.token.scope),
+            is_account_link=is_account_link,
+        )),
+        label="oauth_connect",
+    )
+    _oauth_log_audit_safe(
+        lambda: _aevent.emit_login_success(_aevent.LoginSuccessContext(
+            user_id=user.id,
+            auth_method=_aevent.AUTH_METHOD_OAUTH,
+            provider=provider,
+            mfa_satisfied=False,
+            ip=client_ip,
+            user_agent=ua_header,
+        )),
+        label="login_success",
+    )
+
+    # ─── Cookies + redirect ──────────────────────────────────────
+    secure = _cookie_secure()
+    response.set_cookie(
+        key=auth.SESSION_COOKIE, value=sess.token,
+        max_age=auth.SESSION_TTL_S, httponly=True,
+        secure=secure, samesite="lax",
+    )
+    response.set_cookie(
+        key=auth.CSRF_COOKIE, value=sess.csrf_token,
+        max_age=auth.SESSION_TTL_S, httponly=False,
+        secure=secure, samesite="lax",
+    )
+    response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
+    return RedirectResponse(url=_OAUTH_REDIRECT_AFTER_LOGIN, status_code=302)
 
 
 # ── User management (admin only) ────────────────────────────────

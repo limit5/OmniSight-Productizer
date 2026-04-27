@@ -72,6 +72,23 @@ AS.2.5 (auth shared lib):
     Honours the AS.0.4 §6.2 "DSAR keeps working knob-off" invariant
     via the audit layer's silent-skip.
 
+AS.6.1 (OmniSight self-integration):
+  - oauth_login_handler — backend handler that wires the AS.1 OAuth
+    shared library to OmniSight's own login flow. Implements the
+    four ``Sign in with Google / GitHub / Microsoft / Apple`` SSO
+    buttons via two HTTP endpoints registered in
+    ``backend/routers/auth.py`` (``GET /api/v1/auth/oauth/{vendor}/
+    {authorize,callback}``). FlowSession round-trips through a
+    HMAC-SHA256-signed HttpOnly cookie keyed by
+    ``oauth_flow_signing_key`` (or ``decision_bearer`` fallback).
+    User identity extraction handles per-vendor field-name quirks
+    (Google/Microsoft OIDC ``sub``, GitHub numeric ``id``, Apple
+    id_token claims since Apple has no userinfo endpoint).
+    Account-link flow honours AS.0.3 takeover prevention — refuses
+    silent link when the matched email already carries a
+    ``"password"`` method. Ships login-only; AS.6.2 will route the
+    issued tokens through the AS.2 vault.
+
 AS.5.2 (auth shared lib):
   - auth_dashboard — per-tenant rollup + suspicious-pattern detection.
     Pure-functional read-side companion to AS.5.1 ``auth_event``:
@@ -140,6 +157,7 @@ from . import auth_event  # noqa: F401
 from . import bot_challenge  # noqa: F401
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
+from . import oauth_login_handler  # noqa: F401
 from . import oauth_refresh_hook  # noqa: F401
 from . import oauth_revoke  # noqa: F401
 from . import oauth_vendors  # noqa: F401
@@ -155,6 +173,7 @@ __all__ = [
     "looks_like_injection",
     "oauth_audit",
     "oauth_client",
+    "oauth_login_handler",
     "oauth_refresh_hook",
     "oauth_revoke",
     "oauth_vendors",
