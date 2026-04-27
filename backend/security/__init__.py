@@ -34,6 +34,16 @@ AS.1.4 (auth shared lib):
     `backend.audit.log`; honours the AS.0.8 single knob (knob-false ⇒
     silent skip per AS.0.8 §5 truth-table). TS twin lives at
     `templates/_shared/oauth-client/audit.ts`.
+
+AS.2.1 (auth shared lib):
+  - token_vault — per-user / per-provider OAuth credential at-rest
+    encryption. Reuses `backend.secret_store._fernet` (single master
+    Fernet key invariant per AS.0.4 §3). Wraps plaintext in a binding
+    envelope so a DB-level row swap is caught by `decrypt_for_user`.
+    `key_version` column is reserved for the future KMS rotation hook
+    (defaults to 1 in this release). Provider whitelist mirrors
+    `account_linking._AS1_OAUTH_PROVIDERS` (drift-guarded). TS twin
+    will land at `templates/_shared/token-vault/` (AS.2.3).
 """
 
 from .prompt_hardening import (
@@ -48,6 +58,7 @@ from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_vendors  # noqa: F401
 from . import password_generator  # noqa: F401
+from . import token_vault  # noqa: F401
 
 __all__ = [
     "INJECTION_GUARD_PRELUDE",
@@ -58,4 +69,5 @@ __all__ = [
     "oauth_vendors",
     "password_generator",
     "redact",
+    "token_vault",
 ]
