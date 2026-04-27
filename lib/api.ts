@@ -5775,6 +5775,45 @@ export async function createInstallJob(
   })
 }
 
+/** BS.7.6 — POST /installer/jobs/{id}/retry — clone a non-running
+ *  install job into a fresh ``queued`` row. The source row must be in
+ *  a terminal state (``failed`` / ``cancelled`` / ``completed``);
+ *  retrying a still-active row 409s on the backend.
+ *
+ *  Like ``createInstallJob`` the retry POST goes through the same R20-A
+ *  PEP gateway HOLD path, so the operator gets a fresh coaching card
+ *  before the install actually starts. ``idempotencyKey`` defaults to a
+ *  freshly-generated key — caller may pass one explicitly when guarding
+ *  against double-click on the retry button itself. */
+export async function retryInstallJob(
+  jobId: string,
+  options?: { idempotencyKey?: string },
+): Promise<InstallJob> {
+  const body = {
+    idempotency_key:
+      options?.idempotencyKey ?? generateInstallIdempotencyKey(),
+  }
+  return request<InstallJob>(
+    `/installer/jobs/${encodeURIComponent(jobId)}/retry`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+/** BS.7.6 — GET /installer/jobs/{id} — fetch a single install job row
+ *  including its full ``log_tail`` (max 4 KiB) and ``error_reason``.
+ *  Used by the failed-state "view log" modal so the operator can read
+ *  the tail even after the row has fallen out of the in-memory SSE
+ *  snapshot (e.g. opening the page after the install already failed). */
+export async function getInstallJob(jobId: string): Promise<InstallJob> {
+  return request<InstallJob>(
+    `/installer/jobs/${encodeURIComponent(jobId)}`,
+    { method: "GET" },
+  )
+}
+
 // ─── N3 — OpenAPI compile-time contract tripwire ──────────────────────────
 // These type aliases reach into `lib/generated/api-types.ts` (auto-generated
 // from the FastAPI app's OpenAPI schema). The moment any of the referenced

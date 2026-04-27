@@ -33,6 +33,8 @@ import {
   ApiError,
   createInstallJob,
   generateInstallIdempotencyKey,
+  getInstallJob,
+  retryInstallJob,
   type InstallJob,
 } from "@/lib/api"
 
@@ -212,6 +214,96 @@ describe("BS.7.1 — installer API client", () => {
       const body = JSON.parse(init.body as string)
       expect(body).not.toHaveProperty("bytes_total")
       expect(body.metadata).toEqual({ foo: "bar" })
+    })
+  })
+
+  // ─── BS.7.6 ──────────────────────────────────────────────────────────
+  describe("retryInstallJob()", () => {
+    const SOURCE_ID = "ij-failed01234"
+
+    it("POSTs to /api/v1/installer/jobs/{id}/retry with auto idempotency_key", async () => {
+      const spy = mockFetchOnce(201, { ...SAMPLE_JOB, id: "ij-retry00001" })
+      const result = await retryInstallJob(SOURCE_ID)
+      expect(result.id).toBe("ij-retry00001")
+      expect(spy).toHaveBeenCalledTimes(1)
+      const [url, init] = spy.mock.calls[0]!
+      expect(url).toBe(`/api/v1/installer/jobs/${SOURCE_ID}/retry`)
+      expect(init.method).toBe("POST")
+      const body = JSON.parse(init.body as string)
+      // Same regex the backend enforces — auto-generated key must match.
+      expect(body.idempotency_key).toMatch(/^[A-Za-z0-9_-]{16,64}$/)
+      // No other fields beyond idempotency_key — the backend pulls
+      // entry_id from the source row, not the body.
+      expect(Object.keys(body)).toEqual(["idempotency_key"])
+    })
+
+    it("forwards a caller-supplied idempotencyKey verbatim", async () => {
+      const spy = mockFetchOnce(201, SAMPLE_JOB)
+      await retryInstallJob(SOURCE_ID, {
+        idempotencyKey: "operator-double-click-guard-key",
+      })
+      const [, init] = spy.mock.calls[0]!
+      const body = JSON.parse(init.body as string)
+      expect(body.idempotency_key).toBe("operator-double-click-guard-key")
+    })
+
+    it("URL-encodes the job id segment so a malformed id cannot break the path", async () => {
+      const spy = mockFetchOnce(201, SAMPLE_JOB)
+      await retryInstallJob("ij with/slash")
+      const [url] = spy.mock.calls[0]!
+      // encodeURIComponent encodes spaces as %20 and / as %2F.
+      expect(url).toBe("/api/v1/installer/jobs/ij%20with%2Fslash/retry")
+    })
+
+    it("throws ApiError on a 409 source-still-active response", async () => {
+      mockFetchOnce(409, { detail: "source job is 'running'; cancel first before retry" })
+      await expect(retryInstallJob(SOURCE_ID)).rejects.toBeInstanceOf(ApiError)
+    })
+
+    it("throws ApiError on a 404 source-row-not-found response", async () => {
+      mockFetchOnce(404, { detail: "install job not found" })
+      await expect(retryInstallJob(SOURCE_ID)).rejects.toBeInstanceOf(ApiError)
+    })
+
+    it("throws ApiError on a 403 PEP-deny response (the retry was held + denied)", async () => {
+      mockFetchOnce(403, {
+        error: "pep_denied",
+        reason: "pep_tier_unlisted",
+        job_id: SOURCE_ID,
+      })
+      await expect(retryInstallJob(SOURCE_ID)).rejects.toBeInstanceOf(ApiError)
+    })
+  })
+
+  describe("getInstallJob()", () => {
+    const JOB_ID = "ij-failed01234"
+
+    it("GETs /api/v1/installer/jobs/{id} and returns the row verbatim", async () => {
+      const failed: InstallJob = {
+        ...SAMPLE_JOB,
+        state: "failed",
+        log_tail: "ERROR: layer download failed at byte 0x4f8\nlayer 3/8\n",
+        error_reason: "sidecar:docker_pull:layer_unreachable",
+      }
+      const spy = mockFetchOnce(200, failed)
+      const result = await getInstallJob(JOB_ID)
+      expect(result).toEqual(failed)
+      const [url, init] = spy.mock.calls[0]!
+      expect(url).toBe(`/api/v1/installer/jobs/${JOB_ID}`)
+      // Default method is GET (no init.method override).
+      expect(init.method).toBe("GET")
+    })
+
+    it("URL-encodes the job id so reserved chars pass through safely", async () => {
+      const spy = mockFetchOnce(200, SAMPLE_JOB)
+      await getInstallJob("ij with/slash")
+      const [url] = spy.mock.calls[0]!
+      expect(url).toBe("/api/v1/installer/jobs/ij%20with%2Fslash")
+    })
+
+    it("throws ApiError on a 404 (row gone / wrong tenant)", async () => {
+      mockFetchOnce(404, { detail: "install job not found" })
+      await expect(getInstallJob(JOB_ID)).rejects.toBeInstanceOf(ApiError)
     })
   })
 })

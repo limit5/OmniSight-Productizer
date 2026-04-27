@@ -36,6 +36,17 @@
  * entry's static ``installState`` so an aborted install does not
  * clobber an ``update-available`` chip.
  *
+ * BS.7.6 — failed-state retry + view-log handlers. When the install
+ * pipeline lands an ``installer_progress`` SSE event with
+ * ``state="failed"``, the catalog card flips to its critical-red state
+ * 5 visual and exposes two operator affordances: retry (clones the
+ * source row through the same R20-A PEP gateway HOLD via ``POST
+ * /installer/jobs/{id}/retry``) and view-log (opens the local
+ * `<InstallLogModal />` showing the row's ``log_tail`` + ``error_-
+ * reason``). The modal is mounted at the page root so it overlays the
+ * detail panel + drawer; the operator can read the post-mortem and
+ * re-trigger the install in one place without navigating away.
+ *
  * Sub-tab contract (frozen now so subsequent BS rows can deep-link in):
  *   ?tab=catalog    → catalog browse (BS.6 lands the cards + 5-state)
  *   ?tab=installed  → already-installed list (BS.6.x lands)
@@ -61,7 +72,7 @@
  * write race exists at this layer.
  */
 
-import { Suspense, useCallback, useMemo } from "react"
+import { Suspense, useCallback, useMemo, useState } from "react"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import {
@@ -79,6 +90,7 @@ import {
   CatalogTab,
   type CatalogEntry,
 } from "@/components/omnisight/catalog-tab"
+import { InstallLogModal } from "@/components/omnisight/install-log-modal"
 import {
   PLATFORM_COUNTERS_ZERO,
   PlatformHero,
@@ -91,7 +103,12 @@ import {
   pickInstallJobForEntry,
   useInstallJobs,
 } from "@/hooks/use-install-jobs"
-import { createInstallJob } from "@/lib/api"
+import {
+  createInstallJob,
+  getInstallJob,
+  retryInstallJob,
+  type InstallJob,
+} from "@/lib/api"
 
 // ─────────────────────────────────────────────────────────────────────
 // Sub-tab contract — exported so BS.5.x tests + future deep-link
@@ -249,6 +266,111 @@ function PlatformsPageInner() {
     [installJobs],
   )
 
+  // BS.7.6 — failed-state retry + view-log handlers.
+  //
+  // Retry path mirrors handleInstall: pick the most-recent install job
+  // for the entry (any terminal state — failed / cancelled / completed),
+  // call ``POST /installer/jobs/{id}/retry`` to clone it into a fresh
+  // queued row. The retry endpoint itself runs through the same R20-A
+  // PEP gateway HOLD path, so the operator gets a fresh coaching card
+  // before the install actually starts. Failures (404 source row gone /
+  // 409 source still active / 403 PEP deny / 408 timeout) are surfaced
+  // by the global ``<ApiErrorToastCenter />`` — we just log so dev
+  // consoles see the precise rejection reason.
+  //
+  // View-log path opens the local modal with the freshest InstallJob
+  // for the entry. When the SSE snapshot already has the row (typical:
+  // operator just watched the install fail) we render immediately. When
+  // the operator opens the page after the failure has already been
+  // streamed off, we fetch a fresh row via ``getInstallJob`` so the
+  // log_tail and error_reason are populated. The modal is closed by
+  // setting ``logModalJob`` back to null.
+  const [logModalJob, setLogModalJob] = useState<InstallJob | null>(null)
+  const [logModalEntryName, setLogModalEntryName] = useState<string | undefined>(undefined)
+
+  const handleRetry = useCallback(
+    async (entry: CatalogEntry) => {
+      const job = pickInstallJobForEntry(installJobs, entry.id)
+      if (!job) {
+        // No row in the SSE snapshot — fall back to a fresh create.
+        // This covers the page-loaded-after-failure path where the
+        // entry is still flagged as ``failed`` from a feed snapshot
+        // but the install_jobs row is no longer in local state.
+        try {
+          await createInstallJob(entry.id)
+        } catch (err) {
+          console.error("[platforms] retry-as-create failed", err)
+        }
+        return
+      }
+      try {
+        await retryInstallJob(job.id)
+      } catch (err) {
+        console.error("[platforms] install retry failed", err)
+      }
+    },
+    [installJobs],
+  )
+
+  const handleViewLog = useCallback(
+    async (entry: CatalogEntry) => {
+      const job = pickInstallJobForEntry(installJobs, entry.id)
+      if (job) {
+        setLogModalJob(job)
+        setLogModalEntryName(entry.displayName)
+        return
+      }
+      // Page reloaded after the failure SSE has rolled off — try a
+      // direct fetch by entry_id.metadata.lastInstallJobId if the
+      // catalog feed exposed it; otherwise we cannot recover a tail.
+      const lastJobId =
+        typeof entry.metadata?.lastInstallJobId === "string"
+          ? entry.metadata.lastInstallJobId
+          : undefined
+      if (!lastJobId) {
+        // Surface a clear stub so the operator sees the modal opened
+        // but knows there is no log to show. Future BS.8 history view
+        // will provide a richer recall path.
+        setLogModalJob({
+          id: `${entry.id}-no-job`,
+          tenant_id: "",
+          entry_id: entry.id,
+          state: "failed",
+          idempotency_key: "",
+          sidecar_id: null,
+          protocol_version: 0,
+          bytes_done: 0,
+          bytes_total: null,
+          eta_seconds: null,
+          log_tail: "",
+          result_json: null,
+          error_reason: null,
+          pep_decision_id: null,
+          requested_by: "",
+          queued_at: "",
+          claimed_at: null,
+          started_at: null,
+          completed_at: null,
+        })
+        setLogModalEntryName(entry.displayName)
+        return
+      }
+      try {
+        const fetched = await getInstallJob(lastJobId)
+        setLogModalJob(fetched)
+        setLogModalEntryName(entry.displayName)
+      } catch (err) {
+        console.error("[platforms] install log fetch failed", err)
+      }
+    },
+    [installJobs],
+  )
+
+  const handleCloseLogModal = useCallback(() => {
+    setLogModalJob(null)
+    setLogModalEntryName(undefined)
+  }, [])
+
   return (
     <main
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
@@ -384,6 +506,13 @@ function PlatformsPageInner() {
                     // stop, no portal mount) once the handler is
                     // non-undefined.
                     onInstall={handleInstall}
+                    // BS.7.6 — failed-state retry button calls the
+                    // backend retry endpoint (clones the source row
+                    // through the same PEP HOLD); view-log opens the
+                    // local InstallLogModal showing the row's
+                    // log_tail + error_reason.
+                    onRetry={handleRetry}
+                    onViewLog={handleViewLog}
                     // BS.7.5 — live SSE-derived progress percentage
                     // drives the installing-state conic-gradient
                     // border (state 3). Undefined when total bytes
@@ -410,9 +539,13 @@ function PlatformsPageInner() {
                     entry={liveEntry}
                     onBack={onClose}
                     // BS.7.1 — same handler powers the detail panel's
-                    // primary CTA (Install / Update). Retry + view-log
-                    // remain pending behind BS.7.6 + BS.7.8.
+                    // primary CTA (Install / Update).
                     onInstall={handleInstall}
+                    // BS.7.6 — same retry / view-log handlers as the
+                    // card so the operator can act from either
+                    // surface.
+                    onRetry={handleRetry}
+                    onViewLog={handleViewLog}
                   />
                 )
               }}
@@ -430,6 +563,29 @@ function PlatformsPageInner() {
           )}
         </section>
       </div>
+
+      {/* BS.7.6 — install log + retry modal. Opens when handleViewLog
+          sets ``logModalJob``; closes via the modal's Close button or
+          Esc / overlay click (handleCloseLogModal). The retry button
+          inside the modal reuses ``handleRetry`` so the operator can
+          read the tail and re-trigger the install in one place. */}
+      <InstallLogModal
+        job={logModalJob}
+        entryDisplayName={logModalEntryName}
+        onClose={handleCloseLogModal}
+        onRetry={(job) => {
+          // The retry handler keys off ``entry.id`` since the catalog
+          // card / detail panel pass entries; rebuild a minimal entry
+          // shape from the job's ``entry_id`` so we can reuse the
+          // existing handleRetry path verbatim.
+          handleRetry({
+            id: job.entry_id || job.id,
+            displayName: logModalEntryName ?? (job.entry_id || job.id),
+            vendor: "",
+            family: "custom",
+          })
+        }}
+      />
     </main>
   )
 }
