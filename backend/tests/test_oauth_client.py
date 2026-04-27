@@ -857,3 +857,134 @@ def test_public_surface_matches_all():
     promised = set(oc.__all__)
     leaked = (public_names - promised) - not_ours
     assert not leaked, f"public names not in __all__: {sorted(leaked)}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 12. Cross-twin drift guard — Python ↔ TS (AS.1.2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# AS.1.2 lands the TS twin at templates/_shared/oauth-client/index.ts.
+# The two sides must agree on:
+#   * the 5 canonical OAuth audit event strings (AS.0.8 §5 truth-table)
+#   * the 4 numeric defaults that gate behaviour (PKCE bounds, state
+#     TTL, refresh skew)
+# These tests parse the literal values out of the TS source and assert
+# byte-/value-identity with the Python side. Same pattern as the
+# AS.0.10 cross-twin drift guard in test_password_generator.py.
+
+import pathlib  # noqa: E402  — keep family-local imports near the family
+
+_TS_TWIN_PATH = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "templates"
+    / "_shared"
+    / "oauth-client"
+    / "index.ts"
+)
+
+
+def _read_ts_twin() -> str:
+    if not _TS_TWIN_PATH.exists():
+        pytest.skip(f"TS twin not present at {_TS_TWIN_PATH}")
+    return _TS_TWIN_PATH.read_text(encoding="utf-8")
+
+
+def _extract_ts_string_const(src: str, name: str) -> str:
+    """Pull `export const NAME = "..."` literal value out of TS source."""
+    m = re.search(
+        rf'export\s+const\s+{name}\s*=\s*"((?:[^"\\]|\\.)*)"',
+        src,
+    )
+    assert m, f"could not find `export const {name} = \"...\"` in TS twin"
+    return m.group(1)
+
+
+def _extract_ts_number_const(src: str, name: str) -> int:
+    """Pull `export const NAME = <int>` literal value out of TS source."""
+    m = re.search(
+        rf'export\s+const\s+{name}\s*=\s*(-?\d+)\b',
+        src,
+    )
+    assert m, f"could not find `export const {name} = <int>` in TS twin"
+    return int(m.group(1))
+
+
+def test_oauth_event_strings_parity_python_ts():
+    """SHA-256 of the 5 canonical event strings (joined in declaration
+    order) must match between sides. Any rename, reorder, addition, or
+    removal on either side breaks this oracle."""
+    ts_src = _read_ts_twin()
+    ts_events = [
+        _extract_ts_string_const(ts_src, "EVENT_OAUTH_LOGIN_INIT"),
+        _extract_ts_string_const(ts_src, "EVENT_OAUTH_LOGIN_CALLBACK"),
+        _extract_ts_string_const(ts_src, "EVENT_OAUTH_REFRESH"),
+        _extract_ts_string_const(ts_src, "EVENT_OAUTH_UNLINK"),
+        _extract_ts_string_const(ts_src, "EVENT_OAUTH_TOKEN_ROTATED"),
+    ]
+    py_events = [
+        oc.EVENT_OAUTH_LOGIN_INIT,
+        oc.EVENT_OAUTH_LOGIN_CALLBACK,
+        oc.EVENT_OAUTH_REFRESH,
+        oc.EVENT_OAUTH_UNLINK,
+        oc.EVENT_OAUTH_TOKEN_ROTATED,
+    ]
+    py_hash = hashlib.sha256("\n".join(py_events).encode("utf-8")).hexdigest()
+    ts_hash = hashlib.sha256("\n".join(ts_events).encode("utf-8")).hexdigest()
+    assert py_hash == ts_hash, (
+        f"OAuth audit event-string drift between Python and TS twin\n"
+        f"  Python: {py_events}\n"
+        f"  TS    : {ts_events}\n"
+        f"  Python SHA-256: {py_hash}\n"
+        f"  TS     SHA-256: {ts_hash}"
+    )
+    # Also confirm the per-string parity for nicer error triage.
+    for py_str, ts_str in zip(py_events, ts_events, strict=True):
+        assert py_str == ts_str
+
+
+def test_oauth_defaults_parity_python_ts_pkce_min_length():
+    ts_src = _read_ts_twin()
+    assert _extract_ts_number_const(ts_src, "PKCE_VERIFIER_MIN_LENGTH") == oc.PKCE_VERIFIER_MIN_LENGTH
+
+
+def test_oauth_defaults_parity_python_ts_pkce_max_length():
+    ts_src = _read_ts_twin()
+    assert _extract_ts_number_const(ts_src, "PKCE_VERIFIER_MAX_LENGTH") == oc.PKCE_VERIFIER_MAX_LENGTH
+
+
+def test_oauth_defaults_parity_python_ts_state_ttl():
+    ts_src = _read_ts_twin()
+    assert _extract_ts_number_const(ts_src, "DEFAULT_STATE_TTL_SECONDS") == oc.DEFAULT_STATE_TTL_SECONDS
+
+
+def test_oauth_defaults_parity_python_ts_refresh_skew():
+    ts_src = _read_ts_twin()
+    assert _extract_ts_number_const(ts_src, "DEFAULT_REFRESH_SKEW_SECONDS") == oc.DEFAULT_REFRESH_SKEW_SECONDS
+
+
+def test_ts_twin_uses_web_crypto_not_math_random():
+    """TS-side RNG-provenance pin (mirrors the Python side's
+    `import secrets` grep). Web Crypto via `getRandomValues` is the
+    only acceptable source; `Math.random()` is predictable and would
+    silently weaken state / nonce / PKCE entropy."""
+    ts_src = _read_ts_twin()
+    assert "getRandomValues" in ts_src
+    assert "Math.random" not in ts_src
+
+
+def test_ts_twin_declares_all_five_event_strings():
+    """Sanity: the TS source actually contains all five `export const
+    EVENT_OAUTH_*` declarations. Catches a partial port that leaves
+    some strings hard-coded inline (which would silently bypass the
+    cross-twin drift guard)."""
+    ts_src = _read_ts_twin()
+    for name in (
+        "EVENT_OAUTH_LOGIN_INIT",
+        "EVENT_OAUTH_LOGIN_CALLBACK",
+        "EVENT_OAUTH_REFRESH",
+        "EVENT_OAUTH_UNLINK",
+        "EVENT_OAUTH_TOKEN_ROTATED",
+    ):
+        assert re.search(rf'export\s+const\s+{name}\s*=', ts_src), (
+            f"TS twin missing `export const {name}`"
+        )
