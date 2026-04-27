@@ -257,6 +257,34 @@ async def mfa_challenge(req: MFAChallengeRequest,
         ok = await mfa.verify_totp(user_id, code)
 
     if not ok:
+        # AS.6.5 — fan AS.5.1 ``auth.login_fail`` rollup with reason
+        # ``mfa_failed``. Best-effort, before the 401 response so the
+        # AS.5.2 dashboard counts MFA-rejection attempts toward the
+        # per-user-fp login_fail rate (and the ``login_fail_burst``
+        # rule in auth_dashboard fires on repeat MFA-fail attempts).
+        from backend.security import auth_audit_bridge as _bridge
+        from backend.security import auth_event as _aevent
+        # Resolve the user's email when available (the MFA challenge
+        # holds the user_id; ``get_user`` look-up is cheap PG).
+        attempted = user_id
+        actor = user_id
+        try:
+            failed_user = await auth.get_user(user_id)
+            if failed_user is not None:
+                attempted = failed_user.email
+                actor = failed_user.email
+        except Exception:  # pragma: no cover — defensive
+            pass
+        await _bridge.emit_login_fail_event(
+            attempted_user=attempted,
+            fail_reason=_aevent.LOGIN_FAIL_MFA_FAILED,
+            request=request,
+            auth_method=(
+                _aevent.AUTH_METHOD_MFA_TOTP
+                # backup code rolls onto mfa_totp per AS.6.5 mapping
+            ),
+            actor=actor,
+        )
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
     data = await mfa.consume_mfa_challenge(req.mfa_token)
@@ -292,6 +320,27 @@ async def mfa_challenge(req: MFAChallengeRequest,
         )
     except Exception:
         pass
+
+    # AS.6.5 — fan AS.5.1 ``auth.login_success`` rollup with
+    # ``mfa_satisfied=True`` and the appropriate auth_method
+    # (mfa_totp for both totp + backup_code per the AS.6.5 dispatch
+    # table). The earlier ``auth.login_fail`` row (reason=mfa_required)
+    # from /auth/login marks the password leg; this row marks the
+    # second-factor success leg — together AS.5.2 measures
+    # MFA-completion conversion.
+    from backend.security import auth_audit_bridge as _bridge
+    mfa_method_label = (
+        _bridge.MFA_METHOD_BACKUP_CODE if is_backup
+        else _bridge.MFA_METHOD_TOTP
+    )
+    await _bridge.emit_login_success_event(
+        user_id=user_id,
+        request=request,
+        auth_method=_bridge.mfa_method_to_auth_method(mfa_method_label),
+        mfa_satisfied=True,
+        actor=user.email if user else user_id,
+    )
+
     if user is not None:
         await auth.notify_new_device_login(user, sess, challenge_ip, challenge_ua)
 
@@ -334,6 +383,26 @@ async def webauthn_challenge_complete(
     user_id = challenge["user_id"]
     ok = await mfa.webauthn_complete_authenticate(user_id, req.credential)
     if not ok:
+        # AS.6.5 — fan AS.5.1 ``auth.login_fail`` rollup with reason
+        # ``mfa_failed`` and auth_method ``mfa_webauthn``.
+        from backend.security import auth_audit_bridge as _bridge
+        from backend.security import auth_event as _aevent
+        attempted = user_id
+        actor = user_id
+        try:
+            failed_user = await auth.get_user(user_id)
+            if failed_user is not None:
+                attempted = failed_user.email
+                actor = failed_user.email
+        except Exception:  # pragma: no cover — defensive
+            pass
+        await _bridge.emit_login_fail_event(
+            attempted_user=attempted,
+            fail_reason=_aevent.LOGIN_FAIL_MFA_FAILED,
+            request=request,
+            auth_method=_aevent.AUTH_METHOD_MFA_WEBAUTHN,
+            actor=actor,
+        )
         raise HTTPException(status_code=401, detail="WebAuthn authentication failed")
 
     data = await mfa.consume_mfa_challenge(req.mfa_token)
@@ -368,6 +437,20 @@ async def webauthn_challenge_complete(
         )
     except Exception:
         pass
+
+    # AS.6.5 — fan AS.5.1 ``auth.login_success`` rollup. Same shape
+    # as the TOTP path above; differs only in auth_method=mfa_webauthn.
+    from backend.security import auth_audit_bridge as _bridge
+    await _bridge.emit_login_success_event(
+        user_id=user_id,
+        request=request,
+        auth_method=_bridge.mfa_method_to_auth_method(
+            _bridge.MFA_METHOD_WEBAUTHN,
+        ),
+        mfa_satisfied=True,
+        actor=user.email if user else user_id,
+    )
+
     if user is not None:
         await auth.notify_new_device_login(user, sess, challenge_ip, challenge_ua)
 

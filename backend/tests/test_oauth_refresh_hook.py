@@ -407,10 +407,14 @@ def test_refresh_record_no_refresh_token_emits_audit(monkeypatch):
     assert out.outcome == orh.OUTCOME_NO_REFRESH_TOKEN
     assert out.new_record is None
     assert captured["calls"] == []  # never called
-    # Audit row emitted with outcome=no_refresh_token
-    assert len(events) == 1
-    assert events[0]["action"] == oauth_client.EVENT_OAUTH_REFRESH
-    assert events[0]["after"]["outcome"] == oauth_audit.OUTCOME_NO_REFRESH_TOKEN
+    # Audit rows emitted: forensic AS.1.4 ``oauth.refresh`` + AS.5.1
+    # rollup ``auth.token_refresh`` (AS.6.5 dual-emit, since 2026-04-28).
+    forensic = [e for e in events if e["action"] == oauth_client.EVENT_OAUTH_REFRESH]
+    rollup = [e for e in events if e["action"] == "auth.token_refresh"]
+    assert len(forensic) == 1
+    assert forensic[0]["after"]["outcome"] == oauth_audit.OUTCOME_NO_REFRESH_TOKEN
+    assert len(rollup) == 1
+    assert rollup[0]["after"]["outcome"] == oauth_audit.OUTCOME_NO_REFRESH_TOKEN
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -432,9 +436,14 @@ def test_refresh_record_provider_exception_returns_provider_error(monkeypatch):
     assert "RuntimeError" in (out.error or "")
     assert "network unreachable" in (out.error or "")
 
-    assert len(events) == 1
-    assert events[0]["after"]["outcome"] == oauth_audit.OUTCOME_PROVIDER_ERROR
-    assert "RuntimeError" in (events[0]["after"].get("error") or "")
+    # AS.6.5 dual-emit: forensic AS.1.4 + rollup AS.5.1.
+    forensic = [e for e in events if e["action"] == oauth_client.EVENT_OAUTH_REFRESH]
+    rollup = [e for e in events if e["action"] == "auth.token_refresh"]
+    assert len(forensic) == 1
+    assert forensic[0]["after"]["outcome"] == oauth_audit.OUTCOME_PROVIDER_ERROR
+    assert "RuntimeError" in (forensic[0]["after"].get("error") or "")
+    assert len(rollup) == 1
+    assert rollup[0]["after"]["outcome"] == oauth_audit.OUTCOME_PROVIDER_ERROR
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -553,11 +562,17 @@ def test_refresh_record_vault_binding_mismatch_returns_vault_failure(monkeypatch
     assert "vault:BindingMismatchError" in out.error
     # refresh_fn never called — fail-fast on vault decrypt
     assert captured["calls"] == []
-    # Audit row emitted with outcome=provider_error (vault collapses
-    # onto provider_error in the audit vocabulary)
-    assert len(events) == 1
-    assert events[0]["after"]["outcome"] == oauth_audit.OUTCOME_PROVIDER_ERROR
-    assert "vault:" in (events[0]["after"]["error"] or "")
+    # AS.6.5 dual-emit: forensic AS.1.4 ``oauth.refresh`` + rollup
+    # AS.5.1 ``auth.token_refresh``.  Vault failure collapses onto
+    # ``provider_error`` in the AS.1.4 audit vocabulary; the rollup
+    # mirrors the same outcome.
+    forensic = [e for e in events if e["action"] == oauth_client.EVENT_OAUTH_REFRESH]
+    rollup = [e for e in events if e["action"] == "auth.token_refresh"]
+    assert len(forensic) == 1
+    assert forensic[0]["after"]["outcome"] == oauth_audit.OUTCOME_PROVIDER_ERROR
+    assert "vault:" in (forensic[0]["after"]["error"] or "")
+    assert len(rollup) == 1
+    assert rollup[0]["after"]["outcome"] == oauth_audit.OUTCOME_PROVIDER_ERROR
 
 
 def test_refresh_record_vault_unknown_key_version_returns_vault_failure(monkeypatch):
@@ -594,11 +609,23 @@ def test_refresh_record_vault_unknown_key_version_returns_vault_failure(monkeypa
 def test_refresh_record_knob_off_helper_runs_audit_silent_skip(monkeypatch):
     """AS.0.4 §6.2: pure helpers must keep working with the AS knob off
     so backfill / DSAR / key-rotation scripts can still refresh tokens.
-    Audit emit silent-skips per AS.0.8 §5 (oauth_audit._gate)."""
+    Audit emit silent-skips per AS.0.8 §5 (oauth_audit._gate).
+
+    AS.6.5 update (2026-04-28): the refresh hook now ALSO fans the
+    AS.5.1 ``auth.token_refresh`` + ``auth.token_rotated`` rollups
+    via the bridge. Both gate on AS.0.8 single knob, so this test
+    must patch :func:`auth_event.is_enabled` alongside
+    :func:`oauth_client.is_enabled` to assert the silent-skip
+    contract holds across both audit families.
+    """
     rec = _make_record(version=2, expires_at=1000.0)
     events = _capture_audit(monkeypatch)
     monkeypatch.setattr(
         "backend.security.oauth_audit.oauth_client.is_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "backend.security.auth_event.is_enabled",
         lambda: False,
     )
     fn, _ = _mock_refresh_fn({
@@ -612,7 +639,8 @@ def test_refresh_record_knob_off_helper_runs_audit_silent_skip(monkeypatch):
     assert out.outcome == orh.OUTCOME_SUCCESS
     assert out.new_record is not None
     assert out.new_record.version == 3
-    # No audit row written (knob-off ⇒ silent skip)
+    # No audit row written (knob-off ⇒ silent skip across both
+    # AS.1.4 forensic + AS.5.1 rollup families)
     assert events == []
 
 

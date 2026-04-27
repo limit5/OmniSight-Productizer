@@ -567,6 +567,18 @@ async def refresh_record(
                     triggered_by=trigger,
                 )
             )
+            # AS.6.5 — fan AS.5.1 ``auth.token_rotated`` rollup alongside
+            # the AS.1.4 forensic ``oauth.token_rotated`` row above. Same
+            # fingerprint contract — both refresh tokens are stored as
+            # 12-char SHA-256 (PII redaction) by the AS.5.1 builder.
+            from backend.security import auth_audit_bridge as _bridge
+            await _bridge.emit_token_rotated_event(
+                user_id=record.user_id,
+                provider=record.provider,
+                previous_refresh_token=refresh_plaintext,
+                new_refresh_token=new_token.refresh_token,
+                triggered_by=trigger,
+            )
 
     return outcome
 
@@ -602,19 +614,27 @@ async def _emit_refresh_audit(
     record: TokenVaultRecord,
     outcome: RefreshOutcome,
 ) -> None:
-    """Fan one ``oauth.refresh`` audit row out via AS.1.4.
+    """Fan one ``oauth.refresh`` AS.1.4 forensic row + one
+    ``auth.token_refresh`` AS.5.1 rollup row.
+
+    The two rows coexist by AS.5.1 design: forensic captures every
+    detail (granted_scope, previous_expires_at, raw error string)
+    for the I8 chain verifier and the admin audit query surface;
+    rollup captures the dashboard-visible outcome + new lifetime
+    counter the AS.5.2 ``token_refresh_storm`` rule reads.
 
     Catches any audit-layer exception so a chain-append failure can't
     propagate past the hook (the hook's caller will already persist
     ``new_record`` regardless of audit success — losing a row of
     observability is not the same as losing a refresh).
     """
+    audit_outcome = _audit_outcome_for(outcome)
     try:
         await oauth_audit.emit_refresh(
             oauth_audit.RefreshContext(
                 provider=record.provider,
                 user_id=record.user_id,
-                outcome=_audit_outcome_for(outcome),
+                outcome=audit_outcome,
                 previous_expires_at=record.expires_at,
                 new_expires_in_seconds=outcome.new_expires_in_seconds,
                 granted_scope=outcome.granted_scope,
@@ -626,6 +646,21 @@ async def _emit_refresh_audit(
             "oauth.refresh audit emit failed for %s/%s: %s",
             record.provider, record.user_id, exc,
         )
+
+    # AS.6.5 — fan AS.5.1 ``auth.token_refresh`` rollup alongside the
+    # forensic AS.1.4 row above. Bridge handles its own knob check
+    # (AS.0.8 single-knob via ``auth_event.is_enabled``) and
+    # exception swallow.  Rollup outcome vocabulary is byte-equal
+    # the forensic vocabulary — both come from
+    # :func:`_audit_outcome_for`.
+    from backend.security import auth_audit_bridge as _bridge
+
+    await _bridge.emit_token_refresh_event(
+        user_id=record.user_id,
+        provider=record.provider,
+        outcome=audit_outcome,
+        new_expires_in_seconds=outcome.new_expires_in_seconds,
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

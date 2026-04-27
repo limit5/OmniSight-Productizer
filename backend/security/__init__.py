@@ -72,6 +72,27 @@ AS.2.5 (auth shared lib):
     Honours the AS.0.4 §6.2 "DSAR keeps working knob-off" invariant
     via the audit layer's silent-skip.
 
+AS.6.5 (OmniSight self-integration — audit log bridge to AS.5 event format):
+  - auth_audit_bridge — thin best-effort wrapper around the AS.5.1
+    :mod:`auth_event` emitters that wires the existing OmniSight
+    self-handlers (``/auth/login``, ``/auth/mfa/*``,
+    ``oauth_refresh_hook``) into the canonical ``auth.*`` rollup-event
+    family so the AS.5.2 per-tenant dashboard, the suspicious-pattern
+    detector, and any generated-app self-audit sink can count real
+    OmniSight login activity.  Dual-emit additive contract — the
+    legacy ``login_ok`` / ``auth.login.fail`` / ``mfa.challenge.passed``
+    audit rows stay where they are; this bridge fans one additional
+    AS.5.1 rollup row alongside (the same shape AS.6.1 already
+    adopted in the OAuth callback for ``oauth.login_callback`` +
+    ``auth.login_success``).  Provides FastAPI ``Request``-aware
+    IP / user-agent extraction (Cloudflare ``cf-connecting-ip``
+    precedence matches AS.6.1's ``_client_key``), an
+    :func:`mfa_method_to_auth_method` dispatch table mapping the 3
+    OmniSight MFA challenge labels onto the AS.5.1
+    :data:`auth_event.AUTH_METHODS` vocabulary, and 4 async +
+    2 fire-and-forget emit helpers — each best-effort, swallow on
+    failure, never raises.
+
 AS.6.4 (OmniSight self-integration — per-form honeypot wiring):
   - honeypot_form_verifier — universal helper that wraps AS.4.1
     ``honeypot.validate_honeypot`` + ``should_reject`` + the
@@ -224,6 +245,7 @@ from .prompt_hardening import (
 from .secret_filter import redact
 
 # Re-export pure submodules by name (cheap — constants + functions, no IO).
+from . import auth_audit_bridge  # noqa: F401
 from . import auth_dashboard  # noqa: F401
 from . import auth_event  # noqa: F401
 from . import bot_challenge  # noqa: F401
@@ -242,6 +264,7 @@ from . import turnstile_form_verifier  # noqa: F401
 
 __all__ = [
     "INJECTION_GUARD_PRELUDE",
+    "auth_audit_bridge",
     "auth_dashboard",
     "auth_event",
     "bot_challenge",

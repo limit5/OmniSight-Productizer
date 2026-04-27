@@ -154,7 +154,22 @@ def _mask_email(email: str) -> str:
 
 @router.post("/auth/login")
 async def login(req: LoginRequest, request: Request, response: Response) -> dict:
-    _check_login_rate_limit(request)
+    # AS.6.5 — wrap the legacy per-IP brute-force window so a 429 from
+    # the early check ALSO emits the AS.5.1 ``auth.login_fail`` rollup
+    # (reason=rate_limited).  The check itself stays bare so existing
+    # tests around its 429 surface don't change shape.
+    try:
+        _check_login_rate_limit(request)
+    except HTTPException as exc:
+        if exc.status_code == 429:
+            from backend.security import auth_audit_bridge as _bridge
+            from backend.security import auth_event as _aevent
+            await _bridge.emit_login_fail_event(
+                attempted_user=(req.email or "").lower().strip() or "anonymous",
+                fail_reason=_aevent.LOGIN_FAIL_RATE_LIMITED,
+                request=request,
+            )
+        raise
 
     client_ip = _client_key(request)
     email_key = req.email.lower().strip()
@@ -216,6 +231,16 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
 
     ip_ok, ip_wait = ip_limiter().allow(client_ip)
     if not ip_ok:
+        # AS.6.5 — fan AS.5.1 ``auth.login_fail`` rollup with reason
+        # ``rate_limited`` so AS.5.2 dashboard counts rate-limit-shed
+        # attempts toward the per-tenant fail rate.  Best-effort.
+        from backend.security import auth_audit_bridge as _bridge
+        from backend.security import auth_event as _aevent
+        await _bridge.emit_login_fail_event(
+            attempted_user=email_key or "anonymous",
+            fail_reason=_aevent.LOGIN_FAIL_RATE_LIMITED,
+            request=request,
+        )
         raise HTTPException(
             status_code=429,
             detail=f"too many login attempts from this IP; retry in {int(ip_wait) + 1}s",
@@ -224,6 +249,15 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
 
     email_ok, email_wait = email_limiter().allow(email_key)
     if not email_ok:
+        # AS.6.5 — fan AS.5.1 ``auth.login_fail`` rollup; same shape
+        # as the IP-limit branch above.
+        from backend.security import auth_audit_bridge as _bridge
+        from backend.security import auth_event as _aevent
+        await _bridge.emit_login_fail_event(
+            attempted_user=email_key or "anonymous",
+            fail_reason=_aevent.LOGIN_FAIL_RATE_LIMITED,
+            request=request,
+        )
         raise HTTPException(
             status_code=429,
             detail=f"too many login attempts for this account; retry in {int(email_wait) + 1}s",
@@ -242,6 +276,17 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
             )
         except Exception:
             pass
+        # AS.6.5 — fan AS.5.1 ``auth.login_fail`` rollup so the
+        # AS.5.2 dashboard counts lockouts toward the per-tenant
+        # login_fail rate. Best-effort; the legacy ``auth.lockout``
+        # row above stays the forensic SoT.
+        from backend.security import auth_audit_bridge as _bridge
+        from backend.security import auth_event as _aevent
+        await _bridge.emit_login_fail_event(
+            attempted_user=email_key,
+            fail_reason=_aevent.LOGIN_FAIL_ACCOUNT_LOCKED,
+            request=request,
+        )
         raise HTTPException(
             status_code=423,
             detail=f"account locked; retry in {int(lock_remaining) + 1}s",
@@ -262,6 +307,21 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         except Exception as exc:
             logger.debug("auth.login.fail audit emit failed: %s", exc)
 
+        # AS.6.5 — fan AS.5.1 ``auth.login_fail`` rollup so AS.5.2
+        # dashboard's bad-credential counters + login_fail_burst rule
+        # see real OmniSight password traffic. ``bad_password`` covers
+        # both unknown user and bad password — the unified-error-message
+        # contract (AS.7.1) means we can't distinguish in the response,
+        # but the AS.5.1 vocabulary keeps two separate reasons available
+        # for future telemetry that wants to split.
+        from backend.security import auth_audit_bridge as _bridge
+        from backend.security import auth_event as _aevent
+        await _bridge.emit_login_fail_event(
+            attempted_user=email_key,
+            fail_reason=_aevent.LOGIN_FAIL_BAD_PASSWORD,
+            request=request,
+        )
+
         new_locked, _ = await auth.is_account_locked(email_key)
         if new_locked:
             try:
@@ -274,6 +334,14 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
                 )
             except Exception:
                 pass
+            # AS.6.5 — second rollup for the threshold-reached lockout
+            # so AS.5.2's per-attempted-user-fp rule can correlate
+            # with the lockout edge.
+            await _bridge.emit_login_fail_event(
+                attempted_user=email_key,
+                fail_reason=_aevent.LOGIN_FAIL_ACCOUNT_LOCKED,
+                request=request,
+            )
 
         raise HTTPException(status_code=401, detail="invalid email or password")
 
@@ -298,6 +366,23 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
             )
         except Exception:
             pass
+        # AS.6.5 — fan AS.5.1 ``auth.login_fail`` rollup with reason
+        # ``mfa_required``. Treated as a fail-shaped row in the AS.5.1
+        # vocabulary because the password leg succeeded but the
+        # full login-success boundary is not crossed until the MFA
+        # challenge is verified (the actual ``auth.login_success``
+        # rollup fires from the MFA challenge handler in routers/mfa.py).
+        # AS.5.2 dashboard sums login_success + (login_fail w/ MFA) to
+        # measure "users that authenticated password but didn't finish"
+        # — a useful retention proxy.
+        from backend.security import auth_audit_bridge as _bridge
+        from backend.security import auth_event as _aevent
+        await _bridge.emit_login_fail_event(
+            attempted_user=email_key,
+            fail_reason=_aevent.LOGIN_FAIL_MFA_REQUIRED,
+            request=request,
+            actor=user.email,
+        )
         return {
             "mfa_required": True,
             "mfa_token": mfa_token,
@@ -321,6 +406,22 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         )
     except Exception as exc:
         logger.debug("login_ok audit emit failed: %s", exc)
+
+    # AS.6.5 — fan AS.5.1 ``auth.login_success`` rollup. ``mfa_satisfied=False``
+    # because this branch is only reached when the user has no MFA
+    # enrolled (the ``has_mfa`` short-circuit above returned a different
+    # response). The MFA-satisfied success row fires from routers/mfa.py
+    # after the MFA challenge handler completes.
+    from backend.security import auth_audit_bridge as _bridge
+    from backend.security import auth_event as _aevent
+    await _bridge.emit_login_success_event(
+        user_id=user.id,
+        request=request,
+        auth_method=_aevent.AUTH_METHOD_PASSWORD,
+        mfa_satisfied=False,
+        actor=user.email,
+    )
+
     await auth.notify_new_device_login(user, sess, client_ip, ua_header)
     secure = _cookie_secure()
     response.set_cookie(
