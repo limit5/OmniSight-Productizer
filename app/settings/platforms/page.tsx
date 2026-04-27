@@ -83,6 +83,7 @@ import {
   Layers,
   PieChart,
   Rss,
+  Settings,
   Trash2,
 } from "lucide-react"
 
@@ -93,6 +94,10 @@ import {
   type CatalogEntry,
 } from "@/components/omnisight/catalog-tab"
 import { CleanupUnusedModal, pickCleanupCandidates } from "@/components/omnisight/cleanup-unused-modal"
+import {
+  CustomEntryForm,
+  type CustomEntryFormPayload,
+} from "@/components/omnisight/custom-entry-form"
 import { DiskBreakdownModal } from "@/components/omnisight/disk-breakdown-modal"
 import { InstallLogModal } from "@/components/omnisight/install-log-modal"
 import {
@@ -109,6 +114,7 @@ import {
   PlatformHero,
   type PlatformCounters,
 } from "@/components/omnisight/platform-hero"
+import { useCatalogEntries } from "@/hooks/use-catalog-entries"
 import { useHostMetricsTick } from "@/hooks/use-host-metrics-tick"
 import {
   deriveCatalogProgressPercent,
@@ -119,12 +125,16 @@ import {
 import { useCatalogSources } from "@/hooks/use-catalog-sources"
 import { useInstalledEntries } from "@/hooks/use-installed-entries"
 import {
+  createCatalogEntry,
   createCatalogSource,
   createInstallJob,
+  deleteCatalogEntry,
   deleteCatalogSource,
   getInstallJob,
+  patchCatalogEntry,
   retryInstallJob,
   syncCatalogSource,
+  type CatalogEntryDetail,
   type CatalogSource,
   type InstallJob,
 } from "@/lib/api"
@@ -134,7 +144,7 @@ import {
 // builders share the same source of truth.
 // ─────────────────────────────────────────────────────────────────────
 
-export const PLATFORMS_TABS = ["catalog", "installed", "sources"] as const
+export const PLATFORMS_TABS = ["catalog", "installed", "sources", "custom"] as const
 export type PlatformsTabId = (typeof PLATFORMS_TABS)[number]
 export const PLATFORMS_DEFAULT_TAB: PlatformsTabId = "catalog"
 
@@ -173,6 +183,12 @@ const TAB_META: Record<PlatformsTabId, TabMeta> = {
     label: "Sources",
     description: "管理 catalog feed 訂閱（admin only）。BS.6.x 進駐。",
     icon: Rss,
+  },
+  custom: {
+    id: "custom",
+    label: "Custom",
+    description: "自定義 catalog entries（admin only）— 新增 / 編輯 / 移除 operator + override 條目。",
+    icon: Settings,
   },
 }
 
@@ -501,6 +517,85 @@ function PlatformsPageInner() {
     void refreshCatalogSources()
   }, [refreshCatalogSources])
 
+  // BS.8.6 — custom catalog entries (admin only). The hook fetches the
+  // full visible catalog (`GET /catalog/entries?limit=500`) so the form
+  // can show the operator/override subset in the list view AND populate
+  // the `depends_on` multi-select from the broader catalog (so a new
+  // operator entry can declare a dependency on an existing shipped
+  // toolchain). Each mutation triggers `refresh()` so the snapshot
+  // re-syncs against PG.
+  const {
+    entries: catalogEntries,
+    loading: catalogEntriesLoading,
+    error: catalogEntriesError,
+    refresh: refreshCatalogEntries,
+  } = useCatalogEntries()
+
+  const customCatalogEntries = useMemo(
+    () =>
+      catalogEntries.filter(
+        (e) => e.source === "operator" || e.source === "override",
+      ),
+    [catalogEntries],
+  )
+
+  const handleCustomCreate = useCallback(
+    async (payload: CustomEntryFormPayload): Promise<CatalogEntryDetail> => {
+      const created = await createCatalogEntry({
+        id: payload.id,
+        source: payload.source,
+        vendor: payload.vendor,
+        family: payload.family,
+        display_name: payload.display_name,
+        version: payload.version,
+        install_method: payload.install_method,
+        install_url: payload.install_url,
+        sha256: payload.sha256,
+        size_bytes: payload.size_bytes,
+        depends_on: payload.depends_on,
+        metadata: payload.metadata,
+      })
+      void refreshCatalogEntries()
+      return created
+    },
+    [refreshCatalogEntries],
+  )
+
+  const handleCustomPatch = useCallback(
+    async (
+      entryId: string,
+      payload: CustomEntryFormPayload,
+    ): Promise<CatalogEntryDetail> => {
+      const updated = await patchCatalogEntry(entryId, {
+        vendor: payload.vendor,
+        family: payload.family,
+        display_name: payload.display_name,
+        version: payload.version,
+        install_method: payload.install_method,
+        install_url: payload.install_url,
+        sha256: payload.sha256,
+        size_bytes: payload.size_bytes,
+        depends_on: payload.depends_on,
+        metadata: payload.metadata,
+      })
+      void refreshCatalogEntries()
+      return updated
+    },
+    [refreshCatalogEntries],
+  )
+
+  const handleCustomRemove = useCallback(
+    async (entry: CatalogEntryDetail): Promise<void> => {
+      await deleteCatalogEntry(entry.id)
+      void refreshCatalogEntries()
+    },
+    [refreshCatalogEntries],
+  )
+
+  const handleCustomRetry = useCallback(() => {
+    void refreshCatalogEntries()
+  }, [refreshCatalogEntries])
+
   return (
     <main
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
@@ -752,7 +847,7 @@ function PlatformsPageInner() {
                 )
               }}
             />
-          ) : (
+          ) : tab === "sources" ? (
             // BS.8.5 — Sources tab (admin only). Lists the per-tenant
             // catalog feed subscriptions and exposes admin CRUD: add a
             // new feed, sync now, or remove. Auth is `require_admin` on
@@ -766,6 +861,29 @@ function PlatformsPageInner() {
               onSync={handleSourcesSync}
               onRemove={handleSourcesRemove}
               onRetry={handleSourcesRetry}
+            />
+          ) : (
+            // BS.8.6 — Custom tab (admin only). Lists the per-tenant
+            // operator/override catalog entries and exposes admin CRUD:
+            // add a new custom entry (full form: vendor, family,
+            // version, install method, URL, sha256, license, size
+            // estimate, depends_on multi-select), edit in place, or
+            // remove (with inline confirm). Auth is `require_admin`
+            // on every backend route; non-admins see 403 surfaced via
+            // `<ApiErrorToastCenter />` after they attempt an action.
+            // The depends_on multi-select pulls from the entire visible
+            // catalog (operator + override + shipped + subscription) so
+            // a new entry can declare a dependency on a shipped
+            // toolchain.
+            <CustomEntryForm
+              entries={customCatalogEntries}
+              allEntries={catalogEntries}
+              loading={catalogEntriesLoading}
+              fetchError={catalogEntriesError}
+              onCreate={handleCustomCreate}
+              onPatch={handleCustomPatch}
+              onRemove={handleCustomRemove}
+              onRetry={handleCustomRetry}
             />
           )}
         </section>

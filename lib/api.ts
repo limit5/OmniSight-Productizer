@@ -6200,6 +6200,332 @@ export function validateCatalogSourceRefreshInterval(
   return null
 }
 
+// ─── BS.8.6 — Catalog entry admin CRUD (custom entries) ───────────────────
+//
+// The Custom tab (`<CustomEntryForm />`) needs admin-only CRUD over the
+// per-tenant catalog_entries surface where `source ∈ {operator, override}`.
+// The backend routes already exist and guard with `require_admin`:
+//   • GET    /catalog/entries[?...]      — operator-readable, used to list
+//                                          existing entries + populate the
+//                                          depends_on multi-select.
+//   • POST   /catalog/entries            — admin only (operator/override).
+//   • PATCH  /catalog/entries/{id}       — admin only (override layer or
+//                                          in-place update on existing
+//                                          operator/override rows).
+//   • DELETE /catalog/entries/{id}       — admin only (soft-delete /
+//                                          tombstone).
+//
+// Wire shapes mirror `_row_to_entry()` on the backend
+// (backend/routers/catalog.py:305) — snake_case directly off the wire so
+// the form can pass through without a marshaller.
+
+/** Catalog entry families per backend `ENTRY_FAMILIES` (alembic 0051
+ *  CHECK constraint). The UI catalog-tab `<CatalogTab />` collapses
+ *  `rtos` and `cross-toolchain` into the 5-bucket palette, but the admin
+ *  custom form must surface every backend-accepted family so an admin
+ *  can create RTOS or cross-toolchain entries explicitly. */
+export const CATALOG_ENTRY_FAMILIES: ReadonlyArray<string> = [
+  "mobile",
+  "embedded",
+  "web",
+  "software",
+  "rtos",
+  "cross-toolchain",
+  "custom",
+]
+export type CatalogEntryFamily = (typeof CATALOG_ENTRY_FAMILIES)[number]
+
+/** Catalog entry install methods per backend `ENTRY_INSTALL_METHODS`. */
+export const CATALOG_ENTRY_INSTALL_METHODS: ReadonlyArray<string> = [
+  "noop",
+  "docker_pull",
+  "shell_script",
+  "vendor_installer",
+]
+export type CatalogEntryInstallMethod =
+  (typeof CATALOG_ENTRY_INSTALL_METHODS)[number]
+
+/** Sources that admin can create — `shipped` lives in alembic seeds and
+ *  `subscription` lands via the BS.8.5 feed worker; the admin form only
+ *  writes `operator` (standalone tenant entry) or `override` (overlay
+ *  on an existing shipped row). */
+export const CATALOG_ENTRY_WRITABLE_SOURCES: ReadonlyArray<string> = [
+  "operator",
+  "override",
+]
+export type CatalogEntryWritableSource =
+  (typeof CATALOG_ENTRY_WRITABLE_SOURCES)[number]
+
+/** Mirror `ENTRY_ID_PATTERN` (backend/routers/catalog.py:120) — kebab-case,
+ *  alphanumeric groups separated by single hyphens, no leading / trailing
+ *  hyphen, no double hyphens. */
+export const CATALOG_ENTRY_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+export const CATALOG_ENTRY_ID_MAX_LEN = 64
+export const CATALOG_ENTRY_VENDOR_MAX_LEN = 128
+export const CATALOG_ENTRY_DISPLAY_NAME_MAX_LEN = 256
+export const CATALOG_ENTRY_VERSION_MAX_LEN = 64
+export const CATALOG_ENTRY_INSTALL_URL_MAX_LEN = 2048
+export const CATALOG_ENTRY_SHA256_PATTERN = /^[0-9a-f]{64}$/
+export const CATALOG_ENTRY_SIZE_BYTES_MAX = 2 ** 40 // 1 TiB — mirrors backend SIZE_BYTES_MAX (`1 << 40` overflows 32-bit shift)
+
+/** Wire shape for `_row_to_entry()`. Snake_case as returned by FastAPI;
+ *  the `<CustomEntryForm />` consumes this directly. The `metadata` /
+ *  `depends_on` JSONB columns come back already deserialised. */
+export interface CatalogEntryDetail {
+  id: string
+  source: "shipped" | "operator" | "override" | "subscription"
+  schema_version: number
+  tenant_id: string | null
+  vendor: string | null
+  family: CatalogEntryFamily | null
+  display_name: string | null
+  version: string | null
+  install_method: CatalogEntryInstallMethod | null
+  install_url: string | null
+  sha256: string | null
+  size_bytes: number | null
+  depends_on: string[]
+  metadata: Record<string, unknown>
+  hidden: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface ListCatalogEntriesResponse {
+  items: CatalogEntryDetail[]
+  count: number
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface CreateCatalogEntryRequest {
+  id: string
+  source?: CatalogEntryWritableSource
+  vendor?: string | null
+  family?: CatalogEntryFamily | null
+  display_name?: string | null
+  version?: string | null
+  install_method?: CatalogEntryInstallMethod | null
+  install_url?: string | null
+  sha256?: string | null
+  size_bytes?: number | null
+  depends_on?: string[]
+  metadata?: Record<string, unknown>
+}
+
+export interface PatchCatalogEntryRequest {
+  vendor?: string | null
+  family?: CatalogEntryFamily | null
+  display_name?: string | null
+  version?: string | null
+  install_method?: CatalogEntryInstallMethod | null
+  install_url?: string | null
+  sha256?: string | null
+  size_bytes?: number | null
+  depends_on?: string[] | null
+  metadata?: Record<string, unknown> | null
+  hidden?: boolean | null
+}
+
+export interface DeleteCatalogEntryResponse {
+  status: "deleted"
+  id: string
+  tenant_id: string
+}
+
+export interface ListCatalogEntriesOptions {
+  family?: CatalogEntryFamily
+  source?: string
+  vendor?: string
+  installMethod?: CatalogEntryInstallMethod
+  q?: string
+  sort?: "id" | "vendor" | "family" | "display_name" | "created_at" | "updated_at"
+  order?: "asc" | "desc"
+  includeHidden?: boolean
+  limit?: number
+  offset?: number
+}
+
+/** GET /catalog/entries — list entries visible to the caller. The full
+ *  response is paginated; the BS.8.6 form pulls everything (limit=500
+ *  hard-cap on the backend) so the depends_on multi-select can search
+ *  across the entire catalog without a per-keystroke round-trip. */
+export async function listCatalogEntries(
+  options?: ListCatalogEntriesOptions,
+): Promise<ListCatalogEntriesResponse> {
+  const params = new URLSearchParams()
+  if (options?.family) params.set("family", options.family)
+  if (options?.source) params.set("source", options.source)
+  if (options?.vendor) params.set("vendor", options.vendor)
+  if (options?.installMethod) params.set("install_method", options.installMethod)
+  if (options?.q) params.set("q", options.q)
+  if (options?.sort) params.set("sort", options.sort)
+  if (options?.order) params.set("order", options.order)
+  if (options?.includeHidden) params.set("include_hidden", "true")
+  if (typeof options?.limit === "number") params.set("limit", String(options.limit))
+  if (typeof options?.offset === "number") params.set("offset", String(options.offset))
+  const qs = params.toString()
+  return request<ListCatalogEntriesResponse>(
+    `/catalog/entries${qs ? `?${qs}` : ""}`,
+    { method: "GET" },
+  )
+}
+
+/** POST /catalog/entries — create a new operator/override row. Throws
+ *  :class:`ApiError` with ``status=409`` on duplicate ``(id, source,
+ *  tenant_id)`` per ``uq_catalog_entries_visible``, ``status=422`` on
+ *  validation failure (e.g. malformed sha256), ``status=404`` when an
+ *  override is being created against a non-existent shipped base. */
+export async function createCatalogEntry(
+  body: CreateCatalogEntryRequest,
+): Promise<CatalogEntryDetail> {
+  return request<CatalogEntryDetail>("/catalog/entries", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+/** PATCH /catalog/entries/{id} — partial update. The backend rejects an
+ *  empty body with 422; the frontend should only call this with at
+ *  least one field set. Encodes `id` so a slash never escapes the path. */
+export async function patchCatalogEntry(
+  entryId: string,
+  body: PatchCatalogEntryRequest,
+): Promise<CatalogEntryDetail> {
+  return request<CatalogEntryDetail>(
+    `/catalog/entries/${encodeURIComponent(entryId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+/** DELETE /catalog/entries/{id} — per-tenant soft-delete (operator/
+ *  override row) or tombstone (shipped row gets an override with
+ *  hidden=TRUE). Returns 404 if the row does not resolve in the
+ *  caller's tenant scope. */
+export async function deleteCatalogEntry(
+  entryId: string,
+): Promise<DeleteCatalogEntryResponse> {
+  return request<DeleteCatalogEntryResponse>(
+    `/catalog/entries/${encodeURIComponent(entryId)}`,
+    { method: "DELETE" },
+  )
+}
+
+/** Trim + lowercase the candidate id. Mirrors what the backend's
+ *  Pydantic field accepts (raw kebab-case alphanumeric); the frontend
+ *  does not auto-rewrite invalid characters — it just trims. */
+export function normaliseCatalogEntryId(raw: string): string {
+  return raw.trim()
+}
+
+/** Validate a candidate catalog entry id. Returns ``null`` when valid,
+ *  otherwise a short user-facing message. Mirrors the backend's
+ *  ``ENTRY_ID_PATTERN`` and ``ENTRY_ID_MAX_LEN``. */
+export function validateCatalogEntryId(raw: string): string | null {
+  const v = normaliseCatalogEntryId(raw)
+  if (v.length === 0) return "id is required"
+  if (v.length > CATALOG_ENTRY_ID_MAX_LEN) {
+    return `id must be ≤ ${CATALOG_ENTRY_ID_MAX_LEN} chars`
+  }
+  if (!CATALOG_ENTRY_ID_PATTERN.test(v)) {
+    return "id must be kebab-case (lowercase alphanumerics + single hyphens)"
+  }
+  return null
+}
+
+/** Validate a candidate install URL. Empty / null is allowed (the
+ *  backend column is nullable for `noop` / `vendor_installer` install
+ *  methods); when present, must be http(s) and within the byte cap. */
+export function validateCatalogEntryInstallUrl(
+  raw: string | null | undefined,
+): string | null {
+  if (raw === null || raw === undefined) return null
+  const v = raw.trim()
+  if (v.length === 0) return null
+  if (v.length > CATALOG_ENTRY_INSTALL_URL_MAX_LEN) {
+    return `install URL must be ≤ ${CATALOG_ENTRY_INSTALL_URL_MAX_LEN} chars`
+  }
+  if (!/^https?:\/\//i.test(v)) {
+    return "install URL must start with http:// or https://"
+  }
+  return null
+}
+
+/** Validate a candidate sha256 hex digest. Empty / null is allowed (the
+ *  backend column is nullable when the install method does not require
+ *  a checksum, e.g. `vendor_installer`); when present must match the
+ *  fixed 64-char lowercase-hex pattern. */
+export function validateCatalogEntrySha256(
+  raw: string | null | undefined,
+): string | null {
+  if (raw === null || raw === undefined) return null
+  const v = raw.trim()
+  if (v.length === 0) return null
+  if (!CATALOG_ENTRY_SHA256_PATTERN.test(v)) {
+    return "sha256 must be 64 lowercase hex characters"
+  }
+  return null
+}
+
+/** Validate a candidate size_bytes value. Empty / null is allowed; when
+ *  present must be a non-negative integer below the 1 TiB ceiling. */
+export function validateCatalogEntrySizeBytes(
+  raw: number | null | undefined,
+): string | null {
+  if (raw === null || raw === undefined) return null
+  if (!Number.isFinite(raw)) return "size_bytes must be a number"
+  if (!Number.isInteger(raw)) return "size_bytes must be an integer"
+  if (raw < 0) return "size_bytes must be ≥ 0"
+  if (raw > CATALOG_ENTRY_SIZE_BYTES_MAX) {
+    return `size_bytes must be ≤ ${CATALOG_ENTRY_SIZE_BYTES_MAX} (1 TiB)`
+  }
+  return null
+}
+
+/** Validate a candidate vendor / display_name / version length. Empty
+ *  / null is permitted (override-source rows may carry NULL on the
+ *  inherit-from-shipped path); when present must respect the column
+ *  length. */
+export function validateCatalogEntryVendor(
+  raw: string | null | undefined,
+): string | null {
+  if (raw === null || raw === undefined) return null
+  const v = raw.trim()
+  if (v.length === 0) return null
+  if (v.length > CATALOG_ENTRY_VENDOR_MAX_LEN) {
+    return `vendor must be ≤ ${CATALOG_ENTRY_VENDOR_MAX_LEN} chars`
+  }
+  return null
+}
+
+export function validateCatalogEntryDisplayName(
+  raw: string | null | undefined,
+): string | null {
+  if (raw === null || raw === undefined) return null
+  const v = raw.trim()
+  if (v.length === 0) return null
+  if (v.length > CATALOG_ENTRY_DISPLAY_NAME_MAX_LEN) {
+    return `display_name must be ≤ ${CATALOG_ENTRY_DISPLAY_NAME_MAX_LEN} chars`
+  }
+  return null
+}
+
+export function validateCatalogEntryVersion(
+  raw: string | null | undefined,
+): string | null {
+  if (raw === null || raw === undefined) return null
+  const v = raw.trim()
+  if (v.length === 0) return null
+  if (v.length > CATALOG_ENTRY_VERSION_MAX_LEN) {
+    return `version must be ≤ ${CATALOG_ENTRY_VERSION_MAX_LEN} chars`
+  }
+  return null
+}
+
 /** BS.7.7 — POST /installer/jobs/{id}/cancel — flip a queued / running
  *  install job's PG row to ``state='cancelled'``. The sidecar's next
  *  ``report_progress`` round-trip sees the new state and the in-flight
