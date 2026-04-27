@@ -2844,7 +2844,7 @@ ls backend/alembic/versions/ | tail -3
 
 ### AS.0 — Compatibility & Migration Discipline ⭐ 必須先做（防 production 既有 user 被打擾）
 - [x] AS.0.1 既有 auth surface 完整盤點（列所有 login / signup / password-reset / API auth / git_credentials / LLM credentials call site + 列所有自動化 client → bypass list） — `docs/security/as_0_1_auth_surface_inventory.md`
-- [ ] AS.0.2 alembic 0056 — `tenants.auth_features JSONB DEFAULT '{}'` 欄位（既有 tenant 預設 `{oauth_login: false, turnstile_required: false, honeypot_active: false}` — **零行為變動**；新 tenant 預設全開）
+- [x] AS.0.2 alembic 0056 — `tenants.auth_features JSONB DEFAULT '{}'` 欄位（既有 tenant 預設 `{oauth_login: false, turnstile_required: false, honeypot_active: false}` — **零行為變動**；新 tenant 預設全開） — `backend/alembic/versions/0056_tenants_auth_features.py` + `backend/db.py` SQLite parity + `backend/routers/{admin_tenants,bootstrap}.py` 全開 INSERT + `backend/tests/test_alembic_0056_tenants_auth_features.py` (15 contract tests). **Production status: dev-only.** Next gate: deployed-inactive once alembic chain runs against prod PG.
 - [ ] AS.0.3 Account-linking 安全規則：OAuth email 匹配既有 password user → 強制 password 驗證 BEFORE link（防 takeover）；`users.auth_methods` set/array
 - [ ] AS.0.4 Credential refactor migration plan — expand-migrate-contract，舊表保留一個 release cycle，encryption key 連續性
 - [ ] AS.0.5 Turnstile fail-open 漸進策略：第 1 階段 4 週 fail-open + warning log → 第 2 階段 alert → tenant opt-in 切 fail-closed

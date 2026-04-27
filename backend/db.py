@@ -215,6 +215,9 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("event_log", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
         ("artifacts", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
         ("user_preferences", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
+        # AS.0.2 (alembic 0056): per-tenant auth feature gating. TEXT-of-JSON
+        # on SQLite, JSONB on PG. Default '{}' = no AS opinion.
+        ("tenants", "auth_features", "TEXT NOT NULL DEFAULT '{}'"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -445,12 +448,19 @@ def _conn() -> Any:
 
 _SCHEMA = """
 -- I1: Multi-tenancy foundation
+-- AS.0.2 (alembic 0056): auth_features TEXT-of-JSON column gates
+-- per-tenant AS roadmap knobs (oauth_login / turnstile_required /
+-- honeypot_active / auth_layer).  Default '{}' = no AS opinion;
+-- application interprets missing keys as legacy/false.  Kept TEXT
+-- on SQLite (no native JSONB); promoted to JSONB on PG via the
+-- 0056 migration's PG branch.
 CREATE TABLE IF NOT EXISTS tenants (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    plan        TEXT NOT NULL DEFAULT 'free',
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    enabled     INTEGER NOT NULL DEFAULT 1
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    plan            TEXT NOT NULL DEFAULT 'free',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    auth_features   TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS agents (

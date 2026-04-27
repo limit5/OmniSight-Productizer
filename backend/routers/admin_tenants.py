@@ -186,6 +186,17 @@ async def create_tenant(
     from backend.db_pool import get_pool
     enabled_int = 1 if req.enabled else 0
 
+    # AS.0.2: 新 tenant 預設全開 — explicit ``true`` for the three AS
+    # behavioral knobs the OAuth + Turnstile + honeypot rollout owns.
+    # Existing tenants live with ``false`` (alembic 0056 backfill);
+    # only tenants minted through this code path opt in by default.
+    # The flags are dormant until AS.1+ wires up the consumers.
+    new_tenant_auth_features = (
+        '{"honeypot_active": true, '
+        '"oauth_login": true, '
+        '"turnstile_required": true}'
+    )
+
     # ON CONFLICT DO NOTHING + RETURNING gives us atomic
     # "insert-or-detect-duplicate" semantics: the RETURNING row is
     # only present when the INSERT actually wrote, so a None result
@@ -194,11 +205,12 @@ async def create_tenant(
     # concurrent super-admins both think they created the same id.
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO tenants (id, name, plan, enabled) "
-            "VALUES ($1, $2, $3, $4) "
+            "INSERT INTO tenants (id, name, plan, enabled, auth_features) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb) "
             "ON CONFLICT (id) DO NOTHING "
             "RETURNING id, name, plan, enabled, created_at",
             req.id, req.name, req.plan, enabled_int,
+            new_tenant_auth_features,
         )
 
     if row is None:

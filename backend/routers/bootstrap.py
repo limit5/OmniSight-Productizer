@@ -496,11 +496,22 @@ async def bootstrap_init_tenant(req: InitTenantRequest) -> InitTenantResponse:
         # connection drop mid-flow) leaves zero half-built rows.
         # ``auth.create_user`` accepts a polymorphic ``conn`` so the
         # password hashing happens inside the same tx.
+        # AS.0.2: 新 tenant 預設全開 — explicit ``true`` on the three AS
+        # behavioral knobs.  Existing tenants get ``false`` via the
+        # 0056 backfill; the bootstrap-init path is for *new* tenants
+        # so we opt them in by default. Dormant until AS.1+ readers
+        # land.
+        new_tenant_auth_features = (
+            '{"honeypot_active": true, '
+            '"oauth_login": true, '
+            '"turnstile_required": true}'
+        )
         async with conn.transaction():
             await conn.execute(
-                "INSERT INTO tenants (id, name, plan, enabled) "
-                "VALUES ($1, $2, $3, 1)",
-                tenant_id, display, req.plan,
+                "INSERT INTO tenants "
+                "(id, name, plan, enabled, auth_features) "
+                "VALUES ($1, $2, $3, 1, $4::jsonb)",
+                tenant_id, display, req.plan, new_tenant_auth_features,
             )
 
             super_admin = await _au.create_user(
