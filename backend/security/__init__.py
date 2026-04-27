@@ -25,6 +25,15 @@ AS.1.3 (auth shared lib):
     `begin_authorization_for_vendor` / `build_authorize_url_for_vendor`
     catalog-aware shims onto AS.1.1. TS twin lives at
     `templates/_shared/oauth-client/vendors.ts`.
+
+AS.1.4 (auth shared lib):
+  - oauth_audit — canonical OAuth audit-event emit layer. Five
+    `emit_oauth_*` async helpers (login_init / login_callback /
+    refresh / unlink / token_rotated) plus typed context dataclasses
+    fixing the `before` / `after` JSON shape. Routes into
+    `backend.audit.log`; honours the AS.0.8 single knob (knob-false ⇒
+    silent skip per AS.0.8 §5 truth-table). TS twin lives at
+    `templates/_shared/oauth-client/audit.ts`.
 """
 
 from .prompt_hardening import (
@@ -35,6 +44,7 @@ from .prompt_hardening import (
 from .secret_filter import redact
 
 # Re-export pure submodules by name (cheap — constants + functions, no IO).
+from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_vendors  # noqa: F401
 from . import password_generator  # noqa: F401
@@ -43,6 +53,7 @@ __all__ = [
     "INJECTION_GUARD_PRELUDE",
     "harden_user_message",
     "looks_like_injection",
+    "oauth_audit",
     "oauth_client",
     "oauth_vendors",
     "password_generator",

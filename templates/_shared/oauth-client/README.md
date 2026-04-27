@@ -12,6 +12,7 @@ generated-app workspace.
 |---|---|---|
 | `index.ts` | AS.1.2 | Protocol primitives (PKCE / state / nonce / token parse / rotation / `AutoRefreshFetch`) |
 | `vendors.ts` | AS.1.3 | Frozen `VendorConfig` catalog for the 11 shipped providers + `getVendor` / `buildAuthorizeUrlForVendor` / `beginAuthorizationForVendor` shims |
+| `audit.ts` | AS.1.4 | OAuth audit-event format + sink-fanout emitters (5 events × `build*` + `emit*` pairs, typed contexts, `fingerprint` helper, `noopSink` default) |
 | `README.md` | doc | This file |
 
 ## Cross-twin contract
@@ -28,6 +29,11 @@ The Python and TypeScript sides MUST agree on:
 3. **Eleven vendor catalog entries** (AS.1.3) — every field of every
    `VendorConfig` (provider id / display name / endpoints / scopes /
    OIDC flag / extra params / refresh + PKCE flags) MUST byte-match.
+4. **OAuth audit event format** (AS.1.4) — for each of the five
+   events the `entity_kind` constant, the outcome vocabulary, the
+   `before` / `after` field set, the `entity_id` format, the
+   fingerprint algorithm (SHA-256 hex sliced to 12 chars), and the
+   default-actor rules MUST byte-match.
 
 Drift is caught by the AS.1.5 drift-guard tests:
 
@@ -43,6 +49,13 @@ Drift is caught by the AS.1.5 drift-guard tests:
     SHA-256 over the catalog order tuple, pins ordering.
   * `test_ts_twin_declares_eleven_export_const_vendors` — sanity
     that every Python vendor has a matching TS `export const`.
+* `backend/tests/test_oauth_audit.py`:
+  * `test_audit_outcome_vocab_parity_python_ts` — SHA-256 over the
+    sorted outcome tuples for each event family.
+  * `test_audit_payload_field_set_parity_python_ts[<event>]` — the
+    canonical `before` + `after` keysets per event family.
+  * `test_audit_fingerprint_parity_python_ts` — first-12-hex-char
+    SHA-256 helper produces the same value for a known input.
 
 If you change one side, you MUST change the other. CI red is the canary.
 
