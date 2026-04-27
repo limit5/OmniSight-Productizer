@@ -57,6 +57,20 @@ AS.2.4 (auth shared lib):
     `RefreshOutcome` carrying a fresh `TokenVaultRecord` whose
     `version` has been bumped by one for the AS.2.2 optimistic-lock
     `UPDATE ... WHERE version = old_version`.
+
+AS.2.5 (auth shared lib):
+  - oauth_revoke — stateless orchestrator that revokes a stored
+    OAuth credential at the IdP via RFC 7009 then surfaces a
+    `RevokeOutcome` the caller acts on (typically followed by
+    `DELETE FROM oauth_tokens`).  Powers both the user-initiated
+    unlink path (AS.6.1 `POST /api/v1/auth/oauth/{provider}/unlink`)
+    and the regulatory DSAR / GDPR right-to-erasure runbook.  IdP
+    revocation is best-effort (some vendors expose no endpoint —
+    Microsoft / Bitbucket / Notion / HubSpot / GitHub per the AS.1.3
+    catalog); local deletion is mandatory regardless of the IdP
+    result so DSAR compliance survives an unreachable provider.
+    Honours the AS.0.4 §6.2 "DSAR keeps working knob-off" invariant
+    via the audit layer's silent-skip.
 """
 
 from .prompt_hardening import (
@@ -70,6 +84,7 @@ from .secret_filter import redact
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_refresh_hook  # noqa: F401
+from . import oauth_revoke  # noqa: F401
 from . import oauth_vendors  # noqa: F401
 from . import password_generator  # noqa: F401
 from . import token_vault  # noqa: F401
@@ -81,6 +96,7 @@ __all__ = [
     "oauth_audit",
     "oauth_client",
     "oauth_refresh_hook",
+    "oauth_revoke",
     "oauth_vendors",
     "password_generator",
     "redact",
