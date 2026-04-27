@@ -1,27 +1,48 @@
-# `templates/_shared/oauth-client/` — AS.1.2 TS twin
+# `templates/_shared/oauth-client/` — AS.1.2 + AS.1.3 TS twin
 
-TypeScript twin of `backend/security/oauth_client.py`. Pure-functional
-protocol primitives + a fetch-based auto-refresh wrapper, suitable for
-emission into the generated-app workspace.
+TypeScript twin of `backend/security/oauth_client.py` (AS.1.2) plus
+`backend/security/oauth_vendors.py` (AS.1.3). Pure-functional protocol
+primitives + a fetch-based auto-refresh wrapper + a frozen catalog of
+the 11 shipped OAuth providers, suitable for emission into the
+generated-app workspace.
+
+## Files
+
+| File | Side | What it ships |
+|---|---|---|
+| `index.ts` | AS.1.2 | Protocol primitives (PKCE / state / nonce / token parse / rotation / `AutoRefreshFetch`) |
+| `vendors.ts` | AS.1.3 | Frozen `VendorConfig` catalog for the 11 shipped providers + `getVendor` / `buildAuthorizeUrlForVendor` / `beginAuthorizationForVendor` shims |
+| `README.md` | doc | This file |
 
 ## Cross-twin contract
 
 The Python and TypeScript sides MUST agree on:
 
-1. **Five canonical OAuth audit event strings** — `oauth.login_init` /
-   `oauth.login_callback` / `oauth.refresh` / `oauth.unlink` /
-   `oauth.token_rotated` (AS.0.8 §5 audit-behaviour matrix).
-2. **Four numeric defaults** — `PKCE_VERIFIER_MIN_LENGTH=43`,
+1. **Five canonical OAuth audit event strings** (AS.1.2) —
+   `oauth.login_init` / `oauth.login_callback` / `oauth.refresh` /
+   `oauth.unlink` / `oauth.token_rotated` (AS.0.8 §5 audit-behaviour
+   matrix).
+2. **Four numeric defaults** (AS.1.2) — `PKCE_VERIFIER_MIN_LENGTH=43`,
    `PKCE_VERIFIER_MAX_LENGTH=128`, `DEFAULT_STATE_TTL_SECONDS=600`,
    `DEFAULT_REFRESH_SKEW_SECONDS=60`.
+3. **Eleven vendor catalog entries** (AS.1.3) — every field of every
+   `VendorConfig` (provider id / display name / endpoints / scopes /
+   OIDC flag / extra params / refresh + PKCE flags) MUST byte-match.
 
-Drift between the two sides is caught by the AS.1.5 drift-guard test
-family in `backend/tests/test_oauth_client.py`:
+Drift is caught by the AS.1.5 drift-guard tests:
 
-* `test_oauth_event_strings_parity_python_ts` — joins the 5 event
-  strings and asserts SHA-256 equality.
-* `test_oauth_defaults_parity_python_ts_*` — extracts each numeric
-  literal from `index.ts` and asserts `==` against the Python module.
+* `backend/tests/test_oauth_client.py`:
+  * `test_oauth_event_strings_parity_python_ts` — SHA-256 over joined
+    event strings.
+  * `test_oauth_defaults_parity_python_ts_*` — each numeric literal
+    extracted from `index.ts` and `==`-compared.
+* `backend/tests/test_oauth_vendors.py`:
+  * `test_vendor_catalog_field_parity_python_ts[<vendor>]` —
+    parametrized per-vendor field-by-field check (11 instances).
+  * `test_canonical_vendor_id_order_sha256_parity_python_ts` —
+    SHA-256 over the catalog order tuple, pins ordering.
+  * `test_ts_twin_declares_eleven_export_const_vendors` — sanity
+    that every Python vendor has a matching TS `export const`.
 
 If you change one side, you MUST change the other. CI red is the canary.
 
@@ -100,6 +121,43 @@ sessionStorage.removeItem(`oauth:flow:${returnedState}`)
 // Auto-refresh fetch wrapper
 const fetcher = new AutoRefreshFetch(token, refreshFn, { onRotated })
 const r = await fetcher.fetch("https://api.example/me")
+```
+
+## AS.1.3 vendor catalog (`vendors.ts`)
+
+The 11 shipped vendors as frozen `VendorConfig` objects:
+
+| Slug | Display name | OIDC | Refresh | PKCE | Notes |
+|---|---|:-:|:-:|:-:|---|
+| `github` | GitHub | — | yes | yes | Modern GitHub Apps issue refresh tokens |
+| `google` | Google | yes | yes | yes | Needs `access_type=offline` + `prompt=consent` (catalog default) |
+| `microsoft` | Microsoft | yes | yes | yes | `offline_access` scope drives refresh (catalog default) |
+| `apple` | Apple | yes | yes | yes | `response_mode=form_post` required for `name` scope |
+| `gitlab` | GitLab | yes | yes | yes | OIDC active when `openid` is in scope |
+| `bitbucket` | Bitbucket | — | yes | yes | Cloud only — self-hosted overrides at use site |
+| `slack` | Slack | — | yes | yes | "Sign in with Slack" OIDC is a different endpoint |
+| `notion` | Notion | — | — | — | Long-lived token, no refresh, no scopes, no PKCE |
+| `salesforce` | Salesforce | yes | yes | yes | Caller adds `refresh_token` scope for refresh tokens |
+| `hubspot` | HubSpot | — | yes | — | Authorize on `app.hubspot.com`, token on `api.hubapi.com` |
+| `discord` | Discord | — | yes | yes | RFC 7009 revocation supported |
+
+```ts
+import { GITHUB, getVendor, beginAuthorizationForVendor } from "./vendors"
+
+// Direct constant
+const { url, flow } = await beginAuthorizationForVendor(GITHUB, {
+  clientId: "Iv1.…",
+  redirectUri: "https://app.example/callback",
+})
+
+// Or look up by slug (e.g. from a URL path segment)
+const vendor = getVendor(slugFromUrl)  // throws VendorNotFoundError if unknown
+const { url, flow } = await beginAuthorizationForVendor(vendor, {
+  clientId,
+  redirectUri,
+  scope: ["openid", "email"],         // override catalog default
+  extraAuthorizeParams: { hd: "tenant.example" },  // merged on top of catalog's
+})
 ```
 
 ## Randomness + crypto source
