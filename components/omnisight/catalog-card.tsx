@@ -191,6 +191,13 @@ export interface CatalogCardProps {
    *  index to keep variant cycling stable across re-orders (sort key
    *  changes, search-driven shrink/regrow). */
   floatVariantIndex?: number
+  /** BS.11.2 — explicit roving-tabindex value. Defaults to `0` when
+   *  `onSelect` is wired (preserving the BS.6.2 single-tab-stop card
+   *  contract for standalone usage), but `<CatalogTab />` overrides
+   *  with `-1` for non-active cards so the grid exposes a single tab
+   *  stop and arrow keys move focus within the grid. Ignored when
+   *  the card is non-interactive (no `onSelect`). */
+  tabIndex?: number
   className?: string
 }
 
@@ -457,6 +464,7 @@ export function CatalogCard({
   onRetry,
   onViewLog,
   floatVariantIndex,
+  tabIndex,
   className,
 }: CatalogCardProps) {
   const state = coerceInstallState(entry.installState)
@@ -582,7 +590,7 @@ export function CatalogCard({
   const interactiveProps = interactive
     ? {
         role: "button" as const,
-        tabIndex: 0,
+        tabIndex: typeof tabIndex === "number" ? tabIndex : 0,
         onClick: handleCardClick,
         onKeyDown: handleKeyDown,
       }

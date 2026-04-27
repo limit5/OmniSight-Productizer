@@ -105,9 +105,12 @@
  */
 
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react"
 import {
@@ -637,6 +640,39 @@ export function CatalogDetailPanel({
 
   const handleBack = useCallback(() => onBack(), [onBack])
 
+  // BS.11.2 — Esc returns to the catalog grid. The panel is the focus
+  // root once the operator clicks a card (focus moves to the back
+  // button on mount via the autofocus-on-mount effect below), so an
+  // `onKeyDown` here catches Escape regardless of which inner control
+  // is focused (back button, dependency chip, footer CTA, anywhere).
+  // We deliberately scope this to a panel-local handler rather than a
+  // `document.keydown` listener so multiple panels stacking (future
+  // BS.11.3 split-pane layouts) cannot fire each other's onBack.
+  const handlePanelKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (event.defaultPrevented) return
+      if (event.key === "Escape" || event.key === "Esc") {
+        event.preventDefault()
+        onBack()
+      }
+    },
+    [onBack],
+  )
+
+  // BS.11.2 — autofocus the back button on mount so screen readers
+  // announce the panel landing target and so a subsequent Esc /
+  // Tab / Shift+Tab has a sensible starting frame. Mounted via
+  // `useEffect` so SSR HTML is identical (focus only happens on the
+  // client). The button-ref is captured below with a `useRef` so the
+  // call is scoped to one DOM node (no `document.querySelector` in
+  // the hot path). Skip when the parent host already owns focus
+  // routing (jsdom + tests still observe the focus via the same ref
+  // because they mount the panel client-side).
+  const backButtonRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    backButtonRef.current?.focus({ preventScroll: true })
+  }, [entry.id])
+
   // The slide-in classes come from `tw-animate-css` (already imported in
   // app/globals.css). Reduced-motion users see a fade only — same time
   // budget but no horizontal translation, per BS ADR §6.
@@ -657,6 +693,9 @@ export function CatalogDetailPanel({
       data-activity-total={activity.length}
       data-activity-visible={visibleActivity.length}
       aria-label={`${entry.displayName} — ${stateMeta.label}`}
+      role="region"
+      tabIndex={-1}
+      onKeyDown={handlePanelKeyDown}
       className={[
         "relative flex flex-col rounded-md border bg-[var(--card)] p-4 md:p-5",
         stateMeta.borderClass,
@@ -672,6 +711,7 @@ export function CatalogDetailPanel({
         className="mb-3 flex flex-wrap items-center gap-2 border-b border-[var(--border)]/60 pb-3"
       >
         <button
+          ref={backButtonRef}
           type="button"
           data-testid="catalog-detail-panel-back"
           onClick={handleBack}

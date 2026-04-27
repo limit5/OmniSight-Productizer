@@ -82,6 +82,7 @@
 
 import {
   type ChangeEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -366,6 +367,18 @@ export function columnsForViewport(
  *  (no hydration mismatch); a `useEffect` mounted resize listener then
  *  flips it to the real width-derived value. The 1-column initial pass
  *  also keeps the virtualizer's `count` deterministic during hydration. */
+/** BS.11.2 — defensive `CSS.escape()` shim. The browser-native helper
+ *  is widely supported but not guaranteed under every jsdom version;
+ *  we fall back to a tiny escaper that is safe for catalog entry ids
+ *  (the only characters we have to worry about are the standard
+ *  `slug.dot/colon/dash` set used by `<CatalogEntry>.id`). */
+function cssEscape(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(value)
+  }
+  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`)
+}
+
 function useResponsiveColumnCount(density: CatalogDensity): number {
   const [columns, setColumns] = useState<number>(1)
   useEffect(() => {
@@ -458,6 +471,14 @@ export interface CatalogTabRenderContext {
    *  in. Optional so BS.6.1/6.2 preview hosts (no detail panel) leave
    *  the card non-interactive without writing extra glue. */
   onSelect?: () => void
+  /** BS.11.2 — roving tabindex value the page wrapper must forward
+   *  to `<CatalogCard tabIndex={...} />`. The grid maintains a single
+   *  tab stop (the active card gets `0`, every other card gets `-1`)
+   *  so Tab into the grid lands on one card and arrow keys move
+   *  focus inside the grid. Always a number — even on preview hosts
+   *  with a single visible card we emit `0` so the contract is
+   *  uniform. */
+  tabIndex: number
 }
 
 export interface CatalogTabProps {
@@ -538,9 +559,22 @@ export function CatalogTab({
     useScrollParallax<HTMLDivElement>({ speed: 0.05, maxOffsetPx: 20 })
 
   const detailEnabled = Boolean(renderDetail)
+  // BS.11.2 — roving tabindex anchor. `null` means "no card has been
+  // explicitly focused yet" → the first visible card receives the tab
+  // stop so Tab into the grid still lands somewhere sane. After arrow-
+  // key navigation the active id is pinned here. After detail close we
+  // restore it from `pendingFocusRef` so focus returns to the operator's
+  // last-clicked card (matches the focus-management ARIA pattern).
+  const [focusedEntryId, setFocusedEntryId] = useState<string | null>(null)
+  const pendingFocusRef = useRef<string | null>(null)
   const handleSelectEntry = useCallback(
     (entry: CatalogEntry) => {
       if (!detailEnabled) return
+      // Remember which card to restore focus to when the detail panel
+      // is dismissed — operators expect Esc to return them to the same
+      // card they clicked, not the start of the grid.
+      pendingFocusRef.current = entry.id
+      setFocusedEntryId(entry.id)
       setSelectedId(entry.id)
     },
     [detailEnabled],
@@ -666,6 +700,114 @@ export function CatalogTab({
     ? rowVirtualizer.getTotalSize()
     : 0
 
+  // BS.11.2 — keyboard navigation. Resolve the "active" tab-stop id:
+  // if the operator has explicitly focused / selected a card, that id
+  // wins; otherwise the first visible card is the tab anchor so Tab
+  // into the grid still lands somewhere sane. When the active id no
+  // longer matches a visible entry (filter / search shrunk the list),
+  // fall back to the first visible entry so the tab stop never lands
+  // on `tabindex=-1` for every card.
+  const visibleIds = useMemo(() => visible.map((e) => e.id), [visible])
+  const activeFocusId = useMemo(() => {
+    if (focusedEntryId && visibleIds.includes(focusedEntryId)) {
+      return focusedEntryId
+    }
+    return visibleIds[0] ?? null
+  }, [focusedEntryId, visibleIds])
+
+  // After the detail panel closes we restore focus to the previously
+  // selected card (matches the modal-dismiss focus-restoration ARIA
+  // pattern). `pendingFocusRef` is set when the operator opens detail
+  // and consumed once the grid re-mounts.
+  useEffect(() => {
+    if (detailOpen) return
+    const targetId = pendingFocusRef.current
+    if (!targetId) return
+    if (!visibleIds.includes(targetId)) {
+      pendingFocusRef.current = null
+      return
+    }
+    // Wait one frame so the static / virtualized grid has committed
+    // its DOM before we query for the slot's focusable child.
+    const raf = requestAnimationFrame(() => {
+      focusCardById(targetId)
+      pendingFocusRef.current = null
+    })
+    return () => cancelAnimationFrame(raf)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailOpen, visibleIds])
+
+  // Focus the focusable card root inside the slot wrapper. The card's
+  // outer-most motion shell carries `role="button"` + `tabindex` (set
+  // via the renderCard contract below) so we delegate to it rather
+  // than focusing the slot — the card is the element with click +
+  // Enter/Space affordance the operator expects to see focused.
+  const focusCardById = useCallback((id: string) => {
+    if (typeof document === "undefined") return
+    const slot = document.querySelector<HTMLElement>(
+      `[data-keynav-card-slot="true"][data-entry-id="${cssEscape(id)}"]`,
+    )
+    if (!slot) return
+    // Prefer the card root (role=button); fall back to the slot itself
+    // so jsdom + non-CatalogCard renderCards still receive focus.
+    const card = slot.querySelector<HTMLElement>(
+      "[role='button']",
+    )
+    ;(card ?? slot).focus()
+  }, [])
+
+  // Grid-level keyboard handler. Only intercepts arrow / Home / End /
+  // Escape; everything else bubbles so the card's own Enter/Space →
+  // onSelect path stays untouched.
+  const handleGridKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.defaultPrevented) return
+      const target = event.target as HTMLElement | null
+      if (!target) return
+      const slot = target.closest?.(
+        "[data-keynav-card-slot='true']",
+      ) as HTMLElement | null
+      if (!slot) return
+      const id = slot.getAttribute("data-entry-id")
+      if (!id) return
+      const idx = visibleIds.indexOf(id)
+      if (idx < 0) return
+      const cols = Math.max(1, columnCount)
+      let nextIdx = -1
+      switch (event.key) {
+        case "ArrowRight":
+          nextIdx = Math.min(idx + 1, visibleIds.length - 1)
+          break
+        case "ArrowLeft":
+          nextIdx = Math.max(idx - 1, 0)
+          break
+        case "ArrowDown":
+          nextIdx = Math.min(idx + cols, visibleIds.length - 1)
+          break
+        case "ArrowUp":
+          nextIdx = Math.max(idx - cols, 0)
+          break
+        case "Home":
+          nextIdx = 0
+          break
+        case "End":
+          nextIdx = visibleIds.length - 1
+          break
+        default:
+          return
+      }
+      if (nextIdx === idx || nextIdx < 0) return
+      event.preventDefault()
+      const nextId = visibleIds[nextIdx]
+      setFocusedEntryId(nextId)
+      // Defer the .focus() call to the next frame so React commits the
+      // new roving tabindex (`tabindex=0` moves to the next slot,
+      // previous slot drops to `-1`) before the focus() lands.
+      requestAnimationFrame(() => focusCardById(nextId))
+    },
+    [columnCount, focusCardById, visibleIds],
+  )
+
   return (
     <div
       ref={parallaxRef}
@@ -680,6 +822,7 @@ export function CatalogTab({
       data-catalog-motion-level={motionLevel}
       data-motion-parallax={parallaxStyle.transform ? "on" : "off"}
       data-motion-group-breathe={groupBreatheEnabled ? "on" : "off"}
+      data-catalog-active-focus-id={activeFocusId ?? ""}
       style={parallaxStyle}
       className={["flex flex-col gap-4", className ?? ""]
         .filter(Boolean)
@@ -866,6 +1009,11 @@ export function CatalogTab({
           data-grid-rendered-rows={virtualRows.length}
           data-grid-overscan={CATALOG_VIRTUALIZATION_OVERSCAN}
           data-grid-group-breathe={groupBreatheEnabled ? "on" : "off"}
+          role="grid"
+          aria-label="Catalog entries"
+          aria-rowcount={virtualRowCount}
+          aria-colcount={columnCount}
+          onKeyDown={handleGridKeyDown}
           className={[
             "max-h-[70vh] overflow-auto",
             gridAnimClass,
@@ -902,24 +1050,31 @@ export function CatalogTab({
                   }}
                   className={["grid", gridClass].join(" ")}
                 >
-                  {slice.map((entry, columnIndex) => (
-                    <div
-                      key={entry.id}
-                      data-testid={`catalog-tab-card-slot-${entry.id}`}
-                      data-entry-id={entry.id}
-                      data-entry-family={coerceFamily(entry.family)}
-                    >
-                      {renderEntryCard({
-                        entry,
-                        density,
-                        cardPaddingClass,
-                        floatVariantIndex: rowStart + columnIndex,
-                        onSelect: detailEnabled
-                          ? () => handleSelectEntry(entry)
-                          : undefined,
-                      })}
-                    </div>
-                  ))}
+                  {slice.map((entry, columnIndex) => {
+                    const isActiveFocus = entry.id === activeFocusId
+                    return (
+                      <div
+                        key={entry.id}
+                        data-testid={`catalog-tab-card-slot-${entry.id}`}
+                        data-entry-id={entry.id}
+                        data-entry-family={coerceFamily(entry.family)}
+                        data-keynav-card-slot="true"
+                        data-keynav-active={isActiveFocus ? "true" : "false"}
+                        role="gridcell"
+                      >
+                        {renderEntryCard({
+                          entry,
+                          density,
+                          cardPaddingClass,
+                          floatVariantIndex: rowStart + columnIndex,
+                          tabIndex: isActiveFocus ? 0 : -1,
+                          onSelect: detailEnabled
+                            ? () => handleSelectEntry(entry)
+                            : undefined,
+                        })}
+                      </div>
+                    )
+                  })}
                 </div>
               )
             })}
@@ -937,6 +1092,11 @@ export function CatalogTab({
           data-grid-virtualized="false"
           data-grid-column-count={columnCount}
           data-grid-group-breathe={groupBreatheEnabled ? "on" : "off"}
+          role="grid"
+          aria-label="Catalog entries"
+          aria-rowcount={Math.ceil(visibleCount / Math.max(1, columnCount))}
+          aria-colcount={columnCount}
+          onKeyDown={handleGridKeyDown}
           className={[
             "grid",
             gridClass,
@@ -946,24 +1106,31 @@ export function CatalogTab({
             .filter(Boolean)
             .join(" ")}
         >
-          {visible.map((entry, index) => (
-            <div
-              key={entry.id}
-              data-testid={`catalog-tab-card-slot-${entry.id}`}
-              data-entry-id={entry.id}
-              data-entry-family={coerceFamily(entry.family)}
-            >
-              {renderEntryCard({
-                entry,
-                density,
-                cardPaddingClass,
-                floatVariantIndex: index,
-                onSelect: detailEnabled
-                  ? () => handleSelectEntry(entry)
-                  : undefined,
-              })}
-            </div>
-          ))}
+          {visible.map((entry, index) => {
+            const isActiveFocus = entry.id === activeFocusId
+            return (
+              <div
+                key={entry.id}
+                data-testid={`catalog-tab-card-slot-${entry.id}`}
+                data-entry-id={entry.id}
+                data-entry-family={coerceFamily(entry.family)}
+                data-keynav-card-slot="true"
+                data-keynav-active={isActiveFocus ? "true" : "false"}
+                role="gridcell"
+              >
+                {renderEntryCard({
+                  entry,
+                  density,
+                  cardPaddingClass,
+                  floatVariantIndex: index,
+                  tabIndex: isActiveFocus ? 0 : -1,
+                  onSelect: detailEnabled
+                    ? () => handleSelectEntry(entry)
+                    : undefined,
+                })}
+              </div>
+            )
+          })}
         </div>
       )}
     </div>

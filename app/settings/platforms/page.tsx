@@ -957,6 +957,7 @@ function PlatformsPageInner() {
                 density,
                 cardPaddingClass,
                 floatVariantIndex,
+                tabIndex,
                 onSelect,
               }) => {
                 // BS.7.5 — splice the live SSE-derived install state
@@ -985,6 +986,12 @@ function PlatformsPageInner() {
                     // different idle-drift keyframe phases without
                     // the catalog growing a shared counter.
                     floatVariantIndex={floatVariantIndex}
+                    // BS.11.2 — roving tabindex value owned by the
+                    // catalog tab. Active card receives 0; every
+                    // other card gets -1 so Tab into the grid lands
+                    // on a single anchor and arrow keys move focus
+                    // within the grid.
+                    tabIndex={tabIndex}
                     // BS.6.3 — propagate the tab's selection callback
                     // so a card click flips `<CatalogTab />`'s
                     // selection state and the detail panel slides in.
