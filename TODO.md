@@ -2843,7 +2843,7 @@ ls backend/alembic/versions/ | tail -3
 > **總範圍**：**~21.75 day**（11 phase）
 
 ### AS.0 — Compatibility & Migration Discipline ⭐ 必須先做（防 production 既有 user 被打擾）
-- [ ] AS.0.1 既有 auth surface 完整盤點（列所有 login / signup / password-reset / API auth / git_credentials / LLM credentials call site + 列所有自動化 client → bypass list）
+- [x] AS.0.1 既有 auth surface 完整盤點（列所有 login / signup / password-reset / API auth / git_credentials / LLM credentials call site + 列所有自動化 client → bypass list） — `docs/security/as_0_1_auth_surface_inventory.md`
 - [ ] AS.0.2 alembic 0056 — `tenants.auth_features JSONB DEFAULT '{}'` 欄位（既有 tenant 預設 `{oauth_login: false, turnstile_required: false, honeypot_active: false}` — **零行為變動**；新 tenant 預設全開）
 - [ ] AS.0.3 Account-linking 安全規則：OAuth email 匹配既有 password user → 強制 password 驗證 BEFORE link（防 takeover）；`users.auth_methods` set/array
 - [ ] AS.0.4 Credential refactor migration plan — expand-migrate-contract，舊表保留一個 release cycle，encryption key 連續性
