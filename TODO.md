@@ -2880,7 +2880,7 @@ ls backend/alembic/versions/ | tail -3
 - 預估：**1 day**
 
 ### AS.4 — Honeypot Helper
-- [ ] AS.4.1 Hidden field generator + bot 偵測（搭 AS.3 雙保險）
+- [x] AS.4.1 Hidden field generator + bot 偵測（搭 AS.3 雙保險）
 - 預估：**0.25 day**
 
 ### AS.5 — Observability + Audit Hooks
