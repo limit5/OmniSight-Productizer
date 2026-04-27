@@ -72,7 +72,7 @@
  * write race exists at this layer.
  */
 
-import { Suspense, useCallback, useMemo, useState } from "react"
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import {
@@ -158,6 +158,76 @@ export function coercePlatformsTab(value: string | null | undefined): PlatformsT
   return PLATFORMS_DEFAULT_TAB
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// BS.10.4 — `?entry=<slug>` deeplink contract.
+//
+// Used by the BS.10 install-coach card (backend `_build_templated_coach
+// _message` + `_COACH_SYSTEM_PROMPT`) to point an operator straight at
+// a specific catalog entry. The link shape is frozen as
+// `/settings/platforms?entry=<entry-id>` — both the templated fallback
+// path and the LLM-driven prompt emit URLs of this exact shape, so any
+// drift between the two sides becomes a CI failure (BS.10.5 tests).
+//
+// The behaviour on landing:
+//   1. Force `?tab=catalog` if the operator landed on a different tab
+//      (deeplinks are tab-agnostic so the URL stays clean — operator
+//      can re-share the link without baking a `?tab=` segment in).
+//   2. Poll the DOM for the catalog card slot whose testid matches the
+//      entry id; once mounted, `scrollIntoView({ block: "center" })`
+//      and focus the first available action button (install / update /
+//      retry, in priority order — same vocabulary the card surfaces).
+//   3. Consume the `?entry=` segment via `router.replace` so a refresh
+//      doesn't re-fire the scroll/focus loop, and a screenshot of the
+//      page after landing isn't visually noisier than a clean visit.
+//   4. Bail after `DEEPLINK_TIMEOUT_MS` if the slot never appears (entry
+//      isn't in the live catalog or the catalog feed never resolved) —
+//      `handledEntryRef` marks the id consumed so re-renders don't
+//      poll forever; operator can re-trigger by clicking the deeplink
+//      again.
+// ─────────────────────────────────────────────────────────────────────
+
+/** Query-param name the BS.10 coach card uses to point at a specific
+ *  entry. Frozen as a const so test fixtures + future deeplink callers
+ *  share one source of truth. Mirrors the literal shape baked into
+ *  `backend/routers/invoke.py::_toolchain_install_url`. */
+export const PLATFORMS_DEEPLINK_ENTRY_PARAM = "entry"
+
+/** Build the canonical `?entry=` deeplink URL the BS.10 coach card
+ *  emits. Mirrors the Python-side helper byte-for-byte; exported so
+ *  BS.10.5 frontend tests can lock the shape against backend drift. */
+export function buildPlatformsEntryDeeplink(entryId: string): string {
+  return `/settings/platforms?${PLATFORMS_DEEPLINK_ENTRY_PARAM}=${encodeURIComponent(entryId)}`
+}
+
+/** Test-id template for a catalog tab card slot. Mirrors the literal
+ *  used by `<CatalogTab />` and the BS.10.4 deeplink poll selector,
+ *  exported here so tests + future deeplink callers can build / match
+ *  the selector without scraping the source string. */
+export function catalogTabCardSlotTestId(entryId: string): string {
+  return `catalog-tab-card-slot-${entryId}`
+}
+
+/** Poll budget for the BS.10.4 deeplink slot search (ms). Exported so
+ *  unit tests can wait long enough without baking a magic number. */
+export const PLATFORMS_DEEPLINK_TIMEOUT_MS = 4000
+
+/** Poll cadence for the BS.10.4 deeplink slot search (ms). Below the
+ *  Frame budget to feel "instant" on a typical mount-after-fetch
+ *  sequence; exported for the BS.10.5 test harness only. */
+export const PLATFORMS_DEEPLINK_POLL_INTERVAL_MS = 80
+
+/** Action-button testids the deeplink hook tries to focus, in priority
+ *  order. The catalog card surfaces only one of these depending on
+ *  `installState` — install (available), update (update-available),
+ *  retry (failed). Installed / installing states have no actionable
+ *  button so the deeplink scroll lands but no focus is asserted.
+ *  Exported so BS.10.5 tests can mirror the same priority list. */
+export const PLATFORMS_DEEPLINK_ACTION_TESTIDS = [
+  "catalog-card-action-install",
+  "catalog-card-action-update",
+  "catalog-card-action-retry",
+] as const
+
 interface TabMeta {
   id: PlatformsTabId
   label: string
@@ -216,6 +286,128 @@ function PlatformsPageInner() {
     },
     [router, searchParams, tab],
   )
+
+  // BS.10.4 — `?entry=<slug>` deeplink → auto-scroll grid + auto-focus
+  // install button. The BS.10 install-coach card emits markdown links
+  // of shape `/settings/platforms?entry=<entry-id>`; landing here we:
+  //   1. force `?tab=catalog` if the operator arrived on a different
+  //      tab so the entry actually has a chance to render,
+  //   2. poll the DOM for the matching `catalog-tab-card-slot-<id>`
+  //      slot (the catalog feed may still be in flight when the page
+  //      mounts) and `scrollIntoView({ block: "center" })` once found,
+  //   3. focus the first available action button in priority order
+  //      (install / update / retry) so an operator-arrived-via-deeplink
+  //      can hit Enter to immediately fire the BS.7.1 install flow,
+  //   4. consume the `entry` query segment via `router.replace` so a
+  //      refresh / re-render doesn't re-fire the scroll/focus loop.
+  //
+  // Module-global state audit: the effect closes over a per-component
+  // `useRef` (`handledEntryRef`); each `<PlatformsPageInner />` mount
+  // owns its own ref. No module-level mutable state. Browser-only —
+  // the uvicorn `--workers N` model does not apply (answer #1: each
+  // browser tab derives the same view from the same Next.js bundle).
+  //
+  // Read-after-write timing audit: the effect issues a single
+  // `router.replace` (consume the param) AFTER the slot is found and
+  // scroll/focus has been queued; subsequent re-renders see
+  // `?entry=` cleared so the effect short-circuits via
+  // `handledEntryRef`. No API round-trip, no PG / Redis / cross-worker
+  // race at this layer — the install button click itself goes through
+  // the existing R20-A PEP HOLD path (BS.7.1 `handleInstall`).
+  const handledEntryRef = useRef<string | null>(null)
+  useEffect(() => {
+    const requestedEntryId = searchParams.get(PLATFORMS_DEEPLINK_ENTRY_PARAM)
+    if (!requestedEntryId) return
+    if (handledEntryRef.current === requestedEntryId) return
+
+    if (tab !== "catalog") {
+      // Force the catalog tab via `replace` (not `push`) so the
+      // operator's back-stack is not polluted by the auto-correction.
+      // The next searchParams tick re-runs this effect with
+      // tab === "catalog" and the slot poll begins.
+      const params = new URLSearchParams(searchParams.toString())
+      params.set("tab", "catalog")
+      router.replace(`/settings/platforms?${params.toString()}`)
+      return
+    }
+
+    let cancelled = false
+    let elapsedMs = 0
+    const slotSelector = `[data-testid="${catalogTabCardSlotTestId(requestedEntryId)}"]`
+
+    const tryHighlight = () => {
+      if (cancelled) return
+      const slot = typeof document === "undefined"
+        ? null
+        : document.querySelector<HTMLElement>(slotSelector)
+      if (slot) {
+        // `block: "center"` keeps the highlighted card off the very
+        // top of the scroll container so the operator sees it as the
+        // hero of the page rather than buried under the sub-tab nav.
+        try {
+          slot.scrollIntoView({ behavior: "smooth", block: "center" })
+        } catch {
+          // jsdom + older browsers ignore unknown options silently;
+          // fall back to a plain scroll so the test harness still
+          // passes through the function call without throwing.
+          slot.scrollIntoView()
+        }
+        const actionBtn = PLATFORMS_DEEPLINK_ACTION_TESTIDS.reduce<
+          HTMLButtonElement | null
+        >((acc, testId) => {
+          if (acc) return acc
+          return slot.querySelector<HTMLButtonElement>(
+            `[data-testid="${testId}"]`,
+          )
+        }, null)
+        if (actionBtn) {
+          // Defer focus past the smooth-scroll's reflow so the focus
+          // ring lands on the final position rather than mid-scroll.
+          // `preventScroll: true` keeps the focus call from competing
+          // with `scrollIntoView` — without it some browsers re-snap
+          // the scroll to the top of the focused element rather than
+          // the center we just chose.
+          requestAnimationFrame(() => {
+            if (cancelled) return
+            try {
+              actionBtn.focus({ preventScroll: true })
+            } catch {
+              actionBtn.focus()
+            }
+          })
+        }
+        handledEntryRef.current = requestedEntryId
+        // Consume the `entry` segment so a refresh / re-render doesn't
+        // re-fire the scroll/focus loop. Other params (`tab`, future
+        // BS.x flags) survive verbatim.
+        const params = new URLSearchParams(searchParams.toString())
+        params.delete(PLATFORMS_DEEPLINK_ENTRY_PARAM)
+        const qs = params.toString()
+        router.replace(qs ? `/settings/platforms?${qs}` : "/settings/platforms")
+        return
+      }
+      elapsedMs += PLATFORMS_DEEPLINK_POLL_INTERVAL_MS
+      if (elapsedMs >= PLATFORMS_DEEPLINK_TIMEOUT_MS) {
+        // Slot never appeared. Mark the id handled so re-renders
+        // don't keep polling forever — operator can re-trigger by
+        // clicking the BS.10 coach link again (fresh navigation =
+        // ref ≠ id => effect re-runs).
+        handledEntryRef.current = requestedEntryId
+        return
+      }
+      timeoutId = window.setTimeout(tryHighlight, PLATFORMS_DEEPLINK_POLL_INTERVAL_MS)
+    }
+
+    // Defer the first poll one tick so React commits the catalog tab
+    // render (and any in-flight `useCatalogEntries()` hydration) before
+    // we go DOM-hunting — otherwise the very first tick after a tab
+    // swap would always miss.
+    let timeoutId = window.setTimeout(tryHighlight, 0)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [searchParams, tab, router])
 
   const panelMeta = TAB_META[tab]
   const PanelIcon = panelMeta.icon
