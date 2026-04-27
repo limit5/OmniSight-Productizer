@@ -72,6 +72,30 @@ AS.2.5 (auth shared lib):
     Honours the AS.0.4 §6.2 "DSAR keeps working knob-off" invariant
     via the audit layer's silent-skip.
 
+AS.6.3 (OmniSight self-integration — Turnstile backend verify wiring):
+  - turnstile_form_verifier — universal helper that wraps AS.3.1
+    ``bot_challenge.verify_with_fallback`` + AS.3.4
+    ``should_reject`` + AS.5.1 ``auth.bot_challenge_pass`` /
+    ``auth.bot_challenge_fail`` rollup emit into one entry point so
+    the four OmniSight self-forms (login / signup / password-reset
+    / contact) share identical wiring per AS.0.5 §6.1 acceptance
+    criteria. Provides 4 canonical form-action constants
+    (``login`` / ``signup`` / ``pwreset`` / ``contact``) + 4 form-path
+    constants byte-equal :data:`backend.security.honeypot._FORM_PREFIXES`
+    keys (cross-module drift-guarded), reads phase from
+    ``OMNISIGHT_BOT_CHALLENGE_PHASE`` env var (default 1 fail-open
+    per AS.0.5 §2.2), reads provider site secrets via
+    :func:`bot_challenge.secret_env_for`, and provides two async
+    orchestrators — :func:`verify_form_token` (returns the result for
+    fail-open Phase 1/2) and :func:`verify_form_token_or_reject`
+    (raises :class:`bot_challenge.BotChallengeRejected` on Phase 3
+    confirmed reject so the HTTP layer can map to the canonical 429
+    ``bot_challenge_failed`` response). The router-side wiring lives
+    in ``backend/routers/auth.py`` for the two existing forms
+    (``/auth/login`` + ``/auth/change-password``); the helper itself
+    is the SoT every future caller (signup / contact / generated-app
+    forms via the AS.7.x React widgets) reuses.
+
 AS.6.2 (OmniSight self-integration — credential vault expand phase):
   - credential_vault — generalised binding-envelope vault that
     extends the AS.2.1 token_vault pattern to git_accounts and
@@ -179,6 +203,7 @@ from . import oauth_revoke  # noqa: F401
 from . import oauth_vendors  # noqa: F401
 from . import password_generator  # noqa: F401
 from . import token_vault  # noqa: F401
+from . import turnstile_form_verifier  # noqa: F401
 
 __all__ = [
     "INJECTION_GUARD_PRELUDE",
@@ -197,4 +222,5 @@ __all__ = [
     "password_generator",
     "redact",
     "token_vault",
+    "turnstile_form_verifier",
 ]

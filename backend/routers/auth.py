@@ -126,6 +126,15 @@ def _record_failed_login(request: Request) -> None:
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3)
     password: str = Field(min_length=1)
+    # AS.6.3 — Turnstile (or fallback provider) widget token issued
+    # client-side. Optional so the existing JSON contract isn't
+    # broken in Phase 1 (fail-open: a missing token routes through
+    # ``bot_challenge.unverified_servererr`` allow=True). Phase 3
+    # advance makes this de-facto required by rejecting requests
+    # that the captcha layer can't verify; the caller's JSON shape
+    # doesn't need to change. Field name pinned by
+    # :data:`backend.security.turnstile_form_verifier.TURNSTILE_TOKEN_BODY_FIELD`.
+    turnstile_token: str | None = None
 
 
 def _mask_email(email: str) -> str:
@@ -140,6 +149,34 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
 
     client_ip = _client_key(request)
     email_key = req.email.lower().strip()
+
+    # AS.6.3 — bot challenge Turnstile backend verify (reuses AS.3).
+    # Fail-open by default in Phase 1/2 (AS.0.5 §2 phase matrix —
+    # current_phase reads OMNISIGHT_BOT_CHALLENGE_PHASE env). Phase 3
+    # confirmed low-score → BotChallengeRejected → 429
+    # ``bot_challenge_failed``. Bypass / knob-off / server-error all
+    # fail-open. Audit fan-out (forensic ``bot_challenge.*`` from
+    # AS.3.1 + rollup ``auth.bot_challenge_pass`` / ``auth.bot_challenge_fail``
+    # from AS.5.1 via the helper) happens before the response.
+    from backend.security import bot_challenge as _bc
+    from backend.security import turnstile_form_verifier as _tv
+    bc_token = _tv.extract_token_from_request(
+        request, body_payload={
+            _tv.TURNSTILE_TOKEN_BODY_FIELD: req.turnstile_token,
+        },
+    )
+    try:
+        await _tv.verify_form_token_or_reject(
+            _tv.FORM_ACTION_LOGIN,
+            bc_token,
+            request=request,
+            actor=email_key or "anonymous",
+        )
+    except _bc.BotChallengeRejected as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"error": exc.code},
+        )
 
     ip_ok, ip_wait = ip_limiter().allow(client_ip)
     if not ip_ok:
@@ -314,6 +351,13 @@ async def user_tenants(user: auth.User = Depends(auth.current_user)) -> list[dic
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=12)
+    # AS.6.3 — Turnstile widget token. Same fail-open Phase-1
+    # contract as :class:`LoginRequest.turnstile_token` (optional;
+    # missing / unverified → fail-open in Phase 1/2). The
+    # password-reset form is the closest current-OmniSight analogue
+    # of the AS.0.5 §6.1 ``password-reset`` form; the action label
+    # is :data:`turnstile_form_verifier.FORM_ACTION_PASSWORD_RESET`.
+    turnstile_token: str | None = None
 
 
 @router.post("/auth/change-password")
@@ -321,6 +365,31 @@ async def change_password(req: ChangePasswordRequest, request: Request,
                           response: Response,
                           user: auth.User = Depends(auth.current_user)) -> dict:
     """Change the current user's password. Rotates session token."""
+    # AS.6.3 — bot challenge backend verify on the password-reset
+    # form. Same fail-open Phase 1/2 contract as ``/auth/login``
+    # (AS.0.5 §2). The form_action is ``pwreset`` so the AS.5.1
+    # rollup row is keyed on the password-reset form_path and the
+    # AS.5.2 dashboard can split per-form challenge rates.
+    from backend.security import bot_challenge as _bc
+    from backend.security import turnstile_form_verifier as _tv
+    bc_token = _tv.extract_token_from_request(
+        request, body_payload={
+            _tv.TURNSTILE_TOKEN_BODY_FIELD: req.turnstile_token,
+        },
+    )
+    try:
+        await _tv.verify_form_token_or_reject(
+            _tv.FORM_ACTION_PASSWORD_RESET,
+            bc_token,
+            request=request,
+            actor=user.email,
+        )
+    except _bc.BotChallengeRejected as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"error": exc.code},
+        )
+
     verified = await auth.authenticate_password(user.email, req.current_password)
     if not verified:
         raise HTTPException(status_code=401, detail="current password is incorrect")
