@@ -207,6 +207,63 @@ export function coerceFamily(value: string | undefined | null): CatalogFamily {
   return "custom"
 }
 
+/** BS.11.3 — coerce an arbitrary install-state string to a known bucket
+ *  inside the catalog-tab module. Mirrors `coerceInstallState` from
+ *  `catalog-card.tsx` but kept local so the aria-live announcer can run
+ *  without pulling a circular dependency on the card module. */
+function coerceCatalogInstallState(
+  value: string | null | undefined,
+): CatalogInstallState {
+  if (
+    value &&
+    (CATALOG_INSTALL_STATES as readonly string[]).includes(value)
+  ) {
+    return value as CatalogInstallState
+  }
+  return "available"
+}
+
+/** BS.11.3 — render a screen-reader announcement for a single
+ *  catalog-entry install-state transition. Returns `null` when the
+ *  transition does not need to be announced (no change, or the operator
+ *  walked back to the benign `available` baseline). Exported so unit
+ *  tests can lock every branch and so consumers in BS.10 / BS.7 can
+ *  reuse the phrasing if they want a separate live region. Pure — no
+ *  React, no listener, safe under SSR. */
+export function buildCatalogStateAnnouncement(
+  entry: CatalogEntry,
+  prev: CatalogInstallState | undefined,
+  next: CatalogInstallState,
+): string | null {
+  if (prev === next) return null
+  if (next === "available") return null
+  switch (next) {
+    case "installing": {
+      if (prev === "failed") return `${entry.displayName} install retry started`
+      if (prev === "update-available") return `${entry.displayName} update started`
+      return `${entry.displayName} install started`
+    }
+    case "installed":
+      return `${entry.displayName} installed successfully`
+    case "failed": {
+      const reason = entry.metadata?.failureReason
+      if (typeof reason === "string" && reason.length > 0) {
+        return `${entry.displayName} install failed — ${reason}`
+      }
+      return `${entry.displayName} install failed`
+    }
+    case "update-available": {
+      const nv = entry.metadata?.nextVersion
+      if (typeof nv === "string" && nv.length > 0) {
+        return `Update available for ${entry.displayName} — version ${nv}`
+      }
+      return `Update available for ${entry.displayName}`
+    }
+    default:
+      return null
+  }
+}
+
 /** Coerce a persisted-string density to a known bucket. Used when
  *  reading from `localStorage` — corrupted / legacy values fall back
  *  to the default rather than throwing or rendering an empty grid. */
@@ -567,6 +624,17 @@ export function CatalogTab({
   // last-clicked card (matches the focus-management ARIA pattern).
   const [focusedEntryId, setFocusedEntryId] = useState<string | null>(null)
   const pendingFocusRef = useRef<string | null>(null)
+
+  // BS.11.3 — screen-reader live region for install-state transitions.
+  // `previousStatesRef` snapshots the install-state of every entry the
+  // last time we rendered, so a state flip on any entry (e.g.
+  // available → installing → installed via the BS.7 install pipeline)
+  // produces an aria-live polite announcement without forcing the
+  // operator to chase visual chrome. The first render seeds the map
+  // (no announcement) so we don't burst a transcript of every catalog
+  // entry's current state on tab mount.
+  const previousStatesRef = useRef<Map<string, CatalogInstallState> | null>(null)
+  const [stateAnnouncement, setStateAnnouncement] = useState<string>("")
   const handleSelectEntry = useCallback(
     (entry: CatalogEntry) => {
       if (!detailEnabled) return
@@ -612,6 +680,29 @@ export function CatalogTab({
     () => filterAndSortEntries({ entries, family: familyFilter, search, sort }),
     [entries, familyFilter, search, sort],
   )
+
+  // BS.11.3 — diff install-state across renders + emit the latest
+  // announcement. Runs after commit so React owns ordering. Multiple
+  // simultaneous transitions (rare — usually only one entry flips per
+  // render) collapse to the most-recent `entries` order; if a louder
+  // schedule is needed later we can queue them, but in practice the
+  // BS.7 install pipeline only flips one entry at a time per SSE tick.
+  useEffect(() => {
+    const prevMap = previousStatesRef.current
+    const nextMap = new Map<string, CatalogInstallState>()
+    let lastMessage: string | null = null
+    for (const e of entries) {
+      const next = coerceCatalogInstallState(e.installState)
+      nextMap.set(e.id, next)
+      if (prevMap) {
+        const prev = prevMap.get(e.id)
+        const msg = buildCatalogStateAnnouncement(e, prev, next)
+        if (msg) lastMessage = msg
+      }
+    }
+    previousStatesRef.current = nextMap
+    if (lastMessage) setStateAnnouncement(lastMessage)
+  }, [entries])
 
   const totalCount = entries.length
   const visibleCount = visible.length
@@ -823,11 +914,31 @@ export function CatalogTab({
       data-motion-parallax={parallaxStyle.transform ? "on" : "off"}
       data-motion-group-breathe={groupBreatheEnabled ? "on" : "off"}
       data-catalog-active-focus-id={activeFocusId ?? ""}
+      data-catalog-announcement={stateAnnouncement}
       style={parallaxStyle}
       className={["flex flex-col gap-4", className ?? ""]
         .filter(Boolean)
         .join(" ")}
     >
+      {/* ── BS.11.3 — Screen-reader live region. Visually hidden via
+       *      `sr-only` (Tailwind utility, hides without removing from
+       *      the a11y tree). `aria-live="polite"` so install-state
+       *      transitions announced by `<CatalogTab />` interrupt the
+       *      reader at the next safe boundary instead of stomping the
+       *      operator's current speech. `aria-atomic="true"` so the
+       *      reader announces the full message when the text changes
+       *      (otherwise some readers only read the diff and may swallow
+       *      a state flip from "Installed" → "Install failed" on the
+       *      same entry id). */}
+      <div
+        data-testid="catalog-tab-announcer"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {stateAnnouncement}
+      </div>
       {/* ── Toolbar ─────────────────────────────────────────────── */}
       <div
         data-testid="catalog-tab-toolbar"

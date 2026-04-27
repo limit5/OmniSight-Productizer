@@ -249,6 +249,45 @@ export function coerceInstallState(
  *  tests can lock the cycle without inspecting CSS. */
 export const CATALOG_CARD_FLOAT_VARIANTS = ["a", "b", "c", "d"] as const
 
+/** BS.11.3 — assemble the screen-reader aria-label for a catalog card.
+ *  Goes beyond BS.6.2's `${displayName} — ${statusText}` so SR users
+ *  hear the full operator-relevant context in one announcement instead
+ *  of having to scan the inner chips: family, vendor, version, and a
+ *  state-aware status phrase that surfaces installing percent, update
+ *  next-version, or failure reason inline. Exported so BS.11.3 unit
+ *  tests can lock the contract without scraping the DOM and so any
+ *  future renderCard host can opt-in to the same phrasing. Pure
+ *  function — no React, no listener — safe to call during SSR. */
+export function buildCatalogCardAriaLabel(
+  entry: CatalogEntry,
+  state: CatalogInstallState,
+  progress: number,
+): string {
+  const family = coerceFamily(entry.family)
+  const familyLabel = FAMILY_LABEL[family]
+  const palette = STATE_PALETTE[state]
+  const parts: string[] = [entry.displayName]
+  parts.push(`${familyLabel} catalog entry`)
+  parts.push(`vendor ${entry.vendor}`)
+  if (entry.version) parts.push(`version ${entry.version}`)
+  let status = palette.statusText
+  if (state === "installing") {
+    status = `Installing — ${Math.round(clampInstallProgress(progress))} percent complete`
+  } else if (state === "update-available") {
+    const nv = entry.metadata?.nextVersion
+    if (typeof nv === "string" && nv.length > 0) {
+      status = `Update available — version ${nv}`
+    }
+  } else if (state === "failed") {
+    const reason = entry.metadata?.failureReason
+    if (typeof reason === "string" && reason.length > 0) {
+      status = `Install failed — ${reason}`
+    }
+  }
+  parts.push(status)
+  return parts.join(", ")
+}
+
 export function pickCatalogCardFloatVariant(
   seed: number | string,
 ): FloatVariant {
@@ -670,7 +709,7 @@ export function CatalogCard({
       {...(state === "installing"
         ? { "data-progress": progress.toFixed(2) }
         : {})}
-      aria-label={`${entry.displayName} — ${palette.statusText}`}
+      aria-label={buildCatalogCardAriaLabel(entry, state, progress)}
       style={tiltStyle}
       className={["relative h-full rounded-md", className ?? ""]
         .filter(Boolean)

@@ -139,6 +139,7 @@ import {
   PendingInstallTooltip,
 } from "@/components/omnisight/catalog-card"
 import {
+  buildCatalogStateAnnouncement,
   type CatalogEntry,
   type CatalogFamily,
   type CatalogInstallState,
@@ -238,6 +239,49 @@ export function coerceActivityKind(value: unknown): CatalogActivityKind {
     return value as CatalogActivityKind
   }
   return "info"
+}
+
+/** BS.11.3 — assemble the screen-reader aria-label for the detail
+ *  panel. Mirrors `buildCatalogCardAriaLabel` shape so SR users hear a
+ *  uniform phrasing across the card (in the grid) and the panel (after
+ *  expand): displayName, family, vendor, version, status phrase. The
+ *  panel's status phrase surfaces the same install-state nuance —
+ *  installing percent, update next-version, or failure reason — so
+ *  operators don't have to scan the orb / chips to confirm what they
+ *  just navigated into. Pure helper, exported so BS.11.3 unit tests
+ *  can lock the contract without scraping inner DOM. */
+export function buildCatalogDetailPanelAriaLabel(
+  entry: CatalogEntry,
+  state: CatalogInstallState,
+  progress: number,
+): string {
+  const family = coerceFamily(entry.family)
+  const familyLabel = FAMILY_LABEL[family]
+  const stateMeta = STATE_META[state]
+  const parts: string[] = [`${entry.displayName} detail`]
+  parts.push(`${familyLabel} catalog entry`)
+  parts.push(`vendor ${entry.vendor}`)
+  if (entry.version) parts.push(`version ${entry.version}`)
+  let status = stateMeta.label
+  if (state === "installing") {
+    status = `Installing — ${Math.round(clampInstallProgress(progress))} percent complete`
+  } else if (state === "update-available") {
+    const nv = entry.metadata?.nextVersion
+    if (typeof nv === "string" && nv.length > 0) {
+      status = `Update available — version ${nv}`
+    }
+  } else if (state === "failed") {
+    const reason = entry.metadata?.failureReason
+    if (typeof reason === "string" && reason.length > 0) {
+      status = `Install failed — ${reason}`
+    }
+  } else if (state === "installed") {
+    status = "Installed and healthy"
+  } else if (state === "available") {
+    status = "Available to install"
+  }
+  parts.push(status)
+  return parts.join(", ")
 }
 
 /** Pull dependencies out of an entry. Reads the `depends_on` array on
@@ -673,6 +717,33 @@ export function CatalogDetailPanel({
     backButtonRef.current?.focus({ preventScroll: true })
   }, [entry.id])
 
+  // BS.11.3 — panel-local aria-live region. Announces install-state
+  // transitions while the panel is mounted (e.g. operator opens the
+  // panel on `available`, hits Install, the BS.7 SSE flips
+  // installState → "installing" → "installed"). Tracks the same
+  // entry id only — when the operator switches selection the previous
+  // state ref is reseeded so we don't replay a stale "installed"
+  // announcement against the new entry.
+  const previousStateRef = useRef<{
+    id: string
+    state: CatalogInstallState
+  } | null>(null)
+  const [stateAnnouncement, setStateAnnouncement] = useState<string>("")
+  useEffect(() => {
+    const prev = previousStateRef.current
+    if (prev && prev.id === entry.id) {
+      const msg = buildCatalogStateAnnouncement(entry, prev.state, state)
+      if (msg) setStateAnnouncement(msg)
+    } else {
+      // Selection changed (or first mount) — reset the announcer so a
+      // fresh entry doesn't inherit the previous entry's transition.
+      setStateAnnouncement("")
+    }
+    previousStateRef.current = { id: entry.id, state }
+  }, [entry, state])
+
+  const ariaLabel = buildCatalogDetailPanelAriaLabel(entry, state, progress)
+
   // The slide-in classes come from `tw-animate-css` (already imported in
   // app/globals.css). Reduced-motion users see a fade only — same time
   // budget but no horizontal translation, per BS ADR §6.
@@ -692,7 +763,8 @@ export function CatalogDetailPanel({
       data-usedby-count={usedByWorkspaces.length}
       data-activity-total={activity.length}
       data-activity-visible={visibleActivity.length}
-      aria-label={`${entry.displayName} — ${stateMeta.label}`}
+      data-detail-announcement={stateAnnouncement}
+      aria-label={ariaLabel}
       role="region"
       tabIndex={-1}
       onKeyDown={handlePanelKeyDown}
@@ -705,6 +777,22 @@ export function CatalogDetailPanel({
         .filter(Boolean)
         .join(" ")}
     >
+      {/* ── BS.11.3 — Panel-local screen-reader live region. Visually
+       *      hidden via Tailwind `sr-only` so it stays in the a11y tree
+       *      but never paints. Announces install-state transitions for
+       *      the currently-selected entry while the panel is mounted —
+       *      operator hits Install, the BS.7 SSE flips state, the
+       *      reader announces "installed successfully" without forcing
+       *      a re-scan of the orb / chips. */}
+      <div
+        data-testid="catalog-detail-panel-announcer"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {stateAnnouncement}
+      </div>
       {/* ── Top bar: back · family · state · vendor · version ─────── */}
       <header
         data-testid="catalog-detail-panel-toolbar"
