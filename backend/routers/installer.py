@@ -1014,6 +1014,45 @@ async def cancel_job(
         before={"state": existing["state"]},
         after={"state": "cancelled", "reason": reason},
     )
+
+    # BS.7.7 — broadcast the cancel decision over the existing SSE
+    # ``installer_progress`` channel so cross-tab + cross-worker UIs
+    # converge instantly (no need to wait for the sidecar's next
+    # report_progress round-trip to surface state=cancelled). The
+    # frontend's ``useInstallJobs()`` hook is already a single
+    # subscriber; mapping cancel onto the same channel avoids adding a
+    # second subscription path. ``stage="cancel"`` lets ToastCenter /
+    # drawer disambiguate operator-driven cancels from the sidecar's
+    # later confirmation tick (which carries the original method
+    # stage). Best-effort emit — never propagate bus failure to the
+    # operator who already saw the 200 response.
+    try:
+        from backend import events as _events
+        _events.emit_installer_progress(
+            job_id,
+            state=row["state"],
+            stage="cancel",
+            bytes_done=int(row["bytes_done"]),
+            bytes_total=(
+                int(row["bytes_total"])
+                if row["bytes_total"] is not None else None
+            ),
+            eta_seconds=(
+                int(row["eta_seconds"])
+                if row["eta_seconds"] is not None else None
+            ),
+            log_tail=row["log_tail"] or "",
+            sidecar_id=row["sidecar_id"],
+            entry_id=row["entry_id"],
+            broadcast_scope="tenant",
+            tenant_id=tid,
+        )
+    except Exception as exc:  # pragma: no cover — bus already swallows
+        logger.warning(
+            "installer_progress SSE emit failed for cancelled job %s: %s",
+            job_id, exc,
+        )
+
     return JSONResponse(status_code=200, content=_row_to_install_job(row))
 
 

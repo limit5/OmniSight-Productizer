@@ -31,6 +31,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   ApiError,
+  cancelInstallJob,
   createInstallJob,
   generateInstallIdempotencyKey,
   getInstallJob,
@@ -304,6 +305,85 @@ describe("BS.7.1 — installer API client", () => {
     it("throws ApiError on a 404 (row gone / wrong tenant)", async () => {
       mockFetchOnce(404, { detail: "install job not found" })
       await expect(getInstallJob(JOB_ID)).rejects.toBeInstanceOf(ApiError)
+    })
+  })
+
+  // ─── BS.7.7 ──────────────────────────────────────────────────────────
+  describe("cancelInstallJob()", () => {
+    const JOB_ID = "ij-running00abc"
+    const CANCELLED_ROW: InstallJob = {
+      ...SAMPLE_JOB,
+      id: JOB_ID,
+      state: "cancelled",
+      error_reason: "operator_cancelled",
+      completed_at: "2026-04-27T10:00:30Z",
+    }
+
+    it("POSTs to /api/v1/installer/jobs/{id}/cancel with no body when reason is omitted", async () => {
+      const spy = mockFetchOnce(200, CANCELLED_ROW)
+      const result = await cancelInstallJob(JOB_ID)
+      expect(result).toEqual(CANCELLED_ROW)
+      expect(spy).toHaveBeenCalledTimes(1)
+      const [url, init] = spy.mock.calls[0]!
+      expect(url).toBe(`/api/v1/installer/jobs/${JOB_ID}/cancel`)
+      expect((init as RequestInit).method).toBe("POST")
+      // Zero-byte POST when no reason — backend defaults to
+      // ``operator_cancelled`` so the typical click flow is the
+      // smallest possible request.
+      expect((init as RequestInit).body).toBeUndefined()
+    })
+
+    it("forwards a non-empty reason as JSON body", async () => {
+      const spy = mockFetchOnce(200, CANCELLED_ROW)
+      await cancelInstallJob(JOB_ID, { reason: "wrong vendor channel" })
+      const [, init] = spy.mock.calls[0]!
+      const body = JSON.parse((init as RequestInit).body as string)
+      expect(body).toEqual({ reason: "wrong vendor channel" })
+    })
+
+    it("omits the body when reason is null / undefined / empty string", async () => {
+      const spyA = mockFetchOnce(200, CANCELLED_ROW)
+      await cancelInstallJob(JOB_ID, { reason: null })
+      expect((spyA.mock.calls[0]![1] as RequestInit).body).toBeUndefined()
+
+      const spyB = mockFetchOnce(200, CANCELLED_ROW)
+      await cancelInstallJob(JOB_ID, { reason: undefined })
+      expect((spyB.mock.calls[0]![1] as RequestInit).body).toBeUndefined()
+
+      const spyC = mockFetchOnce(200, CANCELLED_ROW)
+      await cancelInstallJob(JOB_ID, { reason: "" })
+      expect((spyC.mock.calls[0]![1] as RequestInit).body).toBeUndefined()
+    })
+
+    it("URL-encodes the job id segment", async () => {
+      const spy = mockFetchOnce(200, CANCELLED_ROW)
+      await cancelInstallJob("ij with/slash")
+      const [url] = spy.mock.calls[0]!
+      expect(url).toBe("/api/v1/installer/jobs/ij%20with%2Fslash/cancel")
+    })
+
+    it("throws ApiError on a 404 (row not found / wrong tenant)", async () => {
+      mockFetchOnce(404, { detail: "install job not found" })
+      await expect(cancelInstallJob(JOB_ID)).rejects.toBeInstanceOf(ApiError)
+    })
+
+    it("throws ApiError on a 409 (row is already terminal — completed/failed/cancelled)", async () => {
+      mockFetchOnce(409, {
+        detail: "job is in terminal state 'completed'; cannot cancel",
+      })
+      await expect(cancelInstallJob(JOB_ID)).rejects.toBeInstanceOf(ApiError)
+    })
+
+    it("throws ApiError on a 403 (caller lacks operator role)", async () => {
+      mockFetchOnce(403, { detail: "operator role required" })
+      await expect(cancelInstallJob(JOB_ID)).rejects.toBeInstanceOf(ApiError)
+    })
+
+    it("throws ApiError on a 422 (malformed job id)", async () => {
+      mockFetchOnce(422, { detail: "invalid job id" })
+      await expect(cancelInstallJob("not!valid")).rejects.toBeInstanceOf(
+        ApiError,
+      )
     })
   })
 })

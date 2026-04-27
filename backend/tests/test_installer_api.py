@@ -747,6 +747,72 @@ async def test_cancel_queued_job_flips_state_200(
 
 
 @_requires_pg
+async def test_cancel_emits_installer_progress_sse_event(
+    bs24_client, pg_test_pool, monkeypatch, seeded_anon_user,
+):
+    """BS.7.7 — cancel_job emits ``installer_progress`` over SSE so
+    cross-tab + cross-worker UIs converge on the cancelled state
+    immediately, without waiting for the sidecar's next
+    ``report_progress`` round-trip.
+
+    The frontend's ``useInstallJobs()`` hook is a single subscriber
+    on this channel, so reusing it (rather than adding a dedicated
+    ``installer_cancelled`` channel) keeps the wire surface minimal.
+    ``stage="cancel"`` lets ToastCenter / drawer disambiguate the
+    operator-driven cancel from a sidecar's later confirmation tick
+    (which carries the original method stage).
+    """
+    from backend import events as _events
+    from backend.routers import installer
+    entry_id = "bs77-cancel-emit-sse"
+    monkeypatch.setattr(
+        installer._pep, "evaluate", _make_pep_stub("auto_allow"),
+    )
+    captured: list[dict[str, object]] = []
+
+    def fake_emit(job_id: str, **kwargs: object) -> None:
+        captured.append({"job_id": job_id, **kwargs})
+
+    monkeypatch.setattr(_events, "emit_installer_progress", fake_emit)
+    try:
+        await _seed_shipped(pg_test_pool, entry_id)
+        post = await bs24_client.post(
+            "/api/v1/installer/jobs",
+            json={"entry_id": entry_id, "idempotency_key": _new_idempotency_key()},
+        )
+        job_id = post.json()["id"]
+        cancel = await bs24_client.post(
+            f"/api/v1/installer/jobs/{job_id}/cancel",
+            json={"reason": "operator-changed-mind"},
+        )
+        assert cancel.status_code == 200, cancel.text
+
+        # Exactly one emit, addressed to the cancelled job, with the
+        # cancel-specific stage discriminator.
+        assert len(captured) == 1, captured
+        ev = captured[0]
+        assert ev["job_id"] == job_id
+        assert ev["state"] == "cancelled"
+        assert ev["stage"] == "cancel"
+        # broadcast scope is tenant — install_jobs is tenant-scoped.
+        assert ev["broadcast_scope"] == "tenant"
+        # tenant_id pulled from the row's tenant context, not the URL.
+        assert isinstance(ev["tenant_id"], str)
+        assert len(ev["tenant_id"]) > 0
+        # entry_id passed through so the frontend can update the
+        # corresponding catalog card without a second round-trip.
+        assert ev["entry_id"] == entry_id
+        # bytes / eta / log_tail come straight off the cancelled row;
+        # for a queued (never-claimed) row they're 0 / None / "".
+        assert ev["bytes_done"] == 0
+        assert ev["bytes_total"] is None
+        assert ev["eta_seconds"] is None
+        assert ev["log_tail"] == ""
+    finally:
+        await _purge_jobs_and_entry(pg_test_pool, entry_id)
+
+
+@_requires_pg
 async def test_cancel_terminal_state_returns_409(
     bs24_client, pg_test_pool, monkeypatch, seeded_anon_user,
 ):

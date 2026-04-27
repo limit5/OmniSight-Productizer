@@ -5814,6 +5814,46 @@ export async function getInstallJob(jobId: string): Promise<InstallJob> {
   )
 }
 
+/** BS.7.7 — POST /installer/jobs/{id}/cancel — flip a queued / running
+ *  install job's PG row to ``state='cancelled'``. The sidecar's next
+ *  ``report_progress`` round-trip sees the new state and the in-flight
+ *  install method aborts via :class:`InstallCancelled` (BS.4.2 contract).
+ *
+ *  The optional ``reason`` is recorded on the row's ``error_reason``
+ *  column when one was not previously set; it is surfaced in the audit
+ *  log + the ``installer.job_cancelled`` event. Pass ``null`` /
+ *  ``undefined`` to use the backend default ``"operator_cancelled"``.
+ *
+ *  Throws :class:`ApiError` on:
+ *    • 404 — row not found / wrong tenant.
+ *    • 409 — row is already terminal (completed / failed / cancelled).
+ *    • 422 — malformed job_id (does not match
+ *      ``backend/routers/installer._INSTALL_JOB_ID_RE``).
+ *    • 403 — caller lacks ``operator`` role.
+ *
+ *  The frontend cancel UX is optimistic: the caller normally drops the
+ *  row from local SSE state the moment this helper resolves (or even
+ *  before, since the SSE feed re-confirms in ~10–50 ms via the
+ *  ``installer_progress`` ``state="cancelled"`` event the backend emits
+ *  inside :func:`backend.routers.installer.cancel_job`). */
+export async function cancelInstallJob(
+  jobId: string,
+  options?: { reason?: string | null },
+): Promise<InstallJob> {
+  const reason = options?.reason
+  // Body is optional — backend accepts ``null`` / empty body. Only send
+  // a body when a non-empty reason is supplied so the typical
+  // operator-clicks-cancel flow is a zero-byte POST.
+  const init: RequestInit = { method: "POST" }
+  if (typeof reason === "string" && reason.length > 0) {
+    init.body = JSON.stringify({ reason })
+  }
+  return request<InstallJob>(
+    `/installer/jobs/${encodeURIComponent(jobId)}/cancel`,
+    init,
+  )
+}
+
 // ─── N3 — OpenAPI compile-time contract tripwire ──────────────────────────
 // These type aliases reach into `lib/generated/api-types.ts` (auto-generated
 // from the FastAPI app's OpenAPI schema). The moment any of the referenced
