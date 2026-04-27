@@ -1,0 +1,266 @@
+/**
+ * AS.7.0 — Auth Visual Foundation CSS.
+ *
+ * Owns the static fallback gradient (used when the WebGL canvas
+ * fails to initialise or the motion budget says "no shader") plus
+ * the keyframes for the brand wordmark traveling-light sweep,
+ * breathing pulse, glass-card neon-glow flicker, and
+ * `prefers-reduced-motion: reduce` overrides.
+ *
+ * The four BS.3 motion levels are surfaced as a single
+ * `data-motion-level="off|subtle|normal|dramatic"` attribute on
+ * the AS.7.0 root so the CSS can gate animations without per-class
+ * variants. Components also get `data-as7-...` attributes to opt
+ * each effect in/out independently — see the rules below.
+ *
+ * Naming convention: every selector in this file is prefixed with
+ * `.as7-` so it does not collide with any existing OmniSight
+ * component class name.
+ */
+
+/* ─────────────────────────────────────────────────────────────────
+ * Root scaffold
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-root {
+  position: relative;
+  min-height: 100vh;
+  width: 100%;
+  isolation: isolate; /* establish a stacking context for the canvas */
+  background:
+    radial-gradient(ellipse at top, rgba(56, 189, 248, 0.12), transparent 55%),
+    radial-gradient(ellipse at bottom, rgba(168, 85, 247, 0.10), transparent 60%),
+    linear-gradient(180deg, #010409 0%, #0a0f1f 60%, #050912 100%);
+  color: var(--foreground);
+  overflow: hidden;
+}
+
+.as7-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.as7-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem 1rem;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Glass card
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-glass-card {
+  position: relative;
+  width: min(420px, 100%);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.78), rgba(8, 15, 30, 0.62));
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 0 0 1px rgba(56, 189, 248, 0.08),
+    0 30px 60px -20px rgba(0, 0, 0, 0.55),
+    0 0 80px -20px rgba(56, 189, 248, 0.18);
+  padding: 2rem 1.75rem;
+  transform-origin: center center;
+  will-change: transform, box-shadow;
+}
+
+.as7-glass-card[data-as7-flicker="on"] {
+  animation: as7-glow-flicker 9s ease-in-out infinite;
+}
+
+.as7-glass-card[data-as7-flicker="off"] {
+  animation: none;
+}
+
+/* Corner brackets — purely decorative scan-line accents. Drawn
+ * with absolutely-positioned pseudo-elements so they don't steal
+ * pointer events from the form fields inside the card. */
+.as7-glass-card::before,
+.as7-glass-card::after {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-color: rgba(56, 189, 248, 0.65);
+  pointer-events: none;
+}
+
+.as7-glass-card::before {
+  top: -1px;
+  left: -1px;
+  border-top: 1px solid;
+  border-left: 1px solid;
+}
+
+.as7-glass-card::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 1px solid;
+  border-right: 1px solid;
+}
+
+@keyframes as7-glow-flicker {
+  0%,
+  100% {
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.04) inset,
+      0 0 0 1px rgba(56, 189, 248, 0.08),
+      0 30px 60px -20px rgba(0, 0, 0, 0.55),
+      0 0 80px -20px rgba(56, 189, 248, 0.18);
+  }
+  35% {
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.04) inset,
+      0 0 0 1px rgba(56, 189, 248, 0.18),
+      0 30px 60px -20px rgba(0, 0, 0, 0.55),
+      0 0 110px -20px rgba(56, 189, 248, 0.32);
+  }
+  72% {
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.06) inset,
+      0 0 0 1px rgba(168, 85, 247, 0.12),
+      0 30px 60px -20px rgba(0, 0, 0, 0.55),
+      0 0 90px -20px rgba(168, 85, 247, 0.28);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Brand wordmark + traveling light + breathing pulse
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-wordmark {
+  position: relative;
+  display: inline-block;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 600;
+  font-size: 1.5rem;
+  letter-spacing: 0.18em;
+  color: rgba(226, 232, 240, 0.96);
+  text-transform: uppercase;
+}
+
+.as7-wordmark[data-as7-breathe="on"] {
+  animation: as7-breathing-pulse 4s ease-in-out infinite;
+}
+
+.as7-wordmark[data-as7-bloom="on"] {
+  /* Bloom on input focus — short non-looping animation, replayed
+   * by toggling the attribute with a key (see component). */
+  animation: as7-wordmark-bloom 600ms ease-out;
+}
+
+.as7-wordmark[data-as7-traveling-light="on"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 30%,
+    rgba(56, 189, 248, 0.55) 50%,
+    transparent 70%
+  );
+  background-size: 250% 100%;
+  background-position: -50% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  pointer-events: none;
+  animation: as7-traveling-light 4s linear infinite;
+}
+
+@keyframes as7-traveling-light {
+  0% {
+    background-position: 250% 0;
+  }
+  100% {
+    background-position: -50% 0;
+  }
+}
+
+@keyframes as7-breathing-pulse {
+  0%,
+  100% {
+    text-shadow: 0 0 8px rgba(56, 189, 248, 0.18);
+  }
+  50% {
+    text-shadow: 0 0 18px rgba(56, 189, 248, 0.42);
+  }
+}
+
+@keyframes as7-wordmark-bloom {
+  0% {
+    text-shadow: 0 0 8px rgba(56, 189, 248, 0.2);
+  }
+  35% {
+    text-shadow:
+      0 0 24px rgba(56, 189, 248, 0.7),
+      0 0 48px rgba(168, 85, 247, 0.45);
+  }
+  100% {
+    text-shadow: 0 0 8px rgba(56, 189, 248, 0.2);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Motion-level gating
+ * ───────────────────────────────────────────────────────────────── */
+
+/* `off` and `subtle` strip every keyframe-based animation. The
+ * battery-aware demote and BS.3.5 reduce-motion short-circuit
+ * both flow through `data-motion-level`, so a single attribute
+ * controls every effect surface. */
+.as7-root[data-motion-level="off"] *,
+.as7-root[data-motion-level="off"] *::before,
+.as7-root[data-motion-level="off"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+.as7-root[data-motion-level="subtle"] .as7-glass-card,
+.as7-root[data-motion-level="subtle"] .as7-glass-card::before,
+.as7-root[data-motion-level="subtle"] .as7-glass-card::after {
+  animation: none !important;
+}
+
+.as7-root[data-motion-level="subtle"] .as7-wordmark[data-as7-traveling-light="on"]::after {
+  animation: none !important;
+  background: none;
+  -webkit-text-fill-color: inherit;
+  color: inherit;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * `prefers-reduced-motion: reduce` — last-line WCAG R25.2 defence
+ * ───────────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .as7-root,
+  .as7-root *,
+  .as7-root *::before,
+  .as7-root *::after {
+    animation-duration: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0s !important;
+  }
+  .as7-canvas {
+    /* The WebGL canvas is also masked by the leaf, but if a
+     * caller renders the canvas without the gate this CSS rule
+     * keeps the page from flashing the nebula at OS-flag users.
+     */
+    display: none;
+  }
+}
