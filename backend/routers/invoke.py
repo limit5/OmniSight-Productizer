@@ -1451,19 +1451,127 @@ def _build_coach_context(triggers: list[str], pending_count: int) -> str:
     return "\n".join(parts)
 
 
+# BS.10.2: human-friendly display labels per ``_TOOLCHAIN_KEYWORD_MAP``
+# slug. Used by :func:`_build_templated_coach_message` to render an
+# actionable bullet for each ``missing_toolchain:<slug>`` trigger. Tuple
+# is ``(name, hint)`` where *name* is the headline label (mirrors the
+# catalog display name; English so a Chinese-speaking operator can paste
+# it straight into a search) and *hint* a one-line "what is this for"
+# helper so the operator does not need to leave the chat to guess.
+#
+# Module-global state audit (per docs/sop/implement_phase_step.md
+# Step 1): module-level frozen mapping — every uvicorn worker derives
+# the same value from source code (Answer #1, per-worker stateless
+# derivation). Keys must stay aligned with ``_TOOLCHAIN_KEYWORD_MAP``;
+# the inline drift check at module bottom (BS.10.2) raises at import
+# time if a slug is missing here so a future toolchain row added to
+# ``_TOOLCHAIN_KEYWORD_MAP`` cannot silently render as "<slug> /
+# toolchain".
+_TOOLCHAIN_DISPLAY: dict[str, tuple[str, str]] = {
+    "android-sdk-platform-tools": (
+        "Android SDK Platform Tools",
+        "adb / fastboot / Android API",
+    ),
+    "espressif-esp-idf-v5": (
+        "ESP-IDF v5",
+        "Espressif ESP32 / ESP8266 SDK",
+    ),
+    "nodejs-lts-20": (
+        "Node.js LTS 20",
+        "npm / pnpm / yarn / TypeScript",
+    ),
+    "python-uv": (
+        "Python toolchain (uv)",
+        "uv pip / venv / pytest",
+    ),
+    "arm-gnu-toolchain-13": (
+        "ARM GNU Toolchain 13",
+        "arm-none-eabi-gcc / Cortex-M cross-compile",
+    ),
+}
+
+
+def _missing_toolchain_slugs(triggers: list[str]) -> list[str]:
+    """Extract entry-id slugs from ``missing_toolchain:<slug>`` triggers.
+
+    Pure helper. Order is preserved — the planner emits sorted triggers
+    (see :func:`_detect_coaching_triggers`) so the rendered message reads
+    identically across runs and is stable for the BS.10.5 contract test.
+    """
+    out: list[str] = []
+    for t in triggers:
+        if not t.startswith("missing_toolchain:"):
+            continue
+        slug = t.split(":", 1)[1]
+        if slug:
+            out.append(slug)
+    return out
+
+
+def _toolchain_install_url(slug: str) -> str:
+    """BS.10.4 deeplink — `Settings → Platforms` with the ``entry`` query
+    param pre-filled. Slug is locked to ``_TOOLCHAIN_KEYWORD_MAP`` keys
+    (catalog ``entry_id`` values) so frontend / backend stay in lock-step.
+    """
+    return f"/settings/platforms?entry={slug}"
+
+
 def _build_templated_coach_message(
     triggers: list[str], pending_count: int,
 ) -> str:
-    """LLM-unavailable fallback. CJK-default to match the operator base.
+    """LLM-unavailable fallback. CJK-default to match the operator base
+    with bilingual action labels (``安裝 / Install``) so an English-only
+    operator still has a clear call-to-action.
 
     Hard-coded but still vastly better than ``[HEALTH] check complete``.
     Phrasing mirrors what the LLM would produce so the UX stays
     consistent across LLM-on / LLM-off environments.
+
+    BS.10.2 — recognises ``missing_toolchain:<slug>`` triggers and emits
+    one bullet per missing entry with a deeplink to
+    ``/settings/platforms?entry=<slug>`` (handled by BS.10.4). The
+    missing-toolchain banner takes priority over the legacy
+    ``empty_workspace`` / ``stale_pep`` branches because a toolchain gap
+    is the most specific blocker in front of the operator's intended
+    work — install-first-then-run is the productive path.
     """
     has_empty = "empty_workspace" in triggers
     has_pep = "stale_pep" in triggers
+    missing_slugs = _missing_toolchain_slugs(triggers)
     lines: list[str] = []
-    if has_empty and has_pep:
+    if missing_slugs:
+        # Banner phrasing differs slightly for single vs many — a 1-of-1
+        # install gets a pointed sentence; an N-of-N install gets a
+        # summary-then-list so the operator sees the full scope before
+        # committing.
+        if len(missing_slugs) == 1:
+            slug = missing_slugs[0]
+            name, hint = _TOOLCHAIN_DISPLAY.get(slug, (slug, "toolchain"))
+            lines.append(
+                "看起來你接下來要跑的工作會用到 "
+                f"**{name}** ({hint})，但這台機器還沒裝過 — 先裝再跑會比較順。"
+            )
+            lines.append(
+                f"- 一鍵安裝 / Install **{name}**: "
+                f"[Settings → Platforms]({_toolchain_install_url(slug)})"
+            )
+        else:
+            lines.append(
+                f"接下來要跑的工作會用到 {len(missing_slugs)} 個 toolchain，"
+                "但這台機器都還沒裝 — 先裝再跑會比較順。"
+            )
+            for slug in missing_slugs:
+                name, hint = _TOOLCHAIN_DISPLAY.get(slug, (slug, "toolchain"))
+                lines.append(
+                    f"- {name} ({hint}): "
+                    f"[安裝 / Install]({_toolchain_install_url(slug)})"
+                )
+        if has_pep:
+            lines.append(
+                f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
+                "決定等你 APPROVE / REJECT"
+            )
+    elif has_empty and has_pep:
         lines.append(
             f"工作台目前是空的，但右下角還有 {pending_count} 個 PEP HOLD "
             "決定從之前留下來等你處理。"
@@ -1489,6 +1597,19 @@ def _build_templated_coach_message(
     else:
         lines.append("一切看起來都正常 — 隨時告訴我你想做什麼。")
     return "\n".join(lines)
+
+
+# BS.10.2 drift guard — ``_TOOLCHAIN_DISPLAY`` must cover every slug in
+# ``_TOOLCHAIN_KEYWORD_MAP`` so a future toolchain row added to the
+# detector cannot silently fall through to the ``(slug, "toolchain")``
+# placeholder. Module-import-time check (single statement, no IO);
+# raises ``AssertionError`` so ``import backend.routers.invoke`` fails
+# loudly during CI rather than producing a degraded UX in prod.
+assert set(_TOOLCHAIN_DISPLAY.keys()) == set(_TOOLCHAIN_KEYWORD_MAP.keys()), (
+    "_TOOLCHAIN_DISPLAY drift vs _TOOLCHAIN_KEYWORD_MAP: "
+    f"missing={set(_TOOLCHAIN_KEYWORD_MAP) - set(_TOOLCHAIN_DISPLAY)} "
+    f"extra={set(_TOOLCHAIN_DISPLAY) - set(_TOOLCHAIN_KEYWORD_MAP)}"
+)
 
 
 async def _generate_coach_message(action: dict) -> str:
