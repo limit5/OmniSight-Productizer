@@ -2623,10 +2623,27 @@ export async function listTenantProjects(tenantId: string): Promise<TenantProjec
   return res.projects
 }
 
-export async function login(email: string, password: string): Promise<LoginResponse> {
+/**
+ * AS.7.1 — login() accepts an optional `extras` map merged into the
+ * JSON request body. Used by the login page to thread the AS.6.3
+ * turnstile_token + the AS.6.4 rotating honeypot field name (a
+ * dynamic key) through the same request without expanding the
+ * function's positional signature with five new args.
+ *
+ * Backend `LoginRequest` declares `model_config = {"extra": "allow"}`
+ * so the unknown keys round-trip into `model_dump()` for the
+ * AS.6.4 honeypot validate_honeypot to inspect. Same shape contract
+ * applies for any future per-form extras the AS.7.x scaffolds add.
+ */
+export async function login(
+  email: string,
+  password: string,
+  extras?: Readonly<Record<string, string>>,
+): Promise<LoginResponse> {
+  const payload: Record<string, string> = { email, password, ...(extras || {}) }
   return request<LoginResponse>("/auth/login", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify(payload),
   })
 }
 

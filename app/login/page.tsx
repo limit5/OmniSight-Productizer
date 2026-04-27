@@ -1,19 +1,85 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
-import { Lock, Mail, AlertCircle, Loader2, Shield, ArrowLeft, KeyRound } from "lucide-react"
-import { AuthProvider, useAuth } from "@/lib/auth-context"
+/**
+ * AS.7.1 — Login page redesign.
+ *
+ * Composes the AS.7.0 visual foundation (`<AuthVisualFoundation>` +
+ * `<AuthGlassCard>` + `<AuthBrandWordmark>`) with the AS.7.1 login-
+ * specific primitives:
+ *
+ *   - `<AuthFieldElectric>` for email + password (corner brackets
+ *     snap on focus / gradient border / scan line / spring-shake +
+ *     red lightning on error)
+ *   - `<OAuthEnergySphere>` × 5 primary (Google / GitHub / Microsoft
+ *     / Apple / Discord) + `More` toggle revealing 6 secondary
+ *     vendors behind a row of smaller spheres
+ *   - `<AuthTurnstileWidget>` widget — rendered when
+ *     `NEXT_PUBLIC_TURNSTILE_SITE_KEY` env is set; otherwise the
+ *     widget is a noop and the AS.6.3 backend Phase-1 fail-open
+ *     contract carries the request
+ *   - `<AuthHoneypotField>` — hidden field with the rotating AS.6.4
+ *     name backed by Web Crypto SHA-256
+ *   - `<AccountLockedOverlay>` — blue tint + frozen overlay shown
+ *     when the backend returns 423 (driven by `auth.lastLoginError
+ *     .accountLocked`)
+ *   - `<WarpDriveTransition>` — fullscreen warp animation playing
+ *     between `auth.login()` resolving truthy and the actual
+ *     `router.replace(next)` so the page doesn't pop straight to
+ *     the dashboard
+ *
+ * MFA flow integration: when `auth.login()` returns false because
+ * the backend issued an mfa_token, we route to the in-page
+ * `<MfaChallengeForm>` mounted on the same glass card, preserving
+ * the foundation + warp-drive transition.
+ *
+ * Module-global state audit (per implement_phase_step.md SOP §1):
+ * pure browser component. All state lives in React (`useState` /
+ * `useRef`). The auth context is the SoT for user / mfa / error.
+ * Per-tab / per-worker derivation is trivially identical (Answer
+ * #1 of the SOP audit).
+ *
+ * Read-after-write timing audit: N/A — no DB, no parallelisation
+ * change vs. existing auth-context behaviour.
+ */
 
-// Q.1 UI follow-up (2026-04-24): canonical copy for the "your session
-// was ended because a security event happened on another device"
-// banner. Backend ``/auth/change-password`` and the MFA routes set the
-// ``trigger`` when they log the peer-session revocation; ``lib/api.ts``
-// forwards it to ``/login?reason=user_security_event&trigger=<t>``.
-// The banner's ``message`` query param (also set by the API layer)
-// takes precedence so backend copy wins — this map is the fallback
-// when ``message`` is absent (direct navigation, older cached API
-// bundle, etc.).
+import { useEffect, useMemo, useRef, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
+import {
+  AlertCircle,
+  ArrowLeft,
+  ChevronDown,
+  KeyRound,
+  Loader2,
+  Lock,
+  Mail,
+  Shield,
+} from "lucide-react"
+
+import { useAuth } from "@/lib/auth-context"
+import { useEffectiveMotionLevel } from "@/hooks/use-effective-motion-level"
+import {
+  AccountLockedOverlay,
+  AuthBrandWordmark,
+  AuthFieldElectric,
+  AuthGlassCard,
+  AuthHoneypotField,
+  AuthTurnstileWidget,
+  AuthVisualFoundation,
+  OAuthEnergySphere,
+  OAuthProviderIcon,
+  WarpDriveTransition,
+} from "@/components/omnisight/auth"
+import {
+  buildOAuthAuthorizeUrl,
+  getPrimaryProviders,
+  getSecondaryProviders,
+  type OAuthProviderId,
+} from "@/lib/auth/oauth-providers"
+import { bumpShakeKey } from "@/lib/auth/login-form-helpers"
+
+// AS.7.1 — Q.1 banner copy carried across from the previous page
+// rewrite. Kept inline so an operator landing on /login?reason=...
+// after a peer-session revocation still sees the explanation.
 const SESSION_REVOCATION_TRIGGER_COPY: Record<string, string> = {
   password_change:
     "Your password was changed on another device. Please sign in again.",
@@ -31,16 +97,14 @@ const SESSION_REVOCATION_TRIGGER_COPY: Record<string, string> = {
     "Your account role was changed by an administrator. Please sign in again.",
   account_disabled:
     "Your account was disabled by an administrator. Contact your administrator for access.",
-  // Q.2 (#296) 「這不是我」cascade — the user marked a new-device login
-  // as suspicious from the security alerts toast. Every session was
-  // rotated and ``must_change_password=1`` is flipped, so after sign-in
-  // the 428 gate will force them onto the change-password flow.
   not_me_cascade:
     "You flagged a new-device login as suspicious. Every session was signed out and you will be required to change your password after signing in again.",
 }
 
 function getSessionRevocationCopy(
-  reason: string | null, trigger: string | null, message: string | null,
+  reason: string | null,
+  trigger: string | null,
+  message: string | null,
 ): string | null {
   if (reason !== "user_security_event") return null
   if (message && message.length > 0) return message
@@ -50,13 +114,15 @@ function getSessionRevocationCopy(
   return "Your session was ended for security reasons. Please sign in again."
 }
 
-function MfaChallengeForm() {
-  const router = useRouter()
-  const search = useSearchParams()
-  const next = search.get("next") || "/"
+// ─────────────────────────────────────────────────────────────────
+// MFA challenge form — re-used inside the AS.7.0 glass card.
+// ─────────────────────────────────────────────────────────────────
+
+function MfaChallengeForm({ onCompleted }: { onCompleted: () => void }) {
   const auth = useAuth()
   const [code, setCode] = useState("")
   const [busy, setBusy] = useState(false)
+  const [errorKey, setErrorKey] = useState(0)
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -64,7 +130,11 @@ function MfaChallengeForm() {
     setBusy(true)
     try {
       const ok = await auth.submitMfa(code.trim())
-      if (ok) router.replace(next)
+      if (ok) {
+        onCompleted()
+      } else {
+        setErrorKey(bumpShakeKey)
+      }
     } finally {
       setBusy(false)
     }
@@ -73,44 +143,47 @@ function MfaChallengeForm() {
   const methods = auth.mfaPending?.mfa_methods || []
   const hasTotp = methods.includes("totp")
   const hasWebauthn = methods.includes("webauthn")
+  const hint = hasTotp
+    ? "Enter your authenticator code or a backup code"
+    : hasWebauthn
+    ? "Use your security key to continue"
+    : "Enter your verification code"
 
   return (
     <form
       onSubmit={onSubmit}
-      className="w-full max-w-sm rounded-lg border border-[var(--border)] bg-[var(--card)] p-6 flex flex-col gap-4"
+      data-testid="as7-mfa-form"
+      className="flex flex-col gap-4"
     >
-      <div className="text-center">
-        <Shield size={28} className="mx-auto mb-2 text-[var(--artifact-purple)]" />
-        <h1 className="font-mono text-lg font-semibold text-[var(--foreground)]">
+      <div className="flex flex-col items-center text-center gap-1.5">
+        <Shield size={26} className="text-[var(--artifact-purple)]" />
+        <h1 className="font-mono text-base font-semibold text-[var(--foreground)]">
           Two-Factor Authentication
         </h1>
-        <p className="font-mono text-xs text-[var(--muted-foreground)] mt-1">
-          {hasTotp && "Enter your authenticator code or a backup code"}
-          {!hasTotp && hasWebauthn && "Use your security key to continue"}
+        <p className="font-mono text-[11px] text-[var(--muted-foreground)]">
+          {hint}
         </p>
       </div>
 
-      {(hasTotp || true) && (
-        <label className="flex flex-col gap-1">
-          <span className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
-            CODE
-          </span>
-          <div className="flex items-center gap-2 px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] focus-within:ring-1 focus-within:ring-[var(--artifact-purple)]">
-            <Shield size={14} className="text-[var(--muted-foreground)]" />
-            <input
-              type="text"
-              autoComplete="one-time-code"
-              autoFocus
-              required
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              className="flex-1 bg-transparent outline-none font-mono text-sm text-[var(--foreground)] tracking-widest"
-              placeholder="000000"
-              maxLength={20}
-            />
-          </div>
-        </label>
-      )}
+      <AuthFieldElectric
+        level="dramatic"
+        label="CODE"
+        leadingIcon={<Shield size={14} />}
+        hasError={Boolean(auth.error)}
+        errorKey={errorKey}
+        inputProps={{
+          name: "mfa_code",
+          type: "text",
+          autoComplete: "one-time-code",
+          inputMode: "numeric",
+          autoFocus: true,
+          required: true,
+          maxLength: 32,
+          placeholder: "000000",
+          value: code,
+          onChange: (e) => setCode(e.target.value),
+        }}
+      />
 
       {auth.error && (
         <div
@@ -147,63 +220,124 @@ function MfaChallengeForm() {
   )
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Login form — composed inside the AS.7.0 glass card.
+// ─────────────────────────────────────────────────────────────────
+
+const TURNSTILE_SITE_KEY: string | null =
+  process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? null
+
 function LoginForm() {
   const router = useRouter()
   const search = useSearchParams()
   const next = search.get("next") || "/"
   const auth = useAuth()
+  const level = useEffectiveMotionLevel()
+
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
+  const [errorKey, setErrorKey] = useState(0)
+  const [warpActive, setWarpActive] = useState(false)
+  const [showSecondary, setShowSecondary] = useState(false)
+  const [bloomKey, setBloomKey] = useState(0)
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null)
+  const honeypotFieldRef = useRef<string | null>(null)
 
-  // Q.1 UI follow-up (2026-04-24): parse the security-event reason the
-  // API layer appended to the /login URL when a peer-session rotation
-  // kicked this device. Renders a dedicated banner above the form so
-  // the operator understands *why* they were logged out (password
-  // changed on another device / TOTP change / admin disable) rather
-  // than seeing a bare form with no context.
+  // Q.1 UI follow-up — security-event session revocation banner.
   const revokedReason = search.get("reason")
   const revokedTrigger = search.get("trigger")
   const revokedMessage = search.get("message")
   const revocationCopy = getSessionRevocationCopy(
-    revokedReason, revokedTrigger, revokedMessage,
+    revokedReason,
+    revokedTrigger,
+    revokedMessage,
   )
+
+  // Track the locked-overlay countdown locally — the parent owns
+  // the timer so the `AccountLockedOverlay` leaf stays presentation-
+  // only.
+  const [lockedRemaining, setLockedRemaining] = useState<number | null>(null)
+  useEffect(() => {
+    if (!auth.lastLoginError?.accountLocked) {
+      setLockedRemaining(null)
+      return
+    }
+    const start = auth.lastLoginError.retryAfterSeconds
+    if (start === null || start <= 0) {
+      setLockedRemaining(null)
+      return
+    }
+    setLockedRemaining(start)
+    const timer = window.setInterval(() => {
+      setLockedRemaining((prev) => {
+        if (prev === null) return null
+        return prev > 1 ? prev - 1 : 0
+      })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [auth.lastLoginError])
 
   useEffect(() => {
     if (!auth.loading && auth.user) router.replace(next)
   }, [auth.loading, auth.user, next, router])
+
+  const primaryProviders = useMemo(getPrimaryProviders, [])
+  const secondaryProviders = useMemo(getSecondaryProviders, [])
+
+  const onFieldFocus = () => {
+    setBloomKey((k) => k + 1)
+  }
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (busy) return
     setBusy(true)
     try {
-      const ok = await auth.login(email, password)
-      if (ok) router.replace(next)
+      const extras: Record<string, string> = {}
+      if (turnstileToken) extras.turnstile_token = turnstileToken
+      if (honeypotFieldRef.current) {
+        // The honeypot field must be empty to pass — the value goes
+        // out as the empty string which is the canonical "not filled"
+        // signal per AS.4.1 §3.
+        extras[honeypotFieldRef.current] = ""
+      }
+      const ok = await auth.login(email, password, extras)
+      if (ok) {
+        // AS.7.1 — warp drive transition before navigating. The
+        // overlay's onComplete callback fires router.replace(next).
+        setWarpActive(true)
+      } else {
+        // Failed (or routed to MFA). Bump the shake key so the
+        // form re-mounts the spring-shake animation.
+        setErrorKey(bumpShakeKey)
+      }
     } finally {
       setBusy(false)
     }
   }
 
-  if (auth.mfaPending) {
-    return (
-      <main className="min-h-screen flex items-center justify-center p-6 bg-[var(--background)]">
-        <MfaChallengeForm />
-      </main>
-    )
+  const onWarpComplete = () => {
+    router.replace(next)
   }
 
+  if (auth.mfaPending) {
+    return <MfaChallengeForm onCompleted={() => setWarpActive(true)} />
+  }
+
+  const hasError = Boolean(auth.error)
+  const accountLocked = Boolean(auth.lastLoginError?.accountLocked)
+
   return (
-    <main className="min-h-screen flex items-center justify-center p-6 bg-[var(--background)]">
+    <>
       <form
         onSubmit={onSubmit}
-        className="w-full max-w-sm rounded-lg border border-[var(--border)] bg-[var(--card)] p-6 flex flex-col gap-4"
+        data-testid="as7-login-form"
+        className="flex flex-col gap-4 relative"
       >
-        <div className="text-center">
-          <h1 className="font-mono text-lg font-semibold text-[var(--foreground)]">
-            OmniSight
-          </h1>
-          <p className="font-mono text-xs text-[var(--muted-foreground)] mt-1">
+        <div className="flex flex-col items-center gap-1.5 text-center">
+          <AuthBrandWordmark level={level} bloomKey={bloomKey} />
+          <p className="font-mono text-[11px] text-[var(--muted-foreground)]">
             Sign in to continue
           </p>
         </div>
@@ -215,7 +349,10 @@ function LoginForm() {
             data-trigger={revokedTrigger || ""}
             className="flex items-start gap-2 p-3 rounded border border-[var(--artifact-purple)] bg-[var(--artifact-purple)]/10 text-[var(--foreground)] font-mono text-xs leading-relaxed"
           >
-            <KeyRound size={14} className="shrink-0 mt-0.5 text-[var(--artifact-purple)]" />
+            <KeyRound
+              size={14}
+              className="shrink-0 mt-0.5 text-[var(--artifact-purple)]"
+            />
             <div className="flex flex-col gap-1">
               <span className="font-semibold tracking-wider text-[10px] text-[var(--artifact-purple)]">
                 SESSION ENDED
@@ -225,45 +362,69 @@ function LoginForm() {
           </div>
         )}
 
-        <label className="flex flex-col gap-1">
-          <span className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
-            EMAIL
-          </span>
-          <div className="flex items-center gap-2 px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] focus-within:ring-1 focus-within:ring-[var(--artifact-purple)]">
-            <Mail size={14} className="text-[var(--muted-foreground)]" />
-            <input
-              type="email"
-              autoComplete="email"
-              autoFocus
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="flex-1 bg-transparent outline-none font-mono text-sm text-[var(--foreground)]"
-              placeholder="you@example.com"
+        <AuthFieldElectric
+          level={level}
+          label="EMAIL"
+          leadingIcon={<Mail size={14} />}
+          hasError={hasError}
+          errorKey={errorKey}
+          inputProps={{
+            name: "email",
+            type: "email",
+            autoComplete: "email",
+            autoFocus: true,
+            required: true,
+            placeholder: "you@example.com",
+            value: email,
+            onChange: (e) => setEmail(e.target.value),
+            onFocus: onFieldFocus,
+          }}
+        />
+
+        <AuthFieldElectric
+          level={level}
+          label="PASSWORD"
+          leadingIcon={<Lock size={14} />}
+          hasError={hasError}
+          errorKey={errorKey}
+          inputProps={{
+            name: "password",
+            type: "password",
+            autoComplete: "current-password",
+            required: true,
+            value: password,
+            onChange: (e) => setPassword(e.target.value),
+            onFocus: onFieldFocus,
+          }}
+        />
+
+        {/* AS.6.4 honeypot — rotating field name. Renders empty
+            placeholder until SHA-256 resolves; the form's submit
+            adds the resolved key to the extras payload. */}
+        <AuthHoneypotField
+          onResolved={(name) => {
+            honeypotFieldRef.current = name
+          }}
+        />
+
+        {/* AS.6.3 Turnstile — only mounts when the env var is set.
+            The widget's onToken callback feeds turnstileToken which
+            the submit handler threads as `turnstile_token`. */}
+        {TURNSTILE_SITE_KEY ? (
+          <div className="flex justify-center">
+            <AuthTurnstileWidget
+              siteKey={TURNSTILE_SITE_KEY}
+              onToken={(token) => setTurnstileToken(token)}
+              onExpired={() => setTurnstileToken(null)}
+              onError={() => setTurnstileToken(null)}
             />
           </div>
-        </label>
+        ) : null}
 
-        <label className="flex flex-col gap-1">
-          <span className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
-            PASSWORD
-          </span>
-          <div className="flex items-center gap-2 px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] focus-within:ring-1 focus-within:ring-[var(--artifact-purple)]">
-            <Lock size={14} className="text-[var(--muted-foreground)]" />
-            <input
-              type="password"
-              autoComplete="current-password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="flex-1 bg-transparent outline-none font-mono text-sm text-[var(--foreground)]"
-            />
-          </div>
-        </label>
-
-        {auth.error && (
+        {auth.error && !accountLocked && (
           <div
             role="alert"
+            data-testid="as7-login-error"
             className="flex items-start gap-2 p-2 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10 text-[var(--destructive)] font-mono text-xs"
           >
             <AlertCircle size={14} className="shrink-0 mt-0.5" />
@@ -273,38 +434,116 @@ function LoginForm() {
 
         <button
           type="submit"
-          disabled={busy || !email || !password}
+          disabled={busy || !email || !password || accountLocked}
           className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-sm font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {busy ? <Loader2 size={14} className="animate-spin" /> : null}
           Sign in
         </button>
 
+        {/* OAuth row — 5 primary providers always visible + a More
+            toggle that reveals the secondary 6 in a second row. */}
+        <div className="flex flex-col gap-3 mt-1">
+          <div className="flex items-center gap-2 text-[var(--muted-foreground)] font-mono text-[10px] tracking-wider">
+            <span className="flex-1 h-px bg-[var(--border)]" />
+            OR CONTINUE WITH
+            <span className="flex-1 h-px bg-[var(--border)]" />
+          </div>
+          <div
+            data-testid="as7-oauth-row-primary"
+            className="flex items-center justify-center gap-3 flex-wrap"
+          >
+            {primaryProviders.map((p) => (
+              <OAuthEnergySphere
+                key={p.id}
+                level={level}
+                provider={p}
+                href={buildOAuthAuthorizeUrl(p.id, next)}
+                icon={<OAuthProviderIcon id={p.id as OAuthProviderId} />}
+                disabled={accountLocked}
+              />
+            ))}
+          </div>
+          <button
+            type="button"
+            data-testid="as7-oauth-more-toggle"
+            onClick={() => setShowSecondary((v) => !v)}
+            className="self-center flex items-center gap-1 px-2 py-1 rounded font-mono text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+            aria-expanded={showSecondary}
+          >
+            <ChevronDown
+              size={12}
+              style={{
+                transform: showSecondary ? "rotate(180deg)" : "rotate(0deg)",
+                transition: "transform 180ms ease",
+              }}
+            />
+            {showSecondary ? "Hide more" : "More providers"}
+          </button>
+          {showSecondary && (
+            <div
+              data-testid="as7-oauth-row-secondary"
+              className="flex items-center justify-center gap-2 flex-wrap"
+            >
+              {secondaryProviders.map((p) => (
+                <OAuthEnergySphere
+                  key={p.id}
+                  level={level}
+                  provider={p}
+                  href={buildOAuthAuthorizeUrl(p.id, next)}
+                  icon={<OAuthProviderIcon id={p.id as OAuthProviderId} />}
+                  size="secondary"
+                  disabled={accountLocked}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
         <p className="font-mono text-[10px] text-[var(--muted-foreground)] text-center leading-relaxed">
           First boot? Bootstrap admin email is whatever you set in
           <code className="mx-1">OMNISIGHT_ADMIN_EMAIL</code>
           (default: <code>admin@omnisight.local</code>).
         </p>
+
+        {/* 423 / lockout overlay — only renders when the backend
+            reported account_locked. Sits inside the form so it
+            covers the inputs + submit button visually. */}
+        {accountLocked ? (
+          <AccountLockedOverlay
+            level={level}
+            remainingSeconds={lockedRemaining}
+          />
+        ) : null}
       </form>
-    </main>
+
+      <WarpDriveTransition
+        level={level}
+        active={warpActive}
+        onComplete={onWarpComplete}
+      />
+    </>
   )
 }
 
-// Phase-3 P5 (2026-04-20) — remove the per-page ``<AuthProvider>``
-// wrap. ``app/layout.tsx`` already mounts ``<Providers>`` (which
-// includes ``<AuthProvider>``) around every route's children, so
-// re-wrapping here was creating a SECOND nested AuthProvider with
-// independent state. The nested one handled the login call and set
-// ``user = admin`` on its own state, but after
-// ``router.replace("/")`` the dashboard read the OUTER provider's
-// state — still ``user = null`` because the nested provider's
-// login setState never reached it. Dashboard's guard effect saw
-// ``!user``, redirected back to /login; /login re-mounted the inner
-// AuthProvider with fresh ``user = null``; operator retried login;
-// inner got it; navigation to / read outer (still null); redirect
-// back; loop. Dropping the nested wrapper makes login() + setUser
-// update the SAME AuthProvider instance that Home then reads, so
-// state is coherent across the route change.
+// Phase-3 P5 (2026-04-20) — `<Providers>` already mounts a single
+// `<AuthProvider>` at the app layout; this page no longer wraps a
+// nested provider. AS.7.1 keeps the same flat shape.
+function LoginScaffold() {
+  // Resolve the motion level once at the page root and pass it
+  // down. `<AuthVisualFoundation>` accepts `forceLevel` so it
+  // re-uses the same value rather than running its own resolver
+  // and risking a one-frame mismatch with the glass card.
+  const level = useEffectiveMotionLevel()
+  return (
+    <AuthVisualFoundation forceLevel={level}>
+      <AuthGlassCard level={level}>
+        <LoginForm />
+      </AuthGlassCard>
+    </AuthVisualFoundation>
+  )
+}
+
 export default function LoginPage() {
-  return <LoginForm />
+  return <LoginScaffold />
 }

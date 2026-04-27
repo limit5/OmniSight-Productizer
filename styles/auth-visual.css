@@ -243,6 +243,482 @@
   color: inherit;
 }
 
+/* ═════════════════════════════════════════════════════════════════
+ * AS.7.1 — Login-page primitives
+ * (Field 通電 / OAuth energy spheres / locked overlay / warp drive)
+ * ═════════════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────────────────────────────
+ * Field 通電 — corner brackets snap, gradient border, scan line,
+ * spring-shake + lightning flicker on error
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: 100%;
+}
+
+.as7-field-label {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.85);
+}
+
+.as7-field-shell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  background: rgba(2, 6, 23, 0.55);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+  isolation: isolate;
+}
+
+.as7-field-shell:focus-within {
+  border-color: rgba(56, 189, 248, 0.55);
+  box-shadow:
+    0 0 0 1px rgba(56, 189, 248, 0.45),
+    0 0 18px -4px rgba(56, 189, 248, 0.55);
+}
+
+.as7-field-input {
+  flex: 1;
+  background: transparent;
+  outline: none;
+  border: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 14px;
+  color: rgba(226, 232, 240, 0.96);
+}
+
+.as7-field-input::placeholder {
+  color: rgba(148, 163, 184, 0.55);
+}
+
+.as7-field-leading,
+.as7-field-trailing {
+  display: inline-flex;
+  align-items: center;
+  color: rgba(148, 163, 184, 0.85);
+}
+
+.as7-field-trailing {
+  margin-left: auto;
+}
+
+/* Corner brackets — 4 markers anchored to the shell, opacity 0 by
+ * default; snap to opacity 1 + slight scale on focus. */
+.as7-field-corner {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-color: rgba(56, 189, 248, 0.95);
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.as7-field-corner-tl {
+  top: -1px;
+  left: -1px;
+  border-top: 1px solid;
+  border-left: 1px solid;
+}
+
+.as7-field-corner-tr {
+  top: -1px;
+  right: -1px;
+  border-top: 1px solid;
+  border-right: 1px solid;
+}
+
+.as7-field-corner-bl {
+  bottom: -1px;
+  left: -1px;
+  border-bottom: 1px solid;
+  border-left: 1px solid;
+}
+
+.as7-field-corner-br {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 1px solid;
+  border-right: 1px solid;
+}
+
+.as7-field-shell:focus-within .as7-field-corner {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* Scan line — appears on focus, sweeps top→bottom once at 600ms. */
+.as7-field-scan {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(56, 189, 248, 0.65) 50%,
+    transparent 100%
+  );
+  background-size: 100% 6px;
+  background-repeat: no-repeat;
+  background-position: 0 -10px;
+  opacity: 0;
+}
+
+.as7-field[data-as7-electric="on"] .as7-field-shell:focus-within .as7-field-scan {
+  animation: as7-field-scan 700ms linear forwards;
+  opacity: 1;
+}
+
+@keyframes as7-field-scan {
+  0% {
+    background-position: 0 -10px;
+    opacity: 0.85;
+  }
+  90% {
+    background-position: 0 calc(100% + 10px);
+    opacity: 0.85;
+  }
+  100% {
+    background-position: 0 calc(100% + 10px);
+    opacity: 0;
+  }
+}
+
+/* Error state — red border, spring-shake replay (replay driven by
+ * React `key` bump on the wrapper), lightning flicker via box-
+ * shadow keyframe. */
+.as7-field[data-as7-error="on"] .as7-field-shell {
+  border-color: rgba(248, 113, 113, 0.85);
+  box-shadow:
+    0 0 0 1px rgba(248, 113, 113, 0.55),
+    0 0 18px -4px rgba(248, 113, 113, 0.65);
+  animation:
+    as7-field-shake 360ms cubic-bezier(0.36, 0.07, 0.19, 0.97),
+    as7-field-flicker 480ms ease-out;
+}
+
+@keyframes as7-field-shake {
+  0%, 100% { transform: translateX(0); }
+  10% { transform: translateX(-6px); }
+  20% { transform: translateX(6px); }
+  30% { transform: translateX(-4px); }
+  40% { transform: translateX(4px); }
+  55% { transform: translateX(-2px); }
+  70% { transform: translateX(2px); }
+  85% { transform: translateX(-1px); }
+}
+
+@keyframes as7-field-flicker {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.55), 0 0 18px -4px rgba(248, 113, 113, 0.65); }
+  20% { box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.95), 0 0 28px -2px rgba(248, 113, 113, 0.85); }
+  35% { box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.25), 0 0 14px -6px rgba(248, 113, 113, 0.4); }
+  50% { box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.95), 0 0 30px -2px rgba(248, 113, 113, 0.85); }
+  65% { box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.4), 0 0 16px -4px rgba(248, 113, 113, 0.5); }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * OAuth energy sphere — round provider button + brand-color halo
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-oauth-sphere {
+  --as7-oauth-brand: #38bdf8;
+  --as7-oauth-halo: rgba(56, 189, 248, 0.55);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: linear-gradient(
+    140deg,
+    rgba(15, 23, 42, 0.92),
+    rgba(2, 6, 23, 0.85)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--as7-oauth-brand);
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease;
+  isolation: isolate;
+}
+
+.as7-oauth-sphere[data-as7-tier="secondary"] {
+  width: 40px;
+  height: 40px;
+}
+
+.as7-oauth-sphere[data-as7-disabled="on"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: saturate(0.5);
+}
+
+.as7-oauth-sphere:hover {
+  transform: translateY(-2px);
+  border-color: var(--as7-oauth-brand);
+}
+
+.as7-oauth-sphere-inner {
+  position: relative;
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+
+.as7-oauth-sphere[data-as7-tier="secondary"] .as7-oauth-sphere-inner {
+  width: 22px;
+  height: 22px;
+}
+
+.as7-oauth-sphere-inner svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* Halo — outer glow ring driven by brand-color CSS variable. */
+.as7-oauth-sphere-halo {
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+  background: radial-gradient(
+    closest-side,
+    var(--as7-oauth-halo) 0%,
+    transparent 70%
+  );
+  opacity: 0.55;
+  pointer-events: none;
+  transition: opacity 200ms ease, inset 200ms ease;
+}
+
+.as7-oauth-sphere:hover .as7-oauth-sphere-halo {
+  opacity: 1;
+  inset: -12px;
+}
+
+.as7-oauth-sphere[data-as7-halo="on"] .as7-oauth-sphere-halo {
+  animation: as7-oauth-halo-pulse 3.6s ease-in-out infinite;
+}
+
+@keyframes as7-oauth-halo-pulse {
+  0%, 100% { opacity: 0.45; inset: -8px; }
+  50% { opacity: 0.85; inset: -14px; }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Account-locked frozen overlay — blue tint + chill shimmer
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-account-locked {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.as7-account-locked-frost {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(96, 165, 250, 0.35), transparent 60%),
+    linear-gradient(135deg, rgba(56, 189, 248, 0.28), rgba(15, 23, 42, 0.78));
+  backdrop-filter: blur(8px) saturate(120%);
+  -webkit-backdrop-filter: blur(8px) saturate(120%);
+}
+
+.as7-account-locked-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  text-align: center;
+  padding: 1.5rem 1.25rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: rgba(186, 230, 253, 0.96);
+}
+
+.as7-account-locked-icon {
+  font-size: 2.25rem;
+  color: rgba(125, 211, 252, 0.95);
+}
+
+.as7-account-locked-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.as7-account-locked-message {
+  font-size: 0.78rem;
+  color: rgba(186, 230, 253, 0.85);
+  max-width: 260px;
+  line-height: 1.55;
+}
+
+.as7-account-locked-countdown {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: rgba(125, 211, 252, 0.95);
+  letter-spacing: 0.04em;
+}
+
+.as7-account-locked[data-as7-chill="on"] .as7-account-locked-icon {
+  animation: as7-chill-shimmer 2.6s ease-in-out infinite;
+}
+
+@keyframes as7-chill-shimmer {
+  0%, 100% {
+    text-shadow: 0 0 6px rgba(96, 165, 250, 0.5);
+    transform: scale(1);
+  }
+  50% {
+    text-shadow: 0 0 18px rgba(125, 211, 252, 0.95);
+    transform: scale(1.05);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Warp drive transition — concentric rings + star streak overlay
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-warp-drive {
+  --as7-warp-duration: 800ms;
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  pointer-events: none;
+  isolation: isolate;
+  background: radial-gradient(
+    circle at center,
+    rgba(8, 47, 73, 0.4),
+    rgba(2, 6, 23, 0.95)
+  );
+  animation: as7-warp-fade var(--as7-warp-duration) ease-out forwards;
+}
+
+.as7-warp-rings {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(56, 189, 248, 0.55);
+  transform-origin: center;
+  animation: as7-warp-rings var(--as7-warp-duration) ease-out forwards;
+}
+
+.as7-warp-streaks {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent 16px,
+    rgba(56, 189, 248, 0.18) 16px,
+    rgba(56, 189, 248, 0.18) 17px
+  );
+  opacity: 0;
+  animation: as7-warp-streaks var(--as7-warp-duration) ease-out forwards;
+}
+
+.as7-warp-bloom {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(56, 189, 248, 0.65) 40%,
+    transparent 80%
+  );
+  transform: translate(-50%, -50%) scale(1);
+  animation: as7-warp-bloom var(--as7-warp-duration) ease-out forwards;
+}
+
+@keyframes as7-warp-fade {
+  0% { opacity: 0; }
+  35% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes as7-warp-rings {
+  0% {
+    transform: scale(0.05);
+    opacity: 0;
+  }
+  35% { opacity: 1; }
+  100% {
+    transform: scale(8);
+    opacity: 0;
+  }
+}
+
+@keyframes as7-warp-streaks {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.3);
+  }
+  35% {
+    opacity: 0.7;
+    transform: scaleX(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scaleX(2.5);
+  }
+}
+
+@keyframes as7-warp-bloom {
+  0% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+  20% { transform: translate(-50%, -50%) scale(60); opacity: 1; }
+  100% { transform: translate(-50%, -50%) scale(180); opacity: 0; }
+}
+
+/* Motion-level gating for the new AS.7.1 surfaces — same gate as
+ * the AS.7.0 root. `off` strips every animation; `subtle` keeps
+ * static styling but no keyframe motion. */
+.as7-root[data-motion-level="off"] .as7-field-shell,
+.as7-root[data-motion-level="off"] .as7-oauth-sphere,
+.as7-root[data-motion-level="off"] .as7-oauth-sphere-halo,
+.as7-root[data-motion-level="off"] .as7-account-locked-icon,
+.as7-root[data-motion-level="off"] .as7-warp-rings,
+.as7-root[data-motion-level="off"] .as7-warp-streaks,
+.as7-root[data-motion-level="off"] .as7-warp-bloom {
+  animation: none !important;
+}
+
+.as7-root[data-motion-level="subtle"] .as7-field-shell,
+.as7-root[data-motion-level="subtle"] .as7-oauth-sphere-halo,
+.as7-root[data-motion-level="subtle"] .as7-warp-drive {
+  animation: none !important;
+}
+
 /* ─────────────────────────────────────────────────────────────────
  * `prefers-reduced-motion: reduce` — last-line WCAG R25.2 defence
  * ───────────────────────────────────────────────────────────────── */

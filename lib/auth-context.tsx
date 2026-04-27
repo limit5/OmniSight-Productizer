@@ -11,11 +11,58 @@ import {
   type AuthUser,
   type WhoamiResponse,
 } from "@/lib/api"
+import {
+  classifyLoginError,
+  type LoginErrorOutcome,
+} from "@/lib/auth/login-form-helpers"
 
 interface MfaPending {
   mfa_token: string
   mfa_methods: string[]
   email: string
+}
+
+/** Pull a `Retry-After`-style hint out of an `ApiError`.
+ *
+ *  The backend's 423 / 429 responses set the `Retry-After` HTTP
+ *  header AND embed the same number in the response body's `detail`
+ *  string ("account locked; retry in 30s"). The header doesn't
+ *  survive `request()`'s ApiError mapping today (the helper only
+ *  retains body + parsed JSON), so we walk the parsed body's detail
+ *  string for the `retry in <N>s` substring. Returns the integer
+ *  string suitable for `parseRetryAfter()`, or null when neither
+ *  source has a usable value. */
+/** Pull the canonical error-code string out of an `ApiError`'s
+ *  parsed body. Backend `/auth/login` shapes:
+ *    - 429 bot/honeypot: `{"detail": {"error": "bot_challenge_failed"}}`
+ *    - 423 lockout: `{"detail": "account locked; retry in 30s"}`
+ *    - 401 invalid: `{"detail": "invalid email or password"}`
+ *  Returns the explicit error-code field when one exists, else null.
+ */
+function _extractErrorCode(err: ApiError): string | null {
+  const parsed = err.parsed
+  if (!parsed) return null
+  const top = parsed.error
+  if (typeof top === "string") return top
+  const detail = parsed.detail
+  if (detail && typeof detail === "object") {
+    const inner = (detail as Record<string, unknown>).error
+    if (typeof inner === "string") return inner
+  }
+  return null
+}
+
+function _extractRetryAfter(err: ApiError): string | null {
+  const detail = err.parsed?.detail
+  if (typeof detail === "string") {
+    const m = detail.match(/retry in (\d+)\s*s/i)
+    if (m) return m[1]
+  }
+  // Some endpoints return numeric seconds at parsed.retry_after_s.
+  if (typeof err.parsed?.retry_after_s === "number") {
+    return String(err.parsed.retry_after_s)
+  }
+  return null
 }
 
 interface AuthContextValue {
@@ -24,8 +71,18 @@ interface AuthContextValue {
   sessionId: string | null
   loading: boolean
   error: string | null
+  /** AS.7.1 — structured outcome for the most recent failed login.
+   *  Carries the canonical error kind + `accountLocked` flag the
+   *  login page uses to render the blue-tint frozen overlay on 423.
+   *  `null` until the first failure; cleared on the next success or
+   *  on `cancelMfa()`. */
+  lastLoginError: LoginErrorOutcome | null
   mfaPending: MfaPending | null
-  login: (email: string, password: string) => Promise<boolean>
+  login: (
+    email: string,
+    password: string,
+    extras?: Readonly<Record<string, string>>,
+  ) => Promise<boolean>
   logout: () => Promise<void>
   refresh: () => Promise<void>
   submitMfa: (code: string) => Promise<boolean>
@@ -40,6 +97,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [lastLoginError, setLastLoginError] =
+    useState<LoginErrorOutcome | null>(null)
   const [mfaPending, setMfaPending] = useState<MfaPending | null>(null)
 
   const refresh = useCallback(async () => {
@@ -86,38 +145,63 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => { void refresh() }, [refresh])
 
-  const login = useCallback(async (email: string, password: string) => {
-    try {
-      const res = await apiLogin(email, password)
-      if (res.mfa_required && res.mfa_token) {
-        setMfaPending({
-          mfa_token: res.mfa_token,
-          mfa_methods: res.mfa_methods || [],
-          email,
-        })
+  const login = useCallback(
+    async (
+      email: string,
+      password: string,
+      extras?: Readonly<Record<string, string>>,
+    ) => {
+      try {
+        const res = await apiLogin(email, password, extras)
+        if (res.mfa_required && res.mfa_token) {
+          setMfaPending({
+            mfa_token: res.mfa_token,
+            mfa_methods: res.mfa_methods || [],
+            email,
+          })
+          setError(null)
+          setLastLoginError(null)
+          return false
+        }
+        if (res.user) {
+          setUser(res.user as AuthUser)
+        }
         setError(null)
+        setLastLoginError(null)
+        setMfaPending(null)
+        return true
+      } catch (exc) {
+        // AS.7.1 — route every failure through the canonical
+        // classifier so the login page gets a structured outcome
+        // (kind / accountLocked / retryAfterSeconds) on top of the
+        // human-readable message. Falls back to string-parse for
+        // non-ApiError throws (network / timeout) so existing
+        // behaviour is preserved.
+        if (exc instanceof ApiError) {
+          const errorCode = _extractErrorCode(exc)
+          const retryAfter = _extractRetryAfter(exc)
+          const outcome = classifyLoginError({
+            status: exc.status,
+            errorCode,
+            retryAfter,
+          })
+          setLastLoginError(outcome)
+          setError(outcome.message)
+          return false
+        }
+        const msg = exc instanceof Error ? exc.message : String(exc)
+        const outcome = classifyLoginError({
+          status: null,
+          message: msg,
+          retryAfter: null,
+        })
+        setLastLoginError(outcome)
+        setError(outcome.message)
         return false
       }
-      if (res.user) {
-        setUser(res.user as AuthUser)
-      }
-      setError(null)
-      setMfaPending(null)
-      return true
-    } catch (exc) {
-      const msg = exc instanceof Error ? exc.message : String(exc)
-      if (msg.includes("401")) {
-        setError("Invalid email or password.")
-        return false
-      }
-      if (msg.includes("429")) {
-        setError("Too many attempts. Please wait a few minutes and retry.")
-        return false
-      }
-      setError(msg)
-      return false
-    }
-  }, [])
+    },
+    [],
+  )
 
   const submitMfa = useCallback(async (code: string) => {
     if (!mfaPending) return false
@@ -141,6 +225,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const cancelMfa = useCallback(() => {
     setMfaPending(null)
     setError(null)
+    setLastLoginError(null)
   }, [])
 
   const logout = useCallback(async () => {
@@ -156,7 +241,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, mfaPending, login, logout, refresh, submitMfa, cancelMfa }}>
+    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, lastLoginError, mfaPending, login, logout, refresh, submitMfa, cancelMfa }}>
       {children}
     </Ctx.Provider>
   )

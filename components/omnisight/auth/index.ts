@@ -18,3 +18,15 @@ export {
   AuthBrandWordmark,
 } from "./auth-brand-wordmark"
 export { AuthNebulaBackground } from "./auth-nebula-background"
+
+// AS.7.1 — Login page primitives
+export { AuthFieldElectric } from "./auth-field-electric"
+export { OAuthEnergySphere } from "./oauth-energy-sphere"
+export { OAuthProviderIcon } from "./oauth-provider-icons"
+export { AuthHoneypotField } from "./auth-honeypot-field"
+export { AuthTurnstileWidget } from "./auth-turnstile-widget"
+export { AccountLockedOverlay } from "./account-locked-overlay"
+export {
+  WARP_DURATION_BY_LEVEL,
+  WarpDriveTransition,
+} from "./warp-drive-transition"
