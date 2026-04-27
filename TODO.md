@@ -2202,6 +2202,99 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
 
 ---
 
+### W11. Website Cloning Capability (#XXX) ⭐ 借鑑 firecrawl/open-lovable
+
+> firecrawl/open-lovable (MIT) 提供 URL → React app。OmniSight 借此但**不限 React** — 生 Next/Nuxt/Astro/Vue/Svelte 任一。**5 層 defense-in-depth 取代黑名單**（W11.4–W11.8）。
+
+- [ ] W11.1 `backend/web/site_cloner.py` — URL → `CloneSpec`
+- [ ] W11.2 雙 backend：(a) Firecrawl SaaS + (b) self-host Playwright（air-gap 必備）
+- [ ] W11.3 `CloneSpec` schema：title / meta / hero / nav / sections[] / footer / images[] / colors[] / fonts[] / spacing
+- [ ] W11.4 **L1 機器拒絕信號**：robots.txt + noai meta + ai.txt + CF ai-bot rule
+- [ ] W11.5 **L2 LLM 內容分類器**：Haiku/Gemini Flash 分類 risk_level
+- [ ] W11.6 **L3 Output transformation**（最關鍵）：永不複製 bytes、文字 LLM rewrite、圖片 placeholder
+- [ ] W11.7 **L4 強制可追溯性**：HTML comment + `.omnisight/clone-manifest.json` + audit log
+- [ ] W11.8 **L5 rate limit + PEP HOLD**：24h 同 tenant 同 target 最多 3 次
+- [ ] W11.9 Multi-framework adapter（Next / Nuxt / Astro 三條 render path）
+- [ ] W11.10 Frontend agent role prompt 加 `clone_spec_context`
+- [ ] W11.11 Tests: 5 reference URL × snapshot diff
+- [ ] W11.12 Audit log row per clone
+- [ ] W11.13 Attribution: `LICENSES/open-lovable-mit.txt` + commit message + module file header
+- 預估：**3 day**
+
+### W12. Brand Style Extraction from URL (#XXX)
+
+> 擴 `backend/brand_consistency_validator.py`（B5 既有）加 reverse mode — 從外部 URL 抽品牌作為新 spec 依據。
+
+- [ ] W12.1 `BrandSpec` dataclass（5 維 palette/fonts/heading/spacing/radius）
+- [ ] W12.2 `extract_brand_from_url(url)` — k-means clustering on rendered pixels + 字體 + heading scale + spacing 分群
+- [ ] W12.3 既有 B5 forward-mode validator 拆 shared types
+- [ ] W12.4 Scaffold flag `--reference-url`
+- [ ] W12.5 BrandSpec → `.omnisight/brand.json`，後續 agent edit 從這讀
+- [ ] W12.6 Tests: 8 reference URL × 5 維度
+- 預估：**1 day** · 相依 B5 既有 validator
+
+### W13. Multi-breakpoint Screenshot Capture (#XXX)
+
+> 借 open-lovable `scrape-screenshot` pattern。比 open-lovable 加碼**多斷點**（375 / 768 / 1440 / 1920），W14 live preview 可做 ghost overlay diff。
+
+- [ ] W13.1 `backend/web/screenshot_capture.py` — Playwright multi-context（每 viewport 一個）
+- [ ] W13.2 4 預設斷點 + custom 額外斷點 list
+- [ ] W13.3 Output: `.omnisight/refs/{breakpoint}.png` + manifest.json
+- [ ] W13.4 整合 W14 ghost overlay 比對
+- [ ] W13.5 Tests: 5 URLs × 4 breakpoints = 20 screenshot
+- 預估：**0.75 day**
+
+### W14. Live Web Sandbox Preview (#XXX) ⭐ 既有 T2/T3 sandbox 加強版
+
+> **不是平行新建** — W14 = T2/T3 sandbox + BS.4 sidecar + Y6 workspace + B12 CF tunnel + K-rest CF Access SSO 五個既有元件的 glue + Vite-specific 邏輯（~80% reuse / ~20% 新 code）。
+
+- [ ] W14.1 `omnisight-web-preview` sidecar image — Node 22 LTS + pnpm + Vite + Bun（Nuxt SSR）
+- [ ] W14.2 Backend `POST /web-sandbox/preview` — workspace_id → sidecar git fetch + `pnpm install` + `pnpm dev`
+- [ ] W14.3 動態 CF Tunnel ingress rule：`https://preview-{sandbox_id}.{tunnel_host}`
+- [ ] W14.4 Cloudflare Access SSO 鎖（OIDC token 對齊 OmniSight session）
+- [ ] W14.5 Idle timeout 30 分鐘 auto-kill + 刪 ingress
+- [ ] W14.6 Frontend `<LivePreviewPanel />` — `<iframe>` + 連線指示燈 + reload/external/kill + viewport 模擬
+- [ ] W14.7 Vite HMR WebSocket passthrough → frontend iframe 自動 reload
+- [ ] W14.8 PEP HOLD before first preview（npm install 50–500 MB / ETA 30–90s）
+- [ ] W14.9 Resource limit cgroup：2 GB RAM / 1 CPU / 5 GB disk
+- [ ] W14.10 alembic 0059 `web_sandbox_instances` table（sandbox_id / workspace_id / started_at / ingress_url / status / last_request_at / killed_at / killed_reason）
+- [ ] W14.11 R 系列風險登記：R28 動態 CF tunnel ingress credential exhaust / R29 Vite dev server sandbox escape / R30 Vite plugin exfiltration
+- [ ] W14.12 Tests: lifecycle + resource limit hit + Cloudflare Access bypass attempt
+- 預估：**3 day** · 相依 BS.4 + B12
+
+### W15. Vite/Build Error Self-healing Loop (#XXX)
+
+> 借 open-lovable `monitor-vite-logs` + `report-vite-error` pattern，串既有 LangGraph error_check_node。
+
+- [ ] W15.1 `omnisight-vite-plugin` 自製 plugin（Rolldown/Webpack 等價版另寫），編譯/runtime error → POST `/web-sandbox/{id}/error`
+- [ ] W15.2 `backend/web/vite_error_relay.py` 接 error → 寫進 LangGraph state.error_history
+- [ ] W15.3 Error 進 system prompt 模板：「上次 build 有 error: [file:line] [message]」
+- [ ] W15.4 Auto-retry budget：同 error pattern 連 3 次失敗 → escalate operator
+- [ ] W15.5 W6/W7/W8 scaffold 自動把 plugin 加進 vite.config 模板
+- [ ] W15.6 Tests: syntax error / undefined symbol / import path typo 三類自動修
+- 預估：**1 day**
+
+### W16. Orchestrator Chat Auto-Integration ⭐ 串聯 W11-W15
+
+> Operator 不需學新 command，**自然語言就能觸發**全套 W11-W15 能力。
+
+- [ ] W16.1 **URL detection** — `_detect_coaching_triggers` 加新 trigger：訊息含 URL → coach 顯示 (a) 克隆 / (b) 抽品牌 / (c) 截圖 / (d) 不用
+- [ ] W16.2 **Image attachment / paste** — vision LLM (Claude Sonnet 4.6 vision / GPT-4 Vision) 生成 layout spec → coach (a) component / (b) 整頁 / (c) brand reference
+- [ ] W16.3 **Build intent detection** — 「蓋/做/建/make/build/create」+「網站/landing/page/app」→ 自動 scaffold + auto-trigger W14
+- [ ] W16.4 **Inline preview iframe** — 新 SSE event `preview.ready` 帶 sandbox URL → frontend 在 chat message 內嵌 `<iframe>`，可全螢幕展開
+- [ ] W16.5 **Edit-while-preview live cycle** — operator 「header 大一點」→ agent edits → vite HMR 自動 reload preview
+- [ ] W16.6 **Vite error in dialogue** — W15 error 觸發 → orchestrator 自動發訊息「我看到 X 有 error，正在修...」修完發「已修 ✓」
+- [ ] W16.7 **Next-step coaching after preview live** — preview 跑起來後主動建議 (a) Vercel deploy / (b) a11y scan / (c) commit+PR / (d) 繼續編輯
+- [ ] W16.8 **Reference attachment 持續性** — W11/W12/W13 抓的 spec 存 `.omnisight/`，agent prompt 自動帶進 context
+- [ ] W16.9 Tests: 5 個 e2e scenarios（純 URL 克隆 / 純 image 設計 / build intent / edit live / error 自修）
+- 預估：**2 day**
+
+**Priority W (W11-W16) 總預估**：**~11 day**（W 系列完整版 13.5 + 11 = 24.5d）
+
+**Alembic 編號預留**：**0059–0060**（W14.10 用 0059；0060 buffer）
+
+---
+
 ## 🅟 Priority P — Mobile App Vertical（iOS / Android / 跨平台）
 
 > 背景：行動端 app 是三條新 vertical 中最重的（SDK 巨大、簽章鏈繁複、store 審核規則專屬、emulator 資源吃重），但也是工控客戶常與嵌入式設備配對的伴生品（相機 app、條碼 scanner app、IoT remote）。
@@ -2723,6 +2816,414 @@ Wall time → **~7 day**（Track C 仍是關鍵路徑、UI 工作天然較重；
 ls backend/alembic/versions/ | tail -3
 # 預期：最後一號 ≤ 0050（Y 完工）；BS.1.1 寫成 ${last+1}_catalog_tables.py
 ```
+
+---
+
+## 🅐🅢 Priority AS — Auth & Security Shared Library（OAuth / Turnstile / Auto-gen 密碼 + 全套浮誇 UI）
+
+> **背景**：OAuth + reCAPTCHA / Turnstile 不只 generated app 需要，OmniSight 自身 auth 也在用（既有 `git_credentials.py` / Phase 5b LLM credentials 是 ad-hoc per-integration 實作、無共用 abstraction）。AS 把核心 lib 抽出，OmniSight self + W/FS/SC template 全 reuse。
+>
+> **設計核心**：
+> 1. **Shared library + 雙 twin（Python + TS）** — 一份 lib 兩 surface（OmniSight 自家 backend + emit 進 generated app workspace）
+> 2. **Strict additive + 隨時 rollback** — AS.0 migration discipline 保證既有 password user 零影響
+> 3. **OmniSight 自家 dogfood** — AS.6 backend 整合 + AS.7 UI/UX 全 8 頁重做
+> 4. **8 層浮誇視覺**（AS.7.0）— 背景星雲 WebGL shader + floating glass card + brand wordmark 光弧 + field 通電 + OAuth provider energy spheres + 密碼 slot machine + warp drive transition + 場景化 dramatic
+> 5. **Auto-gen 密碼 3 種 style** — Random（max 安全）/ Memorable（Diceware）/ Pronounceable（子音母音交替），Browser keychain 自動整合
+>
+> **排程**：Y → BS → AS（與 W11-W16 平行）→ FS → SC → BP
+>
+> **相依（硬前置）**：
+> - **BS.3 motion library** — AS.7.0 視覺基礎建設 reuse
+> - **BS 完工** — alembic 編號才能精準預留
+> - **K-rest CF Access SSO** — AS.6 OAuth 與 K-rest 邊界釐清（CF Access = 網路層 SSO / AS OAuth = 應用層 OAuth）
+> - **R20 Phase 0** ✅ — AS.7 OAuth coaching card 走 R20-A PEP HOLD
+>
+> **Alembic 編號預留**：**0056–0058**
+>
+> **總範圍**：**~21.75 day**（11 phase）
+
+### AS.0 — Compatibility & Migration Discipline ⭐ 必須先做（防 production 既有 user 被打擾）
+- [ ] AS.0.1 既有 auth surface 完整盤點（列所有 login / signup / password-reset / API auth / git_credentials / LLM credentials call site + 列所有自動化 client → bypass list）
+- [ ] AS.0.2 alembic 0056 — `tenants.auth_features JSONB DEFAULT '{}'` 欄位（既有 tenant 預設 `{oauth_login: false, turnstile_required: false, honeypot_active: false}` — **零行為變動**；新 tenant 預設全開）
+- [ ] AS.0.3 Account-linking 安全規則：OAuth email 匹配既有 password user → 強制 password 驗證 BEFORE link（防 takeover）；`users.auth_methods` set/array
+- [ ] AS.0.4 Credential refactor migration plan — expand-migrate-contract，舊表保留一個 release cycle，encryption key 連續性
+- [ ] AS.0.5 Turnstile fail-open 漸進策略：第 1 階段 4 週 fail-open + warning log → 第 2 階段 alert → tenant opt-in 切 fail-closed
+- [ ] AS.0.6 Automation bypass list（API key auth / IP allowlist / test token header）
+- [ ] AS.0.7 Honeypot field 設計細節（rare field name + CSS hide + tabindex=-1 + autocomplete=off + aria-hidden）
+- [ ] AS.0.8 Single-knob rollback：`OMNISIGHT_AS_ENABLED=true|false` env，false 時 AS 全套 disabled
+- [ ] AS.0.9 Compat regression test suite（5 顆 critical：既有 password / 既有 password+MFA / API key / test token bypass / rollback knob）
+- [ ] AS.0.10 Auto-gen password core lib（Python + TS twin）— Random / Memorable Diceware / Pronounceable 三 style
+- 預估：**1.5 day**
+
+### AS.1 — OAuth Client Core Library
+- [ ] AS.1.1 `backend/auth/oauth_client.py` — Python lib（PKCE + state + nonce + refresh rotation + auto-refresh middleware）
+- [ ] AS.1.2 `templates/_shared/oauth-client/` TypeScript twin（同 spec、emit 進 generated app workspace）
+- [ ] AS.1.3 Vendor catalog（同 BS catalog pattern）— GitHub / Google / Microsoft / Apple / GitLab / Bitbucket / Slack / Notion / Salesforce / HubSpot / Discord 共 11 個
+- [ ] AS.1.4 OAuth audit event format + 統一 emit 進 audit_log
+- [ ] AS.1.5 Drift guard test：Python 跟 TS twin 對同 vendor 回傳一致 token shape
+- 預估：**2 day**
+
+### AS.2 — Token Vault
+- [ ] AS.2.1 `backend/auth/token_vault.py` — per-user / per-provider 加密儲存（reuse Fernet + per-user salt）
+- [ ] AS.2.2 alembic 0057 `oauth_tokens` table（user_id / provider / access_token_enc / refresh_token_enc / expires_at / scope / key_version）
+- [ ] AS.2.3 `templates/_shared/token-vault/` — generated app 用 libsodium 等價物
+- [ ] AS.2.4 Refresh hook：access token 過期前 60s 自動 refresh
+- [ ] AS.2.5 Revoke endpoint：DSAR / GDPR right-to-erasure
+- 預估：**1 day**
+
+### AS.3 — Bot Challenge Lib
+- [ ] AS.3.1 `backend/security/bot_challenge.py` — Turnstile / reCAPTCHA v2/v3 / hCaptcha 統一 interface
+- [ ] AS.3.2 `templates/_shared/bot-challenge/` TS twin
+- [ ] AS.3.3 Provider-selection logic：預設 Turnstile / GDPR strict region → hCaptcha / 既有 Google ecosystem → reCAPTCHA v3
+- [ ] AS.3.4 Server-side score verification + 拒絕邏輯（score < 0.5 → 拒）
+- [ ] AS.3.5 Fallback chain：主 provider down → 自動切備援
+- 預估：**1 day**
+
+### AS.4 — Honeypot Helper
+- [ ] AS.4.1 Hidden field generator + bot 偵測（搭 AS.3 雙保險）
+- 預估：**0.25 day**
+
+### AS.5 — Observability + Audit Hooks
+- [ ] AS.5.1 Auth event format（login_success / login_fail / oauth_connect / oauth_revoke / bot_challenge_pass / bot_challenge_fail / token_refresh / token_rotated）
+- [ ] AS.5.2 Per-tenant dashboard：challenge 通過 / 失敗 rate、auth method 分布、suspicious pattern alert
+- 預估：**0.5 day**
+
+### AS.6 — OmniSight Self-Integration（Backend 部分）⭐ Dogfood
+- [ ] AS.6.1 OmniSight login 加「Sign in with Google / GitHub / Microsoft / Apple」backend handler（reuse AS.1）
+- [ ] AS.6.2 既有 `git_credentials.py` / Phase 5b `llm_credentials.py` 重構走 AS.2 token vault（expand-migrate-contract）
+- [ ] AS.6.3 OmniSight login / signup / password-reset / contact form 加 Turnstile backend verify（reuse AS.3）
+- [ ] AS.6.4 Per-form honeypot field（reuse AS.4）
+- [ ] AS.6.5 OmniSight 自家 audit log 接 AS.5 event format
+- 預估：**1.5 day**
+
+### AS.7 — OmniSight Auth UI/UX Overhaul（含 8 層浮誇視覺）⭐ 完整重做 8 頁
+
+> 全 8 頁套 BS.3 motion library + 額外**「Command Bridge Auth Experience」8 視覺層**（背景星雲 WebGL / floating glass card / brand wordmark 光弧 / field 通電 / OAuth energy spheres / 密碼 slot machine / warp drive transition / 場景化 dramatic）。
+
+- [ ] **AS.7.0 — Auth Visual Foundation 共用層（NEW，3d）**
+  - 背景星雲 WebGL fragment shader（~50 行 GLSL，緩慢漂移 + 三層星空 parallax + 游標 gravity well）
+  - Floating glass card 系統（heavy glass morphism + corner-brackets + neon glow flicker + idle drift + 3D tilt + scroll parallax）
+  - Brand wordmark + traveling light（OmniSight 字內光弧 4s 滑過 + breathing pulse + 點 input 時 wordmark 微 bloom 回應）
+  - Reduce-motion 全套 fallback（@media prefers-reduced-motion）
+  - 電池感知 4 級降級（reuse BS.3 規則）
+  - Performance budget tests（FPS / GPU%）
+- [ ] **AS.7.1 — Login page redesign (2d)**
+  - email + password（主路徑） + Turnstile widget + honeypot field
+  - 5+1 OAuth buttons（圓形 provider energy spheres + brand 色 halo）
+  - Field 通電（focus 4 corner brackets snap + 邊框 gradient + scan line）
+  - MFA flow 整合
+  - 錯誤態：spring-shake + 紅 lightning flicker + 統一文案不洩漏帳號存在
+  - 帳號鎖：blue tint + frozen overlay + chill effect
+  - Warp drive transition 進 dashboard
+- [ ] **AS.7.2 — Signup page redesign + auto-gen 密碼 slot machine (2.5d)**
+  - 預填強密碼（瀏覽器 keychain prompt 自動觸發）
+  - **密碼 Slot Machine 量子坍縮效果**（點 🎲 → 20 column 瘋狂 cycle 200ms → 從左到右逐個 lock + scale flash → 1s 落定）
+  - 三 style toggle（Random / Memorable Diceware / Pronounceable）即時切換重生成
+  - Real-time strength meter（zxcvbn）+ breach check（HaveIBeenPwned k-anonymity）
+  - 「我已保存密碼」強制 checkbox（不勾 submit disabled）
+  - OAuth alt path（不想用密碼可走）
+  - Tenant 選 / ToS / email 驗證
+- [ ] **AS.7.3 — Password reset (0.75d)** — Email link 寄送 / new password 重設（含 auto-gen）/ OAuth-only 帳號明確訊息
+- [ ] **AS.7.4 — MFA challenge page (1d)** — TOTP / WebAuthn / Passkey 三選一 + 6 digit pulse 動畫 + ✓ 通過動畫 + backup codes
+- [ ] **AS.7.5 — Email verification (0.5d)** — Magic link 點進來確認 + envelope idle motion + re-send option
+- [ ] **AS.7.6 — Account locked / suspended (0.5d)** — 清楚說明 + 解鎖路徑 + chill 視覺（藍 tint + 慢速）
+- [ ] **AS.7.7 — Profile / Account settings (2.5d)**
+  - Connected accounts（OAuth providers 軌道衛星佈局，每個 provider 是繞中心頭像旋轉的 satellite）
+  - Auth methods（password / OAuth / Passkey list）
+  - MFA setup（TOTP / WebAuthn）
+  - Sessions list（active / terminate）
+  - Password change with auto-gen
+  - API keys
+  - Export data / delete account（GDPR）
+- [ ] **AS.7.8 — First-login onboarding (1.5d)** — Tenant 設定 / Profile 補完 / 第一個 project 引導 + 慶祝 burst（30 粒子從中心爆發 + 升起組「Welcome aboard」）
+- 預估：**14 day**（總 8 頁 + AS.7.0 視覺基礎）
+
+### AS.8 — Tests + Migration Runbook + ADR
+- [ ] AS.8.1 Compat regression test suite（AS.0.9 5 顆 critical + 新增 8 個 cross-feature integration tests）
+- [ ] AS.8.2 ADR doc：`docs/design/as-auth-security-shared-library.md`
+- [ ] AS.8.3 Operator runbook：`docs/operations/as-rollout-and-rollback.md`（per-tenant feature flag 切換 SOP / single-knob rollback / Turnstile 三階段切換 SOP）
+- 預估：**0.5 day**
+
+**Priority AS 總預估**：**~21.75 day**
+
+### 平行分工建議
+
+如果 1 條 track + operator：嚴格 AS.0 → AS.1 → AS.2 → AS.3 → AS.4 → AS.5 → AS.6 → AS.7（含 AS.7.0 → 7.1 → ...） → AS.8 順序。
+
+如果 2 條 track 平行：
+- **Track A（後端 lib + integration）**：AS.0 → AS.1 → AS.2 → AS.3 → AS.4 → AS.5 → AS.6 → AS.8 → ~8d
+- **Track B（前端 UI/UX 浮誇視覺）**：AS.7.0 (foundation) → AS.7.1 (login) → AS.7.2 (signup slot machine) → AS.7.3-7.8 → ~14d
+- 同步點：AS.6 ship 後 → Track B 才能在 AS.7 接 backend 真實 endpoint
+- Wall time：max(8d, 14d) = ~14d（Track B 是關鍵路徑）
+
+3 track 不再縮短 — AS.7 是視覺工作天然較重，3+ 個人寫同個 React 元件樹會 merge 衝突大於增量速度。
+
+**Alembic 編號精準預留**：
+
+| Migration | 用途 | Phase |
+|---|---|---|
+| 0056 | `tenants.auth_features` JSONB 欄位 | AS.0.2 |
+| 0057 | `oauth_tokens` table | AS.2.2 |
+| 0058 | （buffer） | — |
+
+---
+
+## 🅕🅢 Priority FS — Full-Stack Web Application Generation（補完 W 系列後端缺口）
+
+> **背景**：W11-W16 + W 系列做完後仍只覆蓋前端 + 靜態部署。SaaS 級「DB / Auth provisioning / Object storage / Email / Background jobs / Search / Billing」整合自動化是 generated app **production-ready** 的最後一哩。FS 把這條補完。
+>
+> **設計核心**：
+> 1. **Reuse AS lib** — FS.2 inbound auth + FS.2b outbound OAuth + 任何 form 的 Turnstile 全 reuse `Priority AS` 的 lib（避免重複實作 + 避免 drift）
+> 2. **Provider-agnostic adapter pattern** — 同 BS catalog 設計，per-domain 多 provider 抽象介面（DB / email / search 等）
+> 3. **Vendor lock-in 風險揭露** — 每個整合在 PEP HOLD 顯示 lock-in level（low / medium / high），協助 operator 判斷
+>
+> **排程**：W11-W16 + AS 之後
+>
+> **Alembic 編號預留**：**0061–0063**
+>
+> **總範圍**：**~12 day**（FS.2 + FS.2b 因 reuse AS 已從 3.5d 縮成 1.75d）
+
+### FS.1 — DB Provisioning
+- [ ] FS.1.1 Adapter for Supabase / Neon / PlanetScale 三 backend
+- [ ] FS.1.2 自動跑 migration runner（Prisma / Drizzle / SQLAlchemy schema → tenant own DB）
+- [ ] FS.1.3 alembic 0061 `provisioned_databases` table（tenant_id / provider / connection_url_enc / created_at / status）
+- [ ] FS.1.4 Encryption at rest 自動 enable（依 provider tier）
+- [ ] FS.1.5 Backup 排程（依 provider feature）
+- [ ] FS.1.6 PEP HOLD with cost estimate
+- [ ] FS.1.7 Tests: 三 provider 完整 provision → migrate → smoke
+- 預估：**2 day**
+
+### FS.2 — Auth Provisioning - Inbound（reuse AS.1）
+- [ ] FS.2.1 Clerk / Auth0 / WorkOS API 自動 setup
+- [ ] FS.2.2 NextAuth.js / Lucia self-hosted scaffold（reuse AS.1 OAuth client lib）
+- [ ] FS.2.3 Vendor OAuth app config 半自動化（Google / GitHub 走 vendor API where 有；其他生 step-by-step instructions）
+- [ ] FS.2.4 Account linking + 多 provider stack
+- [ ] FS.2.5 Email + magic link + TOTP MFA + WebAuthn baseline
+- [ ] FS.2.6 Tests: 主流 5 provider 登入完整 flow
+- 預估：**0.75 day**（縮減自原 1.5d，因 reuse AS）
+
+### FS.2b — Auth Provisioning - Outbound Integrations（reuse AS.1 + AS.2）
+- [ ] FS.2b.1 OAuth flow scaffold helper（authorize → callback → token exchange）
+- [ ] FS.2b.2 Token vault：reuse AS.2 token_vault for generated app
+- [ ] FS.2b.3 Refresh token rotation + 過期偵測 + 自動 refresh middleware
+- [ ] FS.2b.4 Scope upgrade flow（已 connect 後升 scope 不重 connect）
+- [ ] FS.2b.5 Disconnect + revoke endpoint（DSAR / GDPR right-to-erasure）
+- [ ] FS.2b.6 Vendor catalog：GitHub / Slack / Google Workspace / Microsoft 365 / Notion / Salesforce / HubSpot / Zoom / Stripe Connect / Discord 共 10 個
+- [ ] FS.2b.7 Tests: 模擬 3 vendor 完整 connect → use → refresh → revoke
+- 預估：**1 day**（縮減自原 2d，因 reuse AS）
+
+### FS.3 — Object Storage
+- [ ] FS.3.1 S3 / R2 / Supabase Storage adapter
+- [ ] FS.3.2 alembic 0062 `provisioned_storage` table（tenant_id / provider / bucket_name / created_at）
+- [ ] FS.3.3 Pre-signed URL generation
+- [ ] FS.3.4 CORS config 自動
+- [ ] FS.3.5 Tests
+- 預估：**1 day**
+
+### FS.4 — Email Service
+- [ ] FS.4.1 Resend / Postmark / AWS SES adapter
+- [ ] FS.4.2 Template registry（welcome / verification / password-reset / DSAR / etc.）
+- [ ] FS.4.3 Bounce / complaint handling webhook
+- [ ] FS.4.4 SPF / DKIM / DMARC setup instructions
+- [ ] FS.4.5 Tests
+- 預估：**1 day**
+
+### FS.5 — Background Jobs
+- [ ] FS.5.1 Inngest / Trigger.dev / Vercel Cron adapter
+- [ ] FS.5.2 Job definition scaffold
+- [ ] FS.5.3 Cron schedule wiring
+- [ ] FS.5.4 Failure retry + dead letter queue
+- [ ] FS.5.5 Tests
+- 預估：**1.5 day**
+
+### FS.6 — Search
+- [ ] FS.6.1 Algolia / Typesense / Meilisearch adapter
+- [ ] FS.6.2 Indexing pipeline scaffold
+- [ ] FS.6.3 Faceted search component template
+- [ ] FS.6.4 Tests
+- 預估：**1 day**
+
+### FS.7 — Full-stack Scaffold Templates
+- [ ] FS.7.1 Next.js + Prisma + Auth.js + tRPC + Resend bundle
+- [ ] FS.7.2 Nuxt + Drizzle + Auth + Postmark bundle
+- [ ] FS.7.3 Astro + content collections + Sanity bundle
+- [ ] FS.7.4 完整 example app（todo / blog / SaaS landing）三選一驗 bundle 通
+- 預估：**2 day**
+
+### FS.8 — Stripe / Billing 整合（既有 Priority T 接通）
+- [ ] FS.8.1 Stripe checkout / billing portal scaffold
+- [ ] FS.8.2 Webhook handler scaffold
+- [ ] FS.8.3 alembic 0063 `provisioned_billing` table
+- [ ] FS.8.4 Subscription state sync
+- [ ] FS.8.5 Tests
+- 預估：**1 day**
+
+### FS.9 — E2E Full-stack Scenario Tests
+- [ ] FS.9.1 「蓋一個 Todo SaaS with auth + DB + email」完整 e2e
+- [ ] FS.9.2 「蓋一個 Blog with CMS + storage + search」完整 e2e
+- [ ] FS.9.3 「蓋一個 SaaS landing with billing + email」完整 e2e
+- 預估：**1 day**
+
+**Priority FS 總預估**：**~12 day**（含 AS reuse 後的縮減）
+
+**Alembic 編號精準預留**：
+
+| Migration | 用途 | Phase |
+|---|---|---|
+| 0061 | `provisioned_databases` table | FS.1.3 |
+| 0062 | `provisioned_storage` table | FS.3.2 |
+| 0063 | `provisioned_billing` table | FS.8.3 |
+
+---
+
+## 🅢🅒 Priority SC — Security Compliance for Generated Apps（OWASP / SAST / DAST / Bot 防禦 / 法規）
+
+> **背景**：W + FS 完成後 generated app 功能完整、但**資安自動化覆蓋率仍只 ~50%**（缺 SAST / DAST / SCA / 安全 headers / OWASP mitigation / 法規 jurisdiction）。SC 把這條補到 ~85%（HIPAA / PCI DSS / SOC2 仍需 human auditor，但所有技術控制 90%+ 自動）。
+>
+> **設計核心**：
+> 1. **Reuse AS bot challenge lib** — SC.13 不重做 Turnstile / reCAPTCHA / hCaptcha 整合，直接用 AS.3
+> 2. **Per-jurisdiction 法規模板** — GDPR / CCPA / PIPL / LGPD / PIPEDA 五個主流地區自動生 privacy notice + DSAR workflow
+> 3. **Defense-in-depth scanning** — SAST + DAST + SCA + Container + Secret + IaC 六種 scanner 整合（不全用 vendor SaaS、有 OSS 替代）
+>
+> **排程**：FS 之後
+>
+> **Alembic 編號預留**：**0064–0065**
+>
+> **總範圍**：**~13.5 day**（SC.13 因 reuse AS 已從 1.5d 縮成 0.5d）
+
+### SC.1 — SAST Integration
+- [ ] SC.1.1 CodeQL / Semgrep / Snyk Code adapter
+- [ ] SC.1.2 走 generated workspace、每次 commit 觸發
+- [ ] SC.1.3 整合 PEP gateway — high severity finding 自動 HOLD
+- [ ] SC.1.4 Tests
+- 預估：**1.5 day**
+
+### SC.2 — DAST Integration
+- [ ] SC.2.1 OWASP ZAP adapter — 走 W14 live preview 自動掃
+- [ ] SC.2.2 整合 W14 sandbox lifecycle
+- [ ] SC.2.3 Tests
+- 預估：**1.5 day**
+
+### SC.3 — SCA（dependency vulnerability scan）
+- [ ] SC.3.1 npm audit / OSV scanner / Snyk wrapper
+- [ ] SC.3.2 自動 fix-PR pattern（dependabot 風格）
+- [ ] SC.3.3 Tests
+- 預估：**1 day**
+
+### SC.4 — Container Vulnerability Scan
+- [ ] SC.4.1 Trivy / Grype 對 W4 deploy artifact 強制掃
+- [ ] SC.4.2 整合 W4 deploy adapter — high CVE 直接 block
+- 預估：**0.5 day**
+
+### SC.5 — Secret Scan
+- [ ] SC.5.1 gitleaks / TruffleHog
+- [ ] SC.5.2 Scaffold 預設裝 pre-commit hook
+- 預估：**0.5 day**
+
+### SC.6 — Security Headers 自動配
+- [ ] SC.6.1 CSP 含 nonce / hash 自動生成
+- [ ] SC.6.2 HSTS + X-Frame-Options + Referrer-Policy + Permissions-Policy + CORP/COEP/COOP
+- [ ] SC.6.3 W6/W7/W8 scaffold middleware 自動加
+- 預估：**1 day**
+
+### SC.7 — OWASP Top 10 Mitigation Library
+- [ ] SC.7.1 Input validation helpers
+- [ ] SC.7.2 Output encoding helpers
+- [ ] SC.7.3 Parameterized query templates
+- [ ] SC.7.4 CSRF token templates
+- [ ] SC.7.5 Path traversal / SSRF 防護 helpers
+- 預估：**2 day**
+
+### SC.8 — MFA Enforcement（FS.2 build on top）
+- [ ] SC.8.1 Clerk / Auth0 中強制 MFA 設定 toggle
+- [ ] SC.8.2 NextAuth.js self-hosted MFA scaffold（reuse AS.1）
+- 預估：**0.5 day**
+
+### SC.9 — Per-jurisdiction Privacy Notice Generator
+- [ ] SC.9.1 GDPR 模板（含 right-to-access / portability / erasure / objection）
+- [ ] SC.9.2 CCPA 模板
+- [ ] SC.9.3 PIPL（中國）模板
+- [ ] SC.9.4 LGPD（巴西）模板
+- [ ] SC.9.5 PIPEDA（加拿大）模板
+- [ ] SC.9.6 自動依 SDK / 第三方依賴推導所需條款
+- 預估：**1.5 day**
+
+### SC.10 — DSAR Workflow Scaffolding
+- [ ] SC.10.1 alembic 0064 `dsar_requests` table
+- [ ] SC.10.2 Access endpoint（user 拿自家所有資料）
+- [ ] SC.10.3 Erasure endpoint
+- [ ] SC.10.4 Portability endpoint（JSON export）
+- [ ] SC.10.5 Email template + 30d SLA timer
+- 預估：**1 day**
+
+### SC.11 — Compliance Evidence Bundle Generator
+- [ ] SC.11.1 alembic 0065 `compliance_evidence_bundles` table
+- [ ] SC.11.2 SOC2 control mapping → 自動 collect logs/policies
+- [ ] SC.11.3 ISO 27001 mapping
+- [ ] SC.11.4 Evidence bundle export（zip + signature）
+- 預估：**1.5 day**
+
+### SC.12 — PII Detection / Masking
+- [ ] SC.12.1 Microsoft Presidio integration
+- [ ] SC.12.2 Auto-mask helpers for logs / responses
+- [ ] SC.12.3 Tests
+- 預估：**1 day**
+
+### SC.13 — Bot Defense Stack（reuse AS.3）
+- [ ] SC.13.1 Reuse AS.3 bot_challenge lib（Turnstile / reCAPTCHA / hCaptcha）
+- [ ] SC.13.2 Scaffold 5 form 預設帶（login / signup / password-reset / contact / comment）
+- [ ] SC.13.3 Honeypot field 自動加（reuse AS.4）
+- [ ] SC.13.4 可觀測性：challenge 通過 / 失敗 / fallback 比例 dashboard
+- [ ] SC.13.5 Tests
+- 預估：**0.5 day**（縮減自原 1.5d，因 reuse AS）
+
+**Priority SC 總預估**：**~13.5 day**
+
+**Alembic 編號精準預留**：
+
+| Migration | 用途 | Phase |
+|---|---|---|
+| 0064 | `dsar_requests` table | SC.10.1 |
+| 0065 | `compliance_evidence_bundles` table | SC.11.1 |
+
+---
+
+## 📊 W 系列擴充 + AS / FS / SC 整體 Roadmap 概覽
+
+| Phase | 範圍 | 預估 | 累計 | 主要相依 |
+|---|---|---|---|---|
+| Y 完工（進行中） | Multi-tenant + Y6 workspace + Y8 frontend | — | — | — |
+| BS | Bootstrap & Catalog | 10d | 10d | Y |
+| W11-W16 | Lovable 整合（克隆 / 品牌 / 截圖 / 預覽 / 自修 / 對話 UX） | 11d | 21d | BS.4 + B12 |
+| **AS** | **Auth & Security shared library + 8 頁浮誇 UI** | **22d** | **43d** | BS.3 + R20 Phase 0 |
+| FS | Full-stack generation（含 reuse AS） | 12d | 55d | AS |
+| SC | Security compliance（含 reuse AS） | 13.5d | 68.5d | FS + AS |
+| BP | Architecture deep work | ~5.5w | ~16w | — |
+
+**平行可能性**：AS 跟 W11-W16 兩條 track 完全獨立、可平行（max(11d, 22d) = 22d wall time、省 11d）。
+
+**Migration 編號完整 layout**：
+
+```
+Y1 (已 ship):         0032-0038
+Y2-Y10 (預留):        0039-0050
+BS:                   0051-0055
+AS:                   0056-0058
+W11-W16:              0059-0060
+FS:                   0061-0063
+SC:                   0064-0065
+BP:                   0066+
+```
+
+**ADR 文件清單**（BS.0 + 本 batch 新增）：
+- `docs/design/blueprint-v2-implementation-plan.md`（既有，BP 主 ADR）
+- `docs/design/bs-bootstrap-vertical-aware.md`（BS.0.1 寫入）
+- `docs/design/w11-w16-as-fs-sc-roadmap.md`（**本 batch 新增**，跨 priority 統籌）
+- `docs/design/as-auth-security-shared-library.md`（**本 batch 新增**，AS 詳細決策）
+- `docs/security/w11-clone-mitigation.md`（W11 5 層 mitigation 政策）
+- `docs/security/as-installer-threat-model.md`（BS.0.2 寫入）
+- `docs/security/as-migration-discipline.md`（**本 batch 新增**，AS.0 細節）
+- `docs/operations/as-rollout-and-rollback.md`（AS.8.3 寫入）
 
 ---
 
