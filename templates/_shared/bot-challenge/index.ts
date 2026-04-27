@@ -154,6 +154,24 @@ export const DEFAULT_VERIFY_TIMEOUT_SECONDS = 3.0
 export const TEST_TOKEN_HEADER = "X-OmniSight-Test-Token"
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  AS.3.4 — server-side score verification + reject enforcement
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/** Canonical error code returned to the client when the request is
+ * rejected by a confirmed low-score bot challenge (Phase 3 fail-closed
+ * branch, `response.success && response.score < threshold`). Pinned by
+ * AS.0.5 §3 row 116 — the front-end UI keys on this string to render
+ * the retry CTA + "contact admin" copy. Cross-twin drift guard locks
+ * it byte-for-byte against the Python twin. */
+export const BOT_CHALLENGE_REJECTED_CODE = "bot_challenge_failed"
+
+/** Canonical HTTP status code for a bot challenge rejection. AS.0.5 §3
+ * ships 429 (rate-limit class) deliberately — see the Python twin's
+ * `BOT_CHALLENGE_REJECTED_HTTP_STATUS` docstring for the rationale.
+ * Cross-twin drift guard locks both sides byte-for-byte. */
+export const BOT_CHALLENGE_REJECTED_HTTP_STATUS = 429
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  Audit event canonical names — AS.0.5 §3 + AS.0.6 §3
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -341,6 +359,44 @@ export class InvalidProviderError extends BotChallengeError {
   constructor(message: string) {
     super(message)
     this.name = "InvalidProviderError"
+  }
+}
+
+/** AS.3.4 — thrown by `verifyAndEnforce` when the request is rejected
+ * by a confirmed low-score bot challenge (or honeypot fail).
+ *
+ * Carries the underlying `BotChallengeResult` so the caller's HTTP
+ * layer can:
+ *   * Read `result.outcome` to log the rejection reason.
+ *   * Read `result.auditEvent` + `result.auditMetadata` to fan out the
+ *     audit row before the 429 response goes back.
+ *   * Read `code` (default `BOT_CHALLENGE_REJECTED_CODE`) +
+ *     `httpStatus` (default `BOT_CHALLENGE_REJECTED_HTTP_STATUS`) to
+ *     serialise the canonical 429 body without re-deriving them per
+ *     route.
+ *
+ * Subclassing `BotChallengeError` (not `Error` directly) means a
+ * caller's `catch (BotChallengeError)` block on the `verify` path
+ * catches both fail-closed reject and transport / config error in one
+ * place. */
+export class BotChallengeRejected extends BotChallengeError {
+  readonly result: BotChallengeResult
+  readonly code: string
+  readonly httpStatus: number
+  constructor(
+    result: BotChallengeResult,
+    opts: { code?: string; httpStatus?: number } = {},
+  ) {
+    const code = opts.code ?? BOT_CHALLENGE_REJECTED_CODE
+    const httpStatus = opts.httpStatus ?? BOT_CHALLENGE_REJECTED_HTTP_STATUS
+    super(
+      `bot challenge rejected: outcome=${result.outcome} ` +
+        `code=${code} http_status=${httpStatus}`,
+    )
+    this.name = "BotChallengeRejected"
+    this.result = result
+    this.code = code
+    this.httpStatus = httpStatus
   }
 }
 
@@ -1310,6 +1366,68 @@ export async function verify(
     scoreThreshold: ctx.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD,
     widgetAction: ctx.widgetAction ?? null,
   })
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  AS.3.4 — reject enforcement primitives
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/** Whether AS.3.4 enforcement should turn `result` into an HTTP 429.
+ *
+ * Pure predicate — the answer is always `!result.allow`. Kept as a
+ * separate, named helper so callers can preview the decision (e.g.
+ * fan a metric / probe header BEFORE choosing to throw) without
+ * duplicating the `allow` semantics in every route.
+ *
+ * `true` for:
+ *   * `OUTCOME_BLOCKED_LOWSCORE`        — Phase 3 confirmed low score.
+ *   * `OUTCOME_JSFAIL_HONEYPOT_FAIL`    — honeypot caught the bot.
+ *
+ * `false` for everything else (`unverified_*` server errors stay
+ * fail-open even in Phase 3 per AS.0.5 §2.4 row 3, every `bypass_*`
+ * outcome, `pass`, `jsfail_honeypot_pass`, `jsfail_fallback_*`).
+ *
+ * Module-global state audit (per implement_phase_step.md SOP §1):
+ * pure function — reads no mutable state, makes no IO, has no side
+ * effects. Cross-worker / cross-tab consistency: every Node worker /
+ * browser tab derives the same boolean from the same input
+ * (answer #1 of SOP §1). */
+export function shouldReject(result: BotChallengeResult): boolean {
+  return !result.allow
+}
+
+/** End-to-end verify + reject enforcement (AS.3.4 single-call entry).
+ *
+ * Runs `verify()` to compute a `BotChallengeResult`, then if
+ * `shouldReject` says yes, throws `BotChallengeRejected` carrying the
+ * result so the caller's HTTP layer can serialise a canonical 429
+ * `bot_challenge_failed` response.
+ *
+ * On allow=true paths (`pass` / `unverified_*` fail-open / `bypass_*` /
+ * `jsfail_*`-but-not-fail), returns the result for the caller to fan
+ * into the audit emitter and continue the request.
+ *
+ * AS.0.5 §3 wire-up table (the routes AS.6.3 / generated-app emits
+ * consume this):
+ *   * `outcome=blocked_lowscore`     → throw (HTTP 429
+ *     `bot_challenge_failed`, audit row before response)
+ *   * `outcome=jsfail_honeypot_fail` → throw (same shape)
+ *   * everything else                → return result, caller emits
+ *     audit + continues the underlying action
+ *
+ * Module-global state audit (per implement_phase_step.md SOP §1):
+ * delegates entirely to `verify()` (no extra module-global state
+ * introduced) + `shouldReject` (pure predicate). Stateless RPC to the
+ * vendor's siteverify, reject decision derived from the response. */
+export async function verifyAndEnforce(
+  ctx: VerifyContext,
+  opts: { fetchImpl?: HttpFetch } = {},
+): Promise<BotChallengeResult> {
+  const result = await verify(ctx, opts)
+  if (shouldReject(result)) {
+    throw new BotChallengeRejected(result)
+  }
+  return result
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

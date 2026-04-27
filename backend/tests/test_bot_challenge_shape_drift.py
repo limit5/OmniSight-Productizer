@@ -356,6 +356,62 @@ def test_ts_declares_three_typed_errors() -> None:
         )
 
 
+def test_ts_bot_challenge_rejected_code_matches_python() -> None:
+    """AS.3.4 — the canonical front-end error code must agree byte-for-
+    byte across the Python and TS twin. The browser UI keys on this
+    string to render its retry CTA + 'contact admin' copy; drift would
+    silently break the UX contract on one side. AS.0.5 §3 row 116."""
+    src = _ts_source()
+    m = re.search(
+        r'export\s+const\s+BOT_CHALLENGE_REJECTED_CODE\s*=\s*"([^"]+)"', src
+    )
+    assert m is not None, "TS twin missing BOT_CHALLENGE_REJECTED_CODE export"
+    assert m.group(1) == bc.BOT_CHALLENGE_REJECTED_CODE, (
+        f"BOT_CHALLENGE_REJECTED_CODE drift: "
+        f"Python={bc.BOT_CHALLENGE_REJECTED_CODE!r}, TS={m.group(1)!r}"
+    )
+
+
+def test_ts_bot_challenge_rejected_http_status_matches_python() -> None:
+    """AS.3.4 — the canonical HTTP status code (429) must agree int-for-
+    int across the Python and TS twin. AS.0.5 §3 row 116."""
+    src = _ts_source()
+    m = re.search(
+        r"export\s+const\s+BOT_CHALLENGE_REJECTED_HTTP_STATUS\s*=\s*(\d+)", src
+    )
+    assert m is not None, "TS twin missing BOT_CHALLENGE_REJECTED_HTTP_STATUS export"
+    assert int(m.group(1)) == bc.BOT_CHALLENGE_REJECTED_HTTP_STATUS, (
+        f"BOT_CHALLENGE_REJECTED_HTTP_STATUS drift: "
+        f"Python={bc.BOT_CHALLENGE_REJECTED_HTTP_STATUS}, TS={m.group(1)}"
+    )
+
+
+def test_ts_declares_bot_challenge_rejected_class() -> None:
+    """AS.3.4 — TS twin must declare `BotChallengeRejected` as a class
+    that extends `BotChallengeError` so callers can `catch (e instanceof
+    BotChallengeError)` once and handle reject + transport / config
+    errors in the same branch."""
+    src = _ts_source()
+    assert re.search(
+        r"export\s+class\s+BotChallengeRejected\s+extends\s+BotChallengeError\b",
+        src,
+    ), "TS twin missing `BotChallengeRejected extends BotChallengeError`"
+
+
+def test_ts_declares_should_reject_and_verify_and_enforce() -> None:
+    """AS.3.4 — TS twin must export the two helper functions
+    (`shouldReject`, `verifyAndEnforce`) so generated apps can wire
+    their forms onto the same single-call enforce primitive without
+    re-implementing the `!result.allow` semantics per route."""
+    src = _ts_source()
+    assert re.search(
+        r"export\s+function\s+shouldReject\s*\(", src
+    ), "TS twin missing shouldReject export"
+    assert re.search(
+        r"export\s+async\s+function\s+verifyAndEnforce\s*\(", src
+    ), "TS twin missing verifyAndEnforce export"
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Family 2 — Behavioural parity via Node subprocess
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -722,6 +778,66 @@ BEHAVIOUR_FIXTURES: Mapping[str, dict[str, Any]] = {
         },
         "expect_provider": "recaptcha_v2",
     },
+    # ── AS.3.4 should_reject pure predicate ──
+    # Cross-twin parity: both sides return the same boolean for every
+    # outcome in `ALL_OUTCOMES`. The fixture passes a synthesised
+    # `BotChallengeResult`-shaped dict (the predicate keys only on `allow`,
+    # but we pass full result shape so the TS side can consume the same
+    # dict literal as Python's frozen dataclass kwargs).
+    "should_reject_blocked_lowscore": {
+        "kind": "should_reject",
+        "result": {"outcome": "blocked_lowscore", "allow": False, "score": 0.1,
+                   "provider": "recaptcha_v3"},
+        "expect_reject": True,
+    },
+    "should_reject_jsfail_honeypot_fail": {
+        "kind": "should_reject",
+        "result": {"outcome": "jsfail_honeypot_fail", "allow": False, "score": 0.0,
+                   "provider": None},
+        "expect_reject": True,
+    },
+    "should_reject_pass_no": {
+        "kind": "should_reject",
+        "result": {"outcome": "pass", "allow": True, "score": 0.9,
+                   "provider": "turnstile"},
+        "expect_reject": False,
+    },
+    "should_reject_unverified_lowscore_no": {
+        "kind": "should_reject",
+        "result": {"outcome": "unverified_lowscore", "allow": True, "score": 0.2,
+                   "provider": "recaptcha_v3"},
+        "expect_reject": False,
+    },
+    "should_reject_unverified_servererr_no": {
+        "kind": "should_reject",
+        "result": {"outcome": "unverified_servererr", "allow": True, "score": 0.0,
+                   "provider": "turnstile"},
+        "expect_reject": False,
+    },
+    "should_reject_bypass_apikey_no": {
+        "kind": "should_reject",
+        "result": {"outcome": "bypass_apikey", "allow": True, "score": 1.0,
+                   "provider": None},
+        "expect_reject": False,
+    },
+    "should_reject_bypass_ip_allowlist_no": {
+        "kind": "should_reject",
+        "result": {"outcome": "bypass_ip_allowlist", "allow": True, "score": 1.0,
+                   "provider": None},
+        "expect_reject": False,
+    },
+    "should_reject_jsfail_honeypot_pass_no": {
+        "kind": "should_reject",
+        "result": {"outcome": "jsfail_honeypot_pass", "allow": True, "score": 1.0,
+                   "provider": None},
+        "expect_reject": False,
+    },
+    "should_reject_jsfail_fallback_recaptcha_no": {
+        "kind": "should_reject",
+        "result": {"outcome": "jsfail_fallback_recaptcha", "allow": True, "score": 0.85,
+                   "provider": "recaptcha_v3"},
+        "expect_reject": False,
+    },
     # ── event_for_outcome lookup table ──
     "lookup_pass": {
         "kind": "event_for_outcome",
@@ -817,6 +933,19 @@ def _python_run_fixture(fx: dict[str, Any]) -> dict[str, Any]:
         }
     if kind == "event_for_outcome":
         return {"event": bc.event_for_outcome(fx["outcome"])}
+    if kind == "should_reject":
+        raw = fx["result"]
+        provider = bc.Provider(raw["provider"]) if raw.get("provider") else None
+        result = bc.BotChallengeResult(
+            outcome=raw["outcome"],
+            allow=raw["allow"],
+            score=raw["score"],
+            provider=provider,
+            audit_event=bc.event_for_outcome(raw["outcome"]),
+            audit_metadata={},
+            error=None,
+        )
+        return {"reject": bool(bc.should_reject(result))}
     if kind == "pick_provider":
         opts_raw = fx["opts"]
         kwargs: dict[str, Any] = {}
@@ -917,6 +1046,18 @@ for (const [key, fx] of Object.entries(fixtures)) {
       if ("region" in o) tsOpts.region = o.region
       if ("ecosystem_hints" in o) tsOpts.ecosystemHints = o.ecosystem_hints
       out[key] = { provider: bc.pickProvider(tsOpts) }
+    } else if (fx.kind === "should_reject") {
+      const r = fx.result
+      const tsResult = {
+        outcome: r.outcome,
+        allow: r.allow,
+        score: r.score,
+        provider: r.provider ?? null,
+        auditEvent: bc.eventForOutcome(r.outcome),
+        auditMetadata: {},
+        error: null,
+      }
+      out[key] = { reject: Boolean(bc.shouldReject(tsResult)) }
     } else {
       out[key] = { __error: `unknown kind ${fx.kind}` }
     }
@@ -1058,6 +1199,14 @@ def test_behaviour_parity_python_ts(
         )
         return
 
+    if fx["kind"] == "should_reject":
+        assert py["reject"] == ts["reject"] == fx["expect_reject"], (
+            f"should_reject {name!r}: "
+            f"Python={py['reject']!r}, TS={ts['reject']!r}, "
+            f"expected={fx['expect_reject']!r}"
+        )
+        return
+
     raise AssertionError(f"unhandled fixture kind: {fx['kind']!r}")
 
 
@@ -1100,7 +1249,7 @@ def _normalise_outcome(d: Mapping[str, Any]) -> dict[str, Any]:
         return {"__error": d["__error"]}
     out: dict[str, Any] = {}
     for key in ("outcome", "allow", "score", "auditEvent", "provider",
-                "passthroughReason", "event", "errorKind"):
+                "passthroughReason", "event", "errorKind", "reject"):
         if key in d:
             out[key] = d[key]
     # `pick_provider` returns {"provider": "<name>"} (no `outcome`),
@@ -1250,4 +1399,34 @@ def test_every_phase_exercised_in_classify() -> None:
     }
     assert phases == {1, 2, 3}, (
         f"phase coverage drift: got {sorted(phases)}, expected {{1, 2, 3}}"
+    )
+
+
+def test_as_3_4_should_reject_covers_both_branches() -> None:
+    """AS.3.4 — both branches of the reject predicate must be
+    exercised by at least one cross-twin fixture (True for confirmed
+    reject outcomes, False for fail-open / bypass outcomes). Drift
+    guard's own drift guard so a refactor can't accidentally drop
+    coverage of either branch."""
+    sr_fxs = [fx for fx in BEHAVIOUR_FIXTURES.values() if fx["kind"] == "should_reject"]
+    assert sr_fxs, "no should_reject fixtures present — AS.3.4 parity blind"
+    assert any(fx["expect_reject"] is True for fx in sr_fxs), (
+        "no should_reject=True fixture (blocked_lowscore / honeypot_fail "
+        "branch is unexercised in the cross-twin guard)"
+    )
+    assert any(fx["expect_reject"] is False for fx in sr_fxs), (
+        "no should_reject=False fixture (allow=True branch is unexercised "
+        "in the cross-twin guard)"
+    )
+    # Spot-check the two outcomes that should_reject MUST mark True.
+    reject_outcomes = {
+        fx["result"]["outcome"]
+        for fx in sr_fxs
+        if fx["expect_reject"] is True
+    }
+    assert "blocked_lowscore" in reject_outcomes, (
+        "AS.3.4 cross-twin guard missing blocked_lowscore reject fixture"
+    )
+    assert "jsfail_honeypot_fail" in reject_outcomes, (
+        "AS.3.4 cross-twin guard missing jsfail_honeypot_fail reject fixture"
     )

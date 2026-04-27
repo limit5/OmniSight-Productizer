@@ -1258,3 +1258,373 @@ def test_is_gdpr_strict_region_helper_matches_pick_provider_branch():
     for code in ("US", "JP", "CN", "TW"):
         assert bc.is_gdpr_strict_region(code) is False
         assert bc.pick_provider(region=code) == bc.Provider.TURNSTILE
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Family 17 — AS.3.4 reject enforcement primitives
+#
+#  Surface:
+#    * ``BOT_CHALLENGE_REJECTED_CODE`` ("bot_challenge_failed", AS.0.5 §3 row 116)
+#    * ``BOT_CHALLENGE_REJECTED_HTTP_STATUS`` (429)
+#    * ``BotChallengeRejected`` (subclass of ``BotChallengeError``,
+#      carries ``result`` / ``code`` / ``http_status``)
+#    * ``should_reject(result)`` — pure predicate, ``not result.allow``
+#    * ``verify_and_enforce(ctx)`` — runs ``verify``, raises if reject
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def test_bot_challenge_rejected_code_constant():
+    """AS.0.5 §3 row 116: the canonical client-facing error code is
+    `bot_challenge_failed`. Pinned byte-for-byte; the front-end UI keys
+    on this string to render its retry CTA."""
+    assert bc.BOT_CHALLENGE_REJECTED_CODE == "bot_challenge_failed"
+
+
+def test_bot_challenge_rejected_http_status_constant():
+    """AS.0.5 §3 row 116: the canonical HTTP status code is 429
+    (rate-limit class)."""
+    assert bc.BOT_CHALLENGE_REJECTED_HTTP_STATUS == 429
+
+
+def test_bot_challenge_rejected_is_bot_challenge_error_subclass():
+    """A caller's `except BotChallengeError` block on the verify path
+    catches both fail-closed reject and transport / config errors in
+    one place."""
+    assert issubclass(bc.BotChallengeRejected, bc.BotChallengeError)
+    assert issubclass(bc.BotChallengeRejected, Exception)
+
+
+def _result_with(outcome: str, *, allow: bool, score: float = 0.0,
+                 provider: bc.Provider | None = None) -> bc.BotChallengeResult:
+    return bc.BotChallengeResult(
+        outcome=outcome,
+        allow=allow,
+        score=score,
+        provider=provider,
+        audit_event=bc.event_for_outcome(outcome),
+        audit_metadata={},
+        error=None,
+    )
+
+
+def test_should_reject_blocked_lowscore_returns_true():
+    """Phase 3 confirmed low score → reject."""
+    result = _result_with(
+        bc.OUTCOME_BLOCKED_LOWSCORE,
+        allow=False, score=0.1, provider=bc.Provider.RECAPTCHA_V3,
+    )
+    assert bc.should_reject(result) is True
+
+
+def test_should_reject_jsfail_honeypot_fail_returns_true():
+    """Honeypot caught the bot → reject (AS.0.7 §3.4 fail-closed)."""
+    result = _result_with(bc.OUTCOME_JSFAIL_HONEYPOT_FAIL, allow=False)
+    assert bc.should_reject(result) is True
+
+
+def test_should_reject_pass_returns_false():
+    """Vendor verified the user → continue."""
+    result = _result_with(
+        bc.OUTCOME_PASS, allow=True, score=0.95,
+        provider=bc.Provider.TURNSTILE,
+    )
+    assert bc.should_reject(result) is False
+
+
+def test_should_reject_unverified_lowscore_returns_false():
+    """Phase 1/2 fail-open: low score is unverified, NOT reject."""
+    result = _result_with(
+        bc.OUTCOME_UNVERIFIED_LOWSCORE, allow=True, score=0.2,
+        provider=bc.Provider.RECAPTCHA_V3,
+    )
+    assert bc.should_reject(result) is False
+
+
+def test_should_reject_unverified_servererr_returns_false():
+    """AS.0.5 §2.4 row 3: server-side verify error stays fail-open in
+    EVERY phase including Phase 3 (our-side fault, not user fault)."""
+    result = _result_with(
+        bc.OUTCOME_UNVERIFIED_SERVERERR, allow=True, score=0.0,
+        provider=bc.Provider.TURNSTILE,
+    )
+    assert bc.should_reject(result) is False
+
+
+@pytest.mark.parametrize("bypass_outcome", [
+    bc.OUTCOME_BYPASS_APIKEY,
+    bc.OUTCOME_BYPASS_WEBHOOK,
+    bc.OUTCOME_BYPASS_CHATOPS,
+    bc.OUTCOME_BYPASS_BOOTSTRAP,
+    bc.OUTCOME_BYPASS_PROBE,
+    bc.OUTCOME_BYPASS_IP_ALLOWLIST,
+    bc.OUTCOME_BYPASS_TEST_TOKEN,
+])
+def test_should_reject_every_bypass_outcome_returns_false(bypass_outcome):
+    """Every one of the 7 bypass flavours is allow=True → never reject."""
+    result = _result_with(bypass_outcome, allow=True, score=1.0)
+    assert bc.should_reject(result) is False
+
+
+def test_should_reject_jsfail_honeypot_pass_returns_false():
+    """Honeypot didn't trigger → user looks human → continue."""
+    result = _result_with(bc.OUTCOME_JSFAIL_HONEYPOT_PASS, allow=True)
+    assert bc.should_reject(result) is False
+
+
+@pytest.mark.parametrize("jsfail_fallback", [
+    bc.OUTCOME_JSFAIL_FALLBACK_RECAPTCHA,
+    bc.OUTCOME_JSFAIL_FALLBACK_HCAPTCHA,
+])
+def test_should_reject_jsfail_fallback_outcomes_return_false(jsfail_fallback):
+    """JS load failed but a fallback provider succeeded → continue.
+
+    AS.3.5 fallback chain orchestrator constructs these outcomes; the
+    fallback's own classify result is what determines allow. Here we
+    just lock that the outcome literal alone never marks reject — the
+    `allow` field carries the decision."""
+    result = _result_with(jsfail_fallback, allow=True, score=0.85,
+                          provider=bc.Provider.HCAPTCHA)
+    assert bc.should_reject(result) is False
+
+
+def test_should_reject_is_pure_function_no_side_effects():
+    """should_reject is a pure predicate: calling it must not mutate
+    the result, must return the same bool every call. Locks SOP §1
+    invariant that AS.3.4 reject decision is deterministic."""
+    result = _result_with(
+        bc.OUTCOME_BLOCKED_LOWSCORE, allow=False, score=0.3,
+        provider=bc.Provider.RECAPTCHA_V3,
+    )
+    snapshot = (result.outcome, result.allow, result.score, result.provider)
+    for _ in range(5):
+        assert bc.should_reject(result) is True
+    after = (result.outcome, result.allow, result.score, result.provider)
+    assert snapshot == after
+
+
+def test_bot_challenge_rejected_carries_result_and_canonical_defaults():
+    """Default ctor uses the canonical code + http_status constants;
+    the result is reachable from the caught exception so the HTTP
+    layer can fan the audit row before serialising the 429 body."""
+    result = _result_with(
+        bc.OUTCOME_BLOCKED_LOWSCORE, allow=False, score=0.1,
+        provider=bc.Provider.RECAPTCHA_V3,
+    )
+    exc = bc.BotChallengeRejected(result)
+    assert exc.result is result
+    assert exc.code == bc.BOT_CHALLENGE_REJECTED_CODE
+    assert exc.http_status == bc.BOT_CHALLENGE_REJECTED_HTTP_STATUS
+    # Message is informational; the contract surface is the structured
+    # fields. Just lock that it surfaces the outcome for grep-friendly logs.
+    assert "blocked_lowscore" in str(exc)
+
+
+def test_bot_challenge_rejected_accepts_custom_code_and_status():
+    """Caller (e.g. a per-tenant override that prefers 401) can swap
+    the canonical defaults — kwargs are keyword-only to prevent
+    accidental positional swap."""
+    result = _result_with(bc.OUTCOME_BLOCKED_LOWSCORE, allow=False, score=0.0)
+    exc = bc.BotChallengeRejected(
+        result, code="custom_block", http_status=401,
+    )
+    assert exc.code == "custom_block"
+    assert exc.http_status == 401
+
+
+@pytest.mark.asyncio
+async def test_verify_and_enforce_passes_through_high_score():
+    """Phase 3 + score above threshold → returns allow=True result; no raise."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.9, "action": "login", "hostname": "x",
+    }))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3,
+        token="tok", secret="s" * 40,
+        phase=3, widget_action="login",
+    )
+    result = await bc.verify_and_enforce(ctx, http_client=fake)
+    assert result.outcome == bc.OUTCOME_PASS
+    assert result.allow is True
+
+
+@pytest.mark.asyncio
+async def test_verify_and_enforce_phase3_low_score_raises():
+    """Phase 3 + score below threshold → raise BotChallengeRejected
+    carrying the BLOCKED_LOWSCORE result."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.1, "action": "login", "hostname": "x",
+    }))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3,
+        token="tok", secret="s" * 40,
+        phase=3, widget_action="login",
+    )
+    with pytest.raises(bc.BotChallengeRejected) as exc_info:
+        await bc.verify_and_enforce(ctx, http_client=fake)
+    exc = exc_info.value
+    assert exc.code == bc.BOT_CHALLENGE_REJECTED_CODE
+    assert exc.http_status == bc.BOT_CHALLENGE_REJECTED_HTTP_STATUS
+    assert exc.result.outcome == bc.OUTCOME_BLOCKED_LOWSCORE
+    assert exc.result.allow is False
+    assert exc.result.score == 0.1
+    assert exc.result.provider is bc.Provider.RECAPTCHA_V3
+    assert exc.result.audit_event == bc.EVENT_BOT_CHALLENGE_BLOCKED_LOWSCORE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", [1, 2])
+async def test_verify_and_enforce_phase1_2_low_score_does_not_raise(phase):
+    """Phase 1/2 fail-open: low score is unverified, NOT raise."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.1, "action": "login", "hostname": "x",
+    }))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3,
+        token="tok", secret="s" * 40,
+        phase=phase, widget_action="login",
+    )
+    result = await bc.verify_and_enforce(ctx, http_client=fake)
+    assert result.outcome == bc.OUTCOME_UNVERIFIED_LOWSCORE
+    assert result.allow is True
+
+
+@pytest.mark.asyncio
+async def test_verify_and_enforce_server_error_phase3_does_not_raise():
+    """AS.0.5 §2.4 row 3: server-side verify error stays fail-open in
+    Phase 3 — verify_and_enforce must NOT lock users out on our-side
+    fault."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": False, "error-codes": ["invalid-input-secret"],
+    }))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE,
+        token="tok", secret="s" * 40,
+        phase=3, widget_action="login",
+    )
+    result = await bc.verify_and_enforce(ctx, http_client=fake)
+    assert result.outcome == bc.OUTCOME_UNVERIFIED_SERVERERR
+    assert result.allow is True
+
+
+@pytest.mark.asyncio
+async def test_verify_and_enforce_knob_off_passthrough_no_raise():
+    """AS.0.8 single-knob: when the AS family is off, verify_and_enforce
+    must short-circuit through passthrough — no raise even on what
+    would otherwise be a Phase 3 reject. Decoupled per AS.0.5 §7.2."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.1, "action": "login", "hostname": "x",
+    }))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3,
+        token="tok", secret="s" * 40,
+        phase=3, widget_action="login",
+    )
+    with patch.object(bc, "is_enabled", return_value=False):
+        result = await bc.verify_and_enforce(ctx, http_client=fake)
+    assert result.outcome == bc.OUTCOME_PASS
+    assert result.allow is True
+    assert fake.calls == []  # verify short-circuited; no provider call
+
+
+@pytest.mark.asyncio
+async def test_verify_and_enforce_bypass_short_circuit_no_raise():
+    """Bypass-axis match → allow=True bypass result, no raise even if
+    phase=3 (the whole point of the bypass list is to allow anti-bot
+    short-circuit for confirmed-non-bot callers)."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {"success": True}))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE,
+        token="tok", secret="s" * 40, phase=3,
+        bypass=bc.BypassContext(caller_kind="apikey_omni", api_key_id="ak-1"),
+    )
+    result = await bc.verify_and_enforce(ctx, http_client=fake)
+    assert result.outcome == bc.OUTCOME_BYPASS_APIKEY
+    assert result.allow is True
+    assert fake.calls == []  # bypass short-circuited; no provider call
+
+
+@pytest.mark.asyncio
+async def test_verify_and_enforce_threshold_boundary_at_0_5_passes():
+    """Score == threshold (0.5) → pass per `>=` invariant in
+    classify_outcome. Important Phase 3 boundary — pinned here so a
+    future refactor can't silently flip `>=` to `>` and start blocking
+    every user at exactly the threshold."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.5, "action": "login", "hostname": "x",
+    }))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3,
+        token="tok", secret="s" * 40,
+        phase=3, widget_action="login",
+    )
+    result = await bc.verify_and_enforce(ctx, http_client=fake)
+    assert result.outcome == bc.OUTCOME_PASS
+    assert result.allow is True
+
+
+@pytest.mark.asyncio
+async def test_verify_and_enforce_just_below_threshold_at_p3_raises():
+    """Score == threshold-epsilon at Phase 3 → reject. Locks the
+    fail-closed branch's strict `<` comparison."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.499, "action": "login", "hostname": "x",
+    }))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3,
+        token="tok", secret="s" * 40,
+        phase=3, widget_action="login",
+    )
+    with pytest.raises(bc.BotChallengeRejected) as exc_info:
+        await bc.verify_and_enforce(ctx, http_client=fake)
+    assert exc_info.value.result.score == 0.499
+
+
+@pytest.mark.asyncio
+async def test_verify_and_enforce_custom_score_threshold_via_ctx():
+    """Caller passes a custom threshold (e.g. tenant pin); the reject
+    boundary moves with it. AS.0.5 §10 forbids stricter thresholds in
+    prod, but the lib must honour the knob — policy lives in caller
+    config, not the library."""
+    fake = _FakeAsyncClient(_FakePoolResponse(200, {
+        "success": True, "score": 0.6, "action": "login", "hostname": "x",
+    }))
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.RECAPTCHA_V3,
+        token="tok", secret="s" * 40,
+        phase=3, widget_action="login",
+        score_threshold=0.7,  # caller raised the bar
+    )
+    with pytest.raises(bc.BotChallengeRejected):
+        await bc.verify_and_enforce(ctx, http_client=fake)
+
+
+@pytest.mark.asyncio
+async def test_verify_and_enforce_propagates_provider_config_error():
+    """Empty secret + non-empty token still propagates ProviderConfigError
+    only when we'd actually call the provider — but verify() itself
+    intercepts secret=None / "" and turns it into a fail-open
+    UNVERIFIED_SERVERERR per AS.0.5 §2.4 row 3, NOT a raise. Locks that
+    AS.3.4 enforce respects this orchestrator-side fail-open behaviour
+    rather than raising on misconfiguration (which would lock every
+    user out)."""
+    ctx = bc.VerifyContext(
+        provider=bc.Provider.TURNSTILE, token="tok", secret=None,
+        phase=3,
+    )
+    result = await bc.verify_and_enforce(ctx)
+    # Fail-open per the orchestrator's missing-secret branch — no raise.
+    assert result.outcome == bc.OUTCOME_UNVERIFIED_SERVERERR
+    assert result.allow is True
+    assert result.audit_metadata["error_kind"] == "config_missing_secret"
+
+
+def test_verify_and_enforce_in_dunder_all():
+    """AS.3.4 surface symbols are exported via `__all__`."""
+    expected = {
+        "BOT_CHALLENGE_REJECTED_CODE",
+        "BOT_CHALLENGE_REJECTED_HTTP_STATUS",
+        "BotChallengeRejected",
+        "should_reject",
+        "verify_and_enforce",
+    }
+    assert expected.issubset(set(bc.__all__))

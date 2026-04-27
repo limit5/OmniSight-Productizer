@@ -57,8 +57,18 @@ Out of scope (deferred to follow-up rows in the same epic)
   ``ecosystem_hints`` + ``override`` to pick a vendor per the
   heuristic doc-string. Cross-twin parity guard locks the
   :data:`GDPR_STRICT_REGIONS` codes to the TS twin.
-* AS.3.4 — Wiring `verify()` into the four OmniSight self forms
-  (login / signup / password-reset / contact) is AS.6.3.
+* AS.3.4 — Server-side score verification + reject enforcement
+  (``score < 0.5`` → reject in Phase 3 fail-closed branch).
+  Landed: :func:`should_reject` predicate +
+  :class:`BotChallengeRejected` exception + :func:`verify_and_enforce`
+  single-call orchestrator + :data:`BOT_CHALLENGE_REJECTED_CODE`
+  (``"bot_challenge_failed"`` per AS.0.5 §3 row 116) +
+  :data:`BOT_CHALLENGE_REJECTED_HTTP_STATUS` (``429``). Caller's
+  HTTP layer maps the exception to a 429 response. Wiring into the
+  four OmniSight self forms (login / signup / password-reset / contact)
+  is AS.6.3 — the primitives ship here so AS.6.3 can call a single
+  `verify_and_enforce(ctx)` instead of re-implementing reject logic
+  per route.
 * AS.3.5 — Fallback chain (primary → secondary → tertiary on jsfail).
   This row exposes the primitives — :func:`verify_provider` per
   provider — but the orchestrator that chains them on widget JS load
@@ -200,6 +210,40 @@ DEFAULT_VERIFY_TIMEOUT_SECONDS: float = 3.0
 # Test-token header name (AS.0.6 §2.3 invariant).  Constant — drift
 # guard test asserts no inline string anywhere in callers.
 TEST_TOKEN_HEADER: str = "X-OmniSight-Test-Token"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AS.3.4 — server-side score verification + reject enforcement
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Canonical error code returned to the client when the request is
+# rejected by a confirmed low-score bot challenge (Phase 3 fail-closed
+# branch, ``response.success and response.score < threshold``).  Pinned
+# by AS.0.5 §3 row 116:
+#
+#     | Browser user, widget OK, score < 0.5 | fail | HTTP 429
+#       `bot_challenge_failed`, UI 顯示「Try again or contact admin」 |
+#       `bot_challenge.blocked_lowscore` |
+#
+# The string is the contract surface the front-end UI keys on to render
+# its retry CTA + "contact admin" copy.  Cross-twin drift guard locks it
+# byte-for-byte against the TS twin.
+BOT_CHALLENGE_REJECTED_CODE: str = "bot_challenge_failed"
+
+
+# Canonical HTTP status code for a bot challenge rejection.  AS.0.5 §3
+# ships 429 (rate-limit class) over 401 (auth class) deliberately:
+#
+#   * 429 stays vague about *which* signal we used (low-score vs
+#     honeypot vs missing token), denying an attacker the side-channel
+#     they'd get from per-failure-mode HTTP codes.
+#   * 429 matches operator runbooks for retry semantics — the client SDK
+#     already knows to back-off + offer a retry CTA on a 429, so we
+#     piggy-back on existing retry infrastructure instead of inventing a
+#     bot-specific class.
+#   * Pinned at 429; the TS twin mirrors the same int. Drift guard locks
+#     both sides byte-for-byte.
+BOT_CHALLENGE_REJECTED_HTTP_STATUS: int = 429
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -402,6 +446,44 @@ class ProviderConfigError(BotChallengeError):
 
 class InvalidProviderError(BotChallengeError, ValueError):
     """Caller passed a string that doesn't match any :class:`Provider`."""
+
+
+class BotChallengeRejected(BotChallengeError):
+    """AS.3.4 — raised by :func:`verify_and_enforce` when the request is
+    rejected by a confirmed low-score bot challenge (or honeypot fail).
+
+    Carries the underlying :class:`BotChallengeResult` so the caller's
+    HTTP layer can:
+
+      * Read :attr:`result.outcome` to log the rejection reason
+        (``blocked_lowscore`` vs ``jsfail_honeypot_fail``).
+      * Read :attr:`result.audit_event` + :attr:`result.audit_metadata`
+        to fan out the audit row before the 429 response goes back.
+      * Read :attr:`code` (default :data:`BOT_CHALLENGE_REJECTED_CODE`)
+        + :attr:`http_status` (default
+        :data:`BOT_CHALLENGE_REJECTED_HTTP_STATUS`) to serialise the
+        canonical 429 body without re-deriving them per route.
+
+    Subclassing :class:`BotChallengeError` (not :class:`Exception`
+    directly) means a caller's ``except BotChallengeError`` block on
+    the :func:`verify` path catches both fail-closed reject and
+    transport / config error in one place — useful for telemetry.
+    """
+
+    def __init__(
+        self,
+        result: "BotChallengeResult",
+        *,
+        code: str = BOT_CHALLENGE_REJECTED_CODE,
+        http_status: int = BOT_CHALLENGE_REJECTED_HTTP_STATUS,
+    ) -> None:
+        self.result = result
+        self.code = code
+        self.http_status = http_status
+        super().__init__(
+            f"bot challenge rejected: outcome={result.outcome} "
+            f"code={code} http_status={http_status}"
+        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1206,6 +1288,82 @@ async def verify(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AS.3.4 — reject enforcement primitives
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def should_reject(result: BotChallengeResult) -> bool:
+    """Whether AS.3.4 enforcement should turn *result* into an HTTP 429.
+
+    Pure predicate — the answer is always ``not result.allow``.  Kept as
+    a separate, named helper so callers can preview the decision (e.g.
+    fan a metric / probe header BEFORE choosing to raise) without
+    duplicating the ``allow`` semantics in every route.
+
+    True for:
+
+      * :data:`OUTCOME_BLOCKED_LOWSCORE` — Phase 3 confirmed low score
+        (vendor said success AND score < threshold).  This is the only
+        outcome the AS.0.5 §2 phase matrix marks as fail-closed.
+      * :data:`OUTCOME_JSFAIL_HONEYPOT_FAIL` — honeypot caught the bot
+        (AS.0.7 §3.4 fail-closed branch). The classifier here doesn't
+        construct this outcome itself; AS.3.5 / AS.0.7 wire the
+        honeypot fallback layer that emits this result.
+
+    False for everything else, including ``unverified_*`` server errors
+    (which stay fail-open even in Phase 3 per AS.0.5 §2.4 row 3) and
+    every ``bypass_*`` outcome.
+
+    Module-global state audit (per implement_phase_step.md SOP §1):
+    pure function — reads no mutable state, makes no IO, has no side
+    effects.  Cross-worker consistency: every uvicorn worker derives the
+    same boolean from the same input dataclass (answer #1 of SOP §1).
+    """
+    return not result.allow
+
+
+async def verify_and_enforce(
+    ctx: VerifyContext,
+    *,
+    http_client: Optional["httpx.AsyncClient"] = None,
+) -> BotChallengeResult:
+    """End-to-end verify + reject enforcement (AS.3.4 single-call entry).
+
+    Runs :func:`verify` to compute a :class:`BotChallengeResult`, then
+    if :func:`should_reject` says yes, raises :class:`BotChallengeRejected`
+    carrying the result so the caller's HTTP layer can serialise a
+    canonical 429 ``bot_challenge_failed`` response.
+
+    On allow=True paths (``pass`` / ``unverified_*`` fail-open /
+    ``bypass_*`` / ``jsfail_*``-but-not-fail), returns the result for
+    the caller to fan into the audit emitter and continue the request.
+
+    AS.0.5 §3 wire-up table (the routes AS.6.3 lands consume this):
+
+      * ``outcome=blocked_lowscore``      → raise (HTTP 429
+        ``bot_challenge_failed``, audit row before response)
+      * ``outcome=jsfail_honeypot_fail``  → raise (same shape)
+      * everything else                   → return result, caller emits
+        audit + continues the underlying action
+
+    Module-global state audit (per implement_phase_step.md SOP §1):
+    delegates entirely to :func:`verify` (no extra module-global state
+    introduced) + :func:`should_reject` (pure predicate).  Same
+    cross-worker semantics as :func:`verify`: stateless RPC to the
+    vendor's siteverify, reject decision derived from the response.
+
+    Read-after-write timing audit (per implement_phase_step.md SOP §1):
+    N/A — verify is per-request, stateless RPC; reject decision is
+    computed in-process from the response.  No DB write, no shared
+    in-memory state, no read-after-write race.
+    """
+    result = await verify(ctx, http_client=http_client)
+    if should_reject(result):
+        raise BotChallengeRejected(result)
+    return result
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Provider selection (AS.3.3 region + ecosystem heuristic)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1402,6 +1560,7 @@ __all__ = [
     "BotChallengeError",
     "ProviderConfigError",
     "InvalidProviderError",
+    "BotChallengeRejected",
     # Public functions
     "is_enabled",
     "passthrough",
@@ -1414,4 +1573,9 @@ __all__ = [
     "GDPR_STRICT_REGIONS",
     "ECOSYSTEM_HINT_GOOGLE",
     "is_gdpr_strict_region",
+    # AS.3.4 reject enforcement primitives
+    "BOT_CHALLENGE_REJECTED_CODE",
+    "BOT_CHALLENGE_REJECTED_HTTP_STATUS",
+    "should_reject",
+    "verify_and_enforce",
 ]

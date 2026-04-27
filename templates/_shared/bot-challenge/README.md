@@ -10,7 +10,7 @@ regardless of which captcha vendor sits behind the request.
 
 | File         | What it ships                                                                                                                                                                                                                                                  |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `index.ts`   | `Provider` enum, 19 `EVENT_BOT_CHALLENGE_*` audit-event strings, 15 `OUTCOME_*` literals, `BotChallengeResult` / `ProviderResponse` / `BypassContext` / `VerifyContext` types, `verifyProvider` + `verify` orchestrators, `evaluateBypass`, `classifyOutcome`, `pickProvider`, `passthrough`, `isEnabled`, `eventForOutcome`, `fingerprint`, plus the three typed errors. |
+| `index.ts`   | `Provider` enum, 19 `EVENT_BOT_CHALLENGE_*` audit-event strings, 15 `OUTCOME_*` literals, `BotChallengeResult` / `ProviderResponse` / `BypassContext` / `VerifyContext` types, `verifyProvider` + `verify` + `verifyAndEnforce` orchestrators, `evaluateBypass`, `classifyOutcome`, `pickProvider`, `passthrough`, `isEnabled`, `eventForOutcome`, `shouldReject`, `fingerprint`, plus the four typed errors (`BotChallengeError` / `ProviderConfigError` / `InvalidProviderError` / `BotChallengeRejected`). |
 | `README.md`  | This file.                                                                                                                                                                                                                                                     |
 
 ## Cross-twin contract
@@ -44,8 +44,12 @@ Node-spawned behavioural parity matrix):
    on failure).
 7. **Bypass axis precedence** — A (api_key) → C (test_token) → B
    (ip_allowlist) → D (path) per AS.0.6 §4.
-8. **Three typed errors** — `BotChallengeError` (base),
-   `ProviderConfigError`, `InvalidProviderError`.
+8. **Four typed errors** — `BotChallengeError` (base),
+   `ProviderConfigError`, `InvalidProviderError`,
+   `BotChallengeRejected` (AS.3.4).
+9. **AS.3.4 reject enforcement constants** — `BOT_CHALLENGE_REJECTED_CODE`
+   (`"bot_challenge_failed"`, AS.0.5 §3 row 116) +
+   `BOT_CHALLENGE_REJECTED_HTTP_STATUS` (`429`).
 
 If you change one side, you MUST change the other. CI red is the canary.
 
@@ -95,10 +99,15 @@ import {
   classifyOutcome,
   secretEnvFor,
   pickProvider,
+  shouldReject,
   fingerprint,
   // orchestrators
   verifyProvider,
   verify,
+  verifyAndEnforce,
+  // AS.3.4 reject enforcement constants
+  BOT_CHALLENGE_REJECTED_CODE,
+  BOT_CHALLENGE_REJECTED_HTTP_STATUS,
   // types
   type ProviderResponse,
   type BypassReason,
@@ -110,6 +119,7 @@ import {
   BotChallengeError,
   ProviderConfigError,
   InvalidProviderError,
+  BotChallengeRejected,
 } from "./index"
 
 // Server-side flow (Node SSR / edge handler):
@@ -200,12 +210,67 @@ pickProvider({
 }) === Provider.TURNSTILE
 ```
 
+## AS.3.4 reject enforcement primitives
+
+The classifier already returns `OUTCOME_BLOCKED_LOWSCORE`
+(`allow=false`) on Phase 3 + low score; AS.3.4 ships the
+single-call enforcement surface around it so callers don't
+re-implement the `!result.allow → HTTP 429` mapping per route.
+
+| Symbol                                 | Type     | What it ships                                                             |
+| -------------------------------------- | -------- | ------------------------------------------------------------------------- |
+| `BOT_CHALLENGE_REJECTED_CODE`          | `string` | `"bot_challenge_failed"` — front-end UI keys on this for the retry CTA.   |
+| `BOT_CHALLENGE_REJECTED_HTTP_STATUS`   | `number` | `429` — rate-limit class, deliberately vague about which signal failed.   |
+| `BotChallengeRejected`                 | `class`  | Subclass of `BotChallengeError`; carries `result` / `code` / `httpStatus`. |
+| `shouldReject(result)`                 | `(BotChallengeResult) => boolean` | Pure predicate; returns `!result.allow`.    |
+| `verifyAndEnforce(ctx, opts?)`         | `async (VerifyContext) => BotChallengeResult` | Runs `verify`, throws if reject. |
+
+```typescript
+import {
+  Provider,
+  verifyAndEnforce,
+  BotChallengeRejected,
+  BOT_CHALLENGE_REJECTED_CODE,
+  BOT_CHALLENGE_REJECTED_HTTP_STATUS,
+} from "./index"
+
+try {
+  const result = await verifyAndEnforce({
+    provider: Provider.RECAPTCHA_V3,
+    token: req.body["g-recaptcha-response"],
+    secret: process.env.OMNISIGHT_RECAPTCHA_SECRET!,
+    phase: 3,
+    widgetAction: "login",
+    expectedAction: "login",
+    remoteIp: req.headers["cf-connecting-ip"] as string,
+  })
+  // Allow path: emit `result.auditEvent` + `result.auditMetadata` to
+  // the audit pipeline and continue with the underlying action.
+} catch (e) {
+  if (e instanceof BotChallengeRejected) {
+    // Fan the audit row before the response goes back.
+    audit.emit(e.result.auditEvent, e.result.auditMetadata)
+    return new Response(
+      JSON.stringify({ error: e.code }),
+      { status: e.httpStatus, headers: { "Content-Type": "application/json" } },
+    )
+  }
+  throw e  // re-throw transport / config errors (still BotChallengeError)
+}
+```
+
+The enforce surface mirrors the Python twin's `verify_and_enforce` /
+`should_reject` / `BotChallengeRejected` byte-for-byte; cross-twin
+drift guard
+(`backend/tests/test_bot_challenge_shape_drift.py::test_ts_bot_challenge_rejected_code_matches_python`
++ `..._http_status_matches_python` + `..._declares_bot_challenge_rejected_class`
++ `..._declares_should_reject_and_verify_and_enforce` + the 9
+behavioural-parity `should_reject_*` fixtures + the
+`test_as_3_4_should_reject_covers_both_branches` coverage guard) locks
+both sides.
+
 ## Out of scope (deferred to follow-up rows in the same epic)
 
-* AS.3.4 — Server-side score-verification + `score < 0.5` reject logic.
-  The classifier here already returns `OUTCOME_BLOCKED_LOWSCORE`
-  (`allow=false`) on Phase 3 + low score; AS.3.4 wires the audit /
-  metric emitters around it.
 * AS.3.5 — Fallback chain (primary → secondary → tertiary on jsfail).
   This row exposes the primitives — `verifyProvider` per provider —
   but the orchestrator that chains them on widget JS load failure is
@@ -237,6 +302,11 @@ pickProvider({
 | `BotChallengeError` (base)                  | `BotChallengeError` (base)                              |
 | `ProviderConfigError`                       | `ProviderConfigError`                                   |
 | `InvalidProviderError`                      | `InvalidProviderError`                                  |
+| `BOT_CHALLENGE_REJECTED_CODE = "bot_challenge_failed"` | `BOT_CHALLENGE_REJECTED_CODE = "bot_challenge_failed"` |
+| `BOT_CHALLENGE_REJECTED_HTTP_STATUS = 429`  | `BOT_CHALLENGE_REJECTED_HTTP_STATUS = 429`              |
+| `BotChallengeRejected(result, code=, http_status=)` | `BotChallengeRejected(result, { code, httpStatus })` |
+| `should_reject(result)`                     | `shouldReject(result)`                                  |
+| `verify_and_enforce(ctx)`                   | `verifyAndEnforce(ctx, opts?)`                          |
 
 Casing follows each language's idiom; the **string values** of the
 `Provider` enum, the 19 audit event names, and the 15 outcome literals
