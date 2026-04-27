@@ -369,11 +369,13 @@ async def _resolve_catalog_entry_for_install(
     or ``None`` if no live row exists. Does not apply the partial-overlay
     merge that the catalog router does for GET — install only needs to
     confirm "yes this entry exists and is installable" + the
-    install_method for the PEP coaching context.
+    install_method / display_name / size_bytes for the PEP coaching
+    context (BS.7.2: coaching card renders entry name + version + size +
+    install method).
     """
     rows = await conn.fetch(
         "SELECT id, source, install_method, family, vendor, version, "
-        "       hidden, tenant_id "
+        "       display_name, size_bytes, hidden, tenant_id "
         "FROM catalog_entries "
         "WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2) "
         "ORDER BY CASE source "
@@ -398,6 +400,10 @@ async def _resolve_catalog_entry_for_install(
         "family": row["family"],
         "vendor": row["vendor"],
         "version": row["version"],
+        "display_name": row["display_name"],
+        "size_bytes": (
+            int(row["size_bytes"]) if row["size_bytes"] is not None else None
+        ),
     }
 
 
@@ -487,6 +493,13 @@ async def create_job(
                 "family": entry["family"],
                 "vendor": entry["vendor"],
                 "version": entry["version"],
+                # BS.7.2 — coaching card pulls display_name + size_bytes
+                # to render the install-specific 4-line card; both are
+                # nullable on catalog_entries (size_bytes if vendor URL
+                # didn't send Content-Length; display_name is NOT NULL
+                # but defensively typed-as-Optional here).
+                "display_name": entry.get("display_name"),
+                "size_bytes": entry.get("size_bytes"),
                 "job_id": inserted["id"],
                 "actor": user.email,
             },

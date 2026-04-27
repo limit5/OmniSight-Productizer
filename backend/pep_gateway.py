@@ -514,7 +514,12 @@ async def evaluate(
         return dec
 
     try:
-        de_id = _propose_hold(dec, propose_fn=propose_fn, timeout_s=hold_timeout_s)
+        de_id = _propose_hold(
+            dec,
+            propose_fn=propose_fn,
+            timeout_s=hold_timeout_s,
+            arguments=arguments,
+        )
         dec.decision_id = de_id
         _breaker_record_success()
     except Exception as exc:
@@ -649,8 +654,93 @@ _RULE_WHY_OVERRIDES: dict[str, str] = {
 }
 
 
+# BS.7.2 — install_entry tool gets a dedicated "install_intercept" action
+# category so the toast UI can render the install-specific 4-line card
+# (what + why + if_approve + if_reject) using arguments captured at
+# evaluate() time (display_name, version, install_method, size_bytes,
+# eta hint). The string keys here are PEP source.category values; the
+# frontend ToastCenter switches rendering on category.
+INSTALL_INTERCEPT_CATEGORY: str = "install_intercept"
+DEFAULT_PEP_INTERCEPT_CATEGORY: str = "pep_tool_intercept"
+
+# Install-method human label for the "why" line. Catalog entries land
+# with one of four DB-CHECK methods; the operator-facing copy spells out
+# what each will actually do on approve so they aren't just reading the
+# enum value.
+_INSTALL_METHOD_HUMAN: dict[str, str] = {
+    "docker_pull": "pulls a vendor Docker image (writes to the host Docker daemon's image store)",
+    "shell_script": "runs a vendor-supplied shell script (executes destructive shell on the host)",
+    "vendor_installer": "launches the vendor's native installer (writes to the host filesystem)",
+    "noop": "registers the entry without touching the host (no-op stub)",
+}
+
+
+def _format_size_bytes(size: Any) -> str:
+    """Return a short human-readable size, e.g. ``"~1.2 GB"`` or
+    ``"size unknown"`` when the catalog row has no Content-Length."""
+    if size is None:
+        return "size unknown"
+    try:
+        n = int(size)
+    except (TypeError, ValueError):
+        return "size unknown"
+    if n < 0:
+        return "size unknown"
+    if n < 1024:
+        return f"{n} B"
+    units = [("KB", 1024), ("MB", 1024**2), ("GB", 1024**3), ("TB", 1024**4)]
+    chosen_unit, chosen_div = units[-1]
+    for unit, div in units:
+        if n < div * 1024:
+            chosen_unit, chosen_div = unit, div
+            break
+    value = n / chosen_div
+    if value >= 100:
+        return f"~{value:.0f} {chosen_unit}"
+    return f"~{value:.1f} {chosen_unit}"
+
+
+def _build_install_coaching(arguments: dict[str, Any] | None) -> dict[str, str]:
+    """BS.7.2: install-specific 4-line coaching card.
+
+    ``arguments`` mirrors what ``backend.routers.installer.create_job``
+    passes to ``pep_gateway.evaluate(tool='install_entry', arguments=…)``.
+    Missing fields fall back to neutral copy so a misconfigured caller
+    still produces a readable card instead of a KeyError.
+    """
+    args = arguments or {}
+    name = str(args.get("display_name") or args.get("entry_id") or "this catalog entry")
+    version = str(args.get("version") or "(version unknown)")
+    install_method = str(args.get("install_method") or "")
+    method_human = _INSTALL_METHOD_HUMAN.get(
+        install_method,
+        f"runs install method {install_method!r}" if install_method
+        else "runs the catalog entry's install method",
+    )
+    size_human = _format_size_bytes(args.get("size_bytes"))
+    return {
+        "what": f"Installs {name} {version} from the catalog onto this OmniSight host.",
+        "why": (
+            f"Catalog installs are inherently destructive: this entry "
+            f"{method_human} ({size_human}). All install_entry calls are held for "
+            "human review regardless of tier — never auto-approved."
+        ),
+        "if_approve": (
+            "The job stays queued; the installer sidecar claims it on the next "
+            "long-poll, starts the download / install, and streams progress + ETA "
+            "to the bottom-right install drawer."
+        ),
+        "if_reject": (
+            "Nothing happens on the host. The queued install_jobs row is flipped to "
+            "'cancelled' with error_reason='pep_tier_unlisted', the catalog card "
+            "returns to its 'available' state, and the queue clears immediately."
+        ),
+    }
+
+
 def _build_coaching(
     tool: str, rule: str, impact_scope: str, command: str,
+    arguments: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """R20 Part A: per-decision coaching card content.
 
@@ -658,7 +748,15 @@ def _build_coaching(
     inline by the frontend toast. Always returns the four required keys
     so the UI can render unconditionally — unknown tools fall back to a
     generic-but-safe template that still beats a bare rule name.
+
+    BS.7.2: ``tool='install_entry'`` dispatches to a dedicated install
+    coaching builder that interpolates ``arguments`` (display_name /
+    version / install_method / size_bytes) into the 4-line card so the
+    operator sees what they're actually about to install — generic
+    "tier_unlisted" copy isn't useful for a catalog install.
     """
+    if tool == "install_entry":
+        return _build_install_coaching(arguments)
     base = _TOOL_COACHING.get(tool) or {
         "what": f"Runs the agent tool {tool!r} (no human-friendly description registered for this tool yet — tell the platform team to add one to _TOOL_COACHING).",
         "why_default": "Tool isn't on the current sandbox tier's whitelist — review the command and impact scope before allowing.",
@@ -679,6 +777,7 @@ def _propose_hold(
     *,
     propose_fn: Callable[..., Any] | None,
     timeout_s: float,
+    arguments: dict[str, Any] | None = None,
 ) -> str:
     """Raise a DE proposal. Returns the DE id so we can wait on it.
 
@@ -686,6 +785,10 @@ def _propose_hold(
     ``decision_engine.propose``. The kind is always
     ``"pep_tool_intercept"`` so the Decision Dashboard filter tab can
     surface these.
+
+    ``arguments`` is the original tool-call arguments dict; we forward it
+    to ``_build_coaching`` so install_entry HOLDs can render an install-
+    specific 4-line card (BS.7.2). Other tools ignore it.
     """
     from backend import decision_engine as de
 
@@ -702,6 +805,13 @@ def _propose_hold(
         {"id": "reject", "label": "REJECT",
          "description": "Block this tool call and return an error to the agent."},
     ]
+    # BS.7.2: install_entry gets a dedicated category so the ToastCenter
+    # can switch on it and render the install-specific coaching card.
+    category = (
+        INSTALL_INTERCEPT_CATEGORY
+        if dec.tool == "install_entry"
+        else DEFAULT_PEP_INTERCEPT_CATEGORY
+    )
     prop = fn(
         kind="pep_tool_intercept",
         title=f"PEP HOLD · {dec.tool}",
@@ -722,10 +832,11 @@ def _propose_hold(
             "tier": dec.tier,
             "impact_scope": dec.impact_scope,
             "rule": dec.rule,
-            "category": "pep_tool_intercept",
-            # R20 Part A: inline coaching card content for the toast UI.
+            "category": category,
+            # R20 Part A + BS.7.2: inline coaching card content for the toast UI.
             "coaching": _build_coaching(
                 dec.tool, dec.rule, dec.impact_scope, dec.command,
+                arguments=arguments,
             ),
         },
     )
