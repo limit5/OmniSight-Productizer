@@ -38,7 +38,7 @@
  * client-side only). Answer #1 — per-render stateless derivation.
  */
 
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import {
   Boxes,
   Check,
@@ -210,16 +210,35 @@ export interface BootstrapVerticalStepProps {
    *  ``localGreen.vertical_setup=true`` + cursor advance; BS.9.5 will
    *  add the batch ``/installer/jobs`` enqueue side-effect. */
   onCommit: (payload: BootstrapVerticalCommitPayload) => void
+  /** BS.9.5 — Fires whenever the selection changes (toggle / reset)
+   *  so a parent can render per-vertical sub-steps next to the
+   *  picker. The Mobile vertical, when checked, surfaces the
+   *  ``AndroidApiSelector`` (BS.9.4) below the picker; the parent
+   *  needs to know "is mobile currently selected?" without owning
+   *  the rest of the picker state. Optional; defaults to no-op so
+   *  callers that only need the commit path stay one-prop-light. */
+  onSelectionChange?: (selected: readonly BootstrapVerticalId[]) => void
 }
 
 export default function BootstrapVerticalStep({
   initialSelected = [],
   disabled = false,
   onCommit,
+  onSelectionChange,
 }: BootstrapVerticalStepProps) {
   const [selected, setSelected] = useState<BootstrapVerticalId[]>(() =>
     coerceSelectedVerticals(initialSelected),
   )
+
+  // BS.9.5 — notify parent on every selection change so it can
+  // surface per-vertical sub-step bodies (AndroidApiSelector for
+  // Mobile). Runs after every render whose ``selected`` reference
+  // changed; setSelected always emits a fresh array (toggleVertical
+  // returns a new reference), so the effect fires exactly when the
+  // selection mutates.
+  useEffect(() => {
+    if (onSelectionChange) onSelectionChange(selected)
+  }, [selected, onSelectionChange])
 
   const onToggle = useCallback(
     (id: BootstrapVerticalId) => {

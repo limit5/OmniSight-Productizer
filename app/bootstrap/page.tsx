@@ -45,6 +45,7 @@ import {
   BOOTSTRAP_PROVIDER_KEY_URL,
   BOOTSTRAP_PROVISION_KIND_COPY,
   BOOTSTRAP_START_SERVICES_KIND_COPY,
+  BOOTSTRAP_VERTICAL_PRIMARY_ENTRY,
   BootstrapAdminPasswordError,
   BootstrapInitTenantError,
   BootstrapLlmProvisionError,
@@ -54,13 +55,16 @@ import {
   bootstrapInitTenant,
   bootstrapLlmProvision,
   bootstrapParallelHealthCheck,
+  bootstrapRecordVerticalSetup,
   bootstrapSetAdminPassword,
   bootstrapSmokeSubset,
   bootstrapStartServices,
+  createInstallJob,
   finalizeBootstrap,
   getBootstrapStatus,
   testGitForgeToken,
   updateSettings,
+  type InstallJob,
   type GitForgeTokenTestResult,
   type BootstrapAdminPasswordKind,
   type BootstrapGates,
@@ -84,7 +88,14 @@ import {
   PASSWORD_MIN_SCORE,
 } from "@/lib/password_strength"
 import CloudflareTunnelSetup from "@/components/omnisight/cloudflare-tunnel-setup"
-import BootstrapVerticalStep from "@/components/omnisight/bootstrap-vertical-step"
+import BootstrapVerticalStep, {
+  type BootstrapVerticalCommitPayload,
+  type BootstrapVerticalId,
+} from "@/components/omnisight/bootstrap-vertical-step"
+import AndroidApiSelector, {
+  DEFAULT_ANDROID_API_SELECTION,
+  type AndroidApiSelection,
+} from "@/components/omnisight/android-api-selector"
 import { useCinemaMode } from "@/lib/use-cinema-mode"
 
 // ─── Step definitions ────────────────────────────────────────────────
@@ -2404,7 +2415,7 @@ function GerritSshForm({ onSaved }: { onSaved: () => void }) {
   )
 }
 
-// ─── BS.9.2 — Step 5.5 (Vertical setup, optional) ───────────────────
+// ─── BS.9.2 / BS.9.5 — Step 5.5 (Vertical setup, optional) ──────────
 //
 // Wizard-shell row matching backend ``STEP_VERTICAL_SETUP`` (see
 // ``backend/bootstrap.py`` and ``alembic/0054_bootstrap_state_metadata_jsonb``).
@@ -2412,22 +2423,29 @@ function GerritSshForm({ onSaved }: { onSaved: () => void }) {
 // installs that finalized pre-BS.9 auto-redirect away from
 // ``/bootstrap`` before this pill ever renders, so they never see it.
 //
-// BS.9.2 introduced the frame (OPTIONAL badge + Skip button +
-// placeholder); BS.9.3 plugged the multi-pick body in via
-// ``components/omnisight/bootstrap-vertical-step.tsx``. The placeholder
-// section now lists what's still pending (BS.9.4 Android API selector,
-// BS.9.5 batch enqueue against ``/installer/jobs``); BS.9.6 will deepen
-// the test coverage.
+// BS.9.2 introduced the frame; BS.9.3 plugged the multi-pick chips
+// in; BS.9.4 added the AndroidApiSelector; BS.9.5 (this row) wires
+// Confirm picks to (1) batch ``POST /installer/jobs`` (one job per
+// selected vertical's primary entry — see
+// ``BOOTSTRAP_VERTICAL_PRIMARY_ENTRY``), (2) ``POST /bootstrap/vertical-setup``
+// recording the selection + install job ids in
+// ``bootstrap_state.metadata``, and (3) only THEN flip the step green
+// + advance the cursor. The BS.7 install-progress drawer (mounted in
+// ``components/providers.tsx`` via ``<InstallProgressDrawerLive />``)
+// picks up the SSE ``installer_progress`` events automatically.
 //
-// Two paths flip the step green:
-//   * ``Confirm picks`` (in the BootstrapVerticalStep body) with ≥ 1
-//     selected vertical — fires ``onCommit`` which routes through the
-//     same ``onCompleted`` callback as Skip.
-//   * ``Skip`` — pure client-only flip (no backend call), so
-//     ``backend.bootstrap._verticals_chosen()`` continues to return
-//     False afterwards and re-opening the step still shows the picker.
-//     BS.9.5 will replace the Confirm path's no-op with the actual
-//     ``POST /installer/jobs`` batch.
+// Three paths flip the step green:
+//   * ``Confirm picks`` with ≥ 1 selection → BS.9.5 batch enqueue
+//     resolves, then ``recordVerticalSetup`` succeeds, then
+//     ``onCompleted()`` (any failure shows an inline error and the
+//     pill stays pending so the operator can retry).
+//   * ``Skip`` — pure client-only flip (no backend call). Means
+//     ``backend.bootstrap._verticals_chosen()`` keeps returning False
+//     and re-opening the step still shows the picker; the operator
+//     can come back later via ``Settings → Platforms``.
+//   * Re-opening the step after a partial commit: any failure that
+//     halted before the backend record landed leaves the picker open
+//     so the operator sees what they had selected.
 
 function VerticalSetupStep({
   alreadyGreen,
@@ -2436,10 +2454,99 @@ function VerticalSetupStep({
   alreadyGreen: boolean
   onCompleted: () => void
 }) {
+  // BS.9.5 — keeps the Mobile-only AndroidApiSelector mounted alongside
+  // the picker. Defaults to the canonical preset; BS.9.4 owns the
+  // shape + clamping.
+  const [androidApi, setAndroidApi] = useState<AndroidApiSelection>(
+    DEFAULT_ANDROID_API_SELECTION,
+  )
+  const [selectedNow, setSelectedNow] = useState<readonly BootstrapVerticalId[]>(
+    [],
+  )
+  const [busy, setBusy] = useState(false)
+  // ``commitErr`` carries either the network-level error message or
+  // the structured ``kind`` from the backend so the inline banner can
+  // pick a remediation hint (currently we only echo the message).
+  const [commitErr, setCommitErr] = useState<string | null>(null)
+  // Surface the resolved install job ids so an operator who lost the
+  // drawer (collapsed it before scrolling) can still see what was
+  // queued and how many. Kept as the most-recent successful commit
+  // payload — re-commit overwrites it.
+  const [lastCommit, setLastCommit] = useState<{
+    verticals: readonly BootstrapVerticalId[]
+    jobs: InstallJob[]
+  } | null>(null)
+
+  const handleCommit = useCallback(
+    async (payload: BootstrapVerticalCommitPayload) => {
+      setBusy(true)
+      setCommitErr(null)
+
+      // Step 1 — enqueue one install job per selected vertical. Each
+      // POST runs through the existing R20-A PEP HOLD path; the
+      // operator approves once per vertical via the global
+      // ToastCenter coaching card.
+      const enqueued: InstallJob[] = []
+      try {
+        for (const v of payload.verticals_selected) {
+          const entryId = BOOTSTRAP_VERTICAL_PRIMARY_ENTRY[v]
+          if (!entryId) continue
+          const metadata: Record<string, unknown> = {
+            vertical: v,
+            source: "bootstrap_wizard",
+          }
+          if (v === "mobile") {
+            metadata.android_api = androidApi
+          }
+          const job = await createInstallJob(entryId, { metadata })
+          enqueued.push(job)
+        }
+      } catch (err) {
+        setBusy(false)
+        const msg =
+          err instanceof Error ? err.message : String(err ?? "unknown error")
+        setCommitErr(`Install enqueue failed: ${msg}`)
+        return
+      }
+
+      // Step 2 — record the selection + the install job ids on the
+      // bootstrap_state row so the audit trail captures which jobs
+      // this step kicked off.
+      try {
+        await bootstrapRecordVerticalSetup({
+          verticals_selected: [...payload.verticals_selected],
+          install_job_ids: enqueued.map((j) => j.id),
+          android_api: payload.verticals_selected.includes("mobile")
+            ? androidApi
+            : null,
+        })
+      } catch (err) {
+        setBusy(false)
+        const msg =
+          err instanceof Error ? err.message : String(err ?? "unknown error")
+        setCommitErr(`Recording vertical setup failed: ${msg}`)
+        return
+      }
+
+      setLastCommit({
+        verticals: [...payload.verticals_selected],
+        jobs: enqueued,
+      })
+      setBusy(false)
+      onCompleted()
+    },
+    [androidApi, onCompleted],
+  )
+
+  const mobileSelected = selectedNow.includes("mobile")
+  const enqueuedCount = lastCommit?.jobs.length ?? 0
+
   return (
     <div
       data-testid="bootstrap-vertical-setup-step"
       data-already-green={alreadyGreen ? "true" : "false"}
+      data-busy={busy ? "true" : "false"}
+      data-mobile-selected={mobileSelected ? "true" : "false"}
       className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
     >
       {alreadyGreen && (
@@ -2448,8 +2555,11 @@ function VerticalSetupStep({
           className="flex items-center gap-2 p-2 rounded border border-[var(--status-green)] bg-[var(--status-green)]/10 font-mono text-[11px] text-[var(--status-green)]"
         >
           <Check size={12} />
-          Marked complete — skip applied. Verticals can be revisited
-          later from <code>Settings → Platforms</code>.
+          Marked complete — {lastCommit
+            ? `${enqueuedCount} install job${enqueuedCount === 1 ? "" : "s"} queued (see install drawer for progress)`
+            : "skip applied. Verticals can be revisited later from "}
+          {!lastCommit && <code>Settings → Platforms</code>}
+          {!lastCommit && "."}
         </div>
       )}
       <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
@@ -2470,17 +2580,68 @@ function VerticalSetupStep({
       </p>
 
       <BootstrapVerticalStep
-        onCommit={() => {
-          // BS.9.3 — Confirm picks flips the step green and advances
-          // the wizard cursor. BS.9.5 will replace this with the
-          // actual batch ``POST /installer/jobs`` and only flip green
-          // once the enqueue resolves; for now the local-green flip
-          // mirrors the Skip path's UX so the operator sees the
-          // wizard advance immediately.
-          onCompleted()
-        }}
+        disabled={busy}
+        onSelectionChange={setSelectedNow}
+        onCommit={handleCommit}
       />
 
+      {mobileSelected && (
+        <div
+          data-testid="bootstrap-vertical-setup-android-block"
+          className="flex flex-col gap-2 p-3 rounded border border-[var(--artifact-purple)]/40 bg-[var(--artifact-purple)]/5"
+        >
+          <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+            <Layers size={12} />
+            <span>BS.9.4 — ANDROID API CONFIG (Mobile sub-step)</span>
+          </div>
+          <AndroidApiSelector
+            value={androidApi}
+            disabled={busy}
+            onChange={setAndroidApi}
+          />
+        </div>
+      )}
+
+      {commitErr && (
+        <div
+          data-testid="bootstrap-vertical-setup-error"
+          className="flex items-start gap-2 p-2 rounded border border-[var(--status-red)] bg-[var(--status-red)]/10 font-mono text-[11px] text-[var(--status-red)]"
+        >
+          <AlertCircle size={12} className="mt-0.5 shrink-0" />
+          <span>{commitErr}</span>
+        </div>
+      )}
+
+      {busy && (
+        <div
+          data-testid="bootstrap-vertical-setup-busy"
+          className="flex items-center gap-2 p-2 rounded border border-[var(--artifact-purple)]/50 bg-[var(--artifact-purple)]/10 font-mono text-[11px] text-[var(--foreground)]"
+        >
+          <Loader2 size={12} className="animate-spin" />
+          <span>
+            Enqueueing install jobs — see the bottom-right install
+            drawer for progress.
+          </span>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-testid="bootstrap-vertical-setup-skip"
+          onClick={onCompleted}
+          disabled={busy}
+          className="flex items-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <Check size={12} />
+          Skip — configure verticals later in Settings → Platforms
+        </button>
+      </div>
+
+      {/* Roadmap placeholder — kept after BS.9.5 wiring so the
+       *  BS.9.2 contract (placeholder enumerates BS.9.3 / 9.4 / 9.5)
+       *  still reads as "what's still pending"; BS.9.6 covers the
+       *  testid stays put for documentation. */}
       <div
         data-testid="bootstrap-vertical-setup-placeholder"
         className="flex flex-col gap-2 p-3 rounded border border-dashed border-[var(--border)] bg-[var(--muted)]/20 font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed"
@@ -2490,35 +2651,17 @@ function VerticalSetupStep({
           <span>BS.9 SUB-STEPS</span>
         </div>
         <ul className="list-disc pl-4 space-y-0.5">
+          <li>BS.9.3 — vertical multi-pick chips (delivered above).</li>
           <li>
-            BS.9.3 — vertical multi-pick chips (D/W/P/S/X) +
-            per-vertical sub-step trigger (delivered above).
+            BS.9.4 — Android API range selector (delivered above when
+            Mobile is checked).
           </li>
           <li>
-            BS.9.4 — Android API range selector (compile target / min
-            API / emulator preset / GMS toggle + live disk estimate).
-          </li>
-          <li>
-            BS.9.5 — Confirm picks → batch enqueue{" "}
-            <code>/installer/jobs</code> → progress in BS.7 drawer.
+            BS.9.5 — Confirm picks → batch <code>/installer/jobs</code>{" "}
+            + bootstrap_state record (delivered above).
           </li>
         </ul>
-        <p>
-          Picks above flip the step green; backend wiring lands in
-          BS.9.5.
-        </p>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          data-testid="bootstrap-vertical-setup-skip"
-          onClick={onCompleted}
-          className="flex items-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90"
-        >
-          <Check size={12} />
-          Skip — configure verticals later in Settings → Platforms
-        </button>
+        <p>BS.9.6 deepens the regression test surface for this step.</p>
       </div>
     </div>
   )

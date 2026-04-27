@@ -5662,6 +5662,92 @@ export async function bootstrapCfTunnelSkip(
   })
 }
 
+// ─── BS.9.5 — Step 5.5 (Vertical setup commit, optional) ──────────
+
+/** Mirror of ``components/omnisight/bootstrap-vertical-step.tsx``
+ *  ``BootstrapVerticalId``. Re-typed inline to avoid a frontend → API
+ *  client → component dependency cycle (the component imports from
+ *  ``lib/api`` for ``createInstallJob``). */
+export type BootstrapVerticalIdWire =
+  | "mobile"
+  | "embedded"
+  | "web"
+  | "software"
+  | "cross-toolchain"
+
+/** Mirror of ``AndroidApiSelection`` in
+ *  ``components/omnisight/android-api-selector.tsx``. ``compile_target``
+ *  / ``min_api`` are restricted to the closed set of supported levels
+ *  by the component before they reach this wire shape. */
+export interface BootstrapVerticalAndroidApi {
+  compile_target: number
+  min_api: number
+  emulator_preset: string
+  google_play_services: boolean
+}
+
+export interface BootstrapVerticalSetupRequest {
+  verticals_selected: BootstrapVerticalIdWire[]
+  install_job_ids: string[]
+  android_api?: BootstrapVerticalAndroidApi | null
+}
+
+export interface BootstrapVerticalSetupResponse {
+  status: string
+  verticals_selected: BootstrapVerticalIdWire[]
+  install_job_ids: string[]
+}
+
+/**
+ * Canonical vertical → primary catalog ``entry_id`` map. The wizard's
+ * BS.9.5 commit path POSTs ONE ``/installer/jobs`` per selected
+ * vertical, picking each vertical's "headline" SDK so the install
+ * drawer surfaces a single in-flight row per pick. Operators can add
+ * the rest of the family from ``Settings → Platforms`` later. Pinned
+ * to ids that ship via ``backend/alembic/versions/0052_catalog_seed.py``
+ * — drift tests in BS.9.6 will lock this map against the seed.
+ *
+ *   mobile         → android-sdk-platform-tools (adb / fastboot;
+ *                    BS.9.4 Android API selection rides on
+ *                    ``metadata.android_api``)
+ *   embedded       → espressif-esp-idf-v5     (most-deployed embedded SDK)
+ *   web            → nodejs-lts-20            (every web stack needs Node)
+ *   software       → python-uv                (fast-pull Python toolchain)
+ *   cross-toolchain → arm-gnu-toolchain-13    (most-common ARM cross-gcc)
+ */
+export const BOOTSTRAP_VERTICAL_PRIMARY_ENTRY: Readonly<
+  Record<BootstrapVerticalIdWire, string>
+> = {
+  mobile: "android-sdk-platform-tools",
+  embedded: "espressif-esp-idf-v5",
+  web: "nodejs-lts-20",
+  software: "python-uv",
+  "cross-toolchain": "arm-gnu-toolchain-13",
+}
+
+/**
+ * BS.9.5 — Record the operator's BS.9.3 vertical pick + BS.9.4 Android
+ * API config + the install_job ids the wizard already enqueued via
+ * ``/installer/jobs``. The backend writes a single row into
+ * ``bootstrap_state.metadata`` so audit / re-runs can see which jobs
+ * the wizard kicked off. Re-commit overwrites the prior payload (the
+ * underlying SQL runs ``ON CONFLICT DO UPDATE``) so re-opening the
+ * step and adding a vertical the operator skipped on the first pass
+ * is a non-destructive idempotent flow.
+ *
+ * The endpoint refuses payloads where ``android_api`` is omitted
+ * while ``"mobile"`` is selected (or sent without it), so the wizard
+ * UI never lands a half-built install metadata row in PG.
+ */
+export async function bootstrapRecordVerticalSetup(
+  body: BootstrapVerticalSetupRequest,
+): Promise<BootstrapVerticalSetupResponse> {
+  return request<BootstrapVerticalSetupResponse>("/bootstrap/vertical-setup", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
 // ─── BS.7.1 — Installer (POST /installer/jobs + PEP HOLD) ────────────────
 //
 // Wires the catalog-card "Install" button to the existing installer router

@@ -22,7 +22,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, Request
@@ -912,6 +912,244 @@ async def bootstrap_cf_tunnel_skip(req: CfTunnelSkipRequest) -> CfTunnelSkipResp
         reason or "<none>",
     )
     return CfTunnelSkipResponse(status="skipped", cf_tunnel_configured=True)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  BS.9.5 — Step 5.5 (vertical setup commit, optional)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Records the operator's BS.9.3 vertical multi-pick + the optional
+# BS.9.4 Android API selection that the wizard front-end already pushed
+# through ``POST /installer/jobs`` (one job per vertical's primary
+# entry). The frontend enqueues the install jobs FIRST so the BS.7
+# install drawer lights up immediately; once every enqueue resolves it
+# calls this endpoint with the resulting ``install_job_ids`` so
+# ``bootstrap_state.metadata`` carries the audit trail of which jobs
+# this step kicked off.
+#
+# Optional + idempotent — the route never blocks finalize, and the
+# underlying :func:`_boot.record_bootstrap_step` runs an
+# ``ON CONFLICT DO UPDATE`` so re-opening the wizard step and
+# committing again simply overwrites the prior payload (operator can
+# legitimately add a vertical they skipped on the first pass).
+#
+# Auth posture: unauthenticated like the other ``/bootstrap/*`` steps.
+# Pre-finalize the bootstrap gate middleware confines the route to the
+# wizard surface; post-finalize the gate middleware redirects this away
+# alongside the rest of the wizard.
+
+# Mirrors ``components/omnisight/bootstrap-vertical-step.tsx``
+# ``BootstrapVerticalId`` exactly. Kept here as a frozen tuple so this
+# router does not import from the catalog router (the validator there
+# carries ``rtos`` + ``custom`` which BS.9 does not surface).
+_BOOTSTRAP_VERTICAL_IDS: tuple[str, ...] = (
+    "mobile", "embedded", "web", "software", "cross-toolchain",
+)
+
+# Mirrors ``components/omnisight/android-api-selector.tsx``
+# ``ANDROID_API_LEVELS`` ids. The wizard frontend coerces+clamps before
+# POSTing so re-validating here is belt-and-braces — bad payload from
+# a malicious / stale-tab caller fails 422 before we write metadata.
+_ANDROID_API_LEVELS: tuple[int, ...] = (
+    23, 24, 26, 28, 29, 30, 31, 32, 33, 34, 35,
+)
+_ANDROID_EMULATOR_PRESETS: tuple[str, ...] = (
+    "pixel-8", "pixel-6a", "pixel-tablet", "pixel-fold", "none",
+)
+
+
+class VerticalSetupAndroidApi(BaseModel):
+    """Android API selection captured by BS.9.4 ``AndroidApiSelector``.
+
+    Mirror of the frontend ``AndroidApiSelection`` shape. Only required
+    when ``"mobile"`` is in ``verticals_selected`` — the body validator
+    refuses ``android_api`` when ``"mobile"`` is absent so a stale
+    payload cannot smuggle Android config into a non-Mobile install.
+    """
+
+    compile_target: int
+    min_api: int
+    emulator_preset: str
+    google_play_services: bool
+
+    @field_validator("compile_target", "min_api")
+    @classmethod
+    def _level_in_set(cls, v: int) -> int:
+        if v not in _ANDROID_API_LEVELS:
+            raise ValueError(
+                f"API level must be one of {_ANDROID_API_LEVELS}",
+            )
+        return v
+
+    @field_validator("emulator_preset")
+    @classmethod
+    def _preset_in_set(cls, v: str) -> str:
+        if v not in _ANDROID_EMULATOR_PRESETS:
+            raise ValueError(
+                f"emulator_preset must be one of {_ANDROID_EMULATOR_PRESETS}",
+            )
+        return v
+
+
+class VerticalSetupRequest(BaseModel):
+    """Body for ``POST /bootstrap/vertical-setup``.
+
+    ``verticals_selected`` is the canonical-ordered list emitted by
+    ``BootstrapVerticalStep.toggleVertical`` — every entry must be in
+    ``_BOOTSTRAP_VERTICAL_IDS`` and the list must be non-empty (Skip
+    is a separate client-only path that does not call this endpoint).
+    ``install_job_ids`` carries the ``install_jobs.id`` values the
+    frontend already POSTed so ``bootstrap_state.metadata`` records
+    which jobs this step kicked off (audit / rerun / drift guard).
+    ``android_api`` is required iff ``"mobile"`` is selected.
+    """
+
+    verticals_selected: list[str] = Field(min_length=1)
+    install_job_ids: list[str] = Field(default_factory=list)
+    android_api: VerticalSetupAndroidApi | None = None
+
+    @field_validator("verticals_selected")
+    @classmethod
+    def _verticals_in_set(cls, v: list[str]) -> list[str]:
+        bad = [s for s in v if s not in _BOOTSTRAP_VERTICAL_IDS]
+        if bad:
+            raise ValueError(
+                f"unknown vertical id(s): {bad}; "
+                f"expected subset of {_BOOTSTRAP_VERTICAL_IDS}",
+            )
+        # Dedup + canonical order so re-commits are idempotent on disk.
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for vid in _BOOTSTRAP_VERTICAL_IDS:
+            if vid in v and vid not in seen:
+                seen.add(vid)
+                ordered.append(vid)
+        return ordered
+
+    @field_validator("install_job_ids")
+    @classmethod
+    def _job_id_shape(cls, v: list[str]) -> list[str]:
+        for jid in v:
+            if not isinstance(jid, str) or not jid or len(jid) > 128:
+                raise ValueError(
+                    "install_job_ids entries must be 1..128 char strings",
+                )
+        return v
+
+
+class VerticalSetupResponse(BaseModel):
+    status: str
+    verticals_selected: list[str]
+    install_job_ids: list[str]
+
+
+@router.post("/vertical-setup", response_model=VerticalSetupResponse)
+async def bootstrap_vertical_setup(
+    req: VerticalSetupRequest,
+) -> VerticalSetupResponse:
+    """Record the operator's BS.9.3 vertical pick + BS.9.4 Android API
+    config + BS.9.5 ``install_jobs.id`` set on ``bootstrap_state`` under
+    :data:`_boot.STEP_VERTICAL_SETUP`.
+
+    The endpoint is intentionally a *recorder* — it does not enqueue
+    install jobs itself. The frontend has already POSTed the install
+    jobs to ``/installer/jobs`` (one per vertical's primary entry) and
+    just hands the resulting ids back so the bootstrap audit trail
+    captures which jobs this step kicked off. Splitting the responsibility
+    keeps the install-jobs PEP HOLD path (R20-A coaching card) unchanged
+    and lets each install row stream progress through the existing BS.7
+    install-progress drawer + ``installer_progress`` SSE channel.
+
+    Side-effects (all idempotent under retry):
+      1. Writes ``bootstrap_state.metadata`` JSONB with
+         ``{verticals_selected, android_api?, install_job_ids,
+            source: "wizard"}`` — re-commit overwrites prior payload.
+      2. Emits an audit row ``bootstrap.vertical_setup_committed`` so
+         the trail records which verticals went live + when. Audit
+         failures are logged but never abort the call (mirrors the
+         cf_tunnel-skip pattern).
+
+    Auth posture: unauthenticated. Wizard runs pre-login; the gate
+    middleware confines this route to the bootstrap surface.
+    """
+    if "mobile" in req.verticals_selected and req.android_api is None:
+        # Belt-and-braces — the frontend always sends android_api when
+        # Mobile is selected, but a stale tab / hand-crafted payload
+        # could omit it. Fail 422 instead of writing a half-built row.
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=422,
+            content={
+                "detail": "android_api is required when 'mobile' is selected",
+                "kind": "android_api_required",
+            },
+        )
+    if "mobile" not in req.verticals_selected and req.android_api is not None:
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=422,
+            content={
+                "detail": (
+                    "android_api must be omitted when 'mobile' is not "
+                    "selected"
+                ),
+                "kind": "android_api_unexpected",
+            },
+        )
+
+    metadata: dict[str, Any] = {
+        "verticals_selected": list(req.verticals_selected),
+        "install_job_ids": list(req.install_job_ids),
+        "source": "wizard",
+    }
+    if req.android_api is not None:
+        metadata["android_api"] = req.android_api.model_dump()
+
+    try:
+        await _boot.record_bootstrap_step(
+            _boot.STEP_VERTICAL_SETUP,
+            actor_user_id=None,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        logger.exception(
+            "bootstrap: record_bootstrap_step(vertical_setup) failed: %s", exc,
+        )
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=500,
+            content={
+                "detail": "failed to record vertical_setup step",
+                "kind": "record_failed",
+            },
+        )
+
+    try:
+        await audit.log(
+            action="bootstrap.vertical_setup_committed",
+            entity_kind="bootstrap",
+            entity_id=_boot.STEP_VERTICAL_SETUP,
+            before=None,
+            after={
+                "verticals_selected": list(req.verticals_selected),
+                "install_job_ids": list(req.install_job_ids),
+                "android_api": (
+                    req.android_api.model_dump()
+                    if req.android_api is not None
+                    else None
+                ),
+            },
+            actor="wizard",
+        )
+    except Exception as exc:
+        logger.debug("bootstrap.vertical_setup_committed audit emit failed: %s", exc)
+
+    logger.info(
+        "bootstrap: vertical_setup committed verticals=%s install_jobs=%d",
+        req.verticals_selected, len(req.install_job_ids),
+    )
+    return VerticalSetupResponse(
+        status="committed",
+        verticals_selected=list(req.verticals_selected),
+        install_job_ids=list(req.install_job_ids),
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
