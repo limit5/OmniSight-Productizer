@@ -2884,7 +2884,7 @@ ls backend/alembic/versions/ | tail -3
 - 預估：**0.25 day**
 
 ### AS.5 — Observability + Audit Hooks
-- [ ] AS.5.1 Auth event format（login_success / login_fail / oauth_connect / oauth_revoke / bot_challenge_pass / bot_challenge_fail / token_refresh / token_rotated）
+- [x] AS.5.1 Auth event format（login_success / login_fail / oauth_connect / oauth_revoke / bot_challenge_pass / bot_challenge_fail / token_refresh / token_rotated）
 - [ ] AS.5.2 Per-tenant dashboard：challenge 通過 / 失敗 rate、auth method 分布、suspicious pattern alert
 - 預估：**0.5 day**
 
