@@ -346,20 +346,64 @@ Frame 5 (700ms):  星雲回正、新 card 完整顯示
 
 ## 6. K-rest CF Access SSO 與 AS OAuth 邊界
 
+> **2026-04-27 audit clarification (P2.1)**：本節實作邊界釐清。原本 TODO row 寫「K-rest 既有 CF Access SSO」是 ops-level 描述（CF console 配置完成），不是 backend code-level feature（backend 沒讀 CF headers）。本節說明 AS 落地時要做哪些 backend code 動作才能讓 `auth_layer="cf_access"` 真正運作。
+
 兩者**功能重疊但設計上互斥使用**：
 
-| 層 | 職責 | 觸發場景 |
-|---|---|---|
-| K-rest CF Access | 網路層 SSO（IdP-driven） | 企業 SSO 配置、whole-site 都在 Access 後面 |
-| AS OAuth | 應用層 OAuth（user-driven） | 個人 / SaaS user 自選 provider |
+| 層 | 職責 | 觸發場景 | 既有狀態 |
+|---|---|---|---|
+| K-rest CF Access | 網路層 SSO（IdP-driven，Cloudflare 邊界閘） | 企業 SSO 配置、whole-site 都在 Access 後面 | ✅ ops-level shipped (Cloudflare console 配置 + email-OTP rule) <br>❌ backend code 未讀 `Cf-Access-Authenticated-User-Email` / `CF-Ray` 等 headers |
+| AS OAuth | 應用層 OAuth（user-driven，OmniSight backend 處理 OIDC flow） | 個人 / SaaS user 自選 provider | ❌ 整套未做（AS 主要交付） |
 
-`auth_features.auth_layer` 明確三選一：
+### 6.1 「shipped」claim 的 audit clarification
 
-- `cf_access`：企業 tenant，K-rest CF Access 一路通到底，AS OAuth 不出現
-- `app_oauth`：SaaS tenant，AS OAuth 出現（"Sign in with Google" 等），K-rest CF Access 不前置
-- `password_only`：傳統，無 OAuth 也無 CF Access（既有預設 + legacy）
+CF Access 邊界控制透過 **Cloudflare console 設定**（rule 5.1 + email-OTP），這部分 **ops-level 已落地**（詳見 `docs/ops/cloudflare_settings.md`）。
+
+但 **backend code 完全沒對應 logic**：
+- 沒讀 `Cf-Access-Authenticated-User-Email` header（CF Access 會在 verified 流量加這個 header）
+- 沒驗 `Cf-Access-Jwt-Assertion`（CF 簽的 JWT、可驗來源是真 CF）
+- 沒在 backend 用 user email 自動 link / create OmniSight user
+
+**意思是**：目前 CF Access 是「**邊界控制 + ops-level trust 邊界**」— 過了 CF Access 的流量被當「已認證」直接送 backend session 流程。**這對單 tenant 是 OK 的**（whole-site 後面、cookie session 仍照常驗），但對 multi-tenant + auth_layer="cf_access" 沒法分辨「哪個 tenant 的 user 進來」。
+
+### 6.2 AS 落地時要做的 CF Access 整合（如果走 cf_access path）
+
+如果要支援 `auth_layer="cf_access"` 的 tenant、AS.6 範圍要加：
+
+1. **新 middleware `backend/auth/cf_access_middleware.py`**
+   - 讀 `Cf-Access-Authenticated-User-Email` + `Cf-Access-Jwt-Assertion`
+   - 驗 JWT signature 對 CF public key（防偽造 — 攻擊者直接打 backend 不經 CF 邊界）
+   - 從 email 找 / 自動 create OmniSight user（per-tenant scope）
+   - 寫 audit row「CF Access SSO login」
+2. **AS.0.2 `tenants.auth_features.auth_layer="cf_access"` 落地時要做的開關**
+   - 啟 cf_access middleware
+   - **不啟** AS OAuth login UI（AS.7.1 login page 自動隱藏 OAuth buttons）
+   - **啟** password 登入仍可用作 fallback（避免 CF Access 中斷時 user 鎖死）
+3. **K-rest CF Access doc 同步更新**
+   - 補一段「backend 對 CF headers 的 trust 規則」
+   - 列「whole-site CF Access vs per-route CF Access」差異
+   - 寫 deploy SOP — CF Access 必須跟 cf_access auth_layer flag 一起切
+
+### 6.3 三 path 行為摘要
+
+`auth_features.auth_layer` 三選一：
+
+| auth_layer | login UI 顯示什麼 | backend 認證流程 | 適用 tenant |
+|---|---|---|---|
+| `cf_access` | 沒 OAuth buttons、沒 password form（CF Access 已經認證了） | CF middleware 從 header 取 email → find/create user → session | 企業 tenant、有 SSO IdP（Okta / Azure AD / Google Workspace） |
+| `app_oauth` | OAuth buttons (Google/Apple/GitHub/MS) + password form 並列 | AS OAuth flow OR password flow（AS 完整） | SaaS tenant、user 自選 provider |
+| `password_only` | 只 password form | 既有 K 系列 password 流程不變 | 既有 prod tenant default、legacy 兼容 |
 
 UI 自動隱藏不適用的選項，避免 user 困惑。
+
+### 6.4 P2.1 audit follow-up status
+
+- ❌ **未做**：backend CF Access middleware（要做才能真正支援 `auth_layer="cf_access"`）
+- ✅ **已 documented**：本 ADR §6 說清楚 ops vs code-level 邊界
+- ❌ **未做**：K-rest doc 同步更新 backend trust 規則（AS.6 落地時補）
+- ⏳ **AS 落地時會做**：AS.6 要實作 cf_access_middleware 才能真正 ship `auth_layer="cf_access"` 三選一
+
+**結論**：CF Access 在 OmniSight 目前是「**邊界控制 + 非分 tenant 的 trust gate**」。要真正讓「企業 tenant 走 CF Access SSO 一路認證到 backend user」，**AS.6 的工作範圍要加 cf_access_middleware**。本 audit clarification 把這個責任放到 AS 落地的 spec 內、避免之後繼續以為「K-rest 既有 CF Access SSO 已 shipped」就跳過 backend code 工作。
 
 ## 7. K 系列 password 政策對 OAuth-only user 的處理
 
