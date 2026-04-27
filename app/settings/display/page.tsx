@@ -201,10 +201,21 @@ export default function DisplaySettingsPage() {
   const BatteryIcon = batteryIcon(battery.tier, battery.status.charging)
   const tierMeta = TIER_LABEL[battery.tier]
 
+  // BS.11.1 — surface the resolved motion-suppress signal on the
+  // page root so contract tests can lock the wiring without scraping
+  // CSS / Tailwind class strings. `motion-suppressed` is true when
+  // either the OS asks for reduce or the user has explicitly picked
+  // ``off`` here on this page (the latter is JS-only and the page
+  // owns its own state ahead of the BS.3.5 round-trip).
+  const motionSuppressed = reducedMotion || userPref === "off"
+
   return (
     <main
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
       data-testid="display-settings-page"
+      data-motion-suppressed={motionSuppressed ? "true" : "false"}
+      data-os-reduced-motion={reducedMotion ? "true" : "false"}
+      data-user-pref={userPref}
     >
       <div className="mx-auto max-w-4xl">
         {/* ── Breadcrumb + heading ─────────────────────────────────── */}
@@ -286,7 +297,22 @@ export default function DisplaySettingsPage() {
                   {checked && saving && (
                     <Loader2
                       size={14}
-                      className="mt-1 shrink-0 animate-spin text-[var(--muted-foreground)]"
+                      data-testid={`motion-level-saving-spinner-${level}`}
+                      data-motion-spin={
+                        reducedMotion || userPref === "off" ? "off" : "on"
+                      }
+                      className={[
+                        "mt-1 shrink-0 text-[var(--muted-foreground)]",
+                        // BS.11.1 — drop the spin class when the user has
+                        // chosen `motion: off` (or the OS asks for reduce).
+                        // The R25.2 global CSS fallback only catches the
+                        // OS flag; the in-app off pref is JS-only and
+                        // would otherwise still spin even though every
+                        // *other* surface honours it.
+                        reducedMotion || userPref === "off" ? "" : "animate-spin",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
                     />
                   )}
                   {checked && !saving && loaded && (

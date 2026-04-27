@@ -42,6 +42,22 @@
  * handler that POSTs ``/installer/jobs/{id}/cancel``. Until then the
  * prop is omitted and no cancel UI renders (no dead button).
  *
+ * Reduce-motion compliance (BS.11.1)
+ * ──────────────────────────────────
+ * The chip's spinner (``Loader2 animate-spin``), the per-row running
+ * spinner, the indeterminate progress bar (``animate-pulse``), and
+ * the determinate bar's width transition are all gated on
+ * ``useEffectiveMotionLevel()``. When the resolver returns ``"off"``
+ * — OS ``prefers-reduced-motion: reduce`` (R25.2 short-circuit), the
+ * user's app-level ``motion: off`` choice from Settings → Display
+ * (BS.3.6), or the BS.3.4 critical-battery degradation — every
+ * motion class is dropped at render time. The R25.2 global CSS
+ * fallback at ``app/globals.css`` only fires for the OS flag; the
+ * JS-only ``motion: off`` choice would otherwise leak through to
+ * CSS. Testability hooks: ``data-motion-level`` on the drawer root
+ * (chip + panel) plus ``data-motion-spin="off|on"`` on each animated
+ * surface.
+ *
  * Module-global state audit
  * ─────────────────────────
  * No module-level mutable state. Speed is derived per-component-instance
@@ -60,6 +76,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { ChevronDown, ChevronUp, Download, Loader2, X } from "lucide-react"
 import type { InstallJob, InstallJobState } from "@/lib/api"
+import { useEffectiveMotionLevel } from "@/hooks/use-zero-g"
 
 const IN_FLIGHT_STATES: ReadonlySet<InstallJobState> = new Set([
   "queued",
@@ -173,6 +190,20 @@ export function InstallProgressDrawer({
   nowMs,
 }: InstallProgressDrawerProps) {
   const [open, setOpen] = useState<boolean>(initialOpen)
+  // BS.11.1 — gate motion-bearing utility classes (`animate-spin`,
+  // `animate-pulse`, the progress-bar width `transition`) on the
+  // resolver chain. The R25.2 global CSS fallback at
+  // `app/globals.css` already neutralises every CSS animation under
+  // OS `prefers-reduced-motion: reduce`, but the user's app-level
+  // `motion: off` (chosen via Settings → Display) is JS-only and
+  // does not propagate to CSS — so without an explicit gate the
+  // chip would still spin for users who picked off in-app while
+  // their OS still allows motion. `motionOff` short-circuits the
+  // utility classes; the dom mark `data-motion-level` is exposed
+  // on both the chip and the panel so BS.11.1 contract tests can
+  // assert the wiring without scraping CSS.
+  const motionLevel = useEffectiveMotionLevel()
+  const motionOff = motionLevel === "off"
   // Per-job speed sample ring. Keyed by job.id so a job that completes
   // and another spawns with the same numeric prefix don't cross-pollute.
   // Stored in a ref (not state) because we don't want speed-sample
@@ -237,11 +268,13 @@ export function InstallProgressDrawer({
       <div
         className="fixed bottom-4 right-4 z-[55] pointer-events-none"
         aria-label="install progress drawer"
+        data-motion-level={motionLevel}
       >
         <button
           type="button"
           onClick={handleToggle}
           data-testid="install-drawer-chip"
+          data-motion-spin={motionOff ? "off" : "on"}
           aria-label={`${inFlight.length} install${inFlight.length === 1 ? "" : "s"} in progress — open drawer`}
           aria-expanded={false}
           className="pointer-events-auto holo-glass-simple corner-brackets-full rounded-sm border border-[var(--neural-cyan,#67e8f9)] backdrop-blur-sm px-3 py-1.5 flex items-center gap-2 font-mono text-[11px] tracking-wider text-[var(--neural-cyan,#67e8f9)] shadow-lg hover:bg-[var(--neural-cyan,#67e8f9)]/10"
@@ -250,7 +283,10 @@ export function InstallProgressDrawer({
               "0 8px 28px -10px var(--neural-cyan,#67e8f9), 0 0 0 1px var(--neural-cyan,#67e8f9)",
           }}
         >
-          <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
+          <Loader2
+            className={`w-3.5 h-3.5${motionOff ? "" : " animate-spin"}`}
+            aria-hidden
+          />
           <span data-testid="install-drawer-chip-count">{inFlight.length}</span>
           <span>installing</span>
         </button>
@@ -262,9 +298,11 @@ export function InstallProgressDrawer({
     <div
       className="fixed bottom-4 right-4 z-[55] w-[min(380px,calc(100vw-2rem))] pointer-events-none"
       aria-label="install progress drawer"
+      data-motion-level={motionLevel}
     >
       <div
         data-testid="install-drawer-panel"
+        data-motion-spin={motionOff ? "off" : "on"}
         className="pointer-events-auto holo-glass-simple corner-brackets-full rounded-sm border border-[var(--neural-cyan,#67e8f9)]/70 backdrop-blur-sm shadow-lg"
         style={{
           boxShadow:
@@ -331,7 +369,11 @@ export function InstallProgressDrawer({
               >
                 <div className="flex items-center gap-2 mb-1">
                   <Loader2
-                    className={`w-3 h-3 ${job.state === "running" ? "animate-spin text-[var(--neural-cyan,#67e8f9)]" : "text-[var(--muted-foreground,#94a3b8)]"}`}
+                    className={`w-3 h-3 ${
+                      job.state === "running"
+                        ? `${motionOff ? "" : "animate-spin "}text-[var(--neural-cyan,#67e8f9)]`
+                        : "text-[var(--muted-foreground,#94a3b8)]"
+                    }`}
                     aria-hidden
                   />
                   <span
@@ -363,10 +405,11 @@ export function InstallProgressDrawer({
                   className="h-[4px] w-full bg-white/5 rounded-sm overflow-hidden mb-1"
                   data-testid={`install-drawer-bar-${job.id}`}
                   data-progress-known={pct !== null ? "true" : "false"}
+                  data-motion-spin={motionOff ? "off" : "on"}
                 >
                   {pct !== null ? (
                     <div
-                      className="h-full transition-[width] duration-150"
+                      className={`h-full${motionOff ? "" : " transition-[width] duration-150"}`}
                       style={{
                         width: `${pct}%`,
                         background: "var(--neural-cyan,#67e8f9)",
@@ -374,7 +417,7 @@ export function InstallProgressDrawer({
                     />
                   ) : (
                     <div
-                      className="h-full w-1/3 animate-pulse"
+                      className={`h-full w-1/3${motionOff ? "" : " animate-pulse"}`}
                       style={{ background: "var(--neural-cyan,#67e8f9)" }}
                     />
                   )}
