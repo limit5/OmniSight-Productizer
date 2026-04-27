@@ -33,7 +33,10 @@ import * as api from "@/lib/api"
 import type { InstallJob, InstallJobState } from "@/lib/api"
 import { primeSSE as _primeSSE } from "../helpers/sse"
 import {
+  deriveCatalogProgressPercent,
+  deriveCatalogStateFromInstallJob,
   mergeInstallJobFromProgress,
+  pickInstallJobForEntry,
   synthesizeInstallJobFromProgress,
   useInstallJobs,
 } from "@/hooks/use-install-jobs"
@@ -426,5 +429,193 @@ describe("mergeInstallJobFromProgress", () => {
       display_name: "OmniSight Vendor SDK 1.2.3",
     })
     expect(merged.state).toBe("completed")
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// BS.7.5 — pure helpers that turn a job list into the catalog card's
+// ``installState`` + ``installProgressPercent`` props.
+// ─────────────────────────────────────────────────────────────────────
+
+function mkJobRow(overrides: Partial<InstallJob> = {}): InstallJob {
+  return {
+    id: "job-base",
+    tenant_id: "t1",
+    entry_id: "entry-foo",
+    state: "running",
+    idempotency_key: "k",
+    sidecar_id: null,
+    protocol_version: 1,
+    bytes_done: 0,
+    bytes_total: null,
+    eta_seconds: null,
+    log_tail: "",
+    result_json: null,
+    error_reason: null,
+    pep_decision_id: null,
+    requested_by: "u",
+    queued_at: "2026-04-27T00:00:00Z",
+    claimed_at: null,
+    started_at: null,
+    completed_at: null,
+    ...overrides,
+  }
+}
+
+describe("pickInstallJobForEntry", () => {
+  it("returns undefined when the list is empty", () => {
+    expect(pickInstallJobForEntry([], "entry-foo")).toBeUndefined()
+  })
+
+  it("returns undefined when no job matches the entry_id", () => {
+    const jobs = [mkJobRow({ id: "j1", entry_id: "other" })]
+    expect(pickInstallJobForEntry(jobs, "entry-foo")).toBeUndefined()
+  })
+
+  it("returns the only matching in-flight row", () => {
+    const jobs = [
+      mkJobRow({ id: "j1", entry_id: "entry-foo", state: "running" }),
+    ]
+    expect(pickInstallJobForEntry(jobs, "entry-foo")?.id).toBe("j1")
+  })
+
+  it("prefers in-flight over a later terminal row for the same entry", () => {
+    const jobs = [
+      mkJobRow({ id: "j1", entry_id: "entry-foo", state: "running" }),
+      mkJobRow({ id: "j2", entry_id: "entry-foo", state: "completed" }),
+    ]
+    expect(pickInstallJobForEntry(jobs, "entry-foo")?.id).toBe("j1")
+  })
+
+  it("falls back to the latest non-cancelled terminal row when no in-flight", () => {
+    const jobs = [
+      mkJobRow({ id: "j1", entry_id: "entry-foo", state: "failed" }),
+      mkJobRow({ id: "j2", entry_id: "entry-foo", state: "completed" }),
+    ]
+    expect(pickInstallJobForEntry(jobs, "entry-foo")?.id).toBe("j2")
+  })
+
+  it("ignores cancelled rows entirely so the catalog reverts to the entry's static state", () => {
+    const jobs = [mkJobRow({ id: "j1", entry_id: "entry-foo", state: "cancelled" })]
+    expect(pickInstallJobForEntry(jobs, "entry-foo")).toBeUndefined()
+  })
+
+  it("returns the latest in-flight when multiple are queued + running", () => {
+    const jobs = [
+      mkJobRow({ id: "j1", entry_id: "entry-foo", state: "queued" }),
+      mkJobRow({ id: "j2", entry_id: "entry-foo", state: "running" }),
+    ]
+    // Iterating from the end of the array, the latest in-flight wins.
+    expect(pickInstallJobForEntry(jobs, "entry-foo")?.id).toBe("j2")
+  })
+})
+
+describe("deriveCatalogStateFromInstallJob", () => {
+  it("returns the fallback when there is no job", () => {
+    expect(deriveCatalogStateFromInstallJob(undefined, "available")).toBe(
+      "available",
+    )
+    expect(
+      deriveCatalogStateFromInstallJob(undefined, "update-available"),
+    ).toBe("update-available")
+  })
+
+  it("maps queued + running to installing (state 3)", () => {
+    expect(
+      deriveCatalogStateFromInstallJob(mkJobRow({ state: "queued" }), "available"),
+    ).toBe("installing")
+    expect(
+      deriveCatalogStateFromInstallJob(mkJobRow({ state: "running" }), "available"),
+    ).toBe("installing")
+  })
+
+  it("maps completed to installed (state 2)", () => {
+    expect(
+      deriveCatalogStateFromInstallJob(
+        mkJobRow({ state: "completed" }),
+        "available",
+      ),
+    ).toBe("installed")
+  })
+
+  it("maps failed to failed (state 5)", () => {
+    expect(
+      deriveCatalogStateFromInstallJob(
+        mkJobRow({ state: "failed" }),
+        "available",
+      ),
+    ).toBe("failed")
+  })
+
+  it("maps cancelled back to fallback so update-available is preserved", () => {
+    expect(
+      deriveCatalogStateFromInstallJob(
+        mkJobRow({ state: "cancelled" }),
+        "update-available",
+      ),
+    ).toBe("update-available")
+    expect(
+      deriveCatalogStateFromInstallJob(
+        mkJobRow({ state: "cancelled" }),
+        "available",
+      ),
+    ).toBe("available")
+  })
+})
+
+describe("deriveCatalogProgressPercent", () => {
+  it("returns undefined when there is no job", () => {
+    expect(deriveCatalogProgressPercent(undefined)).toBeUndefined()
+  })
+
+  it("returns undefined when bytes_total is null / 0 / negative / NaN", () => {
+    expect(
+      deriveCatalogProgressPercent(mkJobRow({ bytes_total: null })),
+    ).toBeUndefined()
+    expect(
+      deriveCatalogProgressPercent(mkJobRow({ bytes_total: 0 })),
+    ).toBeUndefined()
+    expect(
+      deriveCatalogProgressPercent(mkJobRow({ bytes_total: -1 })),
+    ).toBeUndefined()
+    expect(
+      deriveCatalogProgressPercent(
+        mkJobRow({ bytes_total: Number.NaN as unknown as number }),
+      ),
+    ).toBeUndefined()
+  })
+
+  it("returns 0 at the start of the download", () => {
+    expect(
+      deriveCatalogProgressPercent(
+        mkJobRow({ bytes_done: 0, bytes_total: 1000 }),
+      ),
+    ).toBe(0)
+  })
+
+  it("returns the bytes_done/bytes_total ratio in [0..100]", () => {
+    expect(
+      deriveCatalogProgressPercent(
+        mkJobRow({ bytes_done: 250, bytes_total: 1000 }),
+      ),
+    ).toBe(25)
+    expect(
+      deriveCatalogProgressPercent(
+        mkJobRow({ bytes_done: 1000, bytes_total: 1000 }),
+      ),
+    ).toBe(100)
+  })
+
+  it("clamps to [0..100] when sidecar reports overshoot or rollback", () => {
+    expect(
+      deriveCatalogProgressPercent(
+        mkJobRow({ bytes_done: 1500, bytes_total: 1000 }),
+      ),
+    ).toBe(100)
+    expect(
+      deriveCatalogProgressPercent(
+        mkJobRow({ bytes_done: -1, bytes_total: 1000 }),
+      ),
+    ).toBe(0)
   })
 })

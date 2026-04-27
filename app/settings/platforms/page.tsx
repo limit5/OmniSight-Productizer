@@ -23,6 +23,19 @@
  * to its passthrough branch the moment ``onInstall`` is wired, so this
  * change activates the install affordance across both card and panel.
  *
+ * BS.7.5 — live install state on the catalog card (this file owns the
+ * SSE → card state-3 wiring). Once the PEP gate clears and the sidecar
+ * starts the download, ``installer_progress`` SSE events flow into
+ * ``useInstallJobs()``; the card's ``installState`` is overwritten by
+ * the derived value (queued / running → ``installing``, completed →
+ * ``installed``, failed → ``failed``) and ``installProgressPercent`` is
+ * driven by ``bytes_done / bytes_total``. The card's BS.6.2
+ * conic-gradient ring + ``ring-spin`` icon + bytes-counter live read
+ * out activate without any additional plumbing — the card already
+ * paints state 3 from these props. Cancelled jobs revert to the
+ * entry's static ``installState`` so an aborted install does not
+ * clobber an ``update-available`` chip.
+ *
  * Sub-tab contract (frozen now so subsequent BS rows can deep-link in):
  *   ?tab=catalog    → catalog browse (BS.6 lands the cards + 5-state)
  *   ?tab=installed  → already-installed list (BS.6.x lands)
@@ -72,6 +85,12 @@ import {
   type PlatformCounters,
 } from "@/components/omnisight/platform-hero"
 import { useHostMetricsTick } from "@/hooks/use-host-metrics-tick"
+import {
+  deriveCatalogProgressPercent,
+  deriveCatalogStateFromInstallJob,
+  pickInstallJobForEntry,
+  useInstallJobs,
+} from "@/hooks/use-install-jobs"
 import { createInstallJob } from "@/lib/api"
 
 // ─────────────────────────────────────────────────────────────────────
@@ -195,6 +214,41 @@ function PlatformsPageInner() {
     }
   }, [])
 
+  // BS.7.5 — live install state from SSE. The same ``useInstallJobs()``
+  // hook that powers the bottom-right ``<InstallProgressDrawer />``
+  // (mounted in ``components/providers.tsx``) feeds the catalog cards
+  // here so a job's lifecycle ticks (queued → running → completed /
+  // failed / cancelled) are reflected on the card visual without an
+  // extra round-trip. ``pickInstallJobForEntry`` matches the freshest
+  // job per ``entry_id`` (preferring in-flight over terminal so a
+  // retry-while-running scenario shows the active install rather than
+  // the old failure), and ``deriveCatalogStateFromInstallJob`` maps
+  // backend lifecycle → catalog 5-state visual. Cancelled rows revert
+  // to the entry's seeded ``installState`` so an ``update-available``
+  // chip is preserved across an aborted install.
+  //
+  // The hook subscribes once per mount; calling it here in addition to
+  // the drawer-side mount is intentional — ``api.subscribeEvents``
+  // shares a single ``EventSource`` per tab and only registers an extra
+  // listener callback, so the cost is one extra ``InstallJob[]`` array
+  // and one extra listener (negligible). When BS.7.6/7.7 land we may
+  // share state via context; for this row the duplicate listener is
+  // the simplest scope-minimal wiring.
+  const { jobs: installJobs } = useInstallJobs()
+  const renderCardOverlay = useCallback(
+    (entry: CatalogEntry): {
+      installState: CatalogEntry["installState"]
+      installProgressPercent: number | undefined
+    } => {
+      const fallback = entry.installState ?? "available"
+      const job = pickInstallJobForEntry(installJobs, entry.id)
+      const installState = deriveCatalogStateFromInstallJob(job, fallback)
+      const installProgressPercent = deriveCatalogProgressPercent(job)
+      return { installState, installProgressPercent }
+    },
+    [installJobs],
+  )
+
   return (
     <main
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
@@ -293,39 +347,75 @@ function PlatformsPageInner() {
                 cardPaddingClass,
                 floatVariantIndex,
                 onSelect,
-              }) => (
-                <CatalogCard
-                  entry={entry}
-                  density={density}
-                  cardPaddingClass={cardPaddingClass}
-                  // BS.6.6 — stable per-position float variant cycling
-                  // (a/b/c/d) so adjacent cards land on different idle-
-                  // drift keyframe phases without the catalog growing a
-                  // shared counter.
-                  floatVariantIndex={floatVariantIndex}
-                  // BS.6.3 — propagate the tab's selection callback so
-                  // a card click flips `<CatalogTab />`'s selection
-                  // state and the detail panel slides in. Without
-                  // `onSelect` the card is non-interactive (BS.6.2
-                  // standalone preview behaviour).
-                  onSelect={onSelect ? () => onSelect() : undefined}
-                  // BS.7.1 — wire the install button. The card's
-                  // BS.6.7 PendingInstallTooltip flips to its
-                  // passthrough branch (no wrapper span, no tab stop,
-                  // no portal mount) once the handler is non-undefined.
-                  onInstall={handleInstall}
-                />
-              )}
-              renderDetail={({ entry, onClose }) => (
-                <CatalogDetailPanel
-                  entry={entry}
-                  onBack={onClose}
-                  // BS.7.1 — same handler powers the detail panel's
-                  // primary CTA (Install / Update). Retry + view-log
-                  // remain pending behind BS.7.6 + BS.7.8.
-                  onInstall={handleInstall}
-                />
-              )}
+              }) => {
+                // BS.7.5 — splice the live SSE-derived install state
+                // onto the entry. The catalog card already paints
+                // ``entry.installState`` through its 5-state palette
+                // and accepts ``installProgressPercent`` for the
+                // installing-state conic-gradient ring; we just hand
+                // it the freshest values the SSE feed has observed.
+                // When no job is present, ``deriveCatalogStateFrom-
+                // InstallJob`` returns the entry's static state
+                // verbatim so the BS.6.2 visual is unchanged for
+                // entries the operator hasn't touched.
+                const { installState, installProgressPercent } =
+                  renderCardOverlay(entry)
+                const liveEntry =
+                  installState !== entry.installState
+                    ? { ...entry, installState }
+                    : entry
+                return (
+                  <CatalogCard
+                    entry={liveEntry}
+                    density={density}
+                    cardPaddingClass={cardPaddingClass}
+                    // BS.6.6 — stable per-position float variant
+                    // cycling (a/b/c/d) so adjacent cards land on
+                    // different idle-drift keyframe phases without
+                    // the catalog growing a shared counter.
+                    floatVariantIndex={floatVariantIndex}
+                    // BS.6.3 — propagate the tab's selection callback
+                    // so a card click flips `<CatalogTab />`'s
+                    // selection state and the detail panel slides in.
+                    onSelect={onSelect ? () => onSelect() : undefined}
+                    // BS.7.1 — wire the install button. The card's
+                    // BS.6.7 PendingInstallTooltip flips to its
+                    // passthrough branch (no wrapper span, no tab
+                    // stop, no portal mount) once the handler is
+                    // non-undefined.
+                    onInstall={handleInstall}
+                    // BS.7.5 — live SSE-derived progress percentage
+                    // drives the installing-state conic-gradient
+                    // border (state 3). Undefined when total bytes
+                    // are unknown so the card falls back to its
+                    // static "downloading…" hint.
+                    installProgressPercent={installProgressPercent}
+                  />
+                )
+              }}
+              renderDetail={({ entry, onClose }) => {
+                // BS.7.5 — same SSE-derived install state powers the
+                // detail panel header chip / footer CTA so the panel
+                // matches the card visual the operator clicked on.
+                // The detail panel re-derives its own progress block
+                // from ``entry.installState``; we splice the live
+                // state onto the entry the same way as the card.
+                const { installState } = renderCardOverlay(entry)
+                const liveEntry =
+                  installState !== entry.installState
+                    ? { ...entry, installState }
+                    : entry
+                return (
+                  <CatalogDetailPanel
+                    entry={liveEntry}
+                    onBack={onClose}
+                    // BS.7.1 — same handler powers the detail panel's
+                    // primary CTA (Install / Update). Retry + view-log
+                    // remain pending behind BS.7.6 + BS.7.8.
+                    onInstall={handleInstall}
+                  />
+                )
+              }}
             />
           ) : (
             <>

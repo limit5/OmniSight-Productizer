@@ -70,6 +70,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 
 import * as api from "@/lib/api"
 import type { InstallJob, InstallJobState } from "@/lib/api"
+import type { CatalogInstallState } from "@/components/omnisight/catalog-tab"
 
 /** Shape of the ``installer_progress`` SSE event payload. Mirrored
  *  from ``backend/events.emit_installer_progress`` 1:1 — the bus's
@@ -226,4 +227,120 @@ export function useInstallJobs(): UseInstallJobsResult {
   }, [])
 
   return { jobs, removeJob, reset }
+}
+
+/**
+ * BS.7.5 — In-flight install job states. ``queued`` covers the brief
+ * window between the PEP HOLD resolving (operator approves) and the
+ * sidecar long-poll claim; ``running`` covers the sidecar download /
+ * install loop. Both surface as the catalog card's ``installing``
+ * visual (state 3) so the operator sees one continuous "in progress"
+ * affordance regardless of which side currently owns the job.
+ */
+const IN_FLIGHT_INSTALL_STATES: ReadonlySet<InstallJobState> = new Set([
+  "queued",
+  "running",
+])
+
+/**
+ * BS.7.5 — Pick the most relevant install job row for a given catalog
+ * entry. Operators may legitimately have multiple ``install_jobs`` rows
+ * for the same ``entry_id`` (e.g. a previous attempt failed and was
+ * retried; a previous install completed and the operator is reinstalling
+ * a newer version). The catalog card shows ONE state per entry, so we
+ * pick:
+ *
+ *   1. the latest in-flight (``queued`` / ``running``) job — operator
+ *      cares most about an active install; or, when none is in-flight,
+ *   2. the latest terminal job (``completed`` / ``failed``) so the
+ *      card reflects the most recent outcome; ``cancelled`` rows are
+ *      treated as if absent (the catalog card reverts to the entry's
+ *      static ``installState``).
+ *
+ * "Latest" = last index in the ``jobs`` array. The hook appends
+ * synthesized rows on first sight and merges existing rows in place,
+ * so array order tracks first-observation order — close enough to a
+ * monotone clock for "latest among matching" without a separate
+ * timestamp lookup.
+ */
+export function pickInstallJobForEntry(
+  jobs: ReadonlyArray<InstallJob>,
+  entryId: string,
+): InstallJob | undefined {
+  let lastInFlight: InstallJob | undefined
+  let lastTerminal: InstallJob | undefined
+  for (let i = jobs.length - 1; i >= 0; i--) {
+    const j = jobs[i]
+    if (j.entry_id !== entryId) continue
+    if (IN_FLIGHT_INSTALL_STATES.has(j.state)) {
+      if (!lastInFlight) lastInFlight = j
+    } else if (j.state !== "cancelled") {
+      if (!lastTerminal) lastTerminal = j
+    }
+    if (lastInFlight) break
+  }
+  return lastInFlight ?? lastTerminal
+}
+
+/**
+ * BS.7.5 — Map an ``InstallJobState`` (backend lifecycle) to a
+ * ``CatalogInstallState`` (catalog card 5-state visual).
+ *
+ *   queued / running → ``installing``  (state 3 — conic-gradient + ring-spin)
+ *   completed        → ``installed``   (state 2 — emerald check)
+ *   failed           → ``failed``      (state 5 — critical-red + retry CTA)
+ *   cancelled        → ``fallback``    (operator cancelled — treat as
+ *                                        if no job ever existed; revert
+ *                                        to the entry's static state)
+ *
+ * The ``fallback`` arg lets the caller preserve the entry's seeded
+ * ``installState`` (typically ``available`` for a fresh catalog entry,
+ * or ``update-available`` if the catalog feed already flagged a new
+ * version). Cancelling an install must NOT clobber an
+ * ``update-available`` chip back to ``available``.
+ */
+export function deriveCatalogStateFromInstallJob(
+  job: InstallJob | undefined,
+  fallback: CatalogInstallState,
+): CatalogInstallState {
+  if (!job) return fallback
+  switch (job.state) {
+    case "queued":
+    case "running":
+      return "installing"
+    case "completed":
+      return "installed"
+    case "failed":
+      return "failed"
+    case "cancelled":
+    default:
+      return fallback
+  }
+}
+
+/**
+ * BS.7.5 — Derive a 0..100 progress percentage from an install job's
+ * ``bytes_done / bytes_total``. Returns ``undefined`` (not 0) when the
+ * total is unknown so the catalog card can fall back to its existing
+ * "indeterminate" treatment instead of pretending we know the size.
+ *
+ * Mirrors the drawer's :func:`deriveInstallPercent` semantics so chip
+ * + card + drawer all show the same percentage at the same tick.
+ */
+export function deriveCatalogProgressPercent(
+  job: InstallJob | undefined,
+): number | undefined {
+  if (!job) return undefined
+  const total = job.bytes_total
+  if (typeof total !== "number" || !Number.isFinite(total) || total <= 0) {
+    return undefined
+  }
+  const done =
+    typeof job.bytes_done === "number" && Number.isFinite(job.bytes_done)
+      ? Math.max(0, job.bytes_done)
+      : 0
+  const pct = (done / total) * 100
+  if (pct <= 0) return 0
+  if (pct >= 100) return 100
+  return pct
 }
