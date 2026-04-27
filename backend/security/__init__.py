@@ -72,6 +72,39 @@ AS.2.5 (auth shared lib):
     Honours the AS.0.4 §6.2 "DSAR keeps working knob-off" invariant
     via the audit layer's silent-skip.
 
+AS.6.4 (OmniSight self-integration — per-form honeypot wiring):
+  - honeypot_form_verifier — universal helper that wraps AS.4.1
+    ``honeypot.validate_honeypot`` + ``should_reject`` + the
+    forensic ``bot_challenge.honeypot_*`` audit emit into one entry
+    point so the four OmniSight self-forms (login / signup /
+    password-reset / contact) share identical wiring per AS.0.5
+    §6.1 acceptance criteria — sibling to AS.6.3
+    :mod:`turnstile_form_verifier`. Provides 4 form-action constants
+    + 4 form-path constants byte-equal
+    :data:`backend.security.honeypot._FORM_PREFIXES` keys (cross-
+    module drift-guarded), an :data:`ANONYMOUS_TENANT_ID` sentinel
+    for pre-auth forms (login / signup / password-reset before
+    user identification), an :func:`extract_bypass_kind_from_request`
+    helper that walks the AS.0.6 §4 axes (api_key / test_token /
+    ip_allowlist) and routes the result onto the
+    :data:`honeypot.ALL_BYPASS_KINDS` vocabulary so bypass-flagged
+    callers short-circuit the field check, and two async
+    orchestrators — :func:`verify_form_honeypot` (returns the
+    result for fail-open knob-off / bypass / pass paths) and
+    :func:`verify_form_honeypot_or_reject` (raises
+    :class:`honeypot.HoneypotRejected` on field-filled or form-drift
+    so the HTTP layer can map to the canonical 429
+    ``bot_challenge_failed`` response — same surface as the AS.6.3
+    captcha 429 so the front-end UI keys on a single error code
+    regardless of which layer caught the bot). The router-side
+    wiring lives in ``backend/routers/auth.py`` for the two
+    existing forms (``/auth/login`` + ``/auth/change-password``),
+    placed BEFORE the AS.6.3 captcha verify so a confirmed bot
+    can't even consume the upstream siteverify round-trip budget;
+    the helper itself is the SoT every future caller (signup /
+    contact / generated-app forms via the AS.7.x React widgets)
+    reuses.
+
 AS.6.3 (OmniSight self-integration — Turnstile backend verify wiring):
   - turnstile_form_verifier — universal helper that wraps AS.3.1
     ``bot_challenge.verify_with_fallback`` + AS.3.4
@@ -195,6 +228,8 @@ from . import auth_dashboard  # noqa: F401
 from . import auth_event  # noqa: F401
 from . import bot_challenge  # noqa: F401
 from . import credential_vault  # noqa: F401
+from . import honeypot  # noqa: F401
+from . import honeypot_form_verifier  # noqa: F401
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_login_handler  # noqa: F401
@@ -212,6 +247,8 @@ __all__ = [
     "bot_challenge",
     "credential_vault",
     "harden_user_message",
+    "honeypot",
+    "honeypot_form_verifier",
     "looks_like_injection",
     "oauth_audit",
     "oauth_client",

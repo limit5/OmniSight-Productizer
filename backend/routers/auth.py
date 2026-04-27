@@ -124,6 +124,15 @@ def _record_failed_login(request: Request) -> None:
 
 
 class LoginRequest(BaseModel):
+    # AS.6.4 — honeypot field name rotates per (form_path, tenant_id,
+    # 30-day epoch) so it's not declared as a typed field on this
+    # model. ``extra="allow"`` lets the unknown field round-trip into
+    # ``model_dump()`` so :func:`honeypot.validate_honeypot` can
+    # detect a filled-by-bot value. Per AS.0.7 §3.4 the field name
+    # itself is not PII; the value (if filled) IS treated as PII and
+    # only its length lands in the audit row metadata.
+    model_config = {"extra": "allow"}
+
     email: str = Field(min_length=3)
     password: str = Field(min_length=1)
     # AS.6.3 — Turnstile (or fallback provider) widget token issued
@@ -149,6 +158,33 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
 
     client_ip = _client_key(request)
     email_key = req.email.lower().strip()
+
+    # AS.6.4 — per-form honeypot check (reuses AS.4). Pure-CPU
+    # predicate that fires before the AS.6.3 captcha verify so a
+    # confirmed bot can't even consume the upstream siteverify
+    # round-trip budget. Caller-side bypasses (api_key /
+    # ip_allowlist / test_token) short-circuit the field check via
+    # the AS.0.6 §4 axes; missing field → form drift (frontend deploy
+    # alarm); filled field → 429 ``bot_challenge_failed`` (same
+    # surface as the captcha 429 so the front-end UI keys on a single
+    # error code regardless of which layer caught the bot, AS.0.7
+    # §2.5 invariant). The actor on the audit row is the masked
+    # email (PII redaction per AS.0.7 §3.4) rather than the raw
+    # value, since the audit chain is queryable.
+    from backend.security import honeypot as _hp
+    from backend.security import honeypot_form_verifier as _hpv
+    try:
+        await _hpv.verify_form_honeypot_or_reject(
+            _hpv.FORM_ACTION_LOGIN,
+            submitted=req.model_dump(),
+            request=request,
+            actor=email_key or "anonymous",
+        )
+    except _hp.HoneypotRejected as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"error": exc.code},
+        )
 
     # AS.6.3 — bot challenge Turnstile backend verify (reuses AS.3).
     # Fail-open by default in Phase 1/2 (AS.0.5 §2 phase matrix —
@@ -349,6 +385,12 @@ async def user_tenants(user: auth.User = Depends(auth.current_user)) -> list[dic
 
 
 class ChangePasswordRequest(BaseModel):
+    # AS.6.4 — honeypot field name rotates per (form_path, tenant_id,
+    # 30-day epoch). ``extra="allow"`` so the dynamically-named
+    # honeypot field round-trips into ``model_dump()`` for
+    # :func:`honeypot.validate_honeypot` to inspect.
+    model_config = {"extra": "allow"}
+
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=12)
     # AS.6.3 — Turnstile widget token. Same fail-open Phase-1
@@ -365,6 +407,27 @@ async def change_password(req: ChangePasswordRequest, request: Request,
                           response: Response,
                           user: auth.User = Depends(auth.current_user)) -> dict:
     """Change the current user's password. Rotates session token."""
+    # AS.6.4 — per-form honeypot check on the password-reset form.
+    # Authenticated form, so we have ``user.tenant_id`` for the
+    # honeypot field-name seed (anti-fingerprint per AS.0.7 §2.1 —
+    # different tenants render different field names). Same 429
+    # ``bot_challenge_failed`` surface as login.
+    from backend.security import honeypot as _hp
+    from backend.security import honeypot_form_verifier as _hpv
+    try:
+        await _hpv.verify_form_honeypot_or_reject(
+            _hpv.FORM_ACTION_PASSWORD_RESET,
+            submitted=req.model_dump(),
+            request=request,
+            tenant_id=user.tenant_id,
+            actor=user.email,
+        )
+    except _hp.HoneypotRejected as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"error": exc.code},
+        )
+
     # AS.6.3 — bot challenge backend verify on the password-reset
     # form. Same fail-open Phase 1/2 contract as ``/auth/login``
     # (AS.0.5 §2). The form_action is ``pwreset`` so the AS.5.1
