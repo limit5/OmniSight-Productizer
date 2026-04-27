@@ -57,7 +57,17 @@
  *     tilt + glass-reflect wrappers BS.5.4 used so the slide-in stays
  *     legible on a freshly-revealed surface (those layers will land
  *     here in BS.6.6 once BS.6.5 stabilises height/scroll).
- *   • BS.6.7 — wires the disabled tooltip text on the primary action.
+ *
+ * BS.6.7 — disabled-state tooltip (this row owns)
+ * ───────────────────────────────────────────────
+ * Until BS.7 lands the install pipeline, the panel's primary CTA
+ * (Install / Update / Retry / View log) is rendered without a handler
+ * from the page wrapper. To communicate why the affordance is parked,
+ * each disabled button is wrapped with `<PendingInstallTooltip />`
+ * (shared with `<CatalogCard />`) showing
+ * "Install pipeline 即將上線". The wrapper becomes a no-op passthrough
+ * once a handler is wired so BS.7 just plumbs `onInstall` through and
+ * the tooltip + tab-stop wrapper vanishes automatically.
  *   • BS.7.6 — replaces `metadata.activity[]` reads with a live
  *     `audit_log` slice + replaces the "+M more" link with a real deep
  *     link to the audit surface.
@@ -120,8 +130,10 @@ import {
 
 import {
   buildInstallProgressGradient,
+  CATALOG_INSTALL_PENDING_TOOLTIP,
   clampInstallProgress,
   coerceInstallState,
+  PendingInstallTooltip,
 } from "@/components/omnisight/catalog-card"
 import {
   type CatalogEntry,
@@ -1257,23 +1269,38 @@ function DetailFooterAction({
   onRetry,
   onViewLog,
 }: DetailFooterActionProps) {
+  // BS.6.7 — track which CTAs are still parked behind BS.7 (no
+  // handler) so the wrapper tooltip surfaces "Install pipeline 即將
+  // 上線" on hover / focus. Once BS.7 wires the handlers these flags
+  // become false and `<PendingInstallTooltip>` collapses to a no-op
+  // passthrough.
+  const installPending = !onInstall
+  const retryPending = !onRetry
+  const viewLogPending = !onViewLog
+
   let cta: ReactNode
   switch (state) {
     case "available":
       cta = (
-        <button
-          type="button"
-          data-testid="catalog-detail-panel-action-install"
-          aria-label={`Install ${entry.displayName}`}
-          disabled={!onInstall}
-          onClick={() => {
-            if (onInstall) onInstall(entry)
-          }}
-          className="inline-flex items-center gap-1.5 rounded border border-[var(--neural-blue)]/55 bg-[var(--neural-blue)]/10 px-3 py-1.5 font-mono text-[11px] text-[var(--neural-blue)] hover:border-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-[var(--neural-blue)]/10"
+        <PendingInstallTooltip
+          pending={installPending}
+          testId="catalog-detail-panel-action-install-pending-tooltip"
         >
-          <Download size={12} aria-hidden />
-          Install
-        </button>
+          <button
+            type="button"
+            data-testid="catalog-detail-panel-action-install"
+            aria-label={`Install ${entry.displayName}`}
+            title={installPending ? CATALOG_INSTALL_PENDING_TOOLTIP : undefined}
+            disabled={installPending}
+            onClick={() => {
+              if (onInstall) onInstall(entry)
+            }}
+            className="inline-flex items-center gap-1.5 rounded border border-[var(--neural-blue)]/55 bg-[var(--neural-blue)]/10 px-3 py-1.5 font-mono text-[11px] text-[var(--neural-blue)] hover:border-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-[var(--neural-blue)]/10"
+          >
+            <Download size={12} aria-hidden />
+            Install
+          </button>
+        </PendingInstallTooltip>
       )
       break
     case "installed":
@@ -1300,50 +1327,68 @@ function DetailFooterAction({
       break
     case "update-available":
       cta = (
-        <button
-          type="button"
-          data-testid="catalog-detail-panel-action-update"
-          aria-label={`Update ${entry.displayName}`}
-          disabled={!onInstall}
-          onClick={() => {
-            if (onInstall) onInstall(entry)
-          }}
-          className="inline-flex items-center gap-1.5 rounded border border-[var(--artifact-purple)]/55 bg-[var(--artifact-purple)]/10 px-3 py-1.5 font-mono text-[11px] text-[var(--artifact-purple)] hover:border-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)]/20 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-[var(--artifact-purple)]/10"
+        <PendingInstallTooltip
+          pending={installPending}
+          testId="catalog-detail-panel-action-update-pending-tooltip"
         >
-          <ArrowUpCircle size={12} aria-hidden />
-          Update
-        </button>
+          <button
+            type="button"
+            data-testid="catalog-detail-panel-action-update"
+            aria-label={`Update ${entry.displayName}`}
+            title={installPending ? CATALOG_INSTALL_PENDING_TOOLTIP : undefined}
+            disabled={installPending}
+            onClick={() => {
+              if (onInstall) onInstall(entry)
+            }}
+            className="inline-flex items-center gap-1.5 rounded border border-[var(--artifact-purple)]/55 bg-[var(--artifact-purple)]/10 px-3 py-1.5 font-mono text-[11px] text-[var(--artifact-purple)] hover:border-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)]/20 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-[var(--artifact-purple)]/10"
+          >
+            <ArrowUpCircle size={12} aria-hidden />
+            Update
+          </button>
+        </PendingInstallTooltip>
       )
       break
     case "failed":
       cta = (
         <span className="inline-flex items-center gap-2">
-          <button
-            type="button"
-            data-testid="catalog-detail-panel-action-retry"
-            aria-label={`Retry installing ${entry.displayName}`}
-            disabled={!onRetry}
-            onClick={() => {
-              if (onRetry) onRetry(entry)
-            }}
-            className="inline-flex items-center gap-1.5 rounded border border-[var(--critical-red)]/55 bg-[var(--critical-red)]/10 px-3 py-1.5 font-mono text-[11px] text-[var(--critical-red)] hover:border-[var(--critical-red)] hover:bg-[var(--critical-red)]/20 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-[var(--critical-red)]/10"
+          <PendingInstallTooltip
+            pending={retryPending}
+            testId="catalog-detail-panel-action-retry-pending-tooltip"
           >
-            <RefreshCw size={12} aria-hidden />
-            Retry
-          </button>
-          <button
-            type="button"
-            data-testid="catalog-detail-panel-action-view-log"
-            aria-label={`View install log for ${entry.displayName}`}
-            disabled={!onViewLog}
-            onClick={() => {
-              if (onViewLog) onViewLog(entry)
-            }}
-            className="inline-flex items-center gap-1.5 rounded border border-[var(--border)] px-3 py-1.5 font-mono text-[11px] text-[var(--muted-foreground)] hover:border-[var(--neural-blue)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-60"
+            <button
+              type="button"
+              data-testid="catalog-detail-panel-action-retry"
+              aria-label={`Retry installing ${entry.displayName}`}
+              title={retryPending ? CATALOG_INSTALL_PENDING_TOOLTIP : undefined}
+              disabled={retryPending}
+              onClick={() => {
+                if (onRetry) onRetry(entry)
+              }}
+              className="inline-flex items-center gap-1.5 rounded border border-[var(--critical-red)]/55 bg-[var(--critical-red)]/10 px-3 py-1.5 font-mono text-[11px] text-[var(--critical-red)] hover:border-[var(--critical-red)] hover:bg-[var(--critical-red)]/20 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-[var(--critical-red)]/10"
+            >
+              <RefreshCw size={12} aria-hidden />
+              Retry
+            </button>
+          </PendingInstallTooltip>
+          <PendingInstallTooltip
+            pending={viewLogPending}
+            testId="catalog-detail-panel-action-view-log-pending-tooltip"
           >
-            <ExternalLink size={12} aria-hidden />
-            View log
-          </button>
+            <button
+              type="button"
+              data-testid="catalog-detail-panel-action-view-log"
+              aria-label={`View install log for ${entry.displayName}`}
+              title={viewLogPending ? CATALOG_INSTALL_PENDING_TOOLTIP : undefined}
+              disabled={viewLogPending}
+              onClick={() => {
+                if (onViewLog) onViewLog(entry)
+              }}
+              className="inline-flex items-center gap-1.5 rounded border border-[var(--border)] px-3 py-1.5 font-mono text-[11px] text-[var(--muted-foreground)] hover:border-[var(--neural-blue)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <ExternalLink size={12} aria-hidden />
+              View log
+            </button>
+          </PendingInstallTooltip>
         </span>
       )
       break

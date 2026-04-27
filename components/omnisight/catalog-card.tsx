@@ -47,15 +47,32 @@
  *
  * Optional callbacks let later rows wire behaviour without touching
  * this file: `onSelect` (BS.6.3 detail panel expand), `onInstall` /
- * `onRetry` / `onViewLog` (BS.6.7 install button + BS.7 retry/log).
+ * `onRetry` / `onViewLog` (BS.7 install pipeline + retry/log).
  * The footer always renders state-appropriate call-to-action **labels**
- * — buttons stay disabled until BS.6.7 lands so operators see the
- * shape of the surface but can't trigger actions before the install
- * pipeline is wired (avoids a "click that does nothing" UX hole).
+ * — buttons stay disabled when the corresponding handler is not wired
+ * (no `onInstall` / `onRetry` / `onViewLog` from the parent), so
+ * operators see the shape of the surface but can't trigger actions
+ * before the install pipeline is wired (avoids a "click that does
+ * nothing" UX hole).
+ *
+ * BS.6.7 — disabled-state tooltip
+ * ────────────────────────────────
+ * Until BS.7 lands the real install pipeline (`POST /installer/jobs`
+ * → PEP gateway → sidecar), every footer button is rendered without a
+ * handler from the page wrapper. To communicate why the affordance
+ * looks "ready but inert", hovering / focusing a disabled button
+ * surfaces a Radix tooltip with the exact text "Install pipeline 即將
+ * 上線". The tooltip wrapper is a `<span tabIndex=0>` (because a
+ * `<button disabled>` does not fire pointer events the Radix primitive
+ * needs), and a native `title` attribute on the button itself is the
+ * non-JS / SSR / screen-reader fallback. Once a parent wires a real
+ * handler the wrapper is a no-op passthrough so no extra DOM is
+ * introduced on the wired path. The exact tooltip text is exported as
+ * `CATALOG_INSTALL_PENDING_TOOLTIP` so BS.6.8 / BS.7.1 tests can lock
+ * it without scraping DOM strings.
  *
  * Out of scope for this row (deferred to later BS.6.x):
  *   • BS.6.3 — detail panel slide-out (this row only fires `onSelect`).
- *   • BS.6.7 — wires real `onInstall` / disabled-state tooltip text.
  *
  * Module-global state audit
  * ─────────────────────────
@@ -106,6 +123,11 @@ import {
 } from "lucide-react"
 
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import {
   type CatalogDensity,
   type CatalogEntry,
   type CatalogFamily,
@@ -122,6 +144,15 @@ import {
   useGlassReflection,
   useSpringPress,
 } from "@/hooks/use-zero-g"
+
+// ─────────────────────────────────────────────────────────────────────
+// BS.6.7 — disabled-state tooltip text. Exported so BS.6.8 unit tests
+// + BS.7.1 e2e checks can lock the exact message rather than scraping
+// the DOM. Once BS.7 wires `onInstall`, the wrapper component becomes
+// a transparent passthrough (no tooltip mounted, no extra DOM).
+// ─────────────────────────────────────────────────────────────────────
+
+export const CATALOG_INSTALL_PENDING_TOOLTIP = "Install pipeline 即將上線"
 
 // ─────────────────────────────────────────────────────────────────────
 // Public types — exported so BS.6.8 tests + BS.6.6 motion wrapper +
@@ -332,6 +363,62 @@ const FAMILY_ACCENT: Record<CatalogFamily, string> = {
   web: "border-sky-500/55 text-sky-300",
   software: "border-violet-500/55 text-violet-300",
   custom: "border-rose-500/55 text-rose-300",
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// BS.6.7 — `<PendingInstallTooltip />` wraps a footer call-to-action
+// button while it has no handler wired (no `onInstall` / `onRetry` /
+// `onViewLog`). Hovering or focusing the wrapper surfaces the
+// "Install pipeline 即將上線" message via Radix Tooltip; once a
+// handler is wired the component is a transparent passthrough so no
+// extra DOM is added on the wired path. Exported so the catalog
+// detail panel (BS.6.3) can reuse the same affordance for its larger
+// CTA buttons without duplicating the helper.
+// ─────────────────────────────────────────────────────────────────────
+
+interface PendingInstallTooltipProps {
+  /** When `true`, the wrapped button has no handler yet — render the
+   *  tooltip so operators understand the affordance is intentional but
+   *  parked behind BS.7. When `false`, render children as-is (no
+   *  TooltipProvider mounted, no wrapper span, no tab stop, no extra
+   *  DOM) so the wired path is zero-overhead. */
+  pending: boolean
+  /** Optional testid for the wrapper span. The tooltip content also
+   *  picks up `${testId}-content` so BS.6.8 / BS.7.1 tests can locate
+   *  the popover without inspecting Radix portal children. */
+  testId?: string
+  children: ReactNode
+}
+
+export function PendingInstallTooltip({
+  pending,
+  testId,
+  children,
+}: PendingInstallTooltipProps) {
+  if (!pending) return <>{children}</>
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          data-testid={testId}
+          data-pending-install-tooltip="true"
+          tabIndex={0}
+          aria-label={CATALOG_INSTALL_PENDING_TOOLTIP}
+          className="inline-flex rounded outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-blue)]/60"
+        >
+          {children}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent
+        data-testid={testId ? `${testId}-content` : undefined}
+        side="top"
+        sideOffset={4}
+        className="border border-[var(--border)] bg-[var(--card)] font-mono text-[10px] tracking-wide text-[var(--foreground)]"
+      >
+        {CATALOG_INSTALL_PENDING_TOOLTIP}
+      </TooltipContent>
+    </Tooltip>
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -850,27 +937,42 @@ function FooterAction({
   const retryPress = useSpringPress()
   const viewLogPress = useSpringPress()
 
+  // BS.6.7 — every state branch that renders a clickable button wraps
+  // it in `<PendingInstallTooltip>` so disabled-by-default buttons
+  // surface the "pipeline coming soon" message. The wrapper becomes a
+  // no-op passthrough once a real handler lands (BS.7), so the wired
+  // path adds zero DOM.
+  const installPending = !onInstall
+  const retryPending = !onRetry
+  const viewLogPending = !onViewLog
+
   switch (state) {
     case "available":
       return (
-        <button
-          type="button"
-          data-testid="catalog-card-action-install"
-          aria-label={`Install ${entry.displayName}`}
-          disabled={!onInstall}
-          onClick={(e) => {
-            stop(e)
-            if (onInstall) onInstall(entry)
-          }}
-          className={[
-            installPress.className,
-            "inline-flex items-center gap-1 rounded border border-[var(--neural-blue)]/40 px-1.5 py-0.5 font-mono text-[10px] text-[var(--neural-blue)] hover:border-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
-          ].join(" ")}
-          {...installPress.pressProps}
+        <PendingInstallTooltip
+          pending={installPending}
+          testId="catalog-card-action-install-pending-tooltip"
         >
-          <Download size={10} />
-          {palette.footerLabel}
-        </button>
+          <button
+            type="button"
+            data-testid="catalog-card-action-install"
+            aria-label={`Install ${entry.displayName}`}
+            title={installPending ? CATALOG_INSTALL_PENDING_TOOLTIP : undefined}
+            disabled={installPending}
+            onClick={(e) => {
+              stop(e)
+              if (onInstall) onInstall(entry)
+            }}
+            className={[
+              installPress.className,
+              "inline-flex items-center gap-1 rounded border border-[var(--neural-blue)]/40 px-1.5 py-0.5 font-mono text-[10px] text-[var(--neural-blue)] hover:border-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
+            ].join(" ")}
+            {...installPress.pressProps}
+          >
+            <Download size={10} />
+            {palette.footerLabel}
+          </button>
+        </PendingInstallTooltip>
       )
     case "installed":
       return (
@@ -894,64 +996,82 @@ function FooterAction({
       )
     case "update-available":
       return (
-        <button
-          type="button"
-          data-testid="catalog-card-action-update"
-          aria-label={`Update ${entry.displayName}`}
-          disabled={!onInstall}
-          onClick={(e) => {
-            stop(e)
-            if (onInstall) onInstall(entry)
-          }}
-          className={[
-            updatePress.className,
-            "inline-flex items-center gap-1 rounded border border-[var(--artifact-purple)]/55 px-1.5 py-0.5 font-mono text-[10px] text-[var(--artifact-purple)] hover:border-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
-          ].join(" ")}
-          {...updatePress.pressProps}
+        <PendingInstallTooltip
+          pending={installPending}
+          testId="catalog-card-action-update-pending-tooltip"
         >
-          <ArrowUpCircle size={10} />
-          {palette.footerLabel}
-        </button>
+          <button
+            type="button"
+            data-testid="catalog-card-action-update"
+            aria-label={`Update ${entry.displayName}`}
+            title={installPending ? CATALOG_INSTALL_PENDING_TOOLTIP : undefined}
+            disabled={installPending}
+            onClick={(e) => {
+              stop(e)
+              if (onInstall) onInstall(entry)
+            }}
+            className={[
+              updatePress.className,
+              "inline-flex items-center gap-1 rounded border border-[var(--artifact-purple)]/55 px-1.5 py-0.5 font-mono text-[10px] text-[var(--artifact-purple)] hover:border-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
+            ].join(" ")}
+            {...updatePress.pressProps}
+          >
+            <ArrowUpCircle size={10} />
+            {palette.footerLabel}
+          </button>
+        </PendingInstallTooltip>
       )
     case "failed":
       return (
         <span className="inline-flex items-center gap-1">
-          <button
-            type="button"
-            data-testid="catalog-card-action-retry"
-            aria-label={`Retry installing ${entry.displayName}`}
-            disabled={!onRetry}
-            onClick={(e) => {
-              stop(e)
-              if (onRetry) onRetry(entry)
-            }}
-            className={[
-              retryPress.className,
-              "inline-flex items-center gap-1 rounded border border-[var(--critical-red)]/55 px-1.5 py-0.5 font-mono text-[10px] text-[var(--critical-red)] hover:border-[var(--critical-red)] hover:bg-[var(--critical-red)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
-            ].join(" ")}
-            {...retryPress.pressProps}
+          <PendingInstallTooltip
+            pending={retryPending}
+            testId="catalog-card-action-retry-pending-tooltip"
           >
-            <RefreshCw size={10} />
-            {palette.footerLabel}
-          </button>
-          <button
-            type="button"
-            data-testid="catalog-card-action-view-log"
-            aria-label={`View install log for ${entry.displayName}`}
-            disabled={!onViewLog}
-            onClick={(e) => {
-              stop(e)
-              if (onViewLog) onViewLog(entry)
-            }}
-            className={[
-              viewLogPress.className,
-              "inline-flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-60",
-            ].join(" ")}
-            {...viewLogPress.pressProps}
+            <button
+              type="button"
+              data-testid="catalog-card-action-retry"
+              aria-label={`Retry installing ${entry.displayName}`}
+              title={retryPending ? CATALOG_INSTALL_PENDING_TOOLTIP : undefined}
+              disabled={retryPending}
+              onClick={(e) => {
+                stop(e)
+                if (onRetry) onRetry(entry)
+              }}
+              className={[
+                retryPress.className,
+                "inline-flex items-center gap-1 rounded border border-[var(--critical-red)]/55 px-1.5 py-0.5 font-mono text-[10px] text-[var(--critical-red)] hover:border-[var(--critical-red)] hover:bg-[var(--critical-red)]/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
+              ].join(" ")}
+              {...retryPress.pressProps}
+            >
+              <RefreshCw size={10} />
+              {palette.footerLabel}
+            </button>
+          </PendingInstallTooltip>
+          <PendingInstallTooltip
+            pending={viewLogPending}
+            testId="catalog-card-action-view-log-pending-tooltip"
           >
-            <ScrollText size={10} />
-            log
-          </button>
+            <button
+              type="button"
+              data-testid="catalog-card-action-view-log"
+              aria-label={`View install log for ${entry.displayName}`}
+              title={viewLogPending ? CATALOG_INSTALL_PENDING_TOOLTIP : undefined}
+              disabled={viewLogPending}
+              onClick={(e) => {
+                stop(e)
+                if (onViewLog) onViewLog(entry)
+              }}
+              className={[
+                viewLogPress.className,
+                "inline-flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-60",
+              ].join(" ")}
+              {...viewLogPress.pressProps}
+            >
+              <ScrollText size={10} />
+              log
+            </button>
+          </PendingInstallTooltip>
         </span>
       )
     default: {
