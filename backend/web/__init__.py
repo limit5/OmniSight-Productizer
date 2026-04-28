@@ -36,12 +36,22 @@ Sub-modules:
                          has cleared the spec; produces a frozen
                          ``TransformedSpec`` the W11.7 manifest pins.
 
+    clone_manifest       W11.7 L4 forced traceability — emits the HTML
+                         traceability comment + ``.omnisight/clone-
+                         manifest.json`` on disk + appends a per-tenant
+                         audit-log row. Run **after** the L3 transformer
+                         has produced a ``TransformedSpec``; produces a
+                         frozen ``CloneManifest`` and a
+                         ``CloneManifestRecord`` summarising which
+                         footprints landed.
+
 W11.1 ships the entry point + minimal ``CloneSpec`` container +
 ``CloneSource`` protocol; W11.2 plugs the two production-targeted
 backends behind that contract; W11.3 populates the spec from rendered
 HTML; W11.4 adds the L1 refusal-signal gate; W11.5 adds the L2 content
-classifier; W11.6 adds the L3 transformer; subsequent rows add the
-remaining defense layers (W11.7 manifest, W11.8 rate limiter).
+classifier; W11.6 adds the L3 transformer; W11.7 adds the L4
+traceability layer; subsequent rows add the remaining defense
+(W11.8 rate limiter).
 
 Inspired by firecrawl/open-lovable (MIT). Attribution and license text
 land alongside the W11.13 row (`LICENSES/open-lovable-mit.txt`).
@@ -89,6 +99,37 @@ from backend.web.content_classifier import (
     classify_clone_spec,
     heuristic_risk_signals,
     merge_risk_classifications,
+)
+from backend.web.clone_manifest import (
+    AUDIT_ACTION,
+    AUDIT_ENTITY_KIND,
+    CloneManifest,
+    CloneManifestError,
+    CloneManifestRecord,
+    HTML_COMMENT_BEGIN,
+    HTML_COMMENT_END,
+    MANIFEST_DIR,
+    MANIFEST_FILENAME,
+    MANIFEST_HASH_FIELD,
+    MANIFEST_RELATIVE_PATH,
+    MANIFEST_VERSION,
+    ManifestSchemaError,
+    ManifestWriteError,
+    OPEN_LOVABLE_ATTRIBUTION,
+    build_clone_manifest,
+    compute_manifest_hash,
+    finalise_manifest,
+    inject_html_traceability_comment,
+    manifest_to_audit_payload,
+    manifest_to_dict,
+    parse_html_traceability_comment,
+    pin_clone_artefacts,
+    read_manifest_file,
+    record_clone_audit,
+    render_html_traceability_comment,
+    serialize_manifest_json,
+    verify_manifest_hash,
+    write_manifest_file,
 )
 from backend.web.output_transformer import (
     BytesLeakError,
@@ -259,6 +300,8 @@ def make_clone_source(
 __all__ = [
     "AI_BOT_USER_AGENTS",
     "AI_TXT_PATHS",
+    "AUDIT_ACTION",
+    "AUDIT_ENTITY_KIND",
     "BlockedDestinationError",
     "BytesLeakError",
     "CLOUDFLARE_AI_BLOCK_BODY_HINTS",
@@ -266,6 +309,9 @@ __all__ = [
     "ClassifierLLM",
     "ClassifierUnavailableError",
     "CloneCaptureTimeoutError",
+    "CloneManifest",
+    "CloneManifestError",
+    "CloneManifestRecord",
     "CloneSource",
     "CloneSourceError",
     "CloneSpec",
@@ -290,6 +336,8 @@ __all__ = [
     "FirecrawlConfigError",
     "FirecrawlDependencyError",
     "FirecrawlSource",
+    "HTML_COMMENT_BEGIN",
+    "HTML_COMMENT_END",
     "InvalidCloneURLError",
     "KNOWN_CLONE_BACKENDS",
     "LLM_REWRITE_SYSTEM_PROMPT",
@@ -298,6 +346,11 @@ __all__ = [
     "LLM_USER_PROMPT_TEMPLATE",
     "LangchainClassifierLLM",
     "LangchainTextRewriteLLM",
+    "MANIFEST_DIR",
+    "MANIFEST_FILENAME",
+    "MANIFEST_HASH_FIELD",
+    "MANIFEST_RELATIVE_PATH",
+    "MANIFEST_VERSION",
     "MAX_PROMPT_INPUT_CHARS",
     "MAX_REASON_CHARS",
     "MAX_REASONS",
@@ -308,6 +361,9 @@ __all__ = [
     "META_AI_BOT_NAMES",
     "META_NOAI_TOKENS",
     "MachineRefusedError",
+    "ManifestSchemaError",
+    "ManifestWriteError",
+    "OPEN_LOVABLE_ATTRIBUTION",
     "OutputTransformerError",
     "PLACEHOLDER_PROVIDER",
     "PLAYWRIGHT_BACKEND_NAME",
@@ -335,6 +391,7 @@ __all__ = [
     "assert_clone_allowed_pre_capture",
     "assert_clone_spec_safe",
     "assert_no_copied_bytes",
+    "build_clone_manifest",
     "build_clone_spec_from_capture",
     "check_ai_txt",
     "check_cloudflare_ai_block",
@@ -345,14 +402,27 @@ __all__ = [
     "check_x_robots_tag",
     "classify_clone_spec",
     "clone_site",
+    "compute_manifest_hash",
     "default_refusal_fetcher",
     "extract_hostname",
+    "finalise_manifest",
     "heuristic_risk_signals",
+    "inject_html_traceability_comment",
     "is_public_destination",
     "make_clone_source",
+    "manifest_to_audit_payload",
+    "manifest_to_dict",
     "merge_refusal_decisions",
     "merge_risk_classifications",
     "normalize_url",
+    "parse_html_traceability_comment",
+    "pin_clone_artefacts",
+    "read_manifest_file",
+    "record_clone_audit",
+    "render_html_traceability_comment",
+    "serialize_manifest_json",
     "transform_clone_spec",
     "validate_clone_url",
+    "verify_manifest_hash",
+    "write_manifest_file",
 ]
