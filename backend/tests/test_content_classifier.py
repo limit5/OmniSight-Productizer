@@ -982,9 +982,10 @@ def test_total_re_export_count_pinned_at_79():
     # Pin the count so a future row that adds a new symbol must update
     # this assertion deliberately (drift guard).
     # W11.5 originally pinned this at 79; W11.6 added 19 new symbols
-    # (output_transformer surface) → 98. The W11.6 row's own drift
-    # guard (in test_output_transformer.py) re-pins at the new value.
-    assert len(web_pkg.__all__) == 98
+    # (output_transformer surface) → 98; W11.7 added 29 new symbols
+    # (clone_manifest surface) → 127. Each W11 row's own drift guard
+    # re-pins at the new value.
+    assert len(web_pkg.__all__) == 127
 
 
 # ── Whole-spec invariants ───────────────────────────────────────────────
