@@ -983,9 +983,10 @@ def test_total_re_export_count_pinned_at_79():
     # this assertion deliberately (drift guard).
     # W11.5 originally pinned this at 79; W11.6 added 19 new symbols
     # (output_transformer surface) → 98; W11.7 added 29 new symbols
-    # (clone_manifest surface) → 127. Each W11 row's own drift guard
+    # (clone_manifest surface) → 127; W11.8 added 19 new symbols
+    # (clone_rate_limit surface) → 146. Each W11 row's own drift guard
     # re-pins at the new value.
-    assert len(web_pkg.__all__) == 127
+    assert len(web_pkg.__all__) == 146
 
 
 # ── Whole-spec invariants ───────────────────────────────────────────────

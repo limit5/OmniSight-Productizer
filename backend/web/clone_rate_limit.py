@@ -131,7 +131,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional, Protocol, Tuple
+from typing import Any, Awaitable, Callable, Optional, Protocol, Tuple, runtime_checkable
 from urllib.parse import urlsplit
 
 from backend.web.site_cloner import (
@@ -415,6 +415,7 @@ def resolve_clone_rate_window_seconds() -> float:
 # ── Limiter Protocol ────────────────────────────────────────────────────
 
 
+@runtime_checkable
 class CloneRateLimiter(Protocol):
     """Sliding-window-log limiter contract.
 
