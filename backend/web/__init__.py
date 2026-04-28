@@ -45,13 +45,24 @@ Sub-modules:
                          ``CloneManifestRecord`` summarising which
                          footprints landed.
 
+    clone_rate_limit     W11.8 L5 rate limit + PEP HOLD — sliding-window
+                         log (Redis ZSET / in-memory deque) capping any
+                         (tenant, target-origin) pair at
+                         ``DEFAULT_CLONE_RATE_LIMIT=3`` per
+                         ``DEFAULT_CLONE_RATE_WINDOW_S=86400`` (24h).
+                         Run **after** the L4 manifest is pinned;
+                         ``assert_clone_rate_limit`` is the policy-
+                         enforcement point that consumes one slot or
+                         raises :class:`CloneRateLimitedError` (PEP
+                         HOLD) with a precise ``retry_after_seconds``.
+
 W11.1 ships the entry point + minimal ``CloneSpec`` container +
 ``CloneSource`` protocol; W11.2 plugs the two production-targeted
 backends behind that contract; W11.3 populates the spec from rendered
 HTML; W11.4 adds the L1 refusal-signal gate; W11.5 adds the L2 content
 classifier; W11.6 adds the L3 transformer; W11.7 adds the L4
-traceability layer; subsequent rows add the remaining defense
-(W11.8 rate limiter).
+traceability layer; W11.8 adds the L5 rate limit + PEP HOLD; the
+5-layer defense is now complete.
 
 Inspired by firecrawl/open-lovable (MIT). Attribution and license text
 land alongside the W11.13 row (`LICENSES/open-lovable-mit.txt`).
@@ -130,6 +141,27 @@ from backend.web.clone_manifest import (
     serialize_manifest_json,
     verify_manifest_hash,
     write_manifest_file,
+)
+from backend.web.clone_rate_limit import (
+    CLONE_RATE_AUDIT_ACTION,
+    CLONE_RATE_AUDIT_ENTITY_KIND,
+    CLONE_RATE_KEY_PREFIX,
+    CloneRateLimitDecision,
+    CloneRateLimitError,
+    CloneRateLimitedError,
+    CloneRateLimiter,
+    DEFAULT_CLONE_RATE_LIMIT,
+    DEFAULT_CLONE_RATE_WINDOW_S,
+    InMemoryCloneRateLimiter,
+    RedisCloneRateLimiter,
+    assert_clone_rate_limit,
+    canonical_clone_target,
+    clone_rate_limit_key,
+    get_clone_rate_limiter,
+    record_clone_rate_limit_hold,
+    reset_clone_rate_limiter,
+    resolve_clone_rate_limit,
+    resolve_clone_rate_window_seconds,
 )
 from backend.web.output_transformer import (
     BytesLeakError,
@@ -304,6 +336,9 @@ __all__ = [
     "AUDIT_ENTITY_KIND",
     "BlockedDestinationError",
     "BytesLeakError",
+    "CLONE_RATE_AUDIT_ACTION",
+    "CLONE_RATE_AUDIT_ENTITY_KIND",
+    "CLONE_RATE_KEY_PREFIX",
     "CLOUDFLARE_AI_BLOCK_BODY_HINTS",
     "CLOUDFLARE_MITIGATED_REFUSE_VALUES",
     "ClassifierLLM",
@@ -312,6 +347,10 @@ __all__ = [
     "CloneManifest",
     "CloneManifestError",
     "CloneManifestRecord",
+    "CloneRateLimitDecision",
+    "CloneRateLimitError",
+    "CloneRateLimitedError",
+    "CloneRateLimiter",
     "CloneSource",
     "CloneSourceError",
     "CloneSpec",
@@ -320,6 +359,8 @@ __all__ = [
     "ContentRiskError",
     "DEFAULT_BROWSER",
     "DEFAULT_CLASSIFIER_MODEL",
+    "DEFAULT_CLONE_RATE_LIMIT",
+    "DEFAULT_CLONE_RATE_WINDOW_S",
     "DEFAULT_FIRECRAWL_BASE_URL",
     "DEFAULT_MAX_HTML_BYTES",
     "DEFAULT_PLACEHOLDER_HEIGHT",
@@ -338,6 +379,7 @@ __all__ = [
     "FirecrawlSource",
     "HTML_COMMENT_BEGIN",
     "HTML_COMMENT_END",
+    "InMemoryCloneRateLimiter",
     "InvalidCloneURLError",
     "KNOWN_CLONE_BACKENDS",
     "LLM_REWRITE_SYSTEM_PROMPT",
@@ -374,6 +416,7 @@ __all__ = [
     "RISK_LEVELS",
     "ROBOTS_TXT_PATH",
     "RawCapture",
+    "RedisCloneRateLimiter",
     "RefusalDecision",
     "RefusalFetchResult",
     "RefusalFetcher",
@@ -389,10 +432,12 @@ __all__ = [
     "apply_image_placeholders",
     "assert_clone_allowed_post_capture",
     "assert_clone_allowed_pre_capture",
+    "assert_clone_rate_limit",
     "assert_clone_spec_safe",
     "assert_no_copied_bytes",
     "build_clone_manifest",
     "build_clone_spec_from_capture",
+    "canonical_clone_target",
     "check_ai_txt",
     "check_cloudflare_ai_block",
     "check_machine_refusal_post_capture",
@@ -401,11 +446,13 @@ __all__ = [
     "check_robots_txt",
     "check_x_robots_tag",
     "classify_clone_spec",
+    "clone_rate_limit_key",
     "clone_site",
     "compute_manifest_hash",
     "default_refusal_fetcher",
     "extract_hostname",
     "finalise_manifest",
+    "get_clone_rate_limiter",
     "heuristic_risk_signals",
     "inject_html_traceability_comment",
     "is_public_destination",
@@ -419,7 +466,11 @@ __all__ = [
     "pin_clone_artefacts",
     "read_manifest_file",
     "record_clone_audit",
+    "record_clone_rate_limit_hold",
     "render_html_traceability_comment",
+    "reset_clone_rate_limiter",
+    "resolve_clone_rate_limit",
+    "resolve_clone_rate_window_seconds",
     "serialize_manifest_json",
     "transform_clone_spec",
     "validate_clone_url",
