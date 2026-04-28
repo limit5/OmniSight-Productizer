@@ -3697,6 +3697,100 @@ export async function mfaWebauthnChallengeComplete(mfaToken: string, credential:
   })
 }
 
+// ─── AS.7.7 — Profile / Account settings wrappers ──────────────────────────
+//
+// Most of the AS.7.7 page is composed from endpoints that already
+// exist (`listSessions`, `revokeSession`, `revokeAllOtherSessions`,
+// `changePassword`, `mfaStatus`, `mfaTotpEnroll/Confirm/Disable`,
+// `mfaBackupCodesStatus/Regenerate`, `mfaWebauthnRegisterBegin/
+// Complete/Remove`). The wrappers below cover the additional
+// surfaces the AS.7.7 row needs:
+//
+//   - Connected OAuth identities (list + disconnect). The backend
+//     does not yet expose these endpoints — the page is allowed to
+//     surface a graceful "no identities yet" state when the
+//     endpoint 404s, mirroring the AS.7.2 / AS.7.5 "ship visual
+//     layer independently" pattern.
+//   - GDPR account export + delete. Same Phase-1 fail-closed
+//     pattern: the wrappers exist so the page wires up cleanly,
+//     and the helper-side `classifyGdprError()` translates 404 /
+//     501 into the canonical "not implemented" copy.
+//
+// Production status: dev-only. Next gate: deployed-inactive once
+// the backend endpoints land.
+
+export interface OAuthIdentityRow {
+  /** OAuth provider id (matches `OAUTH_PROVIDER_IDS` in
+   *  `lib/auth/oauth-providers.ts`). */
+  provider: string
+  display_name?: string | null
+  linked_at?: string | null
+}
+
+export interface OAuthIdentitiesResponse {
+  items: OAuthIdentityRow[]
+  count: number
+}
+
+/** List OAuth identities the current user has linked to their
+ *  account. The backend endpoint is not yet wired; treat a 404 /
+ *  501 / network failure as "no identities" so the page renders
+ *  the available-providers ring without crashing. */
+export async function listOAuthIdentities(): Promise<OAuthIdentitiesResponse> {
+  try {
+    return await request<OAuthIdentitiesResponse>("/auth/oauth/identities", {
+      method: "GET",
+    }, { skipGlobalErrorHandler: true })
+  } catch {
+    return { items: [], count: 0 }
+  }
+}
+
+/** Disconnect a single OAuth identity. Resolves on success;
+ *  surfaces the canonical `ApiError` on failure so the page can
+ *  branch on it. */
+export async function disconnectOAuthIdentity(
+  providerId: string,
+): Promise<{ status: string; provider: string }> {
+  return request<{ status: string; provider: string }>(
+    `/auth/oauth/identities/${encodeURIComponent(providerId)}`,
+    { method: "DELETE" },
+    { skipGlobalErrorHandler: true },
+  )
+}
+
+export interface AccountExportResponse {
+  status: string
+  download_url?: string | null
+  expires_at?: string | null
+}
+
+/** GDPR data export (Article 20 — right to portability). The
+ *  backend endpoint is not yet wired; the page surfaces a
+ *  canonical "not implemented" banner when this throws. */
+export async function exportAccountData(): Promise<AccountExportResponse> {
+  return request<AccountExportResponse>("/auth/account/export", {
+    method: "POST",
+  }, { skipGlobalErrorHandler: true })
+}
+
+export interface AccountDeleteResponse {
+  status: string
+  scheduled_for?: string | null
+}
+
+/** GDPR account deletion (Article 17 — right to erasure). The
+ *  backend endpoint is not yet wired; the page surfaces a
+ *  canonical "not implemented" banner when this throws. */
+export async function requestAccountDeletion(
+  confirmation: string,
+): Promise<AccountDeleteResponse> {
+  return request<AccountDeleteResponse>("/auth/account/delete", {
+    method: "POST",
+    body: JSON.stringify({ confirmation }),
+  }, { skipGlobalErrorHandler: true })
+}
+
 // ─── Audit log (J6) ──────────────────────────────────────────
 
 export interface AuditEntry {

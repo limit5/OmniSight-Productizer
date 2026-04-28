@@ -1142,6 +1142,137 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────
+ * AS.7.7 — Profile / Account settings (orbit satellites)
+ * ───────────────────────────────────────────────────────────────── */
+
+@keyframes as7-orbit-spin-cw {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes as7-orbit-spin-ccw {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+.as7-orbit-stage {
+  position: relative;
+  width: 100%;
+  max-width: 360px;
+  aspect-ratio: 1 / 1;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.as7-orbit-avatar {
+  position: absolute;
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 50% 35%,
+    rgba(184, 144, 255, 0.55),
+    rgba(80, 50, 160, 0.85) 60%,
+    rgba(20, 10, 60, 0.95) 100%
+  );
+  border: 1.5px solid rgba(184, 144, 255, 0.55);
+  box-shadow: 0 0 24px rgba(184, 144, 255, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+
+.as7-orbit-avatar-glyph {
+  font-size: 2rem;
+  color: rgba(245, 240, 255, 0.95);
+  line-height: 1;
+}
+
+.as7-orbit-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px dashed rgba(184, 144, 255, 0.18);
+  pointer-events: none;
+}
+
+.as7-orbit-ring-inner {
+  width: calc(var(--as7-orbit-inner-radius, 110px) * 2);
+  height: calc(var(--as7-orbit-inner-radius, 110px) * 2);
+}
+
+.as7-orbit-ring-outer {
+  width: calc(var(--as7-orbit-outer-radius, 165px) * 2);
+  height: calc(var(--as7-orbit-outer-radius, 165px) * 2);
+}
+
+.as7-orbit-ring[data-as7-orbit-spin="on"].as7-orbit-ring-inner {
+  animation: as7-orbit-spin-cw 32s linear infinite;
+}
+
+.as7-orbit-ring[data-as7-orbit-spin="on"].as7-orbit-ring-outer {
+  animation: as7-orbit-spin-ccw 48s linear infinite;
+}
+
+.as7-orbit-satellite {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(
+    calc(-50% + var(--as7-orbit-x, 0px)),
+    calc(-50% + var(--as7-orbit-y, 0px))
+  );
+  z-index: 3;
+}
+
+.as7-orbit-satellite[data-as7-orbit-linked="yes"] {
+  border-color: rgba(184, 144, 255, 0.85);
+}
+
+/* Flat fallback layout for off / subtle. */
+.as7-orbit-flat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  width: 100%;
+}
+
+.as7-orbit-flat .as7-orbit-avatar {
+  position: static;
+}
+
+.as7-orbit-flat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.as7-orbit-flat-grid .as7-orbit-satellite {
+  position: static;
+  transform: none;
+  margin: 0 auto;
+}
+
+/* Motion-level gating: off / subtle skip the orbital animation
+ * regardless of any per-leaf data attribute. */
+.as7-root[data-motion-level="off"] .as7-orbit-ring,
+.as7-root[data-motion-level="subtle"] .as7-orbit-ring {
+  animation: none !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────
  * `prefers-reduced-motion: reduce` — last-line WCAG R25.2 defence
  * ───────────────────────────────────────────────────────────────── */
 

@@ -47,3 +47,6 @@ export {
   MFA_PASSED_DURATION_BY_LEVEL,
   MfaPassedCheck,
 } from "./mfa-passed-check"
+
+// AS.7.7 — Profile / Account settings primitives
+export { OAuthOrbitSatellites } from "./oauth-orbit-satellites"
