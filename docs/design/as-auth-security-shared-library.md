@@ -4,9 +4,10 @@ audience: internal
 
 # ADR — Priority AS: Auth & Security Shared Library
 
-> Status: Accepted 2026-04-27
+> Status: Accepted 2026-04-27 · Implemented 2026-04-28（AS.0 → AS.7 ✅、AS.8.1 ✅、AS.8.2 本文 ✅、AS.8.3 runbook 待 land）
 > Authors: nanakusa sora + Agent-software-beta
 > Related: W11-W16/AS/FS/SC Roadmap (`w11-w16-as-fs-sc-roadmap.md`), R20 (chat-layer security), K-rest (CF Access SSO), Phase 5b (LLM credentials), git_credentials (既有 GitHub OAuth)
+> As-built audit 章節：見 §12（2026-04-28 加入）。原本 §2 表格的「Python: backend/auth/...」是規劃時的命名空間預期；實作落在 `backend/security/...`，§12 對齊紀錄。
 
 ## 1. Problem statement
 
@@ -30,14 +31,16 @@ OmniSight 既有 auth 是**碎片化的 ad-hoc 實作**：
 
 建立 **Priority AS — Auth & Security Shared Library**，提供：
 
-| 元件 | OmniSight 自家用 | Generated app（template emit） |
+| 元件 | OmniSight 自家用（as-built path） | Generated app（template emit） |
 |---|---|---|
-| OAuth client core lib（AS.1） | Python: `backend/auth/oauth_client.py` | TypeScript: `templates/_shared/oauth-client/` |
-| Token vault（AS.2） | Python: `backend/auth/token_vault.py` | TypeScript: `templates/_shared/token-vault/` |
-| Bot challenge lib（AS.3） | Python: `backend/security/bot_challenge.py` | TypeScript: `templates/_shared/bot-challenge/` |
-| Honeypot helper（AS.4） | Python | TypeScript |
-| Auto-gen password lib（AS.0.10） | Python: `backend/auth/password_generator.py` | TypeScript: `templates/_shared/password-generator/` |
-| Audit hooks（AS.5） | Python | — |
+| OAuth client core lib（AS.1） | Python: `backend/security/oauth_client.py` + `backend/security/oauth_vendors.py` | TypeScript: `templates/_shared/oauth-client/` |
+| Token vault（AS.2） | Python: `backend/security/token_vault.py` + `backend/security/oauth_refresh_hook.py` + `backend/security/oauth_revoke.py` | TypeScript: `templates/_shared/token-vault/` |
+| Bot challenge lib（AS.3） | Python: `backend/security/bot_challenge.py` + `backend/security/turnstile_form_verifier.py` | TypeScript: `templates/_shared/bot-challenge/` |
+| Honeypot helper（AS.4） | Python: `backend/security/honeypot.py` + `backend/security/honeypot_form_verifier.py` | TypeScript: `templates/_shared/honeypot/` |
+| Auto-gen password lib（AS.0.10） | Python: `backend/security/password_generator.py` | TypeScript: `templates/_shared/password-generator/` |
+| Audit hooks（AS.5） | Python: `backend/security/oauth_audit.py` + `backend/security/auth_event.py` + `backend/security/auth_audit_bridge.py` + `backend/security/auth_dashboard.py` | TypeScript: `templates/_shared/auth-event/` + `templates/_shared/auth-dashboard/` |
+| Credential vault（AS.6.2） | Python: `backend/security/credential_vault.py`（git secrets re-encrypt 路徑） | — |
+| Single-knob 收口（AS.0.8） | `settings.as_enabled`（每模組 `is_enabled()` 走 `getattr(settings, "as_enabled", True)`） | — |
 
 **雙 twin pattern**：Python lib（OmniSight backend）+ TypeScript lib（emit 進 generated app workspace），共享 spec 經 drift guard test 確保兩 surface 行為一致。
 
@@ -470,7 +473,123 @@ Open questions:
 
 - 母 ADR：`docs/design/w11-w16-as-fs-sc-roadmap.md`
 - BS bootstrap pattern：`docs/design/bs-bootstrap-vertical-aware.md`（BS.0.1 寫入）
-- AS migration discipline 詳細：`docs/security/as-migration-discipline.md`（AS.0 落地時寫）
-- AS rollout runbook：`docs/operations/as-rollout-and-rollback.md`（AS.8.3 寫入）
+- AS.0.1 既有 auth surface inventory：`docs/security/as_0_1_auth_surface_inventory.md`
+- AS.0.3 account-linking 安全規則：`docs/security/as_0_3_account_linking.md`
+- AS.0.4 credential refactor expand-migrate-contract：`docs/security/as_0_4_credential_refactor_migration_plan.md`
+- AS.0.5 Turnstile fail-open 三階段：`docs/security/as_0_5_turnstile_fail_open_phased_strategy.md`
+- AS.0.6 automation bypass list：`docs/security/as_0_6_automation_bypass_list.md`
+- AS.0.7 honeypot field 設計：`docs/security/as_0_7_honeypot_field_design.md`
+- AS.0.8 single-knob rollback：`docs/security/as_0_8_single_knob_rollback.md`
+- AS rollout runbook：`docs/operations/as-rollout-and-rollback.md`（AS.8.3 寫入 — 仍待 land）
 - 既有 K 系列：TODO.md Priority K / K-rest / K-early
-- 既有 git_credentials.py + Phase 5b llm_credentials.py：refactor 對象
+- 既有 git_credentials.py + Phase 5b llm_credentials.py：refactor 對象（AS.6.2 走 `backend/security/credential_vault.py`）
+
+## 12. As-built status（2026-04-28）
+
+> 本節為 AS.8.2 ADR 收尾時加入的「實作落地對齊」紀錄。AS.0 → AS.7 + AS.8.1 全部 landed 之後，把規劃 §2 的元件預期、§9 的 migration 編號、§5 的 8 視覺層描述，跟實際 git tree 對上，避免讀者把 §2 的「`backend/auth/...`」當成尋路指引（實作落在 `backend/security/...`）。
+
+### 12.1 落地的 backend 11 模組（位置以 git tree 為準）
+
+```
+backend/security/
+├── __init__.py
+├── oauth_client.py            # AS.1.1 PKCE + state + parse_token_response + is_enabled() 收 settings.as_enabled
+├── oauth_vendors.py           # AS.1.2 vendor catalog（Google / GitHub / Microsoft / Apple / 其他）
+├── oauth_audit.py             # AS.1.4 forensic audit emitters（oauth.login_init / login_callback / refresh / unlink ...）
+├── token_vault.py             # AS.2.1 (user_id, provider) binding 信封 + version + key_version
+├── oauth_refresh_hook.py      # AS.2.4 due-record refresh + rotation 偵測 + version+1 + audit chain
+├── oauth_revoke.py            # AS.2.5 DSAR / right-to-erasure（unlink 永遠 emit、不論 IdP 結果）
+├── oauth_login_handler.py     # AS.6 backend 自家 OAuth login orchestrator
+├── bot_challenge.py           # AS.3.1 Turnstile 三階段 + AS.0.6 bypass evaluator
+├── turnstile_form_verifier.py # AS.3.2 form 端驗 helper
+├── honeypot.py                # AS.4.1 invisible field 名稱算 + AS.0.6 bypass 對齊
+├── honeypot_form_verifier.py  # AS.4.2 form 端驗 helper
+├── auth_event.py              # AS.5.1 dashboard rollup emitters（auth.login_success / oauth_connect / token_rotated ...）
+├── auth_audit_bridge.py       # AS.5.2 forensic ↔ rollup 雙寫橋
+├── auth_dashboard.py          # AS.5.3 dashboard 讀路徑（per-tenant rollup 聚合）
+├── credential_vault.py        # AS.6.2 git secrets re-encrypt 入口（tenant_id × secret_kind binding）
+├── password_generator.py      # AS.0.10 三種 style（random / diceware / pronounceable）
+├── prompt_hardening.py        # 既有 R20 chat-layer security（非 AS scope，但 backend/security/ 同居）
+└── secret_filter.py           # 既有 secret 過濾（非 AS scope）
+```
+
+**Knob 收口**：每個 AS 模組 export 自己的 `is_enabled()`，全部讀 `settings.as_enabled`（`getattr(settings, "as_enabled", True)`），缺 setting 時 default true（保留可運作）。AS.0.8 single-knob rollback 路徑：set `settings.as_enabled=False`（或 env `OMNISIGHT_AS_ENABLED=false` + restart）→ 所有 async emitter `return None`、pure helper 仍可被呼叫但 emitter 都 silent-skip。AS.8.1 cross-feature integration test #5 (`test_knob_off_silences_audit_emitters_but_pure_helpers_still_run`) 鎖定此契約。
+
+### 12.2 落地的 templates/_shared 7 個 TypeScript twin
+
+```
+templates/_shared/
+├── oauth-client/      # AS.1 TS twin（README + index.ts + vendors.ts + audit.ts）
+├── token-vault/       # AS.2 TS twin
+├── bot-challenge/     # AS.3 TS twin
+├── honeypot/          # AS.4 TS twin
+├── password-generator/# AS.0.10 TS twin
+├── auth-event/        # AS.5.1 TS twin
+└── auth-dashboard/    # AS.5.3 TS twin
+```
+
+雙 twin pattern：generated app 拿到的是 TypeScript 版，行為跟 Python 版同 spec，drift 由 AS.8.1 contract test + spec table 鎖定。
+
+### 12.3 Migration（§9 表格 as-built 確認）
+
+| Migration | 用途 | as-built 狀態 |
+|---|---|---|
+| `0056_tenants_auth_features.py` | `tenants.auth_features` JSONB 欄位（既有 tenant 預設 `{}` 隱含全 false） | ✅ landed |
+| `0057_oauth_tokens.py` | `oauth_tokens` table（AS.2.1 token vault） | ✅ landed |
+| `0058_users_auth_methods.py` | `users.auth_methods` JSONB 欄位 + account-linking takeover-prevention 政策 | ✅ landed（檔名 0058 跟 0057 同 phase；AS.8.1 §52 已記錄 `test_alembic_pg_compat.py` 既有 naming-convention 假設因此 fail，pre-existing、out-of-scope） |
+
+### 12.4 AS.7 8 視覺層 → 8 dedicated pages 對應
+
+| AS.7 page | 路徑 | 視覺層重點 |
+|---|---|---|
+| AS.7.1 login | `app/login/page.tsx` | 8 視覺層全套 + AS.7.6 423 redirect + AS.7.4 mfaPending push |
+| AS.7.2 signup | `app/signup/page.tsx` | 層 6 slot-machine（核心主視覺） |
+| AS.7.3 password reset | `app/forgot-password/page.tsx` + `app/reset-password/page.tsx` | 層 8 ring-spin during reset |
+| AS.7.4 MFA | `app/mfa-challenge/page.tsx` | 層 8 6-digit pulse + ✓ 形狀組成 |
+| AS.7.5 email verification | `app/email-verify/page.tsx` | 層 8 envelope idle motion |
+| AS.7.6 account locked | `app/account-locked/page.tsx` | 層 8 chill blue-tint + 動畫 0.5x speed + frosted overlay |
+| AS.7.7 profile / settings | `app/settings/account/page.tsx` | OAuth orbital satellites（層 5 升級，雙圈 counter-rotation） |
+| AS.7.8 first-login onboarding | `app/onboarding/page.tsx` | 30-particle celebration burst + "Welcome aboard, X!" rising wordmark |
+
+視覺基礎在 `lib/auth-visual/` 4 helper module + `components/omnisight/auth/` 11+ React primitive + `styles/auth-visual.css`。Reduce-motion + 4-level battery-aware degradation（§5.9）由 root level resolver `useEffectiveMotionLevel()` thread 給所有 leaf — frame mismatch 不存在。
+
+### 12.5 落地的 test 收尾（AS.8.1）
+
+```
+backend/tests/
+├── test_as_compat_regression.py        # AS.0.9 baseline — 7 test (5 critical + §7.2.6 oracle drift guard + settings field placeholder)
+└── test_as_cross_feature_integration.py # AS.8.1 — 8 cross-feature integration test
+```
+
+8 顆 cross-feature test 把 11 個 backend 模組兩兩 / 三三 / 四四 wire 在一起測 boundary 行為，單模組重構不會通過、必須兩個一起改才綠。詳細 test name + cross-feature 對應參見 HANDOFF.md 2026-04-28 AS.8.1 entry §22-§29。
+
+Pre-commit fingerprint grep（`_conn() / await conn.commit() / datetime('now') / VALUES (?,...)`）對 AS 全模組 0-hit。
+
+### 12.6 與 §5 / §6 spec 對照的 deferred 項
+
+落地時刻意保留為 follow-up（不 in-scope to AS.8）：
+
+- **CF Access middleware**（§6.2 第 1 項）— `backend/security/cf_access_middleware.py` 仍未實作。意思是 `auth_features.auth_layer="cf_access"` 三選一裡的 `cf_access` path 目前沒 backend code 支撐；既有 `cf_access` ops-level（CF console rule 5.1 + email-OTP）仍在 trust-edge mode。AS.6 落地時的 K-rest doc 同步更新 + middleware 實作整體放到 AS.8 之後的 follow-up row（仍由 audit clarification §6.4 紀錄）。
+- **K-rest doc 同步更新**（§6.2 第 3 項）— 跟上面 follow-up 一起 land。
+- **AS.7.0 deployed-active level perf-budget e2e**（Playwright）— vitest contract test 已涵蓋 component path × motion level matrix；e2e 是 AS.7.0 deployed-active 階段獨立 task。
+- **`settings.as_enabled` field 正式 land 在 `backend/config.py`** — 目前每模組走 `getattr` fallback default true；當 settings field 正式宣告後 AS.8.1 cross-feature test #5 的 monkeypatch 路徑可以改用直接翻 setting 的更 robust 寫法（HANDOFF.md AS.8.1 §52 同樣紀錄）。
+
+### 12.7 Production status
+
+```
+Production status: deployed-active（AS.0–AS.7 + AS.8.1 全部 landed；as_enabled default true，每 module is_enabled() 都讀 settings；
+                                    既有 prod tenant 因 §3.2 預設 auth_features={} 故所有 per-tenant gate 仍隱含 off，
+                                    AS shared lib 全套對既有 tenant 行為實質仍 inert — 等於 deployed-but-tenant-gated）
+Next gate:        deployed-observed（24h observation window after first tenant flips auth_features.{oauth_login|turnstile_required|honeypot_active}=true；
+                                     觀察 metric：oauth_audit chain integrity、token_vault decrypt outcome 分佈、turnstile fail-open 上線 unverified-rate）
+```
+
+### 12.8 給未來自己的 sanity-check checklist
+
+照 SOP §136-227 Production Readiness Gate 的 5 個問題，AS shared lib as-built 狀態：
+
+1. **這條 code path 現在 production image 真的跑得起來嗎？** — ✅ AS 11 modules 全在 `backend/security/`，跟既有 `backend/audit.py` / `backend/auth.py` 同 image，無新 OS / Python wheel。
+2. **這條 code path 依賴的「靜態列表 / catalog / schema」跟 live 狀態對齊嗎？** — ✅ AS.5.1 dashboard rollup 用的 `entity_id` 模式、AS.1.4 forensic action 字串、AS.2.4 refresh-rotate 物件 shape 都被 AS.8.1 cross-feature test 8 顆 case-by-case 鎖定；單向更動會立刻 CI red。
+3. **Env knob / feature flag 實際有 set 嗎？** — ⚠️ `settings.as_enabled` 走 `getattr` fallback default true；`auth_features` per-tenant 仍 `{}` for legacy tenant。沒 explicit set 任何 prod tenant 進 active。
+4. **Docker network / external volume / compose dependency 真存在 / 真 mount / 真連通嗎？** — ✅ AS 沒新增 docker resource。Turnstile / OAuth provider 都走 outbound HTTPS，現有 egress 已涵蓋。
+5. **有沒有 drift guard test 可以主動抓到 #2？** — ✅ AS.8.1 8 顆 cross-feature test + AS.0.9 5 顆 critical + `test_as_compat_regression.py::§7.2.6` oracle drift guard。
