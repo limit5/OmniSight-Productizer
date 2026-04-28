@@ -103,6 +103,30 @@ class Settings(BaseSettings):
     token_fallback_model: str = "llama3.1"  # Model to downgrade to at 90%
     llm_fallback_chain: str = "anthropic,openai,google,groq,deepseek,openrouter,ollama"  # Failover priority
 
+    # ── W11.2 Website Cloning Backend ──
+    # Which CloneSource backend the W11 cloning pipeline picks up at
+    # runtime. Empty = auto-select (Firecrawl when an API key is in env,
+    # else Playwright). Operators that want to *force* the air-gap path
+    # even when a Firecrawl key is configured (dev box mirroring prod
+    # creds; regulated tenant sharing config bundle) flip this to
+    # ``playwright`` explicitly. Honored by
+    # ``backend.web.make_clone_source(settings=...)``.
+    clone_backend: str = ""  # "" | firecrawl | playwright
+    # Firecrawl SaaS API key. Empty = SaaS backend disabled even if
+    # ``clone_backend`` is set to ``firecrawl`` (constructor raises
+    # FirecrawlConfigError so the failure surfaces at boot rather than
+    # on first clone request).
+    firecrawl_api_key: str = ""
+    # Override for the Firecrawl base URL — useful for operators
+    # running the OSS Firecrawl server in a private network. Empty =
+    # the default ``https://api.firecrawl.dev`` SaaS endpoint.
+    firecrawl_base_url: str = ""
+    # Browser to drive when the Playwright self-host backend is in use.
+    # One of ``chromium`` / ``firefox`` / ``webkit``; empty = chromium.
+    # Pinned in config (vs hardcoded in PlaywrightSource) so air-gap
+    # operators can swap engines without code change.
+    playwright_browser: str = ""
+
     # ── RTK Output Compression ──
     rtk_enabled: bool = True  # Enable output compression for token savings
     rtk_compression_threshold: int = 1000  # Only compress outputs > this many bytes
