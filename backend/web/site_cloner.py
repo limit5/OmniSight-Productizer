@@ -141,9 +141,13 @@ _STYLE_COLOR_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: ``font-family: 'Inter', sans-serif`` → captures the comma-separated stack.
+#: ``font-family: 'Inter', sans-serif`` → captures the comma-separated
+#: stack (group 1). The negated character class deliberately allows
+#: quotes inside the value because real declarations look like
+#: ``font-family: 'Inter', sans-serif`` and ``"Helvetica Neue"``; we
+#: strip the quotes per-piece in ``_add_font``.
 _FONT_FAMILY_RE = re.compile(
-    r"""font-family\s*:\s*([^;"'}\n]+)""",
+    r"""font-family\s*:\s*([^;}\n]+)""",
     re.IGNORECASE,
 )
 
