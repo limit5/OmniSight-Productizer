@@ -1,26 +1,29 @@
-"""W11.1 #XXX — URL → ``CloneSpec`` orchestrator.
+"""W11.1 + W11.3 #XXX — URL → ``CloneSpec`` orchestrator + populator.
 
 Single entry point for the W11 *Website Cloning Capability* epic. Given
 a public URL, it normalises + safety-validates the URL, hands the fetch
-to a pluggable ``CloneSource`` backend (W11.2 will ship two: Firecrawl
-SaaS and self-hosted Playwright), and returns a structured ``CloneSpec``
-the downstream productizer pipeline (Next / Nuxt / Astro / Vue / Svelte
+to a pluggable ``CloneSource`` backend (W11.2: Firecrawl SaaS or
+self-hosted Playwright), and returns a structured ``CloneSpec`` the
+downstream productizer pipeline (Next / Nuxt / Astro / Vue / Svelte
 scaffolders) can consume to build a fresh, *transformed* clone.
 
-This row (W11.1) deliberately keeps scope tight — it ships:
+W11.1 (orchestrator) and W11.3 (full ``CloneSpec`` population) are both
+implemented here. The module ships:
 
     * The public ``clone_site(url, *, source, ...)`` entry point.
-    * The ``CloneSpec`` container with the W11.3-spec'd categories
-      (title / meta / hero / nav / sections / footer / images / colors /
-      fonts / spacing) — each defaults to an empty / ``None`` placeholder.
-      W11.3 fills the population logic; W11.1 just guarantees the shape.
+    * The ``CloneSpec`` container — title / meta / hero / nav /
+      sections[] / footer / images[] / colors[] / fonts[] / spacing
+      (W11.3 spec line). All categories default to empty / ``None`` so
+      partial-success consumers can branch on emptiness.
     * The ``CloneSource`` Protocol (W11.2 plugs Firecrawl + Playwright
       into this).
     * URL safety validation (scheme allowlist, userinfo reject, SSRF
       destination guard via ``ipaddress``).
-    * A minimal ``build_clone_spec_from_capture`` that maps the raw HTML
-      ``<title>`` / meta description into the spec — every other field
-      remains the W11.3 row's responsibility.
+    * ``build_clone_spec_from_capture`` — full W11.3 populator that
+      extracts every category in a single ``html.parser`` pass plus a
+      few targeted regex sweeps for inline ``style=`` declarations.
+      Stdlib-only (no new pip deps → no production image rebuild needed,
+      Production Readiness Gate §158 satisfied for free).
     * Typed error hierarchy so the W11.12 audit row can categorise
       every failure mode without string-matching exception messages.
 
@@ -59,7 +62,8 @@ import ipaddress
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
+from html.parser import HTMLParser
+from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
@@ -117,17 +121,92 @@ CLOUD_METADATA_IP: str = "169.254.169.254"
 #: get IDNA-encoded by ``urlsplit``.
 _HOSTNAME_CHAR_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 
-#: Minimal HTML scrapers — only used by the W11.1 placeholder
-#: ``build_clone_spec_from_capture``. The W11.3 row will replace these
-#: with a proper parser (BeautifulSoup / selectolax / etc.).
-_TITLE_RE = re.compile(
-    r"<title[^>]*>(?P<t>.*?)</title>",
-    re.IGNORECASE | re.DOTALL,
-)
-_META_DESC_RE = re.compile(
-    r"""<meta\s+[^>]*name=['"]description['"][^>]*content=['"](?P<d>[^'"]*)['"]""",
+#: Colour-token extraction. Matches the syntactic shape of a CSS
+#: colour value — hex (3/4/6/8 digits), ``rgb(...)``, ``rgba(...)``,
+#: ``hsl(...)``, ``hsla(...)``. Order is significant: the 6-8 digit hex
+#: alternative must come BEFORE the 3-4 digit one; the regex is greedy
+#: but the alternation tries left-to-right and won't backtrack across
+#: the alternation boundary, so an 8-digit colour (``#111827``) would
+#: otherwise be eaten by the 3-4 alt as ``#1118``.
+#:
+#: Run only against CSS-context strings (``style=`` attribute values
+#: and ``<style>`` block bodies) — anywhere else risks false positives
+#: from page text that happens to contain a hex literal.
+#:
+#: Named colours (``red``, ``rebeccapurple``) are intentionally NOT
+#: matched: the substring ``red`` shows up in class names, ids, and
+#: copy ("Required field…") far more often than as an actual colour.
+_STYLE_COLOR_RE = re.compile(
+    r"""(#[0-9a-fA-F]{6,8}|#[0-9a-fA-F]{3,4}|rgba?\([^)]+\)|hsla?\([^)]+\))""",
     re.IGNORECASE,
 )
+
+#: ``font-family: 'Inter', sans-serif`` → captures the comma-separated stack.
+_FONT_FAMILY_RE = re.compile(
+    r"""font-family\s*:\s*([^;"'}\n]+)""",
+    re.IGNORECASE,
+)
+
+#: Spacing token candidates pulled from inline / ``<style>`` declarations.
+#: ``padding: 16px``, ``margin-top: 1.5rem``, ``gap: 12px`` etc.
+_SPACING_RE = re.compile(
+    r"""(?P<prop>padding|margin|gap)(?:-[a-z]+)?\s*:\s*(?P<val>[^;"'}\n]+)""",
+    re.IGNORECASE,
+)
+
+#: ``max-width: 1200px`` declared anywhere — used as the primary content
+#: width hint when present (downstream W11.9 framework adapter consumes
+#: this to seed a Tailwind ``max-w-*`` or CSS variable).
+_MAX_WIDTH_RE = re.compile(
+    r"""max-width\s*:\s*(?P<val>[0-9.]+\s*(?:px|rem|em|%|vw))""",
+    re.IGNORECASE,
+)
+
+#: Hosts whose ``<link href>`` we treat as web-font references (in
+#: addition to ``<link rel=preload as=font>`` and any ``rel`` mentioning
+#: ``font``). Lower-case substring match is enough — we just record the
+#: URL string for the W11.6 L3 transformer / W11.9 adapter.
+_FONT_HOST_HINTS: tuple[str, ...] = (
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+    "use.typekit.net",
+    "fast.fonts.net",
+    "use.fontawesome.com",
+)
+
+#: Cap on the per-category list lengths in ``CloneSpec``. Real landing
+#: pages have ≤ 50 nav links / images / sections in 99% of cases; the
+#: cap prevents a pathological / adversarial page (long-list attack)
+#: from blowing up the productizer's downstream prompt budget.
+_MAX_LIST_ITEMS_PER_CATEGORY: int = 100
+
+#: Cap on the number of distinct colours / fonts / spacing tokens we
+#: keep. CSS frameworks ship 100s of utility classes — we want a curated
+#: design-token snapshot, not the full palette.
+_MAX_DESIGN_TOKENS: int = 24
+
+#: Cap on the per-section text summary length (chars). Sections are
+#: condensed to a one-line summary; longer text gets truncated with an
+#: ellipsis sentinel. Downstream LLM rewriters (W11.6 L3) work on
+#: summaries, not full body copy.
+_MAX_SECTION_SUMMARY_CHARS: int = 280
+
+#: Tags whose enclosed text contributes to the *visible* document
+#: outline (used to produce ``sections[]`` summaries). ``script`` /
+#: ``style`` / ``svg`` text is intentionally ignored.
+_VISIBLE_TEXT_TAGS: frozenset[str] = frozenset({
+    "p", "h1", "h2", "h3", "h4", "h5", "h6",
+    "li", "blockquote", "summary", "figcaption",
+    "div", "span", "td", "th", "a", "strong", "em",
+    "small", "label", "legend", "caption", "dt", "dd",
+})
+
+#: Tags whose entire subtree is dropped from the outline / hero /
+#: footer / section text capture.
+_NON_VISIBLE_TAGS: frozenset[str] = frozenset({
+    "script", "style", "noscript", "template", "svg", "math",
+    "object", "embed", "video", "audio", "iframe",
+})
 
 
 # ── Errors ────────────────────────────────────────────────────────────
@@ -444,25 +523,520 @@ def validate_clone_url(url: str) -> str:
     return canonical
 
 
-# ── Spec construction ────────────────────────────────────────────────
+# ── Spec construction (W11.3) ────────────────────────────────────────
+#
+# Single-pass HTML parser that fills every ``CloneSpec`` category from
+# one walk of the document, plus a few targeted regex sweeps over the
+# raw HTML for inline-style declarations the parser doesn't see
+# semantically. The parser is stdlib-only (``html.parser.HTMLParser``)
+# so adding W11.3 does NOT require a Production image rebuild — every
+# Python the project already runs has it. Production Readiness Gate
+# §158 is therefore satisfied without any new pip dep.
+#
+# Module-global state audit: this section adds no module-level mutables
+# beyond compiled regex literals (immutable). Each ``_SpecCollector``
+# instance owns its own per-call buffers; no singleton, no cache, no
+# cross-worker coordination needed (SOP §1 answer #1).
+
+
+def _normalize_text(s: str) -> str:
+    """Collapse runs of whitespace to single spaces, strip ends. Keeps
+    visible glyphs only — the parser already converted entities."""
+    return " ".join((s or "").split())
+
+
+def _truncate(s: str, limit: int) -> str:
+    """Truncate to ``limit`` chars, appending an ellipsis when cut."""
+    s = s or ""
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _ordered_unique(items: Iterable[str]) -> list[str]:
+    """Stable de-duplication of an iterable of strings."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+class _SpecCollector(HTMLParser):
+    """Single-pass HTML walker that populates every ``CloneSpec``
+    category in one DOM traversal.
+
+    Design notes:
+
+    * ``convert_charrefs=True`` so ``handle_data`` already receives
+      decoded text (``&amp;`` → ``&``).
+    * A small ``self._stack`` of ``(tag, attrs)`` tracks nesting so we
+      know whether the current ``<a>`` lives inside a ``<nav>`` or
+      ``<footer>``, and whether the current text run belongs to a
+      ``<section>``'s heading vs. body.
+    * Self-closing / void elements (``img``, ``meta``, ``link``,
+      ``input``, ``br``, ``hr``, ``source``) are explicitly handled
+      via ``handle_startendtag`` AND ``handle_starttag`` because real
+      pages mix XHTML-style ``<img/>`` with HTML5-style ``<img>``.
+    * Subtrees rooted at ``script`` / ``style`` / ``noscript`` /
+      ``svg`` etc. (``_NON_VISIBLE_TAGS``) are *not* skipped at the
+      parser level (HTMLParser doesn't expose subtree skip cheaply),
+      but their text is suppressed via ``self._suppress_depth``.
+      Unbalanced tags decrement defensively; clamps at 0 so a
+      tag-soup page doesn't go negative and accidentally re-enable
+      capture.
+    """
+
+    _VOID_ELEMENTS = frozenset({
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+
+        # Outputs populated as we walk.
+        self.title: Optional[str] = None
+        self.meta: dict[str, str] = {}
+        self.hero_h1: Optional[str] = None
+        self.hero_tagline: Optional[str] = None
+        self.hero_cta: Optional[dict[str, str]] = None
+        self.nav_links: list[dict[str, str]] = []
+        self.section_records: list[dict[str, Any]] = []
+        self.footer_text_buf: list[str] = []
+        self.footer_links: list[dict[str, str]] = []
+        self.images: list[dict[str, str]] = []
+        # Use list+dedupe rather than set so insertion order is preserved
+        # for the W11.6 L3 transformer (deterministic LLM prompt input).
+        self._color_seen: set[str] = set()
+        self.colors: list[str] = []
+        self._font_seen: set[str] = set()
+        self.fonts: list[str] = []
+
+        # Internal state.
+        self._stack: list[tuple[str, dict[str, str]]] = []
+        self._suppress_depth: int = 0
+        self._title_buf: list[str] = []
+        self._in_title: bool = False
+        # Per-section accumulator: heading text + body text + link list.
+        self._section_buf: Optional[dict[str, Any]] = None
+        # While inside a heading (h1-h6) we accumulate to a heading-text
+        # buffer instead of the section body buffer.
+        self._heading_depth: int = 0
+        self._heading_level: Optional[int] = None
+        self._heading_text_buf: list[str] = []
+        # First H1 outside a section is the hero candidate; we capture
+        # *its* text here.
+        self._hero_h1_buf: Optional[list[str]] = None
+        # Once we have a hero H1, the *next* paragraph's first chunk of
+        # text becomes the tagline.
+        self._tagline_pending: bool = False
+        self._tagline_buf: Optional[list[str]] = None
+        # Buffer for the current ``<a>`` link's anchor text. ``None``
+        # outside an ``<a>``.
+        self._a_buf: Optional[list[str]] = None
+        self._a_href: Optional[str] = None
+        # Hero CTA candidate: first ``<a>`` with a button-ish class /
+        # role after the hero H1.
+        self._hero_cta_pending: bool = False
+
+    # ── Helpers ──────────────────────────────────────────────────────
+
+    def _attrs_dict(self, attrs: list[tuple[str, Optional[str]]]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for k, v in attrs:
+            if v is None:
+                out[k.lower()] = ""
+            else:
+                out[k.lower()] = v
+        return out
+
+    def _is_inside(self, tag: str) -> bool:
+        return any(t == tag for t, _ in self._stack)
+
+    def _add_color(self, color: str) -> None:
+        norm = color.strip()
+        if not norm or norm in self._color_seen:
+            return
+        if len(self.colors) >= _MAX_DESIGN_TOKENS:
+            return
+        self._color_seen.add(norm)
+        self.colors.append(norm)
+
+    def _add_font(self, font: str) -> None:
+        norm = font.strip().strip("'\"")
+        if not norm or norm in self._font_seen:
+            return
+        if len(self.fonts) >= _MAX_DESIGN_TOKENS:
+            return
+        self._font_seen.add(norm)
+        self.fonts.append(norm)
+
+    def _harvest_inline_style(self, style: str) -> None:
+        if not style:
+            return
+        for m in _STYLE_COLOR_RE.finditer(style):
+            self._add_color(m.group(1))
+        for m in _FONT_FAMILY_RE.finditer(style):
+            for piece in m.group(1).split(","):
+                self._add_font(piece)
+
+    # ── HTMLParser hooks ─────────────────────────────────────────────
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        tag = tag.lower()
+        attrs_dict = self._attrs_dict(attrs)
+
+        # Push the open tag onto the stack (void tags get popped
+        # immediately at the bottom of this method).
+        self._stack.append((tag, attrs_dict))
+
+        if tag in _NON_VISIBLE_TAGS:
+            self._suppress_depth += 1
+
+        # Inline-style harvest applies to *every* tag.
+        style = attrs_dict.get("style", "")
+        if style:
+            self._harvest_inline_style(style)
+
+        if tag == "title":
+            self._in_title = True
+            self._title_buf = []
+
+        elif tag == "meta":
+            name = (attrs_dict.get("name") or attrs_dict.get("property") or "").strip().lower()
+            content = (attrs_dict.get("content") or "").strip()
+            if name and content and name not in self.meta:
+                self.meta[name] = content
+                if name == "theme-color":
+                    self._add_color(content)
+
+        elif tag == "link":
+            rel = (attrs_dict.get("rel") or "").lower()
+            href = (attrs_dict.get("href") or "").strip()
+            if href:
+                lo = href.lower()
+                is_font = (
+                    "font" in rel
+                    or (rel == "preload" and (attrs_dict.get("as", "").lower() == "font"))
+                    or any(h in lo for h in _FONT_HOST_HINTS)
+                )
+                if is_font:
+                    self._add_font(href)
+
+        elif tag == "img":
+            src = (attrs_dict.get("src") or "").strip()
+            if src and not src.lower().startswith("data:"):
+                if len(self.images) < _MAX_LIST_ITEMS_PER_CATEGORY:
+                    rec: dict[str, str] = {"url": src}
+                    alt = (attrs_dict.get("alt") or "").strip()
+                    if alt:
+                        rec["alt"] = alt
+                    self.images.append(rec)
+
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            level = int(tag[1])
+            self._heading_depth += 1
+            self._heading_level = level
+            self._heading_text_buf = []
+            if (
+                tag == "h1"
+                and self.hero_h1 is None
+                and self._section_buf is None
+                and not self._is_inside("footer")
+            ):
+                # First H1 outside a section/footer = hero candidate.
+                self._hero_h1_buf = self._heading_text_buf
+
+        elif tag == "section":
+            # Begin a new section accumulator (nest is unusual but we
+            # cope by replacing — we always emit on close).
+            if len(self.section_records) < _MAX_LIST_ITEMS_PER_CATEGORY:
+                self._section_buf = {
+                    "heading": None,
+                    "body": [],
+                    "links": [],
+                }
+
+        elif tag == "a":
+            href = (attrs_dict.get("href") or "").strip()
+            self._a_href = href or None
+            self._a_buf = []
+            # Hero CTA detection — first ``<a>`` after we recorded a
+            # hero H1, with a button-ish hint, no explicit nav/footer
+            # ancestor.
+            if (
+                self._hero_cta_pending
+                and self.hero_cta is None
+                and not self._is_inside("nav")
+                and not self._is_inside("footer")
+            ):
+                cls = (attrs_dict.get("class") or "").lower()
+                role = (attrs_dict.get("role") or "").lower()
+                if "btn" in cls or "button" in cls or role == "button" or "cta" in cls:
+                    # Tentatively claim the CTA — finalise on </a>.
+                    self.hero_cta = {"href": href or "", "label": ""}
+
+        elif tag == "p":
+            # Capture first paragraph after hero H1 as tagline.
+            if self._tagline_pending and self._tagline_buf is None:
+                self._tagline_buf = []
+
+        # Pop voids immediately — they have no closing tag.
+        if tag in self._VOID_ELEMENTS:
+            self._stack.pop()
+            if tag in _NON_VISIBLE_TAGS:
+                # No void tag is in _NON_VISIBLE_TAGS today, but keep
+                # this defensive in case the set is extended.
+                self._suppress_depth = max(0, self._suppress_depth - 1)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        # XHTML-style self-closing ``<img/>`` — treat as a normal start
+        # for void elements (they auto-pop in handle_starttag).
+        self.handle_starttag(tag, attrs)
+        # Non-void tags written as self-closing in tag soup: pop them
+        # immediately so the stack stays balanced.
+        if tag.lower() not in self._VOID_ELEMENTS:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+
+        # Pop the matching open tag (best-effort — tag soup may have
+        # mismatches; we walk the stack from the top to find the most
+        # recent matching entry, drop everything above it).
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == tag:
+                # Maintain suppression depth for any popped non-visible
+                # tags. (HTMLParser fires endtag for explicit closes,
+                # which is the only case that matters for our subtree
+                # skip.)
+                for popped, _ in self._stack[i:]:
+                    if popped in _NON_VISIBLE_TAGS:
+                        self._suppress_depth = max(0, self._suppress_depth - 1)
+                self._stack = self._stack[:i]
+                break
+
+        if tag == "title":
+            self._in_title = False
+            text = _normalize_text("".join(self._title_buf))
+            self.title = text or None
+            self._title_buf = []
+
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._heading_depth = max(0, self._heading_depth - 1)
+            heading_text = _normalize_text("".join(self._heading_text_buf))
+            # Hero H1 finalisation.
+            if self._hero_h1_buf is not None and self.hero_h1 is None:
+                self.hero_h1 = heading_text or None
+                self._hero_h1_buf = None
+                self._tagline_pending = bool(self.hero_h1)
+                self._hero_cta_pending = bool(self.hero_h1)
+            # Section heading finalisation: the first heading inside
+            # the section becomes its title.
+            if self._section_buf is not None and not self._section_buf.get("heading"):
+                self._section_buf["heading"] = heading_text or None
+            self._heading_text_buf = []
+            self._heading_level = None
+
+        elif tag == "section":
+            if self._section_buf is not None:
+                body = _normalize_text(" ".join(self._section_buf["body"]))
+                rec: dict[str, Any] = {
+                    "heading": self._section_buf.get("heading"),
+                    "summary": _truncate(body, _MAX_SECTION_SUMMARY_CHARS) or None,
+                }
+                if self._section_buf["links"]:
+                    rec["links"] = self._section_buf["links"][:20]
+                self.section_records.append(rec)
+                self._section_buf = None
+
+        elif tag == "a":
+            label = _normalize_text("".join(self._a_buf or []))
+            href = self._a_href or ""
+            if label or href:
+                if self._is_inside("nav"):
+                    if len(self.nav_links) < _MAX_LIST_ITEMS_PER_CATEGORY:
+                        self.nav_links.append({"label": label, "href": href})
+                elif self._is_inside("footer"):
+                    if len(self.footer_links) < _MAX_LIST_ITEMS_PER_CATEGORY:
+                        self.footer_links.append({"label": label, "href": href})
+                elif self._section_buf is not None:
+                    self._section_buf["links"].append({"label": label, "href": href})
+            # Finalise hero CTA — overwrite the placeholder label.
+            if self.hero_cta is not None and not self.hero_cta.get("label"):
+                self.hero_cta["label"] = label
+                self._hero_cta_pending = False
+            self._a_buf = None
+            self._a_href = None
+
+        elif tag == "p":
+            if self._tagline_pending and self._tagline_buf is not None:
+                tagline = _normalize_text("".join(self._tagline_buf))
+                if tagline:
+                    self.hero_tagline = _truncate(tagline, _MAX_SECTION_SUMMARY_CHARS)
+                    self._tagline_pending = False
+                self._tagline_buf = None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._title_buf.append(data)
+            return
+        if self._suppress_depth > 0:
+            return
+
+        # Heading buffer (highest priority — heading text is also
+        # considered visible for sections/hero).
+        if self._heading_depth > 0:
+            self._heading_text_buf.append(data)
+
+        # Anchor label.
+        if self._a_buf is not None:
+            self._a_buf.append(data)
+
+        # Tagline candidate.
+        if self._tagline_pending and self._tagline_buf is not None:
+            self._tagline_buf.append(data)
+
+        # Section body accumulator (skip while inside heading — heading
+        # already captured separately).
+        if self._section_buf is not None and self._heading_depth == 0:
+            self._section_buf["body"].append(data)
+
+        # Footer text accumulator — capture body copy that lives inside
+        # a ``<footer>`` (©-line, contact info etc.) so the populator
+        # can synthesise a footer summary even when the footer has no
+        # ``<a>`` links. Also gated on heading depth so a footer ``<h2>``
+        # doesn't double-count.
+        if self._is_inside("footer") and self._heading_depth == 0:
+            self.footer_text_buf.append(data)
+
+
+def _harvest_style_blocks(html: str, collector: _SpecCollector) -> None:
+    """``<style>`` block contents are not visible to ``handle_data`` (we
+    suppress them) so we sweep them via regex once, after parsing, to
+    pull design tokens. Each ``<style>...</style>`` block is scanned
+    with the same colour / font / spacing regexes used on inline styles.
+    """
+    block_re = re.compile(r"<style[^>]*>(?P<body>.*?)</style>", re.IGNORECASE | re.DOTALL)
+    for m in block_re.finditer(html):
+        body = m.group("body") or ""
+        for cm in _STYLE_COLOR_RE.finditer(body):
+            collector._add_color(cm.group(1))
+        for fm in _FONT_FAMILY_RE.finditer(body):
+            for piece in fm.group(1).split(","):
+                collector._add_font(piece)
+
+
+def _extract_spacing(html: str) -> dict[str, Any]:
+    """Pull a small spacing snapshot from inline + ``<style>`` content.
+
+    We deliberately do NOT try to compute a token system — that's the
+    W11.6 L3 transformer's job. We just expose the *raw* observed
+    values so the LLM rewriter has something to anchor on.
+
+    The shape:
+        {
+            "padding": [...],   # up to _MAX_DESIGN_TOKENS distinct values
+            "margin":  [...],
+            "gap":     [...],
+            "max_width": "1200px"  # first observed, when any
+        }
+    """
+    out: dict[str, list[str]] = {"padding": [], "margin": [], "gap": []}
+    seen: dict[str, set[str]] = {"padding": set(), "margin": set(), "gap": set()}
+
+    for m in _SPACING_RE.finditer(html):
+        prop = m.group("prop").lower()
+        val = " ".join(m.group("val").split())
+        if not val:
+            continue
+        bucket = seen[prop]
+        if val in bucket:
+            continue
+        bucket.add(val)
+        if len(out[prop]) < _MAX_DESIGN_TOKENS:
+            out[prop].append(val)
+
+    spacing: dict[str, Any] = {k: v for k, v in out.items() if v}
+
+    mw = _MAX_WIDTH_RE.search(html)
+    if mw:
+        spacing["max_width"] = " ".join(mw.group("val").split())
+
+    return spacing
+
+
+def _merge_asset_images(
+    parsed_images: list[dict[str, str]],
+    asset_urls: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Combine ``<img>`` tag captures with ``RawCapture.asset_urls``,
+    deduping on the URL field. Backend-discovered assets that didn't
+    appear as ``<img>`` tags (CSS background images, fetch() requests
+    etc.) join the list as plain ``{"url": ...}`` entries. Cap at
+    ``_MAX_LIST_ITEMS_PER_CATEGORY``."""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for rec in parsed_images:
+        url = rec.get("url", "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append(dict(rec))
+        if len(out) >= _MAX_LIST_ITEMS_PER_CATEGORY:
+            return out
+    for url in asset_urls:
+        if not url or url in seen:
+            continue
+        if url.lower().startswith("data:"):
+            continue  # W11.6 L3: never inline bytes
+        seen.add(url)
+        out.append({"url": url})
+        if len(out) >= _MAX_LIST_ITEMS_PER_CATEGORY:
+            break
+    return out
+
 
 def build_clone_spec_from_capture(
     capture: RawCapture,
     *,
     source_url: Optional[str] = None,
 ) -> CloneSpec:
-    """Map a ``RawCapture`` into a ``CloneSpec`` shell.
+    """Map a ``RawCapture`` into a fully-populated ``CloneSpec`` (W11.3).
 
-    W11.1 deliberately implements only the trivial mappings:
+    The populator walks the rendered HTML once with ``html.parser``
+    (stdlib, no new pip deps) and collects every category in the W11.3
+    schema:
 
-        * ``title`` from the first ``<title>`` tag.
-        * ``meta["description"]`` from the first ``<meta name="description">``.
-        * ``images`` populated from ``capture.asset_urls`` (URLs only —
-          W11.6 L3 will replace each entry with a placeholder).
+        title       — ``<title>`` text (falls back to first ``<h1>``).
+        meta        — every ``<meta name="...">`` and ``<meta property="...">``
+                      with non-empty content (description / og:* /
+                      twitter:* / theme-color / viewport / etc.).
+        hero        — first ``<h1>`` outside ``<section>`` / ``<footer>``,
+                      with the next ``<p>`` as ``tagline`` and the next
+                      button-ish ``<a>`` as ``cta`` when present.
+        nav         — ``<a>`` links inside any ``<nav>``.
+        sections[]  — each ``<section>``: heading + condensed summary +
+                      its internal links.
+        footer      — text + links inside ``<footer>``.
+        images[]    — every ``<img src=...>`` plus ``capture.asset_urls``
+                      (deduped by URL; ``data:`` URLs dropped per W11.6).
+        colors[]    — colours found in inline ``style=`` declarations,
+                      ``<style>`` blocks, and ``<meta name="theme-color">``.
+        fonts[]     — ``<link>`` references to web-font hosts +
+                      ``font-family`` declarations.
+        spacing     — observed ``padding`` / ``margin`` / ``gap`` values
+                      and the page's ``max-width`` token if declared.
 
-    Everything else (hero, nav, sections, footer, colors, fonts,
-    spacing) is the W11.3 row's responsibility — the fields exist with
-    safe defaults so downstream consumers can be written now.
+    All collections are capped (``_MAX_LIST_ITEMS_PER_CATEGORY`` = 100,
+    ``_MAX_DESIGN_TOKENS`` = 24, ``_MAX_SECTION_SUMMARY_CHARS`` = 280)
+    so a pathological landing page can't blow up the downstream
+    productizer's prompt budget. ``warnings`` lists categories that
+    came up empty so callers can branch on partial-success states.
 
     ``source_url`` lets the caller pin the *requested* URL (the
     validated, pre-redirect form) into the spec; defaults to
@@ -483,24 +1057,76 @@ def build_clone_spec_from_capture(
         backend=capture.backend,
     )
 
-    title_match = _TITLE_RE.search(capture.html)
-    if title_match:
-        spec.title = title_match.group("t").strip() or None
-    else:
+    collector = _SpecCollector()
+    try:
+        collector.feed(capture.html)
+        collector.close()
+    except Exception as e:  # pragma: no cover — html.parser is forgiving
+        raise CloneSpecBuildError(f"HTML parse failed: {e!s}") from e
+
+    # ── title ────────────────────────────────────────────────────────
+    spec.title = collector.title or collector.hero_h1 or None
+    if not spec.title:
         spec.warnings.append("title tag not found")
 
-    desc_match = _META_DESC_RE.search(capture.html)
-    if desc_match:
-        spec.meta["description"] = desc_match.group("d").strip()
+    # ── meta ─────────────────────────────────────────────────────────
+    spec.meta = dict(collector.meta)
 
-    if capture.asset_urls:
-        spec.images = [{"url": u} for u in capture.asset_urls]
+    # ── hero ─────────────────────────────────────────────────────────
+    if collector.hero_h1:
+        hero: dict[str, Any] = {"heading": collector.hero_h1}
+        if collector.hero_tagline:
+            hero["tagline"] = collector.hero_tagline
+        if collector.hero_cta and collector.hero_cta.get("label"):
+            hero["cta"] = {
+                "label": collector.hero_cta["label"],
+                "href": collector.hero_cta.get("href", ""),
+            }
+        spec.hero = hero
+    else:
+        spec.warnings.append("hero block not detected")
 
-    # Categories the W11.3 row populates remain at their dataclass
-    # defaults; we annotate so partial-success consumers can detect
-    # "W11.1 placeholder" vs. "W11.3 fully populated" specs.
-    spec.warnings.append("W11.1 placeholder build — W11.3 will populate "
-                         "hero / nav / sections / footer / colors / fonts / spacing")
+    # ── nav ──────────────────────────────────────────────────────────
+    spec.nav = list(collector.nav_links)
+    if not spec.nav:
+        spec.warnings.append("nav links not detected")
+
+    # ── sections[] ───────────────────────────────────────────────────
+    spec.sections = list(collector.section_records)
+    if not spec.sections:
+        spec.warnings.append("no <section> elements found")
+
+    # ── footer ───────────────────────────────────────────────────────
+    footer_text = _normalize_text(" ".join(collector.footer_text_buf))
+    if collector.footer_links or footer_text:
+        footer: dict[str, Any] = {"links": list(collector.footer_links)}
+        if footer_text:
+            footer["text"] = _truncate(footer_text, _MAX_SECTION_SUMMARY_CHARS)
+        spec.footer = footer
+    else:
+        spec.warnings.append("footer block not detected")
+
+    # ── images[] ─────────────────────────────────────────────────────
+    spec.images = _merge_asset_images(collector.images, capture.asset_urls)
+    if not spec.images:
+        spec.warnings.append("no images detected")
+
+    # ── colors[] ─────────────────────────────────────────────────────
+    # Sweep <style> blocks (parser doesn't expose script/style text).
+    _harvest_style_blocks(capture.html, collector)
+    spec.colors = list(collector.colors)
+    if not spec.colors:
+        spec.warnings.append("no colour tokens detected")
+
+    # ── fonts[] ──────────────────────────────────────────────────────
+    spec.fonts = list(collector.fonts)
+    if not spec.fonts:
+        spec.warnings.append("no font tokens detected")
+
+    # ── spacing ──────────────────────────────────────────────────────
+    spec.spacing = _extract_spacing(capture.html)
+    if not spec.spacing:
+        spec.warnings.append("no spacing tokens detected")
 
     return spec
 
