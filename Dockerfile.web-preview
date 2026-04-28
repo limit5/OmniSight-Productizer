@@ -1,0 +1,166 @@
+# W14.1: omnisight-web-preview sidecar image.
+#
+# Owned by Priority W epic 14 (Live Web Sandbox Preview). The backend's
+# `POST /web-sandbox/preview` (W14.2) launches one container of this
+# image per workspace_id, bind-mounts the operator's checked-out source
+# at /workspace, runs `pnpm install`, and finally execs the project's
+# dev / SSR command. The CF Tunnel ingress (W14.3) routes
+# `https://preview-{sandbox_id}.{tunnel_host}` → this container's
+# exposed port.
+#
+# Why the four runtimes:
+#   - Node 22 (LTS): the JS runtime everything else sits on top of.
+#     Node 22 entered active LTS Oct 2024 and is the latest LTS line as
+#     of this image's design.
+#   - pnpm: canonical package manager for OmniSight scaffolds (W6/W7/W8
+#     all generate pnpm-lock.yaml). Installed via corepack so the
+#     version is reproducible and matches the project's `packageManager`
+#     field when present.
+#   - Vite: dev/build tool for the SPA scaffolds (W6 / W8). Installed
+#     globally so `vite --help` works inside the sidecar even before
+#     the project's own deps land — useful for the image-build smoke
+#     test and for diagnostic exec.
+#   - Bun: faster JS runtime + Nuxt SSR target. Bun ships pre-built
+#     glibc binaries only — there's no musl build — so the base image
+#     MUST be Debian-flavoured (bookworm-slim), NOT alpine. Trading
+#     ~70 MB of image weight for Bun support is worth it; Vite SPAs
+#     run fine on plain Node 22 and pay no penalty.
+#
+# Why a single stage instead of multi-stage builder/runner:
+#   pnpm + Vite + Bun are all install-once, never-rebuild tools. There
+#   is no compile-then-strip workflow that would benefit from a builder
+#   stage (compare Dockerfile.frontend, where the Next.js standalone
+#   trace IS produced in a builder and copied without npm). Adding a
+#   builder stage here would just duplicate the apt + curl footprint
+#   without shrinking the runtime.
+#
+# Production Readiness Gate (docs/sop/implement_phase_step.md §158):
+#   This image is its own artefact — built from the operator's host
+#   (or CI) and pulled by docker-socket-proxy at preview-launch time.
+#   It does NOT ship dependencies into Dockerfile.backend, so the
+#   backend image-rebuild check does not apply here. The relevant
+#   Production Readiness gates for this row are:
+#     (a) `docker build -f Dockerfile.web-preview .` succeeds — owned
+#         by the W14.1 contract test that lints the Dockerfile and
+#         (when OMNISIGHT_TEST_DOCKER_WEB_PREVIEW=1) actually builds.
+#     (b) `docker run --rm omnisight-web-preview --version` chain for
+#         each pinned tool agrees with web-preview/manifest.json — same
+#         contract test, opt-in lane.
+#   The image is `dev-only` until W14.2 wires `POST /web-sandbox/preview`
+#   and a CI lane bakes + pushes it to the same registry the backend
+#   pulls from.
+#
+# Module-global state audit (SOP §1): N/A — Dockerfile owns no Python
+# module state. Every uvicorn worker that launches a sidecar (W14.2)
+# starts a fresh container, so cross-worker state lives on disk in the
+# bind-mount, not in the sidecar's memory.
+#
+# Read-after-write timing audit (SOP §2): N/A — image build is a
+# one-shot offline operation; no read-after-write pattern exists.
+
+FROM node:22-bookworm-slim
+
+LABEL org.opencontainers.image.title="omnisight-web-preview"
+LABEL org.opencontainers.image.description="W14.1 sidecar runtime for the OmniSight Live Web Sandbox Preview (Node 22 + pnpm + Vite + Bun)"
+LABEL org.opencontainers.image.source="https://github.com/omnisight/productizer"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+# Pinned tool versions. Bumping any of these requires bumping
+# web-preview/manifest.json in the same commit — the contract test
+# `test_web_preview_image_pins.py::test_dockerfile_arg_matches_manifest`
+# enforces the drift guard.
+ARG PNPM_VERSION=9.15.0
+ARG BUN_VERSION=1.1.40
+ARG VITE_VERSION=5.4.10
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── System packages ─────────────────────────────────────────────────
+# ca-certificates : HTTPS for git fetches + npm/pnpm registry
+# curl            : Bun installer + diagnostic
+# git             : the backend's W14.2 launcher will `git fetch` the
+#                   workspace ref into /workspace before exec'ing the
+#                   dev command; git is the bare minimum for that.
+# unzip           : Bun installer ships a .zip artefact and runs unzip.
+# tini            : PID-1 init that reaps zombies and forwards SIGTERM
+#                   to the dev server. The W14.5 idle-kill reaper sends
+#                   SIGTERM via `docker stop`; without tini, dev servers
+#                   that fork (esbuild workers, vite optimizer) leave
+#                   zombie children and the container hangs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        unzip \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── pnpm via corepack ────────────────────────────────────────────────
+# Node 22 ships corepack pre-bundled. `corepack prepare ... --activate`
+# downloads the pinned pnpm tarball into corepack's cache and writes a
+# /usr/local/bin/pnpm shim, so subsequent `pnpm` calls don't hit the
+# network. We do this as root before switching to the unprivileged user;
+# the cache lives under /root/.cache/node/corepack but the shim in
+# /usr/local/bin is world-readable.
+RUN corepack enable \
+    && corepack prepare "pnpm@${PNPM_VERSION}" --activate
+
+# ── Vite global ──────────────────────────────────────────────────────
+# Installed via npm (not pnpm) because we want a top-level
+# /usr/local/lib/node_modules/vite tree without a pnpm store dance.
+# Project-level Vite (the one that actually serves) comes from the
+# operator's bind-mounted node_modules after W14.2 runs `pnpm install`.
+# This global is for the image-build smoke test + diagnostic exec.
+RUN npm install -g --no-fund --no-audit "vite@${VITE_VERSION}"
+
+# ── Bun ──────────────────────────────────────────────────────────────
+# Bun's official installer fetches a glibc binary tarball from
+# bun.sh/install and verifies the artefact's checksum internally. We
+# install to /opt/bun (a fixed location, not the installer's default
+# of $HOME) so the binary is available to every uid without per-user
+# duplication. Then symlink into /usr/local/bin so PATH works under
+# the unprivileged user.
+ENV BUN_INSTALL=/opt/bun
+RUN curl -fsSL https://bun.sh/install | bash -s -- "bun-v${BUN_VERSION}" \
+    && ln -s /opt/bun/bin/bun /usr/local/bin/bun \
+    && bun --version
+
+# ── Image manifest + entrypoint ──────────────────────────────────────
+# manifest.json is shipped at /etc/omnisight/web-preview-manifest.json
+# so a running container can introspect its own version pins without
+# the backend having to remember which image tag → which Bun build.
+# The contract test asserts this file is present and matches the
+# Dockerfile ARG values.
+COPY web-preview/manifest.json /etc/omnisight/web-preview-manifest.json
+COPY web-preview/entrypoint.sh /usr/local/bin/web-preview-entrypoint.sh
+RUN chmod 0555 /usr/local/bin/web-preview-entrypoint.sh \
+    && chmod 0444 /etc/omnisight/web-preview-manifest.json
+
+# ── Unprivileged user ────────────────────────────────────────────────
+# uid 10002 / gid 10002 — chosen to NOT collide with:
+#   - 10001:10001 → Dockerfile.installer (BS.4 sidecar)
+#   - 65532:65532 → Dockerfile.frontend (Next.js standalone)
+# Operators who bind-mount a workspace at /workspace must `chown
+# 10002:10002` the host directory so the sidecar can write
+# node_modules + .vite + .nuxt build outputs. The W14.2 backend
+# launcher owns that chown step (it knows the host path).
+RUN groupadd -g 10002 preview \
+    && useradd -u 10002 -g 10002 -m -d /home/preview -s /usr/sbin/nologin preview \
+    && mkdir -p /workspace \
+    && chown -R preview:preview /workspace /home/preview
+
+WORKDIR /workspace
+USER 10002:10002
+
+# Vite's default dev port (5173) and Nuxt SSR's default (3000) — the
+# CF Tunnel ingress rule (W14.3) targets one of these depending on
+# which scaffold the operator picked. EXPOSE is metadata-only; the
+# backend's `docker run -p` decides the actual host wiring.
+EXPOSE 3000
+EXPOSE 5173
+
+# tini as PID 1, then our shell shim, then the operator-supplied (or
+# Dockerfile-default) command. `tini -g` forwards signals to the entire
+# process group so esbuild workers / vite optimizer threads die cleanly.
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/web-preview-entrypoint.sh"]
+CMD ["pnpm", "dev", "--host", "0.0.0.0"]

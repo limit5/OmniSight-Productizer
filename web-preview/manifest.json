@@ -1,0 +1,48 @@
+{
+  "schema_version": "1",
+  "image_name": "omnisight-web-preview",
+  "image_purpose": "W14.1 sidecar runtime: clones an operator workspace, installs JS deps, and runs the project's dev/SSR server (Vite for SPAs, Bun for Nuxt SSR, generic pnpm dev for everything else). Backend wires this image via POST /web-sandbox/preview (W14.2).",
+  "base_image": "node:22-bookworm-slim",
+  "runtime_uid": 10002,
+  "runtime_gid": 10002,
+  "runtime_user": "preview",
+  "workdir": "/workspace",
+  "exposed_ports": [3000, 5173],
+  "version_pins": {
+    "node_major": "22",
+    "node_channel": "lts",
+    "pnpm": "9.15.0",
+    "bun": "1.1.40",
+    "vite": "5.4.10"
+  },
+  "exposed_port_purpose": {
+    "3000": "Nuxt SSR / Next.js dev server default",
+    "5173": "Vite dev server default"
+  },
+  "tools": {
+    "node": {
+      "purpose": "JavaScript runtime; Node 22 is in active LTS.",
+      "version_check": ["node", "--version"]
+    },
+    "pnpm": {
+      "purpose": "Canonical package manager for the OmniSight scaffolds (W6/W7/W8); shipped via corepack so the version is reproducible per image.",
+      "version_check": ["pnpm", "--version"]
+    },
+    "bun": {
+      "purpose": "Faster JS runtime used as the Nuxt SSR target inside the sandbox; Bun pre-built binaries are glibc-only, so the base image is bookworm-slim instead of alpine.",
+      "version_check": ["bun", "--version"]
+    },
+    "vite": {
+      "purpose": "Dev/build tool for the SPA scaffolds; installed globally so the sidecar can `vite --help` even before the project's own deps land.",
+      "version_check": ["vite", "--version"]
+    }
+  },
+  "entrypoint": "/usr/local/bin/web-preview-entrypoint.sh",
+  "default_cmd": ["pnpm", "dev", "--host", "0.0.0.0"],
+  "notes": [
+    "This image owns runtime tools only. Cloning the workspace, running `pnpm install`, choosing the dev command, and resource-limiting the container are the responsibility of the backend launcher (W14.2 / W14.9).",
+    "DOCKER_HOST is intentionally NOT set; the sidecar never talks to the docker daemon. The backend launches it via docker-socket-proxy from the host side.",
+    "Idle-timeout enforcement (W14.5) is owned by the backend's preview-instance reaper — the sidecar itself runs until killed.",
+    "The image does NOT bake any project source. The backend bind-mounts the workspace into /workspace at runtime."
+  ]
+}
