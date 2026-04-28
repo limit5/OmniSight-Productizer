@@ -644,11 +644,11 @@ def test_w11_10_symbol_re_exported_via_package(symbol: str) -> None:
 def test_total_re_export_count_pinned_at_192() -> None:
     # W11.9 left __all__ at 169 symbols; W11.10 adds 12 clone_spec_context
     # symbols → 181; W11.12 adds 11 clone_audit symbols → 192;
-    # W13.2 adds 7 screenshot-breakpoint symbols → 199. If this
-    # fails with a different count, audit whether you consciously added /
-    # removed a public symbol and update the pin alongside the row's
-    # TODO entry.
-    assert len(web_pkg.__all__) == 199
+    # W13.2 adds 7 screenshot-breakpoint symbols → 199; W13.3 adds 18
+    # screenshot-writer symbols → 217. If this fails with a different
+    # count, audit whether you consciously added / removed a public
+    # symbol and update the pin alongside the row's TODO entry.
+    assert len(web_pkg.__all__) == 217
 
 
 # ─── 12. Whole-spec invariants ───────────────────────────────────────

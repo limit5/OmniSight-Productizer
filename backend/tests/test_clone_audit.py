@@ -923,10 +923,11 @@ def test_clone_audit_symbol_re_exported_from_package(symbol: str) -> None:
 def test_total_re_export_count_pinned_at_192() -> None:
     """Drift guard: every prior W11 row pinned the running total. W11.12
     adds 11 ``clone_audit`` symbols → 192. W13.2 adds 7 screenshot-
-    breakpoint symbols → 199. Each row's drift guard is updated in
-    lockstep so a future row that adds a new symbol fails every guard
-    until each one acknowledges the new total."""
-    assert len(web_pkg.__all__) == 199
+    breakpoint symbols → 199. W13.3 adds 18 screenshot-writer symbols →
+    217. Each row's drift guard is updated in lockstep so a future row
+    that adds a new symbol fails every guard until each one acknowledges
+    the new total."""
+    assert len(web_pkg.__all__) == 217
 
 
 # ── Whole-spec invariants ───────────────────────────────────────────────
