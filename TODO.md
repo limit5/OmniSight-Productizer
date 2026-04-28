@@ -2237,7 +2237,7 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
 
 > 借 open-lovable `scrape-screenshot` pattern。比 open-lovable 加碼**多斷點**（375 / 768 / 1440 / 1920），W14 live preview 可做 ghost overlay diff。
 
-- [ ] W13.1 `backend/web/screenshot_capture.py` — Playwright multi-context（每 viewport 一個）
+- [x] W13.1 `backend/web/screenshot_capture.py` — Playwright multi-context（每 viewport 一個）<br/>　└─ ✅ landed 2026-04-29 — `MultiContextScreenshotCapture` 引擎 (~580 LOC) + `Viewport` / `ViewportScreenshot` frozen dataclass + 55 contract tests。**One-context-per-viewport 不變式由行為測試鎖**：`test_capture_multi_creates_one_context_per_viewport` 驗 N viewports 觀察到 N 個 `_FakeContext` instance（避免 open-lovable 單一 context 共享 srcset/SW/cookie 的 stale-render 漏洞）；browser launch amortise (`test_capture_multi_amortises_browser_across_viewports` 驗 1 launch / N contexts / 多次呼叫）；context 永遠 `finally`-tear-down。Lazy `playwright` import + typed `ScreenshotDependencyError` ─ stock image 不 import 任何 playwright bytes；引擎不寫磁碟（W13.3 才接 `.omnisight/refs/{breakpoint}.png`）、不鎖 4 個預設斷點（W13.2）、不接 ghost overlay（W13.4）、不跑 5 URL × 4 BP matrix（W13.5）。
 - [ ] W13.2 4 預設斷點 + custom 額外斷點 list
 - [ ] W13.3 Output: `.omnisight/refs/{breakpoint}.png` + manifest.json
 - [ ] W13.4 整合 W14 ghost overlay 比對
