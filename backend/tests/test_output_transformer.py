@@ -915,8 +915,9 @@ def test_package_total_re_export_count_pinned() -> None:
     """Drift guard: the W11.5 row pinned 79 symbols. W11.6 adds 19
     new ones → 98 total. W11.7 adds 29 new ones (clone_manifest
     surface) → 127. W11.8 adds 19 new ones (clone_rate_limit surface)
-    → 146. Any future re-export drift is an obvious diff."""
-    assert len(web_pkg.__all__) == 146
+    → 146. W11.9 adds 23 new ones (framework_adapter surface) → 169.
+    Any future re-export drift is an obvious diff."""
+    assert len(web_pkg.__all__) == 169
 
 
 # ── Whole-spec invariants ──────────────────────────────────────────────

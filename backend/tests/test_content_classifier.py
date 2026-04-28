@@ -984,9 +984,10 @@ def test_total_re_export_count_pinned_at_79():
     # W11.5 originally pinned this at 79; W11.6 added 19 new symbols
     # (output_transformer surface) → 98; W11.7 added 29 new symbols
     # (clone_manifest surface) → 127; W11.8 added 19 new symbols
-    # (clone_rate_limit surface) → 146. Each W11 row's own drift guard
-    # re-pins at the new value.
-    assert len(web_pkg.__all__) == 146
+    # (clone_rate_limit surface) → 146; W11.9 added 23 new symbols
+    # (framework_adapter surface) → 169. Each W11 row's own drift
+    # guard re-pins at the new value.
+    assert len(web_pkg.__all__) == 169
 
 
 # ── Whole-spec invariants ───────────────────────────────────────────────

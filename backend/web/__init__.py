@@ -56,13 +56,29 @@ Sub-modules:
                          raises :class:`CloneRateLimitedError` (PEP
                          HOLD) with a precise ``retry_after_seconds``.
 
+    framework_adapter    W11.9 multi-framework adapter — three render
+                         paths (Next.js 14 / Nuxt 3 / Astro 4) producing
+                         a :class:`RenderedProject` (frozen dataclass of
+                         relative-path-pinned :class:`RenderedFile`
+                         records) from a :class:`TransformedSpec` plus
+                         the W11.7 :class:`CloneManifest`. Pure render
+                         function (no FS I/O) + a separate
+                         ``write_rendered_project`` writer mirrors the
+                         W11.7 build/write split. Bakes the W11.7
+                         traceability comment into a static
+                         ``public/clone-traceability.html`` and
+                         framework-idiomatic ``<meta>`` tags. Future Vue
+                         / Svelte rows plug in via the same
+                         :class:`FrameworkAdapter` Protocol.
+
 W11.1 ships the entry point + minimal ``CloneSpec`` container +
 ``CloneSource`` protocol; W11.2 plugs the two production-targeted
 backends behind that contract; W11.3 populates the spec from rendered
 HTML; W11.4 adds the L1 refusal-signal gate; W11.5 adds the L2 content
 classifier; W11.6 adds the L3 transformer; W11.7 adds the L4
-traceability layer; W11.8 adds the L5 rate limit + PEP HOLD; the
-5-layer defense is now complete.
+traceability layer; W11.8 adds the L5 rate limit + PEP HOLD; W11.9 adds
+the multi-framework render path productizer; the 5-layer defense remains
+intact (W11.9 is consumer-side of the L4 manifest).
 
 Inspired by firecrawl/open-lovable (MIT). Attribution and license text
 land alongside the W11.13 row (`LICENSES/open-lovable-mit.txt`).
@@ -162,6 +178,31 @@ from backend.web.clone_rate_limit import (
     reset_clone_rate_limiter,
     resolve_clone_rate_limit,
     resolve_clone_rate_window_seconds,
+)
+from backend.web.framework_adapter import (
+    ASTRO_FRAMEWORK_NAME,
+    AstroFrameworkAdapter,
+    FrameworkAdapter,
+    FrameworkAdapterError,
+    GENERATOR_META,
+    MAX_RENDERED_IMAGES,
+    MAX_RENDERED_NAV_ITEMS,
+    MAX_RENDERED_SECTIONS,
+    NEXT_FRAMEWORK_NAME,
+    NUXT_FRAMEWORK_NAME,
+    NextFrameworkAdapter,
+    NuxtFrameworkAdapter,
+    RenderedFile,
+    RenderedProject,
+    RenderedProjectWriteError,
+    SUPPORTED_FRAMEWORKS,
+    TRACEABILITY_HTML_FILENAME,
+    TRACEABILITY_HTML_RELATIVE_PATH,
+    UnknownFrameworkError,
+    make_framework_adapter,
+    project_to_audit_payload,
+    render_clone_project,
+    write_rendered_project,
 )
 from backend.web.output_transformer import (
     BytesLeakError,
@@ -332,8 +373,10 @@ def make_clone_source(
 __all__ = [
     "AI_BOT_USER_AGENTS",
     "AI_TXT_PATHS",
+    "ASTRO_FRAMEWORK_NAME",
     "AUDIT_ACTION",
     "AUDIT_ENTITY_KIND",
+    "AstroFrameworkAdapter",
     "BlockedDestinationError",
     "BytesLeakError",
     "CLONE_RATE_AUDIT_ACTION",
@@ -377,6 +420,9 @@ __all__ = [
     "FirecrawlConfigError",
     "FirecrawlDependencyError",
     "FirecrawlSource",
+    "FrameworkAdapter",
+    "FrameworkAdapterError",
+    "GENERATOR_META",
     "HTML_COMMENT_BEGIN",
     "HTML_COMMENT_END",
     "InMemoryCloneRateLimiter",
@@ -396,6 +442,9 @@ __all__ = [
     "MAX_PROMPT_INPUT_CHARS",
     "MAX_REASON_CHARS",
     "MAX_REASONS",
+    "MAX_RENDERED_IMAGES",
+    "MAX_RENDERED_NAV_ITEMS",
+    "MAX_RENDERED_SECTIONS",
     "MAX_REWRITE_INPUT_CHARS",
     "MAX_REWRITE_TEXT_CHARS",
     "MAX_REWRITTEN_LIST_ITEMS",
@@ -405,6 +454,10 @@ __all__ = [
     "MachineRefusedError",
     "ManifestSchemaError",
     "ManifestWriteError",
+    "NEXT_FRAMEWORK_NAME",
+    "NUXT_FRAMEWORK_NAME",
+    "NextFrameworkAdapter",
+    "NuxtFrameworkAdapter",
     "OPEN_LOVABLE_ATTRIBUTION",
     "OutputTransformerError",
     "PLACEHOLDER_PROVIDER",
@@ -420,15 +473,22 @@ __all__ = [
     "RefusalDecision",
     "RefusalFetchResult",
     "RefusalFetcher",
+    "RenderedFile",
+    "RenderedProject",
+    "RenderedProjectWriteError",
     "RewriteUnavailableError",
     "RiskClassification",
     "RiskScore",
     "SUPPORTED_BROWSERS",
+    "SUPPORTED_FRAMEWORKS",
     "SUPPORTED_URL_SCHEMES",
     "SiteClonerError",
+    "TRACEABILITY_HTML_FILENAME",
+    "TRACEABILITY_HTML_RELATIVE_PATH",
     "TextRewriteLLM",
     "TransformedSpec",
     "UnknownCloneBackendError",
+    "UnknownFrameworkError",
     "apply_image_placeholders",
     "assert_clone_allowed_post_capture",
     "assert_clone_allowed_pre_capture",
@@ -457,6 +517,7 @@ __all__ = [
     "inject_html_traceability_comment",
     "is_public_destination",
     "make_clone_source",
+    "make_framework_adapter",
     "manifest_to_audit_payload",
     "manifest_to_dict",
     "merge_refusal_decisions",
@@ -464,9 +525,11 @@ __all__ = [
     "normalize_url",
     "parse_html_traceability_comment",
     "pin_clone_artefacts",
+    "project_to_audit_payload",
     "read_manifest_file",
     "record_clone_audit",
     "record_clone_rate_limit_hold",
+    "render_clone_project",
     "render_html_traceability_comment",
     "reset_clone_rate_limiter",
     "resolve_clone_rate_limit",
@@ -476,4 +539,5 @@ __all__ = [
     "validate_clone_url",
     "verify_manifest_hash",
     "write_manifest_file",
+    "write_rendered_project",
 ]
