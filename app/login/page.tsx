@@ -398,6 +398,21 @@ function LoginForm() {
           }}
         />
 
+        {/* AS.7.3 — Forgot-password link. Forwards the typed email
+            so the next page pre-fills it; users with no email yet
+            land on a blank input. */}
+        <a
+          href={
+            email
+              ? `/forgot-password?email=${encodeURIComponent(email)}`
+              : "/forgot-password"
+          }
+          data-testid="as7-login-forgot-link"
+          className="self-end font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] underline"
+        >
+          Forgot your password?
+        </a>
+
         {/* AS.6.4 honeypot — rotating field name. Renders empty
             placeholder until SHA-256 resolves; the form's submit
             adds the resolved key to the extras payload. */}

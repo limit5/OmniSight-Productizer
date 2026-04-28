@@ -7,9 +7,14 @@ import {
   logout as apiLogout,
   mfaChallenge as apiMfaChallenge,
   signup as apiSignup,
+  requestPasswordReset as apiRequestPasswordReset,
+  resetPassword as apiResetPassword,
   setCurrentSessionId,
   ApiError,
   type AuthUser,
+  type RequestPasswordResetResponse,
+  type ResetPasswordRequestBody,
+  type ResetPasswordResponse,
   type SignupRequestBody,
   type SignupResponse,
   type WhoamiResponse,
@@ -22,6 +27,12 @@ import {
   classifySignupError,
   type SignupErrorOutcome,
 } from "@/lib/auth/signup-form-helpers"
+import {
+  classifyRequestResetError,
+  classifyResetPasswordError,
+  type RequestResetErrorOutcome,
+  type ResetPasswordErrorOutcome,
+} from "@/lib/auth/password-reset-helpers"
 
 interface MfaPending {
   mfa_token: string
@@ -84,6 +95,30 @@ export interface SignupOutcome {
   readonly email: string | null
 }
 
+/** AS.7.3 — outcome surfaced to the forgot-password page after
+ *  `requestPasswordReset()` resolves. `linkSent` is the terminal
+ *  state where the page renders the "check your inbox" copy
+ *  regardless of whether the email matched a known account (the
+ *  enumeration-resistance contract). `failed` is reserved for
+ *  genuine failure modes (rate-limit / bot-challenge / 5xx). */
+export interface RequestPasswordResetOutcome {
+  readonly status: "linkSent" | "failed"
+  readonly error: RequestResetErrorOutcome | null
+  readonly email: string | null
+}
+
+/** AS.7.3 — outcome surfaced to the reset-password page after
+ *  `resetPassword()` resolves. `ok` means the new password was
+ *  accepted; the page transitions to the success card and offers a
+ *  "sign in now" CTA. `failed` carries the structured error so the
+ *  page can branch on invalid_token / expired_token vs. weak
+ *  password. */
+export interface ResetPasswordOutcome {
+  readonly status: "ok" | "failed"
+  readonly error: ResetPasswordErrorOutcome | null
+  readonly email: string | null
+}
+
 interface AuthContextValue {
   user: AuthUser | null
   authMode: WhoamiResponse["auth_mode"] | null
@@ -100,6 +135,13 @@ interface AuthContextValue {
    *  `null` until the first failure; cleared on the next success or
    *  on a fresh `signup()` call. */
   lastSignupError: SignupErrorOutcome | null
+  /** AS.7.3 — structured outcome for the most recent failed
+   *  request-password-reset call. `null` on success (terminal copy
+   *  is shown regardless) or until the first failure. */
+  lastRequestResetError: RequestResetErrorOutcome | null
+  /** AS.7.3 — structured outcome for the most recent failed
+   *  reset-password call (the new-password submission stage). */
+  lastResetPasswordError: ResetPasswordErrorOutcome | null
   mfaPending: MfaPending | null
   login: (
     email: string,
@@ -113,6 +155,21 @@ interface AuthContextValue {
     body: SignupRequestBody,
     extras?: Readonly<Record<string, string>>,
   ) => Promise<SignupOutcome>
+  /** AS.7.3 — request a password-reset email. Resolves with the
+   *  canonical `linkSent` terminal state on every 2xx response
+   *  regardless of whether the email matched a known account
+   *  (enumeration-resistance contract per AS.0.7 §3.4). */
+  requestPasswordReset: (
+    email: string,
+    extras?: Readonly<Record<string, string>>,
+  ) => Promise<RequestPasswordResetOutcome>
+  /** AS.7.3 — submit the new password using the magic-link token.
+   *  Returns a structured outcome the page branches on (success vs
+   *  invalid/expired token vs weak password). */
+  resetPassword: (
+    body: ResetPasswordRequestBody,
+    extras?: Readonly<Record<string, string>>,
+  ) => Promise<ResetPasswordOutcome>
   logout: () => Promise<void>
   refresh: () => Promise<void>
   submitMfa: (code: string) => Promise<boolean>
@@ -131,6 +188,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     useState<LoginErrorOutcome | null>(null)
   const [lastSignupError, setLastSignupError] =
     useState<SignupErrorOutcome | null>(null)
+  const [lastRequestResetError, setLastRequestResetError] =
+    useState<RequestResetErrorOutcome | null>(null)
+  const [lastResetPasswordError, setLastResetPasswordError] =
+    useState<ResetPasswordErrorOutcome | null>(null)
   const [mfaPending, setMfaPending] = useState<MfaPending | null>(null)
 
   const refresh = useCallback(async () => {
@@ -301,6 +362,111 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [],
   )
 
+  const requestPasswordReset = useCallback(
+    async (
+      email: string,
+      extras?: Readonly<Record<string, string>>,
+    ): Promise<RequestPasswordResetOutcome> => {
+      try {
+        const res: RequestPasswordResetResponse =
+          await apiRequestPasswordReset(email, extras)
+        // The 2xx response is the canonical terminal-copy branch.
+        // We do NOT branch on `link_sent === true|false` for the
+        // visible UI copy because the AS.0.7 §3.4 contract requires
+        // the same response shape regardless of whether the email
+        // matched a known user. Pages render "if your account
+        // exists, we've sent a link" full stop.
+        setLastRequestResetError(null)
+        setError(null)
+        return Object.freeze({
+          status: "linkSent" as const,
+          error: null,
+          email: res.email ?? email,
+        })
+      } catch (exc) {
+        if (exc instanceof ApiError) {
+          const errorCode = _extractErrorCode(exc)
+          const retryAfter = _extractRetryAfter(exc)
+          const outcome = classifyRequestResetError({
+            status: exc.status,
+            errorCode,
+            retryAfter,
+          })
+          setLastRequestResetError(outcome)
+          setError(outcome.message)
+          return Object.freeze({
+            status: "failed" as const,
+            error: outcome,
+            email: null,
+          })
+        }
+        const msg = exc instanceof Error ? exc.message : String(exc)
+        const outcome = classifyRequestResetError({
+          status: null,
+          message: msg,
+          retryAfter: null,
+        })
+        setLastRequestResetError(outcome)
+        setError(outcome.message)
+        return Object.freeze({
+          status: "failed" as const,
+          error: outcome,
+          email: null,
+        })
+      }
+    },
+    [],
+  )
+
+  const resetPassword = useCallback(
+    async (
+      body: ResetPasswordRequestBody,
+      extras?: Readonly<Record<string, string>>,
+    ): Promise<ResetPasswordOutcome> => {
+      try {
+        const res: ResetPasswordResponse = await apiResetPassword(body, extras)
+        setLastResetPasswordError(null)
+        setError(null)
+        return Object.freeze({
+          status: "ok" as const,
+          error: null,
+          email: res.email ?? null,
+        })
+      } catch (exc) {
+        if (exc instanceof ApiError) {
+          const errorCode = _extractErrorCode(exc)
+          const retryAfter = _extractRetryAfter(exc)
+          const outcome = classifyResetPasswordError({
+            status: exc.status,
+            errorCode,
+            retryAfter,
+          })
+          setLastResetPasswordError(outcome)
+          setError(outcome.message)
+          return Object.freeze({
+            status: "failed" as const,
+            error: outcome,
+            email: null,
+          })
+        }
+        const msg = exc instanceof Error ? exc.message : String(exc)
+        const outcome = classifyResetPasswordError({
+          status: null,
+          message: msg,
+          retryAfter: null,
+        })
+        setLastResetPasswordError(outcome)
+        setError(outcome.message)
+        return Object.freeze({
+          status: "failed" as const,
+          error: outcome,
+          email: null,
+        })
+      }
+    },
+    [],
+  )
+
   const submitMfa = useCallback(async (code: string) => {
     if (!mfaPending) return false
     try {
@@ -339,7 +505,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, lastLoginError, lastSignupError, mfaPending, login, signup, logout, refresh, submitMfa, cancelMfa }}>
+    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, lastLoginError, lastSignupError, lastRequestResetError, lastResetPasswordError, mfaPending, login, signup, requestPasswordReset, resetPassword, logout, refresh, submitMfa, cancelMfa }}>
       {children}
     </Ctx.Provider>
   )

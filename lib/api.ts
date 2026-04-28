@@ -2707,6 +2707,92 @@ export async function signup(
   })
 }
 
+/**
+ * AS.7.3 — Password reset.
+ *
+ * Two-stage flow mirroring the AS.7.1 / AS.7.2 shape:
+ *
+ *   1. `requestPasswordReset(email, extras?)` posts to
+ *      `POST /api/v1/auth/password-reset/request`. Always resolves
+ *      with the canonical `link_sent` shape regardless of whether
+ *      the email matched a known user — the enumeration-resistance
+ *      contract per AS.0.7 §3.4. The classifier surfaces only the
+ *      genuine failure modes (rate-limit / bot-challenge / 5xx).
+ *
+ *   2. `resetPassword(token, newPassword, extras?)` posts to
+ *      `POST /api/v1/auth/password-reset/confirm`. Returns
+ *      `{status: "ok"}` on success or 400 / 410 / 401 / 404 with a
+ *      specific error code that the classifier maps to
+ *      invalid_token / expired_token / weak_password.
+ *
+ * Both endpoints accept the same `extras` shape as login() / signup()
+ * so the page can thread the rotating honeypot field name + the
+ * Turnstile token through the request body.
+ *
+ * Until the backend endpoint lands the page surfaces the resulting
+ * 404 / 405 through `classifyRequestResetError()` /
+ * `classifyResetPasswordError()` as the canonical
+ * "service_unavailable" copy — a deliberate Phase-1 fail-closed
+ * behaviour that's identical to the AS.7.2 signup pattern.
+ */
+export interface RequestPasswordResetRequestBody {
+  email: string
+}
+
+export interface RequestPasswordResetResponse {
+  /** Always set on the 2xx success path. The canonical terminal copy
+   *  is rendered regardless of whether the email matched a known
+   *  user — the page does not branch on this flag for the visible UI
+   *  copy. */
+  link_sent: boolean
+  /** Echoes the email so the page can render "we sent a link to ..."
+   *  even if the user navigated away from the input. */
+  email?: string
+}
+
+export async function requestPasswordReset(
+  email: string,
+  extras?: Readonly<Record<string, string>>,
+): Promise<RequestPasswordResetResponse> {
+  const payload: Record<string, unknown> = { email, ...(extras || {}) }
+  return request<RequestPasswordResetResponse>(
+    "/auth/password-reset/request",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export interface ResetPasswordRequestBody {
+  /** Single-use token from the magic link in the email. The backend
+   *  binds it to a (user, expiry, signature) triple. */
+  token: string
+  /** New password the user typed (or auto-generated). */
+  password: string
+}
+
+export interface ResetPasswordResponse {
+  status: "ok"
+  /** Echoed so the success card can show "you can now sign in as
+   *  ..." without re-fetching the user. */
+  email?: string
+}
+
+export async function resetPassword(
+  body: ResetPasswordRequestBody,
+  extras?: Readonly<Record<string, string>>,
+): Promise<ResetPasswordResponse> {
+  const payload: Record<string, unknown> = { ...body, ...(extras || {}) }
+  return request<ResetPasswordResponse>(
+    "/auth/password-reset/confirm",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
 // ─── Admin tenant CRUD (Y2 #278 / Y8 row 3 admin page) ───────
 
 export type TenantPlan = "free" | "starter" | "pro" | "enterprise"
