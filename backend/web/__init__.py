@@ -323,6 +323,15 @@ from backend.web.site_cloner import (
     normalize_url,
     validate_clone_url,
 )
+from backend.web.screenshot_breakpoints import (
+    BREAKPOINT_DESKTOP_1440,
+    BREAKPOINT_DESKTOP_1920,
+    BREAKPOINT_MOBILE_375,
+    BREAKPOINT_TABLET_768,
+    DEFAULT_BREAKPOINTS,
+    DEFAULT_BREAKPOINT_NAMES,
+    resolve_breakpoints,
+)
 
 
 # ── Backend selection ─────────────────────────────────────────────────
@@ -428,6 +437,10 @@ __all__ = [
     "AUDIT_ACTION",
     "AUDIT_ENTITY_KIND",
     "AstroFrameworkAdapter",
+    "BREAKPOINT_DESKTOP_1440",
+    "BREAKPOINT_DESKTOP_1920",
+    "BREAKPOINT_MOBILE_375",
+    "BREAKPOINT_TABLET_768",
     "BlockedDestinationError",
     "BytesLeakError",
     "CLONE_ATTEMPT_FAILED_AUDIT_ACTION",
@@ -458,6 +471,8 @@ __all__ = [
     "CloneSpecContextError",
     "ContentClassifierError",
     "ContentRiskError",
+    "DEFAULT_BREAKPOINT_NAMES",
+    "DEFAULT_BREAKPOINTS",
     "DEFAULT_BROWSER",
     "DEFAULT_CLASSIFIER_MODEL",
     "DEFAULT_CLONE_RATE_LIMIT",
@@ -606,6 +621,7 @@ __all__ = [
     "render_clone_project",
     "render_html_traceability_comment",
     "reset_clone_rate_limiter",
+    "resolve_breakpoints",
     "resolve_clone_rate_limit",
     "resolve_clone_rate_window_seconds",
     "serialize_manifest_json",

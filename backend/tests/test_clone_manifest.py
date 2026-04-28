@@ -271,10 +271,10 @@ def test_package_re_exports_w11_7_symbols() -> None:
 def test_total_re_exports_drift_guard() -> None:
     """Drift guard: bumping this number on every W11 row makes adding
     a new symbol an explicit code-review event (matches W11.5/W11.6
-    pattern)."""
-    assert len(web_pkg.__all__) == 192, (
+    pattern). W13.2 adds 7 screenshot-breakpoint symbols → 199."""
+    assert len(web_pkg.__all__) == 199, (
         "If you added/removed a public symbol, update this expectation "
-        "alongside the W11 row's TODO entry — drift here is a code-review "
+        "alongside the W11/W13 row's TODO entry — drift here is a code-review "
         "trigger, not a test bug."
     )
 

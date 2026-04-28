@@ -918,8 +918,9 @@ def test_package_total_re_export_count_pinned() -> None:
     → 146. W11.9 adds 23 new ones (framework_adapter surface) → 169.
     W11.10 adds 12 new ones (clone_spec_context surface) → 181.
     W11.12 adds 11 new ones (clone_audit surface) → 192.
+    W13.2 adds 7 new ones (screenshot_breakpoints surface) → 199.
     Any future re-export drift is an obvious diff."""
-    assert len(web_pkg.__all__) == 192
+    assert len(web_pkg.__all__) == 199
 
 
 # ── Whole-spec invariants ──────────────────────────────────────────────
