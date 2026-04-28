@@ -16,11 +16,18 @@ Sub-modules:
                          Playwright headless browser (W11.2 backend b).
                          Mandatory for air-gapped deployments.
 
-The package is intentionally thin at this point — W11.1 ships the entry
-point + minimal ``CloneSpec`` container + ``CloneSource`` protocol so the
-follow-up rows can build on a stable contract surface; W11.2 plugs the
-two production-targeted backends behind that contract; subsequent rows
-populate the spec / add defense layers.
+    refusal_signals      W11.4 L1 machine-refusal-signal scanner —
+                         robots.txt + ai.txt + ``noai`` meta + X-Robots-
+                         Tag + Cloudflare AI-bot-block detection. Run
+                         **before** ``clone_site()`` so a refused URL
+                         never burns a backend session.
+
+W11.1 ships the entry point + minimal ``CloneSpec`` container +
+``CloneSource`` protocol; W11.2 plugs the two production-targeted
+backends behind that contract; W11.3 populates the spec from rendered
+HTML; W11.4 adds the L1 refusal-signal gate; subsequent rows add the
+remaining defense layers (W11.5 LLM classifier, W11.6 transformer,
+W11.7 manifest, W11.8 rate limiter).
 
 Inspired by firecrawl/open-lovable (MIT). Attribution and license text
 land alongside the W11.13 row (`LICENSES/open-lovable-mit.txt`).
@@ -46,6 +53,33 @@ from backend.web.playwright_source import (
     PlaywrightDependencyError,
     PlaywrightSource,
     SUPPORTED_BROWSERS,
+)
+from backend.web.refusal_signals import (
+    AI_BOT_USER_AGENTS,
+    AI_TXT_PATHS,
+    CLOUDFLARE_AI_BLOCK_BODY_HINTS,
+    CLOUDFLARE_MITIGATED_REFUSE_VALUES,
+    DEFAULT_REFUSAL_FETCH_MAX_BYTES,
+    DEFAULT_REFUSAL_FETCH_TIMEOUT_S,
+    DEFAULT_USER_AGENT,
+    MachineRefusedError,
+    META_AI_BOT_NAMES,
+    META_NOAI_TOKENS,
+    ROBOTS_TXT_PATH,
+    RefusalDecision,
+    RefusalFetchResult,
+    RefusalFetcher,
+    assert_clone_allowed_post_capture,
+    assert_clone_allowed_pre_capture,
+    check_ai_txt,
+    check_cloudflare_ai_block,
+    check_machine_refusal_post_capture,
+    check_machine_refusal_pre_capture,
+    check_meta_noai,
+    check_robots_txt,
+    check_x_robots_tag,
+    default_refusal_fetcher,
+    merge_refusal_decisions,
 )
 from backend.web.site_cloner import (
     BlockedDestinationError,
@@ -166,7 +200,11 @@ def make_clone_source(
 
 
 __all__ = [
+    "AI_BOT_USER_AGENTS",
+    "AI_TXT_PATHS",
     "BlockedDestinationError",
+    "CLOUDFLARE_AI_BLOCK_BODY_HINTS",
+    "CLOUDFLARE_MITIGATED_REFUSE_VALUES",
     "CloneCaptureTimeoutError",
     "CloneSource",
     "CloneSourceError",
@@ -175,7 +213,10 @@ __all__ = [
     "DEFAULT_BROWSER",
     "DEFAULT_FIRECRAWL_BASE_URL",
     "DEFAULT_MAX_HTML_BYTES",
+    "DEFAULT_REFUSAL_FETCH_MAX_BYTES",
+    "DEFAULT_REFUSAL_FETCH_TIMEOUT_S",
     "DEFAULT_TIMEOUT_S",
+    "DEFAULT_USER_AGENT",
     "DEFAULT_WAIT_UNTIL",
     "FIRECRAWL_BACKEND_NAME",
     "FIRECRAWL_SCRAPE_PATH",
@@ -184,20 +225,38 @@ __all__ = [
     "FirecrawlSource",
     "InvalidCloneURLError",
     "KNOWN_CLONE_BACKENDS",
+    "META_AI_BOT_NAMES",
+    "META_NOAI_TOKENS",
+    "MachineRefusedError",
     "PLAYWRIGHT_BACKEND_NAME",
     "PlaywrightConfigError",
     "PlaywrightDependencyError",
     "PlaywrightSource",
+    "ROBOTS_TXT_PATH",
     "RawCapture",
+    "RefusalDecision",
+    "RefusalFetchResult",
+    "RefusalFetcher",
     "SUPPORTED_BROWSERS",
     "SUPPORTED_URL_SCHEMES",
     "SiteClonerError",
     "UnknownCloneBackendError",
+    "assert_clone_allowed_post_capture",
+    "assert_clone_allowed_pre_capture",
     "build_clone_spec_from_capture",
+    "check_ai_txt",
+    "check_cloudflare_ai_block",
+    "check_machine_refusal_post_capture",
+    "check_machine_refusal_pre_capture",
+    "check_meta_noai",
+    "check_robots_txt",
+    "check_x_robots_tag",
     "clone_site",
+    "default_refusal_fetcher",
     "extract_hostname",
     "is_public_destination",
     "make_clone_source",
+    "merge_refusal_decisions",
     "normalize_url",
     "validate_clone_url",
 ]
