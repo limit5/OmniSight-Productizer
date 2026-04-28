@@ -50,3 +50,9 @@ export {
 
 // AS.7.7 — Profile / Account settings primitives
 export { OAuthOrbitSatellites } from "./oauth-orbit-satellites"
+
+// AS.7.8 — First-login onboarding primitives
+export {
+  CELEBRATION_DURATION_BY_LEVEL,
+  OnboardingCelebrationBurst,
+} from "./onboarding-celebration-burst"

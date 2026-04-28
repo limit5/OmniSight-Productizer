@@ -1273,6 +1273,113 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────
+ * AS.7.8 — First-login onboarding celebration burst
+ * ───────────────────────────────────────────────────────────────── */
+
+@keyframes as7-burst-particle {
+  0% {
+    transform: translate(-50%, -50%);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(
+      calc(-50% + var(--as7-burst-x, 0px)),
+      calc(-50% + var(--as7-burst-y, 0px))
+    );
+    opacity: 0;
+  }
+}
+
+@keyframes as7-burst-welcome-rise {
+  0% {
+    transform: translateY(28px) scale(0.92);
+    opacity: 0;
+  }
+  60% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+.as7-burst-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 220px;
+  padding: 1.5rem 0.5rem;
+  pointer-events: none;
+}
+
+.as7-burst-particles {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.as7-burst-particle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--as7-burst-hue, #a78bfa);
+  box-shadow: 0 0 12px var(--as7-burst-hue, #a78bfa);
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  animation: as7-burst-particle var(--as7-burst-duration, 1200ms)
+    cubic-bezier(0.18, 0.7, 0.3, 0.95) var(--as7-burst-delay, 0ms) forwards;
+}
+
+.as7-burst-welcome {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono, ui-monospace, "SFMono-Regular", monospace);
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(245, 240, 255, 0.96);
+  text-shadow: 0 0 14px rgba(184, 144, 255, 0.55);
+  animation: as7-burst-welcome-rise 700ms cubic-bezier(0.2, 0.8, 0.25, 1)
+    100ms backwards;
+}
+
+.as7-burst-welcome-text {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+}
+
+/* Motion-level gating — off / subtle render the welcome wordmark
+ * statically and skip the particle burst entirely. */
+.as7-root[data-motion-level="off"] .as7-burst-particle,
+.as7-root[data-motion-level="subtle"] .as7-burst-particle {
+  animation: none !important;
+  opacity: 0;
+}
+
+.as7-root[data-motion-level="off"] .as7-burst-welcome,
+.as7-root[data-motion-level="subtle"] .as7-burst-welcome {
+  animation: none !important;
+  transform: none !important;
+  opacity: 1;
+}
+
+/* ─────────────────────────────────────────────────────────────────
  * `prefers-reduced-motion: reduce` — last-line WCAG R25.2 defence
  * ───────────────────────────────────────────────────────────────── */
 
