@@ -2793,6 +2793,92 @@ export async function resetPassword(
   )
 }
 
+/**
+ * AS.7.5 — Email verification.
+ *
+ * Two endpoints mirroring the AS.7.3 password-reset shape:
+ *
+ *   1. `verifyEmail({ token }, extras?)` posts to
+ *      `POST /api/v1/auth/verify-email`. The user typically lands
+ *      via a magic link (`?token=...`) so the page calls this on
+ *      mount and switches to a success / failure card based on the
+ *      structured outcome. 2xx returns the verified email so the
+ *      success card can render "you can now sign in as ...".
+ *
+ *   2. `resendEmailVerification(email, extras?)` posts to
+ *      `POST /api/v1/auth/verify-email/resend`. Always resolves
+ *      with the canonical "we sent another link" terminal copy
+ *      regardless of whether the email matched a known unverified
+ *      user — same enumeration-resistance contract as the AS.7.3
+ *      forgot-password endpoint.
+ *
+ * Until the backend endpoints land the page surfaces the resulting
+ * 404 / 405 through `classifyEmailVerifyError()` /
+ * `classifyResendVerifyEmailError()` as the canonical
+ * "service_unavailable" copy — a deliberate Phase-1 fail-closed
+ * behaviour identical to AS.7.2 / AS.7.3.
+ */
+export interface VerifyEmailRequestBody {
+  /** Single-use signed token from the magic link in the email. The
+   *  backend binds it to a (user, expiry, signature) triple. */
+  token: string
+}
+
+export interface VerifyEmailResponse {
+  status: "ok"
+  /** Echoed so the success card can render "you can now sign in as
+   *  ..." without re-fetching the user. May be omitted in early
+   *  endpoint revisions; the page treats `null` as the safe default. */
+  email?: string
+  /** Some backend revisions auto-sign-in the user inline after a
+   *  successful verify so the SPA can route them directly to the
+   *  dashboard. The auth-context accepts either branch. */
+  user?: AuthUser
+}
+
+export async function verifyEmail(
+  body: VerifyEmailRequestBody,
+  extras?: Readonly<Record<string, string>>,
+): Promise<VerifyEmailResponse> {
+  const payload: Record<string, unknown> = { ...body, ...(extras || {}) }
+  return request<VerifyEmailResponse>(
+    "/auth/verify-email",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export interface ResendVerifyEmailRequestBody {
+  email: string
+}
+
+export interface ResendVerifyEmailResponse {
+  /** Always set on the 2xx success path. The canonical terminal copy
+   *  is rendered regardless of whether the email matched a known
+   *  unverified user — the page does not branch on this flag for the
+   *  visible UI copy. */
+  link_sent: boolean
+  /** Echoes the email so the page can render "we sent another link
+   *  to ..." even after clearing the form input. */
+  email?: string
+}
+
+export async function resendEmailVerification(
+  email: string,
+  extras?: Readonly<Record<string, string>>,
+): Promise<ResendVerifyEmailResponse> {
+  const payload: Record<string, unknown> = { email, ...(extras || {}) }
+  return request<ResendVerifyEmailResponse>(
+    "/auth/verify-email/resend",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
 // ─── Admin tenant CRUD (Y2 #278 / Y8 row 3 admin page) ───────
 
 export type TenantPlan = "free" | "starter" | "pro" | "enterprise"

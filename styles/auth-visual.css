@@ -976,6 +976,59 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────
+ * AS.7.5 — Email verification envelope idle motion
+ *
+ * Subtle floating + breathing brand-purple glow on the Mail icon
+ * shown on the verify-email page (both during the verifying spinner
+ * and on the failed/idle resend forms). Gated to motion levels
+ * normal / dramatic via the `data-motion-level` cascade — `off` /
+ * `subtle` render the icon static.
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-envelope-idle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--artifact-purple);
+  will-change: transform, filter;
+}
+
+.as7-envelope-idle[data-as7-envelope-idle="on"] {
+  animation: as7-envelope-idle 3.2s ease-in-out infinite;
+  filter: drop-shadow(0 0 8px rgba(168, 85, 247, 0.25));
+}
+
+@keyframes as7-envelope-idle {
+  0% {
+    transform: translateY(0) rotate(-1deg);
+    filter: drop-shadow(0 0 8px rgba(168, 85, 247, 0.25));
+  }
+  25% {
+    transform: translateY(-3px) rotate(0deg);
+    filter: drop-shadow(0 0 14px rgba(168, 85, 247, 0.45));
+  }
+  50% {
+    transform: translateY(0) rotate(1deg);
+    filter: drop-shadow(0 0 10px rgba(168, 85, 247, 0.30));
+  }
+  75% {
+    transform: translateY(-2px) rotate(0deg);
+    filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.35));
+  }
+  100% {
+    transform: translateY(0) rotate(-1deg);
+    filter: drop-shadow(0 0 8px rgba(168, 85, 247, 0.25));
+  }
+}
+
+/* Motion-level gating — `off` / `subtle` render the icon static. */
+.as7-root[data-motion-level="off"] .as7-envelope-idle,
+.as7-root[data-motion-level="subtle"] .as7-envelope-idle {
+  animation: none !important;
+  filter: none !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────
  * `prefers-reduced-motion: reduce` — last-line WCAG R25.2 defence
  * ───────────────────────────────────────────────────────────────── */
 

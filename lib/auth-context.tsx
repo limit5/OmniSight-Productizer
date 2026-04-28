@@ -11,6 +11,8 @@ import {
   signup as apiSignup,
   requestPasswordReset as apiRequestPasswordReset,
   resetPassword as apiResetPassword,
+  verifyEmail as apiVerifyEmail,
+  resendEmailVerification as apiResendEmailVerification,
   setCurrentSessionId,
   ApiError,
   type AuthUser,
@@ -19,6 +21,9 @@ import {
   type ResetPasswordResponse,
   type SignupRequestBody,
   type SignupResponse,
+  type VerifyEmailRequestBody,
+  type VerifyEmailResponse,
+  type ResendVerifyEmailResponse,
   type WhoamiResponse,
 } from "@/lib/api"
 import {
@@ -39,6 +44,12 @@ import {
   classifyMfaChallengeError,
   type MfaChallengeErrorOutcome,
 } from "@/lib/auth/mfa-challenge-helpers"
+import {
+  classifyEmailVerifyError,
+  classifyResendVerifyEmailError,
+  type EmailVerifyErrorOutcome,
+  type ResendVerifyEmailErrorOutcome,
+} from "@/lib/auth/email-verify-helpers"
 
 interface MfaPending {
   mfa_token: string
@@ -137,6 +148,31 @@ export interface MfaChallengeOutcome {
   readonly error: MfaChallengeErrorOutcome | null
 }
 
+/** AS.7.5 — outcome surfaced to the email-verify page after
+ *  `verifyEmail()` resolves. `ok` means the magic-link token was
+ *  accepted; the page transitions to the success card and offers
+ *  a "sign in now" CTA. `failed` carries the structured error so
+ *  the page can branch on invalid_token / expired_token vs.
+ *  already_verified vs. retryable. */
+export interface EmailVerifyOutcome {
+  readonly status: "ok" | "failed"
+  readonly error: EmailVerifyErrorOutcome | null
+  readonly email: string | null
+}
+
+/** AS.7.5 — outcome surfaced to the email-verify page after
+ *  `resendEmailVerification()` resolves. `linkSent` is the terminal
+ *  state where the page renders "we sent another link to ..." copy
+ *  regardless of whether the email matched a known unverified user
+ *  (enumeration-resistance contract per AS.0.7 §3.4). `failed` is
+ *  reserved for genuine failure modes (invalid_input / rate-limit /
+ *  bot-challenge / 5xx). */
+export interface ResendVerifyEmailOutcome {
+  readonly status: "linkSent" | "failed"
+  readonly error: ResendVerifyEmailErrorOutcome | null
+  readonly email: string | null
+}
+
 interface AuthContextValue {
   user: AuthUser | null
   authMode: WhoamiResponse["auth_mode"] | null
@@ -164,6 +200,14 @@ interface AuthContextValue {
    *  challenge submission (TOTP / backup code / WebAuthn). `null`
    *  on success or until the first failure. */
   lastMfaChallengeError: MfaChallengeErrorOutcome | null
+  /** AS.7.5 — structured outcome for the most recent failed
+   *  email-verification token submission. `null` on success or
+   *  until the first failure. */
+  lastEmailVerifyError: EmailVerifyErrorOutcome | null
+  /** AS.7.5 — structured outcome for the most recent failed resend
+   *  request. `null` on success (terminal copy is shown regardless)
+   *  or until the first failure. */
+  lastResendVerifyEmailError: ResendVerifyEmailErrorOutcome | null
   mfaPending: MfaPending | null
   login: (
     email: string,
@@ -210,6 +254,21 @@ interface AuthContextValue {
    *  one operation. */
   submitMfaWebauthn: () => Promise<MfaChallengeOutcome>
   cancelMfa: () => void
+  /** AS.7.5 — submit the magic-link token to the verify-email
+   *  endpoint. Returns a structured outcome the page branches on
+   *  (success vs invalid/expired/already-verified token). */
+  verifyEmail: (
+    body: VerifyEmailRequestBody,
+    extras?: Readonly<Record<string, string>>,
+  ) => Promise<EmailVerifyOutcome>
+  /** AS.7.5 — request a fresh verification email. Resolves with
+   *  the canonical `linkSent` terminal state on every 2xx response
+   *  regardless of whether the email matched a known unverified
+   *  user (enumeration-resistance contract per AS.0.7 §3.4). */
+  resendEmailVerification: (
+    email: string,
+    extras?: Readonly<Record<string, string>>,
+  ) => Promise<ResendVerifyEmailOutcome>
 }
 
 const Ctx = createContext<AuthContextValue | null>(null)
@@ -230,6 +289,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     useState<ResetPasswordErrorOutcome | null>(null)
   const [lastMfaChallengeError, setLastMfaChallengeError] =
     useState<MfaChallengeErrorOutcome | null>(null)
+  const [lastEmailVerifyError, setLastEmailVerifyError] =
+    useState<EmailVerifyErrorOutcome | null>(null)
+  const [lastResendVerifyEmailError, setLastResendVerifyEmailError] =
+    useState<ResendVerifyEmailErrorOutcome | null>(null)
   const [mfaPending, setMfaPending] = useState<MfaPending | null>(null)
 
   const refresh = useCallback(async () => {
@@ -681,6 +744,115 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLastMfaChallengeError(null)
   }, [])
 
+  const verifyEmail = useCallback(
+    async (
+      body: VerifyEmailRequestBody,
+      extras?: Readonly<Record<string, string>>,
+    ): Promise<EmailVerifyOutcome> => {
+      try {
+        const res: VerifyEmailResponse = await apiVerifyEmail(body, extras)
+        if (res.user) {
+          // Some backend revisions auto-sign-in inline after verify;
+          // absorb the user so the page can route to the dashboard
+          // without a follow-up whoami round-trip.
+          setUser(res.user as AuthUser)
+        }
+        setLastEmailVerifyError(null)
+        setError(null)
+        return Object.freeze({
+          status: "ok" as const,
+          error: null,
+          email: res.email ?? null,
+        })
+      } catch (exc) {
+        if (exc instanceof ApiError) {
+          const errorCode = _extractErrorCode(exc)
+          const retryAfter = _extractRetryAfter(exc)
+          const outcome = classifyEmailVerifyError({
+            status: exc.status,
+            errorCode,
+            retryAfter,
+          })
+          setLastEmailVerifyError(outcome)
+          setError(outcome.message)
+          return Object.freeze({
+            status: "failed" as const,
+            error: outcome,
+            email: null,
+          })
+        }
+        const msg = exc instanceof Error ? exc.message : String(exc)
+        const outcome = classifyEmailVerifyError({
+          status: null,
+          message: msg,
+          retryAfter: null,
+        })
+        setLastEmailVerifyError(outcome)
+        setError(outcome.message)
+        return Object.freeze({
+          status: "failed" as const,
+          error: outcome,
+          email: null,
+        })
+      }
+    },
+    [],
+  )
+
+  const resendEmailVerification = useCallback(
+    async (
+      email: string,
+      extras?: Readonly<Record<string, string>>,
+    ): Promise<ResendVerifyEmailOutcome> => {
+      try {
+        const res: ResendVerifyEmailResponse =
+          await apiResendEmailVerification(email, extras)
+        // The 2xx response is the canonical terminal-copy branch.
+        // Same enumeration-resistance contract as the AS.7.3
+        // request-reset endpoint: the page renders the same "we
+        // sent another link" copy regardless of `link_sent`.
+        setLastResendVerifyEmailError(null)
+        setError(null)
+        return Object.freeze({
+          status: "linkSent" as const,
+          error: null,
+          email: res.email ?? email,
+        })
+      } catch (exc) {
+        if (exc instanceof ApiError) {
+          const errorCode = _extractErrorCode(exc)
+          const retryAfter = _extractRetryAfter(exc)
+          const outcome = classifyResendVerifyEmailError({
+            status: exc.status,
+            errorCode,
+            retryAfter,
+          })
+          setLastResendVerifyEmailError(outcome)
+          setError(outcome.message)
+          return Object.freeze({
+            status: "failed" as const,
+            error: outcome,
+            email: null,
+          })
+        }
+        const msg = exc instanceof Error ? exc.message : String(exc)
+        const outcome = classifyResendVerifyEmailError({
+          status: null,
+          message: msg,
+          retryAfter: null,
+        })
+        setLastResendVerifyEmailError(outcome)
+        setError(outcome.message)
+        return Object.freeze({
+          status: "failed" as const,
+          error: outcome,
+          email: null,
+        })
+      }
+    },
+    [],
+  )
+
   const logout = useCallback(async () => {
     try {
       await apiLogout()
@@ -694,7 +866,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, lastLoginError, lastSignupError, lastRequestResetError, lastResetPasswordError, lastMfaChallengeError, mfaPending, login, signup, requestPasswordReset, resetPassword, logout, refresh, submitMfa, submitMfaStructured, submitMfaWebauthn, cancelMfa }}>
+    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, lastLoginError, lastSignupError, lastRequestResetError, lastResetPasswordError, lastMfaChallengeError, lastEmailVerifyError, lastResendVerifyEmailError, mfaPending, login, signup, requestPasswordReset, resetPassword, logout, refresh, submitMfa, submitMfaStructured, submitMfaWebauthn, cancelMfa, verifyEmail, resendEmailVerification }}>
       {children}
     </Ctx.Provider>
   )
