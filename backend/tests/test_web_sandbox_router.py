@@ -452,3 +452,70 @@ def test_router_exposes_expected_paths() -> None:
     assert ("/web-sandbox/preview/{workspace_id}", "DELETE") in pairs
     assert ("/web-sandbox/preview/{workspace_id}/touch", "POST") in pairs
     assert ("/web-sandbox/preview/{workspace_id}/ready", "POST") in pairs
+
+
+# ── W14.3 — CFIngressManager wiring ───────────────────────────────
+
+
+def test_w14_3_build_cf_ingress_manager_returns_none_when_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the four W14.3 env knobs are absent, get_manager() must
+    fall back to the W14.2 path with ``cf_ingress_manager=None``."""
+
+    monkeypatch.setenv("OMNISIGHT_TUNNEL_HOST", "")
+    monkeypatch.setenv("OMNISIGHT_CF_API_TOKEN", "")
+    monkeypatch.setenv("OMNISIGHT_CF_ACCOUNT_ID", "")
+    monkeypatch.setenv("OMNISIGHT_CF_TUNNEL_ID", "")
+
+    cf = web_sandbox_router._build_cf_ingress_manager()
+    assert cf is None
+
+
+def test_w14_3_build_cf_ingress_manager_returns_manager_when_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All four knobs set + valid → returns a CFIngressManager."""
+
+    monkeypatch.setenv("OMNISIGHT_TUNNEL_HOST", "ai.sora-dev.app")
+    monkeypatch.setenv("OMNISIGHT_CF_API_TOKEN", "deadbeefdeadbeefdeadbeefdeadbeef")
+    monkeypatch.setenv("OMNISIGHT_CF_ACCOUNT_ID", "0" * 32)
+    monkeypatch.setenv("OMNISIGHT_CF_TUNNEL_ID", "1" * 32)
+
+    cf = web_sandbox_router._build_cf_ingress_manager()
+    from backend.cf_ingress import CFIngressManager
+
+    assert isinstance(cf, CFIngressManager)
+    assert cf.config.tunnel_host == "ai.sora-dev.app"
+    assert cf.config.account_id == "0" * 32
+
+
+def test_w14_3_build_cf_ingress_manager_returns_none_when_token_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed value (token set but tunnel_id is not 32-hex) ⇒
+    construct_cf_ingress_manager logs a warning and returns None."""
+
+    monkeypatch.setenv("OMNISIGHT_TUNNEL_HOST", "ai.sora-dev.app")
+    monkeypatch.setenv("OMNISIGHT_CF_API_TOKEN", "deadbeefdeadbeefdeadbeefdeadbeef")
+    monkeypatch.setenv("OMNISIGHT_CF_ACCOUNT_ID", "0" * 32)
+    monkeypatch.setenv("OMNISIGHT_CF_TUNNEL_ID", "not-a-uuid")
+
+    cf = web_sandbox_router._build_cf_ingress_manager()
+    assert cf is None
+
+
+def test_w14_3_post_response_carries_ingress_url_field(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The response body must include the ``ingress_url`` field
+    (W14.2 schema), even when CF wiring is absent (value is null)."""
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={"workspace_id": "ws-42", "workspace_path": str(tmp_path)},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "ingress_url" in body
+    assert body["ingress_url"] is None  # No CF wiring on this fixture

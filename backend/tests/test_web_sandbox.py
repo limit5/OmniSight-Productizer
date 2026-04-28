@@ -1269,3 +1269,203 @@ def test_format_container_name_recoverable_across_workers() -> None:
 
     workers_results = [format_container_name("ws-42") for _ in range(8)]
     assert len(set(workers_results)) == 1
+
+
+# ── W14.3 — CFIngressManager integration ───────────────────────────
+
+
+from backend.cf_ingress import (  # noqa: E402  — integration, not module surface
+    CFIngressAPIError,
+    CFIngressConfig,
+    CFIngressManager,
+)
+from backend.tests.test_cf_ingress import (  # noqa: E402
+    FakeCFIngressClient,
+    _ok_config_kwargs,
+)
+
+
+def _make_cf_manager(
+    *, ingress: list | None = None
+) -> tuple[CFIngressManager, FakeCFIngressClient]:
+    config = CFIngressConfig(**_ok_config_kwargs())
+    fake = FakeCFIngressClient(ingress=ingress)
+    return CFIngressManager(config=config, client=fake), fake
+
+
+def test_w14_3_launch_creates_cf_ingress_rule(workspace: Path) -> None:
+    """When CFIngressManager is wired in, launch creates the ingress
+    rule and pins ``ingress_url`` on the instance."""
+
+    cf_mgr, cf_fake = _make_cf_manager()
+    docker = FakeDockerClient()
+    clock = FakeClock()
+    events = RecordingEventCallback()
+    mgr = WebSandboxManager(
+        docker_client=docker,
+        clock=clock,
+        event_cb=events,
+        cf_ingress_manager=cf_mgr,
+    )
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    inst = mgr.launch(cfg)
+
+    assert inst.ingress_url is not None
+    assert inst.ingress_url == f"https://preview-{inst.sandbox_id}.ai.sora-dev.app"
+    assert inst.preview_url is not None  # still set
+    # CF API was called.
+    assert cf_fake.gets >= 1
+    assert len(cf_fake.puts) == 1
+    # The launched event payload carries ingress_url.
+    launched = next(p for t, p in events.events if t == "web_sandbox.launched")
+    assert launched["ingress_url"] == inst.ingress_url
+
+
+def test_w14_3_launch_without_cf_manager_keeps_ingress_url_none(
+    workspace: Path,
+) -> None:
+    """Default W14.2 path — no CF wiring, ingress_url stays None."""
+
+    mgr, _, _, _ = _make_manager(workspace)
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    inst = mgr.launch(cfg)
+    assert inst.ingress_url is None
+
+
+def test_w14_3_launch_cf_failure_falls_through_with_warning(workspace: Path) -> None:
+    """A CF API outage during launch must NOT fail the launch — the
+    operator's local-host preview still works, and the failure is
+    surfaced as a per-instance warning."""
+
+    cf_mgr, cf_fake = _make_cf_manager()
+    cf_fake.raise_on_get = CFIngressAPIError("flaky CF", status=502)
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_ingress_manager=cf_mgr,
+    )
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    inst = mgr.launch(cfg)
+    # Launch succeeded.
+    assert inst.status == WebSandboxStatus.installing
+    assert inst.preview_url is not None
+    # ingress_url stays None.
+    assert inst.ingress_url is None
+    # Warning recorded.
+    joined = " | ".join(inst.warnings)
+    assert "cf_ingress_create_failed" in joined
+    assert "flaky CF" in joined
+
+
+def test_w14_3_stop_removes_cf_ingress_rule(workspace: Path) -> None:
+    cf_mgr, cf_fake = _make_cf_manager()
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_ingress_manager=cf_mgr,
+    )
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    launched = mgr.launch(cfg)
+    assert launched.ingress_url is not None
+    cf_fake.puts.clear()
+
+    mgr.stop("ws-42")
+    # The stop call removed the rule.
+    assert len(cf_fake.puts) == 1
+    # No more rules with the preview hostname.
+    rules = cf_fake.current_ingress()
+    target = f"preview-{launched.sandbox_id}.ai.sora-dev.app"
+    assert all(r.get("hostname") != target for r in rules)
+
+
+def test_w14_3_stop_skips_cf_when_ingress_url_none(workspace: Path) -> None:
+    """If launch never set ingress_url (CF was down at launch time),
+    stop should skip the CF round-trip entirely."""
+
+    cf_mgr, cf_fake = _make_cf_manager()
+    cf_fake.raise_on_get = CFIngressAPIError("CF down", status=502)
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_ingress_manager=cf_mgr,
+    )
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    mgr.launch(cfg)
+    # Now CF is back up — but we never set ingress_url so stop should
+    # not even attempt the delete.
+    cf_fake.raise_on_get = None
+    cf_fake.gets = 0
+    cf_fake.puts.clear()
+    mgr.stop("ws-42")
+    # No CF round-trip on stop because ingress_url was None.
+    assert cf_fake.gets == 0
+    assert cf_fake.puts == []
+
+
+def test_w14_3_stop_cf_failure_records_warning(workspace: Path) -> None:
+    cf_mgr, cf_fake = _make_cf_manager()
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_ingress_manager=cf_mgr,
+    )
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    mgr.launch(cfg)
+    cf_fake.raise_on_get = CFIngressAPIError("CF flaky on stop", status=502)
+    stopped = mgr.stop("ws-42")
+    # Local stop succeeded.
+    assert stopped.status == WebSandboxStatus.stopped
+    # Warning recorded.
+    joined = " | ".join(stopped.warnings)
+    assert "cf_ingress_delete_failed" in joined
+
+
+def test_w14_3_idempotent_relaunch_keeps_ingress_url(workspace: Path) -> None:
+    """Idempotent re-launch returns the cached instance — ingress_url
+    must come along for the ride."""
+
+    cf_mgr, _ = _make_cf_manager()
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_ingress_manager=cf_mgr,
+    )
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    a = mgr.launch(cfg)
+    b = mgr.launch(cfg)  # idempotent
+    assert a.ingress_url is not None
+    assert b.ingress_url == a.ingress_url
+
+
+def test_w14_3_constructor_accepts_optional_cf_manager() -> None:
+    """The constructor's ``cf_ingress_manager`` is keyword-only and
+    defaults to None — drift guard for the W14.2 backward-compat
+    contract."""
+
+    import inspect
+
+    sig = inspect.signature(WebSandboxManager.__init__)
+    assert "cf_ingress_manager" in sig.parameters
+    param = sig.parameters["cf_ingress_manager"]
+    assert param.default is None
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_w14_3_to_dict_carries_ingress_url(workspace: Path) -> None:
+    cf_mgr, _ = _make_cf_manager()
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_ingress_manager=cf_mgr,
+    )
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    inst = mgr.launch(cfg)
+    d = inst.to_dict()
+    assert d["ingress_url"] == inst.ingress_url
+    assert d["ingress_url"].startswith("https://preview-ws-")

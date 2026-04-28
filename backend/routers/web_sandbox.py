@@ -55,6 +55,12 @@ from pydantic import BaseModel, Field
 
 from backend import auth as _au
 from backend import workspace as _ws
+from backend.cf_ingress import (
+    CFIngressConfig,
+    CFIngressManager,
+    CFIngressMisconfigured,
+)
+from backend.config import Settings
 from backend.web_sandbox import (
     DEFAULT_DEV_COMMAND,
     DEFAULT_IMAGE_TAG,
@@ -87,6 +93,35 @@ router = APIRouter(prefix="/web-sandbox", tags=["web-sandbox"])
 _manager: WebSandboxManager | None = None
 
 
+def _build_cf_ingress_manager() -> CFIngressManager | None:
+    """Construct a :class:`CFIngressManager` from current Settings,
+    returning ``None`` when W14.3 env knobs are absent or invalid.
+
+    The four ``OMNISIGHT_TUNNEL_HOST`` / ``OMNISIGHT_CF_API_TOKEN`` /
+    ``OMNISIGHT_CF_ACCOUNT_ID`` / ``OMNISIGHT_CF_TUNNEL_ID`` env knobs
+    are *all* required — partial config falls back to ``None`` so the
+    W14.2 host-port preview path keeps working unchanged. *Malformed*
+    values (e.g. token set but tunnel_id is not a UUID) also fall
+    back, with a warning log so the operator can see what tripped.
+    """
+
+    try:
+        settings = Settings()
+        config = CFIngressConfig.from_settings(settings)
+    except CFIngressMisconfigured as exc:
+        logger.info(
+            "web_sandbox: CF Tunnel ingress disabled — %s", exc,
+        )
+        return None
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "web_sandbox: CF Tunnel ingress disabled (Settings failed): %s",
+            exc,
+        )
+        return None
+    return CFIngressManager(config=config)
+
+
 def get_manager() -> WebSandboxManager:
     """Return the per-worker :class:`WebSandboxManager`, lazy-creating
     one on first request.
@@ -96,6 +131,14 @@ def get_manager() -> WebSandboxManager:
     import time. The manager is overridable via
     :func:`set_manager_for_tests` so tests can inject a fake docker
     client.
+
+    W14.3 wiring: when the four CF Tunnel env knobs are present and
+    valid, this function constructs a :class:`CFIngressManager` and
+    threads it into the launcher so launches automatically provision
+    ``preview-{sandbox_id}.{tunnel_host}`` ingress rules. When any
+    knob is missing the launcher falls back to the W14.2 host-port
+    preview path — the same dev path :class:`WebSandboxManager` shipped
+    in row W14.2.
     """
 
     global _manager
@@ -108,9 +151,11 @@ def get_manager() -> WebSandboxManager:
                 "manager will run without manifest cross-checks", exc,
             )
             manifest = None
+        cf_ingress = _build_cf_ingress_manager()
         _manager = WebSandboxManager(
             docker_client=SubprocessDockerClient(),
             manifest=manifest,
+            cf_ingress_manager=cf_ingress,
         )
     return _manager
 

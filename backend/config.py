@@ -380,6 +380,32 @@ class Settings(BaseSettings):
     workspace_gc_trash_ttl_days: int = 7
     workspace_gc_interval_s: float = 3600.0
 
+    # ── W14.3 — Live web-preview CF Tunnel ingress ──
+    # Dynamic per-sandbox ingress rules in the operator's existing
+    # Cloudflare Tunnel (B12). When ``OMNISIGHT_TUNNEL_HOST`` is set,
+    # ``backend.routers.web_sandbox.get_manager()`` instantiates a
+    # ``CFIngressManager`` and threads it into ``WebSandboxManager``;
+    # on launch the manager calls ``PUT /accounts/{id}/cfd_tunnel/
+    # {id}/configurations`` to add ``preview-{sandbox_id}.{tunnel_host}``
+    # → ``http://127.0.0.1:{host_port}/``, on stop it removes that rule.
+    # Empty ``tunnel_host`` ⇒ W14.3 is OFF and ``ingress_url`` stays
+    # ``None`` (the W14.2 host-port URL is the only reachable address —
+    # equivalent to the deployed-inactive pre-W14.3 dev path). All four
+    # knobs are needed — partial config logs a warning at construction
+    # and falls back to OFF rather than 500'ing every launch.
+    # Module-global state audit (Step 1, type-1): values are immutable
+    # Settings literals — every uvicorn worker derives the same
+    # ``CFIngressManager`` config from the same source. Cross-worker
+    # consistency: each worker fetches the live tunnel config before
+    # mutating it, so the canonical state is the CF API itself (Step 1,
+    # type-2). Race on simultaneous launches is bounded — workers
+    # idempotently merge their own hostname; W14.10 will replace this
+    # with PG-serialised mutation when alembic 0059 lands.
+    tunnel_host: str = ""           # e.g. "ai.sora-dev.app"
+    cf_api_token: str = ""          # CF API token (Account:Cloudflare Tunnel:Edit)
+    cf_account_id: str = ""         # CF account UUID
+    cf_tunnel_id: str = ""          # CF tunnel UUID
+
     # O8 (#271): orchestration execution mode. "monolith" keeps every
     # agent run going through the LangGraph StateGraph in-process (legacy
     # path since v0.1.0). "distributed" routes the same run through

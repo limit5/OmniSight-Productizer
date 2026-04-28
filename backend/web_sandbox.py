@@ -120,6 +120,16 @@ from backend.ui_sandbox import (
     DockerClient,
     detect_dev_server_ready as _detect_dev_server_ready_shared,
 )
+# W14.3 — optional CF Tunnel ingress manager. Imported under a private
+# alias to keep the public ``__all__`` of this module unchanged; the
+# launcher accepts an optional manager via constructor injection so
+# callers without W14.3 settings can keep using the W14.2 host-port
+# preview_url path unchanged. The B12-style typed errors propagate
+# back via per-instance warnings rather than failing the launch.
+from backend.cf_ingress import (
+    CFIngressError as _CFIngressError,
+    CFIngressManager as _CFIngressManager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -886,6 +896,7 @@ class WebSandboxManager:
         event_cb: EventCallback | None = None,
         preview_host: str = DEFAULT_PREVIEW_HOST,
         port_range: tuple[int, int] = DEFAULT_HOST_PORT_RANGE,
+        cf_ingress_manager: _CFIngressManager | None = None,
     ) -> None:
         self._docker = docker_client
         self._manifest = manifest
@@ -893,6 +904,13 @@ class WebSandboxManager:
         self._event_cb = event_cb
         self._preview_host = preview_host
         self._port_range = port_range
+        # W14.3: optional CF ingress manager. ``None`` ⇒ no public
+        # https URL is provisioned and ``ingress_url`` stays ``None``
+        # (W14.2 dev path). When set, launch/stop call into the
+        # manager and append warnings on per-launch CF errors rather
+        # than failing the launch — a transient CF outage should not
+        # prevent the operator from touching the localhost preview.
+        self._cf_ingress = cf_ingress_manager
         self._lock = threading.RLock()
         self._instances: dict[str, WebSandboxInstance] = {}
 
@@ -1005,13 +1023,37 @@ class WebSandboxManager:
                     return failed
 
             preview_url = build_preview_url(host_port, host=self._preview_host)
+            ingress_url: str | None = None
+            launch_warnings: list[str] = list(pending.warnings)
+            if self._cf_ingress is not None:
+                try:
+                    ingress_url = self._cf_ingress.create_rule(
+                        sandbox_id=sandbox_id,
+                        host_port=host_port,
+                    )
+                except _CFIngressError as exc:
+                    # CF API is best-effort during launch — the host-port
+                    # preview_url remains valid for the operator's local
+                    # tooling and the iframe panel can still render.
+                    # W14.5 idle-kill or W14.10 audit row will surface
+                    # the warning to operator triage.
+                    launch_warnings.append(f"cf_ingress_create_failed: {exc}")
+                    logger.warning(
+                        "web_sandbox: cf_ingress create_rule failed for "
+                        "workspace_id=%s sandbox_id=%s: %s",
+                        config.workspace_id,
+                        sandbox_id,
+                        exc,
+                    )
             started = replace(
                 pending,
                 status=WebSandboxStatus.installing,
                 container_id=container_id,
                 preview_url=preview_url,
+                ingress_url=ingress_url,
                 started_at=self._clock(),
                 last_request_at=self._clock(),
+                warnings=tuple(launch_warnings),
             )
             self._instances[config.workspace_id] = started
         self._emit("web_sandbox.launched", started)
@@ -1092,6 +1134,23 @@ class WebSandboxManager:
                         self._docker.remove(instance.container_id, force=True)
                     except Exception as exc:
                         warnings.append(f"remove_failed: {exc}")
+            # W14.3: best-effort CF ingress cleanup. A failure here does
+            # not block the local stop — an orphan CF rule pointing at a
+            # dead container returns 502 to the public URL but does not
+            # prevent the operator from launching a fresh sandbox (which
+            # would replace the rule via create_rule's idempotent splice).
+            if self._cf_ingress is not None and instance.ingress_url:
+                try:
+                    self._cf_ingress.delete_rule(instance.sandbox_id)
+                except _CFIngressError as exc:
+                    warnings.append(f"cf_ingress_delete_failed: {exc}")
+                    logger.warning(
+                        "web_sandbox: cf_ingress delete_rule failed for "
+                        "workspace_id=%s sandbox_id=%s: %s",
+                        workspace_id,
+                        instance.sandbox_id,
+                        exc,
+                    )
             stopped = replace(
                 stopping,
                 status=WebSandboxStatus.stopped,
