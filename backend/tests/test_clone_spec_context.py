@@ -16,8 +16,8 @@ Pins:
     * :class:`backend.agents.state.GraphState` carries the new field
       with empty-string default and is wired through
       ``_specialist_node_factory``.
-    * Package re-exports: 12 W11.10 symbols + the post-W11.10 total
-      drift-guard pin (169 → 181).
+    * Package re-exports: 12 W11.10 symbols + the running total
+      drift-guard pin (169 → 181 after W11.10 → 192 after W11.12).
 """
 
 from __future__ import annotations
@@ -641,12 +641,13 @@ def test_w11_10_symbol_re_exported_via_package(symbol: str) -> None:
     assert hasattr(web_pkg, symbol), f"{symbol} not attribute of backend.web"
 
 
-def test_total_re_export_count_pinned_at_181() -> None:
-    # W11.9 left __all__ at 169 symbols; W11.10 adds 12
-    # clone_spec_context symbols → 181. If this fails with a different
-    # count, audit whether you consciously added / removed a public
-    # symbol and update the pin alongside the W11.10 row's TODO entry.
-    assert len(web_pkg.__all__) == 181
+def test_total_re_export_count_pinned_at_192() -> None:
+    # W11.9 left __all__ at 169 symbols; W11.10 adds 12 clone_spec_context
+    # symbols → 181; W11.12 adds 11 clone_audit symbols → 192. If this
+    # fails with a different count, audit whether you consciously added /
+    # removed a public symbol and update the pin alongside the row's
+    # TODO entry.
+    assert len(web_pkg.__all__) == 192
 
 
 # ─── 12. Whole-spec invariants ───────────────────────────────────────

@@ -83,6 +83,18 @@ Sub-modules:
                          the LLM ever seeing source bytes, source brand
                          names, or original image URLs.
 
+    clone_audit          W11.12 failure-path audit-log emitter.
+                         :func:`record_clone_attempt_failure` writes one
+                         ``web.clone.failed`` row per failed clone
+                         attempt, classified across the full
+                         :class:`SiteClonerError` subclass tree via
+                         :func:`classify_clone_failure`. Complements the
+                         W11.7 ``web.clone`` (success) and W11.8
+                         ``web.clone.rate_limited`` (L5 HOLD) emitters
+                         so a prefix-filter ``WHERE action LIKE
+                         'web.clone.%'`` catches the full clone
+                         lifecycle.
+
 W11.1 ships the entry point + minimal ``CloneSpec`` container +
 ``CloneSource`` protocol; W11.2 plugs the two production-targeted
 backends behind that contract; W11.3 populates the spec from rendered
@@ -229,6 +241,19 @@ from backend.web.clone_spec_context import (
     TRUNCATION_MARKER,
     W11_INVARIANTS_BLOCK,
     build_clone_spec_context,
+)
+from backend.web.clone_audit import (
+    CLONE_ATTEMPT_FAILED_AUDIT_ACTION,
+    CLONE_ATTEMPT_FAILED_AUDIT_ENTITY_KIND,
+    CLONE_FAILURE_CATEGORIES,
+    CloneAttemptRecord,
+    CloneAuditError,
+    MAX_FAILURE_MESSAGE_CHARS,
+    MAX_FAILURE_REASONS,
+    build_clone_attempt_record,
+    classify_clone_failure,
+    clone_attempt_record_to_audit_payload,
+    record_clone_attempt_failure,
 )
 from backend.web.output_transformer import (
     BytesLeakError,
@@ -405,6 +430,9 @@ __all__ = [
     "AstroFrameworkAdapter",
     "BlockedDestinationError",
     "BytesLeakError",
+    "CLONE_ATTEMPT_FAILED_AUDIT_ACTION",
+    "CLONE_ATTEMPT_FAILED_AUDIT_ENTITY_KIND",
+    "CLONE_FAILURE_CATEGORIES",
     "CLONE_RATE_AUDIT_ACTION",
     "CLONE_RATE_AUDIT_ENTITY_KIND",
     "CLONE_RATE_KEY_PREFIX",
@@ -413,6 +441,8 @@ __all__ = [
     "CLOUDFLARE_MITIGATED_REFUSE_VALUES",
     "ClassifierLLM",
     "ClassifierUnavailableError",
+    "CloneAttemptRecord",
+    "CloneAuditError",
     "CloneCaptureTimeoutError",
     "CloneManifest",
     "CloneManifestError",
@@ -474,6 +504,8 @@ __all__ = [
     "MAX_CONTEXT_NAV_ITEMS",
     "MAX_CONTEXT_SECTION_ITEMS",
     "MAX_CONTEXT_SECTION_SUMMARY_CHARS",
+    "MAX_FAILURE_MESSAGE_CHARS",
+    "MAX_FAILURE_REASONS",
     "MAX_PROMPT_INPUT_CHARS",
     "MAX_REASON_CHARS",
     "MAX_REASONS",
@@ -532,6 +564,7 @@ __all__ = [
     "assert_clone_rate_limit",
     "assert_clone_spec_safe",
     "assert_no_copied_bytes",
+    "build_clone_attempt_record",
     "build_clone_manifest",
     "build_clone_spec_context",
     "build_clone_spec_from_capture",
@@ -543,7 +576,9 @@ __all__ = [
     "check_meta_noai",
     "check_robots_txt",
     "check_x_robots_tag",
+    "classify_clone_failure",
     "classify_clone_spec",
+    "clone_attempt_record_to_audit_payload",
     "clone_rate_limit_key",
     "clone_site",
     "compute_manifest_hash",
@@ -565,6 +600,7 @@ __all__ = [
     "pin_clone_artefacts",
     "project_to_audit_payload",
     "read_manifest_file",
+    "record_clone_attempt_failure",
     "record_clone_audit",
     "record_clone_rate_limit_hold",
     "render_clone_project",
