@@ -155,7 +155,9 @@ No new pip dependencies. ``pathlib`` / ``json`` / ``hashlib`` / ``uuid``
 in the production image. No image rebuild required.
 
 Inspired by firecrawl/open-lovable (MIT). The full attribution + license
-text lands in the W11.13 row.
+text live in ``LICENSES/open-lovable-mit.txt`` (W11.13). The
+``OPEN_LOVABLE_ATTRIBUTION`` constant below is the single source of truth
+for the manifest / HTML-comment attribution string.
 """
 
 from __future__ import annotations

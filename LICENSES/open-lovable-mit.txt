@@ -1,0 +1,63 @@
+MIT License
+
+Copyright (c) 2025 Firecrawl (Sideguide Technologies Inc.) and contributors.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+
+Provenance & attribution (OmniSight project notes — not part of the MIT text)
+--------------------------------------------------------------------------------
+
+The W11 *Website Cloning Capability* epic in this repository
+(``backend/web/site_cloner.py`` + sibling modules under ``backend/web/``)
+takes design inspiration from the open-source project **firecrawl/open-lovable**
+(https://github.com/firecrawl/open-lovable), licensed under the MIT License
+reproduced above.
+
+OmniSight does **not** vendor open-lovable source code, modules, or compiled
+artefacts. Inspiration is conceptual: the URL → cloned-app productizer flow,
+and the recognition that pairing a web-capture step with an LLM-driven
+rewrite is a useful pattern. OmniSight's W11 implementation is independent
+re-engineering, with substantial divergence from open-lovable:
+
+  * **Framework agnostic** — open-lovable produces React apps. OmniSight's
+    W11.9 framework adapter renders Next.js / Nuxt 3 / Astro 4 from the
+    same intermediate ``TransformedSpec`` (and is structured to grow Vue /
+    Svelte / SolidStart adapters without altering the L1–L5 pipeline).
+  * **5-layer defense-in-depth** (W11.4 – W11.8) replaces blacklist-style
+    refusal handling: machine refusal signals (robots / noai / ai.txt /
+    Cloudflare AI-bot rules), LLM content classifier, output transformer
+    that *never copies bytes*, manifest + HTML-comment + audit traceability,
+    and a per-tenant + per-target sliding-window rate limit with PEP HOLD.
+  * **Failure-mode auditability** — every clone attempt (success, refusal,
+    rate-limited, transformer error, framework error) lands a row in the
+    project's tamper-evident audit chain via ``backend.audit.log``, queryable
+    via ``WHERE action LIKE 'web.clone.%'``.
+  * **Image policy** — source ``<img>`` URLs are *never* fetched or copied;
+    the L3 transformer (W11.6) substitutes a deterministic placeholder
+    provider so cloned apps cannot republish source bytes.
+
+Per the MIT License terms reproduced above, this attribution + license text
+is included in OmniSight as a courtesy to the upstream project and to make
+the inspiration explicit. The MIT License does not require attribution for
+ideas / design patterns alone; OmniSight nevertheless ships this file so
+operators, auditors, and downstream consumers can trace the lineage.
+
+For the full upstream source, see ``https://github.com/firecrawl/open-lovable``.

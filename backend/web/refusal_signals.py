@@ -69,6 +69,9 @@ No shared writable state, no parallel-vs-serial timing dependence.
 Stdlib + ``httpx`` only — both are already in the production image, so
 adding W11.4 needs **no** image rebuild (Production Readiness Gate §158
 satisfied without a follow-up requirements bump).
+
+Inspired by firecrawl/open-lovable (MIT). The full attribution + license
+text live in ``LICENSES/open-lovable-mit.txt`` (W11.13).
 """
 
 from __future__ import annotations

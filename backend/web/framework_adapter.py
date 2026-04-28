@@ -107,7 +107,7 @@ OmniSight backend image needs no Node / Next / Nuxt / Astro installed
 to run the adapter. No image rebuild required.
 
 Inspired by firecrawl/open-lovable (MIT). The full attribution +
-license text lands in the W11.13 row.
+license text live in ``LICENSES/open-lovable-mit.txt`` (W11.13).
 """
 
 from __future__ import annotations
@@ -847,7 +847,8 @@ class NextFrameworkAdapter(_AdapterBase):
             "## Attribution\n"
             "\n"
             "Inspired by firecrawl/open-lovable (MIT). See "
-            "`LICENSES/open-lovable-mit.txt` once W11.13 lands.\n"
+            "`LICENSES/open-lovable-mit.txt` in the OmniSight repo for the "
+            "full attribution + license text.\n"
         )
         if manifest is not None:
             body += (
@@ -1070,7 +1071,8 @@ class NuxtFrameworkAdapter(_AdapterBase):
             "## Attribution\n"
             "\n"
             "Inspired by firecrawl/open-lovable (MIT). See "
-            "`LICENSES/open-lovable-mit.txt` once W11.13 lands.\n"
+            "`LICENSES/open-lovable-mit.txt` in the OmniSight repo for the "
+            "full attribution + license text.\n"
         )
         if manifest is not None:
             body += (
@@ -1311,7 +1313,8 @@ class AstroFrameworkAdapter(_AdapterBase):
             "## Attribution\n"
             "\n"
             "Inspired by firecrawl/open-lovable (MIT). See "
-            "`LICENSES/open-lovable-mit.txt` once W11.13 lands.\n"
+            "`LICENSES/open-lovable-mit.txt` in the OmniSight repo for the "
+            "full attribution + license text.\n"
         )
         if manifest is not None:
             body += (

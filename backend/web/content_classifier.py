@@ -126,7 +126,7 @@ already in production image via :mod:`backend.agents.llm`). No image
 rebuild needed.
 
 Inspired by firecrawl/open-lovable (MIT). The full attribution + license
-text lands in the W11.13 row.
+text live in ``LICENSES/open-lovable-mit.txt`` (W11.13).
 """
 
 from __future__ import annotations

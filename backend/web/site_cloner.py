@@ -52,7 +52,7 @@ have no I/O so unit tests run in-process with no fixtures. The async
 what the W11.11 reference-URL × snapshot tests will use.
 
 Inspired by firecrawl/open-lovable (MIT). The full attribution +
-license text lands in the W11.13 row.
+license text live in ``LICENSES/open-lovable-mit.txt`` (W11.13).
 """
 
 from __future__ import annotations
