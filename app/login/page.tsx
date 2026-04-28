@@ -292,6 +292,35 @@ function LoginForm() {
     }
   }, [auth.mfaPending, next, router])
 
+  // AS.7.6 — When the backend returned 423 (account locked), push
+  // the user to the dedicated `/account-locked` page. The auth
+  // context is the SoT for `lastLoginError`, so the new page reads
+  // the kind / retry-after from the same provider; we still forward
+  // the typed email + `next` via the query string so a user landing
+  // on the dedicated page from a fresh tab still sees a sensible
+  // pre-fill on the recovery CTAs. The legacy inline
+  // `<AccountLockedOverlay>` stays mounted for the AS.7.1 test
+  // backwards-compat (the redirect happens immediately AFTER mount
+  // so the overlay renders for one frame before navigation; the
+  // dedicated page is the canonical UI from there onward).
+  useEffect(() => {
+    if (!auth.lastLoginError?.accountLocked) return
+    const params = new URLSearchParams()
+    params.set("reason", "temporary_lockout")
+    if (auth.lastLoginError.retryAfterSeconds !== null) {
+      params.set(
+        "retry_after",
+        String(auth.lastLoginError.retryAfterSeconds),
+      )
+    }
+    if (email) params.set("email", email)
+    if (next && next !== "/") params.set("next", next)
+    router.push(`/account-locked?${params.toString()}`)
+    // The redirect should fire on the rising edge of `accountLocked`
+    // — once the user is on /account-locked the auth context still
+    // carries the error but the new page is what matters.
+  }, [auth.lastLoginError, email, next, router])
+
   const primaryProviders = useMemo(getPrimaryProviders, [])
   const secondaryProviders = useMemo(getSecondaryProviders, [])
 
