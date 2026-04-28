@@ -22,12 +22,19 @@ Sub-modules:
                          **before** ``clone_site()`` so a refused URL
                          never burns a backend session.
 
+    content_classifier   W11.5 L2 LLM content classifier — heuristic
+                         prefilter + cheapest-model (Haiku 4.5 / Gemini
+                         Flash / DeepSeek) classification of the
+                         populated ``CloneSpec`` into ``risk_level`` +
+                         categories. Run **after** ``clone_site()`` so
+                         the classifier sees the full populated spec.
+
 W11.1 ships the entry point + minimal ``CloneSpec`` container +
 ``CloneSource`` protocol; W11.2 plugs the two production-targeted
 backends behind that contract; W11.3 populates the spec from rendered
-HTML; W11.4 adds the L1 refusal-signal gate; subsequent rows add the
-remaining defense layers (W11.5 LLM classifier, W11.6 transformer,
-W11.7 manifest, W11.8 rate limiter).
+HTML; W11.4 adds the L1 refusal-signal gate; W11.5 adds the L2 content
+classifier; subsequent rows add the remaining defense layers (W11.6
+transformer, W11.7 manifest, W11.8 rate limiter).
 
 Inspired by firecrawl/open-lovable (MIT). Attribution and license text
 land alongside the W11.13 row (`LICENSES/open-lovable-mit.txt`).
@@ -53,6 +60,28 @@ from backend.web.playwright_source import (
     PlaywrightDependencyError,
     PlaywrightSource,
     SUPPORTED_BROWSERS,
+)
+from backend.web.content_classifier import (
+    ClassifierLLM,
+    ClassifierUnavailableError,
+    ContentClassifierError,
+    ContentRiskError,
+    DEFAULT_CLASSIFIER_MODEL,
+    DEFAULT_REFUSAL_THRESHOLD,
+    LLM_SYSTEM_PROMPT,
+    LLM_USER_PROMPT_TEMPLATE,
+    LangchainClassifierLLM,
+    MAX_PROMPT_INPUT_CHARS,
+    MAX_REASON_CHARS,
+    MAX_REASONS,
+    RISK_CATEGORIES,
+    RISK_LEVELS,
+    RiskClassification,
+    RiskScore,
+    assert_clone_spec_safe,
+    classify_clone_spec,
+    heuristic_risk_signals,
+    merge_risk_classifications,
 )
 from backend.web.refusal_signals import (
     AI_BOT_USER_AGENTS,
@@ -205,16 +234,22 @@ __all__ = [
     "BlockedDestinationError",
     "CLOUDFLARE_AI_BLOCK_BODY_HINTS",
     "CLOUDFLARE_MITIGATED_REFUSE_VALUES",
+    "ClassifierLLM",
+    "ClassifierUnavailableError",
     "CloneCaptureTimeoutError",
     "CloneSource",
     "CloneSourceError",
     "CloneSpec",
     "CloneSpecBuildError",
+    "ContentClassifierError",
+    "ContentRiskError",
     "DEFAULT_BROWSER",
+    "DEFAULT_CLASSIFIER_MODEL",
     "DEFAULT_FIRECRAWL_BASE_URL",
     "DEFAULT_MAX_HTML_BYTES",
     "DEFAULT_REFUSAL_FETCH_MAX_BYTES",
     "DEFAULT_REFUSAL_FETCH_TIMEOUT_S",
+    "DEFAULT_REFUSAL_THRESHOLD",
     "DEFAULT_TIMEOUT_S",
     "DEFAULT_USER_AGENT",
     "DEFAULT_WAIT_UNTIL",
@@ -225,6 +260,12 @@ __all__ = [
     "FirecrawlSource",
     "InvalidCloneURLError",
     "KNOWN_CLONE_BACKENDS",
+    "LLM_SYSTEM_PROMPT",
+    "LLM_USER_PROMPT_TEMPLATE",
+    "LangchainClassifierLLM",
+    "MAX_PROMPT_INPUT_CHARS",
+    "MAX_REASON_CHARS",
+    "MAX_REASONS",
     "META_AI_BOT_NAMES",
     "META_NOAI_TOKENS",
     "MachineRefusedError",
@@ -232,17 +273,22 @@ __all__ = [
     "PlaywrightConfigError",
     "PlaywrightDependencyError",
     "PlaywrightSource",
+    "RISK_CATEGORIES",
+    "RISK_LEVELS",
     "ROBOTS_TXT_PATH",
     "RawCapture",
     "RefusalDecision",
     "RefusalFetchResult",
     "RefusalFetcher",
+    "RiskClassification",
+    "RiskScore",
     "SUPPORTED_BROWSERS",
     "SUPPORTED_URL_SCHEMES",
     "SiteClonerError",
     "UnknownCloneBackendError",
     "assert_clone_allowed_post_capture",
     "assert_clone_allowed_pre_capture",
+    "assert_clone_spec_safe",
     "build_clone_spec_from_capture",
     "check_ai_txt",
     "check_cloudflare_ai_block",
@@ -251,12 +297,15 @@ __all__ = [
     "check_meta_noai",
     "check_robots_txt",
     "check_x_robots_tag",
+    "classify_clone_spec",
     "clone_site",
     "default_refusal_fetcher",
     "extract_hostname",
+    "heuristic_risk_signals",
     "is_public_destination",
     "make_clone_source",
     "merge_refusal_decisions",
+    "merge_risk_classifications",
     "normalize_url",
     "validate_clone_url",
 ]
