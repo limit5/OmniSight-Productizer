@@ -2206,7 +2206,7 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
 
 > firecrawl/open-lovable (MIT) 提供 URL → React app。OmniSight 借此但**不限 React** — 生 Next/Nuxt/Astro/Vue/Svelte 任一。**5 層 defense-in-depth 取代黑名單**（W11.4–W11.8）。
 
-- [ ] W11.1 `backend/web/site_cloner.py` — URL → `CloneSpec`
+- [x] W11.1 `backend/web/site_cloner.py` — URL → `CloneSpec`
 - [ ] W11.2 雙 backend：(a) Firecrawl SaaS + (b) self-host Playwright（air-gap 必備）
 - [ ] W11.3 `CloneSpec` schema：title / meta / hero / nav / sections[] / footer / images[] / colors[] / fonts[] / spacing
 - [ ] W11.4 **L1 機器拒絕信號**：robots.txt + noai meta + ai.txt + CF ai-bot rule
