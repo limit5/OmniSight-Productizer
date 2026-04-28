@@ -52,11 +52,29 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Iterator, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
+
+# W12.3: shared canonicalisation primitives used by both forward-mode
+# (this module) and reverse-mode (:mod:`backend.brand_extractor`).  Re-
+# exported below for back-compat with callers that learned to import
+# them from this module before the split.
+from backend.brand_canonical import (
+    GENERIC_FONT_KEYWORDS,
+    extract_font_families,
+    extract_hex_colors,
+    extract_hsl_colors,
+    extract_rgb_colors,
+    extract_tailwind_palette_classes,
+    hsl_to_hex,
+    iter_css_vars,
+    normalize_font_name,
+    normalize_hex,
+    rgb_to_hex,
+    split_font_stack,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -262,311 +280,16 @@ class BrandValidationReport:
 
 
 # ── Canonicalisation helpers ─────────────────────────────────────────
-
-
-_HEX3_RE = re.compile(r"^#([0-9a-fA-F]{3})$")
-_HEX4_RE = re.compile(r"^#([0-9a-fA-F]{4})$")
-_HEX6_RE = re.compile(r"^#([0-9a-fA-F]{6})$")
-_HEX8_RE = re.compile(r"^#([0-9a-fA-F]{8})$")
-
-
-def normalize_hex(color: str) -> str | None:
-    """Canonicalise a hex colour to ``#rrggbb`` lowercase.
-
-    * ``#abc`` → ``#aabbcc``
-    * ``#AABBCC`` → ``#aabbcc``
-    * ``#abcd`` (RGBA short) → ``#aabbcc`` (alpha dropped — we
-      compare palette equality on RGB only; operators may ship
-      alpha-variants of a brand colour freely).
-    * ``#aabbccdd`` → ``#aabbcc``
-    * anything else → ``None``.
-
-    Returning ``None`` is what lets the validator flag "not a proper
-    hex" offenders without raising.
-    """
-    if not isinstance(color, str):
-        return None
-    s = color.strip()
-    if not s.startswith("#"):
-        return None
-    m = _HEX3_RE.match(s)
-    if m:
-        r, g, b = m.group(1)
-        return f"#{r}{r}{g}{g}{b}{b}".lower()
-    m = _HEX4_RE.match(s)
-    if m:
-        r, g, b, _ = m.group(1)
-        return f"#{r}{r}{g}{g}{b}{b}".lower()
-    m = _HEX6_RE.match(s)
-    if m:
-        return f"#{m.group(1)}".lower()
-    m = _HEX8_RE.match(s)
-    if m:
-        return f"#{m.group(1)[:6]}".lower()
-    return None
-
-
-def normalize_font_name(name: str) -> str | None:
-    """Strip quotes / whitespace / case from a font-family token.
-
-    ``'Inter'`` / ``"Inter"`` / ``inter`` → ``inter``.
-
-    Generic keywords (``sans-serif`` / ``monospace`` / ``serif``) are
-    preserved: they are universally allowed fallbacks and the
-    validator does not flag them.
-    """
-    if not isinstance(name, str):
-        return None
-    s = name.strip().strip("'").strip('"').strip()
-    if not s:
-        return None
-    return s.lower()
-
-
-_GENERIC_FONT_KEYWORDS: frozenset[str] = frozenset({
-    "sans-serif",
-    "serif",
-    "monospace",
-    "cursive",
-    "fantasy",
-    "system-ui",
-    "ui-sans-serif",
-    "ui-serif",
-    "ui-monospace",
-    "ui-rounded",
-    "emoji",
-    "math",
-    "fangsong",
-    "inherit",
-    "initial",
-    "unset",
-    "revert",
-    "revert-layer",
-    "-apple-system",
-    "blinkmacsystemfont",
-})
-
-
-def _clamp255(n: float) -> int:
-    if n < 0:
-        return 0
-    if n > 255:
-        return 255
-    return int(round(n))
-
-
-def rgb_to_hex(r: float, g: float, b: float) -> str:
-    """Convert RGB channel triple (0-255) to ``#rrggbb`` lowercase."""
-    return "#{:02x}{:02x}{:02x}".format(_clamp255(r), _clamp255(g), _clamp255(b))
-
-
-def _hsl_channel(h: float, c: float, x: float, m: float, i: int) -> float:
-    table = (
-        (c, x, 0.0),
-        (x, c, 0.0),
-        (0.0, c, x),
-        (0.0, x, c),
-        (x, 0.0, c),
-        (c, 0.0, x),
-    )
-    segment = int(h // 60) % 6
-    return (table[segment][i] + m) * 255
-
-
-def hsl_to_hex(h: float, s: float, lightness: float) -> str:
-    """Convert HSL (h in degrees, s/l as fractions 0-1) to ``#rrggbb``.
-
-    Values outside nominal ranges are clamped: we tolerate whatever
-    the minifier emits (``hsl(380, 120%, 50%)``) rather than refusing
-    to normalise.  Palette-match callers get ``#rrggbb`` or a close
-    approximation; the validator never crashes on malformed CSS.
-    """
-    # Clamp hue into [0, 360)
-    hue = h % 360 if h >= 0 else (h % 360 + 360) % 360
-    sat = max(0.0, min(1.0, s))
-    light = max(0.0, min(1.0, lightness))
-
-    c = (1 - abs(2 * light - 1)) * sat
-    x = c * (1 - abs(((hue / 60) % 2) - 1))
-    m = light - c / 2
-
-    r = _hsl_channel(hue, c, x, m, 0)
-    g = _hsl_channel(hue, c, x, m, 1)
-    b = _hsl_channel(hue, c, x, m, 2)
-    return rgb_to_hex(r, g, b)
-
-
-# ── Extractors ───────────────────────────────────────────────────────
-
-
-# Hex colour literal.  Enforce word-boundary so we don't match the
-# fragment identifier in `href="#top"` or inside a hash like
-# `#/route`.  We allow 3, 4, 6 or 8 hex digits.
-_HEX_RE = re.compile(r"(?<![0-9a-fA-F])#([0-9a-fA-F]{3,8})(?![0-9a-fA-F])")
-
-# rgb / rgba functional notation.  The alpha field is optional; we
-# ignore it when comparing palettes.
-_RGB_RE = re.compile(
-    r"\brgba?\(\s*"
-    r"(-?\d*\.?\d+)\s*%?\s*[,\s]\s*"
-    r"(-?\d*\.?\d+)\s*%?\s*[,\s]\s*"
-    r"(-?\d*\.?\d+)\s*%?"
-    r"(?:\s*[,/]\s*(-?\d*\.?\d+%?))?\s*\)",
-    re.IGNORECASE,
-)
-
-# hsl / hsla functional notation.
-_HSL_RE = re.compile(
-    r"\bhsla?\(\s*"
-    r"(-?\d*\.?\d+)(deg|rad|turn|grad)?\s*[,\s]\s*"
-    r"(-?\d*\.?\d+)%?\s*[,\s]\s*"
-    r"(-?\d*\.?\d+)%?"
-    r"(?:\s*[,/]\s*(-?\d*\.?\d+%?))?\s*\)",
-    re.IGNORECASE,
-)
-
-# CSS `font-family: "Inter", sans-serif;`.  We capture everything
-# between `font-family:` and `;` or `}` (`}` handles
-# `h1 { font-family: X }` without trailing semicolon).
-_FONT_FAMILY_CSS_RE = re.compile(
-    r"font-family\s*:\s*([^;}]*)",
-    re.IGNORECASE,
-)
-
-# JSX inline style: `style={{ fontFamily: 'Inter, sans-serif' }}`.
-_FONT_FAMILY_JSX_RE = re.compile(
-    r"fontFamily\s*:\s*['\"]([^'\"]+)['\"]",
-    re.IGNORECASE,
-)
-
-# Tailwind palette class — taken from the component consistency linter
-# list for parity.
-_PALETTE_FAMILIES = (
-    "slate", "zinc", "gray", "neutral", "stone",
-    "red", "orange", "amber", "yellow", "lime",
-    "green", "emerald", "teal", "cyan", "sky",
-    "blue", "indigo", "violet", "purple", "fuchsia", "pink", "rose",
-)
-_TAILWIND_PALETTE_RE = re.compile(
-    r"\b(?:bg|text|border|ring|from|to|via|fill|stroke|divide|outline|"
-    r"decoration|placeholder|caret|accent|shadow)"
-    r"-(?:" + "|".join(_PALETTE_FAMILIES) + r")-\d{2,3}\b"
-)
-
-# `var(--foo)` or `var(--foo, fallback)` — the token name is captured
-# without the leading `--`.
-_CSS_VAR_RE = re.compile(r"var\(\s*--([a-zA-Z0-9_-]+)")
-
-
-def _hue_to_degrees(value: str, unit: str | None) -> float:
-    n = float(value)
-    if unit is None or unit == "":
-        return n
-    u = unit.lower()
-    if u == "deg":
-        return n
-    if u == "rad":
-        return n * 180.0 / 3.141592653589793
-    if u == "turn":
-        return n * 360.0
-    if u == "grad":
-        return n * 0.9
-    return n
-
-
-def extract_hex_colors(text: str) -> tuple[tuple[str, int], ...]:
-    """Return ``((hex, offset), …)`` for every hex literal in ``text``."""
-    if not isinstance(text, str):
-        return ()
-    out: list[tuple[str, int]] = []
-    for m in _HEX_RE.finditer(text):
-        digits = m.group(1)
-        if len(digits) in (3, 4, 6, 8):
-            out.append((f"#{digits}", m.start()))
-    return tuple(out)
-
-
-def extract_rgb_colors(text: str) -> tuple[tuple[str, int], ...]:
-    """Return ``((canonical_hex, offset), …)`` for every ``rgb[a](…)``."""
-    if not isinstance(text, str):
-        return ()
-    out: list[tuple[str, int]] = []
-    for m in _RGB_RE.finditer(text):
-        try:
-            r = _rgb_component(m.group(1), m.string[m.start():m.end()])
-            g = _rgb_component(m.group(2), m.string[m.start():m.end()])
-            b = _rgb_component(m.group(3), m.string[m.start():m.end()])
-        except ValueError:
-            continue
-        out.append((rgb_to_hex(r, g, b), m.start()))
-    return tuple(out)
-
-
-def _rgb_component(value: str, ctx: str) -> float:
-    """Return an rgb channel in 0-255 from a numeric string.
-
-    Handles the ``rgb(50% 50% 50%)`` percentage form by scanning the
-    surrounding text snippet for a trailing ``%`` after the captured
-    number.  Percentage detection is approximate but safe: we take
-    ``<value>%`` as a percentage iff the literal ``<value>%`` substring
-    appears in the function call.
-    """
-    n = float(value)
-    if f"{value}%" in ctx:
-        return n * 255.0 / 100.0
-    return n
-
-
-def extract_hsl_colors(text: str) -> tuple[tuple[str, int], ...]:
-    """Return ``((canonical_hex, offset), …)`` for every ``hsl[a](…)``."""
-    if not isinstance(text, str):
-        return ()
-    out: list[tuple[str, int]] = []
-    for m in _HSL_RE.finditer(text):
-        try:
-            h = _hue_to_degrees(m.group(1), m.group(2))
-            s = float(m.group(3)) / 100.0
-            light = float(m.group(4)) / 100.0
-        except ValueError:
-            continue
-        out.append((hsl_to_hex(h, s, light), m.start()))
-    return tuple(out)
-
-
-def extract_font_families(text: str) -> tuple[tuple[str, int], ...]:
-    """Return ``((raw_family_decl, offset), …)`` for every font-family
-    (CSS) or ``fontFamily`` (JSX) reference.
-
-    The ``raw_family_decl`` is the entire value side — the caller
-    still needs to split on comma and canonicalise each name.  That
-    keeps this helper pure (no side-effect of font-name parsing).
-    """
-    if not isinstance(text, str):
-        return ()
-    out: list[tuple[str, int]] = []
-    for m in _FONT_FAMILY_CSS_RE.finditer(text):
-        val = m.group(1).strip().strip(";").strip()
-        if val:
-            out.append((val, m.start(1)))
-    for m in _FONT_FAMILY_JSX_RE.finditer(text):
-        val = m.group(1).strip()
-        if val:
-            out.append((val, m.start(1)))
-    return tuple(out)
-
-
-def extract_tailwind_palette_classes(text: str) -> tuple[tuple[str, int], ...]:
-    """Return ``((class_name, offset), …)`` for every Tailwind default
-    palette class reference (``bg-slate-500``, ``text-blue-600``, …).
-    """
-    if not isinstance(text, str):
-        return ()
-    return tuple((m.group(0), m.start()) for m in _TAILWIND_PALETTE_RE.finditer(text))
-
-
-def _iter_css_vars(text: str) -> Iterator[tuple[str, int]]:
-    for m in _CSS_VAR_RE.finditer(text):
-        yield m.group(1), m.start()
+#
+# W12.3: ``normalize_hex`` / ``normalize_font_name`` / ``rgb_to_hex`` /
+# ``hsl_to_hex`` / ``extract_hex_colors`` / ``extract_rgb_colors`` /
+# ``extract_hsl_colors`` / ``extract_font_families`` /
+# ``extract_tailwind_palette_classes`` were extracted into
+# :mod:`backend.brand_canonical` so the W12 reverse-mode extractor can
+# import them publicly instead of crossing this module's privacy
+# boundary.  They are re-exported at the top of this file for back-
+# compat — callers still import from
+# :mod:`backend.brand_consistency_validator` unchanged.
 
 
 # ── Allowed-set builders ─────────────────────────────────────────────
@@ -612,7 +335,7 @@ def collect_allowed_fonts(tokens) -> frozenset[str]:
         if getattr(tok, "kind", None) != "font":
             continue
         value = getattr(tok, "value", "") or ""
-        for part in _split_font_stack(value):
+        for part in split_font_stack(value):
             normalised = normalize_font_name(part)
             if normalised:
                 out.add(normalised)
@@ -629,45 +352,6 @@ def collect_allowed_css_var_names(tokens) -> frozenset[str]:
         if name:
             out.add(name)
     return frozenset(out)
-
-
-def _split_font_stack(value: str) -> list[str]:
-    """Split a CSS font stack on commas that are NOT inside brackets.
-
-    ``"var(--font-sans, 'Inter'), sans-serif"`` →
-    ``["var(--font-sans, 'Inter')", "sans-serif"]``.
-    """
-    out: list[str] = []
-    depth = 0
-    buf: list[str] = []
-    in_single = False
-    in_double = False
-    for ch in value:
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            buf.append(ch)
-            continue
-        if ch == '"' and not in_single:
-            in_double = not in_double
-            buf.append(ch)
-            continue
-        if in_single or in_double:
-            buf.append(ch)
-            continue
-        if ch == "(":
-            depth += 1
-            buf.append(ch)
-        elif ch == ")":
-            depth = max(0, depth - 1)
-            buf.append(ch)
-        elif ch == "," and depth == 0:
-            out.append("".join(buf).strip())
-            buf = []
-        else:
-            buf.append(ch)
-    if buf:
-        out.append("".join(buf).strip())
-    return [p for p in out if p]
 
 
 # ── Matching helpers ─────────────────────────────────────────────────
@@ -695,7 +379,7 @@ def font_allowed(font_name: str, allowed: Iterable[str]) -> bool:
     normalised = normalize_font_name(font_name)
     if normalised is None:
         return False
-    if normalised in _GENERIC_FONT_KEYWORDS:
+    if normalised in GENERIC_FONT_KEYWORDS:
         return True
     if normalised.startswith("var(--"):
         # `var(--font-sans, 'Inter')` — leaves allow/deny to the var
@@ -811,7 +495,7 @@ def scan_text(
 
     # ── Font families ────────────────────────────────────────────
     for raw_stack, offset in extract_font_families(text):
-        for piece in _split_font_stack(raw_stack):
+        for piece in split_font_stack(raw_stack):
             if piece.lower().startswith("var(--"):
                 # Fall through to the unknown-css-var path; the name
                 # check there is authoritative.
@@ -847,7 +531,7 @@ def scan_text(
 
     # ── CSS var references pointing at undefined tokens ──────────
     if allowed.css_var_names:
-        for var_name, offset in _iter_css_vars(text):
+        for var_name, offset in iter_css_vars(text):
             if var_name in allowed.css_var_names:
                 continue
             line, col = _line_col(text, offset)

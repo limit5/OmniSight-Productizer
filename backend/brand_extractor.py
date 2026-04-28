@@ -61,8 +61,8 @@ Wire contract
 Module-global state audit (SOP §1)
 ----------------------------------
 
-Only immutable constants (compiled-regex singletons,
-``_GENERIC_FONT_KEYWORDS`` frozenset, the ``DEFAULT_*`` ints, the
+Only immutable constants (compiled-regex singletons inherited from
+:mod:`backend.brand_canonical`, the ``DEFAULT_*`` ints, the
 ``_REM_BASE_PX`` float) plus the standard module-level ``logger``.
 Cross-worker consistency: SOP answer #1 — every ``uvicorn`` worker
 derives identical constants from identical source.
@@ -88,14 +88,15 @@ import re
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Mapping
 
-from backend.brand_consistency_validator import (
-    _split_font_stack,
+from backend.brand_canonical import (
+    GENERIC_FONT_KEYWORDS,
     extract_font_families,
     extract_hex_colors,
     extract_hsl_colors,
     extract_rgb_colors,
     normalize_font_name,
     normalize_hex,
+    split_font_stack,
 )
 from backend.brand_spec import (
     BrandSpec,
@@ -152,34 +153,11 @@ _MAX_FETCH_BYTES = 8 * 1024 * 1024
 #: theme that publishes ``em``-only typography.
 _REM_BASE_PX = 16.0
 
-#: Generic CSS font keywords reused from the B5 forward-mode validator.
-#: Repeated here rather than imported from
-#: :mod:`backend.brand_consistency_validator` because that module
-#: keeps it module-private (single-leading-underscore) and W12.3 will
-#: extract it into a shared types module.  Until W12.3 lands, mirror
-#: the literal set so a divergence is impossible.
-_GENERIC_FONT_KEYWORDS: frozenset[str] = frozenset({
-    "sans-serif",
-    "serif",
-    "monospace",
-    "cursive",
-    "fantasy",
-    "system-ui",
-    "ui-sans-serif",
-    "ui-serif",
-    "ui-monospace",
-    "ui-rounded",
-    "emoji",
-    "math",
-    "fangsong",
-    "inherit",
-    "initial",
-    "unset",
-    "revert",
-    "revert-layer",
-    "-apple-system",
-    "blinkmacsystemfont",
-})
+# W12.3 landed: the generic CSS font keyword set was lifted into
+# :mod:`backend.brand_canonical` (imported above as
+# :data:`GENERIC_FONT_KEYWORDS`).  Both forward-mode and reverse-mode
+# now share the *same* frozenset; a divergence is impossible by
+# construction.
 
 
 # ── Pixel tally + colour helpers ────────────────────────────────────
@@ -423,14 +401,14 @@ def extract_font_stack(text: str) -> tuple[str, ...]:
         return ()
     counts: dict[str, int] = {}
     for raw_stack, _ in extract_font_families(text):
-        for piece in _split_font_stack(raw_stack):
+        for piece in split_font_stack(raw_stack):
             stripped = piece.strip()
             if stripped.lower().startswith("var(--"):
                 continue
             normalised = normalize_font_name(stripped)
             if not normalised:
                 continue
-            if normalised in _GENERIC_FONT_KEYWORDS:
+            if normalised in GENERIC_FONT_KEYWORDS:
                 continue
             counts[normalised] = counts.get(normalised, 0) + 1
     sorted_fonts = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
