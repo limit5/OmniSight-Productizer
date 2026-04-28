@@ -282,6 +282,16 @@ function LoginForm() {
     if (!auth.loading && auth.user) router.replace(next)
   }, [auth.loading, auth.user, next, router])
 
+  // AS.7.4 — When the backend issued an MFA challenge, push the
+  // user to the dedicated `/mfa-challenge` page. The auth context
+  // is the SoT for `mfaPending`, so the new page can read it from
+  // the same provider without a query-string handoff.
+  useEffect(() => {
+    if (auth.mfaPending) {
+      router.push(`/mfa-challenge?next=${encodeURIComponent(next)}`)
+    }
+  }, [auth.mfaPending, next, router])
+
   const primaryProviders = useMemo(getPrimaryProviders, [])
   const secondaryProviders = useMemo(getSecondaryProviders, [])
 

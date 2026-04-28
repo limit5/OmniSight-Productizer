@@ -811,6 +811,171 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────
+ * AS.7.4 — MFA challenge dedicated page
+ *
+ * Six-cell pulse code display + ✓ passed check overlay + method-tab
+ * pill.  The pulse keyframe is gated to motion levels normal /
+ * dramatic; off / subtle render the cells statically so their colour
+ * change alone communicates progress. The passed-check overlay is
+ * skipped entirely at off / subtle (the leaf returns null), so the
+ * keyframes below only fire at the higher tiers.
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-mfa-tabs {
+  display: flex;
+}
+
+.as7-mfa-tab {
+  transition: background-color 180ms ease, color 180ms ease, box-shadow 220ms ease;
+}
+
+.as7-mfa-pulse {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+.as7-mfa-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 40px;
+  border-radius: 6px;
+  border: 1px solid rgba(168, 85, 247, 0.22);
+  background: rgba(15, 23, 42, 0.55);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 220ms ease;
+  will-change: transform, color, box-shadow;
+}
+
+.as7-mfa-cell[data-as7-mfa-cell="empty"] {
+  color: rgba(148, 163, 184, 0.45);
+}
+
+.as7-mfa-cell[data-as7-mfa-cell="filled"] {
+  color: var(--foreground);
+  border-color: rgba(168, 85, 247, 0.6);
+}
+
+.as7-mfa-cell[data-as7-mfa-cell="passed"] {
+  color: rgba(16, 185, 129, 1);
+  border-color: rgba(16, 185, 129, 0.7);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.45);
+}
+
+/* Pulse keyframe replays via React `key={...}` re-mount on filled
+ * cells when the parent bumps `pulseKey`. */
+.as7-mfa-pulse[data-as7-mfa-pulse="on"] .as7-mfa-cell[data-as7-mfa-cell="filled"] {
+  animation: as7-mfa-pulse 320ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes as7-mfa-pulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 rgba(168, 85, 247, 0);
+  }
+  35% {
+    transform: scale(1.18);
+    box-shadow: 0 0 16px rgba(168, 85, 247, 0.85);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 6px rgba(168, 85, 247, 0.35);
+  }
+}
+
+/* Passed-check overlay — fullscreen z=9100 so it sits above the
+ * glass card but below the warp-drive layer (which uses 9000+). */
+.as7-mfa-passed {
+  position: fixed;
+  inset: 0;
+  z-index: 9100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(16, 185, 129, 0.18),
+    rgba(2, 6, 23, 0.45) 60%,
+    rgba(2, 6, 23, 0.85) 100%
+  );
+  color: rgba(16, 185, 129, 1);
+  animation: as7-mfa-passed-fade var(--as7-mfa-passed-duration, 600ms) ease-out forwards;
+}
+
+.as7-mfa-passed-svg {
+  width: 96px;
+  height: 96px;
+  filter: drop-shadow(0 0 24px rgba(16, 185, 129, 0.65));
+  animation: as7-mfa-passed-pop var(--as7-mfa-passed-duration, 600ms) cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.as7-mfa-passed-circle {
+  stroke-dasharray: 176;
+  stroke-dashoffset: 176;
+  animation: as7-mfa-passed-draw var(--as7-mfa-passed-duration, 600ms) ease-out forwards;
+}
+
+.as7-mfa-passed-stroke {
+  stroke-dasharray: 60;
+  stroke-dashoffset: 60;
+  animation: as7-mfa-passed-draw var(--as7-mfa-passed-duration, 600ms) ease-out 100ms forwards;
+}
+
+.as7-mfa-passed-ring {
+  position: absolute;
+  width: 220px;
+  height: 220px;
+  border-radius: 50%;
+  border: 2px solid rgba(16, 185, 129, 0.55);
+  animation: as7-mfa-passed-ring var(--as7-mfa-passed-duration, 600ms) ease-out forwards;
+}
+
+@keyframes as7-mfa-passed-fade {
+  0% { opacity: 0; }
+  20% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes as7-mfa-passed-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes as7-mfa-passed-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes as7-mfa-passed-ring {
+  0% { transform: scale(0.4); opacity: 0.9; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+/* Motion-level gating — `off` strips every animation; `subtle`
+ * keeps the static cell colours but no pulse/ring. */
+.as7-root[data-motion-level="off"] .as7-mfa-cell,
+.as7-root[data-motion-level="off"] .as7-mfa-passed,
+.as7-root[data-motion-level="off"] .as7-mfa-passed-ring,
+.as7-root[data-motion-level="off"] .as7-mfa-passed-svg,
+.as7-root[data-motion-level="off"] .as7-mfa-tab {
+  animation: none !important;
+  transition-duration: 0s !important;
+}
+
+.as7-root[data-motion-level="subtle"] .as7-mfa-pulse[data-as7-mfa-pulse="on"] .as7-mfa-cell[data-as7-mfa-cell="filled"] {
+  animation: none !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────
  * `prefers-reduced-motion: reduce` — last-line WCAG R25.2 defence
  * ───────────────────────────────────────────────────────────────── */
 

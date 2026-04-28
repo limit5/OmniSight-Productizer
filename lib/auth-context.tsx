@@ -6,6 +6,8 @@ import {
   login as apiLogin,
   logout as apiLogout,
   mfaChallenge as apiMfaChallenge,
+  mfaWebauthnChallengeBegin as apiMfaWebauthnChallengeBegin,
+  mfaWebauthnChallengeComplete as apiMfaWebauthnChallengeComplete,
   signup as apiSignup,
   requestPasswordReset as apiRequestPasswordReset,
   resetPassword as apiResetPassword,
@@ -33,6 +35,10 @@ import {
   type RequestResetErrorOutcome,
   type ResetPasswordErrorOutcome,
 } from "@/lib/auth/password-reset-helpers"
+import {
+  classifyMfaChallengeError,
+  type MfaChallengeErrorOutcome,
+} from "@/lib/auth/mfa-challenge-helpers"
 
 interface MfaPending {
   mfa_token: string
@@ -119,6 +125,18 @@ export interface ResetPasswordOutcome {
   readonly email: string | null
 }
 
+/** AS.7.4 — outcome surfaced to the dedicated MFA-challenge page
+ *  after `submitMfa()` / `submitMfaWebauthn()` resolves. `ok` means
+ *  the second-factor was accepted; the page plays the passed-check
+ *  overlay and navigates to the post-login destination. `failed`
+ *  carries the structured error so the page can branch on
+ *  expired-challenge (kicks back to /login) vs. retryable
+ *  invalid-code / rate-limited / webauthn-failed. */
+export interface MfaChallengeOutcome {
+  readonly status: "ok" | "failed"
+  readonly error: MfaChallengeErrorOutcome | null
+}
+
 interface AuthContextValue {
   user: AuthUser | null
   authMode: WhoamiResponse["auth_mode"] | null
@@ -142,6 +160,10 @@ interface AuthContextValue {
   /** AS.7.3 — structured outcome for the most recent failed
    *  reset-password call (the new-password submission stage). */
   lastResetPasswordError: ResetPasswordErrorOutcome | null
+  /** AS.7.4 — structured outcome for the most recent failed MFA
+   *  challenge submission (TOTP / backup code / WebAuthn). `null`
+   *  on success or until the first failure. */
+  lastMfaChallengeError: MfaChallengeErrorOutcome | null
   mfaPending: MfaPending | null
   login: (
     email: string,
@@ -173,6 +195,20 @@ interface AuthContextValue {
   logout: () => Promise<void>
   refresh: () => Promise<void>
   submitMfa: (code: string) => Promise<boolean>
+  /** AS.7.4 — structured-outcome variant of `submitMfa()` that
+   *  routes errors through `classifyMfaChallengeError` so the
+   *  dedicated `/mfa-challenge` page can branch on expired-challenge
+   *  vs retryable invalid-code without parsing the message string.
+   *  Both `submitMfa()` and `submitMfaStructured()` hit the same
+   *  backend endpoint; the boolean variant is preserved for the
+   *  legacy login-page inline flow. */
+  submitMfaStructured: (code: string) => Promise<MfaChallengeOutcome>
+  /** AS.7.4 — submit a WebAuthn challenge. The hook orchestrates
+   *  the two-step `webauthn/challenge/{begin,complete}` round-trip
+   *  including the `navigator.credentials.get()` invocation; the
+   *  caller only passes the (begin → get → complete) execution as
+   *  one operation. */
+  submitMfaWebauthn: () => Promise<MfaChallengeOutcome>
   cancelMfa: () => void
 }
 
@@ -192,6 +228,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     useState<RequestResetErrorOutcome | null>(null)
   const [lastResetPasswordError, setLastResetPasswordError] =
     useState<ResetPasswordErrorOutcome | null>(null)
+  const [lastMfaChallengeError, setLastMfaChallengeError] =
+    useState<MfaChallengeErrorOutcome | null>(null)
   const [mfaPending, setMfaPending] = useState<MfaPending | null>(null)
 
   const refresh = useCallback(async () => {
@@ -474,6 +512,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(res.user)
       setMfaPending(null)
       setError(null)
+      setLastMfaChallengeError(null)
       return true
     } catch (exc) {
       const msg = exc instanceof Error ? exc.message : String(exc)
@@ -486,10 +525,160 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [mfaPending])
 
+  const submitMfaStructured = useCallback(
+    async (code: string): Promise<MfaChallengeOutcome> => {
+      if (!mfaPending) {
+        const outcome = classifyMfaChallengeError({
+          status: 410,
+          errorCode: null,
+          retryAfter: null,
+        })
+        setLastMfaChallengeError(outcome)
+        setError(outcome.message)
+        return Object.freeze({
+          status: "failed" as const,
+          error: outcome,
+        })
+      }
+      try {
+        const res = await apiMfaChallenge(mfaPending.mfa_token, code)
+        setUser(res.user)
+        setMfaPending(null)
+        setError(null)
+        setLastMfaChallengeError(null)
+        return Object.freeze({ status: "ok" as const, error: null })
+      } catch (exc) {
+        if (exc instanceof ApiError) {
+          const errorCode = _extractErrorCode(exc)
+          const retryAfter = _extractRetryAfter(exc)
+          const outcome = classifyMfaChallengeError({
+            status: exc.status,
+            errorCode,
+            retryAfter,
+          })
+          setLastMfaChallengeError(outcome)
+          setError(outcome.message)
+          return Object.freeze({
+            status: "failed" as const,
+            error: outcome,
+          })
+        }
+        const msg = exc instanceof Error ? exc.message : String(exc)
+        const outcome = classifyMfaChallengeError({
+          status: null,
+          message: msg,
+          retryAfter: null,
+        })
+        setLastMfaChallengeError(outcome)
+        setError(outcome.message)
+        return Object.freeze({
+          status: "failed" as const,
+          error: outcome,
+        })
+      }
+    },
+    [mfaPending],
+  )
+
+  const submitMfaWebauthn = useCallback(
+    async (): Promise<MfaChallengeOutcome> => {
+      if (!mfaPending) {
+        const outcome = classifyMfaChallengeError({
+          status: 410,
+          errorCode: null,
+          retryAfter: null,
+        })
+        setLastMfaChallengeError(outcome)
+        setError(outcome.message)
+        return Object.freeze({
+          status: "failed" as const,
+          error: outcome,
+        })
+      }
+      const buildFailed = (): MfaChallengeOutcome => {
+        const outcome = classifyMfaChallengeError({
+          status: 400,
+          errorCode: "webauthn_failed",
+          retryAfter: null,
+        })
+        setLastMfaChallengeError(outcome)
+        setError(outcome.message)
+        return Object.freeze({
+          status: "failed" as const,
+          error: outcome,
+        })
+      }
+      let assertion: unknown
+      try {
+        const options = await apiMfaWebauthnChallengeBegin(
+          mfaPending.mfa_token,
+        )
+        const cred = (globalThis as { navigator?: Navigator }).navigator
+          ?.credentials
+        if (!cred || typeof cred.get !== "function") {
+          return buildFailed()
+        }
+        assertion = await cred.get({
+          publicKey: options as unknown as PublicKeyCredentialRequestOptions,
+        })
+        if (!assertion) {
+          return buildFailed()
+        }
+      } catch (exc) {
+        if (exc instanceof ApiError) {
+          const errorCode = _extractErrorCode(exc)
+          const retryAfter = _extractRetryAfter(exc)
+          const outcome = classifyMfaChallengeError({
+            status: exc.status,
+            errorCode,
+            retryAfter,
+          })
+          setLastMfaChallengeError(outcome)
+          setError(outcome.message)
+          return Object.freeze({
+            status: "failed" as const,
+            error: outcome,
+          })
+        }
+        return buildFailed()
+      }
+      try {
+        const res = await apiMfaWebauthnChallengeComplete(
+          mfaPending.mfa_token,
+          assertion,
+        )
+        setUser(res.user)
+        setMfaPending(null)
+        setError(null)
+        setLastMfaChallengeError(null)
+        return Object.freeze({ status: "ok" as const, error: null })
+      } catch (exc) {
+        if (exc instanceof ApiError) {
+          const errorCode = _extractErrorCode(exc)
+          const retryAfter = _extractRetryAfter(exc)
+          const outcome = classifyMfaChallengeError({
+            status: exc.status,
+            errorCode,
+            retryAfter,
+          })
+          setLastMfaChallengeError(outcome)
+          setError(outcome.message)
+          return Object.freeze({
+            status: "failed" as const,
+            error: outcome,
+          })
+        }
+        return buildFailed()
+      }
+    },
+    [mfaPending],
+  )
+
   const cancelMfa = useCallback(() => {
     setMfaPending(null)
     setError(null)
     setLastLoginError(null)
+    setLastMfaChallengeError(null)
   }, [])
 
   const logout = useCallback(async () => {
@@ -505,7 +694,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, lastLoginError, lastSignupError, lastRequestResetError, lastResetPasswordError, mfaPending, login, signup, requestPasswordReset, resetPassword, logout, refresh, submitMfa, cancelMfa }}>
+    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, lastLoginError, lastSignupError, lastRequestResetError, lastResetPasswordError, lastMfaChallengeError, mfaPending, login, signup, requestPasswordReset, resetPassword, logout, refresh, submitMfa, submitMfaStructured, submitMfaWebauthn, cancelMfa }}>
       {children}
     </Ctx.Provider>
   )

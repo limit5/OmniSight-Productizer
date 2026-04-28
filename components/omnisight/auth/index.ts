@@ -39,3 +39,11 @@ export {
 } from "./password-style-toggle"
 export { PasswordStrengthMeter } from "./password-strength-meter"
 export { SaveAcknowledgementCheckbox } from "./save-acknowledgement-checkbox"
+
+// AS.7.4 — MFA challenge page primitives
+export { MfaMethodTabs } from "./mfa-method-tabs"
+export { MfaCodePulse } from "./mfa-code-pulse"
+export {
+  MFA_PASSED_DURATION_BY_LEVEL,
+  MfaPassedCheck,
+} from "./mfa-passed-check"
