@@ -30,6 +30,8 @@ debug/
 
 # python
 backend/.venv/
+/venv/
+/.venv/
 __pycache__/
 *.pyc
 
