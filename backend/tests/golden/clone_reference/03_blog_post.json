@@ -1,0 +1,325 @@
+{
+  "context_block_lines": [
+    "# Clone Spec Context (W11)",
+    "",
+    "## Source identity (W11.7 manifest fingerprint)",
+    "",
+    "- clone_id: `00000000-0000-4000-8000-000000000003`",
+    "- manifest_hash: `sha256:48366a0182b8eebe02e48f5f7b1b63038395fa972b87427167beff26e4cd7157`",
+    "- source_url: `https://eng.initech.example/blog/build-system`",
+    "- fetched_at: `2026-04-29T00:00:00Z`",
+    "- capture_backend: `mock`",
+    "- rewrite_model: `heuristic`",
+    "- transformations: bytes_strip, text_rewrite_heuristic, image_placeholder",
+    "- attribution: Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "",
+    "## W11 invariants (non-negotiable)",
+    "",
+    "1. **Never copy bytes from the source.** The L3 transformer already",
+    "   replaced every source image with a placeholder record. You MUST",
+    "   NOT request a network fetch of any URL listed under",
+    "   `source_url` of an image record — that field is provenance-only,",
+    "   pinned in the W11.7 manifest for audit replay.",
+    "2. **Image placeholders only.** Every `<img>` / `<Image>` tag you",
+    "   emit must point at the placeholder URL provided in the image",
+    "   record's `url` field. Never substitute the `source_url`.",
+    "3. **No source brand names in user-visible copy.** The L3 rewrite",
+    "   already paraphrased the source — preserve that paraphrase.",
+    "   Never regress to the original wording even if you can guess",
+    "   what it was.",
+    "4. **Attribution travels with the artefact.** The W11.7 traceability",
+    "   comment + the `LICENSES/open-lovable-mit.txt` reference are",
+    "   pinned by the framework adapter; your scaffolding must not",
+    "   delete or rewrite them.",
+    "5. **Echo the manifest fingerprint.** When you produce a project",
+    "   README, a header comment, or a metadata file, include the",
+    "   `clone_id` and `manifest_hash` shown above so the W11.12 audit",
+    "   replay can cross-reference your output.",
+    "",
+    "## Rewritten outline (design inspiration only — already paraphrased by L3)",
+    "",
+    "- title: Our take: Why we rewrote our build system — Our Brand Engineering Blog",
+    "- hero:",
+    "  heading: A page about: Why we rewrote our build system",
+    "  tagline: After three years of escalating Makefile pain, we finally bit the bullet and migrated the whole engineering organisation onto a proper task graph runner. Here is what we learned, what we shipped, and what we would do differently.",
+    "  cta_label: ",
+    "- nav:",
+    "  - Home",
+    "  - Blog",
+    "  - About",
+    "- sections:",
+    "  - **The pain we were running from** — Our old build pipeline was a 4,000-line Makefile with implicit rules layered on top of explicit ones. Onboarding a new engineer took three weeks. A typo in one rule could silently rebuild every artefact. We could not parallelise across mac…",
+    "  - **What we shipped** — We picked a content-addressed task graph runner with first-class remote caching. The migration took six engineers four months — about half the time we estimated, mostly because we wrote a small DSL that translated existing Make targets int…",
+    "  - **What surprised us** — The biggest unexpected win was that the new system surfaced flaky tests we did not know we had. The old Makefile retried silently; the new runner failed loudly. We fixed eighty-seven flakes in the first month.",
+    "  - **What we would change** — We would migrate test targets first, application targets second, and infrastructure targets last. We did the opposite, and infrastructure became a long tail that blocked the cutover for two months.",
+    "- footer: Written by the Our Brand Engineering team — © 2026 Our Brand. RSS Contact",
+    "",
+    "## Design tokens (functional — map onto your framework's design system)",
+    "",
+    "- colors: #102030, #f5f5f5, #666",
+    "- fonts: https://fonts.googleapis.com/css2?family=Lora&family=IBM+Plex+Mono, Lora, serif, IBM Plex Mono, monospace",
+    "- spacing:",
+    "  - gap: ['12px']",
+    "  - margin: ['32px auto']",
+    "  - max_width: 720px",
+    "  - padding: ['16px']",
+    "",
+    "## Images (placeholders)",
+    "",
+    "  (empty)"
+  ],
+  "fixture": {
+    "clone_id": "00000000-0000-4000-8000-000000000003",
+    "slug": "03_blog_post",
+    "source_url": "https://eng.initech.example/blog/build-system",
+    "tenant_id": "tenant-fixture-003"
+  },
+  "manifest": {
+    "actor": "snapshot-harness@omnisight.test",
+    "attribution": "Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "classification": {
+      "categories": [
+        "clean"
+      ],
+      "model": "snapshot-harness-classifier",
+      "risk_level": "low",
+      "signals_used": [
+        "heuristic"
+      ]
+    },
+    "clone_id": "00000000-0000-4000-8000-000000000003",
+    "created_at": "2026-04-29T00:00:00Z",
+    "defense_layers": {
+      "L1_machine_refusal": "passed",
+      "L2_content_classifier": "low",
+      "L3_output_transformer": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "L4_traceability": "manifest_v1"
+    },
+    "manifest_hash": "sha256:48366a0182b8eebe02e48f5f7b1b63038395fa972b87427167beff26e4cd7157",
+    "manifest_version": "1",
+    "source": {
+      "backend": "mock",
+      "fetched_at": "2026-04-29T00:00:00Z",
+      "status_code": 200,
+      "url": "https://eng.initech.example/blog/build-system"
+    },
+    "tenant_id": "tenant-fixture-003",
+    "transformation": {
+      "model": "heuristic",
+      "signals_used": [
+        "heuristic",
+        "image_placeholder"
+      ],
+      "transformations": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "warnings": [
+        "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+      ]
+    },
+    "transformed_summary": {
+      "color_count": 3,
+      "font_count": 5,
+      "has_footer": true,
+      "has_hero": true,
+      "image_count": 0,
+      "nav_count": 3,
+      "section_count": 4,
+      "title": "Our take: Why we rewrote our build system — Our Brand Engineering Blog"
+    }
+  },
+  "rendered": {
+    "astro": {
+      "adapter": "AstroFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "astro.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "src/layouts/Layout.astro",
+        "src/pages/index.astro",
+        "src/styles/global.css",
+        "tsconfig.json"
+      ],
+      "framework": "astro",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000003",
+      "manifest_hash": "sha256:48366a0182b8eebe02e48f5f7b1b63038395fa972b87427167beff26e4cd7157",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "next": {
+      "adapter": "NextFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app/globals.css",
+        "app/layout.tsx",
+        "app/page.tsx",
+        "next.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "next",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000003",
+      "manifest_hash": "sha256:48366a0182b8eebe02e48f5f7b1b63038395fa972b87427167beff26e4cd7157",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "nuxt": {
+      "adapter": "NuxtFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app.vue",
+        "assets/css/main.css",
+        "nuxt.config.ts",
+        "package.json",
+        "pages/index.vue",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "nuxt",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000003",
+      "manifest_hash": "sha256:48366a0182b8eebe02e48f5f7b1b63038395fa972b87427167beff26e4cd7157",
+      "traceability_html_path": "public/clone-traceability.html"
+    }
+  },
+  "spec": {
+    "color_count": 3,
+    "colors": [
+      "#102030",
+      "#f5f5f5",
+      "#666"
+    ],
+    "font_count": 5,
+    "fonts": [
+      "https://fonts.googleapis.com/css2?family=Lora&family=IBM+Plex+Mono",
+      "Lora",
+      "serif",
+      "IBM Plex Mono",
+      "monospace"
+    ],
+    "hero": {
+      "heading": "Why we rewrote our build system",
+      "tagline": "After three years of escalating Makefile pain, we finally bit the bullet and migrated the whole engineering organisation onto a proper task graph runner. Here is what we learned, what we shipped, and what we would do differently."
+    },
+    "image_count": 0,
+    "image_urls": [],
+    "meta_keys": [
+      "description",
+      "og:description",
+      "theme-color"
+    ],
+    "nav_count": 3,
+    "nav_labels": [
+      "Home",
+      "Blog",
+      "About"
+    ],
+    "section_count": 4,
+    "section_headings": [
+      "The pain we were running from",
+      "What we shipped",
+      "What surprised us",
+      "What we would change"
+    ],
+    "spacing_keys": [
+      "gap",
+      "margin",
+      "max_width",
+      "padding"
+    ],
+    "title": "Why we rewrote our build system — Initech Engineering Blog",
+    "warnings": [
+      "no images detected"
+    ]
+  },
+  "transformed": {
+    "colors": [
+      "#102030",
+      "#f5f5f5",
+      "#666"
+    ],
+    "fonts": [
+      "https://fonts.googleapis.com/css2?family=Lora&family=IBM+Plex+Mono",
+      "Lora",
+      "serif",
+      "IBM Plex Mono",
+      "monospace"
+    ],
+    "footer": {
+      "text": "Written by the Our Brand Engineering team — © 2026 Our Brand. RSS Contact"
+    },
+    "hero": {
+      "cta_label": "",
+      "heading": "A page about: Why we rewrote our build system",
+      "tagline": "After three years of escalating Makefile pain, we finally bit the bullet and migrated the whole engineering organisation onto a proper task graph runner. Here is what we learned, what we shipped, and what we would do differently."
+    },
+    "images": [],
+    "meta": {
+      "description": "A retrospective on the journey from a hand-rolled Makefile build to a proper task graph.",
+      "og:description": "Our Brand engineers walk through migrating from Make to a modern task graph."
+    },
+    "model": "heuristic",
+    "nav": [
+      {
+        "label": "Home"
+      },
+      {
+        "label": "Blog"
+      },
+      {
+        "label": "About"
+      }
+    ],
+    "sections": [
+      {
+        "heading": "The pain we were running from",
+        "summary": "Our old build pipeline was a 4,000-line Makefile with implicit rules layered on top of explicit ones. Onboarding a new engineer took three weeks. A typo in one rule could silently rebuild every artefact. We could not parallelise across machines because the dependency graph was n…"
+      },
+      {
+        "heading": "What we shipped",
+        "summary": "We picked a content-addressed task graph runner with first-class remote caching. The migration took six engineers four months — about half the time we estimated, mostly because we wrote a small DSL that translated existing Make targets into the new format."
+      },
+      {
+        "heading": "What surprised us",
+        "summary": "The biggest unexpected win was that the new system surfaced flaky tests we did not know we had. The old Makefile retried silently; the new runner failed loudly. We fixed eighty-seven flakes in the first month."
+      },
+      {
+        "heading": "What we would change",
+        "summary": "We would migrate test targets first, application targets second, and infrastructure targets last. We did the opposite, and infrastructure became a long tail that blocked the cutover for two months."
+      }
+    ],
+    "signals_used": [
+      "heuristic",
+      "image_placeholder"
+    ],
+    "spacing": {
+      "gap": [
+        "12px"
+      ],
+      "margin": [
+        "32px auto"
+      ],
+      "max_width": "720px",
+      "padding": [
+        "16px"
+      ]
+    },
+    "title": "Our take: Why we rewrote our build system — Our Brand Engineering Blog",
+    "transformations": [
+      "bytes_strip",
+      "text_rewrite_heuristic",
+      "image_placeholder"
+    ],
+    "warnings": [
+      "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+    ]
+  }
+}

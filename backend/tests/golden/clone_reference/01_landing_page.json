@@ -1,0 +1,351 @@
+{
+  "context_block_lines": [
+    "# Clone Spec Context (W11)",
+    "",
+    "## Source identity (W11.7 manifest fingerprint)",
+    "",
+    "- clone_id: `00000000-0000-4000-8000-000000000001`",
+    "- manifest_hash: `sha256:667e10f85f52d0d562f99719d102b7ae5540d48989bb5aa8c18a22a705c49021`",
+    "- source_url: `https://acme.example/landing`",
+    "- fetched_at: `2026-04-29T00:00:00Z`",
+    "- capture_backend: `mock`",
+    "- rewrite_model: `heuristic`",
+    "- transformations: bytes_strip, text_rewrite_heuristic, image_placeholder",
+    "- attribution: Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "",
+    "## W11 invariants (non-negotiable)",
+    "",
+    "1. **Never copy bytes from the source.** The L3 transformer already",
+    "   replaced every source image with a placeholder record. You MUST",
+    "   NOT request a network fetch of any URL listed under",
+    "   `source_url` of an image record — that field is provenance-only,",
+    "   pinned in the W11.7 manifest for audit replay.",
+    "2. **Image placeholders only.** Every `<img>` / `<Image>` tag you",
+    "   emit must point at the placeholder URL provided in the image",
+    "   record's `url` field. Never substitute the `source_url`.",
+    "3. **No source brand names in user-visible copy.** The L3 rewrite",
+    "   already paraphrased the source — preserve that paraphrase.",
+    "   Never regress to the original wording even if you can guess",
+    "   what it was.",
+    "4. **Attribution travels with the artefact.** The W11.7 traceability",
+    "   comment + the `LICENSES/open-lovable-mit.txt` reference are",
+    "   pinned by the framework adapter; your scaffolding must not",
+    "   delete or rewrite them.",
+    "5. **Echo the manifest fingerprint.** When you produce a project",
+    "   README, a header comment, or a metadata file, include the",
+    "   `clone_id` and `manifest_hash` shown above so the W11.12 audit",
+    "   replay can cross-reference your output.",
+    "",
+    "## Rewritten outline (design inspiration only — already paraphrased by L3)",
+    "",
+    "- title: Our take: Our Brand Cloud Platform — Modern Infrastructure",
+    "- hero:",
+    "  heading: A page about: Welcome to Our Brand Cloud",
+    "  tagline: Serverless infrastructure that scales with your team — from prototype to production.",
+    "  cta_label: Start Free Trial",
+    "- nav:",
+    "  - Home",
+    "  - Product",
+    "  - Pricing",
+    "  - Docs",
+    "  - Contact",
+    "- sections:",
+    "  - **Built for small teams** — Our Brand Cloud removes the operational overhead of running production services so small teams can focus on shipping product.",
+    "  - **Globally distributed** — Edge functions running in 30 regions; every request gets the closest node automatically.",
+    "  - **Transparent pricing** — No surprise bills — pay for what you use, with a generous free tier for hobby projects.",
+    "- footer: © 2026 Our Brand Corp. All rights reserved. Privacy Terms",
+    "",
+    "## Design tokens (functional — map onto your framework's design system)",
+    "",
+    "- colors: #1118ff, #ff6f61",
+    "- fonts: https://fonts.googleapis.com/css2?family=Inter, Inter, sans-serif",
+    "- spacing:",
+    "  - gap: ['16px']",
+    "  - margin: ['0 auto']",
+    "  - max_width: 1200px",
+    "  - padding: ['24px', '64px 16px']",
+    "",
+    "## Images (placeholders — never fetch the source URLs)",
+    "  - `https://placehold.co/800x600?text=Acme+Cloud+dashboard` (kind=placeholder, alt='Acme Cloud dashboard')",
+    "  - `https://placehold.co/800x600?text=Architecture+diagram` (kind=placeholder, alt='Architecture diagram')"
+  ],
+  "fixture": {
+    "clone_id": "00000000-0000-4000-8000-000000000001",
+    "slug": "01_landing_page",
+    "source_url": "https://acme.example/landing",
+    "tenant_id": "tenant-fixture-001"
+  },
+  "manifest": {
+    "actor": "snapshot-harness@omnisight.test",
+    "attribution": "Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "classification": {
+      "categories": [
+        "clean"
+      ],
+      "model": "snapshot-harness-classifier",
+      "risk_level": "low",
+      "signals_used": [
+        "heuristic"
+      ]
+    },
+    "clone_id": "00000000-0000-4000-8000-000000000001",
+    "created_at": "2026-04-29T00:00:00Z",
+    "defense_layers": {
+      "L1_machine_refusal": "passed",
+      "L2_content_classifier": "low",
+      "L3_output_transformer": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "L4_traceability": "manifest_v1"
+    },
+    "manifest_hash": "sha256:667e10f85f52d0d562f99719d102b7ae5540d48989bb5aa8c18a22a705c49021",
+    "manifest_version": "1",
+    "source": {
+      "backend": "mock",
+      "fetched_at": "2026-04-29T00:00:00Z",
+      "status_code": 200,
+      "url": "https://acme.example/landing"
+    },
+    "tenant_id": "tenant-fixture-001",
+    "transformation": {
+      "model": "heuristic",
+      "signals_used": [
+        "heuristic",
+        "image_placeholder"
+      ],
+      "transformations": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "warnings": [
+        "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+      ]
+    },
+    "transformed_summary": {
+      "color_count": 2,
+      "font_count": 3,
+      "has_footer": true,
+      "has_hero": true,
+      "image_count": 2,
+      "nav_count": 5,
+      "section_count": 3,
+      "title": "Our take: Our Brand Cloud Platform — Modern Infrastructure"
+    }
+  },
+  "rendered": {
+    "astro": {
+      "adapter": "AstroFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "astro.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "src/layouts/Layout.astro",
+        "src/pages/index.astro",
+        "src/styles/global.css",
+        "tsconfig.json"
+      ],
+      "framework": "astro",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000001",
+      "manifest_hash": "sha256:667e10f85f52d0d562f99719d102b7ae5540d48989bb5aa8c18a22a705c49021",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "next": {
+      "adapter": "NextFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app/globals.css",
+        "app/layout.tsx",
+        "app/page.tsx",
+        "next.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "next",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000001",
+      "manifest_hash": "sha256:667e10f85f52d0d562f99719d102b7ae5540d48989bb5aa8c18a22a705c49021",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "nuxt": {
+      "adapter": "NuxtFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app.vue",
+        "assets/css/main.css",
+        "nuxt.config.ts",
+        "package.json",
+        "pages/index.vue",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "nuxt",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000001",
+      "manifest_hash": "sha256:667e10f85f52d0d562f99719d102b7ae5540d48989bb5aa8c18a22a705c49021",
+      "traceability_html_path": "public/clone-traceability.html"
+    }
+  },
+  "spec": {
+    "color_count": 2,
+    "colors": [
+      "#1118ff",
+      "#ff6f61"
+    ],
+    "font_count": 3,
+    "fonts": [
+      "https://fonts.googleapis.com/css2?family=Inter",
+      "Inter",
+      "sans-serif"
+    ],
+    "hero": {
+      "cta": {
+        "href": "/signup",
+        "label": "Start Free Trial"
+      },
+      "heading": "Welcome to Acme Cloud",
+      "tagline": "Serverless infrastructure that scales with your team — from prototype to production."
+    },
+    "image_count": 2,
+    "image_urls": [
+      "https://cdn.acme.example/hero.png",
+      "https://cdn.acme.example/diagram.png"
+    ],
+    "meta_keys": [
+      "description",
+      "og:description",
+      "og:title",
+      "og:url",
+      "theme-color",
+      "twitter:description"
+    ],
+    "nav_count": 5,
+    "nav_labels": [
+      "Home",
+      "Product",
+      "Pricing",
+      "Docs",
+      "Contact"
+    ],
+    "section_count": 3,
+    "section_headings": [
+      "Built for small teams",
+      "Globally distributed",
+      "Transparent pricing"
+    ],
+    "spacing_keys": [
+      "gap",
+      "margin",
+      "max_width",
+      "padding"
+    ],
+    "title": "Acme Cloud Platform — Modern Infrastructure",
+    "warnings": []
+  },
+  "transformed": {
+    "colors": [
+      "#1118ff",
+      "#ff6f61"
+    ],
+    "fonts": [
+      "https://fonts.googleapis.com/css2?family=Inter",
+      "Inter",
+      "sans-serif"
+    ],
+    "footer": {
+      "text": "© 2026 Our Brand Corp. All rights reserved. Privacy Terms"
+    },
+    "hero": {
+      "cta_label": "Start Free Trial",
+      "heading": "A page about: Welcome to Our Brand Cloud",
+      "tagline": "Serverless infrastructure that scales with your team — from prototype to production."
+    },
+    "images": [
+      {
+        "alt": "Acme Cloud dashboard",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.acme.example/hero.png",
+        "url": "https://placehold.co/800x600?text=Acme+Cloud+dashboard",
+        "width": "800"
+      },
+      {
+        "alt": "Architecture diagram",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.acme.example/diagram.png",
+        "url": "https://placehold.co/800x600?text=Architecture+diagram",
+        "width": "800"
+      }
+    ],
+    "meta": {
+      "description": "Our Brand Cloud Platform helps small teams ship faster with serverless tooling.",
+      "og:description": "Serverless tooling for ambitious small teams.",
+      "og:title": "Our take: Our Brand Cloud Platform — Modern Infrastructure",
+      "twitter:description": "Serverless tooling for ambitious small teams."
+    },
+    "model": "heuristic",
+    "nav": [
+      {
+        "label": "Home"
+      },
+      {
+        "label": "Product"
+      },
+      {
+        "label": "Pricing"
+      },
+      {
+        "label": "Docs"
+      },
+      {
+        "label": "Contact"
+      }
+    ],
+    "sections": [
+      {
+        "heading": "Built for small teams",
+        "summary": "Our Brand Cloud removes the operational overhead of running production services so small teams can focus on shipping product."
+      },
+      {
+        "heading": "Globally distributed",
+        "summary": "Edge functions running in 30 regions; every request gets the closest node automatically."
+      },
+      {
+        "heading": "Transparent pricing",
+        "summary": "No surprise bills — pay for what you use, with a generous free tier for hobby projects."
+      }
+    ],
+    "signals_used": [
+      "heuristic",
+      "image_placeholder"
+    ],
+    "spacing": {
+      "gap": [
+        "16px"
+      ],
+      "margin": [
+        "0 auto"
+      ],
+      "max_width": "1200px",
+      "padding": [
+        "24px",
+        "64px 16px"
+      ]
+    },
+    "title": "Our take: Our Brand Cloud Platform — Modern Infrastructure",
+    "transformations": [
+      "bytes_strip",
+      "text_rewrite_heuristic",
+      "image_placeholder"
+    ],
+    "warnings": [
+      "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+    ]
+  }
+}

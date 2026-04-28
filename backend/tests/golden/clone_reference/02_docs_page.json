@@ -1,0 +1,363 @@
+{
+  "context_block_lines": [
+    "# Clone Spec Context (W11)",
+    "",
+    "## Source identity (W11.7 manifest fingerprint)",
+    "",
+    "- clone_id: `00000000-0000-4000-8000-000000000002`",
+    "- manifest_hash: `sha256:80767d3f4b0ce5aa19020da61b75dddd156d296dd5e5c9a4f6bb6e3016e88c44`",
+    "- source_url: `https://docs.globex.example/sdk/getting-started`",
+    "- fetched_at: `2026-04-29T00:00:00Z`",
+    "- capture_backend: `mock`",
+    "- rewrite_model: `heuristic`",
+    "- transformations: bytes_strip, text_rewrite_heuristic, image_placeholder",
+    "- attribution: Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "",
+    "## W11 invariants (non-negotiable)",
+    "",
+    "1. **Never copy bytes from the source.** The L3 transformer already",
+    "   replaced every source image with a placeholder record. You MUST",
+    "   NOT request a network fetch of any URL listed under",
+    "   `source_url` of an image record — that field is provenance-only,",
+    "   pinned in the W11.7 manifest for audit replay.",
+    "2. **Image placeholders only.** Every `<img>` / `<Image>` tag you",
+    "   emit must point at the placeholder URL provided in the image",
+    "   record's `url` field. Never substitute the `source_url`.",
+    "3. **No source brand names in user-visible copy.** The L3 rewrite",
+    "   already paraphrased the source — preserve that paraphrase.",
+    "   Never regress to the original wording even if you can guess",
+    "   what it was.",
+    "4. **Attribution travels with the artefact.** The W11.7 traceability",
+    "   comment + the `LICENSES/open-lovable-mit.txt` reference are",
+    "   pinned by the framework adapter; your scaffolding must not",
+    "   delete or rewrite them.",
+    "5. **Echo the manifest fingerprint.** When you produce a project",
+    "   README, a header comment, or a metadata file, include the",
+    "   `clone_id` and `manifest_hash` shown above so the W11.12 audit",
+    "   replay can cross-reference your output.",
+    "",
+    "## Rewritten outline (design inspiration only — already paraphrased by L3)",
+    "",
+    "- title: Our take: Our Brand Docs — Getting Started Guide",
+    "- hero:",
+    "  heading: A page about: Our Brand SDK Getting Started",
+    "  tagline: This guide walks you through installing the Our Brand SDK and making your first authenticated request in under five minutes.",
+    "  cta_label: ",
+    "- nav:",
+    "  - Overview",
+    "  - Install",
+    "  - Quickstart",
+    "  - API Reference",
+    "  - CLI",
+    "  - SDK",
+    "  - Authentication",
+    "  - Webhooks",
+    "- sections:",
+    "  - **Prerequisites** — You need a Our Brand account and an API key generated from the dashboard. Node.js 18+ and npm 9+ are required for the JavaScript SDK.",
+    "  - **Install** — Install the SDK from the public npm registry. Production teams should pin a major version. The package supports CommonJS and ESM imports.",
+    "  - **Authenticate** — Authentication is handled via the GLOBEX_API_KEY environment variable. The SDK refuses to start if the key is missing or malformed.",
+    "  - **Make a request** — Every SDK method returns a typed Promise. Errors are thrown as GlobexAPIError instances carrying the HTTP status code and the raw response body.",
+    "  - **Handle webhooks** — Webhook payloads are signed with HMAC-SHA256. Verify the signature before trusting the payload — the SDK ships a helper for this.",
+    "  - **Next steps** — Read the API reference for every supported endpoint, or jump into the CLI guide if you prefer a no-code workflow.",
+    "- footer: © 2026 Our Brand Corporation. All trademarks acknowledged. Legal Support",
+    "",
+    "## Design tokens (functional — map onto your framework's design system)",
+    "",
+    "- colors: #0a7d36, #c7254e",
+    "- fonts: Source Sans Pro, system-ui",
+    "- spacing:",
+    "  - gap: ['8px']",
+    "  - margin: ['16px']",
+    "  - max_width: 960px",
+    "  - padding: ['8px', '12px']",
+    "",
+    "## Images (placeholders — never fetch the source URLs)",
+    "  - `https://placehold.co/800x600?text=SDK+architecture+diagram` (kind=placeholder, alt='SDK architecture diagram')"
+  ],
+  "fixture": {
+    "clone_id": "00000000-0000-4000-8000-000000000002",
+    "slug": "02_docs_page",
+    "source_url": "https://docs.globex.example/sdk/getting-started",
+    "tenant_id": "tenant-fixture-002"
+  },
+  "manifest": {
+    "actor": "snapshot-harness@omnisight.test",
+    "attribution": "Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "classification": {
+      "categories": [
+        "clean"
+      ],
+      "model": "snapshot-harness-classifier",
+      "risk_level": "low",
+      "signals_used": [
+        "heuristic"
+      ]
+    },
+    "clone_id": "00000000-0000-4000-8000-000000000002",
+    "created_at": "2026-04-29T00:00:00Z",
+    "defense_layers": {
+      "L1_machine_refusal": "passed",
+      "L2_content_classifier": "low",
+      "L3_output_transformer": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "L4_traceability": "manifest_v1"
+    },
+    "manifest_hash": "sha256:80767d3f4b0ce5aa19020da61b75dddd156d296dd5e5c9a4f6bb6e3016e88c44",
+    "manifest_version": "1",
+    "source": {
+      "backend": "mock",
+      "fetched_at": "2026-04-29T00:00:00Z",
+      "status_code": 200,
+      "url": "https://docs.globex.example/sdk/getting-started"
+    },
+    "tenant_id": "tenant-fixture-002",
+    "transformation": {
+      "model": "heuristic",
+      "signals_used": [
+        "heuristic",
+        "image_placeholder"
+      ],
+      "transformations": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "warnings": [
+        "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+      ]
+    },
+    "transformed_summary": {
+      "color_count": 2,
+      "font_count": 2,
+      "has_footer": true,
+      "has_hero": true,
+      "image_count": 1,
+      "nav_count": 8,
+      "section_count": 6,
+      "title": "Our take: Our Brand Docs — Getting Started Guide"
+    }
+  },
+  "rendered": {
+    "astro": {
+      "adapter": "AstroFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "astro.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "src/layouts/Layout.astro",
+        "src/pages/index.astro",
+        "src/styles/global.css",
+        "tsconfig.json"
+      ],
+      "framework": "astro",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000002",
+      "manifest_hash": "sha256:80767d3f4b0ce5aa19020da61b75dddd156d296dd5e5c9a4f6bb6e3016e88c44",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "next": {
+      "adapter": "NextFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app/globals.css",
+        "app/layout.tsx",
+        "app/page.tsx",
+        "next.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "next",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000002",
+      "manifest_hash": "sha256:80767d3f4b0ce5aa19020da61b75dddd156d296dd5e5c9a4f6bb6e3016e88c44",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "nuxt": {
+      "adapter": "NuxtFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app.vue",
+        "assets/css/main.css",
+        "nuxt.config.ts",
+        "package.json",
+        "pages/index.vue",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "nuxt",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000002",
+      "manifest_hash": "sha256:80767d3f4b0ce5aa19020da61b75dddd156d296dd5e5c9a4f6bb6e3016e88c44",
+      "traceability_html_path": "public/clone-traceability.html"
+    }
+  },
+  "spec": {
+    "color_count": 2,
+    "colors": [
+      "#0a7d36",
+      "#c7254e"
+    ],
+    "font_count": 2,
+    "fonts": [
+      "Source Sans Pro",
+      "system-ui"
+    ],
+    "hero": {
+      "heading": "Globex SDK Getting Started",
+      "tagline": "This guide walks you through installing the Globex SDK and making your first authenticated request in under five minutes."
+    },
+    "image_count": 1,
+    "image_urls": [
+      "https://docs.globex.example/sdk-architecture.svg"
+    ],
+    "meta_keys": [
+      "description",
+      "og:title",
+      "theme-color"
+    ],
+    "nav_count": 8,
+    "nav_labels": [
+      "Overview",
+      "Install",
+      "Quickstart",
+      "API Reference",
+      "CLI",
+      "SDK",
+      "Authentication",
+      "Webhooks"
+    ],
+    "section_count": 6,
+    "section_headings": [
+      "Prerequisites",
+      "Install",
+      "Authenticate",
+      "Make a request",
+      "Handle webhooks",
+      "Next steps"
+    ],
+    "spacing_keys": [
+      "gap",
+      "margin",
+      "max_width",
+      "padding"
+    ],
+    "title": "Globex Docs — Getting Started Guide",
+    "warnings": []
+  },
+  "transformed": {
+    "colors": [
+      "#0a7d36",
+      "#c7254e"
+    ],
+    "fonts": [
+      "Source Sans Pro",
+      "system-ui"
+    ],
+    "footer": {
+      "text": "© 2026 Our Brand Corporation. All trademarks acknowledged. Legal Support"
+    },
+    "hero": {
+      "cta_label": "",
+      "heading": "A page about: Our Brand SDK Getting Started",
+      "tagline": "This guide walks you through installing the Our Brand SDK and making your first authenticated request in under five minutes."
+    },
+    "images": [
+      {
+        "alt": "SDK architecture diagram",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://docs.globex.example/sdk-architecture.svg",
+        "url": "https://placehold.co/800x600?text=SDK+architecture+diagram",
+        "width": "800"
+      }
+    ],
+    "meta": {
+      "description": "Our Brand documentation for the Foo SDK.",
+      "og:title": "Our take: Our Brand Docs — Getting Started Guide"
+    },
+    "model": "heuristic",
+    "nav": [
+      {
+        "label": "Overview"
+      },
+      {
+        "label": "Install"
+      },
+      {
+        "label": "Quickstart"
+      },
+      {
+        "label": "API Reference"
+      },
+      {
+        "label": "CLI"
+      },
+      {
+        "label": "SDK"
+      },
+      {
+        "label": "Authentication"
+      },
+      {
+        "label": "Webhooks"
+      }
+    ],
+    "sections": [
+      {
+        "heading": "Prerequisites",
+        "summary": "You need a Our Brand account and an API key generated from the dashboard. Node.js 18+ and npm 9+ are required for the JavaScript SDK."
+      },
+      {
+        "heading": "Install",
+        "summary": "Install the SDK from the public npm registry. Production teams should pin a major version. The package supports CommonJS and ESM imports."
+      },
+      {
+        "heading": "Authenticate",
+        "summary": "Authentication is handled via the GLOBEX_API_KEY environment variable. The SDK refuses to start if the key is missing or malformed."
+      },
+      {
+        "heading": "Make a request",
+        "summary": "Every SDK method returns a typed Promise. Errors are thrown as GlobexAPIError instances carrying the HTTP status code and the raw response body."
+      },
+      {
+        "heading": "Handle webhooks",
+        "summary": "Webhook payloads are signed with HMAC-SHA256. Verify the signature before trusting the payload — the SDK ships a helper for this."
+      },
+      {
+        "heading": "Next steps",
+        "summary": "Read the API reference for every supported endpoint, or jump into the CLI guide if you prefer a no-code workflow."
+      }
+    ],
+    "signals_used": [
+      "heuristic",
+      "image_placeholder"
+    ],
+    "spacing": {
+      "gap": [
+        "8px"
+      ],
+      "margin": [
+        "16px"
+      ],
+      "max_width": "960px",
+      "padding": [
+        "8px",
+        "12px"
+      ]
+    },
+    "title": "Our take: Our Brand Docs — Getting Started Guide",
+    "transformations": [
+      "bytes_strip",
+      "text_rewrite_heuristic",
+      "image_placeholder"
+    ],
+    "warnings": [
+      "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+    ]
+  }
+}

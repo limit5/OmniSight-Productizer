@@ -1,0 +1,423 @@
+{
+  "context_block_lines": [
+    "# Clone Spec Context (W11)",
+    "",
+    "## Source identity (W11.7 manifest fingerprint)",
+    "",
+    "- clone_id: `00000000-0000-4000-8000-000000000004`",
+    "- manifest_hash: `sha256:52d023505d5560a1d22af31384bd4e0c1bf4439ef26e8b9071d57cac604137e3`",
+    "- source_url: `https://umbrella.example/work`",
+    "- fetched_at: `2026-04-29T00:00:00Z`",
+    "- capture_backend: `mock`",
+    "- rewrite_model: `heuristic`",
+    "- transformations: bytes_strip, text_rewrite_heuristic, image_placeholder",
+    "- attribution: Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "",
+    "## W11 invariants (non-negotiable)",
+    "",
+    "1. **Never copy bytes from the source.** The L3 transformer already",
+    "   replaced every source image with a placeholder record. You MUST",
+    "   NOT request a network fetch of any URL listed under",
+    "   `source_url` of an image record — that field is provenance-only,",
+    "   pinned in the W11.7 manifest for audit replay.",
+    "2. **Image placeholders only.** Every `<img>` / `<Image>` tag you",
+    "   emit must point at the placeholder URL provided in the image",
+    "   record's `url` field. Never substitute the `source_url`.",
+    "3. **No source brand names in user-visible copy.** The L3 rewrite",
+    "   already paraphrased the source — preserve that paraphrase.",
+    "   Never regress to the original wording even if you can guess",
+    "   what it was.",
+    "4. **Attribution travels with the artefact.** The W11.7 traceability",
+    "   comment + the `LICENSES/open-lovable-mit.txt` reference are",
+    "   pinned by the framework adapter; your scaffolding must not",
+    "   delete or rewrite them.",
+    "5. **Echo the manifest fingerprint.** When you produce a project",
+    "   README, a header comment, or a metadata file, include the",
+    "   `clone_id` and `manifest_hash` shown above so the W11.12 audit",
+    "   replay can cross-reference your output.",
+    "",
+    "## Rewritten outline (design inspiration only — already paraphrased by L3)",
+    "",
+    "- title: Our take: Our Brand Studio — Selected Works",
+    "- hero:",
+    "  heading: A page about: Selected Works",
+    "  tagline: A handful of projects we are proud of.",
+    "  cta_label: ",
+    "- nav:",
+    "  - Home",
+    "  - Work",
+    "  - Studio",
+    "  - Contact",
+    "- sections:",
+    "  - **Recent projects** — Click any tile below to see the case study, including process notes, design rationale, and the deliverables we shipped to the client.",
+    "- footer: © 2026 Our Brand Studio. Made with care. Our Brand Contact",
+    "",
+    "## Design tokens (functional — map onto your framework's design system)",
+    "",
+    "- colors: #0d0d0d, #f5f5f5, rgba(255, 255, 255, 0.04)",
+    "- fonts: https://use.typekit.net/foo.css, Helvetica Neue, sans-serif",
+    "- spacing:",
+    "  - gap: ['24px']",
+    "  - margin: ['0 auto']",
+    "  - max_width: 1440px",
+    "  - padding: ['32px', '16px', '24px']",
+    "",
+    "## Images (placeholders — never fetch the source URLs)",
+    "  - `https://placehold.co/800x600?text=Brand+identity+for+a+cycling+brand` (kind=placeholder, alt='Brand identity for a cycling brand')",
+    "  - `https://placehold.co/800x600?text=Editorial+layout+for+an+art+magazine` (kind=placeholder, alt='Editorial layout for an art magazine')",
+    "  - `https://placehold.co/800x600?text=Packaging+design+for+a+coffee+roaster` (kind=placeholder, alt='Packaging design for a coffee roaster')",
+    "  - `https://placehold.co/800x600?text=Type+specimen+for+a+custom+typeface` (kind=placeholder, alt='Type specimen for a custom typeface')",
+    "  - `https://placehold.co/800x600?text=Wayfinding+system+for+a+municipal+library` (kind=placeholder, alt='Wayfinding system for a municipal library')",
+    "  - `https://placehold.co/800x600?text=Identity+refresh+for+a+regional+brewery` (kind=placeholder, alt='Identity refresh for a regional brewery')",
+    "  - … [6 more images]"
+  ],
+  "fixture": {
+    "clone_id": "00000000-0000-4000-8000-000000000004",
+    "slug": "04_portfolio_page",
+    "source_url": "https://umbrella.example/work",
+    "tenant_id": "tenant-fixture-004"
+  },
+  "manifest": {
+    "actor": "snapshot-harness@omnisight.test",
+    "attribution": "Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "classification": {
+      "categories": [
+        "clean"
+      ],
+      "model": "snapshot-harness-classifier",
+      "risk_level": "low",
+      "signals_used": [
+        "heuristic"
+      ]
+    },
+    "clone_id": "00000000-0000-4000-8000-000000000004",
+    "created_at": "2026-04-29T00:00:00Z",
+    "defense_layers": {
+      "L1_machine_refusal": "passed",
+      "L2_content_classifier": "low",
+      "L3_output_transformer": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "L4_traceability": "manifest_v1"
+    },
+    "manifest_hash": "sha256:52d023505d5560a1d22af31384bd4e0c1bf4439ef26e8b9071d57cac604137e3",
+    "manifest_version": "1",
+    "source": {
+      "backend": "mock",
+      "fetched_at": "2026-04-29T00:00:00Z",
+      "status_code": 200,
+      "url": "https://umbrella.example/work"
+    },
+    "tenant_id": "tenant-fixture-004",
+    "transformation": {
+      "model": "heuristic",
+      "signals_used": [
+        "heuristic",
+        "image_placeholder"
+      ],
+      "transformations": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "warnings": [
+        "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+      ]
+    },
+    "transformed_summary": {
+      "color_count": 3,
+      "font_count": 3,
+      "has_footer": true,
+      "has_hero": true,
+      "image_count": 12,
+      "nav_count": 4,
+      "section_count": 1,
+      "title": "Our take: Our Brand Studio — Selected Works"
+    }
+  },
+  "rendered": {
+    "astro": {
+      "adapter": "AstroFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "astro.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "src/layouts/Layout.astro",
+        "src/pages/index.astro",
+        "src/styles/global.css",
+        "tsconfig.json"
+      ],
+      "framework": "astro",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000004",
+      "manifest_hash": "sha256:52d023505d5560a1d22af31384bd4e0c1bf4439ef26e8b9071d57cac604137e3",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "next": {
+      "adapter": "NextFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app/globals.css",
+        "app/layout.tsx",
+        "app/page.tsx",
+        "next.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "next",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000004",
+      "manifest_hash": "sha256:52d023505d5560a1d22af31384bd4e0c1bf4439ef26e8b9071d57cac604137e3",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "nuxt": {
+      "adapter": "NuxtFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app.vue",
+        "assets/css/main.css",
+        "nuxt.config.ts",
+        "package.json",
+        "pages/index.vue",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "nuxt",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000004",
+      "manifest_hash": "sha256:52d023505d5560a1d22af31384bd4e0c1bf4439ef26e8b9071d57cac604137e3",
+      "traceability_html_path": "public/clone-traceability.html"
+    }
+  },
+  "spec": {
+    "color_count": 3,
+    "colors": [
+      "#0d0d0d",
+      "#f5f5f5",
+      "rgba(255, 255, 255, 0.04)"
+    ],
+    "font_count": 3,
+    "fonts": [
+      "https://use.typekit.net/foo.css",
+      "Helvetica Neue",
+      "sans-serif"
+    ],
+    "hero": {
+      "heading": "Selected Works",
+      "tagline": "A handful of projects we are proud of."
+    },
+    "image_count": 12,
+    "image_urls": [
+      "https://cdn.umbrella.example/work/01.jpg",
+      "https://cdn.umbrella.example/work/02.jpg",
+      "https://cdn.umbrella.example/work/03.jpg",
+      "https://cdn.umbrella.example/work/04.jpg",
+      "https://cdn.umbrella.example/work/05.jpg",
+      "https://cdn.umbrella.example/work/06.jpg",
+      "https://cdn.umbrella.example/work/07.jpg",
+      "https://cdn.umbrella.example/work/08.jpg",
+      "https://cdn.umbrella.example/work/09.jpg",
+      "https://cdn.umbrella.example/work/10.jpg",
+      "https://cdn.umbrella.example/work/11.jpg",
+      "https://cdn.umbrella.example/work/12.jpg"
+    ],
+    "meta_keys": [
+      "description",
+      "og:description",
+      "theme-color"
+    ],
+    "nav_count": 4,
+    "nav_labels": [
+      "Home",
+      "Work",
+      "Studio",
+      "Contact"
+    ],
+    "section_count": 1,
+    "section_headings": [
+      "Recent projects"
+    ],
+    "spacing_keys": [
+      "gap",
+      "margin",
+      "max_width",
+      "padding"
+    ],
+    "title": "Umbrella Studio — Selected Works",
+    "warnings": []
+  },
+  "transformed": {
+    "colors": [
+      "#0d0d0d",
+      "#f5f5f5",
+      "rgba(255, 255, 255, 0.04)"
+    ],
+    "fonts": [
+      "https://use.typekit.net/foo.css",
+      "Helvetica Neue",
+      "sans-serif"
+    ],
+    "footer": {
+      "text": "© 2026 Our Brand Studio. Made with care. Our Brand Contact"
+    },
+    "hero": {
+      "cta_label": "",
+      "heading": "A page about: Selected Works",
+      "tagline": "A handful of projects we are proud of."
+    },
+    "images": [
+      {
+        "alt": "Brand identity for a cycling brand",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/01.jpg",
+        "url": "https://placehold.co/800x600?text=Brand+identity+for+a+cycling+brand",
+        "width": "800"
+      },
+      {
+        "alt": "Editorial layout for an art magazine",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/02.jpg",
+        "url": "https://placehold.co/800x600?text=Editorial+layout+for+an+art+magazine",
+        "width": "800"
+      },
+      {
+        "alt": "Packaging design for a coffee roaster",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/03.jpg",
+        "url": "https://placehold.co/800x600?text=Packaging+design+for+a+coffee+roaster",
+        "width": "800"
+      },
+      {
+        "alt": "Type specimen for a custom typeface",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/04.jpg",
+        "url": "https://placehold.co/800x600?text=Type+specimen+for+a+custom+typeface",
+        "width": "800"
+      },
+      {
+        "alt": "Wayfinding system for a municipal library",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/05.jpg",
+        "url": "https://placehold.co/800x600?text=Wayfinding+system+for+a+municipal+library",
+        "width": "800"
+      },
+      {
+        "alt": "Identity refresh for a regional brewery",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/06.jpg",
+        "url": "https://placehold.co/800x600?text=Identity+refresh+for+a+regional+brewery",
+        "width": "800"
+      },
+      {
+        "alt": "Album artwork for a debut record",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/07.jpg",
+        "url": "https://placehold.co/800x600?text=Album+artwork+for+a+debut+record",
+        "width": "800"
+      },
+      {
+        "alt": "Poster series for a film festival",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/08.jpg",
+        "url": "https://placehold.co/800x600?text=Poster+series+for+a+film+festival",
+        "width": "800"
+      },
+      {
+        "alt": "Annual report for a nonprofit",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/09.jpg",
+        "url": "https://placehold.co/800x600?text=Annual+report+for+a+nonprofit",
+        "width": "800"
+      },
+      {
+        "alt": "Web identity for a music label",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/10.jpg",
+        "url": "https://placehold.co/800x600?text=Web+identity+for+a+music+label",
+        "width": "800"
+      },
+      {
+        "alt": "Editorial illustration set",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/11.jpg",
+        "url": "https://placehold.co/800x600?text=Editorial+illustration+set",
+        "width": "800"
+      },
+      {
+        "alt": "Custom monogram for a pastry shop",
+        "height": "600",
+        "kind": "placeholder",
+        "source_url": "https://cdn.umbrella.example/work/12.jpg",
+        "url": "https://placehold.co/800x600?text=Custom+monogram+for+a+pastry+shop",
+        "width": "800"
+      }
+    ],
+    "meta": {
+      "description": "A small portfolio of recent design work from Our Brand Studio.",
+      "og:description": "Selected design work from Our Brand Studio."
+    },
+    "model": "heuristic",
+    "nav": [
+      {
+        "label": "Home"
+      },
+      {
+        "label": "Work"
+      },
+      {
+        "label": "Studio"
+      },
+      {
+        "label": "Contact"
+      }
+    ],
+    "sections": [
+      {
+        "heading": "Recent projects",
+        "summary": "Click any tile below to see the case study, including process notes, design rationale, and the deliverables we shipped to the client."
+      }
+    ],
+    "signals_used": [
+      "heuristic",
+      "image_placeholder"
+    ],
+    "spacing": {
+      "gap": [
+        "24px"
+      ],
+      "margin": [
+        "0 auto"
+      ],
+      "max_width": "1440px",
+      "padding": [
+        "32px",
+        "16px",
+        "24px"
+      ]
+    },
+    "title": "Our take: Our Brand Studio — Selected Works",
+    "transformations": [
+      "bytes_strip",
+      "text_rewrite_heuristic",
+      "image_placeholder"
+    ],
+    "warnings": [
+      "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+    ]
+  }
+}

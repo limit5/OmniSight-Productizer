@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Why we rewrote our build system — Initech Engineering Blog</title>
+    <meta name="description" content="A retrospective on the journey from a hand-rolled Makefile build to a proper task graph." />
+    <meta property="og:description" content="Initech engineers walk through migrating from Make to a modern task graph." />
+    <meta name="theme-color" content="#102030" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lora&family=IBM+Plex+Mono" />
+    <style>
+      body { font-family: 'Lora', serif; max-width: 720px; margin: 32px auto; padding: 16px; }
+      pre { font-family: 'IBM Plex Mono', monospace; background: #f5f5f5; }
+      .post-meta { color: #666; gap: 12px; }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/blog">Blog</a>
+      <a href="/about">About</a>
+    </nav>
+    <article>
+      <h1>Why we rewrote our build system</h1>
+      <p>After three years of escalating Makefile pain, we finally bit the bullet and migrated the whole engineering organisation onto a proper task graph runner. Here is what we learned, what we shipped, and what we would do differently.</p>
+      <section>
+        <h2>The pain we were running from</h2>
+        <p>Our old build pipeline was a 4,000-line Makefile with implicit rules layered on top of explicit ones. Onboarding a new engineer took three weeks. A typo in one rule could silently rebuild every artefact. We could not parallelise across machines because the dependency graph was not introspectable.</p>
+      </section>
+      <section>
+        <h2>What we shipped</h2>
+        <p>We picked a content-addressed task graph runner with first-class remote caching. The migration took six engineers four months — about half the time we estimated, mostly because we wrote a small DSL that translated existing Make targets into the new format.</p>
+      </section>
+      <section>
+        <h2>What surprised us</h2>
+        <p>The biggest unexpected win was that the new system surfaced flaky tests we did not know we had. The old Makefile retried silently; the new runner failed loudly. We fixed eighty-seven flakes in the first month.</p>
+      </section>
+      <section>
+        <h2>What we would change</h2>
+        <p>We would migrate test targets first, application targets second, and infrastructure targets last. We did the opposite, and infrastructure became a long tail that blocked the cutover for two months.</p>
+      </section>
+    </article>
+    <footer>
+      <p>Written by the Initech Engineering team — © 2026 Initech.</p>
+      <a href="/feed.xml">RSS</a>
+      <a href="/contact">Contact</a>
+    </footer>
+  </body>
+</html>

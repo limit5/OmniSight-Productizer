@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Globex Docs — Getting Started Guide</title>
+    <meta name="description" content="Globex documentation for the Foo SDK." />
+    <meta property="og:title" content="Globex SDK Docs" />
+    <meta name="theme-color" content="#0a7d36" />
+    <style>
+      body { font-family: "Source Sans Pro", system-ui; max-width: 960px; margin: 16px; padding: 8px; }
+      .sidebar { gap: 8px; padding: 12px; }
+      code { color: #c7254e; }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a href="/docs">Overview</a>
+      <a href="/docs/install">Install</a>
+      <a href="/docs/quickstart">Quickstart</a>
+      <a href="/docs/api">API Reference</a>
+      <a href="/docs/cli">CLI</a>
+      <a href="/docs/sdk">SDK</a>
+      <a href="/docs/auth">Authentication</a>
+      <a href="/docs/webhooks">Webhooks</a>
+    </nav>
+    <header>
+      <h1>Globex SDK Getting Started</h1>
+      <p>This guide walks you through installing the Globex SDK and making your first authenticated request in under five minutes.</p>
+    </header>
+    <section>
+      <h2>Prerequisites</h2>
+      <p>You need a Globex account and an API key generated from the dashboard. Node.js 18+ and npm 9+ are required for the JavaScript SDK.</p>
+    </section>
+    <section>
+      <h2>Install</h2>
+      <p>Install the SDK from the public npm registry. Production teams should pin a major version. The package supports CommonJS and ESM imports.</p>
+    </section>
+    <section>
+      <h2>Authenticate</h2>
+      <p>Authentication is handled via the GLOBEX_API_KEY environment variable. The SDK refuses to start if the key is missing or malformed.</p>
+    </section>
+    <section>
+      <h2>Make a request</h2>
+      <p>Every SDK method returns a typed Promise. Errors are thrown as GlobexAPIError instances carrying the HTTP status code and the raw response body.</p>
+    </section>
+    <section>
+      <h2>Handle webhooks</h2>
+      <p>Webhook payloads are signed with HMAC-SHA256. Verify the signature before trusting the payload — the SDK ships a helper for this.</p>
+    </section>
+    <section>
+      <h2>Next steps</h2>
+      <p>Read the API reference for every supported endpoint, or jump into the CLI guide if you prefer a no-code workflow.</p>
+    </section>
+    <img src="https://docs.globex.example/sdk-architecture.svg" alt="SDK architecture diagram" />
+    <footer>
+      <p>© 2026 Globex Corporation. All trademarks acknowledged.</p>
+      <a href="/legal">Legal</a>
+      <a href="/contact">Support</a>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,247 @@
+{
+  "context_block_lines": [
+    "# Clone Spec Context (W11)",
+    "",
+    "## Source identity (W11.7 manifest fingerprint)",
+    "",
+    "- clone_id: `00000000-0000-4000-8000-000000000005`",
+    "- manifest_hash: `sha256:497b832a5c2a6388b8c60b0882260a30523a5df3c2296c452227aeba5cbd4bb5`",
+    "- source_url: `https://stark.example/coming-soon`",
+    "- fetched_at: `2026-04-29T00:00:00Z`",
+    "- capture_backend: `mock`",
+    "- rewrite_model: `heuristic`",
+    "- transformations: bytes_strip, text_rewrite_heuristic, image_placeholder",
+    "- attribution: Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "",
+    "## W11 invariants (non-negotiable)",
+    "",
+    "1. **Never copy bytes from the source.** The L3 transformer already",
+    "   replaced every source image with a placeholder record. You MUST",
+    "   NOT request a network fetch of any URL listed under",
+    "   `source_url` of an image record — that field is provenance-only,",
+    "   pinned in the W11.7 manifest for audit replay.",
+    "2. **Image placeholders only.** Every `<img>` / `<Image>` tag you",
+    "   emit must point at the placeholder URL provided in the image",
+    "   record's `url` field. Never substitute the `source_url`.",
+    "3. **No source brand names in user-visible copy.** The L3 rewrite",
+    "   already paraphrased the source — preserve that paraphrase.",
+    "   Never regress to the original wording even if you can guess",
+    "   what it was.",
+    "4. **Attribution travels with the artefact.** The W11.7 traceability",
+    "   comment + the `LICENSES/open-lovable-mit.txt` reference are",
+    "   pinned by the framework adapter; your scaffolding must not",
+    "   delete or rewrite them.",
+    "5. **Echo the manifest fingerprint.** When you produce a project",
+    "   README, a header comment, or a metadata file, include the",
+    "   `clone_id` and `manifest_hash` shown above so the W11.12 audit",
+    "   replay can cross-reference your output.",
+    "",
+    "## Rewritten outline (design inspiration only — already paraphrased by L3)",
+    "",
+    "- title: Our take: Our Brand Industries — Coming Soon",
+    "- hero:",
+    "  heading: A page about: Coming Soon",
+    "  tagline: We are working on something new and we cannot wait to share it.",
+    "  cta_label: ",
+    "- nav:",
+    "  (empty)",
+    "- sections:",
+    "  (empty)",
+    "- footer: © 2026 Our Brand Industries.",
+    "",
+    "## Design tokens (functional — map onto your framework's design system)",
+    "",
+    "- colors: (empty)",
+    "- fonts: (empty)",
+    "- spacing:",
+    "  (empty)",
+    "",
+    "## Images (placeholders)",
+    "",
+    "  (empty)"
+  ],
+  "fixture": {
+    "clone_id": "00000000-0000-4000-8000-000000000005",
+    "slug": "05_minimal_page",
+    "source_url": "https://stark.example/coming-soon",
+    "tenant_id": "tenant-fixture-005"
+  },
+  "manifest": {
+    "actor": "snapshot-harness@omnisight.test",
+    "attribution": "Inspired by firecrawl/open-lovable (MIT). See LICENSES/open-lovable-mit.txt.",
+    "classification": {
+      "categories": [
+        "clean"
+      ],
+      "model": "snapshot-harness-classifier",
+      "risk_level": "low",
+      "signals_used": [
+        "heuristic"
+      ]
+    },
+    "clone_id": "00000000-0000-4000-8000-000000000005",
+    "created_at": "2026-04-29T00:00:00Z",
+    "defense_layers": {
+      "L1_machine_refusal": "passed",
+      "L2_content_classifier": "low",
+      "L3_output_transformer": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "L4_traceability": "manifest_v1"
+    },
+    "manifest_hash": "sha256:497b832a5c2a6388b8c60b0882260a30523a5df3c2296c452227aeba5cbd4bb5",
+    "manifest_version": "1",
+    "source": {
+      "backend": "mock",
+      "fetched_at": "2026-04-29T00:00:00Z",
+      "status_code": 200,
+      "url": "https://stark.example/coming-soon"
+    },
+    "tenant_id": "tenant-fixture-005",
+    "transformation": {
+      "model": "heuristic",
+      "signals_used": [
+        "heuristic",
+        "image_placeholder"
+      ],
+      "transformations": [
+        "bytes_strip",
+        "text_rewrite_heuristic",
+        "image_placeholder"
+      ],
+      "warnings": [
+        "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+      ]
+    },
+    "transformed_summary": {
+      "color_count": 0,
+      "font_count": 0,
+      "has_footer": true,
+      "has_hero": true,
+      "image_count": 0,
+      "nav_count": 0,
+      "section_count": 0,
+      "title": "Our take: Our Brand Industries — Coming Soon"
+    }
+  },
+  "rendered": {
+    "astro": {
+      "adapter": "AstroFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "astro.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "src/layouts/Layout.astro",
+        "src/pages/index.astro",
+        "src/styles/global.css",
+        "tsconfig.json"
+      ],
+      "framework": "astro",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000005",
+      "manifest_hash": "sha256:497b832a5c2a6388b8c60b0882260a30523a5df3c2296c452227aeba5cbd4bb5",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "next": {
+      "adapter": "NextFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app/globals.css",
+        "app/layout.tsx",
+        "app/page.tsx",
+        "next.config.mjs",
+        "package.json",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "next",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000005",
+      "manifest_hash": "sha256:497b832a5c2a6388b8c60b0882260a30523a5df3c2296c452227aeba5cbd4bb5",
+      "traceability_html_path": "public/clone-traceability.html"
+    },
+    "nuxt": {
+      "adapter": "NuxtFrameworkAdapter",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "app.vue",
+        "assets/css/main.css",
+        "nuxt.config.ts",
+        "package.json",
+        "pages/index.vue",
+        "public/clone-traceability.html",
+        "tsconfig.json"
+      ],
+      "framework": "nuxt",
+      "manifest_clone_id": "00000000-0000-4000-8000-000000000005",
+      "manifest_hash": "sha256:497b832a5c2a6388b8c60b0882260a30523a5df3c2296c452227aeba5cbd4bb5",
+      "traceability_html_path": "public/clone-traceability.html"
+    }
+  },
+  "spec": {
+    "color_count": 0,
+    "colors": [],
+    "font_count": 0,
+    "fonts": [],
+    "hero": {
+      "heading": "Coming Soon",
+      "tagline": "We are working on something new and we cannot wait to share it."
+    },
+    "image_count": 0,
+    "image_urls": [],
+    "meta_keys": [
+      "description"
+    ],
+    "nav_count": 0,
+    "nav_labels": [],
+    "section_count": 0,
+    "section_headings": [],
+    "spacing_keys": [],
+    "title": "Stark Industries — Coming Soon",
+    "warnings": [
+      "nav links not detected",
+      "no <section> elements found",
+      "no images detected",
+      "no colour tokens detected",
+      "no font tokens detected",
+      "no spacing tokens detected"
+    ]
+  },
+  "transformed": {
+    "colors": [],
+    "fonts": [],
+    "footer": {
+      "text": "© 2026 Our Brand Industries."
+    },
+    "hero": {
+      "cta_label": "",
+      "heading": "A page about: Coming Soon",
+      "tagline": "We are working on something new and we cannot wait to share it."
+    },
+    "images": [],
+    "meta": {
+      "description": "A new product is on the way."
+    },
+    "model": "heuristic",
+    "nav": [],
+    "sections": [],
+    "signals_used": [
+      "heuristic",
+      "image_placeholder"
+    ],
+    "spacing": {},
+    "title": "Our take: Our Brand Industries — Coming Soon",
+    "transformations": [
+      "bytes_strip",
+      "text_rewrite_heuristic",
+      "image_placeholder"
+    ],
+    "warnings": [
+      "rewrite_llm_unavailable: snapshot harness — forces heuristic fallback for determinism"
+    ]
+  }
+}
