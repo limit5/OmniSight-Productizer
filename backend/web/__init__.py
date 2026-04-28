@@ -29,12 +29,19 @@ Sub-modules:
                          categories. Run **after** ``clone_site()`` so
                          the classifier sees the full populated spec.
 
+    output_transformer   W11.6 L3 output transformation — never-copy-
+                         bytes invariant gate + LLM text rewrite
+                         (cheapest-model chain) + image placeholder
+                         substitution. Run **after** the L2 classifier
+                         has cleared the spec; produces a frozen
+                         ``TransformedSpec`` the W11.7 manifest pins.
+
 W11.1 ships the entry point + minimal ``CloneSpec`` container +
 ``CloneSource`` protocol; W11.2 plugs the two production-targeted
 backends behind that contract; W11.3 populates the spec from rendered
 HTML; W11.4 adds the L1 refusal-signal gate; W11.5 adds the L2 content
-classifier; subsequent rows add the remaining defense layers (W11.6
-transformer, W11.7 manifest, W11.8 rate limiter).
+classifier; W11.6 adds the L3 transformer; subsequent rows add the
+remaining defense layers (W11.7 manifest, W11.8 rate limiter).
 
 Inspired by firecrawl/open-lovable (MIT). Attribution and license text
 land alongside the W11.13 row (`LICENSES/open-lovable-mit.txt`).
@@ -82,6 +89,27 @@ from backend.web.content_classifier import (
     classify_clone_spec,
     heuristic_risk_signals,
     merge_risk_classifications,
+)
+from backend.web.output_transformer import (
+    BytesLeakError,
+    DEFAULT_PLACEHOLDER_HEIGHT,
+    DEFAULT_PLACEHOLDER_WIDTH,
+    DEFAULT_REWRITE_MODEL,
+    LLM_REWRITE_SYSTEM_PROMPT,
+    LLM_REWRITE_USER_PROMPT_TEMPLATE,
+    LangchainTextRewriteLLM,
+    MAX_REWRITE_INPUT_CHARS,
+    MAX_REWRITE_TEXT_CHARS,
+    MAX_REWRITTEN_LIST_ITEMS,
+    MAX_TRANSFORM_RISK_LEVEL,
+    OutputTransformerError,
+    PLACEHOLDER_PROVIDER,
+    RewriteUnavailableError,
+    TextRewriteLLM,
+    TransformedSpec,
+    apply_image_placeholders,
+    assert_no_copied_bytes,
+    transform_clone_spec,
 )
 from backend.web.refusal_signals import (
     AI_BOT_USER_AGENTS,
@@ -232,6 +260,7 @@ __all__ = [
     "AI_BOT_USER_AGENTS",
     "AI_TXT_PATHS",
     "BlockedDestinationError",
+    "BytesLeakError",
     "CLOUDFLARE_AI_BLOCK_BODY_HINTS",
     "CLOUDFLARE_MITIGATED_REFUSE_VALUES",
     "ClassifierLLM",
@@ -247,9 +276,12 @@ __all__ = [
     "DEFAULT_CLASSIFIER_MODEL",
     "DEFAULT_FIRECRAWL_BASE_URL",
     "DEFAULT_MAX_HTML_BYTES",
+    "DEFAULT_PLACEHOLDER_HEIGHT",
+    "DEFAULT_PLACEHOLDER_WIDTH",
     "DEFAULT_REFUSAL_FETCH_MAX_BYTES",
     "DEFAULT_REFUSAL_FETCH_TIMEOUT_S",
     "DEFAULT_REFUSAL_THRESHOLD",
+    "DEFAULT_REWRITE_MODEL",
     "DEFAULT_TIMEOUT_S",
     "DEFAULT_USER_AGENT",
     "DEFAULT_WAIT_UNTIL",
@@ -260,15 +292,24 @@ __all__ = [
     "FirecrawlSource",
     "InvalidCloneURLError",
     "KNOWN_CLONE_BACKENDS",
+    "LLM_REWRITE_SYSTEM_PROMPT",
+    "LLM_REWRITE_USER_PROMPT_TEMPLATE",
     "LLM_SYSTEM_PROMPT",
     "LLM_USER_PROMPT_TEMPLATE",
     "LangchainClassifierLLM",
+    "LangchainTextRewriteLLM",
     "MAX_PROMPT_INPUT_CHARS",
     "MAX_REASON_CHARS",
     "MAX_REASONS",
+    "MAX_REWRITE_INPUT_CHARS",
+    "MAX_REWRITE_TEXT_CHARS",
+    "MAX_REWRITTEN_LIST_ITEMS",
+    "MAX_TRANSFORM_RISK_LEVEL",
     "META_AI_BOT_NAMES",
     "META_NOAI_TOKENS",
     "MachineRefusedError",
+    "OutputTransformerError",
+    "PLACEHOLDER_PROVIDER",
     "PLAYWRIGHT_BACKEND_NAME",
     "PlaywrightConfigError",
     "PlaywrightDependencyError",
@@ -280,15 +321,20 @@ __all__ = [
     "RefusalDecision",
     "RefusalFetchResult",
     "RefusalFetcher",
+    "RewriteUnavailableError",
     "RiskClassification",
     "RiskScore",
     "SUPPORTED_BROWSERS",
     "SUPPORTED_URL_SCHEMES",
     "SiteClonerError",
+    "TextRewriteLLM",
+    "TransformedSpec",
     "UnknownCloneBackendError",
+    "apply_image_placeholders",
     "assert_clone_allowed_post_capture",
     "assert_clone_allowed_pre_capture",
     "assert_clone_spec_safe",
+    "assert_no_copied_bytes",
     "build_clone_spec_from_capture",
     "check_ai_txt",
     "check_cloudflare_ai_block",
@@ -307,5 +353,6 @@ __all__ = [
     "merge_refusal_decisions",
     "merge_risk_classifications",
     "normalize_url",
+    "transform_clone_spec",
     "validate_clone_url",
 ]
