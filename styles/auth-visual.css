@@ -720,6 +720,97 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────
+ * AS.7.2 — Signup page password slot-machine + style toggle + meter
+ *
+ * Visual layer for the password block on /signup. The reducer that
+ * drives the per-column animation lives in
+ * `lib/auth/password-slot-machine.ts`; this CSS only styles the
+ * resulting columns (cycle phase = mono purple text, locked + flash
+ * window = scale 1 → 1.18 → 1, settled = solid foreground colour).
+ * ───────────────────────────────────────────────────────────────── */
+
+.as7-slot-machine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(168, 85, 247, 0.18);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  min-height: 28px;
+  align-items: center;
+}
+
+.as7-slot-col {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 12px;
+  padding: 0 1px;
+  color: var(--muted-foreground);
+  transition: color 120ms ease;
+  will-change: transform, color;
+}
+
+.as7-slot-col[data-as7-slot-locked="yes"] {
+  color: var(--foreground);
+}
+
+.as7-slot-col[data-as7-slot-flash="on"] {
+  animation: as7-slot-flash both;
+  animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes as7-slot-flash {
+  0% { transform: scale(1); color: var(--artifact-purple); text-shadow: 0 0 8px rgba(168, 85, 247, 0.7); }
+  35% { transform: scale(1.18); color: var(--artifact-purple); text-shadow: 0 0 14px rgba(168, 85, 247, 0.9); }
+  100% { transform: scale(1); color: var(--foreground); text-shadow: none; }
+}
+
+/* Style toggle (radiogroup pill) — most visuals already covered by
+ * the inline tailwind classes; the prefix-locked rules below are for
+ * the motion-level gating cascade. */
+.as7-style-toggle {
+  flex-wrap: wrap;
+}
+
+.as7-style-segment[data-as7-style-active="yes"] {
+  /* The active segment glows. The :hover rules already adjust the
+   * inactive segments via Tailwind utilities. */
+  transition: background-color 180ms ease, color 180ms ease, box-shadow 220ms ease;
+}
+
+/* Save-ack + strength-meter rules — minimal because the components
+ * carry all colours via Tailwind classes. The prefix-locked
+ * selectors here exist so the motion-level gates below can disable
+ * any future micro-animations without retroactive churn. */
+
+.as7-save-ack {
+  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease;
+}
+
+.as7-strength-seg {
+  transition: background-color 220ms ease;
+}
+
+/* Motion-level gating — `off` strips every animation; `subtle`
+ * keeps the static look but no scale-flash. Same cascade as
+ * AS.7.1. */
+.as7-root[data-motion-level="off"] .as7-slot-col,
+.as7-root[data-motion-level="off"] .as7-save-ack,
+.as7-root[data-motion-level="off"] .as7-strength-seg {
+  animation: none !important;
+  transition-duration: 0s !important;
+}
+
+.as7-root[data-motion-level="subtle"] .as7-slot-col[data-as7-slot-flash="on"] {
+  animation: none !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────
  * `prefers-reduced-motion: reduce` — last-line WCAG R25.2 defence
  * ───────────────────────────────────────────────────────────────── */
 

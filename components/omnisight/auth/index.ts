@@ -30,3 +30,12 @@ export {
   WARP_DURATION_BY_LEVEL,
   WarpDriveTransition,
 } from "./warp-drive-transition"
+
+// AS.7.2 — Signup page primitives
+export { PasswordSlotMachine } from "./password-slot-machine"
+export {
+  PASSWORD_STYLE_OPTIONS,
+  PasswordStyleToggle,
+} from "./password-style-toggle"
+export { PasswordStrengthMeter } from "./password-strength-meter"
+export { SaveAcknowledgementCheckbox } from "./save-acknowledgement-checkbox"

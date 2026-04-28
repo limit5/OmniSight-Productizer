@@ -2651,6 +2651,62 @@ export async function logout(): Promise<void> {
   await request<{ status: string }>("/auth/logout", { method: "POST" })
 }
 
+/**
+ * AS.7.2 — signup() posts a new-account registration to
+ * `POST /api/v1/auth/signup`. Mirrors the AS.7.1 `login()` shape:
+ * accepts an optional `extras` map merged into the JSON body so
+ * the page can thread the AS.6.3 `turnstile_token`, the AS.6.4
+ * rotating honeypot field name, the chosen tenant_id (when the
+ * UI offers a picker), and the ToS-accepted flag through the same
+ * request without expanding the positional signature.
+ *
+ * The backend `SignupRequest` model — when implemented — will
+ * declare `model_config = {"extra": "allow"}` so the unknown
+ * extras keys round-trip into `model_dump()` for `validate_honeypot()`
+ * to inspect. Same shape contract as `login()`.
+ *
+ * Until the backend endpoint lands the page surfaces the resulting
+ * 404 / 405 through `classifySignupError()` as the canonical
+ * "registration failed" copy — a deliberate Phase-1 fail-closed
+ * (the frontend never claims a fake success).
+ */
+export interface SignupRequestBody {
+  email: string
+  password: string
+  /** When the page offers a tenant picker, the chosen tenant id.
+   *  When omitted, backend creates a fresh tenant for the user. */
+  tenant_id?: string
+  /** ToS / privacy-policy acknowledgement timestamp (ISO-8601).
+   *  The page derives this from `Date.now()` at submit. */
+  tos_accepted_at?: string
+}
+
+export interface SignupResponse {
+  /** Mirrors LoginResponse — populated when the backend creates the
+   *  user AND signs them in inline. May be empty when the backend
+   *  requires email verification before activation. */
+  user?: AuthUser
+  csrf_token?: string
+  /** Set by the backend when email verification is required before
+   *  the account is usable. The page surfaces this as a "check your
+   *  inbox" terminal state. */
+  email_verification_required?: boolean
+  /** Echoes the email so the page can render "we sent a link to ..."
+   *  even after clearing the form input. */
+  email?: string
+}
+
+export async function signup(
+  body: SignupRequestBody,
+  extras?: Readonly<Record<string, string>>,
+): Promise<SignupResponse> {
+  const payload: Record<string, unknown> = { ...body, ...(extras || {}) }
+  return request<SignupResponse>("/auth/signup", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })
+}
+
 // ─── Admin tenant CRUD (Y2 #278 / Y8 row 3 admin page) ───────
 
 export type TenantPlan = "free" | "starter" | "pro" | "enterprise"

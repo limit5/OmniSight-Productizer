@@ -6,15 +6,22 @@ import {
   login as apiLogin,
   logout as apiLogout,
   mfaChallenge as apiMfaChallenge,
+  signup as apiSignup,
   setCurrentSessionId,
   ApiError,
   type AuthUser,
+  type SignupRequestBody,
+  type SignupResponse,
   type WhoamiResponse,
 } from "@/lib/api"
 import {
   classifyLoginError,
   type LoginErrorOutcome,
 } from "@/lib/auth/login-form-helpers"
+import {
+  classifySignupError,
+  type SignupErrorOutcome,
+} from "@/lib/auth/signup-form-helpers"
 
 interface MfaPending {
   mfa_token: string
@@ -65,6 +72,18 @@ function _extractRetryAfter(err: ApiError): string | null {
   return null
 }
 
+/** AS.7.2 — outcome surfaced to the signup page after `signup()`
+ *  resolves. Either `ok` (auth-context absorbed the user) or
+ *  `verifyEmail` (terminal state — page renders a "check your inbox"
+ *  card) or `failed` (page renders the canonical error banner +
+ *  spring-shake). */
+export interface SignupOutcome {
+  readonly status: "ok" | "verifyEmail" | "failed"
+  readonly error: SignupErrorOutcome | null
+  readonly emailVerificationRequired: boolean
+  readonly email: string | null
+}
+
 interface AuthContextValue {
   user: AuthUser | null
   authMode: WhoamiResponse["auth_mode"] | null
@@ -77,12 +96,23 @@ interface AuthContextValue {
    *  `null` until the first failure; cleared on the next success or
    *  on `cancelMfa()`. */
   lastLoginError: LoginErrorOutcome | null
+  /** AS.7.2 — structured outcome for the most recent failed signup.
+   *  `null` until the first failure; cleared on the next success or
+   *  on a fresh `signup()` call. */
+  lastSignupError: SignupErrorOutcome | null
   mfaPending: MfaPending | null
   login: (
     email: string,
     password: string,
     extras?: Readonly<Record<string, string>>,
   ) => Promise<boolean>
+  /** AS.7.2 — submit a new-account registration. Returns a
+   *  structured outcome the page can branch on (auto-login vs
+   *  email-verify gate vs failure). */
+  signup: (
+    body: SignupRequestBody,
+    extras?: Readonly<Record<string, string>>,
+  ) => Promise<SignupOutcome>
   logout: () => Promise<void>
   refresh: () => Promise<void>
   submitMfa: (code: string) => Promise<boolean>
@@ -99,6 +129,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null)
   const [lastLoginError, setLastLoginError] =
     useState<LoginErrorOutcome | null>(null)
+  const [lastSignupError, setLastSignupError] =
+    useState<SignupErrorOutcome | null>(null)
   const [mfaPending, setMfaPending] = useState<MfaPending | null>(null)
 
   const refresh = useCallback(async () => {
@@ -203,6 +235,72 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [],
   )
 
+  const signup = useCallback(
+    async (
+      body: SignupRequestBody,
+      extras?: Readonly<Record<string, string>>,
+    ): Promise<SignupOutcome> => {
+      try {
+        const res: SignupResponse = await apiSignup(body, extras)
+        // Success branch — clear any prior error so the next render
+        // doesn't show stale state.
+        setLastSignupError(null)
+        if (res.email_verification_required) {
+          setError(null)
+          return Object.freeze({
+            status: "verifyEmail" as const,
+            error: null,
+            emailVerificationRequired: true,
+            email: res.email ?? body.email,
+          })
+        }
+        if (res.user) {
+          setUser(res.user as AuthUser)
+        }
+        setError(null)
+        return Object.freeze({
+          status: "ok" as const,
+          error: null,
+          emailVerificationRequired: false,
+          email: res.email ?? body.email,
+        })
+      } catch (exc) {
+        if (exc instanceof ApiError) {
+          const errorCode = _extractErrorCode(exc)
+          const retryAfter = _extractRetryAfter(exc)
+          const outcome = classifySignupError({
+            status: exc.status,
+            errorCode,
+            retryAfter,
+          })
+          setLastSignupError(outcome)
+          setError(outcome.message)
+          return Object.freeze({
+            status: "failed" as const,
+            error: outcome,
+            emailVerificationRequired: false,
+            email: null,
+          })
+        }
+        const msg = exc instanceof Error ? exc.message : String(exc)
+        const outcome = classifySignupError({
+          status: null,
+          message: msg,
+          retryAfter: null,
+        })
+        setLastSignupError(outcome)
+        setError(outcome.message)
+        return Object.freeze({
+          status: "failed" as const,
+          error: outcome,
+          emailVerificationRequired: false,
+          email: null,
+        })
+      }
+    },
+    [],
+  )
+
   const submitMfa = useCallback(async (code: string) => {
     if (!mfaPending) return false
     try {
@@ -241,7 +339,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, lastLoginError, mfaPending, login, logout, refresh, submitMfa, cancelMfa }}>
+    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, lastLoginError, lastSignupError, mfaPending, login, signup, logout, refresh, submitMfa, cancelMfa }}>
       {children}
     </Ctx.Provider>
   )
