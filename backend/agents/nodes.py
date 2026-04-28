@@ -433,6 +433,13 @@ def _specialist_node_factory(agent_type: str):
                 sub_type=state.agent_sub_type,
                 handoff_context=state.handoff_context,
                 task_skill_context=state.task_skill_context,
+                # W11.10 (#XXX): when the router populated ``clone_spec_context``
+                # from a W11.6 TransformedSpec + W11.7 CloneManifest, append the
+                # block to the frontend agent's role prompt so scaffolding
+                # respects W11 invariants (no copied bytes / placeholder images
+                # only / attribution mandatory / manifest fingerprint echoed).
+                # Empty string for non-W11 runs is a no-op in build_system_prompt.
+                clone_spec_context=state.clone_spec_context,
             )
             if state.last_verification_failure:
                 # M3 audit (2026-04-19): wrap error in XML so any jailbreak

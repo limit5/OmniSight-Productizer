@@ -71,6 +71,18 @@ Sub-modules:
                          / Svelte rows plug in via the same
                          :class:`FrameworkAdapter` Protocol.
 
+    clone_spec_context   W11.10 frontend agent role-prompt context
+                         block. :func:`build_clone_spec_context` turns a
+                         :class:`TransformedSpec` (W11.6) plus the
+                         optional :class:`CloneManifest` (W11.7) into a
+                         deterministic markdown block that the prompt
+                         loader injects into the frontend agent role
+                         prompt so the specialist node can scaffold a
+                         Next / Nuxt / Astro project (W11.9) using the
+                         rewritten outline as design inspiration without
+                         the LLM ever seeing source bytes, source brand
+                         names, or original image URLs.
+
 W11.1 ships the entry point + minimal ``CloneSpec`` container +
 ``CloneSource`` protocol; W11.2 plugs the two production-targeted
 backends behind that contract; W11.3 populates the spec from rendered
@@ -203,6 +215,20 @@ from backend.web.framework_adapter import (
     project_to_audit_payload,
     render_clone_project,
     write_rendered_project,
+)
+from backend.web.clone_spec_context import (
+    CLONE_SPEC_CONTEXT_HEADER,
+    CloneSpecContextError,
+    MAX_CLONE_SPEC_CONTEXT_CHARS,
+    MAX_CONTEXT_COLOR_ITEMS,
+    MAX_CONTEXT_FONT_ITEMS,
+    MAX_CONTEXT_IMAGE_ITEMS,
+    MAX_CONTEXT_NAV_ITEMS,
+    MAX_CONTEXT_SECTION_ITEMS,
+    MAX_CONTEXT_SECTION_SUMMARY_CHARS,
+    TRUNCATION_MARKER,
+    W11_INVARIANTS_BLOCK,
+    build_clone_spec_context,
 )
 from backend.web.output_transformer import (
     BytesLeakError,
@@ -382,6 +408,7 @@ __all__ = [
     "CLONE_RATE_AUDIT_ACTION",
     "CLONE_RATE_AUDIT_ENTITY_KIND",
     "CLONE_RATE_KEY_PREFIX",
+    "CLONE_SPEC_CONTEXT_HEADER",
     "CLOUDFLARE_AI_BLOCK_BODY_HINTS",
     "CLOUDFLARE_MITIGATED_REFUSE_VALUES",
     "ClassifierLLM",
@@ -398,6 +425,7 @@ __all__ = [
     "CloneSourceError",
     "CloneSpec",
     "CloneSpecBuildError",
+    "CloneSpecContextError",
     "ContentClassifierError",
     "ContentRiskError",
     "DEFAULT_BROWSER",
@@ -439,6 +467,13 @@ __all__ = [
     "MANIFEST_HASH_FIELD",
     "MANIFEST_RELATIVE_PATH",
     "MANIFEST_VERSION",
+    "MAX_CLONE_SPEC_CONTEXT_CHARS",
+    "MAX_CONTEXT_COLOR_ITEMS",
+    "MAX_CONTEXT_FONT_ITEMS",
+    "MAX_CONTEXT_IMAGE_ITEMS",
+    "MAX_CONTEXT_NAV_ITEMS",
+    "MAX_CONTEXT_SECTION_ITEMS",
+    "MAX_CONTEXT_SECTION_SUMMARY_CHARS",
     "MAX_PROMPT_INPUT_CHARS",
     "MAX_REASON_CHARS",
     "MAX_REASONS",
@@ -485,10 +520,12 @@ __all__ = [
     "SiteClonerError",
     "TRACEABILITY_HTML_FILENAME",
     "TRACEABILITY_HTML_RELATIVE_PATH",
+    "TRUNCATION_MARKER",
     "TextRewriteLLM",
     "TransformedSpec",
     "UnknownCloneBackendError",
     "UnknownFrameworkError",
+    "W11_INVARIANTS_BLOCK",
     "apply_image_placeholders",
     "assert_clone_allowed_post_capture",
     "assert_clone_allowed_pre_capture",
@@ -496,6 +533,7 @@ __all__ = [
     "assert_clone_spec_safe",
     "assert_no_copied_bytes",
     "build_clone_manifest",
+    "build_clone_spec_context",
     "build_clone_spec_from_capture",
     "canonical_clone_target",
     "check_ai_txt",

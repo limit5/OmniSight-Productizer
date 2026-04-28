@@ -75,6 +75,13 @@ _MAX_MODEL_RULES = 3000
 _MAX_ROLE_SKILL = 8000
 _MAX_TASK_SKILL = 4000
 _MAX_HANDOFF = 4000
+# W11.10 (#XXX): cap on the W11 clone-spec context block injected into
+# the frontend agent role prompt. Mirrors
+# ``backend.web.clone_spec_context.MAX_CLONE_SPEC_CONTEXT_CHARS`` — kept
+# as a separate constant here so callers that pass an already-truncated
+# block (or a non-W11 caller that wants a custom cap) need not import
+# the W11 sub-package just to know the budget.
+_MAX_CLONE_SPEC_CONTEXT = 4000
 
 # L1 Core Rules cache (loaded once)
 _core_rules_cache: str | None = None
@@ -860,6 +867,7 @@ def build_system_prompt(
     *,
     mode: str | None = None,
     domain_context: str = "",
+    clone_spec_context: str = "",
 ) -> str:
     """Assemble the full system prompt from model rules + role skill + task skill + handoff.
 
@@ -879,6 +887,17 @@ def build_system_prompt(
     ``backend/catc.py``). It is only consulted in lazy mode to pick the
     Phase-2 pre-load hint. Falls back to built-in prompts if config files
     are missing.
+
+    W11.10 (#XXX) ``clone_spec_context``: pre-rendered W11 clone-spec
+    context block produced by
+    :func:`backend.web.clone_spec_context.build_clone_spec_context`. When
+    non-empty it is appended to the assembled prompt as a dedicated
+    section (after the task skill and before the handoff) so frontend
+    agents scaffolding a Next / Nuxt / Astro project from a cloned site
+    see the rewritten outline + design tokens + W11 invariants without
+    the LLM ever touching source bytes. Truncated to
+    :data:`_MAX_CLONE_SPEC_CONTEXT` defensively in case a non-W11 caller
+    passes an oversized block.
     """
     resolved_mode = _resolve_skill_loading_mode(mode)
     sections: list[str] = []
@@ -1018,6 +1037,20 @@ def build_system_prompt(
         if len(task_skill_context) > _MAX_TASK_SKILL:
             task_skill_context = task_skill_context[:_MAX_TASK_SKILL] + "\n... [task skill truncated]"
         sections.append(f"# Task Skill\n\n{task_skill_context}")
+
+    # 3a. W11.10: clone-spec context (only present when the router has a
+    # W11.6 ``TransformedSpec`` + W11.7 ``CloneManifest`` to pin into the
+    # frontend agent's prompt). The block is already a self-contained
+    # markdown section starting with ``# Clone Spec Context (W11)`` so it
+    # is appended verbatim — we only enforce the defensive char cap in
+    # case a non-W11 caller passes an oversized block.
+    if clone_spec_context:
+        if len(clone_spec_context) > _MAX_CLONE_SPEC_CONTEXT:
+            clone_spec_context = (
+                clone_spec_context[:_MAX_CLONE_SPEC_CONTEXT]
+                + "\n... [clone-spec context truncated]"
+            )
+        sections.append(clone_spec_context)
 
     # 4. Handoff context (truncated if too long)
     if handoff_context:

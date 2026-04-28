@@ -1017,10 +1017,11 @@ def test_w11_8_symbol_re_exported(symbol):
 
 def test_package_total_symbol_count_pinned_at_146():
     # W11.7 left __all__ at 127 symbols; W11.8 adds 19 → 146;
-    # W11.9 adds 23 framework_adapter symbols → 169.
+    # W11.9 adds 23 framework_adapter symbols → 169;
+    # W11.10 adds 12 clone_spec_context symbols → 181.
     # If this test fails with a DIFFERENT count, audit whether you
     # consciously added / removed a public symbol and update the pin.
-    assert len(web_pkg.__all__) == 169
+    assert len(web_pkg.__all__) == 181
 
 
 # ── 11. Whole-spec invariants ────────────────────────────────────────────

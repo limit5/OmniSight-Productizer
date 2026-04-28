@@ -69,6 +69,13 @@ class GraphState(BaseModel):
     agent_sub_type: str = ""
     handoff_context: str = ""
     task_skill_context: str = ""  # Anthropic SKILL.md content for task-specific guidance
+    # W11.10 (#XXX): pre-rendered clone-spec context block produced by
+    # ``backend.web.clone_spec_context.build_clone_spec_context``. Empty
+    # string for non-W11 graph runs. Threaded through
+    # ``_specialist_node_factory`` into ``build_system_prompt`` so the
+    # frontend agent role prompt sees the rewritten outline + W11
+    # invariants without the LLM ever touching source bytes.
+    clone_spec_context: str = ""
     is_conversational: bool = False  # True = conversation mode (no tools), False = task execution
 
     # R20 Phase 0 (2026-04-25): role of the user driving this graph run.
