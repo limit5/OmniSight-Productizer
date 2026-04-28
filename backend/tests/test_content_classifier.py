@@ -989,9 +989,10 @@ def test_total_re_export_count_pinned_at_79():
     # (clone_spec_context surface) → 181; W11.12 added 11 new symbols
     # (clone_audit surface) → 192; W13.2 added 7 new symbols
     # (screenshot_breakpoints surface) → 199; W13.3 added 18 new symbols
-    # (screenshot_writer surface) → 217. Each row's own drift guard
-    # re-pins at the new value.
-    assert len(web_pkg.__all__) == 217
+    # (screenshot_writer surface) → 217; W13.4 added 16 new symbols
+    # (screenshot_ghost_overlay surface) → 233. Each row's own drift
+    # guard re-pins at the new value.
+    assert len(web_pkg.__all__) == 233
 
 
 # ── Whole-spec invariants ───────────────────────────────────────────────

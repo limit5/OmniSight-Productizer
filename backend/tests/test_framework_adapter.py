@@ -758,11 +758,12 @@ def test_total_re_export_count_pinned_at_192():
     # symbols → 169; W11.10 adds 12 clone_spec_context symbols → 181;
     # W11.12 adds 11 clone_audit symbols → 192;
     # W13.2 adds 7 screenshot-breakpoint symbols → 199;
-    # W13.3 adds 18 screenshot-writer symbols → 217.
+    # W13.3 adds 18 screenshot-writer symbols → 217;
+    # W13.4 adds 16 screenshot-ghost-overlay symbols → 233.
     # If this fails with a different count, audit whether you consciously
     # added / removed a public symbol and update the pin alongside the
     # current row's TODO entry.
-    assert len(web_pkg.__all__) == 217
+    assert len(web_pkg.__all__) == 233
 
 
 # ─── 14. Whole-spec invariants ────────────────────────────────────────

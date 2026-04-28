@@ -1021,10 +1021,11 @@ def test_package_total_symbol_count_pinned_at_192():
     # W11.10 adds 12 clone_spec_context symbols → 181;
     # W11.12 adds 11 clone_audit symbols → 192;
     # W13.2 adds 7 screenshot-breakpoint symbols → 199;
-    # W13.3 adds 18 screenshot-writer symbols → 217.
+    # W13.3 adds 18 screenshot-writer symbols → 217;
+    # W13.4 adds 16 screenshot-ghost-overlay symbols → 233.
     # If this test fails with a DIFFERENT count, audit whether you
     # consciously added / removed a public symbol and update the pin.
-    assert len(web_pkg.__all__) == 217
+    assert len(web_pkg.__all__) == 233
 
 
 # ── 11. Whole-spec invariants ────────────────────────────────────────────
