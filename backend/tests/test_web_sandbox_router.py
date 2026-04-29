@@ -519,3 +519,138 @@ def test_w14_3_post_response_carries_ingress_url_field(
     body = resp.json()
     assert "ingress_url" in body
     assert body["ingress_url"] is None  # No CF wiring on this fixture
+
+
+# ── W14.4 — CFAccessManager wiring ────────────────────────────────
+
+
+def test_w14_4_build_cf_access_manager_returns_none_when_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the four W14.4 env knobs are absent, get_manager() must
+    fall back to the W14.3 path with ``cf_access_manager=None``."""
+
+    monkeypatch.setenv("OMNISIGHT_TUNNEL_HOST", "")
+    monkeypatch.setenv("OMNISIGHT_CF_API_TOKEN", "")
+    monkeypatch.setenv("OMNISIGHT_CF_ACCOUNT_ID", "")
+    monkeypatch.setenv("OMNISIGHT_CF_ACCESS_TEAM_DOMAIN", "")
+
+    cf = web_sandbox_router._build_cf_access_manager()
+    assert cf is None
+
+
+def test_w14_4_build_cf_access_manager_returns_manager_when_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All four knobs set + valid → returns a CFAccessManager."""
+
+    monkeypatch.setenv("OMNISIGHT_TUNNEL_HOST", "ai.sora-dev.app")
+    monkeypatch.setenv("OMNISIGHT_CF_API_TOKEN", "deadbeefdeadbeefdeadbeefdeadbeef")
+    monkeypatch.setenv("OMNISIGHT_CF_ACCOUNT_ID", "0" * 32)
+    monkeypatch.setenv(
+        "OMNISIGHT_CF_ACCESS_TEAM_DOMAIN", "acme.cloudflareaccess.com"
+    )
+    monkeypatch.setenv(
+        "OMNISIGHT_CF_ACCESS_DEFAULT_EMAILS", "admin@example.com,oncall@example.com"
+    )
+
+    cf = web_sandbox_router._build_cf_access_manager()
+    from backend.cf_access import CFAccessManager
+
+    assert isinstance(cf, CFAccessManager)
+    assert cf.config.tunnel_host == "ai.sora-dev.app"
+    assert cf.config.team_domain == "acme.cloudflareaccess.com"
+    assert "admin@example.com" in cf.config.default_emails
+    assert "oncall@example.com" in cf.config.default_emails
+
+
+def test_w14_4_build_cf_access_manager_returns_none_when_team_domain_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed value (team_domain has the wrong suffix) ⇒
+    _build_cf_access_manager logs and returns None."""
+
+    monkeypatch.setenv("OMNISIGHT_TUNNEL_HOST", "ai.sora-dev.app")
+    monkeypatch.setenv("OMNISIGHT_CF_API_TOKEN", "deadbeefdeadbeefdeadbeefdeadbeef")
+    monkeypatch.setenv("OMNISIGHT_CF_ACCOUNT_ID", "0" * 32)
+    monkeypatch.setenv(
+        "OMNISIGHT_CF_ACCESS_TEAM_DOMAIN", "acme.example.com"  # wrong suffix
+    )
+
+    cf = web_sandbox_router._build_cf_access_manager()
+    assert cf is None
+
+
+def test_w14_4_post_response_carries_access_app_id_field(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The response body must include the ``access_app_id`` field
+    (W14.4 schema), even when CF Access wiring is absent (value is
+    null)."""
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={"workspace_id": "ws-42", "workspace_path": str(tmp_path)},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "access_app_id" in body
+    assert body["access_app_id"] is None  # No CF Access wiring on this fixture
+
+
+def test_w14_4_post_response_carries_allowed_emails_in_config(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The router auto-prepends the operator's email to the config's
+    ``allowed_emails`` so the manager can build the CF Access policy."""
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={
+            "workspace_id": "ws-42",
+            "workspace_path": str(tmp_path),
+            "allowed_emails": ["second@example.com"],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Operator email (from the fixture's _operator() factory) is at index 0,
+    # caller-supplied emails follow.
+    emails = body["config"]["allowed_emails"]
+    assert "op@example.com" in emails
+    assert "second@example.com" in emails
+
+
+def test_w14_4_post_response_default_allowed_emails_is_just_operator(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """When no allowed_emails are supplied, the router still records
+    the operator's email so the launcher has at least one identity to
+    let through CF Access."""
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={"workspace_id": "ws-42", "workspace_path": str(tmp_path)},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["config"]["allowed_emails"] == ["op@example.com"]
+
+
+def test_w14_4_post_with_allowed_emails_validates_at_config_layer(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Passing a non-string entry trips the WebSandboxConfig validator
+    → 400."""
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={
+            "workspace_id": "ws-42",
+            "workspace_path": str(tmp_path),
+            "allowed_emails": [123],  # invalid
+        },
+    )
+    # FastAPI/Pydantic rejects at the schema layer before we hit the
+    # WebSandboxConfig validator.
+    assert resp.status_code == 422

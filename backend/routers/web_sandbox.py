@@ -55,6 +55,11 @@ from pydantic import BaseModel, Field
 
 from backend import auth as _au
 from backend import workspace as _ws
+from backend.cf_access import (
+    CFAccessConfig,
+    CFAccessManager,
+    CFAccessMisconfigured,
+)
 from backend.cf_ingress import (
     CFIngressConfig,
     CFIngressManager,
@@ -122,6 +127,42 @@ def _build_cf_ingress_manager() -> CFIngressManager | None:
     return CFIngressManager(config=config)
 
 
+def _build_cf_access_manager() -> CFAccessManager | None:
+    """Construct a :class:`CFAccessManager` from current Settings,
+    returning ``None`` when W14.4 env knobs are absent or invalid.
+
+    Required knobs (all four):
+      - ``OMNISIGHT_TUNNEL_HOST`` (shared with W14.3)
+      - ``OMNISIGHT_CF_API_TOKEN`` (shared with W14.3 — needs the
+        ``Account:Cloudflare Access:Edit`` scope on top of the
+        ``Account:Cloudflare Tunnel:Edit`` scope W14.3 needs)
+      - ``OMNISIGHT_CF_ACCOUNT_ID`` (shared with W14.3)
+      - ``OMNISIGHT_CF_ACCESS_TEAM_DOMAIN`` (W14.4-specific —
+        ``<team>.cloudflareaccess.com``)
+
+    Partial config falls back to ``None`` so the W14.3 ingress path
+    keeps working unchanged with no SSO gate. Malformed values (e.g.
+    team_domain set to a non-cloudflareaccess.com hostname) also fall
+    back, with an info-level log so the operator can see what tripped.
+    """
+
+    try:
+        settings = Settings()
+        config = CFAccessConfig.from_settings(settings)
+    except CFAccessMisconfigured as exc:
+        logger.info(
+            "web_sandbox: CF Access SSO disabled — %s", exc,
+        )
+        return None
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "web_sandbox: CF Access SSO disabled (Settings failed): %s",
+            exc,
+        )
+        return None
+    return CFAccessManager(config=config)
+
+
 def get_manager() -> WebSandboxManager:
     """Return the per-worker :class:`WebSandboxManager`, lazy-creating
     one on first request.
@@ -152,10 +193,12 @@ def get_manager() -> WebSandboxManager:
             )
             manifest = None
         cf_ingress = _build_cf_ingress_manager()
+        cf_access = _build_cf_access_manager()
         _manager = WebSandboxManager(
             docker_client=SubprocessDockerClient(),
             manifest=manifest,
             cf_ingress_manager=cf_ingress,
+            cf_access_manager=cf_access,
         )
     return _manager
 
@@ -212,6 +255,16 @@ class LaunchPreviewRequest(BaseModel):
         None,
         description="Extra environment variables to forward into the sidecar (e.g. NUXT_PUBLIC_API_URL).",
     )
+    allowed_emails: list[str] | None = Field(
+        None,
+        description=(
+            "W14.4 — additional emails to allow through the CF Access "
+            "SSO gate. The launching operator's email is auto-prepended "
+            "by the router; the operator-wide ``cf_access_default_emails`` "
+            "admin allowlist is unioned in by the manager. None ⇒ rely "
+            "on the operator's email plus the admin allowlist."
+        ),
+    )
 
 
 class WebSandboxInstanceResponse(BaseModel):
@@ -230,6 +283,7 @@ class WebSandboxInstanceResponse(BaseModel):
     host_port: int | None
     preview_url: str | None
     ingress_url: str | None
+    access_app_id: str | None
     created_at: float
     started_at: float | None
     ready_at: float | None
@@ -295,6 +349,19 @@ async def launch_preview(
         if body.dev_command
         else DEFAULT_DEV_COMMAND
     )
+    # W14.4: prepend the launching operator's email to the requested
+    # allowlist so the OIDC token CF Access issues for them lines up
+    # 1-to-1 with the OmniSight session that called POST /preview.
+    # Empty / missing email (rare — only when the auth-bypass dev
+    # path runs without a user record) means the manager falls back
+    # to the cf_access_default_emails admin allowlist, and surfaces a
+    # warning if both are empty.
+    auth_emails: list[str] = []
+    operator_email = (getattr(user, "email", "") or "").strip()
+    if operator_email:
+        auth_emails.append(operator_email)
+    if body.allowed_emails:
+        auth_emails.extend(body.allowed_emails)
     try:
         config = WebSandboxConfig(
             workspace_id=body.workspace_id,
@@ -305,6 +372,7 @@ async def launch_preview(
             dev_command=dev_command,
             container_port=body.container_port,
             env=body.env or {},
+            allowed_emails=tuple(auth_emails),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

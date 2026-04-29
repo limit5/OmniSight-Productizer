@@ -130,6 +130,18 @@ from backend.cf_ingress import (
     CFIngressError as _CFIngressError,
     CFIngressManager as _CFIngressManager,
 )
+# W14.4 — optional CF Access SSO manager. Imported under a private
+# alias to keep the public ``__all__`` of this module unchanged; the
+# launcher accepts an optional manager via constructor injection so
+# callers without W14.4 settings can keep using the W14.3 ingress-only
+# path unchanged. The CF Access errors propagate back via per-instance
+# warnings rather than failing the launch (CF Access is best-effort
+# during launch — the host-port preview_url still works for the
+# operator's local tooling even if the SSO gate is briefly broken).
+from backend.cf_access import (
+    CFAccessError as _CFAccessError,
+    CFAccessManager as _CFAccessManager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +399,16 @@ class WebSandboxConfig:
     env: Mapping[str, str] = field(default_factory=dict)
     startup_timeout_s: float = DEFAULT_STARTUP_TIMEOUT_S
     stop_timeout_s: float = DEFAULT_STOP_TIMEOUT_S
+    # W14.4 — emails to allow through the CF Access SSO gate. The
+    # launcher unions this with the operator-wide
+    # ``cf_access_default_emails`` allowlist before POSTing the policy
+    # to CF. Empty tuple ⇒ rely entirely on the admin allowlist; when
+    # both are empty and a CFAccessManager is wired in, launch will
+    # surface a per-instance warning and skip CF Access app creation
+    # (the ingress URL stays publicly reachable, which is the W14.3
+    # behaviour). The router auto-prepends the launching operator's
+    # email so a default launch always at least authorises the caller.
+    allowed_emails: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.workspace_id, str) or not self.workspace_id.strip():
@@ -446,6 +468,33 @@ class WebSandboxConfig:
             if not isinstance(key, str) or not isinstance(value, str):
                 raise ValueError("env keys and values must be strings")
         object.__setattr__(self, "env", MappingProxyType(env_src))
+        # W14.4: normalise + validate allowed_emails. Accept lists
+        # defensively (router builds it as a list) and reject any
+        # non-string entry. Empty entries (whitespace) are dropped
+        # silently — a CSV split with trailing comma is the most
+        # common shape the operator hands us. The deep email-shape
+        # validation happens later in cf_access.compute_effective_emails;
+        # here we only enforce the structural shape so a malformed
+        # request fails at config-construction time rather than
+        # mid-launch.
+        emails = self.allowed_emails
+        if isinstance(emails, str):
+            raise ValueError(
+                "allowed_emails must be a sequence of strings, not a CSV "
+                "string — split on ',' before constructing WebSandboxConfig"
+            )
+        if not isinstance(emails, (list, tuple)):
+            raise ValueError("allowed_emails must be a sequence of strings")
+        cleaned: list[str] = []
+        for entry in emails:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"allowed_emails entry must be a string: {entry!r}"
+                )
+            stripped = entry.strip()
+            if stripped:
+                cleaned.append(stripped)
+        object.__setattr__(self, "allowed_emails", tuple(cleaned))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -462,6 +511,7 @@ class WebSandboxConfig:
             "env": dict(self.env),
             "startup_timeout_s": float(self.startup_timeout_s),
             "stop_timeout_s": float(self.stop_timeout_s),
+            "allowed_emails": list(self.allowed_emails),
         }
 
 
@@ -484,6 +534,13 @@ class WebSandboxInstance:
     host_port: int | None = None
     preview_url: str | None = None
     ingress_url: str | None = None
+    # W14.4: CF Access application id (UUID) returned by the CF API
+    # when the manager creates the per-sandbox SSO gate. Stored on the
+    # instance so :meth:`WebSandboxManager.stop` can DELETE it without
+    # re-listing every app on the account. ``None`` when no
+    # CFAccessManager was wired in OR the launch-time create_application
+    # call failed (the failure mode is folded into ``warnings``).
+    access_app_id: str | None = None
     created_at: float = 0.0
     started_at: float | None = None
     ready_at: float | None = None
@@ -541,6 +598,7 @@ class WebSandboxInstance:
             "host_port": self.host_port,
             "preview_url": self.preview_url,
             "ingress_url": self.ingress_url,
+            "access_app_id": self.access_app_id,
             "created_at": float(self.created_at),
             "started_at": None if self.started_at is None else float(self.started_at),
             "ready_at": None if self.ready_at is None else float(self.ready_at),
@@ -897,6 +955,7 @@ class WebSandboxManager:
         preview_host: str = DEFAULT_PREVIEW_HOST,
         port_range: tuple[int, int] = DEFAULT_HOST_PORT_RANGE,
         cf_ingress_manager: _CFIngressManager | None = None,
+        cf_access_manager: _CFAccessManager | None = None,
     ) -> None:
         self._docker = docker_client
         self._manifest = manifest
@@ -911,6 +970,16 @@ class WebSandboxManager:
         # than failing the launch — a transient CF outage should not
         # prevent the operator from touching the localhost preview.
         self._cf_ingress = cf_ingress_manager
+        # W14.4: optional CF Access SSO manager. ``None`` ⇒ ingress URL
+        # (when present) is publicly reachable with no auth gate (W14.3
+        # dev path). When set, launch creates a per-sandbox CF Access
+        # application that bounces unauthenticated visitors to the
+        # operator's IdP; the OIDC token CF Access issues lines up with
+        # the OmniSight session via the email allowlist on the policy
+        # (operator's email + ``cf_access_default_emails``). A
+        # transient CF Access outage during launch is folded into a
+        # per-instance warning rather than failing the launch.
+        self._cf_access = cf_access_manager
         self._lock = threading.RLock()
         self._instances: dict[str, WebSandboxInstance] = {}
 
@@ -1045,12 +1114,58 @@ class WebSandboxManager:
                         sandbox_id,
                         exc,
                     )
+            # W14.4: provision the CF Access SSO gate. Best-effort —
+            # a CF Access outage at launch time leaves the ingress URL
+            # publicly reachable (W14.3 behaviour); the failure is
+            # surfaced as a per-instance warning so operator triage
+            # can spot it. We deliberately attempt CF Access AFTER CF
+            # ingress so the order matches the lifecycle the public
+            # URL goes through (DNS / tunnel routing first, then SSO
+            # gate). Skipping CF Access when the operator supplied no
+            # emails AND the manager has no defaults avoids posting an
+            # always-deny policy that would lock everyone out — we
+            # surface that as a warning instead.
+            access_app_id: str | None = None
+            if self._cf_access is not None:
+                requested_emails = tuple(config.allowed_emails)
+                default_emails = self._cf_access.config.default_emails
+                if not requested_emails and not default_emails:
+                    launch_warnings.append(
+                        "cf_access_skipped: no emails to allow — set "
+                        "WebSandboxConfig.allowed_emails or configure "
+                        "OMNISIGHT_CF_ACCESS_DEFAULT_EMAILS to enable SSO"
+                    )
+                    logger.warning(
+                        "web_sandbox: cf_access skipped for workspace_id=%s "
+                        "sandbox_id=%s — no emails to allow",
+                        config.workspace_id,
+                        sandbox_id,
+                    )
+                else:
+                    try:
+                        record = self._cf_access.create_application(
+                            sandbox_id=sandbox_id,
+                            emails=requested_emails,
+                        )
+                        access_app_id = record.app_id
+                    except _CFAccessError as exc:
+                        launch_warnings.append(
+                            f"cf_access_create_failed: {exc}"
+                        )
+                        logger.warning(
+                            "web_sandbox: cf_access create_application failed "
+                            "for workspace_id=%s sandbox_id=%s: %s",
+                            config.workspace_id,
+                            sandbox_id,
+                            exc,
+                        )
             started = replace(
                 pending,
                 status=WebSandboxStatus.installing,
                 container_id=container_id,
                 preview_url=preview_url,
                 ingress_url=ingress_url,
+                access_app_id=access_app_id,
                 started_at=self._clock(),
                 last_request_at=self._clock(),
                 warnings=tuple(launch_warnings),
@@ -1146,6 +1261,26 @@ class WebSandboxManager:
                     warnings.append(f"cf_ingress_delete_failed: {exc}")
                     logger.warning(
                         "web_sandbox: cf_ingress delete_rule failed for "
+                        "workspace_id=%s sandbox_id=%s: %s",
+                        workspace_id,
+                        instance.sandbox_id,
+                        exc,
+                    )
+            # W14.4: best-effort CF Access SSO cleanup. A failure here
+            # leaves an orphan Access app pointing at a hostname whose
+            # tunnel rule we just removed — visitors hit the SSO gate
+            # then 502 from the now-missing tunnel route. The next
+            # ``cleanup()`` call (or the W14.5 idle reaper or the
+            # operator's CF dashboard) reaps it; we don't block the
+            # local stop on it. Skip when ``access_app_id`` is None
+            # (CF Access wasn't wired in OR launch-time create failed).
+            if self._cf_access is not None and instance.access_app_id:
+                try:
+                    self._cf_access.delete_application(instance.sandbox_id)
+                except _CFAccessError as exc:
+                    warnings.append(f"cf_access_delete_failed: {exc}")
+                    logger.warning(
+                        "web_sandbox: cf_access delete_application failed for "
                         "workspace_id=%s sandbox_id=%s: %s",
                         workspace_id,
                         instance.sandbox_id,

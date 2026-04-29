@@ -406,6 +406,58 @@ class Settings(BaseSettings):
     cf_account_id: str = ""         # CF account UUID
     cf_tunnel_id: str = ""          # CF tunnel UUID
 
+    # ── W14.4 — Cloudflare Access SSO lock for live web-preview ──
+    # On top of W14.3's dynamic ingress rule, every per-sandbox public
+    # hostname is registered as a Cloudflare Access self-hosted app so
+    # an unauthenticated visitor is bounced to the operator's CF Access
+    # IdP (Google / GitHub / OIDC etc). The app's policy carries the
+    # launching operator's email + the optional admin allowlist below,
+    # so the OIDC token CF Access issues lines up with the OmniSight
+    # session that requested the preview.
+    #
+    # All four CF env knobs (TUNNEL_HOST + CF_API_TOKEN + CF_ACCOUNT_ID
+    # + CF_ACCESS_TEAM_DOMAIN) are required to enable W14.4 — partial
+    # config logs an info-level note at construction and falls back to
+    # the W14.3-only path (publicly-reachable URL, no SSO gate). Note
+    # that W14.4 needs an additional ``Account:Cloudflare Access:Edit``
+    # scope on top of the W14.3 ``Account:Cloudflare Tunnel:Edit``
+    # scope; reusing a single CF API token with both scopes is the
+    # recommended deployment.
+    #
+    # ``cf_access_team_domain`` — ``<team>.cloudflareaccess.com``;
+    # used as the OIDC issuer URL the JWT ``iss`` claim carries (and
+    # for the dashboard URL the operator hits to manage policies).
+    #
+    # ``cf_access_default_emails`` — CSV of admin emails always added
+    # to every per-sandbox policy. Useful so an on-call admin can take
+    # over a preview without the launching operator's session being
+    # live. Empty ⇒ only the launching operator's email is in the
+    # policy.
+    #
+    # ``cf_access_session_duration`` — how long a successful login
+    # lasts before CF Access re-authenticates. Format ``Ns/Nm/Nh/Nd``.
+    # Default 30m.
+    #
+    # ``cf_access_aud_tag`` — Optional fixed CF Access AUD UUID. When
+    # set, downstream JWT verifiers (W14.6 frontend handler, W14.7 HMR
+    # proxy) can enforce ``claims["aud"]`` carries it. Empty ⇒ AUD is
+    # not enforced (CF Access still verifies the signature; only the
+    # in-OmniSight cross-check is relaxed).
+    #
+    # Module-global state audit (Step 1, type-1): values are immutable
+    # Settings literals — every uvicorn worker derives the same
+    # ``CFAccessManager`` config from the same source. Cross-worker
+    # consistency: each worker fetches the live applications list
+    # before mutating it, so the canonical state is the CF Access
+    # API itself (Step 1, type-2). Race window on simultaneous launches
+    # for the same sandbox_id is bounded by the loser's idempotent
+    # GET-by-name look-up; W14.10 will replace this with PG-serialised
+    # mutation when alembic 0059 lands.
+    cf_access_team_domain: str = ""       # e.g. "acme.cloudflareaccess.com"
+    cf_access_default_emails: str = ""    # CSV: "admin@example.com,oncall@example.com"
+    cf_access_session_duration: str = ""  # default "30m" when empty
+    cf_access_aud_tag: str = ""           # Optional fixed CF Access AUD UUID
+
     # O8 (#271): orchestration execution mode. "monolith" keeps every
     # agent run going through the LangGraph StateGraph in-process (legacy
     # path since v0.1.0). "distributed" routes the same run through

@@ -1469,3 +1469,330 @@ def test_w14_3_to_dict_carries_ingress_url(workspace: Path) -> None:
     d = inst.to_dict()
     assert d["ingress_url"] == inst.ingress_url
     assert d["ingress_url"].startswith("https://preview-ws-")
+
+
+# ── W14.4 — CFAccessManager integration ────────────────────────────
+
+
+from backend.cf_access import (  # noqa: E402  — integration, not module surface
+    CFAccessAPIError,
+    CFAccessConfig,
+    CFAccessManager,
+)
+from backend.tests.test_cf_access import (  # noqa: E402
+    FakeCFAccessClient,
+    _ok_config_kwargs as _ok_access_config_kwargs,
+)
+
+
+def _make_access_manager(
+    *, default_emails: tuple[str, ...] = (), apps: list | None = None
+) -> tuple[CFAccessManager, FakeCFAccessClient]:
+    config = CFAccessConfig(
+        **_ok_access_config_kwargs(), default_emails=default_emails
+    )
+    fake = FakeCFAccessClient(apps=apps)
+    return CFAccessManager(config=config, client=fake), fake
+
+
+def test_w14_4_launch_creates_cf_access_app(workspace: Path) -> None:
+    """When CFAccessManager is wired in and the config carries
+    ``allowed_emails``, launch creates an Access app and pins the app
+    id onto the instance."""
+
+    access_mgr, access_fake = _make_access_manager()
+    docker = FakeDockerClient()
+    clock = FakeClock()
+    events = RecordingEventCallback()
+    mgr = WebSandboxManager(
+        docker_client=docker,
+        clock=clock,
+        event_cb=events,
+        cf_access_manager=access_mgr,
+    )
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(workspace),
+        allowed_emails=("op@example.com",),
+    )
+    inst = mgr.launch(cfg)
+
+    assert inst.access_app_id is not None
+    assert inst.access_app_id.startswith("app-")
+    assert len(access_fake.create_calls) == 1
+    body = access_fake.create_calls[0]
+    assert body["name"] == f"omnisight-preview-{inst.sandbox_id}"
+    assert body["domain"] == f"preview-{inst.sandbox_id}.ai.sora-dev.app"
+    # Policy carries the operator's email.
+    include = body["policies"][0]["include"]
+    assert {"email": {"email": "op@example.com"}} in include
+    # Event payload carries access_app_id.
+    launched = next(p for t, p in events.events if t == "web_sandbox.launched")
+    assert launched["access_app_id"] == inst.access_app_id
+
+
+def test_w14_4_launch_unions_default_emails(workspace: Path) -> None:
+    """The Access policy's email list = config.allowed_emails ∪
+    cf_access_default_emails."""
+
+    access_mgr, access_fake = _make_access_manager(
+        default_emails=("admin@example.com",)
+    )
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_access_manager=access_mgr,
+    )
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(workspace),
+        allowed_emails=("op@example.com",),
+    )
+    inst = mgr.launch(cfg)
+    assert inst.access_app_id is not None
+    body = access_fake.create_calls[0]
+    include = body["policies"][0]["include"]
+    addrs = {entry["email"]["email"] for entry in include}
+    assert addrs == {"op@example.com", "admin@example.com"}
+
+
+def test_w14_4_launch_without_cf_access_manager_keeps_app_id_none(
+    workspace: Path,
+) -> None:
+    """Default W14.3 path — no Access wiring, access_app_id stays None."""
+
+    mgr, _, _, _ = _make_manager(workspace)
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(workspace),
+        allowed_emails=("op@example.com",),
+    )
+    inst = mgr.launch(cfg)
+    assert inst.access_app_id is None
+
+
+def test_w14_4_launch_skipped_when_no_emails(workspace: Path) -> None:
+    """When neither allowed_emails nor default_emails are set, launch
+    skips the Access app create and surfaces a per-instance warning —
+    posting an empty-include policy would lock everyone out."""
+
+    access_mgr, access_fake = _make_access_manager()
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_access_manager=access_mgr,
+    )
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(workspace),
+        allowed_emails=(),
+    )
+    inst = mgr.launch(cfg)
+    # No CF Access call.
+    assert access_fake.create_calls == []
+    # access_app_id stays None.
+    assert inst.access_app_id is None
+    # Warning surfaced.
+    joined = " | ".join(inst.warnings)
+    assert "cf_access_skipped" in joined
+
+
+def test_w14_4_launch_cf_access_failure_falls_through_with_warning(
+    workspace: Path,
+) -> None:
+    """A CF Access API outage during launch must NOT fail the launch —
+    the operator's local-host preview still works, and the failure is
+    surfaced as a per-instance warning. The W14.3 ingress_url stays as
+    a publicly-reachable (unauthenticated) URL until the operator can
+    fix the CF Access wiring; that's the documented best-effort fold."""
+
+    access_mgr, access_fake = _make_access_manager()
+    access_fake.raise_on_create = CFAccessAPIError("flaky CF Access", status=502)
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_access_manager=access_mgr,
+    )
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(workspace),
+        allowed_emails=("op@example.com",),
+    )
+    inst = mgr.launch(cfg)
+    # Launch succeeded.
+    assert inst.status == WebSandboxStatus.installing
+    assert inst.preview_url is not None
+    # access_app_id stays None.
+    assert inst.access_app_id is None
+    # Warning recorded.
+    joined = " | ".join(inst.warnings)
+    assert "cf_access_create_failed" in joined
+    assert "flaky CF Access" in joined
+
+
+def test_w14_4_stop_deletes_cf_access_app(workspace: Path) -> None:
+    access_mgr, access_fake = _make_access_manager()
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_access_manager=access_mgr,
+    )
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(workspace),
+        allowed_emails=("op@example.com",),
+    )
+    launched = mgr.launch(cfg)
+    assert launched.access_app_id is not None
+    access_fake.delete_calls.clear()
+
+    mgr.stop("ws-42")
+    # Access app was deleted.
+    assert len(access_fake.delete_calls) == 1
+
+
+def test_w14_4_stop_skips_cf_access_when_app_id_none(workspace: Path) -> None:
+    """If launch never set access_app_id (CF Access was down at launch
+    time, or no emails), stop should skip the CF Access round-trip
+    entirely."""
+
+    access_mgr, access_fake = _make_access_manager()
+    access_fake.raise_on_create = CFAccessAPIError("CF down", status=502)
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_access_manager=access_mgr,
+    )
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(workspace),
+        allowed_emails=("op@example.com",),
+    )
+    mgr.launch(cfg)
+    access_fake.raise_on_create = None
+    access_fake.list_calls = 0
+    access_fake.delete_calls.clear()
+    mgr.stop("ws-42")
+    # No CF Access round-trip on stop because access_app_id was None.
+    assert access_fake.delete_calls == []
+
+
+def test_w14_4_stop_cf_access_failure_records_warning(workspace: Path) -> None:
+    access_mgr, access_fake = _make_access_manager()
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_access_manager=access_mgr,
+    )
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(workspace),
+        allowed_emails=("op@example.com",),
+    )
+    mgr.launch(cfg)
+    access_fake.raise_on_delete = CFAccessAPIError("CF flaky on stop", status=502)
+    stopped = mgr.stop("ws-42")
+    # Local stop succeeded.
+    assert stopped.status == WebSandboxStatus.stopped
+    # Warning recorded.
+    joined = " | ".join(stopped.warnings)
+    assert "cf_access_delete_failed" in joined
+
+
+def test_w14_4_constructor_accepts_optional_cf_access_manager() -> None:
+    """The constructor's ``cf_access_manager`` is keyword-only and
+    defaults to None — drift guard for the W14.3 backward-compat
+    contract."""
+
+    import inspect
+
+    sig = inspect.signature(WebSandboxManager.__init__)
+    assert "cf_access_manager" in sig.parameters
+    param = sig.parameters["cf_access_manager"]
+    assert param.default is None
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_w14_4_to_dict_carries_access_app_id(workspace: Path) -> None:
+    access_mgr, _ = _make_access_manager()
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        clock=FakeClock(),
+        event_cb=RecordingEventCallback(),
+        cf_access_manager=access_mgr,
+    )
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(workspace),
+        allowed_emails=("op@example.com",),
+    )
+    inst = mgr.launch(cfg)
+    d = inst.to_dict()
+    assert d["access_app_id"] == inst.access_app_id
+    assert d["access_app_id"].startswith("app-")
+
+
+def test_w14_4_config_normalises_allowed_emails_list_to_tuple() -> None:
+    """WebSandboxConfig.allowed_emails accepts list defensively (router
+    builds a list from request body) and freezes to a tuple."""
+
+    from pathlib import Path as _P
+
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(_P("/tmp")),
+        allowed_emails=["op@example.com", "admin@example.com"],
+    )
+    assert isinstance(cfg.allowed_emails, tuple)
+    assert cfg.allowed_emails == ("op@example.com", "admin@example.com")
+
+
+def test_w14_4_config_rejects_non_string_email_entry() -> None:
+    from pathlib import Path as _P
+
+    with pytest.raises(ValueError):
+        WebSandboxConfig(
+            workspace_id="ws-42",
+            workspace_path=str(_P("/tmp")),
+            allowed_emails=(123,),  # type: ignore[arg-type]
+        )
+
+
+def test_w14_4_config_rejects_csv_string_in_allowed_emails() -> None:
+    from pathlib import Path as _P
+
+    with pytest.raises(ValueError):
+        WebSandboxConfig(
+            workspace_id="ws-42",
+            workspace_path=str(_P("/tmp")),
+            allowed_emails="op@example.com,admin@example.com",  # type: ignore[arg-type]
+        )
+
+
+def test_w14_4_config_strips_whitespace_emails() -> None:
+    from pathlib import Path as _P
+
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(_P("/tmp")),
+        allowed_emails=(" op@example.com ", "", "admin@example.com"),
+    )
+    assert cfg.allowed_emails == ("op@example.com", "admin@example.com")
+
+
+def test_w14_4_config_to_dict_carries_allowed_emails() -> None:
+    from pathlib import Path as _P
+
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(_P("/tmp")),
+        allowed_emails=("op@example.com",),
+    )
+    d = cfg.to_dict()
+    assert d["allowed_emails"] == ["op@example.com"]
