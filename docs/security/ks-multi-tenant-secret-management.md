@@ -75,9 +75,34 @@ OmniSight 的 secret 儲存目前透過 **AS Token Vault**（`backend/security/t
 
 | Phase | 對應 Tier | 時程估算 | 觸發條件 | 是否硬阻塞 |
 |-------|-----------|---------|---------|-----------|
-| **Phase 1** | Tier 1 envelope | ~3 週 | Priority I multi-tenant 上線前 | **是**（不上線會在 multi-tenant 第一天踩到合規 / 法務地雷） |
-| **Phase 2** | Tier 2 CMEK | ~3 週 | 第一個中型 enterprise 客戶簽約前 | 否（依商務節奏） |
-| **Phase 3** | Tier 3 BYOG proxy | ~2 週（與 HD.21.5 共享 image） | 第一個銀行 / 政府 / 軍工客戶詢盤時 | 否（依商務節奏） |
+| **Phase 1** | Tier 1 envelope | ~3 週 | **BP 完工後 → HD 開工前**（multi-tenant 上線 + HD.17 多客戶 NDA 隔離前置） | **是**（single Fernet master key 在 multi-tenant 場景是資安炸彈） |
+| **Phase 2** | Tier 2 CMEK | ~3 週 | **HD 之後 commercial-driven** — 第一個中型 enterprise 詢盤要求 CMEK 時暫停 HD 排程、提前 pull forward | 否（商務驅動、可 pull forward） |
+| **Phase 3** | Tier 3 BYOG proxy | ~2 週（與 HD.21.5 共享 image） | **HD 之後 commercial-driven** — 第一個銀行 / 政府 / 軍工詢盤；缺席期客戶可走 **HD.21.5.2 self-hosted edition** 當 fallback | 否（商務驅動、可 pull forward） |
+
+### 2.2.1 排程定位（2026-04-29 operator confirmed）
+
+```
+AS (done) → W11-W16 (in progress) → FS → SC → BP → KS.1 → HD → [KS.2 / KS.3 by commercial trigger]
+                                                    ↑
+                                       3 週、sequential 必過
+                                       multi-tenant + HD.17 前置
+```
+
+- **KS.1 = sequential 必過**：BP 完工後 / HD 開工前、~3 週、無例外
+- **KS.2 = HD 後 commercial-driven**：mid-market enterprise 詢盤觸發；security questionnaire 通常會問 CMEK、沒有 = 失單；Phase 2 提前 ~3 週 cost 換 unblock deal
+- **KS.3 = HD 後 commercial-driven**：銀行 / 政府 / 軍工詢盤；缺席期 fallback = **HD.21.5.2 self-hosted edition**（整套 OmniSight 進客戶 VPC、與 KS.3 BYOG 是兩條獨立路徑、僅共享 proxy container image 為實作便利）
+- **KS.4 cross-cutting**：跨 phase incrementally ship、不阻塞任一 phase
+
+### 2.2.2 BP 期間 multi-tenant 政策（明文）
+
+**BP 期間（路線 (b) BP 5.5 週）不開 multi-tenant 收費入口**：
+
+- 防 KS.1 沒到位、就有 paying tenant 暴露於 single Fernet master key 風險
+- BP 期間 OmniSight 維持 **single-tenant / 內部 dogfood / 邀請制 early-access**
+- 邀請制 early-access tenant 簽 explicit risk acceptance form：明示「pre-multi-tenant secret management、breach 風險高於 GA、可隨時退出」
+- BP 完工 + KS.1 ship 後、才打開 self-service signup + 收費
+
+此政策進 N10 audit ledger、由 operator + 法律 / 業務共同 sign-off。
 
 ### 2.3 為什麼不走 zero-knowledge / 客戶端加密
 
@@ -377,7 +402,7 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 ## 12. Rollout 三階段
 
-### Phase 1 — Tier 1 Envelope Encryption（multi-tenant 上線前必過，~3 週）
+### 12.1 Phase 1 — Tier 1 Envelope Encryption（**BP 完工後 → HD 開工前 sequential 必過、~3 週**）
 
 - Week 1：KMS adapter 抽象 + AWS / GCP / Vault 三家 adapter + LocalFernet fallback
 - Week 2：Per-tenant DEK + envelope wrap/unwrap + AS Token Vault 接管 + 雙讀雙寫
@@ -385,16 +410,32 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 **Day 1 結束**：所有新建 tenant 已走 envelope、舊 tenant 雙寫漸進升級、operator 看不出差別。
 
-### Phase 2 — Tier 2 CMEK（~3 週、第一個中型 enterprise 簽約前）
+**BP 完工 + KS.1 ship 完成 = multi-tenant gate 解鎖** — 此時可打開 self-service signup + 收費入口、HD.17 多客戶 NDA 隔離也可開工。
+
+### 12.2 Phase 2 — Tier 2 CMEK（**HD 之後 commercial-driven、~3 週**）
+
+**觸發條件**：第一個 mid-market enterprise 詢盤要求 CMEK（security questionnaire 通常必問）。
 
 - Week 1：AWS KMS / GCP KMS / Vault Transit live integration + CMEK revoke 偵測
 - Week 2：Tenant Settings Wizard（5-step IAM policy generator）+ Tier upgrade flow
 - Week 3：CMEK revoke graceful degrade + audit log 連客戶 SIEM + 完整 E2E test
 
-### Phase 3 — Tier 3 BYOG Proxy（~2 週、第一個銀行 / 政府 / 軍工詢盤時）
+**Pull-forward 政策**：HD 期間若收到 mid-market enterprise 詢盤 → **暫停 HD 排程**、Phase 2 提前 ship（3 週 cost、unblock 一個 deal 值得）。HD 工作 resume 後從原進度繼續、不重做。
+
+### 12.3 Phase 3 — Tier 3 BYOG Proxy（**HD 之後 commercial-driven、~2 週**）
+
+**觸發條件**：第一個銀行 / 政府 / 軍工 / 國防詢盤。
+
+**缺席期 fallback**：客戶可走 **HD.21.5.2 self-hosted edition**（整套 OmniSight 進客戶 VPC）。HD.21.5.2 與 KS.3 是**兩條獨立路徑**：
+- HD.21.5.2 = 整套 OmniSight 在客戶 VPC 跑（最 paranoid 客戶選這條）
+- KS.3 = 只把 LLM key 放客戶 VPC、SaaS 主體仍在我方（要 SaaS 體驗但不放心 key）
+
+僅共享 proxy container image 為實作便利、不互依賴。所以 Phase 3 缺席期 OmniSight 仍能服務 air-gapped 客戶。
 
 - Week 1：omnisight-proxy container（distroless base、< 100MB）+ mTLS + 簽名 nonce + proxy config schema
 - Week 2：Proxy ↔ SaaS protocol（streaming-aware）+ HD.21.5 self-hosted edition 對齊 + audit log + p95 latency budget 驗證
+
+**Pull-forward 政策**：HD 期間若收到 bank / gov 詢盤而客戶不接受 HD.21.5.2 整套 self-host（要保留 SaaS 體驗）→ **暫停 HD、Phase 3 提前 ship**（2 週 cost）。
 
 ---
 
