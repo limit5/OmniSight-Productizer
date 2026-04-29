@@ -1489,14 +1489,63 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 
 預估：**0.5 day**
 
-**Z 總預估**：**3.5 day**
+---
+
+### Z.6 Ollama tool calling 補上 (#NEW — 2026-04-29 audit)
+
+> 背景：2026-04-29 跨 provider tool-calling audit 發現 `backend/llm_adapter.py:190-198` 的 ollama 分支**沒接** `bind_tools()`，但 Ollama 0.3.0+（2024-07-25 釋出）+ `langchain-ollama` 0.2+ 已支援 tool calling，涵蓋主流 model（llama3.1 / llama3.2 / qwen2.5 / qwen3 / mistral-nemo / mistral-small / firefunction-v2 / command-r / mixtral）。
+>
+> **影響**：目前等於「沒 internet 就退化成純 chat、不能跑 agent skill」。HD.21.5 air-gapped / self-hosted 客戶情境會中招（agent dispatcher 收到 ollama provider 時靜默 degrade、operator 看不到 fallback 警示）。
+
+- [ ] Z.6.1 確認 `langchain-ollama` 鎖到 ≥ 0.2（`backend/requirements.txt` / `pnpm` 對應 lockfile 對齊），跑一次 `pip-audit` 確認沒引入新漏洞
+- [ ] Z.6.2 `backend/llm_adapter.py::build_chat_model()` ollama 分支接 `bind_tools` 路徑、與其他 7 家共用 adapter `tool_call()` 流
+- [ ] Z.6.3 `backend/agents/llm.py::AGENT_TOOLS` mapping 確認 ollama provider 不被短路、specialist node 拿到 `bind_tools_for=agent_type` 後正常 invoke
+- [ ] Z.6.4 **Model 兼容矩陣**寫進 `config/llm_pricing.yaml` 同層的 `config/ollama_tool_calling.yaml`：列 9 顆主流 model 對 tool_calls 的支援度（`full / partial / none`）+ 推薦最低版本；catalog UI 顯示 badge
+- [ ] Z.6.5 **Graceful fallback**：tool calling 失敗（model 不支援 / Ollama daemon 報錯 / parse 失敗）時退回純 chat + `SharedKV("ollama_tool_failures").incr()` 計數 + dashboard 警示，不直接 raise
+- [ ] Z.6.6 `backend/tests/test_llm_adapter.py` 加 ollama tool_call mock test：mock `ChatOllama.invoke` 回 `tool_calls=[{"name": "...", "args": {...}, "id": "..."}]`、驗 adapter normalise 過後與其他 provider 對等
+- [ ] Z.6.7 `backend/tests/test_ollama_tool_fallback.py`（新檔案）：unsupported model graceful degrade test、daemon 連不到 test、parse 失敗 test
+- [ ] Z.6.8 `docs/integrations/llm-observability.md` 矩陣加「Tool Calling」一欄（補既有 9 列只有 Balance + Rate-Limit 的維度）
+
+預估：**1 day**
+
+---
+
+### Z.7 Live Integration Test — Anthropic / OpenAI / Gemini 三家實打驗證 (#NEW — 2026-04-29 audit)
+
+> 背景：`backend/tests/test_llm_adapter.py:266-322` 目前只測 **mock response shape**（dict-shaped + attribute-based parse），**沒有實打任何 provider API**。
+>
+> **風險**：
+> - LangChain 升版 / provider response schema 改變 → silent break、tool calling 突然回 `text-only` 卻不報錯
+> - Tool schema 跨家偏差（OpenAI tools schema vs Anthropic tools schema vs Gemini function declaration） → 巢狀 schema / enum 在某 provider 上 silent truncate
+> - Multi-turn tool use loop（tool_use → execute → tool_result → LLM continue）每家行為不同、目前 `nodes.py:429-549` 只跑 single-shot，缺實打驗證 multi-turn 真的閉環
+>
+> **範圍**：先做 Anthropic / OpenAI / Gemini 三家主力（其他 5 家 OpenAI-compat 共享 OpenAI 路徑、由它代驗）。Nightly CI 跑、不阻塞 PR。
+
+- [ ] Z.7.1 **CI secret pool 設立**：sandbox key（低額度限制 + 預算上限） — `ANTHROPIC_API_KEY_CI` / `OPENAI_API_KEY_CI` / `GOOGLE_API_KEY_CI`，存 GitHub Actions repo secrets；本地 dev 不需設、`pytest.mark.live` 預設 skip
+- [ ] Z.7.2 **新 test file** `backend/tests/test_llm_adapter_live.py`：`@pytest.mark.live` + 環境變數偵測 skip、`pytest -m live` 才跑
+- [ ] Z.7.3 **三家 × 最小 tool_call test**：定義 `get_weather(city: str) -> dict` tool → invoke → 驗 `response.tool_calls[0]` 含正確 `name` / `args` / `id`，三家行為一致
+- [ ] Z.7.4 **三家 × multi-turn loop test**：tool_use → 餵 fake `tool_result` → LLM 二輪回應、驗 LLM 真的看到 tool_result 並產 final text（**核心 — 之前完全沒驗**）
+- [ ] Z.7.5 **三家 × streaming + tool_calls test**：streaming 模式同時拿 tool_calls；Gemini 早期 model 不支援可走 `pytest.skip(reason=...)`、文件記錄
+- [ ] Z.7.6 **三家 × nested schema test**：定義 `book_flight(from: str, to: str, date: str, passengers: list[dict])` 巢狀 schema + enum → 驗三家 silent truncate / 錯誤行為（這條最容易抓 schema 跨家偏差）
+- [ ] Z.7.7 **GitHub Actions workflow** `.github/workflows/llm-live-tests.yml`：cron `0 6 * * *` UTC（每天 06:00 UTC = 台北 14:00）、單次 budget guard < USD $0.50、結果寫 `SharedKV("llm_live_test_status")` + dashboard `Z provider observability` 顯示「Last live-test pass: 2h ago」chip
+- [ ] Z.7.8 **Failure escalation**：連續 2 次 nightly fail → BP.B Guild 派 `llm-adapter-debug-bot` 自動診斷 + 開 issue
+- [ ] Z.7.9 **Budget guard**：單次 nightly run cost 預估 < USD $0.50（限 token 上限 + max iter = 3）、超過 budget 自動 fail + alert
+- [ ] Z.7.10 `docs/integrations/llm-observability.md` 補一節「Live integration test 涵蓋率 + pass/fail SOP」
+
+預估：**1 day**
+
+---
+
+**Z 總預估**：**5.5 day**（原 Z.1-Z.5: 3.5 day + 2026-04-29 補的 Z.6 + Z.7: 2 day）
 
 **出貨節奏建議**：
 - Day 1：Z.1（半天）+ Z.2（半天）— rate-limit header 開始收集，DeepSeek + OpenRouter 兩家 balance 可查
 - Day 2：Z.3（半天）+ Z.4（一半）— YAML 上線，UI 開始顯示 balance badge
 - Day 3：Z.4 剩半天 + Z.5 tests + 文件 — 收尾
+- Day 4 (2026-04-29 新增)：Z.6 Ollama tool calling — air-gapped / self-hosted 客戶 unblock
+- Day 5 (2026-04-29 新增)：Z.7 Live integration test — 三家主力進 nightly CI、抓 LangChain / provider schema 偏移
 
-Day 1 結束就已經比現況好一大截（operator 能看到兩家的真實餘額 + rate-limit），後面三天主要補 UI 完整度 + 保護網。
+Day 1 結束就已經比現況好一大截（operator 能看到兩家的真實餘額 + rate-limit），後面三天主要補 UI 完整度 + 保護網。Day 4-5 補 tool calling 完整度（Z.6 解 air-gapped / Z.7 解 silent break 風險）。
 
 **Non-goals**（明確不做）：
 - ❌ Dashboard HTML scraping / session cookie 拿更多 provider 的 balance（fragile + ToS 風險）
