@@ -217,23 +217,91 @@ class Plane:
 
 ---
 
-## 5. EDA Vendor Coverage Matrix
+## 5. EDA Vendor Coverage Matrix（**2026-04-30 community survey 重大更新**）
 
-| EDA Tool | Schematic Format | Layout Format | Parser 路徑 | 覆蓋難度 |
-|----------|------------------|---------------|-------------|----------|
-| **KiCad** | `.kicad_sch` (S-expr text) | `.kicad_pcb` (S-expr text) | 純 Python S-expr parser + `pcbnew` API | ⭐ 易 |
-| **Altium** | `.SchDoc` (OLE binary) | `.PcbDoc` (OLE binary) | `olefile` + 反向工程 schema | ⭐⭐⭐ 中高 |
-| **OrCAD Capture** | `.dsn` (ASCII s-expr) | — | s-expr parser | ⭐⭐ 中 |
-| **OrCAD Allegro** | — | `.brd` (binary) | 走 IPC-2581 export 中介 | ⭐⭐⭐⭐ 極高（要客戶配合 export） |
-| **PADS** | `.sch` | `.pcb` | 走 `.asc` ASCII export 中介 | ⭐⭐ 中 |
-| **Mentor / Siemens Xpedition** | (proprietary) | (proprietary) | 走 IPC-2581 / ODB++ 中介 | ⭐⭐ 中（廠商級工具普遍 export 標準格式） |
-| **Eagle** | `.sch` (XML) | `.brd` (XML) | XML parser | ⭐ 易 |
-| **(fallback)** | PDF + Gerber 圖 | PDF + Gerber 圖 | Vision LLM (Claude Sonnet 4.6) | ⭐⭐⭐⭐ 高（confidence 標記） |
+> 經跨 vendor community survey、整體 HD.1 系列**節省 ~32-42 工程週**（vs greenfield 自寫）。各 vendor 借力策略明示、license 邊界紀律寫入 §5.2、unified `EdaBackend` adapter 寫入 §5.3。
 
-### 5.1 覆蓋策略
-- **直接 binary parser 為主**：KiCad / Altium / Eagle / OrCAD Capture / PADS（5 家）
-- **中介格式 fallback**：IPC-2581 + ODB++（2 個業界標準、Mentor / Allegro / 高階 EDA 都能 export）
-- **Vision LLM 為最後 fallback**：客戶用 niche EDA / 無法 export 標準格式 / 只有 PDF。**不取代 binary parser、僅當補強**。
+| EDA Tool | Schematic | Layout | Parser 路徑（2026-04-30 更新） | License 邊界 | 省 |
+|----------|-----------|--------|------------------------------|--------------|-----|
+| **KiCad ≥ 9.0** | `.kicad_sch` | `.kicad_pcb` | [`mixelpixx/KiCAD-MCP-Server`](https://github.com/mixelpixx/KiCAD-MCP-Server)（122 tools / MIT / 853⭐）走 Docker sandbox + 28 read-only whitelist；fallback [`lamaalrajih/kicad-mcp`](https://github.com/lamaalrajih/kicad-mcp)（438⭐ MIT） | MIT 直接 link | ~3-5 day |
+| **KiCad 6 / 7 / 8** | 同上 | 同上 | [`psychogenic/kicad-skip`](https://github.com/psychogenic/kicad-skip)（LGPL-2.1 / 203⭐）+ 純 Python S-expr | LGPL 動態 link OK | — |
+| **Altium SchDoc** | `.SchDoc` | — | [`a3ng7n/Altium-Schematic-Parser`](https://github.com/a3ng7n/Altium-Schematic-Parser)（MIT / Python / 2026-01 active） | MIT 直接 link | ~6-8 week |
+| **Altium PcbDoc** | — | `.PcbDoc` | [`thesourcerer8/altium2kicad`](https://github.com/thesourcerer8/altium2kicad)（GPL-2.0 / Perl）→ KiCad → HD.1.2a backend | **GPL subprocess only**（R57） | （含上） |
+| **OrCAD Capture** | `.dsn` | — | [`Werni2A/OpenOrCadParser`](https://github.com/Werni2A/OpenOrCadParser)（C++ / MIT / 66⭐）+ `pybind11` wrapper | MIT 直接 link | ~8-10 week |
+| **Cadence Allegro** | — | `.brd` | **戰略放棄 binary**、強制客戶 export IPC-2581 → HD.1.11 | — | 避免投入 |
+| **PADS** | `.sch` | `.pcb` | 自寫 ASCII parser（`.asc` export、~1-2 day） | — | — |
+| **Mentor / Siemens Xpedition** | (proprietary) | (proprietary) | **戰略放棄 native**、強制 IPC-2581 export → HD.1.11 | — | 避免投入 |
+| **Eagle** | `.sch` (XML) | `.brd` (XML) | **走 KiCad-MCP 內建 importer 路徑、零新 code** | — | ~2-3 week |
+| **Gerber + IPC-356** | — | — | [`jaseg/gerbonara`](https://github.com/jaseg/gerbonara)（Apache-2.0 / active）+ [`Argmaster/pygerber`](https://github.com/Argmaster/pygerber)（MIT / 109⭐）渲染 | Apache / MIT 直接 link | ~3-4 week |
+| **IPC-2581** | — | — | 自寫 XML parser（~1 week）；參考 [`midub/boardui`](https://github.com/midub/boardui)（MIT） | — | — |
+| **ODB++** | — | — | [`nam20485/OdbDesign`](https://github.com/nam20485/OdbDesign)（**AGPL-3.0** / 75⭐ / 2026-04 active）**Docker sidecar 模式**；fallback [`ulikoehler/ODBPy`](https://github.com/ulikoehler/ODBPy)（Apache-2.0） | **AGPL Docker REST only**（R57） | ~4-6 week |
+| **Vision LLM (fallback)** | PDF | PDF / Gerber | Claude Sonnet 4.6 vision；datasheet 抽取走 [`iamarunbrahma/vision-parse`](https://github.com/iamarunbrahma/vision-parse)（MIT / 470⭐） | MIT 直接 link | ~2-3 week (HD.5) |
+
+### 5.1 KiCad Backend 雙路徑策略（2026-04-30 新增）
+
+KiCAD-MCP-Server 只支援 KiCad 9.0+、客戶老檔案（KiCad 6/7/8）需 fallback。HD.1.2 採雙 backend：
+
+```
+HD client schematic upload (.kicad_sch / .kicad_pcb)
+   │
+   ▼ HD.1.2 KiCad parser dispatch
+   │
+   ├─ KiCad 9.0+ → KiCAD-MCP-Server (Docker sandbox)
+   │                28 read tools whitelist、94 write tools disable
+   │                走 R51 sandbox（distroless + read-only mount + no outbound）
+   │
+   └─ KiCad 6/7/8 → kicad-skip + 純 Python S-expr parser
+                    LGPL 動態 link、無 sandbox 需求（純解析無 RCE 面）
+   │
+   ▼ HDIR canonical 匯流（HD.1.2c）
+   │
+   └─ 流入 HD.2 / HD.3 / HD.4 等下游
+```
+
+### 5.2 OSS License Boundary Discipline（2026-04-30 新增）
+
+社群借力同時**嚴守 license 邊界**、避免 SaaS 整體被 GPL / AGPL 傳染。完整紀律見 `docs/legal/oss-boundaries.md`。
+
+**三層 boundary 策略**：
+
+| License | 整合方式 | 範例 |
+|---------|---------|------|
+| MIT / Apache / BSD / WTFPL | **直接 link / vendor**（首選） | KiCAD-MCP / Altium-Schematic-Parser / OpenOrCadParser / gerbonara / pygerber / ODBPy / vision-parse / SKiDL / pyFDT / ldparser |
+| LGPL | **動態 link OK、靜態 link 須 source release**（次選） | kicad-skip |
+| **GPL** | **subprocess / 命令列工具 only、絕不 link / vendor**（守線） | altium2kicad（Perl 工具走 subprocess） |
+| **AGPL** | **Docker sidecar + REST only、process boundary 即 license boundary**（守線） | OdbDesign（自帶 Docker REST） |
+
+**強制紀律**：
+- CI 加 license scanner（FOSSA / ScanCode / `licensee` 三選一）阻擋 GPL / AGPL 進 source tree
+- 每個 third-party dep 進 `third_party/` 目錄、git submodule 鎖 commit、license 標記
+- `docs/legal/oss-boundaries.md` 維護完整 dep matrix
+- 季度 license drift audit 進 N10 ledger
+- 商務簽約 review 必驗 OmniSight 不含 GPL / AGPL viral code
+
+### 5.3 Unified `EdaBackend` MCP Adapter Pattern（2026-04-30 新增）
+
+避免 6 個 vendor backend 各自做接口、定義統一 Protocol：
+
+```python
+class EdaBackend(Protocol):
+    def load(self, file_path: Path) -> HDIR: ...
+    def list_components(self, hdir: HDIR) -> list[Component]: ...
+    def get_netlist(self, hdir: HDIR) -> Netlist: ...
+    def get_bom(self, hdir: HDIR) -> BOM: ...
+    def render_layer(self, hdir: HDIR, layer: int) -> bytes: ...  # PNG/SVG
+
+# Implementations
+class KiCadBackend(EdaBackend): ...   # HD.1.2a/b dual-mode
+class AltiumBackend(EdaBackend): ...  # HD.1.3a/b
+class OrCadBackend(EdaBackend): ...   # HD.1.4a (Capture only; Allegro → IPC2581)
+class PadsBackend(EdaBackend): ...    # HD.1.5
+class EagleBackend(EdaBackend): ...   # HD.1.7 (KiCad route)
+class Ipc2581Backend(EdaBackend): ... # HD.1.11c (universal lingua franca)
+class OdbBackend(EdaBackend): ...     # HD.1.12 (Docker sidecar)
+class GerberBackend(EdaBackend): ...  # HD.1.11a/b (gerbonara + pygerber)
+```
+
+上傳 file → MIME / extension sniff → dispatch 到對應 backend → HDIR canonical 寫入。Agent 看到的 SKILL_HD_PARSE 不需知道 backend 種類、統一介面。
 
 ---
 
@@ -381,7 +449,9 @@ HD 在 BP.B Guild SKILL registry 新增：
 
 ---
 
-## 12. Risk Register（R36-R40）
+## 12. Risk Register（R36-R40 + R51-R57）
+
+> R41-R45 在姊妹 ADR `hd-daily-scenarios-and-platform-pipeline.md` §10。R51-R57 是 2026-04-30 community integration 新增。
 
 | ID | 風險 | Mitigation |
 |----|------|-----------|
@@ -390,6 +460,13 @@ HD 在 BP.B Guild SKILL registry 新增：
 | **R38** | 客戶 schematic 機密外洩（HDIR 存 raw → DB 入侵） | HDIR 走 AS Token Vault 同等加密（per-tenant Fernet）、N10 ledger 不含 raw bytes |
 | **R39** | HIL emulator vs real board 行為偏差 | emulator output 永遠帶 confidence 標記、明示不取代實機、emulator validation suite 季度 re-run |
 | **R40** | Forced-AVL substitution 法律責任 | 所有 substitution 提案明示「decision support only / final responsibility on operator」、ledger 完整保存決策路徑、提供 export 給客戶法務存檔 |
+| **R51** | Subprocess sandbox escape（HD.1.2 / HD.1.12）— 客戶檔透過 third-party MCP / OdbDesign 若有 RCE → IP 外洩 | HD.1.2d / HD.1.12 走獨立 OCI container（distroless + read-only mount + no outbound + CPU/memory cap）；走 KS.1 envelope encryption 邊界 |
+| **R52** | KiCad 9.0+ only 不相容老檔（HD.1.2）— KiCAD-MCP 只支援 9.0+、客戶老 project 無法 parse | HD.1.2b 雙 backend：老版本走 `kicad-skip` + 純 Python S-expr、9.0+ 走 KiCAD-MCP；HDIR 層匯流 |
+| **R53** | Third-party project velocity（HD.1 全系列）— 6+ 社群 lib 維護者放棄 | 全 vendor 進 `third_party/` 目錄 + git submodule 鎖 commit + 我方 fork-friendly license；季度 review、abandon 警報走 N10 |
+| **R54** | Subprocess overhead（HD.1.10 batch CLI）— 每 tool call spawn Python 慢 | batch mode 走長進程駐留、subprocess 啟一次處理 N 檔；CLI single-shot 預設 |
+| **R55** | KiCAD-MCP 122 tools 中 94 個寫面積過剩 — HD 主要 read、寫暴露客戶 IP 修改風險 | HD.1.2a read-only whitelist（28 tools）、94 寫工具全 disable、MCP middleware 攔截、policy 落 N10 |
+| **R56** | TS + Python 混合棧複雜度上升（HD.1.2）— Node.js 18+ 進依賴 | 透過 MCP protocol 隔離（OmniSight 只當 client）；Node.js runtime 跟 KiCAD-MCP container 走、不污染我方 backend image |
+| **R57** | GPL / AGPL 邊界違規（HD.1.3 / HD.1.12）— altium2kicad GPL-2 / OdbDesign AGPL-3 若 vendor 進 codebase = SaaS 整體被傳染 | 嚴格 subprocess / Docker sidecar、process boundary = license boundary、`docs/legal/oss-boundaries.md` 寫明、CI 加 license scanner |
 
 ---
 
