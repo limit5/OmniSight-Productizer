@@ -3017,6 +3017,165 @@ ls backend/alembic/versions/ | tail -3
 
 ---
 
+## 🅚🅢 Priority KS — Multi-Tenant Secret Management（3 Tier × 3 Phase）
+
+> **背景（2026-04-29 multi-tenant secret audit）**：目前 AS Token Vault（`backend/security/token_vault.py`）走**單一 master Fernet key**（AS.0.4 §3 invariant）、master key 在 env var、所有租戶共用一把鑰匙。**Single-tenant 下夠用、multi-tenant 上線後是資安炸彈**。
+>
+> **真實風險**：N 客戶 × 9 provider × 平均 2 把 key ≈ 數百到數千把 key、每把都有花錢能力（Anthropic / OpenAI 預設無上限）；一次 breach + leak = (a) 客戶被燒爆 + ToS 全責 + 提告連帶、(b) 早期 SaaS 品牌死亡、(c) GDPR / CCPA / 個保法 / SOC 2 全踩雷、(d) backup leak / log leak / insider / social-engineering 任一中招都全滅。
+>
+> **決策**：採用 **3 tier × 3 phase 模型** — 客戶依規模 / 監管自選 secret management 強度、我方依商務節奏 ship。Phase 1 是 Priority I（multi-tenancy foundation, line 1098）上線前**硬阻塞**、Phase 2 / 3 商務驅動。
+>
+> **ADR**：`docs/security/ks-multi-tenant-secret-management.md`（同步維護）
+>
+> **Single knob 三層獨立**：
+> - `OMNISIGHT_KS_ENVELOPE_ENABLED=false` → Phase 1 退回 single Fernet
+> - `OMNISIGHT_KS_CMEK_ENABLED=false` → Phase 2 隱藏 Tier 2 wizard
+> - `OMNISIGHT_KS_BYOG_ENABLED=false` → Phase 3 隱藏 Tier 3 註冊
+>
+> **Migration 編號**：KS 0106-0115（共 10 顆預留）。
+>
+> **時程估算**：Phase 1 ~3 週（multi-tenant 必過）+ Phase 2 ~3 週（中型 enterprise 簽約前）+ Phase 3 ~2 週（銀行 / 政府詢盤時）= 整體 ~8 週、可平行壓縮到 ~5-6 週。
+>
+> **三 tier 客戶分布預估**：
+> - **Tier 1（預設、envelope）**：~95% 客戶 — 個人 / startup / 小團隊、體感與現況一樣
+> - **Tier 2（CMEK）**：~4% 客戶 — 中大型企業 / 受監管產業、onboarding +5-10 min wizard、客戶可隨時 revoke
+> - **Tier 3（BYOG proxy）**：~1% 客戶 — 銀行 / 政府 / 醫療 / 軍工 / air-gapped、SRE 1-2 day 部署、key 永不離客戶 VPC、合約金額最大
+
+### KS.1 Phase 1 — Tier 1 Envelope Encryption（multi-tenant 上線前硬阻塞）
+
+> **目標**：把 single Fernet 升 envelope（per-tenant DEK + master KEK in KMS）+ 完整 audit + spend anomaly + log scrubber + backup DLP。**95% 客戶覆蓋這層、體感無變化**。
+
+- [ ] KS.1.1 **KMS adapter 抽象**：`KMSAdapter` Protocol + 4 implementations
+  - [ ] AWS KMS adapter（boto3 + IAM assume-role）
+  - [ ] GCP KMS adapter（google-cloud-kms）
+  - [ ] HashiCorp Vault Transit adapter（self-hosted Vault 也可）
+  - [ ] LocalFernet adapter（dev / single-tenant fallback、與現況等價）
+- [ ] KS.1.2 **Per-tenant DEK schema** + envelope wrap/unwrap helper（`encrypt(plaintext, tenant_id) → (ciphertext, dek_ref)` / 反向）
+- [ ] KS.1.3 **AS Token Vault 升級**：雙讀雙寫 30 天遷移期 — 寫只走新 envelope、讀 fallback 到舊 Fernet；30 天後 deprecate 舊路徑
+- [ ] KS.1.4 **Master KEK rotation hook**：季度自動 rotation、`key_version` column 啟用為索引、舊 row 後台 lazy re-encrypt
+- [ ] KS.1.5 **Decryption audit log**：每筆 decryption 寫 `(tenant / user / time / key_id / request_id)` → N10 ledger（tamper-evident）
+- [ ] KS.1.6 **Spend anomaly detector**：per-tenant token rate threshold + 觸發後 auto-throttle + Slack / email alert
+- [ ] KS.1.7 **Log secret scrubber**：custom logger filter 攔 secret pattern → `[REDACTED]`；CI pre-commit `gitleaks` / `trufflehog` 掃描
+- [ ] KS.1.8 **Backup pipeline DLP**：backup encrypt + DLP scanner、防 secret 隨備份外流
+- [ ] KS.1.9 **Memory zeroization**：Python `ctypes.memset` 用後抹除（best-effort、防 memory dump）
+- [ ] KS.1.10 **alembic 0106** — `kms_keys` / `tenant_deks` / `decryption_audits` / `spend_thresholds` / `kek_rotations`
+- [ ] KS.1.11 **Compat regression**：既有 `oauth_tokens` / `customer_secrets` / future provider keys 全走新路徑、0 回歸；雙寫期間隨機 hard-restart 測試
+- [ ] KS.1.12 **Single knob**：`OMNISIGHT_KS_ENVELOPE_ENABLED=false` 退回 single Fernet 路徑（migration 雙寫期間有效、之後此 knob 永久 ON）
+- [ ] KS.1.13 **Test**：master KEK compromise 模擬、envelope round-trip、KEK rotation、雙讀雙寫 hard-restart、audit log 每筆 N10 對齊、anomaly 60 sec 內觸發、log scrubber 確認 sink 看到 redacted、backup DLP 攔截
+
+預估：**3 週**（Day 1-5 KMS adapter / Day 6-10 envelope + 雙寫 / Day 11-15 audit + anomaly + scrubber + DLP + test）
+
+### KS.2 Phase 2 — Tier 2 CMEK（Customer-Managed Encryption Keys）
+
+> **目標**：中型 enterprise 客戶帶自己 KMS key、可隨時 revoke 讓我方瞬間失能。**4% 客戶覆蓋、onboarding +5-10 min wizard**。第一個中型 enterprise 簽約前 ship。
+
+- [ ] KS.2.1 **CMEK Tenant Settings Wizard**（5 step）
+  - [ ] Step 1 選 KMS provider（AWS / GCP / Vault）
+  - [ ] Step 2 IAM policy generator（精準輸出 JSON、客戶在自家 console 貼上）
+  - [ ] Step 3 KMS key ARN / resource id 貼回 wizard
+  - [ ] Step 4 verify connection（OmniSight 跑一次 test encrypt-decrypt）
+  - [ ] Step 5 done + UI 切到 Tier 2
+- [ ] KS.2.2 **AWS KMS live integration**（CI sandbox account + production IAM assume-role）
+- [ ] KS.2.3 **GCP KMS live integration**
+- [ ] KS.2.4 **HashiCorp Vault Transit live integration**（multi-cloud / cloud-neutral 客戶必選）
+- [ ] KS.2.5 **CMEK revoke 偵測**：定期 `DescribeKey` 健康檢查 → key disabled / 權限拔除 → 60 sec 內偵測
+- [ ] KS.2.6 **Graceful degrade**：客戶 revoke 後 (a) in-flight 完成 / (b) 新請求 403 + 友善錯誤 + 復原 runbook、不 retry
+- [ ] KS.2.7 **客戶 SIEM audit log 整合**：CloudTrail / Cloud Audit Logs 加 OmniSight tag、客戶可 ingest
+- [ ] KS.2.8 **Tier 1 → Tier 2 升級 flow**：re-encrypt 所有 tenant 資料（per-tenant DEK 不變、上層 wrap 從 master KEK 換成客戶 CMK）+ progress UI
+- [ ] KS.2.9 **Tier 2 → Tier 1 降級 flow**：撤回我方 IAM 對客戶 CMK 的依賴 + re-encrypt 回 master KEK
+- [ ] KS.2.10 **Settings UI**：「Security Tier」selector + revoke status indicator + KMS health badge
+- [ ] KS.2.11 **alembic 0107** — `cmek_configs` / `tier_assignments` / `cmek_revoke_events`
+- [ ] KS.2.12 **Single knob**：`OMNISIGHT_KS_CMEK_ENABLED=false` → 隱藏 Tier 2 wizard、所有 tenant 退回 Tier 1、既有 Tier 2 客戶 graceful 降級
+- [ ] KS.2.13 **Test**：3 KMS adapter live test + CMEK revoke E2E + Tier upgrade / downgrade re-encrypt 路徑 + Compat regression（Tier 1 客戶 0 變化）
+
+預估：**3 週**（Day 1-5 三 KMS live integration / Day 6-10 wizard + revoke 偵測 / Day 11-15 Tier 升降級 + UI + test）
+
+### KS.3 Phase 3 — Tier 3 BYOG Proxy（Bring Your Own Gateway，對齊 HD.21.5）
+
+> **目標**：銀行 / 政府 / 醫療 / 軍工 / air-gapped 客戶在自家 VPC 跑 omnisight-proxy、key 永不離客戶基建。**1% 客戶但合約金額最大**。第一個此類客戶詢盤時 ship。
+
+- [ ] KS.3.1 **`omnisight-proxy` container image**：distroless base、< 100 MB、單 binary（Go or Rust）
+- [ ] KS.3.2 **Proxy auth**：mTLS + 簽名 nonce（防 replay） + per-tenant client cert + cert pinning
+- [ ] KS.3.3 **Proxy config schema**：provider keys 從 local file / KMS / Vault 讀（客戶選）+ multi-provider 同 proxy 支援
+- [ ] KS.3.4 **Proxy ↔ SaaS 通訊協定**：forward LLM request、stream response back、**不 cache payload**（嚴格 zero-trust）
+- [ ] KS.3.5 **Health check + heartbeat**：proxy 每 30 sec 上報健康、SaaS 端 60 sec 沒收 heartbeat 視為失聯
+- [ ] KS.3.6 **Latency budget**：proxy hop p95 < 50 ms（含 mTLS handshake reuse） — CI 持續驗
+- [ ] KS.3.7 **客戶側 proxy audit log**：完整 prompt + response（客戶資產）；OmniSight 端只 metadata（時間 / model / token count、不含 prompt 內文）
+- [ ] KS.3.8 **Tier 2 → Tier 3 升級 runbook**：proxy 部署 + key migration（OmniSight export → 客戶導入 proxy → OmniSight 清除）
+- [ ] KS.3.9 **HD.21.5 self-hosted edition 對齊**：omnisight-proxy 與 self-hosted edition 共享 container image + 部署 SOP
+- [ ] KS.3.10 **Settings UI**：「Proxy Configuration」面板取代 Tier 3 tenant 的 Provider Keys panel（不貼 key、貼 proxy URL + cert）
+- [ ] KS.3.11 **Fail-fast 嚴格 zero-trust**：proxy unreachable / mTLS handshake failed → 直接 close、**不 fallback 到我方直連**（這是 Tier 3 客戶選擇 BYOG 的根本原因）
+- [ ] KS.3.12 **alembic 0108** — `proxy_registrations` / `proxy_health_checks` / `proxy_mtls_certs`
+- [ ] KS.3.13 **Single knob**：`OMNISIGHT_KS_BYOG_ENABLED=false` → 隱藏 Tier 3 註冊、proxy 模式不可選
+- [ ] KS.3.14 **Test**：mTLS handshake 矩陣（valid / expired / self-signed） + 簽名 nonce replay 防護 + proxy unreachable graceful 失敗 + p95 latency budget + streaming LLM response 不破 + Compat regression（Tier 1/2 客戶 0 變化）
+
+預估：**2 週**（Day 1-5 container + mTLS + 通訊協定 / Day 6-10 audit + UI + HD.21.5 對齊 + test）
+
+### KS.4 Cross-Cutting Defense-in-Depth + Incident Response（跨 Phase、~1 週）
+
+> **目標**：不分 tier 都要做的縱深防禦 + 出事 SOP。
+
+- [ ] KS.4.1 **Log secret scrubber 強化**：擴充 KS.1.7、加更多 pattern（API key prefix / OAuth token / JWT / cookie / database URL）
+- [ ] KS.4.2 **CI pre-commit secret scanner**：`gitleaks` / `trufflehog` 整合 GitHub Actions、PR 帶 secret 直接 block
+- [ ] KS.4.3 **Backup pipeline DLP 強化**：擴充 KS.1.8、backup at-rest encryption + DLP rule + off-site immutable backup（S3 Object Lock / Glacier）
+- [ ] KS.4.4 **季度第三方 pentest SOP**：與外部 pentest vendor 簽約、每季 1 次、報告進 N10 ledger
+- [ ] KS.4.5 **Bug bounty program 評估**：HackerOne / Bugcrowd 比較、GA 後啟動（payout policy / scope / triage SOP）
+- [ ] KS.4.6 **Incident response runbook**：24h SOP（detect / contain / rotate / notify customer / forensics / blameless postmortem）寫進 `docs/security/incident-response-runbook.md`
+- [ ] KS.4.7 **SOC 2 Type II 準備清單**：control mapping + evidence collection + 第三方 auditor 評估
+- [ ] KS.4.8 **GDPR / DSAR 對齊**：tenant data deletion 完整 purge DEK + audit trail metadata（保留 hash、刪 raw）+ DSAR export 流程
+- [ ] KS.4.9 **Memory zeroization 升級**：擴充 KS.1.9、libsodium `sodium_memzero` 取代 ctypes.memset（更可靠）
+
+預估：**1 週**
+
+### KS R-series 風險（R46-R50）
+
+- **R46 Master KEK compromise（Phase 1）**：KMS misconfig / IAM credential leak → 全租戶全洩。**Mitigation**：KEK 季度 rotation；IAM least-privilege；KMS admin dual-control（break-glass workflow）；KMS audit log 進 N10。
+- **R47 KMS vendor lock-in（Phase 2）**：客戶被綁 AWS / GCP。**Mitigation**：multi-adapter abstraction (AWS / GCP / Vault) + Vault Transit 為 cloud-neutral fallback、客戶可雙寫遷移。
+- **R48 CMEK revoke 行為不佳**：客戶 disable key、in-flight transactions 中斷、體驗炸。**Mitigation**：graceful degrade — (a) in-flight 完成 / (b) 新請求 60 sec 內偵測 + 403 + 友善錯誤 + 復原 runbook。
+- **R49 BYOG proxy MITM（Phase 3）**：攻擊者中間人 SaaS↔proxy。**Mitigation**：mTLS + cert pinning + 簽名 nonce、handshake fail 直接 close（不 fallback、嚴格 zero-trust）。
+- **R50 Audit log integrity tampering**：insider 改 decryption audit。**Mitigation**：N10 hash chain + append-only + off-site immutable backup（S3 Object Lock / Glacier）。
+
+### KS 完工 Definition of Done
+
+- [ ] **Phase 1（Tier 1 envelope）**
+  - [ ] AS Token Vault 完成從 single Fernet 演進到 envelope encryption
+  - [ ] 4 KMS adapter（AWS / GCP / Vault / LocalFernet）live test pass
+  - [ ] Decryption audit log 100% 覆蓋、寫入 N10 ledger
+  - [ ] Spend anomaly detector 60 sec 內觸發 alert
+  - [ ] Log scrubber + CI gitleaks + backup DLP 全綠
+  - [ ] 雙讀雙寫 30 天遷移完成、舊 Fernet 路徑 deprecate
+  - [ ] Priority I（multi-tenancy foundation）啟動前 100% ready
+- [ ] **Phase 2（Tier 2 CMEK）**
+  - [ ] CMEK wizard 5-step E2E 通過
+  - [ ] AWS / GCP / Vault 三 KMS live integration green
+  - [ ] CMEK revoke E2E：客戶 disable → 60 sec 偵測 + 全 tenant graceful 403
+  - [ ] Tier 升級 / 降級 re-encrypt 路徑驗過
+- [ ] **Phase 3（Tier 3 BYOG proxy）**
+  - [ ] omnisight-proxy GA、< 100 MB、p95 latency overhead < 50 ms
+  - [ ] mTLS handshake 矩陣 + replay 防護驗過
+  - [ ] HD.21.5 self-hosted edition 共享 image 確認
+  - [ ] 嚴格 zero-trust：proxy unreachable 不 fallback
+- [ ] **Cross-cutting**
+  - [ ] R46-R50 全部 mitigation 落地
+  - [ ] Incident response runbook ship
+  - [ ] 第一次外部 pentest 跑過、findings 修完
+  - [ ] SOC 2 Type II 準備清單建立
+- [ ] **總體**
+  - [ ] KS 全套可用三 knob（envelope / cmek / byog）獨立 disable、既有功能 0 回歸
+  - [ ] ADR `docs/security/ks-multi-tenant-secret-management.md` 完整
+  - [ ] operator runbook 完整、客戶 onboarding 教材完整（per-tier）
+
+### KS Migrations 對照表
+
+| Migration | 內容 | Phase |
+|-----------|------|-------|
+| 0106 | `kms_keys` / `tenant_deks` / `decryption_audits` / `spend_thresholds` / `kek_rotations` | Phase 1 |
+| 0107 | `cmek_configs` / `tier_assignments` / `cmek_revoke_events` | Phase 2 |
+| 0108 | `proxy_registrations` / `proxy_health_checks` / `proxy_mtls_certs` | Phase 3 |
+| 0109-0115 | 預留 — 細節擴充 / 第三方 KMS adapter / Tier 0 aggregator pass-through | 未來 |
+
+---
+
 ## 🅕🅢 Priority FS — Full-Stack Web Application Generation（補完 W 系列後端缺口）
 
 > **背景**：W11-W16 + W 系列做完後仍只覆蓋前端 + 靜態部署。SaaS 級「DB / Auth provisioning / Object storage / Email / Background jobs / Search / Billing」整合自動化是 generated app **production-ready** 的最後一哩。FS 把這條補完。
@@ -3263,6 +3422,7 @@ FS:                   0061-0063
 SC:                   0064-0065
 BP:                   0066-0079
 HD:                   0080-0105     # core 0080-0095 + platform-pipeline 0096-0105
+KS:                   0106-0115     # multi-tenant secret management (3 tier × 3 phase)
 ```
 
 **ADR 文件清單**（BS.0 + 本 batch 新增）：
@@ -3276,6 +3436,7 @@ HD:                   0080-0105     # core 0080-0095 + platform-pipeline 0096-01
 - `docs/operations/as-rollout-and-rollback.md`（AS.8.3 寫入）
 - `docs/design/hd-hardware-design-verification.md`（**本 batch 新增**，HD 完整 ADR — 7 EDA × 4 FW × 10 sensor vendor matrix）
 - `docs/design/hd-daily-scenarios-and-platform-pipeline.md`（**本 batch 新增**，HD 姊妹 ADR — 14 vendor × 50 SoC platform pipeline + 18 daily scenario clusters + multi-customer / lifecycle / CVE / production / OTA / bring-up / port / ISP tuning / blob / compliance / build farm / deployment / AI companion）
+- `docs/security/ks-multi-tenant-secret-management.md`（**本 batch 新增**，KS 完整 ADR — 3 tier × 3 phase secret management、AS Token Vault 演進、multi-tenant 上線前硬阻塞）
 
 ---
 
