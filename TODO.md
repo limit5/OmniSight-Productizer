@@ -3334,6 +3334,311 @@ ls backend/alembic/versions/ | tail -3
 
 ---
 
+## 🅒🅛 Priority CL — Commercial Launch（最後一哩、L2 → L3 floor）
+
+> **背景（2026-04-30 maturity audit）**：路線（AS / W / FS / SC / WP / BP / KS / HD）跑完、Type A / B / C 三產品線都到 **L2 production-ready**、但**仍離 L3 commercial-grade 一段距離**。L3 需要工程之外的「最後一哩」：SOC 2 / ISO 27001 認證 / SLA framework / Customer Success / billing / 規模壓測 / data residency / IR drill / bug bounty 等。**這些不是 feature、是 readiness**。
+>
+> **ADR**：`docs/design/l1-l5-product-maturity-model.md` §5
+>
+> **Migration**：CL 0126-0140（15 slots）
+>
+> **時程**：~6-12 個月（含 SOC 2 audit ~6 月、其他 4-6 月並行）
+>
+> **觸發點**：HD 完工 + KS.1 ship 後立即啟動
+>
+> **特性**：CL 是**跨部門 priority**（工程 + legal + business + customer success），不是純 dev TODO；工程在每 phase 提供 enabling tooling、其他角色執行真正 audit / 簽約 / 客戶協同。
+
+### CL.1 SOC 2 Type II 認證
+- [ ] CL.1.1 簽約外部 auditor（評估 Drata / Vanta / Secureframe 三家）+ 簽 NDA
+- [ ] CL.1.2 內部 readiness scan（控制 control 對齊 SOC 2 5 trust services criteria）
+- [ ] CL.1.3 工程補洞：access control / change management / incident response / risk assessment / vendor management 各自 evidence collection 自動化
+- [ ] CL.1.4 Type I audit（一次性、~3 個月）
+- [ ] CL.1.5 Type II audit（~12 個月觀察期、持續證據收集）
+- [ ] CL.1.6 alembic 0126 — `compliance_evidence` / `control_attestations` 表
+- [ ] CL.1.7 通過後對外公布、客戶採購流程提供 SOC 2 report
+
+### CL.2 ISO 27001 認證
+- [ ] CL.2.1 與 SOC 2 ~70% 重疊、與 SOC 2 同期跑
+- [ ] CL.2.2 ISMS（Information Security Management System）建立
+- [ ] CL.2.3 risk assessment / treatment plan 文件化
+- [ ] CL.2.4 內部稽核 + management review + 外部 stage 1 / stage 2 audit
+- [ ] CL.2.5 認證取得後年度 surveillance audit
+
+### CL.3 SLA Framework + 補償條款
+- [ ] CL.3.1 SLA 階梯設計：99.9% standard / 99.95% premium / 99.99% enterprise
+- [ ] CL.3.2 補償條款：downtime > N% 退費 X%（與 T pricing 整合）
+- [ ] CL.3.3 整合 G priority HA + R priority DR 提供實際 uptime 能力
+- [ ] CL.3.4 Status page 建立（statuspage.io / 自建）+ 即時 incident 公告
+- [ ] CL.3.5 Legal review + 定型契約寫入 ToS
+- [ ] CL.3.6 6 個月實際 uptime 數據累積後才開放最高 tier
+
+### CL.4 Customer Support Workflow + Ticket System
+- [ ] CL.4.1 三層支援架構（L1 自助 / L2 一線 / L3 工程升級）
+- [ ] CL.4.2 工單系統選型（Zendesk / Intercom / 自建走 N10 ledger）
+- [ ] CL.4.3 SLA 設計：first-response / resolution time per tier
+- [ ] CL.4.4 知識庫（KB）建立、與 R20 RAG 整合（客戶問題自動匹配相關 doc）
+- [ ] CL.4.5 客戶 onboarding playbook（依 product type 三套）
+
+### CL.5 Pricing Tier 落地（與 Priority T 整合）
+- [ ] CL.5.1 四階定價：Free（功能限）/ Pro / Team / Enterprise
+- [ ] CL.5.2 Stripe / ECPay / PayPal 三 gateway 整合
+- [ ] CL.5.3 試用流程：14-day free trial、credit card optional
+- [ ] CL.5.4 升降級流程：自動 prorated billing
+- [ ] CL.5.5 退款流程：30-day money-back（Free / Pro tier）
+- [ ] CL.5.6 Per-tenant credit pool 與 PEP gateway 整合
+- [ ] CL.5.7 alembic 0127 — `subscriptions` / `invoices` / `credit_pools` 表
+
+### CL.6 Marketing 資產 + Demo Materials
+- [ ] CL.6.1 Landing page（產品 value prop 三產品線各自表述）
+- [ ] CL.6.2 產品 demo video（每 type 一支、3-5 分鐘）
+- [ ] CL.6.3 客戶 case study（CL.7 fleet 客戶 + 早期 dogfood 客戶）
+- [ ] CL.6.4 Demo asset 工程準備：HD reference design demo / Y6 sample workspace / W demo SaaS
+- [ ] CL.6.5 整合 BS.0.1 vertical-aware bootstrap 提供 demo 模式
+
+### CL.7 Real-World Device Fleet Validation（Type B 主、HD 配對）
+- [ ] CL.7.1 第一個 willing-to-take-risk 客戶識別（嵌入式相熟業界）
+- [ ] CL.7.2 客製 onboarding（OmniSight engineer + client engineer 混合 team）
+- [ ] CL.7.3 客製 SLA + 風險共擔條款 + insurance
+- [ ] CL.7.4 量產驗證：1 顆 → 100 顆 → 1000 顆漸進
+- [ ] CL.7.5 Findings 反哺 HD R36-R57 實際 mitigation 驗證
+- [ ] CL.7.6 累積 case study + ToS / runbook iteration
+
+### CL.8 規模壓測（10K+ tenant）
+- [ ] CL.8.1 合成 tenant 資料 generator（10K tenant × 10K user × 變化負載）
+- [ ] CL.8.2 流量模擬（k6 / Locust / Gatling）
+- [ ] CL.8.3 抓 schema / cache / lock / index 規模 bug
+- [ ] CL.8.4 整合 R priority watchdog 持續壓測 in production
+- [ ] CL.8.5 alembic 0128 — `scale_test_runs` / `regression_anchors`
+
+### CL.9 跨地理 Data Residency（中國 / 歐盟 / 美國）
+- [ ] CL.9.1 HD.21.5.3 PEP gateway region routing 啟動
+- [ ] CL.9.2 中國市場：簽 local data center partner（騰訊雲 / 阿里雲）+ 個資保護法對接
+- [ ] CL.9.3 歐盟市場：GDPR DPA template / data subject rights 流程 / EU data center
+- [ ] CL.9.4 美國 federal：FedRAMP Moderate baseline（與 CL.1 SOC 2 同期可疊）
+- [ ] CL.9.5 Local legal counsel retainer 各地一家
+- [ ] CL.9.6 alembic 0129 — `data_residency_assignments` 表
+
+### CL.10 Real-World Incident Response 演練
+- [ ] CL.10.1 Tabletop exercise（模擬 incident、跑完 24h SOP from KS.4.6）
+- [ ] CL.10.2 Red team / Purple team exercise（外部 + 內部聯合）
+- [ ] CL.10.3 Findings 寫進 N10 audit + iterate runbook
+- [ ] CL.10.4 至少 1 輪、findings 修完才算過
+- [ ] CL.10.5 季度 drill 排程進 N10 ledger
+
+### CL.11 Bug Bounty + 持續第三方 Pentest
+- [ ] CL.11.1 HackerOne / Bugcrowd 評估與簽約
+- [ ] CL.11.2 Scope / payout policy / triage SOP 明文
+- [ ] CL.11.3 Public disclosure policy（Coordinated Vulnerability Disclosure）
+- [ ] CL.11.4 季度 pentest（外部 + 內部 + RTO drill）
+- [ ] CL.11.5 結果進 N10 + 公開 transparency report（年度）
+
+### CL R-series 風險（R63-R66）
+
+- **R63 SOC 2 audit 失敗**（finding 過多、首次 audit 失敗 → 6 月延期）。**Mitigation**：簽約前內部 readiness scan + Drata 等工具預跑、findings 修完才送 audit。
+- **R64 SLA 補償炸成本**（dual-active 不夠、incident 多 → 退費爆）。**Mitigation**：SLA 階梯設保守、初期不開最高 tier、累積 6 月 uptime 數據再開放。
+- **R65 第一個 beta 客戶 burn**（HD 第一個客戶量產失敗 → 連帶責任）。**Mitigation**：客製 risk acceptance form + insurance + OmniSight engineer 駐場。
+- **R66 跨地法規誤判**（中國 / 歐盟法規進入錯誤）。**Mitigation**：簽約前 local legal counsel review、不自行解讀。
+
+### CL Definition of Done
+
+- [ ] SOC 2 Type II / ISO 27001 認證取得
+- [ ] SLA framework 上線、補償條款生效
+- [ ] Customer support workflow + ticket system 運作
+- [ ] Pricing tier 完整、可付費 / 退費 / 升降級
+- [ ] Real-world device fleet 至少 3 客戶 / 1000 顆 device 驗過
+- [ ] 10K+ tenant 規模壓測 0 critical regression
+- [ ] 至少 1 個跨地理市場（中國 OR 歐盟 OR 美國 federal）法規對接完成
+- [ ] Incident response 演練至少 1 輪、findings 修完
+- [ ] Bug bounty + 季度 pentest 啟動
+- [ ] R63-R66 全部 mitigation 落地
+- [ ] **三產品線（A / B / C）公開可標榜為 L3 Commercial-Grade**
+
+---
+
+## 🅛🅵🅸🅻 Priority L4 — Beyond-Commercial Excellence（10 項差異化、L3 → L4）
+
+> **背景（2026-04-30 maturity audit）**：L3 是「能上市販售」入場券、不是差異化。L4 是真實 moat — reproducibility / provenance / adversarial robustness 等是 invariant、越早建越省工。
+>
+> **ADR**：`docs/design/l1-l5-product-maturity-model.md` §6
+>
+> **Migration**：L4 0141-0160（20 slots）
+>
+> **時程**：~12-18 個月、可 4-6 項並行
+>
+> **關鍵 invariant**：L4.1 / L4.2 / L4.3 是 cross-cutting、**建議與 CL 並行啟動、不等 CL 完工**。
+>
+> **觸發策略**：商務 / 客戶詢盤可 pull forward 任一 phase。
+
+### L4.1 Determinism / Reproducibility Framework（cross-cutting invariant、越早越省工）
+- [ ] L4.1.1 LLM 層：`temperature=0` + 鎖 `seed`（Anthropic / OpenAI / Gemini）+ rerun 同 seed → bit-equal 驗證
+- [ ] L4.1.2 Agent 層：tool result 全 cache、二次跑同 task 走 cache、不打 LLM
+- [ ] L4.1.3 Output 層：每 artifact deterministic hash、與 `(input, agent, model, params)` 三方綁
+- [ ] L4.1.4 HD 層：HDIR + toolchain OCI + SBOM 鎖鏈、5 年後重 build bit-equal
+- [ ] L4.1.5 alembic 0141 — `deterministic_runs` / `artifact_hashes` 表
+- [ ] L4.1.6 月度 deterministic regression test、provider 升版 alert
+- [ ] L4.1.7 Single knob：`OMNISIGHT_L4_DETERMINISM_ENABLED`
+
+### L4.2 Tamper-Evident Provenance DAG（cross-cutting invariant）
+- [ ] L4.2.1 DAG schema：`(artifact_id, parent_artifacts[], producer_agent, model, params, human_approver, timestamp, integrity_hash)`
+- [ ] L4.2.2 Hash chain：每 node 鏈到 parent + N10 root、tamper 即測
+- [ ] L4.2.3 UI：artifact detail panel 一鍵展開完整 DAG（祖先 / 後代 / 旁系）
+- [ ] L4.2.4 整合 KS.1 audit + WP.9 shareable_objects + N10
+- [ ] L4.2.5 alembic 0142 — `provenance_dag_nodes` / `provenance_dag_edges`
+- [ ] L4.2.6 分層 storage（hot / warm / cold）+ DAG 摘要 + 分頁 query
+
+### L4.3 Adversarial Robustness Suite（cross-cutting invariant）
+- [ ] L4.3.1 Prompt injection scanner（input + output、已知 patterns + ML detector）
+- [ ] L4.3.2 Jailbreak regression test（DAN / Sydney / 等標準集）每 release 跑
+- [ ] L4.3.3 Supply chain attestation（dep / model / training data 鏈）
+- [ ] L4.3.4 Continuous red-team CI stage、每 PR 跑 adversarial test
+- [ ] L4.3.5 整合 SC + KS.4 + S2 + R51（HD subprocess sandbox）
+
+### L4.4 Industry Certification Pack Inheritance（Type A 主）
+- [ ] L4.4.1 HIPAA pack：BAA template + audit log + encryption defaults + access control template
+- [ ] L4.4.2 PCI-DSS pack：cardholder data scope + tokenization + scan compliance
+- [ ] L4.4.3 FedRAMP pack：federal hosting + access control + continuous monitoring
+- [ ] L4.4.4 GDPR / 個保法 pack：data subject rights + consent / DSAR
+- [ ] L4.4.5 客戶選 pack → generated app 自動帶 baseline 配置
+- [ ] L4.4.6 Pack 帶 `valid_until`、強制 expire（防 R69 過時）
+- [ ] L4.4.7 alembic 0143 — `cert_packs` / `tenant_cert_subscriptions`
+
+### L4.5 Field Telemetry → AI Insights Pipeline（Type B 主、closes the loop）
+- [ ] L4.5.1 Telemetry SDK 給 generated firmware embed
+- [ ] L4.5.2 後端 ingestion（Kafka / Pulsar / 自建 streaming）
+- [ ] L4.5.3 ML 分析（anomaly detection / trend analysis）
+- [ ] L4.5.4 自動建議 firmware patch（與 HD.18.7 auto-PR backport 整合）
+- [ ] L4.5.5 客戶 dashboard 顯示 fleet health
+- [ ] L4.5.6 隱私平衡（telemetry 細節 vs metric only）依客戶 tier 不同
+- [ ] L4.5.7 alembic 0144 — `device_telemetry` / `field_insights`
+
+### L4.6 Real-Time Human + Agent Collaboration
+- [ ] L4.6.1 CRDT layer（Yjs / Automerge）建在 WP.1 Block model 之上
+- [ ] L4.6.2 Presence indicator（誰在看 / 改 / 跑 agent）
+- [ ] L4.6.3 Conflict resolution（agent 改 vs human 改）
+- [ ] L4.6.4 整合 Q multi-device parity + WP.1 Block
+- [ ] L4.6.5 alembic 0145 — `crdt_state` / `presence_events`
+
+### L4.7 Functional Safety Formal Verification（Type B 主）
+- [ ] L4.7.1 整合 model checker / proof assistant（TLA+ / Coq / Isabelle / Lean / Why3）擇 1-2
+- [ ] L4.7.2 HD bring-up code 走 formal proof（power sequence / clock / safety check）
+- [ ] L4.7.3 與 HD.10 compliance retest plan 配對升級
+- [ ] L4.7.4 ASIL-B / C / D 不同 rigor 客戶可選
+- [ ] L4.7.5 與 ISO 26262 / IEC 62304 / DO-178C 對齊
+
+### L4.8 Skill / Agent Marketplace with Cryptographic Attestation（Type C 主）
+- [ ] L4.8.1 Skill SBOM（依賴 / model / prompt 鏈）
+- [ ] L4.8.2 Sigstore / Cosign 簽章
+- [ ] L4.8.3 Marketplace UI：browse / install / review / report
+- [ ] L4.8.4 Reputation system（download / review / verified-by-OmniSight）
+- [ ] L4.8.5 整合 WP.2 + KS.4 OSS attestation
+
+### L4.9 Cost-per-Decision Meta-LLM Optimization（Type C / Cross-cutting）
+- [ ] L4.9.1 Per-task confidence threshold + cost ceiling
+- [ ] L4.9.2 Meta-LLM 預估 task 難度 → 動態選 Anthropic / OpenAI / Gemini / Ollama
+- [ ] L4.9.3 Fallback chain（嘗試便宜模型、信心不足升級）
+- [ ] L4.9.4 學習：歷史 task → 模型選擇 → 結果品質 retrospective
+- [ ] L4.9.5 整合 Z + BP
+
+### L4.10 Multi-Region Edge Deployment Strategy（Type A 主）
+- [ ] L4.10.1 Adapter 層：generated app 程式 portable 跨 edge runtime（CF Workers / Deno Deploy / Fly.io / Vercel Edge / AWS Lambda@Edge）
+- [ ] L4.10.2 部署 wizard：客戶選 target → 自動 deploy
+- [ ] L4.10.3 Region routing：依用戶位置 → nearest edge
+- [ ] L4.10.4 Cost / latency 對比 dashboard
+- [ ] L4.10.5 整合 FS + SC + 跨地理 CL.9
+
+### L4 R-series 風險（R67-R69）
+
+- **R67 Determinism 假象**（鎖 seed 但 LLM provider 升版改 sampling）。**Mitigation**：每月 deterministic regression test、provider 升版前 alert、多 provider 驗證冗餘。
+- **R68 Provenance DAG 規模爆炸**（百萬 artifact 後 DAG 查詢慢）。**Mitigation**：分層 storage（hot / warm / cold）+ DAG 摘要 + 分頁 query。
+- **R69 Cert pack 過時**（HIPAA / PCI / FedRAMP 標準改）。**Mitigation**：cert pack 帶 `valid_until` 強制 expire、季度 compliance team 同步、外部 legal review。
+
+### L4 Definition of Done
+- [ ] L4.1-L4.10 各自 GA、knob disable 退化乾淨
+- [ ] R67-R69 risks 全 mitigated
+- [ ] 至少 3 個 L4 features 對外公布為差異化賣點
+- [ ] **三產品線達 L4 Beyond-Commercial Excellence**
+
+---
+
+## 🅛🅵🅸🅵 Priority L5 — Category-Defining R&D（5 R&D 大項、L4 → L5）
+
+> **背景（2026-04-30 maturity audit）**：L5 是定義產業的能力。每項 12-24 個月 R&D、需 domain expert 招募、不是 BAU 工程。**獨立啟動、不必同期**。
+>
+> **ADR**：`docs/design/l1-l5-product-maturity-model.md` §7
+>
+> **Migration**：L5 0161-0180（20 slots）
+>
+> **時程**：12-24 個月每項、可獨立啟動
+>
+> **觸發策略**：商務 trigger（大客戶詢盤 / 政府 grant / 學術合作）才啟動特定項
+
+### L5.A Hardware-Software Co-Simulation Pre-Tape-Out（Type B、~18-24 月）
+- [ ] L5.A.1 SystemVerilog / VHDL → Verilator / Icarus 整合
+- [ ] L5.A.2 ARM Fast Models 整合（SoC core 模擬）
+- [ ] L5.A.3 Sensor + PMIC + memory 模型整合
+- [ ] L5.A.4 Firmware / driver / kernel 在模擬上跑、抓 race / boot bug
+- [ ] L5.A.5 Tape-out risk reduction：~30% bring-up bug 在 silicon 前抓出
+- [ ] L5.A.6 競品定位：Synopsys VCS / Cadence Xcelium 民主化版
+- [ ] L5.A.7 alembic 0161-0163 — `cosim_runs` / `silicon_models` / `cosim_findings`
+- [ ] L5.A.8 商務模式：可能獨立 pricing（成本高、客戶群不同）
+
+### L5.B Long-Term Agent Memory + Continual Learning（Type C、~12-18 月）
+- [ ] L5.B.1 Vector store + episodic memory + semantic compression
+- [ ] L5.B.2 整合 R20 Phase 0 RAG + WP.5 project-context walker
+- [ ] L5.B.3 持續學習：agent 學客戶 codebase patterns、decision style
+- [ ] L5.B.4 Per-tenant memory 嚴格 KS.1 envelope、嚴禁 cross-tenant 引用
+- [ ] L5.B.5 客戶可 export / delete + audit cert
+- [ ] L5.B.6 alembic 0164-0167 — `agent_memories` / `memory_episodes` / `learning_traces`
+- [ ] L5.B.7 R71 mitigation：季度 cross-tenant memory leak audit
+
+### L5.C Side-Channel + Fault Injection Security Analysis（Type B、~18-24 月）
+- [ ] L5.C.1 Power analysis（DPA / SPA）oracle
+- [ ] L5.C.2 EM emanation analysis
+- [ ] L5.C.3 Voltage glitching simulation
+- [ ] L5.C.4 Fault injection model（單 bit / multi-bit）
+- [ ] L5.C.5 整合 HD.20.7 firmware blob analysis
+- [ ] L5.C.6 競品定位：Riscure / Synopsys SecureIC 整合進 dev workflow
+- [ ] L5.C.7 客戶：軍工 / 金融 / 醫療嵌入式
+- [ ] L5.C.8 alembic 0168-0170
+
+### L5.D Multi-Agent Simulation + Adversarial Red-Teaming Framework（Cross-cutting、~12-18 月）
+- [ ] L5.D.1 Adversarial agent 池（攻擊者 / 防禦者）
+- [ ] L5.D.2 持續對抗訓練
+- [ ] L5.D.3 ML-driven attack synthesis（不只已知 patterns）
+- [ ] L5.D.4 Findings 自動進 L4.3 adversarial robustness suite
+- [ ] L5.D.5 整合 SC + KS.4
+- [ ] L5.D.6 alembic 0171-0175
+- [ ] L5.D.7 R73 mitigation：framework 程式碼 IP-classified、不對外發布
+
+### L5.E Real-Time Digital Twin for Field Devices（Type B、~18-24 月）
+- [ ] L5.E.1 Per-device 數位模型（physics + behavior + degradation）
+- [ ] L5.E.2 Real-time telemetry → twin update
+- [ ] L5.E.3 Forecast：N 月後 sensor 退化 / 元件壽命
+- [ ] L5.E.4 客戶 fleet management dashboard：哪些 device 即將失效
+- [ ] L5.E.5 整合 L4.5 field telemetry pipeline
+- [ ] L5.E.6 競品定位：PTC ThingWorx / Siemens MindSphere + AI integration 民主化
+- [ ] L5.E.7 alembic 0176-0180
+- [ ] L5.E.8 Confidence interval 必顯示（R74 mitigation）
+
+### L5 R-series 風險（R70-R75）
+
+- **R70 HW/SW co-sim vs real silicon 偏差**（client tape-out 後仍崩、信任崩）。**Mitigation**：明示「reduce risk 不取代」、每 fabric 與真實 silicon 比對、accuracy 公開報告。
+- **R71 Long-term memory 客戶 IP leak**（agent 記憶污染跨 customer）。**Mitigation**：per-tenant memory 嚴格 KS.1 envelope、嚴禁 cross-tenant 引用、季度 audit。
+- **R72 Side-channel 分析誤判**（false positive 太多、客戶失信）。**Mitigation**：confidence + accuracy disclosure、與 Riscure / Synopsys 等比對、不取代 lab。
+- **R73 Adversarial red-team 攻擊外洩**（內部 red-team 工具被外洩變 weapon）。**Mitigation**：framework 程式碼分級存取、未對外發布、研究 paper 才發。
+- **R74 Digital twin 預測失準**（forecast 客戶 device 失效時間錯）。**Mitigation**：confidence interval 必顯示、不掩蓋 uncertainty、客戶教育。
+- **R75 R&D budget 不足**（L5 5 項全做需多年）。**Mitigation**：每項獨立啟動、商務 trigger 觸發、與 academic / 政府 grant 合作。
+
+### L5 Definition of Done
+
+- [ ] L5.A-L5.E 至少 3 項 GA（其餘 R&D 持續）
+- [ ] R70-R75 全部 mitigation 落地
+- [ ] 至少 1 個 L5 feature 形成業界標準（與 IEEE / ISO / IETF / Linux Foundation 等合作標準制定）
+- [ ] 學術 / 研究機構 / 標準制定組織建立合作
+- [ ] **三產品線達 L5 Category-Defining、定義產業地位**
+
+---
+
 ## 🅕🅢 Priority FS — Full-Stack Web Application Generation（補完 W 系列後端缺口）
 
 > **背景**：W11-W16 + W 系列做完後仍只覆蓋前端 + 靜態部署。SaaS 級「DB / Auth provisioning / Object storage / Email / Background jobs / Search / Billing」整合自動化是 generated app **production-ready** 的最後一哩。FS 把這條補完。
@@ -3582,6 +3887,9 @@ BP:                   0066-0079
 HD:                   0080-0105     # core 0080-0095 + platform-pipeline 0096-0105
 KS:                   0106-0115     # multi-tenant secret management (3 tier × 3 phase)
 WP:                   0116-0125     # Warp-inspired patterns (Block / Skills / Diff-validation / Runbook / shareable_objects)
+CL:                   0126-0140     # Commercial Launch (SOC 2 / SLA / support / billing / fleet validation / 規模 / data residency / IR / bounty)
+L4:                   0141-0160     # Beyond-Commercial Excellence (10 features: determinism / provenance / adversarial / cert pack / telemetry / collab / formal-verify / marketplace / meta-LLM / edge)
+L5:                   0161-0180     # Category-Defining R&D (5 R&D: HW/SW co-sim / long-term memory / side-channel / multi-agent sim / digital twin)
 ```
 
 **ADR 文件清單**（BS.0 + 本 batch 新增）：
@@ -3598,6 +3906,7 @@ WP:                   0116-0125     # Warp-inspired patterns (Block / Skills / D
 - `docs/security/ks-multi-tenant-secret-management.md`（**本 batch 新增**，KS 完整 ADR — 3 tier × 3 phase secret management、AS Token Vault 演進、multi-tenant 上線前硬阻塞）
 - `docs/legal/oss-boundaries.md`（**2026-04-30 新增**，HD 第三方 OSS license 邊界紀律 — GPL / AGPL 走 subprocess / Docker sidecar / 不可 link / 不可 vendor、CI license scanner、季度 audit；**WP batch 加第四級 inspiration-only tier**）
 - `docs/design/wp-warp-inspired-patterns.md`（**本 batch 新增**，WP 完整 ADR — 13 phase 借鑑 Warp pattern、Wave-1 五個 phase 必過 BP 前、其他 fold 進對應 priority）
+- `docs/design/l1-l5-product-maturity-model.md`（**本 batch 新增**，L0-L5 產品成熟度分層 ADR — 既有所有 priority 的 L-level mapping + Priority CL / L4 / L5 三新 priority 完整規劃 + R63-R75 風險）
 
 ---
 
@@ -3631,6 +3940,35 @@ BS（已完工）→ AS (~22d) → W11-W16 (~11d, +WP.4 onboarding 1d) → FS (~
 3. **AS.6 dogfood + AS.7 浮誇 UI** — 對所有 operator 立刻可感的 first-impression upgrade，不限蓋網站者
 4. **W11-W16 是 feature-add，惠及子集**（蓋網站的 vertical），不是所有 operator 必要
 5. **KS.1 必過才開 multi-tenant** — single Fernet master key 在 multi-tenant 場景是資安炸彈（master key compromise = 全租戶全 key 全洩）；envelope encryption + KMS 是付費客戶上線前不可妥協的地基
+
+### 🟦 L1-L5 產品成熟度進程（2026-04-30 新增）
+
+> 詳見 `docs/design/l1-l5-product-maturity-model.md`。OmniSight 三產品線（Type A Web SaaS gen / Type B Embedded HW / Type C Multi-agent dev tool）對「真實落地能力」分 L0-L5 六層。
+
+```
+L0 Toy (玩具) → L1 Prototype (原型) → L2 Production-Ready (上線級) → L3 Commercial-Grade (商業級) → L4 Beyond-Commercial Excellence (卓越級) → L5 Category-Defining R&D (定義產業)
+```
+
+**路線推進對應 L-level**：
+
+```
+Today (BS done, AS done, W in progress)
+   ↓
+W11-W16 (+WP.4) → FS → SC → WP-Wave-1 → BP (+WP.10) → KS.1   ← Type A / C 達 L2 floor
+   ↓
+HD (~20 週)                                                    ← Type B 達 L2 floor
+   ↓
+Priority CL (commercial 最後一哩、~6-12 月)                      ← 三產品線達 L3 floor
+   ↓ (含 SOC 2 audit / SLA / customer success / billing / fleet validation / 規模壓測 / data residency / IR drill / bug bounty)
+Priority L4 (Beyond-Commercial Excellence、~12-18 月)            ← 達 L4 ceiling
+   ↓ (10 features: determinism / provenance DAG / adversarial / cert pack / telemetry / collab / formal-verify / marketplace / meta-LLM / edge)
+Priority L5 (Category-Defining R&D、各項 12-24 月、可獨立啟動)   ← 達 L5 (定義產業)
+   (5 R&D: HW/SW co-sim / long-term memory / side-channel / multi-agent sim / digital twin)
+```
+
+**關鍵 invariant**：L4.1 / L4.2 / L4.3（determinism / provenance / adversarial robustness）是 **cross-cutting invariant、越早建越省工** — 建議與 CL 並行啟動、不等 CL 完工。
+
+**總時程估算**：L0 → L5 全到頂 ~3-4 年 from today（L2 floor ~31 週 / L3 floor +6-12 月 / L4 ceiling +12-18 月 / L5 部分項 +12-24 月並行）
 
 ### 🟡 Alternative path —— 路線 (a) 雙 / 三 track 平行（有額外 capacity 才走）
 
