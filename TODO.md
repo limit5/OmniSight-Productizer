@@ -3185,6 +3185,155 @@ ls backend/alembic/versions/ | tail -3
 
 ---
 
+## 🅦🅟 Priority WP — Warp-inspired Patterns（Block / Skills / Diff-Validation / Onboarding / Runbook / 等 13 模式）
+
+> **背景（2026-04-30 Warp repo 深度審計）**：[`warpdotdev/warp`](https://github.com/warpdotdev/warp)（Rust 寫、~63 crate、AGPLv3 為主、UI crate MIT）審計後找到 13 個可借鑑 design pattern。Warp 的「結構化人機協作 + AI agent 介入 + 多執行單元組裝」與 OmniSight 高度同構、其驗證過的 pattern 直接可借。
+>
+> **借 pattern 不借 code**：採 `docs/legal/oss-boundaries.md` 新增的**第四級 inspiration-only license tier** — 嚴禁 vendor / port any Warp source、所有 commit 必須能獨立 audit 為「OmniSight 自寫」。
+>
+> **ADR**：`docs/design/wp-warp-inspired-patterns.md`（同步維護）
+>
+> **Migration 編號**：WP 0116-0125（10 slots 預留）。
+>
+> **三 tier 借鑑模型**：
+> - **Tier 1**（必借、infra primitive）：WP.1 / 2 / 3 / 4 / 5 — BP / HD enabler、必過 BP 前
+> - **Tier 2**（強推、priority gap 補強）：WP.6 / 7 / 8 / 9 / 10
+> - **Tier 3**（加分、polish / niche）：WP.11 / 12 / 13
+>
+> **分散式落地**（不集中、按依賴關係 fold 進對應 priority）：
+> - **WP-Wave-1 main**（本區塊、SC 完工後 / BP 開工前 sequential ~2 週）：WP.1 / 2 / 3 / 5 / 7 / 9
+> - **WP.4 fold 進 W11-W16** Y6 dashboard sub-task（W11-W16 期間 +1 day）
+> - **WP.6 fold 進 Priority Q**（line 954）作為核心 schema
+> - **WP.8 + WP.13 fold 進 HD.19** Bring-up Workbench sub-task
+> - **WP.10 fold 進 BP dispatch board** sub-task
+> - **WP.11 / WP.12 opportunistic polish**（任何 idle window）
+>
+> **Single knob**：3 個獨立 — `OMNISIGHT_WP_BLOCK_MODEL_ENABLED` / `OMNISIGHT_WP_SKILLS_LOADER_ENABLED` / `OMNISIGHT_WP_DIFF_VALIDATION_ENABLED`；其他 phase fold 進對應 priority 後繼承既有 knob。
+>
+> **時程估算**：Wave-1 ~2 週 sequential 插主路線；分散 fold ~3-4 週分散吸收。**淨影響 schedule-neutral 或略省**（避免 BP retrofit 省 ~3-4 週）。
+
+### WP.1 Block Data Model + Share/Permalink + Redaction Masks（Tier 1、Wave-1 main）
+
+> 每個 agent turn / 命令 / 輸出 / sandbox snapshot / HD finding 都是 addressable Block。是 BP / HD / W14 / Z / ORCHESTRATOR 共用 primitive。
+
+- [ ] WP.1.1 **`blocks` schema 定義**：`block_id` / `parent_id` / `tenant_id` / `user_id` / `project_id` / `session_id` / `kind` / `status` / `title` / `payload` JSONB / `metadata` JSONB / `redaction_mask` JSONB / `started_at` / `completed_at` / `created_at`
+- [ ] WP.1.2 **alembic 0116 — `blocks` table + indexes**（`(tenant_id, session_id, started_at DESC)` + `(parent_id)`）
+- [ ] WP.1.3 **`<Block />` React primitive**：統一替換既有 message / output / finding 卡片散落實作（ORCHESTRATOR / TokenUsageStats / W14 / HD bring-up workbench / BP dispatch board）
+- [ ] WP.1.4 **Share modal**：右鍵 Block → Share → 勾選 sub-region（command / output / metadata / screenshots）→ 走 WP.9 `shareable_objects` 開 permalink
+- [ ] WP.1.5 **Redaction mask 邏輯**：JSONB 標明哪些 sub-region 在 share 時遮（secret / PII / customer IP）；KS.1 envelope 邊界對齊
+- [ ] WP.1.6 **遷移策略**：分 surface 漸進 — 先 ORCHESTRATOR / TokenUsageStats → 後 BP → 後 HD；雙寫期 feature flag 切換、舊 surface 退回路徑保留 30 天
+- [ ] WP.1.7 **Single knob**：`OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false` 退回 ad-hoc 卡片
+- [ ] WP.1.8 **Test**：每 surface migration 前後 UI snapshot 零回歸 + Block CRUD + permalink + redaction round-trip
+
+### WP.2 Skills Loader（`.claude/skills` + `.omnisight/skills` 共用慣例）
+
+> Markdown 檔（YAML frontmatter `name` / `description` + body）、3 scope precedence、與 Claude Code 共用 `.claude/` 慣例降低 onboarding 摩擦。
+
+- [ ] WP.2.1 **3 scope loader**：Bundled（`omnisight/agents/skills/`）+ Home（`~/.claude/skills/` + `~/.omnisight/skills/`）+ Project（`./<repo>/.claude/skills/` + `./<repo>/.omnisight/skills/`）
+- [ ] WP.2.2 **Provider rank precedence**：高 precedence 同名覆蓋低、衝突時 WARN log
+- [ ] WP.2.3 **FS-watch project scope**：改檔即時 reload
+- [ ] WP.2.4 **Skill registry 暴露**：command palette 可叫用 + chat `@skill-name` mention
+- [ ] WP.2.5 **BP.B Guild 既有 SKILL_HD_*** 改走新 loader、不 hard-code
+- [ ] WP.2.6 **CLI**：`omnisight skills list` / `omnisight skills resolve <name>`（印 effective skill source 防 R59 衝突排序不可預測）
+- [ ] WP.2.7 **Single knob**：`OMNISIGHT_WP_SKILLS_LOADER_ENABLED=false` 退回 hard-code SKILL registry
+- [ ] WP.2.8 **Test**：3 scope + 衝突 + FS watch + reload 各自 unit + 整合
+
+### WP.3 Diff-Validation Cascade（4-tier fuzzy ladder）
+
+> Agent 改檔（patch / replace / insert）走 4 層 fallback、防 silent corrupt。BP / HD / W14 sandbox 共用。
+
+- [ ] WP.3.1 **Cascade 實作**：Layer 1 exact match → Layer 2 indent-agnostic → Layer 3 prefix-tail rescue → Layer 4 Jaro-Winkler ≥ 0.9
+- [ ] WP.3.2 **Confidence score**：每 layer 帶 score、進 N10 ledger
+- [ ] WP.3.3 **Strict mode**：HD bring-up agent 改 DTS / Yocto recipe 預設 strict（不走 0.9 fallback、改 0.95），防 R60 false-positive
+- [ ] WP.3.4 **既有 Edit tool wrapper 升級**：BP agent / HD bring-up agent / W14 sandbox 統一走 cascade
+- [ ] WP.3.5 **失敗 explicit error**：不 silent fail、走 agent self-correction loop
+- [ ] WP.3.6 **Single knob**：`OMNISIGHT_WP_DIFF_VALIDATION_ENABLED=false` 退回 exact-match only
+- [ ] WP.3.7 **Test**：4 層 ladder 各自 unit + 50+ scenario regression（正改 / 誤改 / 邊界 / strict mode triggers）
+
+### WP.5 Project-Context Multi-Rule Walker
+
+> 升級 OmniSight 既有 CLAUDE.md 處理：multi-file + parent-walk + FS-watched。HD RAG corpus 多 datasheet / spec 自動 ingest。
+
+- [ ] WP.5.1 **Multi-file**：`CLAUDE.md` + `AGENTS.md` + `OMNISIGHT.md` + `WARP.md` 全掃
+- [ ] WP.5.2 **Parent walk**：current dir + 最多 3 層父目錄、依距離 weight
+- [ ] WP.5.3 **FS-watched**：檔變動即時重 merge
+- [ ] WP.5.4 **Merge precedence**：current dir > 父目錄、project-specific > generic
+- [ ] WP.5.5 **R20 Phase 0 RAG 整合**：HD datasheet / sensor spec / errata 走相同 walker 自動 ingest
+- [ ] WP.5.6 **Size cap**：每檔 max 5 KB、總和 max 50 KB（防 R61 prompt 污染）；超過則 UI 顯示 truncated + ignore option
+- [ ] WP.5.7 **UI 顯示**：載入哪些檔 + 各檔大小 + operator 可 ignore 特定檔
+- [ ] WP.5.8 **Test**：parent walk + multi-file merge + size cap + ignore + reload
+
+### WP.7 Feature Flag Tiered Registry
+
+> 5 tier flag（debug / dogfood / preview / release / runtime push）+ atomic 讀取、BP / HD / KS 漸進 ship 必備。
+
+- [ ] WP.7.1 **alembic 0118 — `feature_flags` 表 + audit log**（`flag_name` / `tier` / `state` / `expires_at` / `owner` / `created_at`）
+- [ ] WP.7.2 **5 tier 定義**：DEBUG / DOGFOOD / PREVIEW / RELEASE / RUNTIME
+- [ ] WP.7.3 **Resolution priority**：test-override → user preference → global state → default
+- [ ] WP.7.4 **Atomic 讀**：hot path 友好（in-memory cache + Redis pub/sub invalidate）
+- [ ] WP.7.5 **過期強制**：`expires_at` field、過期未清理 CI fail（防 R62 flag 爆炸）
+- [ ] WP.7.6 **季度 flag review SOP**：進 N10 ledger、長期未動 flag 警報
+- [ ] WP.7.7 **既有散落 ENV knob 收編**：`OMNISIGHT_BP_*` / `OMNISIGHT_HD_*` / `OMNISIGHT_KS_*` / `OMNISIGHT_WP_*` 統一進 registry（漸進、不一次全改）
+- [ ] WP.7.8 **Operator UI**：admin role read-only inspect + toggle、其他 role 只看；改 flag 進 N10 audit
+- [ ] WP.7.9 **Test**：5 tier resolution + atomic 讀 + push reload + expire enforcement
+
+### WP.9 `shareable_objects` Generic Table（與 WP.1 配對）
+
+> 一張 table 管所有可 share 物件的 ACL / permalink / expiry — blocks / runbooks / notebooks / agent transcripts 統一走。
+
+- [ ] WP.9.1 **alembic 0117 — `shareable_objects` 表**：`share_id` / `object_kind` / `object_id` / `tenant_id` / `owner_user_id` / `visibility` / `expires_at` / `redaction_applied` JSONB / `created_at`
+- [ ] WP.9.2 **Permalink slug 生成**：URL-safe 短 slug（防猜）、collision check
+- [ ] WP.9.3 **ACL 4 level**：private / team / tenant / public
+- [ ] WP.9.4 **Expiry 自動清理**：cron job、過期 share 走 audit 後 delete
+- [ ] WP.9.5 **Redaction enforcement**：share 時依 `redaction_mask` 過濾 payload、不可繞過
+- [ ] WP.9.6 **Test**：ACL + permalink + expiry + redaction round-trip
+
+### WP-Wave-1 完工 Definition of Done
+
+- [ ] WP.1 Block model 全 surface migration green、舊路徑可 30 天回退
+- [ ] WP.2 Skills loader 上線、BP.B Guild SKILL_HD_* 走新 registry
+- [ ] WP.3 Diff-validation cascade 上線、BP / HD agent 改檔走 cascade
+- [ ] WP.5 Project-context walker 上線、R20 RAG 自動 ingest 多檔
+- [ ] WP.7 Feature flag registry 上線、新 ENV knob 走 registry（既有漸進收編）
+- [ ] WP.9 shareable_objects 上線、Block share + Runbook share 共用
+- [ ] R58-R62 全部 mitigation 落地
+- [ ] **BP 開工前 Wave-1 100% ready**（避免 BP retrofit）
+
+### WP R-series 風險（R58-R62）
+
+- **R58 Block model migration risk**：既有 message / output / finding 散落各 surface，遷移到 Block primitive 過程 UI 可能斷裂。**Mitigation**：分 surface 漸進、雙寫期 feature flag、舊 surface 30 天退回路徑。
+- **R59 Skills loader scope creep**：3 scope + 多檔合併 → skill 衝突排序不可預測。**Mitigation**：name 唯一強制、衝突高 precedence wins + WARN、CLI `omnisight skills resolve <name>` 印 effective source。
+- **R60 Diff-validation false-positive**：Jaro-Winkler 0.9 太寬鬆 → agent 改錯位置 silent pass。**Mitigation**：Jaro-Winkler 觸發必 log + N10、HD bring-up 預設 strict mode（0.95）、threshold 可調。
+- **R61 Project-context walker 噪音**：parent walk 拉到無關共用檔污染 prompt。**Mitigation**：每檔 5 KB cap、總 50 KB cap、UI 顯示載入清單、operator 可 ignore。
+- **R62 Feature flag 爆炸**：250+ flag 在 Warp 已是事實、OmniSight 控制不重蹈。**Mitigation**：`expires_at` 強制、過期未清 CI fail、季度 review 進 N10。
+
+### WP Migrations 對照表
+
+| Migration | 內容 | Phase |
+|-----------|------|-------|
+| 0116 | `blocks` 表 + indexes | WP.1 |
+| 0117 | `shareable_objects` 表 | WP.9 |
+| 0118 | `feature_flags` 表 + audit log | WP.7 |
+| 0119 | `runbooks` + `runbook_steps` | WP.8（fold HD.19） |
+| 0120 | `skills` registry 持久化（optional、loader 直接讀檔即可） | WP.2 |
+| 0121-0125 | 預留 | 未來 |
+
+### WP fold-out 子任務（散落各 priority、本區塊只列指針）
+
+| Phase | Fold 進去 | 對應行 | 預估 |
+|-------|----------|--------|------|
+| **WP.4 Onboarding intention picker** | W11-W16（Y6 dashboard first-run）| 既有 W 系列 sub-task | +1 day |
+| **WP.6 Settings sync-scope**（Globally / PerPlatform / Never）| Priority Q（Multi-Device Parity, line ~954）| Q 核心 schema 設計 | 0 day（Q 內吸收）|
+| **WP.8 Runbook primitive + "Save Block as Runbook"** | HD.19 Bring-up Workbench sub-task | HD.19.x | +1 week |
+| **WP.10 BP fleet UI lanes**（Active / Scheduled / Ambient / History）| BP dispatch board sub-task | BP.x | +1 week |
+| **WP.11 Command palette smart-case + matched-indices** | opportunistic、任何 idle window | — | Sec-Day |
+| **WP.12 CodeMirror 6 ghost-text suggestion** | opportunistic、與 W 系列 polish 同期 | — | Day |
+| **WP.13 Computer-use Actor for HD bring-up VNC** | HD.19 sub-task（與 WP.8 同 phase）| HD.19.x | +1 week |
+
+→ 各 fold 點開工時、對應 priority 內補一條 sub-task、cross-reference 本 ADR `docs/design/wp-warp-inspired-patterns.md`。
+
+---
+
 ## 🅕🅢 Priority FS — Full-Stack Web Application Generation（補完 W 系列後端缺口）
 
 > **背景**：W11-W16 + W 系列做完後仍只覆蓋前端 + 靜態部署。SaaS 級「DB / Auth provisioning / Object storage / Email / Background jobs / Search / Billing」整合自動化是 generated app **production-ready** 的最後一哩。FS 把這條補完。
@@ -3432,6 +3581,7 @@ SC:                   0064-0065
 BP:                   0066-0079
 HD:                   0080-0105     # core 0080-0095 + platform-pipeline 0096-0105
 KS:                   0106-0115     # multi-tenant secret management (3 tier × 3 phase)
+WP:                   0116-0125     # Warp-inspired patterns (Block / Skills / Diff-validation / Runbook / shareable_objects)
 ```
 
 **ADR 文件清單**（BS.0 + 本 batch 新增）：
@@ -3446,7 +3596,8 @@ KS:                   0106-0115     # multi-tenant secret management (3 tier × 
 - `docs/design/hd-hardware-design-verification.md`（**本 batch 新增**，HD 完整 ADR — 7 EDA × 4 FW × 10 sensor vendor matrix）
 - `docs/design/hd-daily-scenarios-and-platform-pipeline.md`（**本 batch 新增**，HD 姊妹 ADR — 14 vendor × 50 SoC platform pipeline + 18 daily scenario clusters + multi-customer / lifecycle / CVE / production / OTA / bring-up / port / ISP tuning / blob / compliance / build farm / deployment / AI companion）
 - `docs/security/ks-multi-tenant-secret-management.md`（**本 batch 新增**，KS 完整 ADR — 3 tier × 3 phase secret management、AS Token Vault 演進、multi-tenant 上線前硬阻塞）
-- `docs/legal/oss-boundaries.md`（**2026-04-30 新增**，HD 第三方 OSS license 邊界紀律 — GPL / AGPL 走 subprocess / Docker sidecar / 不可 link / 不可 vendor、CI license scanner、季度 audit）
+- `docs/legal/oss-boundaries.md`（**2026-04-30 新增**，HD 第三方 OSS license 邊界紀律 — GPL / AGPL 走 subprocess / Docker sidecar / 不可 link / 不可 vendor、CI license scanner、季度 audit；**WP batch 加第四級 inspiration-only tier**）
+- `docs/design/wp-warp-inspired-patterns.md`（**本 batch 新增**，WP 完整 ADR — 13 phase 借鑑 Warp pattern、Wave-1 五個 phase 必過 BP 前、其他 fold 進對應 priority）
 
 ---
 
@@ -3457,17 +3608,21 @@ KS:                   0106-0115     # multi-tenant secret management (3 tier × 
 ### 🟢 Primary path —— 路線 (b) 單 track，AS 先（production hygiene 優先）
 
 ```
-BS（已完工）→ AS (~22d) → W11-W16 (~11d) → FS (~12d) → SC (~13.5d) → BP (~5.5w) → KS.1 (~3w) → HD (~12w)
-                                                                                  ↑                ↑
-                                                                       multi-tenant       HD.17 多客戶 NDA
-                                                                       crypto 地基         隔離開工前置
+BS（已完工）→ AS (~22d) → W11-W16 (~11d, +WP.4 onboarding 1d) → FS (~12d) → SC (~13.5d) → WP-Wave-1 (~2w) → BP (~5.5w, 含 WP.10) → KS.1 (~3w) → HD (~12w, HD.19 含 WP.8 + WP.13)
+                                                                                                ↑                                       ↑                ↑
+                                                                                  Block / Skills / Diff-          multi-tenant      HD.17 多客戶 NDA
+                                                                                  validation / Project-           crypto 地基       隔離開工前置
+                                                                                  context / Feature-flag
+                                                                                  必過 BP 前（避免 retrofit）
 
-單 track wall time: 22 + 11 + 12 + 13.5 + 38 + 21 + 84 = ~201.5d (~29 週)（BS → HD 完工）
+單 track wall time: 22 + 11 + 12 + 13.5 + 14 + 40 + 21 + 84 = ~217.5d (~31 週)（BS → HD 完工含 WP）
 
 備註：
+- WP-Wave-1（Warp-inspired Block/Skills/Diff-validation/Project-context/Feature-flag）= BP 開工前硬阻塞、否則 BP / HD ship 後 retrofit cost > 早做 cost；淨影響 schedule-neutral 或略省（省 BP retrofit ~3-4 週）
 - KS.1（envelope encryption + KMS 主鑰 + audit + spend anomaly）= multi-tenant 真正上線前硬阻塞、HD.17 開工前必過
 - KS.2（CMEK）/ KS.3（BYOG proxy）= HD 之後 commercial-driven、詢盤觸發才 pull forward；HD.21.5.2 self-hosted edition 為 KS.3 缺席期 fallback
 - BP 期間不開 multi-tenant 收費入口（明文政策）— 防 KS.1 沒到位就有 paying tenant 暴露
+- WP.4 onboarding picker fold 進 W11-W16 期間（+1 day 吸收）；WP.6 settings sync-scope fold 進 Priority Q；WP.8 runbook + WP.13 computer-use fold 進 HD.19；WP.10 BP fleet UI fold 進 BP dispatch board；WP.11 / WP.12 polish opportunistic
 ```
 
 **選此路線的 rationale**：

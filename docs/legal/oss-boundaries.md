@@ -34,6 +34,7 @@ OmniSight 是商業 SaaS、需保留客戶資料 / 商務邏輯不被 viral copy
 | **LGPL-2.1 / LGPL-3.0** | **動態 link OK、靜態 link 須 source release** | 動態 link 商務無妨、避免靜態 vendor | kicad-skip (LGPL-2.1) |
 | **GPL-2.0 / GPL-3.0** | **subprocess / 命令列工具 only、絕不 link / vendor 進 source tree** | 邊界對 = 商務無妨、邊界錯 = 整套 SaaS 被迫 release source | altium2kicad (GPL-2.0、Perl 工具走 subprocess) |
 | **AGPL-3.0** | **Docker sidecar + REST only、process boundary 即 license boundary、SaaS over network 也會觸發 viral** | 邊界對 = 商務無妨、邊界錯 = 即便不 distribute binary 也須 release source（AGPL §13） | OdbDesign (AGPL-3.0、自帶 Docker REST 設計) |
+| **Inspiration-only**（**2026-04-30 WP 新增**）| **借 design pattern + UX flow + 資料模型形狀、嚴禁 vendor / port any source、所有實作必須能獨立 audit 為「自寫」** | PR description 註明「inspired by X、independently implemented」、code review 對照上游確認結構不雷同字面、嚴禁 LLM 以該 source 為輸入 generate 我方 code | Warp（AGPLv3）/ 任何 viral copyleft 純 idea 借鑑 |
 | **Proprietary / Commercial** | 商務簽約 + 明示 redistribution 範圍 | 視合約而定 | Altium / Cadence / Mentor / Siemens 官方 SDK（不在借力範圍） |
 
 ---
@@ -66,6 +67,25 @@ OmniSight 是商業 SaaS、需保留客戶資料 / 商務邏輯不被 viral copy
 - container 跑在 OmniSight infra、OdbDesign 本身不 expose 給客戶端（避免客戶端的 AGPL §13 義務 cascade）
 
 **法律備援**：legal review 每季抽檢 OdbDesign image SHA、確認無 fork drift；OdbDesign upstream license 若改變（如轉 commercial）走 N10 ledger alert + 切 ODBPy fallback。
+
+---
+
+## 4.5 Inspiration-Only Boundary 操作細節（2026-04-30 WP 新增、Warp 案例）
+
+**戰略**：Warp（AGPLv3 為主）的 design pattern 對 OmniSight 高度同構（terminal vs multi-agent dev command center 同樣是「結構化人機協作 + AI agent 介入 + 多執行單元組裝」）。借 pattern 不借 source、避開 AGPL viral 風險的同時取得設計上的捷徑。
+
+**邊界執行**：
+- **嚴禁**：vendor / port / submodule / git subtree / 任何方式把 Warp source 帶進 OmniSight repo
+- **允許**：閱讀 Warp source 理解 pattern、commit message / PR description 引用 Warp 上游 path 為靈感來源
+- **要求**：所有 WP-* commit 必須在 PR description 註明 `Inspired by Warp <crate>/<file>; independently implemented in TS/Python.`
+- **Code review 規範**：reviewer 對照 Warp 上游 source 確認**結構不字面雷同、概念對齊即可**（避免 inadvertent transcription 被認定衍生作品）
+- **禁用 LLM 輔助**：嚴禁把 Warp Rust source 餵給 LLM 要求「翻譯成 TS/Python」（會構成衍生作品）；可用「描述 pattern」的方式（如「Warp 用 4 層 fuzzy ladder 做 diff validation」）但**禁止貼 source code 進 prompt**
+- **Legal spot-check**：每季抽 5 個 WP-* PR、legal 對照 Warp 上游確認結構獨立性
+- 第三方 dep registry 內 Warp 標明「**inspiration_source: 不 vendor、不 install**」
+
+**為何不走 GPL subprocess 模式**：Warp 是完整 GUI app、無 CLI subprocess 介面可呼叫；其 cloud 後端 proprietary、無 REST API 可走 sidecar。所以必須走 inspiration-only 純概念借鑑路徑、不能像 altium2kicad / OdbDesign 那樣走 process boundary 隔離。
+
+**法律備援**：Anthropic / OpenAI 等 LLM 供應商目前 ToS 對「閱讀 OSS 後寫 inspired-by 程式碼」屬合理使用、但 inadvertent transcription（即便經 LLM 中介）仍可能構成衍生。本紀律的核心是**人類工程師親自讀懂 pattern 後自寫**、不依賴 LLM 自動化轉譯。
 
 ---
 
