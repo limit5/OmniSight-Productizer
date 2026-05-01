@@ -3673,13 +3673,13 @@ ls backend/alembic/versions/ | tail -3
 預估：**3 day**（**AB.1.1-AB.1.4 ship 2026-05-01；AB.1.5 留待 AB.10**）
 
 ### AB.2 Anthropic Messages API Native Client
-- [ ] AB.2.1 `backend/agents/anthropic_native_client.py` — 純 Anthropic SDK 直連、繞 LangChain 抽象（給 batch + 高效能 path）
-- [ ] AB.2.2 Tool use loop 實作（while stop_reason == "tool_use"）
-- [ ] AB.2.3 與既有 LangChain `ChatAnthropic` 並存（雙 path、按 task type 選）
-- [ ] AB.2.4 與 `backend/agents/tool_dispatcher.py` 接 — 工具執行 router
-- [ ] AB.2.5 Prompt cache 整合（cached input 90% 折扣）
+- [x] AB.2.1 `backend/agents/anthropic_native_client.py` — 純 Anthropic SDK 0.94 直連、繞 LangChain 抽象（給 batch + 高效能 path）<!-- 2026-05-01 ship: `AnthropicClient` 類別 wrap 官方 SDK；`simple()` 一發一收 / `simple_params()` 給 batch 用、產生 batch-ready params dict / `run_with_tools()` 完整 multi-turn loop。`messages` property 直接 expose SDK namespace 給 AB.3 batches.create 用。`TokenUsage` + `RunResult` frozen dataclass 紀錄完整 transcript + tool_calls log。 -->
+- [x] AB.2.2 Tool use loop 實作（while stop_reason == "tool_use"）<!-- 2026-05-01 ship: 多 tool_use blocks 在單回合內全部執行、tool_results 走單一 user message bundled 回送（Anthropic convention）；max_iterations 預設 25 hard guard、超過 stop_reason="max_iterations_exceeded"；token usage 跨回合累加；transcript 紀錄完整 system/user/assistant/tool_results 鏈。 -->
+- [x] AB.2.3 與既有 LangChain `ChatAnthropic` 並存（雙 path、按 task type 選）<!-- 2026-05-01 ship: `backend.llm_adapter.build_chat_model("anthropic")` 維持 LangChain 路徑（multi-provider 統一 facade）、`backend.agents.anthropic_native_client.AnthropicClient` 為 Anthropic-only 高效能路徑。文件明示分工：multi-provider 走前者、batch + tool-loop 高頻走後者。 -->
+- [x] AB.2.4 與 `backend/agents/tool_dispatcher.py` 接 — 工具執行 router<!-- 2026-05-01 ship: `ToolDispatcher.execute(tool_use_id, name, input) → ToolResult` 永不 raise、handler 異常 / 未註冊 / 不知 tool 全部回 `is_error=True` tool_result 讓 model self-correct；async/sync handler 自動偵測（sync 走 default executor 不阻塞 event loop）；`@register_handler("Read")` decorator 接 module-level dispatcher；`register()` 拒絕未在 tool_schemas registry 內的 tool name（防 typo / 防 schema drift）；payload 自動 JSON-serialize（dict / list / None / str 都接）。 -->
+- [x] AB.2.5 Prompt cache 整合（cached input 90% 折扣）<!-- 2026-05-01 ship: `_apply_cache_control()` helper 在 system 最後一個 block + tools 最後一個 entry 加 `cache_control: {"type": "ephemeral"}`；`enable_cache=True` 預設、`run_with_tools()` 內第二回合起 input 走 90% 折扣 cached path（5 min TTL within Anthropic）；string system 自動 wrap 成 list-of-blocks 才能加 cache_control；test 鎖 enable_cache=False 路徑保留原 string 不 wrap。 -->
 
-預估：**2 day**
+預估：**2 day**（**全 5 sub-tasks ship 2026-05-01；32 contract test 全綠 0.22s**）
 
 ### AB.3 Anthropic Batch API Integration
 - [ ] AB.3.1 `client.messages.batches.create / retrieve / results` 完整 wrapper
