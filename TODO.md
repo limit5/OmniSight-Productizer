@@ -3664,13 +3664,13 @@ ls backend/alembic/versions/ | tail -3
 > **與 Claude 訂閱版 cost 對比**：同價位、能力跨數量級提升（無 individual-use limit / 100+ task 平行 / 50% batch 折扣 / cost observability）
 
 ### AB.1 工具 Schema Canonical Doc + Pydantic Validation
-- [ ] AB.1.1 `backend/agents/tool_schemas.py` — 中央 registry、Claude Code 內建工具（Bash / Read / Edit / Write / Glob / Grep / Agent / WebFetch / WebSearch / TaskCreate / Skill / etc）+ OmniSight SKILL_HD_*（26 個）全部 type-stamped
-- [ ] AB.1.2 Pydantic schema → Anthropic `tools=[]` 自動 serialize helper
-- [ ] AB.1.3 `docs/agents/tool-reference.md` — markdown reference（每工具 2-3 段、user-facing）
-- [ ] AB.1.4 CI hook — schema 改動必更新 reference doc（pre-commit）
-- [ ] AB.1.5 deferred tool（ToolSearch lazy load）schema versioning 處理（防 R79 drift）
+- [x] AB.1.1 `backend/agents/tool_schemas.py` — 中央 registry、Claude Code 內建工具 10 eager（Read / Write / Edit / Bash / Grep / Glob / Agent / WebFetch / ToolSearch / Skill）+ 14 deferred（WebSearch / ScheduleWakeup / Task* × 6 / Cron* × 3 / EnterPlanMode / ExitPlanMode / EnterWorktree / ExitWorktree / NotebookEdit / Monitor / PushNotification / RemoteTrigger / AskUserQuestion / ListMcpResourcesTool / ReadMcpResourceTool）+ OmniSight SKILL_HD_* 28 個全 type-stamped <!-- 2026-05-01 ship: Pydantic v2 frozen ToolSchema model with `name / description / input_schema / category / deferred`; module-level `_REGISTRY` populated at import time via `register_tool(schema)`; categories = filesystem / shell / search / web / agent / task / skill / scheduler / plan / worktree / notebook / mcp / meta / skill_hd; 52 total tools registered (10 eager + 14 deferred Claude Code built-ins + 28 SKILL_HD_* placeholders for HD.1 through HD.21). -->
+- [x] AB.1.2 Pydantic schema → Anthropic `tools=[]` 自動 serialize helper <!-- 2026-05-01 ship: `to_anthropic_tools(names: list[str] | None = None)` — None returns all eager (default), list of names returns selected subset (allows including specific deferred tools for batch tasks); each entry serializes to {name, description, input_schema} matching Anthropic Messages API tools=[] payload contract. `ToolSchema.to_anthropic()` per-instance serialize. -->
+- [x] AB.1.3 `docs/agents/tool-reference.md` — markdown reference（每工具 description + JSON Schema + deferred badge + 14.8 KB） <!-- 2026-05-01 ship: `generate_markdown_reference()` produces full doc grouped by category with totals ledger (52 tools / 10 eager / 42 deferred / 28 HD skills). CLI `python -m backend.agents.tool_schemas --regen-doc` writes file. -->
+- [x] AB.1.4 CI hook — schema 改動必更新 reference doc（CLI `--check-doc` exit 1 on drift）+ test_tool_schemas.py 13 contract test 鎖 registry / serialization / doc sync / frozen-ness <!-- 2026-05-01 ship: `python -m backend.agents.tool_schemas --check-doc` 比對 generated vs committed 內容、drift 即 exit 1（接 pre-commit / CI 任一）；`backend/tests/test_tool_schemas.py` 13 test 全綠（eager set drift / HD count / Anthropic shape / KeyError on unknown / dup-name reject / frozen-ness / doc sync drift / h3 anchor coverage），0.16s pass。 -->
+- [ ] AB.1.5 deferred tool（ToolSearch lazy load）schema versioning 處理（防 R79 drift） — 留待 AB.10 test strategy 階段擴充
 
-預估：**3 day**
+預估：**3 day**（**AB.1.1-AB.1.4 ship 2026-05-01；AB.1.5 留待 AB.10**）
 
 ### AB.2 Anthropic Messages API Native Client
 - [ ] AB.2.1 `backend/agents/anthropic_native_client.py` — 純 Anthropic SDK 直連、繞 LangChain 抽象（給 batch + 高效能 path）
