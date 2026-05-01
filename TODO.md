@@ -3682,14 +3682,16 @@ ls backend/alembic/versions/ | tail -3
 預估：**2 day**（**全 5 sub-tasks ship 2026-05-01；32 contract test 全綠 0.22s**）
 
 ### AB.3 Anthropic Batch API Integration
-- [ ] AB.3.1 `client.messages.batches.create / retrieve / results` 完整 wrapper
-- [ ] AB.3.2 `custom_id` ↔ OmniSight task_id 雙向 mapping
-- [ ] AB.3.3 100K req / 256MB / 24h 限制 enforcement
-- [ ] AB.3.4 Batch result async streaming（per-result callback）
-- [ ] AB.3.5 alembic 0181 — `batch_runs` / `batch_results` 表
-- [ ] AB.3.6 失敗 partial-result 處理（部分成功 + 部分失敗）
+- [x] AB.3.1 `client.messages.batches.create / retrieve / results / cancel` 完整 wrapper <!-- 2026-05-01 ship: `BatchClient` class wrap SDK `messages.batches` namespace；`submit_batch / poll_batch / stream_results / cancel_batch / find_result_for_task` 五個 entry。SDK calls 注入 namespace 而非 client、testable 不依賴 anthropic import。 -->
+- [x] AB.3.2 `custom_id` ↔ OmniSight `task_id` 雙向 mapping <!-- 2026-05-01 ship: `BatchRequest(custom_id, params, task_id?)` data class 帶雙 ID；submit 時預先 persist `batch_results` row（status=pending、含 task_id）讓 dispatcher 在 batch 完工前就能反查；`find_result_for_task(task_id)` 一支 reverse lookup（pending / succeeded / errored 任一狀態都能找）。 -->
+- [x] AB.3.3 100K req / 256MB / 24h 限制 enforcement <!-- 2026-05-01 ship: 三個 module-level 常數 `MAX_REQUESTS_PER_BATCH=100_000` / `MAX_BATCH_SIZE_BYTES=256MB` / `MAX_PROCESSING_HOURS=24`；`validate_batch_limits()` 在 SDK call 前跑、违反就 raise `BatchLimitError`、完全不打 API（test 鎖 fail-closed 行為）。custom_id 1-64 chars + uniqueness 同步驗。 -->
+- [x] AB.3.4 Batch result async streaming（per-result callback） <!-- 2026-05-01 ship: `stream_results(batch_run_id, on_result=callback)` async generator；每筆 yield 前 persist + 可選 invoke async callback；同時支援 sync iter（`anthropic` SDK）+ async iter（`anthropic.AsyncAnthropic` SDK）兩種 — `_async_iter()` helper 統一處理。 -->
+- [x] AB.3.5 alembic 0181 — `batch_runs` / `batch_results` 表 <!-- 2026-05-01 ship: PG + SQLite dual dialect、`batch_runs(batch_run_id PK, anthropic_batch_id, status, request_count, success/error/canceled/expired_count, metadata JSONB, expires_at, ended_at, ...)` + `batch_results((batch_run_id, custom_id) composite PK, task_id, status, response JSONB, error JSONB, final_text, input/output/cache_*_tokens, completed_at)` + 兩個 index（status / task_id）。FK ON DELETE CASCADE、downgrade no-op（防 in-flight batch orphan）。 -->
+- [x] AB.3.6 失敗 partial-result 處理（部分成功 + 部分失敗） <!-- 2026-05-01 ship: 每 result 帶獨立 `BatchResultStatus`（pending / succeeded / errored / canceled / expired）；`stream_results()` yield 全部 results 不論狀態、caller 自己 filter；`response` JSONB on success / `error` JSONB on failure / `final_text` + token counts 只 succeeded 才填；test 鎖 succeeded + errored + expired 三種混在同 batch 全 surface 正確。 -->
 
-預估：**3 day**
+預估：**3 day**（**全 6 sub-tasks ship 2026-05-01；19 contract test 全綠 0.18s；51 test total 1.74s（AB.1+AB.2+AB.3）**）
+
+> **注意**：`BatchPersistence` 目前只 ship `InMemoryBatchPersistence`（dev / test）。Postgres-backed impl 留到 **AB.4 dispatcher** 落地時一起、因為 dispatcher 才是真正需要 cross-restart 持久化的 consumer。schema 已先 ship（alembic 0181）。
 
 ### AB.4 Batch Task Queue + Dispatcher
 - [ ] AB.4.1 Redis / Postgres queue 實作（依既有 stack）
