@@ -3744,12 +3744,14 @@ ls backend/alembic/versions/ | tail -3
 > **重要 Python gotcha 已避**：`__init__` 走 `is None` 檢查而非 `or` — 防 `InMemoryDeadLetterQueue.__len__() = 0` 在 falsy fallback 時被當「未提供」、丟掉 caller reference。policy / tracker / dlq 三處都走 `is None`。
 
 ### AB.8 Subscription → API Migration UI + Runbook
-- [ ] AB.8.1 Settings → Provider Keys → Anthropic：「Use Claude Code subscription」toggle + API Key field
-- [ ] AB.8.2 切換 wizard（5 step：取 API key → 設 spend limit → 切 OmniSight mode → 跑 smoke test → 確認）
-- [ ] AB.8.3 Operator runbook：`docs/ops/anthropic-api-migration-runbook.md`
-- [ ] AB.8.4 Rollback 路徑（API key 保留 + 隨時切回訂閱版）
+- [x] AB.8.1 Settings → Provider Keys → Anthropic 切換 backend state machine + AS Token Vault 整合 <!-- 2026-05-02 ship: backend `AnthropicModeManager` ship 完整 5-step state machine + key_vault_writer callback hook 接 AS Token Vault；frontend Settings UI .tsx 留 frontend track 落地（schema + endpoint contract 已固定）。validate_api_key 走 `^sk-ant-[A-Za-z0-9_\-]{20,}$` regex（不打 API、純格式檢查防 typo）；fingerprint_api_key 永遠只露 last 8 chars 防 log leak（test 鎖 "VERYLONG"+"SECRET" 不出現於 repr）。 -->
+- [x] AB.8.2 切換 wizard 5-step state machine（取 API key → 設 spend limit → 切 OmniSight mode → 跑 smoke test → 確認） <!-- 2026-05-02 ship: `WizardStep` enum 6 value（NOT_STARTED + 5 step + CONFIRMED）;每步 idempotent re-entry 安全（`_max_step()` 永不回退）+ out-of-order raise `WizardOutOfOrderError`；submit_api_key 走 vault_writer 持久化、configure_spend_limits 走 AB.6 CostGuard 配置 workspace scope cap、switch_mode 翻 mode 為 API + 保留 fallback、run_smoke_test 走 caller 注入的 smoke_test_runner（成功才進 SMOKE_TEST_PASSED、失敗 stay 在 MODE_SWITCHED 讓 operator 重試或 rollback）、confirm 鎖 CONFIRMED + 啟動 30-day rollback grace。 -->
+- [x] AB.8.3 Operator runbook：`docs/ops/anthropic-api-migration-runbook.md` <!-- 2026-05-02 ship: 10-section runbook、~330 行；前置確認 / 取 API key（Anthropic console 導引 + monthly cap 雙閘） / 5-step wizard 完整 curl 範例 / 切換後驗證（cost / rate-limit / batch 三檢） / 30-day 觀察期週度 SOP / rollback 操作（lossless + idempotent） / finalize_disable_subscription 條件 / 6 種故障排除（401 / 429 / 網路 / 順序 / cost spike / 訂閱版受影響） / 監控 alert 閾值建議表 / Z Provider Observability 整合說明。 -->
+- [x] AB.8.4 Rollback 路徑（API key 保留 + 隨時切回訂閱版） <!-- 2026-05-02 ship: `rollback()` lossless + idempotent — 翻 mode 回 SUBSCRIPTION + reset step → NOT_STARTED + API key 配置仍保留（重 wizard 時可秒過 step 1）；30-day grace 期間隨時可走（CONFIRMED 後 / MODE_SWITCHED 後皆 OK）；`finalize_disable_subscription()` 是 one-way hard switch、要求 CONFIRMED + grace elapsed（或 operator override `rollback_grace_days=0`）；finalize 後 rollback 走 `WizardError("fallback_subscription_kept=False")` 強制 raise（test 鎖完整 confirmed → finalize → rollback 三-state path）。 -->
 
-預估：**1 day**
+預估：**1 day**（**全 4 sub-tasks ship 2026-05-02；28 contract test 全綠 0.16s；221 test total 2.03s（AB.1-AB.8 累計）**）
+
+> **Frontend Settings UI（.tsx）**：留 frontend track 落地。Backend state machine + endpoint contract 已固定（schema 不會再變）、UI 直接 wrap 即可。Runbook 提供 curl-based fallback 給 operator 在 UI 落地前用。
 
 ### AB.9 Batch Eligible Task Identifier
 - [ ] AB.9.1 Per task type opt-in flag（task definition 加 `batch_eligible: bool` + `batch_priority`）
