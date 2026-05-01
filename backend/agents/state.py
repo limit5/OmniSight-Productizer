@@ -64,6 +64,29 @@ class GraphState(BaseModel):
     # hasn't set it explicitly. Unknown values collapse to t1.
     sandbox_tier: str = "t1"
 
+    # BP.C.5 (Blueprint v2 Phase C — T-shirt Gateway + S/M/XL Topology):
+    # T-shirt size assigned by the upstream sizer (`backend/t_shirt_sizer.py`,
+    # BP.C.1) and consumed by the topology builder (`backend/graph_topology.py`,
+    # BP.C.2) to pick S (single-track) / M (standard DAG) / XL (fractal matrix).
+    #
+    # Default = "M" because:
+    #   1. M maps to the *current* legacy LangGraph topology (standard DAG),
+    #      so any code path that constructs ``GraphState()`` without going
+    #      through the new sizer pre-stage (BP.C.4) keeps the legacy
+    #      behaviour byte-for-byte. This is the safe default while the
+    #      ``OMNISIGHT_TOPOLOGY_MODE=legacy|smxl`` feature flag is still
+    #      gating the rollout.
+    #   2. Treating "M" as the canonical mid-point matches the design doc
+    #      (`docs/design/blueprint-v2-implementation-plan.md` §"Phase C",
+    #      §"Appendix B TaskTemplate.size").
+    #
+    # Module-global audit (per SOP §"Module-global state"): this is a
+    # per-instance Pydantic field, no module-level mutable state. Each
+    # GraphState flows through one graph run; multi-worker processes
+    # never share GraphState instances (LangGraph state is run-scoped).
+    # No cross-worker coordination required.
+    size: Literal["S", "M", "XL"] = "M"
+
     # Per-agent model and role context
     model_name: str = ""
     agent_sub_type: str = ""
@@ -120,3 +143,27 @@ class GraphState(BaseModel):
     # specialist.
     soc_vendor: str = ""
     sdk_version: str = ""
+
+    # BP.C.5 (2026-04-25) — T-shirt sizing dimension for the S/M/XL
+    # topology gateway (Blueprint v2 Phase C). Written by
+    # ``backend.t_shirt_sizer`` (BP.C.1) before graph execution and
+    # read by ``backend.graph_topology`` (BP.C.2) / ``backend.agents.graph``
+    # (BP.C.3) to choose the correct topology builder:
+    #
+    #   - "S"  → single-track (lightweight sequential pipeline)
+    #   - "M"  → standard DAG (current default LangGraph topology)
+    #   - "XL" → fractal matrix (heavy multi-agent recursion)
+    #
+    # Default is ``"M"`` so existing call sites and tests that don't
+    # populate this field keep their pre-BP.C behaviour (standard DAG).
+    # The dimension is independent of ``ProjectClass`` (BP.C.6 — three-
+    # way orthogonal axis: ProjectClass × Target_Triple × T-shirt size)
+    # and of ``OMNISIGHT_TOPOLOGY_MODE`` (the legacy/smxl feature flag
+    # is read at gateway level, not here).
+    #
+    # Module-global audit (SOP Step 1): this field lives on the per-
+    # request ``GraphState`` instance — no shared singleton, no cross-
+    # worker visibility concern; each uvicorn worker constructs its own
+    # state object per invocation (answer type 1: not shared because
+    # each worker derives identical defaults independently).
+    size: Literal["S", "M", "XL"] = "M"

@@ -191,7 +191,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] BP.C.2 `backend/graph_topology.py` — S（單軌）/ M（標準 DAG）/ XL（碎形矩陣）三種 builder
 - [ ] BP.C.3 `backend/agents/graph.py` 重寫支持 3 種 topology
 - [ ] BP.C.4 `backend/routers/orchestrator.py` 加 sizing 前置層（在 O4 CATC split 之前）
-- [ ] BP.C.5 `GraphState` 加 `size: Literal["S","M","XL"]`
+- [x] BP.C.5 `GraphState` 加 `size: Literal["S","M","XL"]` <!-- 2026-04-27: `backend/agents/state.py` 加 `size: Literal["S","M","XL"] = "M"` schema 欄位（M = 標準 DAG，匹配 legacy topology，向後相容直到 BP.C.4 sizer pre-stage 上線）。配 13 顆 schema-shape test in `backend/tests/test_graph_state.py`：default-is-M / 三 literal accept / 7 invalid reject (含 `"L"` typo / 大小寫敏感 / whitespace / None / int) / orthogonality / pre-BP.C 既有 caller 不受影響。114/114 GraphState 消費者鄰居測試 (test_nodes + test_verification_loop + test_clone_spec_context + test_graph_state) 0 regression。test_debug_blackboard 1 失敗是 pre-existing 401（已 stash 驗證、與此無關）。Module-global audit: 純 per-instance Pydantic field、無 module-level state、不需 cross-worker coord（LangGraph state 是 run-scoped）。**Production status: dev-only** — schema-only addition; downstream sizer (BP.C.1) / topology builder (BP.C.2) / orchestrator pre-stage (BP.C.4) 尚未實作；feature flag `OMNISIGHT_TOPOLOGY_MODE=legacy|smxl` 仍掛 legacy。-->
 - [ ] BP.C.6 與 C0 ProjectClass enum 三維正交（ProjectClass / Target_Triple / T-shirt size）
 - [ ] BP.C.7 `backend/tests/test_topology_smxl.py` — ~90 test
 
