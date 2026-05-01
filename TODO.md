@@ -217,7 +217,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.J — Self-healing Docs Watchdog（~1 週）
 > 前置 BP.B（Reporter Guild 存在）；屬 polish，可延後
-- [ ] BP.J.1 `backend/self_healing_docs.py` — API change 偵測 → 反向更新 Swagger + architecture.md
+- [x] BP.J.1 `backend/self_healing_docs.py` — API change 偵測 → 反向更新 Swagger + architecture.md *(done 2026-05-01: pure-function diff (`detect_api_changes`) returning `ApiChangeReport` with added/removed/modified route tuples + schema-name delta + `has_breaking_changes` flag; atomic writers (`regenerate_openapi_snapshot`, `regenerate_architecture_md`) using tempfile + `os.replace` for multi-worker safety; canonical openapi.json output byte-identical to `scripts/dump_openapi.py` for drift-test compatibility; sentinel-bracketed (`<!-- BEGIN/END AUTO-GENERATED -->`) rewrite of `docs/architecture.md` preserves manual content outside the block; scaffold-seed when file missing; orchestrator `run(check, strict)` + CLI (`python -m backend.self_healing_docs --check|--report-only|--strict`) with exit codes 0/1/2 for clean/drift/breaking-refused. Live smoke against real app: detects 79 added + 5 modified + 1 removed-schema vs committed `openapi.json`. Seeded `docs/architecture.md` (714 routes, 287 schemas, 47 KB) from committed snapshot. BP.J.2 (post-merge hook) and BP.J.3 (~20 tests) tracked separately.)*
 - [ ] BP.J.2 `backend/hooks/post_merge_docs.py` — git post-merge hook
 - [ ] BP.J.3 `backend/tests/test_self_healing_docs.py` — ~20 test
 
