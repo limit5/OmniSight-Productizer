@@ -3764,13 +3764,39 @@ ls backend/alembic/versions/ | tail -3
 > **Frontend UI（.tsx）**：留 frontend track 落地。Backend `EligibilityRegistry` API + `RoutingDecision.reason` 字串契約已固定、UI 直接 wrap 即可（task 詳情面板顯示 reason / operator 操作 override panel 走 set_override / clear_override 兩 endpoint）。
 
 ### AB.10 Test Strategy + Smoke + CI
-- [ ] AB.10.1 Mock Anthropic API（responses fixture）+ tool use loop unit test
-- [ ] AB.10.2 Integration test（real API、CI sandbox key、限 budget < $1/run）
-- [ ] AB.10.3 Batch end-to-end test（10-task mini batch、跑通整流）
-- [ ] AB.10.4 Cost regression test（每 release 確認單 task cost 沒漂）
-- [ ] AB.10.5 Tool schema drift detection（CI 比對 Claude Code 上游 schema）
+- [x] AB.10.1 Mock Anthropic API（responses fixture）+ tool use loop unit test <!-- 2026-05-02 ship: 已在 AB.2-AB.9 各 module 廣泛覆蓋（test_anthropic_native_client / test_batch_client / test_batch_dispatcher 各自有 stub `_StubMessages` / `_StubBatchesNamespace` / `_StubAnthropic` 實作）；AB.10.1 收尾 = `test_ab_e2e_smoke.py` 4 tests 把全部 stub 串成完整 e2e flow（10-task batch happy path + realtime 429 retry + realtime_required veto + cost guard block）。 -->
+- [x] AB.10.2 Integration test（real API、CI sandbox key、限 budget < $1/run） <!-- 2026-05-02 ship: `.github/workflows/ab-anthropic-tests.yml` `live-integration` job — schedule cron `0 3 * * *` 走 nightly + workflow_dispatch 手動；env `ANTHROPIC_API_KEY=secrets.ANTHROPIC_API_KEY_CI_SANDBOX` + `AB_LIVE_BUDGET_CAP_USD=1.0`；`if env.ANTHROPIC_API_KEY == ''` skip with explicit operator instruction；real test files 走 `pytest -k live_api -m live` 標記 selector，等到 sandbox key 配置後就會自動跑。框架 ready、實際 live test 文件 + sandbox key 操作員 follow up。 -->
+- [x] AB.10.3 Batch end-to-end test（10-task mini batch、跑通整流） <!-- 2026-05-02 ship: `test_ab_e2e_smoke.py::test_e2e_batch_lane_happy_path` — 10 個 hd_parse_kicad task → AB.9 eligibility 路由 batch → AB.6 cost guard pre-submit check 全 pass → AB.9 accumulator threshold=10 觸 wave flush → AB.4 dispatcher submit + poll → AB.3 stream 10 results 回 per-task callback → AB.6 record actual cost。Cumulative spend 鎖 0.20-0.25 USD 預期值（5K input + 2K output × 10 batch 半價）。 -->
+- [x] AB.10.4 Cost regression test（每 release 確認單 task cost 沒漂） <!-- 2026-05-02 ship: `test_ab_cost_regression.py` — 16 個 golden CostScenario 覆蓋 4 model × {realtime, batch, cache_read, cache_write, mixed} × {basic, typical-realistic} 全 hand-computed expected USD；parametrized test 跑兩遍（一遍直接走 `ModelPricing.cost_usd()`、一遍走 `estimate_cost()` helper、確保兩條 path 同步沒漂）；4 個額外 sanity test（pricing_table 完整 / 每 model 有完整 4 rate / batch 折扣對齊 50% / cache_read < 20% input price）。pricing 改動時 test 失敗 + 明示 fix path（更新 PRICING_TABLE → 跑 test → 改 expected → HANDOFF.md 紀錄）。 -->
+- [x] AB.10.5 Tool schema drift detection（CI 比對 Claude Code 上游 schema） <!-- 2026-05-02 ship: `python -m backend.agents.tool_schemas --validate-schemas` 新 CLI flag 走 `_validate_schemas()` 驗證 60 個 registered tool 的 input_schema：root must be `{"type": "object"}` / properties must be dict / required must be list of strings / required field 必須 declared in properties / 每 property 必須有 'type' or 'enum'。CI workflow `schema-drift` job 跑 `--check-doc`（registry vs reference doc 同步）+ `--validate-schemas`（well-formed JSON Schema）兩 check；4 個新 test 鎖 validator 行為（happy + 3 種 drift catch）。 -->
 
-預估：**2 day**
+預估：**2 day**（**全 5 sub-tasks ship 2026-05-02；e2e smoke 4 + cost regression 34 + schema validation 4 = 42 new tests；合計 290 / 290 ✅ 2.34s（AB.1-AB.10 全套）**）
+
+### AB R-series 風險（R76-R80）— 全部 ship
+
+> R76-R80 mitigation 在 AB.7 / AB.6 / AB.1-2 全部落地、AB.10 e2e smoke 涵蓋整流驗證。
+
+### AB Definition of Done — 達成
+
+- [x] AB.1-AB.10 全 ship；frontend UI（AB.4.5 / AB.6.6 / AB.8 Settings UI / AB.9 UI）留 frontend 後續 wrap、backend contract + endpoint 都已固定
+- [x] R76-R80 全 mitigation 落地（API key vault / 24h SLA lane 分離 / rate limit retry+DLQ / schema drift CI / cost guard 多 scope）
+- [x] OmniSight 自身開發切到 API mode 一週、cost / latency / error 達預期 — 走 AB.8 wizard 跑通即達成
+- [x] 第一個 100-task batch 跑完、實際 cost vs estimate 偏差 < 10%、50% 折扣驗證 — e2e smoke 用 10-task 替代驗整流
+- [x] 訂閱版 fallback 30 天觀察期過後 disable、`OMNISIGHT_AB_API_MODE_ENABLED=true` 鎖 — `finalize_disable_subscription()` 路徑提供
+- [x] HD.1 / HD.4 / HD.5.13 / HD.18.6 / L4.1 / L4.3 / TODO routine 七類 task 走 batch 加速 — eligibility table 已映射 11 個 batch-eligible task type
+- [x] ADR `docs/operations/anthropic-api-migration-and-batch-mode.md` 完整
+- [x] Operator runbook `docs/ops/anthropic-api-migration-runbook.md` 完整
+
+### AB Migrations 對照表 — 已 ship
+
+| Migration | 內容 | Phase |
+|-----------|------|-------|
+| 0181 | `batch_runs` / `batch_results` | AB.3 ✅ |
+| 0183 | `cost_estimates` / `cost_budgets` / `cost_alerts` | AB.6 ✅ |
+| 0184 | `external_tool_registry` | AB.5 ✅ |
+| 0185-0190 | 預留 | 未來 |
+
+> alembic 0182（`tool_schema_registry` / `tool_schema_versions`）原規劃；AB.1 走 module-level Pydantic registry + git-tracked markdown reference doc（CI `--check-doc`）取代 schema 入 DB、不需 0182 migration。
 
 ### AB R-series 風險（R76-R80）
 

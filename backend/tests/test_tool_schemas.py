@@ -178,3 +178,70 @@ def test_doc_contains_all_eager_tool_anchors():
     doc = DOC_PATH.read_text()
     for name in EAGER_TOOL_NAMES:
         assert f"### `{name}`" in doc, f"Doc missing anchor for {name}"
+
+
+# ─── AB.10.5 schema validation ───────────────────────────────────
+
+
+def test_validate_schemas_clean_on_default_registry():
+    """Every shipped ToolSchema's input_schema is a well-formed JSON Schema
+    object (CI gate against future malformed registrations)."""
+    from backend.agents.tool_schemas import _validate_schemas
+
+    error_count = _validate_schemas()
+    assert error_count == 0
+
+
+def test_validate_schemas_catches_required_not_in_properties(monkeypatch):
+    """Locks the validator catches drift: required field declared but not
+    in properties — most common typo."""
+    from backend.agents.tool_schemas import _REGISTRY, _validate_schemas, ToolSchema
+
+    bad = ToolSchema(
+        name="_BadDriftCanary",
+        description="x",
+        category="meta",
+        input_schema={
+            "type": "object",
+            "properties": {"foo": {"type": "string"}},
+            "required": ["foo", "missing_property"],  # drift — not in properties
+        },
+    )
+    # Inject directly bypassing register_tool() guard.
+    monkeypatch.setitem(_REGISTRY, "_BadDriftCanary", bad)
+
+    assert _validate_schemas() >= 1
+
+
+def test_validate_schemas_catches_missing_property_type(monkeypatch):
+    """Property must have 'type' or 'enum' — common Anthropic API rejection."""
+    from backend.agents.tool_schemas import _REGISTRY, _validate_schemas, ToolSchema
+
+    bad = ToolSchema(
+        name="_BadMissingType",
+        description="x",
+        category="meta",
+        input_schema={
+            "type": "object",
+            "properties": {"foo": {"description": "no type!"}},
+            "required": ["foo"],
+        },
+    )
+    monkeypatch.setitem(_REGISTRY, "_BadMissingType", bad)
+
+    assert _validate_schemas() >= 1
+
+
+def test_validate_schemas_catches_non_object_root(monkeypatch):
+    """Top-level type must be 'object' for Anthropic tools=[] payload."""
+    from backend.agents.tool_schemas import _REGISTRY, _validate_schemas, ToolSchema
+
+    bad = ToolSchema(
+        name="_BadRootType",
+        description="x",
+        category="meta",
+        input_schema={"type": "array"},  # wrong
+    )
+    monkeypatch.setitem(_REGISTRY, "_BadRootType", bad)
+
+    assert _validate_schemas() >= 1

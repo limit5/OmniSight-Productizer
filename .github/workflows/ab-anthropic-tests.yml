@@ -1,0 +1,113 @@
+name: AB Anthropic API + Batch Tests
+
+# AB.10.1+10.4+10.5 — runs the AB.* test suite on every PR, checks
+# tool-schema doc drift, validates cost regression. AB.10.2 live-API
+# integration runs nightly via the `live-integration` job, which
+# requires a sandbox API key with budget cap < $1/day.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Nightly live integration at 03:00 UTC.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ab-unit:
+    name: AB unit + e2e mock + cost regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt
+
+      - name: Run AB.* test suite
+        run: |
+          python -m pytest \
+            backend/tests/test_tool_schemas.py \
+            backend/tests/test_anthropic_native_client.py \
+            backend/tests/test_batch_client.py \
+            backend/tests/test_batch_dispatcher.py \
+            backend/tests/test_external_tool_registry.py \
+            backend/tests/test_cost_guard.py \
+            backend/tests/test_rate_limiter.py \
+            backend/tests/test_anthropic_mode_manager.py \
+            backend/tests/test_batch_eligibility.py \
+            backend/tests/test_ab_e2e_smoke.py \
+            backend/tests/test_ab_cost_regression.py \
+            -v --tb=short
+
+  schema-drift:
+    name: AB.10.5 — tool-schema doc drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt
+
+      - name: Verify tool-reference.md in sync with registry
+        run: |
+          python -m backend.agents.tool_schemas --check-doc
+
+      - name: Validate every registered tool has well-formed JSON schema
+        run: |
+          python -m backend.agents.tool_schemas --validate-schemas
+
+  live-integration:
+    name: AB.10.2 — nightly live API integration
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 15
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_CI_SANDBOX }}
+      AB_LIVE_BUDGET_CAP_USD: "1.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt
+
+      - name: Skip if no sandbox key configured
+        if: env.ANTHROPIC_API_KEY == ''
+        run: |
+          echo "ANTHROPIC_API_KEY_CI_SANDBOX not configured. Skipping live tests."
+          echo "(Operator: add a sandbox API key with monthly cap < \$10 to enable)"
+
+      - name: Run live AB.10.2 smoke
+        if: env.ANTHROPIC_API_KEY != ''
+        run: |
+          python -m pytest backend/tests/ -v \
+            -k "live_api" \
+            --tb=short \
+            -m "live"

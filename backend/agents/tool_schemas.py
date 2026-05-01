@@ -629,6 +629,78 @@ def generate_markdown_reference() -> str:
 # ─────────────────────────────────────────────────────────────────
 
 
+def _validate_schemas() -> int:
+    """AB.10.5 — drift detection on registered tool schemas.
+
+    Validates that every entry has a well-formed JSON Schema for its
+    ``input_schema``: must be ``{"type": "object", ...}`` shape that
+    Anthropic ``tools=[]`` accepts. Returns count of validation
+    errors (0 == clean).
+
+    Catches: typo in property names, missing top-level "type",
+    non-object schemas, malformed property dicts.
+    """
+    errors: list[str] = []
+    for schema in _REGISTRY.values():
+        s = schema.input_schema
+        if not isinstance(s, dict):
+            errors.append(f"{schema.name}: input_schema must be a dict, got {type(s).__name__}")
+            continue
+        if s.get("type") != "object":
+            errors.append(
+                f"{schema.name}: input_schema.type must be 'object', got {s.get('type')!r}"
+            )
+        # Properties must be a dict if present
+        if "properties" in s and not isinstance(s["properties"], dict):
+            errors.append(
+                f"{schema.name}: input_schema.properties must be dict, "
+                f"got {type(s['properties']).__name__}"
+            )
+        # Required must be a list of strings if present
+        if "required" in s:
+            if not isinstance(s["required"], list):
+                errors.append(
+                    f"{schema.name}: input_schema.required must be list, "
+                    f"got {type(s['required']).__name__}"
+                )
+            elif not all(isinstance(r, str) for r in s["required"]):
+                errors.append(
+                    f"{schema.name}: input_schema.required entries must be strings"
+                )
+            else:
+                # Required names must exist in properties (where applicable)
+                props = s.get("properties", {})
+                if isinstance(props, dict):
+                    for r in s["required"]:
+                        if r not in props:
+                            errors.append(
+                                f"{schema.name}: required field {r!r} "
+                                "not declared in properties"
+                            )
+        # Each property entry must itself be a dict with "type"
+        props = s.get("properties", {})
+        if isinstance(props, dict):
+            for prop_name, prop_def in props.items():
+                if not isinstance(prop_def, dict):
+                    errors.append(
+                        f"{schema.name}.properties.{prop_name}: must be dict"
+                    )
+                    continue
+                if "type" not in prop_def and "enum" not in prop_def:
+                    errors.append(
+                        f"{schema.name}.properties.{prop_name}: missing 'type' or 'enum'"
+                    )
+
+    if errors:
+        print("Schema validation errors:")
+        for e in errors:
+            print(f"  - {e}")
+        print(f"\nTotal: {len(errors)} error(s)")
+    else:
+        print(f"OK: all {len(_REGISTRY)} registered tool schemas validated cleanly.")
+    return len(errors)
+
+
 def _main() -> None:
     import argparse
     from pathlib import Path
@@ -652,12 +724,22 @@ def _main() -> None:
         help="Verify docs/agents/tool-reference.md matches current registry "
         "(exit 1 on drift).",
     )
+    parser.add_argument(
+        "--validate-schemas",
+        action="store_true",
+        help="AB.10.5 — validate every registered ToolSchema has a "
+        "well-formed JSON Schema input_schema (exit 1 on errors).",
+    )
     args = parser.parse_args()
 
     if args.list:
         for s in list_schemas(include_deferred=True):
             mark = " [deferred]" if s.deferred else ""
             print(f"{s.category:12s}  {s.name}{mark}")
+
+    if args.validate_schemas:
+        if _validate_schemas() > 0:
+            raise SystemExit(1)
 
     if args.regen_doc or args.check_doc:
         repo_root = Path(__file__).resolve().parents[2]
