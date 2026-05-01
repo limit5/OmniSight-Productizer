@@ -3719,14 +3719,16 @@ ls backend/alembic/versions/ | tail -3
 > **Postgres-backed `ExternalToolRegistryStore`**：抽象層已定義（`Protocol`）、`InMemoryExternalToolRegistryStore` ship 給 dev / test 用、PG impl 留待 dispatcher 對接 production DB（同 AB.3/4 既有節奏）。alembic 0184 schema 已 ship、不需再加 migration。
 
 ### AB.6 Cost Estimator + Budget Guard
-- [ ] AB.6.1 alembic 0183 — `cost_estimates` / `cost_alerts` 表
-- [ ] AB.6.2 Pre-submit cost estimator（input + output token 預估 + 模型定價 + batch 折扣）
-- [ ] AB.6.3 Per-batch budget cap（超 cap fail）
-- [ ] AB.6.4 Daily / monthly cap（per workspace + per priority + per task type）
-- [ ] AB.6.5 80% / 100% / 120% 三階 alert（與 Z spend anomaly detector 整合）
-- [ ] AB.6.6 Cost dashboard（real-time spend / projected monthly / per priority breakdown）
+- [x] AB.6.1 alembic 0183 — `cost_estimates` / `cost_budgets` / `cost_alerts` 三表 <!-- 2026-05-02 ship: PG + SQLite dual-dialect、`cost_estimates`（call_id / model / is_batch / input/output tokens estimated+actual / cost_usd estimated+actual / scope keys workspace+priority+task_type / metadata JSONB）+ `cost_budgets`（scope_kind PK + scope_key + daily/monthly/per_batch limits + enabled + UNIQUE(kind,key)）+ `cost_alerts`（alert_id / scope / period / level / threshold/observed USD / action_taken / fired_at）；6 個 index 涵蓋 call_id / created_at DESC / priority+created / scope partial / fired_at DESC / scope+fired。downgrade no-op（防 budget config + alert history 流失）。 -->
+- [x] AB.6.2 Pre-submit cost estimator（input + output token 預估 + 模型定價 + batch 折扣 + cache discount） <!-- 2026-05-02 ship: `PRICING_TABLE` 4 model（Opus 4.7 $15/$75 / Sonnet 4.6 $3/$15 / Haiku 4.5 $1/$5 / Sonnet legacy compat）含 cache_read（90% off）+ cache_write（+25% premium）；`ModelPricing.cost_usd()` 算 input + output + cache_read + cache_write、is_batch=True 走 50% off input+output（cache 不重複折扣）；`estimate_cost()` helper build CostEstimate 含 scope keys + auto call_id；test 鎖 9 種 pricing case 含 mixed cache realtime $0.05225 精確 expected。 -->
+- [x] AB.6.3 Per-batch budget cap（超 cap fail） <!-- 2026-05-02 ship: `BudgetCap.per_batch_limit_usd` field + `CostGuard.check(estimate, per_batch_observed_usd=)` — caller 傳 batch 累計 observed 金額、check 算 projected = observed + estimate.cost、超 over_120 (120%) action='block' 回 BudgetCheck(allowed=False, reason="Budget exceeded ...")；不傳 per_batch_observed_usd 則 per_batch cap 跳過。 -->
+- [x] AB.6.4 Daily / monthly cap（per workspace + per priority + per task type + per model + global） <!-- 2026-05-02 ship: 5 種 ScopeKind（global / workspace / priority / task_type / model）配對 ScopeKey；`_period_start()` 算 daily / monthly 切點；`spend_in_period()` 累加同 scope 內歷史花費（actual 優先 estimate fallback）；`_scopes_for_estimate()` 為一個 estimate 自動展開 5 個 scope（global + workspace + priority + task_type + model）逐一 check budget；test 覆蓋 global / priority / model 三種 scope 累加準確 + actual 覆寫 estimate。 -->
+- [x] AB.6.5 80% / 100% / 120% 三階 alert（與 Z spend anomaly detector 整合 hook） <!-- 2026-05-02 ship: `_LEVEL_FRACTION` 表 warn_80=0.80 / cap_100=1.0 / over_120=1.2；`_LEVEL_DEFAULT_ACTION` warn→notify / cap→throttle / over→block；`_classify_level(projected, limit)` 取最高 level（zero/negative limit 視為「track only no enforce」回 None）；`alert_sink` 注入式 callback、sink 異常 catch 不中斷；alerts 自動 persist + `alerts_since(scope=, since=)` 查詢。Z spend anomaly 整合 hook：`alert_sink` 可接 Z 的 SharedKV("cost_alerts") writer、後續 dashboard 雙路 surface（provider rate exhaust + OmniSight spend overshoot）。 -->
+- [ ] AB.6.6 Cost dashboard（real-time spend / projected monthly / per priority breakdown） — 留 frontend；schema (`cost_estimates / cost_budgets / cost_alerts` from 0183) 已 ship、UI 直接 query 即可
 
-預估：**2 day**
+預估：**2 day**（**AB.6.1-6.5 ship 2026-05-02；AB.6.6 留 frontend；36 contract test 全綠 0.17s；149 test total 1.81s（AB.1-AB.6 累計）**）
+
+> **Postgres-backed `CostStore`**：抽象層已定義（Protocol）、`InMemoryCostStore` ship 給 dev / test 用、PG impl 留待 dispatcher 對接 production DB（同 AB.3/4/5 既有節奏）。alembic 0183 schema 已 ship、不需再加 migration。
 
 ### AB.7 Rate Limit + Retry + Backoff
 - [ ] AB.7.1 429 / 529 偵測 + exponential backoff
