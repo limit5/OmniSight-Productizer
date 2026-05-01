@@ -3694,14 +3694,16 @@ ls backend/alembic/versions/ | tail -3
 > **注意**：`BatchPersistence` 目前只 ship `InMemoryBatchPersistence`（dev / test）。Postgres-backed impl 留到 **AB.4 dispatcher** 落地時一起、因為 dispatcher 才是真正需要 cross-restart 持久化的 consumer。schema 已先 ship（alembic 0181）。
 
 ### AB.4 Batch Task Queue + Dispatcher
-- [ ] AB.4.1 Redis / Postgres queue 實作（依既有 stack）
-- [ ] AB.4.2 Group by model（Opus / Sonnet / Haiku）+ tool requirement + chunk to 100K/batch
-- [ ] AB.4.3 Dispatcher worker：submit batch → poll 60s → process result
-- [ ] AB.4.4 Real-time vs batch lane 分離（防 R77 24h 排程錯亂）
-- [ ] AB.4.5 UI 顯示 batch 進度（pending / submitted / processing / completed / failed）
-- [ ] AB.4.6 與 BP.B Guild dispatch 整合（Guild 是 dispatcher 的 client）
+- [x] AB.4.1 In-memory `BatchTaskQueue` 實作（4-tier priority bucket P0/P1/P2/P3、async `enqueue` / `drain` / `wait_until_nonempty`）<!-- 2026-05-01 ship: `BatchTaskQueue` 走 4 個 priority 桶（P0 incident / P1 hotfix / P2 sprint / P3 backlog）、drain 從高 priority 起 FIFO 排空、`max_count` + `max_size` 雙 cap、`asyncio.Event` 觸發 wait_until_nonempty；Postgres / Redis-Streams 後端留在「換 BatchPersistence + queue impl 即可」抽象層、生產時加（同 backend/queue_backend.py 的 backend swap pattern）。 -->
+- [x] AB.4.2 Group by model + tools + chunk to 100K/batch <!-- 2026-05-01 ship: `chunk_by_model_tools()` 把 tasks 依 `(model, tools_signature)` tuple group、每組再依 `max_per_chunk` (100K) + `max_size_per_chunk` (256MB) 切分。tools_signature 走「sorted tool names join with |」確保同 prompt-cache 結構的 tasks 同 batch（cached input 90% 折扣最大化）。test 鎖三種 chunking case（model/tools 分組 / 數量 cap / size cap）。 -->
+- [x] AB.4.3 Dispatcher worker：submit batch → poll 60s → process result <!-- 2026-05-01 ship: `BatchDispatcher` long-running async worker — `start() / stop()` 生命週期、loop body 每 iteration 走 (a) 從 queue drain → 分組 → submit / (b) poll 所有 active batches、status==ended 即 stream_results + invoke per-task callback / (c) idle 時 wait_until_nonempty(timeout=drain_idle_timeout)。`max_concurrent_batches=10` cap、超出 group 自動 requeue。`stats()` 回 queued / active / batches_submitted / results_processed / errors_encountered / loop_iter dashboard 用。 -->
+- [x] AB.4.4 Real-time vs batch lane 分離（防 R77 24h 排程錯亂）<!-- 2026-05-01 ship: `submit_in_lane(lane, task, realtime_runner=, dispatcher=)` 路由器；`lane="realtime"` 走 caller 注入的 runner（典型走 `AnthropicClient.run_with_tools()`）回同步 BatchResult；`lane="batch"` 走 dispatcher.enqueue() 回 None（callback 在 batch 完工時觸發）。caller 必選一邊、混用兩 lane 的 task 不互相阻塞。test 鎖 realtime 路徑 + batch 路徑 + missing 引數 raise。 -->
+- [ ] AB.4.5 UI 顯示 batch 進度（pending / submitted / processing / completed / failed） — 留待 frontend；schema (`batch_runs.status`) 已 ship、UI 直接 query 即可
+- [ ] AB.4.6 與 BP.B Guild dispatch 整合（Guild 是 dispatcher 的 client） — 留待 BP.B 落地時把 Guild dispatch path 接 `submit_in_lane()`
 
-預估：**3 day**
+> **PG-backed `BatchPersistence`**：抽象層已定義（AB.3 `BatchPersistence` Protocol）、`InMemoryBatchPersistence` ship 給 dev / test 用、PG impl 留待 dispatcher 實際對接 production DB 時一起寫（next phase）。alembic 0181 schema 已 ship、不需再加 migration。
+
+預估：**3 day**（**AB.4.1-AB.4.4 ship 2026-05-01；AB.4.5 / AB.4.6 留 frontend / Guild 落地時對接；26 contract test 全綠 0.32s；77 test total 1.59s（AB.1+AB.2+AB.3+AB.4）**）
 
 ### AB.5 External MCP / Subprocess Tool Registry
 - [ ] AB.5.1 `external_tool_registry` 表（alembic 0184）— 每工具標 integration_type / sandbox_required / license_tier
