@@ -255,11 +255,16 @@ async def run_one_item(
     _ = todo_text  # not embedded — LLM reads on demand
     _ = handoff_text  # not embedded — LLM reads on demand
     system_text = (
+        f"# 執行環境\n"
+        f"- 專案根目錄（PROJECT_ROOT）：`{BASE_DIR}`\n"
+        f"- **所有檔案路徑必須在這個 root 之下**。Read/Write/Edit/Bash/Grep/Glob 工具會拒絕 root 之外的路徑。\n"
+        f"- 你也可以直接傳相對路徑（例如 `TODO.md`、`backend/agents/state.py`），會被 resolve 成 PROJECT_ROOT 之下。\n"
+        f"- Bash 的 cwd 已經固定在 PROJECT_ROOT；不要 `cd` 到別處。\n\n"
         f"# 專案 SOP\n{sop_text}\n\n"
         "# 可用上下文檔案\n"
-        "- `TODO.md`（專案根目錄）— 全部任務清單。當前任務的區塊已經放在你的 user prompt 內。\n"
-        "  若需要查其他區塊（例如 cross-reference 到上下游 task），用 Read tool 開檔。\n"
-        "- `HANDOFF.md`（專案根目錄）— 過往 task 的詳細交接記錄。預設**不要全讀**（檔案可能上萬行）。\n"
+        "- `TODO.md`（PROJECT_ROOT）— 全部任務清單。當前任務的區塊已放在你的 user prompt 內。\n"
+        "  若需查其他區塊（例如 cross-reference 上下游 task），用 Read tool。\n"
+        "- `HANDOFF.md`（PROJECT_ROOT）— 過往 task 的交接記錄。**檔案上萬行，預設不要全讀**。\n"
         "  若你的任務明確需要參考 prior context，用 Read tool 配合 offset/limit 撈相關段落即可。\n"
         "- 專案 source code — 用 Read / Grep / Glob 探索。\n"
     )
