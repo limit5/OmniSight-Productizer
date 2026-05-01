@@ -3754,12 +3754,14 @@ ls backend/alembic/versions/ | tail -3
 > **Frontend Settings UI（.tsx）**：留 frontend track 落地。Backend state machine + endpoint contract 已固定（schema 不會再變）、UI 直接 wrap 即可。Runbook 提供 curl-based fallback 給 operator 在 UI 落地前用。
 
 ### AB.9 Batch Eligible Task Identifier
-- [ ] AB.9.1 Per task type opt-in flag（task definition 加 `batch_eligible: bool` + `batch_priority`）
-- [ ] AB.9.2 預設 routing 表：HD.1 parser ✅ / HD.4 diff ✅ / HD.5.13 datasheet ✅ / HD.18.6 CVE ✅ / L4.1 determinism ✅ / L4.3 adversarial ✅ / TODO routine ✅ / chat UI ❌ / W14 sandbox ❌ / HD.19 live console ❌
-- [ ] AB.9.3 UI：每 task 顯示 batch eligible 標記、operator 可手動 override
-- [ ] AB.9.4 Auto-batch heuristic（同類 task 累積 N 個 → 自動 form batch）
+- [x] AB.9.1 Per task type opt-in flag（`EligibilityRule(batch_eligible / batch_priority / realtime_required / auto_batch_threshold)`） <!-- 2026-05-02 ship: frozen `EligibilityRule` dataclass、`__post_init__` 強制 `realtime_required=True` 與 `batch_eligible=True` 互斥（structural enforcement、不靠 reviewer）；priority 對齊 AB.4 P0/P1/P2/P3 既有 4-tier；auto_batch_threshold 可選（None = 無 threshold-driven 自動 flush、純走 age timeout）。 -->
+- [x] AB.9.2 預設 routing 表：HD.1 parser ✅×4 / HD.4 diff ✅ / HD.5.13 datasheet ✅ / HD.6 AVL ✅ / HD.7 fw_dts/linker ✅×2 / HD.18 CVE ✅ / L4.1 determinism ✅ / L4.3 adversarial ✅ / TODO routine ✅ / chat UI ❌ realtime_required / w14 sandbox ❌ realtime_required / hd_bringup_live ❌ realtime_required / planning ❌ soft / hd_bringup ❌ soft / generic_dev ❌ soft <!-- 2026-05-02 ship: `DEFAULT_ROUTING` 17 entries、4 類分群（batch-eligible HD/L4/TODO 11 個 / realtime_required hard-3 個 / soft-realtime preferred 3 個 / fallback generic_dev 1 個）；每 entry 有 reason 字串 surface 給 caller 追溯為何路由這條；priority 分層（HD batch P2 / L4 + 大量 backfill P3 / planning + bringup P1 / chat + sandbox + live console P0 hard-realtime）。 -->
+- [x] AB.9.3 UI：每 task 顯示 batch eligible 標記、operator 可手動 override <!-- 2026-05-02 ship: backend `EligibilityRegistry` 提供完整 override mechanism — `set_override(rule)` / `clear_override(kind) → bool` / `list_overrides() → dict` 三 API；`route(task_kind, force_lane=)` 回 `RoutingDecision(lane, priority, rule, reason)` 含完整 reason 字串供 UI 顯示「為何路由這條」；`realtime_required` rule 對 `force_lane="batch"` 走 hard veto 回 RoutingDecision(lane="realtime", reason="VETOED — realtime_required") 防誤把 chat 丟到 24h batch；test 鎖 default + override + force + veto 完整 5 種 routing decision path。frontend UI .tsx 留 frontend 落地；backend contract + endpoint 已就緒、UI 直接 wrap。 -->
+- [x] AB.9.4 Auto-batch heuristic（同類 task 累積 N 個 → 自動 form batch + 老化 timeout 防低頻 task 卡住）<!-- 2026-05-02 ship: `AutoBatchAccumulator` — bucket 鍵 `(task_kind, model, tools_signature)` 同 prompt-cache 結構的 task 走同 bucket（90% off cached input 最大化）；雙 flush trigger — count threshold（hot path、`add()` 內 opportunistic flush）+ age timeout（caller 從 dispatcher loop 呼 `flush_due()`）；`flush_all()` shutdown 用；non-batch-eligible task 不 buffer 直接 forward 到 dispatcher_enqueue（防 chat task 被誤吞）；clock 注入式測試（fake_t list 控時間）；test 9 case 涵蓋 threshold 觸發 / age 觸發 / 多 bucket 隔離 / realtime forward / flush_all / pending_count tracking / unknown kind fallback / no-threshold age-only path。 -->
 
-預估：**2 day**
+預估：**2 day**（**全 4 sub-tasks ship 2026-05-02；27 contract test 全綠 0.16s；248 test total 2.08s（AB.1-AB.9 累計）**）
+
+> **Frontend UI（.tsx）**：留 frontend track 落地。Backend `EligibilityRegistry` API + `RoutingDecision.reason` 字串契約已固定、UI 直接 wrap 即可（task 詳情面板顯示 reason / operator 操作 override panel 走 set_override / clear_override 兩 endpoint）。
 
 ### AB.10 Test Strategy + Smoke + CI
 - [ ] AB.10.1 Mock Anthropic API（responses fixture）+ tool use loop unit test
