@@ -3731,13 +3731,17 @@ ls backend/alembic/versions/ | tail -3
 > **Postgres-backed `CostStore`**：抽象層已定義（Protocol）、`InMemoryCostStore` ship 給 dev / test 用、PG impl 留待 dispatcher 對接 production DB（同 AB.3/4/5 既有節奏）。alembic 0183 schema 已 ship、不需再加 migration。
 
 ### AB.7 Rate Limit + Retry + Backoff
-- [ ] AB.7.1 429 / 529 偵測 + exponential backoff
-- [ ] AB.7.2 Max retry = 5、後進 dead-letter queue
-- [ ] AB.7.3 Per-model rate limit tracker（Tier 4 RPM / TPM）
-- [ ] AB.7.4 Batch API rate limit 獨立計（不吃 real-time TPM/RPM）
-- [ ] AB.7.5 Anthropic Workspace 切分（dev / batch / production 三 workspace）
+- [x] AB.7.1 429 / 529 偵測 + exponential backoff <!-- 2026-05-02 ship: `classify_error(status_code=, exception=)` 4-class 分類器（success / rate_limited 429+529 / non_retryable 4xx / retryable 5xx+network+ambiguous）；`compute_backoff(attempt, policy, retry_after=, rng=)` 走 base*2^attempt 指數退避 + full-jitter（AWS pattern）；`parse_retry_after()` 同時接 integer seconds + RFC 7231 HTTP-date 格式；`retry_after` 永遠走 max_delay cap 防 malicious server 把我們 park 24h（`compute_backoff(0, policy, retry_after=86400)` → `min(86400, 60)` = 60）。 -->
+- [x] AB.7.2 Max retry = 5、後進 dead-letter queue <!-- 2026-05-02 ship: `RetryPolicy(max_retries=5, base_delay=1.0, max_delay=60.0, jitter=True)` 預設；validation 拒絕 negative max_retries / negative delays / base > max；`RetryableExecutor.execute()` 跑 attempt 0..max_retries（共 max_retries+1 次嘗試）、最後一次失敗 deposit DLQ + re-raise；`DLQEntry` 含 entry_id / workspace / model / classification / attempts_made / last_status_code / last_exception_repr / last_reason / request_metadata / created_at；`InMemoryDeadLetterQueue` 走 deposit / list_entries(since=) / remove；non_retryable (4xx) 跳過 retry 直接 DLQ。 -->
+- [x] AB.7.3 Per-model rate limit tracker（Tier 4 RPM / TPM）<!-- 2026-05-02 ship: `TIER_4_LIMITS` 4 model（Opus 4.7: 4000 RPM / 8M input TPM / 1M output TPM；Sonnet 4.6: 5000 / 16M / 10M；Haiku 4.5: 5000 / 32M / 20M；legacy compat）；`RateLimitTracker` 60s sliding window、per (workspace, model) 三窗口（rpm / input_tpm / output_tpm）獨立追蹤、deque-based O(1) 攤銷 add + lazy O(N) eviction；`record(workspace, model, input_tokens, output_tokens)` hot path、`would_exceed(...)` predict 下次提交是否破限（rpm / input_tpm / output_tpm 各自 boundary）；unknown model 走 no-op 不 raise（degrade gracefully）。 -->
+- [x] AB.7.4 Batch API rate limit 獨立計（不吃 real-time TPM/RPM）<!-- 2026-05-02 ship: workspace key 區分 batch vs realtime 達成獨立計量 — caller 用 `workspace="batch"` vs `workspace="production"` 把兩種流量分到不同 sliding window；test 覆蓋 same-model + different-workspace 完全隔離（`test_tracker_isolates_workspaces`）。Anthropic 官方 batch API 本身就走獨立 quota、tracker 模型對齊這個事實。 -->
+- [x] AB.7.5 Anthropic Workspace 切分（dev / batch / production 三 workspace）<!-- 2026-05-02 ship: `WorkspaceConfig(kind, api_key, description)` frozen dataclass；`WorkspaceKind = Literal["dev", "batch", "production"]`；`__repr__` 強制 redact api_key（test 鎖：`"VERY-SECRET-KEY" not in repr(cfg)`）；tracker + DLQ 都走 workspace 維度隔離；caller 持 3 個 WorkspaceConfig instance、依 task type 路由到不同 workspace（dev experiment 不會燒 production budget、batch retry 不會排擠 production traffic）。 -->
 
-預估：**2 day**
+預估：**2 day**（**全 5 sub-tasks ship 2026-05-02；44 contract test 全綠 0.22s；193 test total 2.01s（AB.1-AB.7 累計）**）
+
+> **Postgres-backed `DeadLetterQueue`**：抽象層已定義（Protocol）、`InMemoryDeadLetterQueue` ship 給 dev / test 用、PG impl 留待 dispatcher 對接 production DB 時一起寫（同 AB.3-6 既有節奏）。schema 留作 follow-up（DLQ 表沒在 0181/0183/0184 已 ship migration 之列、dispatcher 落地時再建）。
+
+> **重要 Python gotcha 已避**：`__init__` 走 `is None` 檢查而非 `or` — 防 `InMemoryDeadLetterQueue.__len__() = 0` 在 falsy fallback 時被當「未提供」、丟掉 caller reference。policy / tracker / dlq 三處都走 `is None`。
 
 ### AB.8 Subscription → API Migration UI + Runbook
 - [ ] AB.8.1 Settings → Provider Keys → Anthropic：「Use Claude Code subscription」toggle + API Key field
