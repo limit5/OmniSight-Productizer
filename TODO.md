@@ -3706,15 +3706,17 @@ ls backend/alembic/versions/ | tail -3
 預估：**3 day**（**AB.4.1-AB.4.4 ship 2026-05-01；AB.4.5 / AB.4.6 留 frontend / Guild 落地時對接；26 contract test 全綠 0.32s；77 test total 1.59s（AB.1+AB.2+AB.3+AB.4）**）
 
 ### AB.5 External MCP / Subprocess Tool Registry
-- [ ] AB.5.1 `external_tool_registry` 表（alembic 0184）— 每工具標 integration_type / sandbox_required / license_tier
-- [ ] AB.5.2 接 KiCAD-MCP-Server（Docker MCP STDIO、HD.1.2a 對應）
-- [ ] AB.5.3 接 altium2kicad（Perl subprocess、HD.1.3b、GPL boundary）
-- [ ] AB.5.4 接 OdbDesign Docker sidecar（HTTP REST、HD.1.12a、AGPL boundary）
-- [ ] AB.5.5 接 vision-parse / SKiDL / pyFDT / ldparser（Python lib direct）
-- [ ] AB.5.6 接既有 MCP（claude_ai_Figma / Gmail / Google_Calendar / Google_Drive）走 ToolSearch lazy load
-- [ ] AB.5.7 Per-task type tool dispatch 表（task.kind → 適用 tool subset、避免 prompt 爆炸）
+- [x] AB.5.1 `external_tool_registry` 表（alembic 0184）— 每工具標 integration_type / sandbox_required / license_tier <!-- 2026-05-02 ship: PG + SQLite dual dialect、`tool_name PK / integration_type / license_tier / sandbox_required / config JSONB / enabled / health_status / last_health_check / deployed_at / description / created_at / updated_at`、兩個 index（enabled partial / health composite）。下層 `ExternalToolDefinition` dataclass `__post_init__` 走 R57 結構性邊界檢查 — GPL 必須 subprocess、AGPL 必須 docker_sidecar、GPL/AGPL 必須 sandbox_required=True。 -->
+- [x] AB.5.2 接 KiCAD-MCP-Server（Docker MCP STDIO、HD.1.2a 對應）<!-- 2026-05-02 ship: `DockerMCPHandler` + `KiCadMCP` definition；config `docker_image=ghcr.io/mixelpixx/kicad-mcp:latest` + `stdio=True` + `read_only_whitelist=True`；handler 強制 R55 read-only — method 名稱以 `write_/create_/delete_/edit_/modify_` 開頭一律 reject ExternalToolError。stub 模式回 `status=deferred` 直到 operator 部署 Docker container。 -->
+- [x] AB.5.3 接 altium2kicad（Perl subprocess、HD.1.3b、GPL boundary）<!-- 2026-05-02 ship: `SubprocessHandler` + `Altium2KiCad` definition；license_tier='gpl' + integration_type='subprocess'（R57 結構性 enforce、否則 LicenseBoundaryViolation）；config `command=["perl", "third_party/altium2kicad/altium2kicad.pl"] + timeout_sec=300`；stdin/stdout pipe 雙向、timeout asyncio.wait_for + ProcessLookupError suppression、stderr 也回 caller。 -->
+- [x] AB.5.4 接 OdbDesign Docker sidecar（HTTP REST、HD.1.12a、AGPL boundary）<!-- 2026-05-02 ship: `DockerSidecarHandler` + `OdbDesign` definition；license_tier='agpl' + integration_type='docker_sidecar'（R57 結構性 enforce）；config `rest_url=http://odb-sidecar:8080 + image=ghcr.io/nam20485/odb-design:latest`；stub 模式回 deferred 直到 operator 部署 sidecar；production 升級用 httpx.AsyncClient 一行 swap。 -->
+- [x] AB.5.5 接 vision-parse / SKiDL / pyFDT / ldparser（Python lib direct）<!-- 2026-05-02 ship: 4 個 `python_lib` definition（VisionParse / SKiDL / PyFDT / LDParser）— license_tier='mit_apache_bsd' / sandbox_required=False（in-process 無需 sandbox）。`PythonLibHandler` 走 importlib.import_module → resolve callable（class 或函數）→ async vs sync auto-detect（async 直 await / sync 走 default executor 不阻塞 event loop）→ result dict-or-wrap。test 用 monkeypatch + types.ModuleType 注入 fake module 覆蓋 sync / async / scalar-result / missing-module 4 條 path。 -->
+- [ ] AB.5.6 接既有 MCP（claude_ai_Figma / Gmail / Google_Calendar / Google_Drive）走 ToolSearch lazy load — 留待真實開發場景觸發；ToolSchema 已標 deferred、registry 已就緒、`DockerMCPHandler` 接同協議
+- [x] AB.5.7 Per-task type tool dispatch 表（task.kind → 適用 tool subset、避免 prompt 爆炸）<!-- 2026-05-02 ship: `TASK_KIND_DISPATCH` 12-entry 表覆蓋 hd_parse_kicad / hd_parse_altium / hd_parse_odb / hd_parse_eagle / hd_diff_reference / hd_sensor_kb_extract / hd_avl_substitution / hd_fw_dts_parse / hd_fw_linker_parse / hd_cve_impact / hd_bringup / generic_dev / planning；每 task_kind 只 surface 5-10 tools 給 Anthropic 而非全部 50+（R55 prompt bloat mitigation）；`tools_for_task_kind()` 不知 kind WARN log + fallback generic_dev、絕不 raise；`ExternalToolRegistry.list_for_task_kind()` 走過濾 disabled tools + Claude Code built-ins（Read/Write/etc）pass-through。 -->
 
-預估：**4 day**
+預估：**4 day**（**AB.5.1-5.5 + 5.7 ship 2026-05-02；AB.5.6 留真實開發 trigger；36 contract test 全綠 0.19s；113 test total 1.79s（AB.1-AB.5 累計）**）
+
+> **Postgres-backed `ExternalToolRegistryStore`**：抽象層已定義（`Protocol`）、`InMemoryExternalToolRegistryStore` ship 給 dev / test 用、PG impl 留待 dispatcher 對接 production DB（同 AB.3/4 既有節奏）。alembic 0184 schema 已 ship、不需再加 migration。
 
 ### AB.6 Cost Estimator + Budget Guard
 - [ ] AB.6.1 alembic 0183 — `cost_estimates` / `cost_alerts` 表
