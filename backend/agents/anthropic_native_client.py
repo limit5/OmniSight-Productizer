@@ -281,12 +281,18 @@ class AnthropicClient:
         max_tokens: int | None = None,
         temperature: float = 1.0,
         enable_cache: bool = True,
+        mcp_servers: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build a `params` dict for batch submission.
 
         AB.3 batch dispatcher uses this to construct each request entry of
         a `messages.batches.create()` call. Identical shape to what
         `messages.create()` accepts.
+
+        AB.5.6: ``mcp_servers`` is forwarded as Anthropic's
+        ``mcp_servers=[]`` parameter so SDK auto-injects remote MCP tool
+        definitions (Figma / Gmail / Calendar / Drive). Caller typically
+        builds via ``RemoteMCPRegistry.to_anthropic_mcp_servers()``.
         """
         tool_payload = to_anthropic_tools(tools) if tools else None
         sys_blocks, tool_payload = _apply_cache_control(system, tool_payload, enable_cache)
@@ -301,6 +307,8 @@ class AnthropicClient:
             params["system"] = sys_blocks
         if tool_payload:
             params["tools"] = tool_payload
+        if mcp_servers:
+            params["mcp_servers"] = mcp_servers
         return params
 
     async def run_with_tools(
@@ -318,6 +326,7 @@ class AnthropicClient:
             Literal["log", "silent"]
             | None
         ) = "log",
+        mcp_servers: list[dict[str, Any]] | None = None,
     ) -> RunResult:
         """Execute multi-turn tool-use loop until `stop_reason="end_turn"`.
 
@@ -362,6 +371,8 @@ class AnthropicClient:
                 kwargs["system"] = sys_blocks
             if tool_payload:
                 kwargs["tools"] = tool_payload
+            if mcp_servers:
+                kwargs["mcp_servers"] = mcp_servers
 
             response = self._client.messages.create(**kwargs)
             content = _content_to_dict(response.content)
