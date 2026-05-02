@@ -7000,6 +7000,131 @@ export async function cancelInstallJob(
   )
 }
 
+// ─── W14 — Live Web Sandbox Preview ──────────────────────────────────────
+//
+// Wire surface for the W14.2 backend launcher (`backend/routers/web_sandbox.py`).
+// Used by `<LivePreviewPanel />` (W14.6) to launch / poll / touch / kill the
+// per-workspace Vite/Bun/Nuxt sidecar, and by future operator triage UI to
+// list every live preview the worker knows about.
+//
+// Status enum and field shape mirror `WebSandboxInstance.to_dict()` exactly
+// — adding a field on the backend means widening this interface here.
+
+export type WebSandboxStatus =
+  | "pending"
+  | "installing"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "failed"
+
+export interface WebSandboxConfigWire {
+  schema_version: string
+  workspace_id: string
+  workspace_path: string
+  image_tag: string
+  git_ref: string | null
+  install_command: string[]
+  dev_command: string[]
+  container_port: number
+  env: Record<string, string>
+  preview_url_path: string
+  startup_timeout_s: number
+  install_timeout_s: number
+  log_tail_lines: number
+  allowed_emails: string[]
+}
+
+export interface WebSandboxInstanceWire {
+  schema_version: string
+  workspace_id: string
+  sandbox_id: string
+  container_name: string
+  config: WebSandboxConfigWire
+  status: WebSandboxStatus
+  container_id: string | null
+  host_port: number | null
+  preview_url: string | null
+  ingress_url: string | null
+  access_app_id: string | null
+  created_at: number
+  started_at: number | null
+  ready_at: number | null
+  stopped_at: number | null
+  last_request_at: number
+  error: string | null
+  killed_reason: string | null
+  warnings: string[]
+}
+
+export interface WebSandboxSnapshot {
+  schema_version: string
+  sandboxes: WebSandboxInstanceWire[]
+}
+
+export interface LaunchWebSandboxBody {
+  workspace_id: string
+  workspace_path?: string | null
+  image_tag?: string
+  git_ref?: string | null
+  install_command?: string[] | null
+  dev_command?: string[] | null
+  container_port?: number
+  env?: Record<string, string> | null
+  allowed_emails?: string[] | null
+}
+
+export async function launchWebSandbox(
+  body: LaunchWebSandboxBody,
+): Promise<WebSandboxInstanceWire> {
+  return request<WebSandboxInstanceWire>("/web-sandbox/preview", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function getWebSandbox(
+  workspaceId: string,
+): Promise<WebSandboxInstanceWire> {
+  return request<WebSandboxInstanceWire>(
+    `/web-sandbox/preview/${encodeURIComponent(workspaceId)}`,
+  )
+}
+
+export async function listWebSandboxes(): Promise<WebSandboxSnapshot> {
+  return request<WebSandboxSnapshot>("/web-sandbox/preview")
+}
+
+export async function touchWebSandbox(
+  workspaceId: string,
+): Promise<WebSandboxInstanceWire> {
+  return request<WebSandboxInstanceWire>(
+    `/web-sandbox/preview/${encodeURIComponent(workspaceId)}/touch`,
+    { method: "POST" },
+  )
+}
+
+export async function markWebSandboxReady(
+  workspaceId: string,
+): Promise<WebSandboxInstanceWire> {
+  return request<WebSandboxInstanceWire>(
+    `/web-sandbox/preview/${encodeURIComponent(workspaceId)}/ready`,
+    { method: "POST" },
+  )
+}
+
+export async function stopWebSandbox(
+  workspaceId: string,
+  options?: { reason?: string | null },
+): Promise<WebSandboxInstanceWire> {
+  const reason = options?.reason
+  const qs = reason ? `?reason=${encodeURIComponent(reason)}` : ""
+  return request<WebSandboxInstanceWire>(
+    `/web-sandbox/preview/${encodeURIComponent(workspaceId)}${qs}`,
+    { method: "DELETE" },
+  )
+}
+
 // ─── N3 — OpenAPI compile-time contract tripwire ──────────────────────────
 // These type aliases reach into `lib/generated/api-types.ts` (auto-generated
 // from the FastAPI app's OpenAPI schema). The moment any of the referenced
