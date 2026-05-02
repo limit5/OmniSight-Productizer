@@ -1536,6 +1536,27 @@ CREATE TABLE IF NOT EXISTS provisioned_storage (
     created_at  REAL NOT NULL,
     PRIMARY KEY (tenant_id, provider)
 );
+
+-- FS.8.3 (alembic 0063): tenant-owned Stripe billing registry.
+-- Stores Stripe customer/subscription identifiers and current
+-- subscription state only; API keys and webhook secrets stay in env /
+-- AS.2 vault paths.  Composite PK ``(tenant_id, provider)`` mirrors
+-- alembic 0063 and allows one billing provider record per tenant.
+CREATE TABLE IF NOT EXISTS provisioned_billing (
+    tenant_id              TEXT NOT NULL
+                                REFERENCES tenants(id) ON DELETE CASCADE,
+    provider               TEXT NOT NULL
+                                CHECK (provider IN ('stripe')),
+    stripe_customer_id     TEXT NOT NULL,
+    stripe_subscription_id TEXT NOT NULL,
+    stripe_price_id        TEXT NOT NULL DEFAULT '',
+    status                 TEXT NOT NULL,
+    current_period_end     REAL,
+    cancel_at_period_end   INTEGER NOT NULL DEFAULT 0,
+    created_at             REAL NOT NULL,
+    updated_at             REAL NOT NULL,
+    PRIMARY KEY (tenant_id, provider)
+);
 """
 
 

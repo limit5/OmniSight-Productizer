@@ -213,6 +213,13 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # NOT in TABLES_WITH_IDENTITY_ID. Bucket names are non-secret
     # provider identifiers; credentials are not stored in this table.
     "provisioned_storage",
+    # FS.8.3 (alembic 0063): tenant-owned Stripe billing registry.
+    # FK ``tenant_id → tenants.id`` (CASCADE) so it MUST replay after
+    # ``tenants``. Composite PK ``(tenant_id, provider)`` is TEXT —
+    # NOT in TABLES_WITH_IDENTITY_ID. Stores Stripe customer /
+    # subscription identifiers and current subscription status for
+    # FS.8.4 state sync; no API keys or webhook secrets live here.
+    "provisioned_billing",
     "sessions",
     "github_installations",
     # Project runs (alembic 0006).
