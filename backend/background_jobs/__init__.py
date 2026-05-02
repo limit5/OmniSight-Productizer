@@ -27,6 +27,15 @@ from backend.background_jobs.schedules import (
     build_cron_schedule_manifest,
     get_cron_schedule_binding,
 )
+from backend.background_jobs.retry import (
+    BackgroundJobDeadLetterEntry,
+    BackgroundJobDeadLetterQueue,
+    BackgroundJobRetryPolicy,
+    InMemoryBackgroundJobDeadLetterQueue,
+    background_job_retry_delay,
+    dispatch_background_job_with_retry,
+    is_retryable_background_job_error,
+)
 
 
 def list_providers() -> list[str]:
@@ -67,11 +76,18 @@ __all__ = [
     "InvalidBackgroundJobTokenError",
     "MissingBackgroundJobScopeError",
     "CronScheduleBinding",
+    "BackgroundJobDeadLetterEntry",
+    "BackgroundJobDeadLetterQueue",
+    "BackgroundJobRetryPolicy",
+    "InMemoryBackgroundJobDeadLetterQueue",
     "build_cron_schedule_bindings",
     "build_cron_schedule_manifest",
+    "background_job_retry_delay",
+    "dispatch_background_job_with_retry",
     "get_background_job_definition",
     "get_adapter",
     "get_cron_schedule_binding",
+    "is_retryable_background_job_error",
     "list_background_job_definitions",
     "list_providers",
 ]
