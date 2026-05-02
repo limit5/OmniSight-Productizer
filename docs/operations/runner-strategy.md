@@ -150,6 +150,96 @@ work indefinitely.
 
 ---
 
+## Multi-agent collaboration (Claude × Codex × human, 2026-05-02)
+
+The repo now ships **three** runner scripts:
+
+| Script | LLM driver | Auth | Best for |
+|---|---|---|---|
+| `auto-runner.py` | Claude Code CLI (`claude -p`) | Anthropic subscription (Max 20x) | Multi-subsystem integration; Claude's strength |
+| `auto-runner-sdk.py` | Anthropic Messages API (programmatic) | API key, per-token billing | Pattern-bounded single-file work, batchable items, observable cost |
+| `auto-runner-codex.py` | OpenAI Codex CLI (`codex exec`) | OpenAI ChatGPT subscription (Pro 5x) | Pattern-replicated work where GPT-class structuring shines |
+
+These coexist by design — different sweet spots, complementary capacity.
+The companion docs that govern their coexistence:
+
+  * **`AGENTS.md`** (project root) — Codex's L1 rule layer (mirrors
+    `CLAUDE.md`'s structure but adds GPT-specific strict rules:
+    "mirror existing patterns, ask, do not invent" / scope discipline /
+    retreat when uncertain / Tier marker / TODO+HANDOFF prefix).
+  * **`coordination.md`** (project root) — section ownership matrix
+    (Claude vs Codex), Tier A/B classification, worktree layout,
+    same-branch parallel-runner safety contract.
+
+### Section ownership (default)
+
+  * **Claude**: agent infra (`backend/agents/*`), security (`KS.*`),
+    cross-subsystem epics (`BP.A`/`B`/`C`/`F`/`H`), web sandbox
+    (`W11-W16`), domain-specific (`HD.*`), new architecture (`BP.A2A`,
+    `BP.Q`, `BP.W3.*`).
+  * **Codex**: pattern-replicated adapters (`FS.*`), security scan
+    integrations (`SC.*`), audit-skill markdown (`BP.D.7`), 27 skill
+    pack rework (`BP.W3.1`), Gerrit hooks (`BP.G`), single-file glue
+    (`BP.J.2`), documentation, follow-up tests for already-shipped code,
+    high-volume mechanical fixes (`B9` ESLint).
+
+When ambiguous → default to Claude. The full table is in
+`coordination.md`.
+
+### Tier A vs Tier B (per-task safety)
+
+Every task is classified as one of two tiers:
+
+  * **Tier A** — direct commit to `master`. Used when output is
+    pattern-constrained AND single-file AND `git revert` is
+    sufficient recovery. Codex's runner with `OMNISIGHT_CODEX_TIER=A`.
+  * **Tier B** — commit goes to `codex-work` branch via worktree at
+    `../OmniSight-codex-worktree`. Reviewed by human/Claude before
+    merge. Default tier for Codex.
+
+Decision rule: when uncertain → assume Tier B.
+
+### Same-branch parallel safety contract
+
+Multiple Claude runners on master is empirically safe (single model,
+consistent judgement). Adding Codex on master in Tier A mode requires
+strict invariants:
+
+  1. Section non-overlap (each runner has distinct
+     `OMNISIGHT_*_FILTER`)
+  2. File non-overlap (cross-section file overlap → escalate, don't
+     parallelize)
+  3. TODO marker disjoint (Claude marks `[x][C]`, Codex marks
+     `[x][G]`; neither modifies the other's tag)
+  4. HANDOFF heading prefix (`## [Claude/Opus]` vs
+     `## [Codex/GPT-5.5]`; append-only, no edits to other agent's
+     entries)
+  5. Atomic Co-Authored-By commit messages (separates authorship for
+     `git log --grep "GPT-5.5"` audits)
+
+If any invariant fails → stop runners, fix manually, restart.
+
+### Why three runners and not just one router
+
+A single runner that auto-picks "Claude vs Codex vs API" backend is
+the eventual right design (it lives in BP.A2A or its successor — the
+multi-vendor lingua franca pattern). Today we keep them as separate
+scripts because:
+
+  * Independent scripts are simpler to reason about and easier to
+    kill / debug
+  * Authentication differs (Claude Code session vs OpenAI session vs
+    API key) — no clean unified config story yet
+  * Operator-driven routing (per-task `OMNISIGHT_*_FILTER` selection)
+    is fine at Phase A scale
+
+When Phase B / C arrives and OmniSight ships an Orchestrator UI, the
+three runners collapse into one auto-routing component (an instance of
+the `BP.A2A` pattern operating on internal agents). Until then,
+explicit-choice is the sane default.
+
+---
+
 ## Why runner intentionally does NOT pursue Claude Code parity
 
 A natural-but-wrong instinct, when seeing how much Claude Code can do
