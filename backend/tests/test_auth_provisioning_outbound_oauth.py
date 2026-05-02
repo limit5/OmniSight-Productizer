@@ -5,13 +5,16 @@ from __future__ import annotations
 import pytest
 
 from backend.auth_provisioning import (
+    OUTBOUND_OAUTH_VENDOR_IDS,
     OutboundOAuthFlowScaffoldOptions,
+    OutboundOAuthVendorCatalogOptions,
     VendorOAuthAppConfigOptions,
+    get_outbound_oauth_vendor,
     list_outbound_oauth_flow_providers,
     render_outbound_oauth_flow_scaffold,
+    render_outbound_oauth_vendor_catalog,
     render_vendor_oauth_app_config_plan,
 )
-from backend.security.oauth_vendors import ALL_VENDOR_IDS
 
 
 def _plan(provider: str, **overrides):
@@ -35,11 +38,100 @@ def _render(*providers: str, **overrides):
 
 class TestOutboundOAuthRegistry:
 
-    def test_list_outbound_oauth_flow_providers_matches_as1_catalog(self):
-        assert list_outbound_oauth_flow_providers() == list(ALL_VENDOR_IDS)
+    def test_list_outbound_oauth_flow_providers_matches_fs_2b_6_catalog(self):
+        assert list_outbound_oauth_flow_providers() == list(OUTBOUND_OAUTH_VENDOR_IDS)
+
+    def test_fs_2b_6_catalog_pins_the_ten_outbound_vendors(self):
+        assert OUTBOUND_OAUTH_VENDOR_IDS == (
+            "github",
+            "slack",
+            "google_workspace",
+            "microsoft_365",
+            "notion",
+            "salesforce",
+            "hubspot",
+            "zoom",
+            "stripe_connect",
+            "discord",
+        )
+
+    def test_get_outbound_oauth_vendor_returns_frozen_catalog_entry(self):
+        item = get_outbound_oauth_vendor("zoom")
+        assert item.display_name == "Zoom"
+        assert item.authorize_endpoint == "https://zoom.us/oauth/authorize"
+        assert item.token_endpoint == "https://zoom.us/oauth/token"
+        assert item.revocation_endpoint == "https://zoom.us/oauth/revoke"
+        assert item.scope == ("user:read", "meeting:read", "meeting:write")
+
+    def test_get_outbound_oauth_vendor_rejects_unknown_vendor(self):
+        with pytest.raises(KeyError, match="unknown outbound OAuth vendor"):
+            get_outbound_oauth_vendor("myspace")
+
+    def test_render_outbound_oauth_vendor_catalog_returns_plan_shape(self):
+        plans = render_outbound_oauth_vendor_catalog(
+            OutboundOAuthVendorCatalogOptions(
+                app_name="tenant-demo",
+                app_base_url="https://app.example.com",
+            )
+        )
+        assert [p.provider for p in plans] == list(OUTBOUND_OAUTH_VENDOR_IDS)
+        assert plans[2].provider == "google_workspace"
+        assert plans[2].callback_url == (
+            "https://app.example.com/api/integrations/google_workspace/callback"
+        )
+        assert plans[2].metadata["token_vault_provider"] == "google"
+        assert plans[7].metadata["token_endpoint"] == "https://zoom.us/oauth/token"
 
 
 class TestOutboundOAuthScaffold:
+
+    def test_fs_2b_6_catalog_renders_all_ten_provider_routes(self):
+        plans = render_outbound_oauth_vendor_catalog(
+            OutboundOAuthVendorCatalogOptions(
+                app_name="tenant-demo",
+                app_base_url="https://app.example.com",
+            )
+        )
+        result = render_outbound_oauth_flow_scaffold(
+            OutboundOAuthFlowScaffoldOptions(provider_plans=plans)
+        )
+
+        assert [p.provider for p in result.providers] == list(OUTBOUND_OAUTH_VENDOR_IDS)
+        assert len(result.providers) == 10
+        assert len(result.files) == 5 + (10 * 4)
+        route_paths = [f.path for f in result.files]
+        assert "app/api/integrations/zoom/authorize/route.ts" in route_paths
+        assert "app/api/integrations/stripe_connect/disconnect/route.ts" in route_paths
+
+    def test_fs_2b_6_aliases_google_workspace_and_microsoft_365_to_as2_vault(self):
+        plans = render_outbound_oauth_vendor_catalog(
+            OutboundOAuthVendorCatalogOptions(
+                app_name="tenant-demo",
+                app_base_url="https://app.example.com",
+            )
+        )
+        result = render_outbound_oauth_flow_scaffold(
+            OutboundOAuthFlowScaffoldOptions(provider_plans=plans)
+        )
+        support = {
+            p.provider: (p.token_vault_supported, p.token_vault_provider)
+            for p in result.providers
+        }
+        assert support["github"] == (True, "github")
+        assert support["google_workspace"] == (True, "google")
+        assert support["microsoft_365"] == (True, "microsoft")
+        assert support["zoom"] == (False, None)
+
+        helper = result.files[0].content
+        vault_helper = result.files[1].content
+        assert 'provider: "google_workspace"' in helper
+        assert 'tokenVaultProvider: "google"' in helper
+        assert 'provider: "microsoft_365"' in helper
+        assert 'tokenVaultProvider: "microsoft"' in helper
+        assert "vaultProvider: string" in vault_helper
+        assert "provider.tokenVaultProvider || provider.provider" in "\n".join(
+            f.content for f in result.files
+        )
 
     def test_renders_flow_helper_and_provider_routes(self):
         result = _render("github", "slack")
@@ -106,8 +198,9 @@ class TestOutboundOAuthScaffold:
         assert "TokenVault" in helper
         assert "importMasterKey" in helper
         assert "encryptOutboundTokenSet" in helper
-        assert "vault.encryptForUser(userId, provider, token.accessToken)" in helper
+        assert "vault.encryptForUser(userId, vaultProvider, token.accessToken)" in helper
         assert "refreshTokenEnc" in helper
+        assert "vaultProvider: string" in helper
 
     def test_refresh_middleware_reuses_as1_auto_refresh_and_as2_vault(self):
         result = _render(

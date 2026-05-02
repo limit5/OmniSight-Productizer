@@ -19,7 +19,8 @@ IO, or shared mutable state across uvicorn workers.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from backend.auth_provisioning.self_hosted import (
     AuthScaffoldEnvVar,
@@ -27,7 +28,220 @@ from backend.auth_provisioning.self_hosted import (
 )
 from backend.auth_provisioning.vendor_oauth import VendorOAuthAppConfigPlan
 from backend.security import token_vault
-from backend.security.oauth_vendors import ALL_VENDOR_IDS, get_vendor
+from backend.security.oauth_vendors import VendorNotFoundError, get_vendor
+
+
+OUTBOUND_OAUTH_VENDOR_IDS: tuple[str, ...] = (
+    "github",
+    "slack",
+    "google_workspace",
+    "microsoft_365",
+    "notion",
+    "salesforce",
+    "hubspot",
+    "zoom",
+    "stripe_connect",
+    "discord",
+)
+
+
+@dataclass(frozen=True)
+class OutboundOAuthVendorCatalogItem:
+    """One FS.2b.6 outbound integration vendor catalog entry."""
+
+    provider: str
+    display_name: str
+    scope: tuple[str, ...]
+    authorize_endpoint: str
+    token_endpoint: str
+    revocation_endpoint: str | None
+    extra_authorize_params: tuple[tuple[str, str], ...] = ()
+    is_oidc: bool = False
+    token_vault_provider: str | None = None
+
+    def to_plan(
+        self,
+        *,
+        app_name: str,
+        app_base_url: str,
+        callback_path: str,
+    ) -> VendorOAuthAppConfigPlan:
+        callback_url = _callback_url(
+            base_url=app_base_url,
+            callback_path=callback_path,
+            provider=self.provider,
+        )
+        return VendorOAuthAppConfigPlan(
+            provider=self.provider,
+            display_name=self.display_name,
+            app_name=app_name,
+            callback_url=callback_url,
+            automation="manual",
+            console_url=_outbound_console_urls()[self.provider],
+            instructions=(),
+            required_env=("AUTH_CLIENT_ID", "AUTH_CLIENT_SECRET", "AUTH_PROVIDER"),
+            warnings=(),
+            metadata={
+                "scope": list(self.scope),
+                "authorize_endpoint": self.authorize_endpoint,
+                "token_endpoint": self.token_endpoint,
+                "revocation_endpoint": self.revocation_endpoint,
+                "extra_authorize_params": [
+                    list(p) for p in self.extra_authorize_params
+                ],
+                "is_oidc": self.is_oidc,
+                "token_vault_provider": self.token_vault_provider,
+            },
+        )
+
+
+@dataclass(frozen=True)
+class OutboundOAuthVendorCatalogOptions:
+    """Inputs for rendering the FS.2b.6 outbound integration vendor catalog."""
+
+    app_name: str
+    app_base_url: str
+    callback_path: str = "/api/integrations/{provider}/callback"
+
+    def validate(self) -> None:
+        if not self.app_name or not self.app_name.strip():
+            raise ValueError("app_name is required")
+        if not self.app_base_url or not self.app_base_url.strip():
+            raise ValueError("app_base_url is required")
+        if not self.callback_path or not self.callback_path.strip():
+            raise ValueError("callback_path is required")
+
+
+OUTBOUND_OAUTH_VENDOR_ITEMS: tuple[OutboundOAuthVendorCatalogItem, ...] = (
+    OutboundOAuthVendorCatalogItem(
+        provider="github",
+        display_name="GitHub",
+        scope=("read:user", "user:email", "repo"),
+        authorize_endpoint="https://github.com/login/oauth/authorize",
+        token_endpoint="https://github.com/login/oauth/access_token",
+        revocation_endpoint=None,
+        extra_authorize_params=(("allow_signup", "true"),),
+        token_vault_provider="github",
+    ),
+    OutboundOAuthVendorCatalogItem(
+        provider="slack",
+        display_name="Slack",
+        scope=("users:read", "users:read.email", "channels:read", "chat:write"),
+        authorize_endpoint="https://slack.com/oauth/v2/authorize",
+        token_endpoint="https://slack.com/api/oauth.v2.access",
+        revocation_endpoint="https://slack.com/api/auth.revoke",
+    ),
+    OutboundOAuthVendorCatalogItem(
+        provider="google_workspace",
+        display_name="Google Workspace",
+        scope=(
+            "openid",
+            "email",
+            "profile",
+            "https://www.googleapis.com/auth/admin.directory.user.readonly",
+            "https://www.googleapis.com/auth/drive.metadata.readonly",
+        ),
+        authorize_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
+        token_endpoint="https://oauth2.googleapis.com/token",
+        revocation_endpoint="https://oauth2.googleapis.com/revoke",
+        extra_authorize_params=(
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+        ),
+        is_oidc=True,
+        token_vault_provider="google",
+    ),
+    OutboundOAuthVendorCatalogItem(
+        provider="microsoft_365",
+        display_name="Microsoft 365",
+        scope=(
+            "openid",
+            "email",
+            "profile",
+            "offline_access",
+            "User.Read",
+            "Files.Read",
+        ),
+        authorize_endpoint="https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+        token_endpoint="https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        revocation_endpoint=None,
+        is_oidc=True,
+        token_vault_provider="microsoft",
+    ),
+    OutboundOAuthVendorCatalogItem(
+        provider="notion",
+        display_name="Notion",
+        scope=(),
+        authorize_endpoint="https://api.notion.com/v1/oauth/authorize",
+        token_endpoint="https://api.notion.com/v1/oauth/token",
+        revocation_endpoint=None,
+        extra_authorize_params=(("owner", "user"),),
+    ),
+    OutboundOAuthVendorCatalogItem(
+        provider="salesforce",
+        display_name="Salesforce",
+        scope=("openid", "email", "profile", "api", "refresh_token"),
+        authorize_endpoint="https://login.salesforce.com/services/oauth2/authorize",
+        token_endpoint="https://login.salesforce.com/services/oauth2/token",
+        revocation_endpoint="https://login.salesforce.com/services/oauth2/revoke",
+        is_oidc=True,
+    ),
+    OutboundOAuthVendorCatalogItem(
+        provider="hubspot",
+        display_name="HubSpot",
+        scope=("oauth", "crm.objects.contacts.read", "crm.objects.companies.read"),
+        authorize_endpoint="https://app.hubspot.com/oauth/authorize",
+        token_endpoint="https://api.hubapi.com/oauth/v1/token",
+        revocation_endpoint=None,
+    ),
+    OutboundOAuthVendorCatalogItem(
+        provider="zoom",
+        display_name="Zoom",
+        scope=("user:read", "meeting:read", "meeting:write"),
+        authorize_endpoint="https://zoom.us/oauth/authorize",
+        token_endpoint="https://zoom.us/oauth/token",
+        revocation_endpoint="https://zoom.us/oauth/revoke",
+    ),
+    OutboundOAuthVendorCatalogItem(
+        provider="stripe_connect",
+        display_name="Stripe Connect",
+        scope=("read_write",),
+        authorize_endpoint="https://connect.stripe.com/oauth/authorize",
+        token_endpoint="https://connect.stripe.com/oauth/token",
+        revocation_endpoint=None,
+    ),
+    OutboundOAuthVendorCatalogItem(
+        provider="discord",
+        display_name="Discord",
+        scope=("identify", "email", "guilds"),
+        authorize_endpoint="https://discord.com/oauth2/authorize",
+        token_endpoint="https://discord.com/api/oauth2/token",
+        revocation_endpoint="https://discord.com/api/oauth2/token/revoke",
+    ),
+)
+
+
+OUTBOUND_OAUTH_VENDORS: Mapping[str, OutboundOAuthVendorCatalogItem] = MappingProxyType(
+    {item.provider: item for item in OUTBOUND_OAUTH_VENDOR_ITEMS}
+)
+
+
+def _outbound_console_urls() -> Mapping[str, str]:
+    return MappingProxyType({
+        "github": "https://github.com/settings/developers",
+        "slack": "https://api.slack.com/apps",
+        "google_workspace": "https://console.cloud.google.com/apis/credentials",
+        "microsoft_365": (
+            "https://entra.microsoft.com/#view/"
+            "Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+        ),
+        "notion": "https://www.notion.so/my-integrations",
+        "salesforce": "https://login.salesforce.com/setup",
+        "hubspot": "https://developers.hubspot.com/",
+        "zoom": "https://marketplace.zoom.us/develop/create",
+        "stripe_connect": "https://dashboard.stripe.com/settings/connect",
+        "discord": "https://discord.com/developers/applications",
+    })
 
 
 @dataclass(frozen=True)
@@ -46,6 +260,7 @@ class OutboundOAuthFlowProviderItem:
     client_id_env: str
     client_secret_env: str
     token_vault_supported: bool
+    token_vault_provider: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +276,7 @@ class OutboundOAuthFlowProviderItem:
             "client_id_env": self.client_id_env,
             "client_secret_env": self.client_secret_env,
             "token_vault_supported": self.token_vault_supported,
+            "token_vault_provider": self.token_vault_provider,
         }
 
 
@@ -121,9 +337,36 @@ class OutboundOAuthFlowScaffoldOptions:
             raise ValueError("disconnect_path is required")
 
 
+def get_outbound_oauth_vendor(provider: str) -> OutboundOAuthVendorCatalogItem:
+    """Return the FS.2b.6 outbound integration catalog entry."""
+    key = provider.strip().lower()
+    try:
+        return OUTBOUND_OAUTH_VENDORS[key]
+    except KeyError:
+        raise KeyError(
+            f"unknown outbound OAuth vendor {provider!r}; "
+            f"known: {', '.join(OUTBOUND_OAUTH_VENDOR_IDS)}"
+        ) from None
+
+
+def render_outbound_oauth_vendor_catalog(
+    options: OutboundOAuthVendorCatalogOptions,
+) -> tuple[VendorOAuthAppConfigPlan, ...]:
+    """Render the FS.2b.6 ten-vendor outbound OAuth setup catalog."""
+    options.validate()
+    return tuple(
+        item.to_plan(
+            app_name=options.app_name,
+            app_base_url=options.app_base_url,
+            callback_path=options.callback_path,
+        )
+        for item in OUTBOUND_OAUTH_VENDOR_ITEMS
+    )
+
+
 def list_outbound_oauth_flow_providers() -> list[str]:
-    """Return AS.1 vendor ids that can render FS.2b.1 flow scaffolds."""
-    return list(ALL_VENDOR_IDS)
+    """Return FS.2b.6 outbound integration vendor ids."""
+    return list(OUTBOUND_OAUTH_VENDOR_IDS)
 
 
 def render_outbound_oauth_flow_scaffold(
@@ -166,6 +409,7 @@ def render_outbound_oauth_flow_scaffold(
             "FS.2b.3 refresh middleware rotates refresh tokens before provider calls",
             "FS.2b.4 upgrades missing scopes from an existing connection without disconnect/reconnect",
             "FS.2b.5 disconnect deletes local vault records after best-effort IdP revocation",
+            "FS.2b.6 outbound vendor catalog pins GitHub/Slack/Google Workspace/Microsoft 365/Notion/Salesforce/HubSpot/Zoom/Stripe Connect/Discord",
             "client secrets are declared as env metadata only",
         ),
     )
@@ -173,29 +417,65 @@ def render_outbound_oauth_flow_scaffold(
 
 def _provider_item(plan: VendorOAuthAppConfigPlan) -> OutboundOAuthFlowProviderItem:
     provider = plan.provider.strip().lower()
-    vendor = get_vendor(provider)
     metadata = dict(plan.metadata)
-    return OutboundOAuthFlowProviderItem(
-        provider=provider,
-        display_name=plan.display_name,
-        callback_url=plan.callback_url,
-        scope=tuple(str(s) for s in metadata.get("scope", vendor.default_scopes)),
-        authorize_endpoint=str(
+    try:
+        vendor = get_vendor(provider)
+        display_name = plan.display_name
+        scope = tuple(str(s) for s in metadata.get("scope", vendor.default_scopes))
+        authorize_endpoint = str(
             metadata.get("authorize_endpoint") or vendor.authorize_endpoint
-        ),
-        token_endpoint=str(metadata.get("token_endpoint") or vendor.token_endpoint),
-        revocation_endpoint=(
+        )
+        token_endpoint = str(metadata.get("token_endpoint") or vendor.token_endpoint)
+        revocation_endpoint = (
             str(metadata["revocation_endpoint"])
             if metadata.get("revocation_endpoint")
             else vendor.revocation_endpoint
-        ),
-        extra_authorize_params=tuple(
-            (str(k), str(v)) for k, v in vendor.extra_authorize_params
-        ),
-        is_oidc=bool(metadata.get("is_oidc", vendor.is_oidc)),
+        )
+        extra_authorize_params = tuple(
+            (str(k), str(v))
+            for k, v in metadata.get(
+                "extra_authorize_params",
+                vendor.extra_authorize_params,
+            )
+        )
+        is_oidc = bool(metadata.get("is_oidc", vendor.is_oidc))
+    except VendorNotFoundError:
+        required = ("authorize_endpoint", "token_endpoint", "scope", "is_oidc")
+        missing = [name for name in required if name not in metadata]
+        if missing:
+            raise KeyError(
+                f"outbound provider {provider!r} is not in AS.1 catalog "
+                f"and missing metadata: {', '.join(missing)}"
+            ) from None
+        display_name = plan.display_name
+        scope = tuple(str(s) for s in metadata["scope"])
+        authorize_endpoint = str(metadata["authorize_endpoint"])
+        token_endpoint = str(metadata["token_endpoint"])
+        revocation_endpoint = (
+            str(metadata["revocation_endpoint"])
+            if metadata.get("revocation_endpoint")
+            else None
+        )
+        extra_authorize_params = tuple(
+            (str(k), str(v)) for k, v in metadata.get("extra_authorize_params", ())
+        )
+        is_oidc = bool(metadata["is_oidc"])
+    token_vault_provider = metadata.get("token_vault_provider") or provider
+    token_vault_supported = str(token_vault_provider) in token_vault.SUPPORTED_PROVIDERS
+    return OutboundOAuthFlowProviderItem(
+        provider=provider,
+        display_name=display_name,
+        callback_url=plan.callback_url,
+        scope=scope,
+        authorize_endpoint=authorize_endpoint,
+        token_endpoint=token_endpoint,
+        revocation_endpoint=revocation_endpoint,
+        extra_authorize_params=extra_authorize_params,
+        is_oidc=is_oidc,
         client_id_env=_env_name(provider, "CLIENT_ID"),
         client_secret_env=_env_name(provider, "CLIENT_SECRET"),
-        token_vault_supported=provider in token_vault.SUPPORTED_PROVIDERS,
+        token_vault_supported=token_vault_supported,
+        token_vault_provider=str(token_vault_provider) if token_vault_supported else None,
     )
 
 
@@ -263,6 +543,7 @@ export type OutboundOAuthProvider = {{
   clientIdEnv: string
   clientSecretEnv: string
   tokenVaultSupported: boolean
+  tokenVaultProvider: string | null
 }}
 
 export const outboundOAuthProviders = [
@@ -431,6 +712,7 @@ import type {{ OutboundOAuthTokenSet }} from "./outbound-oauth-flow"
 export type OutboundOAuthVaultRecord = {{
   userId: string
   provider: string
+  vaultProvider: string
   accessTokenEnc: EncryptedToken
   refreshTokenEnc: EncryptedToken | null
   tokenType: string | null
@@ -450,16 +732,18 @@ export async function encryptOutboundTokenSet(
   provider: string,
   token: OutboundOAuthTokenSet,
   masterKeyRaw: string,
+  vaultProvider: string = provider,
 ): Promise<OutboundOAuthVaultRecord> {{
-  assertTokenVaultProvider(provider)
+  assertTokenVaultProvider(vaultProvider)
   const vault = new TokenVault(await importMasterKey(base64urlDecode(masterKeyRaw)))
-  const accessTokenEnc = await vault.encryptForUser(userId, provider, token.accessToken)
+  const accessTokenEnc = await vault.encryptForUser(userId, vaultProvider, token.accessToken)
   const refreshTokenEnc = token.refreshToken
-    ? await vault.encryptForUser(userId, provider, token.refreshToken)
+    ? await vault.encryptForUser(userId, vaultProvider, token.refreshToken)
     : null
   return {{
     userId,
     provider,
+    vaultProvider,
     accessTokenEnc,
     refreshTokenEnc,
     tokenType: token.tokenType || null,
@@ -524,13 +808,14 @@ export async function decryptOutboundVaultRecord(
   masterKeyRaw: string,
 ): Promise<TokenSet> {{
   const vault = new TokenVault(await importMasterKey(base64urlDecode(masterKeyRaw)))
+  const vaultProvider = record.vaultProvider || record.provider
   const accessToken = await vault.decryptForUser(
     record.userId,
-    record.provider,
+    vaultProvider,
     record.accessTokenEnc,
   )
   const refreshToken = record.refreshTokenEnc
-    ? await vault.decryptForUser(record.userId, record.provider, record.refreshTokenEnc)
+    ? await vault.decryptForUser(record.userId, vaultProvider, record.refreshTokenEnc)
     : null
   return Object.freeze({{
     accessToken,
@@ -573,6 +858,7 @@ export async function refreshOutboundVaultRecord(
         record.provider,
         token,
         masterKeyRaw,
+        record.vaultProvider || record.provider,
       )
     : record
   return {{ token, vaultRecord, refreshed: due, rotated }}
@@ -599,6 +885,7 @@ export async function createOutboundAutoRefreshFetch(
         record.provider,
         newToken,
         masterKeyRaw,
+        record.vaultProvider || record.provider,
       )
       await store.save(next)
     }},
@@ -735,6 +1022,7 @@ export async function mergeOutboundScopeUpgradeToken(
     previousRecord.provider,
     mergedToken,
     masterKeyRaw,
+    previousRecord.vaultProvider || previousRecord.provider,
   )
 }}
 
@@ -785,6 +1073,7 @@ def _provider_entry(item: OutboundOAuthFlowProviderItem) -> str:
     clientIdEnv: "{_ts_string(item.client_id_env)}",
     clientSecretEnv: "{_ts_string(item.client_secret_env)}",
     tokenVaultSupported: {_ts_bool(item.token_vault_supported)},
+    tokenVaultProvider: {_ts_nullable_string(item.token_vault_provider)},
   }}"""
 
 
@@ -906,6 +1195,7 @@ export async function GET(req: Request) {{
     provider.provider,
     token,
     process.env.OAUTH_TOKEN_VAULT_MASTER_KEY!,
+    provider.tokenVaultProvider || provider.provider,
   )
   return Response.json({{
     ok: true,
@@ -964,6 +1254,14 @@ def _env_name(provider: str, suffix: str) -> str:
     return f"OAUTH_{provider.upper()}_{suffix}"
 
 
+def _callback_url(*, base_url: str, callback_path: str, provider: str) -> str:
+    base = base_url.strip().rstrip("/")
+    path = callback_path.strip()
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path.format(provider=provider)}"
+
+
 def _cookie_name(provider: str) -> str:
     return f"outbound_oauth_flow_{provider}"
 
@@ -983,9 +1281,16 @@ def _ts_string(value: str | None) -> str:
 
 
 __all__ = [
+    "OUTBOUND_OAUTH_VENDOR_IDS",
+    "OUTBOUND_OAUTH_VENDOR_ITEMS",
+    "OUTBOUND_OAUTH_VENDORS",
+    "OutboundOAuthVendorCatalogItem",
+    "OutboundOAuthVendorCatalogOptions",
     "OutboundOAuthFlowProviderItem",
     "OutboundOAuthFlowScaffoldOptions",
     "OutboundOAuthFlowScaffoldResult",
+    "get_outbound_oauth_vendor",
     "list_outbound_oauth_flow_providers",
+    "render_outbound_oauth_vendor_catalog",
     "render_outbound_oauth_flow_scaffold",
 ]
