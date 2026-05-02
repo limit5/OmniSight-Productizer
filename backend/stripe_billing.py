@@ -160,6 +160,8 @@ def build_checkout_payload(
         "client_reference_id": tenant_id,
         "metadata[tenant_id]": tenant_id,
         "metadata[user_id]": user_id,
+        "subscription_data[metadata][tenant_id]": tenant_id,
+        "subscription_data[metadata][user_id]": user_id,
     }
     if customer_id:
         payload["customer"] = customer_id

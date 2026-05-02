@@ -72,6 +72,8 @@ class TestCheckoutPayload:
             "client_reference_id": "t-acme",
             "metadata[tenant_id]": "t-acme",
             "metadata[user_id]": "u-1",
+            "subscription_data[metadata][tenant_id]": "t-acme",
+            "subscription_data[metadata][user_id]": "u-1",
             "customer_email": "owner@example.com",
         }]
 

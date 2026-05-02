@@ -14,6 +14,23 @@ import pytest
 from backend import stripe_webhooks as sw
 
 
+class _FakeBillingConn:
+    def __init__(self, tenant_id: str = "") -> None:
+        self.tenant_id = tenant_id
+        self.fetchrow_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fetchrow(self, sql: str, *args: object):
+        self.fetchrow_calls.append((sql, args))
+        if not self.tenant_id:
+            return None
+        return {"tenant_id": self.tenant_id}
+
+    async def execute(self, sql: str, *args: object) -> str:
+        self.execute_calls.append((sql, args))
+        return "INSERT 0 1"
+
+
 @contextmanager
 def _stripe_webhook_secret(secret: str):
     from backend.config import settings
@@ -79,6 +96,72 @@ class TestStripeWebhookHelpers:
             "object": "subscription",
         }
         assert event.data_object["id"] == "sub_123"
+
+    async def test_subscription_state_sync_upserts_metadata_tenant(self) -> None:
+        event = sw.parse_stripe_webhook_event({
+            "id": "evt_123",
+            "type": "customer.subscription.updated",
+            "data": {
+                "object": {
+                    "id": "sub_123",
+                    "object": "subscription",
+                    "customer": "cus_123",
+                    "status": "active",
+                    "current_period_end": 1_700_010_000,
+                    "cancel_at_period_end": False,
+                    "metadata": {"tenant_id": "t-acme"},
+                    "items": {
+                        "data": [{
+                            "price": {"id": "price_pro"},
+                        }],
+                    },
+                },
+            },
+        })
+        conn = _FakeBillingConn()
+
+        synced = await sw.sync_stripe_subscription_state(event, conn=conn)
+
+        assert synced is True
+        assert conn.fetchrow_calls == []
+        assert len(conn.execute_calls) == 1
+        sql, args = conn.execute_calls[0]
+        assert "ON CONFLICT (tenant_id, provider) DO UPDATE" in sql
+        assert args[:8] == (
+            "t-acme",
+            "stripe",
+            "cus_123",
+            "sub_123",
+            "price_pro",
+            "active",
+            1_700_010_000.0,
+            False,
+        )
+
+    async def test_subscription_state_sync_falls_back_to_existing_row(self) -> None:
+        event = sw.parse_stripe_webhook_event({
+            "id": "evt_124",
+            "type": "customer.subscription.deleted",
+            "data": {
+                "object": {
+                    "id": "sub_123",
+                    "object": "subscription",
+                    "customer": "cus_123",
+                    "status": "canceled",
+                    "cancel_at_period_end": True,
+                    "metadata": {},
+                },
+            },
+        })
+        conn = _FakeBillingConn(tenant_id="t-acme")
+
+        synced = await sw.sync_stripe_subscription_state(event, conn=conn)
+
+        assert synced is True
+        assert len(conn.fetchrow_calls) == 1
+        assert conn.fetchrow_calls[0][1] == ("stripe", "sub_123", "cus_123")
+        assert conn.execute_calls[0][1][0] == "t-acme"
+        assert conn.execute_calls[0][1][5] == "canceled"
 
 
 class TestStripeWebhookEndpoint:

@@ -34,6 +34,7 @@ from backend.models import (
 from backend.stripe_webhooks import (
     StripeWebhookEvent,
     parse_stripe_webhook_event,
+    sync_stripe_subscription_state,
     verify_stripe_webhook_signature,
 )
 
@@ -98,8 +99,8 @@ async def stripe_webhook(request: Request):
 
     ``settings.stripe_webhook_secret`` is env/runtime configuration, so
     every worker independently verifies against the same source value
-    without writing module-global state. FS.8.2 only acknowledges and
-    normalizes events; subscription state sync is FS.8.4 scope.
+    without writing module-global state. FS.8.4 subscription lifecycle
+    events are then persisted through PG ``provisioned_billing``.
     """
     secret = settings.stripe_webhook_secret
     if not secret:
@@ -195,12 +196,14 @@ async def _on_email_feedback_event(event: EmailFeedbackEvent) -> None:
 
 
 async def _on_stripe_webhook_event(event: StripeWebhookEvent) -> None:
-    """Record receipt of a verified Stripe event without local state sync."""
+    """Route a verified Stripe event into the FS.8 billing state sync."""
+    synced = await sync_stripe_subscription_state(event)
     logger.info(
-        "stripe_webhook event_id=%s type=%s object=%s",
+        "stripe_webhook event_id=%s type=%s object=%s synced=%s",
         event.event_id,
         event.event_type,
         event.object_type,
+        synced,
     )
 
 
