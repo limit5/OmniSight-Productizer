@@ -87,6 +87,16 @@ from backend.web_sandbox_idle_reaper import (
     IdleReaperError,
     WebSandboxIdleReaper,
 )
+from backend.web_sandbox_resource_limits import (
+    DEFAULT_CPU_LIMIT,
+    DEFAULT_MEMORY_LIMIT_BYTES,
+    DEFAULT_STORAGE_LIMIT_BYTES,
+    ResourceLimitsError,
+    WebPreviewResourceLimits,
+    parse_cpu_limit,
+    parse_memory_bytes,
+    parse_storage_bytes,
+)
 from backend.web_sandbox_pep import (
     WebPreviewPepResult,
     evaluate_first_preview_hold,
@@ -180,6 +190,47 @@ def _build_cf_access_manager() -> CFAccessManager | None:
     return CFAccessManager(config=config)
 
 
+def _build_resource_limits() -> WebPreviewResourceLimits:
+    """Construct a :class:`WebPreviewResourceLimits` from current
+    Settings, falling back to row-spec defaults (2 GiB / 1 CPU /
+    5 GiB) on any malformed env knob.
+
+    The W14.9 row spec defaults work out of the box — operators don't
+    need to set any env knob to get the documented behaviour. Three
+    optional overrides:
+
+      * ``OMNISIGHT_WEB_SANDBOX_MEMORY_LIMIT`` — docker-style size
+        (``2g``, ``512m``, raw bytes).
+      * ``OMNISIGHT_WEB_SANDBOX_CPU_LIMIT`` — fractional CPUs (``1``,
+        ``0.5``, ``2``).
+      * ``OMNISIGHT_WEB_SANDBOX_STORAGE_LIMIT`` — same syntax as
+        memory; ``off`` / ``0`` / ``none`` disables the disk cap (for
+        operators on overlay2-on-ext4 hosts where docker silently
+        ignores ``--storage-opt size=``).
+
+    On any parse failure we log a warning and fall through to the
+    defaults; this preserves the W14.5 / W14.4 fallback shape
+    ("malformed config falls back gracefully") so a single typo in
+    ``.env`` cannot break every preview launch in the fleet.
+    """
+
+    try:
+        settings = Settings()
+        return WebPreviewResourceLimits.from_settings(settings)
+    except ResourceLimitsError as exc:
+        logger.warning(
+            "web_sandbox: resource_limits env knobs malformed — falling "
+            "back to row-spec defaults (2g / 1 cpu / 5g): %s", exc,
+        )
+        return WebPreviewResourceLimits.default()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "web_sandbox: resource_limits Settings load failed — falling "
+            "back to row-spec defaults: %s", exc,
+        )
+        return WebPreviewResourceLimits.default()
+
+
 def _build_idle_reaper(manager: WebSandboxManager) -> WebSandboxIdleReaper | None:
     """Construct a :class:`WebSandboxIdleReaper` from current Settings,
     returning ``None`` when the config is malformed (operator misset
@@ -242,11 +293,13 @@ def get_manager() -> WebSandboxManager:
             manifest = None
         cf_ingress = _build_cf_ingress_manager()
         cf_access = _build_cf_access_manager()
+        resource_limits = _build_resource_limits()
         _manager = WebSandboxManager(
             docker_client=SubprocessDockerClient(),
             manifest=manifest,
             cf_ingress_manager=cf_ingress,
             cf_access_manager=cf_access,
+            resource_limits=resource_limits,
         )
         # W14.5 — start the idle-timeout reaper daemon thread so any
         # sandbox sitting more than ``OMNISIGHT_WEB_SANDBOX_IDLE_TIMEOUT_S``
@@ -377,6 +430,33 @@ class LaunchPreviewRequest(BaseModel):
             "on the operator's email plus the admin allowlist."
         ),
     )
+    memory_limit: str | None = Field(
+        None,
+        description=(
+            "W14.9 — per-launch override for the cgroup RAM cap. "
+            "Docker-style size (``2g``, ``512m``, raw bytes). When "
+            "omitted, the manager applies its operator-wide policy "
+            "(default 2 GiB)."
+        ),
+    )
+    cpu_limit: float | str | None = Field(
+        None,
+        description=(
+            "W14.9 — per-launch override for the cgroup CPU cap. "
+            "Fractional CPUs allowed (``1``, ``0.5``, ``2``). When "
+            "omitted, the manager applies its operator-wide policy "
+            "(default 1 CPU)."
+        ),
+    )
+    storage_limit: str | None = Field(
+        None,
+        description=(
+            "W14.9 — per-launch override for the writable-layer disk "
+            "cap. Docker-style size (``5g``, ``10g``). ``off`` / ``0`` "
+            "/ ``none`` disables. When omitted, the manager applies "
+            "its operator-wide policy (default 5 GiB)."
+        ),
+    )
 
 
 class WebSandboxInstanceResponse(BaseModel):
@@ -491,6 +571,50 @@ async def launch_preview(
         auth_emails.append(operator_email)
     if body.allowed_emails:
         auth_emails.extend(body.allowed_emails)
+    # W14.9: per-launch resource-limit override. ``None`` everywhere
+    # ⇒ defer to the manager's operator-wide policy (the env-knob /
+    # row-spec default chain). Any subset triggers a per-launch
+    # override that *fully* replaces the policy — partial overrides
+    # would otherwise need the caller to know the manager's policy
+    # to compose, which they typically don't.
+    resource_override: WebPreviewResourceLimits | None = None
+    if (
+        body.memory_limit is not None
+        or body.cpu_limit is not None
+        or body.storage_limit is not None
+    ):
+        try:
+            mem_bytes = (
+                parse_memory_bytes(body.memory_limit)
+                if body.memory_limit is not None
+                else DEFAULT_MEMORY_LIMIT_BYTES
+            )
+            cpu_value = (
+                parse_cpu_limit(body.cpu_limit)
+                if body.cpu_limit is not None
+                else DEFAULT_CPU_LIMIT
+            )
+            if body.storage_limit is None:
+                storage_bytes: int | None = DEFAULT_STORAGE_LIMIT_BYTES
+            else:
+                from backend.web_sandbox_resource_limits import (
+                    STORAGE_LIMIT_DISABLED_TOKENS,
+                )
+                if (
+                    isinstance(body.storage_limit, str)
+                    and body.storage_limit.strip().lower()
+                    in STORAGE_LIMIT_DISABLED_TOKENS
+                ):
+                    storage_bytes = None
+                else:
+                    storage_bytes = parse_storage_bytes(body.storage_limit)
+            resource_override = WebPreviewResourceLimits(
+                memory_limit_bytes=mem_bytes,
+                cpu_limit=cpu_value,
+                storage_limit_bytes=storage_bytes,
+            )
+        except ResourceLimitsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     try:
         config = WebSandboxConfig(
             workspace_id=body.workspace_id,
@@ -502,6 +626,7 @@ async def launch_preview(
             container_port=body.container_port,
             env=body.env or {},
             allowed_emails=tuple(auth_emails),
+            resource_limits=resource_override,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

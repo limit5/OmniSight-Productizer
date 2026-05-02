@@ -438,6 +438,16 @@ class DockerClient(Protocol):
         ports: Mapping[int, int],
         env: Mapping[str, str],
         workdir: str,
+        # W14.9 — optional cgroup resource limits applied at docker
+        # run time. ``None`` (the default) preserves the V2 ui_sandbox
+        # behaviour for callers that haven't opted into resource caps.
+        # ``backend.web_sandbox.WebSandboxManager`` always passes them
+        # so every per-workspace web-preview sidecar gets the row's
+        # 2 GiB / 1 CPU / 5 GiB defaults unless the operator overrides.
+        memory_limit_bytes: int | None = None,
+        cpu_limit: float | None = None,
+        storage_limit_bytes: int | None = None,
+        memory_swap_disabled: bool = True,
     ) -> str:  # returns container_id
         ...
 
@@ -506,8 +516,27 @@ class SubprocessDockerClient:
         ports: Mapping[int, int],
         env: Mapping[str, str],
         workdir: str,
+        memory_limit_bytes: int | None = None,
+        cpu_limit: float | None = None,
+        storage_limit_bytes: int | None = None,
+        memory_swap_disabled: bool = True,
     ) -> str:
         argv: list[str] = [self._docker_bin, "run", "-d", "--rm", "--name", name, "-w", workdir]
+        # W14.9 — cgroup resource caps. Lay them out before mounts /
+        # ports so the resulting ``docker run`` command-line is grouped
+        # with the other lifecycle flags (``--rm``, ``--name``) for
+        # easier triage in ``docker events``. None values are skipped
+        # so a caller that opts out (V2 ui_sandbox) keeps the legacy
+        # argv shape.
+        if memory_limit_bytes is not None:
+            argv += ["--memory", str(int(memory_limit_bytes))]
+            if memory_swap_disabled:
+                argv += ["--memory-swap", str(int(memory_limit_bytes))]
+        if cpu_limit is not None:
+            from backend.web_sandbox_resource_limits import format_cpu_arg
+            argv += ["--cpus", format_cpu_arg(float(cpu_limit))]
+        if storage_limit_bytes is not None:
+            argv += ["--storage-opt", f"size={int(storage_limit_bytes)}"]
         for m in mounts:
             src = m["source"]
             dst = m["target"]

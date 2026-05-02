@@ -101,6 +101,7 @@ EXPECTED_ALL = {
     "WebSandboxNotFound",
     "WebSandboxNameConflict",
     "WebSandboxManager",
+    "DEFAULT_RESOURCE_LIMITS",
     "load_image_manifest",
     "format_sandbox_id",
     "format_container_name",
@@ -862,6 +863,12 @@ class FakeDockerClient:
         ports: Mapping[int, int],
         env: Mapping[str, str],
         workdir: str,
+        # W14.9 — accept resource-limit kwargs the manager threads
+        # through. Defaults match the DockerClient Protocol.
+        memory_limit_bytes: int | None = None,
+        cpu_limit: float | None = None,
+        storage_limit_bytes: int | None = None,
+        memory_swap_disabled: bool = True,
     ) -> str:
         if self.run_error is not None:
             raise self.run_error
@@ -877,6 +884,10 @@ class FakeDockerClient:
                 "ports": dict(ports),
                 "env": dict(env),
                 "workdir": workdir,
+                "memory_limit_bytes": memory_limit_bytes,
+                "cpu_limit": cpu_limit,
+                "storage_limit_bytes": storage_limit_bytes,
+                "memory_swap_disabled": memory_swap_disabled,
                 "container_id": cid,
             }
         )
@@ -1796,3 +1807,262 @@ def test_w14_4_config_to_dict_carries_allowed_emails() -> None:
     )
     d = cfg.to_dict()
     assert d["allowed_emails"] == ["op@example.com"]
+
+
+# ── W14.9 — Resource limit cgroup integration ──────────────────────
+
+
+from backend.web_sandbox import DEFAULT_RESOURCE_LIMITS  # noqa: E402
+from backend.web_sandbox_resource_limits import (  # noqa: E402
+    CGROUP_OOM_REASON,
+    DEFAULT_CPU_LIMIT,
+    DEFAULT_MEMORY_LIMIT_BYTES,
+    DEFAULT_STORAGE_LIMIT_BYTES,
+    WebPreviewResourceLimits,
+)
+
+
+def test_w14_9_default_resource_limits_is_row_spec() -> None:
+    """W14.9 row spec literals: 2 GiB / 1 CPU / 5 GiB."""
+
+    assert DEFAULT_RESOURCE_LIMITS.memory_limit_bytes == 2 * 1024**3
+    assert DEFAULT_RESOURCE_LIMITS.cpu_limit == 1.0
+    assert DEFAULT_RESOURCE_LIMITS.storage_limit_bytes == 5 * 1024**3
+
+
+def test_w14_9_manager_default_resource_limits_property() -> None:
+    """Manager exposes its resource_limits via property — the W14.10
+    audit row reads this to record the cgroup contract per-launch."""
+
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        manifest=None,
+        clock=FakeClock(),
+    )
+    assert mgr.resource_limits == DEFAULT_RESOURCE_LIMITS
+
+
+def test_w14_9_manager_accepts_resource_limits_override() -> None:
+    custom = WebPreviewResourceLimits(
+        memory_limit_bytes=4 * 1024**3,
+        cpu_limit=2.0,
+        storage_limit_bytes=10 * 1024**3,
+    )
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        manifest=None,
+        clock=FakeClock(),
+        resource_limits=custom,
+    )
+    assert mgr.resource_limits is custom
+
+
+def test_w14_9_manager_constructor_resource_limits_is_keyword_only() -> None:
+    """Drift guard — resource_limits is keyword-only with default
+    ``None`` so existing callers remain backward-compatible."""
+
+    import inspect
+
+    sig = inspect.signature(WebSandboxManager.__init__)
+    assert "resource_limits" in sig.parameters
+    param = sig.parameters["resource_limits"]
+    assert param.default is None
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_w14_9_manager_rejects_non_limits_type() -> None:
+    with pytest.raises(TypeError):
+        WebSandboxManager(
+            docker_client=FakeDockerClient(),
+            manifest=None,
+            clock=FakeClock(),
+            resource_limits={"memory": 1},  # type: ignore[arg-type]
+        )
+
+
+def test_w14_9_launch_passes_default_limits_to_run_detached(workspace: Path) -> None:
+    mgr, docker, _, _ = _make_manager(workspace)
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    mgr.launch(cfg)
+    call = docker.run_calls[0]
+    assert call["memory_limit_bytes"] == DEFAULT_MEMORY_LIMIT_BYTES
+    assert call["cpu_limit"] == DEFAULT_CPU_LIMIT
+    assert call["storage_limit_bytes"] == DEFAULT_STORAGE_LIMIT_BYTES
+    assert call["memory_swap_disabled"] is True
+
+
+def test_w14_9_launch_passes_manager_override(workspace: Path) -> None:
+    custom = WebPreviewResourceLimits(
+        memory_limit_bytes=4 * 1024**3,
+        cpu_limit=2.0,
+        storage_limit_bytes=None,  # disabled disk cap
+        memory_swap_disabled=False,
+    )
+    mgr = WebSandboxManager(
+        docker_client=FakeDockerClient(),
+        manifest=None,
+        clock=FakeClock(),
+        resource_limits=custom,
+    )
+    docker = mgr._docker  # type: ignore[attr-defined]
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    mgr.launch(cfg)
+    call = docker.run_calls[0]  # type: ignore[attr-defined]
+    assert call["memory_limit_bytes"] == 4 * 1024**3
+    assert call["cpu_limit"] == 2.0
+    assert call["storage_limit_bytes"] is None
+    assert call["memory_swap_disabled"] is False
+
+
+def test_w14_9_per_launch_override_beats_manager_policy(workspace: Path) -> None:
+    """When config carries resource_limits, it supersedes the manager-
+    wide policy (operator-on-call can pin a one-off larger sandbox
+    without rewiring the manager)."""
+
+    mgr, docker, _, _ = _make_manager(workspace)  # default 2g/1/5g
+    one_shot = WebPreviewResourceLimits(
+        memory_limit_bytes=8 * 1024**3,
+        cpu_limit=4.0,
+        storage_limit_bytes=20 * 1024**3,
+    )
+    cfg = WebSandboxConfig(
+        workspace_id="ws-big",
+        workspace_path=str(workspace),
+        resource_limits=one_shot,
+    )
+    mgr.launch(cfg)
+    call = docker.run_calls[0]
+    assert call["memory_limit_bytes"] == 8 * 1024**3
+    assert call["cpu_limit"] == 4.0
+    assert call["storage_limit_bytes"] == 20 * 1024**3
+
+
+def test_w14_9_config_resource_limits_is_keyword_only_default_none() -> None:
+    import inspect
+
+    sig = inspect.signature(WebSandboxConfig.__init__)
+    assert "resource_limits" in sig.parameters
+    assert sig.parameters["resource_limits"].default is None
+
+
+def test_w14_9_config_rejects_non_limits_type() -> None:
+    from pathlib import Path as _P
+
+    with pytest.raises(ValueError):
+        WebSandboxConfig(
+            workspace_id="ws-42",
+            workspace_path=str(_P("/tmp")),
+            resource_limits={"memory": 1},  # type: ignore[arg-type]
+        )
+
+
+def test_w14_9_config_to_dict_carries_resource_limits() -> None:
+    from pathlib import Path as _P
+
+    custom = WebPreviewResourceLimits(memory_limit_bytes=4 * 1024**3)
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(_P("/tmp")),
+        resource_limits=custom,
+    )
+    d = cfg.to_dict()
+    assert d["resource_limits"]["memory_limit_bytes"] == 4 * 1024**3
+
+
+def test_w14_9_config_to_dict_resource_limits_is_none_by_default() -> None:
+    from pathlib import Path as _P
+
+    cfg = WebSandboxConfig(
+        workspace_id="ws-42",
+        workspace_path=str(_P("/tmp")),
+    )
+    assert cfg.to_dict()["resource_limits"] is None
+
+
+def test_w14_9_build_docker_run_spec_includes_limit_keys(workspace: Path) -> None:
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    spec = ws.build_docker_run_spec(cfg, resource_limits=DEFAULT_RESOURCE_LIMITS)
+    assert spec["memory_limit_bytes"] == DEFAULT_MEMORY_LIMIT_BYTES
+    assert spec["cpu_limit"] == DEFAULT_CPU_LIMIT
+    assert spec["storage_limit_bytes"] == DEFAULT_STORAGE_LIMIT_BYTES
+    assert spec["memory_swap_disabled"] is True
+    assert "resource_limits" in spec
+
+
+def test_w14_9_build_docker_run_spec_omits_limit_keys_when_none(
+    workspace: Path,
+) -> None:
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    spec = ws.build_docker_run_spec(cfg, resource_limits=None)
+    assert "memory_limit_bytes" not in spec
+    assert "cpu_limit" not in spec
+    assert "storage_limit_bytes" not in spec
+
+
+def test_w14_9_build_docker_run_spec_rejects_non_limits_type(workspace: Path) -> None:
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    with pytest.raises(TypeError):
+        ws.build_docker_run_spec(cfg, resource_limits={"memory": 1})  # type: ignore[arg-type]
+
+
+def test_w14_9_stop_detects_oom_kill_overrides_reason(workspace: Path) -> None:
+    """When docker.inspect reports OOMKilled=true, stop() records
+    killed_reason='cgroup_oom' regardless of the caller's reason —
+    the kernel verdict is canonical."""
+
+    docker = FakeDockerClient(
+        inspect_payload={"Id": "fake-cid-0001", "State": {"OOMKilled": True}}
+    )
+    mgr, _, _, _ = _make_manager(workspace, docker=docker)
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    mgr.launch(cfg)
+    stopped = mgr.stop("ws-42", reason="idle_timeout")
+    assert stopped.killed_reason == CGROUP_OOM_REASON
+    joined = " | ".join(stopped.warnings)
+    assert "cgroup_oom_detected" in joined
+
+
+def test_w14_9_stop_no_oom_keeps_caller_reason(workspace: Path) -> None:
+    """Default inspect payload (OOMKilled missing) ⇒ caller's reason
+    survives — backward compat with W14.5 idle reaper."""
+
+    mgr, _, _, _ = _make_manager(workspace)  # default inspect: no OOMKilled
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    mgr.launch(cfg)
+    stopped = mgr.stop("ws-42", reason="idle_timeout")
+    assert stopped.killed_reason == "idle_timeout"
+
+
+def test_w14_9_stop_oom_with_no_caller_reason_still_records_oom(
+    workspace: Path,
+) -> None:
+    docker = FakeDockerClient(
+        inspect_payload={"Id": "fake-cid-0001", "State": {"OOMKilled": True}}
+    )
+    mgr, _, _, _ = _make_manager(workspace, docker=docker)
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    mgr.launch(cfg)
+    stopped = mgr.stop("ws-42")  # no reason
+    assert stopped.killed_reason == CGROUP_OOM_REASON
+
+
+def test_w14_9_stop_oom_inspect_failure_falls_through_silently(
+    workspace: Path,
+) -> None:
+    """Inspect raising during OOM check must NOT block the local stop —
+    a transient docker daemon hiccup mid-stop is more likely than an
+    actual OOM-kill, and we'd rather record the caller's reason than
+    fabricate one."""
+
+    class FlakyInspectDocker(FakeDockerClient):
+        def inspect(self, container_id):  # type: ignore[no-untyped-def]
+            raise RuntimeError("daemon transient")
+
+    docker = FlakyInspectDocker()
+    mgr, _, _, _ = _make_manager(workspace, docker=docker)
+    cfg = WebSandboxConfig(workspace_id="ws-42", workspace_path=str(workspace))
+    mgr.launch(cfg)
+    stopped = mgr.stop("ws-42", reason="operator_request")
+    assert stopped.status == WebSandboxStatus.stopped
+    assert stopped.killed_reason == "operator_request"
+

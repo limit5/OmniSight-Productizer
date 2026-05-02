@@ -948,3 +948,148 @@ def test_w14_8_evaluator_forwards_git_ref_and_container_port(
     call = recorder.calls[0]
     assert call["git_ref"] == "feature/pretty"
     assert call["container_port"] == 3000
+
+
+# ─────────────── W14.9 — Resource limit cgroup wiring ───────────────
+
+
+def test_w14_9_build_resource_limits_returns_default_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the three OMNISIGHT_WEB_SANDBOX_* env knobs are absent,
+    _build_resource_limits returns the row-spec default (2g/1/5g)."""
+
+    monkeypatch.setenv("OMNISIGHT_WEB_SANDBOX_MEMORY_LIMIT", "")
+    monkeypatch.setenv("OMNISIGHT_WEB_SANDBOX_CPU_LIMIT", "")
+    monkeypatch.setenv("OMNISIGHT_WEB_SANDBOX_STORAGE_LIMIT", "")
+
+    from backend.web_sandbox_resource_limits import WebPreviewResourceLimits
+
+    limits = web_sandbox_router._build_resource_limits()
+    assert limits == WebPreviewResourceLimits.default()
+
+
+def test_w14_9_build_resource_limits_respects_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_WEB_SANDBOX_MEMORY_LIMIT", "4g")
+    monkeypatch.setenv("OMNISIGHT_WEB_SANDBOX_CPU_LIMIT", "2")
+    monkeypatch.setenv("OMNISIGHT_WEB_SANDBOX_STORAGE_LIMIT", "10g")
+
+    limits = web_sandbox_router._build_resource_limits()
+    assert limits.memory_limit_bytes == 4 * 1024**3
+    assert limits.cpu_limit == 2.0
+    assert limits.storage_limit_bytes == 10 * 1024**3
+
+
+def test_w14_9_build_resource_limits_falls_back_on_malformed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed env knob ⇒ logs + falls back to defaults rather than
+    500'ing every launch — same gracefully-degrade pattern as W14.5
+    idle reaper / W14.4 CF Access."""
+
+    monkeypatch.setenv("OMNISIGHT_WEB_SANDBOX_MEMORY_LIMIT", "2x")  # bogus
+    from backend.web_sandbox_resource_limits import WebPreviewResourceLimits
+
+    limits = web_sandbox_router._build_resource_limits()
+    assert limits == WebPreviewResourceLimits.default()
+
+
+def test_w14_9_build_resource_limits_storage_disabled_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OMNISIGHT_WEB_SANDBOX_STORAGE_LIMIT=off disables --storage-opt
+    for operators on overlay2-on-ext4 hosts."""
+
+    monkeypatch.setenv("OMNISIGHT_WEB_SANDBOX_STORAGE_LIMIT", "off")
+    limits = web_sandbox_router._build_resource_limits()
+    assert limits.storage_limit_bytes is None
+
+
+def test_w14_9_post_response_carries_resource_limits_in_config(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """When the request body specifies a resource override, it round-
+    trips through to the response body's config block."""
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={
+            "workspace_id": "ws-42",
+            "workspace_path": str(tmp_path),
+            "memory_limit": "3g",
+            "cpu_limit": 0.5,
+            "storage_limit": "8g",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    rl = body["config"]["resource_limits"]
+    assert rl is not None
+    assert rl["memory_limit_bytes"] == 3 * 1024**3
+    assert rl["cpu_limit"] == 0.5
+    assert rl["storage_limit_bytes"] == 8 * 1024**3
+
+
+def test_w14_9_post_response_resource_limits_none_by_default(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """Without per-launch override, config.resource_limits is null
+    (manager-wide policy applies; the manager's wiring is asserted
+    in test_web_sandbox.py)."""
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={"workspace_id": "ws-42", "workspace_path": str(tmp_path)},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["config"]["resource_limits"] is None
+
+
+def test_w14_9_post_rejects_malformed_memory_limit(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={
+            "workspace_id": "ws-42",
+            "workspace_path": str(tmp_path),
+            "memory_limit": "2x",
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_w14_9_post_rejects_malformed_cpu_limit(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={
+            "workspace_id": "ws-42",
+            "workspace_path": str(tmp_path),
+            "cpu_limit": "abc",
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_w14_9_post_storage_disabled_token(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """Per-launch storage_limit='off' disables the disk cap on this
+    one launch — useful when an operator on overlay2-on-ext4 launches
+    a one-off sandbox and knows the host can't enforce."""
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={
+            "workspace_id": "ws-42",
+            "workspace_path": str(tmp_path),
+            "storage_limit": "off",
+        },
+    )
+    assert resp.status_code == 200
+    rl = resp.json()["config"]["resource_limits"]
+    assert rl["storage_limit_bytes"] is None

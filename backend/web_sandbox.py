@@ -142,6 +142,15 @@ from backend.cf_access import (
     CFAccessError as _CFAccessError,
     CFAccessManager as _CFAccessManager,
 )
+# W14.9 — cgroup resource limits. A frozen value object that ships
+# with row-spec defaults (2 GiB RAM / 1 CPU / 5 GiB disk) and renders
+# to the docker-run argv extension at launch time. Per-launch override
+# is via :attr:`WebSandboxConfig.resource_limits`; operator-wide policy
+# lives in :class:`backend.web_sandbox_resource_limits.WebPreviewResourceLimits.from_settings`.
+from backend.web_sandbox_resource_limits import (
+    CGROUP_OOM_REASON as _CGROUP_OOM_REASON,
+    WebPreviewResourceLimits as _WebPreviewResourceLimits,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +178,7 @@ __all__ = [
     "WebSandboxNotFound",
     "WebSandboxNameConflict",
     "WebSandboxManager",
+    "DEFAULT_RESOURCE_LIMITS",
     "load_image_manifest",
     "format_sandbox_id",
     "format_container_name",
@@ -258,6 +268,13 @@ MANIFEST_ABSOLUTE_IN_CONTAINER = "/etc/omnisight/web-preview-manifest.json"
 #: Hard cap on retained log bytes per instance — matches
 #: :data:`backend.ui_sandbox.MAX_LOG_CHARS`.
 MAX_LOG_CHARS = 200_000
+
+#: Module-level default resource limits applied to every web-preview
+#: sidecar that does not carry an explicit
+#: :attr:`WebSandboxConfig.resource_limits` override. Matches the
+#: W14.9 row spec literals: 2 GiB RAM / 1 CPU / 5 GiB writable-layer
+#: disk. Frozen — consumers receive a single shared instance.
+DEFAULT_RESOURCE_LIMITS = _WebPreviewResourceLimits.default()
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -409,6 +426,15 @@ class WebSandboxConfig:
     # behaviour). The router auto-prepends the launching operator's
     # email so a default launch always at least authorises the caller.
     allowed_emails: tuple[str, ...] = ()
+    # W14.9 — cgroup hard caps for the sidecar. ``None`` means "use
+    # the manager's default", which is :data:`DEFAULT_RESOURCE_LIMITS`
+    # (2 GiB / 1 CPU / 5 GiB) unless the manager was constructed with
+    # an explicit operator-policy override. Per-launch override is
+    # rare — almost every caller wants the row's defaults — but the
+    # field exists so the W14.10 audit row can record exactly what the
+    # cgroup contract was when launch hit docker, even if the operator
+    # later flips the manager-wide default.
+    resource_limits: _WebPreviewResourceLimits | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.workspace_id, str) or not self.workspace_id.strip():
@@ -495,6 +521,16 @@ class WebSandboxConfig:
             if stripped:
                 cleaned.append(stripped)
         object.__setattr__(self, "allowed_emails", tuple(cleaned))
+        # W14.9: validate resource_limits. ``None`` ⇒ defer to manager
+        # default at launch time. Reject every other type so an
+        # accidental dict / mapping at the call site fails fast.
+        if self.resource_limits is not None and not isinstance(
+            self.resource_limits, _WebPreviewResourceLimits
+        ):
+            raise ValueError(
+                "resource_limits must be WebPreviewResourceLimits or None: "
+                f"got {type(self.resource_limits).__name__}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -512,6 +548,10 @@ class WebSandboxConfig:
             "startup_timeout_s": float(self.startup_timeout_s),
             "stop_timeout_s": float(self.stop_timeout_s),
             "allowed_emails": list(self.allowed_emails),
+            "resource_limits": (
+                None if self.resource_limits is None
+                else self.resource_limits.to_dict()
+            ),
         }
 
 
@@ -841,14 +881,17 @@ def build_composite_command(config: WebSandboxConfig) -> tuple[str, ...]:
 
 
 def build_docker_run_spec(
-    config: WebSandboxConfig, manifest: WebPreviewManifest | None = None
+    config: WebSandboxConfig,
+    manifest: WebPreviewManifest | None = None,
+    *,
+    resource_limits: _WebPreviewResourceLimits | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic dict describing the ``docker run`` invocation.
 
-    Pure function — same ``(config, manifest)`` always yields the
-    same dict. Used by :class:`WebSandboxManager` to assemble the
-    container spec; tests assert the exact shape without stubbing
-    docker.
+    Pure function — same ``(config, manifest, resource_limits)``
+    always yields the same dict. Used by :class:`WebSandboxManager`
+    to assemble the container spec; tests assert the exact shape
+    without stubbing docker.
 
     When ``manifest`` is provided, the spec cross-checks
     ``config.workdir == manifest.workdir`` and
@@ -859,12 +902,26 @@ def build_docker_run_spec(
     When ``manifest`` is ``None`` the spec is emitted with the
     caller's literal config values; this is the test-time path
     where the manifest may not exist yet.
+
+    W14.9 — when ``resource_limits`` is supplied (non-None), the
+    spec includes ``memory_limit_bytes`` / ``cpu_limit`` /
+    ``storage_limit_bytes`` / ``memory_swap_disabled`` keys so the
+    docker-run argv carries the cgroup caps. A ``None`` value
+    omits those keys entirely so the container starts with no caps
+    (test/dev path; production always passes the row-spec defaults
+    via :attr:`WebSandboxManager._resource_limits`).
     """
 
     if not isinstance(config, WebSandboxConfig):
         raise TypeError("config must be a WebSandboxConfig")
     if manifest is not None and not isinstance(manifest, WebPreviewManifest):
         raise TypeError("manifest must be a WebPreviewManifest or None")
+    if resource_limits is not None and not isinstance(
+        resource_limits, _WebPreviewResourceLimits
+    ):
+        raise TypeError(
+            "resource_limits must be WebPreviewResourceLimits or None"
+        )
 
     if manifest is not None:
         if config.workdir != manifest.workdir:
@@ -898,7 +955,7 @@ def build_docker_run_spec(
     if config.host_port is not None:
         ports[config.host_port] = config.container_port
 
-    return {
+    spec: dict[str, Any] = {
         "schema_version": WEB_SANDBOX_SCHEMA_VERSION,
         "image": config.image_tag,
         "container_name": format_container_name(config.workspace_id),
@@ -908,6 +965,16 @@ def build_docker_run_spec(
         "env": dict(sorted(env.items())),
         "workdir": config.workdir,
     }
+    if resource_limits is not None:
+        spec["memory_limit_bytes"] = int(resource_limits.memory_limit_bytes)
+        spec["cpu_limit"] = float(resource_limits.cpu_limit)
+        spec["storage_limit_bytes"] = (
+            None if resource_limits.storage_limit_bytes is None
+            else int(resource_limits.storage_limit_bytes)
+        )
+        spec["memory_swap_disabled"] = bool(resource_limits.memory_swap_disabled)
+        spec["resource_limits"] = resource_limits.to_dict()
+    return spec
 
 
 def detect_dev_server_ready(log_text: str) -> bool:
@@ -956,6 +1023,7 @@ class WebSandboxManager:
         port_range: tuple[int, int] = DEFAULT_HOST_PORT_RANGE,
         cf_ingress_manager: _CFIngressManager | None = None,
         cf_access_manager: _CFAccessManager | None = None,
+        resource_limits: _WebPreviewResourceLimits | None = None,
     ) -> None:
         self._docker = docker_client
         self._manifest = manifest
@@ -963,6 +1031,19 @@ class WebSandboxManager:
         self._event_cb = event_cb
         self._preview_host = preview_host
         self._port_range = port_range
+        # W14.9: operator-policy resource caps. None ⇒ row-spec
+        # defaults (2 GiB / 1 CPU / 5 GiB). Per-launch override via
+        # :attr:`WebSandboxConfig.resource_limits` takes precedence.
+        if resource_limits is not None and not isinstance(
+            resource_limits, _WebPreviewResourceLimits
+        ):
+            raise TypeError(
+                "resource_limits must be WebPreviewResourceLimits or None"
+            )
+        self._resource_limits = (
+            resource_limits if resource_limits is not None
+            else DEFAULT_RESOURCE_LIMITS
+        )
         # W14.3: optional CF ingress manager. ``None`` ⇒ no public
         # https URL is provisioned and ``ingress_url`` stays ``None``
         # (W14.2 dev path). When set, launch/stop call into the
@@ -989,6 +1070,14 @@ class WebSandboxManager:
         ``None`` when running in test/dev mode without one."""
 
         return self._manifest
+
+    @property
+    def resource_limits(self) -> _WebPreviewResourceLimits:
+        """Operator-policy cgroup caps applied at launch when the
+        per-config override is absent. Frozen — return a single
+        shared instance per manager."""
+
+        return self._resource_limits
 
     # ─────────────── Public API ───────────────
 
@@ -1056,7 +1145,17 @@ class WebSandboxManager:
             )
             self._instances[config.workspace_id] = pending
 
-            spec = build_docker_run_spec(config, self._manifest)
+            # W14.9: resolve effective resource limits — per-config
+            # override beats manager-wide policy. The result is folded
+            # into the docker-run argv via run_detached's keyword args.
+            effective_limits = (
+                config.resource_limits
+                if config.resource_limits is not None
+                else self._resource_limits
+            )
+            spec = build_docker_run_spec(
+                config, self._manifest, resource_limits=effective_limits
+            )
             try:
                 container_id = self._docker.run_detached(
                     image=spec["image"],
@@ -1066,6 +1165,10 @@ class WebSandboxManager:
                     ports=spec["ports"],
                     env=spec["env"],
                     workdir=spec["workdir"],
+                    memory_limit_bytes=spec.get("memory_limit_bytes"),
+                    cpu_limit=spec.get("cpu_limit"),
+                    storage_limit_bytes=spec.get("storage_limit_bytes"),
+                    memory_swap_disabled=spec.get("memory_swap_disabled", True),
                 )
             except Exception as exc:
                 if _is_name_conflict(exc):
@@ -1236,6 +1339,23 @@ class WebSandboxManager:
             )
             self._instances[workspace_id] = stopping
             warnings: list[str] = list(instance.warnings)
+            # W14.9: detect cgroup OOM-kill BEFORE docker stop+rm tears
+            # down the container — the inspect payload disappears with
+            # ``docker rm`` so this is our only window. ``State.OOMKilled``
+            # is True iff the kernel oom-killer fired because the
+            # container exceeded its --memory cap. We treat that as a
+            # stronger reason than whatever the caller passed (e.g. the
+            # idle reaper might call stop(reason="idle_timeout") on a
+            # container that actually died of OOM minutes ago).
+            oom_detected = self._inspect_oom_killed(instance.container_id)
+            if oom_detected:
+                # Override caller-supplied reason so the audit trail
+                # reflects the kernel verdict, not the manager's guess.
+                reason = _CGROUP_OOM_REASON
+                warnings.append(
+                    "cgroup_oom_detected: container exceeded memory limit "
+                    "before stop()"
+                )
             if instance.container_id:
                 try:
                     self._docker.stop(
@@ -1386,6 +1506,36 @@ class WebSandboxManager:
         if isinstance(cid, str) and cid:
             return cid
         return None
+
+    def _inspect_oom_killed(self, container_id: str | None) -> bool:
+        """Return True iff docker reports the container was OOM-killed.
+
+        W14.9: docker's ``inspect`` payload carries
+        ``State.OOMKilled = true`` when the kernel oom-killer fired
+        because the container's cgroup hit its --memory cap. We read
+        this on the way out of :meth:`stop` so the killed_reason on
+        the final instance reflects what actually happened, not what
+        the caller guessed. Best-effort — any inspect error returns
+        False (no false positives — better to record the caller's
+        reason than make up a kernel event).
+        """
+
+        if not container_id:
+            return False
+        try:
+            data = self._docker.inspect(container_id)
+        except Exception as exc:  # pragma: no cover - inspect is best-effort
+            logger.warning(
+                "web_sandbox: oom-detection inspect failed for %s: %s",
+                container_id, exc,
+            )
+            return False
+        if not data:
+            return False
+        state = data.get("State") if isinstance(data, Mapping) else None
+        if not isinstance(state, Mapping):
+            return False
+        return bool(state.get("OOMKilled"))
 
     def _emit(self, event_type: str, instance: WebSandboxInstance) -> None:
         if self._event_cb is None:

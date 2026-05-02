@@ -488,6 +488,45 @@ class Settings(BaseSettings):
     web_sandbox_idle_timeout_s: float = 1800.0
     web_sandbox_reap_interval_s: float = 60.0
 
+    # ── W14.9 — Live web-preview cgroup resource limits ──
+    # Hard caps applied at ``docker run`` time on every per-workspace
+    # web-preview sidecar. Defaults match the W14.9 row spec: 2 GiB
+    # RAM / 1 CPU / 5 GiB writable-layer disk. Operators don't need to
+    # set these knobs to get the documented behaviour — leaving them
+    # empty falls through to the row-spec defaults.
+    #
+    # ``web_sandbox_memory_limit`` — docker-style size (``2g``,
+    # ``512m``, raw bytes). The launcher passes ``--memory <bytes>``
+    # plus ``--memory-swap <bytes>`` (set equal) to disable swap-based
+    # cap escape. Range floor 64 MiB, ceiling 64 GiB.
+    #
+    # ``web_sandbox_cpu_limit`` — fractional CPU count (``1``,
+    # ``0.5``, ``2``). Mapped to ``--cpus N``. Range floor 0.05,
+    # ceiling 64.
+    #
+    # ``web_sandbox_storage_limit`` — docker-style size for the
+    # container's writable layer; passed as ``--storage-opt size=``.
+    # **Caveat**: docker only honours this on storage drivers that
+    # support per-container quotas (overlay2 with xfs project quotas,
+    # devicemapper, btrfs). On overlay2-on-ext4 (most dev boxes) the
+    # cap is silently ignored — operators on those hosts can set this
+    # to ``off`` / ``0`` / ``none`` to skip the flag entirely so the
+    # spec doesn't lie about enforcement. Range floor 256 MiB,
+    # ceiling 256 GiB.
+    #
+    # Module-global state audit (Step 1, type-1): all three fields are
+    # immutable Settings literals derived once at process boot from
+    # env / .env — every uvicorn worker derives the same
+    # :class:`WebPreviewResourceLimits` from the same source so the
+    # cgroup contract is identical across workers without any in-
+    # process cache. A misconfigured value (e.g. ``2x``) raises
+    # :class:`backend.web_sandbox_resource_limits.ResourceLimitsError`
+    # at construction; the router catches that and falls back to row-
+    # spec defaults rather than 500'ing every launch.
+    web_sandbox_memory_limit: str = ""    # default "2g"
+    web_sandbox_cpu_limit: str = ""       # default "1"
+    web_sandbox_storage_limit: str = ""   # default "5g"; "off" disables
+
     # O8 (#271): orchestration execution mode. "monolith" keeps every
     # agent run going through the LangGraph StateGraph in-process (legacy
     # path since v0.1.0). "distributed" routes the same run through
