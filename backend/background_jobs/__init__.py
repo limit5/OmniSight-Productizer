@@ -13,6 +13,14 @@ from backend.background_jobs.base import (
     InvalidBackgroundJobTokenError,
     MissingBackgroundJobScopeError,
 )
+from backend.background_jobs.definitions import (
+    BACKGROUND_JOB_DEFINITION_IDS,
+    BACKGROUND_JOB_DEFINITION_ITEMS,
+    BACKGROUND_JOB_DEFINITIONS,
+    BackgroundJobDefinition,
+    get_background_job_definition,
+    list_background_job_definitions,
+)
 
 
 def list_providers() -> list[str]:
@@ -46,8 +54,14 @@ __all__ = [
     "BackgroundJobRequest",
     "BackgroundJobResult",
     "CronDescriptor",
+    "BACKGROUND_JOB_DEFINITION_IDS",
+    "BACKGROUND_JOB_DEFINITION_ITEMS",
+    "BACKGROUND_JOB_DEFINITIONS",
+    "BackgroundJobDefinition",
     "InvalidBackgroundJobTokenError",
     "MissingBackgroundJobScopeError",
+    "get_background_job_definition",
     "get_adapter",
+    "list_background_job_definitions",
     "list_providers",
 ]
