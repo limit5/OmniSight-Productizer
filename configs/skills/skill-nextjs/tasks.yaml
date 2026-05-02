@@ -69,6 +69,35 @@ tasks:
     artifacts: [nx_trpc]
     estimated_hours: 2
 
+  - id: nx-prisma
+    name: "Prisma data layer"
+    description: >
+      When PRISMA=on, render `prisma/schema.prisma` plus `server/db.ts`.
+      The client helper follows the standard Next.js dev-HMR globalThis
+      pattern; production workers intentionally keep separate pools.
+    depends_on: [nx-scaffold-init]
+    artifacts: [nx_prisma]
+    estimated_hours: 2
+
+  - id: nx-resend
+    name: "Resend email route"
+    description: >
+      When RESEND=on, render `server/email.ts` and `app/api/contact`.
+      With PRISMA=on the route also records contact submissions through
+      the generated Prisma client.
+    depends_on: [nx-scaffold-init]
+    artifacts: [nx_resend]
+    estimated_hours: 1
+
+  - id: nx-fs71-bundle
+    name: "FS.7.1 full-stack bundle"
+    description: >
+      Contract render for Next.js + Prisma + Auth.js + tRPC + Resend.
+      Uses AUTH=nextauth, TRPC=on, PRISMA=on, RESEND=on, and target=both.
+    depends_on: [nx-auth-nextauth, nx-trpc, nx-prisma, nx-resend]
+    artifacts: [nx_fs71_bundle]
+    estimated_hours: 1
+
   - id: nx-build-vercel
     name: "Vercel build preset"
     description: >
@@ -143,6 +172,7 @@ tasks:
       - nx-components
       - nx-auth-nextauth
       - nx-api-routes
+      - nx-fs71-bundle
       - nx-build-vercel
       - nx-build-cloudflare
       - nx-playwright

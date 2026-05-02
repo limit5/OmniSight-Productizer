@@ -36,6 +36,8 @@ from backend.nextjs_scaffolder import (
     ScaffoldOptions,
     _SCAFFOLDS_DIR,
     _SKILL_DIR,
+    _PRISMA_ONLY_FILES,
+    _RESEND_ONLY_FILES,
     _TRPC_ONLY_FILES,
     _render_context,
     dry_run_deploy,
@@ -58,6 +60,8 @@ def _default_opts(**overrides) -> ScaffoldOptions:
         project_name="pilot-app",
         auth="nextauth",
         trpc=False,
+        prisma=False,
+        resend=False,
         target="both",
         compliance=True,
     )
@@ -102,7 +106,7 @@ class TestSkillPackRegistry:
         kws = set(info.manifest.keywords)
         # "w6" marks the pilot milestone; "pilot" + "turbopack" make the
         # pack findable by operators debugging the workspace-root panic.
-        assert {"pilot", "w6", "turbopack", "nextjs"}.issubset(kws)
+        assert {"pilot", "w6", "turbopack", "nextjs", "fs-7-1"}.issubset(kws)
 
     def test_validate_pack_helper(self):
         result = validate_pack()
@@ -176,10 +180,52 @@ class TestScaffoldRender:
         assert (project_dir / "server" / "trpc.ts").is_file()
         assert (project_dir / "app" / "api" / "trpc" / "[trpc]" / "route.ts").is_file()
 
+    def test_package_json_branches_on_prisma(self, project_dir):
+        render_project(project_dir, _default_opts(prisma=True))
+        pkg = json.loads((project_dir / "package.json").read_text())
+        assert "@prisma/client" in pkg["dependencies"]
+        assert "prisma" in pkg["devDependencies"]
+        assert "db:generate" in pkg["scripts"]
+        assert (project_dir / "prisma" / "schema.prisma").is_file()
+        assert (project_dir / "server" / "db.ts").is_file()
+
+    def test_package_json_branches_on_resend(self, project_dir):
+        render_project(project_dir, _default_opts(resend=True))
+        pkg = json.loads((project_dir / "package.json").read_text())
+        assert "resend" in pkg["dependencies"]
+        assert (project_dir / "server" / "email.ts").is_file()
+        assert (project_dir / "app" / "api" / "contact" / "route.ts").is_file()
+
+    def test_fs71_fullstack_bundle(self, project_dir):
+        opts = _default_opts(auth="nextauth", trpc=True, prisma=True, resend=True)
+        render_project(project_dir, opts)
+        pkg = json.loads((project_dir / "package.json").read_text())
+        for dep in ("next-auth", "@trpc/server", "@prisma/client", "resend"):
+            assert dep in pkg["dependencies"]
+        assert (project_dir / "auth" / "nextauth.config.ts").is_file()
+        assert (project_dir / "server" / "trpc.ts").is_file()
+        assert (project_dir / "server" / "db.ts").is_file()
+        assert (project_dir / "server" / "email.ts").is_file()
+        contact = (project_dir / "app" / "api" / "contact" / "route.ts").read_text()
+        assert "sendContactEmail" in contact
+        assert "db.message.create" in contact
+
     def test_trpc_off_skips_trpc_files(self, project_dir):
         render_project(project_dir, _default_opts(trpc=False))
         for rel in _TRPC_ONLY_FILES:
             assert not (project_dir / rel).exists(), f"{rel} leaked through"
+
+    def test_prisma_off_skips_prisma_files(self, project_dir):
+        render_project(project_dir, _default_opts(prisma=False))
+        for rel in _PRISMA_ONLY_FILES:
+            rendered_rel = rel.removesuffix(".j2")
+            assert not (project_dir / rendered_rel).exists(), f"{rendered_rel} leaked through"
+
+    def test_resend_off_skips_resend_files(self, project_dir):
+        render_project(project_dir, _default_opts(resend=False))
+        for rel in _RESEND_ONLY_FILES:
+            rendered_rel = rel.removesuffix(".j2")
+            assert not (project_dir / rendered_rel).exists(), f"{rendered_rel} leaked through"
 
     def test_auth_nextauth_skips_clerk_files(self, project_dir):
         render_project(project_dir, _default_opts(auth="nextauth"))

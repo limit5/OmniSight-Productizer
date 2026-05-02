@@ -23,10 +23,11 @@ name: skill-nextjs
 description: >
   Next.js 16 App Router pilot skill pack. Generates a production-ready
   web project with Server/Client Components, next-auth OR Clerk auth
-  templates, API Routes + optional tRPC, dual-target build for Vercel
-  and Cloudflare Pages, Playwright E2E and vitest unit skeletons, and
-  WCAG / GDPR / SPDX compliance gates enabled by default. Validates the
-  W0-W5 web framework (pilot skill, mirrors D1/D29 pattern).
+  templates, API Routes + optional tRPC, optional Prisma and Resend
+  full-stack bundle, dual-target build for Vercel and Cloudflare Pages,
+  Playwright E2E and vitest unit skeletons, and WCAG / GDPR / SPDX
+  compliance gates enabled by default. Validates the W0-W5 web framework
+  (pilot skill, mirrors D1/D29 pattern).
 version: "1.0.0"
 author: "OmniSight Productizer"
 license: "Apache-2.0"
@@ -68,6 +69,9 @@ keywords:
   - next-auth
   - clerk
   - trpc
+  - prisma
+  - resend
+  - fs-7-1
   - vercel
   - cloudflare-pages
   - playwright

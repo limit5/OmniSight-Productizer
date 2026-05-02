@@ -61,8 +61,9 @@ _TARGET_CHOICES = ("vercel", "cloudflare", "both")
 
 _TEMPLATE_SUFFIX = ".j2"
 
-# Files that only make sense for one auth / trpc / target mode. The
-# scaffolder skips the irrelevant ones to keep the rendered tree clean.
+# Files that only make sense for one auth / trpc / prisma / resend /
+# target mode. The scaffolder skips the irrelevant ones to keep the
+# rendered tree clean.
 _AUTH_ONLY_FILES: dict[str, str] = {
     "auth/nextauth.config.ts":       "nextauth",
     "auth/middleware.nextauth.ts":   "nextauth",
@@ -75,6 +76,16 @@ _TRPC_ONLY_FILES: frozenset[str] = frozenset({
     "server/trpc.ts",
     "server/trpc.client.tsx",
     "app/api/trpc/[trpc]/route.ts",
+})
+
+_PRISMA_ONLY_FILES: frozenset[str] = frozenset({
+    "prisma/schema.prisma.j2",
+    "server/db.ts",
+})
+
+_RESEND_ONLY_FILES: frozenset[str] = frozenset({
+    "server/email.ts",
+    "app/api/contact/route.ts.j2",
 })
 
 _TARGET_ONLY_FILES: dict[str, str] = {
@@ -93,6 +104,8 @@ class ScaffoldOptions:
     project_name: str
     auth: str = "nextauth"         # nextauth | clerk | none
     trpc: bool = False
+    prisma: bool = False
+    resend: bool = False
     target: str = "both"           # vercel | cloudflare | both
     compliance: bool = True
     backend_url: str = "http://localhost:8000"
@@ -151,6 +164,12 @@ def _should_skip(rel_path: str, opts: ScaffoldOptions) -> bool:
     # tRPC-gated files
     if rel_path in _TRPC_ONLY_FILES and not opts.trpc:
         return True
+    # Prisma-gated files
+    if rel_path in _PRISMA_ONLY_FILES and not opts.prisma:
+        return True
+    # Resend-gated files
+    if rel_path in _RESEND_ONLY_FILES and not opts.resend:
+        return True
     # Target-gated build configs
     for marker, required in _TARGET_ONLY_FILES.items():
         if rel_path == marker and opts.target not in (required, "both"):
@@ -182,6 +201,8 @@ def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
         "project_name": opts.project_name,
         "auth": opts.auth,
         "trpc": opts.trpc,
+        "prisma": opts.prisma,
+        "resend": opts.resend,
         "target": opts.target,
         "compliance": opts.compliance,
         "backend_url": opts.backend_url,
@@ -366,6 +387,8 @@ def pilot_report(
             "project_name": options.project_name,
             "auth": options.auth,
             "trpc": options.trpc,
+            "prisma": options.prisma,
+            "resend": options.resend,
             "target": options.target,
             "compliance": options.compliance,
         },

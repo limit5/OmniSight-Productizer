@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "next dev",
     "dev:turbo": "next dev --turbopack",
-    "build": "next build",
+    "build": "next build"{% if prisma %},
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev"{% endif %},
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
@@ -18,7 +20,8 @@
   "dependencies": {
     "next": "^16.0.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"{% if auth == "nextauth" %},
+    "react-dom": "^19.0.0"{% if prisma %},
+    "@prisma/client": "^6.0.0"{% endif %}{% if auth == "nextauth" %},
     "next-auth": "^5.0.0"{% endif %}{% if auth == "clerk" %},
     "@clerk/nextjs": "^6.0.0"{% endif %}{% if trpc %},
     "@trpc/server": "^11.0.0",
@@ -26,7 +29,8 @@
     "@trpc/react-query": "^11.0.0",
     "@trpc/next": "^11.0.0",
     "@tanstack/react-query": "^5.0.0",
-    "zod": "^3.23.0"{% endif %}
+    "zod": "^3.23.0"{% endif %}{% if resend %},
+    "resend": "^4.0.0"{% endif %}
   },
   "devDependencies": {
     "typescript": "^5.6.0",
@@ -40,7 +44,8 @@
     "@testing-library/react": "^16.0.0",
     "@testing-library/jest-dom": "^6.5.0",
     "jsdom": "^25.0.0",
-    "@playwright/test": "^1.48.0"{% if target in ["cloudflare", "both"] %},
+    "@playwright/test": "^1.48.0"{% if prisma %},
+    "prisma": "^6.0.0"{% endif %}{% if target in ["cloudflare", "both"] %},
     "@cloudflare/next-on-pages": "^1.13.0",
     "wrangler": "^3.80.0"{% endif %}{% if target in ["vercel", "both"] %},
     "vercel": "^37.0.0"{% endif %}
