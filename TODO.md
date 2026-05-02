@@ -3887,7 +3887,7 @@ ls backend/alembic/versions/ | tail -3
 > **總範圍**：**~12 day**（FS.2 + FS.2b 因 reuse AS 已從 3.5d 縮成 1.75d）
 
 ### FS.1 — DB Provisioning
-- [ ] FS.1.1 Adapter for Supabase / Neon / PlanetScale 三 backend
+- [x][G] FS.1.1 Adapter for Supabase / Neon / PlanetScale 三 backend
 - [ ] FS.1.2 自動跑 migration runner（Prisma / Drizzle / SQLAlchemy schema → tenant own DB）
 - [ ] FS.1.3 alembic 0061 `provisioned_databases` table（tenant_id / provider / connection_url_enc / created_at / status）
 - [ ] FS.1.4 Encryption at rest 自動 enable（依 provider tier）
