@@ -207,6 +207,12 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # NOT in TABLES_WITH_IDENTITY_ID.  Stores encrypted connection URL
     # ciphertext only; plaintext DSNs never enter the control-plane DB.
     "provisioned_databases",
+    # FS.3.2 (alembic 0062): tenant-owned object storage registry.
+    # FK ``tenant_id → tenants.id`` (CASCADE) so it MUST replay after
+    # ``tenants``. Composite PK ``(tenant_id, provider)`` is TEXT —
+    # NOT in TABLES_WITH_IDENTITY_ID. Bucket names are non-secret
+    # provider identifiers; credentials are not stored in this table.
+    "provisioned_storage",
     "sessions",
     "github_installations",
     # Project runs (alembic 0006).

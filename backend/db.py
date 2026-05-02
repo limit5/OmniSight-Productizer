@@ -1521,6 +1521,21 @@ CREATE TABLE IF NOT EXISTS provisioned_databases (
     status             TEXT NOT NULL,
     PRIMARY KEY (tenant_id, provider)
 );
+
+-- FS.3.2 (alembic 0062): tenant-owned object storage registry.
+-- Bucket name is not secret material; credentials stay with provider
+-- config / vault callers.  Composite PK ``(tenant_id, provider)``
+-- mirrors alembic 0062 and allows one recorded bucket per tenant/provider
+-- pair without adding a synthetic id beyond the TODO surface.
+CREATE TABLE IF NOT EXISTS provisioned_storage (
+    tenant_id   TEXT NOT NULL
+                    REFERENCES tenants(id) ON DELETE CASCADE,
+    provider    TEXT NOT NULL
+                    CHECK (provider IN ('r2','s3','supabase-storage')),
+    bucket_name TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (tenant_id, provider)
+);
 """
 
 
