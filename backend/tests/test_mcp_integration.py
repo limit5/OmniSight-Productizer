@@ -384,3 +384,127 @@ async def test_run_with_tools_forwards_mcp_servers(monkeypatch):
     )
     assert captured_kwargs.get("mcp_servers") == mcp_payload
     assert len(captured_kwargs["mcp_servers"]) == 2
+
+
+# ─── build_registry_from_env (Phase 1: runner ↔ MCP wiring) ───────
+
+
+def test_build_registry_from_env_empty_env_returns_empty_registry():
+    from backend.agents.mcp_integration import build_registry_from_env
+
+    reg = build_registry_from_env(env={})
+    assert len(reg) == 0
+    assert reg.to_anthropic_mcp_servers() == []
+
+
+def test_build_registry_from_env_single_token_creates_one_server():
+    from backend.agents.mcp_integration import build_registry_from_env
+
+    reg = build_registry_from_env(
+        env={"OMNISIGHT_MCP_FIGMA_TOKEN": "tok-figma-abc"}
+    )
+    assert len(reg) == 1
+    cfg = reg.get("claude_ai_Figma")
+    assert cfg is not None
+    assert cfg.authorization_token == "tok-figma-abc"
+    assert cfg.enabled is True
+    payload = reg.to_anthropic_mcp_servers()
+    assert payload[0]["name"] == "claude_ai_Figma"
+    assert payload[0]["authorization_token"] == "tok-figma-abc"
+
+
+def test_build_registry_from_env_multiple_tokens():
+    from backend.agents.mcp_integration import build_registry_from_env
+
+    reg = build_registry_from_env(
+        env={
+            "OMNISIGHT_MCP_FIGMA_TOKEN": "tok-figma",
+            "OMNISIGHT_MCP_GMAIL_TOKEN": "tok-gmail",
+            "OMNISIGHT_MCP_GOOGLE_DRIVE_TOKEN": "tok-drive",
+        }
+    )
+    names = {c.name for c in reg.list_all()}
+    assert names == {
+        "claude_ai_Figma", "claude_ai_Gmail", "claude_ai_Google_Drive",
+    }
+
+
+def test_build_registry_from_env_skips_empty_tokens():
+    from backend.agents.mcp_integration import build_registry_from_env
+
+    reg = build_registry_from_env(
+        env={
+            "OMNISIGHT_MCP_FIGMA_TOKEN": "real-tok",
+            "OMNISIGHT_MCP_GMAIL_TOKEN": "",
+            "OMNISIGHT_MCP_GOOGLE_DRIVE_TOKEN": "   ",  # whitespace
+        }
+    )
+    assert len(reg) == 1
+    assert reg.get("claude_ai_Figma") is not None
+    assert reg.get("claude_ai_Gmail") is None
+    assert reg.get("claude_ai_Google_Drive") is None
+
+
+@pytest.mark.parametrize("disable_value", ["1", "true", "yes", "on", "TRUE"])
+def test_build_registry_from_env_master_disable(disable_value):
+    from backend.agents.mcp_integration import build_registry_from_env
+
+    reg = build_registry_from_env(
+        env={
+            "OMNISIGHT_MCP_FIGMA_TOKEN": "would-be-active",
+            "OMNISIGHT_MCP_DISABLE_ALL": disable_value,
+        }
+    )
+    assert len(reg) == 0
+
+
+def test_build_registry_from_env_disable_off_value_keeps_servers():
+    """``OMNISIGHT_MCP_DISABLE_ALL=0`` should NOT disable."""
+    from backend.agents.mcp_integration import build_registry_from_env
+
+    reg = build_registry_from_env(
+        env={
+            "OMNISIGHT_MCP_FIGMA_TOKEN": "tok",
+            "OMNISIGHT_MCP_DISABLE_ALL": "0",
+        }
+    )
+    assert len(reg) == 1
+
+
+def test_build_registry_from_env_uses_os_environ_when_env_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.agents.mcp_integration import build_registry_from_env
+
+    for v in (
+        "OMNISIGHT_MCP_FIGMA_TOKEN",
+        "OMNISIGHT_MCP_GMAIL_TOKEN",
+        "OMNISIGHT_MCP_GOOGLE_CALENDAR_TOKEN",
+        "OMNISIGHT_MCP_GOOGLE_DRIVE_TOKEN",
+        "OMNISIGHT_MCP_DISABLE_ALL",
+    ):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("OMNISIGHT_MCP_FIGMA_TOKEN", "from-env")
+
+    reg = build_registry_from_env()  # no env arg → reads os.environ
+    cfg = reg.get("claude_ai_Figma")
+    assert cfg is not None
+    assert cfg.authorization_token == "from-env"
+
+
+def test_build_registry_from_env_custom_alias_map():
+    from backend.agents.mcp_integration import (
+        DEFAULT_REMOTE_MCP_CATALOG,
+        build_registry_from_env,
+    )
+
+    custom_map = {"claude_ai_Figma": "MY_FIGMA_TOKEN"}
+    reg = build_registry_from_env(
+        env={"MY_FIGMA_TOKEN": "abc"},
+        env_var_by_name=custom_map,
+        catalog=DEFAULT_REMOTE_MCP_CATALOG,
+    )
+    assert len(reg) == 1
+    cfg = reg.get("claude_ai_Figma")
+    assert cfg is not None
+    assert cfg.authorization_token == "abc"

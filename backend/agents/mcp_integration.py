@@ -33,10 +33,24 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §5.6
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# Friendly env-var alias → catalog entry name. Used by
+# :func:`build_registry_from_env` so operators don't have to spell out the
+# ``claude_ai_`` prefix in their .env. Both runner (auto-runner-sdk.py)
+# and backend specialist agents read tokens through this map, so adding a
+# new MCP server requires a single line here.
+ENV_TOKEN_VAR_BY_NAME: dict[str, str] = {
+    "claude_ai_Figma":            "OMNISIGHT_MCP_FIGMA_TOKEN",
+    "claude_ai_Gmail":            "OMNISIGHT_MCP_GMAIL_TOKEN",
+    "claude_ai_Google_Calendar":  "OMNISIGHT_MCP_GOOGLE_CALENDAR_TOKEN",
+    "claude_ai_Google_Drive":     "OMNISIGHT_MCP_GOOGLE_DRIVE_TOKEN",
+}
 
 
 # ─── Server config + registry ────────────────────────────────────
@@ -252,6 +266,63 @@ class RemoteMCPRegistry:
 
 
 # ─── Tool name parsing (mcp__<server>__<method>) ─────────────────
+
+
+def build_registry_from_env(
+    env: dict[str, str] | None = None,
+    *,
+    catalog: tuple[_CatalogEntry, ...] = DEFAULT_REMOTE_MCP_CATALOG,
+    env_var_by_name: dict[str, str] | None = None,
+) -> RemoteMCPRegistry:
+    """Build a registry from environment-supplied OAuth tokens.
+
+    For each catalog entry whose ENV_TOKEN_VAR_BY_NAME alias is set in
+    ``env`` (defaults to ``os.environ``), an enabled MCPServerConfig is
+    added to the returned registry. Catalog entries with **no token** in
+    env are silently skipped — Anthropic rejects MCP servers without auth
+    on most managed integrations, and an empty-token request would fail
+    the whole turn for an LLM call that didn't even need that MCP.
+
+    Operators set ``OMNISIGHT_MCP_DISABLE_ALL=1`` to opt out entirely
+    (e.g., for a deterministic CI run that mustn't hit Figma).
+
+    Returns:
+      A registry containing 0..N enabled servers. Caller passes
+      ``registry.to_anthropic_mcp_servers()`` into
+      ``AnthropicClient.run_with_tools(mcp_servers=...)``.
+    """
+    src = env if env is not None else os.environ
+    if src.get("OMNISIGHT_MCP_DISABLE_ALL", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }:
+        logger.info("MCP integration disabled via OMNISIGHT_MCP_DISABLE_ALL")
+        return RemoteMCPRegistry()
+
+    aliases = env_var_by_name or ENV_TOKEN_VAR_BY_NAME
+    configs: list[MCPServerConfig] = []
+    for entry in catalog:
+        env_var = aliases.get(entry.name)
+        if env_var is None:
+            continue  # catalog entry without a known env alias
+        token = src.get(env_var, "").strip()
+        if not token:
+            continue  # operator hasn't completed OAuth for this server
+        configs.append(
+            MCPServerConfig(
+                name=entry.name,
+                url=entry.default_url,
+                authorization_token=token,
+                description=entry.description,
+                enabled=True,
+            )
+        )
+    if configs:
+        logger.info(
+            "MCP registry: %d server(s) configured via env (%s)",
+            len(configs),
+            ", ".join(c.name for c in configs),
+        )
+    return RemoteMCPRegistry(configs)
 
 
 def parse_mcp_tool_name(tool_name: str) -> tuple[str, str] | None:

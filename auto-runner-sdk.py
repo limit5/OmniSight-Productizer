@@ -47,6 +47,10 @@ from backend.agents.cost_guard import (  # noqa: E402
     InMemoryCostStore,
     estimate_cost,
 )
+from backend.agents.mcp_integration import (  # noqa: E402
+    RemoteMCPRegistry,
+    build_registry_from_env,
+)
 from backend.agents.runner_handlers import make_runner_dispatcher  # noqa: E402
 
 
@@ -242,6 +246,7 @@ async def run_one_item(
     todo_text: str,
     handoff_text: str,
     claude_md_text: str = "",
+    mcp_servers: list[dict] | None = None,
 ) -> tuple[bool, RunResult | None]:
     """Drive Claude through one TODO item. Returns (success, run_result)."""
     print(f"\n{'=' * 60}")
@@ -315,6 +320,7 @@ async def run_one_item(
             max_iterations=MAX_ITERATIONS,
             enable_cache=True,
             on_tool_call="log",
+            mcp_servers=mcp_servers,
         )
     except Exception as e:  # noqa: BLE001 - external boundary
         elapsed = time.time() - started
@@ -416,6 +422,20 @@ async def main() -> None:
     cost_store = InMemoryCostStore()
     cost_guard = CostGuard(store=cost_store)
 
+    # Build MCP server registry from env tokens — if no
+    # OMNISIGHT_MCP_*_TOKEN vars are set the registry is empty and
+    # ``mcp_servers_payload`` is an empty list (treated as None downstream).
+    mcp_registry: RemoteMCPRegistry = build_registry_from_env()
+    mcp_servers_payload: list[dict] = mcp_registry.to_anthropic_mcp_servers()
+    if mcp_servers_payload:
+        names = [s["name"] for s in mcp_servers_payload]
+        print(f"🔌 MCP servers active: {', '.join(names)}")
+    else:
+        print(
+            "🔌 MCP servers: none configured "
+            "(set OMNISIGHT_MCP_*_TOKEN to enable Figma/Gmail/Calendar/Drive)"
+        )
+
     pipeline_start = time.time()
     completed = 0
     failed = 0
@@ -472,6 +492,7 @@ async def main() -> None:
                 todo_text=todo_text,
                 handoff_text=handoff_text,
                 claude_md_text=claude_md_text,
+                mcp_servers=mcp_servers_payload or None,
             )
             if success:
                 break
