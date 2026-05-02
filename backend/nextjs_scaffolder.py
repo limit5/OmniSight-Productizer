@@ -23,6 +23,9 @@ Design
 * **Dry-run deploy** — ``dry_run_deploy()`` calls the W4 adapter's
   constructor path + a fake BuildArtifact validation to prove the
   generated project hands off cleanly, without hitting the network.
+* **Example app** — optional example surfaces are scaffold-only files
+  so the default skeleton stays unchanged while FS.7.4 can render a
+  complete todo app inside the same full-stack bundle.
 
 Public API
 ----------
@@ -58,6 +61,7 @@ _SCAFFOLDS_DIR = _SKILL_DIR / "scaffolds"
 
 _AUTH_CHOICES = ("nextauth", "clerk", "none")
 _TARGET_CHOICES = ("vercel", "cloudflare", "both")
+_EXAMPLE_APP_CHOICES = ("none", "todo")
 
 _TEMPLATE_SUFFIX = ".j2"
 
@@ -93,6 +97,12 @@ _TARGET_ONLY_FILES: dict[str, str] = {
     "wrangler.toml.j2": "cloudflare",
 }
 
+_EXAMPLE_ONLY_FILES: dict[str, str] = {
+    "app/todos/page.tsx":              "todo",
+    "components/TodoApp.tsx":          "todo",
+    "tests/unit/todo-app.test.tsx":    "todo",
+}
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Data models
@@ -109,6 +119,7 @@ class ScaffoldOptions:
     target: str = "both"           # vercel | cloudflare | both
     compliance: bool = True
     backend_url: str = "http://localhost:8000"
+    example_app: str = "none"      # none | todo
 
     def validate(self) -> None:
         if not self.project_name or not self.project_name.strip():
@@ -117,6 +128,10 @@ class ScaffoldOptions:
             raise ValueError(f"auth must be one of {_AUTH_CHOICES}, got {self.auth!r}")
         if self.target not in _TARGET_CHOICES:
             raise ValueError(f"target must be one of {_TARGET_CHOICES}, got {self.target!r}")
+        if self.example_app not in _EXAMPLE_APP_CHOICES:
+            raise ValueError(
+                f"example_app must be one of {_EXAMPLE_APP_CHOICES}, got {self.example_app!r}"
+            )
 
     def resolved_profiles(self) -> list[str]:
         """Which W1 web profile IDs this scaffold binds to."""
@@ -174,6 +189,10 @@ def _should_skip(rel_path: str, opts: ScaffoldOptions) -> bool:
     for marker, required in _TARGET_ONLY_FILES.items():
         if rel_path == marker and opts.target not in (required, "both"):
             return True
+    # Example-app-gated files
+    for marker, required in _EXAMPLE_ONLY_FILES.items():
+        if rel_path == marker and opts.example_app != required:
+            return True
     # Compliance-gated files
     compliance_paths = (
         "docs/privacy/retention.md.j2",
@@ -206,6 +225,7 @@ def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
         "target": opts.target,
         "compliance": opts.compliance,
         "backend_url": opts.backend_url,
+        "example_app": opts.example_app,
     }
     # Resolve W1 profile budgets so the generated vercel.json /
     # wrangler.toml know their ceilings without duplicating values.
@@ -391,6 +411,7 @@ def pilot_report(
             "resend": options.resend,
             "target": options.target,
             "compliance": options.compliance,
+            "example_app": options.example_app,
         },
         "w0_w1_profiles": options.resolved_profiles(),
         "w4_deploy": dry_run_deploy(out_dir, options),

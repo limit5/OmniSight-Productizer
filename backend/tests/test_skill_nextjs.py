@@ -64,6 +64,7 @@ def _default_opts(**overrides) -> ScaffoldOptions:
         resend=False,
         target="both",
         compliance=True,
+        example_app="none",
     )
     kwargs.update(overrides)
     return ScaffoldOptions(**kwargs)
@@ -210,6 +211,35 @@ class TestScaffoldRender:
         assert "sendContactEmail" in contact
         assert "db.message.create" in contact
 
+    def test_fs74_todo_example_app_bundle(self, project_dir):
+        opts = _default_opts(
+            auth="nextauth",
+            trpc=True,
+            prisma=True,
+            resend=True,
+            target="both",
+            compliance=True,
+            example_app="todo",
+        )
+        render_project(project_dir, opts)
+
+        assert (project_dir / "app" / "todos" / "page.tsx").is_file()
+        assert (project_dir / "components" / "TodoApp.tsx").is_file()
+        assert (project_dir / "tests" / "unit" / "todo-app.test.tsx").is_file()
+
+        page = (project_dir / "app" / "todos" / "page.tsx").read_text()
+        todo_app = (project_dir / "components" / "TodoApp.tsx").read_text()
+        todo_test = (project_dir / "tests" / "unit" / "todo-app.test.tsx").read_text()
+        assert 'role="main"' in page
+        assert "TodoApp" in page
+        assert "useState<Todo[]>" in todo_app
+        assert "module-global cache" in todo_app
+        assert "adds, toggles, and deletes a task" in todo_test
+
+        report = pilot_report(project_dir, opts)
+        assert report["options"]["example_app"] == "todo"
+        assert report["w5_compliance"]["failed_count"] == 0
+
     def test_trpc_off_skips_trpc_files(self, project_dir):
         render_project(project_dir, _default_opts(trpc=False))
         for rel in _TRPC_ONLY_FILES:
@@ -226,6 +256,12 @@ class TestScaffoldRender:
         for rel in _RESEND_ONLY_FILES:
             rendered_rel = rel.removesuffix(".j2")
             assert not (project_dir / rendered_rel).exists(), f"{rendered_rel} leaked through"
+
+    def test_example_app_none_skips_example_files(self, project_dir):
+        render_project(project_dir, _default_opts(example_app="none"))
+        assert not (project_dir / "app" / "todos" / "page.tsx").exists()
+        assert not (project_dir / "components" / "TodoApp.tsx").exists()
+        assert not (project_dir / "tests" / "unit" / "todo-app.test.tsx").exists()
 
     def test_auth_nextauth_skips_clerk_files(self, project_dir):
         render_project(project_dir, _default_opts(auth="nextauth"))
@@ -290,6 +326,10 @@ class TestScaffoldRender:
     def test_empty_project_name_rejected(self):
         with pytest.raises(ValueError):
             ScaffoldOptions(project_name="   ").validate()
+
+    def test_invalid_example_app_rejected(self):
+        with pytest.raises(ValueError):
+            ScaffoldOptions(project_name="x", example_app="forum").validate()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
