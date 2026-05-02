@@ -118,6 +118,29 @@ DAILY_BUDGET_USD = float(os.environ.get("OMNISIGHT_SDK_DAILY_BUDGET", "0") or 0)
 # leaves headroom for large items but stops runaway retries.
 MAX_PER_ITEM_USD = float(os.environ.get("OMNISIGHT_SDK_MAX_PER_ITEM_USD", "8") or 0)
 
+# Phase 7 — what to do when an item fails / is deferred.
+#   stop     (default): write structured stop reason to HANDOFF.md and
+#                       exit the pipeline cleanly. Operator decides next
+#                       step (manual fix / subscription CLI / decompose
+#                       TODO). Safe under implicit dependencies — W15.2
+#                       won't run when W15.1 failed.
+#   continue           : original best-effort batch behaviour. Keep
+#                       going. Only safe when caller knows items are
+#                       truly independent (e.g., BP.K.1-8 separate
+#                       frontend components, or BP.W3.1 27 skill packs).
+#
+# A `section` mode (skip remaining items in current section, advance to
+# next matching section) is intentionally NOT implemented in v1 — it
+# adds runtime exclusion-set complexity for a use case we don't have
+# real demand for. Add when an empirical need surfaces.
+FAIL_BEHAVIOR = os.environ.get("OMNISIGHT_SDK_FAIL_BEHAVIOR", "stop").strip().lower()
+if FAIL_BEHAVIOR not in {"stop", "continue"}:
+    print(
+        f"⚠️ OMNISIGHT_SDK_FAIL_BEHAVIOR={FAIL_BEHAVIOR!r} 不是合法值"
+        " (stop|continue)，回退到 'stop'"
+    )
+    FAIL_BEHAVIOR = "stop"
+
 # Tools the agent loop is allowed to call. Wired in runner_handlers +
 # skills_loader + sub_agent (Skill / Agent are registered dynamically at
 # startup once the registry / dispatcher are ready).
@@ -256,6 +279,151 @@ def _mark_item_failed(item_line: str) -> None:
             print(f"📝 已將失敗項目標記為 [!]：{failed[:60]}")
     except OSError as e:
         print(f"⚠️ 標記失敗項目時出錯：{e}")
+
+
+# ─── Phase 7 — stop-on-failure structured handoff ────────────────
+
+
+def _collect_remaining_pending(
+    *, current_section_title: str, current_item_line: str
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Return (remaining_in_section, remaining_other_sections).
+
+    `remaining_in_section`: pending item strings (still ``- [ ]``) in
+    the same ### section as the failure, AFTER the failed item, that
+    pass the RUNNER_FILTER. These are the items most likely blocked by
+    the failure (intra-section dependency).
+
+    `remaining_other_sections`: list of ``(section_title, item_line)``
+    pairs in OTHER matching sections still pending. Lower likelihood
+    of dependency on this failure but worth surfacing for ops review.
+    """
+    if not TODO_FILE.exists():
+        return [], []
+    lines = TODO_FILE.read_text(encoding="utf-8").splitlines()
+
+    in_section: list[str] = []
+    other: list[tuple[str, str]] = []
+    cur_sec: str | None = None
+    in_target = False
+    past_failed_item = False
+
+    for line in lines:
+        if line.startswith("### "):
+            cur_sec = line.strip()
+            in_target = cur_sec == current_section_title
+            if not in_target:
+                past_failed_item = False
+            continue
+        if line.startswith("## "):
+            cur_sec = None
+            in_target = False
+            past_failed_item = False
+            continue
+        stripped = line.strip()
+        if cur_sec is None:
+            continue
+        if not _section_matches_filter(cur_sec):
+            continue
+        if in_target:
+            if stripped == current_item_line:
+                past_failed_item = True
+                continue
+            if past_failed_item and stripped.startswith("- [ ]"):
+                in_section.append(stripped)
+        else:
+            if stripped.startswith("- [ ]"):
+                other.append((cur_sec, stripped))
+    return in_section, other
+
+
+_HANDOFF_STOP_HEADING = "## ⏸️ Runner 自動停工"
+
+
+def _write_handoff_stop_block(
+    *,
+    section_title: str,
+    item_line: str,
+    failure_reason: str,
+    cumulative_usd: float,
+    completed_count: int,
+    remaining_in_section: list[str],
+    remaining_other_sections: list[tuple[str, str]],
+) -> None:
+    """Append a structured ``## ⏸️ Runner 自動停工`` block to HANDOFF.md.
+
+    Always APPENDED (never replaces existing content) so prior task
+    history is preserved. The block has a stable heading prefix so
+    operators can grep for `## ⏸️ Runner 自動停工` to enumerate all
+    pipeline stops over time.
+    """
+    iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    short_section = section_title.lstrip("#").strip()
+
+    blocked_section_lines = "\n".join(f"  - {it}" for it in remaining_in_section)
+    if not blocked_section_lines:
+        blocked_section_lines = "  - (本 section 無其他 pending 項)"
+
+    other_section_lines = (
+        "\n".join(
+            f"  - [{s.lstrip('#').strip()[:60]}] {it[:80]}"
+            for s, it in remaining_other_sections[:15]
+        )
+        or "  - (其他 section 無 pending 項或不在 RUNNER_FILTER 內)"
+    )
+    if len(remaining_other_sections) > 15:
+        other_section_lines += (
+            f"\n  - …（還有 {len(remaining_other_sections) - 15} 項未列出）"
+        )
+
+    block = f"""
+
+{_HANDOFF_STOP_HEADING} — {iso}
+
+**停工項目**: `{item_line[:120]}`
+**所屬區塊**: {short_section[:120]}
+**停工原因**: {failure_reason}
+**本批次累計花費**: {_format_usd(cumulative_usd)}
+**本批次已完成**: {completed_count} 顆
+**FAIL_BEHAVIOR**: `stop`（default）— runner 主動退出，等人工介入
+
+### 同 section 內被擋住的後續項
+{blocked_section_lines}
+
+### 其他符合 RUNNER_FILTER 的 section 待跑項
+{other_section_lines}
+
+### 為什麼停而不是繼續
+
+當前 runner 採用 stop-on-failure 策略：失敗的項目可能阻擋下游（例
+如 W15.2 vite_error_relay 依賴 W15.1 plugin 介面，W15.1 沒成功的話
+W15.2 跑也是白跑）。直接停工讓人類判斷下一步比 runner 自作主張安全。
+
+### 下一步建議（操作者選一）
+
+1. **改用訂閱版 CLI 跑這項**：
+   `python3 auto-runner.py`（訂閱版有完整 Agent / Skill / MCP 工具，
+   月費已付不另外燒）。注意需手動把 `[!]` 改回 `[ ]` 才會被 picked。
+2. **手動拆 TODO**：把卡住的項目在 TODO 裡拆成 2-5 顆獨立 sub-item，
+   然後重跑 API runner。
+3. **跳過 + 標 `[O]`**：人工確認此項需 operator-blocked，標 `[O]`
+   後重跑 runner，會自動跳過。
+4. **強制繼續**：明確知道後續項目獨立時，
+   `OMNISIGHT_SDK_FAIL_BEHAVIOR=continue` 重跑。**只有確定獨立才用，
+   不然會浪費錢**。
+5. **整批回退**：看 `git log --oneline` 找 baseline，`git reset --hard
+   <SHA>` 拋棄整批。
+"""
+    try:
+        existing = (
+            HANDOFF_FILE.read_text(encoding="utf-8")
+            if HANDOFF_FILE.exists()
+            else ""
+        )
+        HANDOFF_FILE.write_text(existing + block, encoding="utf-8")
+        print(f"📜 [HANDOFF] 已附加停工原因區塊")
+    except OSError as e:
+        print(f"⚠️ 寫 HANDOFF 失敗：{e}")
 
 
 # ─── Cost helpers ────────────────────────────────────────────────
@@ -521,6 +689,16 @@ async def main() -> None:
             f"💸 Per-item soft cap: {_format_usd(MAX_PER_ITEM_USD)} "
             "(超過 → 不重試，避免炸更多)"
         )
+    if FAIL_BEHAVIOR == "stop":
+        print(
+            "🛑 Fail behavior: stop "
+            "(任一項失敗即停工 + 寫 HANDOFF 等人工介入)"
+        )
+    else:
+        print(
+            "🏃 Fail behavior: continue "
+            "(失敗會跳下一項 — 確定 items 獨立才用)"
+        )
     print(
         "⚠️ 警告：系統將自動執行程式碼與系統指令，按 Ctrl+C 可隨時中斷。\n"
     )
@@ -701,10 +879,56 @@ async def main() -> None:
         else:
             failed += 1
             skipped.append(f"[{section_title}] {item_line[:80]}")
-            print(
-                f"\n⏭️ [跳過] 重試 {MAX_RETRIES} 次仍失敗，跳過此項目繼續下一個。"
-            )
             _mark_item_failed(item_line)
+
+            # Recompute cumulative for the stop-reason block (Phase 7).
+            current_total = sum(
+                est.cost_usd_estimated
+                for est in cost_store._estimates.values()  # noqa: SLF001
+            )
+
+            if FAIL_BEHAVIOR == "stop":
+                # Phase 7: write structured stop reason + clean exit so
+                # operator can decide next step (manual fix / subscription
+                # CLI / decompose TODO / etc) without burning more $ on
+                # downstream items whose preconditions may be unmet.
+                if run_result is not None:
+                    reason = (
+                        f"stop_reason={run_result.stop_reason}"
+                        + (
+                            f" / 重試 {MAX_RETRIES} 次仍失敗"
+                            if run_result.stop_reason
+                            in {"end_turn"}  # generic fail, exhausted retries
+                            else ""
+                        )
+                    )
+                else:
+                    reason = "系統錯誤（API exception）"
+
+                in_section, other = _collect_remaining_pending(
+                    current_section_title=section_title,
+                    current_item_line=item_line,
+                )
+                _write_handoff_stop_block(
+                    section_title=section_title,
+                    item_line=item_line,
+                    failure_reason=reason,
+                    cumulative_usd=current_total,
+                    completed_count=completed,
+                    remaining_in_section=in_section,
+                    remaining_other_sections=other,
+                )
+                print(
+                    f"\n🛑 [停工] FAIL_BEHAVIOR=stop。"
+                    f"等待人工介入，看 HANDOFF.md 最新區塊了解下一步。"
+                )
+                cumulative_usd = current_total
+                break  # exit the while-loop cleanly
+            else:
+                # FAIL_BEHAVIOR=continue: original best-effort batch behaviour
+                print(
+                    f"\n⏭️ [跳過] 失敗已標 [!]，FAIL_BEHAVIOR=continue 進下一項。"
+                )
 
         # Recompute cumulative so we have an honest figure for budget gate.
         cumulative_usd = sum(

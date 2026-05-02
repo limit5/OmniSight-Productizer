@@ -491,3 +491,152 @@ def test_run_one_item_under_budget_keeps_retryable_true(
     )
     assert success is False
     assert retryable is True  # transient — caller may retry once
+
+
+# ─── Phase 7: stop-on-failure HANDOFF helpers ─────────────────────
+
+
+def test_collect_remaining_pending_in_section(fake_project) -> None:
+    _, mod = fake_project
+    in_sec, other = mod._collect_remaining_pending(
+        current_section_title="### A1. First section",
+        current_item_line="- [ ] A1.1 the first task — describe the API surface",
+    )
+    # A1.2 is the only other pending in A1
+    assert any("A1.2" in s for s in in_sec)
+    # A2.2 is in another section
+    assert any("A2.2" in item for sec, item in other if sec.startswith("### A2"))
+    # A2.1 is already [x] — must NOT show up
+    assert not any("A2.1" in item for _, item in other)
+
+
+def test_collect_remaining_pending_filter_respected(
+    fake_project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RUNNER_FILTER constrains both in_section and other_sections."""
+    _, mod = fake_project
+    # Filter to only A1 — A2 items must be excluded from "other"
+    monkeypatch.setattr(mod, "RUNNER_FILTER", {"A1"})
+    _in_sec, other = mod._collect_remaining_pending(
+        current_section_title="### A1. First section",
+        current_item_line="- [ ] A1.1 the first task — describe the API surface",
+    )
+    assert all(not sec.startswith("### A2") for sec, _ in other)
+
+
+def test_collect_remaining_pending_nothing_after_failed_item(
+    fake_project,
+) -> None:
+    """If failure is the last item in section, in_section is empty."""
+    _, mod = fake_project
+    # A1.2 is the last A1 item; failing it leaves nothing after.
+    in_sec, _other = mod._collect_remaining_pending(
+        current_section_title="### A1. First section",
+        current_item_line="- [ ] A1.2 the second task",
+    )
+    assert in_sec == []
+
+
+def test_write_handoff_stop_block_appends_structured_section(
+    fake_project,
+) -> None:
+    _, mod = fake_project
+    before = mod.HANDOFF_FILE.read_text()
+    mod._write_handoff_stop_block(
+        section_title="### A1. First section",
+        item_line="- [ ] A1.1 the first task",
+        failure_reason="stop_reason=max_tokens",
+        cumulative_usd=9.4567,
+        completed_count=2,
+        remaining_in_section=["- [ ] A1.2 the second task"],
+        remaining_other_sections=[
+            ("### A2. Second section", "- [ ] A2.2 still pending"),
+        ],
+    )
+    after = mod.HANDOFF_FILE.read_text()
+    # Original content preserved (append-only)
+    assert after.startswith(before)
+    # Stable heading prefix so operators can grep for it later
+    assert "## ⏸️ Runner 自動停工" in after
+    # Carries the relevant context
+    assert "A1.1 the first task" in after
+    assert "A1.2 the second task" in after
+    assert "A2.2 still pending" in after
+    assert "stop_reason=max_tokens" in after
+    assert "$9.4567" in after
+    # Has the standard 5 next-step suggestions
+    assert "改用訂閱版" in after
+    assert "FAIL_BEHAVIOR=continue" in after
+
+
+def test_write_handoff_stop_block_truncates_long_other_sections(
+    fake_project,
+) -> None:
+    _, mod = fake_project
+    other = [
+        (f"### Section{i}", f"- [ ] item-{i}")
+        for i in range(20)
+    ]
+    mod._write_handoff_stop_block(
+        section_title="### A1. First section",
+        item_line="- [ ] A1.1 trigger",
+        failure_reason="reason",
+        cumulative_usd=1.0,
+        completed_count=0,
+        remaining_in_section=[],
+        remaining_other_sections=other,
+    )
+    after = mod.HANDOFF_FILE.read_text()
+    # First 15 listed
+    assert "item-0" in after
+    assert "item-14" in after
+    # Last 5 elided behind a count message
+    assert "還有 5 項未列出" in after
+    assert "item-19" not in after
+
+
+def test_write_handoff_stop_block_handles_missing_handoff(
+    fake_project,
+) -> None:
+    """If HANDOFF doesn't exist yet, the block becomes the first content."""
+    _, mod = fake_project
+    mod.HANDOFF_FILE.unlink()  # delete it
+    mod._write_handoff_stop_block(
+        section_title="### A1. First section",
+        item_line="- [ ] A1.1 first",
+        failure_reason="reason",
+        cumulative_usd=0.0,
+        completed_count=0,
+        remaining_in_section=[],
+        remaining_other_sections=[],
+    )
+    assert mod.HANDOFF_FILE.exists()
+    text = mod.HANDOFF_FILE.read_text()
+    assert "## ⏸️ Runner 自動停工" in text
+
+
+# ─── Phase 7: FAIL_BEHAVIOR config ─────────────────────────────────
+
+
+def test_fail_behavior_default_is_stop() -> None:
+    """When env var unset, FAIL_BEHAVIOR resolves to 'stop'."""
+    mod = _load_runner_module()
+    assert mod.FAIL_BEHAVIOR == "stop"
+
+
+def test_fail_behavior_invalid_value_falls_back_to_stop(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_SDK_FAIL_BEHAVIOR", "explode")
+    mod = _load_runner_module()
+    assert mod.FAIL_BEHAVIOR == "stop"
+    captured = capsys.readouterr()
+    assert "不是合法值" in captured.out
+
+
+def test_fail_behavior_continue_respected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_SDK_FAIL_BEHAVIOR", "continue")
+    mod = _load_runner_module()
+    assert mod.FAIL_BEHAVIOR == "continue"
