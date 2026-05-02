@@ -36,6 +36,25 @@ def _render(*providers: str, **overrides):
     )
 
 
+def _render_catalog_subset(*providers: str, **overrides):
+    catalog = render_outbound_oauth_vendor_catalog(
+        OutboundOAuthVendorCatalogOptions(
+            app_name="tenant-demo",
+            app_base_url="https://app.example.com",
+        )
+    )
+    selected = tuple(plan for plan in catalog if plan.provider in providers)
+    kwargs = dict(provider_plans=selected)
+    kwargs.update(overrides)
+    return render_outbound_oauth_flow_scaffold(
+        OutboundOAuthFlowScaffoldOptions(**kwargs)
+    )
+
+
+def _files_by_path(result):
+    return {item.path: item.content for item in result.files}
+
+
 class TestOutboundOAuthRegistry:
 
     def test_list_outbound_oauth_flow_providers_matches_fs_2b_6_catalog(self):
@@ -313,6 +332,104 @@ class TestOutboundOAuthScaffold:
         assert data["providers"][0]["scope"] == ["identify", "email"]
         assert data["files"][0]["path"] == "auth/outbound-oauth-flow.ts"
         assert data["env"][1]["sensitive"] is True
+
+
+class TestOutboundOAuthFullLifecycle:
+
+    def test_fs_2b_7_simulates_three_vendor_connect_use_refresh_revoke(self):
+        """Lock the generated-app lifecycle for three AS.2-backed vendors."""
+        result = _render_catalog_subset("github", "google_workspace", "microsoft_365")
+        files = _files_by_path(result)
+        provider_support = {
+            item.provider: item.token_vault_provider for item in result.providers
+        }
+
+        assert provider_support == {
+            "github": "github",
+            "google_workspace": "google",
+            "microsoft_365": "microsoft",
+        }
+
+        flow = files["auth/outbound-oauth-flow.ts"]
+        refresh = files["auth/outbound-refresh-middleware.ts"]
+        disconnect = files["auth/outbound-disconnect.ts"]
+        assert "exchangeOutboundCode" in flow
+        assert "createOutboundAutoRefreshFetch" in refresh
+        assert "refreshOutboundVaultRecord" in refresh
+        assert "disconnectOutboundOAuth" in disconnect
+
+        for provider, vault_provider in provider_support.items():
+            authorize = files[f"app/api/integrations/{provider}/authorize/route.ts"]
+            callback = files[f"app/api/integrations/{provider}/callback/route.ts"]
+            scope_upgrade = files[
+                f"app/api/integrations/{provider}/scope-upgrade/route.ts"
+            ]
+            disconnect_route = files[
+                f"app/api/integrations/{provider}/disconnect/route.ts"
+            ]
+
+            # connect: authorize starts AS.1 flow, callback exchanges the code,
+            # validates state, and encrypts the token set through AS.2.
+            assert f'beginOutboundAuthorization("{provider}")' in authorize
+            assert f"outbound_oauth_flow_{provider}=" in authorize
+            assert f'outboundProviderById("{provider}")' in callback
+            assert "verifyOutboundCallback(flow, state)" in callback
+            assert "exchangeOutboundCode(provider, flow, code)" in callback
+            assert "encryptOutboundTokenSet(" in callback
+            assert "provider.tokenVaultProvider || provider.provider" in callback
+            assert f'tokenVaultProvider: "{vault_provider}"' in flow
+
+            # use + refresh: generated callers load the stored record, decrypt
+            # it, refresh when due, and save rotated tokens back to the store.
+            assert "store.load(userId, provider.provider)" in refresh
+            assert "decryptOutboundVaultRecord(record, masterKeyRaw)" in refresh
+            assert "needsRefresh(current" in refresh
+            assert 'grant_type: "refresh_token"' in refresh
+            assert "await store.save(next)" in refresh
+
+            # scope upgrade uses the same connection rather than reconnecting.
+            assert "beginOutboundScopeUpgrade(" in scope_upgrade
+            assert "outboundTokenStore" in scope_upgrade
+
+            # revoke: disconnect accepts user unlink / DSAR and erases the local
+            # vault record after the helper's best-effort provider revoke path.
+            assert f'"{provider}"' in disconnect_route
+            assert "disconnectOutboundOAuth(" in disconnect_route
+            assert "outboundTokenStore" in disconnect_route
+            assert 'triggerParam === "dsar_erasure" ? "dsar_erasure"' in disconnect_route
+            assert "await store.delete(userId, provider.provider)" in disconnect
+
+    def test_fs_2b_7_three_vendor_lifecycle_pins_vendor_specific_edges(self):
+        result = _render_catalog_subset("github", "google_workspace", "microsoft_365")
+        providers = {item.provider: item for item in result.providers}
+
+        assert providers["github"].revocation_endpoint is None
+        assert providers["github"].extra_authorize_params == (("allow_signup", "true"),)
+        assert providers["google_workspace"].revocation_endpoint == (
+            "https://oauth2.googleapis.com/revoke"
+        )
+        assert providers["google_workspace"].extra_authorize_params == (
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+        )
+        assert providers["microsoft_365"].revocation_endpoint is None
+        assert "offline_access" in providers["microsoft_365"].scope
+
+        env = {item.name: item for item in result.env}
+        for name in (
+            "OAUTH_GITHUB_CLIENT_ID",
+            "OAUTH_GITHUB_CLIENT_SECRET",
+            "OAUTH_GOOGLE_WORKSPACE_CLIENT_ID",
+            "OAUTH_GOOGLE_WORKSPACE_CLIENT_SECRET",
+            "OAUTH_MICROSOFT_365_CLIENT_ID",
+            "OAUTH_MICROSOFT_365_CLIENT_SECRET",
+            "OAUTH_TOKEN_VAULT_MASTER_KEY",
+        ):
+            assert env[name].required is True
+
+        assert env["OAUTH_GITHUB_CLIENT_SECRET"].sensitive is True
+        assert env["OAUTH_GOOGLE_WORKSPACE_CLIENT_SECRET"].sensitive is True
+        assert env["OAUTH_MICROSOFT_365_CLIENT_SECRET"].sensitive is True
 
 
 class TestOutboundOAuthValidation:
