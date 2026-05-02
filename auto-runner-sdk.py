@@ -52,6 +52,12 @@ from backend.agents.mcp_integration import (  # noqa: E402
     build_registry_from_env,
 )
 from backend.agents.runner_handlers import make_runner_dispatcher  # noqa: E402
+from backend.agents.skills_loader import (  # noqa: E402
+    SkillRegistry,
+    load_default_scopes,
+    make_skill_handler,
+    render_catalog_for_prompt,
+)
 
 
 # ─── Graceful shutdown ───────────────────────────────────────────
@@ -96,8 +102,17 @@ COOLDOWN_S = int(os.environ.get("OMNISIGHT_SDK_COOLDOWN", "5"))
 SECTION_COOLDOWN_S = int(os.environ.get("OMNISIGHT_SDK_SECTION_COOLDOWN", "10"))
 DAILY_BUDGET_USD = float(os.environ.get("OMNISIGHT_SDK_DAILY_BUDGET", "0") or 0)
 
-# Tools the agent loop is allowed to call. Wired in runner_handlers.
-RUNNER_TOOLS: list[str] = ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
+# Tools the agent loop is allowed to call. Wired in runner_handlers +
+# skills_loader (Skill is registered dynamically at startup once the
+# skill registry is built).
+RUNNER_TOOLS: list[str] = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Skill"]
+
+# OMNISIGHT_SDK_DISABLE_SKILLS=1 silences the loader entirely (drops "Skill"
+# from RUNNER_TOOLS, no catalog injection). Useful for benchmark / size
+# audits where a deterministic prompt is needed.
+SKILLS_DISABLED = os.environ.get("OMNISIGHT_SDK_DISABLE_SKILLS", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 
 
 # ─── Track filter (parallel-worker support) ──────────────────────
@@ -247,6 +262,8 @@ async def run_one_item(
     handoff_text: str,
     claude_md_text: str = "",
     mcp_servers: list[dict] | None = None,
+    skills_catalog: str = "",
+    tools: list[str] | None = None,
 ) -> tuple[bool, RunResult | None]:
     """Drive Claude through one TODO item. Returns (success, run_result)."""
     print(f"\n{'=' * 60}")
@@ -271,6 +288,7 @@ async def run_one_item(
         if claude_md_text.strip()
         else ""
     )
+    skills_block = f"\n{skills_catalog}\n" if skills_catalog else ""
     system_text = (
         f"# 執行環境\n"
         f"- 專案根目錄（PROJECT_ROOT）：`{BASE_DIR}`\n"
@@ -285,6 +303,7 @@ async def run_one_item(
         "- `HANDOFF.md`（PROJECT_ROOT）— 過往 task 的交接記錄。**檔案上萬行，預設不要全讀**。\n"
         "  若你的任務明確需要參考 prior context，用 Read tool 配合 offset/limit 撈相關段落即可。\n"
         "- 專案 source code — 用 Read / Grep / Glob 探索。\n"
+        f"{skills_block}"
     )
 
     prompt = (
@@ -313,7 +332,7 @@ async def run_one_item(
     try:
         result = await client.run_with_tools(
             prompt=prompt,
-            tools=RUNNER_TOOLS,
+            tools=tools or RUNNER_TOOLS,
             system=system_text,
             model=MODEL_NAME,
             max_tokens=MAX_TOKENS,
@@ -414,6 +433,31 @@ async def main() -> None:
         sys.exit(1)
 
     dispatcher = make_runner_dispatcher()
+
+    # Skills: load 3-scope registry, register Skill tool handler on the
+    # SAME dispatcher so AnthropicClient's tool loop can resolve it.
+    if SKILLS_DISABLED:
+        skill_registry = SkillRegistry()
+        active_tools = [t for t in RUNNER_TOOLS if t != "Skill"]
+        skills_catalog = ""
+        print("🎒 Skills: disabled via OMNISIGHT_SDK_DISABLE_SKILLS")
+    else:
+        skill_registry = load_default_scopes(BASE_DIR)
+        if len(skill_registry) > 0:
+            dispatcher.register("Skill", make_skill_handler(skill_registry))
+            active_tools = list(RUNNER_TOOLS)
+            skills_catalog = render_catalog_for_prompt(skill_registry)
+            print(
+                f"🎒 Skills: {len(skill_registry)} loaded "
+                f"(project / home / bundled scopes)"
+            )
+        else:
+            # Empty registry → drop Skill tool to avoid the LLM calling a
+            # tool that has no entries.
+            active_tools = [t for t in RUNNER_TOOLS if t != "Skill"]
+            skills_catalog = ""
+            print("🎒 Skills: none found")
+
     client = AnthropicClient(
         default_model=MODEL_NAME,
         max_tokens_default=MAX_TOKENS,
@@ -493,6 +537,8 @@ async def main() -> None:
                 handoff_text=handoff_text,
                 claude_md_text=claude_md_text,
                 mcp_servers=mcp_servers_payload or None,
+                skills_catalog=skills_catalog,
+                tools=active_tools,
             )
             if success:
                 break
