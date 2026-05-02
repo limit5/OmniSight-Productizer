@@ -48,10 +48,13 @@ class TestOutboundOAuthScaffold:
             "auth/outbound-oauth-flow.ts",
             "auth/outbound-token-vault.ts",
             "auth/outbound-refresh-middleware.ts",
+            "auth/outbound-scope-upgrade.ts",
             "app/api/integrations/github/authorize/route.ts",
             "app/api/integrations/github/callback/route.ts",
+            "app/api/integrations/github/scope-upgrade/route.ts",
             "app/api/integrations/slack/authorize/route.ts",
             "app/api/integrations/slack/callback/route.ts",
+            "app/api/integrations/slack/scope-upgrade/route.ts",
         ]
 
     def test_flow_helper_reuses_as1_authorize_callback_and_token_parser(self):
@@ -81,8 +84,8 @@ class TestOutboundOAuthScaffold:
 
     def test_routes_render_authorize_cookie_and_callback_token_exchange(self):
         result = _render("notion")
-        authorize = result.files[3].content
-        callback = result.files[4].content
+        authorize = result.files[4].content
+        callback = result.files[5].content
         assert 'beginOutboundAuthorization("notion")' in authorize
         assert "outbound_oauth_flow_notion=" in authorize
         assert 'outboundProviderById("notion")' in callback
@@ -132,6 +135,37 @@ class TestOutboundOAuthScaffold:
             in helper
         )
 
+    def test_scope_upgrade_reuses_existing_connection_and_authorizes_missing_scopes(self):
+        result = _render("github", oauth_client_import="../oauth-client")
+        helper = result.files[3].content
+        assert 'from "../oauth-client"' in helper
+        assert "beginOutboundScopeUpgrade" in helper
+        assert "scope upgrade requires an existing outbound OAuth connection" in helper
+        assert "missingScopeValues(current.scope, requestedScopes)" in helper
+        assert 'scope_upgrade: "true"' in helper
+        assert "scope: mergedScopes" in helper
+        assert 'status: "already_granted"' in helper
+        assert "disconnectOutbound" not in helper
+        assert "revokeOutbound" not in helper
+
+    def test_scope_upgrade_merge_preserves_refresh_token_when_provider_omits_it(self):
+        result = _render("github")
+        helper = result.files[3].content
+        assert "mergeOutboundScopeUpgradeToken" in helper
+        assert "refreshToken: upgradedToken.refreshToken || previous.refreshToken" in helper
+        assert "scope: mergeScopes(previous.scope, upgradedToken.scope)" in helper
+        assert "encryptOutboundTokenSet" in helper
+
+    def test_scope_upgrade_route_requires_requested_scope_and_sets_flow_cookie(self):
+        result = _render("github")
+        route = result.files[6].content
+        assert 'beginOutboundScopeUpgrade' in route
+        assert 'outboundTokenStore' in route
+        assert 'missing_requested_scopes' in route
+        assert 'beginOutboundScopeUpgrade(' in route
+        assert 'outbound_oauth_flow_github=' in route
+        assert 'missingScopes: result.authorization!.missingScopes' in route
+
     def test_provider_metadata_marks_as2_token_vault_support(self):
         result = _render("github", "slack")
         support = {p.provider: p.token_vault_supported for p in result.providers}
@@ -175,6 +209,7 @@ class TestOutboundOAuthValidation:
             "token_vault_import",
             "token_vault_path",
             "refresh_middleware_path",
+            "scope_upgrade_path",
         ],
     )
     def test_required_fields(self, field):
@@ -186,6 +221,7 @@ class TestOutboundOAuthValidation:
             token_vault_import="@/shared/token-vault",
             token_vault_path="auth/outbound-token-vault.ts",
             refresh_middleware_path="auth/outbound-refresh-middleware.ts",
+            scope_upgrade_path="auth/outbound-scope-upgrade.ts",
         )
         kwargs[field] = () if field == "provider_plans" else ""
         opts = OutboundOAuthFlowScaffoldOptions(**kwargs)

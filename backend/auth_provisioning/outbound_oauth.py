@@ -4,8 +4,8 @@ FS.2b connects generated apps to third-party APIs (GitHub, Slack,
 Notion, and similar outbound integrations). This module renders the
 minimal generated-app scaffold for the authorization-code flow:
 authorize route, callback route, token exchange, token-vault storage
-bridge, and refresh middleware. Scope upgrades and disconnect/revoke
-endpoints are separate FS.2b follow-up rows.
+bridge, refresh middleware, and scope upgrades for already-connected
+providers. Disconnect/revoke endpoints are separate FS.2b follow-up rows.
 
 Module-global state audit (per implement_phase_step.md SOP §1)
 --------------------------------------------------------------
@@ -90,6 +90,7 @@ class OutboundOAuthFlowScaffoldOptions:
     token_vault_import: str = "@/shared/token-vault"
     token_vault_path: str = "auth/outbound-token-vault.ts"
     refresh_middleware_path: str = "auth/outbound-refresh-middleware.ts"
+    scope_upgrade_path: str = "auth/outbound-scope-upgrade.ts"
     extra_env: tuple[AuthScaffoldEnvVar, ...] = field(default_factory=tuple)
 
     def validate(self) -> None:
@@ -110,6 +111,8 @@ class OutboundOAuthFlowScaffoldOptions:
             or not self.refresh_middleware_path.strip()
         ):
             raise ValueError("refresh_middleware_path is required")
+        if not self.scope_upgrade_path or not self.scope_upgrade_path.strip():
+            raise ValueError("scope_upgrade_path is required")
 
 
 def list_outbound_oauth_flow_providers() -> list[str]:
@@ -142,11 +145,16 @@ def render_outbound_oauth_flow_scaffold(
                     options.token_vault_import,
                 ),
             ),
+            AuthScaffoldFile(
+                options.scope_upgrade_path.strip("/"),
+                _scope_upgrade_file(options.oauth_client_import),
+            ),
         ) + _route_files(options.route_prefix, providers),
         env=_env_vars(providers) + tuple(options.extra_env),
         notes=(
             "FS.2b.2 encrypts callback token sets with the AS.2 token vault",
             "FS.2b.3 refresh middleware rotates refresh tokens before provider calls",
+            "FS.2b.4 upgrades missing scopes from an existing connection without disconnect/reconnect",
             "client secrets are declared as env metadata only",
         ),
     )
@@ -517,6 +525,135 @@ function base64urlDecode(value: string): Uint8Array {{
 """
 
 
+def _scope_upgrade_file(oauth_client_import: str) -> str:
+    imported_oauth = _ts_string(oauth_client_import)
+    return f"""// FS.2b.4 outbound OAuth scope upgrade flow.
+// Requires an existing vault record; missing scopes are authorized without disconnect/reconnect.
+
+import {{
+  beginAuthorization,
+  type TokenSet,
+}} from "{imported_oauth}"
+import {{ outboundProviderById, type OutboundOAuthProvider }} from "./outbound-oauth-flow"
+import {{ encryptOutboundTokenSet, type OutboundOAuthVaultRecord }} from "./outbound-token-vault"
+import {{ decryptOutboundVaultRecord }} from "./outbound-refresh-middleware"
+
+export type OutboundOAuthScopeUpgradeStore = {{
+  load(userId: string, provider: string): Promise<OutboundOAuthVaultRecord | null>
+  save(record: OutboundOAuthVaultRecord): Promise<void>
+}}
+
+export type OutboundOAuthScopeUpgradeAuthorization = {{
+  url: string
+  flow: Awaited<ReturnType<typeof beginAuthorization>>["flow"]
+  missingScopes: readonly string[]
+  mergedScopes: readonly string[]
+}}
+
+export type OutboundOAuthScopeUpgradeResult = {{
+  status: "already_granted" | "authorization_required"
+  authorization: OutboundOAuthScopeUpgradeAuthorization | null
+}}
+
+export async function beginOutboundScopeUpgrade(
+  userId: string,
+  providerId: string,
+  requestedScopes: readonly string[],
+  store: OutboundOAuthScopeUpgradeStore,
+  masterKeyRaw: string,
+): Promise<OutboundOAuthScopeUpgradeResult> {{
+  const provider = outboundProviderById(providerId)
+  if (!provider) throw new Error(`unsupported outbound OAuth provider: ${{providerId}}`)
+
+  const record = await store.load(userId, provider.provider)
+  if (!record) {{
+    throw new Error("scope upgrade requires an existing outbound OAuth connection")
+  }}
+
+  const current = await decryptOutboundVaultRecord(record, masterKeyRaw)
+  const missingScopes = missingScopeValues(current.scope, requestedScopes)
+  if (missingScopes.length === 0) {{
+    return {{ status: "already_granted", authorization: null }}
+  }}
+
+  const mergedScopes = mergeScopes(current.scope, requestedScopes)
+  const {{ url, flow }} = await beginAuthorization({{
+    provider: provider.provider,
+    authorizeEndpoint: provider.authorizeEndpoint,
+    clientId: process.env[provider.clientIdEnv]!,
+    redirectUri: provider.callbackUrl,
+    scope: mergedScopes,
+    useOidcNonce: provider.isOidc,
+    extraAuthorizeParams: provider.extraAuthorizeParams,
+    extra: {{
+      scope_upgrade: "true",
+      current_scope: current.scope.join(" "),
+      requested_scope: requestedScopes.join(" "),
+      missing_scope: missingScopes.join(" "),
+    }},
+  }})
+  return {{
+    status: "authorization_required",
+    authorization: {{
+      url,
+      flow,
+      missingScopes,
+      mergedScopes,
+    }},
+  }}
+}}
+
+export async function mergeOutboundScopeUpgradeToken(
+  previousRecord: OutboundOAuthVaultRecord,
+  upgradedToken: TokenSet,
+  masterKeyRaw: string,
+): Promise<OutboundOAuthVaultRecord> {{
+  const previous = await decryptOutboundVaultRecord(previousRecord, masterKeyRaw)
+  const mergedToken = Object.freeze({{
+    accessToken: upgradedToken.accessToken,
+    refreshToken: upgradedToken.refreshToken || previous.refreshToken,
+    tokenType: upgradedToken.tokenType || previous.tokenType,
+    expiresAt: upgradedToken.expiresAt ?? previous.expiresAt,
+    scope: mergeScopes(previous.scope, upgradedToken.scope),
+    idToken: upgradedToken.idToken || previous.idToken,
+    raw: upgradedToken.raw,
+  }}) as TokenSet
+  return encryptOutboundTokenSet(
+    previousRecord.userId,
+    previousRecord.provider,
+    mergedToken,
+    masterKeyRaw,
+  )
+}}
+
+export function missingScopeValues(
+  currentScopes: readonly string[],
+  requestedScopes: readonly string[],
+): readonly string[] {{
+  const current = new Set(currentScopes.map(normalizeScope).filter(Boolean))
+  return requestedScopes
+    .map(normalizeScope)
+    .filter((scope, index, all) => scope && all.indexOf(scope) === index)
+    .filter((scope) => !current.has(scope))
+}}
+
+function mergeScopes(
+  currentScopes: readonly string[],
+  requestedScopes: readonly string[],
+): readonly string[] {{
+  const out: string[] = []
+  for (const scope of [...currentScopes, ...requestedScopes].map(normalizeScope)) {{
+    if (scope && !out.includes(scope)) out.push(scope)
+  }}
+  return Object.freeze(out) as readonly string[]
+}}
+
+function normalizeScope(scope: string): string {{
+  return String(scope).trim()
+}}
+"""
+
+
 def _provider_entry(item: OutboundOAuthFlowProviderItem) -> str:
     scope = ", ".join(f'"{_ts_string(s)}"' for s in item.scope)
     extra = ", ".join(
@@ -553,6 +690,10 @@ def _route_files(
             AuthScaffoldFile(
                 f"{prefix}/{item.provider}/callback/route.ts",
                 _callback_route(item.provider),
+            ),
+            AuthScaffoldFile(
+                f"{prefix}/{item.provider}/scope-upgrade/route.ts",
+                _scope_upgrade_route(item.provider),
             ),
         )
     return files
@@ -628,6 +769,50 @@ export async function GET(req: Request) {{
     provider: provider.provider,
     vaultRecord,
   }})
+}}
+"""
+
+
+def _scope_upgrade_route(provider: str) -> str:
+    provider_literal = _ts_string(provider)
+    cookie_name = _cookie_name(provider)
+    return f"""// FS.2b.4 outbound OAuth scope-upgrade route for {provider_literal}.
+
+import {{ beginOutboundScopeUpgrade }} from "@/auth/outbound-scope-upgrade"
+import {{ outboundTokenStore }} from "@/auth/outbound-token-store"
+
+export async function POST(req: Request) {{
+  const userId = req.headers.get("x-omnisight-user-id")
+  if (!userId) return Response.json({{ error: "missing_user_id" }}, {{ status: 401 }})
+
+  const body = await req.json()
+  const requestedScopes = Array.isArray(body.scopes)
+    ? body.scopes.map((scope: unknown) => String(scope))
+    : []
+  if (requestedScopes.length === 0) {{
+    return Response.json({{ error: "missing_requested_scopes" }}, {{ status: 400 }})
+  }}
+
+  const result = await beginOutboundScopeUpgrade(
+    userId,
+    "{provider_literal}",
+    requestedScopes,
+    outboundTokenStore,
+    process.env.OAUTH_TOKEN_VAULT_MASTER_KEY!,
+  )
+  if (result.status === "already_granted") return Response.json({{ ok: true, status: result.status }})
+
+  const res = Response.json({{
+    ok: true,
+    status: result.status,
+    url: result.authorization!.url,
+    missingScopes: result.authorization!.missingScopes,
+  }})
+  res.headers.append(
+    "Set-Cookie",
+    `{cookie_name}=${{encodeURIComponent(JSON.stringify(result.authorization!.flow))}}; HttpOnly; Path=/; SameSite=Lax`,
+  )
+  return res
 }}
 """
 
