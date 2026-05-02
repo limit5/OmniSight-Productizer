@@ -16,6 +16,7 @@ from backend.db_provisioning.base import (
     InvalidDBProvisionTokenError,
     MissingDBProvisionScopeError,
 )
+from backend.db_provisioning.encryption import plan_encryption_at_rest
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +52,12 @@ class NeonDBProvisionAdapter(DBProvisionAdapter):
         self,
         *,
         region_id: str = "aws-us-east-1",
+        provider_tier: str = "free",
         api_base: str = NEON_API_BASE,
         **_: Any,
     ) -> None:
         self._region_id = region_id
+        self._encryption_at_rest = plan_encryption_at_rest(self.provider, provider_tier)
         self._api_base = api_base.rstrip("/")
 
     def _headers(self) -> dict[str, str]:
@@ -136,6 +139,7 @@ class NeonDBProvisionAdapter(DBProvisionAdapter):
             status=project.get("provisioner") or project.get("status") or "ready",
             created=created,
             region=project.get("region_id") or self._region_id,
+            encryption_at_rest=self._encryption_at_rest,
             raw=raw,
         )
 

@@ -17,6 +17,7 @@ from backend.db_provisioning.base import (
     InvalidDBProvisionTokenError,
     MissingDBProvisionScopeError,
 )
+from backend.db_provisioning.encryption import plan_encryption_at_rest
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class SupabaseDBProvisionAdapter(DBProvisionAdapter):
         *,
         organization_id: str,
         region: str = "us-east-1",
+        provider_tier: str = "free",
         api_base: str = SUPABASE_API_BASE,
         **_: Any,
     ) -> None:
@@ -60,6 +62,7 @@ class SupabaseDBProvisionAdapter(DBProvisionAdapter):
             raise ValueError("SupabaseDBProvisionAdapter requires organization_id")
         self._organization_id = organization_id
         self._region = region
+        self._encryption_at_rest = plan_encryption_at_rest(self.provider, provider_tier)
         self._api_base = api_base.rstrip("/")
 
     def _headers(self) -> dict[str, str]:
@@ -158,6 +161,7 @@ class SupabaseDBProvisionAdapter(DBProvisionAdapter):
             status=project.get("status") or "ready",
             created=created,
             region=project.get("region") or region or self._region,
+            encryption_at_rest=self._encryption_at_rest,
             raw=project,
         )
 

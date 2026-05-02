@@ -11,6 +11,13 @@ from backend.db_provisioning.base import (
     InvalidDBProvisionTokenError,
     MissingDBProvisionScopeError,
 )
+from backend.db_provisioning.encryption import (
+    EncryptionAtRestPolicy,
+    EncryptionAtRestUnsupportedTierError,
+    encryption_supported_tiers,
+    normalize_provider_tier,
+    plan_encryption_at_rest,
+)
 from backend.db_provisioning.migrations import (
     DBMigrationCommandError,
     DBMigrationError,
@@ -50,6 +57,8 @@ __all__ = [
     "DBProvisionConflictError",
     "DBProvisionError",
     "DBProvisionRateLimitError",
+    "EncryptionAtRestPolicy",
+    "EncryptionAtRestUnsupportedTierError",
     "InvalidDBProvisionTokenError",
     "MissingDBProvisionScopeError",
     "DBMigrationCommandError",
@@ -57,7 +66,10 @@ __all__ = [
     "DBMigrationResult",
     "UnsupportedDBMigrationToolError",
     "build_migration_command",
+    "encryption_supported_tiers",
     "get_adapter",
     "list_providers",
+    "normalize_provider_tier",
+    "plan_encryption_at_rest",
     "run_tenant_migrations",
 ]

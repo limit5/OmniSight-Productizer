@@ -23,6 +23,7 @@ from typing import Any, ClassVar, Optional
 
 from backend import secret_store
 from backend.deploy.base import token_fingerprint
+from backend.db_provisioning.encryption import EncryptionAtRestPolicy
 
 
 class DBProvisionError(Exception):
@@ -65,6 +66,7 @@ class DatabaseProvisionResult:
     status: str = "ready"
     created: bool = False
     region: Optional[str] = None
+    encryption_at_rest: Optional[EncryptionAtRestPolicy] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -76,6 +78,11 @@ class DatabaseProvisionResult:
             "status": self.status,
             "created": self.created,
             "region": self.region,
+            "encryption_at_rest": (
+                self.encryption_at_rest.to_dict()
+                if self.encryption_at_rest is not None
+                else None
+            ),
         }
 
 
@@ -151,6 +158,7 @@ __all__ = [
     "DBProvisionConflictError",
     "DBProvisionError",
     "DBProvisionRateLimitError",
+    "EncryptionAtRestPolicy",
     "InvalidDBProvisionTokenError",
     "MissingDBProvisionScopeError",
 ]

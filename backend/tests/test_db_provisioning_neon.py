@@ -53,6 +53,9 @@ class TestProvision:
         result = await _mk_adapter().provision_database(pg_version=16)
         assert result.created is True
         assert result.database_id == "prj_123"
+        assert result.encryption_at_rest is not None
+        assert result.encryption_at_rest.provider_tier == "free"
+        assert result.encryption_at_rest.enabled is True
         assert result.connection_url == "postgresql://user:pass@ep.example/neondb"
         body = route.calls.last.request.read()
         assert b'"name":"tenant-demo"' in body
@@ -70,6 +73,17 @@ class TestProvision:
         assert result.created is False
         assert result.database_id == "prj_123"
         assert result.connection_url is None
+
+    @respx.mock
+    async def test_provider_tier_controls_encryption_policy_metadata(self):
+        respx.get(f"{N}/projects").mock(
+            return_value=_ok({"projects": [
+                {"id": "prj_123", "name": "tenant-demo", "region_id": "aws-us-east-1"},
+            ]}),
+        )
+        result = await _mk_adapter(provider_tier="business").provision_database()
+        assert result.encryption_at_rest is not None
+        assert result.encryption_at_rest.provider_tier == "business"
 
     @respx.mock
     async def test_401_and_403_map_correctly(self):

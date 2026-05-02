@@ -65,6 +65,9 @@ class TestProvision:
         result = await _mk_adapter().provision_database(password_name="omnisight")
         assert result.created is True
         assert result.database_id == "db_123"
+        assert result.encryption_at_rest is not None
+        assert result.encryption_at_rest.provider_tier == "scaler-pro"
+        assert result.encryption_at_rest.enabled is True
         assert result.connection_url == (
             "mysql://u%2Fser:p%3Dword@aws.connect.psdb.cloud/"
             "tenant-demo?sslaccept=strict"
@@ -98,6 +101,25 @@ class TestProvision:
         assert result.connection_url == (
             "mysql://user:secret@aws.connect.psdb.cloud/tenant-demo?sslaccept=strict"
         )
+
+    @respx.mock
+    async def test_provider_tier_controls_encryption_policy_metadata(self):
+        respx.get(f"{P}/organizations/org-demo/databases/tenant-demo").mock(
+            return_value=_ok({"id": "db_123", "name": "tenant-demo"}),
+        )
+        respx.post(
+            f"{P}/organizations/org-demo/databases/tenant-demo/branches/main/passwords",
+        ).mock(
+            return_value=_ok({
+                "id": "pw_123",
+                "username": "user",
+                "plain_text": "secret",
+                "access_host_url": "aws.connect.psdb.cloud",
+            }, status=201),
+        )
+        result = await _mk_adapter(provider_tier="enterprise").provision_database()
+        assert result.encryption_at_rest is not None
+        assert result.encryption_at_rest.provider_tier == "enterprise-multi-tenant"
 
     @respx.mock
     async def test_401_and_403_map_correctly(self):
