@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
+import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -125,6 +127,55 @@ class TestCheckoutPayload:
         assert "cancel_url" in str(exc.value)
 
 
+class TestHttpxStripeBillingClient:
+    @respx.mock
+    async def test_client_posts_checkout_form_with_stripe_headers(self) -> None:
+        config = sb.StripeBillingConfig(
+            secret_key="sk_test_123",
+            api_base_url="https://stripe.test/v1",
+        )
+        route = respx.post("https://stripe.test/v1/checkout/sessions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "cs_test_123",
+                    "object": "checkout.session",
+                    "url": "https://checkout.stripe.test/session",
+                },
+            ),
+        )
+
+        out = await sb.HttpxStripeBillingClient().create_checkout_session(
+            config, {"mode": "subscription"},
+        )
+
+        assert out["id"] == "cs_test_123"
+        request = route.calls[0].request
+        assert request.headers["Authorization"] == "Bearer sk_test_123"
+        assert request.headers["Stripe-Version"] == "2025-04-30.basil"
+        assert request.content.decode() == "mode=subscription"
+
+    @respx.mock
+    async def test_client_maps_stripe_error_message(self) -> None:
+        config = sb.StripeBillingConfig(
+            secret_key="sk_test_123",
+            api_base_url="https://stripe.test/v1",
+        )
+        respx.post("https://stripe.test/v1/billing_portal/sessions").mock(
+            return_value=httpx.Response(
+                400,
+                json={"error": {"message": "No such customer: cus_missing"}},
+            ),
+        )
+
+        with pytest.raises(sb.StripeBillingError) as exc:
+            await sb.HttpxStripeBillingClient().create_billing_portal_session(
+                config, {"customer": "cus_missing"},
+            )
+
+        assert "No such customer" in str(exc.value)
+
+
 class TestPortalPayload:
     async def test_portal_session_uses_customer_and_return_url(self) -> None:
         fake = _FakeStripeClient()
@@ -182,14 +233,7 @@ class TestResponseShape:
 
 
 class TestRouter:
-    def test_router_uses_require_admin_dependency(self) -> None:
-        deps = {
-            getattr(dep, "dependency", None)
-            for dep in billing_router.router.dependencies
-        }
-        assert _auth.require_admin in deps
-
-    def test_checkout_route_maps_missing_config_to_400(self) -> None:
+    def _client(self) -> TestClient:
         app = FastAPI()
         app.include_router(billing_router.router)
         app.dependency_overrides[_auth.require_admin] = lambda: _auth.User(
@@ -200,9 +244,82 @@ class TestRouter:
             id="u-1", email="owner@example.com", name="Owner", role="admin",
             tenant_id="t-acme",
         )
+        return TestClient(app)
 
-        client = TestClient(app)
-        resp = client.post("/billing/stripe/checkout-session", json={})
+    def test_router_uses_require_admin_dependency(self) -> None:
+        deps = {
+            getattr(dep, "dependency", None)
+            for dep in billing_router.router.dependencies
+        }
+        assert _auth.require_admin in deps
+
+    def test_checkout_route_maps_missing_config_to_400(self) -> None:
+        resp = self._client().post("/billing/stripe/checkout-session", json={})
 
         assert resp.status_code == 400
         assert "Stripe" in resp.json()["detail"]
+
+    def test_checkout_route_passes_user_and_body_to_billing_helper(
+        self, monkeypatch,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def _fake_create_checkout_session(config, **kwargs):
+            captured["config"] = config
+            captured["kwargs"] = kwargs
+            return {
+                "id": "cs_route_123",
+                "object": "checkout.session",
+                "url": "https://checkout.stripe.test/route",
+                "secret": "hidden",
+            }
+
+        monkeypatch.setattr(
+            billing_router,
+            "create_checkout_session",
+            _fake_create_checkout_session,
+        )
+
+        resp = self._client().post(
+            "/billing/stripe/checkout-session",
+            json={
+                "price_id": "price_override",
+                "success_url": "https://app.example/success",
+                "cancel_url": "https://app.example/cancel",
+                "customer_id": "cus_123",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "id": "cs_route_123",
+            "object": "checkout.session",
+            "url": "https://checkout.stripe.test/route",
+        }
+        assert captured["kwargs"] == {
+            "tenant_id": "t-acme",
+            "user_id": "u-1",
+            "user_email": "owner@example.com",
+            "price_id": "price_override",
+            "success_url": "https://app.example/success",
+            "cancel_url": "https://app.example/cancel",
+            "customer_id": "cus_123",
+        }
+
+    def test_portal_route_maps_stripe_error_to_502(self, monkeypatch) -> None:
+        async def _fake_create_billing_portal_session(config, **kwargs):
+            raise sb.StripeBillingError("stripe unavailable")
+
+        monkeypatch.setattr(
+            billing_router,
+            "create_billing_portal_session",
+            _fake_create_billing_portal_session,
+        )
+
+        resp = self._client().post(
+            "/billing/stripe/portal-session",
+            json={"customer_id": "cus_123"},
+        )
+
+        assert resp.status_code == 502
+        assert resp.json()["detail"] == "stripe unavailable"

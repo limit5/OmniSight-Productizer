@@ -163,6 +163,103 @@ class TestStripeWebhookHelpers:
         assert conn.execute_calls[0][1][0] == "t-acme"
         assert conn.execute_calls[0][1][5] == "canceled"
 
+    async def test_non_subscription_event_does_not_touch_db(self) -> None:
+        event = sw.parse_stripe_webhook_event({
+            "id": "evt_125",
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_123",
+                    "object": "checkout.session",
+                },
+            },
+        })
+        conn = _FakeBillingConn(tenant_id="t-acme")
+
+        synced = await sw.sync_stripe_subscription_state(event, conn=conn)
+
+        assert synced is False
+        assert conn.fetchrow_calls == []
+        assert conn.execute_calls == []
+
+    async def test_subscription_state_sync_skips_missing_tenant(self) -> None:
+        event = sw.parse_stripe_webhook_event({
+            "id": "evt_126",
+            "type": "customer.subscription.updated",
+            "data": {
+                "object": {
+                    "id": "sub_missing_tenant",
+                    "object": "subscription",
+                    "customer": "cus_123",
+                    "status": "active",
+                    "metadata": {},
+                },
+            },
+        })
+        conn = _FakeBillingConn()
+
+        synced = await sw.sync_stripe_subscription_state(event, conn=conn)
+
+        assert synced is False
+        assert conn.fetchrow_calls[0][1] == (
+            "stripe",
+            "sub_missing_tenant",
+            "cus_123",
+        )
+        assert conn.execute_calls == []
+
+    async def test_subscription_state_sync_uses_plan_price_fallback(self) -> None:
+        event = sw.parse_stripe_webhook_event({
+            "id": "evt_127",
+            "type": "customer.subscription.updated",
+            "data": {
+                "object": {
+                    "id": "sub_123",
+                    "object": "subscription",
+                    "customer": "cus_123",
+                    "status": "active",
+                    "current_period_end": "",
+                    "metadata": {"tenant_id": "t-acme"},
+                    "items": {"data": []},
+                    "plan": {"id": "price_legacy"},
+                },
+            },
+        })
+        conn = _FakeBillingConn()
+
+        synced = await sw.sync_stripe_subscription_state(event, conn=conn)
+
+        assert synced is True
+        assert conn.execute_calls[0][1][4] == "price_legacy"
+        assert conn.execute_calls[0][1][6] is None
+
+    async def test_subscription_state_sync_preserves_existing_price_when_blank(
+        self,
+    ) -> None:
+        event = sw.parse_stripe_webhook_event({
+            "id": "evt_128",
+            "type": "customer.subscription.updated",
+            "data": {
+                "object": {
+                    "id": "sub_123",
+                    "object": "subscription",
+                    "customer": "cus_123",
+                    "status": "active",
+                    "metadata": {"tenant_id": "t-acme"},
+                    "items": {"data": []},
+                },
+            },
+        })
+        conn = _FakeBillingConn()
+
+        synced = await sw.sync_stripe_subscription_state(event, conn=conn)
+
+        assert synced is True
+        sql, args = conn.execute_calls[0]
+        assert args[4] == ""
+        assert "WHEN EXCLUDED.stripe_price_id = ''" in sql
+        assert "THEN provisioned_billing.stripe_price_id" in sql
+
 
 class TestStripeWebhookEndpoint:
     @pytest.mark.asyncio
