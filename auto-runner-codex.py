@@ -216,7 +216,10 @@ _PENDING_RE = re.compile(r"^\s*-\s*\[ \]\s+(.*)$")
 def _find_first_pending(lines: list[str]) -> str | None:
     for line in lines:
         stripped = line.strip()
-        # Untagged pending: "- [ ] ..." with no [C]/[G] suffix yet.
+        # A pending bullet is `- [ ] ...` with NO agent tag yet.
+        # `- [~][G]` (reserved by codex), `- [x][G]` (done), `- [!][G]`
+        # (failed) all start with something other than `- [ ]` and are
+        # therefore correctly skipped. Same for `[C]` Claude-tagged.
         if stripped.startswith("- [ ]"):
             if TARGET_ITEM_SUBSTR and TARGET_ITEM_SUBSTR not in stripped:
                 continue
@@ -224,20 +227,94 @@ def _find_first_pending(lines: list[str]) -> str | None:
     return None
 
 
-def _mark_item_failed(item_line: str) -> None:
-    """Flip ``- [ ]`` → ``- [!][G]`` so we don't loop on it."""
+# ── Runner-managed TODO marker contract (Tier B fix, 2026-05-03) ──
+#
+# Why the runner — not codex — owns the TODO marker:
+#
+# Tier B runs codex in a separate worktree on `codex-work` branch. That
+# worktree has its OWN TODO.md (a snapshot at the branch HEAD), distinct
+# from the master checkout's TODO.md. If codex updates the worktree's
+# TODO.md and commits, those changes land on `codex-work`, NOT on
+# master. The runner reads master/TODO.md every iteration → never sees
+# the [G] marker codex wrote in the worktree → infinite loop dispatching
+# the same already-completed item.
+#
+# Fix: runner takes full ownership of master/TODO.md marker writes.
+#   * BEFORE dispatching, runner reserves the item with `- [~][G]` so
+#     parallel runners (Claude or other codex instances) see it claimed
+#     and skip it.
+#   * AFTER codex returns success, runner flips `- [~][G]` → `- [x][G]`.
+#   * AFTER codex returns failure, runner flips `- [~][G]` → `- [!][G]`.
+#
+# Codex's prompt is updated to TELL it not to touch TODO.md at all in
+# Tier B mode. Code commits on `codex-work` are the work product;
+# master/TODO.md is the coordination state.
+
+
+def _replace_marker_in_master_todo(
+    item_line: str,
+    new_prefix: str,
+    *,
+    label: str,
+) -> str | None:
+    """Replace the leading ``- [X]...`` of a single line in master TODO.
+
+    Returns the new line on success, None on failure / no match. Caller
+    typically uses the returned string as the canonical reference for
+    later flips (``[~][G]`` → ``[x][G]`` etc.).
+    """
     try:
         with open(TODO_FILE, "r", encoding="utf-8") as f:
             content = f.read()
-        original = item_line
-        failed_mark = item_line.replace("- [ ]", "- [!][G]", 1)
-        if original != failed_mark:
-            content = content.replace(original, failed_mark, 1)
-            with open(TODO_FILE, "w", encoding="utf-8") as f:
-                f.write(content)
-            print(f"📝 已將失敗項目標記為 [!][G]：{failed_mark[:60]}")
     except OSError as e:
-        print(f"⚠️ 標記失敗項目時出錯：{e}")
+        print(f"⚠️ 讀 master TODO 失敗：{e}")
+        return None
+
+    if item_line not in content:
+        # Could happen if a parallel runner already mutated this line.
+        # Don't try to recover — just log and bail.
+        print(
+            f"⚠️ 在 master TODO 找不到原始 marker（可能已被其他 runner 改動）：\n"
+            f"   {item_line[:80]}"
+        )
+        return None
+
+    # item_line starts with one of: "- [ ]", "- [~][G]", "- [x][G]", "- [!][G]".
+    # Replace the leading marker with `new_prefix`.
+    for old_prefix in ("- [ ]", "- [~][G]", "- [x][G]", "- [!][G]"):
+        if item_line.startswith(old_prefix):
+            new_line = new_prefix + item_line[len(old_prefix):]
+            break
+    else:
+        print(f"⚠️ 無法解析的 marker prefix：{item_line[:40]}")
+        return None
+
+    if new_line == item_line:
+        return new_line  # idempotent no-op
+    new_content = content.replace(item_line, new_line, 1)
+    try:
+        with open(TODO_FILE, "w", encoding="utf-8") as f:
+            f.write(new_content)
+    except OSError as e:
+        print(f"⚠️ 寫 master TODO 失敗：{e}")
+        return None
+    print(f"📝 [{label}] {new_prefix} ← {item_line[:60]}")
+    return new_line
+
+
+def _reserve_item_for_codex(item_line: str) -> str | None:
+    """Pre-flight: flip ``- [ ]`` → ``- [~][G]`` so parallel runners skip it."""
+    return _replace_marker_in_master_todo(item_line, "- [~][G]", label="reserved")
+
+
+def _flip_reservation_to_done(reserved_line: str) -> str | None:
+    """Post-success: flip ``- [~][G]`` → ``- [x][G]``."""
+    return _replace_marker_in_master_todo(reserved_line, "- [x][G]", label="done")
+
+
+def _flip_reservation_to_failed(reserved_line: str) -> str | None:
+    """Post-failure: flip ``- [~][G]`` → ``- [!][G]``."""
+    return _replace_marker_in_master_todo(reserved_line, "- [!][G]", label="failed")
 
 
 # ── codex 命令組 ──
@@ -300,18 +377,21 @@ Claude (Opus)。協作規則在 {COORDINATION_FILE}，你的特定規則在 {AGE
    `[codex-blocked]: ...` 並停止。
 6. 這是真實執行階段，請直接讀寫檔案、修改程式碼、建立資料夾或執行必要指令。
 7. 如果遇到缺少的檔案，請參考專案上下文自行推導並建立。
-8. **【狀態標記鐵律】**：完成後，你「必須」開啟 {TODO_FILE} 進行狀態標記：
-   - 若你已完成該項目，請將對應的 `- [ ]` 改為 **`- [x][G]`**（不是 `- [x]`，
-     `[G]` 標明是 Codex 完成的）。
-   - 若該項目需要人類實體操作 (Operator-blocked)，請將它從 `- [ ]` 改為
-     **`- [O][G]`**。
-   - 若你卡住無法完成，請改為 **`- [!][G]`** 並在 HANDOFF.md 寫
-     `[codex-blocked]:` 條目。
-   - **只標記你剛完成的那一項**，不要改動其他項目，**特別不要改動已經
-     標 `[C]` (Claude) 的項目**。
-9. **HANDOFF.md 寫入規範**：你寫的條目 heading 必須以 **`## [Codex/GPT-5.5]`**
-   開頭，後面跟日期跟 item ID。例：`## [Codex/GPT-5.5] 2026-05-02 FS.4.1
-   完工`。**不要改動 Claude 寫的條目** (heading 是 `## [Claude/Opus]`)。
+8. **【TODO.md 寫入鐵律 — Tier B 重要】**：在 Tier B (worktree) 模式下，你
+   **完全不要改動 TODO.md**。原因：你的 worktree 跟 master 是不同 working
+   tree，TODO.md 的 master 副本由 runner 統一管理。runner 已經在你開工前
+   把那行從 `- [ ]` 標成 `- [~][G]`（reserved），完工後 runner 會根據你
+   的 exit code 自動翻成 `- [x][G]`（成功）或 `- [!][G]`（失敗）。
+   - **不要在 worktree 內 edit TODO.md**（你改的是 codex-work 那份的副本，
+     完全沒被 runner 看見，會造成過去版本的「無限 loop bug」復發）
+   - **不要把 TODO.md 加進你的 commit**
+   - 唯一例外：Tier A 模式時 (cwd 為 master)，你才照舊 `- [ ]` → `- [x][G]`
+     自己標。
+9. **HANDOFF.md 寫入規範**：HANDOFF.md 你**可以**寫，因為它在 worktree
+   內你寫進去的內容會跟你的 code 一起 commit 到 codex-work，後續 merge 時
+   一併進入 master。你寫的條目 heading 必須以 **`## [Codex/GPT-5.5]`** 開頭，
+   後面跟日期跟 item ID。例：`## [Codex/GPT-5.5] 2026-05-02 FS.4.1 完工`。
+   **不要改動 Claude 寫的條目** (heading 是 `## [Claude/Opus]`)。
 10. 更新完後，請務必將更動後的內容 commit 到 Git。**commit message 末尾必須
     在 Co-Authored-By trailers 之前加一行 Tier marker**：
        [Tier-{TIER}]
@@ -323,7 +403,8 @@ Claude (Opus)。協作規則在 {COORDINATION_FILE}，你的特定規則在 {AGE
 12. 完成後，直接輸出「✅ 項目完成」並結束。
 
 **不要做這些（會搞砸協作）**：
-  * 改動標記為 `[C]` 的 TODO 條目（那是 Claude 的工作）
+  * 改動 TODO.md（Tier B 模式 runner 管，見上面鐵律 8）
+  * 改動標記為 `[C]` 的 TODO 條目（那是 Claude 的工作 — Tier A 也禁）
   * 改動 heading 為 `[Claude/Opus]` 的 HANDOFF 條目
   * 改動 CLAUDE.md 或 docs/operations/runner-strategy.md（Claude 主管）
   * 改動 coordination.md 或 AGENTS.md（這是規則文件，需人類同意）
@@ -456,6 +537,29 @@ def main() -> None:
             time.sleep(SECTION_COOLDOWN_S)
         last_section = section_title
 
+        # Tier B fix (2026-05-03): runner OWNS master/TODO.md marker.
+        # Reserve the item with [~][G] BEFORE dispatching codex so:
+        #   (a) the next iteration of THIS runner won't re-pick it (the
+        #       infinite-loop bug that wasted hours on FS.1.1 before)
+        #   (b) parallel Claude runners reading the same master/TODO see
+        #       it claimed and skip
+        # Codex's prompt (Rule 8) tells it NOT to touch TODO.md in
+        # Tier B mode — so changes made in worktree's TODO.md are
+        # invisible-but-harmless; the master copy is the truth.
+        if TIER == "B":
+            reserved_line = _reserve_item_for_codex(item_line)
+            if reserved_line is None:
+                # Could not reserve — likely raced with another runner.
+                # Skip this iteration; next scan will skip the now-tagged
+                # item naturally.
+                print("⚠️ 無法 reserve item（可能被其他 runner 改了），跳下一輪")
+                time.sleep(COOLDOWN_S)
+                continue
+        else:
+            # Tier A: codex runs in master; old contract — codex owns
+            # TODO marker itself.
+            reserved_line = item_line
+
         success = False
         for attempt in range(1, MAX_RETRIES + 1):
             if attempt > 1:
@@ -467,13 +571,19 @@ def main() -> None:
 
         if success:
             completed_count += 1
+            if TIER == "B":
+                _flip_reservation_to_done(reserved_line)
         else:
             failed_count += 1
             skipped_items.append(f"[{section_title}] {item_line[:80]}")
             print(
                 f"\n⏭️ [跳過] 重試 {MAX_RETRIES} 次仍失敗，跳過此項目繼續下一個。"
             )
-            _mark_item_failed(item_line)
+            if TIER == "B":
+                _flip_reservation_to_failed(reserved_line)
+            else:
+                # Tier A still uses the legacy direct-mark behaviour.
+                _replace_marker_in_master_todo(item_line, "- [!][G]", label="failed")
 
         if _shutdown_requested:
             break

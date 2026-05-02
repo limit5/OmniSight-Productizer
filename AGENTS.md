@@ -147,18 +147,32 @@ The `(codex-cli)` parenthetical and `noreply@openai.com` are mandatory
 — they let `git log --grep` distinguish your commits from Claude's at
 a glance.
 
-### Rule 6 — TODO marker conventions
+### Rule 6 — TODO marker conventions (Tier-aware)
 
-When marking a task complete in `TODO.md`:
+**Tier B (default — you are running from `codex-work` worktree)**:
 
-- Use `- [x][G]` (not just `- [x]`) where `[G]` = "GPT/Codex completed".
-- For failed: `- [!][G]`.
-- For deferred (you decided this is too complex for you): `- [~][G]`.
-- For operator-blocked (needs human input): `- [O][G]`.
+  * **DO NOT modify `TODO.md` at all.** The runner owns master/TODO.md
+    marker writes. Before it dispatches you, it has already flipped
+    the line to `- [~][G]` (reserved). After you finish, the runner
+    flips it to `- [x][G]` (success) or `- [!][G]` (failure) based on
+    your exit code.
+  * **DO NOT include `TODO.md` in your `git add` / commit**.
+  * Why: your worktree has its OWN copy of TODO.md (a snapshot of the
+    `codex-work` branch). If you edit it there, master never sees the
+    change → runner re-dispatches the same item → infinite loop. This
+    burned hours on FS.1.1 before this rule was clarified (2026-05-03).
 
-Claude uses `[C]` similarly. **Never modify a marker that has the other
-agent's tag** — if you see `- [x][C] item` you do NOT touch it; if
-Claude sees `- [x][G] item` Claude does NOT touch it.
+**Tier A (rare — you are running from the master checkout)**:
+
+  * Use `- [x][G]` (not `- [x]`) where `[G]` = "GPT/Codex completed".
+  * For failed: `- [!][G]`. For operator-blocked: `- [O][G]`.
+  * For "I don't think I should attempt this" deferral: `- [~][G]`.
+
+**Both tiers**:
+
+  * Claude uses `[C]` similarly. **Never modify a marker that has
+    Claude's tag** (`[x][C]` / `[!][C]` / etc.). If you see `- [x][C]
+    item`, leave it alone; Claude leaves your `[G]`-tagged items alone.
 
 ### Rule 7 — HANDOFF.md write conventions
 
