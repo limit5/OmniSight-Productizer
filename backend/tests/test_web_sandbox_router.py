@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient
 
 from backend import auth as _au
 from backend import web_sandbox as ws
+from backend import web_sandbox_pep as _wsp
 from backend import workspace as _ws
 from backend.routers import web_sandbox as web_sandbox_router
 from backend.tests.test_web_sandbox import (
@@ -107,6 +108,31 @@ def reset_workspace_registry() -> Any:
     yield
     _ws._workspaces.clear()
     _ws._workspaces.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def stub_pep_evaluator() -> Any:
+    """W14.8 — every test runs with the PEP HOLD auto-approved by
+    default so the lifecycle / validation / SSO tests don't have to
+    plumb a propose_fn into every call site. Tests that explicitly
+    want to assert PEP behaviour install a richer recorder via
+    :func:`web_sandbox_router.set_pep_evaluator_for_tests`.
+
+    The fixture also resets the evaluator after each test so a custom
+    recorder doesn't leak into the next test's run.
+    """
+
+    async def _auto_approve(**_kwargs: Any) -> _wsp.WebPreviewPepResult:
+        return _wsp.WebPreviewPepResult(
+            action="approved",
+            reason="auto-approved by stub_pep_evaluator fixture",
+            decision_id="stub-dec",
+            rule="tier_unlisted",
+        )
+
+    web_sandbox_router.set_pep_evaluator_for_tests(_auto_approve)
+    yield
+    web_sandbox_router.set_pep_evaluator_for_tests(None)
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -654,3 +680,271 @@ def test_w14_4_post_with_allowed_emails_validates_at_config_layer(
     # FastAPI/Pydantic rejects at the schema layer before we hit the
     # WebSandboxConfig validator.
     assert resp.status_code == 422
+
+
+# ─────────────── W14.8 — PEP HOLD before first preview ───────────────
+#
+# The router calls ``backend.web_sandbox_pep.evaluate_first_preview_hold``
+# on cold launches (no live instance). Tests inject a fake evaluator
+# via ``set_pep_evaluator_for_tests`` so we can assert all four
+# branches (approved → 200 + decision_id, rejected → 403, gateway
+# error → 503, idempotent re-launch → no PEP call) deterministically.
+
+
+class _PepEvaluatorRecorder:
+    """Records every ``(workspace_id, kwargs)`` call and returns the
+    canned :class:`WebPreviewPepResult` queued by the test."""
+
+    def __init__(self, results: list[_wsp.WebPreviewPepResult]):
+        self._results = list(results)
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> _wsp.WebPreviewPepResult:
+        self.calls.append(kwargs)
+        if not self._results:
+            raise AssertionError("PepEvaluatorRecorder ran out of canned results")
+        return self._results.pop(0)
+
+
+def test_w14_8_first_preview_holds_via_pep_gateway(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """Cold launch goes through the PEP HOLD; on approval the router
+    proceeds with manager.launch and surfaces the decision_id on the
+    response."""
+
+    recorder = _PepEvaluatorRecorder([
+        _wsp.WebPreviewPepResult(
+            action="approved",
+            decision_id="dec-w14-8-approved",
+            rule="tier_unlisted",
+        ),
+    ])
+    web_sandbox_router.set_pep_evaluator_for_tests(recorder)
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={"workspace_id": "ws-fresh", "workspace_path": str(tmp_path)},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pep_decision_id"] == "dec-w14-8-approved"
+    assert body["status"] == WebSandboxStatus.installing.value
+    # Recorder saw the workspace + image + actor email forwarded.
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["workspace_id"] == "ws-fresh"
+    assert call["workspace_path"] == str(tmp_path)
+    assert call["image_tag"] == ws.DEFAULT_IMAGE_TAG
+    # actor_email forwarded from the dependency-overridden operator.
+    assert call["actor_email"] == "op@example.com"
+
+
+def test_w14_8_first_preview_rejected_returns_403(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """PEP rejection surfaces as HTTP 403 — frontend renders the
+    operator's reject reason, no docker work happens."""
+
+    recorder = _PepEvaluatorRecorder([
+        _wsp.WebPreviewPepResult(
+            action="rejected",
+            reason="operator rejected",
+            decision_id="dec-rejected",
+            rule="tier_unlisted",
+        ),
+    ])
+    web_sandbox_router.set_pep_evaluator_for_tests(recorder)
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={"workspace_id": "ws-blocked", "workspace_path": str(tmp_path)},
+    )
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "pep_first_preview_rejected"
+    assert detail["decision_id"] == "dec-rejected"
+    assert detail["reason"] == "operator rejected"
+    assert detail["rule"] == "tier_unlisted"
+
+
+def test_w14_8_gateway_error_returns_503(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """A gateway-error result (raised propose / fastapi-internal)
+    surfaces as 503 so the operator can retry."""
+
+    recorder = _PepEvaluatorRecorder([
+        _wsp.WebPreviewPepResult(
+            action="gateway_error",
+            reason="pep_gateway_error:RuntimeError",
+        ),
+    ])
+    web_sandbox_router.set_pep_evaluator_for_tests(recorder)
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={"workspace_id": "ws-broken", "workspace_path": str(tmp_path)},
+    )
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    assert detail["code"] == "pep_gateway_unavailable"
+    assert "RuntimeError" in detail["reason"]
+
+
+def test_w14_8_idempotent_relaunch_skips_pep(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """Once a sandbox is live, re-POSTing the same workspace_id is an
+    idempotent recovery — no second PEP HOLD."""
+
+    recorder = _PepEvaluatorRecorder([
+        _wsp.WebPreviewPepResult(action="approved", decision_id="dec-1"),
+        # Second result should never be consumed — recorder asserts on
+        # exhaustion if it is.
+        _wsp.WebPreviewPepResult(action="approved", decision_id="dec-2"),
+    ])
+    web_sandbox_router.set_pep_evaluator_for_tests(recorder)
+
+    body = {"workspace_id": "ws-stable", "workspace_path": str(tmp_path)}
+    a = client.post("/web-sandbox/preview", json=body)
+    b = client.post("/web-sandbox/preview", json=body)
+    assert a.status_code == 200
+    assert b.status_code == 200
+    # Cold launch consumed exactly one PEP evaluation.
+    assert len(recorder.calls) == 1
+    # First call carried decision_id; idempotent second call does not.
+    assert a.json()["pep_decision_id"] == "dec-1"
+    assert b.json().get("pep_decision_id") is None
+
+
+def test_w14_8_set_pep_evaluator_for_tests_resets_with_none(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """``set_pep_evaluator_for_tests(None)`` reverts to the production
+    evaluator (drift guard for the test seam)."""
+
+    rec = _PepEvaluatorRecorder([
+        _wsp.WebPreviewPepResult(action="approved", decision_id="dec-1"),
+    ])
+    web_sandbox_router.set_pep_evaluator_for_tests(rec)
+    assert web_sandbox_router.get_pep_evaluator() is rec
+
+    web_sandbox_router.set_pep_evaluator_for_tests(None)
+    assert web_sandbox_router.get_pep_evaluator() is _wsp.evaluate_first_preview_hold
+
+
+def test_w14_8_default_evaluator_is_module_function(
+    # reset handled by autouse stub_pep_evaluator
+) -> None:
+    """Drift guard — the router must default to the public evaluator
+    function so a future rename in :mod:`backend.web_sandbox_pep`
+    breaks compile-time, not at first request."""
+
+    web_sandbox_router.set_pep_evaluator_for_tests(None)
+    assert web_sandbox_router.get_pep_evaluator() is _wsp.evaluate_first_preview_hold
+
+
+def test_w14_8_terminal_instance_re_holds_on_relaunch(
+    client: TestClient, tmp_path: Path, manager: WebSandboxManager,
+    # reset handled by autouse stub_pep_evaluator
+) -> None:
+    """Operator stops the sandbox → next launch is again 'first' and
+    re-pays the PEP HOLD. The W14.5 idle reaper / W14.10 PG audit will
+    eventually persist this transition; today the per-worker manager
+    enforces it."""
+
+    recorder = _PepEvaluatorRecorder([
+        _wsp.WebPreviewPepResult(action="approved", decision_id="dec-cold-1"),
+        _wsp.WebPreviewPepResult(action="approved", decision_id="dec-cold-2"),
+    ])
+    web_sandbox_router.set_pep_evaluator_for_tests(recorder)
+
+    body = {"workspace_id": "ws-cycle", "workspace_path": str(tmp_path)}
+
+    # First cold launch.
+    a = client.post("/web-sandbox/preview", json=body)
+    assert a.status_code == 200
+    assert a.json()["pep_decision_id"] == "dec-cold-1"
+
+    # Stop it (operator action).
+    d = client.delete("/web-sandbox/preview/ws-cycle")
+    assert d.status_code == 200
+    assert d.json()["status"] == WebSandboxStatus.stopped.value
+
+    # Second launch — manager.get returns the terminal instance →
+    # requires_first_preview_hold returns True → PEP HOLD again.
+    b = client.post("/web-sandbox/preview", json=body)
+    # The launcher's idempotent re-launch path returns the terminal
+    # instance unchanged (it doesn't auto-restart on terminal). What
+    # matters for W14.8 contract is that the PEP gate fired again.
+    assert b.status_code == 200
+    assert len(recorder.calls) == 2
+
+
+def test_w14_8_response_schema_includes_pep_decision_id_field(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """Response carries pep_decision_id on cold launches (and a None
+    placeholder on idempotent re-launches when the test client decodes
+    via the typed response model)."""
+
+    recorder = _PepEvaluatorRecorder([
+        _wsp.WebPreviewPepResult(action="approved", decision_id="dec-shape"),
+    ])
+    web_sandbox_router.set_pep_evaluator_for_tests(recorder)
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={"workspace_id": "ws-shape", "workspace_path": str(tmp_path)},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "pep_decision_id" in body
+    assert body["pep_decision_id"] == "dec-shape"
+
+
+def test_w14_8_evaluator_receives_image_tag_default(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """When the caller doesn't override image_tag, the router
+    forwards :data:`backend.web_sandbox.DEFAULT_IMAGE_TAG` so the
+    coaching card renders the production image, not an empty string."""
+
+    recorder = _PepEvaluatorRecorder([
+        _wsp.WebPreviewPepResult(action="approved", decision_id="dec-img"),
+    ])
+    web_sandbox_router.set_pep_evaluator_for_tests(recorder)
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={"workspace_id": "ws-img", "workspace_path": str(tmp_path)},
+    )
+    assert resp.status_code == 200
+    assert recorder.calls[0]["image_tag"] == ws.DEFAULT_IMAGE_TAG
+
+
+def test_w14_8_evaluator_forwards_git_ref_and_container_port(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """git_ref + container_port land in the evaluator kwargs so the
+    coaching card / audit row see exactly what the operator clicked."""
+
+    recorder = _PepEvaluatorRecorder([
+        _wsp.WebPreviewPepResult(action="approved", decision_id="dec-fwd"),
+    ])
+    web_sandbox_router.set_pep_evaluator_for_tests(recorder)
+
+    resp = client.post(
+        "/web-sandbox/preview",
+        json={
+            "workspace_id": "ws-fwd",
+            "workspace_path": str(tmp_path),
+            "git_ref": "feature/pretty",
+            "container_port": 3000,
+        },
+    )
+    assert resp.status_code == 200
+    call = recorder.calls[0]
+    assert call["git_ref"] == "feature/pretty"
+    assert call["container_port"] == 3000

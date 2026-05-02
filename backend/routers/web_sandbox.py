@@ -39,10 +39,13 @@ as the dependency for every write endpoint and ``require_viewer`` for
 reads — the same RBAC contract every other workspace-touching router
 uses (compare :mod:`backend.routers.workspaces`).
 
-PEP HOLD (W14.8) is a separate row that will gate this endpoint
-behind an operator-confirmation flow because ``pnpm install`` can
-download 50-500 MB of node_modules on a first-touch workspace. Until
-W14.8 lands, the operator role gate is the only friction.
+PEP HOLD (W14.8) gates this endpoint behind an operator-confirmation
+flow because ``pnpm install`` can download 50–500 MB of node_modules
+on a first-touch workspace and typically blocks 30–90s before the
+dev server is reachable. The HOLD only fires on a *cold* launch
+(no live instance for the workspace) — idempotent re-launches of an
+already-running sandbox bypass the HOLD via
+:func:`backend.web_sandbox_pep.requires_first_preview_hold`.
 """
 
 from __future__ import annotations
@@ -83,6 +86,11 @@ from backend.web_sandbox_idle_reaper import (
     IdleReaperConfig,
     IdleReaperError,
     WebSandboxIdleReaper,
+)
+from backend.web_sandbox_pep import (
+    WebPreviewPepResult,
+    evaluate_first_preview_hold,
+    requires_first_preview_hold,
 )
 from backend.ui_sandbox import SubprocessDockerClient
 
@@ -289,6 +297,31 @@ def get_reaper() -> WebSandboxIdleReaper | None:
     return _reaper
 
 
+# ─────────────── W14.8 — PEP HOLD before first preview ───────────────
+#
+# Module-level handle to :func:`backend.web_sandbox_pep.evaluate_first_preview_hold`
+# so tests can swap in a fake without monkey-patching imports. Calling
+# this through the indirection (rather than importing the function name
+# directly into ``launch_preview``) means a test that does
+# ``set_pep_evaluator_for_tests(fake)`` is observed by the next request
+# without rebinding ``backend.routers.web_sandbox`` symbols.
+_pep_evaluator: Any = evaluate_first_preview_hold
+
+
+def set_pep_evaluator_for_tests(evaluator: Any) -> None:
+    """Test-only injection point. Pass ``None`` to reset to the default
+    :func:`backend.web_sandbox_pep.evaluate_first_preview_hold`."""
+
+    global _pep_evaluator
+    _pep_evaluator = evaluator if evaluator is not None else evaluate_first_preview_hold
+
+
+def get_pep_evaluator() -> Any:
+    """Test helper — returns the active evaluator (default or injected)."""
+
+    return _pep_evaluator
+
+
 # ─────────────── Request / Response models ───────────────
 
 
@@ -350,7 +383,14 @@ class WebSandboxInstanceResponse(BaseModel):
     """Wire shape for :class:`WebSandboxInstance`. Intentionally
     a thin pass-through of ``to_dict()`` so the wire format tracks
     :data:`WEB_SANDBOX_SCHEMA_VERSION` without duplicating field
-    declarations."""
+    declarations.
+
+    W14.8 — ``pep_decision_id`` is the optional id of the PEP
+    proposal that gated the first-preview launch. Only present on
+    the response shape (not on the snapshot/list endpoints) because
+    it ties a specific HTTP request to the operator decision; idempotent
+    re-launches keep it ``None``.
+    """
 
     schema_version: str
     workspace_id: str
@@ -371,6 +411,7 @@ class WebSandboxInstanceResponse(BaseModel):
     error: str | None
     killed_reason: str | None
     warnings: list[str]
+    pep_decision_id: str | None = None
 
 
 def _resolve_workspace_path(workspace_id: str, override: str | None) -> str:
@@ -415,7 +456,16 @@ async def launch_preview(
     user: _au.User = Depends(_au.require_operator),
     manager: WebSandboxManager = Depends(get_manager),
 ) -> dict[str, Any]:
-    """Launch (or recover) a web-preview sidecar for ``workspace_id``."""
+    """Launch (or recover) a web-preview sidecar for ``workspace_id``.
+
+    W14.8 — first launch (no live instance for the workspace) goes
+    through a PEP HOLD before docker is touched. The operator approves
+    via the standard PEP toast; the HOLD enforces that the operator
+    consents to the 50–500 MB / 30–90s cold-install cost before the
+    sidecar starts pulling tarballs. Idempotent re-launches of an
+    already-running sandbox bypass the HOLD because the docker work
+    has already been paid for.
+    """
 
     workspace_path = _resolve_workspace_path(body.workspace_id, body.workspace_path)
     install_command = (
@@ -456,6 +506,54 @@ async def launch_preview(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # W14.8 — first-preview HOLD. Skipped for idempotent re-launches
+    # of a non-terminal instance (operator already paid for the cold
+    # install on the previous launch). Cold launch (no instance, or
+    # last instance is terminal) routes through the PEP gateway —
+    # the standard ``tier_unlisted`` HOLD fires because
+    # ``web_sandbox_preview`` is intentionally never on a tier
+    # whitelist.
+    pep_decision_id: str | None = None
+    if requires_first_preview_hold(manager.get, body.workspace_id):
+        evaluator = get_pep_evaluator()
+        result: WebPreviewPepResult = await evaluator(
+            workspace_id=body.workspace_id,
+            workspace_path=workspace_path,
+            image_tag=body.image_tag,
+            actor_email=operator_email or None,
+            git_ref=body.git_ref,
+            container_port=body.container_port,
+        )
+        if result.is_rejected:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "pep_first_preview_rejected",
+                    "message": (
+                        "First-preview launch was not approved by an "
+                        "operator. Click Launch preview again to resubmit."
+                    ),
+                    "reason": result.reason,
+                    "rule": result.rule,
+                    "decision_id": result.decision_id,
+                    "degraded": result.degraded,
+                },
+            )
+        if result.is_error:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "pep_gateway_unavailable",
+                    "message": (
+                        "PEP gateway could not evaluate the first-preview "
+                        "HOLD — try again in a moment, or contact platform "
+                        "ops if this persists."
+                    ),
+                    "reason": result.reason,
+                },
+            )
+        pep_decision_id = result.decision_id
+
     try:
         instance = manager.launch(config)
     except WebSandboxAlreadyExists as exc:  # pragma: no cover - idempotent=True path
@@ -463,7 +561,14 @@ async def launch_preview(
     except WebSandboxError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    return _instance_to_response(instance)
+    response = _instance_to_response(instance)
+    # W14.8 — surface the PEP decision id on the response so the
+    # frontend can cross-link the toast with the running sandbox.
+    # Only present when a HOLD was actually evaluated (idempotent
+    # re-launch returns ``None`` as expected).
+    if pep_decision_id:
+        response["pep_decision_id"] = pep_decision_id
+    return response
 
 
 @router.get("/preview")

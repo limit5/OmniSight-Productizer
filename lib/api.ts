@@ -7055,6 +7055,11 @@ export interface WebSandboxInstanceWire {
   error: string | null
   killed_reason: string | null
   warnings: string[]
+  // W14.8 — present on POST /web-sandbox/preview responses for cold
+  // launches (PEP HOLD evaluated). Idempotent re-launches and
+  // GET/list responses omit this field; downstream consumers must
+  // tolerate `undefined`.
+  pep_decision_id?: string | null
 }
 
 export interface WebSandboxSnapshot {

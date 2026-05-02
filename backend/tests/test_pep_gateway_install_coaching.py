@@ -482,3 +482,166 @@ class TestEvaluateInstallIntercept:
             hold_timeout_s=1.0,
         )
         assert calls[0].severity == de.DecisionSeverity.risky
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  W14.8 — _build_web_preview_coaching unit tests
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestBuildWebPreviewCoaching:
+    """W14.8 — direct tests for the web-sandbox-preview coaching builder.
+
+    Same shape as :class:`TestBuildInstallCoaching` above. The router
+    integration is covered by :mod:`backend.tests.test_web_sandbox_pep`
+    end-to-end; these tests pin the pep_gateway-internal contract so a
+    refactor that breaks the 4-key shape or the row-spec literals fails
+    immediately.
+    """
+
+    def _full_args(self) -> dict[str, Any]:
+        return {
+            "workspace_id": "ws-deadbeef",
+            "image_tag": "omnisight-web-preview:dev",
+            "size_estimate_text": "50–500 MB",
+            "eta_text": "30–90s",
+            "workspace_path": "/tmp/work",
+        }
+
+    def test_full_args_renders_all_four_keys(self):
+        out = pep._build_web_preview_coaching(self._full_args())
+        assert set(out.keys()) == {"what", "why", "if_approve", "if_reject"}
+
+    def test_what_includes_workspace_id_and_image(self):
+        out = pep._build_web_preview_coaching(self._full_args())
+        assert "ws-deadbeef" in out["what"]
+        assert "omnisight-web-preview:dev" in out["what"]
+
+    def test_why_includes_size_and_eta_estimates(self):
+        out = pep._build_web_preview_coaching(self._full_args())
+        assert "50–500 MB" in out["why"]
+        assert "30–90s" in out["why"]
+        assert "pnpm install" in out["why"]
+
+    def test_if_approve_mentions_panel_transition(self):
+        # The W14.6 LivePreviewPanel reference is what tells the
+        # operator what they'll see after approval.
+        out = pep._build_web_preview_coaching(self._full_args())
+        assert "installing" in out["if_approve"]
+        assert "running" in out["if_approve"]
+
+    def test_if_reject_mentions_no_container(self):
+        out = pep._build_web_preview_coaching(self._full_args())
+        assert "no container" in out["if_reject"].lower()
+
+    def test_missing_workspace_id_falls_back_to_neutral_copy(self):
+        out = pep._build_web_preview_coaching({"image_tag": "omnisight-web-preview:dev"})
+        assert "this workspace" in out["what"]
+
+    def test_missing_image_tag_falls_back_to_default(self):
+        out = pep._build_web_preview_coaching({"workspace_id": "ws-x"})
+        assert "omnisight-web-preview:dev" in out["what"]
+
+    def test_missing_size_text_falls_back_to_default_literal(self):
+        # Caller didn't override → row-spec default literal lands.
+        out = pep._build_web_preview_coaching({
+            "workspace_id": "ws-x",
+            "image_tag": "omnisight-web-preview:dev",
+        })
+        assert "50–500 MB" in out["why"]
+
+    def test_missing_eta_text_falls_back_to_default_literal(self):
+        out = pep._build_web_preview_coaching({
+            "workspace_id": "ws-x",
+            "image_tag": "omnisight-web-preview:dev",
+        })
+        assert "30–90s" in out["why"]
+
+    def test_none_arguments_returns_neutral_card(self):
+        out = pep._build_web_preview_coaching(None)
+        assert set(out.keys()) == {"what", "why", "if_approve", "if_reject"}
+        assert "this workspace" in out["what"]
+
+    def test_empty_arguments_returns_neutral_card(self):
+        out = pep._build_web_preview_coaching({})
+        assert set(out.keys()) == {"what", "why", "if_approve", "if_reject"}
+        assert "this workspace" in out["what"]
+
+
+class TestBuildCoachingDispatchWebPreview:
+
+    def test_web_sandbox_preview_routes_to_web_preview_builder(self):
+        out = pep._build_coaching(
+            tool="web_sandbox_preview",
+            rule="tier_unlisted",
+            impact_scope="local",
+            command="web_sandbox_preview workspace_id=ws-x",
+            arguments={
+                "workspace_id": "ws-x",
+                "image_tag": "omnisight-web-preview:dev",
+                "size_estimate_text": "50–500 MB",
+                "eta_text": "30–90s",
+            },
+        )
+        assert "ws-x" in out["what"]
+        assert "50–500 MB" in out["why"]
+
+    def test_web_sandbox_preview_ignores_rule_override(self):
+        # Web-preview coaching is content-driven — rule-name override
+        # table doesn't apply here. Pass a rule that *would* override
+        # on run_bash and verify the web-preview coaching wins.
+        out = pep._build_coaching(
+            tool="web_sandbox_preview",
+            rule="terraform_apply",
+            impact_scope="prod",
+            command="web_sandbox_preview workspace_id=ws-x",
+            arguments={
+                "workspace_id": "ws-x",
+                "image_tag": "omnisight-web-preview:dev",
+            },
+        )
+        assert "ws-x" in out["what"]
+        assert "terraform" not in out["why"].lower()
+
+    def test_web_sandbox_preview_with_no_arguments_still_renders(self):
+        out = pep._build_coaching(
+            tool="web_sandbox_preview",
+            rule="tier_unlisted",
+            impact_scope="local",
+            command="web_sandbox_preview",
+            arguments=None,
+        )
+        assert set(out.keys()) == {"what", "why", "if_approve", "if_reject"}
+        assert "this workspace" in out["what"]
+
+
+class TestProposeHoldCategoryWebPreview:
+
+    @pytest.mark.asyncio
+    async def test_web_sandbox_preview_sets_web_preview_intercept_category(self):
+        outcomes: dict[str, str] = {}
+        propose_fn, calls = _make_propose_fn(outcomes)
+        outcomes["fake-dec-1"] = "rejected"
+        await pep.evaluate(
+            tool="web_sandbox_preview",
+            arguments={
+                "workspace_id": "ws-x",
+                "workspace_path": "/tmp/work",
+                "image_tag": "omnisight-web-preview:dev",
+                "size_estimate_text": "50–500 MB",
+                "eta_text": "30–90s",
+            },
+            agent_id="operator:alice@example.com",
+            tier="t1",
+            propose_fn=propose_fn,
+            wait_for_decision=_waiter(outcomes),
+            hold_timeout_s=1.0,
+        )
+        assert len(calls) == 1
+        assert calls[0].source["category"] == pep.WEB_PREVIEW_INTERCEPT_CATEGORY
+
+    @pytest.mark.asyncio
+    async def test_web_preview_intercept_category_distinct(self):
+        # Ensure ToastCenter switching never sees a category collision.
+        assert pep.WEB_PREVIEW_INTERCEPT_CATEGORY != pep.INSTALL_INTERCEPT_CATEGORY
+        assert pep.WEB_PREVIEW_INTERCEPT_CATEGORY != pep.DEFAULT_PEP_INTERCEPT_CATEGORY

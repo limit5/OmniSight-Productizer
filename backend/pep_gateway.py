@@ -662,6 +662,12 @@ _RULE_WHY_OVERRIDES: dict[str, str] = {
 # frontend ToastCenter switches rendering on category.
 INSTALL_INTERCEPT_CATEGORY: str = "install_intercept"
 DEFAULT_PEP_INTERCEPT_CATEGORY: str = "pep_tool_intercept"
+# W14.8 — first-preview HOLD before launching a web sandbox. ``pnpm
+# install`` on a cold workspace fetches 50–500 MB of node_modules and
+# typically blocks 30–90s while doing it; the operator sees a dedicated
+# coaching card naming the workspace + size/ETA estimate so they know
+# what they're approving before the sidecar starts pulling tarballs.
+WEB_PREVIEW_INTERCEPT_CATEGORY: str = "web_preview_intercept"
 
 # Install-method human label for the "why" line. Catalog entries land
 # with one of four DB-CHECK methods; the operator-facing copy spells out
@@ -738,6 +744,51 @@ def _build_install_coaching(arguments: dict[str, Any] | None) -> dict[str, str]:
     }
 
 
+def _build_web_preview_coaching(arguments: dict[str, Any] | None) -> dict[str, str]:
+    """W14.8: web-sandbox-preview-specific 4-line coaching card.
+
+    ``arguments`` mirrors what ``backend.routers.web_sandbox.launch_preview``
+    passes to ``pep_gateway.evaluate(tool='web_sandbox_preview', arguments=…)``
+    via :func:`backend.web_sandbox_pep.build_pep_arguments`. Required-ish
+    fields: ``workspace_id`` (the docker container name suffix);
+    ``image_tag``; ``size_estimate_text`` (human "50–500 MB" copy);
+    ``eta_text`` (human "30–90s" copy). Missing fields fall back to
+    neutral copy so a misconfigured caller still produces a readable
+    card instead of a KeyError.
+    """
+    args = arguments or {}
+    workspace_id = str(args.get("workspace_id") or "this workspace")
+    image_tag = str(args.get("image_tag") or "omnisight-web-preview:dev")
+    size_text = str(args.get("size_estimate_text") or "50–500 MB")
+    eta_text = str(args.get("eta_text") or "30–90s")
+    return {
+        "what": (
+            f"Launches a live web-preview sidecar for workspace "
+            f"{workspace_id!r} from {image_tag}, then runs ``pnpm install`` "
+            "and ``pnpm dev`` inside the container."
+        ),
+        "why": (
+            f"First preview is held because cold ``pnpm install`` pulls "
+            f"~{size_text} of node_modules and blocks the sidecar for "
+            f"~{eta_text} before the dev server is reachable. Approving "
+            "commits docker resources (RAM / CPU / disk) and may briefly "
+            "saturate the operator's outbound network."
+        ),
+        "if_approve": (
+            "The sidecar container is created, ``pnpm install`` starts and "
+            "streams progress; the W14.6 ``<LivePreviewPanel/>`` flips "
+            "from ``installing`` to ``running`` once Vite reports ready, "
+            "and the W14.5 idle reaper schedules a 30-min auto-kill."
+        ),
+        "if_reject": (
+            "No container is created, no packages are downloaded, and "
+            "the panel returns to its ``Launch preview`` CTA. The "
+            "operator can re-trigger later (idempotent — the same row "
+            "raises a fresh PEP HOLD on the next click)."
+        ),
+    }
+
+
 def _build_coaching(
     tool: str, rule: str, impact_scope: str, command: str,
     arguments: dict[str, Any] | None = None,
@@ -754,9 +805,18 @@ def _build_coaching(
     version / install_method / size_bytes) into the 4-line card so the
     operator sees what they're actually about to install — generic
     "tier_unlisted" copy isn't useful for a catalog install.
+
+    W14.8: ``tool='web_sandbox_preview'`` dispatches to a dedicated
+    web-preview coaching builder that interpolates ``arguments``
+    (workspace_id / image_tag / size_estimate_text / eta_text) so the
+    operator sees the cold-launch cost upfront — ``pnpm install`` on a
+    fresh workspace pulls 50–500 MB and takes 30–90s before the dev
+    server is reachable.
     """
     if tool == "install_entry":
         return _build_install_coaching(arguments)
+    if tool == "web_sandbox_preview":
+        return _build_web_preview_coaching(arguments)
     base = _TOOL_COACHING.get(tool) or {
         "what": f"Runs the agent tool {tool!r} (no human-friendly description registered for this tool yet — tell the platform team to add one to _TOOL_COACHING).",
         "why_default": "Tool isn't on the current sandbox tier's whitelist — review the command and impact scope before allowing.",
@@ -807,11 +867,14 @@ def _propose_hold(
     ]
     # BS.7.2: install_entry gets a dedicated category so the ToastCenter
     # can switch on it and render the install-specific coaching card.
-    category = (
-        INSTALL_INTERCEPT_CATEGORY
-        if dec.tool == "install_entry"
-        else DEFAULT_PEP_INTERCEPT_CATEGORY
-    )
+    # W14.8: web_sandbox_preview adds a parallel category so the panel
+    # can render the cold-launch size/ETA estimate upfront.
+    if dec.tool == "install_entry":
+        category = INSTALL_INTERCEPT_CATEGORY
+    elif dec.tool == "web_sandbox_preview":
+        category = WEB_PREVIEW_INTERCEPT_CATEGORY
+    else:
+        category = DEFAULT_PEP_INTERCEPT_CATEGORY
     prop = fn(
         kind="pep_tool_intercept",
         title=f"PEP HOLD · {dec.tool}",
