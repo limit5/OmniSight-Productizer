@@ -150,6 +150,140 @@ work indefinitely.
 
 ---
 
+## Why runner intentionally does NOT pursue Claude Code parity
+
+A natural-but-wrong instinct, when seeing how much Claude Code can do
+that the runner cannot, is "we should build all of those features so
+OmniSight isn't a weaker product". This section pins down why that
+framing is wrong and what the right framing is.
+
+### The instinct: "OmniSight 不能比 Claude Code 還弱"
+
+The premise: Claude Code as a CLI dev assistant offers ~30 tools, RLHF-
+tuned tool-use behaviours, a slash-command syntax, plugins/hooks,
+auto-memory, multiple sub-agent types, streaming UX, per-tool cost
+estimation, approval workflows, and so on. The runner today has 9
+tools, 3 sub-agent types, manual memory, no plugins, no slash
+commands, no streaming UX. If OmniSight ships as a real product whose
+value includes "agentic execution", losing this comparison loses the
+product.
+
+### Why the premise is wrong: different competitors
+
+OmniSight is not in the same product category as Claude Code:
+
+|                   | Claude Code                          | OmniSight                                                                       |
+|-------------------|--------------------------------------|---------------------------------------------------------------------------------|
+| Target user       | Individual developer                 | Embedded AI camera engineering team (Type A / B / C verticals)                  |
+| Core value        | General-purpose agentic dev workflow | Multi-agent orchestration + domain expertise + multi-tenant + compliance audit  |
+| Direct competitors | Cursor / Continue / Aider / etc.    | Vendor IDEs (Renesas e²studio / NXP MCUXpresso / ...), internal dev portals, vertical MLOps platforms |
+| Moat              | Anthropic infra + RLHF + subscription distribution | Domain expertise (HD/BSP/HAL/Algo-CV/Optical/ISP) + multi-vendor integration + compliance audit + workflow DAG composition |
+
+OmniSight's real users will not benchmark "OmniSight Read tool vs
+Claude Code Read tool". They'll evaluate questions Claude Code can't
+even answer:
+
+  * Can it orchestrate Claude + Gemini + a third-party PCB review
+    agent in one workflow? (A2A — `BP.A2A`)
+  * Can it isolate per-tenant audit logs for IEC 62304 / ISO 13485?
+    (`KS.*` + `BP.D` compliance matrices)
+  * Can it run an EVK on real hardware via daemon RPC? (`BP.W3.12`
+    Phase T Hardware Bridge)
+  * Can it ingest a Figma file + a vendor SDK datasheet + a customer's
+    private MCP server in the same task? (Phase 1 MCP + future
+    integrations)
+
+### The honest answer: OmniSight wraps Claude Code, not replaces it
+
+The architecture that actually scales:
+
+```
+                      OmniSight orchestration layer
+                       /         |         \
+              Claude Code   Anthropic API   Other vendors
+              (subscription) (per-token)    (Google/OpenAI/etc.)
+                       \         |         /
+              OmniSight domain specialist agents
+              (HD / BSP / HAL / Algo-CV / Optical / ISP)
+```
+
+User-facing entry is OmniSight. Internally, OmniSight routes each
+task to whichever execution backend fits: Claude Code subscription
+for general agentic dev work, raw Anthropic API for batch/runner-
+shape work, vendor APIs for specialised work. **OmniSight competes
+on the orchestration / domain / compliance layer, not on raw
+agentic execution.**
+
+This already exists in skeleton form:
+
+  * `auto-runner.py` (subscription) — drives Claude Code CLI
+  * `auto-runner-sdk.py` (API) — drives Anthropic SDK directly
+  * Future OmniSight Orchestrator will auto-route tasks across these
+    rather than asking the user to pick
+
+### Filter for future runner Phases (sharpened)
+
+The runner-strategy filter from the *Time budget* section is updated
+with a Claude-Code-axis check:
+
+> Before adding a new runner Phase, ask:
+>
+> 1. **Mirror property**: does this teach us something we'll need for
+>    OmniSight's user product, or is it runner-only optimization?
+> 2. **Axis check**: is this an axis Claude Code already does well
+>    (and we'd be reinventing), or one OmniSight uniquely needs?
+>
+> If (1) is "user product" AND (2) is "OmniSight uniquely needs" →
+> proceed. If either is no → defer or skip.
+
+The 3 epics added 2026-05-02 from *Agentic Design Patterns* review
+all pass this filter:
+
+  * `BP.A2A` (Ch 15) — Claude Code doesn't do cross-system A2A; it's
+    OmniSight's native domain (multi-agent + multi-provider).
+  * `BP.Q` RAG (Ch 14) — Claude Code has personal-codebase RAG; the
+    multi-tenant + compliance-audit-able version is OmniSight-unique.
+  * `KS.4.10-15` LLM Firewall (Ch 18) — Claude Code trusts its single
+    user; OmniSight's multi-tenant model demands an input firewall.
+
+What this filter CORRECTLY rejects, even though they look attractive:
+
+  * Reinventing TaskCreate/Monitor/ScheduleWakeup-style coordination
+    tools — Claude Code has these, we'd just be tracing a worse
+    version.
+  * Auto-memory write-back from runner execution — Claude Code does
+    this well; for OmniSight backend service we'd build memory
+    differently anyway (per-tenant rule layer).
+  * Slash-command syntax — Claude Code-product-shape, not relevant
+    to OmniSight's web/API surface.
+  * RLHF-quality tool-use prompt tuning — Anthropic does this for
+    Claude Code; we have neither the data nor the cycle to replicate
+    competitively.
+
+### The companion concern: TODO granularity
+
+A related symptom of the same wrong frame: the project's TODO items
+were written at "what a competent dev with Claude Code can finish in
+one session" granularity, not "what one agentic loop can complete in
+one commit-unit". This is why W14.5 / W15.1 / W15.2 each contained
+3-6 implicit sub-tasks but appeared as single bullets — and why API-
+mode runs blew through max_tokens / max_iterations.
+
+**The fix is NOT runner-side** (we already learned Phase 6 auto-
+decompose is premature without empirical samples). The fixes are:
+
+  * **Going forward**: when adding new TODO items, target commit-unit
+    granularity (one bullet ≈ one commit-shaped change), include
+    explicit acceptance criteria, mark cross-bullet dependencies.
+  * **For existing big bullets**: human-led decomposition pass when
+    a specific epic comes up for execution. LLM can suggest the
+    split, human validates.
+  * **For OmniSight as user product**: task-sizing is one of the
+    user-facing features OmniSight must build (mirror property). The
+    runner's pain here previews user pain there.
+
+---
+
 ## Open questions (Phase B+ concerns, not blocking now)
 
 These are recorded for future visit when their phase arrives:
@@ -184,10 +318,18 @@ These are recorded for future visit when their phase arrives:
 ## How to use this doc
 
   * Before adding a runner Phase: re-read the **mirror property**
-    section. Filter the proposed Phase through "user-product preview"
-    or "runner perfectionism".
+    section + the **two-question filter** in *Why runner intentionally
+    does NOT pursue Claude Code parity § Filter for future runner
+    Phases*. Both must pass: (1) mirror to user product, (2) axis where
+    OmniSight uniquely needs (not where Claude Code already does well).
   * Before declaring Phase X done: ensure `backend/agents/*` carries
     the durable artifact, not the runner script.
   * When user / operator pushes back on a proposed Phase: take the
     pushback as the empirical signal Phase 6 deferral relies on. Don't
     rationalise around it.
+  * When tempted to "make runner more like Claude Code": stop. Re-read
+    the parity section. The right move is usually to wrap Claude Code
+    as a backend, not duplicate it.
+  * When writing TODO items: target commit-unit granularity, include
+    acceptance criteria, mark cross-bullet dependencies. See *The
+    companion concern: TODO granularity* for why.
