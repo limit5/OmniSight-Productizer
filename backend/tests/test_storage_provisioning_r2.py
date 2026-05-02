@@ -46,6 +46,20 @@ class TestProvision:
         assert result.created is False
         assert result.endpoint_url == endpoint
 
+    @respx.mock
+    async def test_configures_cors_with_r2_endpoint(self):
+        respx.head(f"{R2}/tenant-demo").mock(return_value=httpx.Response(200))
+        route = respx.put(f"{R2}/tenant-demo?cors").mock(return_value=httpx.Response(200))
+
+        await _mk_adapter(
+            cors_allowed_origins=["https://app.example.com"],
+        ).provision_bucket()
+
+        assert b"<AllowedOrigin>https://app.example.com</AllowedOrigin>" in (
+            route.calls.last.request.read()
+        )
+        assert "/auto/s3/aws4_request" in route.calls.last.request.headers["authorization"]
+
 
 class TestPresignedUrl:
 

@@ -11,6 +11,8 @@ from backend.storage_provisioning.base import (
     InvalidStorageProvisionTokenError,
     MissingStorageProvisionScopeError,
     PresignedStorageUrl,
+    StorageCorsConfig,
+    StorageCorsResult,
     StorageProvisionAdapter,
     StorageProvisionConflictError,
     StorageProvisionError,
@@ -146,6 +148,7 @@ class SupabaseStorageProvisionAdapter(StorageProvisionAdapter):
             raw=bucket,
         )
         self._cached_result = result
+        await self._configure_cors_if_requested()
         return result
 
     async def generate_presigned_url(
@@ -192,6 +195,37 @@ class SupabaseStorageProvisionAdapter(StorageProvisionAdapter):
             url=url,
             method=verb,
             expires_in=expires_in,
+            raw=data,
+        )
+
+    async def configure_cors(
+        self,
+        config: Optional[StorageCorsConfig] = None,
+        **kwargs: Any,
+    ) -> StorageCorsResult:
+        del kwargs
+        cors = config or self._cors_config
+        if cors is None:
+            raise ValueError("cors config is required")
+        body = {
+            "cors": {
+                "allowed_origins": list(cors.allowed_origins),
+                "allowed_methods": list(cors.allowed_methods),
+                "allowed_headers": list(cors.allowed_headers),
+                "expose_headers": list(cors.expose_headers),
+                "max_age_seconds": cors.max_age_seconds,
+            },
+        }
+        data = await self._request("PATCH", f"/buckets/{self._bucket_name}", json=body)
+        logger.info(
+            "supabase_storage.storage_cors bucket=%s origins=%s fp=%s",
+            self._bucket_name, len(cors.allowed_origins), self.token_fp(),
+        )
+        return StorageCorsResult(
+            provider=self.provider,
+            bucket_name=self._bucket_name,
+            configured=True,
+            cors=cors,
             raw=data,
         )
 

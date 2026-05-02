@@ -106,6 +106,57 @@ class PresignedStorageUrl:
         }
 
 
+@dataclass
+class StorageCorsConfig:
+    """CORS rules applied by ``adapter.configure_cors(...)``."""
+
+    allowed_origins: list[str]
+    allowed_methods: list[str] = field(default_factory=lambda: ["GET", "PUT", "HEAD"])
+    allowed_headers: list[str] = field(default_factory=lambda: ["*"])
+    expose_headers: list[str] = field(default_factory=lambda: ["ETag"])
+    max_age_seconds: int = 3600
+
+    def __post_init__(self) -> None:
+        self.allowed_origins = [o.strip() for o in self.allowed_origins if o and o.strip()]
+        self.allowed_methods = [m.strip().upper() for m in self.allowed_methods if m and m.strip()]
+        self.allowed_headers = [h.strip() for h in self.allowed_headers if h and h.strip()]
+        self.expose_headers = [h.strip() for h in self.expose_headers if h and h.strip()]
+        if not self.allowed_origins:
+            raise ValueError("allowed_origins is required")
+        if not self.allowed_methods:
+            raise ValueError("allowed_methods is required")
+        if self.max_age_seconds < 0:
+            raise ValueError("max_age_seconds must be non-negative")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "allowed_origins": list(self.allowed_origins),
+            "allowed_methods": list(self.allowed_methods),
+            "allowed_headers": list(self.allowed_headers),
+            "expose_headers": list(self.expose_headers),
+            "max_age_seconds": self.max_age_seconds,
+        }
+
+
+@dataclass
+class StorageCorsResult:
+    """Outcome of ``adapter.configure_cors(...)``."""
+
+    provider: str
+    bucket_name: str
+    configured: bool
+    cors: StorageCorsConfig
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "bucket_name": self.bucket_name,
+            "configured": self.configured,
+            "cors": self.cors.to_dict(),
+        }
+
+
 class StorageProvisionAdapter(ABC):
     """Abstract base for every tenant object storage provider adapter."""
 
@@ -117,6 +168,11 @@ class StorageProvisionAdapter(ABC):
         token: str,
         bucket_name: str,
         timeout: float = 30.0,
+        cors_allowed_origins: Optional[list[str]] = None,
+        cors_allowed_methods: Optional[list[str]] = None,
+        cors_allowed_headers: Optional[list[str]] = None,
+        cors_expose_headers: Optional[list[str]] = None,
+        cors_max_age_seconds: int = 3600,
         **kwargs: Any,
     ):
         if not self.provider:
@@ -127,6 +183,15 @@ class StorageProvisionAdapter(ABC):
         self._bucket_name = bucket_name
         self._timeout = timeout
         self._cached_result: Optional[StorageProvisionResult] = None
+        self._cors_config: Optional[StorageCorsConfig] = None
+        if cors_allowed_origins is not None:
+            self._cors_config = StorageCorsConfig(
+                allowed_origins=cors_allowed_origins,
+                allowed_methods=cors_allowed_methods or ["GET", "PUT", "HEAD"],
+                allowed_headers=cors_allowed_headers or ["*"],
+                expose_headers=cors_expose_headers or ["ETag"],
+                max_age_seconds=cors_max_age_seconds,
+            )
         self._configure(**kwargs)
 
     @classmethod
@@ -178,6 +243,19 @@ class StorageProvisionAdapter(ABC):
     ) -> PresignedStorageUrl:
         """Return a short-lived object URL for generated app upload/download."""
 
+    @abstractmethod
+    async def configure_cors(
+        self,
+        config: Optional[StorageCorsConfig] = None,
+        **kwargs: Any,
+    ) -> StorageCorsResult:
+        """Apply bucket CORS config for browser upload/download flows."""
+
+    async def _configure_cors_if_requested(self) -> Optional[StorageCorsResult]:
+        if self._cors_config is None:
+            return None
+        return await self.configure_cors(self._cors_config)
+
     def get_bucket_config(self) -> Optional[dict[str, Any]]:
         """Return scaffold-facing bucket config from the last provision call."""
         if self._cached_result is None:
@@ -188,6 +266,8 @@ class StorageProvisionAdapter(ABC):
 __all__ = [
     "StorageProvisionAdapter",
     "PresignedStorageUrl",
+    "StorageCorsConfig",
+    "StorageCorsResult",
     "StorageProvisionResult",
     "StorageProvisionConflictError",
     "StorageProvisionError",

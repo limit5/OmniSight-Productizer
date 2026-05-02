@@ -143,6 +143,43 @@ class TestGetBucketConfig:
         }
 
 
+class TestCorsConfig:
+
+    @respx.mock
+    async def test_configures_cors_after_bucket_provision_when_requested(self):
+        respx.get(f"{S}/buckets/tenant-demo").mock(
+            return_value=_ok({"id": "tenant-demo", "name": "tenant-demo"}),
+        )
+        route = respx.patch(f"{S}/buckets/tenant-demo").mock(
+            return_value=_ok({"id": "tenant-demo"}),
+        )
+
+        await _mk_adapter(
+            cors_allowed_origins=["https://app.example.com"],
+        ).provision_bucket()
+
+        assert route.calls.last.request.read() == (
+            b'{"cors":{"allowed_origins":["https://app.example.com"],'
+            b'"allowed_methods":["GET","PUT","HEAD"],'
+            b'"allowed_headers":["*"],"expose_headers":["ETag"],'
+            b'"max_age_seconds":3600}}'
+        )
+
+    @respx.mock
+    async def test_configure_cors_returns_result(self):
+        respx.patch(f"{S}/buckets/tenant-demo").mock(
+            return_value=_ok({"id": "tenant-demo"}),
+        )
+
+        result = await _mk_adapter(
+            cors_allowed_origins=["https://studio.example.com"],
+        ).configure_cors()
+
+        assert result.configured is True
+        assert result.provider == "supabase-storage"
+        assert result.cors.allowed_origins == ["https://studio.example.com"]
+
+
 class TestPresignedUrl:
 
     @respx.mock

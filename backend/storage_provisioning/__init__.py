@@ -6,6 +6,8 @@ from backend.storage_provisioning.base import (
     InvalidStorageProvisionTokenError,
     MissingStorageProvisionScopeError,
     PresignedStorageUrl,
+    StorageCorsConfig,
+    StorageCorsResult,
     StorageProvisionAdapter,
     StorageProvisionConflictError,
     StorageProvisionError,
@@ -40,6 +42,8 @@ def get_adapter(provider: str) -> type[StorageProvisionAdapter]:
 __all__ = [
     "StorageProvisionAdapter",
     "PresignedStorageUrl",
+    "StorageCorsConfig",
+    "StorageCorsResult",
     "StorageProvisionResult",
     "StorageProvisionConflictError",
     "StorageProvisionError",

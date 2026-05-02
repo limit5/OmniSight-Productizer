@@ -7,6 +7,8 @@ import pytest
 from backend import secret_store
 from backend.storage_provisioning import (
     PresignedStorageUrl,
+    StorageCorsConfig,
+    StorageCorsResult,
     StorageProvisionAdapter,
     StorageProvisionError,
     StorageProvisionResult,
@@ -131,6 +133,48 @@ class TestPresignedStorageUrl:
         }
 
 
+class TestStorageCorsConfig:
+
+    def test_to_dict_normalizes_values(self):
+        config = StorageCorsConfig(
+            allowed_origins=[" https://app.example.com "],
+            allowed_methods=["get", " put "],
+            allowed_headers=[" authorization "],
+            expose_headers=[" etag "],
+            max_age_seconds=600,
+        )
+
+        assert config.to_dict() == {
+            "allowed_origins": ["https://app.example.com"],
+            "allowed_methods": ["GET", "PUT"],
+            "allowed_headers": ["authorization"],
+            "expose_headers": ["etag"],
+            "max_age_seconds": 600,
+        }
+
+    def test_rejects_empty_origins(self):
+        with pytest.raises(ValueError, match="allowed_origins"):
+            StorageCorsConfig(allowed_origins=[" "])
+
+
+class TestStorageCorsResult:
+
+    def test_to_dict(self):
+        result = StorageCorsResult(
+            provider="s3",
+            bucket_name="tenant-demo",
+            configured=True,
+            cors=StorageCorsConfig(allowed_origins=["https://app.example.com"]),
+        )
+
+        data = result.to_dict()
+
+        assert data["provider"] == "s3"
+        assert data["bucket_name"] == "tenant-demo"
+        assert data["configured"] is True
+        assert data["cors"]["allowed_origins"] == ["https://app.example.com"]
+
+
 class TestInterfaceContract:
 
     @pytest.mark.parametrize("provider", ["s3", "r2", "supabase-storage"])
@@ -138,6 +182,7 @@ class TestInterfaceContract:
         cls = get_adapter(provider)
         assert callable(getattr(cls, "provision_bucket"))
         assert callable(getattr(cls, "generate_presigned_url"))
+        assert callable(getattr(cls, "configure_cors"))
         assert callable(getattr(cls, "get_bucket_config"))
 
     def test_cannot_instantiate_base_directly(self):

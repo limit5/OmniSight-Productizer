@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+from xml.sax.saxutils import escape
 from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse
 
 import httpx
 
@@ -15,6 +16,8 @@ from backend.storage_provisioning.base import (
     InvalidStorageProvisionTokenError,
     MissingStorageProvisionScopeError,
     PresignedStorageUrl,
+    StorageCorsConfig,
+    StorageCorsResult,
     StorageProvisionAdapter,
     StorageProvisionConflictError,
     StorageProvisionError,
@@ -56,6 +59,15 @@ def _signing_key(secret: str, datestamp: str, region: str, service: str) -> byte
     return hmac.new(key_service, b"aws4_request", hashlib.sha256).digest()
 
 
+def _canonical_query_string(query: str) -> str:
+    if not query:
+        return ""
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if query and not pairs:
+        pairs = [(query, "")]
+    return urlencode(sorted(pairs), quote_via=quote, safe="")
+
+
 class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
     """Shared S3-compatible bucket provisioning implementation."""
 
@@ -79,6 +91,9 @@ class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
 
     def _bucket_url(self) -> str:
         return f"{self._endpoint_url}/{quote(self._bucket_name, safe='')}"
+
+    def _cors_url(self) -> str:
+        return f"{self._bucket_url()}?cors"
 
     def _object_url(self, object_key: str) -> str:
         key = object_key.lstrip("/")
@@ -104,6 +119,7 @@ class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
         parsed = urlparse(url)
         host = parsed.netloc
         canonical_uri = parsed.path or "/"
+        canonical_query = _canonical_query_string(parsed.query)
         headers = {
             "host": host,
             "x-amz-content-sha256": payload_hash,
@@ -114,7 +130,7 @@ class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
         canonical_request = "\n".join([
             method,
             canonical_uri,
-            "",
+            canonical_query,
             canonical_headers,
             signed_headers,
             payload_hash,
@@ -189,6 +205,24 @@ class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
         async with httpx.AsyncClient(timeout=self._timeout) as c:
             return await c.request(method, url, headers=headers, content=payload)
 
+    def _cors_payload(self, config: StorageCorsConfig) -> bytes:
+        lines = [
+            '<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">',
+            "<CORSRule>",
+        ]
+        for origin in config.allowed_origins:
+            lines.append(f"<AllowedOrigin>{escape(origin)}</AllowedOrigin>")
+        for method in config.allowed_methods:
+            lines.append(f"<AllowedMethod>{escape(method)}</AllowedMethod>")
+        for header in config.allowed_headers:
+            lines.append(f"<AllowedHeader>{escape(header)}</AllowedHeader>")
+        for header in config.expose_headers:
+            lines.append(f"<ExposeHeader>{escape(header)}</ExposeHeader>")
+        lines.append(f"<MaxAgeSeconds>{config.max_age_seconds}</MaxAgeSeconds>")
+        lines.append("</CORSRule>")
+        lines.append("</CORSConfiguration>")
+        return "".join(lines).encode()
+
     async def _bucket_exists(self) -> bool:
         resp = await self._request("HEAD", self._bucket_url())
         if resp.status_code == 404:
@@ -219,6 +253,7 @@ class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
             raw={"bucket_url": self._bucket_url()},
         )
         self._cached_result = result
+        await self._configure_cors_if_requested()
         return result
 
     async def generate_presigned_url(
@@ -248,6 +283,30 @@ class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
             method=verb,
             expires_in=expires_in,
             raw={"endpoint_url": self._endpoint_url},
+        )
+
+    async def configure_cors(
+        self,
+        config: Optional[StorageCorsConfig] = None,
+        **kwargs: Any,
+    ) -> StorageCorsResult:
+        del kwargs
+        cors = config or self._cors_config
+        if cors is None:
+            raise ValueError("cors config is required")
+        payload = self._cors_payload(cors)
+        resp = await self._request("PUT", self._cors_url(), payload)
+        _raise_for_s3(resp, self.provider)
+        logger.info(
+            "%s.storage_cors bucket=%s origins=%s fp=%s",
+            self.provider, self._bucket_name, len(cors.allowed_origins), self.token_fp(),
+        )
+        return StorageCorsResult(
+            provider=self.provider,
+            bucket_name=self._bucket_name,
+            configured=True,
+            cors=cors,
+            raw={"cors_url": self._cors_url()},
         )
 
 

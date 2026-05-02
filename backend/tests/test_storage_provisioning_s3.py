@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 from backend.storage_provisioning.base import (
     InvalidStorageProvisionTokenError,
     MissingStorageProvisionScopeError,
+    StorageCorsConfig,
     StorageProvisionConflictError,
     StorageProvisionRateLimitError,
 )
@@ -104,6 +105,50 @@ class TestGetBucketConfig:
             "created": False,
             "region": "us-east-1",
         }
+
+
+class TestCorsConfig:
+
+    @respx.mock
+    async def test_configures_cors_after_bucket_provision_when_requested(self):
+        respx.head(f"{S}/tenant-demo").mock(return_value=httpx.Response(200))
+        route = respx.put(f"{S}/tenant-demo?cors").mock(return_value=httpx.Response(200))
+
+        result = await _mk_adapter(
+            cors_allowed_origins=["https://app.example.com"],
+        ).provision_bucket()
+
+        body = route.calls.last.request.read()
+        assert result.bucket_name == "tenant-demo"
+        assert b"<AllowedOrigin>https://app.example.com</AllowedOrigin>" in body
+        assert b"<AllowedMethod>GET</AllowedMethod>" in body
+        assert b"<AllowedMethod>PUT</AllowedMethod>" in body
+        assert b"<AllowedHeader>*</AllowedHeader>" in body
+        assert b"<ExposeHeader>ETag</ExposeHeader>" in body
+        assert b"<MaxAgeSeconds>3600</MaxAgeSeconds>" in body
+        assert "Credential=AKIA0123456789/" in route.calls.last.request.headers["authorization"]
+
+    @respx.mock
+    async def test_configure_cors_accepts_explicit_config(self):
+        route = respx.put(f"{S}/tenant-demo?cors").mock(return_value=httpx.Response(200))
+
+        result = await _mk_adapter().configure_cors(
+            StorageCorsConfig(
+                allowed_origins=["https://studio.example.com"],
+                allowed_methods=["GET"],
+                allowed_headers=["authorization"],
+                expose_headers=[],
+                max_age_seconds=60,
+            ),
+        )
+
+        body = route.calls.last.request.read()
+        assert result.configured is True
+        assert result.cors.allowed_origins == ["https://studio.example.com"]
+        assert b"<AllowedMethod>GET</AllowedMethod>" in body
+        assert b"<AllowedMethod>PUT</AllowedMethod>" not in body
+        assert b"<AllowedHeader>authorization</AllowedHeader>" in body
+        assert b"<MaxAgeSeconds>60</MaxAgeSeconds>" in body
 
 
 class TestPresignedUrl:
