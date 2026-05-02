@@ -206,6 +206,7 @@ class Settings(BaseSettings):
     github_webhook_secret: str = ""     # HMAC-SHA256 signature verification
     gitlab_webhook_secret: str = ""     # X-Gitlab-Token header verification
     jira_webhook_secret: str = ""       # Bearer token verification
+    email_webhook_secret: str = ""      # FS.4.3 email bounce/complaint webhook token
 
     # ── CI/CD Pipeline Triggers ──
     ci_github_actions_enabled: bool = False

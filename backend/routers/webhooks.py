@@ -9,6 +9,8 @@ Currently supports Gerrit Code Review events:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import uuid
@@ -19,6 +21,11 @@ from fastapi.responses import JSONResponse
 
 from backend.config import settings
 from backend.db_pool import get_conn, get_pool
+from backend.email_delivery.webhooks import (
+    EmailFeedbackEvent,
+    normalize_email_webhook_provider,
+    parse_email_feedback_events,
+)
 from backend.events import emit_invoke, emit_agent_update, emit_task_update
 from backend.models import (
     Agent, AgentProgress, AgentStatus,
@@ -28,6 +35,109 @@ from backend.models import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+
+@router.post("/email/{provider}")
+async def email_feedback_webhook(provider: str, request: Request):
+    """Receive provider bounce / complaint webhooks for FS.4 email.
+
+    The endpoint accepts a shared bearer token or HMAC-SHA256 signature.
+    ``settings.email_webhook_secret`` is env/runtime configuration, so
+    every worker independently verifies against the same source value
+    without writing module-global state.
+    """
+    try:
+        canonical_provider = normalize_email_webhook_provider(provider)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    secret = settings.email_webhook_secret
+    if not secret:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Email feedback webhooks not configured"},
+        )
+
+    raw_body = await request.body()
+    if len(raw_body) > 1_048_576:
+        return JSONResponse(status_code=413, content={"detail": "Payload too large"})
+    if not _verify_email_feedback_webhook(request, raw_body, secret):
+        return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
+
+    try:
+        body = json.loads(raw_body)
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+
+    try:
+        events = parse_email_feedback_events(canonical_provider, body)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    for event in events:
+        await _on_email_feedback_event(event)
+
+    return {
+        "status": "ok",
+        "provider": canonical_provider,
+        "count": len(events),
+        "events": [event.to_dict() for event in events],
+    }
+
+
+def _verify_email_feedback_webhook(
+    request: Request,
+    raw_body: bytes,
+    secret: str,
+) -> bool:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth.removeprefix("Bearer ").strip()
+        if hmac.compare_digest(token, secret):
+            return True
+
+    token = request.headers.get("X-OmniSight-Email-Webhook-Token", "")
+    if token and hmac.compare_digest(token, secret):
+        return True
+
+    signature = request.headers.get("X-OmniSight-Email-Signature", "")
+    expected = "sha256=" + hmac.new(
+        secret.encode(),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+async def _on_email_feedback_event(event: EmailFeedbackEvent) -> None:
+    """Route a normalized email feedback event to operator notification."""
+    logger.warning(
+        "email_feedback provider=%s type=%s recipient=%s message_id=%s reason=%s",
+        event.provider,
+        event.event_type,
+        event.recipient,
+        event.message_id,
+        event.reason,
+    )
+    from backend.notifications import notify
+
+    title = (
+        "Email complaint received"
+        if event.event_type == "complaint"
+        else "Email bounce received"
+    )
+    await notify(
+        "warning",
+        title,
+        message=(
+            f"{event.provider} reported {event.event_type} for "
+            f"{event.recipient}"
+            + (f" ({event.reason})" if event.reason else "")
+        ),
+        source="email_delivery",
+    )
 
 
 @router.post("/gerrit")

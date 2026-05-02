@@ -25,6 +25,12 @@ from backend.email_delivery.templates import (
     list_email_templates,
     render_email_template,
 )
+from backend.email_delivery.webhooks import (
+    EMAIL_FEEDBACK_EVENT_TYPES,
+    EmailFeedbackEvent,
+    normalize_email_webhook_provider,
+    parse_email_feedback_events,
+)
 
 
 def list_providers() -> list[str]:
@@ -62,6 +68,8 @@ __all__ = [
     "EMAIL_TEMPLATE_IDS",
     "EMAIL_TEMPLATE_ITEMS",
     "EMAIL_TEMPLATES",
+    "EMAIL_FEEDBACK_EVENT_TYPES",
+    "EmailFeedbackEvent",
     "EmailTemplateItem",
     "EmailTemplateRenderOptions",
     "InvalidEmailDeliveryTokenError",
@@ -71,5 +79,7 @@ __all__ = [
     "get_email_template",
     "list_email_templates",
     "list_providers",
+    "normalize_email_webhook_provider",
+    "parse_email_feedback_events",
     "render_email_template",
 ]
