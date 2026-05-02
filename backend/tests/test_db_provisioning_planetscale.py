@@ -72,6 +72,10 @@ class TestProvision:
         assert result.backup_schedule.provider_tier == "scaler-pro"
         assert result.backup_schedule.enabled is True
         assert result.backup_schedule.schedule == "twice-daily"
+        assert result.pep_hold is not None
+        assert result.pep_hold.provider_tier == "scaler-pro"
+        assert result.pep_hold.required is True
+        assert result.pep_hold.cost_estimate.monthly_low_usd == 5.0
         assert result.connection_url == (
             "mysql://u%2Fser:p%3Dword@aws.connect.psdb.cloud/"
             "tenant-demo?sslaccept=strict"
@@ -144,6 +148,9 @@ class TestProvision:
         assert result.backup_schedule is not None
         assert result.backup_schedule.provider_tier == "enterprise-multi-tenant"
         assert result.backup_schedule.schedule == "twice-daily"
+        assert result.pep_hold is not None
+        assert result.pep_hold.provider_tier == "enterprise-multi-tenant"
+        assert result.pep_hold.cost_estimate.currency == "USD"
 
     @respx.mock
     async def test_401_and_403_map_correctly(self):

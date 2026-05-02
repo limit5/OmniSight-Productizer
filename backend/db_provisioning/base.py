@@ -25,6 +25,7 @@ from backend import secret_store
 from backend.deploy.base import token_fingerprint
 from backend.db_provisioning.backup import BackupSchedulePolicy
 from backend.db_provisioning.encryption import EncryptionAtRestPolicy
+from backend.db_provisioning.pep_hold import DBProvisionPepHoldPolicy
 
 
 class DBProvisionError(Exception):
@@ -69,6 +70,7 @@ class DatabaseProvisionResult:
     region: Optional[str] = None
     encryption_at_rest: Optional[EncryptionAtRestPolicy] = None
     backup_schedule: Optional[BackupSchedulePolicy] = None
+    pep_hold: Optional[DBProvisionPepHoldPolicy] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -88,6 +90,11 @@ class DatabaseProvisionResult:
             "backup_schedule": (
                 self.backup_schedule.to_dict()
                 if self.backup_schedule is not None
+                else None
+            ),
+            "pep_hold": (
+                self.pep_hold.to_dict()
+                if self.pep_hold is not None
                 else None
             ),
         }

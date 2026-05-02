@@ -60,6 +60,10 @@ class TestProvision:
         assert result.backup_schedule.provider_tier == "free"
         assert result.backup_schedule.enabled is True
         assert result.backup_schedule.schedule == "continuous-wal-retention"
+        assert result.pep_hold is not None
+        assert result.pep_hold.provider_tier == "free"
+        assert result.pep_hold.required is True
+        assert result.pep_hold.cost_estimate.monthly_low_usd == 0.0
         assert result.connection_url == "postgresql://user:pass@ep.example/neondb"
         body = route.calls.last.request.read()
         assert b'"name":"tenant-demo"' in body
@@ -101,6 +105,9 @@ class TestProvision:
         assert result.backup_schedule.provider_tier == "business"
         assert result.backup_schedule.mode == "provider-managed-pitr"
         assert result.backup_schedule.schedule == "continuous-wal-retention"
+        assert result.pep_hold is not None
+        assert result.pep_hold.provider_tier == "business"
+        assert result.pep_hold.cost_estimate.currency == "USD"
 
     @respx.mock
     async def test_401_and_403_map_correctly(self):

@@ -61,6 +61,10 @@ class TestProvision:
         assert result.backup_schedule.provider_tier == "free"
         assert result.backup_schedule.enabled is False
         assert result.backup_schedule.schedule == "manual-offsite"
+        assert result.pep_hold is not None
+        assert result.pep_hold.provider_tier == "free"
+        assert result.pep_hold.required is True
+        assert result.pep_hold.cost_estimate.monthly_low_usd == 0.0
         assert result.connection_url == (
             "postgresql://postgres.abcdefghijklmnopqrst:p%3Dword@"
             "db.abcdefghijklmnopqrst.supabase.co:5432/postgres"
@@ -120,6 +124,9 @@ class TestProvision:
         assert result.backup_schedule.provider_tier == "team"
         assert result.backup_schedule.enabled is True
         assert result.backup_schedule.schedule == "daily"
+        assert result.pep_hold is not None
+        assert result.pep_hold.provider_tier == "team"
+        assert result.pep_hold.cost_estimate.currency == "USD"
 
     @respx.mock
     async def test_create_requires_db_pass_when_absent(self):

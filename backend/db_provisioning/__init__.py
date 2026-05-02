@@ -32,6 +32,13 @@ from backend.db_provisioning.migrations import (
     build_migration_command,
     run_tenant_migrations,
 )
+from backend.db_provisioning.pep_hold import (
+    DBProvisionCostEstimate,
+    DBProvisionPepHoldPolicy,
+    DBProvisionPepHoldUnsupportedTierError,
+    pep_hold_supported_tiers,
+    plan_pep_hold,
+)
 
 
 def list_providers() -> list[str]:
@@ -65,6 +72,9 @@ __all__ = [
     "DBProvisionConflictError",
     "DBProvisionError",
     "DBProvisionRateLimitError",
+    "DBProvisionCostEstimate",
+    "DBProvisionPepHoldPolicy",
+    "DBProvisionPepHoldUnsupportedTierError",
     "EncryptionAtRestPolicy",
     "EncryptionAtRestUnsupportedTierError",
     "InvalidDBProvisionTokenError",
@@ -79,7 +89,9 @@ __all__ = [
     "get_adapter",
     "list_providers",
     "normalize_provider_tier",
+    "pep_hold_supported_tiers",
     "plan_encryption_at_rest",
     "plan_backup_schedule",
+    "plan_pep_hold",
     "run_tenant_migrations",
 ]
