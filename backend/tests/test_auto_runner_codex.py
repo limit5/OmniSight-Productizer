@@ -216,30 +216,122 @@ def test_find_first_pending_returns_none_when_all_tagged(
     assert mod._find_first_pending(lines) is None
 
 
-# ─── _mark_item_failed ──────────────────────────────────────────
+# ─── Reservation-based TODO management (Tier B fix) ─────────────
 
 
-def test_mark_item_failed_flips_to_codex_bang(
+def _make_codex_runner_with_fake_todo(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+) -> tuple[Any, Path]:
+    """Helper: load the runner module + redirect TODO_FILE to a tmp file."""
     monkeypatch.setenv("OMNISIGHT_CODEX_TIER", "A")
     monkeypatch.setenv("OMNISIGHT_CODEX_WORKTREE", str(tmp_path))
     fake_todo = tmp_path / "TODO.md"
     fake_todo.write_text(
-        "## A\n"
-        "### A1\n"
+        "## Priority X\n\n"
+        "### A1. First section\n"
         "- [ ] A1.1 task one\n"
         "- [ ] A1.2 task two\n"
+        "- [x][C] A1.3 done by claude\n"
     )
     mod = _load_codex_runner()
     monkeypatch.setattr(mod, "TODO_FILE", str(fake_todo))
-    mod._mark_item_failed("- [ ] A1.1 task one")
+    return mod, fake_todo
+
+
+def test_reserve_item_for_codex_flips_blank_to_squiggle_G(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pre-flight reservation: - [ ] item → - [~][G] item."""
+    mod, fake_todo = _make_codex_runner_with_fake_todo(monkeypatch, tmp_path)
+    reserved = mod._reserve_item_for_codex("- [ ] A1.1 task one")
+    assert reserved == "- [~][G] A1.1 task one"
     text = fake_todo.read_text()
-    assert "- [!][G] A1.1 task one" in text
-    # other item untouched
+    assert "- [~][G] A1.1 task one" in text
+    # other lines untouched
     assert "- [ ] A1.2 task two" in text
-    # Critical: did NOT use [!][C]
-    assert "- [!][C]" not in text
+    assert "- [x][C] A1.3 done by claude" in text
+
+
+def test_flip_reservation_to_done_after_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Post-success: - [~][G] → - [x][G]."""
+    mod, fake_todo = _make_codex_runner_with_fake_todo(monkeypatch, tmp_path)
+    reserved = mod._reserve_item_for_codex("- [ ] A1.1 task one")
+    assert reserved is not None
+    done = mod._flip_reservation_to_done(reserved)
+    assert done == "- [x][G] A1.1 task one"
+    text = fake_todo.read_text()
+    assert "- [x][G] A1.1 task one" in text
+    assert "- [~][G]" not in text  # reservation marker fully gone
+
+
+def test_flip_reservation_to_failed_after_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Post-failure: - [~][G] → - [!][G]."""
+    mod, fake_todo = _make_codex_runner_with_fake_todo(monkeypatch, tmp_path)
+    reserved = mod._reserve_item_for_codex("- [ ] A1.2 task two")
+    failed = mod._flip_reservation_to_failed(reserved)
+    assert failed == "- [!][G] A1.2 task two"
+    text = fake_todo.read_text()
+    assert "- [!][G] A1.2 task two" in text
+
+
+def test_reserved_item_not_picked_up_by_next_scan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Once reserved, subsequent _find_first_pending calls skip it.
+
+    This is the invariant that PREVENTS the FS.1.1-style infinite loop:
+    after reservation the line no longer starts with `- [ ]`, so the
+    next scan picks the next pending item instead of redispatching.
+    """
+    mod, fake_todo = _make_codex_runner_with_fake_todo(monkeypatch, tmp_path)
+    # Initial scan — should pick A1.1
+    monkeypatch.setattr(mod, "TARGET_ITEM_SUBSTR", "")
+    text_lines = fake_todo.read_text().splitlines(keepends=True)
+    first = mod._find_first_pending(text_lines)
+    assert "A1.1" in first
+
+    # Reserve A1.1
+    mod._reserve_item_for_codex(first)
+
+    # Re-scan — should advance to A1.2 (NOT pick A1.1 again)
+    text_lines = fake_todo.read_text().splitlines(keepends=True)
+    second = mod._find_first_pending(text_lines)
+    assert second is not None
+    assert "A1.2" in second
+    assert "A1.1" not in second
+
+
+def test_replace_marker_idempotent_on_already_correct(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Calling done-flip on a line already at [x][G] is a safe no-op."""
+    mod, fake_todo = _make_codex_runner_with_fake_todo(monkeypatch, tmp_path)
+    reserved = mod._reserve_item_for_codex("- [ ] A1.1 task one")
+    mod._flip_reservation_to_done(reserved)
+    # Now try flipping again on the new line — should not duplicate
+    result = mod._flip_reservation_to_done("- [x][G] A1.1 task one")
+    # The line is already done; replace should be a no-op (returns same line).
+    assert result == "- [x][G] A1.1 task one"
+    # Sanity: only ONE [x][G] A1.1 in file
+    text = fake_todo.read_text()
+    assert text.count("- [x][G] A1.1 task one") == 1
+
+
+def test_replace_marker_returns_none_when_line_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Trying to reserve an item that's been mutated by another runner
+    returns None instead of corrupting the file."""
+    mod, fake_todo = _make_codex_runner_with_fake_todo(monkeypatch, tmp_path)
+    result = mod._reserve_item_for_codex("- [ ] DOES NOT EXIST")
+    assert result is None
+    # File untouched
+    text = fake_todo.read_text()
+    assert "DOES NOT EXIST" not in text
 
 
 # ─── Filename + co-existence with auto-runner.py ────────────────

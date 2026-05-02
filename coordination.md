@@ -160,6 +160,16 @@ otherwise concurrent commits / TODO writes corrupt state:
    `[O][G]`. Each runner only modifies markers with its own letter.
    Reading another's marker is fine; modifying is not.
 
+   **Tier B special**: in Tier B (codex worktree), the **codex runner
+   itself** writes the `[G]` marker on master TODO, NOT codex inside
+   the worktree. This is because the worktree has its own TODO.md
+   snapshot — codex modifying it never reaches master and causes
+   infinite-loop dispatch. The runner pre-reserves with `- [~][G]`
+   before dispatch and flips to `[x]` / `[!]` after. Codex's prompt
+   (AGENTS.md Rule 6) tells it not to touch TODO.md in Tier B.
+   Discovered + fixed 2026-05-03 after FS.1.1 looped on auto-runner-
+   codex.py's first real run.
+
 4. **HANDOFF.md heading prefix**: Claude entries start with `##
    [Claude/Opus]`; Codex entries start with `## [Codex/GPT-5.5]`.
    Append-only, never edit other agent's entries.
