@@ -3,9 +3,9 @@
 FS.2b connects generated apps to third-party APIs (GitHub, Slack,
 Notion, and similar outbound integrations). This module renders the
 minimal generated-app scaffold for the authorization-code flow:
-authorize route, callback route, and token exchange. Token persistence,
-refresh middleware, scope upgrades, and disconnect/revoke endpoints are
-separate FS.2b follow-up rows.
+authorize route, callback route, token exchange, token-vault storage
+bridge, and refresh middleware. Scope upgrades and disconnect/revoke
+endpoints are separate FS.2b follow-up rows.
 
 Module-global state audit (per implement_phase_step.md SOP §1)
 --------------------------------------------------------------
@@ -89,6 +89,7 @@ class OutboundOAuthFlowScaffoldOptions:
     oauth_client_import: str = "@/shared/oauth-client"
     token_vault_import: str = "@/shared/token-vault"
     token_vault_path: str = "auth/outbound-token-vault.ts"
+    refresh_middleware_path: str = "auth/outbound-refresh-middleware.ts"
     extra_env: tuple[AuthScaffoldEnvVar, ...] = field(default_factory=tuple)
 
     def validate(self) -> None:
@@ -104,6 +105,11 @@ class OutboundOAuthFlowScaffoldOptions:
             raise ValueError("token_vault_import is required")
         if not self.token_vault_path or not self.token_vault_path.strip():
             raise ValueError("token_vault_path is required")
+        if (
+            not self.refresh_middleware_path
+            or not self.refresh_middleware_path.strip()
+        ):
+            raise ValueError("refresh_middleware_path is required")
 
 
 def list_outbound_oauth_flow_providers() -> list[str]:
@@ -129,10 +135,18 @@ def render_outbound_oauth_flow_scaffold(
                 options.token_vault_path.strip("/"),
                 _token_vault_file(options.token_vault_import),
             ),
+            AuthScaffoldFile(
+                options.refresh_middleware_path.strip("/"),
+                _refresh_middleware_file(
+                    options.oauth_client_import,
+                    options.token_vault_import,
+                ),
+            ),
         ) + _route_files(options.route_prefix, providers),
         env=_env_vars(providers) + tuple(options.extra_env),
         notes=(
             "FS.2b.2 encrypts callback token sets with the AS.2 token vault",
+            "FS.2b.3 refresh middleware rotates refresh tokens before provider calls",
             "client secrets are declared as env metadata only",
         ),
     )
@@ -332,6 +346,161 @@ export async function encryptOutboundTokenSet(
     scope: token.scope.length ? token.scope.join(" ") : null,
     expiresAt: token.expiresAt ? new Date(token.expiresAt * 1000).toISOString() : null,
     keyVersion: KEY_VERSION_CURRENT,
+  }}
+}}
+
+function base64urlDecode(value: string): Uint8Array {{
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(
+    Math.ceil(value.length / 4) * 4,
+    "=",
+  )
+  const bin = atob(padded)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}}
+"""
+
+
+def _refresh_middleware_file(
+    oauth_client_import: str,
+    token_vault_import: str,
+) -> str:
+    imported_oauth = _ts_string(oauth_client_import)
+    imported_vault = _ts_string(token_vault_import)
+    return f"""// FS.2b.3 outbound OAuth refresh middleware.
+// Reuses AS.1 AutoRefreshFetch + AS.2 token vault records.
+
+import {{
+  AutoRefreshFetch,
+  TokenRefreshError,
+  autoRefresh,
+  needsRefresh,
+  type RefreshFn,
+  type TokenSet,
+}} from "{imported_oauth}"
+import {{
+  TokenVault,
+  importMasterKey,
+}} from "{imported_vault}"
+import {{ outboundProviderById, type OutboundOAuthProvider }} from "./outbound-oauth-flow"
+import {{ encryptOutboundTokenSet, type OutboundOAuthVaultRecord }} from "./outbound-token-vault"
+
+export type OutboundOAuthRefreshStore = {{
+  load(userId: string, provider: string): Promise<OutboundOAuthVaultRecord | null>
+  save(record: OutboundOAuthVaultRecord): Promise<void>
+  markExpired?(userId: string, provider: string, reason: string): Promise<void>
+}}
+
+export type OutboundOAuthRefreshResult = {{
+  token: TokenSet
+  vaultRecord: OutboundOAuthVaultRecord
+  refreshed: boolean
+  rotated: boolean
+}}
+
+export async function decryptOutboundVaultRecord(
+  record: OutboundOAuthVaultRecord,
+  masterKeyRaw: string,
+): Promise<TokenSet> {{
+  const vault = new TokenVault(await importMasterKey(base64urlDecode(masterKeyRaw)))
+  const accessToken = await vault.decryptForUser(
+    record.userId,
+    record.provider,
+    record.accessTokenEnc,
+  )
+  const refreshToken = record.refreshTokenEnc
+    ? await vault.decryptForUser(record.userId, record.provider, record.refreshTokenEnc)
+    : null
+  return Object.freeze({{
+    accessToken,
+    refreshToken,
+    tokenType: record.tokenType || "Bearer",
+    expiresAt: record.expiresAt ? Date.parse(record.expiresAt) / 1000 : null,
+    scope: record.scope ? record.scope.split(/[\\s,]+/).filter(Boolean) : [],
+    idToken: null,
+    raw: {{}},
+  }}) as TokenSet
+}}
+
+export async function refreshOutboundVaultRecord(
+  record: OutboundOAuthVaultRecord,
+  provider: OutboundOAuthProvider,
+  masterKeyRaw: string,
+  opts: {{ skewSeconds?: number; now?: number }} = {{}},
+): Promise<OutboundOAuthRefreshResult> {{
+  const current = await decryptOutboundVaultRecord(record, masterKeyRaw)
+  const due = needsRefresh(current, {{
+    skewSeconds: opts.skewSeconds,
+    now: opts.now,
+  }})
+  if (due && !current.refreshToken) {{
+    throw new TokenRefreshError(
+      "stored outbound OAuth token is expired and has no refresh_token",
+    )
+  }}
+
+  let rotated = false
+  const token = await autoRefresh(current, buildRefreshFn(provider), {{
+    skewSeconds: opts.skewSeconds,
+    onRotated: (_oldToken, _newToken, didRotate) => {{
+      rotated = didRotate
+    }},
+  }})
+  const vaultRecord = due
+    ? await encryptOutboundTokenSet(
+        record.userId,
+        record.provider,
+        token,
+        masterKeyRaw,
+      )
+    : record
+  return {{ token, vaultRecord, refreshed: due, rotated }}
+}}
+
+export async function createOutboundAutoRefreshFetch(
+  userId: string,
+  providerId: string,
+  store: OutboundOAuthRefreshStore,
+  masterKeyRaw: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<AutoRefreshFetch> {{
+  const provider = outboundProviderById(providerId)
+  if (!provider) throw new Error(`unsupported outbound OAuth provider: ${{providerId}}`)
+  const record = await store.load(userId, provider.provider)
+  if (!record) throw new Error(`missing outbound OAuth token for ${{provider.provider}}`)
+
+  const current = await decryptOutboundVaultRecord(record, masterKeyRaw)
+  return new AutoRefreshFetch(current, buildRefreshFn(provider), {{
+    fetchImpl,
+    onRotated: async (_oldToken, newToken) => {{
+      const next = await encryptOutboundTokenSet(
+        record.userId,
+        record.provider,
+        newToken,
+        masterKeyRaw,
+      )
+      await store.save(next)
+    }},
+  }})
+}}
+
+function buildRefreshFn(provider: OutboundOAuthProvider): RefreshFn {{
+  return async (refreshToken: string) => {{
+    const tokenRes = await fetch(provider.tokenEndpoint, {{
+      method: "POST",
+      headers: {{
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      }},
+      body: new URLSearchParams({{
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: process.env[provider.clientIdEnv]!,
+        client_secret: process.env[provider.clientSecretEnv] || "",
+      }}),
+    }})
+    return tokenRes.json()
   }}
 }}
 

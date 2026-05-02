@@ -47,6 +47,7 @@ class TestOutboundOAuthScaffold:
         assert [f.path for f in result.files] == [
             "auth/outbound-oauth-flow.ts",
             "auth/outbound-token-vault.ts",
+            "auth/outbound-refresh-middleware.ts",
             "app/api/integrations/github/authorize/route.ts",
             "app/api/integrations/github/callback/route.ts",
             "app/api/integrations/slack/authorize/route.ts",
@@ -80,8 +81,8 @@ class TestOutboundOAuthScaffold:
 
     def test_routes_render_authorize_cookie_and_callback_token_exchange(self):
         result = _render("notion")
-        authorize = result.files[2].content
-        callback = result.files[3].content
+        authorize = result.files[3].content
+        callback = result.files[4].content
         assert 'beginOutboundAuthorization("notion")' in authorize
         assert "outbound_oauth_flow_notion=" in authorize
         assert 'outboundProviderById("notion")' in callback
@@ -100,6 +101,36 @@ class TestOutboundOAuthScaffold:
         assert "encryptOutboundTokenSet" in helper
         assert "vault.encryptForUser(userId, provider, token.accessToken)" in helper
         assert "refreshTokenEnc" in helper
+
+    def test_refresh_middleware_reuses_as1_auto_refresh_and_as2_vault(self):
+        result = _render(
+            "github",
+            oauth_client_import="../oauth-client",
+            token_vault_import="../token-vault",
+        )
+        helper = result.files[2].content
+        assert 'from "../oauth-client"' in helper
+        assert 'from "../token-vault"' in helper
+        assert "AutoRefreshFetch" in helper
+        assert "autoRefresh" in helper
+        assert "needsRefresh" in helper
+        assert "TokenRefreshError" in helper
+        assert "decryptOutboundVaultRecord" in helper
+        assert "refreshOutboundVaultRecord" in helper
+        assert "createOutboundAutoRefreshFetch" in helper
+        assert 'grant_type: "refresh_token"' in helper
+        assert "encryptOutboundTokenSet" in helper
+        assert "rotated: boolean" in helper
+
+    def test_refresh_middleware_rejects_expired_tokens_without_refresh_token(self):
+        result = _render("github")
+        helper = result.files[2].content
+        assert "stored outbound OAuth token is expired and has no refresh_token" in helper
+        assert "refreshTokenEnc" in helper
+        assert (
+            "expiresAt: record.expiresAt ? Date.parse(record.expiresAt) / 1000 : null"
+            in helper
+        )
 
     def test_provider_metadata_marks_as2_token_vault_support(self):
         result = _render("github", "slack")
@@ -143,6 +174,7 @@ class TestOutboundOAuthValidation:
             "oauth_client_import",
             "token_vault_import",
             "token_vault_path",
+            "refresh_middleware_path",
         ],
     )
     def test_required_fields(self, field):
@@ -153,6 +185,7 @@ class TestOutboundOAuthValidation:
             oauth_client_import="@/shared/oauth-client",
             token_vault_import="@/shared/token-vault",
             token_vault_path="auth/outbound-token-vault.ts",
+            refresh_middleware_path="auth/outbound-refresh-middleware.ts",
         )
         kwargs[field] = () if field == "provider_plans" else ""
         opts = OutboundOAuthFlowScaffoldOptions(**kwargs)
