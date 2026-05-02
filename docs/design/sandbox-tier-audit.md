@@ -253,7 +253,7 @@ Concise list of common misreadings to head off during legal review:
   * **R12** (gVisor cost-weight only / not actual runtime) — mitigated by §0 R12 callout; tracked in BP.S.5.
   * **R13** (Hardware Daemon nominal until Phase T) — Tier 3 RPC is enum-named, the actual FastAPI daemon is Phase T (Window 3); claims in §3.2 / §3.4 about T3 isolation depend on Phase T landing.
 * **Drift-guard test** (future): `backend/tests/test_sandbox_tier_policy.py::test_audit_doc_matches_runtime_matrix` (BP.S.6).
-* **PEP Gateway integration** (future): BP.S.4 will document how `assert_admitted` is wired into `backend/policy_enforcement_point.py`.
+* **PEP Gateway integration**: [`docs/design/pep-gateway-tier-policy.md`](pep-gateway-tier-policy.md) (BP.S.4) — documents the *already-shipped* tier-aware policy in `backend/pep_gateway.py`, the relationship between `SandboxTier` (admission) and the PEP `tier="t1"|"t2"|"t3"` enforcement layer, and an explicit forward roadmap for Guild-aware enforcement + yaml loader (both out of scope for BP.S.4).
 
 ---
 
