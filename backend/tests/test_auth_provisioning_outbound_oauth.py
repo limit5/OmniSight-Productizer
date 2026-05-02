@@ -49,12 +49,15 @@ class TestOutboundOAuthScaffold:
             "auth/outbound-token-vault.ts",
             "auth/outbound-refresh-middleware.ts",
             "auth/outbound-scope-upgrade.ts",
+            "auth/outbound-disconnect.ts",
             "app/api/integrations/github/authorize/route.ts",
             "app/api/integrations/github/callback/route.ts",
             "app/api/integrations/github/scope-upgrade/route.ts",
+            "app/api/integrations/github/disconnect/route.ts",
             "app/api/integrations/slack/authorize/route.ts",
             "app/api/integrations/slack/callback/route.ts",
             "app/api/integrations/slack/scope-upgrade/route.ts",
+            "app/api/integrations/slack/disconnect/route.ts",
         ]
 
     def test_flow_helper_reuses_as1_authorize_callback_and_token_parser(self):
@@ -75,6 +78,7 @@ class TestOutboundOAuthScaffold:
         assert item.scope == ("openid", "email", "profile")
         assert item.authorize_endpoint == "https://accounts.google.com/o/oauth2/v2/auth"
         assert item.token_endpoint == "https://oauth2.googleapis.com/token"
+        assert item.revocation_endpoint == "https://oauth2.googleapis.com/revoke"
         assert item.extra_authorize_params == (
             ("access_type", "offline"),
             ("prompt", "consent"),
@@ -84,8 +88,8 @@ class TestOutboundOAuthScaffold:
 
     def test_routes_render_authorize_cookie_and_callback_token_exchange(self):
         result = _render("notion")
-        authorize = result.files[4].content
-        callback = result.files[5].content
+        authorize = result.files[5].content
+        callback = result.files[6].content
         assert 'beginOutboundAuthorization("notion")' in authorize
         assert "outbound_oauth_flow_notion=" in authorize
         assert 'outboundProviderById("notion")' in callback
@@ -148,6 +152,26 @@ class TestOutboundOAuthScaffold:
         assert "disconnectOutbound" not in helper
         assert "revokeOutbound" not in helper
 
+    def test_disconnect_helper_revokes_then_deletes_local_vault_record(self):
+        result = _render("google")
+        helper = result.files[4].content
+        assert "disconnectOutboundOAuth" in helper
+        assert 'OutboundOAuthDisconnectTrigger = "user_unlink" | "dsar_erasure"' in helper
+        assert "decryptOutboundVaultRecord(record, masterKeyRaw)" in helper
+        assert "token.refreshToken || token.accessToken" in helper
+        assert 'token_type_hint: hint' in helper
+        assert "await store.delete(userId, provider.provider)" in helper
+        assert 'revocationOutcome = "revocation_failed"' in helper
+
+    def test_disconnect_route_accepts_dsar_trigger_and_uses_outbound_store(self):
+        result = _render("google")
+        route = result.files[8].content
+        assert "disconnectOutboundOAuth" in route
+        assert "outboundTokenStore" in route
+        assert 'triggerParam === "dsar_erasure" ? "dsar_erasure" : "user_unlink"' in route
+        assert 'disconnectOutboundOAuth(' in route
+        assert "OAUTH_TOKEN_VAULT_MASTER_KEY!" in route
+
     def test_scope_upgrade_merge_preserves_refresh_token_when_provider_omits_it(self):
         result = _render("github")
         helper = result.files[3].content
@@ -158,7 +182,7 @@ class TestOutboundOAuthScaffold:
 
     def test_scope_upgrade_route_requires_requested_scope_and_sets_flow_cookie(self):
         result = _render("github")
-        route = result.files[6].content
+        route = result.files[7].content
         assert 'beginOutboundScopeUpgrade' in route
         assert 'outboundTokenStore' in route
         assert 'missing_requested_scopes' in route
@@ -176,6 +200,7 @@ class TestOutboundOAuthScaffold:
         helper = result.files[0].content
         assert "tokenVaultSupported: true" in helper
         assert "tokenVaultSupported: false" in helper
+        assert "revocationEndpoint:" in helper
 
     def test_env_declares_per_provider_secrets_without_values(self):
         result = _render("github")
@@ -210,6 +235,7 @@ class TestOutboundOAuthValidation:
             "token_vault_path",
             "refresh_middleware_path",
             "scope_upgrade_path",
+            "disconnect_path",
         ],
     )
     def test_required_fields(self, field):
@@ -222,6 +248,7 @@ class TestOutboundOAuthValidation:
             token_vault_path="auth/outbound-token-vault.ts",
             refresh_middleware_path="auth/outbound-refresh-middleware.ts",
             scope_upgrade_path="auth/outbound-scope-upgrade.ts",
+            disconnect_path="auth/outbound-disconnect.ts",
         )
         kwargs[field] = () if field == "provider_plans" else ""
         opts = OutboundOAuthFlowScaffoldOptions(**kwargs)

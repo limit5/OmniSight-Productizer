@@ -5,7 +5,8 @@ Notion, and similar outbound integrations). This module renders the
 minimal generated-app scaffold for the authorization-code flow:
 authorize route, callback route, token exchange, token-vault storage
 bridge, refresh middleware, and scope upgrades for already-connected
-providers. Disconnect/revoke endpoints are separate FS.2b follow-up rows.
+providers. Disconnect/revoke endpoints erase the generated app's local
+token record after a best-effort provider revocation call.
 
 Module-global state audit (per implement_phase_step.md SOP §1)
 --------------------------------------------------------------
@@ -39,6 +40,7 @@ class OutboundOAuthFlowProviderItem:
     scope: tuple[str, ...]
     authorize_endpoint: str
     token_endpoint: str
+    revocation_endpoint: str | None
     extra_authorize_params: tuple[tuple[str, str], ...]
     is_oidc: bool
     client_id_env: str
@@ -53,6 +55,7 @@ class OutboundOAuthFlowProviderItem:
             "scope": list(self.scope),
             "authorize_endpoint": self.authorize_endpoint,
             "token_endpoint": self.token_endpoint,
+            "revocation_endpoint": self.revocation_endpoint,
             "extra_authorize_params": [list(p) for p in self.extra_authorize_params],
             "is_oidc": self.is_oidc,
             "client_id_env": self.client_id_env,
@@ -91,6 +94,7 @@ class OutboundOAuthFlowScaffoldOptions:
     token_vault_path: str = "auth/outbound-token-vault.ts"
     refresh_middleware_path: str = "auth/outbound-refresh-middleware.ts"
     scope_upgrade_path: str = "auth/outbound-scope-upgrade.ts"
+    disconnect_path: str = "auth/outbound-disconnect.ts"
     extra_env: tuple[AuthScaffoldEnvVar, ...] = field(default_factory=tuple)
 
     def validate(self) -> None:
@@ -113,6 +117,8 @@ class OutboundOAuthFlowScaffoldOptions:
             raise ValueError("refresh_middleware_path is required")
         if not self.scope_upgrade_path or not self.scope_upgrade_path.strip():
             raise ValueError("scope_upgrade_path is required")
+        if not self.disconnect_path or not self.disconnect_path.strip():
+            raise ValueError("disconnect_path is required")
 
 
 def list_outbound_oauth_flow_providers() -> list[str]:
@@ -149,12 +155,17 @@ def render_outbound_oauth_flow_scaffold(
                 options.scope_upgrade_path.strip("/"),
                 _scope_upgrade_file(options.oauth_client_import),
             ),
+            AuthScaffoldFile(
+                options.disconnect_path.strip("/"),
+                _disconnect_file(),
+            ),
         ) + _route_files(options.route_prefix, providers),
         env=_env_vars(providers) + tuple(options.extra_env),
         notes=(
             "FS.2b.2 encrypts callback token sets with the AS.2 token vault",
             "FS.2b.3 refresh middleware rotates refresh tokens before provider calls",
             "FS.2b.4 upgrades missing scopes from an existing connection without disconnect/reconnect",
+            "FS.2b.5 disconnect deletes local vault records after best-effort IdP revocation",
             "client secrets are declared as env metadata only",
         ),
     )
@@ -173,6 +184,11 @@ def _provider_item(plan: VendorOAuthAppConfigPlan) -> OutboundOAuthFlowProviderI
             metadata.get("authorize_endpoint") or vendor.authorize_endpoint
         ),
         token_endpoint=str(metadata.get("token_endpoint") or vendor.token_endpoint),
+        revocation_endpoint=(
+            str(metadata["revocation_endpoint"])
+            if metadata.get("revocation_endpoint")
+            else vendor.revocation_endpoint
+        ),
         extra_authorize_params=tuple(
             (str(k), str(v)) for k, v in vendor.extra_authorize_params
         ),
@@ -241,6 +257,7 @@ export type OutboundOAuthProvider = {{
   scope: readonly string[]
   authorizeEndpoint: string
   tokenEndpoint: string
+  revocationEndpoint: string | null
   extraAuthorizeParams: Readonly<Record<string, string>>
   isOidc: boolean
   clientIdEnv: string
@@ -299,6 +316,101 @@ export async function exchangeOutboundCode(
   }})
   return parseTokenResponse(await tokenRes.json())
 }}
+"""
+
+
+def _disconnect_file() -> str:
+    return """// FS.2b.5 outbound OAuth disconnect + revoke helper.
+// Best-effort IdP revocation; local token erasure always proceeds for DSAR.
+
+import { outboundProviderById } from "./outbound-oauth-flow"
+import {
+  decryptOutboundVaultRecord,
+} from "./outbound-refresh-middleware"
+import type { OutboundOAuthVaultRecord } from "./outbound-token-vault"
+
+export type OutboundOAuthDisconnectStore = {
+  load(userId: string, provider: string): Promise<OutboundOAuthVaultRecord | null>
+  delete(userId: string, provider: string): Promise<void>
+}
+
+export type OutboundOAuthDisconnectTrigger = "user_unlink" | "dsar_erasure"
+
+export type OutboundOAuthDisconnectResult = {
+  ok: true
+  provider: string
+  status: "revoked" | "not_linked"
+  trigger: OutboundOAuthDisconnectTrigger
+  revocationAttempted: boolean
+  revocationOutcome: "success" | "revocation_failed" | null
+  localDeleted: boolean
+  error: string | null
+}
+
+export async function disconnectOutboundOAuth(
+  userId: string,
+  providerId: string,
+  store: OutboundOAuthDisconnectStore,
+  masterKeyRaw: string,
+  trigger: OutboundOAuthDisconnectTrigger = "user_unlink",
+): Promise<OutboundOAuthDisconnectResult> {
+  const provider = outboundProviderById(providerId)
+  if (!provider) throw new Error(`unsupported outbound OAuth provider: ${providerId}`)
+
+  const record = await store.load(userId, provider.provider)
+  if (!record) {
+    return {
+      ok: true,
+      provider: provider.provider,
+      status: "not_linked",
+      trigger,
+      revocationAttempted: false,
+      revocationOutcome: null,
+      localDeleted: false,
+      error: null,
+    }
+  }
+
+  let revocationAttempted = false
+  let revocationOutcome: "success" | "revocation_failed" | null = null
+  let error: string | null = null
+
+  if (provider.revocationEndpoint) {
+    try {
+      const token = await decryptOutboundVaultRecord(record, masterKeyRaw)
+      const tokenToRevoke = token.refreshToken || token.accessToken
+      const hint = token.refreshToken ? "refresh_token" : "access_token"
+      if (tokenToRevoke) {
+        revocationAttempted = true
+        const res = await fetch(provider.revocationEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            token: tokenToRevoke,
+            token_type_hint: hint,
+          }),
+        })
+        if (!res.ok) throw new Error(`revocation_http_${res.status}`)
+        revocationOutcome = "success"
+      }
+    } catch (err) {
+      revocationOutcome = "revocation_failed"
+      error = err instanceof Error ? err.message : "revocation_failed"
+    }
+  }
+
+  await store.delete(userId, provider.provider)
+  return {
+    ok: true,
+    provider: provider.provider,
+    status: "revoked",
+    trigger,
+    revocationAttempted,
+    revocationOutcome,
+    localDeleted: true,
+    error,
+  }
+}
 """
 
 
@@ -667,6 +779,7 @@ def _provider_entry(item: OutboundOAuthFlowProviderItem) -> str:
     scope: [{scope}],
     authorizeEndpoint: "{_ts_string(item.authorize_endpoint)}",
     tokenEndpoint: "{_ts_string(item.token_endpoint)}",
+    revocationEndpoint: {_ts_nullable_string(item.revocation_endpoint)},
     extraAuthorizeParams: {{{extra}}},
     isOidc: {_ts_bool(item.is_oidc)},
     clientIdEnv: "{_ts_string(item.client_id_env)}",
@@ -695,6 +808,10 @@ def _route_files(
                 f"{prefix}/{item.provider}/scope-upgrade/route.ts",
                 _scope_upgrade_route(item.provider),
             ),
+            AuthScaffoldFile(
+                f"{prefix}/{item.provider}/disconnect/route.ts",
+                _disconnect_route(item.provider),
+            ),
         )
     return files
 
@@ -714,6 +831,32 @@ export async function GET() {{
     `{cookie_name}=${{encodeURIComponent(JSON.stringify(flow))}}; HttpOnly; Path=/; SameSite=Lax`,
   )
   return res
+}}
+"""
+
+
+def _disconnect_route(provider: str) -> str:
+    provider_literal = _ts_string(provider)
+    return f"""// FS.2b.5 outbound OAuth disconnect + revoke route for {provider_literal}.
+
+import {{ disconnectOutboundOAuth }} from "@/auth/outbound-disconnect"
+import {{ outboundTokenStore }} from "@/auth/outbound-token-store"
+
+export async function DELETE(req: Request) {{
+  const userId = req.headers.get("x-omnisight-user-id")
+  if (!userId) return Response.json({{ error: "missing_user_id" }}, {{ status: 401 }})
+
+  const url = new URL(req.url)
+  const triggerParam = url.searchParams.get("trigger")
+  const trigger = triggerParam === "dsar_erasure" ? "dsar_erasure" : "user_unlink"
+  const result = await disconnectOutboundOAuth(
+    userId,
+    "{provider_literal}",
+    outboundTokenStore,
+    process.env.OAUTH_TOKEN_VAULT_MASTER_KEY!,
+    trigger,
+  )
+  return Response.json(result)
 }}
 """
 
@@ -827,6 +970,12 @@ def _cookie_name(provider: str) -> str:
 
 def _ts_bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _ts_nullable_string(value: str | None) -> str:
+    if value is None:
+        return "null"
+    return f'"{_ts_string(value)}"'
 
 
 def _ts_string(value: str | None) -> str:
