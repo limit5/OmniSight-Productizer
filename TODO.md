@@ -176,6 +176,30 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] **BP.F.9** Notification 整合：hard-error 觸發 L3 Jira (`LLM-HARD-ERROR-{provider}-{ts}`) + L4 PagerDuty (P2) + **orchestrator gateway refuse new DAG submit**（避免 silent degrade 到 slow fallback）
 - [ ] **BP.F.10** `backend/tests/test_llm_error_classifier.py` — ~25 test：每 provider 至少 2 hard + 2 soft 對照 + fallback chain happy path + hard-error refuse-submit path
 
+### BP.A2A — Agent-to-Agent Protocol Integration（~2-3 週）— **2026-05-02 新增 (from Agentic Design Patterns Ch 15)**
+> 借鑑 [Agentic Design Patterns Ch 15 — Inter-Agent Communication / A2A](https://github.com/evoiz/Agentic-Design-Patterns)。OmniSight 本質就是 multi-agent + multi-provider 編排器，A2A 是這個架構的 native protocol layer。**範圍嚴格分清**：內部 specialist routing 仍走 LangGraph state（不動）；A2A 只負責 cross-process / cross-vendor / cross-system edge —— 跨 vendor 統一介面、外部 agent invocation、對外暴露 OmniSight agent 給 enterprise client / partner / 第三方系統。**前置**：BP.B (Guild 重組) 完成後 capability descriptor 才有清楚對映；建議跟 BP.F 同期或之後做，因為 A2A 是 BP.F 的 agent-level companion (BP.F 抽象 LLM-call 級 provider，A2A 抽象 agent-call 級 provider)。
+
+#### Inbound — OmniSight 發 A2A AgentCard 給外部系統用
+- [ ] BP.A2A.1 `backend/a2a/agent_card.py` — AgentCard schema (capabilities / endpoints / auth / streaming spec) + 對 OmniSight specialist guild (HD / BSP / HAL / Architect / Orchestrator / etc.) 自動產生 capability descriptor + 對外 publish endpoint URL
+- [ ] BP.A2A.2 `backend/routers/a2a_inbound.py` — `/.well-known/agent.json` AgentCard discovery endpoint + `/a2a/invoke/{agent_name}` 雙模 invocation (sync JSON / streaming SSE) + 整合既有 PEP gateway auth
+- [ ] BP.A2A.3 既有 OAuth scope 加 `a2a:invoke:*` + `a2a:discover:*`、per-tenant rate limit per-AgentCard (沿用 Phase 5-12 infra)、整合 KS.1.7 audit chain
+- [ ] BP.A2A.4 alembic 0188 `a2a_invocations` table — `invocation_id / tenant_id / agent_name / caller_identity / payload_hash / response_hash / latency_ms / status / created_at` (audit + replay 能力)
+
+#### Outbound — OmniSight 用 A2A 呼叫外部 agent
+- [ ] BP.A2A.5 `backend/a2a/client.py` — A2A client (HTTP + streaming SSE) + AgentCard fetch & cache (TTL 1h) + retry / per-tenant circuit breaker (沿用 Phase Q2 infra) + timeout / cancellation
+- [ ] BP.A2A.6 `backend/agents/external_agent_registry.py` — operator 註冊外部 A2A agent endpoint (sibling to `external_tool_registry.py`，domain 是「外部 agent」而非「外部 tool」) + Operations Console UI 註冊介面
+- [ ] BP.A2A.7 LangGraph `external_agent_node` factory — workflow 內部一個 step 透過 A2A 走外部 agent、state 仍同 graph 流轉、結果寫進 `tool_results` 共用 SSE event
+- [ ] BP.A2A.8 整合 BP.I (SecOps Threat Intel) — 第三方 threat intel agent 走 A2A 而非各自 SDK，證明 outbound 在真實場景可用
+
+#### Cross-vendor lingua franca — 同 OmniSight backend 內統一介面
+- [ ] BP.A2A.9 9 個 provider (Anthropic / OpenAI / Google / xAI / Groq / DeepSeek / Together / OpenRouter / Ollama) 對 specialist agent 一律 expose A2A AgentCard 即便是同 backend；Orchestrator 層只認 A2A endpoint，不認底層 SDK class
+- [ ] BP.A2A.10 替 BP.F per-Guild model mapping 自動生成 sample AgentCard，runtime 動態 reload 不必硬編
+
+#### Tests + docs
+- [ ] BP.A2A.11 `backend/tests/test_a2a_inbound.py` — ~50 test (AgentCard discovery shape / invoke happy / auth fail / rate limit / streaming chunks order / replay from audit log / per-tenant isolation)
+- [ ] BP.A2A.12 `backend/tests/test_a2a_outbound.py` — ~40 test (client retry / breaker / cache TTL / external_agent_node integration / external_agent_registry CRUD + tenant RLS)
+- [ ] BP.A2A.13 `docs/operations/a2a-integration.md` — operator 怎麼註冊外部 agent、怎麼 expose 自己 agent、OAuth setup、AgentCard schema reference
+
 ### BP.H — 3-tier Penalty + Red Card（~1 週）
 > 前置 R0 / R2 / Watchdog（已完）；BP.B 完後加 guild_id label
 > 注意：此「Phase H」是 Blueprint Phase H，與 TODO `Priority H — Host-aware Coordinator`（line 2525+）是**不同**東西，命名碰撞（見 ADR Appendix C §C.5）
@@ -278,6 +302,18 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] BP.S.4 PEP Gateway Tier-aware policy 文件化（補完 line 2742 既有 PEP-tier integration 的 documentation gap）
 - [ ] BP.S.5 紀錄 Risk R12（gVisor cost-weight only / not actual runtime）— 防誤導 claim
 - [ ] BP.S.6 `backend/tests/test_sandbox_tier_policy.py` ~20 test (Guild × Tier matrix / policy parsing / PEP integration)
+
+### BP.Q — Internal Knowledge Retrieval Layer (Vector RAG)（~2-3 週）— **2026-05-02 新增 (from Agentic Design Patterns Ch 14)**
+> 借鑑 [Agentic Design Patterns Ch 14 — Knowledge Retrieval (RAG)](https://github.com/evoiz/Agentic-Design-Patterns)。OmniSight user workflow 必備能力：對 user project / codebase / docs / TODO / 規範文件做語意檢索，不再只能 Read + Grep。**範圍邊界**：BP.Q 是 vector / embedding RAG 基礎層；BP.E (在 BP.W4) GraphRAG / Neo4j 是 graph-RAG 進階版、前置依賴 BP.Q；本 epic 不接 GraphRAG。**對比 BP.N (Web Search)**：BP.N 是「**外部** web search」、BP.Q 是「**內部** codebase / docs 語意檢索」，互補不重疊。**對比 sub_agent (Phase 3) Explore type**：Explore 現走 Read / Grep / Glob (字面)；BP.Q 落地後 Explore 預設改走 RAG (語意)，Grep 留 fallback。
+
+- [ ] BP.Q.1 `backend/agents/rag.py` — VectorStore Protocol (`upsert / query / delete / list_by_tenant`) + 3 adapter (`PgvectorStore` 預設 / `QdrantStore` / `ChromaStore`) + 統一 embedding interface (`OpenAIEmbedding` / `AnthropicEmbedding` / `GoogleEmbedding` / `LocalSentenceTransformerEmbedding` for air-gap)
+- [ ] BP.Q.2 `backend/agents/rag_indexer.py` — workspace git tree / docs / SKILL.md / TODO.md 自動 chunk (tree-sitter for code / markdown header for docs) + embed + 持久化 (initial bulk + incremental on git change via post-merge hook 沿用 BP.J.2 pattern)
+- [ ] BP.Q.3 `KnowledgeRetrieval` tool schema (`backend/agents/tool_schemas.py`) + handler (`backend/agents/runner_handlers.py` 沿用 Phase 1 pattern) — agentic loop 可呼叫、回傳 top-K relevant chunks + citation (path + line range + similarity score)
+- [ ] BP.Q.4 alembic 0186 `embedding_chunks` table — `chunk_id / tenant_id / source_path / chunk_text / embedding (pgvector) / metadata JSONB / created_at`、indexes on `(tenant_id, source_path)` + ivfflat 或 hnsw on embedding column
+- [ ] BP.Q.5 整合 sub_agent (Phase 3) — Explore sub-agent 預設用 RAG 而非 Grep 做 codebase 探索；保留 Grep 作為 fallback (沒 RAG index 或語法 / 字面查詢時)
+- [ ] BP.Q.6 Per-tenant isolation — tenant A 不能 query tenant B 的 chunks；走 RLS + tenant filter at query time (跟 KS.1 envelope encryption 一起 review，embedding 是否需要也 envelope 加密)
+- [ ] BP.Q.7 `backend/tests/test_rag.py` — ~50 test (chunking strategy correctness / retrieval relevance on canned corpus / tenant isolation / multi-adapter contract / handler integration / pgvector live test)
+- [ ] BP.Q.8 `docs/operations/rag-setup.md` — operator 怎麼啟用 RAG (pgvector extension / 預設 embedding model / 索引 cron schedule)
 
 ### BP.W3 — Backlog 收尾（Blueprint 完成後，~30-50 週）
 > 等 Phase B 完成後按 Guild 歸屬批次重做
@@ -3133,8 +3169,14 @@ ls backend/alembic/versions/ | tail -3
 - [ ] KS.4.7 **SOC 2 Type II 準備清單**：control mapping + evidence collection + 第三方 auditor 評估
 - [ ] KS.4.8 **GDPR / DSAR 對齊**：tenant data deletion 完整 purge DEK + audit trail metadata（保留 hash、刪 raw）+ DSAR export 流程
 - [ ] KS.4.9 **Memory zeroization 升級**：擴充 KS.1.9、libsodium `sodium_memzero` 取代 ctypes.memset（更可靠）
+- [ ] KS.4.10 **LLM-as-Firewall 輸入 guardrail**（**2026-05-02 新增 from Agentic Design Patterns Ch 18 Guardrails**）：`backend/security/llm_firewall.py` — Haiku-based fast classifier `classify_input(text) → {safe, suspicious, blocked}`，擋 prompt injection / jailbreak / PII / 違規 prompt。**為什麼必要**：KS.4.1 secret scrubber 是 **output** 端 (擋洩密)，KS.4.10 是 **input** 端 (擋攻擊)；untrusted user input (chat / GitHub issue / 客戶 ticket / 上傳文件) 進 specialist agent 前必過此層，否則 prompt injection 攻擊面巨大
+- [ ] KS.4.11 **三層攔截機制**：safe → pass、suspicious → log + 加 system prompt 警示 LLM 提高警覺、blocked → 拒絕 + 回報 audit_log + 阻 invocation
+- [ ] KS.4.12 **整合 Orchestrator entry**：所有 user-facing input (chat / API / webhook) 在進 specialist routing 前先過 firewall；後台內部 specialist↔specialist 通信豁免 (避免 over-blocking)；BP.A2A inbound endpoint 也走 firewall (外部 A2A caller 是 untrusted)
+- [ ] KS.4.13 **alembic 0187 `firewall_events` table**：`event_id / tenant_id / classification / input_hash / blocked_reason / created_at` (持久化 blocked + suspicious cases 給 review，input plain text 不入庫只存 hash 避免擴大洩露面)
+- [ ] KS.4.14 **Tests** — `backend/tests/test_llm_firewall.py` ~40 test：經典 jailbreak corpus (DAN / system override / role play attacks 涵蓋公開 jailbreak 集) + safe negative case + false positive 校準 (避免擋掉合法 input) + per-tenant isolation
+- [ ] KS.4.15 **整合既有 PEP gateway**：firewall 是 PEP 的一個 layer (而非取代 PEP)；不通過 firewall 的 input 連 PEP 都不到、直接 audit log
 
-預估：**1 週**
+預估：**1.5 週**（KS.4.1-9 約 1 週 + KS.4.10-15 LLM firewall ~0.5 週）
 
 ### KS R-series 風險（R46-R50）
 
