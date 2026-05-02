@@ -30,6 +30,12 @@ from backend.auth_provisioning.account_linking import (
     list_account_linking_stack_providers,
     render_account_linking_stack,
 )
+from backend.auth_provisioning.email_mfa import (
+    EmailMfaBaselineOptions,
+    EmailMfaBaselineResult,
+    list_email_mfa_baseline_methods,
+    render_email_mfa_baseline,
+)
 from backend.auth_provisioning.vendor_oauth import (
     VendorOAuthApiRequest,
     VendorOAuthAppConfigOptions,
@@ -81,17 +87,21 @@ __all__ = [
     "AccountLinkingStackOptions",
     "AccountLinkingStackResult",
     "UnsupportedAccountLinkingProviderError",
+    "EmailMfaBaselineOptions",
+    "EmailMfaBaselineResult",
     "VendorOAuthApiRequest",
     "VendorOAuthAppConfigOptions",
     "VendorOAuthAppConfigPlan",
     "VendorOAuthInstruction",
     "get_adapter",
     "list_account_linking_stack_providers",
+    "list_email_mfa_baseline_methods",
     "list_vendor_oauth_plan_providers",
     "list_self_hosted_frameworks",
     "list_providers",
     "normalize_self_hosted_framework",
     "render_account_linking_stack",
+    "render_email_mfa_baseline",
     "render_vendor_oauth_app_config_plan",
     "render_self_hosted_auth_scaffold",
 ]
