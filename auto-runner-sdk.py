@@ -404,6 +404,19 @@ async def run_one_item(
         f"🛑 [stop] {result.stop_reason}"
     )
 
+    # Tool-call summary so operators can see Phase 2/3 effectiveness:
+    # which tools the LLM actually picked, and how often. Differentiates
+    # Skill / Agent (Phase 2-3 features) from the basic 6 host tools.
+    if result.tool_calls:
+        by_name: dict[str, int] = {}
+        for tc in result.tool_calls:
+            name = tc.get("name", "?")
+            by_name[name] = by_name.get(name, 0) + 1
+        summary = ", ".join(
+            f"{k}={v}" for k, v in sorted(by_name.items(), key=lambda kv: -kv[1])
+        )
+        print(f"🔧 [tool calls] {summary}")
+
     success = (
         result.stop_reason == "end_turn"
         and "✅ 項目完成" in result.final_text
