@@ -241,7 +241,7 @@ def test_run_one_item_drives_loop_to_completion(
 
     cost_guard = CostGuard(store=InMemoryCostStore())
 
-    success, result = asyncio.run(
+    success, result, retryable = asyncio.run(
         mod.run_one_item(
             client=client,
             cost_guard=cost_guard,
@@ -255,6 +255,7 @@ def test_run_one_item_drives_loop_to_completion(
     )
 
     assert success is True
+    assert retryable is True  # default
     assert result is not None
     assert result.iterations == 3
     assert result.stop_reason == "end_turn"
@@ -295,7 +296,7 @@ def test_run_one_item_marks_failure_when_no_completion_signal(
     )
     client._client = _build_canned_sdk(turns)  # type: ignore[attr-defined]
 
-    success, result = asyncio.run(
+    success, result, retryable = asyncio.run(
         mod.run_one_item(
             client=client,
             cost_guard=CostGuard(store=InMemoryCostStore()),
@@ -308,5 +309,185 @@ def test_run_one_item_marks_failure_when_no_completion_signal(
         )
     )
     assert success is False
+    # Plain end_turn-without-marker is retryable (could be transient model
+    # confusion); only structural failures (max_tokens / max_iterations /
+    # over-budget) flip retryable=False.
+    assert retryable is True
     assert result is not None
     assert result.stop_reason == "end_turn"
+
+
+# ─── Phase 5: stability hardening — fail-fast classification ─────
+
+
+def test_run_one_item_max_tokens_returns_retryable_false(
+    fake_project, monkeypatch
+) -> None:
+    """stop_reason=max_tokens → retryable=False (no point retrying same prompt)."""
+    project_root, mod = fake_project
+    item_line = "- [ ] A1.1 the first task — describe the API surface"
+
+    turns = [
+        _CannedResponse(
+            content=[_Block("text", text="(truncated mid-completion)")],
+            stop_reason="max_tokens",
+            usage=_Usage(input_tokens=200, output_tokens=16000),
+        ),
+    ]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    client = AnthropicClient(
+        default_model="claude-opus-4-7",
+        dispatcher=make_runner_dispatcher(),
+    )
+    client._client = _build_canned_sdk(turns)  # type: ignore[attr-defined]
+
+    success, result, retryable = asyncio.run(
+        mod.run_one_item(
+            client=client,
+            cost_guard=CostGuard(store=InMemoryCostStore()),
+            section_title="### A1. First section",
+            item_line=item_line,
+            section_context="(ctx)",
+            sop_text=mod.SOP_FILE.read_text(),
+            todo_text=mod.TODO_FILE.read_text(),
+            handoff_text=mod.HANDOFF_FILE.read_text(),
+        )
+    )
+    assert success is False
+    assert retryable is False
+    assert result is not None
+    assert result.stop_reason == "max_tokens"
+
+
+def test_run_one_item_max_iterations_returns_retryable_false(
+    fake_project, monkeypatch
+) -> None:
+    """stop_reason=max_iterations_exceeded → retryable=False."""
+    project_root, mod = fake_project
+    item_line = "- [ ] A1.1 the first task — describe the API surface"
+
+    # The AnthropicClient.run_with_tools raises this stop_reason from
+    # its own bail-out logic, not the SDK. Easiest to fake: produce a
+    # turn that the SDK loop classifies as continuing tool_use, then
+    # patch max_iterations to 1 so loop bails immediately.
+    todo_path = mod.TODO_FILE
+    turns = [
+        _CannedResponse(
+            content=[
+                _Block(
+                    "tool_use",
+                    id="tu_loop_1",
+                    name="Read",
+                    input={"file_path": str(todo_path)},
+                ),
+            ],
+            stop_reason="tool_use",
+            usage=_Usage(input_tokens=200, output_tokens=50),
+        ),
+    ]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(mod, "MAX_ITERATIONS", 1)
+    client = AnthropicClient(
+        default_model="claude-opus-4-7",
+        dispatcher=make_runner_dispatcher(),
+    )
+    client._client = _build_canned_sdk(turns)  # type: ignore[attr-defined]
+
+    success, result, retryable = asyncio.run(
+        mod.run_one_item(
+            client=client,
+            cost_guard=CostGuard(store=InMemoryCostStore()),
+            section_title="### A1. First section",
+            item_line=item_line,
+            section_context="(ctx)",
+            sop_text=mod.SOP_FILE.read_text(),
+            todo_text=mod.TODO_FILE.read_text(),
+            handoff_text=mod.HANDOFF_FILE.read_text(),
+        )
+    )
+    assert success is False
+    assert retryable is False
+    assert result is not None
+    assert result.stop_reason == "max_iterations_exceeded"
+
+
+def test_run_one_item_over_budget_returns_retryable_false(
+    fake_project, monkeypatch
+) -> None:
+    """Per-item cost > MAX_PER_ITEM_USD → retryable=False even for non-structural failure."""
+    project_root, mod = fake_project
+    item_line = "- [ ] A1.1 the first task — describe the API surface"
+
+    # Big-output single turn that fails (no ✅ marker) AND blows
+    # the per-item cap. Choose tokens to push opus-4-7 cost > $0.01,
+    # then set MAX_PER_ITEM_USD just below to trip the cap.
+    # Opus-4-7 prices: $15/MTok input + $75/MTok output.
+    # 100k input + 20k output ≈ $1.50 + $1.50 = $3.00.
+    turns = [
+        _CannedResponse(
+            content=[_Block("text", text="big response but no completion marker")],
+            stop_reason="end_turn",
+            usage=_Usage(input_tokens=100_000, output_tokens=20_000),
+        ),
+    ]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(mod, "MAX_PER_ITEM_USD", 1.0)  # cap below $3
+    client = AnthropicClient(
+        default_model="claude-opus-4-7",
+        dispatcher=make_runner_dispatcher(),
+    )
+    client._client = _build_canned_sdk(turns)  # type: ignore[attr-defined]
+
+    success, result, retryable = asyncio.run(
+        mod.run_one_item(
+            client=client,
+            cost_guard=CostGuard(store=InMemoryCostStore()),
+            section_title="### A1. First section",
+            item_line=item_line,
+            section_context="(ctx)",
+            sop_text=mod.SOP_FILE.read_text(),
+            todo_text=mod.TODO_FILE.read_text(),
+            handoff_text=mod.HANDOFF_FILE.read_text(),
+        )
+    )
+    assert success is False
+    assert retryable is False  # cap tripped
+    assert result is not None
+
+
+def test_run_one_item_under_budget_keeps_retryable_true(
+    fake_project, monkeypatch
+) -> None:
+    """Below per-item cap + non-structural failure → retryable stays True."""
+    project_root, mod = fake_project
+    item_line = "- [ ] A1.1 the first task — describe the API surface"
+
+    turns = [
+        _CannedResponse(
+            content=[_Block("text", text="small fail")],
+            stop_reason="end_turn",
+            usage=_Usage(input_tokens=100, output_tokens=20),
+        ),
+    ]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(mod, "MAX_PER_ITEM_USD", 8.0)  # generous cap
+    client = AnthropicClient(
+        default_model="claude-opus-4-7",
+        dispatcher=make_runner_dispatcher(),
+    )
+    client._client = _build_canned_sdk(turns)  # type: ignore[attr-defined]
+
+    success, result, retryable = asyncio.run(
+        mod.run_one_item(
+            client=client,
+            cost_guard=CostGuard(store=InMemoryCostStore()),
+            section_title="### A1. First section",
+            item_line=item_line,
+            section_context="(ctx)",
+            sop_text=mod.SOP_FILE.read_text(),
+            todo_text=mod.TODO_FILE.read_text(),
+            handoff_text=mod.HANDOFF_FILE.read_text(),
+        )
+    )
+    assert success is False
+    assert retryable is True  # transient — caller may retry once

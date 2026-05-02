@@ -112,6 +112,11 @@ MAX_RETRIES = int(os.environ.get("OMNISIGHT_SDK_MAX_RETRIES", "2"))
 COOLDOWN_S = int(os.environ.get("OMNISIGHT_SDK_COOLDOWN", "5"))
 SECTION_COOLDOWN_S = int(os.environ.get("OMNISIGHT_SDK_SECTION_COOLDOWN", "10"))
 DAILY_BUDGET_USD = float(os.environ.get("OMNISIGHT_SDK_DAILY_BUDGET", "0") or 0)
+# Per-item soft cap. Items costing more than this are flagged
+# retryable=False — preventing the "$10 → retry → $10 → still broken"
+# pattern that burned $25 on W14.5. Set to 0 to disable. Default $8
+# leaves headroom for large items but stops runaway retries.
+MAX_PER_ITEM_USD = float(os.environ.get("OMNISIGHT_SDK_MAX_PER_ITEM_USD", "8") or 0)
 
 # Tools the agent loop is allowed to call. Wired in runner_handlers +
 # skills_loader + sub_agent (Skill / Agent are registered dynamically at
@@ -284,8 +289,28 @@ async def run_one_item(
     mcp_servers: list[dict] | None = None,
     skills_catalog: str = "",
     tools: list[str] | None = None,
-) -> tuple[bool, RunResult | None]:
-    """Drive Claude through one TODO item. Returns (success, run_result)."""
+) -> tuple[bool, RunResult | None, bool]:
+    """Drive Claude through one TODO item.
+
+    Returns:
+      (success, run_result, retryable)
+
+      ``retryable=False`` for **structural** failures where retrying the
+      same prompt would burn money for the same outcome:
+
+        * ``stop_reason=max_tokens``: LLM's final turn was cut off
+          mid-response. Same prompt → same long response → same cut-off.
+          Caller should mark the item failed-skip-without-retry.
+        * ``stop_reason=max_iterations_exceeded``: tool loop exhausted
+          MAX_ITERATIONS. Task likely needs decomposition; more rounds
+          won't help.
+        * Item cost exceeded :data:`MAX_PER_ITEM_USD`: cap as a guard
+          against the "$10 → retry → $10 → still broken" failure mode
+          that burned $25 on W14.5.
+
+      ``retryable=True`` for transient / unknown failures (e.g., API
+      hiccups) where one more attempt has positive expected value.
+    """
     print(f"\n{'=' * 60}")
     print(f"🚀 [自動調度] 區塊: {section_title}")
     truncated = item_line[:80] + ("..." if len(item_line) > 80 else "")
@@ -340,7 +365,17 @@ async def run_one_item(
         "7. 更新完後，請務必將更動後的內容 commit 到 Git，確保版本控制的完整性。\n"
         "8. 絕對不要詢問我任何問題或要求人類確認（你已經擁有最高權限）。\n"
         "9. 完成後，直接輸出「✅ 項目完成」並結束。\n\n"
-        "可用工具：Read / Write / Edit / Bash / Grep / Glob — 路徑限專案根目錄之下。\n"
+        "【🛡️ 反 max_tokens 截斷準則】（Phase 5 強化規則）：\n"
+        "  * 若任務涉及**多個 subsystem**（例如同時要動 backend + frontend + alembic + tests / "
+        "    > 5 檔同改 / > 200 行新 code），**先**呼叫 Agent tool 用 `subagent_type=\"Plan\"` "
+        "    出實作計畫拆成 1-3 個小 commit，再開始動手。\n"
+        "  * 不要試圖在**單一回應內**寫完一個大模組 + 對應測試 + alembic — output 會被 "
+        "    `max_tokens` 截斷，而且重試也會被截。**分多輪 tool_use** 才是對的。\n"
+        "  * 若你開始懷疑這個 task 對 single-shot 太大 → 大膽用 Plan sub-agent。\n\n"
+        "可用工具：Read / Write / Edit / Bash / Grep / Glob"
+        + (" / Skill" if "Skill" in (tools or RUNNER_TOOLS) else "")
+        + (" / Agent" if "Agent" in (tools or RUNNER_TOOLS) else "")
+        + " — 路徑限專案根目錄之下。\n"
     )
 
     started = time.time()
@@ -360,7 +395,8 @@ async def run_one_item(
         elapsed = time.time() - started
         print(f"\n❌ [系統錯誤] {type(e).__name__}: {e}")
         print(f"⏱️ [耗時] {_fmt_duration(elapsed)}")
-        return False, None
+        # Genuinely transient (API hiccup, connection reset) → retryable.
+        return False, None, True
 
     elapsed = time.time() - started
     usage = result.usage
@@ -421,15 +457,46 @@ async def run_one_item(
         result.stop_reason == "end_turn"
         and "✅ 項目完成" in result.final_text
     )
+
+    # Phase 5: classify failure as retryable or structural. Structural
+    # failures (max_tokens / max_iterations / over-budget) won't improve
+    # on retry — they reflect that THIS task is too big for the current
+    # config. Retrying just burns money for the same outcome (cf. W14.5
+    # which lost $25 on two identical max_tokens retries).
+    retryable = True
+    item_cost = actual_cost.cost_usd_estimated
+
     if success:
         print(f"\n✅ [項目完成] {item_line[:60]}")
+    elif result.stop_reason == "max_tokens":
+        print(
+            f"\n⚠️ [回應被截斷] stop_reason=max_tokens — LLM 單次回應超過 "
+            f"max_tokens={MAX_TOKENS}。重試會再被截，**不重試**。\n"
+            f"   救法：用 Plan sub-agent 拆解任務，或調高 OMNISIGHT_SDK_MAX_TOKENS。"
+        )
+        retryable = False
     elif result.stop_reason == "max_iterations_exceeded":
         print(
-            f"\n⚠️ [iterations 用盡] {MAX_ITERATIONS} 輪未收 ✅，視為失敗"
+            f"\n⚠️ [iterations 用盡] {MAX_ITERATIONS} 輪未收 ✅。任務需拆解，"
+            f"重試多輪也救不了，**不重試**。"
         )
+        retryable = False
     else:
-        print("\n❌ [項目異常] 未收到 ✅ 項目完成 標記")
-    return success, result
+        print(f"\n❌ [項目異常] 未收到 ✅ 項目完成 標記（stop={result.stop_reason}）")
+
+    if (
+        not success
+        and MAX_PER_ITEM_USD > 0
+        and item_cost > MAX_PER_ITEM_USD
+    ):
+        print(
+            f"\n💸 [單項超預算] 本項花費 {_format_usd(item_cost)} > "
+            f"MAX_PER_ITEM_USD {_format_usd(MAX_PER_ITEM_USD)}，"
+            f"**不重試**避免炸更多。"
+        )
+        retryable = False
+
+    return success, result, retryable
 
 
 # ─── Main loop ───────────────────────────────────────────────────
@@ -449,6 +516,11 @@ async def main() -> None:
         print("🏷️ Track filter：無（處理所有項目）")
     if DAILY_BUDGET_USD > 0:
         print(f"💵 Daily budget cap: {_format_usd(DAILY_BUDGET_USD)}")
+    if MAX_PER_ITEM_USD > 0:
+        print(
+            f"💸 Per-item soft cap: {_format_usd(MAX_PER_ITEM_USD)} "
+            "(超過 → 不重試，避免炸更多)"
+        )
     print(
         "⚠️ 警告：系統將自動執行程式碼與系統指令，按 Ctrl+C 可隨時中斷。\n"
     )
@@ -598,7 +670,7 @@ async def main() -> None:
             if attempt > 1:
                 print(f"\n🔄 [重試 {attempt}/{MAX_RETRIES}] {item_line[:60]}")
                 await asyncio.sleep(COOLDOWN_S)
-            success, run_result = await run_one_item(
+            success, run_result, retryable = await run_one_item(
                 client=client,
                 cost_guard=cost_guard,
                 section_title=section_title,
@@ -613,6 +685,15 @@ async def main() -> None:
                 tools=active_tools,
             )
             if success:
+                break
+            if not retryable:
+                # Phase 5: structural failures (max_tokens / max_iterations
+                # / over-budget) do NOT retry — same prompt produces same
+                # outcome, just burns more tokens. Move on to next item.
+                print(
+                    f"\n⏭️ [跳過重試] 失敗類型對重試無 ROI（同樣 prompt → "
+                    f"同樣結果）。直接進下一項。"
+                )
                 break
 
         if success:
