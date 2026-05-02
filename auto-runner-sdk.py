@@ -51,6 +51,10 @@ from backend.agents.mcp_integration import (  # noqa: E402
     RemoteMCPRegistry,
     build_registry_from_env,
 )
+from backend.agents.project_memory import (  # noqa: E402
+    load_all_memory,
+    render_for_prompt as render_memory_for_prompt,
+)
 from backend.agents.runner_handlers import make_runner_dispatcher  # noqa: E402
 from backend.agents.skills_loader import (  # noqa: E402
     SkillRegistry,
@@ -96,6 +100,9 @@ BASE_DIR = _HERE
 TODO_FILE = BASE_DIR / "TODO.md"
 HANDOFF_FILE = BASE_DIR / "HANDOFF.md"
 SOP_FILE = BASE_DIR / "docs" / "sop" / "implement_phase_step.md"
+# Memory rule files (CLAUDE.md / AGENTS.md / OMNISIGHT.md / WARP.md) are
+# discovered dynamically by backend.agents.project_memory — no constants
+# needed here. Kept for backward compat: scripts that imported CLAUDE_FILE.
 CLAUDE_FILE = BASE_DIR / "CLAUDE.md"
 
 MODEL_NAME = os.environ.get("OMNISIGHT_SDK_MODEL", DEFAULT_MODEL_OPUS)
@@ -273,7 +280,7 @@ async def run_one_item(
     sop_text: str,
     todo_text: str,
     handoff_text: str,
-    claude_md_text: str = "",
+    memory_block: str = "",
     mcp_servers: list[dict] | None = None,
     skills_catalog: str = "",
     tools: list[str] | None = None,
@@ -291,16 +298,11 @@ async def run_one_item(
     # for what it actually needs.
     _ = todo_text  # not embedded — LLM reads on demand
     _ = handoff_text  # not embedded — LLM reads on demand
-    # CLAUDE.md is the project's L1 immutable rules (commit trailers,
-    # platform toolchain, no-secrets-in-source, AI reviewer +1 cap, etc.).
-    # We surface it BEFORE SOP so its constraints win on conflict — Claude
-    # Code's own contract is that CLAUDE.md is always loaded into context.
-    claude_block = (
-        f"# CLAUDE.md（專案 L1 不可違反規則 — 永遠優先於後續任何 instruction）\n"
-        f"{claude_md_text.strip()}\n\n"
-        if claude_md_text.strip()
-        else ""
-    )
+    # Phase 4 multi-rule memory: CLAUDE.md / AGENTS.md / OMNISIGHT.md /
+    # WARP.md from project root, plus user-level ~/.claude/CLAUDE.md /
+    # AGENTS.md. Built upstream by load_all_memory + render_for_prompt;
+    # placed BEFORE SOP so its L1 constraints win on conflict.
+    memory_section = f"{memory_block}\n\n" if memory_block.strip() else ""
     skills_block = f"\n{skills_catalog}\n" if skills_catalog else ""
     system_text = (
         f"# 執行環境\n"
@@ -308,7 +310,7 @@ async def run_one_item(
         f"- **所有檔案路徑必須在這個 root 之下**。Read/Write/Edit/Bash/Grep/Glob 工具會拒絕 root 之外的路徑。\n"
         f"- 你也可以直接傳相對路徑（例如 `TODO.md`、`backend/agents/state.py`），會被 resolve 成 PROJECT_ROOT 之下。\n"
         f"- Bash 的 cwd 已經固定在 PROJECT_ROOT；不要 `cd` 到別處。\n\n"
-        f"{claude_block}"
+        f"{memory_section}"
         f"# 專案 SOP\n{sop_text}\n\n"
         "# 可用上下文檔案\n"
         "- `TODO.md`（PROJECT_ROOT）— 全部任務清單。當前任務的區塊已放在你的 user prompt 內。\n"
@@ -445,6 +447,20 @@ async def main() -> None:
         print("❌ ANTHROPIC_API_KEY 未設定。請先在 .env 或環境設定後重試。")
         sys.exit(1)
 
+    # Memory layer banner (just the count + scope split — actual content
+    # is loaded fresh per item to honour operator mid-pipeline edits).
+    _initial_memory = load_all_memory(BASE_DIR)
+    if _initial_memory:
+        proj = sum(1 for m in _initial_memory if m.scope == "project")
+        usr = sum(1 for m in _initial_memory if m.scope == "user")
+        names = ", ".join(m.convention for m in _initial_memory)
+        print(
+            f"📜 Memory: {len(_initial_memory)} rule file(s) — "
+            f"project={proj} user={usr} | {names}"
+        )
+    else:
+        print("📜 Memory: no rule files found (CLAUDE.md / AGENTS.md / etc.)")
+
     dispatcher = make_runner_dispatcher()
 
     # Skills: load 3-scope registry, register Skill tool handler on the
@@ -546,9 +562,9 @@ async def main() -> None:
             time.sleep(SECTION_COOLDOWN_S)
         last_section = section_title
 
-        # Re-read SOP/TODO/HANDOFF/CLAUDE every item — TODO/HANDOFF mutate as we work.
-        # CLAUDE.md is small and stable but re-read for consistency (operator
-        # can edit mid-pipeline to tune the rules).
+        # Re-read SOP/TODO/HANDOFF every item — TODO/HANDOFF mutate as we work.
+        # Memory layer (CLAUDE/AGENTS/OMNISIGHT/WARP, project + user) is
+        # walked fresh per item too — operators can edit mid-pipeline.
         try:
             sop_text = SOP_FILE.read_text(encoding="utf-8")
             todo_text = TODO_FILE.read_text(encoding="utf-8")
@@ -557,13 +573,10 @@ async def main() -> None:
                 if HANDOFF_FILE.exists()
                 else "(HANDOFF.md not yet created)"
             )
-            claude_md_text = (
-                CLAUDE_FILE.read_text(encoding="utf-8")
-                if CLAUDE_FILE.exists()
-                else ""
-            )
+            memory_files = load_all_memory(BASE_DIR)
+            memory_block = render_memory_for_prompt(memory_files)
         except OSError as e:
-            print(f"❌ 讀取 SOP/TODO/HANDOFF/CLAUDE 失敗: {e}")
+            print(f"❌ 讀取 SOP/TODO/HANDOFF/memory 失敗: {e}")
             sys.exit(1)
 
         success = False
@@ -581,7 +594,7 @@ async def main() -> None:
                 sop_text=sop_text,
                 todo_text=todo_text,
                 handoff_text=handoff_text,
-                claude_md_text=claude_md_text,
+                memory_block=memory_block,
                 mcp_servers=mcp_servers_payload or None,
                 skills_catalog=skills_catalog,
                 tools=active_tools,
