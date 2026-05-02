@@ -25,6 +25,7 @@ from backend.auth_provisioning.self_hosted import (
     AuthScaffoldFile,
 )
 from backend.auth_provisioning.vendor_oauth import VendorOAuthAppConfigPlan
+from backend.security import token_vault
 from backend.security.oauth_vendors import ALL_VENDOR_IDS, get_vendor
 
 
@@ -42,6 +43,7 @@ class OutboundOAuthFlowProviderItem:
     is_oidc: bool
     client_id_env: str
     client_secret_env: str
+    token_vault_supported: bool
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +57,7 @@ class OutboundOAuthFlowProviderItem:
             "is_oidc": self.is_oidc,
             "client_id_env": self.client_id_env,
             "client_secret_env": self.client_secret_env,
+            "token_vault_supported": self.token_vault_supported,
         }
 
 
@@ -84,6 +87,8 @@ class OutboundOAuthFlowScaffoldOptions:
     flow_path: str = "auth/outbound-oauth-flow.ts"
     route_prefix: str = "app/api/integrations"
     oauth_client_import: str = "@/shared/oauth-client"
+    token_vault_import: str = "@/shared/token-vault"
+    token_vault_path: str = "auth/outbound-token-vault.ts"
     extra_env: tuple[AuthScaffoldEnvVar, ...] = field(default_factory=tuple)
 
     def validate(self) -> None:
@@ -95,6 +100,10 @@ class OutboundOAuthFlowScaffoldOptions:
             raise ValueError("route_prefix is required")
         if not self.oauth_client_import or not self.oauth_client_import.strip():
             raise ValueError("oauth_client_import is required")
+        if not self.token_vault_import or not self.token_vault_import.strip():
+            raise ValueError("token_vault_import is required")
+        if not self.token_vault_path or not self.token_vault_path.strip():
+            raise ValueError("token_vault_path is required")
 
 
 def list_outbound_oauth_flow_providers() -> list[str]:
@@ -116,10 +125,14 @@ def render_outbound_oauth_flow_scaffold(
                 options.flow_path.strip("/"),
                 _flow_file(providers, options.oauth_client_import),
             ),
+            AuthScaffoldFile(
+                options.token_vault_path.strip("/"),
+                _token_vault_file(options.token_vault_import),
+            ),
         ) + _route_files(options.route_prefix, providers),
         env=_env_vars(providers) + tuple(options.extra_env),
         notes=(
-            "FS.2b.1 stops after token exchange; token persistence is FS.2b.2",
+            "FS.2b.2 encrypts callback token sets with the AS.2 token vault",
             "client secrets are declared as env metadata only",
         ),
     )
@@ -144,6 +157,7 @@ def _provider_item(plan: VendorOAuthAppConfigPlan) -> OutboundOAuthFlowProviderI
         is_oidc=bool(metadata.get("is_oidc", vendor.is_oidc)),
         client_id_env=_env_name(provider, "CLIENT_ID"),
         client_secret_env=_env_name(provider, "CLIENT_SECRET"),
+        token_vault_supported=provider in token_vault.SUPPORTED_PROVIDERS,
     )
 
 
@@ -171,7 +185,14 @@ def _env_vars(
                 source="fs.2b.1",
             ),
         )
-    return env
+    return env + (
+        AuthScaffoldEnvVar(
+            "OAUTH_TOKEN_VAULT_MASTER_KEY",
+            True,
+            sensitive=True,
+            source="fs.2b.2",
+        ),
+    )
 
 
 def _flow_file(
@@ -202,6 +223,7 @@ export type OutboundOAuthProvider = {{
   isOidc: boolean
   clientIdEnv: string
   clientSecretEnv: string
+  tokenVaultSupported: boolean
 }}
 
 export const outboundOAuthProviders = [
@@ -258,6 +280,74 @@ export async function exchangeOutboundCode(
 """
 
 
+def _token_vault_file(token_vault_import: str) -> str:
+    imported = _ts_string(token_vault_import)
+    return f"""// FS.2b.2 outbound OAuth token vault bridge.
+// Reuses the AS.2 token-vault TS twin; the generated app owns storage.
+
+import {{
+  KEY_VERSION_CURRENT,
+  SUPPORTED_PROVIDERS,
+  TokenVault,
+  importMasterKey,
+  type EncryptedToken,
+}} from "{imported}"
+import type {{ OutboundOAuthTokenSet }} from "./outbound-oauth-flow"
+
+export type OutboundOAuthVaultRecord = {{
+  userId: string
+  provider: string
+  accessTokenEnc: EncryptedToken
+  refreshTokenEnc: EncryptedToken | null
+  tokenType: string | null
+  scope: string | null
+  expiresAt: string | null
+  keyVersion: number
+}}
+
+export function assertTokenVaultProvider(provider: string) {{
+  if (!SUPPORTED_PROVIDERS.has(provider)) {{
+    throw new Error(`unsupported token-vault provider: ${{provider}}`)
+  }}
+}}
+
+export async function encryptOutboundTokenSet(
+  userId: string,
+  provider: string,
+  token: OutboundOAuthTokenSet,
+  masterKeyRaw: string,
+): Promise<OutboundOAuthVaultRecord> {{
+  assertTokenVaultProvider(provider)
+  const vault = new TokenVault(await importMasterKey(base64urlDecode(masterKeyRaw)))
+  const accessTokenEnc = await vault.encryptForUser(userId, provider, token.accessToken)
+  const refreshTokenEnc = token.refreshToken
+    ? await vault.encryptForUser(userId, provider, token.refreshToken)
+    : null
+  return {{
+    userId,
+    provider,
+    accessTokenEnc,
+    refreshTokenEnc,
+    tokenType: token.tokenType || null,
+    scope: token.scope.length ? token.scope.join(" ") : null,
+    expiresAt: token.expiresAt ? new Date(token.expiresAt * 1000).toISOString() : null,
+    keyVersion: KEY_VERSION_CURRENT,
+  }}
+}}
+
+function base64urlDecode(value: string): Uint8Array {{
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(
+    Math.ceil(value.length / 4) * 4,
+    "=",
+  )
+  const bin = atob(padded)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}}
+"""
+
+
 def _provider_entry(item: OutboundOAuthFlowProviderItem) -> str:
     scope = ", ".join(f'"{_ts_string(s)}"' for s in item.scope)
     extra = ", ".join(
@@ -275,6 +365,7 @@ def _provider_entry(item: OutboundOAuthFlowProviderItem) -> str:
     isOidc: {_ts_bool(item.is_oidc)},
     clientIdEnv: "{_ts_string(item.client_id_env)}",
     clientSecretEnv: "{_ts_string(item.client_secret_env)}",
+    tokenVaultSupported: {_ts_bool(item.token_vault_supported)},
   }}"""
 
 
@@ -329,6 +420,7 @@ import {{
   verifyOutboundCallback,
   type OutboundOAuthFlowRecord,
 }} from "@/auth/outbound-oauth-flow"
+import {{ encryptOutboundTokenSet }} from "@/auth/outbound-token-vault"
 
 function readFlow(req: Request): OutboundOAuthFlowRecord {{
   const cookie = req.headers.get("cookie") || ""
@@ -340,6 +432,9 @@ function readFlow(req: Request): OutboundOAuthFlowRecord {{
 export async function GET(req: Request) {{
   const provider = outboundProviderById("{provider_literal}")
   if (!provider) return Response.json({{ error: "unsupported_provider" }}, {{ status: 404 }})
+  if (!provider.tokenVaultSupported) {{
+    return Response.json({{ error: "unsupported_token_vault_provider" }}, {{ status: 501 }})
+  }}
 
   const url = new URL(req.url)
   const code = url.searchParams.get("code")
@@ -350,10 +445,19 @@ export async function GET(req: Request) {{
   verifyOutboundCallback(flow, state)
 
   const token = await exchangeOutboundCode(provider, flow, code)
+  const userId = req.headers.get("x-omnisight-user-id")
+  if (!userId) return Response.json({{ error: "missing_user_id" }}, {{ status: 401 }})
+
+  const vaultRecord = await encryptOutboundTokenSet(
+    userId,
+    provider.provider,
+    token,
+    process.env.OAUTH_TOKEN_VAULT_MASTER_KEY!,
+  )
   return Response.json({{
     ok: true,
     provider: provider.provider,
-    token,
+    vaultRecord,
   }})
 }}
 """

@@ -46,6 +46,7 @@ class TestOutboundOAuthScaffold:
         assert [p.provider for p in result.providers] == ["github", "slack"]
         assert [f.path for f in result.files] == [
             "auth/outbound-oauth-flow.ts",
+            "auth/outbound-token-vault.ts",
             "app/api/integrations/github/authorize/route.ts",
             "app/api/integrations/github/callback/route.ts",
             "app/api/integrations/slack/authorize/route.ts",
@@ -75,17 +76,41 @@ class TestOutboundOAuthScaffold:
             ("prompt", "consent"),
         )
         assert item.is_oidc is True
+        assert item.token_vault_supported is True
 
     def test_routes_render_authorize_cookie_and_callback_token_exchange(self):
         result = _render("notion")
-        authorize = result.files[1].content
-        callback = result.files[2].content
+        authorize = result.files[2].content
+        callback = result.files[3].content
         assert 'beginOutboundAuthorization("notion")' in authorize
         assert "outbound_oauth_flow_notion=" in authorize
         assert 'outboundProviderById("notion")' in callback
         assert "verifyOutboundCallback(flow, state)" in callback
         assert "exchangeOutboundCode(provider, flow, code)" in callback
-        assert "token" in callback
+        assert "encryptOutboundTokenSet" in callback
+        assert "unsupported_token_vault_provider" in callback
+        assert "vaultRecord" in callback
+
+    def test_token_vault_helper_reuses_as2_twin_and_encrypts_token_set(self):
+        result = _render("github", token_vault_import="../token-vault")
+        helper = result.files[1].content
+        assert 'from "../token-vault"' in helper
+        assert "TokenVault" in helper
+        assert "importMasterKey" in helper
+        assert "encryptOutboundTokenSet" in helper
+        assert "vault.encryptForUser(userId, provider, token.accessToken)" in helper
+        assert "refreshTokenEnc" in helper
+
+    def test_provider_metadata_marks_as2_token_vault_support(self):
+        result = _render("github", "slack")
+        support = {p.provider: p.token_vault_supported for p in result.providers}
+        assert support == {"github": True, "slack": False}
+        data = result.to_dict()
+        assert data["providers"][0]["token_vault_supported"] is True
+        assert data["providers"][1]["token_vault_supported"] is False
+        helper = result.files[0].content
+        assert "tokenVaultSupported: true" in helper
+        assert "tokenVaultSupported: false" in helper
 
     def test_env_declares_per_provider_secrets_without_values(self):
         result = _render("github")
@@ -93,8 +118,11 @@ class TestOutboundOAuthScaffold:
         assert env["OAUTH_GITHUB_CLIENT_ID"].required is True
         assert env["OAUTH_GITHUB_CLIENT_ID"].source == "fs.2b.1"
         assert env["OAUTH_GITHUB_CLIENT_SECRET"].sensitive is True
+        assert env["OAUTH_TOKEN_VAULT_MASTER_KEY"].source == "fs.2b.2"
+        assert env["OAUTH_TOKEN_VAULT_MASTER_KEY"].sensitive is True
         text = "\n".join(f.content for f in result.files)
         assert "client-secret-value" not in text
+        assert "OAUTH_TOKEN_VAULT_MASTER_KEY!" in text
 
     def test_to_dict_is_json_ready_shape(self):
         data = _render("discord").to_dict()
@@ -108,7 +136,14 @@ class TestOutboundOAuthValidation:
 
     @pytest.mark.parametrize(
         "field",
-        ["provider_plans", "flow_path", "route_prefix", "oauth_client_import"],
+        [
+            "provider_plans",
+            "flow_path",
+            "route_prefix",
+            "oauth_client_import",
+            "token_vault_import",
+            "token_vault_path",
+        ],
     )
     def test_required_fields(self, field):
         kwargs = dict(
@@ -116,6 +151,8 @@ class TestOutboundOAuthValidation:
             flow_path="auth/outbound-oauth-flow.ts",
             route_prefix="app/api/integrations",
             oauth_client_import="@/shared/oauth-client",
+            token_vault_import="@/shared/token-vault",
+            token_vault_path="auth/outbound-token-vault.ts",
         )
         kwargs[field] = () if field == "provider_plans" else ""
         opts = OutboundOAuthFlowScaffoldOptions(**kwargs)
