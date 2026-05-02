@@ -61,6 +61,18 @@ tasks:
     artifacts: [as_cms_sanity]
     estimated_hours: 2
 
+  - id: as-fs73-bundle
+    name: "FS.7.3 full-stack bundle"
+    description: >
+      Contract render for Astro + content collections + Sanity.
+      Uses islands=react, cms=sanity, target=all, and compliance=on
+      so the generated tree ships the typed content collection, seed
+      MDX entry, Sanity source adapter, webhook route, Vitest CMS
+      test, and every selected deploy target config together.
+    depends_on: [as-islands-integration, as-content-collections, as-cms-sanity]
+    artifacts: [as_fs73_bundle]
+    estimated_hours: 1
+
   - id: as-cms-contentful
     name: "Contentful CMS source adapter"
     description: >
@@ -183,6 +195,7 @@ tasks:
     depends_on:
       - as-islands-integration
       - as-content-collections
+      - as-fs73-bundle
       - as-build-static
       - as-build-node
       - as-build-vercel

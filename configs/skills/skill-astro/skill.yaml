@@ -37,9 +37,10 @@ description: >
   (react / vue / svelte hydration), first-class MDX and
   content-collection support, multi-target output (static export /
   @astrojs/node / @astrojs/vercel / @astrojs/cloudflare), headless
-  CMS source adapters for Sanity and Contentful, Vitest unit +
-  Playwright E2E harness, and WCAG / GDPR / SPDX compliance gates
-  enabled by default. Third web skill — with W6 SKILL-NEXTJS as the
+  CMS source adapters for Sanity and Contentful, an FS.7.3 Astro +
+  content collections + Sanity bundle, Vitest unit + Playwright E2E
+  harness, and WCAG / GDPR / SPDX compliance gates enabled by
+  default. Third web skill — with W6 SKILL-NEXTJS as the
   pilot (n=1) and W7 SKILL-NUXT as the cross-stack validator (n=2),
   W8 SKILL-ASTRO (n=3) is the "content vertical" consumer: it
   extends the framework onto a stack where SSG is the norm and SSR
@@ -83,6 +84,7 @@ keywords:
   - content-collections
   - mdx
   - sanity
+  - fs-7-3
   - contentful
   - headless-cms
   - static-site

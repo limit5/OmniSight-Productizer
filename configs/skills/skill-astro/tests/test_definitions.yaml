@@ -30,6 +30,10 @@ test_suites:
         name: "Render: cms=sanity ships Sanity adapter + webhook"
         type: unit
         target: backend.astro_scaffolder.render_project
+      - id: scaffold-fs73-fullstack-bundle
+        name: "Render: Astro + content collections + Sanity bundle"
+        type: unit
+        target: backend.astro_scaffolder.render_project
       - id: scaffold-cms-contentful
         name: "Render: cms=contentful ships Contentful adapter + webhook"
         type: unit

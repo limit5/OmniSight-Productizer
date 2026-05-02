@@ -24,6 +24,10 @@ content-first static generator with optional islands, the W0-W5
 framework is not "the framework of one or two stacks" but
 genuinely stack-agnostic for the web vertical.
 
+It can render the **FS.7.3** bundle: Astro + typed content
+collections + Sanity, using `islands=react`, `cms=sanity`,
+`target=all`, and compliance gates on.
+
 ## Outputs
 
 A rendered project tree that:
@@ -107,6 +111,9 @@ gating the adapter selection on `process.env.ASTRO_TARGET` in
   "serve from nginx" reference — the W4 family's static-site path.
 - **W5** compliance — WCAG / GDPR / SPDX stubs shipped; green on
   first render.
+- **FS.7.3** full-stack bundle — content collection config + seed
+  MDX, Sanity source adapter, Sanity webhook route, CMS unit test,
+  and all selected target configs in one contract render.
 
 ## Anti-patterns the scaffold bakes in
 
