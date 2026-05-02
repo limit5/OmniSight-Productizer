@@ -11,6 +11,14 @@ from backend.db_provisioning.base import (
     InvalidDBProvisionTokenError,
     MissingDBProvisionScopeError,
 )
+from backend.db_provisioning.migrations import (
+    DBMigrationCommandError,
+    DBMigrationError,
+    DBMigrationResult,
+    UnsupportedDBMigrationToolError,
+    build_migration_command,
+    run_tenant_migrations,
+)
 
 
 def list_providers() -> list[str]:
@@ -44,6 +52,12 @@ __all__ = [
     "DBProvisionRateLimitError",
     "InvalidDBProvisionTokenError",
     "MissingDBProvisionScopeError",
+    "DBMigrationCommandError",
+    "DBMigrationError",
+    "DBMigrationResult",
+    "UnsupportedDBMigrationToolError",
+    "build_migration_command",
     "get_adapter",
     "list_providers",
+    "run_tenant_migrations",
 ]
