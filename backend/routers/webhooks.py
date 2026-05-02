@@ -31,6 +31,11 @@ from backend.models import (
     Agent, AgentProgress, AgentStatus,
     Task, TaskStatus, TaskPriority,
 )
+from backend.stripe_webhooks import (
+    StripeWebhookEvent,
+    parse_stripe_webhook_event,
+    verify_stripe_webhook_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,55 @@ async def email_feedback_webhook(provider: str, request: Request):
     }
 
 
+@router.post("/stripe")
+async def stripe_webhook(request: Request):
+    """Receive Stripe billing webhooks for FS.8.
+
+    ``settings.stripe_webhook_secret`` is env/runtime configuration, so
+    every worker independently verifies against the same source value
+    without writing module-global state. FS.8.2 only acknowledges and
+    normalizes events; subscription state sync is FS.8.4 scope.
+    """
+    secret = settings.stripe_webhook_secret
+    if not secret:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Stripe webhooks not configured"},
+        )
+
+    raw_body = await request.body()
+    if len(raw_body) > 1_048_576:
+        return JSONResponse(status_code=413, content={"detail": "Payload too large"})
+
+    try:
+        verify_stripe_webhook_signature(
+            raw_body,
+            request.headers.get("Stripe-Signature", ""),
+            secret,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=401, content={"detail": str(exc)})
+
+    try:
+        body = json.loads(raw_body)
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+
+    try:
+        event = parse_stripe_webhook_event(body)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    await _on_stripe_webhook_event(event)
+
+    return {
+        "status": "ok",
+        "event": event.to_dict(),
+    }
+
+
 def _verify_email_feedback_webhook(
     request: Request,
     raw_body: bytes,
@@ -137,6 +191,16 @@ async def _on_email_feedback_event(event: EmailFeedbackEvent) -> None:
             + (f" ({event.reason})" if event.reason else "")
         ),
         source="email_delivery",
+    )
+
+
+async def _on_stripe_webhook_event(event: StripeWebhookEvent) -> None:
+    """Record receipt of a verified Stripe event without local state sync."""
+    logger.info(
+        "stripe_webhook event_id=%s type=%s object=%s",
+        event.event_id,
+        event.event_type,
+        event.object_type,
     )
 
 

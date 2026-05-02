@@ -217,6 +217,7 @@ class Settings(BaseSettings):
     stripe_checkout_success_url: str = ""
     stripe_checkout_cancel_url: str = ""
     stripe_billing_portal_return_url: str = ""
+    stripe_webhook_secret: str = ""
     stripe_api_base_url: str = "https://api.stripe.com/v1"
 
     # ── CI/CD Pipeline Triggers ──
