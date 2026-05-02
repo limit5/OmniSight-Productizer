@@ -22,6 +22,8 @@ A rendered project tree that:
 - passes `scripts/simulate.sh --type=web --web-profile=web-ssr-node`
   for node-server target, and the corresponding profiles for the
   other presets
+- can render the FS.7.2 full-stack bundle: Nuxt + Drizzle +
+  sidebase/nuxt-auth + Postmark
 - passes the three W5 compliance gates on a fresh render
 - can be `provision()` + `deploy()`'d through `backend/deploy/*.py`
   for whichever target(s) the render selected
@@ -32,6 +34,8 @@ A rendered project tree that:
 |--------------|-------------------------------------------|-----------|
 | `auth`       | `sidebase` \| `clerk` \| `none`           | `sidebase`|
 | `pinia`      | `on` \| `off`                             | `on`      |
+| `drizzle`    | `on` \| `off`                             | `off`     |
+| `postmark`   | `on` \| `off`                             | `off`     |
 | `target`     | `node` \| `vercel` \| `cloudflare` \| `bun` \| `all` | `all` |
 | `compliance` | `on` \| `off`                             | `on`      |
 
@@ -55,6 +59,8 @@ outcome = render_project(
         project_name="my-nuxt-app",
         auth="sidebase",
         pinia=True,
+        drizzle=True,
+        postmark=True,
         target="all",
         compliance=True,
     ),
@@ -93,3 +99,6 @@ platform invariants.
   exercises VercelAdapter / CloudflarePagesAdapter / DockerNginxAdapter.
 - **W5** compliance — WCAG / GDPR / SPDX stubs shipped; green on
   first render.
+- **FS.7.2** full-stack bundle — Drizzle schema/client helper,
+  sidebase/nuxt-auth credentials scaffold, and Postmark contact
+  route render together behind explicit knobs.

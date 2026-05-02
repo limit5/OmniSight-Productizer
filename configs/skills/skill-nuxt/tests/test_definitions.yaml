@@ -22,6 +22,10 @@ test_suites:
         name: "Render: sidebase + pinia on all presets"
         type: unit
         target: backend.nuxt_scaffolder.render_project
+      - id: scaffold-fs72-fullstack-bundle
+        name: "Render: Nuxt + Drizzle + Auth + Postmark bundle"
+        type: unit
+        target: backend.nuxt_scaffolder.render_project
       - id: scaffold-nitro-preset-pins
         name: "Rendered nuxt.config.ts pins nitro.preset"
         type: unit

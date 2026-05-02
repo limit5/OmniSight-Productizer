@@ -73,6 +73,35 @@ tasks:
     artifacts: [nu_auth_sidebase]
     estimated_hours: 2
 
+  - id: nu-drizzle
+    name: "Drizzle data layer"
+    description: >
+      When DRIZZLE=on, render `drizzle/schema.ts` plus `server/db.ts`.
+      Nitro workers intentionally keep separate per-process pools;
+      Postgres coordinates consistency across workers.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_drizzle]
+    estimated_hours: 2
+
+  - id: nu-postmark
+    name: "Postmark email route"
+    description: >
+      When POSTMARK=on, render `server/email.ts` and `server/api/contact.post.ts`.
+      With DRIZZLE=on the route also records contact submissions through
+      the Drizzle client.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_postmark]
+    estimated_hours: 1
+
+  - id: nu-fs72-bundle
+    name: "FS.7.2 full-stack bundle"
+    description: >
+      Contract render for Nuxt + Drizzle + sidebase/nuxt-auth + Postmark.
+      Uses AUTH=sidebase, PINIA=on, DRIZZLE=on, POSTMARK=on, and target=all.
+    depends_on: [nu-auth-sidebase, nu-drizzle, nu-postmark]
+    artifacts: [nu_fs72_bundle]
+    estimated_hours: 1
+
   - id: nu-auth-clerk
     name: "Wire Clerk (@clerk/nuxt) template"
     description: >
@@ -190,6 +219,7 @@ tasks:
       - nu-server-routes
       - nu-composables
       - nu-auth-sidebase
+      - nu-fs72-bundle
       - nu-build-node
       - nu-build-vercel
       - nu-build-cloudflare
