@@ -12,6 +12,16 @@ from backend.auth_provisioning.base import (
     InvalidAuthProvisionTokenError,
     MissingAuthProvisionScopeError,
 )
+from backend.auth_provisioning.self_hosted import (
+    AuthScaffoldEnvVar,
+    AuthScaffoldFile,
+    SelfHostedAuthScaffoldOptions,
+    SelfHostedAuthScaffoldResult,
+    UnsupportedSelfHostedAuthFrameworkError,
+    list_self_hosted_frameworks,
+    normalize_self_hosted_framework,
+    render_self_hosted_auth_scaffold,
+)
 
 
 def list_providers() -> list[str]:
@@ -46,6 +56,14 @@ __all__ = [
     "AuthProvisionRateLimitError",
     "InvalidAuthProvisionTokenError",
     "MissingAuthProvisionScopeError",
+    "AuthScaffoldEnvVar",
+    "AuthScaffoldFile",
+    "SelfHostedAuthScaffoldOptions",
+    "SelfHostedAuthScaffoldResult",
+    "UnsupportedSelfHostedAuthFrameworkError",
     "get_adapter",
+    "list_self_hosted_frameworks",
     "list_providers",
+    "normalize_self_hosted_framework",
+    "render_self_hosted_auth_scaffold",
 ]
