@@ -16,6 +16,7 @@ from backend.db_provisioning.base import (
     InvalidDBProvisionTokenError,
     MissingDBProvisionScopeError,
 )
+from backend.db_provisioning.backup import plan_backup_schedule
 from backend.db_provisioning.encryption import plan_encryption_at_rest
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class NeonDBProvisionAdapter(DBProvisionAdapter):
     ) -> None:
         self._region_id = region_id
         self._encryption_at_rest = plan_encryption_at_rest(self.provider, provider_tier)
+        self._backup_schedule = plan_backup_schedule(self.provider, provider_tier)
         self._api_base = api_base.rstrip("/")
 
     def _headers(self) -> dict[str, str]:
@@ -140,6 +142,7 @@ class NeonDBProvisionAdapter(DBProvisionAdapter):
             created=created,
             region=project.get("region_id") or self._region_id,
             encryption_at_rest=self._encryption_at_rest,
+            backup_schedule=self._backup_schedule,
             raw=raw,
         )
 

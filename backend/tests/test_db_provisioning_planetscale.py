@@ -68,6 +68,10 @@ class TestProvision:
         assert result.encryption_at_rest is not None
         assert result.encryption_at_rest.provider_tier == "scaler-pro"
         assert result.encryption_at_rest.enabled is True
+        assert result.backup_schedule is not None
+        assert result.backup_schedule.provider_tier == "scaler-pro"
+        assert result.backup_schedule.enabled is True
+        assert result.backup_schedule.schedule == "twice-daily"
         assert result.connection_url == (
             "mysql://u%2Fser:p%3Dword@aws.connect.psdb.cloud/"
             "tenant-demo?sslaccept=strict"
@@ -120,6 +124,26 @@ class TestProvision:
         result = await _mk_adapter(provider_tier="enterprise").provision_database()
         assert result.encryption_at_rest is not None
         assert result.encryption_at_rest.provider_tier == "enterprise-multi-tenant"
+
+    @respx.mock
+    async def test_provider_tier_controls_backup_schedule_metadata(self):
+        respx.get(f"{P}/organizations/org-demo/databases/tenant-demo").mock(
+            return_value=_ok({"id": "db_123", "name": "tenant-demo"}),
+        )
+        respx.post(
+            f"{P}/organizations/org-demo/databases/tenant-demo/branches/main/passwords",
+        ).mock(
+            return_value=_ok({
+                "id": "pw_123",
+                "username": "user",
+                "plain_text": "secret",
+                "access_host_url": "aws.connect.psdb.cloud",
+            }, status=201),
+        )
+        result = await _mk_adapter(provider_tier="enterprise").provision_database()
+        assert result.backup_schedule is not None
+        assert result.backup_schedule.provider_tier == "enterprise-multi-tenant"
+        assert result.backup_schedule.schedule == "twice-daily"
 
     @respx.mock
     async def test_401_and_403_map_correctly(self):

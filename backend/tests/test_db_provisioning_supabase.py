@@ -57,6 +57,10 @@ class TestProvision:
         assert result.encryption_at_rest is not None
         assert result.encryption_at_rest.provider_tier == "free"
         assert result.encryption_at_rest.enabled is True
+        assert result.backup_schedule is not None
+        assert result.backup_schedule.provider_tier == "free"
+        assert result.backup_schedule.enabled is False
+        assert result.backup_schedule.schedule == "manual-offsite"
         assert result.connection_url == (
             "postgresql://postgres.abcdefghijklmnopqrst:p%3Dword@"
             "db.abcdefghijklmnopqrst.supabase.co:5432/postgres"
@@ -99,6 +103,23 @@ class TestProvision:
         )
         assert result.encryption_at_rest is not None
         assert result.encryption_at_rest.provider_tier == "team"
+
+    @respx.mock
+    async def test_provider_tier_controls_backup_schedule_metadata(self):
+        respx.get(f"{S}/projects").mock(
+            return_value=_ok([{
+                "ref": "abcdefghijklmnopqrst",
+                "organization_id": "org_123",
+                "name": "tenant-demo",
+            }]),
+        )
+        result = await _mk_adapter(provider_tier="team").provision_database(
+            db_pass="secret",
+        )
+        assert result.backup_schedule is not None
+        assert result.backup_schedule.provider_tier == "team"
+        assert result.backup_schedule.enabled is True
+        assert result.backup_schedule.schedule == "daily"
 
     @respx.mock
     async def test_create_requires_db_pass_when_absent(self):

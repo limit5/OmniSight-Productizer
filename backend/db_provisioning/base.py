@@ -23,6 +23,7 @@ from typing import Any, ClassVar, Optional
 
 from backend import secret_store
 from backend.deploy.base import token_fingerprint
+from backend.db_provisioning.backup import BackupSchedulePolicy
 from backend.db_provisioning.encryption import EncryptionAtRestPolicy
 
 
@@ -67,6 +68,7 @@ class DatabaseProvisionResult:
     created: bool = False
     region: Optional[str] = None
     encryption_at_rest: Optional[EncryptionAtRestPolicy] = None
+    backup_schedule: Optional[BackupSchedulePolicy] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,6 +83,11 @@ class DatabaseProvisionResult:
             "encryption_at_rest": (
                 self.encryption_at_rest.to_dict()
                 if self.encryption_at_rest is not None
+                else None
+            ),
+            "backup_schedule": (
+                self.backup_schedule.to_dict()
+                if self.backup_schedule is not None
                 else None
             ),
         }
@@ -154,6 +161,7 @@ class DBProvisionAdapter(ABC):
 
 __all__ = [
     "DBProvisionAdapter",
+    "BackupSchedulePolicy",
     "DatabaseProvisionResult",
     "DBProvisionConflictError",
     "DBProvisionError",

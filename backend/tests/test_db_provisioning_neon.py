@@ -56,6 +56,10 @@ class TestProvision:
         assert result.encryption_at_rest is not None
         assert result.encryption_at_rest.provider_tier == "free"
         assert result.encryption_at_rest.enabled is True
+        assert result.backup_schedule is not None
+        assert result.backup_schedule.provider_tier == "free"
+        assert result.backup_schedule.enabled is True
+        assert result.backup_schedule.schedule == "continuous-wal-retention"
         assert result.connection_url == "postgresql://user:pass@ep.example/neondb"
         body = route.calls.last.request.read()
         assert b'"name":"tenant-demo"' in body
@@ -84,6 +88,19 @@ class TestProvision:
         result = await _mk_adapter(provider_tier="business").provision_database()
         assert result.encryption_at_rest is not None
         assert result.encryption_at_rest.provider_tier == "business"
+
+    @respx.mock
+    async def test_provider_tier_controls_backup_schedule_metadata(self):
+        respx.get(f"{N}/projects").mock(
+            return_value=_ok({"projects": [
+                {"id": "prj_123", "name": "tenant-demo", "region_id": "aws-us-east-1"},
+            ]}),
+        )
+        result = await _mk_adapter(provider_tier="business").provision_database()
+        assert result.backup_schedule is not None
+        assert result.backup_schedule.provider_tier == "business"
+        assert result.backup_schedule.mode == "provider-managed-pitr"
+        assert result.backup_schedule.schedule == "continuous-wal-retention"
 
     @respx.mock
     async def test_401_and_403_map_correctly(self):

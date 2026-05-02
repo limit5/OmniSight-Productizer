@@ -96,6 +96,7 @@ class TestDatabaseProvisionResult:
         assert data["connection_url"].startswith("postgresql://")
         assert data["created"] is True
         assert data["encryption_at_rest"] is None
+        assert data["backup_schedule"] is None
 
 
 class TestInterfaceContract:

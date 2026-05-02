@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from backend.db_provisioning.base import (
+    BackupSchedulePolicy,
     DBProvisionAdapter,
     DatabaseProvisionResult,
     DBProvisionConflictError,
@@ -10,6 +11,11 @@ from backend.db_provisioning.base import (
     DBProvisionRateLimitError,
     InvalidDBProvisionTokenError,
     MissingDBProvisionScopeError,
+)
+from backend.db_provisioning.backup import (
+    BackupScheduleUnsupportedTierError,
+    backup_supported_tiers,
+    plan_backup_schedule,
 )
 from backend.db_provisioning.encryption import (
     EncryptionAtRestPolicy,
@@ -53,6 +59,8 @@ def get_adapter(provider: str) -> type[DBProvisionAdapter]:
 
 __all__ = [
     "DBProvisionAdapter",
+    "BackupSchedulePolicy",
+    "BackupScheduleUnsupportedTierError",
     "DatabaseProvisionResult",
     "DBProvisionConflictError",
     "DBProvisionError",
@@ -65,11 +73,13 @@ __all__ = [
     "DBMigrationError",
     "DBMigrationResult",
     "UnsupportedDBMigrationToolError",
+    "backup_supported_tiers",
     "build_migration_command",
     "encryption_supported_tiers",
     "get_adapter",
     "list_providers",
     "normalize_provider_tier",
     "plan_encryption_at_rest",
+    "plan_backup_schedule",
     "run_tenant_migrations",
 ]
