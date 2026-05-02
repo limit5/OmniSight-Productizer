@@ -18,6 +18,14 @@ from backend.search.base import (
     SearchQuery,
     SearchResult,
 )
+from backend.search.pipeline import (
+    DEFAULT_INDEX_BATCH_SIZE,
+    SearchIndexAction,
+    SearchIndexingJob,
+    SearchIndexingOperation,
+    SearchIndexingResult,
+    run_indexing_pipeline,
+)
 
 
 def list_providers() -> list[str]:
@@ -56,8 +64,14 @@ __all__ = [
     "SearchIndexNotFoundError",
     "SearchIndexRequest",
     "SearchIndexResult",
+    "SearchIndexAction",
+    "SearchIndexingJob",
+    "SearchIndexingOperation",
+    "SearchIndexingResult",
     "SearchQuery",
     "SearchResult",
+    "DEFAULT_INDEX_BATCH_SIZE",
     "get_adapter",
     "list_providers",
+    "run_indexing_pipeline",
 ]
