@@ -44,6 +44,13 @@ from backend.auth_provisioning.vendor_oauth import (
     list_vendor_oauth_plan_providers,
     render_vendor_oauth_app_config_plan,
 )
+from backend.auth_provisioning.outbound_oauth import (
+    OutboundOAuthFlowProviderItem,
+    OutboundOAuthFlowScaffoldOptions,
+    OutboundOAuthFlowScaffoldResult,
+    list_outbound_oauth_flow_providers,
+    render_outbound_oauth_flow_scaffold,
+)
 
 
 def list_providers() -> list[str]:
@@ -93,15 +100,20 @@ __all__ = [
     "VendorOAuthAppConfigOptions",
     "VendorOAuthAppConfigPlan",
     "VendorOAuthInstruction",
+    "OutboundOAuthFlowProviderItem",
+    "OutboundOAuthFlowScaffoldOptions",
+    "OutboundOAuthFlowScaffoldResult",
     "get_adapter",
     "list_account_linking_stack_providers",
     "list_email_mfa_baseline_methods",
+    "list_outbound_oauth_flow_providers",
     "list_vendor_oauth_plan_providers",
     "list_self_hosted_frameworks",
     "list_providers",
     "normalize_self_hosted_framework",
     "render_account_linking_stack",
     "render_email_mfa_baseline",
+    "render_outbound_oauth_flow_scaffold",
     "render_vendor_oauth_app_config_plan",
     "render_self_hosted_auth_scaffold",
 ]
