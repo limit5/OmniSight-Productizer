@@ -1,0 +1,124 @@
+# BP.S.2 — Operator-overridable Guild × Tier admission narrowing.
+#
+# This file is the **operator narrowing layer** that sits on top of the
+# structural Guild × Tier admission matrix declared in
+# ``backend/sandbox_tier.py`` (BP.S.1). The structural matrix says what
+# is *architecturally allowed*; this file says what *this deployment*
+# additionally forbids.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Resolution order (loader contract — to be implemented in BP.S.4)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+#   effective_tiers(guild) =
+#       MATRIX[guild]                       if guild not in this file
+#       set(overrides[guild].allowed_tiers) if guild has explicit list
+#       frozenset()                         if guild has explicit []
+#
+# Three semantic cases, in priority order:
+#
+#   1. **Omitted Guild** (no key under ``guilds:``)
+#      → Use the structural default from
+#        ``GUILD_TIER_ADMISSION_MATRIX``. This is the common case;
+#        empty file means "no operator overrides — trust the code".
+#
+#   2. **Explicit non-empty list**
+#      → Use exactly that list, IF it is a *subset* of the structural
+#        default. The loader (BP.S.4) MUST reject any list that
+#        widens past the code matrix (e.g. operator trying to give
+#        ``auditor`` tier T1 access). Reason: widening would breach
+#        invariants the code paths assume (e.g. auditor T0-only is
+#        a KS.1 audit-chain integrity contract, not a soft preference).
+#
+#   3. **Explicit empty list (``allowed_tiers: []``)**
+#      → Forbid that Guild from *all* tiers — incident-response escape
+#        hatch (e.g. revoke ``red_team`` Guild during an active intrusion
+#        investigation without redeploying code). PEP Gateway will
+#        refuse every Guild → Tier dispatch from such a Guild and emit
+#        a high-severity audit event.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Schema
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+#   schema_version: 1            # bump only on incompatible structure change
+#   guilds:                      # optional; omit entirely for "no overrides"
+#     <guild_slug>:
+#       allowed_tiers: [T0, T2]  # subset of structural default; [] = forbid all
+#       reason: "free-text operator note for audit-log readers"  # optional
+#
+# ``<guild_slug>`` MUST match a member of the ``Guild`` enum in
+# ``backend/sandbox_tier.py`` exactly (lower_snake_case). Unknown slugs
+# are a hard validation failure — not silently ignored — so that a typo
+# like ``red-team`` (hyphen instead of underscore) cannot accidentally
+# leave an intended narrowing un-applied.
+#
+# Tier identifiers MUST be one of: ``T0``, ``T1``, ``T2``, ``T3``.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Source-of-truth ordering (mirror of backend/sandbox_tier.py docstring)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+#   1. Code (backend/sandbox_tier.py) — structural ceiling, immutable
+#      at runtime.
+#   2. This file — runtime narrowing layer.
+#   3. docs/design/sandbox-tier-audit.md (BP.S.3) — human-readable
+#      audit doc; cites the code matrix verbatim.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Worked examples (commented out — uncomment to apply)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Example A — Air-gapped deployment (no outbound network at all):
+# Strip every Guild's T2 admission. Frontend / Backend / Optical /
+# Intel / QA / SRE / Reporter / Architect / SA-SD / RedTeam /
+# Forensics / Custom all lose T2; structurally they keep T0 (and any
+# T1/T3 they had). ``intel`` Guild collapses to T0-only, which makes it
+# nearly useless — air-gapped sites would typically also disable
+# ``intel`` outright (set its ``allowed_tiers`` to ``[]``).
+#
+#   guilds:
+#     architect:    {allowed_tiers: [T0],     reason: "air-gapped: no T2 outbound"}
+#     sa_sd:        {allowed_tiers: [T0],     reason: "air-gapped: no T2 outbound"}
+#     frontend:     {allowed_tiers: [T0],     reason: "air-gapped: no T2 outbound"}
+#     backend:      {allowed_tiers: [T0],     reason: "air-gapped: no T2 outbound"}
+#     optical:      {allowed_tiers: [T0],     reason: "air-gapped: no T2 outbound"}
+#     qa:           {allowed_tiers: [T0],     reason: "air-gapped: no T2 outbound"}
+#     sre:          {allowed_tiers: [T0],     reason: "air-gapped: no T2 outbound"}
+#     reporter:     {allowed_tiers: [T0],     reason: "air-gapped: no T2 outbound"}
+#     custom:       {allowed_tiers: [T0],     reason: "air-gapped: no T2 outbound"}
+#     red_team:     {allowed_tiers: [T1],     reason: "air-gapped: no T2 outbound"}
+#     forensics:    {allowed_tiers: [T0, T1, T3], reason: "air-gapped: no T2 outbound"}
+#     intel:        {allowed_tiers: [],       reason: "air-gapped: intel feed unreachable, disable"}
+#
+# Example B — Active red-team intrusion investigation (lock down):
+# Forbid the red_team Guild entirely until the investigation closes.
+# All other Guilds inherit code defaults.
+#
+#   guilds:
+#     red_team:     {allowed_tiers: [], reason: "INC-2026-04-25 lockdown — re-enable after RCA"}
+#
+# Example C — Hardware-bench unavailable (EVK lab offline for maintenance):
+# Strip T3 from every compile+simulate Guild so dispatchers fail fast
+# at the policy layer instead of timing out on an unreachable Hardware
+# Daemon.
+#
+#   guilds:
+#     bsp:       {allowed_tiers: [T1], reason: "EVK lab offline 2026-04-25..04-28"}
+#     hal:       {allowed_tiers: [T1], reason: "EVK lab offline 2026-04-25..04-28"}
+#     algo_cv:   {allowed_tiers: [T1], reason: "EVK lab offline 2026-04-25..04-28"}
+#     isp:       {allowed_tiers: [T1], reason: "EVK lab offline 2026-04-25..04-28"}
+#     audio:     {allowed_tiers: [T1], reason: "EVK lab offline 2026-04-25..04-28"}
+#     forensics: {allowed_tiers: [T0, T1, T2], reason: "EVK lab offline 2026-04-25..04-28"}
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Active configuration (default deployment — no overrides)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+schema_version: 1
+
+# Empty ``guilds:`` block means "trust the structural matrix entirely".
+# Operator should add per-Guild entries here when narrowing is needed
+# (see worked examples above). The loader (BP.S.4) treats both an
+# omitted ``guilds:`` key and an explicitly empty mapping ``guilds: {}``
+# as "no overrides" — pick whichever reads more clearly to your team.
+guilds: {}
