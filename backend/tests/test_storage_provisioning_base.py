@@ -6,6 +6,7 @@ import pytest
 
 from backend import secret_store
 from backend.storage_provisioning import (
+    PresignedStorageUrl,
     StorageProvisionAdapter,
     StorageProvisionError,
     StorageProvisionResult,
@@ -104,12 +105,39 @@ class TestStorageProvisionResult:
         assert data["region"] == "us-east-1"
 
 
+class TestPresignedStorageUrl:
+
+    def test_to_dict(self):
+        result = PresignedStorageUrl(
+            provider="s3",
+            bucket_name="tenant-demo",
+            object_key="uploads/a.txt",
+            url="https://example.com/tenant-demo/uploads/a.txt?sig=1",
+            method="PUT",
+            expires_in=900,
+            headers={"content-type": "text/plain"},
+        )
+
+        data = result.to_dict()
+
+        assert data == {
+            "provider": "s3",
+            "bucket_name": "tenant-demo",
+            "object_key": "uploads/a.txt",
+            "url": "https://example.com/tenant-demo/uploads/a.txt?sig=1",
+            "method": "PUT",
+            "expires_in": 900,
+            "headers": {"content-type": "text/plain"},
+        }
+
+
 class TestInterfaceContract:
 
     @pytest.mark.parametrize("provider", ["s3", "r2", "supabase-storage"])
     def test_required_methods_present(self, provider):
         cls = get_adapter(provider)
         assert callable(getattr(cls, "provision_bucket"))
+        assert callable(getattr(cls, "generate_presigned_url"))
         assert callable(getattr(cls, "get_bucket_config"))
 
     def test_cannot_instantiate_base_directly(self):

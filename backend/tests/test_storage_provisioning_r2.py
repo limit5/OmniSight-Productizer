@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import httpx
 import respx
+from urllib.parse import parse_qs, urlparse
 
 from backend.storage_provisioning.r2 import R2StorageProvisionAdapter
 
@@ -44,3 +45,17 @@ class TestProvision:
 
         assert result.created is False
         assert result.endpoint_url == endpoint
+
+
+class TestPresignedUrl:
+
+    async def test_generates_r2_signed_url_with_auto_region(self):
+        result = await _mk_adapter().generate_presigned_url("images/logo.png")
+
+        parsed = urlparse(result.url)
+        query = parse_qs(parsed.query)
+        assert result.provider == "r2"
+        assert parsed.netloc == "acct_123.r2.cloudflarestorage.com"
+        assert parsed.path == "/tenant-demo/images/logo.png"
+        assert "/auto/s3/aws4_request" in query["X-Amz-Credential"][0]
+        assert query["X-Amz-Signature"][0]

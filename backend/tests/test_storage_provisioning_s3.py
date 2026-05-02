@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 import respx
+from urllib.parse import parse_qs, urlparse
 
 from backend.storage_provisioning.base import (
     InvalidStorageProvisionTokenError,
@@ -103,3 +104,49 @@ class TestGetBucketConfig:
             "created": False,
             "region": "us-east-1",
         }
+
+
+class TestPresignedUrl:
+
+    async def test_generates_get_url_without_network_call(self):
+        result = await _mk_adapter().generate_presigned_url(
+            "reports/final.pdf",
+            expires_in=900,
+        )
+
+        parsed = urlparse(result.url)
+        query = parse_qs(parsed.query)
+        assert result.provider == "s3"
+        assert result.bucket_name == "tenant-demo"
+        assert result.object_key == "reports/final.pdf"
+        assert result.method == "GET"
+        assert result.expires_in == 900
+        assert parsed.scheme == "https"
+        assert parsed.netloc == "s3.amazonaws.com"
+        assert parsed.path == "/tenant-demo/reports/final.pdf"
+        assert query["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+        assert query["X-Amz-Expires"] == ["900"]
+        assert query["X-Amz-SignedHeaders"] == ["host"]
+        assert query["X-Amz-Credential"][0].startswith("AKIA0123456789/")
+        assert query["X-Amz-Signature"][0]
+
+    async def test_generates_put_url_for_upload(self):
+        result = await _mk_adapter(region="us-west-2").generate_presigned_url(
+            "/uploads/a.txt",
+            method="PUT",
+            expires_in=60,
+        )
+
+        query = parse_qs(urlparse(result.url).query)
+        assert result.object_key == "uploads/a.txt"
+        assert result.method == "PUT"
+        assert "/us-west-2/s3/aws4_request" in query["X-Amz-Credential"][0]
+
+    @pytest.mark.parametrize("method", ["DELETE", "POST"])
+    async def test_rejects_unsupported_method(self, method):
+        with pytest.raises(ValueError, match="method must be GET or PUT"):
+            await _mk_adapter().generate_presigned_url("a.txt", method=method)
+
+    async def test_rejects_invalid_expiry(self):
+        with pytest.raises(ValueError, match="expires_in"):
+            await _mk_adapter().generate_presigned_url("a.txt", expires_in=604801)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from backend.storage_provisioning.base import (
     InvalidStorageProvisionTokenError,
     MissingStorageProvisionScopeError,
+    PresignedStorageUrl,
     StorageProvisionAdapter,
     StorageProvisionConflictError,
     StorageProvisionError,
@@ -38,6 +39,7 @@ def get_adapter(provider: str) -> type[StorageProvisionAdapter]:
 
 __all__ = [
     "StorageProvisionAdapter",
+    "PresignedStorageUrl",
     "StorageProvisionResult",
     "StorageProvisionConflictError",
     "StorageProvisionError",

@@ -7,13 +7,14 @@ import hmac
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
 from backend.storage_provisioning.base import (
     InvalidStorageProvisionTokenError,
     MissingStorageProvisionScopeError,
+    PresignedStorageUrl,
     StorageProvisionAdapter,
     StorageProvisionConflictError,
     StorageProvisionError,
@@ -79,6 +80,12 @@ class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
     def _bucket_url(self) -> str:
         return f"{self._endpoint_url}/{quote(self._bucket_name, safe='')}"
 
+    def _object_url(self, object_key: str) -> str:
+        key = object_key.lstrip("/")
+        if not key:
+            raise ValueError("object_key is required")
+        return f"{self._bucket_url()}/{quote(key, safe='/')}"
+
     def _payload(self) -> bytes:
         if self._region == "us-east-1":
             return b""
@@ -131,6 +138,52 @@ class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
         )
         return headers
 
+    def _presigned_query(
+        self,
+        method: str,
+        url: str,
+        expires_in: int,
+    ) -> dict[str, str]:
+        if expires_in < 1 or expires_in > 604800:
+            raise ValueError("expires_in must be between 1 and 604800 seconds")
+        now = datetime.now(timezone.utc)
+        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+        datestamp = now.strftime("%Y%m%d")
+        parsed = urlparse(url)
+        host = parsed.netloc
+        canonical_uri = parsed.path or "/"
+        scope = f"{datestamp}/{self._region}/{self.service}/aws4_request"
+        signed_headers = "host"
+        params = {
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Credential": f"{self._access_key_id}/{scope}",
+            "X-Amz-Date": amz_date,
+            "X-Amz-Expires": str(expires_in),
+            "X-Amz-SignedHeaders": signed_headers,
+        }
+        canonical_query = urlencode(sorted(params.items()), quote_via=quote, safe="")
+        canonical_request = "\n".join([
+            method,
+            canonical_uri,
+            canonical_query,
+            f"host:{host}\n",
+            signed_headers,
+            "UNSIGNED-PAYLOAD",
+        ])
+        string_to_sign = "\n".join([
+            "AWS4-HMAC-SHA256",
+            amz_date,
+            scope,
+            hashlib.sha256(canonical_request.encode()).hexdigest(),
+        ])
+        signature = hmac.new(
+            _signing_key(self._token, datestamp, self._region, self.service),
+            string_to_sign.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        params["X-Amz-Signature"] = signature
+        return params
+
     async def _request(self, method: str, url: str, payload: bytes = b"") -> httpx.Response:
         headers = self._headers(method, url, payload)
         async with httpx.AsyncClient(timeout=self._timeout) as c:
@@ -167,6 +220,35 @@ class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
         )
         self._cached_result = result
         return result
+
+    async def generate_presigned_url(
+        self,
+        object_key: str,
+        *,
+        method: str = "GET",
+        expires_in: int = 3600,
+        **kwargs: Any,
+    ) -> PresignedStorageUrl:
+        del kwargs
+        verb = method.upper()
+        if verb not in ("GET", "PUT"):
+            raise ValueError("method must be GET or PUT")
+        url = self._object_url(object_key)
+        params = self._presigned_query(verb, url, expires_in)
+        signed_url = f"{url}?{urlencode(sorted(params.items()), quote_via=quote, safe='')}"
+        logger.info(
+            "%s.storage_presign bucket=%s key=%s method=%s expires_in=%s fp=%s",
+            self.provider, self._bucket_name, object_key, verb, expires_in, self.token_fp(),
+        )
+        return PresignedStorageUrl(
+            provider=self.provider,
+            bucket_name=self._bucket_name,
+            object_key=object_key.lstrip("/"),
+            url=signed_url,
+            method=verb,
+            expires_in=expires_in,
+            raw={"endpoint_url": self._endpoint_url},
+        )
 
 
 class S3StorageProvisionAdapter(S3CompatibleStorageProvisionAdapter):

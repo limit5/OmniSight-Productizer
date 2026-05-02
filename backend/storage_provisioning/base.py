@@ -2,7 +2,7 @@
 
 S3 / Cloudflare R2 / Supabase Storage expose management APIs that can
 prepare a tenant-owned object bucket before later FS.3 rows add database
-persistence, signed URLs, and CORS automation. This module mirrors
+persistence and CORS automation. This module mirrors
 ``backend.db_provisioning.base``: callers construct a provider adapter
 from an encrypted or plaintext token, call ``provision_bucket()``, then
 hand the returned bucket metadata to downstream storage setup.
@@ -81,6 +81,31 @@ class StorageProvisionResult:
         }
 
 
+@dataclass
+class PresignedStorageUrl:
+    """Outcome of ``adapter.generate_presigned_url(...)``."""
+
+    provider: str
+    bucket_name: str
+    object_key: str
+    url: str
+    method: str = "GET"
+    expires_in: int = 3600
+    headers: dict[str, str] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "bucket_name": self.bucket_name,
+            "object_key": self.object_key,
+            "url": self.url,
+            "method": self.method,
+            "expires_in": self.expires_in,
+            "headers": dict(self.headers),
+        }
+
+
 class StorageProvisionAdapter(ABC):
     """Abstract base for every tenant object storage provider adapter."""
 
@@ -142,6 +167,17 @@ class StorageProvisionAdapter(ABC):
     async def provision_bucket(self, **kwargs: Any) -> StorageProvisionResult:
         """Create or reuse the provider-side object storage bucket."""
 
+    @abstractmethod
+    async def generate_presigned_url(
+        self,
+        object_key: str,
+        *,
+        method: str = "GET",
+        expires_in: int = 3600,
+        **kwargs: Any,
+    ) -> PresignedStorageUrl:
+        """Return a short-lived object URL for generated app upload/download."""
+
     def get_bucket_config(self) -> Optional[dict[str, Any]]:
         """Return scaffold-facing bucket config from the last provision call."""
         if self._cached_result is None:
@@ -151,6 +187,7 @@ class StorageProvisionAdapter(ABC):
 
 __all__ = [
     "StorageProvisionAdapter",
+    "PresignedStorageUrl",
     "StorageProvisionResult",
     "StorageProvisionConflictError",
     "StorageProvisionError",

@@ -10,6 +10,7 @@ import httpx
 from backend.storage_provisioning.base import (
     InvalidStorageProvisionTokenError,
     MissingStorageProvisionScopeError,
+    PresignedStorageUrl,
     StorageProvisionAdapter,
     StorageProvisionConflictError,
     StorageProvisionError,
@@ -146,6 +147,53 @@ class SupabaseStorageProvisionAdapter(StorageProvisionAdapter):
         )
         self._cached_result = result
         return result
+
+    async def generate_presigned_url(
+        self,
+        object_key: str,
+        *,
+        method: str = "GET",
+        expires_in: int = 3600,
+        **kwargs: Any,
+    ) -> PresignedStorageUrl:
+        del kwargs
+        key = object_key.lstrip("/")
+        if not key:
+            raise ValueError("object_key is required")
+        verb = method.upper()
+        if verb != "GET":
+            raise ValueError("Supabase signed object URLs currently support GET")
+        if expires_in < 1:
+            raise ValueError("expires_in must be positive")
+        data = await self._request(
+            "POST",
+            f"/object/sign/{self._bucket_name}/{key}",
+            json={"expiresIn": expires_in},
+        )
+        signed_path = data.get("signedURL") or data.get("signedUrl") or data.get("signed_url")
+        if not signed_path:
+            raise StorageProvisionError(
+                "Supabase signed URL response missing signedURL",
+                provider=self.provider,
+            )
+        if signed_path.startswith("http://") or signed_path.startswith("https://"):
+            url = signed_path
+        else:
+            base = f"https://{self._project_ref}.supabase.co/storage/v1"
+            url = f"{base}/{signed_path.lstrip('/')}"
+        logger.info(
+            "supabase_storage.storage_presign bucket=%s key=%s expires_in=%s fp=%s",
+            self._bucket_name, key, expires_in, self.token_fp(),
+        )
+        return PresignedStorageUrl(
+            provider=self.provider,
+            bucket_name=self._bucket_name,
+            object_key=key,
+            url=url,
+            method=verb,
+            expires_in=expires_in,
+            raw=data,
+        )
 
 
 __all__ = ["SUPABASE_STORAGE_API_BASE", "SupabaseStorageProvisionAdapter"]

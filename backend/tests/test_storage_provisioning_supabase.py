@@ -141,3 +141,47 @@ class TestGetBucketConfig:
             "created": False,
             "region": None,
         }
+
+
+class TestPresignedUrl:
+
+    @respx.mock
+    async def test_generates_signed_get_url(self):
+        route = respx.post(f"{S}/object/sign/tenant-demo/reports/final.pdf").mock(
+            return_value=_ok({"signedURL": "/object/sign/tenant-demo/reports/final.pdf?token=abc"}),
+        )
+
+        result = await _mk_adapter().generate_presigned_url(
+            "/reports/final.pdf",
+            expires_in=120,
+        )
+
+        assert result.provider == "supabase-storage"
+        assert result.bucket_name == "tenant-demo"
+        assert result.object_key == "reports/final.pdf"
+        assert result.method == "GET"
+        assert result.expires_in == 120
+        assert result.url == (
+            "https://prj_123.supabase.co/storage/v1/object/sign/"
+            "tenant-demo/reports/final.pdf?token=abc"
+        )
+        assert route.calls.last.request.read() == b'{"expiresIn":120}'
+
+    @respx.mock
+    async def test_preserves_absolute_signed_url(self):
+        signed = "https://cdn.example.com/object/sign/tenant-demo/a.txt?token=abc"
+        respx.post(f"{S}/object/sign/tenant-demo/a.txt").mock(
+            return_value=_ok({"signedURL": signed}),
+        )
+
+        result = await _mk_adapter().generate_presigned_url("a.txt")
+
+        assert result.url == signed
+
+    async def test_rejects_put_method(self):
+        with pytest.raises(ValueError, match="currently support GET"):
+            await _mk_adapter().generate_presigned_url("a.txt", method="PUT")
+
+    async def test_rejects_empty_key(self):
+        with pytest.raises(ValueError, match="object_key is required"):
+            await _mk_adapter().generate_presigned_url("/")
