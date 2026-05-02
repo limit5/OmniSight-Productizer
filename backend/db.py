@@ -1504,6 +1504,44 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_provider_expires
     ON oauth_tokens(provider, expires_at);
+
+-- W14.10 (alembic 0059): per-launch audit log for the
+-- ``omnisight-web-preview`` sidecar.  Holds the cross-worker
+-- preview state that survives uvicorn worker restart and lets the
+-- W14.5 idle reaper see sandboxes launched by sibling workers.
+-- Columns mirror alembic 0059's CREATE TABLE; see that file's
+-- docstring for the column-by-column rationale.  ``status`` CHECK
+-- byte-equals :class:`backend.web_sandbox.WebSandboxStatus`.value;
+-- ``killed_reason`` is free-form by design (literals owned by
+-- multiple sibling rows W14.5 / W14.9).  Partial UNIQUE on
+-- ``workspace_id`` WHERE status NOT IN ('stopped','failed')
+-- enforces "at most one live sidecar per workspace" across the
+-- worker fleet — that's the cross-worker invariant W14.10 exists
+-- to deliver.  Empty until the WebSandboxManager swap to PG-backed
+-- reads lands (separate row).
+CREATE TABLE IF NOT EXISTS web_sandbox_instances (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    sandbox_id        TEXT NOT NULL,
+    workspace_id      TEXT NOT NULL,
+    started_at        REAL NOT NULL,
+    ingress_url       TEXT,
+    status            TEXT NOT NULL
+                            CHECK (status IN ('failed','installing','pending',
+                                              'running','stopped','stopping')),
+    last_request_at   REAL NOT NULL,
+    killed_at         REAL,
+    killed_reason     TEXT,
+    created_at        REAL NOT NULL,
+    updated_at        REAL NOT NULL,
+    version           INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_web_sandbox_instances_workspace_live
+    ON web_sandbox_instances (workspace_id)
+    WHERE status NOT IN ('stopped', 'failed');
+CREATE INDEX IF NOT EXISTS idx_web_sandbox_instances_idle
+    ON web_sandbox_instances (status, last_request_at);
+CREATE INDEX IF NOT EXISTS idx_web_sandbox_instances_sandbox
+    ON web_sandbox_instances (sandbox_id);
 """
 
 
