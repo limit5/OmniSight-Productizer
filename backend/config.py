@@ -458,6 +458,36 @@ class Settings(BaseSettings):
     cf_access_session_duration: str = ""  # default "30m" when empty
     cf_access_aud_tag: str = ""           # Optional fixed CF Access AUD UUID
 
+    # ── W14.5 — Live web-preview idle-timeout auto-kill reaper ──
+    # Per-uvicorn-worker daemon thread that walks
+    # :class:`backend.web_sandbox.WebSandboxManager` once per
+    # ``web_sandbox_reap_interval_s`` and calls ``stop(reason=
+    # "idle_timeout")`` on any sandbox whose ``last_request_at`` is
+    # more than ``web_sandbox_idle_timeout_s`` behind the wall clock.
+    # ``stop()`` already removes the W14.3 CF Tunnel ingress rule and
+    # W14.4 CF Access SSO app on its way out, so an idle-killed sandbox
+    # also frees the public hostname slot — that is the "刪 ingress"
+    # half of the W14.5 row.
+    #
+    # Default ``1800.0`` (30 min) matches the W14.5 row spec; lower
+    # values are useful only for unit tests that want to drive the
+    # reaper deterministically (the reaper module enforces a soft
+    # floor of 1.0s + ceiling of 86400.0s on the timeout, and a
+    # 0.05s..3600s range on the interval, so a misconfigured knob
+    # raises ``IdleReaperError`` at construction rather than silently
+    # disabling the sweep).
+    #
+    # Module-global state audit (Step 1, type-3): the reaper holds a
+    # per-instance ``threading.Thread`` + ``threading.Event`` — bound
+    # to the per-worker :class:`backend.web_sandbox.WebSandboxManager`
+    # singleton. Each worker reaps only the sandboxes it itself
+    # launched; cross-worker reaping of orphaned containers is
+    # **W14.10 territory** (PG-backed audit table + orchestrator-level
+    # reaper). That deferral is the row's "intentionally per-worker"
+    # type-3 answer per ``docs/sop/implement_phase_step.md`` Step 1.
+    web_sandbox_idle_timeout_s: float = 1800.0
+    web_sandbox_reap_interval_s: float = 60.0
+
     # O8 (#271): orchestration execution mode. "monolith" keeps every
     # agent run going through the LangGraph StateGraph in-process (legacy
     # path since v0.1.0). "distributed" routes the same run through

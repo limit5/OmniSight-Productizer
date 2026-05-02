@@ -79,6 +79,11 @@ from backend.web_sandbox import (
     load_image_manifest,
     validate_workspace_path,
 )
+from backend.web_sandbox_idle_reaper import (
+    IdleReaperConfig,
+    IdleReaperError,
+    WebSandboxIdleReaper,
+)
 from backend.ui_sandbox import SubprocessDockerClient
 
 logger = logging.getLogger(__name__)
@@ -96,6 +101,10 @@ router = APIRouter(prefix="/web-sandbox", tags=["web-sandbox"])
 # shape for the row's scope.
 
 _manager: WebSandboxManager | None = None
+# W14.5 — per-worker idle-timeout reaper. Constructed alongside the
+# manager in :func:`get_manager` (lazy). Daemon thread, dies with the
+# process. Tests inject via :func:`set_reaper_for_tests`.
+_reaper: WebSandboxIdleReaper | None = None
 
 
 def _build_cf_ingress_manager() -> CFIngressManager | None:
@@ -163,6 +172,37 @@ def _build_cf_access_manager() -> CFAccessManager | None:
     return CFAccessManager(config=config)
 
 
+def _build_idle_reaper(manager: WebSandboxManager) -> WebSandboxIdleReaper | None:
+    """Construct a :class:`WebSandboxIdleReaper` from current Settings,
+    returning ``None`` when the config is malformed (operator misset
+    one of the two ``OMNISIGHT_WEB_SANDBOX_*`` knobs to a value the
+    reaper module rejects — e.g. interval > timeout).
+
+    A ``None`` return falls back to "no reaper" — the W14.2/W14.3/W14.4
+    paths keep working without auto-kill, which matches the
+    deployed-inactive shape every other W14.* row degrades to. The
+    operator notices the missing reaper because their long-idle
+    sandboxes never auto-clean and shows up as a Settings error in
+    the startup log.
+    """
+
+    try:
+        settings = Settings()
+        config = IdleReaperConfig.from_settings(settings)
+    except IdleReaperError as exc:
+        logger.warning(
+            "web_sandbox: idle reaper disabled — %s", exc,
+        )
+        return None
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "web_sandbox: idle reaper disabled (Settings failed): %s",
+            exc,
+        )
+        return None
+    return WebSandboxIdleReaper(manager=manager, config=config)
+
+
 def get_manager() -> WebSandboxManager:
     """Return the per-worker :class:`WebSandboxManager`, lazy-creating
     one on first request.
@@ -182,7 +222,7 @@ def get_manager() -> WebSandboxManager:
     in row W14.2.
     """
 
-    global _manager
+    global _manager, _reaper
     if _manager is None:
         try:
             manifest = load_image_manifest()
@@ -200,6 +240,16 @@ def get_manager() -> WebSandboxManager:
             cf_ingress_manager=cf_ingress,
             cf_access_manager=cf_access,
         )
+        # W14.5 — start the idle-timeout reaper daemon thread so any
+        # sandbox sitting more than ``OMNISIGHT_WEB_SANDBOX_IDLE_TIMEOUT_S``
+        # seconds without a touch/launch/ready bump is automatically
+        # collected. ``manager.stop(reason="idle_timeout")`` cascades
+        # the W14.3 ingress + W14.4 SSO cleanup — that is the "刪
+        # ingress" half of the W14.5 row spec.
+        if _reaper is None:
+            _reaper = _build_idle_reaper(_manager)
+            if _reaper is not None:
+                _reaper.start()
     return _manager
 
 
@@ -208,6 +258,35 @@ def set_manager_for_tests(manager: WebSandboxManager | None) -> None:
 
     global _manager
     _manager = manager
+
+
+def set_reaper_for_tests(reaper: WebSandboxIdleReaper | None) -> None:
+    """Test-only injection point. ``None`` resets the singleton.
+
+    Tests that swap in a fake :class:`WebSandboxIdleReaper` (or
+    nullify it) should call :meth:`WebSandboxIdleReaper.stop` on the
+    previous reaper themselves before swapping — the production
+    :func:`get_manager` does that implicitly via process exit, but
+    the unit-test :class:`fastapi.testclient.TestClient` lifetime is
+    much shorter and a leaked daemon thread can leak across tests.
+    """
+
+    global _reaper
+    if _reaper is not None and _reaper is not reaper:
+        try:
+            _reaper.stop(timeout_s=1.0)
+        except Exception:  # pragma: no cover - defensive
+            pass
+    _reaper = reaper
+
+
+def get_reaper() -> WebSandboxIdleReaper | None:
+    """Return the per-worker reaper, or ``None`` when one has not
+    been built. The W14.5 row constructs the reaper inside
+    :func:`get_manager` so the first request that hits the manager
+    also boots the daemon thread."""
+
+    return _reaper
 
 
 # ─────────────── Request / Response models ───────────────
