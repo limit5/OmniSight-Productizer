@@ -22,6 +22,14 @@ from backend.auth_provisioning.self_hosted import (
     normalize_self_hosted_framework,
     render_self_hosted_auth_scaffold,
 )
+from backend.auth_provisioning.vendor_oauth import (
+    VendorOAuthApiRequest,
+    VendorOAuthAppConfigOptions,
+    VendorOAuthAppConfigPlan,
+    VendorOAuthInstruction,
+    list_vendor_oauth_plan_providers,
+    render_vendor_oauth_app_config_plan,
+)
 
 
 def list_providers() -> list[str]:
@@ -61,9 +69,15 @@ __all__ = [
     "SelfHostedAuthScaffoldOptions",
     "SelfHostedAuthScaffoldResult",
     "UnsupportedSelfHostedAuthFrameworkError",
+    "VendorOAuthApiRequest",
+    "VendorOAuthAppConfigOptions",
+    "VendorOAuthAppConfigPlan",
+    "VendorOAuthInstruction",
     "get_adapter",
+    "list_vendor_oauth_plan_providers",
     "list_self_hosted_frameworks",
     "list_providers",
     "normalize_self_hosted_framework",
+    "render_vendor_oauth_app_config_plan",
     "render_self_hosted_auth_scaffold",
 ]
