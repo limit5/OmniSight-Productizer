@@ -65,7 +65,12 @@ vi.mock("@/lib/api", () => ({
   stopWebSandbox: vi.fn(),
 }))
 
-import { LivePreviewPanel } from "@/components/omnisight/live-preview-panel"
+import {
+  LivePreviewPanel,
+  deriveHmrWebSocketUrl,
+  HMR_RECONNECT_DELAY_MS,
+  VITE_HMR_WS_SUBPROTOCOL,
+} from "@/components/omnisight/live-preview-panel"
 import * as api from "@/lib/api"
 import type {
   WebSandboxInstanceWire,
@@ -358,6 +363,242 @@ describe("LivePreviewPanel — touch loop (W14.5 idle reaper defence)", () => {
       () => expect(screen.getByTestId("live-preview-idle")).toBeInTheDocument(),
       { timeout: 1000 },
     )
+  })
+})
+
+// ─── W14.7 — HMR WebSocket observer tests ───────────────────────────
+
+class FakeWebSocket {
+  static instances: FakeWebSocket[] = []
+  url: string
+  protocols: string[] | string | undefined
+  readyState: number = 0 // CONNECTING
+  onopen: ((ev: Event) => void) | null = null
+  onmessage: ((ev: MessageEvent) => void) | null = null
+  onclose: ((ev: CloseEvent) => void) | null = null
+  onerror: ((ev: Event) => void) | null = null
+  closeCalls = 0
+  constructor(url: string, protocols?: string[] | string) {
+    this.url = url
+    this.protocols = protocols
+    FakeWebSocket.instances.push(this)
+  }
+  // Helpers used by tests to drive the observer state machine.
+  emitOpen() {
+    this.readyState = 1
+    this.onopen?.(new Event("open"))
+  }
+  emitMessage(payload: unknown) {
+    const data = typeof payload === "string" ? payload : JSON.stringify(payload)
+    this.onmessage?.(new MessageEvent("message", { data }))
+  }
+  emitClose() {
+    this.readyState = 3
+    this.onclose?.(new CloseEvent("close"))
+  }
+  emitError() {
+    this.onerror?.(new Event("error"))
+  }
+  close() {
+    this.closeCalls += 1
+    this.readyState = 3
+  }
+  static reset() {
+    FakeWebSocket.instances = []
+  }
+}
+
+describe("LivePreviewPanel — W14.7 Vite HMR observer", () => {
+  beforeEach(() => {
+    FakeWebSocket.reset()
+  })
+
+  it("deriveHmrWebSocketUrl swaps https → wss + drops query/hash", () => {
+    expect(
+      deriveHmrWebSocketUrl(
+        "https://preview-ws-deadbeef.ai.sora-dev.app/foo?bar=1#x",
+      ),
+    ).toBe("wss://preview-ws-deadbeef.ai.sora-dev.app/foo")
+  })
+
+  it("deriveHmrWebSocketUrl swaps http → ws", () => {
+    expect(deriveHmrWebSocketUrl("http://127.0.0.1:41001/")).toBe(
+      "ws://127.0.0.1:41001/",
+    )
+  })
+
+  it("deriveHmrWebSocketUrl returns null for empty/invalid input", () => {
+    expect(deriveHmrWebSocketUrl(null)).toBeNull()
+    expect(deriveHmrWebSocketUrl("")).toBeNull()
+    expect(deriveHmrWebSocketUrl("not a url")).toBeNull()
+  })
+
+  it("opens a HMR WebSocket with the Vite subprotocol when sandbox is running", async () => {
+    getWebSandbox.mockResolvedValue(mkInstance())
+    render(
+      <LivePreviewPanel
+        workspaceId="ws-abc123"
+        webSocketFactory={FakeWebSocket as unknown as typeof WebSocket}
+      />,
+    )
+    await screen.findByTestId("live-preview-iframe")
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1))
+    const ws = FakeWebSocket.instances[0]
+    expect(ws.url).toBe("wss://preview-ws-deadbeef0001.ai.sora-dev.app/")
+    expect(ws.protocols).toEqual([VITE_HMR_WS_SUBPROTOCOL])
+  })
+
+  it("HMR badge transitions connecting → live on open event", async () => {
+    getWebSandbox.mockResolvedValue(mkInstance())
+    render(
+      <LivePreviewPanel
+        workspaceId="ws-abc123"
+        webSocketFactory={FakeWebSocket as unknown as typeof WebSocket}
+      />,
+    )
+    await screen.findByTestId("live-preview-iframe")
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1))
+    const badge = screen.getByTestId("live-preview-hmr")
+    expect(badge).toHaveAttribute("data-hmr-status", "connecting")
+    FakeWebSocket.instances[0].emitOpen()
+    await waitFor(() =>
+      expect(screen.getByTestId("live-preview-hmr")).toHaveAttribute(
+        "data-hmr-status",
+        "live",
+      ),
+    )
+  })
+
+  it("Vite full-reload payload bumps the iframe reload nonce", async () => {
+    getWebSandbox.mockResolvedValue(mkInstance())
+    render(
+      <LivePreviewPanel
+        workspaceId="ws-abc123"
+        webSocketFactory={FakeWebSocket as unknown as typeof WebSocket}
+      />,
+    )
+    const iframe = await screen.findByTestId("live-preview-iframe")
+    const before = iframe.getAttribute("src") || ""
+    expect(before).toMatch(/__omnisight_reload=0/)
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1))
+    const ws = FakeWebSocket.instances[0]
+    ws.emitOpen()
+    ws.emitMessage({ type: "full-reload", path: "*" })
+    await waitFor(() => {
+      const after =
+        screen.getByTestId("live-preview-iframe").getAttribute("src") || ""
+      expect(after).toMatch(/__omnisight_reload=1/)
+      expect(after).not.toBe(before)
+    })
+  })
+
+  it("Vite update payload does NOT bump the iframe nonce (HMR replaces in place)", async () => {
+    getWebSandbox.mockResolvedValue(mkInstance())
+    render(
+      <LivePreviewPanel
+        workspaceId="ws-abc123"
+        webSocketFactory={FakeWebSocket as unknown as typeof WebSocket}
+      />,
+    )
+    const iframe = await screen.findByTestId("live-preview-iframe")
+    const before = iframe.getAttribute("src")
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1))
+    const ws = FakeWebSocket.instances[0]
+    ws.emitOpen()
+    ws.emitMessage({ type: "update", updates: [{ path: "/src/App.tsx" }] })
+    // Brief wait to let any reactive update complete.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(screen.getByTestId("live-preview-iframe").getAttribute("src")).toBe(
+      before,
+    )
+  })
+
+  it("HMR badge falls to stale when the WS closes", async () => {
+    getWebSandbox.mockResolvedValue(mkInstance())
+    render(
+      <LivePreviewPanel
+        workspaceId="ws-abc123"
+        webSocketFactory={FakeWebSocket as unknown as typeof WebSocket}
+      />,
+    )
+    await screen.findByTestId("live-preview-iframe")
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1))
+    FakeWebSocket.instances[0].emitOpen()
+    await waitFor(() =>
+      expect(screen.getByTestId("live-preview-hmr")).toHaveAttribute(
+        "data-hmr-status",
+        "live",
+      ),
+    )
+    FakeWebSocket.instances[0].emitClose()
+    await waitFor(() =>
+      expect(screen.getByTestId("live-preview-hmr")).toHaveAttribute(
+        "data-hmr-status",
+        "stale",
+      ),
+    )
+  })
+
+  it("HMR observer auto-reconnects after a close event", async () => {
+    getWebSandbox.mockResolvedValue(mkInstance())
+    render(
+      <LivePreviewPanel
+        workspaceId="ws-abc123"
+        webSocketFactory={FakeWebSocket as unknown as typeof WebSocket}
+      />,
+    )
+    await screen.findByTestId("live-preview-iframe")
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1))
+    FakeWebSocket.instances[0].emitClose()
+    await waitFor(
+      () => expect(FakeWebSocket.instances.length).toBe(2),
+      { timeout: HMR_RECONNECT_DELAY_MS + 1000 },
+    )
+  })
+
+  it("HMR observer is suppressed when disableHmrObserver=true", async () => {
+    getWebSandbox.mockResolvedValue(mkInstance())
+    render(
+      <LivePreviewPanel
+        workspaceId="ws-abc123"
+        webSocketFactory={FakeWebSocket as unknown as typeof WebSocket}
+        disableHmrObserver
+      />,
+    )
+    await screen.findByTestId("live-preview-iframe")
+    // Brief wait — if the effect fired it would have run by now.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(FakeWebSocket.instances.length).toBe(0)
+    const badge = screen.getByTestId("live-preview-hmr")
+    expect(badge).toHaveAttribute("data-hmr-status", "disabled")
+  })
+
+  it("HMR observer is idle (badge hidden) when sandbox is not running", async () => {
+    getWebSandbox.mockResolvedValue(mkInstance({ status: "installing" }))
+    render(
+      <LivePreviewPanel
+        workspaceId="ws-abc123"
+        webSocketFactory={FakeWebSocket as unknown as typeof WebSocket}
+      />,
+    )
+    await screen.findByTestId("live-preview-installing")
+    expect(FakeWebSocket.instances.length).toBe(0)
+    expect(screen.queryByTestId("live-preview-hmr")).not.toBeInTheDocument()
+  })
+
+  it("HMR observer closes the WS when the panel unmounts", async () => {
+    getWebSandbox.mockResolvedValue(mkInstance())
+    const { unmount } = render(
+      <LivePreviewPanel
+        workspaceId="ws-abc123"
+        webSocketFactory={FakeWebSocket as unknown as typeof WebSocket}
+      />,
+    )
+    await screen.findByTestId("live-preview-iframe")
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1))
+    const ws = FakeWebSocket.instances[0]
+    unmount()
+    expect(ws.closeCalls).toBeGreaterThanOrEqual(1)
   })
 })
 

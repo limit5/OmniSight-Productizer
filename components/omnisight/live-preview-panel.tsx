@@ -3,6 +3,28 @@
 /**
  * W14.6 — Live Web Sandbox Preview Panel.
  *
+ * W14.7 extension — Vite HMR WebSocket observer
+ * ─────────────────────────────────────────────
+ *
+ * On top of the W14.6 surface, the panel also opens a *parallel* WS
+ * connection back to the dev server's HMR endpoint and reports the
+ * link state next to the connection LED. The browser running inside
+ * the iframe already opens its own Vite HMR client (the page Vite
+ * served carries the script tag); the parent panel's observer is
+ * additive — it gives the operator a "HMR live" indicator and, on
+ * Vite ``full-reload`` events, bumps the iframe's reload nonce so
+ * the iframe definitely refreshes even if the inner client got
+ * disconnected (defence-in-depth).
+ *
+ * The W14.3 CF Tunnel ingress rule now ships with a HMR-friendly
+ * ``originRequest`` block (``connectTimeout: 30s``, ``tcpKeepAlive:
+ * 30s``, ``keepAliveTimeout: 900s``, ``disableChunkedEncoding:
+ * false``) so cloudflared does not idle-collect the WebSocket between
+ * Vite update messages — that's the "WebSocket passthrough" half of
+ * W14.7. The frontend's job is to (a) verify the WS does come up,
+ * (b) surface its state to the operator, and (c) auto-bump the iframe
+ * src nonce when Vite says "the next change needs a full reload".
+ *
  * Renders an `<iframe>` wrapper around the per-workspace Vite/Bun/Nuxt
  * sidecar launched by the W14.2 backend (`POST /web-sandbox/preview`).
  * Owns the operator-facing controls the row spec promised:
@@ -106,6 +128,41 @@ import {
 // a single touch fails (stale CF token, transient 5xx).
 export const TOUCH_INTERVAL_MS = 5 * 60 * 1000
 
+// W14.7 — Vite HMR WebSocket subprotocol. Vite's dev client opens
+// the WS with this subprotocol; mirroring it in the parent observer
+// keeps cloudflared from rejecting the upgrade with "subprotocol
+// mismatch".
+export const VITE_HMR_WS_SUBPROTOCOL = "vite-hmr"
+
+// W14.7 — HMR observer reconnection backoff. Vite's own client uses
+// 1 s; we use a small bump to avoid two clients (iframe + observer)
+// dog-piling the dev server during transient drops.
+export const HMR_RECONNECT_DELAY_MS = 1500
+
+export type HmrStatus = "idle" | "connecting" | "live" | "stale" | "disabled"
+
+/**
+ * W14.7 — Convert a preview HTTP(S) URL to its Vite HMR ws(s):// URL.
+ * Vite's HMR endpoint lives at the same host:port:path as the page;
+ * the only difference is the protocol scheme. Returns ``null`` when
+ * the input is empty or unparseable.
+ */
+export function deriveHmrWebSocketUrl(previewUrl: string | null): string | null {
+  if (!previewUrl) return null
+  try {
+    const u = new URL(previewUrl)
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:"
+    // Vite's HMR endpoint is the page's path; drop existing search
+    // and leave a trailing slash so cloudflared routes match the
+    // ingress rule.
+    u.search = ""
+    u.hash = ""
+    return u.toString()
+  } catch {
+    return null
+  }
+}
+
 export type ViewportMode = "auto" | "mobile" | "tablet" | "desktop"
 
 interface ViewportSpec {
@@ -207,6 +264,14 @@ export interface LivePreviewPanelProps {
   /** Optional injection point so tests can drive the touch loop with
    *  fake timers / a deterministic clock. */
   touchIntervalMs?: number
+  /** W14.7 — Disable the parallel HMR WebSocket observer. Defaults to
+   *  ``false`` (observer ON in production); tests pass ``true`` to
+   *  avoid opening a real WebSocket in jsdom. */
+  disableHmrObserver?: boolean
+  /** W14.7 — Inject a custom WebSocket constructor (test seam). When
+   *  omitted the observer falls back to ``globalThis.WebSocket``; if
+   *  that is not available the observer marks itself ``disabled``. */
+  webSocketFactory?: typeof WebSocket
 }
 
 interface PanelState {
@@ -220,6 +285,8 @@ export function LivePreviewPanel({
   workspacePath,
   onClosed,
   touchIntervalMs = TOUCH_INTERVAL_MS,
+  disableHmrObserver = false,
+  webSocketFactory,
 }: LivePreviewPanelProps) {
   const [state, setState] = useState<PanelState>({
     status: "loading",
@@ -231,6 +298,14 @@ export function LivePreviewPanel({
   // Reload nonce — appended to the iframe `src` so the browser refetches
   // even when an aggressive cache would otherwise short-circuit.
   const [reloadNonce, setReloadNonce] = useState(0)
+  // W14.7 — HMR observer state. ``idle`` ⇒ no live sandbox to watch;
+  // ``connecting`` ⇒ ``new WebSocket(...)`` issued, no open event yet;
+  // ``live`` ⇒ open + at least one Vite ``connected`` payload received;
+  // ``stale`` ⇒ the WS dropped and we are between reconnect attempts;
+  // ``disabled`` ⇒ caller passed ``disableHmrObserver`` or the runtime
+  // has no ``WebSocket`` (SSR / paranoid jsdom).
+  const [hmrStatus, setHmrStatus] = useState<HmrStatus>("idle")
+  const [hmrLastEventAt, setHmrLastEventAt] = useState<number | null>(null)
   const mountedRef = useRef(true)
 
   useEffect(() => {
@@ -287,6 +362,117 @@ export function LivePreviewPanel({
     const handle = setInterval(() => { void tick() }, touchIntervalMs)
     return () => { cancelled = true; clearInterval(handle) }
   }, [state.instance, workspaceId, touchIntervalMs])
+
+  // ─── W14.7 — Vite HMR observer ─────────────────────────────────────
+  // Opens a parallel WebSocket to the dev server's HMR endpoint while
+  // the sandbox is ``running`` and reflects the link state next to
+  // the connection LED. On Vite ``full-reload`` payloads we also bump
+  // the iframe reload nonce so the iframe definitely refreshes — the
+  // in-iframe Vite client already handles location.reload(), the
+  // parent's nonce bump is defence-in-depth in case the inner client
+  // got disconnected by a long-running stop-the-world (V8 GC, debugger
+  // pause, etc).
+  useEffect(() => {
+    if (disableHmrObserver) {
+      setHmrStatus("disabled")
+      return
+    }
+    const inst = state.instance
+    if (!inst || inst.status !== "running") {
+      setHmrStatus("idle")
+      return
+    }
+    const previewUrl = pickPreviewUrl(inst)
+    const wsUrl = deriveHmrWebSocketUrl(previewUrl)
+    if (!wsUrl) {
+      setHmrStatus("idle")
+      return
+    }
+    const Ctor: typeof WebSocket | undefined =
+      webSocketFactory ??
+      (typeof globalThis !== "undefined"
+        ? (globalThis as unknown as { WebSocket?: typeof WebSocket }).WebSocket
+        : undefined)
+    if (!Ctor) {
+      setHmrStatus("disabled")
+      return
+    }
+
+    let cancelled = false
+    let socket: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+    const connect = () => {
+      if (cancelled || !mountedRef.current) return
+      setHmrStatus("connecting")
+      try {
+        socket = new Ctor(wsUrl, [VITE_HMR_WS_SUBPROTOCOL])
+      } catch {
+        setHmrStatus("stale")
+        scheduleReconnect()
+        return
+      }
+      socket.onopen = () => {
+        if (cancelled || !mountedRef.current) return
+        setHmrStatus("live")
+        setHmrLastEventAt(Date.now())
+      }
+      socket.onmessage = (ev: MessageEvent) => {
+        if (cancelled || !mountedRef.current) return
+        setHmrLastEventAt(Date.now())
+        let payload: { type?: string } | null = null
+        try {
+          payload = typeof ev.data === "string" ? JSON.parse(ev.data) : null
+        } catch {
+          payload = null
+        }
+        if (payload && payload.type === "full-reload") {
+          // Bump iframe nonce — the inner Vite client also reloads,
+          // but the parent nonce is a no-cost defence-in-depth pin.
+          setReloadNonce((n) => n + 1)
+        }
+      }
+      socket.onclose = () => {
+        if (cancelled || !mountedRef.current) return
+        setHmrStatus("stale")
+        scheduleReconnect()
+      }
+      socket.onerror = () => {
+        if (cancelled || !mountedRef.current) return
+        setHmrStatus("stale")
+      }
+    }
+
+    const scheduleReconnect = () => {
+      if (cancelled || !mountedRef.current) return
+      if (reconnectTimer !== null) return
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        connect()
+      }, HMR_RECONNECT_DELAY_MS)
+    }
+
+    connect()
+
+    return () => {
+      cancelled = true
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+      if (socket !== null) {
+        try {
+          socket.close()
+        } catch {
+          /* swallow — closing a half-open socket is a no-op */
+        }
+      }
+    }
+  }, [
+    state.instance,
+    disableHmrObserver,
+    webSocketFactory,
+  ])
 
   const handleLaunch = useCallback(async () => {
     setBusy(true)
@@ -369,6 +555,7 @@ export function LivePreviewPanel({
       {/* ─── Toolbar ─── */}
       <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] px-3 py-2">
         <StatusBadge status={status} />
+        <HmrBadge status={hmrStatus} lastEventAt={hmrLastEventAt} />
         <div className="hidden flex-1 truncate text-[10px] font-mono text-[var(--muted-foreground)] sm:block">
           {previewUrl ?? "—"}
         </div>
@@ -524,6 +711,64 @@ function StatusBadge({ status }: { status: WebSandboxStatus | null }) {
         style={{ backgroundColor: color, boxShadow: `0 0 6px ${color}` }}
       />
       {label}
+    </span>
+  )
+}
+
+// W14.7 — HMR observer badge. Renders a small chip next to the
+// status LED reflecting the parallel HMR WebSocket state. Hidden in
+// the ``idle`` state so the toolbar stays calm while no sandbox is
+// running.
+const HMR_LABEL: Record<HmrStatus, string> = {
+  idle: "HMR",
+  connecting: "HMR…",
+  live: "HMR",
+  stale: "HMR ⚠",
+  disabled: "HMR—",
+}
+
+const HMR_COLOR: Record<HmrStatus, string> = {
+  idle: "var(--muted-foreground)",
+  connecting: "var(--neural-blue)",
+  live: "var(--validation-emerald)",
+  stale: "var(--critical-red)",
+  disabled: "var(--muted-foreground)",
+}
+
+function HmrBadge({
+  status,
+  lastEventAt,
+}: {
+  status: HmrStatus
+  lastEventAt: number | null
+}) {
+  if (status === "idle") return null
+  const color = HMR_COLOR[status]
+  const title =
+    status === "live" && lastEventAt
+      ? `Vite HMR — last event ${new Date(lastEventAt).toLocaleTimeString()}`
+      : status === "live"
+        ? "Vite HMR — connected"
+        : status === "connecting"
+          ? "Vite HMR — connecting"
+          : status === "stale"
+            ? "Vite HMR — disconnected, reconnecting"
+            : "Vite HMR — disabled"
+  return (
+    <span
+      data-testid="live-preview-hmr"
+      data-hmr-status={status}
+      title={title}
+      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider"
+      style={{ color }}
+    >
+      <span
+        aria-hidden
+        data-testid="live-preview-hmr-led"
+        className="inline-block h-1.5 w-1.5 rounded-full"
+        style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}` }}
+      />
+      {HMR_LABEL[status]}
     </span>
   )
 }

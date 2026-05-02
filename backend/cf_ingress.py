@@ -107,6 +107,7 @@ __all__ = [
     "DEFAULT_HTTP_TIMEOUT_S",
     "PREVIEW_HOSTNAME_PREFIX",
     "DEFAULT_INGRESS_FALLBACK",
+    "DEFAULT_HMR_ORIGIN_REQUEST",
     "CFIngressError",
     "CFIngressAPIError",
     "CFIngressNotFound",
@@ -117,6 +118,7 @@ __all__ = [
     "CFIngressManager",
     "build_ingress_hostname",
     "build_ingress_service_url",
+    "build_hmr_origin_request",
     "compute_ingress_rules_add",
     "compute_ingress_rules_remove",
     "find_ingress_rule",
@@ -154,6 +156,52 @@ PREVIEW_HOSTNAME_PREFIX = "preview-"
 #: when one is missing we synthesise this default.
 DEFAULT_INGRESS_FALLBACK: Mapping[str, Any] = MappingProxyType(
     {"service": "http_status:404"}
+)
+
+
+#: W14.7 — WebSocket-friendly ``originRequest`` block spliced into every
+#: per-sandbox ingress rule by default so Vite HMR / Bun / Nuxt dev
+#: WebSocket connections survive ``cloudflared``'s default 100-second
+#: idle window. Each value is the canonical Go-duration string the
+#: ``cloudflared`` config schema accepts.
+#:
+#:   * ``connectTimeout`` — how long ``cloudflared`` will wait to dial
+#:     the loopback origin (W14.2 ``host_port``). 30s gives the docker
+#:     daemon room to publish the port even when the sidecar's first
+#:     ``pnpm dev`` is still optimising the dep graph.
+#:   * ``tcpKeepAlive`` — keep-alive interval on the underlying TCP
+#:     socket. 30s matches the default but pinning makes the intent
+#:     explicit so a future cloudflared default change does not silently
+#:     starve HMR connections.
+#:   * ``keepAliveTimeout`` — max time between HTTP keep-alive packets.
+#:     900s (15 min) is past the typical Vite "no edits for a while"
+#:     window so the WS does not get evicted from CF's idle pool while
+#:     the operator is reading docs in another tab. The W14.5 idle
+#:     reaper still kills the *sandbox* at 30 min — this only affects
+#:     the WS lifetime under continuous mount.
+#:   * ``keepAliveConnections`` — bound the connector's per-rule
+#:     connection-pool size. 100 is conservative for a single-operator
+#:     preview but leaves headroom for HMR + page nav + iframe poll.
+#:   * ``noTLSVerify`` — origin (Vite dev server) is plain HTTP on the
+#:     loopback so TLS verification is irrelevant; pin ``false`` so
+#:     when an operator points the rule at a TLS origin it fails
+#:     loudly rather than silently bypassing cert checks.
+#:   * ``disableChunkedEncoding`` — must be ``false`` for WebSocket
+#:     upgrade negotiation. Pinning it explicitly means a future
+#:     cloudflared default flip does not break HMR.
+#:
+#: Mutating this constant from outside is rejected by ``MappingProxyType``;
+#: callers wanting a per-launch override pass ``origin_request=...``
+#: into :func:`compute_ingress_rules_add` / :meth:`CFIngressManager.create_rule`.
+DEFAULT_HMR_ORIGIN_REQUEST: Mapping[str, Any] = MappingProxyType(
+    {
+        "connectTimeout": "30s",
+        "tcpKeepAlive": "30s",
+        "keepAliveTimeout": "900s",
+        "keepAliveConnections": 100,
+        "noTLSVerify": False,
+        "disableChunkedEncoding": False,
+    }
 )
 
 
@@ -375,23 +423,65 @@ def find_ingress_rule(
     return None
 
 
+def build_hmr_origin_request(
+    overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a fresh copy of :data:`DEFAULT_HMR_ORIGIN_REQUEST`, optionally
+    layering caller overrides on top.
+
+    Pure helper — used by :meth:`CFIngressManager.create_rule` to stamp
+    every per-sandbox rule with WebSocket-friendly timeouts so Vite HMR
+    survives the default ``cloudflared`` idle window. Callers (tests,
+    custom dev environments) may override individual fields without
+    touching the module-level immutable constant. Override values are
+    sanity-checked: keys must be non-empty strings, values must be
+    JSON-serialisable scalars (str / int / float / bool).
+    """
+
+    body: dict[str, Any] = {k: v for k, v in DEFAULT_HMR_ORIGIN_REQUEST.items()}
+    if overrides is None:
+        return body
+    if not isinstance(overrides, Mapping):
+        raise CFIngressError("origin_request overrides must be a Mapping")
+    for key, value in overrides.items():
+        if not isinstance(key, str) or not key.strip():
+            raise CFIngressError("origin_request keys must be non-empty strings")
+        if not isinstance(value, (str, int, float, bool)):
+            raise CFIngressError(
+                f"origin_request values must be JSON scalars, got {type(value).__name__}"
+            )
+        body[key] = value
+    return body
+
+
 def compute_ingress_rules_add(
     existing: list[Mapping[str, Any]],
     *,
     hostname: str,
     service_url: str,
+    origin_request: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return a new rules list with ``hostname → service_url`` spliced
     in **before** the fallback rule.
 
     Idempotent: if the rules list already contains a rule for
-    ``hostname`` whose ``service`` matches ``service_url`` exactly,
-    the input is returned unchanged (deep-copied to avoid aliasing).
-    If the hostname matches but the service URL drifted (operator
-    relaunched on a different host_port), the existing rule is
-    *replaced* — the W14.3 contract is "this hostname always points
-    at the latest sandbox for this workspace_id", which keeps the CF
-    config from accumulating dead rules across restarts.
+    ``hostname`` whose ``service`` matches ``service_url`` exactly
+    **and** whose ``originRequest`` block matches the caller-supplied
+    one, the input is returned unchanged (deep-copied to avoid aliasing).
+    If the hostname matches but the service URL or originRequest
+    drifted (operator relaunched on a different host_port; W14.7 first
+    rolled out HMR-friendly timeouts), the existing rule is *replaced* —
+    the W14.3 contract is "this hostname always points at the latest
+    sandbox for this workspace_id" + the W14.7 contract is "every
+    per-sandbox rule carries the canonical HMR-friendly originRequest",
+    which keeps the CF config from accumulating dead or stale rules
+    across restarts.
+
+    ``origin_request`` is the W14.7 hook: when ``None`` the rule is
+    written without an originRequest block (legacy W14.3 shape); when
+    a Mapping is supplied it is shallow-copied into the rule. Pass
+    :func:`build_hmr_origin_request` to get the WebSocket-friendly
+    defaults.
 
     Pure function — caller is responsible for the live-config GET +
     PUT round-trip.
@@ -403,8 +493,12 @@ def compute_ingress_rules_add(
         raise CFIngressError("service_url must be non-empty")
     if not isinstance(existing, list):
         raise CFIngressError("existing must be a list of mappings")
+    if origin_request is not None and not isinstance(origin_request, Mapping):
+        raise CFIngressError("origin_request must be None or a Mapping")
 
-    new_rule = {"hostname": hostname, "service": service_url}
+    new_rule: dict[str, Any] = {"hostname": hostname, "service": service_url}
+    if origin_request is not None:
+        new_rule["originRequest"] = dict(origin_request)
     fallback = extract_fallback_rule(existing)
     body: list[dict[str, Any]] = []
     replaced = False
@@ -741,6 +835,7 @@ class CFIngressManager:
         *,
         sandbox_id: str,
         host_port: int,
+        origin_request: Mapping[str, Any] | None = None,
     ) -> str:
         """Add (or refresh) a rule for ``sandbox_id`` and return the
         public ``https://...`` URL.
@@ -751,6 +846,14 @@ class CFIngressManager:
         restarted with a different port), the existing rule is
         *replaced* — the public URL stays stable, the in-tunnel
         target updates to the new port.
+
+        ``origin_request`` is the W14.7 hook. When ``None`` the manager
+        stamps :func:`build_hmr_origin_request` onto every per-sandbox
+        rule so Vite HMR / Bun / Nuxt WebSocket connections survive
+        ``cloudflared``'s default 100-second idle window. Callers may
+        pass an explicit Mapping (overrides are layered on top of the
+        defaults) or pass an empty dict to disable the block entirely
+        (rare — only useful for triage of a misbehaving connector).
 
         Raises :class:`CFIngressAPIError` when the CF API rejects
         either the GET or the PUT — the launcher catches and folds
@@ -763,11 +866,20 @@ class CFIngressManager:
         service_url = build_ingress_service_url(
             host_port, host=self._config.service_host
         )
+        if origin_request is None:
+            effective_origin_request: Mapping[str, Any] | None = build_hmr_origin_request()
+        elif isinstance(origin_request, Mapping) and len(origin_request) == 0:
+            effective_origin_request = None
+        else:
+            effective_origin_request = build_hmr_origin_request(origin_request)
         with self._lock:
             current = self._client.get_tunnel_config()
             ingress = list(current.get("ingress") or [])
             new_ingress = compute_ingress_rules_add(
-                ingress, hostname=hostname, service_url=service_url
+                ingress,
+                hostname=hostname,
+                service_url=service_url,
+                origin_request=effective_origin_request,
             )
             if new_ingress != ingress:
                 merged = dict(current)

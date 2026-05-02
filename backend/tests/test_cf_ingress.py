@@ -59,6 +59,7 @@ EXPECTED_ALL = {
     "DEFAULT_HTTP_TIMEOUT_S",
     "PREVIEW_HOSTNAME_PREFIX",
     "DEFAULT_INGRESS_FALLBACK",
+    "DEFAULT_HMR_ORIGIN_REQUEST",
     "CFIngressError",
     "CFIngressAPIError",
     "CFIngressNotFound",
@@ -69,6 +70,7 @@ EXPECTED_ALL = {
     "CFIngressManager",
     "build_ingress_hostname",
     "build_ingress_service_url",
+    "build_hmr_origin_request",
     "compute_ingress_rules_add",
     "compute_ingress_rules_remove",
     "find_ingress_rule",
@@ -971,10 +973,15 @@ def test_manager_create_rule_happy_path() -> None:
 
 
 def test_manager_create_rule_idempotent_no_put_when_already_present() -> None:
+    # W14.7: "already in target shape" now includes the HMR-friendly
+    # originRequest block. Seeding a rule without originRequest is the
+    # legacy → upgraded migration case; that path is covered by
+    # test_manager_create_rule_upgrades_legacy_rule_missing_origin_request.
     seed = [
         {
             "hostname": "preview-ws-1234abcd.ai.sora-dev.app",
             "service": "http://127.0.0.1:41001",
+            "originRequest": dict(ci.DEFAULT_HMR_ORIGIN_REQUEST),
         },
         {"service": "http_status:404"},
     ]
@@ -1256,3 +1263,239 @@ def test_eight_workers_compute_same_hostname() -> None:
 
     hosts = {build_ingress_hostname("ws-deadbeef", "ai.sora-dev.app") for _ in range(8)}
     assert len(hosts) == 1
+
+
+# ──────────────────────────────────────────────────────────────────
+#  W14.7 — HMR-friendly originRequest + WebSocket passthrough
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_w14_7_default_origin_request_pins_required_keys() -> None:
+    """Drift guard: the default originRequest must carry the six
+    cloudflared knobs the W14.7 spec promises."""
+
+    body = dict(ci.DEFAULT_HMR_ORIGIN_REQUEST)
+    assert set(body.keys()) == {
+        "connectTimeout",
+        "tcpKeepAlive",
+        "keepAliveTimeout",
+        "keepAliveConnections",
+        "noTLSVerify",
+        "disableChunkedEncoding",
+    }
+
+
+def test_w14_7_default_origin_request_values() -> None:
+    body = dict(ci.DEFAULT_HMR_ORIGIN_REQUEST)
+    assert body["connectTimeout"] == "30s"
+    assert body["tcpKeepAlive"] == "30s"
+    assert body["keepAliveTimeout"] == "900s"
+    assert body["keepAliveConnections"] == 100
+    assert body["noTLSVerify"] is False
+    assert body["disableChunkedEncoding"] is False
+
+
+def test_w14_7_default_origin_request_is_immutable() -> None:
+    """``MappingProxyType`` rejects mutation; this is the contract for
+    "callers may read but never mutate the canonical default"."""
+
+    with pytest.raises(TypeError):
+        ci.DEFAULT_HMR_ORIGIN_REQUEST["connectTimeout"] = "1s"  # type: ignore[index]
+
+
+def test_w14_7_build_hmr_origin_request_returns_fresh_copy() -> None:
+    a = ci.build_hmr_origin_request()
+    b = ci.build_hmr_origin_request()
+    assert a == b
+    a["connectTimeout"] = "1s"
+    # The default constant + the second call must not have been mutated.
+    assert ci.DEFAULT_HMR_ORIGIN_REQUEST["connectTimeout"] == "30s"
+    assert b["connectTimeout"] == "30s"
+
+
+def test_w14_7_build_hmr_origin_request_layers_overrides() -> None:
+    body = ci.build_hmr_origin_request({"connectTimeout": "45s"})
+    assert body["connectTimeout"] == "45s"
+    # Untouched keys still carry the defaults.
+    assert body["keepAliveTimeout"] == "900s"
+    assert body["disableChunkedEncoding"] is False
+
+
+def test_w14_7_build_hmr_origin_request_rejects_non_mapping() -> None:
+    with pytest.raises(CFIngressError):
+        ci.build_hmr_origin_request("not a mapping")  # type: ignore[arg-type]
+
+
+def test_w14_7_build_hmr_origin_request_rejects_empty_key() -> None:
+    with pytest.raises(CFIngressError):
+        ci.build_hmr_origin_request({"": "30s"})
+
+
+def test_w14_7_build_hmr_origin_request_rejects_non_scalar_value() -> None:
+    with pytest.raises(CFIngressError):
+        ci.build_hmr_origin_request({"connectTimeout": ["30s"]})  # type: ignore[dict-item]
+
+
+def test_w14_7_build_hmr_origin_request_accepts_bool_int_float() -> None:
+    body = ci.build_hmr_origin_request(
+        {"noTLSVerify": True, "keepAliveConnections": 200, "extra_float": 1.5}
+    )
+    assert body["noTLSVerify"] is True
+    assert body["keepAliveConnections"] == 200
+    assert body["extra_float"] == 1.5
+
+
+def test_w14_7_compute_add_includes_origin_request_when_supplied() -> None:
+    out = compute_ingress_rules_add(
+        [],
+        hostname="preview-ws-deadbeef.x.com",
+        service_url="http://127.0.0.1:41001",
+        origin_request=ci.build_hmr_origin_request(),
+    )
+    new_rule = out[0]
+    assert "originRequest" in new_rule
+    assert new_rule["originRequest"]["disableChunkedEncoding"] is False
+
+
+def test_w14_7_compute_add_omits_origin_request_when_none() -> None:
+    """Backward compat: passing ``origin_request=None`` keeps the
+    legacy W14.3 shape (no originRequest field), so callers that have
+    not yet upgraded continue to work."""
+
+    out = compute_ingress_rules_add(
+        [],
+        hostname="preview-ws-deadbeef.x.com",
+        service_url="http://127.0.0.1:41001",
+        origin_request=None,
+    )
+    assert "originRequest" not in out[0]
+
+
+def test_w14_7_compute_add_replaces_when_origin_request_drifts() -> None:
+    """If a legacy rule (no originRequest) already exists for the
+    hostname, supplying an origin_request triggers a replacement so
+    every per-sandbox rule converges on the HMR-friendly shape."""
+
+    existing: list[Mapping[str, Any]] = [
+        {
+            "hostname": "preview-ws-deadbeef.x.com",
+            "service": "http://127.0.0.1:41001",
+        },
+        {"service": "http_status:404"},
+    ]
+    out = compute_ingress_rules_add(
+        existing,
+        hostname="preview-ws-deadbeef.x.com",
+        service_url="http://127.0.0.1:41001",
+        origin_request=ci.build_hmr_origin_request(),
+    )
+    target = next(r for r in out if r.get("hostname") == "preview-ws-deadbeef.x.com")
+    assert "originRequest" in target
+
+
+def test_w14_7_compute_add_rejects_non_mapping_origin_request() -> None:
+    with pytest.raises(CFIngressError):
+        compute_ingress_rules_add(
+            [],
+            hostname="preview-ws-deadbeef.x.com",
+            service_url="http://127.0.0.1:41001",
+            origin_request="not a mapping",  # type: ignore[arg-type]
+        )
+
+
+def test_w14_7_manager_create_rule_default_stamps_hmr_origin_request() -> None:
+    """Production behaviour: callers who don't pass origin_request get
+    the HMR-friendly defaults stamped onto the new rule automatically."""
+
+    manager, fake = _make_manager()
+    manager.create_rule(sandbox_id="ws-deadbeef", host_port=41001)
+    rules = fake.current_ingress()
+    target = next(
+        r for r in rules if r.get("hostname") == "preview-ws-deadbeef.ai.sora-dev.app"
+    )
+    assert target["originRequest"] == dict(ci.DEFAULT_HMR_ORIGIN_REQUEST)
+
+
+def test_w14_7_manager_create_rule_caller_overrides_layer_on_top() -> None:
+    manager, fake = _make_manager()
+    manager.create_rule(
+        sandbox_id="ws-deadbeef",
+        host_port=41001,
+        origin_request={"connectTimeout": "45s"},
+    )
+    rules = fake.current_ingress()
+    target = next(
+        r for r in rules if r.get("hostname") == "preview-ws-deadbeef.ai.sora-dev.app"
+    )
+    assert target["originRequest"]["connectTimeout"] == "45s"
+    # Other defaults still present.
+    assert target["originRequest"]["keepAliveTimeout"] == "900s"
+
+
+def test_w14_7_manager_create_rule_empty_dict_disables_origin_request() -> None:
+    """Caller may explicitly opt-out by passing an empty dict — the
+    rule then has the legacy W14.3 shape (no originRequest). Only
+    used for triage of misbehaving connectors."""
+
+    manager, fake = _make_manager()
+    manager.create_rule(
+        sandbox_id="ws-deadbeef", host_port=41001, origin_request={}
+    )
+    rules = fake.current_ingress()
+    target = next(
+        r for r in rules if r.get("hostname") == "preview-ws-deadbeef.ai.sora-dev.app"
+    )
+    assert "originRequest" not in target
+
+
+def test_w14_7_manager_create_rule_upgrades_legacy_rule_missing_origin_request() -> None:
+    """Migration path: a legacy rule (no originRequest) gets replaced
+    with the HMR-friendly shape on the next ``create_rule`` call.
+    This is the W14.7 first-rollout behaviour — every restart re-stamps
+    rules so an existing fleet converges on WebSocket-friendly defaults
+    without requiring an explicit migration script."""
+
+    seed = [
+        {
+            "hostname": "preview-ws-deadbeef.ai.sora-dev.app",
+            "service": "http://127.0.0.1:41001",
+        },
+        {"service": "http_status:404"},
+    ]
+    manager, fake = _make_manager(ingress=seed)
+    manager.create_rule(sandbox_id="ws-deadbeef", host_port=41001)
+    # PUT must have been issued because the rule needed upgrading.
+    assert len(fake.puts) == 1
+    rules = fake.current_ingress()
+    target = next(
+        r for r in rules if r.get("hostname") == "preview-ws-deadbeef.ai.sora-dev.app"
+    )
+    assert target["originRequest"]["disableChunkedEncoding"] is False
+
+
+def test_w14_7_manager_create_rule_idempotent_when_origin_request_already_canonical() -> None:
+    """Once a rule has the canonical originRequest, a re-launch with
+    the same host_port produces no PUT (idempotent)."""
+
+    seed = [
+        {
+            "hostname": "preview-ws-deadbeef.ai.sora-dev.app",
+            "service": "http://127.0.0.1:41001",
+            "originRequest": dict(ci.DEFAULT_HMR_ORIGIN_REQUEST),
+        },
+        {"service": "http_status:404"},
+    ]
+    manager, fake = _make_manager(ingress=seed)
+    manager.create_rule(sandbox_id="ws-deadbeef", host_port=41001)
+    assert fake.gets == 1
+    assert fake.puts == []
+
+
+def test_w14_7_eight_workers_stamp_identical_origin_request() -> None:
+    """Cross-worker contract: every uvicorn worker stamps a byte-equal
+    originRequest body so concurrent re-launches converge on the same
+    canonical rule."""
+
+    bodies = [ci.build_hmr_origin_request() for _ in range(8)]
+    first = bodies[0]
+    assert all(b == first for b in bodies)
