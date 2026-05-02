@@ -14,6 +14,17 @@ from backend.email_delivery.base import (
     InvalidEmailDeliveryTokenError,
     MissingEmailDeliveryScopeError,
 )
+from backend.email_delivery.templates import (
+    EMAIL_TEMPLATE_IDS,
+    EMAIL_TEMPLATE_ITEMS,
+    EMAIL_TEMPLATES,
+    EmailTemplateItem,
+    EmailTemplateRenderOptions,
+    MissingEmailTemplateVariableError,
+    get_email_template,
+    list_email_templates,
+    render_email_template,
+)
 
 
 def list_providers() -> list[str]:
@@ -48,8 +59,17 @@ __all__ = [
     "EmailDeliveryRateLimitError",
     "EmailDeliveryResult",
     "EmailMessage",
+    "EMAIL_TEMPLATE_IDS",
+    "EMAIL_TEMPLATE_ITEMS",
+    "EMAIL_TEMPLATES",
+    "EmailTemplateItem",
+    "EmailTemplateRenderOptions",
     "InvalidEmailDeliveryTokenError",
     "MissingEmailDeliveryScopeError",
+    "MissingEmailTemplateVariableError",
     "get_adapter",
+    "get_email_template",
+    "list_email_templates",
     "list_providers",
+    "render_email_template",
 ]
