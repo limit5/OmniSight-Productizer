@@ -106,6 +106,19 @@ class TestStorageProvisionResult:
         assert data["created"] is True
         assert data["region"] == "us-east-1"
 
+    def test_to_dict_omits_raw_payload(self):
+        result = StorageProvisionResult(
+            provider="r2",
+            bucket_name="tenant-demo",
+            bucket_id="tenant-demo",
+            raw={"token": "provider-secret"},
+        )
+
+        data = result.to_dict()
+
+        assert "raw" not in data
+        assert "provider-secret" not in repr(data)
+
 
 class TestPresignedStorageUrl:
 
@@ -156,6 +169,20 @@ class TestStorageCorsConfig:
         with pytest.raises(ValueError, match="allowed_origins"):
             StorageCorsConfig(allowed_origins=[" "])
 
+    def test_rejects_empty_methods(self):
+        with pytest.raises(ValueError, match="allowed_methods"):
+            StorageCorsConfig(
+                allowed_origins=["https://app.example.com"],
+                allowed_methods=[" "],
+            )
+
+    def test_rejects_negative_max_age(self):
+        with pytest.raises(ValueError, match="max_age_seconds"):
+            StorageCorsConfig(
+                allowed_origins=["https://app.example.com"],
+                max_age_seconds=-1,
+            )
+
 
 class TestStorageCorsResult:
 
@@ -191,3 +218,12 @@ class TestInterfaceContract:
 
     def test_rate_limit_error_is_storage_provision_error_subclass(self):
         assert issubclass(StorageProvisionRateLimitError, StorageProvisionError)
+
+    def test_get_bucket_config_is_empty_before_provision(self):
+        adapter = get_adapter("s3")(
+            token="aws_secret_ABCDEF0123456789",
+            access_key_id="AKIA0123456789",
+            bucket_name="tenant-demo",
+        )
+
+        assert adapter.get_bucket_config() is None

@@ -150,6 +150,15 @@ class TestCorsConfig:
         assert b"<AllowedHeader>authorization</AllowedHeader>" in body
         assert b"<MaxAgeSeconds>60</MaxAgeSeconds>" in body
 
+    @respx.mock
+    async def test_configure_cors_maps_provider_errors(self):
+        respx.put(f"{S}/tenant-demo?cors").mock(return_value=httpx.Response(403, text="scope"))
+
+        with pytest.raises(MissingStorageProvisionScopeError):
+            await _mk_adapter().configure_cors(
+                StorageCorsConfig(allowed_origins=["https://app.example.com"]),
+            )
+
 
 class TestPresignedUrl:
 
@@ -195,3 +204,7 @@ class TestPresignedUrl:
     async def test_rejects_invalid_expiry(self):
         with pytest.raises(ValueError, match="expires_in"):
             await _mk_adapter().generate_presigned_url("a.txt", expires_in=604801)
+
+    async def test_rejects_empty_object_key(self):
+        with pytest.raises(ValueError, match="object_key is required"):
+            await _mk_adapter().generate_presigned_url("/")

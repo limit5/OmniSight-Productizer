@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
 from urllib.parse import parse_qs, urlparse
 
@@ -59,6 +60,15 @@ class TestProvision:
             route.calls.last.request.read()
         )
         assert "/auto/s3/aws4_request" in route.calls.last.request.headers["authorization"]
+
+    def test_requires_account_id(self):
+        with pytest.raises(ValueError, match="account_id"):
+            R2StorageProvisionAdapter(
+                token="r2_secret_ABCDEF0123456789",
+                access_key_id="r2_access_123",
+                account_id="",
+                bucket_name="tenant-demo",
+            )
 
 
 class TestPresignedUrl:

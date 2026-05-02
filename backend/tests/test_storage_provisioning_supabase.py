@@ -9,7 +9,9 @@ import respx
 from backend.storage_provisioning.base import (
     InvalidStorageProvisionTokenError,
     MissingStorageProvisionScopeError,
+    StorageCorsConfig,
     StorageProvisionConflictError,
+    StorageProvisionError,
     StorageProvisionRateLimitError,
 )
 from backend.storage_provisioning.supabase import (
@@ -179,6 +181,15 @@ class TestCorsConfig:
         assert result.provider == "supabase-storage"
         assert result.cors.allowed_origins == ["https://studio.example.com"]
 
+    @respx.mock
+    async def test_configure_cors_maps_provider_errors(self):
+        respx.patch(f"{S}/buckets/tenant-demo").mock(return_value=_err(403, "scope"))
+
+        with pytest.raises(MissingStorageProvisionScopeError):
+            await _mk_adapter().configure_cors(
+                StorageCorsConfig(allowed_origins=["https://app.example.com"]),
+            )
+
 
 class TestPresignedUrl:
 
@@ -214,6 +225,13 @@ class TestPresignedUrl:
         result = await _mk_adapter().generate_presigned_url("a.txt")
 
         assert result.url == signed
+
+    @respx.mock
+    async def test_rejects_missing_signed_url_response(self):
+        respx.post(f"{S}/object/sign/tenant-demo/a.txt").mock(return_value=_ok({"id": "a"}))
+
+        with pytest.raises(StorageProvisionError, match="missing signedURL"):
+            await _mk_adapter().generate_presigned_url("a.txt")
 
     async def test_rejects_put_method(self):
         with pytest.raises(ValueError, match="currently support GET"):
