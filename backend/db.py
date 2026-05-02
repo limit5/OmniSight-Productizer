@@ -1504,6 +1504,23 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_provider_expires
     ON oauth_tokens(provider, expires_at);
+
+-- FS.1.3 (alembic 0061): tenant-owned DB provisioning registry.
+-- The encrypted connection URL is stored as ciphertext only; plaintext
+-- DSNs stay in transient adapter / migration-runner memory.  Composite
+-- PK ``(tenant_id, provider)`` mirrors alembic 0061 and keeps the table
+-- within the five-column TODO surface while allowing one recorded DB per
+-- tenant/provider pair.
+CREATE TABLE IF NOT EXISTS provisioned_databases (
+    tenant_id          TEXT NOT NULL
+                            REFERENCES tenants(id) ON DELETE CASCADE,
+    provider           TEXT NOT NULL
+                            CHECK (provider IN ('neon','planetscale','supabase')),
+    connection_url_enc TEXT NOT NULL,
+    created_at         REAL NOT NULL,
+    status             TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, provider)
+);
 """
 
 
