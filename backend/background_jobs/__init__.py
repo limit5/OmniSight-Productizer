@@ -21,6 +21,12 @@ from backend.background_jobs.definitions import (
     get_background_job_definition,
     list_background_job_definitions,
 )
+from backend.background_jobs.schedules import (
+    CronScheduleBinding,
+    build_cron_schedule_bindings,
+    build_cron_schedule_manifest,
+    get_cron_schedule_binding,
+)
 
 
 def list_providers() -> list[str]:
@@ -60,8 +66,12 @@ __all__ = [
     "BackgroundJobDefinition",
     "InvalidBackgroundJobTokenError",
     "MissingBackgroundJobScopeError",
+    "CronScheduleBinding",
+    "build_cron_schedule_bindings",
+    "build_cron_schedule_manifest",
     "get_background_job_definition",
     "get_adapter",
+    "get_cron_schedule_binding",
     "list_background_job_definitions",
     "list_providers",
 ]
