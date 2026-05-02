@@ -58,6 +58,10 @@ from backend.agents.skills_loader import (  # noqa: E402
     make_skill_handler,
     render_catalog_for_prompt,
 )
+from backend.agents.sub_agent import (  # noqa: E402
+    list_default_subagent_types,
+    make_agent_tool_handler,
+)
 
 
 # ─── Graceful shutdown ───────────────────────────────────────────
@@ -103,9 +107,11 @@ SECTION_COOLDOWN_S = int(os.environ.get("OMNISIGHT_SDK_SECTION_COOLDOWN", "10"))
 DAILY_BUDGET_USD = float(os.environ.get("OMNISIGHT_SDK_DAILY_BUDGET", "0") or 0)
 
 # Tools the agent loop is allowed to call. Wired in runner_handlers +
-# skills_loader (Skill is registered dynamically at startup once the
-# skill registry is built).
-RUNNER_TOOLS: list[str] = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Skill"]
+# skills_loader + sub_agent (Skill / Agent are registered dynamically at
+# startup once the registry / dispatcher are ready).
+RUNNER_TOOLS: list[str] = [
+    "Read", "Write", "Edit", "Bash", "Grep", "Glob", "Skill", "Agent",
+]
 
 # OMNISIGHT_SDK_DISABLE_SKILLS=1 silences the loader entirely (drops "Skill"
 # from RUNNER_TOOLS, no catalog injection). Useful for benchmark / size
@@ -113,6 +119,13 @@ RUNNER_TOOLS: list[str] = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Ski
 SKILLS_DISABLED = os.environ.get("OMNISIGHT_SDK_DISABLE_SKILLS", "").strip().lower() in {
     "1", "true", "yes", "on",
 }
+
+# OMNISIGHT_SDK_DISABLE_SUBAGENTS=1 drops "Agent" from RUNNER_TOOLS so the
+# parent loop cannot spawn sub-agents. Useful when budget is tight or
+# when the LLM has been observed over-using sub-agents on simple tasks.
+SUBAGENTS_DISABLED = os.environ.get(
+    "OMNISIGHT_SDK_DISABLE_SUBAGENTS", ""
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ─── Track filter (parallel-worker support) ──────────────────────
@@ -436,16 +449,16 @@ async def main() -> None:
 
     # Skills: load 3-scope registry, register Skill tool handler on the
     # SAME dispatcher so AnthropicClient's tool loop can resolve it.
+    active_tools = list(RUNNER_TOOLS)
     if SKILLS_DISABLED:
         skill_registry = SkillRegistry()
-        active_tools = [t for t in RUNNER_TOOLS if t != "Skill"]
+        active_tools = [t for t in active_tools if t != "Skill"]
         skills_catalog = ""
         print("🎒 Skills: disabled via OMNISIGHT_SDK_DISABLE_SKILLS")
     else:
         skill_registry = load_default_scopes(BASE_DIR)
         if len(skill_registry) > 0:
             dispatcher.register("Skill", make_skill_handler(skill_registry))
-            active_tools = list(RUNNER_TOOLS)
             skills_catalog = render_catalog_for_prompt(skill_registry)
             print(
                 f"🎒 Skills: {len(skill_registry)} loaded "
@@ -454,7 +467,7 @@ async def main() -> None:
         else:
             # Empty registry → drop Skill tool to avoid the LLM calling a
             # tool that has no entries.
-            active_tools = [t for t in RUNNER_TOOLS if t != "Skill"]
+            active_tools = [t for t in active_tools if t != "Skill"]
             skills_catalog = ""
             print("🎒 Skills: none found")
 
@@ -463,6 +476,39 @@ async def main() -> None:
         max_tokens_default=MAX_TOKENS,
         dispatcher=dispatcher,
     )
+
+    # Sub-agent (Agent tool): handler needs the client reference, so
+    # register AFTER client construction. Closure captures client; the
+    # sub-agent re-uses the same dispatcher → inherits sandboxed handlers.
+    if SUBAGENTS_DISABLED:
+        active_tools = [t for t in active_tools if t != "Agent"]
+        print("🧩 Sub-agents: disabled via OMNISIGHT_SDK_DISABLE_SUBAGENTS")
+    else:
+        _subagent_call_count = {"n": 0}
+
+        def _on_subagent(info: dict) -> None:
+            _subagent_call_count["n"] += 1
+            print(
+                f"   🧩 sub-agent #{_subagent_call_count['n']} "
+                f"({info['subagent_type']} on {info['model']}, "
+                f"max_iter={info['max_iterations']}): "
+                f"{info['description'][:70]}"
+            )
+
+        dispatcher.register(
+            "Agent",
+            make_agent_tool_handler(
+                client=client,
+                parent_system_suffix=(
+                    f"# Inherited execution context\n"
+                    f"PROJECT_ROOT: {BASE_DIR}\n"
+                    f"All tool paths must be inside PROJECT_ROOT — sandboxed.\n"
+                ),
+                on_dispatch=_on_subagent,
+            ),
+        )
+        types_avail = ", ".join(list_default_subagent_types())
+        print(f"🧩 Sub-agents: enabled ({types_avail})")
     cost_store = InMemoryCostStore()
     cost_guard = CostGuard(store=cost_store)
 
