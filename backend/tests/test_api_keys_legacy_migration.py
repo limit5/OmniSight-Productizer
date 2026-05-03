@@ -28,6 +28,7 @@ Two tests:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 import pytest
 
@@ -159,22 +160,32 @@ def test_migrate_legacy_bearer_multi_worker_single_winner(
         )
         # All non-migrators return None (no row object) — but the key_id
         # of the winning migrator is the deterministic sha-prefix.
+        expected_id = (
+            "ak-legacy-"
+            + hashlib.sha256(LEGACY_SECRET.encode("utf-8")).hexdigest()[:12]
+        )
         winner_id = migrators[0]["key_id"]
-        assert winner_id.startswith("ak-legacy-"), winner_id
+        assert winner_id == expected_id, (
+            "legacy migration id must be derived from sha256(secret) so "
+            f"every worker converges on the same row; got {winner_id!r}"
+        )
 
         # And the DB confirms: exactly one row.
-        async def _count():
+        async def _fetch_rows():
             import asyncpg
             c = await asyncpg.connect(pg_test_dsn)
-            n = await c.fetchval(
-                "SELECT COUNT(*) FROM api_keys WHERE name = 'legacy-bearer'"
+            rows = await c.fetch(
+                "SELECT id, key_prefix FROM api_keys "
+                "WHERE name = 'legacy-bearer'"
             )
             await c.close()
-            return n
+            return rows
 
-        count = asyncio.run(_count())
-        assert count == 1, (
-            f"multi-worker migration must collapse to 1 row, got {count}"
+        rows = asyncio.run(_fetch_rows())
+        assert [r["id"] for r in rows] == [expected_id], (
+            f"multi-worker migration must collapse to the deterministic row, "
+            f"got {[dict(r) for r in rows]}"
         )
+        assert rows[0]["key_prefix"] == LEGACY_SECRET[:8]
     finally:
         asyncio.run(_reset())

@@ -133,23 +133,44 @@ def test_require_super_admin_is_module_level_constant():
     assert callable(a1.require_super_admin)
 
 
-def test_require_super_admin_has_dep_signature_shape():
-    """``require_role`` returns an async ``_dep(request, user=...)``
-    closure. Walk the signature and confirm both params are present —
-    this is the contract FastAPI relies on to inject Request + the
-    upstream ``current_user``."""
+async def test_require_super_admin_dependency_real_call_contract(_open_mode):
+    """Call the dependency closure directly for allow + deny paths."""
     import inspect
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
     from backend import auth
     sig = inspect.signature(auth.require_super_admin)
     names = list(sig.parameters)
-    # First positional is the FastAPI Request; second is the
-    # current_user dependency injection.
     assert "request" in names, (
         f"require_super_admin missing Request param; got {names!r}"
     )
     assert "user" in names, (
         f"require_super_admin missing user param; got {names!r}"
     )
+
+    request = Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/probe",
+        "headers": [],
+    })
+    super_admin = auth.User(
+        id="u-sa-direct", email="sa@local", name="Super",
+        role="super_admin", enabled=True,
+    )
+    granted = await auth.require_super_admin(request, user=super_admin)
+    assert granted is super_admin
+
+    admin = auth.User(
+        id="u-admin-direct", email="admin@local", name="Admin",
+        role="admin", enabled=True,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await auth.require_super_admin(request, user=admin)
+    assert exc.value.status_code == 403
+    assert "Requires role=super_admin" in exc.value.detail
+    assert "you are admin" in exc.value.detail
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

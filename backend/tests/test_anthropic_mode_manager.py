@@ -48,9 +48,15 @@ from backend.agents.cost_guard import CostGuard, ScopeKey
 # ─── validate_api_key ────────────────────────────────────────────
 
 
-def test_validate_accepts_canonical_anthropic_key():
-    validate_api_key("sk-ant-" + "A" * 30)
-    validate_api_key("sk-ant-" + "abcdef0123_-XYZ" * 4)
+@pytest.mark.asyncio
+async def test_validate_accepts_canonical_anthropic_key():
+    key = "sk-ant-" + "abcdef0123_-XYZ" * 4
+    validate_api_key(key)
+
+    mgr = AnthropicModeManager()
+    state = await mgr.submit_api_key(key)
+    assert state.current_step == WizardStep.KEY_OBTAINED
+    assert state.api_key_fingerprint == "…123_-XYZ"
 
 
 def test_validate_rejects_empty():

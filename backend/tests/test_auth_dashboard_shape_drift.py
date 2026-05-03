@@ -256,12 +256,48 @@ def test_default_rule_severities_byte_equal() -> None:
         assert ts_sev == py_sev, f"severity drift on {rule_var}"
 
 
-def test_ts_declares_summarise() -> None:
-    src = _ts_source()
-    assert re.search(r"export\s+function\s+summarise\b", src)
-    assert re.search(r"export\s+function\s+detectSuspiciousPatterns\b", src)
-    assert re.search(r"export\s+function\s+emptySummary\b", src)
-    assert re.search(r"export\s+function\s+isEnabled\b", src)
+def test_ts_exports_execute_empty_fixture() -> None:
+    """Import the TS twin and execute the four public functions."""
+    if not _node_supports_strip_types():
+        pytest.skip("Node ≥ 22 (--experimental-strip-types) not available")
+
+    runner = """
+import {
+  summarise,
+  detectSuspiciousPatterns,
+  emptySummary,
+  isEnabled,
+} from %(twin_path)s;
+
+const summary = summarise([], { tenantId: "t-empty-real-call" });
+const empty = emptySummary("t-empty-real-call");
+const alerts = detectSuspiciousPatterns([], { tenantId: "t-empty-real-call" });
+process.stdout.write(JSON.stringify({
+  summary,
+  empty,
+  alerts,
+  enabled: isEnabled(),
+}));
+""" % {"twin_path": json.dumps(str(_TS_TWIN_PATH))}
+
+    proc = subprocess.run(
+        ["node", "--experimental-strip-types", "--input-type=module", "-"],
+        input=runner,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        pytest.fail(
+            f"TS twin export real-call failed:\n"
+            f"stdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+        )
+    out = json.loads(proc.stdout)
+    assert out["summary"]["tenantId"] == "t-empty-real-call"
+    assert out["summary"]["totalEvents"] == 0
+    assert out["empty"] == out["summary"]
+    assert out["alerts"] == []
+    assert out["enabled"] is True
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
