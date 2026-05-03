@@ -21429,6 +21429,104 @@ export interface components {
              */
             name: string;
         };
+        /** WorkflowInFlightRunResponse */
+        WorkflowInFlightRunResponse: {
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Last Step Id */
+            last_step_id?: string | null;
+            /** Metadata */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Started At */
+            started_at: number;
+        };
+        /** WorkflowInFlightRunsResponse */
+        WorkflowInFlightRunsResponse: {
+            /** Count */
+            count: number;
+            /** Runs */
+            runs: components["schemas"]["WorkflowInFlightRunResponse"][];
+        };
+        /** WorkflowReplayResponse */
+        WorkflowReplayResponse: {
+            /** In Flight */
+            in_flight: boolean;
+            run: components["schemas"]["WorkflowRunResponse"];
+            /** Steps */
+            steps: components["schemas"]["WorkflowStepResponse"][];
+        };
+        /** WorkflowRunResponse */
+        WorkflowRunResponse: {
+            /** Completed At */
+            completed_at?: number | null;
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Last Step Id */
+            last_step_id?: string | null;
+            /** Metadata */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Started At */
+            started_at: number;
+            /** Status */
+            status: string;
+            /** Version */
+            version: number;
+        };
+        /** WorkflowRunsResponse */
+        WorkflowRunsResponse: {
+            /** Count */
+            count: number;
+            /** Runs */
+            runs: components["schemas"]["WorkflowRunResponse"][];
+        };
+        /** WorkflowStatusResponse */
+        WorkflowStatusResponse: {
+            /** Id */
+            id: string;
+            /** Status */
+            status: string;
+        };
+        /** WorkflowStepResponse */
+        WorkflowStepResponse: {
+            /** Completed At */
+            completed_at?: number | null;
+            /** Error */
+            error?: string | null;
+            /** Id */
+            id: string;
+            /** Is Done */
+            is_done: boolean;
+            /** Key */
+            key: string;
+            /** Output */
+            output?: unknown | null;
+            /** Started At */
+            started_at: number;
+        };
+        /** WorkflowVersionResponse */
+        WorkflowVersionResponse: {
+            /** Id */
+            id: string;
+            /** Version */
+            version: number;
+        };
+        /** WorkflowVersionedStatusResponse */
+        WorkflowVersionedStatusResponse: {
+            /** Id */
+            id: string;
+            /** Status */
+            status: string;
+            /** Version */
+            version: number;
+        };
         /** XUSetRequest */
         XUSetRequest: {
             /**
@@ -44739,9 +44837,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowInFlightRunsResponse"];
                 };
             };
         };
@@ -44765,9 +44861,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowRunsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -44798,9 +44892,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowReplayResponse"];
                 };
             };
             /** @description Validation Error */
@@ -44837,9 +44929,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowVersionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -44872,9 +44962,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowVersionedStatusResponse"];
                 };
             };
             /** @description Validation Error */
@@ -44909,9 +44997,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowStatusResponse"];
                 };
             };
             /** @description Validation Error */
@@ -44944,9 +45030,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowVersionedStatusResponse"];
                 };
             };
             /** @description Validation Error */

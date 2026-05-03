@@ -10619,6 +10619,292 @@
         "title": "WebAuthnRegisterCompleteRequest",
         "type": "object"
       },
+      "WorkflowInFlightRunResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Step Id"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "started_at",
+          "metadata"
+        ],
+        "title": "WorkflowInFlightRunResponse",
+        "type": "object"
+      },
+      "WorkflowInFlightRunsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowInFlightRunResponse"
+            },
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs",
+          "count"
+        ],
+        "title": "WorkflowInFlightRunsResponse",
+        "type": "object"
+      },
+      "WorkflowReplayResponse": {
+        "properties": {
+          "in_flight": {
+            "title": "In Flight",
+            "type": "boolean"
+          },
+          "run": {
+            "$ref": "#/components/schemas/WorkflowRunResponse"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowStepResponse"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "run",
+          "steps",
+          "in_flight"
+        ],
+        "title": "WorkflowReplayResponse",
+        "type": "object"
+      },
+      "WorkflowRunResponse": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Step Id"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "number"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "started_at",
+          "metadata",
+          "version"
+        ],
+        "title": "WorkflowRunResponse",
+        "type": "object"
+      },
+      "WorkflowRunsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunResponse"
+            },
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs",
+          "count"
+        ],
+        "title": "WorkflowRunsResponse",
+        "type": "object"
+      },
+      "WorkflowStatusResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "WorkflowStatusResponse",
+        "type": "object"
+      },
+      "WorkflowStepResponse": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "is_done": {
+            "title": "Is Done",
+            "type": "boolean"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "output": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "started_at",
+          "is_done"
+        ],
+        "title": "WorkflowStepResponse",
+        "type": "object"
+      },
+      "WorkflowVersionResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "title": "WorkflowVersionResponse",
+        "type": "object"
+      },
+      "WorkflowVersionedStatusResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "version"
+        ],
+        "title": "WorkflowVersionedStatusResponse",
+        "type": "object"
+      },
       "XUSetRequest": {
         "properties": {
           "selector": {
@@ -41375,9 +41661,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List In Flight Api V1 Workflow In Flight Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowInFlightRunsResponse"
                 }
               }
             },
@@ -41430,9 +41714,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Runs Api V1 Workflow Runs Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowRunsResponse"
                 }
               }
             },
@@ -41474,9 +41756,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Replay Run Api V1 Workflow Runs  Run Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowReplayResponse"
                 }
               }
             },
@@ -41542,9 +41822,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Update Run Api V1 Workflow Runs  Run Id  Patch",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowVersionResponse"
                 }
               }
             },
@@ -41602,9 +41880,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Cancel Run Api V1 Workflow Runs  Run Id  Cancel Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowVersionedStatusResponse"
                 }
               }
             },
@@ -41672,9 +41948,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Finish Run Api V1 Workflow Runs  Run Id  Finish Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowStatusResponse"
                 }
               }
             },
@@ -41732,9 +42006,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Retry Run Api V1 Workflow Runs  Run Id  Retry Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowVersionedStatusResponse"
                 }
               }
             },
