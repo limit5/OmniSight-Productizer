@@ -279,7 +279,7 @@ def test_total_re_exports_drift_guard() -> None:
     W15.4 adds 10 vite_retry_budget symbols → 262.
     W15.5 adds 13 vite_config_injection symbols → 275.
     W15.6 adds 13 vite_self_fix symbols → 288."""
-    assert len(web_pkg.__all__) == 288, (
+    assert len(web_pkg.__all__) == 313, (
         "If you added/removed a public symbol, update this expectation "
         "alongside the W11/W13 row's TODO entry — drift here is a code-review "
         "trigger, not a test bug."

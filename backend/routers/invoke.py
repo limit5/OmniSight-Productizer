@@ -26,6 +26,11 @@ from backend.handoff import load_handoff_for_task
 from fastapi.responses import JSONResponse
 
 from backend.events import emit_agent_update, emit_invoke
+from backend.web.image_attachment import (
+    IMAGE_COACH_TRIGGER_PREFIX,
+    ImageAttachmentRef,
+    detect_image_attachments_in_text,
+)
 
 router = APIRouter(prefix="/invoke", tags=["invoke"])
 
@@ -1072,6 +1077,14 @@ def _detect_coaching_triggers(
     a slash command. Per-URL suppress is honoured so a dismissed URL
     won't re-coach the operator on every INVOKE press in the same
     session.
+
+    W16.2 — also emits one ``image_in_message:<hash16>`` trigger per
+    distinct image attachment (data URL or ``[image: <name>]`` marker)
+    detected in ``command``. The coach surfaces the three vision-LLM
+    options: (a) component / (b) full page / (c) brand reference.
+    Detection / hashing / dedup is owned by
+    :mod:`backend.web.image_attachment` so the W16.2 contract tests
+    can pin the helper without round-tripping through the planner.
     """
     triggers: list[str] = []
     if (not state["agents"] and not state["tasks"]
@@ -1094,6 +1107,18 @@ def _detect_coaching_triggers(
     # we deliberately scope the URL scan to the freshly typed command.
     for url in _detect_urls_in_text(command):
         key = f"url_in_message:{url}"
+        if key in suppress:
+            continue
+        triggers.append(key)
+
+    # W16.2 — image-attachment coaching trigger. Same scoping rationale
+    # as W16.1: only the freshly typed command is scanned (an image
+    # buried in an old task description is low-signal and would
+    # re-coach forever). Per-attachment suppress is honoured via the
+    # ``image_in_message:<hash16>`` key shape so dismissing a paste
+    # does not silence a subsequent fresh paste.
+    for ref in detect_image_attachments_in_text(command):
+        key = ref.trigger_key()
         if key in suppress:
             continue
         triggers.append(key)
@@ -1195,10 +1220,19 @@ def _plan_actions(
             state, suppress_coach, command=command,
         )
         if triggers:
+            # W16.2 — re-detect attachments so the coach renderer (LLM
+            # context block + templated fallback) can recover the
+            # operator-facing label from the trigger key's hash.
+            # ``detect_image_attachments_in_text`` is a pure function so
+            # the second call is byte-identical to the planner's call
+            # inside ``_detect_coaching_triggers`` — no caching layer
+            # needed.
+            image_refs = detect_image_attachments_in_text(command)
             actions.append({
                 "type": "coach",
                 "triggers": triggers,
                 "pending_count": pending_count,
+                "image_refs": image_refs,
                 "agent_count": len(state["agents"]),
                 "task_count": len(state["tasks"]),
             })
@@ -1522,17 +1556,24 @@ Triggers tell you what to coach about. Translate them to operator-facing languag
 - stale_pep:N: there are N PEP HOLD decisions waiting from earlier. Suggest: review them via the bottom-right toasts (each has a WHY? button now), or APPROVE / REJECT in bulk.
 - missing_toolchain:<entry-id>: the operator's INVOKE command (and/or the backlog tasks they queued) will need a vendor toolchain that this machine has not installed yet. The context block hands you the human display name (e.g. "Android SDK Platform Tools", "ESP-IDF v5", "Node.js LTS 20", "Python toolchain (uv)", "ARM GNU Toolchain 13"), a one-line hint about what the toolchain is for, and a one-click install URL of shape `/settings/platforms?entry=<entry-id>`. Surface each missing toolchain as its own bullet, render the install URL as a markdown link with a bilingual action label like `[安裝 / Install](url)` so a CJK or English operator both see a clear CTA, and ALWAYS use the display name — never paste the slug verbatim.
 - url_in_message:<url>: the operator pasted a URL into the chat. Ask which of the W11/W12/W13 capabilities they want to apply: clone the site (`/clone <url>`, builds a working scaffold from the live page), extract its brand style (`/brand <url>`, captures colours / fonts / spacing tokens for reuse), capture multi-breakpoint screenshots (`/screenshot <url>`, 320 / 768 / 1280 / 1920 PNGs into `.omnisight/`), or skip if the URL is just FYI. Render each option as its own bullet with a bilingual label and a backtick-wrapped slash command (e.g. `(a) 克隆網站 / Clone: /clone https://…`). Show the full URL in each command — operators copy-paste the bullet into the chat. Multiple URLs in one message → one option-set per URL, grouped under a "URL #N: <url>" sub-heading.
+- image_in_message:<hash16>: the operator attached / pasted a screenshot into the chat (data URL or `[image: <name>]` upload marker). The context block hands you the operator-facing label (filename for markers; ``<mime>:<hash16>`` for data URLs). Ask which vision-LLM-driven branch they want: (a) component — extract one isolated component from the shot (`/clone-image <hash16> --as=component`), (b) 整頁 / full page — scaffold an entire page from the design (`/clone-image <hash16> --as=page`), or (c) brand reference — extract colours / fonts / spacing tokens for reuse (`/brand-image <hash16>`). Render each option as its own bullet with a bilingual label. Multiple images in one message → one option-set per image, grouped under an "Image #N: <label>" sub-heading.
 
 Trigger priority when several co-fire:
 - `missing_toolchain` always leads. The operator already declared intent by typing the command, so install-first-then-run is the productive path; SKIP the `empty_workspace` framing entirely whenever any `missing_toolchain` is present.
 - If `stale_pep` co-fires with `missing_toolchain`, mention pending PEPs as ONE short reminder line at the end (not a full sub-list) — the toolchain install is the headline.
 - `url_in_message` lands BETWEEN `missing_toolchain` and `empty_workspace`: when a URL is present and no toolchain is missing, lead with the URL menu (the operator declared intent — pick a capability for the URL); SKIP the `empty_workspace` framing in that case for the same reason missing-toolchain skips it. If both `missing_toolchain` AND `url_in_message` co-fire, the toolchain install still leads (cannot run any of the W11/W12/W13 capabilities without it) — append the URL menu as a secondary section after the install link.
+- `image_in_message` mirrors `url_in_message` priority: leads when only it + `empty_workspace` co-fire (operator pasted intent); appended as a secondary section when `missing_toolchain` co-fires (install first then run vision pass). When BOTH `url_in_message` and `image_in_message` co-fire (operator pasted both a link and a screenshot in the same message), render the URL menu first and the image menu second under a separator line — operators usually paste the URL as the canonical source and the screenshot as supporting reference, not the other way round.
 - When only `empty_workspace` and `stale_pep` co-fire, lead with the PEP queue (it's already-started work) and offer the empty-workspace prompts as the secondary nudge.
 
 Match the operator's recent message language (CJK or English; default CJK if no recent operator messages). Do not apologise, do not over-explain, do not repeat what's already in the toast — your job is meta-narration + action prompts. Keep total length under 6 lines."""
 
 
-def _build_coach_context(triggers: list[str], pending_count: int) -> str:
+def _build_coach_context(
+    triggers: list[str],
+    pending_count: int,
+    *,
+    image_refs: list[ImageAttachmentRef] | None = None,
+) -> str:
     """LLM context block. Each trigger is translated to a one-line
     operator-facing description so the LLM never has to guess what the
     raw key means.
@@ -1551,6 +1592,14 @@ def _build_coach_context(triggers: list[str], pending_count: int) -> str:
     syntax. Display URL is truncated to ``_MAX_URL_DISPLAY_CHARS`` for
     the coach card; the slash commands always use the full URL because
     a truncated URL would 4xx the W11/W12/W13 routers.
+
+    W16.2 — ``image_in_message:<hash16>`` triggers carry the operator-
+    facing label + the three-option slash-command set (component /
+    full page / brand reference), pre-rendered so the vision-LLM-
+    aware downstream agent never has to invent the syntax.  The
+    attachment label / kind / hash plumbing lives in
+    :mod:`backend.web.image_attachment`; this function only renders
+    the LLM-facing context line.
     """
     parts = ["Triggers detected by the planner:"]
     for t in triggers:
@@ -1581,9 +1630,45 @@ def _build_coach_context(triggers: list[str], pending_count: int) -> str:
                 f"multi-breakpoint screenshot (`/screenshot {url}`), "
                 "or skip if FYI."
             )
+        elif t.startswith(IMAGE_COACH_TRIGGER_PREFIX):
+            hash16 = t.split(":", 1)[1]
+            label, kind = _resolve_image_label_for_trigger(
+                hash16, image_refs,
+            )
+            parts.append(
+                f"- image_in_message: operator attached **{label}** "
+                f"({kind}, hash={hash16}) — available vision-LLM "
+                f"branches: component-only (`/clone-image {hash16} "
+                f"--as=component`), full-page scaffold (`/clone-image "
+                f"{hash16} --as=page`), brand-reference extract "
+                f"(`/brand-image {hash16}`)."
+            )
         else:
             parts.append(f"- {t}")
     return "\n".join(parts)
+
+
+def _resolve_image_label_for_trigger(
+    hash16: str,
+    image_refs: list[ImageAttachmentRef] | None,
+) -> tuple[str, str]:
+    """Look up (display_label, kind) for *hash16* in *image_refs*.
+
+    W16.2 helper. ``image_refs`` is the list of attachments detected
+    at planner time and forwarded to the coach action dict so the
+    LLM-side / templated-side renderers can both recover the operator-
+    facing label without re-running the detection regex.
+
+    Falls back to a generic placeholder when *image_refs* is ``None``
+    or the hash is unknown — keeps the helper safe to drive from a
+    unit test that hands a synthetic trigger key without a matching
+    ref.
+    """
+    if image_refs:
+        for ref in image_refs:
+            if ref.image_hash == hash16:
+                return ref.display_label, ref.kind
+    return "image", "image_attachment"
 
 
 # BS.10.2: human-friendly display labels per ``_TOOLCHAIN_KEYWORD_MAP``
@@ -1715,6 +1800,76 @@ def _render_url_action_bullets(url: str) -> list[str]:
     ]
 
 
+def _image_in_message_hashes(triggers: list[str]) -> list[str]:
+    """Extract attachment hash16 values from ``image_in_message:<hash16>``
+    triggers.
+
+    W16.2 sibling of :func:`_url_in_message_urls`. Order is preserved
+    so the rendered coach card walks the attachments in the same
+    order the operator pasted — matches the determinism contract that
+    the W16.2 tests assert on.
+    """
+    out: list[str] = []
+    for t in triggers:
+        if not t.startswith(IMAGE_COACH_TRIGGER_PREFIX):
+            continue
+        hash16 = t.split(":", 1)[1]
+        if hash16:
+            out.append(hash16)
+    return out
+
+
+def _render_image_options_block(
+    image_hashes: list[str],
+    image_refs: list[ImageAttachmentRef] | None,
+    *,
+    single_image_intro: bool,
+) -> list[str]:
+    """W16.2 — render the three-option menu (component / 整頁 / brand
+    reference) for one or many attached images.
+
+    Mirrors :func:`_render_url_options_block`. ``image_refs`` is the
+    attachment metadata threaded through the action dict so the
+    operator-facing label (filename for upload markers, ``<mime>:
+    <hash16>`` for inline pastes) can be recovered from the
+    16-hex-char trigger key.
+    """
+    lines: list[str] = []
+    if single_image_intro and len(image_hashes) == 1:
+        h = image_hashes[0]
+        label = _resolve_image_label_for_trigger(h, image_refs)[0]
+        lines.append(
+            f"看到你貼了一張圖片 **{label}** — 想用 OmniSight 做什麼？"
+        )
+        lines.extend(_render_image_action_bullets(h))
+        return lines
+    if len(image_hashes) > 1:
+        lines.append(
+            f"看到你貼了 {len(image_hashes)} 張圖片 — 每張都可以選一個動作："
+        )
+    for idx, h in enumerate(image_hashes, start=1):
+        label = _resolve_image_label_for_trigger(h, image_refs)[0]
+        prefix = f"Image #{idx}: " if len(image_hashes) > 1 else ""
+        lines.append(f"**{prefix}{label}**")
+        lines.extend(_render_image_action_bullets(h))
+    return lines
+
+
+def _render_image_action_bullets(hash16: str) -> list[str]:
+    """The three canonical W16.2 options for a single image attachment.
+
+    Bilingual labels mirror the W16.1 URL bullet shape.  Slash
+    commands carry the 16-hex hash so the downstream router can
+    resolve the attachment back to bytes via the upload store /
+    inline-data-URL cache.
+    """
+    return [
+        f"- **(a) 元件 / Component**: `/clone-image {hash16} --as=component`",
+        f"- **(b) 整頁 / Full page**: `/clone-image {hash16} --as=page`",
+        f"- **(c) 品牌參考 / Brand reference**: `/brand-image {hash16}`",
+    ]
+
+
 def _toolchain_install_url(slug: str) -> str:
     """BS.10.4 deeplink — `Settings → Platforms` with the ``entry`` query
     param pre-filled. Slug is locked to ``_TOOLCHAIN_KEYWORD_MAP`` keys
@@ -1725,6 +1880,8 @@ def _toolchain_install_url(slug: str) -> str:
 
 def _build_templated_coach_message(
     triggers: list[str], pending_count: int,
+    *,
+    image_refs: list[ImageAttachmentRef] | None = None,
 ) -> str:
     """LLM-unavailable fallback. CJK-default to match the operator base
     with bilingual action labels (``安裝 / Install``) so an English-only
@@ -1750,11 +1907,21 @@ def _build_templated_coach_message(
     co-fires, the install link still leads and the URL menu is appended
     as a secondary section (you cannot run any of the W11/W12/W13
     capabilities without the toolchain installed).
+
+    W16.2 — recognises ``image_in_message:<hash16>`` triggers and emits
+    the three-option menu (component / full page / brand reference)
+    per attached image. Priority mirrors W16.1: leads when only the
+    image trigger + ``empty_workspace`` co-fire (operator pasted
+    intent); appended after the URL menu when both URL and image
+    triggers co-fire (URL is the canonical source, screenshot is
+    supporting reference); appended after the toolchain install link
+    when ``missing_toolchain`` co-fires.
     """
     has_empty = "empty_workspace" in triggers
     has_pep = "stale_pep" in triggers
     missing_slugs = _missing_toolchain_slugs(triggers)
     urls = _url_in_message_urls(triggers)
+    image_hashes = _image_in_message_hashes(triggers)
     lines: list[str] = []
     if missing_slugs:
         # Banner phrasing differs slightly for single vs many — a 1-of-1
@@ -1792,6 +1959,18 @@ def _build_templated_coach_message(
                 "裝完 toolchain 之後，你貼的網址也可以直接拿來用："
             )
             lines.extend(_render_url_options_block(urls, single_url_intro=False))
+        if image_hashes:
+            # W16.2 — image menu trails as a secondary section after the
+            # toolchain install (and after the URL menu if both fire),
+            # for the same reason: vision LLM cannot run against the
+            # operator's reference until the toolchain that builds the
+            # generated component / page is installed.
+            lines.append(
+                "裝完 toolchain 之後，你貼的圖片也可以直接拿來用："
+            )
+            lines.extend(_render_image_options_block(
+                image_hashes, image_refs, single_image_intro=False,
+            ))
         if has_pep:
             lines.append(
                 f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
@@ -1802,6 +1981,27 @@ def _build_templated_coach_message(
         # empty_workspace framing for the same reason missing_toolchain
         # skips it — pasting a URL is itself "tell me what to do next".
         lines.extend(_render_url_options_block(urls, single_url_intro=True))
+        if image_hashes:
+            # W16.2 — when URL + image co-fire, render the URL menu
+            # first (canonical source) and the image menu second
+            # (supporting reference) under a separator line.
+            lines.append("")
+            lines.append("另外，你貼的圖片也可以走 vision-LLM 路徑：")
+            lines.extend(_render_image_options_block(
+                image_hashes, image_refs, single_image_intro=False,
+            ))
+        if has_pep:
+            lines.append(
+                f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
+                "決定等你 APPROVE / REJECT"
+            )
+    elif image_hashes:
+        # W16.2 — image menu leads when no URL / toolchain trigger
+        # co-fires. Same rationale as URL: pasting an image IS intent,
+        # so SKIP the empty_workspace framing.
+        lines.extend(_render_image_options_block(
+            image_hashes, image_refs, single_image_intro=True,
+        ))
         if has_pep:
             lines.append(
                 f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
@@ -1863,7 +2063,10 @@ async def _generate_coach_message(action: dict) -> str:
     """
     triggers = list(action.get("triggers") or [])
     pending = int(action.get("pending_count") or 0)
-    fallback = _build_templated_coach_message(triggers, pending)
+    image_refs = action.get("image_refs") or None
+    fallback = _build_templated_coach_message(
+        triggers, pending, image_refs=image_refs,
+    )
     try:
         from backend.agents.nodes import _get_llm
         from backend.security import INJECTION_GUARD_PRELUDE, redact
@@ -1874,7 +2077,9 @@ async def _generate_coach_message(action: dict) -> str:
         sys = SystemMessage(
             content=INJECTION_GUARD_PRELUDE + "\n\n" + _COACH_SYSTEM_PROMPT,
         )
-        ctx = HumanMessage(content=_build_coach_context(triggers, pending))
+        ctx = HumanMessage(content=_build_coach_context(
+            triggers, pending, image_refs=image_refs,
+        ))
         resp = llm.invoke([sys, ctx])
         out = (resp.content or "").strip() if hasattr(resp, "content") else ""  # type: ignore[union-attr]
         if not out:
@@ -1931,7 +2136,11 @@ async def invoke_stream(
     those triggers so the operator isn't re-coached on every INVOKE
     press. Recognised keys: ``empty_workspace`` / ``stale_pep`` /
     ``missing_toolchain:<slug>`` (BS.10.1) / ``url_in_message:<url>``
-    (W16.1, per-URL dismissal so re-pasting a fresh URL still coaches).
+    (W16.1, per-URL dismissal so re-pasting a fresh URL still coaches)
+    / ``image_in_message:<hash16>`` (W16.2, per-attachment dismissal so
+    re-pasting a fresh image still coaches; the hash is the 16-hex-
+    char SHA-256 prefix of the data URL payload or the upload marker
+    filename).
     """
     suppress_set: frozenset[str] = frozenset(
         t.strip() for t in (suppress_coach or "").split(",") if t.strip()

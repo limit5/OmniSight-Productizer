@@ -653,7 +653,7 @@ def test_total_re_export_count_pinned_at_192() -> None:
     # symbols → 288. If this fails with a different count, audit
     # whether you consciously added / removed a public symbol and
     # update the pin alongside the row's TODO entry.
-    assert len(web_pkg.__all__) == 288
+    assert len(web_pkg.__all__) == 313
 
 
 # ─── 12. Whole-spec invariants ───────────────────────────────────────
