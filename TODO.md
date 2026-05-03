@@ -2351,7 +2351,7 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
 
 > 借 open-lovable `monitor-vite-logs` + `report-vite-error` pattern，串既有 LangGraph error_check_node。
 
-- [ ] W15.1 `omnisight-vite-plugin` 自製 plugin（Rolldown/Webpack 等價版另寫），編譯/runtime error → POST `/web-sandbox/{id}/error`
+- [x] W15.1 `omnisight-vite-plugin` 自製 plugin（Rolldown/Webpack 等價版另寫），編譯/runtime error → POST `/web-sandbox/{id}/error`
 - [ ] W15.2 `backend/web/vite_error_relay.py` 接 error → 寫進 LangGraph state.error_history
 - [ ] W15.3 Error 進 system prompt 模板：「上次 build 有 error: [file:line] [message]」
 - [ ] W15.4 Auto-retry budget：同 error pattern 連 3 次失敗 → escalate operator
@@ -3916,55 +3916,55 @@ ls backend/alembic/versions/ | tail -3
 - 預估：**1 day**（縮減自原 2d，因 reuse AS）
 
 ### FS.3 — Object Storage
-- [~][G] FS.3.1 S3 / R2 / Supabase Storage adapter
-- [ ] FS.3.2 alembic 0062 `provisioned_storage` table（tenant_id / provider / bucket_name / created_at）
-- [ ] FS.3.3 Pre-signed URL generation
-- [ ] FS.3.4 CORS config 自動
-- [ ] FS.3.5 Tests
+- [x][G] FS.3.1 S3 / R2 / Supabase Storage adapter
+- [x][G] FS.3.2 alembic 0062 `provisioned_storage` table（tenant_id / provider / bucket_name / created_at）
+- [x][G] FS.3.3 Pre-signed URL generation
+- [x][G] FS.3.4 CORS config 自動
+- [x][G] FS.3.5 Tests
 - 預估：**1 day**
 
 ### FS.4 — Email Service
-- [ ] FS.4.1 Resend / Postmark / AWS SES adapter
-- [ ] FS.4.2 Template registry（welcome / verification / password-reset / DSAR / etc.）
-- [ ] FS.4.3 Bounce / complaint handling webhook
-- [ ] FS.4.4 SPF / DKIM / DMARC setup instructions
-- [ ] FS.4.5 Tests
+- [x][G] FS.4.1 Resend / Postmark / AWS SES adapter
+- [x][G] FS.4.2 Template registry（welcome / verification / password-reset / DSAR / etc.）
+- [x][G] FS.4.3 Bounce / complaint handling webhook
+- [x][G] FS.4.4 SPF / DKIM / DMARC setup instructions
+- [x][G] FS.4.5 Tests
 - 預估：**1 day**
 
 ### FS.5 — Background Jobs
-- [ ] FS.5.1 Inngest / Trigger.dev / Vercel Cron adapter
-- [ ] FS.5.2 Job definition scaffold
-- [ ] FS.5.3 Cron schedule wiring
-- [ ] FS.5.4 Failure retry + dead letter queue
-- [ ] FS.5.5 Tests
+- [x][G] FS.5.1 Inngest / Trigger.dev / Vercel Cron adapter
+- [x][G] FS.5.2 Job definition scaffold
+- [x][G] FS.5.3 Cron schedule wiring
+- [x][G] FS.5.4 Failure retry + dead letter queue
+- [x][G] FS.5.5 Tests
 - 預估：**1.5 day**
 
 ### FS.6 — Search
-- [ ] FS.6.1 Algolia / Typesense / Meilisearch adapter
-- [ ] FS.6.2 Indexing pipeline scaffold
-- [ ] FS.6.3 Faceted search component template
-- [ ] FS.6.4 Tests
+- [x][G] FS.6.1 Algolia / Typesense / Meilisearch adapter
+- [x][G] FS.6.2 Indexing pipeline scaffold
+- [x][G] FS.6.3 Faceted search component template
+- [x][G] FS.6.4 Tests
 - 預估：**1 day**
 
 ### FS.7 — Full-stack Scaffold Templates
-- [ ] FS.7.1 Next.js + Prisma + Auth.js + tRPC + Resend bundle
-- [ ] FS.7.2 Nuxt + Drizzle + Auth + Postmark bundle
-- [ ] FS.7.3 Astro + content collections + Sanity bundle
-- [ ] FS.7.4 完整 example app（todo / blog / SaaS landing）三選一驗 bundle 通
+- [x][G] FS.7.1 Next.js + Prisma + Auth.js + tRPC + Resend bundle
+- [x][G] FS.7.2 Nuxt + Drizzle + Auth + Postmark bundle
+- [x][G] FS.7.3 Astro + content collections + Sanity bundle
+- [x][G] FS.7.4 完整 example app（todo / blog / SaaS landing）三選一驗 bundle 通
 - 預估：**2 day**
 
 ### FS.8 — Stripe / Billing 整合（既有 Priority T 接通）
-- [ ] FS.8.1 Stripe checkout / billing portal scaffold
-- [ ] FS.8.2 Webhook handler scaffold
-- [ ] FS.8.3 alembic 0063 `provisioned_billing` table
-- [ ] FS.8.4 Subscription state sync
-- [ ] FS.8.5 Tests
+- [x][G] FS.8.1 Stripe checkout / billing portal scaffold
+- [x][G] FS.8.2 Webhook handler scaffold
+- [x][G] FS.8.3 alembic 0063 `provisioned_billing` table
+- [x][G] FS.8.4 Subscription state sync
+- [x][G] FS.8.5 Tests
 - 預估：**1 day**
 
 ### FS.9 — E2E Full-stack Scenario Tests
-- [ ] FS.9.1 「蓋一個 Todo SaaS with auth + DB + email」完整 e2e
-- [ ] FS.9.2 「蓋一個 Blog with CMS + storage + search」完整 e2e
-- [ ] FS.9.3 「蓋一個 SaaS landing with billing + email」完整 e2e
+- [x][G] FS.9.1 「蓋一個 Todo SaaS with auth + DB + email」完整 e2e
+- [x][G] FS.9.2 「蓋一個 Blog with CMS + storage + search」完整 e2e
+- [x][G] FS.9.3 「蓋一個 SaaS landing with billing + email」完整 e2e
 - 預估：**1 day**
 
 **Priority FS 總預估**：**~12 day**（含 AS reuse 後的縮減）

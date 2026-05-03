@@ -1,0 +1,23 @@
+{
+  "name": "@omnisight/vite-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "W15.1 — Vite plugin that ships compile-time and runtime errors from the omnisight-web-preview sidecar back to the OmniSight backend at POST /web-sandbox/preview/{workspace_id}/error so the LangGraph error_check_node (W15.2) can self-heal.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./runtime": "./runtime.js"
+  },
+  "files": [
+    "index.js",
+    "runtime.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "vite": ">=4 <7"
+  }
+}

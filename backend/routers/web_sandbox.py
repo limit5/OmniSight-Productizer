@@ -102,6 +102,16 @@ from backend.web_sandbox_pep import (
     evaluate_first_preview_hold,
     requires_first_preview_hold,
 )
+from backend.web_sandbox_vite_errors import (
+    WEB_SANDBOX_VITE_ERROR_SCHEMA_VERSION,
+    VITE_ERROR_ALLOWED_KINDS,
+    VITE_ERROR_ALLOWED_PHASES,
+    ViteBuildError,
+    ViteBuildErrorValidationError,
+    ViteErrorBuffer,
+    get_default_buffer,
+    validate_error_payload,
+)
 from backend.ui_sandbox import SubprocessDockerClient
 
 logger = logging.getLogger(__name__)
@@ -768,3 +778,180 @@ async def stop_preview(
     except WebSandboxNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return _instance_to_response(instance)
+
+
+# ─────────────── W15.1 — Vite plugin error reporting ───────────────
+#
+# The W14.1 sidecar's W15.5 vite.config scaffold loads
+# ``packages/omnisight-vite-plugin`` which captures every compile-time
+# and runtime error and POSTs it here.  W15.2
+# (``backend/web/vite_error_relay.py``) will read from the buffer and
+# fold the entries into LangGraph ``state.error_history``; W15.3 will
+# quote them in the system-prompt template; W15.4 will escalate after
+# 3 identical failures.  This row only owns the receiving endpoint and
+# the in-memory buffer (see ``backend.web_sandbox_vite_errors``).
+#
+# Auth: ``require_operator`` mirrors the rest of the router.  This works
+# for the browser-side runtime overlay (the iframe carries the operator
+# session cookie) but the Node-side compile branch from inside the
+# sidecar process will land 401 until W15.5 wires either a same-session
+# reverse proxy or a bearer-token env knob.  The plugin already supports
+# ``options.authToken`` for that follow-up.
+
+_vite_error_buffer: ViteErrorBuffer | None = None
+
+
+def get_vite_error_buffer() -> ViteErrorBuffer:
+    """Return the per-worker Vite error buffer used by
+    ``POST /web-sandbox/preview/{workspace_id}/error``.
+
+    Lazy passthrough to
+    :func:`backend.web_sandbox_vite_errors.get_default_buffer` so test
+    fixtures can override the buffer with
+    :func:`set_vite_error_buffer_for_tests` without touching module
+    globals across the whole process.
+    """
+
+    return _vite_error_buffer if _vite_error_buffer is not None else get_default_buffer()
+
+
+def set_vite_error_buffer_for_tests(buffer: ViteErrorBuffer | None) -> None:
+    """Test-only injection point for the per-worker buffer."""
+
+    global _vite_error_buffer
+    _vite_error_buffer = buffer
+
+
+class ViteErrorReport(BaseModel):
+    """Wire shape posted by ``packages/omnisight-vite-plugin``.
+
+    Frozen — additions need a matching bump in
+    :data:`backend.web_sandbox_vite_errors.WEB_SANDBOX_VITE_ERROR_SCHEMA_VERSION`
+    *and* in ``OMNISIGHT_VITE_ERROR_SCHEMA_VERSION`` in the JS plugin.
+    The drift-guard tests (vitest + pytest) assert the two literals
+    byte-equal; an unmatched bump fails CI red on both sides.
+    """
+
+    schema_version: str = Field(
+        ...,
+        description=(
+            "Wire-shape pin.  Must equal the backend's "
+            "WEB_SANDBOX_VITE_ERROR_SCHEMA_VERSION literal — anything "
+            "else 422s so the JS plugin sees a clean schema mismatch."
+        ),
+    )
+    kind: str = Field(
+        ...,
+        description=(
+            "Error origin.  ``compile`` for Vite plugin hooks "
+            "(buildStart / load / transform / hmr / config); "
+            "``runtime`` for browser-side window.onerror + "
+            "unhandledrejection handlers."
+        ),
+    )
+    phase: str = Field(
+        ...,
+        description=(
+            "Which Vite phase produced the error.  One of "
+            f"{list(VITE_ERROR_ALLOWED_PHASES)}."
+        ),
+    )
+    message: str = Field(..., description="Vite or browser error message.")
+    file: str | None = Field(
+        None, description="Resolved file id when known, else null."
+    )
+    line: int | None = Field(
+        None, ge=0, description="1-based line number when known, else null."
+    )
+    column: int | None = Field(
+        None, ge=0, description="0-based column when known, else null."
+    )
+    stack: str | None = Field(
+        None,
+        description=(
+            "Stack trace when the error carries one (truncated to "
+            "8 KiB by the plugin)."
+        ),
+    )
+    plugin: str = Field(
+        ...,
+        description=(
+            "Plugin identifier.  Today only ``omnisight-vite-plugin`` "
+            "is accepted; the W15.5 Rolldown / Webpack siblings register "
+            "their own ids."
+        ),
+    )
+    plugin_version: str = Field(..., description="Plugin semver.")
+    occurred_at: float = Field(
+        ...,
+        ge=0,
+        description="POSIX seconds when the plugin captured the error.",
+    )
+
+    model_config = {"extra": "forbid"}
+
+
+@router.post("/preview/{workspace_id}/error", status_code=200)
+async def report_preview_error(
+    workspace_id: str,
+    report: ViteErrorReport,
+    user: _au.User = Depends(_au.require_operator),
+) -> dict[str, Any]:
+    """Record a compile-time or runtime error for ``workspace_id``.
+
+    Returns the recorded entry (with the server-side ``received_at``
+    populated) plus the current buffer count.  Best-effort transport
+    on the JS side — the plugin swallows all non-2xx responses; this
+    endpoint therefore never raises 5xx for ordinary contract
+    failures, only 422 for shape errors.
+    """
+
+    payload = report.model_dump()
+    try:
+        recorded = validate_error_payload(payload)
+    except ViteBuildErrorValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    buffer = get_vite_error_buffer()
+    stored = buffer.record(workspace_id, recorded)
+    logger.info(
+        "web_sandbox.vite_error: workspace=%s kind=%s phase=%s file=%s line=%s",
+        workspace_id,
+        stored.kind,
+        stored.phase,
+        stored.file,
+        stored.line,
+    )
+    return {
+        "schema_version": WEB_SANDBOX_VITE_ERROR_SCHEMA_VERSION,
+        "workspace_id": workspace_id,
+        "recorded": stored.to_dict(),
+        "buffer_count": buffer.count(workspace_id),
+    }
+
+
+@router.get("/preview/{workspace_id}/errors")
+async def list_preview_errors(
+    workspace_id: str,
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=500,
+        description="Cap on the number of recent errors returned.",
+    ),
+    user: _au.User = Depends(_au.require_viewer),
+) -> dict[str, Any]:
+    """Return the ring-buffer of recent Vite errors for the workspace.
+
+    W15.2's LangGraph integration will be the primary consumer; this
+    GET exists today so operators can manually inspect pending errors
+    via the W14.6 panel without waiting for the W15.2 wiring.
+    """
+
+    buffer = get_vite_error_buffer()
+    entries = buffer.recent(workspace_id, limit=limit)
+    return {
+        "schema_version": WEB_SANDBOX_VITE_ERROR_SCHEMA_VERSION,
+        "workspace_id": workspace_id,
+        "errors": [e.to_dict() for e in entries],
+        "buffer_count": buffer.count(workspace_id),
+    }
