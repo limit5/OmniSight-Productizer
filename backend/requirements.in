@@ -74,6 +74,11 @@ pytest==8.3.5
 pytest-asyncio==1.0.0
 pytest-cov==6.0.0
 httpx==0.28.1
+# respx: httpx mock library used by FS-series provider adapter tests
+# (FS.1 db_provisioning / FS.3 storage / FS.4 email / FS.5 jobs /
+# FS.6 search / FS.8 stripe-billing). Added 2026-05-03 alongside the
+# codex-authored FS commits — see docs/operations/codex-collaboration.md.
+respx==0.23.1
 
 # --- K5: MFA (TOTP + WebAuthn) ----------------------------------------
 pyotp==2.9.0

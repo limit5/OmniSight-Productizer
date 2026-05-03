@@ -1316,6 +1316,11 @@ httpx==0.28.1 \
     #   google-genai
     #   groq
     #   langgraph-sdk
+    #   respx
+respx==0.23.1 \
+    --hash=sha256:b18004b029935384bccfa6d7d9d74b4ec9af73a081cc28600fffc0447f4b8c1a \
+    --hash=sha256:242dcc6ce6b5b9bf621f5870c82a63997e8e82bc7c947f9ffe272b8f3dd5a780
+    # via -r backend/requirements.in
     #   langsmith
     #   ollama
     #   openai

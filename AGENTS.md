@@ -206,9 +206,39 @@ Run shell / etc.). Treat:
   * **Bash / shell**: cwd is fixed at `PROJECT_ROOT`. Don't `cd` elsewhere.
   * **File edits**: Stay inside `PROJECT_ROOT`. Never modify outside.
   * **Tests**: Run them yourself before claiming done. `pytest <relevant
-    file>` is the minimum bar.
+    file>` is the minimum bar. **Run pytest using the project's venv**
+    at `backend/.venv/bin/pytest`, NOT codex's bundled python — the
+    project venv is what CI / master / Claude all use, and it is the
+    only environment that proves your tests pass for everyone, not
+    just you. If a `ModuleNotFoundError` appears, that's a missing
+    declared dep — see Rule 11.
   * **Network**: Avoid unless task explicitly requires it. Most tasks
     here are local.
+
+### Rule 11 — New pip dependencies must be declared
+
+If your work requires a Python package that isn't already in
+`backend/requirements.in`, you must:
+
+  1. Add the package + version pin to `backend/requirements.in`
+     (next to a topically related entry; add a 1-line comment
+     explaining what uses it)
+  2. Update `backend/requirements.txt` with the locked entry + sha256
+     hashes (use `pip-compile` or hand-author the entry mirroring
+     existing format — fetch hashes via
+     `pip download <pkg>==<ver> --no-deps --dest /tmp/`)
+  3. Commit the dep change in the SAME logical commit that introduces
+     the import — do NOT split "use the dep" from "declare the dep"
+
+If you skip these steps, `master` (Claude / CI / other operators)
+cannot run your tests and will fail at import time. Discovered
+2026-05-03 when codex's FS-series tests imported `respx` without
+declaring it; 47 alembic + provider tests failed at collection until
+the dep was retroactively added. **Don't repeat this.**
+
+When you're unsure if something is already in requirements.in, run
+`grep -E "^<pkg>" backend/requirements.in` BEFORE writing the import.
+If absent, follow the 3 steps above.
 
 ### Rule 10 — End-of-task checklist
 
