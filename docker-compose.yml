@@ -22,6 +22,12 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    # FX.7.7 — cgroup memory caps. Dev image runs uvicorn --reload + a single
+    # worker so steady-state RSS is ~300-500 MB; 4 GB ceiling tolerates a
+    # debugger / large dataset load, mem_reservation=512m is the soft floor
+    # under host pressure (matches typical dev workload baseline).
+    mem_limit: 4g
+    mem_reservation: 512m
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/readyz"]
       interval: 30s
@@ -42,6 +48,12 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    # FX.7.7 — cgroup memory caps. Next.js dev server (hot-reload + bundler)
+    # peaks higher than prod SSR; 2g ceiling matches prod frontend cap so
+    # local OOM behaviour matches what prod hits, mem_reservation=512m
+    # mirrors the prod soft floor.
+    mem_limit: 2g
+    mem_reservation: 512m
 
   # ──────────────────────────────────────────────────────────────
   # O3 (#266): stateless agent worker pool.
@@ -74,3 +86,10 @@ services:
     stop_signal: SIGTERM
     stop_grace_period: 60s
     restart: unless-stopped
+    # FX.7.7 — cgroup memory caps. Worker is stateless agent runtime;
+    # baseline ~150 MB, occasional bursts during large doc/code execution.
+    # 2g ceiling stops a runaway agent loop from starving backend, 256m
+    # reservation is the host-pressure soft floor (workers scale ≥ 1, so
+    # the floor is per-replica, not aggregate).
+    mem_limit: 2g
+    mem_reservation: 256m

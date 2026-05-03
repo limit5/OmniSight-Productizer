@@ -93,6 +93,11 @@ services:
       - SETGID
       - SETUID
       - NET_BIND_SERVICE
+    # FX.7.7 — cgroup caps. Tiny haproxy-based ACL forwarder; steady-state
+    # RSS < 20 MB. 128m ceiling stops a runaway connection storm from
+    # bloating the proxy, 16m reservation is the soft floor.
+    mem_limit: 128m
+    mem_reservation: 16m
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "-T", "2", "http://127.0.0.1:2375/_ping"]
       interval: 15s
@@ -216,6 +221,14 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # FX.7.7 — cgroup memory caps. Backend runs uvicorn with N workers
+    # (default max(2, cpu_count // 2)), each worker ~300-500 MB steady-state
+    # plus per-request asyncpg pool buffers + agent-task in-flight scratch.
+    # 4g ceiling tolerates the worst-case parallel-task burst on an 8-core
+    # host; 1g reservation is the host-pressure soft floor (per-replica, so
+    # backend-a + backend-b together = 2g reservation pair).
+    mem_limit: 4g
+    mem_reservation: 1g
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/readyz"]
       interval: 30s
@@ -287,6 +300,9 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # FX.7.7 — cgroup memory caps. Symmetric with backend-a (see above).
+    mem_limit: 4g
+    mem_reservation: 1g
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8001/readyz"]
       interval: 30s
@@ -337,6 +353,11 @@ services:
       - SETUID
       - SETGID
       - DAC_OVERRIDE
+    # FX.7.7 — cgroup memory caps. Caddy is a Go reverse-proxy; steady-state
+    # RSS ~30-80 MB even under load. 512m ceiling has plenty of headroom for
+    # cert-cache + connection-pool spikes; 64m reservation is the soft floor.
+    mem_limit: 512m
+    mem_reservation: 64m
     # Probe Caddy's Docker-internal :8000 block — that path is a plain HTTP
     # reverse proxy into the backend pool (no TLS, no redirect). Probing
     # `:80/` fails because `:80` issues a 301 → `https://...` and wget
@@ -512,6 +533,12 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE   # quic client may bind low source ports
+    # FX.7.7 — cgroup memory caps. cloudflared maintains QUIC connection
+    # state to CF edge; steady-state ~50-100 MB. 512m ceiling tolerates
+    # connection churn during edge re-pinning, 64m reservation is the
+    # soft floor under host pressure.
+    mem_limit: 512m
+    mem_reservation: 64m
 
   # ──────────────────────────────────────────────────────────────────
   # BS.4.6 — omnisight-installer sidecar (epic 6/7).
@@ -689,6 +716,12 @@ services:
       - backend-a
       - backend-b
     restart: always
+    # FX.7.7 — cgroup memory caps. Prometheus TSDB compaction + 15d
+    # retention can grow heap several hundred MB on busy stacks. 1g
+    # ceiling is generous for this scrape-target footprint (backend-a +
+    # backend-b only); 256m reservation is the soft floor under pressure.
+    mem_limit: 1g
+    mem_reservation: 256m
 
   grafana:
     image: grafana/grafana:11.2.0
@@ -704,6 +737,11 @@ services:
     depends_on:
       - prometheus
     restart: always
+    # FX.7.7 — cgroup memory caps. Grafana steady-state ~150 MB; 512m
+    # ceiling absorbs heavy dashboard-render bursts, 128m reservation
+    # keeps the UI responsive under host pressure.
+    mem_limit: 512m
+    mem_reservation: 128m
 
 volumes:
   omnisight-data:

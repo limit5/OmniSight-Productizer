@@ -73,6 +73,16 @@ services:
       timeout: 5s
       retries: 6
       start_period: 20s
+    # FX.7.7 — cgroup memory caps. Production primary runs synchronous
+    # replication + WAL retention for the named slot; shared_buffers +
+    # work_mem + maintenance_work_mem + per-connection backend memory all
+    # add up. 4g ceiling matches typical mid-size prod PG sizing for
+    # single-tenant workloads (postgresql.primary.conf shared_buffers
+    # default is sub-512m); 1g reservation is the soft floor required to
+    # keep the slot's WAL retention + replication backend resident under
+    # host pressure.
+    mem_limit: 4g
+    mem_reservation: 1g
     networks:
       - pg-ha
 
@@ -123,6 +133,12 @@ services:
     depends_on:
       pg-primary:
         condition: service_healthy
+    # FX.7.7 — cgroup memory caps. Symmetric with pg-primary (see above).
+    # Standby must size identically to absorb post-failover writer load
+    # without restart — asymmetric sizing would mean a successful
+    # promotion immediately OOM-kills the new primary.
+    mem_limit: 4g
+    mem_reservation: 1g
     networks:
       - pg-ha
 

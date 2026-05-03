@@ -55,6 +55,14 @@ services:
       start_period: 5s
     networks:
       - pg_test_net
+    # FX.7.7 — cgroup memory caps. Test PG runs with shared_buffers=64MB
+    # and max_connections=100; whole instance steady-state ~150 MB.
+    # 512m ceiling absorbs the test-suite's parallel-conn bursts without
+    # risk of starving the dev host running pytest alongside; 64m
+    # reservation matches the soft floor the postgres process actually
+    # needs to accept connections.
+    mem_limit: 512m
+    mem_reservation: 64m
     # Reasonable defaults for a test DB: small shared_buffers so it
     # boots fast, fewer max_connections than prod (test load never
     # exceeds 20 parallel conns).
