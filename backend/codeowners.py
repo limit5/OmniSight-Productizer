@@ -35,18 +35,29 @@ def _match_codeowner_pattern(file_path: str, pattern: str) -> bool:
         filename = Path(file_path).name
         return fnmatch.fnmatch(filename, pattern)
 
-# Parsed rules: list of (glob_pattern, agent_type, sub_type, hard_block)
-_rules: list[tuple[str, str, str, bool]] | None = None
+# Parsed rules: (CODEOWNERS mtime, parsed CODEOWNERS tuples)
+_rules: tuple[float | None, list[tuple[str, str, str, bool]]] | None = None
 
 
 def _load_rules() -> list[tuple[str, str, str, bool]]:
-    """Parse CODEOWNERS file. Cached after first call."""
+    """Parse CODEOWNERS file with file-mtime cache invalidation.
+
+    Module-global state audit: ``_rules`` is per-worker process state,
+    keyed by ``configs/CODEOWNERS`` mtime. Every worker derives the same
+    rule table from the same shared file and reloads when another
+    worker/operator updates it.
+    """
     global _rules
-    if _rules is not None:
-        return _rules
-    _rules = []
-    if not _CODEOWNERS_PATH.exists():
-        return _rules
+    try:
+        config_mtime = _CODEOWNERS_PATH.stat().st_mtime
+    except OSError:
+        config_mtime = None
+    if _rules is not None and _rules[0] == config_mtime:
+        return _rules[1]
+    parsed = []
+    if config_mtime is None:
+        _rules = (config_mtime, parsed)
+        return parsed
     for line in _CODEOWNERS_PATH.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -64,9 +75,15 @@ def _load_rules() -> list[tuple[str, str, str, bool]]:
             agent_type, sub_type = owner.split("/", 1)
         else:
             agent_type, sub_type = owner, ""
-        _rules.append((pattern, agent_type, sub_type, hard_block))
-    logger.info("Loaded %d CODEOWNERS rules", len(_rules))
-    return _rules
+        parsed.append((pattern, agent_type, sub_type, hard_block))
+    _rules = (config_mtime, parsed)
+    logger.info("Loaded %d CODEOWNERS rules", len(parsed))
+    return parsed
+
+
+def reload_codeowners_for_tests() -> None:
+    global _rules
+    _rules = None
 
 
 def get_file_owners(file_path: str) -> list[tuple[str, str, bool]]:
