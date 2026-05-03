@@ -412,22 +412,24 @@ def install_skill(
         manifest = load_manifest(manifest_path)
         if manifest.hooks.install:
             try:
-                subprocess.run(
+                result = _run_skill_hook(
                     manifest.hooks.install,
-                    shell=True,
-                    capture_output=True,
+                    cwd=dest,
                     timeout=60,
-                    cwd=str(dest),
-                    check=True,
+                    hook_label="install hook",
                 )
-            except subprocess.CalledProcessError as exc:
-                logger.warning(
-                    "install hook for %s failed (rc=%d): %s",
-                    skill_name, exc.returncode,
-                    exc.stderr.decode("utf-8", errors="replace")[:200],
-                )
+                if result.returncode != 0:
+                    logger.warning(
+                        "install hook for %s failed (rc=%d): %s",
+                        skill_name, result.returncode,
+                        result.stderr.decode("utf-8", errors="replace")[:200],
+                    )
             except subprocess.TimeoutExpired:
                 logger.warning("install hook for %s timed out", skill_name)
+            except ValueError as exc:
+                logger.warning(
+                    "install hook for %s rejected: %s", skill_name, exc,
+                )
 
     return _inspect_skill(dest)
 

