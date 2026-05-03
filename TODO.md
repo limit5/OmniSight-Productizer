@@ -3996,7 +3996,7 @@ ls backend/alembic/versions/ | tail -3
 
 ### SC.1 — SAST Integration
 - [x][G] SC.1.1 CodeQL / Semgrep / Snyk Code adapter
-- [~][G] SC.1.2 走 generated workspace、每次 commit 觸發
+- [x][G] SC.1.2 走 generated workspace、每次 commit 觸發
 - [x][G] SC.1.3 整合 PEP gateway — high severity finding 自動 HOLD
 - [x][G] SC.1.4 Tests
 - 預估：**1.5 day**
@@ -4063,21 +4063,21 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] SC.11.1 alembic 0065 `compliance_evidence_bundles` table
 - [x][G] SC.11.2 SOC2 control mapping → 自動 collect logs/policies
 - [x][G] SC.11.3 ISO 27001 mapping
-- [~][G] SC.11.4 Evidence bundle export（zip + signature）
+- [x][G] SC.11.4 Evidence bundle export（zip + signature）
 - 預估：**1.5 day**
 
 ### SC.12 — PII Detection / Masking
-- [ ] SC.12.1 Microsoft Presidio integration
-- [ ] SC.12.2 Auto-mask helpers for logs / responses
-- [ ] SC.12.3 Tests
+- [x][G] SC.12.1 Microsoft Presidio integration
+- [x][G] SC.12.2 Auto-mask helpers for logs / responses
+- [x][G] SC.12.3 Tests
 - 預估：**1 day**
 
 ### SC.13 — Bot Defense Stack（reuse AS.3）
-- [ ] SC.13.1 Reuse AS.3 bot_challenge lib（Turnstile / reCAPTCHA / hCaptcha）
-- [ ] SC.13.2 Scaffold 5 form 預設帶（login / signup / password-reset / contact / comment）
-- [ ] SC.13.3 Honeypot field 自動加（reuse AS.4）
-- [ ] SC.13.4 可觀測性：challenge 通過 / 失敗 / fallback 比例 dashboard
-- [ ] SC.13.5 Tests
+- [x][G] SC.13.1 Reuse AS.3 bot_challenge lib（Turnstile / reCAPTCHA / hCaptcha）
+- [x][G] SC.13.2 Scaffold 5 form 預設帶（login / signup / password-reset / contact / comment）
+- [x][G] SC.13.3 Honeypot field 自動加（reuse AS.4）
+- [x][G] SC.13.4 可觀測性：challenge 通過 / 失敗 / fallback 比例 dashboard
+- [x][G] SC.13.5 Tests
 - 預估：**0.5 day**（縮減自原 1.5d，因 reuse AS）
 
 **Priority SC 總預估**：**~13.5 day**
