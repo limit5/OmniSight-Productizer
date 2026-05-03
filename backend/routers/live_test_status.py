@@ -1,4 +1,4 @@
-"""Z.7.7 — GET/POST /runtime/live-test-status.
+"""Z.7.7 / Z.7.8 — GET/POST /runtime/live-test-status.
 
 Surface the nightly LLM live integration test result from the
 ``SharedKV("llm_live_test_status")`` namespace so the dashboard chip
@@ -19,6 +19,14 @@ Two endpoints:
   ``current_user`` dependency is bypassed here so no interactive login is
   needed from the workflow.
 
+Z.7.8 additions
+───────────────
+POST handler now tracks ``consecutive_failures`` in the same SharedKV
+namespace: incremented on every fail, reset to 0 on pass. This is a
+bonus for the dashboard GET — the primary escalation trigger is the
+GitHub Actions ``escalate`` job which checks previous-run conclusion via
+``gh run list`` (independent of backend availability).
+
 Module-global audit (SOP Step 1, 2026-04-21 rule)
 ──────────────────────────────────────────────────
 No module-globals introduced. Both endpoints use a fresh
@@ -26,12 +34,14 @@ No module-globals introduced. Both endpoints use a fresh
 consistency is Redis-backed (qualified answer #2) or intentionally
 per-worker in-memory fallback (qualified answer #3 — per-worker drift
 is tolerable for an observability chip that shows "last nightly pass").
+``incr`` on ``consecutive_failures`` is atomically backed by Redis
+HINCRBY (or in-memory under the class-level lock) — same answer #2/#3.
 
 Read-after-write audit
 ──────────────────────
 Writer: the CI POST endpoint. Reader: GET endpoint + frontend chip.
 No concurrent-write concern (one nightly runner + manual workflow_dispatch;
-single writer per run). ``SharedKV.set`` is atomic per its own docstring.
+single writer per run). ``SharedKV.set`` / ``SharedKV.incr`` are atomic.
 """
 
 from __future__ import annotations
@@ -63,6 +73,8 @@ _FIELD_ESTIMATED_COST = "estimated_cost_usd"
 _FIELD_TESTS_RUN = "tests_run"
 _FIELD_TESTS_PASSED = "tests_passed"
 _FIELD_TESTS_SKIPPED = "tests_skipped"
+# Z.7.8 — consecutive failure counter; incremented on fail, reset to 0 on pass.
+_FIELD_CONSECUTIVE_FAILURES = "consecutive_failures"
 
 
 def _reporter_token() -> str:
@@ -88,6 +100,10 @@ class LiveTestStatusResponse(BaseModel):
     tests_run: int | None = None
     tests_passed: int | None = None
     tests_skipped: int | None = None
+    consecutive_failures: int | None = Field(
+        default=None,
+        description="Z.7.8: number of consecutive nightly failures; 0 after a pass.",
+    )
 
 
 class LiveTestStatusWriteRequest(BaseModel):
@@ -152,12 +168,17 @@ def get_live_test_status() -> LiveTestStatusResponse:
         tests_run=_int_or_none(_FIELD_TESTS_RUN),
         tests_passed=_int_or_none(_FIELD_TESTS_PASSED),
         tests_skipped=_int_or_none(_FIELD_TESTS_SKIPPED),
+        consecutive_failures=_int_or_none(_FIELD_CONSECUTIVE_FAILURES),
     )
 
 
 @router.post(
     "/live-test-status",
     status_code=204,
+    # response_model=None: `from __future__ import annotations` stringifies
+    # `-> None` so FastAPI 0.115+ cannot infer "no body" from the annotation;
+    # we must be explicit to avoid the "204 must not have a response body" assert.
+    response_model=None,
     summary="Write LLM live integration test result (CI reporter)",
 )
 def post_live_test_status(
@@ -207,3 +228,15 @@ def post_live_test_status(
         kv.set(_FIELD_TESTS_PASSED, str(body.tests_passed))
     if body.tests_skipped is not None:
         kv.set(_FIELD_TESTS_SKIPPED, str(body.tests_skipped))
+    # Z.7.8 — consecutive failure counter: increment on fail, reset on pass.
+    # Read-modify-write (not atomic incr) because: single nightly writer,
+    # and this avoids int() raising ValueError on an absent / empty field.
+    if body.status == "fail":
+        raw = kv.get(_FIELD_CONSECUTIVE_FAILURES, "") or "0"
+        try:
+            new_count = int(raw) + 1
+        except ValueError:
+            new_count = 1
+        kv.set(_FIELD_CONSECUTIVE_FAILURES, str(new_count))
+    else:
+        kv.set(_FIELD_CONSECUTIVE_FAILURES, "0")

@@ -31,8 +31,11 @@ name: LLM Live Integration Tests (nightly)
 # nightly job, and the ``on.push`` trigger fires only when this file or
 # the live-test source changes, to keep edit→verify latency low.
 #
-# Z.7.8 (failure escalation) will add a "consecutive failures" counter
-# and auto-file a GitHub issue after 2 red runs. Not in this workflow yet.
+# Z.7.8 (failure escalation): ``escalate`` job checks if the previous run
+# also failed (via ``gh run list``) and, if so, invokes
+# ``scripts/llm_adapter_debug_bot.py`` to auto-diagnose and file a GitHub
+# issue. The backend POST handler also tracks ``consecutive_failures`` in
+# SharedKV for the dashboard chip. Rate-limited to one open issue per streak.
 
 on:
   schedule:
@@ -54,6 +57,8 @@ on:
 
 permissions:
   contents: read
+  # Z.7.8: the ``escalate`` job creates GitHub issues on consecutive failures.
+  issues: write
 
 concurrency:
   group: llm-live-tests
@@ -287,3 +292,131 @@ jobs:
         run: |
           echo "LLM live integration tests: PASS"
           echo "Budget guard: PASS"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # escalate — Z.7.8: fire llm-adapter-debug-bot when 2 consecutive
+  # nightly runs fail.
+  #
+  # Runs only when the current live-tests job failed.  A Python step
+  # queries ``gh run list`` to find the previous completed run of this
+  # workflow and checks its conclusion.  If it also failed, we have 2
+  # consecutive failures and the debug-bot is invoked to auto-diagnose
+  # and open a GitHub issue.
+  #
+  # Rate-limiting: the bot itself checks for an existing open
+  # ``llm-live-test-failure`` issue and skips creation if one is found.
+  # This prevents issue spam when failures continue past the initial 2.
+  # Close the issue once the root cause is resolved to re-arm escalation.
+  #
+  # BP.B note: once BP.B Guild infrastructure lands, the bot invocation
+  # here will be replaced by a Guild dispatch call.  The script itself
+  # is designed as a thin standalone wrapper that can be wrapped without
+  # a logic rewrite.
+  # ─────────────────────────────────────────────────────────────────────
+  escalate:
+    name: "Failure escalation — Z.7.8 (llm-adapter-debug-bot)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Wait for gate (which transitively waits for live-tests + budget-guard + report)
+    # so SharedKV is updated before we potentially query the backend.
+    needs: [live-tests, gate]
+    # Only run when the live-tests job actually failed.
+    if: >-
+      always() &&
+      needs.live-tests.outputs.exit_code != '0' &&
+      needs.live-tests.outputs.exit_code != ''
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Check if previous run also failed
+        id: check_consecutive
+        env:
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        # Use Python to avoid shell quoting issues when working with gh JSON output.
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+
+          current_id = int(os.environ.get("CURRENT_RUN_ID", "0"))
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+
+          result = subprocess.run(
+              [
+                  "gh", "run", "list",
+                  "--workflow=llm-live-tests.yml",
+                  "--repo", repo,
+                  "--limit=10",
+                  "--status=completed",
+                  "--json=databaseId,conclusion",
+              ],
+              capture_output=True, text=True,
+          )
+          if result.returncode != 0:
+              print(f"gh run list failed: {result.stderr}", file=sys.stderr)
+              sys.exit(0)  # non-fatal: skip escalation on gh errors
+
+          try:
+              runs = json.loads(result.stdout)
+          except json.JSONDecodeError:
+              print("could not parse gh run list output", file=sys.stderr)
+              sys.exit(0)
+
+          # Completed runs are sorted newest-first.  Find the most recent
+          # completed run that is NOT the current in-progress workflow.
+          prev = next(
+              (r for r in runs if r["databaseId"] != current_id),
+              None,
+          )
+
+          output_file = os.environ.get("GITHUB_OUTPUT", "")
+
+          if prev and prev["conclusion"] == "failure":
+              prev_id = prev["databaseId"]
+              print(
+                  f"[escalate] previous run #{prev_id} also failed — "
+                  "2 consecutive failures, triggering debug-bot"
+              )
+              if output_file:
+                  with open(output_file, "a") as f:
+                      f.write(f"consecutive_failure=true\n")
+                      f.write(f"previous_run_id={prev_id}\n")
+          else:
+              prev_conc = prev["conclusion"] if prev else "no previous run"
+              print(
+                  f"[escalate] previous run conclusion: {prev_conc} — "
+                  "not 2 consecutive failures, skipping escalation"
+              )
+              if output_file:
+                  with open(output_file, "a") as f:
+                      f.write("consecutive_failure=false\n")
+                      f.write("previous_run_id=\n")
+          PY
+
+      - name: Run llm-adapter-debug-bot
+        if: steps.check_consecutive.outputs.consecutive_failure == 'true'
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/llm_adapter_debug_bot.py \
+            --current-run-id  "${{ github.run_id }}" \
+            --previous-run-id "${{ steps.check_consecutive.outputs.previous_run_id }}"
+
+      - name: Escalation summary
+        if: always()
+        env:
+          CONSECUTIVE: ${{ steps.check_consecutive.outputs.consecutive_failure }}
+        run: |
+          if [ "$CONSECUTIVE" = "true" ]; then
+            echo "::warning::Z.7.8 escalation fired — 2 consecutive LLM live-test failures; llm-adapter-debug-bot invoked."
+          else
+            echo "Z.7.8 escalation check: no consecutive failure condition met."
+          fi
