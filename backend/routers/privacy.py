@@ -1,4 +1,4 @@
-"""SC.10.2 / SC.10.3 -- DSAR access and erasure endpoints.
+"""SC.10.2-SC.10.4 -- DSAR access, erasure, and portability endpoints.
 
 POST /privacy/access
     Return the current user's account-owned data and write a completed
@@ -6,9 +6,12 @@ POST /privacy/access
 POST /privacy/erasure
     Erase the current user's account-owned data, redact the retained
     ``users`` row, and write a completed ``dsar_requests`` receipt.
+POST /privacy/portability
+    Return a portable JSON export for the current user's account-owned
+    data and write a completed ``dsar_requests`` receipt.
 
-These routes are intentionally narrow: SC.10.4 owns portable JSON
-exports, and SC.10.5 owns email/SLA background work.
+These routes are intentionally narrow: SC.10.5 owns email/SLA
+background work.
 """
 from __future__ import annotations
 
@@ -33,6 +36,10 @@ def _request_id() -> str:
 
 def _erasure_request_id() -> str:
     return f"dsar-erasure-{uuid.uuid4().hex}"
+
+
+def _portability_request_id() -> str:
+    return f"dsar-portability-{uuid.uuid4().hex}"
 
 
 def _row(row) -> dict:
@@ -150,6 +157,30 @@ def _counts(data: dict) -> dict:
     for key, value in data.items():
         counts[key] = len(value) if isinstance(value, list) else int(bool(value))
     return counts
+
+
+def _build_portability_export(
+    data: dict,
+    user: auth.User,
+    generated_at: float,
+) -> dict:
+    """Return the SC.10.4 JSON export envelope for ``user``.
+
+    Module-global state audit: this helper keeps no mutable in-process
+    export state; every worker derives the same envelope from request
+    arguments and PG-sourced data.
+    """
+    return {
+        "format": "json",
+        "schema": "omnisight.dsar.portability.v1",
+        "generated_at": generated_at,
+        "subject": {
+            "user_id": user.id,
+            "tenant_id": user.tenant_id,
+            "email": user.email,
+        },
+        "data": data,
+    }
 
 
 _EXECUTE_COUNT_RE = re.compile(r"\b(\d+)\s*$")
@@ -306,5 +337,54 @@ async def create_erasure_request(
             "due_at": due_at,
             "completed_at": completed_at,
         },
+        "result": result,
+    }
+
+
+@router.post("/portability")
+async def create_portability_request(
+    user: auth.User = Depends(auth.current_user),
+) -> dict:
+    from backend.db_pool import get_pool
+
+    request_id = _portability_request_id()
+    requested_at = time.time()
+    completed_at = requested_at
+    due_at = requested_at + _DSAR_SLA_SECONDS
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            data = await _fetch_all_user_data(conn, user)
+            export = _build_portability_export(data, user, completed_at)
+            result = {
+                "format": "json",
+                "schema": export["schema"],
+                "category_counts": _counts(data),
+            }
+            await conn.execute(
+                "INSERT INTO dsar_requests "
+                "(id, tenant_id, user_id, request_type, status, requested_at, "
+                "due_at, completed_at, payload_json, result_json) "
+                "VALUES ($1, $2, $3, 'portability', 'completed', $4, $5, $6, "
+                "$7::jsonb, $8::jsonb)",
+                request_id,
+                user.tenant_id,
+                user.id,
+                requested_at,
+                due_at,
+                completed_at,
+                json.dumps({"source": "privacy_portability_endpoint"}),
+                json.dumps(result),
+            )
+
+    return {
+        "request": {
+            "id": request_id,
+            "type": "portability",
+            "status": "completed",
+            "requested_at": requested_at,
+            "due_at": due_at,
+            "completed_at": completed_at,
+        },
+        "export": export,
         "result": result,
     }

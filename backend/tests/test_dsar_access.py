@@ -1,4 +1,4 @@
-"""SC.10.2 / SC.10.3 -- DSAR access and erasure endpoint contracts."""
+"""SC.10.2-SC.10.4 -- DSAR access, erasure, and portability contracts."""
 from __future__ import annotations
 
 import json
@@ -174,6 +174,38 @@ async def test_erasure_handler_smoke_uses_pool_and_records_counts(monkeypatch):
     encoded = json.dumps(body, sort_keys=True)
     assert "alice-dsar@example.test" not in encoded
     assert "password_hash" not in encoded
+
+
+async def test_portability_handler_smoke_returns_json_export(monkeypatch):
+    conn = _FakeConn()
+    from backend import db_pool as _db_pool
+
+    monkeypatch.setattr(_db_pool, "_pool", _FakePool(conn))
+
+    body = await _privacy.create_portability_request(
+        _user("u-dsar-alice", "alice-dsar@example.test")
+    )
+
+    assert body["request"]["type"] == "portability"
+    assert body["request"]["status"] == "completed"
+    assert body["export"]["format"] == "json"
+    assert body["export"]["schema"] == "omnisight.dsar.portability.v1"
+    assert body["export"]["subject"] == {
+        "user_id": "u-dsar-alice",
+        "tenant_id": "t-dsar",
+        "email": "alice-dsar@example.test",
+    }
+    assert body["export"]["data"]["profile"]["id"] == "u-dsar-alice"
+    assert body["export"]["data"]["preferences"][0]["value"] == "en-US"
+    assert body["result"]["category_counts"]["preferences"] == 1
+    assert body["result"]["format"] == "json"
+    assert conn.insert_args is not None
+    assert conn.insert_args[2] == "u-dsar-alice"
+
+    encoded = json.dumps(body, sort_keys=True)
+    assert "password_hash" not in encoded
+    assert "access_token_enc" not in encoded
+    assert "refresh_token_enc" not in encoded
 
 
 @pytest.fixture
@@ -524,3 +556,66 @@ async def test_erasure_endpoint_redacts_user_data_and_records_receipt(
     assert receipt["status"] == "completed"
     assert receipt["payload_json"]["source"] == "privacy_erasure_endpoint"
     assert receipt["result_json"]["erased_counts"]["profile"] == 1
+
+
+async def test_portability_endpoint_returns_json_export_and_records_receipt(
+    _privacy_client: AsyncClient,
+    pg_test_pool,
+):
+    resp = await _privacy_client.post("/api/v1/privacy/portability")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    request_id = body["request"]["id"]
+
+    assert body["request"]["type"] == "portability"
+    assert body["request"]["status"] == "completed"
+    assert request_id.startswith("dsar-portability-")
+    assert body["request"]["due_at"] - body["request"]["requested_at"] == pytest.approx(
+        30 * 24 * 60 * 60,
+        rel=1e-6,
+    )
+
+    export = body["export"]
+    assert export["format"] == "json"
+    assert export["schema"] == "omnisight.dsar.portability.v1"
+    assert export["generated_at"] == body["request"]["completed_at"]
+    assert export["subject"] == {
+        "user_id": "u-dsar-alice",
+        "tenant_id": "t-dsar",
+        "email": "alice-dsar@example.test",
+    }
+    assert export["data"]["profile"]["id"] == "u-dsar-alice"
+    assert export["data"]["preferences"][0]["value"] == "en-US"
+    assert export["data"]["drafts"][0]["content"] == "alice draft"
+    assert export["data"]["chat_messages"][0]["content"] == "hello from alice"
+    assert body["result"]["format"] == "json"
+    assert body["result"]["schema"] == "omnisight.dsar.portability.v1"
+    assert body["result"]["category_counts"]["profile"] == 1
+
+    encoded = json.dumps(body, sort_keys=True)
+    assert "u-dsar-bob" not in encoded
+    assert "bob draft" not in encoded
+    assert "hash-secret" not in encoded
+    assert "session-token-secret" not in encoded
+    assert "csrf-secret" not in encoded
+    assert "totp-secret" not in encoded
+    assert "backup-hash-secret" not in encoded
+    assert "old-password-secret" not in encoded
+    assert "api-key-hash-secret" not in encoded
+    assert "ciphertext-secret" not in encoded
+
+    async with pg_test_pool.acquire() as conn:
+        receipt = await conn.fetchrow(
+            "SELECT tenant_id, user_id, request_type, status, payload_json, "
+            "result_json FROM dsar_requests WHERE id = $1",
+            request_id,
+        )
+
+    assert receipt["tenant_id"] == "t-dsar"
+    assert receipt["user_id"] == "u-dsar-alice"
+    assert receipt["request_type"] == "portability"
+    assert receipt["status"] == "completed"
+    assert receipt["payload_json"]["source"] == "privacy_portability_endpoint"
+    assert receipt["result_json"]["format"] == "json"
+    assert receipt["result_json"]["schema"] == "omnisight.dsar.portability.v1"
+    assert receipt["result_json"]["category_counts"]["profile"] == 1
