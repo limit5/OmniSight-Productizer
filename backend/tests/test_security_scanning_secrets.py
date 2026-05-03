@@ -393,4 +393,20 @@ class TestRepoSecretPreCommitConfig:
         workflow = (repo_root / ".github/workflows/ci.yml").read_text()
 
         assert "secret-pre-commit:" in workflow
-        assert "pre-commit run --all-files" in workflow
+        assert "pre-commit run --all-files --show-diff-on-failure" in workflow
+
+    def test_ci_secret_pre_commit_is_pull_request_hard_gate(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github/workflows/ci.yml").read_text()
+
+        triggers = workflow.split("jobs:", 1)[0]
+        job = workflow.split("  secret-pre-commit:", 1)[1].split(
+            "\n  catalog-schema:",
+            1,
+        )[0]
+
+        assert "pull_request:" in triggers
+        assert "KS.4.2" in job
+        assert "go install github.com/gitleaks/gitleaks/v8@v8.24.0" in job
+        assert "go install github.com/trufflesecurity/trufflehog/v3@v3.88.8" in job
+        assert "continue-on-error" not in job
