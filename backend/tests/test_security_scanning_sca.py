@@ -22,7 +22,7 @@ from backend.security_scanning import (
     scan_sca,
     write_sca_fix_pr_artifact,
 )
-from backend.security_scanning.sca import _normalise_severity
+from backend.security_scanning.sca import _main, _normalise_severity
 
 
 _NPM_AUDIT_PAYLOAD = {
@@ -131,6 +131,38 @@ class TestSCANpmAudit:
         assert finding.path == "<5.0.1"
         assert not report.passed
 
+    def test_parses_legacy_npm_advisories_json(self, tmp_path: Path):
+        (tmp_path / "package.json").write_text('{"name":"x"}')
+        payload = {
+            "advisories": {
+                "118": {
+                    "id": 118,
+                    "module_name": "hoek",
+                    "vulnerable_versions": "<4.2.1",
+                    "patched_versions": ">=4.2.1",
+                    "severity": "moderate",
+                    "title": "Prototype pollution",
+                }
+            }
+        }
+        with mock.patch(
+            "backend.security_scanning.sca.shutil.which",
+            lambda x: "/fake/npm" if x == "npm" else None,
+        ), mock.patch(
+            "backend.security_scanning.sca._run",
+            return_value=(1, json.dumps(payload), ""),
+        ):
+            report = scan_sca(tmp_path, scanner="npm-audit")
+
+        assert report.source == "npm-audit"
+        assert report.total_findings == 1
+        finding = report.findings[0]
+        assert finding.vulnerability_id == "118"
+        assert finding.package == "hoek"
+        assert finding.version == "<4.2.1"
+        assert finding.fixed_version == ">=4.2.1"
+        assert finding.severity == "MEDIUM"
+
     def test_requires_package_json_before_claiming_npm_source(self, tmp_path: Path):
         with mock.patch(
             "backend.security_scanning.sca.shutil.which",
@@ -164,6 +196,44 @@ class TestSCAOsv:
         assert finding.severity == "HIGH"
         assert finding.path == "package-lock.json"
 
+    def test_database_specific_osv_severity_wins(self, tmp_path: Path):
+        payload = {
+            "results": [
+                {
+                    "source": {"path": "requirements.txt"},
+                    "packages": [
+                        {
+                            "package": {
+                                "name": "jinja2",
+                                "version": "3.1.2",
+                                "ecosystem": "PyPI",
+                            },
+                            "groups": [{"max_severity": "4.0"}],
+                            "vulnerabilities": [
+                                {
+                                    "id": "PYSEC-2024-1",
+                                    "summary": "Sandbox escape",
+                                    "database_specific": {"severity": "CRITICAL"},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        with mock.patch(
+            "backend.security_scanning.sca.shutil.which",
+            lambda x: "/fake/osv-scanner" if x == "osv-scanner" else None,
+        ), mock.patch(
+            "backend.security_scanning.sca._run",
+            return_value=(1, json.dumps(payload), ""),
+        ):
+            report = scan_sca(tmp_path, scanner="osv-scanner")
+
+        assert report.source == "osv-scanner"
+        assert report.severity_counts == {"CRITICAL": 1}
+        assert not report.passed
+
 
 class TestSCASnyk:
     def test_parses_snyk_json(self, tmp_path: Path):
@@ -185,6 +255,55 @@ class TestSCASnyk:
         assert finding.fixed_version == "1.2.6"
         assert finding.severity == "CRITICAL"
         assert finding.path == "package.json"
+
+    def test_parses_snyk_projects_shape(self, tmp_path: Path):
+        payload = {
+            "projects": [
+                {
+                    "packageManager": "npm",
+                    "targetFile": "apps/web/package.json",
+                    "issues": [
+                        {
+                            "issueId": "SNYK-JS-WEB-1",
+                            "pkgName": "@scope/web-lib",
+                            "from": ["root@1.0.0", "@scope/web-lib@2.0.0"],
+                            "severity": "high",
+                            "description": "Unsafe dependency",
+                            "fixedInVersions": ["2.0.1"],
+                        }
+                    ],
+                },
+                {
+                    "packageManager": "pip",
+                    "targetFile": "backend/requirements.txt",
+                    "vulnerabilities": [
+                        {
+                            "id": "SNYK-PYTHON-JINJA2-1",
+                            "packageName": "jinja2",
+                            "version": "3.1.2",
+                            "severity": "medium",
+                        }
+                    ],
+                },
+            ]
+        }
+        with mock.patch(
+            "backend.security_scanning.sca.shutil.which",
+            lambda x: "/fake/snyk" if x == "snyk" else None,
+        ), mock.patch(
+            "backend.security_scanning.sca._run",
+            return_value=(1, json.dumps(payload), ""),
+        ):
+            report = scan_sca(tmp_path, scanner="snyk")
+
+        assert report.source == "snyk"
+        assert report.total_findings == 2
+        assert report.severity_counts == {"HIGH": 1, "MEDIUM": 1}
+        assert report.findings[0].package == "@scope/web-lib"
+        assert report.findings[0].version == "@scope/web-lib@2.0.0"
+        assert report.findings[0].fixed_version == "2.0.1"
+        assert report.findings[0].path == "apps/web/package.json"
+        assert report.findings[1].ecosystem == "pip"
 
     def test_threshold_can_be_loosened(self, tmp_path: Path):
         payload = {
@@ -441,6 +560,38 @@ class TestSCAFixPrPlan:
 
 
 class TestSCACli:
+    def test_cli_fix_pr_out_writes_artifact(self, tmp_path: Path, capsys):
+        (tmp_path / "package.json").write_text('{"name":"x"}')
+        with mock.patch(
+            "backend.security_scanning.sca.shutil.which",
+            lambda x: "/fake/npm" if x == "npm" else None,
+        ), mock.patch(
+            "backend.security_scanning.sca._run",
+            return_value=(1, json.dumps(_NPM_AUDIT_PAYLOAD), ""),
+        ):
+            rc = _main(
+                [
+                    "--app-path",
+                    str(tmp_path),
+                    "--scanner",
+                    "npm-audit",
+                    "--fix-pr-out",
+                    str(tmp_path),
+                    "--base-branch",
+                    "main",
+                ]
+            )
+
+        summary = json.loads(capsys.readouterr().out)
+        artifact = tmp_path / SCA_FIX_PR_ARTIFACT
+        payload = json.loads(artifact.read_text())
+
+        assert rc == 1
+        assert summary["blocking_count"] == 1
+        assert payload["fix_pr_count"] == 1
+        assert payload["fix_prs"][0]["base_branch"] == "main"
+        assert payload["fix_prs"][0]["package"] == "ansi-regex"
+
     def test_cli_writes_json_summary(self, tmp_path: Path):
         (tmp_path / "package.json").write_text('{"name":"x"}')
         repo_root = Path(__file__).resolve().parents[2]
