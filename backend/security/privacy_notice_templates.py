@@ -2,8 +2,8 @@
 
 Small framework-agnostic privacy notice generator intended for generated
 web/service templates.  SC.9.1 covers GDPR notice text; SC.9.2 covers
-CCPA notice text.  PIPL, LGPD, PIPEDA, SDK inference, and DSAR workflow
-scaffolding are separate SC.9 / SC.10 rows.
+CCPA notice text; SC.9.3 covers PIPL notice text.  LGPD, PIPEDA, SDK
+inference, and DSAR workflow scaffolding are separate SC.9 / SC.10 rows.
 
 Security boundary:
 
@@ -14,6 +14,9 @@ Security boundary:
   * The CCPA consumer rights covered here are know/access, delete,
     correct, opt-out of sale/sharing, limit sensitive personal
     information, and non-discrimination.
+  * The PIPL individual rights covered here are know/decide,
+    restrict/refuse, access/copy, portability, correction, deletion,
+    explanation, and deceased close-relative rights.
   * Runtime request handling, identity verification, SLA timers, and
     export/delete endpoints are owned by SC.10.
 
@@ -30,6 +33,7 @@ from dataclasses import dataclass
 
 JURISDICTION_GDPR = "gdpr"
 JURISDICTION_CCPA = "ccpa"
+JURISDICTION_PIPL = "pipl"
 GDPR_RESPONSE_DEADLINE = "one month"
 CCPA_RESPONSE_DEADLINE = "45 calendar days"
 CCPA_OPT_OUT_LIMIT_DEADLINE = "15 business days"
@@ -234,6 +238,119 @@ CCPA_RIGHTS = (
         request_prompt=(
             "Contact the privacy team if exercising a CCPA right changes "
             "service access, pricing, or quality."
+        ),
+    ),
+)
+
+
+PIPL_RIGHTS = (
+    DataSubjectRight(
+        id="know_decide",
+        label="Right to know and decide",
+        article="PIPL Article 44",
+        summary=(
+            "Individuals may know and decide how their personal information "
+            "is processed, unless laws or administrative regulations provide "
+            "otherwise."
+        ),
+        request_prompt=(
+            "Submit a request identifying the processing activity, account, "
+            "or service scope."
+        ),
+    ),
+    DataSubjectRight(
+        id="restrict_refuse",
+        label="Right to restrict or refuse processing",
+        article="PIPL Article 44",
+        summary=(
+            "Individuals may restrict or refuse processing of their personal "
+            "information, unless laws or administrative regulations provide "
+            "otherwise."
+        ),
+        request_prompt=(
+            "Submit a restriction or refusal request and identify the "
+            "processing activity being challenged."
+        ),
+    ),
+    DataSubjectRight(
+        id="access_copy",
+        label="Right to access and copy",
+        article="PIPL Article 45",
+        summary=(
+            "Individuals may consult and copy their personal information, "
+            "subject to exceptions under PIPL."
+        ),
+        request_prompt=(
+            "Submit an access or copy request through the PIPL request path."
+        ),
+    ),
+    DataSubjectRight(
+        id="portability",
+        label="Right to portability",
+        article="PIPL Article 45",
+        summary=(
+            "Individuals may request transfer of personal information to a "
+            "designated processor where PIPL and national cyberspace "
+            "authority conditions are met."
+        ),
+        request_prompt=(
+            "Submit a portability request and specify the recipient processor "
+            "and service scope."
+        ),
+    ),
+    DataSubjectRight(
+        id="correction",
+        label="Right to correction or supplementation",
+        article="PIPL Article 46",
+        summary=(
+            "Individuals may request correction or supplementation when "
+            "personal information is inaccurate or incomplete."
+        ),
+        request_prompt=(
+            "Submit a correction request and identify the inaccurate or "
+            "incomplete account or service data."
+        ),
+    ),
+    DataSubjectRight(
+        id="deletion",
+        label="Right to deletion",
+        article="PIPL Article 47",
+        summary=(
+            "Individuals may request deletion where PIPL deletion grounds "
+            "apply and the processor has not proactively deleted the data."
+        ),
+        request_prompt=(
+            "Submit a deletion request; the service may retain or restrict "
+            "processing where retention is still required by law or technically "
+            "necessary safeguards."
+        ),
+    ),
+    DataSubjectRight(
+        id="explanation",
+        label="Right to request explanation",
+        article="PIPL Article 48",
+        summary=(
+            "Individuals may request that a personal information processor "
+            "explain its personal information processing rules."
+        ),
+        request_prompt=(
+            "Submit an explanation request through the PIPL request path or "
+            "privacy contact."
+        ),
+    ),
+    DataSubjectRight(
+        id="deceased_close_relative",
+        label="Close-relative rights for deceased individuals",
+        article="PIPL Article 49",
+        summary=(
+            "Close relatives may exercise consultation, copying, correction, "
+            "and deletion rights over a deceased individual's relevant "
+            "personal information for their own lawful and legitimate interests, "
+            "unless the deceased individual arranged otherwise."
+        ),
+        request_prompt=(
+            "Submit a close-relative request with documentation needed to "
+            "verify identity, relationship, and lawful interest."
         ),
     ),
 )
@@ -454,6 +571,124 @@ def build_ccpa_privacy_notice(
     )
 
 
+def build_pipl_privacy_notice(
+    *,
+    processor_name: str = "{{ processor_name }}",
+    privacy_contact: str = "{{ privacy_contact }}",
+    pipl_request_endpoint: str = "{{ pipl_request_endpoint }}",
+    china_representative_contact: str = "{{ china_representative_contact }}",
+    effective_date: str = "{{ effective_date }}",
+) -> PrivacyNoticeTemplate:
+    """Build the PIPL privacy-notice markdown template."""
+
+    sections = (
+        PrivacyNoticeSection(
+            id="scope",
+            title="Scope",
+            body=(
+                f"This notice explains how {processor_name} processes "
+                "personal information of individuals in the People's Republic "
+                "of China under the Personal Information Protection Law. It "
+                "is a template and must be reviewed against the generated "
+                "application's actual data flows before publication.\n\n"
+                f"Effective date: {effective_date}."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="processor",
+            title="Personal Information Processor and Contacts",
+            body=(
+                f"Personal information processor: {processor_name}.\n\n"
+                f"Privacy contact: {privacy_contact}.\n\n"
+                "China representative or specialised agency contact, if "
+                "required for an overseas processor: "
+                f"{china_representative_contact}.\n\n"
+                f"PIPL request path: {pipl_request_endpoint}."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="categories",
+            title="Personal Information We Process",
+            body=(
+                "List each personal-information category processed, including "
+                "account profile data, authentication identifiers, billing "
+                "records, support messages, device or log data, integration "
+                "data received from connected third-party services, and any "
+                "sensitive personal information. For sensitive personal "
+                "information, document the specific purpose, necessity, and "
+                "impact on individual rights and interests."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="purposes_methods",
+            title="Purposes, Methods, and Retention",
+            body=(
+                "Document each processing purpose, processing method, and "
+                "retention period. Personal information should be retained "
+                "for the shortest period necessary to achieve the processing "
+                "purpose, unless a longer period is required by law or "
+                "administrative regulation."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="legal_basis_consent",
+            title="Legal Basis, Consent, and Separate Consent",
+            body=(
+                "Document the legal basis for each processing activity. Where "
+                "PIPL requires consent or separate consent, including for "
+                "sensitive personal information, public disclosure, certain "
+                "third-party sharing, or cross-border transfer, record the "
+                "consent path and withdrawal method."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="rights",
+            title="Your PIPL Rights",
+            body=_rights_markdown(PIPL_RIGHTS),
+        ),
+        PrivacyNoticeSection(
+            id="requests",
+            title="How to Exercise Your Rights",
+            body=(
+                f"Submit PIPL requests through {pipl_request_endpoint} or by "
+                f"contacting {privacy_contact}. We verify requester identity "
+                "before disclosing, copying, transferring, correcting, "
+                "deleting, or explaining personal information processing "
+                "rules. We respond within the applicable legal deadline and "
+                "will explain the reason if a request is rejected."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="third_parties",
+            title="Third-Party Sharing and Entrusted Processing",
+            body=(
+                "List entrusted processors, third-party recipients, and joint "
+                "processing arrangements. For each recipient, document its "
+                "name or category, contact method where required, processing "
+                "purpose, processing method, and personal-information category."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="cross_border",
+            title="Cross-Border Transfers",
+            body=(
+                "If personal information is provided outside mainland China, "
+                "document the overseas recipient's name and contact method, "
+                "processing purpose and method, personal-information "
+                "categories, the method and procedure for individuals to "
+                "exercise PIPL rights over the overseas recipient, the "
+                "separate consent path, and the applicable transfer mechanism."
+            ),
+        ),
+    )
+    return PrivacyNoticeTemplate(
+        jurisdiction=JURISDICTION_PIPL,
+        title="PIPL Privacy Notice Template",
+        sections=sections,
+        rights=PIPL_RIGHTS,
+    )
+
+
 def _rights_markdown(rights: tuple[DataSubjectRight, ...]) -> str:
     lines: list[str] = []
     for right in rights:
@@ -472,9 +707,12 @@ __all__ = (
     "GDPR_RIGHTS",
     "JURISDICTION_CCPA",
     "JURISDICTION_GDPR",
+    "JURISDICTION_PIPL",
+    "PIPL_RIGHTS",
     "DataSubjectRight",
     "PrivacyNoticeSection",
     "PrivacyNoticeTemplate",
     "build_ccpa_privacy_notice",
     "build_gdpr_privacy_notice",
+    "build_pipl_privacy_notice",
 )

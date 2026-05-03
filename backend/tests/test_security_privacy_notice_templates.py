@@ -127,6 +127,75 @@ class TestCcpaPrivacyNotice:
         assert payload["rights"][0]["id"] == "know"
 
 
+class TestPiplPrivacyNotice:
+    def test_builds_pipl_notice_with_required_rights(self):
+        notice = pnt.build_pipl_privacy_notice()
+        assert notice.jurisdiction == pnt.JURISDICTION_PIPL
+        assert notice.title == "PIPL Privacy Notice Template"
+
+        rights = {right.id: right for right in notice.rights}
+        assert set(rights) == {
+            "know_decide",
+            "restrict_refuse",
+            "access_copy",
+            "portability",
+            "correction",
+            "deletion",
+            "explanation",
+            "deceased_close_relative",
+        }
+        assert rights["know_decide"].article == "PIPL Article 44"
+        assert rights["restrict_refuse"].article == "PIPL Article 44"
+        assert rights["access_copy"].article == "PIPL Article 45"
+        assert rights["portability"].article == "PIPL Article 45"
+        assert rights["correction"].article == "PIPL Article 46"
+        assert rights["deletion"].article == "PIPL Article 47"
+        assert rights["explanation"].article == "PIPL Article 48"
+        assert rights["deceased_close_relative"].article == "PIPL Article 49"
+
+    def test_markdown_contains_pipl_rights_and_transfer_sections(self):
+        notice = pnt.build_pipl_privacy_notice()
+        markdown = notice.markdown
+
+        assert markdown.startswith("# PIPL Privacy Notice Template\n")
+        assert "## Your PIPL Rights" in markdown
+        assert "Right to know and decide" in markdown
+        assert "Right to restrict or refuse processing" in markdown
+        assert "Right to access and copy" in markdown
+        assert "Right to portability" in markdown
+        assert "Right to correction or supplementation" in markdown
+        assert "Right to deletion" in markdown
+        assert "Right to request explanation" in markdown
+        assert "Close-relative rights for deceased individuals" in markdown
+        assert "## Cross-Border Transfers" in markdown
+        assert "separate consent path" in markdown
+
+    def test_accepts_generated_app_pipl_placeholders_or_concrete_values(self):
+        notice = pnt.build_pipl_privacy_notice(
+            processor_name="Acme Robotics",
+            privacy_contact="privacy@example.com",
+            pipl_request_endpoint="/api/v1/privacy/pipl",
+            china_representative_contact="cn-rep@example.cn",
+            effective_date="2026-05-03",
+        )
+
+        markdown = notice.markdown
+        assert "Personal information processor: Acme Robotics." in markdown
+        assert "Privacy contact: privacy@example.com." in markdown
+        assert "required for an overseas processor: cn-rep@example.cn." in markdown
+        assert "PIPL request path: /api/v1/privacy/pipl." in markdown
+        assert "Submit PIPL requests through /api/v1/privacy/pipl" in markdown
+        assert "Effective date: 2026-05-03." in markdown
+
+    def test_to_dict_is_json_ready_and_includes_pipl_metadata(self):
+        payload = pnt.build_pipl_privacy_notice().to_dict()
+        assert payload["jurisdiction"] == "pipl"
+        assert payload["markdown"]
+        assert len(payload["sections"]) == 9
+        assert len(payload["rights"]) == 8
+        assert payload["rights"][0]["id"] == "know_decide"
+
+
 class TestPrivacyNoticeTemplateShape:
     def test_gdpr_rights_constant_is_tuple_of_frozen_dataclasses(self):
         assert isinstance(pnt.GDPR_RIGHTS, tuple)
@@ -154,6 +223,7 @@ class TestPrivacyNoticeTemplateShape:
         reloaded = importlib.reload(pnt)
         assert reloaded.JURISDICTION_GDPR == "gdpr"
         assert reloaded.JURISDICTION_CCPA == "ccpa"
+        assert reloaded.JURISDICTION_PIPL == "pipl"
         assert reloaded.GDPR_RESPONSE_DEADLINE == "one month"
         assert reloaded.CCPA_RESPONSE_DEADLINE == "45 calendar days"
         assert reloaded.CCPA_OPT_OUT_LIMIT_DEADLINE == "15 business days"
@@ -171,6 +241,16 @@ class TestPrivacyNoticeTemplateShape:
             "limit_sensitive_pi",
             "non_discrimination",
         )
+        assert tuple(right.id for right in reloaded.PIPL_RIGHTS) == (
+            "know_decide",
+            "restrict_refuse",
+            "access_copy",
+            "portability",
+            "correction",
+            "deletion",
+            "explanation",
+            "deceased_close_relative",
+        )
 
     def test_public_exports_are_pinned(self):
         assert set(pnt.__all__) == {
@@ -181,9 +261,12 @@ class TestPrivacyNoticeTemplateShape:
             "GDPR_RIGHTS",
             "JURISDICTION_CCPA",
             "JURISDICTION_GDPR",
+            "JURISDICTION_PIPL",
+            "PIPL_RIGHTS",
             "DataSubjectRight",
             "PrivacyNoticeSection",
             "PrivacyNoticeTemplate",
             "build_ccpa_privacy_notice",
             "build_gdpr_privacy_notice",
+            "build_pipl_privacy_notice",
         }
