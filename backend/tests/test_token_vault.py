@@ -38,6 +38,7 @@ import importlib.util
 import inspect
 import json
 import pathlib
+import subprocess
 import sys
 
 import pytest
@@ -158,6 +159,52 @@ def test_encrypt_accepts_explicit_tenant_id() -> None:
     outer = json.loads(encrypted.ciphertext)
     assert outer["dek_ref"]["tenant_id"] == "tenant-42"
     assert tv.decrypt_for_user("user-peek", "google", encrypted) == "tok-peek"
+
+
+def test_oauth_token_envelope_survives_hard_restart(monkeypatch) -> None:
+    """KS.1.11 compat regression: an ``oauth_tokens`` ciphertext
+    written on the new envelope path must decrypt in a fresh interpreter.
+
+    This simulates the dual-write window's random hard-restart case:
+    no module-global Fernet / KMS adapter cache is shared with the
+    reader process; both workers derive the same local KEK from
+    ``OMNISIGHT_SECRET_KEY``.
+    """
+    monkeypatch.setenv(
+        "OMNISIGHT_SECRET_KEY",
+        "ks-1-11-oauth-hard-restart-secret",
+    )
+    secret_store._reset_for_tests()
+    encrypted = tv.encrypt_for_user(
+        "user-restart",
+        "github",
+        "ghp_restart_token",
+        tenant_id="tenant-restart",
+    )
+    payload = json.dumps({
+        "ciphertext": encrypted.ciphertext,
+        "key_version": encrypted.key_version,
+    })
+    code = """
+import json
+import sys
+from backend.security import token_vault as tv
+
+raw = json.loads(sys.stdin.read())
+token = tv.EncryptedToken(
+    ciphertext=raw["ciphertext"],
+    key_version=raw["key_version"],
+)
+print(tv.decrypt_for_user("user-restart", "github", token))
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == "ghp_restart_token"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

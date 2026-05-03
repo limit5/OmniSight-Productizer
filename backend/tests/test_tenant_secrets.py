@@ -16,12 +16,84 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
 
 import pytest
 
 
 DEFAULT_TENANT = "t-default"
 OTHER_TENANT = "t-secrets-other"
+
+
+def test_secret_value_envelope_helpers_survive_hard_restart(monkeypatch):
+    """KS.1.11 customer-secret compat without requiring a live PG pool.
+
+    ``tenant_secrets`` persists the returned string in the existing
+    ``encrypted_value`` column; decrypting that value in a fresh
+    interpreter simulates a random hard restart during the dual-write
+    window.
+    """
+    monkeypatch.setenv(
+        "OMNISIGHT_SECRET_KEY",
+        "ks-1-11-tenant-hard-restart-secret",
+    )
+    from backend import secret_store
+    from backend import tenant_secrets as sec
+    secret_store._reset_for_tests()
+
+    stored = sec._encrypt_secret_value(
+        DEFAULT_TENANT,
+        "provider_key",
+        "openai",
+        "sk-proj-tenant-hard-restart",
+    )
+    outer = json.loads(stored)
+    assert outer["fmt"] == sec.SECRET_ENVELOPE_FORMAT_VERSION
+    assert outer["dek_ref"]["tenant_id"] == DEFAULT_TENANT
+    assert outer["dek_ref"]["encryption_context"]["purpose"] == "tenant-secret"
+    assert "sk-proj-tenant-hard-restart" not in stored
+
+    code = """
+import os
+from backend import tenant_secrets as sec
+
+print(sec._decrypt_secret_value(
+    os.environ["KS111_TENANT_STORED"],
+    "t-default",
+    "provider_key",
+    "openai",
+))
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        capture_output=True,
+        check=True,
+        env={
+            **dict(os.environ),
+            "KS111_TENANT_STORED": stored,
+        },
+    )
+    assert proc.stdout.strip() == "sk-proj-tenant-hard-restart"
+
+
+def test_secret_value_legacy_fernet_helper_fallback(monkeypatch):
+    """Existing Fernet-only ``tenant_secrets.encrypted_value`` cells
+    remain readable during the KS.1.11 compatibility window."""
+    monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-11-tenant-legacy-secret")
+    from backend import secret_store
+    from backend import tenant_secrets as sec
+    secret_store._reset_for_tests()
+    legacy = secret_store.encrypt("sk-legacy-tenant")
+    assert sec._decrypt_secret_value(
+        legacy,
+        DEFAULT_TENANT,
+        "provider_key",
+        "legacy",
+    ) == "sk-legacy-tenant"
 
 
 @pytest.fixture()
@@ -75,6 +147,49 @@ async def test_get_secret_value_roundtrip(_secrets_db):
     sid = await sec.upsert_secret("api-token", "my-api-token-12345", "provider_key")
     val = await sec.get_secret_value(sid)
     assert val == "my-api-token-12345"
+
+
+@pytest.mark.asyncio
+async def test_new_secret_writes_use_ks_envelope_carrier(_secrets_db, pg_test_pool):
+    """KS.1.11 compat regression: customer/tenant secrets written via
+    the existing CRUD API now go through the per-tenant DEK envelope,
+    while keeping the original ``tenant_secrets.encrypted_value`` column.
+    """
+    sec = _secrets_db
+    sid = await sec.upsert_secret("openai", "sk-proj-new-path", "provider_key")
+    async with pg_test_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT encrypted_value FROM tenant_secrets WHERE id = $1",
+            sid,
+        )
+    stored = row["encrypted_value"]
+    outer = json.loads(stored)
+    assert outer["fmt"] == sec.SECRET_ENVELOPE_FORMAT_VERSION
+    assert outer["ciphertext"].startswith("{")
+    assert outer["dek_ref"]["tenant_id"] == DEFAULT_TENANT
+    assert outer["dek_ref"]["encryption_context"]["purpose"] == "tenant-secret"
+    assert "sk-proj-new-path" not in stored
+    assert await sec.get_secret_value(sid) == "sk-proj-new-path"
+
+
+@pytest.mark.asyncio
+async def test_legacy_fernet_secret_reads_during_compat_window(
+    _secrets_db, pg_test_pool,
+):
+    """Existing Fernet-only ``tenant_secrets`` rows stay readable while
+    KS.1.11 writes use the new envelope carrier."""
+    from backend import secret_store
+    sec = _secrets_db
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO tenant_secrets "
+            "(id, tenant_id, secret_type, key_name, encrypted_value) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            "sec-legacy-fernet", DEFAULT_TENANT, "provider_key", "legacy",
+            secret_store.encrypt("sk-legacy-fernet"),
+        )
+    assert await sec.get_secret_value("sec-legacy-fernet") == "sk-legacy-fernet"
+    assert await sec.get_secret_by_name("legacy", "provider_key") == "sk-legacy-fernet"
 
 
 @pytest.mark.asyncio
