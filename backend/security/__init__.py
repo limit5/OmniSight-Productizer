@@ -10,7 +10,10 @@ R20 Phase 0 (chat-layer):
 KS.4.10 (input firewall):
   - llm_firewall.classify_input(text) — Haiku-backed classifier returning
     safe / suspicious / blocked before untrusted text reaches specialist
-    agents. Enforcement/audit/persistence are later KS.4.11+ rows.
+    agents.
+  - llm_firewall.enforce_input(text) — KS.4.11 three-tier enforcement:
+    safe passes, suspicious logs + returns a system-prompt warning, blocked
+    refuses invocation + emits audit_log. Persistence is a later KS.4.13 row.
 
 SC.7.1 (OWASP mitigation shared lib):
   - input_validation — pure allowlist-first scalar validators for
