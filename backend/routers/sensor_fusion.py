@@ -67,9 +67,242 @@ class ArtifactGenRequest(BaseModel):
     provided_artifacts: list[str] = Field(default_factory=list)
 
 
+class IMUDriverResponse(BaseModel):
+    driver_id: str
+    name: str
+    vendor: str
+    bus: str
+    i2c_addr_default: str
+    i2c_addr_alt: str
+    accel_range_g: list[int]
+    gyro_range_dps: list[int]
+    sample_rate_hz: int
+    fifo_depth: int
+    axes: int
+    temperature: bool
+    interrupt_pin: bool
+    wake_on_motion: bool
+    compatible_socs: list[str]
+
+
+class IMUDriversResponse(BaseModel):
+    count: int
+    drivers: list[IMUDriverResponse]
+
+
+class GPSProtocolResponse(BaseModel):
+    protocol_id: str
+    name: str
+    standard: str
+    baud_default: int
+    supported_sentences: list[dict[str, str]]
+    message_classes: list[dict[str, str]]
+    key_messages: list[dict[str, str]]
+    talker_ids: list[dict[str, str]]
+    checksum: str
+
+
+class GPSProtocolsResponse(BaseModel):
+    count: int
+    protocols: list[GPSProtocolResponse]
+
+
+class NMEAParseResponse(BaseModel):
+    sentence_type: str
+    talker_id: str
+    valid: bool
+    fields: dict[str, Any]
+    raw: str
+    checksum_ok: bool
+    error: str
+
+
+class UBXParseResponse(BaseModel):
+    msg_class: str
+    msg_id: str
+    payload_length: int
+    valid: bool
+    class_name: str
+    msg_name: str
+    parsed_fields: dict[str, Any]
+    error: str
+
+
+class BarometerDriverResponse(BaseModel):
+    driver_id: str
+    name: str
+    vendor: str
+    bus: str
+    i2c_addr_default: str
+    pressure_range_hpa: list[float]
+    pressure_resolution_pa: float
+    temperature_range_c: list[float]
+    sample_rate_hz: int
+    modes: list[str]
+    compatible_socs: list[str]
+
+
+class BarometerDriversResponse(BaseModel):
+    count: int
+    drivers: list[BarometerDriverResponse]
+
+
+class AltitudeResponse(BaseModel):
+    altitude_m: float
+    pressure_pa: float
+    sea_level_pressure_pa: float
+
+
+class EKFProfileResponse(BaseModel):
+    profile_id: str
+    name: str
+    description: str
+    state_dim: int
+    measurement_dim: int
+    state_vector: list[dict[str, str]]
+    process_noise: dict[str, float]
+    measurement_noise: dict[str, float]
+    initial_covariance: float
+    prediction_model: str
+    update_model: str
+
+
+class EKFProfilesResponse(BaseModel):
+    count: int
+    profiles: list[EKFProfileResponse]
+
+
+class EKFRunResponse(BaseModel):
+    profile_id: str
+    state: str
+    quaternion: list[float]
+    euler_deg: dict[str, float]
+    gyro_bias: list[float]
+    covariance_trace: float
+    iterations: int
+    rms_error_deg: float
+    timestamp: float
+    message: str
+
+
+class CalibrationProfileResponse(BaseModel):
+    profile_id: str
+    name: str
+    description: str
+    parameters: dict[str, dict[str, Any]]
+    procedure: list[dict[str, Any]]
+
+
+class CalibrationProfilesResponse(BaseModel):
+    count: int
+    profiles: list[CalibrationProfileResponse]
+
+
+class CalibrationRunResponse(BaseModel):
+    profile_id: str
+    status: str
+    accel_bias: list[float]
+    accel_scale: list[float]
+    gyro_bias: list[float]
+    gyro_scale: list[float]
+    misalignment_matrix: list[list[float]]
+    residual_g: float
+    samples_used: int
+    timestamp: float
+    message: str
+
+
+class SensorTestRecipeResponse(BaseModel):
+    recipe_id: str
+    name: str
+    category: str
+    description: str
+    sensor_type: str
+    tools: list[str]
+    timeout_s: int
+
+
+class SensorTestRecipesResponse(BaseModel):
+    count: int
+    recipes: list[SensorTestRecipeResponse]
+
+
+class SensorTestRunResponse(BaseModel):
+    recipe_id: str
+    sensor_type: str
+    status: str
+    target_device: str
+    timestamp: float
+    measurements: dict[str, Any]
+    raw_log_path: str
+    message: str
+
+
+class TrajectoryFixtureResponse(BaseModel):
+    fixture_id: str
+    name: str
+    duration_s: float
+    sample_rate_hz: int
+    tolerance_deg: float
+    description: str
+    expected_orientation: dict[str, float] | None = None
+    expected_final_orientation: dict[str, float] | None = None
+    angular_rate_dps: float | None = None
+    return_to_origin: bool | None = None
+
+
+class TrajectoryFixturesResponse(BaseModel):
+    count: int
+    fixtures: list[TrajectoryFixtureResponse]
+
+
+class TrajectoryEvaluationResponse(BaseModel):
+    passed: bool
+    error: str | None = None
+    fixture_id: str | None = None
+    tolerance_deg: float | None = None
+    max_error_deg: float | None = None
+    rms_error_deg: float | None = None
+    per_axis_error: dict[str, float] | None = None
+    expected: dict[str, float] | None = None
+    actual: dict[str, float] | None = None
+
+
+class SocCompatResponse(BaseModel):
+    soc_id: str
+    compatibility: dict[str, bool]
+
+
+class ArtifactDefinitionResponse(BaseModel):
+    artifact_id: str
+    name: str
+    description: str
+    file_pattern: str
+
+
+class ArtifactDefinitionsResponse(BaseModel):
+    count: int
+    artifacts: list[ArtifactDefinitionResponse]
+
+
+class CertArtifactResponse(BaseModel):
+    artifact_id: str
+    name: str
+    sensor_type: str
+    status: str
+    file_path: str
+    description: str
+
+
+class ArtifactGenerationResponse(BaseModel):
+    sensor_type: str
+    count: int
+    artifacts: list[CertArtifactResponse]
+
+
 # -- IMU driver endpoints --
 
-@router.get("/imu/drivers")
+@router.get("/imu/drivers", response_model=IMUDriversResponse)
 async def list_imu_drivers() -> dict[str, Any]:
     drivers = sf.list_imu_drivers()
     return {
@@ -78,7 +311,7 @@ async def list_imu_drivers() -> dict[str, Any]:
     }
 
 
-@router.get("/imu/drivers/{driver_id}")
+@router.get("/imu/drivers/{driver_id}", response_model=IMUDriverResponse)
 async def get_imu_driver(driver_id: str) -> dict[str, Any]:
     driver = sf.get_imu_driver(driver_id)
     if driver is None:
@@ -88,7 +321,7 @@ async def get_imu_driver(driver_id: str) -> dict[str, Any]:
 
 # -- GPS protocol endpoints --
 
-@router.get("/gps/protocols")
+@router.get("/gps/protocols", response_model=GPSProtocolsResponse)
 async def list_gps_protocols() -> dict[str, Any]:
     protocols = sf.list_gps_protocols()
     return {
@@ -97,7 +330,7 @@ async def list_gps_protocols() -> dict[str, Any]:
     }
 
 
-@router.get("/gps/protocols/{protocol_id}")
+@router.get("/gps/protocols/{protocol_id}", response_model=GPSProtocolResponse)
 async def get_gps_protocol(protocol_id: str) -> dict[str, Any]:
     proto = sf.get_gps_protocol(protocol_id)
     if proto is None:
@@ -105,13 +338,13 @@ async def get_gps_protocol(protocol_id: str) -> dict[str, Any]:
     return proto.to_dict()
 
 
-@router.post("/gps/nmea/parse")
+@router.post("/gps/nmea/parse", response_model=NMEAParseResponse)
 async def parse_nmea(request: NMEAParseRequest) -> dict[str, Any]:
     result = sf.parse_nmea_sentence(request.sentence)
     return result.to_dict()
 
 
-@router.post("/gps/ubx/parse")
+@router.post("/gps/ubx/parse", response_model=UBXParseResponse)
 async def parse_ubx(request: UBXParseRequest) -> dict[str, Any]:
     try:
         data = bytes.fromhex(request.data_hex)
@@ -123,7 +356,7 @@ async def parse_ubx(request: UBXParseRequest) -> dict[str, Any]:
 
 # -- Barometer endpoints --
 
-@router.get("/barometer/drivers")
+@router.get("/barometer/drivers", response_model=BarometerDriversResponse)
 async def list_barometer_drivers() -> dict[str, Any]:
     drivers = sf.list_barometer_drivers()
     return {
@@ -132,7 +365,7 @@ async def list_barometer_drivers() -> dict[str, Any]:
     }
 
 
-@router.get("/barometer/drivers/{driver_id}")
+@router.get("/barometer/drivers/{driver_id}", response_model=BarometerDriverResponse)
 async def get_barometer_driver(driver_id: str) -> dict[str, Any]:
     driver = sf.get_barometer_driver(driver_id)
     if driver is None:
@@ -140,7 +373,7 @@ async def get_barometer_driver(driver_id: str) -> dict[str, Any]:
     return driver.to_dict()
 
 
-@router.post("/barometer/altitude")
+@router.post("/barometer/altitude", response_model=AltitudeResponse)
 async def calculate_altitude(request: AltitudeRequest) -> dict[str, Any]:
     alt = sf.pressure_to_altitude(request.pressure_pa, request.sea_level_pressure_pa)
     return {
@@ -152,7 +385,7 @@ async def calculate_altitude(request: AltitudeRequest) -> dict[str, Any]:
 
 # -- EKF endpoints --
 
-@router.get("/ekf/profiles")
+@router.get("/ekf/profiles", response_model=EKFProfilesResponse)
 async def list_ekf_profiles() -> dict[str, Any]:
     profiles = sf.list_ekf_profiles()
     return {
@@ -161,7 +394,7 @@ async def list_ekf_profiles() -> dict[str, Any]:
     }
 
 
-@router.get("/ekf/profiles/{profile_id}")
+@router.get("/ekf/profiles/{profile_id}", response_model=EKFProfileResponse)
 async def get_ekf_profile(profile_id: str) -> dict[str, Any]:
     profile = sf.get_ekf_profile(profile_id)
     if profile is None:
@@ -169,7 +402,7 @@ async def get_ekf_profile(profile_id: str) -> dict[str, Any]:
     return profile.to_dict()
 
 
-@router.post("/ekf/run")
+@router.post("/ekf/run", response_model=EKFRunResponse)
 async def run_ekf(request: EKFRunRequest) -> dict[str, Any]:
     samples = [
         sf.IMUSample(
@@ -196,7 +429,7 @@ async def run_ekf(request: EKFRunRequest) -> dict[str, Any]:
 
 # -- Calibration endpoints --
 
-@router.get("/calibration/profiles")
+@router.get("/calibration/profiles", response_model=CalibrationProfilesResponse)
 async def list_calibration_profiles() -> dict[str, Any]:
     profiles = sf.list_calibration_profiles()
     return {
@@ -205,7 +438,7 @@ async def list_calibration_profiles() -> dict[str, Any]:
     }
 
 
-@router.get("/calibration/profiles/{profile_id}")
+@router.get("/calibration/profiles/{profile_id}", response_model=CalibrationProfileResponse)
 async def get_calibration_profile(profile_id: str) -> dict[str, Any]:
     profile = sf.get_calibration_profile(profile_id)
     if profile is None:
@@ -213,7 +446,7 @@ async def get_calibration_profile(profile_id: str) -> dict[str, Any]:
     return profile.to_dict()
 
 
-@router.post("/calibration/run")
+@router.post("/calibration/run", response_model=CalibrationRunResponse)
 async def run_calibration(request: CalibrationRequest) -> dict[str, Any]:
     static_data: dict[str, list[sf.IMUSample]] = {}
     for position, samples_raw in request.static_data.items():
@@ -235,7 +468,7 @@ async def run_calibration(request: CalibrationRequest) -> dict[str, Any]:
 
 # -- Test recipe endpoints --
 
-@router.get("/test/recipes")
+@router.get("/test/recipes", response_model=SensorTestRecipesResponse)
 async def list_test_recipes(
     sensor_type: str | None = None,
     category: str | None = None,
@@ -252,7 +485,7 @@ async def list_test_recipes(
     }
 
 
-@router.get("/test/recipes/{recipe_id}")
+@router.get("/test/recipes/{recipe_id}", response_model=SensorTestRecipeResponse)
 async def get_test_recipe(recipe_id: str) -> dict[str, Any]:
     recipe = sf.get_test_recipe(recipe_id)
     if recipe is None:
@@ -260,7 +493,7 @@ async def get_test_recipe(recipe_id: str) -> dict[str, Any]:
     return recipe.to_dict()
 
 
-@router.post("/test/run")
+@router.post("/test/run", response_model=SensorTestRunResponse)
 async def run_sensor_test(request: SensorTestRequest) -> dict[str, Any]:
     result = sf.run_sensor_test(
         request.recipe_id,
@@ -272,7 +505,7 @@ async def run_sensor_test(request: SensorTestRequest) -> dict[str, Any]:
 
 # -- Trajectory fixture endpoints --
 
-@router.get("/trajectory/fixtures")
+@router.get("/trajectory/fixtures", response_model=TrajectoryFixturesResponse)
 async def list_trajectory_fixtures() -> dict[str, Any]:
     fixtures = sf.list_trajectory_fixtures()
     return {
@@ -281,7 +514,7 @@ async def list_trajectory_fixtures() -> dict[str, Any]:
     }
 
 
-@router.get("/trajectory/fixtures/{fixture_id}")
+@router.get("/trajectory/fixtures/{fixture_id}", response_model=TrajectoryFixtureResponse)
 async def get_trajectory_fixture(fixture_id: str) -> dict[str, Any]:
     fixture = sf.get_trajectory_fixture(fixture_id)
     if fixture is None:
@@ -289,7 +522,7 @@ async def get_trajectory_fixture(fixture_id: str) -> dict[str, Any]:
     return fixture.to_dict()
 
 
-@router.post("/trajectory/evaluate")
+@router.post("/trajectory/evaluate", response_model=TrajectoryEvaluationResponse)
 async def evaluate_trajectory(request: TrajectoryEvalRequest) -> dict[str, Any]:
     ekf_result = sf.EKFResult(
         profile_id=request.profile_id,
@@ -301,7 +534,7 @@ async def evaluate_trajectory(request: TrajectoryEvalRequest) -> dict[str, Any]:
 
 # -- SoC compatibility --
 
-@router.post("/soc-compat")
+@router.post("/soc-compat", response_model=SocCompatResponse)
 async def check_soc_compat(request: SocCompatRequest) -> dict[str, Any]:
     compat = sf.check_soc_compatibility(request.soc_id, request.sensor_ids or None)
     return {
@@ -312,7 +545,7 @@ async def check_soc_compat(request: SocCompatRequest) -> dict[str, Any]:
 
 # -- Artifact endpoints --
 
-@router.get("/artifacts")
+@router.get("/artifacts", response_model=ArtifactDefinitionsResponse)
 async def list_artifact_definitions() -> dict[str, Any]:
     defs = sf.list_artifact_definitions()
     return {
@@ -321,7 +554,7 @@ async def list_artifact_definitions() -> dict[str, Any]:
     }
 
 
-@router.post("/artifacts/generate")
+@router.post("/artifacts/generate", response_model=ArtifactGenerationResponse)
 async def generate_artifacts(request: ArtifactGenRequest) -> dict[str, Any]:
     artifacts = sf.generate_cert_artifacts(
         request.sensor_type,

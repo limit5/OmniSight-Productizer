@@ -421,6 +421,29 @@
         "title": "AltitudeRequest",
         "type": "object"
       },
+      "AltitudeResponse": {
+        "properties": {
+          "altitude_m": {
+            "title": "Altitude M",
+            "type": "number"
+          },
+          "pressure_pa": {
+            "title": "Pressure Pa",
+            "type": "number"
+          },
+          "sea_level_pressure_pa": {
+            "title": "Sea Level Pressure Pa",
+            "type": "number"
+          }
+        },
+        "required": [
+          "altitude_m",
+          "pressure_pa",
+          "sea_level_pressure_pa"
+        ],
+        "title": "AltitudeResponse",
+        "type": "object"
+      },
       "ApproveRejectRequest": {
         "properties": {
           "approver": {
@@ -438,6 +461,81 @@
           "approver"
         ],
         "title": "ApproveRejectRequest",
+        "type": "object"
+      },
+      "ArtifactDefinitionResponse": {
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "file_pattern": {
+            "title": "File Pattern",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "name",
+          "description",
+          "file_pattern"
+        ],
+        "title": "ArtifactDefinitionResponse",
+        "type": "object"
+      },
+      "ArtifactDefinitionsResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactDefinitionResponse"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "artifacts"
+        ],
+        "title": "ArtifactDefinitionsResponse",
+        "type": "object"
+      },
+      "ArtifactGenerationResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/CertArtifactResponse"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "sensor_type": {
+            "title": "Sensor Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor_type",
+          "count",
+          "artifacts"
+        ],
+        "title": "ArtifactGenerationResponse",
         "type": "object"
       },
       "AssembleRequest": {
@@ -673,6 +771,122 @@
         "title": "AuthenticateRequest",
         "type": "object"
       },
+      "BarometerDriverResponse": {
+        "properties": {
+          "bus": {
+            "title": "Bus",
+            "type": "string"
+          },
+          "compatible_socs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Compatible Socs",
+            "type": "array"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "i2c_addr_default": {
+            "title": "I2C Addr Default",
+            "type": "string"
+          },
+          "modes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Modes",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pressure_range_hpa": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Pressure Range Hpa",
+            "type": "array"
+          },
+          "pressure_resolution_pa": {
+            "title": "Pressure Resolution Pa",
+            "type": "number"
+          },
+          "sample_rate_hz": {
+            "title": "Sample Rate Hz",
+            "type": "integer"
+          },
+          "temperature_range_c": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Temperature Range C",
+            "type": "array"
+          },
+          "vendor": {
+            "title": "Vendor",
+            "type": "string"
+          }
+        },
+        "required": [
+          "driver_id",
+          "name",
+          "vendor",
+          "bus",
+          "i2c_addr_default",
+          "pressure_range_hpa",
+          "pressure_resolution_pa",
+          "temperature_range_c",
+          "sample_rate_hz",
+          "modes",
+          "compatible_socs"
+        ],
+        "title": "BarometerDriverResponse",
+        "type": "object"
+      },
+      "BarometerDriversResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "drivers": {
+            "items": {
+              "$ref": "#/components/schemas/BarometerDriverResponse"
+            },
+            "title": "Drivers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "drivers"
+        ],
+        "title": "BarometerDriversResponse",
+        "type": "object"
+      },
+      "BillingPortalSessionRequest": {
+        "properties": {
+          "customer_id": {
+            "description": "Stripe customer ID",
+            "title": "Customer Id",
+            "type": "string"
+          },
+          "return_url": {
+            "default": "",
+            "description": "Portal return URL override",
+            "title": "Return Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "title": "BillingPortalSessionRequest",
+        "type": "object"
+      },
       "BindUdcRequest": {
         "properties": {
           "udc_name": {
@@ -883,6 +1097,149 @@
         "title": "BulkUninstallBody",
         "type": "object"
       },
+      "CalibrationProfileResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parameters": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Parameters",
+            "type": "object"
+          },
+          "procedure": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Procedure",
+            "type": "array"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "name",
+          "description",
+          "parameters",
+          "procedure"
+        ],
+        "title": "CalibrationProfileResponse",
+        "type": "object"
+      },
+      "CalibrationProfilesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/CalibrationProfileResponse"
+            },
+            "title": "Profiles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "profiles"
+        ],
+        "title": "CalibrationProfilesResponse",
+        "type": "object"
+      },
+      "CalibrationRunResponse": {
+        "properties": {
+          "accel_bias": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Accel Bias",
+            "type": "array"
+          },
+          "accel_scale": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Accel Scale",
+            "type": "array"
+          },
+          "gyro_bias": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Gyro Bias",
+            "type": "array"
+          },
+          "gyro_scale": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Gyro Scale",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "misalignment_matrix": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "title": "Misalignment Matrix",
+            "type": "array"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "residual_g": {
+            "title": "Residual G",
+            "type": "number"
+          },
+          "samples_used": {
+            "title": "Samples Used",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "profile_id",
+          "status",
+          "accel_bias",
+          "accel_scale",
+          "gyro_bias",
+          "gyro_scale",
+          "misalignment_matrix",
+          "residual_g",
+          "samples_used",
+          "timestamp",
+          "message"
+        ],
+        "title": "CalibrationRunResponse",
+        "type": "object"
+      },
       "CameraConnectRequest": {
         "properties": {
           "camera_model": {
@@ -959,6 +1316,44 @@
           "standard"
         ],
         "title": "CertArtifactRequest",
+        "type": "object"
+      },
+      "CertArtifactResponse": {
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "file_path": {
+            "title": "File Path",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sensor_type": {
+            "title": "Sensor Type",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "name",
+          "sensor_type",
+          "status",
+          "file_path",
+          "description"
+        ],
+        "title": "CertArtifactResponse",
         "type": "object"
       },
       "CfTunnelSkipRequest": {
@@ -1108,6 +1503,36 @@
           "status"
         ],
         "title": "CheckResult",
+        "type": "object"
+      },
+      "CheckoutSessionRequest": {
+        "properties": {
+          "cancel_url": {
+            "default": "",
+            "description": "Checkout cancel URL override",
+            "title": "Cancel Url",
+            "type": "string"
+          },
+          "customer_id": {
+            "default": "",
+            "description": "Existing Stripe customer ID",
+            "title": "Customer Id",
+            "type": "string"
+          },
+          "price_id": {
+            "default": "",
+            "description": "Stripe Price ID override",
+            "title": "Price Id",
+            "type": "string"
+          },
+          "success_url": {
+            "default": "",
+            "description": "Checkout success URL override",
+            "title": "Success Url",
+            "type": "string"
+          }
+        },
+        "title": "CheckoutSessionRequest",
         "type": "object"
       },
       "CircuitResetRequest": {
@@ -1983,6 +2408,102 @@
         "title": "DraftBody",
         "type": "object"
       },
+      "EKFProfileResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "initial_covariance": {
+            "title": "Initial Covariance",
+            "type": "number"
+          },
+          "measurement_dim": {
+            "title": "Measurement Dim",
+            "type": "integer"
+          },
+          "measurement_noise": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Measurement Noise",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "prediction_model": {
+            "title": "Prediction Model",
+            "type": "string"
+          },
+          "process_noise": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Process Noise",
+            "type": "object"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "state_dim": {
+            "title": "State Dim",
+            "type": "integer"
+          },
+          "state_vector": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "State Vector",
+            "type": "array"
+          },
+          "update_model": {
+            "title": "Update Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "name",
+          "description",
+          "state_dim",
+          "measurement_dim",
+          "state_vector",
+          "process_noise",
+          "measurement_noise",
+          "initial_covariance",
+          "prediction_model",
+          "update_model"
+        ],
+        "title": "EKFProfileResponse",
+        "type": "object"
+      },
+      "EKFProfilesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/EKFProfileResponse"
+            },
+            "title": "Profiles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "profiles"
+        ],
+        "title": "EKFProfilesResponse",
+        "type": "object"
+      },
       "EKFRunRequest": {
         "properties": {
           "initial_orientation": {
@@ -2022,6 +2543,73 @@
           "samples"
         ],
         "title": "EKFRunRequest",
+        "type": "object"
+      },
+      "EKFRunResponse": {
+        "properties": {
+          "covariance_trace": {
+            "title": "Covariance Trace",
+            "type": "number"
+          },
+          "euler_deg": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Euler Deg",
+            "type": "object"
+          },
+          "gyro_bias": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Gyro Bias",
+            "type": "array"
+          },
+          "iterations": {
+            "title": "Iterations",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "quaternion": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Quaternion",
+            "type": "array"
+          },
+          "rms_error_deg": {
+            "title": "Rms Error Deg",
+            "type": "number"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "profile_id",
+          "state",
+          "quaternion",
+          "euler_deg",
+          "gyro_bias",
+          "covariance_trace",
+          "iterations",
+          "rms_error_deg",
+          "timestamp",
+          "message"
+        ],
+        "title": "EKFRunResponse",
         "type": "object"
       },
       "EMVGateRequest": {
@@ -2755,6 +3343,104 @@
         "title": "ForceTurboRequest",
         "type": "object"
       },
+      "GPSProtocolResponse": {
+        "properties": {
+          "baud_default": {
+            "title": "Baud Default",
+            "type": "integer"
+          },
+          "checksum": {
+            "title": "Checksum",
+            "type": "string"
+          },
+          "key_messages": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Key Messages",
+            "type": "array"
+          },
+          "message_classes": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Message Classes",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "protocol_id": {
+            "title": "Protocol Id",
+            "type": "string"
+          },
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "supported_sentences": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Supported Sentences",
+            "type": "array"
+          },
+          "talker_ids": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Talker Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "protocol_id",
+          "name",
+          "standard",
+          "baud_default",
+          "supported_sentences",
+          "message_classes",
+          "key_messages",
+          "talker_ids",
+          "checksum"
+        ],
+        "title": "GPSProtocolResponse",
+        "type": "object"
+      },
+      "GPSProtocolsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "protocols": {
+            "items": {
+              "$ref": "#/components/schemas/GPSProtocolResponse"
+            },
+            "title": "Protocols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "protocols"
+        ],
+        "title": "GPSProtocolsResponse",
+        "type": "object"
+      },
       "GenerateReportRequest": {
         "properties": {
           "data": {
@@ -3448,6 +4134,119 @@
           "profile_id"
         ],
         "title": "ICCEmbedRequest",
+        "type": "object"
+      },
+      "IMUDriverResponse": {
+        "properties": {
+          "accel_range_g": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Accel Range G",
+            "type": "array"
+          },
+          "axes": {
+            "title": "Axes",
+            "type": "integer"
+          },
+          "bus": {
+            "title": "Bus",
+            "type": "string"
+          },
+          "compatible_socs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Compatible Socs",
+            "type": "array"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "fifo_depth": {
+            "title": "Fifo Depth",
+            "type": "integer"
+          },
+          "gyro_range_dps": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Gyro Range Dps",
+            "type": "array"
+          },
+          "i2c_addr_alt": {
+            "title": "I2C Addr Alt",
+            "type": "string"
+          },
+          "i2c_addr_default": {
+            "title": "I2C Addr Default",
+            "type": "string"
+          },
+          "interrupt_pin": {
+            "title": "Interrupt Pin",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sample_rate_hz": {
+            "title": "Sample Rate Hz",
+            "type": "integer"
+          },
+          "temperature": {
+            "title": "Temperature",
+            "type": "boolean"
+          },
+          "vendor": {
+            "title": "Vendor",
+            "type": "string"
+          },
+          "wake_on_motion": {
+            "title": "Wake On Motion",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "driver_id",
+          "name",
+          "vendor",
+          "bus",
+          "i2c_addr_default",
+          "i2c_addr_alt",
+          "accel_range_g",
+          "gyro_range_dps",
+          "sample_rate_hz",
+          "fifo_depth",
+          "axes",
+          "temperature",
+          "interrupt_pin",
+          "wake_on_motion",
+          "compatible_socs"
+        ],
+        "title": "IMUDriverResponse",
+        "type": "object"
+      },
+      "IMUDriversResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "drivers": {
+            "items": {
+              "$ref": "#/components/schemas/IMUDriverResponse"
+            },
+            "title": "Drivers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "drivers"
+        ],
+        "title": "IMUDriversResponse",
         "type": "object"
       },
       "IPPJobRequest": {
@@ -4259,6 +5058,196 @@
         "title": "LineScanComposeRequest",
         "type": "object"
       },
+      "LiveTestStatusResponse": {
+        "properties": {
+          "consecutive_failures": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Z.7.8: number of consecutive nightly failures; 0 after a pass.",
+            "title": "Consecutive Failures"
+          },
+          "estimated_cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Cost Usd"
+          },
+          "providers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProviderResult"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providers"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "status": {
+            "description": "pass | fail | unknown | never_run",
+            "title": "Status",
+            "type": "string"
+          },
+          "tests_passed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Passed"
+          },
+          "tests_run": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Run"
+          },
+          "tests_skipped": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Skipped"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "LiveTestStatusResponse",
+        "type": "object"
+      },
+      "LiveTestStatusWriteRequest": {
+        "properties": {
+          "estimated_cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Cost Usd"
+          },
+          "providers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providers"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "status": {
+            "description": "pass | fail",
+            "title": "Status",
+            "type": "string"
+          },
+          "tests_passed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Passed"
+          },
+          "tests_run": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Run"
+          },
+          "tests_skipped": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Skipped"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "LiveTestStatusWriteRequest",
+        "type": "object"
+      },
       "LlmProvisionRequest": {
         "description": "Request body for the wizard's L3 Step 2 provider provisioning.\n\n``api_key`` is required for every hosted provider (anthropic / openai\n/ azure); ``ollama`` is local and authenticates by reachability only.\n``base_url`` is mandatory for Azure (the resource endpoint) and\noptional for Ollama (defaults to ``http://localhost:11434``). A\ncaller-supplied ``model`` is echoed back into\n:attr:`settings.llm_model` so the agent factory picks it up.",
         "properties": {
@@ -4354,12 +5343,17 @@
         "type": "object"
       },
       "LoginRequest": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "email": {
             "minLength": 3,
             "title": "Email",
             "type": "string"
+          },
+          "honeypot_fields": {
+            "additionalProperties": true,
+            "title": "Honeypot Fields",
+            "type": "object"
           },
           "password": {
             "minLength": 1,
@@ -4554,6 +5548,50 @@
           "sentence"
         ],
         "title": "NMEAParseRequest",
+        "type": "object"
+      },
+      "NMEAParseResponse": {
+        "properties": {
+          "checksum_ok": {
+            "title": "Checksum Ok",
+            "type": "boolean"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "fields": {
+            "additionalProperties": true,
+            "title": "Fields",
+            "type": "object"
+          },
+          "raw": {
+            "title": "Raw",
+            "type": "string"
+          },
+          "sentence_type": {
+            "title": "Sentence Type",
+            "type": "string"
+          },
+          "talker_id": {
+            "title": "Talker Id",
+            "type": "string"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sentence_type",
+          "talker_id",
+          "valid",
+          "fields",
+          "raw",
+          "checksum_ok",
+          "error"
+        ],
+        "title": "NMEAParseResponse",
         "type": "object"
       },
       "OCRRequest": {
@@ -5646,6 +6684,20 @@
             "default": true,
             "title": "Requires Key",
             "type": "boolean"
+          },
+          "tool_calling_compat": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProviderToolCallingCompat"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Calling Compat"
           }
         },
         "required": [
@@ -5653,6 +6705,59 @@
           "name"
         ],
         "title": "ProviderInfo",
+        "type": "object"
+      },
+      "ProviderResult": {
+        "properties": {
+          "status": {
+            "description": "pass | fail | skip",
+            "title": "Status",
+            "type": "string"
+          },
+          "tests_passed": {
+            "default": 0,
+            "title": "Tests Passed",
+            "type": "integer"
+          },
+          "tests_run": {
+            "default": 0,
+            "title": "Tests Run",
+            "type": "integer"
+          },
+          "tests_skipped": {
+            "default": 0,
+            "title": "Tests Skipped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ProviderResult",
+        "type": "object"
+      },
+      "ProviderToolCallingCompat": {
+        "description": "Per-model tool-calling support entry from config/ollama_tool_calling.yaml.",
+        "properties": {
+          "min_ollama_version": {
+            "title": "Min Ollama Version",
+            "type": "string"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "support": {
+            "title": "Support",
+            "type": "string"
+          }
+        },
+        "required": [
+          "support",
+          "min_ollama_version"
+        ],
+        "title": "ProviderToolCallingCompat",
         "type": "object"
       },
       "ProvidersListResponse": {
@@ -6371,6 +7476,73 @@
         "title": "SendRequest",
         "type": "object"
       },
+      "SensorTestRecipeResponse": {
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "sensor_type": {
+            "title": "Sensor Type",
+            "type": "string"
+          },
+          "timeout_s": {
+            "title": "Timeout S",
+            "type": "integer"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "name",
+          "category",
+          "description",
+          "sensor_type",
+          "tools",
+          "timeout_s"
+        ],
+        "title": "SensorTestRecipeResponse",
+        "type": "object"
+      },
+      "SensorTestRecipesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "recipes": {
+            "items": {
+              "$ref": "#/components/schemas/SensorTestRecipeResponse"
+            },
+            "title": "Recipes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "recipes"
+        ],
+        "title": "SensorTestRecipesResponse",
+        "type": "object"
+      },
       "SensorTestRequest": {
         "properties": {
           "recipe_id": {
@@ -6395,6 +7567,55 @@
           "target_device"
         ],
         "title": "SensorTestRequest",
+        "type": "object"
+      },
+      "SensorTestRunResponse": {
+        "properties": {
+          "measurements": {
+            "additionalProperties": true,
+            "title": "Measurements",
+            "type": "object"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "raw_log_path": {
+            "title": "Raw Log Path",
+            "type": "string"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "sensor_type": {
+            "title": "Sensor Type",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_device": {
+            "title": "Target Device",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "sensor_type",
+          "status",
+          "target_device",
+          "timestamp",
+          "measurements",
+          "raw_log_path",
+          "message"
+        ],
+        "title": "SensorTestRunResponse",
         "type": "object"
       },
       "SessionTitleBody": {
@@ -6760,6 +7981,27 @@
           "audit_chain"
         ],
         "title": "SmokeSubsetResponse",
+        "type": "object"
+      },
+      "SocCompatResponse": {
+        "properties": {
+          "compatibility": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Compatibility",
+            "type": "object"
+          },
+          "soc_id": {
+            "title": "Soc Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "soc_id",
+          "compatibility"
+        ],
+        "title": "SocCompatResponse",
         "type": "object"
       },
       "SocSecurityRequest": {
@@ -7184,7 +8426,7 @@
         "type": "object"
       },
       "SystemInfoResponse": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "arch": {
             "default": "",
@@ -8347,6 +9589,225 @@
         "title": "TrajectoryEvalRequest",
         "type": "object"
       },
+      "TrajectoryEvaluationResponse": {
+        "properties": {
+          "actual": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "expected": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected"
+          },
+          "fixture_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixture Id"
+          },
+          "max_error_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Error Deg"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "per_axis_error": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Per Axis Error"
+          },
+          "rms_error_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rms Error Deg"
+          },
+          "tolerance_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tolerance Deg"
+          }
+        },
+        "required": [
+          "passed"
+        ],
+        "title": "TrajectoryEvaluationResponse",
+        "type": "object"
+      },
+      "TrajectoryFixtureResponse": {
+        "properties": {
+          "angular_rate_dps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Angular Rate Dps"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "duration_s": {
+            "title": "Duration S",
+            "type": "number"
+          },
+          "expected_final_orientation": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Final Orientation"
+          },
+          "expected_orientation": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Orientation"
+          },
+          "fixture_id": {
+            "title": "Fixture Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "return_to_origin": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return To Origin"
+          },
+          "sample_rate_hz": {
+            "title": "Sample Rate Hz",
+            "type": "integer"
+          },
+          "tolerance_deg": {
+            "title": "Tolerance Deg",
+            "type": "number"
+          }
+        },
+        "required": [
+          "fixture_id",
+          "name",
+          "duration_s",
+          "sample_rate_hz",
+          "tolerance_deg",
+          "description"
+        ],
+        "title": "TrajectoryFixtureResponse",
+        "type": "object"
+      },
+      "TrajectoryFixturesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "fixtures": {
+            "items": {
+              "$ref": "#/components/schemas/TrajectoryFixtureResponse"
+            },
+            "title": "Fixtures",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "fixtures"
+        ],
+        "title": "TrajectoryFixturesResponse",
+        "type": "object"
+      },
       "TransitionDetectRequest": {
         "properties": {
           "trace": {
@@ -8454,6 +9915,55 @@
           "data_hex"
         ],
         "title": "UBXParseRequest",
+        "type": "object"
+      },
+      "UBXParseResponse": {
+        "properties": {
+          "class_name": {
+            "title": "Class Name",
+            "type": "string"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "msg_class": {
+            "title": "Msg Class",
+            "type": "string"
+          },
+          "msg_id": {
+            "title": "Msg Id",
+            "type": "string"
+          },
+          "msg_name": {
+            "title": "Msg Name",
+            "type": "string"
+          },
+          "parsed_fields": {
+            "additionalProperties": true,
+            "title": "Parsed Fields",
+            "type": "object"
+          },
+          "payload_length": {
+            "title": "Payload Length",
+            "type": "integer"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "msg_class",
+          "msg_id",
+          "payload_length",
+          "valid",
+          "class_name",
+          "msg_name",
+          "parsed_fields",
+          "error"
+        ],
+        "title": "UBXParseResponse",
         "type": "object"
       },
       "UpdateScopesRequest": {
@@ -12813,6 +14323,96 @@
         "summary": "Get Vendor Capabilities",
         "tags": [
           "barcode"
+        ]
+      }
+    },
+    "/api/v1/billing/stripe/checkout-session": {
+      "post": {
+        "operationId": "create_stripe_checkout_session_api_v1_billing_stripe_checkout_session_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckoutSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Create Stripe Checkout Session Api V1 Billing Stripe Checkout Session Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Stripe Checkout Session",
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/v1/billing/stripe/portal-session": {
+      "post": {
+        "operationId": "create_stripe_billing_portal_session_api_v1_billing_stripe_portal_session_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingPortalSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Create Stripe Billing Portal Session Api V1 Billing Stripe Portal Session Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Stripe Billing Portal Session",
+        "tags": [
+          "billing"
         ]
       }
     },
@@ -21415,7 +23015,7 @@
     },
     "/api/v1/invoke/stream": {
       "post": {
-        "description": "SSE streaming invoke — analyses state, plans, executes, reports.\n\nQuery param `command` is optional; if provided, it takes priority\nand is routed through the LangGraph pipeline.\n\nR20-B: ``suppress_coach`` is a comma-separated list of coaching\ntrigger keys the frontend has already shown the operator this\nsession (tracked in sessionStorage). Planner skips coaching for\nthose triggers so the operator isn't re-coached on every INVOKE\npress. Recognised keys: ``empty_workspace`` / ``stale_pep``.",
+        "description": "SSE streaming invoke — analyses state, plans, executes, reports.\n\nQuery param `command` is optional; if provided, it takes priority\nand is routed through the LangGraph pipeline.\n\nR20-B: ``suppress_coach`` is a comma-separated list of coaching\ntrigger keys the frontend has already shown the operator this\nsession (tracked in sessionStorage). Planner skips coaching for\nthose triggers so the operator isn't re-coached on every INVOKE\npress. Recognised keys: ``empty_workspace`` / ``stale_pep`` /\n``missing_toolchain:<slug>`` (BS.10.1) / ``url_in_message:<url>``\n(W16.1, per-URL dismissal so re-pasting a fresh URL still coaches)\n/ ``image_in_message:<hash16>`` (W16.2, per-attachment dismissal so\nre-pasting a fresh image still coaches; the hash is the 16-hex-\nchar SHA-256 prefix of the data URL payload or the upload marker\nfilename).",
         "operationId": "invoke_stream_api_v1_invoke_stream_post",
         "parameters": [
           {
@@ -27317,6 +28917,75 @@
         ]
       }
     },
+    "/api/v1/privacy/access": {
+      "post": {
+        "operationId": "create_access_request_api_v1_privacy_access_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Access Request Api V1 Privacy Access Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Access Request",
+        "tags": [
+          "privacy"
+        ]
+      }
+    },
+    "/api/v1/privacy/erasure": {
+      "post": {
+        "operationId": "create_erasure_request_api_v1_privacy_erasure_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Erasure Request Api V1 Privacy Erasure Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Erasure Request",
+        "tags": [
+          "privacy"
+        ]
+      }
+    },
+    "/api/v1/privacy/portability": {
+      "post": {
+        "operationId": "create_portability_request_api_v1_privacy_portability_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Portability Request Api V1 Privacy Portability Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Portability Request",
+        "tags": [
+          "privacy"
+        ]
+      }
+    },
     "/api/v1/profile": {
       "get": {
         "operationId": "get_profile_api_v1_profile_get",
@@ -29750,6 +31419,79 @@
         ]
       }
     },
+    "/api/v1/runtime/live-test-status": {
+      "get": {
+        "description": "Return the most recent nightly live-test result from SharedKV.\n\nReturns ``status: never_run`` when the CI workflow has not yet written\nany result (fresh deploy / first run not completed).",
+        "operationId": "get_live_test_status_api_v1_runtime_live_test_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveTestStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read last LLM live integration test result",
+        "tags": [
+          "runtime"
+        ]
+      },
+      "post": {
+        "description": "Write nightly live-test results from the GitHub Actions runner.\n\nAuth: ``Authorization: Bearer <OMNISIGHT_REPORTER_TOKEN>`` — a static\npre-shared secret stored in GitHub Actions repo secrets. The standard\nuser-session auth is intentionally skipped so CI does not need an\noperator account.\n\nIf ``OMNISIGHT_REPORTER_TOKEN`` is unset/empty, the endpoint is\ndisabled (returns 503) to prevent accidental open writes.",
+        "operationId": "post_live_test_status_api_v1_runtime_live_test_status_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiveTestStatusWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Write LLM live integration test result (CI reporter)",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
     "/api/v1/runtime/logs": {
       "get": {
         "description": "Return recent system logs.",
@@ -30172,6 +31914,26 @@
           }
         },
         "summary": "Update Npi Phase",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/ollama/tool-failures": {
+      "get": {
+        "description": "Return Ollama tool-call failure counters from SharedKV.\n\nZ.6.5: when the ollama adapter degrades to pure-chat (model does not\nsupport tool calling, daemon is unreachable, or the tool_calls block\ncannot be parsed), it increments SharedKV(\"ollama_tool_failures\")\ncounters.  This endpoint exposes those counts for the dashboard.\n\n``has_warning`` is True whenever total > 0, signalling that at least\none Ollama tool-call silently degraded since the last counter reset.\n\nModule-global state: SharedKV reads from Redis (cross-worker) or\nin-memory fallback (per-process in degraded mode — 故意每 worker 獨立\nwhen Redis is absent, acceptable for observability counters).",
+        "operationId": "get_ollama_tool_failures_api_v1_runtime_ollama_tool_failures_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Ollama Tool Failures",
         "tags": [
           "runtime"
         ]
@@ -33134,9 +34896,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Artifact Definitions Api V1 Sensor Fusion Artifacts Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ArtifactDefinitionsResponse"
                 }
               }
             },
@@ -33167,9 +34927,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Generate Artifacts Api V1 Sensor Fusion Artifacts Generate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ArtifactGenerationResponse"
                 }
               }
             },
@@ -33210,9 +34968,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Calculate Altitude Api V1 Sensor Fusion Barometer Altitude Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/AltitudeResponse"
                 }
               }
             },
@@ -33243,9 +34999,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Barometer Drivers Api V1 Sensor Fusion Barometer Drivers Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/BarometerDriversResponse"
                 }
               }
             },
@@ -33277,9 +35031,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Barometer Driver Api V1 Sensor Fusion Barometer Drivers  Driver Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/BarometerDriverResponse"
                 }
               }
             },
@@ -33310,9 +35062,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Calibration Profiles Api V1 Sensor Fusion Calibration Profiles Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CalibrationProfilesResponse"
                 }
               }
             },
@@ -33344,9 +35094,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Calibration Profile Api V1 Sensor Fusion Calibration Profiles  Profile Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CalibrationProfileResponse"
                 }
               }
             },
@@ -33387,9 +35135,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Calibration Api V1 Sensor Fusion Calibration Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CalibrationRunResponse"
                 }
               }
             },
@@ -33420,9 +35166,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Ekf Profiles Api V1 Sensor Fusion Ekf Profiles Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EKFProfilesResponse"
                 }
               }
             },
@@ -33454,9 +35198,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Ekf Profile Api V1 Sensor Fusion Ekf Profiles  Profile Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EKFProfileResponse"
                 }
               }
             },
@@ -33497,9 +35239,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Ekf Api V1 Sensor Fusion Ekf Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EKFRunResponse"
                 }
               }
             },
@@ -33540,9 +35280,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Parse Nmea Api V1 Sensor Fusion Gps Nmea Parse Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/NMEAParseResponse"
                 }
               }
             },
@@ -33573,9 +35311,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Gps Protocols Api V1 Sensor Fusion Gps Protocols Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/GPSProtocolsResponse"
                 }
               }
             },
@@ -33607,9 +35343,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Gps Protocol Api V1 Sensor Fusion Gps Protocols  Protocol Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/GPSProtocolResponse"
                 }
               }
             },
@@ -33650,9 +35384,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Parse Ubx Api V1 Sensor Fusion Gps Ubx Parse Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/UBXParseResponse"
                 }
               }
             },
@@ -33683,9 +35415,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Imu Drivers Api V1 Sensor Fusion Imu Drivers Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IMUDriversResponse"
                 }
               }
             },
@@ -33717,9 +35447,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Imu Driver Api V1 Sensor Fusion Imu Drivers  Driver Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IMUDriverResponse"
                 }
               }
             },
@@ -33760,9 +35488,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Check Soc Compat Api V1 Sensor Fusion Soc Compat Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SocCompatResponse"
                 }
               }
             },
@@ -33827,9 +35553,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Test Recipes Api V1 Sensor Fusion Test Recipes Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SensorTestRecipesResponse"
                 }
               }
             },
@@ -33871,9 +35595,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Test Recipe Api V1 Sensor Fusion Test Recipes  Recipe Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SensorTestRecipeResponse"
                 }
               }
             },
@@ -33914,9 +35636,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Sensor Test Api V1 Sensor Fusion Test Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SensorTestRunResponse"
                 }
               }
             },
@@ -33957,9 +35677,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Evaluate Trajectory Api V1 Sensor Fusion Trajectory Evaluate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/TrajectoryEvaluationResponse"
                 }
               }
             },
@@ -33990,9 +35708,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Trajectory Fixtures Api V1 Sensor Fusion Trajectory Fixtures Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/TrajectoryFixturesResponse"
                 }
               }
             },
@@ -34024,9 +35740,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Trajectory Fixture Api V1 Sensor Fusion Trajectory Fixtures  Fixture Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/TrajectoryFixtureResponse"
                 }
               }
             },
@@ -39423,7 +41137,7 @@
     },
     "/api/v1/web-sandbox/preview/{workspace_id}/ready": {
       "post": {
-        "description": "Caller signals that the dev server has reported ready.",
+        "description": "Caller signals that the dev server has reported ready.\n\nW16.4 — emits a ``preview.ready`` SSE event carrying the sandbox\nURL so the orchestrator-chat surface can append an inline-iframe\nmessage without polling docker logs from the browser.  The emit is\nbest-effort; a transport failure does not break the existing\noperator-tier ready signal contract.",
         "operationId": "mark_preview_ready_api_v1_web_sandbox_preview__workspace_id__ready_post",
         "parameters": [
           {
@@ -39511,6 +41225,47 @@
         ]
       }
     },
+    "/api/v1/webhooks/email/{provider}": {
+      "post": {
+        "description": "Receive provider bounce / complaint webhooks for FS.4 email.\n\nThe endpoint accepts a shared bearer token or HMAC-SHA256 signature.\n``settings.email_webhook_secret`` is env/runtime configuration, so\nevery worker independently verifies against the same source value\nwithout writing module-global state.",
+        "operationId": "email_feedback_webhook_api_v1_webhooks_email__provider__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Email Feedback Webhook",
+        "tags": [
+          "webhooks"
+        ]
+      }
+    },
     "/api/v1/webhooks/gerrit": {
       "post": {
         "description": "Receive Gerrit events and trigger appropriate actions.\n\nGerrit sends JSON events via its webhook plugin or stream-events.\nSupports optional HMAC-SHA256 signature via X-Gerrit-Signature header.\n\nPhase-3-Runtime-v2 SP-3.1: handler takes a pool-backed\n``asyncpg.Connection`` so the agent-spawn code path inside\n``_on_patchset_created`` can persist the spawned reviewer via\nthe ported ``db.upsert_agent`` API. Background tasks started from\nhere (``_run_review``) acquire their OWN conn since the request\nscope ends before they run.",
@@ -39586,6 +41341,26 @@
           }
         },
         "summary": "Jira Webhook",
+        "tags": [
+          "webhooks"
+        ]
+      }
+    },
+    "/api/v1/webhooks/stripe": {
+      "post": {
+        "description": "Receive Stripe billing webhooks for FS.8.\n\n``settings.stripe_webhook_secret`` is env/runtime configuration, so\nevery worker independently verifies against the same source value\nwithout writing module-global state. FS.8.4 subscription lifecycle\nevents are then persisted through PG ``provisioned_billing``.",
+        "operationId": "stripe_webhook_api_v1_webhooks_stripe_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stripe Webhook",
         "tags": [
           "webhooks"
         ]

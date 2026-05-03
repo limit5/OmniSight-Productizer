@@ -21,6 +21,497 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/audit/tenants/{tenant_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Tenant Audit Events
+         * @description List audit events scoped to a single tenant.
+         *
+         *     Authorisation
+         *     ─────────────
+         *     * ``super_admin`` may query any tenant.
+         *     * Tenant ``owner`` / ``admin`` may query their own tenant only,
+         *       where "own" means an *active* ``user_tenant_memberships`` row
+         *       with role ∈ {owner, admin} on the path-param tenant.
+         *     * Anything else → 403.
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — payload below.
+         *     * 403 — caller cannot query this tenant. Body includes the
+         *       caller's role + the queried tenant id so the operator UI can
+         *       render an explanation.
+         *     * 404 — tenant id is well-formed but does not exist. Returned
+         *       *after* the authz check passes so a non-super-admin probing
+         *       arbitrary IDs cannot enumerate which tenants they would have
+         *       been allowed to query.
+         *     * 422 — ``tenant_id`` fails ``TENANT_ID_PATTERN``, or any query
+         *       param violates its Pydantic constraint (limit out of range,
+         *       negative cursor, ...).
+         *
+         *     Payload
+         *     ───────
+         *     ::
+         *
+         *         {
+         *             "tenant_id": "t-acme",
+         *             "items": [
+         *                 {
+         *                     "id": 9876,
+         *                     "ts": 1745580000.0,
+         *                     "actor": "alice@acme.example",
+         *                     "action": "tenant.created",
+         *                     "entity_kind": "tenant",
+         *                     "entity_id": "t-acme",
+         *                     "before_json": "{...}",
+         *                     "after_json": "{...}",
+         *                     "prev_hash": "...",
+         *                     "curr_hash": "...",
+         *                     "session_id": "...",
+         *                     "tenant_id": "t-acme"
+         *                 },
+         *                 ...
+         *             ],
+         *             "count": 200,
+         *             "limit": 200,
+         *             "cursor": null,
+         *             "next_cursor": 9711,
+         *             "filtered_to_self": false
+         *         }
+         *
+         *     Pagination
+         *     ──────────
+         *     Rows come back newest-first (``ORDER BY id DESC``). To page,
+         *     pass the smallest ``id`` from the previous page as ``cursor``;
+         *     the next call returns rows with ``id < cursor``. ``next_cursor``
+         *     is the smallest id in the current response, or ``null`` if the
+         *     response was shorter than ``limit`` (i.e. end of stream).
+         *
+         *     Forensic audit row
+         *     ──────────────────
+         *     Every successful query (200) writes one ``audit.queried`` row
+         *     INTO THE QUERIED TENANT'S CHAIN so the queried tenant's own audit
+         *     pane carries a record of cross-tenant inspection by super-admins.
+         *     The row records actor (querier email), querier role, querier home
+         *     tenant, the ``cross_tenant`` flag, the filter shape, and the
+         *     result count. Best-effort: a chain-write failure logs at warning
+         *     but never 5xx's the read.
+         */
+        get: operations["get_tenant_audit_events_api_v1_admin_audit_tenants__tenant_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/super-admins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Promote Super Admin
+         * @description Promote a user to ``role='super_admin'``.
+         *
+         *     Idempotent: if the target is already platform-tier the response
+         *     has ``already_super_admin=True`` and no audit row is written.
+         */
+        post: operations["promote_super_admin_api_v1_admin_super_admins_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/super-admins/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke Super Admin
+         * @description Demote a super-admin back to ``role='admin'``.
+         *
+         *     Idempotent on a target that is already not super-admin (returns
+         *     200 + ``already_revoked=True``). Refuses with 409 if the demotion
+         *     would leave zero enabled super-admins (last-super-admin
+         *     protection). Concurrent demotions are serialised by a platform-
+         *     wide ``pg_advisory_xact_lock`` so two operators racing each other
+         *     cannot collectively floor the count.
+         */
+        delete: operations["revoke_super_admin_api_v1_admin_super_admins__user_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Tenants
+         * @description List every tenant with aggregated usage metrics.
+         *
+         *     Per-row payload::
+         *
+         *         {
+         *             "id": "t-acme",
+         *             "name": "Acme Corp",
+         *             "plan": "pro",
+         *             "enabled": true,
+         *             "created_at": "2026-01-15 12:34:56",
+         *             "usage": {
+         *                 "user_count": 7,
+         *                 "project_count": 3,
+         *                 "disk_used_bytes": 1234567,
+         *                 "llm_tokens_30d": 4500000,
+         *                 "rate_limit_hits_7d": 0,
+         *                 "last_activity_at": 1745580000.0
+         *             }
+         *         }
+         *
+         *     Returned envelope is ``{"tenants": [...]}`` so future fields
+         *     (pagination cursor, server timestamp) can be added without
+         *     breaking clients.
+         *
+         *     Metric notes
+         *     ────────────
+         *     * ``user_count`` — only enabled users.
+         *     * ``project_count`` — only non-archived projects.
+         *     * ``disk_used_bytes`` — filesystem walk over
+         *       ``data/tenants/<id>/{artifacts,workflow_runs,backups,ingest_tmp}``
+         *       via ``backend.tenant_quota.measure_tenant_usage``. The measurement
+         *       is *not* cached: the operator-facing view should be live.
+         *     * ``llm_tokens_30d`` — ``SUM(data_json->>'tokens_used')`` from
+         *       ``event_log`` ``turn.complete`` rows in the last 30 days.
+         *     * ``rate_limit_hits_7d`` — currently 0; the rate-limiter is
+         *       Redis / in-memory only and we don't yet persist hit events.
+         *       Reserved here as an explicit field so the contract is stable
+         *       once persistent rate-limit logging lands.
+         *     * ``last_activity_at`` — UNIX timestamp of the most recent
+         *       ``audit_log`` row for this tenant (``ts`` column, REAL). NULL
+         *       for tenants that have never recorded an audit row.
+         */
+        get: operations["list_tenants_api_v1_admin_tenants_get"];
+        put?: never;
+        /**
+         * Create Tenant
+         * @description Create a new tenant.
+         *
+         *     Returns 201 with the created tenant row on success, 409 if the id
+         *     already exists (including the seeded ``t-default``), 422 if the
+         *     body is malformed (handled by FastAPI/Pydantic before this body
+         *     runs), and 403 if the caller is not a super-admin.
+         */
+        post: operations["create_tenant_api_v1_admin_tenants_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Tenant Detail
+         * @description Return the per-tenant detail panel.
+         *
+         *     Payload::
+         *
+         *         {
+         *             "id": "t-acme",
+         *             "name": "Acme Corp",
+         *             "plan": "pro",
+         *             "enabled": true,
+         *             "created_at": "2026-01-15 12:34:56",
+         *             "quota": {
+         *                 "soft_bytes": 107374182400,
+         *                 "hard_bytes": 214748364800,
+         *                 "keep_recent_runs": 20
+         *             },
+         *             "usage": {
+         *                 "user_count": 7,
+         *                 "project_count": 3,
+         *                 "disk_used_bytes": 1234567,
+         *                 "disk_used_pct_of_hard": 0.0057,
+         *                 "llm_tokens_30d": 4500000,
+         *                 "rate_limit_hits_7d": 0,
+         *                 "last_activity_at": 1745580000.0
+         *             },
+         *             "members": [
+         *                 {
+         *                     "user_id": "u-...",
+         *                     "email": "alice@acme.example",
+         *                     "name": "Alice",
+         *                     "role": "owner",
+         *                     "status": "active",
+         *                     "user_enabled": true,
+         *                     "joined_at": "2026-02-01 09:00:00",
+         *                     "last_active_at": null
+         *                 },
+         *                 ...
+         *             ],
+         *             "projects": [
+         *                 {
+         *                     "id": "p-acme-default",
+         *                     "name": "Default",
+         *                     "slug": "default",
+         *                     "product_line": "default",
+         *                     "parent_id": null,
+         *                     "plan_override": null,
+         *                     "disk_budget_bytes": null,
+         *                     "llm_budget_tokens": null,
+         *                     "created_at": "2026-02-01 09:00:00",
+         *                     "archived_at": null
+         *                 },
+         *                 ...
+         *             ],
+         *             "recent_audit_events": [
+         *                 {
+         *                     "id": 9876,
+         *                     "ts": 1745580000.0,
+         *                     "actor": "alice@acme.example",
+         *                     "action": "tenant_updated",
+         *                     "entity_kind": "tenant",
+         *                     "entity_id": "t-acme",
+         *                     "before_json": "{...}",
+         *                     "after_json": "{...}"
+         *                 },
+         *                 ...
+         *             ]
+         *         }
+         *
+         *     Errors
+         *     ──────
+         *     * 404 — tenant id does not exist
+         *     * 422 — id fails ``TENANT_ID_PATTERN`` (validated *before* DB hit
+         *       to avoid leaking ill-formed values into the query)
+         *     * 403 — caller is not a super-admin (handled by dependency)
+         *
+         *     Recent audit events are capped at ``_AUDIT_EVENT_LIMIT`` rows,
+         *     newest first. ``before_json`` / ``after_json`` are returned as
+         *     raw JSON strings — clients that need structured access call
+         *     ``JSON.parse`` themselves.
+         */
+        get: operations["get_tenant_detail_api_v1_admin_tenants__tenant_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Tenant
+         * @description Cascade-delete a tenant and every owned row / artifact.
+         *
+         *     The actual delete runs in the background (``asyncio.create_task``)
+         *     and emits one ``tenant_delete_progress`` SSE event per phase via
+         *     the global event bus. The HTTP response returns ``202 Accepted``
+         *     immediately so the caller doesn't block on a tenant with millions
+         *     of rows / many GiB of artifacts.
+         *
+         *     Status codes
+         *     ────────────
+         *     * 202 — accepted; cascade started, watch SSE for progress.
+         *     * 403 — caller is not a super-admin (handled by dependency), OR
+         *       ``tenant_id`` is in ``PROTECTED_TENANT_IDS`` (``t-default``).
+         *     * 404 — well-formed id but no such tenant.
+         *     * 422 — id fails ``TENANT_ID_PATTERN``, OR the ``?confirm=`` query
+         *       param is missing or doesn't match the path id.
+         *
+         *     Confirm handshake
+         *     ─────────────────
+         *     A misconfigured client / shell history replay must not be able to
+         *     delete a tenant by accidentally re-sending a stored URL. The caller
+         *     is required to echo the tenant id in ``?confirm=<id>`` — same kind
+         *     of two-step guard GitHub uses for ``DELETE`` of repos / orgs. The
+         *     check is exact-equal, case-sensitive.
+         *
+         *     SSE channel
+         *     ───────────
+         *     Event type: ``tenant_delete_progress``. Per-event payload::
+         *
+         *         {
+         *             "tenant_id": "t-acme",
+         *             "phase": "<table_name|filesystem|all>",
+         *             "status": "started|running|done|completed|failed",
+         *             "step": <int>,                  # 1..N (per-phase)
+         *             "total": <int>,                 # N (constant)
+         *             "rows_deleted": <int>,          # only on table phases
+         *             "bytes_freed": <int>,           # only on filesystem
+         *             "elapsed_seconds": <float>,     # only on completed
+         *             "deleted_counts": {table:int},  # only on completed/failed
+         *             "error": "...",                 # only on failed
+         *             "timestamp": "...iso..."
+         *         }
+         *
+         *     Audit
+         *     ─────
+         *     Three audit actions are written under the super-admin's chain:
+         *       * ``tenant_delete_requested`` — synchronous, before kickoff
+         *       * ``tenant_deleted`` — after successful cascade
+         *       * ``tenant_delete_failed`` — if the cascade aborts mid-flight
+         *
+         *     Module-global state
+         *     ───────────────────
+         *     SQL constants are module-level immutable strings (each worker
+         *     derives the same value). The asyncpg pool is shared via PG.
+         *     ``_pending_delete_tasks`` is intentionally per-worker (see its
+         *     docstring) — each uvicorn worker tracks only the cascades it
+         *     started, which matches the asyncio event-loop ownership semantics.
+         */
+        delete: operations["delete_tenant_api_v1_admin_tenants__tenant_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Patch Tenant
+         * @description Partial-update a tenant.
+         *
+         *     Body accepts any subset of ``{name, plan, enabled}``; at least one
+         *     field must be present. Returns 200 with the updated tenant row::
+         *
+         *         {
+         *             "id": "t-acme",
+         *             "name": "Acme Corp (renamed)",
+         *             "plan": "starter",
+         *             "enabled": false,
+         *             "created_at": "2026-01-15 12:34:56"
+         *         }
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — applied successfully.
+         *     * 403 — caller is not a super-admin (handled by dependency).
+         *     * 404 — well-formed id but no such tenant.
+         *     * 409 — plan downgrade refused because current ``disk_used_bytes``
+         *       exceeds the new plan's ``hard_bytes``. The response includes
+         *       ``current_plan`` / ``requested_plan`` / ``disk_used_bytes`` /
+         *       ``new_hard_bytes`` so the operator (or UI) can render the gap
+         *       directly. **No data is force-deleted** — the spec is explicit
+         *       that downgrading must never silently reclaim storage; the
+         *       operator must run an LRU sweep, mark-keep, or pick a higher
+         *       plan.
+         *     * 422 — id fails ``TENANT_ID_PATTERN``, body has no settable
+         *       field, or any field violates its Pydantic constraints.
+         *
+         *     Plan-downgrade quota guard
+         *     ──────────────────────────
+         *     If ``plan`` is in the body AND it differs from the current plan,
+         *     the handler measures live disk usage (filesystem walk; same
+         *     helper as the LIST / GET handlers) and compares it against the
+         *     *new* plan's default ``hard_bytes`` from ``PLAN_DISK_QUOTAS``.
+         *     The yaml override file (``data/tenants/<id>/quota.yaml``) is
+         *     intentionally not consulted here — it represents the *current*
+         *     operator-granted budget and a plan change implies that override
+         *     will be re-materialised by the next sweep with the new plan's
+         *     defaults. Comparing against the override would let an over-
+         *     provisioned tenant sneak through a downgrade that would then
+         *     immediately violate its own plan.
+         *
+         *     Module-global state
+         *     ───────────────────
+         *     None introduced. SQL constants are module-level immutable
+         *     strings (each worker derives the same value); the asyncpg pool
+         *     is shared via PG; the audit chain serialises through
+         *     ``pg_advisory_xact_lock`` inside ``audit._log_impl``.
+         */
+        patch: operations["patch_tenant_api_v1_admin_tenants__tenant_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/admin/usage/breakdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Usage Breakdown By Project
+         * @description Per-(``tenant_id``, ``project_id``) usage breakdown — T6 pricing
+         *     page data source.
+         *
+         *     Authorisation
+         *     ─────────────
+         *     * ``super_admin`` may query any tenant.
+         *     * Tenant ``owner`` / ``admin`` may query their own tenant only,
+         *       where "own" means an *active* ``user_tenant_memberships`` row
+         *       with role ∈ {owner, admin} on the queried tenant.
+         *     * Anything else → 403.
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — payload below.
+         *     * 403 — caller cannot query this tenant.
+         *     * 404 — tenant not found (returned *after* authz so non-super-admin
+         *       cannot enumerate via 404-vs-403 timing).
+         *     * 422 — ``tenant_id`` shape invalid.
+         *
+         *     Payload
+         *     ───────
+         *     ::
+         *
+         *         {
+         *             "tenant_id": "t-acme",
+         *             "since": 1745500000.0,
+         *             "until": null,
+         *             "breakdown": [
+         *                 {
+         *                     "project_id": "p-acme-firmware",
+         *                     "llm_calls": 1024,
+         *                     "llm_input_tokens": 245000,
+         *                     "llm_output_tokens": 91000,
+         *                     "llm_cost_usd": 14.32,
+         *                     "workflow_runs": 53,
+         *                     "workspace_gb_hours": 17.6
+         *                 },
+         *                 ...
+         *             ],
+         *             "totals": {
+         *                 "llm_calls": 4096,
+         *                 "llm_input_tokens": 980000,
+         *                 "llm_output_tokens": 364000,
+         *                 "llm_cost_usd": 57.28,
+         *                 "workflow_runs": 212,
+         *                 "workspace_gb_hours": 70.4
+         *             }
+         *         }
+         *
+         *     Sort order
+         *     ──────────
+         *     Rows come back ordered by ``llm_cost_usd DESC`` then ``project_id
+         *     ASC`` (the spend hot-spots first) — matches what the T6 pricing
+         *     page wants for its breakdown table.
+         */
+        get: operations["get_usage_breakdown_by_project_api_v1_admin_usage_breakdown_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/agents": {
         parameters: {
             query?: never;
@@ -580,6 +1071,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/oauth/{provider}/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Oauth Authorize
+         * @description AS.6.1 — start the SSO flow for *provider*.
+         *
+         *     Returns 302 to the vendor authorize URL + sets the in-flight
+         *     ``omnisight_oauth_flow`` cookie. The cookie carries the PKCE
+         *     verifier, state, nonce, and redirect_uri so the /callback can
+         *     verify the response without server-side state.
+         *
+         *     Errors:
+         *       * 503 — AS feature family disabled (knob off).
+         *       * 404 — vendor slug not in SUPPORTED_PROVIDERS.
+         *       * 501 — vendor supported but client_id/secret unconfigured.
+         */
+        get: operations["oauth_authorize_api_v1_auth_oauth__provider__authorize_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/oauth/{provider}/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Oauth Callback
+         * @description AS.6.1 — handle the vendor's callback POST.
+         *
+         *     On success:
+         *       * Look up / create the OmniSight user (AS.0.3 takeover guard).
+         *       * Issue session cookies (omnisight_session + omnisight_csrf).
+         *       * Emit auth.oauth_connect + auth.login_success rollup events.
+         *       * Clear the in-flight flow cookie.
+         *       * Redirect to /.
+         *
+         *     On failure: 4xx with the relevant detail string (state mismatch
+         *     / expired / vendor error / link conflict). The frontend's
+         *     /login page reads ``?oauth_error=...`` query in the redirect
+         *     fallback to surface the error inline.
+         */
+        get: operations["oauth_callback_api_v1_auth_oauth__provider__callback_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/oidc/{provider}": {
         parameters: {
             query?: never;
@@ -970,6 +1523,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/billing/stripe/checkout-session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Stripe Checkout Session */
+        post: operations["create_stripe_checkout_session_api_v1_billing_stripe_checkout_session_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/billing/stripe/portal-session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Stripe Billing Portal Session */
+        post: operations["create_stripe_billing_portal_session_api_v1_billing_stripe_portal_session_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/bootstrap/admin-password": {
         parameters: {
             query?: never;
@@ -1097,6 +1684,57 @@ export interface paths {
          *     ``bootstrap_finalized=true`` app-setting flag.
          */
         post: operations["bootstrap_finalize_api_v1_bootstrap_finalize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/init-tenant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Init Tenant
+         * @description Y7 row 1 — create real tenant + super-admin + default project.
+         *
+         *     Inserted between Step 1 (admin password rotation) and Step 2 (LLM
+         *     provider) in the wizard.  Lets a fresh install land in
+         *     multi-tenant production shape rather than orphaned on
+         *     ``t-default``.  Skipping is allowed — the wizard advances and the
+         *     install keeps using ``t-default``.
+         *
+         *     Refusal contract (each carries a ``kind`` so the UI can pick a
+         *     matching banner without parsing ``detail``):
+         *
+         *       * 422 + ``kind=invalid_display_name`` — display_name slugifies
+         *         to empty (e.g. ``"-"`` / pure whitespace / unicode-only).
+         *       * 422 + ``kind=invalid_slug`` — slugified id fails
+         *         ``_INIT_TENANT_SLUG_RE`` (defensive — pydantic catches most).
+         *       * 422 + ``kind=enterprise_license_required`` — plan == enterprise
+         *         but license_key absent or shape-invalid.
+         *       * 422 + ``kind=password_too_weak`` / ``password_too_short`` —
+         *         same strength gate as Step 1.
+         *       * 409 + ``kind=tenant_already_exists`` — the slugified
+         *         ``t-{slug}`` already exists in the tenants table.
+         *       * 409 + ``kind=non_default_tenant_already_exists`` — at least
+         *         one tenant other than ``t-default`` already exists, so this
+         *         endpoint must not be called again.  Defends against replay /
+         *         misuse after a successful first run.
+         *       * 409 + ``kind=email_already_exists`` — the proposed
+         *         super-admin email collides with an existing user row.
+         *
+         *     On success, returns 200 + the created ids so the UI can render
+         *     a "go log in as <email>" banner.  ``env_write_warning`` is
+         *     non-empty when the ``.env`` patch failed and the operator must
+         *     set the var manually — DB state is authoritative either way.
+         */
+        post: operations["bootstrap_init_tenant_api_v1_bootstrap_init_tenant_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1415,6 +2053,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/bootstrap/vertical-setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Vertical Setup
+         * @description Record the operator's BS.9.3 vertical pick + BS.9.4 Android API
+         *     config + BS.9.5 ``install_jobs.id`` set on ``bootstrap_state`` under
+         *     :data:`_boot.STEP_VERTICAL_SETUP`.
+         *
+         *     The endpoint is intentionally a *recorder* — it does not enqueue
+         *     install jobs itself. The frontend has already POSTed the install
+         *     jobs to ``/installer/jobs`` (one per vertical's primary entry) and
+         *     just hands the resulting ids back so the bootstrap audit trail
+         *     captures which jobs this step kicked off. Splitting the responsibility
+         *     keeps the install-jobs PEP HOLD path (R20-A coaching card) unchanged
+         *     and lets each install row stream progress through the existing BS.7
+         *     install-progress drawer + ``installer_progress`` SSE channel.
+         *
+         *     Side-effects (all idempotent under retry):
+         *       1. Writes ``bootstrap_state.metadata`` JSONB with
+         *          ``{verticals_selected, android_api?, install_job_ids,
+         *             source: "wizard"}`` — re-commit overwrites prior payload.
+         *       2. Emits an audit row ``bootstrap.vertical_setup_committed`` so
+         *          the trail records which verticals went live + when. Audit
+         *          failures are logged but never abort the call (mirrors the
+         *          cf_tunnel-skip pattern).
+         *
+         *     Auth posture: unauthenticated. Wizard runs pre-login; the gate
+         *     middleware confines this route to the bootstrap surface.
+         */
+        post: operations["bootstrap_vertical_setup_api_v1_bootstrap_vertical_setup_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/bootstrap/wait-ready": {
         parameters: {
             query?: never;
@@ -1464,6 +2145,206 @@ export interface paths {
         /** Put Budget Strategy */
         put: operations["put_budget_strategy_api_v1_budget_strategy_put"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/catalog/entries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Entries
+         * @description List catalog entries visible to the caller.
+         *
+         *     Visibility rules:
+         *
+         *     * ``shipped`` rows are global; every authenticated operator sees
+         *       every shipped row regardless of tenant.
+         *     * ``operator`` / ``override`` / ``subscription`` rows are scoped
+         *       to ``user.tenant_id`` only.
+         *     * ``hidden = TRUE`` rows are excluded by default; ``include_hidden``
+         *       flips the filter for admin-side debugging (the auth gate is
+         *       ``require_operator`` here so an operator can see what the admin
+         *       tombstoned, but that's the same trust boundary as already
+         *       reading the catalog).
+         *
+         *     Sort key + pagination: server-side, indexed where possible. The
+         *     ``offset`` ceiling (100k) is the same defence-in-depth guard the
+         *     rest of the codebase uses against ``offset=10^9`` DoS.
+         */
+        get: operations["list_entries_api_v1_catalog_entries_get"];
+        put?: never;
+        /**
+         * Create Entry
+         * @description Create an ``operator`` (per-tenant new entry) or ``override``
+         *     (per-tenant overlay of an existing shipped row) catalog entry.
+         *
+         *     For ``operator`` source: every required column must be present —
+         *     the row is a standalone resolved entry. For ``override``: ``id``
+         *     must reference an existing shipped row (we look it up to validate);
+         *     optional columns left ``None`` mean "inherit from the shipped base".
+         *
+         *     409 on duplicate ``(id, source, tenant_id)`` per the partial UNIQUE
+         *     index ``uq_catalog_entries_visible``.
+         */
+        post: operations["create_entry_api_v1_catalog_entries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/catalog/entries/{entry_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Entry
+         * @description Return the resolved entry for *entry_id* in the caller's tenant.
+         *
+         *     By default returns the resolved view (override > operator > shipped).
+         *     ``raw=true`` returns every layer the caller can see, in priority
+         *     order, so the admin UI can show the diff a tenant override layered
+         *     on top of the shipped base.
+         */
+        get: operations["get_entry_api_v1_catalog_entries__entry_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Entry
+         * @description Hide an entry from the caller's tenant.
+         *
+         *     * If a tenant-scoped ``operator`` row exists: soft-delete via
+         *       ``hidden = TRUE``. The row stays in the table (audit trail) but
+         *       drops out of the resolved view.
+         *     * Else if a tenant-scoped ``override`` row exists: same — set
+         *       ``hidden = TRUE``.
+         *     * Else create a tombstone ``override`` row with ``hidden = TRUE``
+         *       so the shipped row stops resolving for this tenant.
+         *
+         *     Shipped rows themselves are never deleted by this endpoint —
+         *     deletion is only ever per-tenant. A tenant who wants the shipped
+         *     row back can DELETE the tombstone (the admin UI calls
+         *     ``unhide_entry`` for that, BS.6.x).
+         */
+        delete: operations["delete_entry_api_v1_catalog_entries__entry_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Patch Entry
+         * @description Apply an override-layer patch to *entry_id*.
+         *
+         *     Behaviour:
+         *
+         *     * If a tenant-scoped ``override`` row already exists for *entry_id*,
+         *       update it in place.
+         *     * Else if a tenant-scoped ``operator`` row exists, update the
+         *       ``operator`` row in place (operator entries patch in place — they
+         *       have no shipped base to overlay).
+         *     * Else create a new ``override`` row that overlays the shipped base.
+         *       404 if no shipped / operator / override row exists for *entry_id*.
+         *
+         *     Partial semantics: every ``None`` field in the body is "leave
+         *     alone"; every present field replaces the column on the override /
+         *     operator row.
+         */
+        patch: operations["patch_entry_api_v1_catalog_entries__entry_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/catalog/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Sources
+         * @description List the caller's tenant's catalog subscriptions.
+         */
+        get: operations["list_sources_api_v1_catalog_sources_get"];
+        put?: never;
+        /**
+         * Create Source
+         * @description Add a new catalog feed subscription for the caller's tenant.
+         *
+         *     409 if the same ``(tenant_id, feed_url)`` already exists per the
+         *     UNIQUE constraint in alembic 0051.
+         */
+        post: operations["create_source_api_v1_catalog_sources_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/catalog/sources/{sub_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Source
+         * @description Delete a catalog subscription. Hard-delete (no tombstone) — the
+         *     feed sync workflow has no audit dependency on the row beyond the
+         *     audit_log entry below.
+         */
+        delete: operations["delete_source_api_v1_catalog_sources__sub_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Patch Source
+         * @description Update a subscription. 404 if no such row in caller's tenant.
+         */
+        patch: operations["patch_source_api_v1_catalog_sources__sub_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/catalog/sources/{sub_id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sync Source
+         * @description Request an immediate catalog feed refresh for a single subscription.
+         *
+         *     BS.8.5 — "Sync now" button on the Sources tab. Stamps the row so the
+         *     feed-sync cron worker (separate row) picks it up on the next tick.
+         *     Pure SQL UPDATE — no synchronous feed fetch in the request path.
+         *
+         *     * ``last_sync_status`` ← ``"pending_manual"``
+         *     * ``last_synced_at`` ← NULL  (jumps row to front of
+         *       ``idx_catalog_subscriptions_due`` ``NULLS FIRST`` queue)
+         *     * ``updated_at`` ← ``now()``
+         *
+         *     Tenant-scoped: 404 if ``sub_id`` does not belong to the caller's
+         *     tenant. Subscribing / unsubscribing is already admin-only and
+         *     audit-logged; a manual refresh of an already-subscribed source is
+         *     a stamp + cron-priority bump, so no PEP HOLD here.
+         *
+         *     Module-global state audit: stateless SQL through ``db_pool.get_pool()``;
+         *     multi-worker safe via PG MVCC. Read-after-write: single UPDATE …
+         *     RETURNING in one tx; the response carries the post-commit row.
+         */
+        post: operations["sync_source_api_v1_catalog_sources__sub_id__sync_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2122,6 +3003,23 @@ export interface paths {
         put?: never;
         /** Run Connectivity Test */
         post: operations["run_connectivity_test_api_v1_connectivity_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/coordinator/force-turbo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Force Turbo */
+        post: operations["force_turbo_api_v1_coordinator_force_turbo_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3533,6 +4431,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/git-accounts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Git Accounts */
+        get: operations["list_git_accounts_api_v1_git_accounts_get"];
+        put?: never;
+        /** Create Git Account */
+        post: operations["create_git_account_api_v1_git_accounts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/git-accounts/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Account For Url
+         * @description Return the ``git_accounts`` row that :func:`pick_account_for_url`
+         *     would pick for *url*, plus a short ``matched_via`` tag describing
+         *     WHICH resolver step produced the match so operators can debug
+         *     URL-pattern behaviour.
+         *
+         *     Does NOT touch ``last_used_at`` — debug introspection must not
+         *     move the LRU bookkeeping.
+         */
+        post: operations["resolve_account_for_url_api_v1_git_accounts_resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/git-accounts/{account_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Git Account */
+        get: operations["get_git_account_api_v1_git_accounts__account_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete Git Account */
+        delete: operations["delete_git_account_api_v1_git_accounts__account_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Git Account */
+        patch: operations["update_git_account_api_v1_git_accounts__account_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/git-accounts/{account_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test Git Account */
+        post: operations["test_git_account_api_v1_git_accounts__account_id__test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/health": {
         parameters: {
             query?: never;
@@ -4492,6 +5470,396 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/installer/installed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Installed Entries
+         * @description List currently-installed catalog entries for the caller's tenant.
+         *
+         *     BS.8.2: derives the "installed" set from the install_jobs table —
+         *     for each ``entry_id`` in the tenant we pick the latest row by
+         *     ``queued_at DESC`` and treat the entry as installed when that row
+         *     is ``state='completed'`` AND its ``result_json`` is *not* an
+         *     uninstall record (see :func:`_is_uninstall_record`).
+         *
+         *     Each row in the response carries the post-install bookkeeping
+         *     fields the BS.8.1 ``InstalledTab`` consumes:
+         *
+         *     * ``entry_id`` / ``display_name`` / ``vendor`` / ``family`` /
+         *       ``version`` / ``description`` — pulled from ``catalog_entries``
+         *       via a LEFT JOIN. ``description`` lives in ``metadata.description``
+         *       following the BS.6 catalog convention.
+         *     * ``disk_usage_bytes`` — falls back to ``catalog_entries.size_bytes``
+         *       until BS.8.3 wires real on-disk measurement.
+         *     * ``used_by_workspace_count`` — defaults to ``0`` until the
+         *       workspace-platform link table lands; the field is surfaced today
+         *       so the UI doesn't need to skip a column when the data appears.
+         *     * ``last_used_at`` — null today (BS.8.x will read the workspace
+         *       activity timestamp); the cleanup modal currently treats null +
+         *       old ``installed_at`` as "idle since install", which is the
+         *       conservative interpretation.
+         *     * ``installed_at`` — install_jobs.completed_at on the latest
+         *       successful install.
+         *     * ``update_available`` / ``available_version`` — null today;
+         *       surfaced for forward-compat with the catalog feed lookahead
+         *       that BS.6.x will land.
+         *     * ``source`` — ``shipped`` / ``operator`` / ``override`` /
+         *       ``subscription`` from the resolved catalog row.
+         *
+         *     Module-global / cross-worker state audit
+         *     ────────────────────────────────────────
+         *     Pure SELECT path; no shared in-memory state. Each tenant's caller
+         *     sees only their own rows because every WHERE filters by tenant_id.
+         *     Multi-worker safe: each worker's pool acquires its own asyncpg
+         *     connection; the SELECT is repeatable-read by default and the
+         *     response is rendered from the snapshot.
+         *
+         *     Read-after-write timing audit
+         *     ─────────────────────────────
+         *     Operator just approved an uninstall via POST /installer/uninstall
+         *     → INSERT install_jobs (state='completed', kind='uninstall') →
+         *     HTTP 200 returns. A subsequent GET /installer/installed sees the
+         *     new row by PG MVCC (commit happened before HTTP 200), so the
+         *     optimistic frontend refresh stays consistent with the backend.
+         */
+        get: operations["list_installed_entries_api_v1_installer_installed_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installer/installed/{entry_id}/dependents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Entry Dependents
+         * @description List currently-installed catalog entries that declare *entry_id*
+         *     as a dependency.
+         *
+         *     BS.8.4 dependency-check gate: before the per-row uninstall path
+         *     sends a job, the frontend opens a confirm modal that calls this
+         *     endpoint. When the response carries any items, the modal renders a
+         *     "N other installed entries depend on this — uninstall anyway?"
+         *     warning the operator must explicitly confirm; an empty list short-
+         *     circuits the warning and the modal lets the operator proceed
+         *     immediately.
+         *
+         *     Resolution semantics
+         *     ────────────────────
+         *     For every installed entry in the caller's tenant (same
+         *     DISTINCT-ON-latest-install-job derivation that powers
+         *     ``GET /installer/installed``), check whether the resolved
+         *     ``catalog_entries`` row's ``depends_on`` JSONB array contains
+         *     *entry_id*. Rows where the latest install_jobs row is NOT
+         *     state='completed' OR is an uninstall record are excluded — only
+         *     *currently installed* dependents matter; a soft-deleted /
+         *     queued / failed dependent should not block an uninstall.
+         *
+         *     Self-references are filtered out: an entry never lists itself as
+         *     its own dependent. The response shape mirrors the
+         *     ``InstalledEntryRow`` items wire format so the frontend can reuse
+         *     the existing snake→camel marshaller (less surface to drift).
+         *
+         *     Module-global / cross-worker state audit (SOP Step 1)
+         *     ─────────────────────────────────────────────────────
+         *     Pure read path; no shared in-memory state. Each tenant sees only
+         *     its own rows because the WHERE clause filters by ``tenant_id``.
+         *     Multi-worker safe — every worker acquires its own asyncpg conn and
+         *     sees the same PG snapshot via MVCC.
+         *
+         *     Read-after-write timing audit
+         *     ─────────────────────────────
+         *     Read-only endpoint, no race possible. Stale-dependents window: an
+         *     operator could install a new dependent between this GET and the
+         *     operator's confirm click — the uninstall still proceeds (PEP gate
+         *     still applies); the worst case is the operator confirms on
+         *     slightly stale information. Backend remains the source of truth.
+         */
+        get: operations["list_entry_dependents_api_v1_installer_installed__entry_id__dependents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installer/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Jobs
+         * @description List install jobs visible to the caller's tenant.
+         *
+         *     Filters: ``state`` (one of ``queued|running|completed|failed|cancelled``),
+         *     ``entry_id``, ``sidecar_id``. Sort: ``queued_at DESC, id ASC`` —
+         *     newest first, deterministic tiebreak.
+         */
+        get: operations["list_jobs_api_v1_installer_jobs_get"];
+        put?: never;
+        /**
+         * Create Job
+         * @description Create an install job for *entry_id*; HOLD via PEP gateway.
+         *
+         *     Flow:
+         *
+         *     1. Validate the catalog entry exists & is not hidden in this tenant.
+         *     2. ``INSERT … ON CONFLICT (idempotency_key) DO NOTHING RETURNING id``.
+         *        If conflict, return the *existing* row at 200 (idempotent retry —
+         *        no second PEP HOLD).
+         *     3. New row exists → call ``pep_gateway.evaluate(tool='install_entry',
+         *        arguments={…})`` and block on operator approval.
+         *     4. On approve → UPDATE the row's ``pep_decision_id``, return 201.
+         *     5. On deny / timeout → flip row to ``state='cancelled'`` with
+         *        ``error_reason='pep_<rule>'`` and return 403.
+         */
+        post: operations["create_job_api_v1_installer_jobs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installer/jobs/poll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Poll For Job
+         * @description Sidecar long-poll: claim one queued job.
+         *
+         *     Implements ADR §4.3 handshake (426 on unsupported protocol_version)
+         *     and ADR §4.4 step 1 (single-tx claim via ``SELECT … FOR UPDATE
+         *     SKIP LOCKED``). Polls in 250 ms ticks until either a job is claimed
+         *     or ``timeout_s`` elapses.
+         *
+         *     Returns 200 + the claimed job row on success, 204 No Content if
+         *     no claim within the timeout window, 426 if the sidecar's protocol
+         *     version is unsupported.
+         */
+        get: operations["poll_for_job_api_v1_installer_jobs_poll_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installer/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Job
+         * @description Return a single install job in the caller's tenant. 404 otherwise.
+         */
+        get: operations["get_job_api_v1_installer_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installer/jobs/{job_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Job
+         * @description Cancel a queued or running install job.
+         *
+         *     Cancel semantics:
+         *
+         *     * ``queued`` → flip to ``cancelled`` immediately; sidecar will
+         *       never claim it (its long-poll WHERE ``state='queued'`` excludes it).
+         *     * ``running`` → flip to ``cancelled``; sidecar's next progress emit
+         *       will see the new state and abort (BS.4.2 sidecar contract).
+         *     * Terminal states (``completed`` / ``failed`` / ``cancelled``) →
+         *       409 Conflict; the caller wanted ``retry`` instead.
+         */
+        post: operations["cancel_job_api_v1_installer_jobs__job_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installer/jobs/{job_id}/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report Progress
+         * @description Sidecar progress emit. BS.4.4.
+         *
+         *     Updates the in-flight install_jobs row's
+         *     ``bytes_done / bytes_total / eta_seconds / log_tail`` and (on first
+         *     progress tick of a job) stamps ``started_at = now()``. Then emits an
+         *     SSE ``installer_progress`` event so the operator UI's progress bar
+         *     refreshes without polling. Returns the row's current ``state`` so the
+         *     sidecar can detect operator cancel (state flipped to ``cancelled`` →
+         *     sidecar's ``progress_cb`` raises :class:`InstallCancelled` and the
+         *     in-flight install method runs its kill-and-reap path).
+         *
+         *     Auth surface: same as ``/jobs/poll`` — ``require_admin`` because the
+         *     sidecar process is operator-managed infrastructure (per BS.2.3
+         *     notes); a per-sidecar service token is on the BS-future roadmap.
+         *
+         *     State invariants:
+         *
+         *     * ``running`` → accept and update; this is the steady-state path.
+         *     * ``queued`` → accept (gives the UI a head-start hint) but flip to
+         *       ``running`` since the sidecar wouldn't ticker progress for a
+         *       job it hasn't claimed; rare race during the brief window between
+         *       ``UPDATE … SET state='running'`` and the first progress emit
+         *       (network latency + the install method's first stage). The
+         *       transition mirrors what claim's UPDATE would do, so it is safe.
+         *     * ``completed`` / ``failed`` / ``cancelled`` → return 200 + the
+         *       terminal state without mutating; the sidecar's emitter sees the
+         *       response, raises :class:`InstallCancelled`, and the method aborts.
+         *       Refusing here (e.g. 409) would leave a hung subprocess.
+         *
+         *     Cross-tenant note: the sidecar's bearer token authenticates as
+         *     ``admin``, which today has cross-tenant visibility. We stamp
+         *     ``set_tenant_id`` from the row's ``tenant_id`` so any audit emit
+         *     correlates to the right tenant context. SSE broadcast is scoped to
+         *     the row's tenant.
+         */
+        post: operations["report_progress_api_v1_installer_jobs__job_id__progress_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installer/jobs/{job_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry Job
+         * @description Clone a non-running install job into a fresh ``queued`` row.
+         *
+         *     Retry preserves audit history by leaving the source row untouched
+         *     and creating a NEW row with a fresh id + caller-supplied
+         *     ``idempotency_key`` (so the retry POST is itself idempotent).
+         *
+         *     Source-row state requirement:
+         *
+         *     * Source must be in a non-active terminal state (``failed`` /
+         *       ``cancelled``) OR in ``completed`` (re-install). Re-trying a row
+         *       that's still ``queued`` / ``running`` is a 409 — cancel first if
+         *       that's what the operator meant.
+         *
+         *     Per ADR §4.4 step 3, ``shell_script`` install methods are NOT
+         *     auto-retried by the sidecar (vendor scripts may not be idempotent).
+         *     The retry endpoint itself is method-agnostic — it always creates
+         *     a fresh queued row regardless of install_method, then routes
+         *     through the same PEP HOLD as a fresh POST.
+         */
+        post: operations["retry_job_api_v1_installer_jobs__job_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installer/uninstall": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk Uninstall
+         * @description Bulk uninstall a list of catalog entries; HOLD via PEP gateway.
+         *
+         *     BS.8.2 cleanup-unused flow. The operator picks N idle entries in the
+         *     Cleanup-unused modal and clicks "Uninstall N selected". One PEP
+         *     HOLD fires for the whole batch (``tool='uninstall_entry'`` with
+         *     arguments listing the entry ids and counts). On approve, every
+         *     entry id gets an install_jobs row with ``state='completed'`` and
+         *     ``result_json = {"kind": "uninstall", ...}``; on deny, every entry
+         *     id gets a row with ``state='cancelled'`` and ``error_reason =
+         *     'pep_<rule>'`` so the operator can see in the audit log that the
+         *     bulk operation was rejected.
+         *
+         *     Why one HOLD instead of N? Bulk-cleanup is a single intent ("get
+         *     rid of all of these"); presenting the operator with N coaching
+         *     cards is hostile UX — they'd approve them all anyway. The audit
+         *     trail still shows N rows, one per uninstalled entry, so per-entry
+         *     forensics is preserved.
+         *
+         *     Sidecar interaction
+         *     ───────────────────
+         *     Uninstall rows are inserted with ``state='completed'`` /
+         *     ``state='cancelled'`` (NOT ``state='queued'``), so the sidecar's
+         *     long-poll claim — ``WHERE state='queued'`` — never sees them. The
+         *     actual on-disk cleanup is deferred to a follow-up sidecar handler;
+         *     today the row is the audit + state-of-truth marker that the
+         *     operator approved removing the entry.
+         *
+         *     Read-after-write timing audit (SOP Step 1)
+         *     ──────────────────────────────────────────
+         *     Two transactions: (1) PEP HOLD evaluate in a separate tx so the
+         *     pool conn is released during the wait; (2) bulk INSERT in a
+         *     single tx after the HOLD resolves. A frontend GET
+         *     ``/installer/installed`` between (1) and (2) sees the entry as
+         *     still installed (no uninstall row exists yet); a GET *after* (2)
+         *     sees the entry filtered out. Optimistic frontend remove-then-poll
+         *     is therefore safe: the optimistic state matches the backend the
+         *     instant (2) commits.
+         */
+        post: operations["bulk_uninstall_api_v1_installer_uninstall_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/intent/clarify": {
         parameters: {
             query?: never;
@@ -4573,6 +5941,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/invites/{invite_id}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept Invite
+         * @description Consume a one-time invite token.
+         *
+         *     Open to both anonymous and authenticated callers — see the module
+         *     docstring for the two-branch semantics.
+         *
+         *     Returns 200 with::
+         *
+         *         {
+         *             "invite_id": "inv-...",
+         *             "tenant_id": "t-acme",
+         *             "user_id": "u-...",          # the user the membership was
+         *                                           # materialised onto (existing
+         *                                           # row for authed caller, freshly
+         *                                           # created for anon caller)
+         *             "role": "admin",             # the membership role granted
+         *             "status": "accepted",
+         *             "already_member": false      # true if the user already had
+         *                                           # an active membership row in
+         *                                           # this tenant pre-accept
+         *         }
+         */
+        post: operations["accept_invite_api_v1_invites__invite_id__accept_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/invoke": {
         parameters: {
             query?: never;
@@ -4648,6 +6055,18 @@ export interface paths {
          *
          *     Query param `command` is optional; if provided, it takes priority
          *     and is routed through the LangGraph pipeline.
+         *
+         *     R20-B: ``suppress_coach`` is a comma-separated list of coaching
+         *     trigger keys the frontend has already shown the operator this
+         *     session (tracked in sessionStorage). Planner skips coaching for
+         *     those triggers so the operator isn't re-coached on every INVOKE
+         *     press. Recognised keys: ``empty_workspace`` / ``stale_pep`` /
+         *     ``missing_toolchain:<slug>`` (BS.10.1) / ``url_in_message:<url>``
+         *     (W16.1, per-URL dismissal so re-pasting a fresh URL still coaches)
+         *     / ``image_in_message:<hash16>`` (W16.2, per-attachment dismissal so
+         *     re-pasting a fresh image still coaches; the hash is the 16-hex-
+         *     char SHA-256 prefix of the data URL payload or the upload marker
+         *     filename).
          */
         post: operations["invoke_stream_api_v1_invoke_stream_post"];
         delete?: never;
@@ -4667,6 +6086,67 @@ export interface paths {
         get: operations["livez_prefixed_api_v1_livez_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/llm-credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Llm Credentials */
+        get: operations["list_llm_credentials_api_v1_llm_credentials_get"];
+        put?: never;
+        /** Create Llm Credential */
+        post: operations["create_llm_credential_api_v1_llm_credentials_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/llm-credentials/{credential_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Llm Credential Endpoint */
+        get: operations["get_llm_credential_endpoint_api_v1_llm_credentials__credential_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete Llm Credential */
+        delete: operations["delete_llm_credential_api_v1_llm_credentials__credential_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Llm Credential */
+        patch: operations["update_llm_credential_api_v1_llm_credentials__credential_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/llm-credentials/{credential_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Llm Credential
+         * @description Live-probe the provider's API with this credential's stored key.
+         *
+         *     The plaintext key is decrypted server-side, threaded into the probe
+         *     (curl, 15s timeout), and is never echoed back in the response.
+         *     Ollama credentials use ``metadata.base_url`` instead of an API key.
+         */
+        post: operations["test_llm_credential_api_v1_llm_credentials__credential_id__test_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -7383,6 +8863,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/privacy/access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Access Request */
+        post: operations["create_access_request_api_v1_privacy_access_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/privacy/erasure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Erasure Request */
+        post: operations["create_erasure_request_api_v1_privacy_erasure_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/privacy/portability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Portability Request */
+        post: operations["create_portability_request_api_v1_privacy_portability_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/profile": {
         parameters: {
             query?: never;
@@ -8724,6 +10255,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runtime/live-test-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read last LLM live integration test result
+         * @description Return the most recent nightly live-test result from SharedKV.
+         *
+         *     Returns ``status: never_run`` when the CI workflow has not yet written
+         *     any result (fresh deploy / first run not completed).
+         */
+        get: operations["get_live_test_status_api_v1_runtime_live_test_status_get"];
+        put?: never;
+        /**
+         * Write LLM live integration test result (CI reporter)
+         * @description Write nightly live-test results from the GitHub Actions runner.
+         *
+         *     Auth: ``Authorization: Bearer <OMNISIGHT_REPORTER_TOKEN>`` — a static
+         *     pre-shared secret stored in GitHub Actions repo secrets. The standard
+         *     user-session auth is intentionally skipped so CI does not need an
+         *     operator account.
+         *
+         *     If ``OMNISIGHT_REPORTER_TOKEN`` is unset/empty, the endpoint is
+         *     disabled (returns 503) to prevent accidental open writes.
+         */
+        post: operations["post_live_test_status_api_v1_runtime_live_test_status_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runtime/logs": {
         parameters: {
             query?: never;
@@ -8906,6 +10472,38 @@ export interface paths {
         patch: operations["update_npi_phase_api_v1_runtime_npi_phases__phase_id__patch"];
         trace?: never;
     };
+    "/api/v1/runtime/ollama/tool-failures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Ollama Tool Failures
+         * @description Return Ollama tool-call failure counters from SharedKV.
+         *
+         *     Z.6.5: when the ollama adapter degrades to pure-chat (model does not
+         *     support tool calling, daemon is unreachable, or the tool_calls block
+         *     cannot be parsed), it increments SharedKV("ollama_tool_failures")
+         *     counters.  This endpoint exposes those counts for the dashboard.
+         *
+         *     ``has_warning`` is True whenever total > 0, signalling that at least
+         *     one Ollama tool-call silently degraded since the last counter reset.
+         *
+         *     Module-global state: SharedKV reads from Redis (cross-worker) or
+         *     in-memory fallback (per-process in degraded mode — 故意每 worker 獨立
+         *     when Redis is absent, acceptable for observability counters).
+         */
+        get: operations["get_ollama_tool_failures_api_v1_runtime_ollama_tool_failures_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runtime/pipeline/advance": {
         parameters: {
             query?: never;
@@ -9041,6 +10639,194 @@ export interface paths {
          *       by_tier:      { tier_id: [allowed_toolchains] }
          */
         get: operations["list_toolchains_api_v1_runtime_platforms_toolchains_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/pricing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Pricing Snapshot
+         * @description Return the current LLM pricing table + metadata.
+         *
+         *     Z.3 checkbox 5 (#292). Read-only view onto `config/llm_pricing.yaml`
+         *     so a dashboard / operator can render the live rates without parsing
+         *     the YAML themselves and so an operator can verify the table state
+         *     after `POST /runtime/pricing/reload`. Authenticated users only —
+         *     no admin gate, since pricing is non-sensitive informational data
+         *     (matches peer GETs like `/runtime/info` and `/runtime/status`).
+         *
+         *     Response shape: see `backend.pricing.get_pricing_table` — `providers`
+         *     map (per-provider, per-model `{input, output}` USD per 1M tokens),
+         *     a global `defaults` pair, the YAML's `metadata` block (notably
+         *     `updated_at` + `source` URL), and `loaded_from_yaml` so a dashboard
+         *     can flag the degraded "YAML missing/corrupt → hard-coded fallback"
+         *     state instead of silently rendering the boot-safety table.
+         */
+        get: operations["get_pricing_snapshot_api_v1_runtime_pricing_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/pricing/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reload Pricing Table
+         * @description Hot-reload `config/llm_pricing.yaml` and broadcast to all workers.
+         *
+         *     Z.3 checkbox 4 (#292). Operator workflow: edit the YAML on disk
+         *     (e.g. anthropic raises Sonnet from 3/15 to 3.5/16), POST here, every
+         *     uvicorn worker re-reads the file. Without this endpoint the only
+         *     way to pick up a price change is a rolling restart through Caddy.
+         *
+         *     Local + remote reload semantics:
+         *         - This worker calls `pricing.reload()` synchronously and uses
+         *           the returned status as the response payload.
+         *         - `publish_cross_worker(PRICING_RELOAD_EVENT, ...)` fans the
+         *           signal out via Redis pub/sub. Every peer (including this
+         *           worker — the listener filters on event name only) calls
+         *           `pricing._on_pricing_reload_event` which clears its local
+         *           cache so its next `get_pricing()` re-reads the YAML.
+         *         - When Redis is unavailable `publish_cross_worker` returns
+         *           False and only this worker reloads. Operator runbook
+         *           documents the manual rolling restart fallback.
+         */
+        post: operations["reload_pricing_table_api_v1_runtime_pricing_reload_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/prompts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Prompt Versions
+         * @description ZZ.C1 #305-1: return the prompt-version timeline for one agent.
+         *
+         *     Deduped by ``content_hash`` (``body_sha256``) — if the same body was
+         *     re-registered across multiple ``version`` rows (e.g. an
+         *     ``active → archive → active`` flap that re-emits the same content),
+         *     only the most recent copy shows in the list. The ``supersedes_id``
+         *     field on each entry points at the id of the next-older distinct-
+         *     hash row, so the drawer can anchor "v7 replaced v5 at HH:MM" lines
+         *     without a second request.
+         *
+         *     Module-global audit (SOP Step 1): ``_PROMPT_LIMIT_DEFAULT`` /
+         *     ``_PROMPT_LIMIT_MAX`` / ``_AGENT_TYPE_RE`` are module-const literals
+         *     — every uvicorn worker derives the same values from source (SOP
+         *     acceptable answer #1).
+         */
+        get: operations["list_prompt_versions_api_v1_runtime_prompts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/prompts/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Prompt Diff
+         * @description ZZ.C1 #305-1: unified diff between two prompt_versions rows.
+         *
+         *     Row spec: "回 unified diff text". We return a Pydantic envelope so
+         *     the same endpoint can carry both sides' metadata (hash prefix,
+         *     version, created_at) without forcing the drawer to fetch the list
+         *     again — the ``diff`` field itself is the verbatim ``difflib.
+         *     unified_diff`` output (context=3 lines, matching git's default +
+         *     the "unfold context 預設 3 行" line in the row spec).
+         *
+         *     Both ids must resolve to rows sharing the same ``path``; a
+         *     cross-agent diff is meaningless and rejected with 400 so a
+         *     misconfigured drawer fails loudly instead of rendering a giant
+         *     add-everything/remove-everything hunk. Missing ids → 404.
+         */
+        get: operations["get_prompt_diff_api_v1_runtime_prompts_diff_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/providers/balance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Providers Balance Batch
+         * @description Return a single-request snapshot of every LLM provider's
+         *     balance envelope.
+         *
+         *     Shape: ``{"providers": [<envelope>, <envelope>, ...]}`` where each
+         *     inner envelope is identical to what
+         *     ``GET /runtime/providers/{provider}/balance`` would return for that
+         *     provider (``ok`` / ``unsupported`` / ``error``). Ordering is
+         *     alphabetical across the nine-provider registry so the dashboard has
+         *     a stable render order without client-side sorting.
+         */
+        get: operations["get_providers_balance_batch_api_v1_runtime_providers_balance_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/providers/{provider}/balance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Provider Balance
+         * @description Return the cached (or freshly fetched) LLM provider balance.
+         *
+         *     Rejects provider names that aren't in the service-layer registry
+         *     so a typo surfaces as HTTP 400 rather than a confusing
+         *     ``unsupported`` envelope.
+         */
+        get: operations["get_provider_balance_api_v1_runtime_providers__provider__balance_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -9522,6 +11308,91 @@ export interface paths {
          *     從同樣來源推導出同樣的值").
          */
         get: operations["get_token_burn_rate_api_v1_runtime_tokens_burn_rate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/tokens/heatmap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Token Heatmap
+         * @description Return a ``(day, hour)``-bucketed token + cost matrix.
+         *
+         *     ZZ.C2 #305-2 checkbox 1: feeds the Calendar-style heatmap
+         *     beneath ``<TokenUsageStats>`` (checkbox 2) — x-axis is hour-of-
+         *     day, y-axis is calendar date, cell shade scales with
+         *     ``token_total``.
+         *
+         *     **Source**: ``event_log`` rows with ``event_type='turn.complete'``
+         *     — the same authoritative per-turn time series that
+         *     ``/runtime/tokens/burn-rate`` consumes. Each row carries
+         *     ``tokens_used`` + ``cost_usd`` in ``data_json`` and the TEXT
+         *     ``created_at`` column (``YYYY-MM-DD HH24:MI:SS``) is the bucket
+         *     key, parsed via ``to_timestamp(created_at, …)`` to align with
+         *     PG's session timezone.
+         *
+         *     **Bucket keys**: ``day`` is ``to_char(…, 'YYYY-MM-DD')`` in UTC
+         *     (we call ``to_timestamp(…) AT TIME ZONE 'UTC'`` to pin the
+         *     bucket boundary independently of the PG session timezone) and
+         *     ``hour`` is ``EXTRACT(HOUR FROM …)::int`` in the same UTC
+         *     frame. Operators see local time because the frontend (checkbox
+         *     2) shifts the grid by the browser offset at render time — the
+         *     backend is authoritative UTC so two operators in different
+         *     regions see the same cells just painted at different grid
+         *     positions.
+         *
+         *     **Sparse payload**: the ``GROUP BY`` emits only ``(day, hour)``
+         *     pairs that actually had at least one ``turn.complete`` row.
+         *     The frontend treats a missing cell as genuine zero activity;
+         *     this keeps the payload bounded by real traffic rather than
+         *     always paying 168 (7 × 24) or 720 (30 × 24) cells.
+         *
+         *     **NULL-vs-genuine-zero contract**: mirrors burn-rate —
+         *     ``COALESCE((data_json::jsonb->>'cost_usd')::numeric, 0)`` maps
+         *     unknown-model ``null`` to 0 so the bucket's tokens still
+         *     contribute even if one row had no pricing coverage.
+         *
+         *     **Tenant isolation**: ``tenant_where_pg`` narrows to the
+         *     caller's tenant so one tenant's nightly-batch burst doesn't
+         *     light up a neighbour's heatmap.
+         *
+         *     **Per-model filter** (ZZ.C2 checkbox 4, 2026-04-24): optional
+         *     ``model`` query param restricts cells to rows whose
+         *     ``data_json->>'model'`` matches the slug exactly. ``None`` /
+         *     empty string means "all models" (backward-compatible with
+         *     checkbox 1/2/3 callers who never pass the param). The response
+         *     always carries ``available_models`` — the distinct model slugs
+         *     observed across the *unfiltered* window + tenant + event-type
+         *     fence — so the frontend dropdown can render every choice even
+         *     after a filter is applied.
+         *
+         *     Module-global audit (SOP Step 1): ``_HEATMAP_WINDOWS`` is a
+         *     module-const literal dict and ``_HEATMAP_MODEL_RE`` +
+         *     ``_HEATMAP_MODEL_MAX_LEN`` are module-level literals — every
+         *     uvicorn worker derives the same values from the same source
+         *     code, matching SOP acceptable answer #1 ("不共享,因為每
+         *     worker 從同樣來源推導出同樣的值"). The endpoint handler is
+         *     pure-read request-scoped — no caches, queues, or counters are
+         *     mutated.
+         *
+         *     Read-after-write timing audit (SOP Step 1): pure-read path
+         *     over ``event_log``; writers are ``emit_turn_complete`` via
+         *     ``_PERSIST_EVENT_TYPES`` which commit on each event. Heatmap
+         *     reads are eventually-consistent vs. in-flight turns — the
+         *     dashboard refreshes on SSE events anyway, so a ~second lag
+         *     between ``turn.complete`` emit and GET-heatmap visibility is
+         *     invisible to the operator.
+         */
+        get: operations["get_token_heatmap_api_v1_runtime_tokens_heatmap_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -11591,6 +13462,563 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tenants/{tenant_id}/invites": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Invites
+         * @description List invites for a tenant.
+         *
+         *     Returns 200 with::
+         *
+         *         {
+         *             "tenant_id": "t-acme",
+         *             "status_filter": "pending",
+         *             "count": 3,
+         *             "invites": [
+         *                 {
+         *                     "invite_id": "inv-...",
+         *                     "email": "alice@example.com",
+         *                     "role": "admin",
+         *                     "status": "pending",
+         *                     "invited_by": "u-...",
+         *                     "created_at": "2026-04-25 12:00:00",
+         *                     "expires_at": "2026-05-02 12:00:00"
+         *                 },
+         *                 ...
+         *             ]
+         *         }
+         *
+         *     The plaintext token is **never** included — it exists only at
+         *     POST time and is not persisted. ``token_hash`` is also omitted;
+         *     the admin uses ``invite_id`` for revoke / resend.
+         */
+        get: operations["list_invites_api_v1_tenants__tenant_id__invites_get"];
+        put?: never;
+        /**
+         * Create Invite
+         * @description Issue a one-time invite token for ``tenant_id``.
+         *
+         *     Returns 201 with::
+         *
+         *         {
+         *             "invite_id": "inv-<uuid>",
+         *             "token_plaintext": "<url-safe base64, ~43 chars>",
+         *             "expires_at": "YYYY-MM-DD HH:MM:SS"
+         *         }
+         *
+         *     The plaintext token is shown in the response **once and only
+         *     once**. It is also embedded in the email delivered through the
+         *     ``notifications.notify`` channel; neither the audit log nor the
+         *     application log records the plaintext.
+         */
+        post: operations["create_invite_api_v1_tenants__tenant_id__invites_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/invites/{invite_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke Invite
+         * @description Revoke a pending invite for ``tenant_id``.
+         *
+         *     Returns 200 with::
+         *
+         *         {
+         *             "invite_id": "inv-...",
+         *             "tenant_id": "t-acme",
+         *             "status": "revoked",
+         *             "already_revoked": false,   # true on idempotent re-revoke
+         *             "email": "alice@example.com",
+         *             "role": "admin",
+         *             "created_at": "2026-04-25 12:00:00",
+         *             "expires_at": "2026-05-02 12:00:00"
+         *         }
+         *
+         *     Errors: 403 RBAC · 404 invite/tenant unknown · 409 invite is in
+         *     a terminal state that cannot be revoked (accepted / expired) ·
+         *     422 malformed id.
+         */
+        delete: operations["revoke_invite_api_v1_tenants__tenant_id__invites__invite_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Members
+         * @description List memberships for a tenant.
+         *
+         *     Returns 200 with::
+         *
+         *         {
+         *             "tenant_id": "t-acme",
+         *             "status_filter": "active",
+         *             "count": 4,
+         *             "members": [
+         *                 {
+         *                     "user_id": "u-...",
+         *                     "email": "alice@example.com",
+         *                     "name": "Alice",
+         *                     "role": "admin",
+         *                     "status": "active",
+         *                     "user_enabled": true,
+         *                     "joined_at": "2026-04-25 12:00:00",
+         *                     "last_active_at": "2026-04-25 13:14:15"
+         *                 },
+         *                 ...
+         *             ]
+         *         }
+         */
+        get: operations["list_members_api_v1_tenants__tenant_id__members_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/members/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Member
+         * @description Soft-delete a membership by flipping ``status`` to
+         *     ``suspended``. The row + audit history is preserved; hard delete
+         *     only happens when the tenant itself is dropped (PG cascade).
+         *
+         *     Idempotent on already-suspended rows (200 + ``already_suspended=
+         *     True``, no audit). Refuses with 409 if the demotion would leave
+         *     the tenant with zero active admin-tier members.
+         */
+        delete: operations["delete_member_api_v1_tenants__tenant_id__members__user_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Patch Member
+         * @description Update a membership's role and/or status.
+         *
+         *     Returns 200 with the post-update row state plus a ``no_change``
+         *     flag for callers that PATCH'd the row to its current values.
+         */
+        patch: operations["patch_member_api_v1_tenants__tenant_id__members__user_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Projects
+         * @description List projects for ``tenant_id`` filtered by the caller's
+         *     visibility.
+         *
+         *     Returns 200 with::
+         *
+         *         {
+         *             "tenant_id": "t-acme",
+         *             "product_line_filter": "embedded" | None,
+         *             "archived_filter": "false" | "true" | "all",
+         *             "count": 3,
+         *             "projects": [
+         *                 {
+         *                     "project_id": "p-...",
+         *                     "tenant_id": "t-acme",
+         *                     "product_line": "embedded",
+         *                     "name": "ISP Tuning",
+         *                     "slug": "isp-tuning",
+         *                     "parent_id": null,
+         *                     "plan_override": null,
+         *                     "disk_budget_bytes": null,
+         *                     "llm_budget_tokens": null,
+         *                     "created_by": "u-...",
+         *                     "created_at": "YYYY-MM-DD HH:MM:SS",
+         *                     "archived_at": null
+         *                 },
+         *                 ...
+         *             ]
+         *         }
+         */
+        get: operations["list_projects_api_v1_tenants__tenant_id__projects_get"];
+        put?: never;
+        /**
+         * Create Project
+         * @description Create a project under ``tenant_id``.
+         *
+         *     Returns 201 with the full project row on success; 403 / 404 / 409
+         *     / 422 for the conditions documented in the module docstring.
+         */
+        post: operations["create_project_api_v1_tenants__tenant_id__projects_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/projects/{project_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Patch Project
+         * @description Partial-update a project.
+         *
+         *     Body accepts any subset of ``{name, plan_override,
+         *     disk_budget_bytes, parent_id}``; at least one field must be
+         *     present. Explicit JSON ``null`` on ``plan_override`` /
+         *     ``disk_budget_bytes`` / ``parent_id`` clears that column (project
+         *     then inherits from tenant / becomes top-level). Explicit ``null``
+         *     on ``name`` is rejected as 422.
+         *
+         *     Returns 200 with the post-update project row plus a ``no_change``
+         *     flag for callers that PATCH'd the row to its current values
+         *     (skips the audit emit).
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — applied successfully (or no_change=True with no audit).
+         *     * 403 — caller is not a tenant admin / owner on this tenant and
+         *             not platform super_admin.
+         *     * 404 — well-formed ids but no such tenant or no such project in
+         *             this tenant.
+         *     * 422 — id format fails the pattern, body has no settable field,
+         *             ``name`` is explicitly null, ``parent_id`` would create a
+         *             self-loop / refers to a non-existent project / refers to
+         *             a project in a different tenant / would create a cycle.
+         */
+        patch: operations["patch_project_api_v1_tenants__tenant_id__projects__project_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/projects/{project_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive Project
+         * @description Soft-archive a project.
+         *
+         *     Sets ``archived_at`` to the current UTC timestamp. The row stays in
+         *     the table for ``OMNISIGHT_PROJECT_GC_RETENTION_DAYS`` days (default
+         *     90) before the background GC permanently deletes it; restore is
+         *     available throughout that window.
+         *
+         *     Idempotent: a second archive returns 200 with ``no_change=True``
+         *     and emits no audit row.
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — archived (or no_change=True if already archived).
+         *     * 403 — caller is not tenant admin / owner and not super_admin.
+         *     * 404 — well-formed ids but no such tenant or no such project in
+         *             this tenant.
+         *     * 422 — malformed tenant_id / project_id pattern.
+         */
+        post: operations["archive_project_api_v1_tenants__tenant_id__projects__project_id__archive_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/projects/{project_id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Project Members
+         * @description List explicit project_members rows for ``(tenant_id, project_id)``.
+         *
+         *     Returns 200 with::
+         *
+         *         {
+         *             "tenant_id": "t-acme",
+         *             "project_id": "p-fw",
+         *             "count": 3,
+         *             "members": [
+         *                 {"user_id": "u-alice", "email": "alice@x.io",
+         *                  "name": "Alice", "role": "owner",
+         *                  "created_at": "...", "user_enabled": true},
+         *                 ...
+         *             ]
+         *         }
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — happy path; ``members`` may be empty if no explicit
+         *       project_members rows exist (tenant admins / owners still have
+         *       project access via the tenant-default fallback documented in
+         *       alembic 0034 — those rows are NOT enumerated here because they
+         *       are not stored).
+         *     * 403 — caller is not tenant admin / owner, not super_admin, and
+         *             not project owner on this project (same gate as the write
+         *             surface).
+         *     * 404 — well-formed ids but no such tenant or no such project on
+         *             this tenant.
+         *     * 422 — malformed tenant_id / project_id.
+         */
+        get: operations["list_project_members_api_v1_tenants__tenant_id__projects__project_id__members_get"];
+        put?: never;
+        /**
+         * Create Project Member
+         * @description Grant an existing tenant member an explicit project role.
+         *
+         *     Status codes
+         *     ────────────
+         *     * 201 — granted; ``project_members`` row inserted.
+         *     * 403 — caller is not tenant admin / owner, not super_admin, and
+         *             not project owner.
+         *     * 404 — well-formed ids but no such tenant or no such project on
+         *             this tenant.
+         *     * 409 — target user already has an explicit row on this project;
+         *             response body carries ``existing_role`` so the operator
+         *             can PATCH (change) or DELETE (revoke) instead.
+         *     * 422 — malformed tenant_id / project_id / user_id / role; or the
+         *             target user has no active tenant membership on this
+         *             tenant (operator must invite + accept first).
+         */
+        post: operations["create_project_member_api_v1_tenants__tenant_id__projects__project_id__members_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/projects/{project_id}/members/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Project Member
+         * @description Remove the explicit project_members row for ``(user, project)``.
+         *
+         *     Per alembic 0034 docstring this IS the project-layer suspension —
+         *     once the row is gone the user falls back to the tenant default
+         *     (admin/owner → contributor; member/viewer → no project access).
+         *     There is no ``status`` column to soft-flip.
+         *
+         *     Idempotent: a second DELETE on a row that was never granted (or
+         *     was already removed) returns 200 with ``already_removed=True`` and
+         *     emits no audit row — matches Y4 row 4 archive/restore posture.
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — removed (or already_removed=True if no row to delete).
+         *     * 403 — caller is not tenant admin / owner, not super_admin, and
+         *             not project owner on this project.
+         *     * 404 — well-formed ids but no such tenant or no such project on
+         *             this tenant.
+         *     * 422 — malformed ids.
+         */
+        delete: operations["delete_project_member_api_v1_tenants__tenant_id__projects__project_id__members__user_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Patch Project Member
+         * @description Update an existing project_members row's role.
+         *
+         *     Idempotent: re-PATCHing to the same role returns 200 with
+         *     ``no_change=True`` and emits no audit row.
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — updated (or no_change=True if same-state PATCH).
+         *     * 403 — caller is not tenant admin / owner, not super_admin, and
+         *             not project owner on this project.
+         *     * 404 — well-formed ids but no such tenant / no such project on
+         *             this tenant / no explicit project_members row for this
+         *             (user, project) pair (use POST to grant).
+         *     * 422 — malformed ids / unknown role.
+         */
+        patch: operations["patch_project_member_api_v1_tenants__tenant_id__projects__project_id__members__user_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/projects/{project_id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore Project
+         * @description Restore a soft-archived project to live.
+         *
+         *     Clears ``archived_at`` back to NULL, available throughout the
+         *     retention window. Once the GC has hard-deleted the row, restore
+         *     returns 404 (no row to flip).
+         *
+         *     Idempotent: restoring a row that is already live returns 200 with
+         *     ``no_change=True`` and emits no audit row.
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — restored (or no_change=True if already live).
+         *     * 403 — caller is not tenant admin / owner and not super_admin.
+         *     * 404 — well-formed ids but no such tenant or no such project in
+         *             this tenant (eg. already GC'd).
+         *     * 422 — malformed tenant_id / project_id pattern.
+         */
+        post: operations["restore_project_api_v1_tenants__tenant_id__projects__project_id__restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/projects/{project_id}/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Project Shares
+         * @description List cross-tenant share grants for ``(tenant_id, project_id)``.
+         *
+         *     Returns 200 with::
+         *
+         *         {
+         *             "tenant_id": "t-acme",
+         *             "project_id": "p-fw",
+         *             "count": 1,
+         *             "shares": [
+         *                 {"share_id": "psh-...", "project_id": "p-fw",
+         *                  "guest_tenant_id": "t-bob", "role": "viewer",
+         *                  "granted_by": "u-alice",
+         *                  "created_at": "...", "expires_at": null},
+         *                 ...
+         *             ]
+         *         }
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — happy path; ``shares`` may be empty.
+         *     * 403 — caller is not tenant admin / owner on the *owning*
+         *             tenant and not platform super_admin.
+         *     * 404 — well-formed ids but no such tenant or no such project
+         *             on this tenant.
+         *     * 422 — malformed tenant_id / project_id.
+         */
+        get: operations["list_project_shares_api_v1_tenants__tenant_id__projects__project_id__shares_get"];
+        put?: never;
+        /**
+         * Create Project Share
+         * @description Grant a guest tenant cross-tenant access to a project.
+         *
+         *     Status codes
+         *     ────────────
+         *     * 201 — share row inserted; guest tenant now sees this project in
+         *             its admin console under the "Guest" tab.
+         *     * 403 — caller is not tenant admin / owner on the *owning* tenant
+         *             and not platform super_admin.
+         *     * 404 — well-formed ids but no such tenant / no such project on
+         *             this tenant / no such guest tenant.
+         *     * 409 — share already exists for ``(project, guest_tenant)``.
+         *             Body carries ``existing_share_id`` + ``existing_role`` so
+         *             the caller can pick PATCH / DELETE / no-op.
+         *     * 422 — malformed tenant_id / project_id / guest_tenant_id /
+         *             unknown role / guest_tenant_id == tenant_id / malformed
+         *             expires_at / expires_at not in the future.
+         */
+        post: operations["create_project_share_api_v1_tenants__tenant_id__projects__project_id__shares_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{tenant_id}/projects/{project_id}/shares/{share_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Project Share
+         * @description Revoke a cross-tenant share grant.
+         *
+         *     Idempotent: re-revoking a missing share returns 200 with
+         *     ``already_revoked=True`` and emits no audit row — matches the
+         *     DELETE project_member posture (Y4 row 5).
+         *
+         *     Status codes
+         *     ────────────
+         *     * 200 — share removed (or already_revoked=True).
+         *     * 403 — caller is not tenant admin / owner on the *owning*
+         *             tenant and not platform super_admin.
+         *     * 404 — well-formed ids but no such tenant or no such project
+         *             on this tenant.
+         *     * 422 — malformed tenant_id / project_id / share_id.
+         */
+        delete: operations["delete_project_share_api_v1_tenants__tenant_id__projects__project_id__shares__share_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tenants/{tid}/egress": {
         parameters: {
             query?: never;
@@ -12416,6 +14844,185 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/web-sandbox/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Previews
+         * @description List all live sidecars known to this worker.
+         */
+        get: operations["list_previews_api_v1_web_sandbox_preview_get"];
+        put?: never;
+        /**
+         * Launch Preview
+         * @description Launch (or recover) a web-preview sidecar for ``workspace_id``.
+         *
+         *     W14.8 — first launch (no live instance for the workspace) goes
+         *     through a PEP HOLD before docker is touched. The operator approves
+         *     via the standard PEP toast; the HOLD enforces that the operator
+         *     consents to the 50–500 MB / 30–90s cold-install cost before the
+         *     sidecar starts pulling tarballs. Idempotent re-launches of an
+         *     already-running sandbox bypass the HOLD because the docker work
+         *     has already been paid for.
+         */
+        post: operations["launch_preview_api_v1_web_sandbox_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/web-sandbox/preview/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Preview
+         * @description Return the current snapshot for ``workspace_id``.
+         */
+        get: operations["get_preview_api_v1_web_sandbox_preview__workspace_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Stop Preview
+         * @description Stop + remove the sidecar. ``reason`` is optional and gets
+         *     stored on :attr:`WebSandboxInstance.killed_reason`.
+         */
+        delete: operations["stop_preview_api_v1_web_sandbox_preview__workspace_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/web-sandbox/preview/{workspace_id}/error": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report Preview Error
+         * @description Record a compile-time or runtime error for ``workspace_id``.
+         *
+         *     Returns the recorded entry (with the server-side ``received_at``
+         *     populated) plus the current buffer count.  Best-effort transport
+         *     on the JS side — the plugin swallows all non-2xx responses; this
+         *     endpoint therefore never raises 5xx for ordinary contract
+         *     failures, only 422 for shape errors.
+         */
+        post: operations["report_preview_error_api_v1_web_sandbox_preview__workspace_id__error_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/web-sandbox/preview/{workspace_id}/errors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Preview Errors
+         * @description Return the ring-buffer of recent Vite errors for the workspace.
+         *
+         *     W15.2's LangGraph integration will be the primary consumer; this
+         *     GET exists today so operators can manually inspect pending errors
+         *     via the W14.6 panel without waiting for the W15.2 wiring.
+         */
+        get: operations["list_preview_errors_api_v1_web_sandbox_preview__workspace_id__errors_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/web-sandbox/preview/{workspace_id}/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark Preview Ready
+         * @description Caller signals that the dev server has reported ready.
+         *
+         *     W16.4 — emits a ``preview.ready`` SSE event carrying the sandbox
+         *     URL so the orchestrator-chat surface can append an inline-iframe
+         *     message without polling docker logs from the browser.  The emit is
+         *     best-effort; a transport failure does not break the existing
+         *     operator-tier ready signal contract.
+         */
+        post: operations["mark_preview_ready_api_v1_web_sandbox_preview__workspace_id__ready_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/web-sandbox/preview/{workspace_id}/touch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Touch Preview
+         * @description Bump ``last_request_at`` so the W14.5 idle reaper does not
+         *     collect this sidecar.
+         */
+        post: operations["touch_preview_api_v1_web_sandbox_preview__workspace_id__touch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/webhooks/email/{provider}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Email Feedback Webhook
+         * @description Receive provider bounce / complaint webhooks for FS.4 email.
+         *
+         *     The endpoint accepts a shared bearer token or HMAC-SHA256 signature.
+         *     ``settings.email_webhook_secret`` is env/runtime configuration, so
+         *     every worker independently verifies against the same source value
+         *     without writing module-global state.
+         */
+        post: operations["email_feedback_webhook_api_v1_webhooks_email__provider__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/webhooks/gerrit": {
         parameters: {
             query?: never;
@@ -12458,6 +15065,11 @@ export interface paths {
         /**
          * Github Webhook
          * @description Receive GitHub issue/PR webhooks — sync status to internal tasks.
+         *
+         *     Phase 5-7 (#multi-account-forge): per-instance secret read goes
+         *     through the async resolver so operator-added ``git_accounts`` rows
+         *     are honoured. Falls back to the legacy ``settings.github_webhook_secret``
+         *     via :func:`get_webhook_secret_for_host_async`'s scalar tail.
          */
         post: operations["github_webhook_api_v1_webhooks_github_post"];
         delete?: never;
@@ -12478,6 +15090,11 @@ export interface paths {
         /**
          * Gitlab Webhook
          * @description Receive GitLab issue webhooks — sync status to internal tasks.
+         *
+         *     Phase 5-7 (#multi-account-forge): per-instance secret read goes
+         *     through the async resolver so operator-added ``git_accounts`` rows
+         *     are honoured (e.g. multiple self-hosted GitLab instances each with
+         *     its own webhook secret).
          */
         post: operations["gitlab_webhook_api_v1_webhooks_gitlab_post"];
         delete?: never;
@@ -12498,8 +15115,56 @@ export interface paths {
         /**
          * Jira Webhook
          * @description Receive Jira issue webhooks — sync status to internal tasks.
+         *
+         *     Cross-worker coherence: the rotate endpoint in ``integration.py`` mirrors
+         *     ``jira_webhook_secret`` into the Redis-backed SharedKV, but the local
+         *     ``settings`` singleton is per-worker. Overlay SharedKV on each inbound
+         *     webhook so a rotate on worker-A is immediately visible to the verifier
+         *     on worker-B (the ``_SHARED_KV_STR_FIELDS`` registration alone only
+         *     provides the write side; the read side needs this overlay call to close
+         *     the loop). Cheap: a single Redis HGETALL round-trip per webhook, which
+         *     is already guarded by try/except inside the overlay helper.
+         *
+         *     Phase 5-8 (#multi-account-forge): per-instance secret read goes through
+         *     :func:`backend.git_credentials.get_webhook_secret_for_host_async` so
+         *     operator-added ``git_accounts(platform='jira')`` rows are honoured
+         *     (including the auto-migrated ``ga-legacy-jira-*`` row from row 5-5).
+         *     The helper's platform-scoped scalar tail falls back to
+         *     ``settings.jira_webhook_secret`` so single-instance deployments with
+         *     only the legacy scalar configured keep authenticating.
+         *
+         *     Tenant isolation: the resolver scopes by ``current_tenant_id()``,
+         *     defaulting to ``t-default`` at webhook time (no user session yet). A
+         *     tenant-A JIRA account's ``webhook_secret`` sits in a ``tenant_id='t-A'``
+         *     row and is not visible to this default-tenant lookup — so tenant A's
+         *     credential can't leak out via the shared webhook endpoint.
          */
         post: operations["jira_webhook_api_v1_webhooks_jira_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/webhooks/stripe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stripe Webhook
+         * @description Receive Stripe billing webhooks for FS.8.
+         *
+         *     ``settings.stripe_webhook_secret`` is env/runtime configuration, so
+         *     every worker independently verifies against the same source value
+         *     without writing module-global state. FS.8.4 subscription lifecycle
+         *     events are then persisted through PG ``provisioned_billing``.
+         */
+        post: operations["stripe_webhook_api_v1_webhooks_stripe_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -12936,6 +15601,35 @@ export interface components {
             type: string;
         };
         /**
+         * AcceptInviteRequest
+         * @description Body for ``POST /api/v1/invites/{id}/accept``.
+         *
+         *     The plaintext ``token`` is REQUIRED — it's the only proof of
+         *     "I'm the human the admin invited". ``name`` and ``password`` are
+         *     only consulted on the anonymous-caller branch (creating the
+         *     user). On the authenticated branch they are ignored — name lives
+         *     on the existing ``users`` row, password rotation has its own
+         *     dedicated endpoint.
+         */
+        AcceptInviteRequest: {
+            /**
+             * Name
+             * @description Optional display name. Only consulted on the anonymous-caller branch (where we are creating the user row). On an authenticated accept, the existing users.name wins.
+             * @default
+             */
+            name: string;
+            /**
+             * Password
+             * @description Optional password to set on the freshly-created user. Only consulted on the anonymous-caller branch. If absent the user is created with an empty password_hash and must complete the password-set flow before logging in. Authenticated branch ignores this field entirely.
+             */
+            password?: string | null;
+            /**
+             * Token
+             * @description Plaintext invite token from the email. The server hashes with sha256 and compares against tenant_invites.token_hash.
+             */
+            token: string;
+        };
+        /**
          * AdminPasswordRequest
          * @description Request body for the wizard's Step 1 password rotation.
          *
@@ -13025,6 +15719,8 @@ export interface components {
         AgentType: "firmware" | "software" | "reporter" | "validator" | "reviewer" | "custom";
         /** AgentWorkspace */
         AgentWorkspace: {
+            /** Anchor Sha */
+            anchor_sha?: string | null;
             /** Branch */
             branch?: string | null;
             /**
@@ -13064,6 +15760,15 @@ export interface components {
              */
             sea_level_pressure_pa: number;
         };
+        /** AltitudeResponse */
+        AltitudeResponse: {
+            /** Altitude M */
+            altitude_m: number;
+            /** Pressure Pa */
+            pressure_pa: number;
+            /** Sea Level Pressure Pa */
+            sea_level_pressure_pa: number;
+        };
         /** ApproveRejectRequest */
         ApproveRejectRequest: {
             /**
@@ -13076,6 +15781,33 @@ export interface components {
              * @default
              */
             reason: string;
+        };
+        /** ArtifactDefinitionResponse */
+        ArtifactDefinitionResponse: {
+            /** Artifact Id */
+            artifact_id: string;
+            /** Description */
+            description: string;
+            /** File Pattern */
+            file_pattern: string;
+            /** Name */
+            name: string;
+        };
+        /** ArtifactDefinitionsResponse */
+        ArtifactDefinitionsResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["ArtifactDefinitionResponse"][];
+            /** Count */
+            count: number;
+        };
+        /** ArtifactGenerationResponse */
+        ArtifactGenerationResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["CertArtifactResponse"][];
+            /** Count */
+            count: number;
+            /** Sensor Type */
+            sensor_type: string;
         };
         /** AssembleRequest */
         AssembleRequest: {
@@ -13237,6 +15969,52 @@ export interface components {
              */
             username: string;
         };
+        /** BarometerDriverResponse */
+        BarometerDriverResponse: {
+            /** Bus */
+            bus: string;
+            /** Compatible Socs */
+            compatible_socs: string[];
+            /** Driver Id */
+            driver_id: string;
+            /** I2C Addr Default */
+            i2c_addr_default: string;
+            /** Modes */
+            modes: string[];
+            /** Name */
+            name: string;
+            /** Pressure Range Hpa */
+            pressure_range_hpa: number[];
+            /** Pressure Resolution Pa */
+            pressure_resolution_pa: number;
+            /** Sample Rate Hz */
+            sample_rate_hz: number;
+            /** Temperature Range C */
+            temperature_range_c: number[];
+            /** Vendor */
+            vendor: string;
+        };
+        /** BarometerDriversResponse */
+        BarometerDriversResponse: {
+            /** Count */
+            count: number;
+            /** Drivers */
+            drivers: components["schemas"]["BarometerDriverResponse"][];
+        };
+        /** BillingPortalSessionRequest */
+        BillingPortalSessionRequest: {
+            /**
+             * Customer Id
+             * @description Stripe customer ID
+             */
+            customer_id: string;
+            /**
+             * Return Url
+             * @description Portal return URL override
+             * @default
+             */
+            return_url: string;
+        };
         /** BindUdcRequest */
         BindUdcRequest: {
             /**
@@ -13340,6 +16118,78 @@ export interface components {
             /** Ids */
             ids?: number[];
         };
+        /**
+         * BulkUninstallBody
+         * @description POST body for ``/installer/uninstall`` (BS.8.2).
+         *
+         *     ``entry_ids`` is the list of catalog_entries the operator selected in
+         *     the cleanup-unused modal. The list is bounded at the
+         *     :data:`BULK_UNINSTALL_MAX_ENTRIES` ceiling so a single request never
+         *     blows the PEP coaching card out (and so a server-side typo can't
+         *     queue 100k uninstalls).
+         *
+         *     Each entry id must match the same ``ENTRY_ID_PATTERN`` the install
+         *     create body uses; duplicates in the list are deduplicated server-side
+         *     before the PEP HOLD fires (one entry = one row even if the operator
+         *     submitted it twice).
+         */
+        BulkUninstallBody: {
+            /** Entry Ids */
+            entry_ids: string[];
+            /** Reason */
+            reason?: string | null;
+        };
+        /** CalibrationProfileResponse */
+        CalibrationProfileResponse: {
+            /** Description */
+            description: string;
+            /** Name */
+            name: string;
+            /** Parameters */
+            parameters: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
+            /** Procedure */
+            procedure: {
+                [key: string]: unknown;
+            }[];
+            /** Profile Id */
+            profile_id: string;
+        };
+        /** CalibrationProfilesResponse */
+        CalibrationProfilesResponse: {
+            /** Count */
+            count: number;
+            /** Profiles */
+            profiles: components["schemas"]["CalibrationProfileResponse"][];
+        };
+        /** CalibrationRunResponse */
+        CalibrationRunResponse: {
+            /** Accel Bias */
+            accel_bias: number[];
+            /** Accel Scale */
+            accel_scale: number[];
+            /** Gyro Bias */
+            gyro_bias: number[];
+            /** Gyro Scale */
+            gyro_scale: number[];
+            /** Message */
+            message: string;
+            /** Misalignment Matrix */
+            misalignment_matrix: number[][];
+            /** Profile Id */
+            profile_id: string;
+            /** Residual G */
+            residual_g: number;
+            /** Samples Used */
+            samples_used: number;
+            /** Status */
+            status: string;
+            /** Timestamp */
+            timestamp: number;
+        };
         /** CameraConnectRequest */
         CameraConnectRequest: {
             /**
@@ -13403,6 +16253,21 @@ export interface components {
              */
             standard: string;
         };
+        /** CertArtifactResponse */
+        CertArtifactResponse: {
+            /** Artifact Id */
+            artifact_id: string;
+            /** Description */
+            description: string;
+            /** File Path */
+            file_path: string;
+            /** Name */
+            name: string;
+            /** Sensor Type */
+            sensor_type: string;
+            /** Status */
+            status: string;
+        };
         /**
          * CfTunnelSkipRequest
          * @description Request body for the wizard's Step 3 ``skip tunnel`` transition.
@@ -13433,6 +16298,10 @@ export interface components {
             current_password: string;
             /** New Password */
             new_password: string;
+            /** Turnstile Token */
+            turnstile_token?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** ChatRequest */
         ChatRequest: {
@@ -13468,6 +16337,33 @@ export interface components {
              * @enum {string}
              */
             status: "green" | "red" | "skipped";
+        };
+        /** CheckoutSessionRequest */
+        CheckoutSessionRequest: {
+            /**
+             * Cancel Url
+             * @description Checkout cancel URL override
+             * @default
+             */
+            cancel_url: string;
+            /**
+             * Customer Id
+             * @description Existing Stripe customer ID
+             * @default
+             */
+            customer_id: string;
+            /**
+             * Price Id
+             * @description Stripe Price ID override
+             * @default
+             */
+            price_id: string;
+            /**
+             * Success Url
+             * @description Checkout success URL override
+             * @default
+             */
+            success_url: string;
         };
         /** CircuitResetRequest */
         CircuitResetRequest: {
@@ -13619,6 +16515,24 @@ export interface components {
              */
             vendor_id: number;
         };
+        /**
+         * CreateInviteRequest
+         * @description Body for ``POST /api/v1/tenants/{tid}/invites``.
+         */
+        CreateInviteRequest: {
+            /**
+             * Email
+             * @description Mailbox address. Stored verbatim (case preserved) but compared case-insensitively at rate-limit / duplicate-pending / acceptance time. Length capped at 320 to match RFC 5321 + the ``tenant_invites.email`` CHECK constraint. Format check is loose (presence of ``@`` + a domain part with a dot) — the recipient MTA decides actual deliverability.
+             */
+            email: string;
+            /**
+             * Role
+             * @description Tenant-scope role to grant on acceptance. Matches the ``user_tenant_memberships.role`` CHECK enum. Must be one of (owner, admin, member, viewer); pydantic 422s on anything else before the handler runs.
+             * @default member
+             * @enum {string}
+             */
+            role: "owner" | "admin" | "member" | "viewer";
+        };
         /** CreateKeyRequest */
         CreateKeyRequest: {
             /** Name */
@@ -13649,6 +16563,87 @@ export interface components {
              */
             title: string;
         };
+        /**
+         * CreateProjectMemberRequest
+         * @description Body for ``POST /api/v1/tenants/{tid}/projects/{pid}/members``.
+         */
+        CreateProjectMemberRequest: {
+            /**
+             * Role
+             * @description Project-scope role to grant. Must be one of (owner, contributor, viewer). Pydantic returns 422 on anything else before the handler runs.
+             * @enum {string}
+             */
+            role: "owner" | "contributor" | "viewer";
+            /**
+             * User Id
+             * @description Target user id. Must already exist in ``users`` and have an active ``user_tenant_memberships`` row on the same tenant — this surface promotes an existing tenant member to a project role; new-user onboarding goes through POST /tenants/{tid}/invites.
+             */
+            user_id: string;
+        };
+        /**
+         * CreateProjectRequest
+         * @description Body for ``POST /api/v1/tenants/{tid}/projects``.
+         */
+        CreateProjectRequest: {
+            /**
+             * Disk Budget Bytes
+             * @description Per-project disk quota override in bytes. ``None`` means inherit from tenant. Must be non-negative; the DB CHECK is defence in depth. Non-NULL values are subject to the Y4 row 7 oversell guard: Σ(non-NULL project budgets on this tenant) must not exceed the tenant's plan ceiling.
+             */
+            disk_budget_bytes?: number | null;
+            /**
+             * Llm Budget Tokens
+             * @description Per-project LLM token override. ``None`` means inherit from the tenant's plan ceiling (see ``backend.project_quota.PLAN_LLM_TOKEN_QUOTAS``). Must be non-negative. Subject to the same Σ ≤ tenant total oversell guard as ``disk_budget_bytes``.
+             */
+            llm_budget_tokens?: number | null;
+            /**
+             * Name
+             * @description Display name. Operator-facing free-form text. Length matches the ``projects.name`` CHECK (1..200).
+             */
+            name: string;
+            /**
+             * Parent Id
+             * @description Parent project id for sub-project trees. ``None`` means top-level. The parent must belong to the same tenant.
+             */
+            parent_id?: string | null;
+            /**
+             * Plan Override
+             * @description Per-project plan override. ``None`` means inherit from tenant. Must match the migration's CHECK enum.
+             */
+            plan_override?: ("free" | "starter" | "pro" | "enterprise") | null;
+            /**
+             * Product Line
+             * @description Product line bucket — must be one of (embedded, web, mobile, software, custom). Maps to the L4 skill-pack D / W / P / X / custom slots. Pydantic 422s on anything else before the handler runs.
+             * @enum {string}
+             */
+            product_line: "embedded" | "web" | "mobile" | "software" | "custom";
+            /**
+             * Slug
+             * @description URL-safe shortname; must match ^[a-z0-9][a-z0-9-]*$. Unique within (tenant_id, product_line) per the migration 0033 composite UNIQUE.
+             */
+            slug: string;
+        };
+        /**
+         * CreateProjectShareRequest
+         * @description Body for ``POST /api/v1/tenants/{tid}/projects/{pid}/shares``.
+         */
+        CreateProjectShareRequest: {
+            /**
+             * Expires At
+             * @description Optional UTC expiry timestamp in ``YYYY-MM-DD HH:MM:SS`` format.  ``None`` means the share is permanent (the granter explicitly opts in to no TTL).  Non-null values must be strictly in the future of ``now() at time zone 'utc'``; an already-expired ``expires_at`` is a 422.
+             */
+            expires_at?: string | null;
+            /**
+             * Guest Tenant Id
+             * @description Tenant id of the guest that should receive this share. Must NOT equal the URL's {tid} — a tenant cannot share a project to itself (handler 422).
+             */
+            guest_tenant_id: string;
+            /**
+             * Role
+             * @description Project-scope role granted to members of the guest tenant. Must be one of (viewer, contributor) — 'owner' is deliberately rejected because a guest tenant cannot own a project belonging to a different tenant (alembic 0036 DB CHECK enforces this server-side).
+             * @enum {string}
+             */
+            role: "viewer" | "contributor";
+        };
         /** CreateSessionRequest */
         CreateSessionRequest: {
             /**
@@ -13662,33 +16657,6 @@ export interface components {
              * @description User ID
              */
             user_id: string;
-        };
-        /** CreateTenantRequest */
-        CreateTenantRequest: {
-            /** Features */
-            features?: {
-                [key: string]: unknown;
-            };
-            /**
-             * Max Users
-             * @default 5
-             */
-            max_users: number;
-            /**
-             * Name
-             * @description Tenant name
-             */
-            name: string;
-            /**
-             * Plan
-             * @default free
-             */
-            plan: string;
-            /**
-             * Slug
-             * @description Tenant slug (URL-safe, unique)
-             */
-            slug: string;
         };
         /** CreateUserRequest */
         CreateUserRequest: {
@@ -13945,6 +16913,44 @@ export interface components {
              */
             content: string;
         };
+        /** EKFProfileResponse */
+        EKFProfileResponse: {
+            /** Description */
+            description: string;
+            /** Initial Covariance */
+            initial_covariance: number;
+            /** Measurement Dim */
+            measurement_dim: number;
+            /** Measurement Noise */
+            measurement_noise: {
+                [key: string]: number;
+            };
+            /** Name */
+            name: string;
+            /** Prediction Model */
+            prediction_model: string;
+            /** Process Noise */
+            process_noise: {
+                [key: string]: number;
+            };
+            /** Profile Id */
+            profile_id: string;
+            /** State Dim */
+            state_dim: number;
+            /** State Vector */
+            state_vector: {
+                [key: string]: string;
+            }[];
+            /** Update Model */
+            update_model: string;
+        };
+        /** EKFProfilesResponse */
+        EKFProfilesResponse: {
+            /** Count */
+            count: number;
+            /** Profiles */
+            profiles: components["schemas"]["EKFProfileResponse"][];
+        };
         /** EKFRunRequest */
         EKFRunRequest: {
             /**
@@ -13967,6 +16973,31 @@ export interface components {
             samples: {
                 [key: string]: number;
             }[];
+        };
+        /** EKFRunResponse */
+        EKFRunResponse: {
+            /** Covariance Trace */
+            covariance_trace: number;
+            /** Euler Deg */
+            euler_deg: {
+                [key: string]: number;
+            };
+            /** Gyro Bias */
+            gyro_bias: number[];
+            /** Iterations */
+            iterations: number;
+            /** Message */
+            message: string;
+            /** Profile Id */
+            profile_id: string;
+            /** Quaternion */
+            quaternion: number[];
+            /** Rms Error Deg */
+            rms_error_deg: number;
+            /** State */
+            state: string;
+            /** Timestamp */
+            timestamp: number;
         };
         /** EMVGateRequest */
         EMVGateRequest: {
@@ -14071,6 +17102,84 @@ export interface components {
              * @default 0
              */
             size_bytes: number;
+        };
+        /**
+         * EntryCreate
+         * @description POST body for ``operator`` (per-tenant new entry) or ``override``
+         *     (per-tenant overlay of an existing shipped row).
+         *
+         *     For ``operator``: every required column must be present (the row is
+         *     a standalone, fully-resolved entry). For ``override``: only the
+         *     columns the admin wants to overlay are required; ``id`` must match
+         *     an existing ``shipped`` row's id.
+         */
+        EntryCreate: {
+            /** Depends On */
+            depends_on?: string[];
+            /** Display Name */
+            display_name?: string | null;
+            /** Family */
+            family?: ("mobile" | "embedded" | "web" | "software" | "rtos" | "cross-toolchain" | "custom") | null;
+            /** Id */
+            id: string;
+            /** Install Method */
+            install_method?: ("noop" | "docker_pull" | "shell_script" | "vendor_installer") | null;
+            /** Install Url */
+            install_url?: string | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /** Sha256 */
+            sha256?: string | null;
+            /** Size Bytes */
+            size_bytes?: number | null;
+            /**
+             * Source
+             * @default operator
+             * @enum {string}
+             */
+            source: "operator" | "override";
+            /** Vendor */
+            vendor?: string | null;
+            /** Version */
+            version?: string | null;
+        };
+        /**
+         * EntryPatch
+         * @description PATCH body — partial overlay (override layer). Every field is
+         *     optional; ``None`` means "leave alone", a present value means "set".
+         *
+         *     A PATCH on an entry id with no existing override / operator row
+         *     creates an ``override`` row that overlays the shipped base. A
+         *     PATCH on an existing operator/override row updates that row in
+         *     place.
+         */
+        EntryPatch: {
+            /** Depends On */
+            depends_on?: string[] | null;
+            /** Display Name */
+            display_name?: string | null;
+            /** Family */
+            family?: ("mobile" | "embedded" | "web" | "software" | "rtos" | "cross-toolchain" | "custom") | null;
+            /** Hidden */
+            hidden?: boolean | null;
+            /** Install Method */
+            install_method?: ("noop" | "docker_pull" | "shell_script" | "vendor_installer") | null;
+            /** Install Url */
+            install_url?: string | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
+            /** Sha256 */
+            sha256?: string | null;
+            /** Size Bytes */
+            size_bytes?: number | null;
+            /** Vendor */
+            vendor?: string | null;
+            /** Version */
+            version?: string | null;
         };
         /** ExportExecuteRequest */
         ExportExecuteRequest: {
@@ -14233,6 +17342,56 @@ export interface components {
              */
             opt_in: boolean;
         };
+        /** ForceTurboRequest */
+        ForceTurboRequest: {
+            /**
+             * Confirm
+             * @description Must be true. Frontend confirm dialog must warn about possible OOM under sustained load before setting this flag.
+             * @default false
+             */
+            confirm: boolean;
+            /**
+             * Reason
+             * @description Optional operator rationale — persisted to the audit row.
+             */
+            reason?: string | null;
+        };
+        /** GPSProtocolResponse */
+        GPSProtocolResponse: {
+            /** Baud Default */
+            baud_default: number;
+            /** Checksum */
+            checksum: string;
+            /** Key Messages */
+            key_messages: {
+                [key: string]: string;
+            }[];
+            /** Message Classes */
+            message_classes: {
+                [key: string]: string;
+            }[];
+            /** Name */
+            name: string;
+            /** Protocol Id */
+            protocol_id: string;
+            /** Standard */
+            standard: string;
+            /** Supported Sentences */
+            supported_sentences: {
+                [key: string]: string;
+            }[];
+            /** Talker Ids */
+            talker_ids: {
+                [key: string]: string;
+            }[];
+        };
+        /** GPSProtocolsResponse */
+        GPSProtocolsResponse: {
+            /** Count */
+            count: number;
+            /** Protocols */
+            protocols: components["schemas"]["GPSProtocolResponse"][];
+        };
         /** GenerateReportRequest */
         GenerateReportRequest: {
             /** Data */
@@ -14328,6 +17487,110 @@ export interface components {
              * @default 29418
              */
             ssh_port: number;
+        };
+        /** GitAccountCreate */
+        GitAccountCreate: {
+            /**
+             * Auth Type
+             * @default pat
+             */
+            auth_type: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Instance Url
+             * @default
+             */
+            instance_url: string;
+            /**
+             * Is Default
+             * @default false
+             */
+            is_default: boolean;
+            /**
+             * Label
+             * @default
+             */
+            label: string;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /** Platform */
+            platform: string;
+            /**
+             * Project
+             * @default
+             */
+            project: string;
+            /**
+             * Ssh Host
+             * @default
+             */
+            ssh_host: string;
+            /**
+             * Ssh Key
+             * @default
+             */
+            ssh_key: string;
+            /**
+             * Ssh Port
+             * @default 0
+             */
+            ssh_port: number;
+            /**
+             * Token
+             * @default
+             */
+            token: string;
+            /** Url Patterns */
+            url_patterns?: string[];
+            /**
+             * Username
+             * @default
+             */
+            username: string;
+            /**
+             * Webhook Secret
+             * @default
+             */
+            webhook_secret: string;
+        };
+        /** GitAccountUpdate */
+        GitAccountUpdate: {
+            /** Auth Type */
+            auth_type?: string | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Instance Url */
+            instance_url?: string | null;
+            /** Is Default */
+            is_default?: boolean | null;
+            /** Label */
+            label?: string | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
+            /** Project */
+            project?: string | null;
+            /** Ssh Host */
+            ssh_host?: string | null;
+            /** Ssh Key */
+            ssh_key?: string | null;
+            /** Ssh Port */
+            ssh_port?: number | null;
+            /** Token */
+            token?: string | null;
+            /** Url Patterns */
+            url_patterns?: string[] | null;
+            /** Username */
+            username?: string | null;
+            /** Webhook Secret */
+            webhook_secret?: string | null;
         };
         /** GitForgeTokenTest */
         GitForgeTokenTest: {
@@ -14518,6 +17781,46 @@ export interface components {
              */
             profile_id: string;
         };
+        /** IMUDriverResponse */
+        IMUDriverResponse: {
+            /** Accel Range G */
+            accel_range_g: number[];
+            /** Axes */
+            axes: number;
+            /** Bus */
+            bus: string;
+            /** Compatible Socs */
+            compatible_socs: string[];
+            /** Driver Id */
+            driver_id: string;
+            /** Fifo Depth */
+            fifo_depth: number;
+            /** Gyro Range Dps */
+            gyro_range_dps: number[];
+            /** I2C Addr Alt */
+            i2c_addr_alt: string;
+            /** I2C Addr Default */
+            i2c_addr_default: string;
+            /** Interrupt Pin */
+            interrupt_pin: boolean;
+            /** Name */
+            name: string;
+            /** Sample Rate Hz */
+            sample_rate_hz: number;
+            /** Temperature */
+            temperature: boolean;
+            /** Vendor */
+            vendor: string;
+            /** Wake On Motion */
+            wake_on_motion: boolean;
+        };
+        /** IMUDriversResponse */
+        IMUDriversResponse: {
+            /** Count */
+            count: number;
+            /** Drivers */
+            drivers: components["schemas"]["IMUDriverResponse"][];
+        };
         /** IPPJobRequest */
         IPPJobRequest: {
             /**
@@ -14637,6 +17940,63 @@ export interface components {
              */
             opt_in: boolean;
         };
+        /**
+         * InitTenantRequest
+         * @description Body for ``POST /bootstrap/init-tenant``.
+         *
+         *     ``display_name`` is the human-readable tenant title; ``id``/slug is
+         *     derived from it server-side via :func:`_slugify_display_name` so the
+         *     wizard UI doesn't need to know the slug rules.  ``plan`` defaults to
+         *     ``free``; ``enterprise`` requires a non-empty ``license_key``.
+         *     Super-admin email + password seed the first user under the new
+         *     tenant.
+         */
+        InitTenantRequest: {
+            /** Admin Email */
+            admin_email: string;
+            /**
+             * Admin Name
+             * @default
+             */
+            admin_name: string;
+            /** Admin Password */
+            admin_password: string;
+            /** Display Name */
+            display_name: string;
+            /**
+             * License Key
+             * @default
+             */
+            license_key: string;
+            /**
+             * Plan
+             * @default free
+             * @enum {string}
+             */
+            plan: "free" | "starter" | "pro" | "enterprise";
+        };
+        /** InitTenantResponse */
+        InitTenantResponse: {
+            /**
+             * Env Write Warning
+             * @default
+             */
+            env_write_warning: string;
+            /** Plan */
+            plan: string;
+            /** Project Id */
+            project_id: string;
+            /** Status */
+            status: string;
+            /** Super Admin Email */
+            super_admin_email: string;
+            /** Super Admin User Id */
+            super_admin_user_id: string;
+            /** Tenant Id */
+            tenant_id: string;
+            /** Tenant Name */
+            tenant_name: string;
+        };
         /** InjectRequest */
         InjectRequest: {
             /** Agent Id */
@@ -14648,6 +18008,85 @@ export interface components {
             author: string;
             /** Text */
             text: string;
+        };
+        /**
+         * InstallJobCancelBody
+         * @description Optional body for ``POST /installer/jobs/{id}/cancel``.
+         *
+         *     A bare empty POST is fine; ``reason`` is recorded in audit + the
+         *     job's ``error_reason`` column when set.
+         */
+        InstallJobCancelBody: {
+            /** Reason */
+            reason?: string | null;
+        };
+        /**
+         * InstallJobCreate
+         * @description POST body for ``/installer/jobs``.
+         *
+         *     ``entry_id`` is the catalog_entries id the operator wants to install
+         *     (resolved across the three source layers by the catalog resolver —
+         *     install always uses the resolved view). ``idempotency_key`` is the
+         *     UI-side dedupe token; same key = same job.
+         */
+        InstallJobCreate: {
+            /** Bytes Total */
+            bytes_total?: number | null;
+            /** Entry Id */
+            entry_id: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * InstallJobProgress
+         * @description Sidecar → backend progress payload. BS.4.4.
+         *
+         *     Fields mirror :data:`installer.progress.ProgressEmitterConfig` /
+         *     :func:`installer.progress.make_progress_cb`'s POST body. Validation
+         *     matches what the install_jobs schema can hold:
+         *
+         *     * ``bytes_done`` — non-negative; bigint column, no upper cap.
+         *     * ``bytes_total`` — None (unknown — vendor URL didn't send a
+         *       Content-Length) or non-negative.
+         *     * ``eta_seconds`` — None or non-negative.
+         *     * ``log_tail`` — text, max 4 KiB (sidecar trims; we still validate).
+         *     * ``stage`` — free-form short string the UI shows under the bar.
+         *     * ``sidecar_id`` — for audit only; we already know it from claim,
+         *       but accepting it makes log lines easier to correlate.
+         */
+        InstallJobProgress: {
+            /** Bytes Done */
+            bytes_done: number;
+            /** Bytes Total */
+            bytes_total?: number | null;
+            /** Eta Seconds */
+            eta_seconds?: number | null;
+            /**
+             * Log Tail
+             * @default
+             */
+            log_tail: string;
+            /** Sidecar Id */
+            sidecar_id?: string | null;
+            /** Stage */
+            stage: string;
+        };
+        /**
+         * InstallJobRetryBody
+         * @description Optional body for ``POST /installer/jobs/{id}/retry``.
+         *
+         *     ``idempotency_key`` is required so the retry POST is itself idempotent
+         *     against double-clicks. The clone takes the source row's ``entry_id``
+         *     and ``metadata`` as a starting point; the caller may not override
+         *     those (admin can patch the catalog entry instead via BS.2.1 PATCH).
+         */
+        InstallJobRetryBody: {
+            /** Idempotency Key */
+            idempotency_key: string;
         };
         /** InvokeHaltResponse */
         InvokeHaltResponse: {
@@ -14663,6 +18102,133 @@ export interface components {
              * @default 0
              */
             tasks_cancelled: number;
+        };
+        /** LLMCredentialCreate */
+        LLMCredentialCreate: {
+            /**
+             * Auth Type
+             * @default pat
+             */
+            auth_type: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Is Default
+             * @default false
+             */
+            is_default: boolean;
+            /**
+             * Label
+             * @default
+             */
+            label: string;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /** Provider */
+            provider: string;
+            /**
+             * Value
+             * @default
+             */
+            value: string;
+        };
+        /** LLMCredentialUpdate */
+        LLMCredentialUpdate: {
+            /** Auth Type */
+            auth_type?: string | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Is Default */
+            is_default?: boolean | null;
+            /** Label */
+            label?: string | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
+            /** Value */
+            value?: string | null;
+        };
+        /**
+         * LaunchPreviewRequest
+         * @description Body for ``POST /web-sandbox/preview``.
+         *
+         *     ``workspace_id`` is required. ``workspace_path`` is optional —
+         *     when omitted, the launcher resolves it via
+         *     :func:`backend.workspace.get_workspace` (which is keyed on
+         *     ``agent_id`` today; until Y6 lands a true workspace_id index, the
+         *     convention is "workspace_id == agent_id").
+         */
+        LaunchPreviewRequest: {
+            /**
+             * Allowed Emails
+             * @description W14.4 — additional emails to allow through the CF Access SSO gate. The launching operator's email is auto-prepended by the router; the operator-wide ``cf_access_default_emails`` admin allowlist is unioned in by the manager. None ⇒ rely on the operator's email plus the admin allowlist.
+             */
+            allowed_emails?: string[] | null;
+            /**
+             * Container Port
+             * @description In-container port the dev server binds to. 5173 = Vite default; 3000 = Nuxt SSR.
+             * @default 5173
+             */
+            container_port: number;
+            /**
+             * Cpu Limit
+             * @description W14.9 — per-launch override for the cgroup CPU cap. Fractional CPUs allowed (``1``, ``0.5``, ``2``). When omitted, the manager applies its operator-wide policy (default 1 CPU).
+             */
+            cpu_limit?: number | string | null;
+            /**
+             * Dev Command
+             * @description Override the default dev command (pnpm dev --host 0.0.0.0). Use for Bun / Vite preview.
+             */
+            dev_command?: string[] | null;
+            /**
+             * Env
+             * @description Extra environment variables to forward into the sidecar (e.g. NUXT_PUBLIC_API_URL).
+             */
+            env?: {
+                [key: string]: string;
+            } | null;
+            /**
+             * Git Ref
+             * @description Optional git ref to fetch + checkout before running pnpm install. Skips git steps when None.
+             */
+            git_ref?: string | null;
+            /**
+             * Image Tag
+             * @description Sidecar image tag. Defaults to omnisight-web-preview:dev (the W14.1 image).
+             * @default omnisight-web-preview:dev
+             */
+            image_tag: string;
+            /**
+             * Install Command
+             * @description Override the default install command (pnpm install --frozen-lockfile).
+             */
+            install_command?: string[] | null;
+            /**
+             * Memory Limit
+             * @description W14.9 — per-launch override for the cgroup RAM cap. Docker-style size (``2g``, ``512m``, raw bytes). When omitted, the manager applies its operator-wide policy (default 2 GiB).
+             */
+            memory_limit?: string | null;
+            /**
+             * Storage Limit
+             * @description W14.9 — per-launch override for the writable-layer disk cap. Docker-style size (``5g``, ``10g``). ``off`` / ``0`` / ``none`` disables. When omitted, the manager applies its operator-wide policy (default 5 GiB).
+             */
+            storage_limit?: string | null;
+            /**
+             * Workspace Id
+             * @description Workspace identifier — also serves as the docker container name suffix.
+             */
+            workspace_id: string;
+            /**
+             * Workspace Path
+             * @description Absolute host path to the workspace. When omitted, resolved from backend.workspace.get_workspace(workspace_id).
+             */
+            workspace_path?: string | null;
         };
         /** LifetimeRequest */
         LifetimeRequest: {
@@ -14709,6 +18275,59 @@ export interface components {
              * @description Line width in pixels
              */
             width: number;
+        };
+        /** LiveTestStatusResponse */
+        LiveTestStatusResponse: {
+            /**
+             * Consecutive Failures
+             * @description Z.7.8: number of consecutive nightly failures; 0 after a pass.
+             */
+            consecutive_failures?: number | null;
+            /** Estimated Cost Usd */
+            estimated_cost_usd?: number | null;
+            /** Providers */
+            providers?: {
+                [key: string]: components["schemas"]["ProviderResult"];
+            } | null;
+            /** Run Id */
+            run_id?: string | null;
+            /**
+             * Status
+             * @description pass | fail | unknown | never_run
+             */
+            status: string;
+            /** Tests Passed */
+            tests_passed?: number | null;
+            /** Tests Run */
+            tests_run?: number | null;
+            /** Tests Skipped */
+            tests_skipped?: number | null;
+            /** Timestamp */
+            timestamp?: string | null;
+        };
+        /** LiveTestStatusWriteRequest */
+        LiveTestStatusWriteRequest: {
+            /** Estimated Cost Usd */
+            estimated_cost_usd?: number | null;
+            /** Providers */
+            providers?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            } | null;
+            /** Run Id */
+            run_id?: string | null;
+            /**
+             * Status
+             * @description pass | fail
+             */
+            status: string;
+            /** Tests Passed */
+            tests_passed?: number | null;
+            /** Tests Run */
+            tests_run?: number | null;
+            /** Tests Skipped */
+            tests_skipped?: number | null;
         };
         /**
          * LlmProvisionRequest
@@ -14772,8 +18391,14 @@ export interface components {
         LoginRequest: {
             /** Email */
             email: string;
+            /** Honeypot Fields */
+            honeypot_fields?: {
+                [key: string]: unknown;
+            };
             /** Password */
             password: string;
+            /** Turnstile Token */
+            turnstile_token?: string | null;
         };
         /** MFAChallengeRequest */
         MFAChallengeRequest: {
@@ -14884,6 +18509,25 @@ export interface components {
              * @description NMEA sentence (starting with $)
              */
             sentence: string;
+        };
+        /** NMEAParseResponse */
+        NMEAParseResponse: {
+            /** Checksum Ok */
+            checksum_ok: boolean;
+            /** Error */
+            error: string;
+            /** Fields */
+            fields: {
+                [key: string]: unknown;
+            };
+            /** Raw */
+            raw: string;
+            /** Sentence Type */
+            sentence_type: string;
+            /** Talker Id */
+            talker_id: string;
+            /** Valid */
+            valid: boolean;
         };
         /** OCRRequest */
         OCRRequest: {
@@ -15192,6 +18836,107 @@ export interface components {
              */
             use_llm: boolean;
         };
+        /**
+         * PatchMemberRequest
+         * @description Body for ``PATCH /api/v1/tenants/{tid}/members/{user_id}``.
+         *
+         *     Both fields are optional individually but at least one must be
+         *     supplied — an empty body is rejected at the schema layer to avoid
+         *     a wasteful round-trip to PG only to discover the caller had
+         *     nothing to change.
+         */
+        PatchMemberRequest: {
+            /**
+             * Role
+             * @description New tenant-scope role for the membership row. Must be one of (owner, admin, member, viewer). Pydantic returns 422 on anything else before the handler runs. Demoting the last admin-tier member of the tenant is refused with 409 — the tenant must always have at least one active owner / admin.
+             */
+            role?: ("owner" | "admin" | "member" | "viewer") | null;
+            /**
+             * Status
+             * @description New membership status. ``suspended`` keeps the row + audit trail but disables tenant access; ``active`` reactivates a previously-suspended membership. Suspending the last admin-tier member is refused with 409.
+             */
+            status?: ("active" | "suspended") | null;
+        };
+        /**
+         * PatchProjectMemberRequest
+         * @description Body for ``PATCH /api/v1/tenants/{tid}/projects/{pid}/members/{uid}``.
+         *
+         *     Only ``role`` is patchable — ``user_id`` and ``project_id`` are
+         *     the composite PK and not user-mutable; ``created_at`` is audit-
+         *     only. The schema requires the field; a missing role is a 422.
+         */
+        PatchProjectMemberRequest: {
+            /**
+             * Role
+             * @description New project-scope role. Must be one of (owner, contributor, viewer).
+             * @enum {string}
+             */
+            role: "owner" | "contributor" | "viewer";
+        };
+        /**
+         * PatchProjectRequest
+         * @description Body for ``PATCH /api/v1/tenants/{tid}/projects/{pid}``.
+         *
+         *     All four fields are optional; at least one must be supplied. The
+         *     schema accepts ``None`` for each field at the type level — the
+         *     handler distinguishes "absent" from "explicit null" via
+         *     ``model_fields_set`` (Pydantic v2 only contains the names the
+         *     caller actually supplied) and rejects ``name=null`` explicitly
+         *     because the underlying column is NOT NULL.
+         */
+        PatchProjectRequest: {
+            /**
+             * Disk Budget Bytes
+             * @description New per-project disk quota in bytes. Omit to keep current; explicit JSON null clears the override (project then inherits the tenant's PLAN quota). Must be non-negative; the DB CHECK is defence in depth. Non-NULL values are subject to the Y4 row 7 oversell guard (Σ over the tenant's other live projects ≤ tenant plan ceiling).
+             */
+            disk_budget_bytes?: number | null;
+            /**
+             * Llm Budget Tokens
+             * @description New per-project LLM token override. Omit to keep current; explicit JSON null clears the override (project then inherits the tenant's plan ceiling). Must be non-negative. Subject to the same Σ ≤ tenant total oversell guard.
+             */
+            llm_budget_tokens?: number | null;
+            /**
+             * Name
+             * @description New display name. Omit to keep current. Explicit JSON null is rejected (422) because the underlying column is NOT NULL — to drop a name use a DELETE on the project.
+             */
+            name?: string | null;
+            /**
+             * Parent Id
+             * @description New parent project id for sub-project trees. Omit to keep current; explicit JSON null promotes the project back to top-level. Parent must belong to the same tenant; cycles (self-loop or new parent is a descendant) are refused.
+             */
+            parent_id?: string | null;
+            /**
+             * Plan Override
+             * @description New per-project plan override. Omit to keep current; explicit JSON null clears the override (project then inherits the tenant's plan). Must match the migration's CHECK enum.
+             */
+            plan_override?: ("free" | "starter" | "pro" | "enterprise") | null;
+        };
+        /**
+         * PatchTenantRequest
+         * @description Partial update: every field optional, but at least one required.
+         *
+         *     PATCH semantics: ``None`` means "leave this column alone", a present
+         *     value (incl. ``False`` for ``enabled``) means "set the column to
+         *     this". Empty body / all-None body is a 422 — operator probably
+         *     meant something else and an empty UPDATE wastes an audit row.
+         */
+        PatchTenantRequest: {
+            /**
+             * Enabled
+             * @description True → enable, False → disable, omit → keep current.
+             */
+            enabled?: boolean | null;
+            /**
+             * Name
+             * @description New display name; omit to keep current.
+             */
+            name?: string | null;
+            /**
+             * Plan
+             * @description New plan tier; omit to keep current. A downgrade is refused (409) if current disk usage exceeds the new plan's hard quota.
+             */
+            plan?: ("free" | "starter" | "pro" | "enterprise") | null;
+        };
         /** PatchUserRequest */
         PatchUserRequest: {
             /** Enabled */
@@ -15282,6 +19027,161 @@ export interface components {
                 [key: string]: unknown;
             }[] | null;
         };
+        /**
+         * PromoteSuperAdminRequest
+         * @description Body for ``POST /api/v1/admin/super-admins``.
+         */
+        PromoteSuperAdminRequest: {
+            /**
+             * User Id
+             * @description Target ``users.id``. Must match the standard ``^u-[a-z0-9]{4,64}$`` shape; pydantic returns 422 on anything else before the handler runs.
+             */
+            user_id: string;
+        };
+        /**
+         * PromptDiffResponse
+         * @description ZZ.C1 envelope for ``GET /runtime/prompts/diff``.
+         *
+         *     The TODO spec phrases the response as "unified diff text" — we keep
+         *     that literal shape under ``diff`` while also surfacing the two row
+         *     endpoints' metadata so the drawer can label both sides without a
+         *     second fetch (``from`` / ``to`` carry agent_type, version, hash,
+         *     created_at; ``content`` bodies are omitted to keep the payload slim).
+         */
+        PromptDiffResponse: {
+            /**
+             * Agent Type
+             * @default
+             */
+            agent_type: string;
+            /**
+             * Diff
+             * @default
+             */
+            diff: string;
+            /**
+             * From Created At
+             * @default
+             */
+            from_created_at: string;
+            /**
+             * From Hash
+             * @default
+             */
+            from_hash: string;
+            /**
+             * From Id
+             * @default 0
+             */
+            from_id: number;
+            /**
+             * From Version
+             * @default 0
+             */
+            from_version: number;
+            /**
+             * To Created At
+             * @default
+             */
+            to_created_at: string;
+            /**
+             * To Hash
+             * @default
+             */
+            to_hash: string;
+            /**
+             * To Id
+             * @default 0
+             */
+            to_id: number;
+            /**
+             * To Version
+             * @default 0
+             */
+            to_version: number;
+        };
+        /**
+         * PromptVersionEntry
+         * @description ZZ.C1 #305-1 checkbox 1: one row in the prompt-version timeline.
+         *
+         *     The TODO row phrases the schema as ``(id, agent_type, content_hash,
+         *     content, created_at, supersedes_id)`` but the shipped table is
+         *     ``prompt_versions(id, path, version, role, body, body_sha256,
+         *     created_at, …)`` (see SP-5.2 + ``backend/prompt_registry.py``). We
+         *     project the real columns onto the spec's field names:
+         *
+         *       * ``agent_type``    ← basename of ``path`` without ``.md`` (e.g.
+         *                             ``backend/agents/prompts/orchestrator.md``
+         *                             → ``orchestrator``)
+         *       * ``content``       ← ``body``
+         *       * ``content_hash``  ← ``body_sha256`` (truncated-friendly SHA-256)
+         *       * ``supersedes_id`` ← id of the next-older distinct-hash row for
+         *                             the same path, derived at query time from
+         *                             the dedupe cursor. Null for the bottom of
+         *                             the timeline.
+         *
+         *     ``version`` + ``role`` are also surfaced so the drawer UI can show
+         *     "v7 (active)" / "v6 (archive)" without an extra round-trip.
+         */
+        PromptVersionEntry: {
+            /** Agent Type */
+            agent_type: string;
+            /** Content */
+            content: string;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Content Preview
+             * @default
+             */
+            content_preview: string;
+            /**
+             * Created At
+             * @default
+             */
+            created_at: string;
+            /** Id */
+            id: number;
+            /**
+             * Role
+             * @default
+             */
+            role: string;
+            /** Supersedes Id */
+            supersedes_id?: number | null;
+            /**
+             * Version
+             * @default 0
+             */
+            version: number;
+        };
+        /**
+         * PromptVersionsListResponse
+         * @description ZZ.C1 envelope for ``GET /runtime/prompts``.
+         *
+         *     Echoes the request params (``agent_type`` + resolved ``path``) so
+         *     the frontend drawer can cache per-agent lists without reparsing the
+         *     URL, and exposes the raw ``limit`` that was applied after clamping.
+         */
+        PromptVersionsListResponse: {
+            /**
+             * Agent Type
+             * @default
+             */
+            agent_type: string;
+            /**
+             * Limit
+             * @default 20
+             */
+            limit: number;
+            /**
+             * Path
+             * @default
+             */
+            path: string;
+            /** Versions */
+            versions?: components["schemas"]["PromptVersionEntry"][];
+        };
         /** ProviderHealthItem */
         ProviderHealthItem: {
             /**
@@ -15348,6 +19248,48 @@ export interface components {
              * @default true
              */
             requires_key: boolean;
+            /** Tool Calling Compat */
+            tool_calling_compat?: {
+                [key: string]: components["schemas"]["ProviderToolCallingCompat"];
+            } | null;
+        };
+        /** ProviderResult */
+        ProviderResult: {
+            /**
+             * Status
+             * @description pass | fail | skip
+             */
+            status: string;
+            /**
+             * Tests Passed
+             * @default 0
+             */
+            tests_passed: number;
+            /**
+             * Tests Run
+             * @default 0
+             */
+            tests_run: number;
+            /**
+             * Tests Skipped
+             * @default 0
+             */
+            tests_skipped: number;
+        };
+        /**
+         * ProviderToolCallingCompat
+         * @description Per-model tool-calling support entry from config/ollama_tool_calling.yaml.
+         */
+        ProviderToolCallingCompat: {
+            /** Min Ollama Version */
+            min_ollama_version: string;
+            /**
+             * Notes
+             * @default
+             */
+            notes: string;
+            /** Support */
+            support: string;
         };
         /** ProvidersListResponse */
         ProvidersListResponse: {
@@ -15780,6 +19722,30 @@ export interface components {
              */
             title: string;
         };
+        /** SensorTestRecipeResponse */
+        SensorTestRecipeResponse: {
+            /** Category */
+            category: string;
+            /** Description */
+            description: string;
+            /** Name */
+            name: string;
+            /** Recipe Id */
+            recipe_id: string;
+            /** Sensor Type */
+            sensor_type: string;
+            /** Timeout S */
+            timeout_s: number;
+            /** Tools */
+            tools: string[];
+        };
+        /** SensorTestRecipesResponse */
+        SensorTestRecipesResponse: {
+            /** Count */
+            count: number;
+            /** Recipes */
+            recipes: components["schemas"]["SensorTestRecipeResponse"][];
+        };
         /** SensorTestRequest */
         SensorTestRequest: {
             /**
@@ -15798,6 +19764,27 @@ export interface components {
              * @default 600
              */
             timeout_s: number;
+        };
+        /** SensorTestRunResponse */
+        SensorTestRunResponse: {
+            /** Measurements */
+            measurements: {
+                [key: string]: unknown;
+            };
+            /** Message */
+            message: string;
+            /** Raw Log Path */
+            raw_log_path: string;
+            /** Recipe Id */
+            recipe_id: string;
+            /** Sensor Type */
+            sensor_type: string;
+            /** Status */
+            status: string;
+            /** Target Device */
+            target_device: string;
+            /** Timestamp */
+            timestamp: number;
         };
         /**
          * SessionTitleBody
@@ -15995,6 +19982,15 @@ export interface components {
             /** Subset */
             subset: string;
         };
+        /** SocCompatResponse */
+        SocCompatResponse: {
+            /** Compatibility */
+            compatibility: {
+                [key: string]: boolean;
+            };
+            /** Soc Id */
+            soc_id: string;
+        };
         /** SocSecurityRequest */
         SocSecurityRequest: {
             /**
@@ -16162,6 +20158,51 @@ export interface components {
              */
             status: string;
         };
+        /**
+         * SubscriptionCreate
+         * @description POST body for ``catalog_subscriptions`` rows (BS.8.5 feed).
+         *
+         *     The ``auth_secret_ref`` field never carries plaintext — it's a
+         *     pointer into the tenant secret store (set out-of-band by the
+         *     operator). The router refuses any value containing whitespace
+         *     so an accidental "paste the bearer token here" scenario fails
+         *     422 instead of leaking into the DB.
+         */
+        SubscriptionCreate: {
+            /**
+             * Auth Method
+             * @default none
+             * @enum {string}
+             */
+            auth_method: "none" | "basic" | "bearer" | "signed_url";
+            /** Auth Secret Ref */
+            auth_secret_ref?: string | null;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Feed Url */
+            feed_url: string;
+            /**
+             * Refresh Interval S
+             * @default 86400
+             */
+            refresh_interval_s: number;
+        };
+        /** SubscriptionPatch */
+        SubscriptionPatch: {
+            /** Auth Method */
+            auth_method?: ("none" | "basic" | "bearer" | "signed_url") | null;
+            /** Auth Secret Ref */
+            auth_secret_ref?: string | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Feed Url */
+            feed_url?: string | null;
+            /** Refresh Interval S */
+            refresh_interval_s?: number | null;
+        };
         /** SwitchProviderRequest */
         SwitchProviderRequest: {
             /** Model */
@@ -16246,8 +20287,6 @@ export interface components {
              * @default false
              */
             wsl: boolean;
-        } & {
-            [key: string]: unknown;
         };
         /** SystemStatusResponse */
         SystemStatusResponse: {
@@ -16650,6 +20689,98 @@ export interface components {
              */
             window: string;
         };
+        /**
+         * TokenHeatmapCell
+         * @description ZZ.C2 #305-2 checkbox 1: one cell in the token-usage heatmap.
+         *
+         *     The TODO spec phrases the schema as
+         *     ``[{day, hour, token_total, cost_total}]`` (7 × 24 or 30 × 24
+         *     matrix). Source of truth is the same ``event_log`` rows with
+         *     ``event_type='turn.complete'`` that feed ``/runtime/tokens/
+         *     burn-rate`` — each row carries ``tokens_used`` + ``cost_usd`` in
+         *     ``data_json`` and a ``created_at`` in ``YYYY-MM-DD HH24:MI:SS``
+         *     TEXT format.
+         *
+         *       * ``day``: ``YYYY-MM-DD`` date string in UTC. A date string
+         *         (rather than a relative ``0..N-1`` index) makes it trivial
+         *         for the frontend to label each heatmap row with an operator-
+         *         recognisable calendar date; the client still converts to
+         *         its local timezone in the render pass (checkbox 5 of ZZ.C2
+         *         locks that contract).
+         *       * ``hour``: 0–23 integer, hour-of-day in UTC. The frontend
+         *         shifts by the local offset when painting the grid.
+         *       * ``token_total``: ``SUM(tokens_used)`` across all
+         *         ``turn.complete`` rows whose UTC (day, hour) bucket matches.
+         *       * ``cost_total``: ``SUM(COALESCE(cost_usd, 0))`` across the
+         *         same bucket — the NULL-vs-genuine-zero contract from
+         *         ``_estimate_turn_cost_usd`` maps unknown-model turns to 0
+         *         cost without dropping the bucket's tokens (same
+         *         COALESCE-to-zero policy as burn-rate).
+         *
+         *     The endpoint emits only non-empty cells (sparse list). The
+         *     heatmap UI fills in zeros for the ``(day, hour)`` slots the
+         *     response omits; this keeps the payload proportional to real
+         *     activity instead of always paying 168 / 720 cells on every GET.
+         */
+        TokenHeatmapCell: {
+            /**
+             * Cost Total
+             * @default 0
+             */
+            cost_total: number;
+            /**
+             * Day
+             * @default
+             */
+            day: string;
+            /**
+             * Hour
+             * @default 0
+             */
+            hour: number;
+            /**
+             * Token Total
+             * @default 0
+             */
+            token_total: number;
+        };
+        /**
+         * TokenHeatmapResponse
+         * @description ZZ.C2 #305-2 checkbox 1: session-heatmap envelope.
+         *
+         *     ``window`` echoes ``7d`` or ``30d`` so the frontend Calendar-
+         *     style heatmap (checkbox 2) can title its panel and decide the
+         *     grid height (7 vs 30 rows) without re-parsing the URL.
+         *
+         *     Cells are sparse: only ``(day, hour)`` buckets with at least one
+         *     ``turn.complete`` row appear. The frontend treats missing cells
+         *     as genuine zero activity — this matches operator intuition
+         *     (empty slot = no work happened) and keeps the payload bounded
+         *     by real traffic rather than by window size.
+         *
+         *     ZZ.C2 #305-2 checkbox 4 (2026-04-24): ``available_models`` carries
+         *     the distinct ``model`` slugs observed across the unfiltered
+         *     window so the frontend can render a per-model dropdown without
+         *     a second round-trip. The list is intentionally derived *before*
+         *     applying the ``model`` filter so operators can still pick a
+         *     different model after selecting one — otherwise filtering by
+         *     ``claude-opus-4-7`` would hide every other option. ``model``
+         *     echoes the applied filter (or ``None`` for "All models") so the
+         *     frontend can reconcile the select state after a remount.
+         */
+        TokenHeatmapResponse: {
+            /** Available Models */
+            available_models?: string[];
+            /** Cells */
+            cells?: components["schemas"]["TokenHeatmapCell"][];
+            /** Model */
+            model?: string | null;
+            /**
+             * Window
+             * @default
+             */
+            window: string;
+        };
         /** TokenMapInstance */
         TokenMapInstance: {
             /** Host */
@@ -16774,6 +20905,67 @@ export interface components {
              */
             profile_id: string;
         };
+        /** TrajectoryEvaluationResponse */
+        TrajectoryEvaluationResponse: {
+            /** Actual */
+            actual?: {
+                [key: string]: number;
+            } | null;
+            /** Error */
+            error?: string | null;
+            /** Expected */
+            expected?: {
+                [key: string]: number;
+            } | null;
+            /** Fixture Id */
+            fixture_id?: string | null;
+            /** Max Error Deg */
+            max_error_deg?: number | null;
+            /** Passed */
+            passed: boolean;
+            /** Per Axis Error */
+            per_axis_error?: {
+                [key: string]: number;
+            } | null;
+            /** Rms Error Deg */
+            rms_error_deg?: number | null;
+            /** Tolerance Deg */
+            tolerance_deg?: number | null;
+        };
+        /** TrajectoryFixtureResponse */
+        TrajectoryFixtureResponse: {
+            /** Angular Rate Dps */
+            angular_rate_dps?: number | null;
+            /** Description */
+            description: string;
+            /** Duration S */
+            duration_s: number;
+            /** Expected Final Orientation */
+            expected_final_orientation?: {
+                [key: string]: number;
+            } | null;
+            /** Expected Orientation */
+            expected_orientation?: {
+                [key: string]: number;
+            } | null;
+            /** Fixture Id */
+            fixture_id: string;
+            /** Name */
+            name: string;
+            /** Return To Origin */
+            return_to_origin?: boolean | null;
+            /** Sample Rate Hz */
+            sample_rate_hz: number;
+            /** Tolerance Deg */
+            tolerance_deg: number;
+        };
+        /** TrajectoryFixturesResponse */
+        TrajectoryFixturesResponse: {
+            /** Count */
+            count: number;
+            /** Fixtures */
+            fixtures: components["schemas"]["TrajectoryFixtureResponse"][];
+        };
         /** TransitionDetectRequest */
         TransitionDetectRequest: {
             /**
@@ -16846,6 +21038,27 @@ export interface components {
              * @description UBX message as hex string
              */
             data_hex: string;
+        };
+        /** UBXParseResponse */
+        UBXParseResponse: {
+            /** Class Name */
+            class_name: string;
+            /** Error */
+            error: string;
+            /** Msg Class */
+            msg_class: string;
+            /** Msg Id */
+            msg_id: string;
+            /** Msg Name */
+            msg_name: string;
+            /** Parsed Fields */
+            parsed_fields: {
+                [key: string]: unknown;
+            };
+            /** Payload Length */
+            payload_length: number;
+            /** Valid */
+            valid: boolean;
         };
         /** UpdateScopesRequest */
         UpdateScopesRequest: {
@@ -17007,6 +21220,121 @@ export interface components {
             vendor_id: string;
         };
         /**
+         * VerticalSetupAndroidApi
+         * @description Android API selection captured by BS.9.4 ``AndroidApiSelector``.
+         *
+         *     Mirror of the frontend ``AndroidApiSelection`` shape. Only required
+         *     when ``"mobile"`` is in ``verticals_selected`` — the body validator
+         *     refuses ``android_api`` when ``"mobile"`` is absent so a stale
+         *     payload cannot smuggle Android config into a non-Mobile install.
+         */
+        VerticalSetupAndroidApi: {
+            /** Compile Target */
+            compile_target: number;
+            /** Emulator Preset */
+            emulator_preset: string;
+            /** Google Play Services */
+            google_play_services: boolean;
+            /** Min Api */
+            min_api: number;
+        };
+        /**
+         * VerticalSetupRequest
+         * @description Body for ``POST /bootstrap/vertical-setup``.
+         *
+         *     ``verticals_selected`` is the canonical-ordered list emitted by
+         *     ``BootstrapVerticalStep.toggleVertical`` — every entry must be in
+         *     ``_BOOTSTRAP_VERTICAL_IDS`` and the list must be non-empty (Skip
+         *     is a separate client-only path that does not call this endpoint).
+         *     ``install_job_ids`` carries the ``install_jobs.id`` values the
+         *     frontend already POSTed so ``bootstrap_state.metadata`` records
+         *     which jobs this step kicked off (audit / rerun / drift guard).
+         *     ``android_api`` is required iff ``"mobile"`` is selected.
+         */
+        VerticalSetupRequest: {
+            android_api?: components["schemas"]["VerticalSetupAndroidApi"] | null;
+            /** Install Job Ids */
+            install_job_ids?: string[];
+            /** Verticals Selected */
+            verticals_selected: string[];
+        };
+        /** VerticalSetupResponse */
+        VerticalSetupResponse: {
+            /** Install Job Ids */
+            install_job_ids: string[];
+            /** Status */
+            status: string;
+            /** Verticals Selected */
+            verticals_selected: string[];
+        };
+        /**
+         * ViteErrorReport
+         * @description Wire shape posted by ``packages/omnisight-vite-plugin``.
+         *
+         *     Frozen — additions need a matching bump in
+         *     :data:`backend.web_sandbox_vite_errors.WEB_SANDBOX_VITE_ERROR_SCHEMA_VERSION`
+         *     *and* in ``OMNISIGHT_VITE_ERROR_SCHEMA_VERSION`` in the JS plugin.
+         *     The drift-guard tests (vitest + pytest) assert the two literals
+         *     byte-equal; an unmatched bump fails CI red on both sides.
+         */
+        ViteErrorReport: {
+            /**
+             * Column
+             * @description 0-based column when known, else null.
+             */
+            column?: number | null;
+            /**
+             * File
+             * @description Resolved file id when known, else null.
+             */
+            file?: string | null;
+            /**
+             * Kind
+             * @description Error origin.  ``compile`` for Vite plugin hooks (buildStart / load / transform / hmr / config); ``runtime`` for browser-side window.onerror + unhandledrejection handlers.
+             */
+            kind: string;
+            /**
+             * Line
+             * @description 1-based line number when known, else null.
+             */
+            line?: number | null;
+            /**
+             * Message
+             * @description Vite or browser error message.
+             */
+            message: string;
+            /**
+             * Occurred At
+             * @description POSIX seconds when the plugin captured the error.
+             */
+            occurred_at: number;
+            /**
+             * Phase
+             * @description Which Vite phase produced the error.  One of ['config', 'buildStart', 'load', 'transform', 'hmr', 'client'].
+             */
+            phase: string;
+            /**
+             * Plugin
+             * @description Plugin identifier.  Today only ``omnisight-vite-plugin`` is accepted; the W15.5 Rolldown / Webpack siblings register their own ids.
+             */
+            plugin: string;
+            /**
+             * Plugin Version
+             * @description Plugin semver.
+             */
+            plugin_version: string;
+            /**
+             * Schema Version
+             * @description Wire-shape pin.  Must equal the backend's WEB_SANDBOX_VITE_ERROR_SCHEMA_VERSION literal — anything else 422s so the JS plugin sees a clean schema mismatch.
+             */
+            schema_version: string;
+            /**
+             * Stack
+             * @description Stack trace when the error carries one (truncated to 8 KiB by the plugin).
+             */
+            stack?: string | null;
+        };
+        /**
          * WaitReadyRequest
          * @description Body for ``POST /bootstrap/wait-ready``.
          *
@@ -17141,6 +21469,27 @@ export interface components {
             /** Label */
             label?: string | null;
         };
+        /** CreateTenantRequest */
+        backend__routers__admin_tenants__CreateTenantRequest: {
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Id
+             * @description Tenant id; must match ^t-[a-z0-9][a-z0-9-]{2,62}$
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Plan
+             * @default free
+             * @enum {string}
+             */
+            plan: "free" | "starter" | "pro" | "enterprise";
+        };
         /** ProvisionRequest */
         backend__routers__cloudflare_tunnel__ProvisionRequest: {
             /** Account Id */
@@ -17199,6 +21548,33 @@ export interface components {
              * @description SoC identifier
              */
             soc_id: string;
+        };
+        /** CreateTenantRequest */
+        backend__routers__enterprise_web_stack__CreateTenantRequest: {
+            /** Features */
+            features?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Max Users
+             * @default 5
+             */
+            max_users: number;
+            /**
+             * Name
+             * @description Tenant name
+             */
+            name: string;
+            /**
+             * Plan
+             * @default free
+             */
+            plan: string;
+            /**
+             * Slug
+             * @description Tenant slug (URL-safe, unique)
+             */
+            slug: string;
         };
         /** GateValidateRequest */
         backend__routers__enterprise_web_stack__GateValidateRequest: {
@@ -17493,6 +21869,305 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_tenant_audit_events_api_v1_admin_audit_tenants__tenant_id__get: {
+        parameters: {
+            query?: {
+                /** @description Lower bound (inclusive) on audit_log.ts (UNIX seconds). */
+                since?: number | null;
+                /** @description Upper bound (inclusive) on audit_log.ts (UNIX seconds). */
+                until?: number | null;
+                /** @description Exact-match filter on audit_log.actor (typically email). */
+                actor?: string | null;
+                /** @description Exact-match filter on audit_log.action — pass one of the canonical event types from ``backend.audit_events.ALL_EVENT_TYPES`` or any legacy snake_case action. */
+                action?: string | null;
+                /** @description Exact-match filter on audit_log.entity_kind (``tenant`` / ``project`` / ``tenant_invite`` / ...). */
+                entity_kind?: string | null;
+                /** @description Max rows to return; hard-capped at 500. */
+                limit?: number;
+                /** @description Pagination cursor: only return rows with audit_log.id strictly less than this value. Use the smallest id in the previous page to fetch the next. */
+                cursor?: number | null;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    promote_super_admin_api_v1_admin_super_admins_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PromoteSuperAdminRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_super_admin_api_v1_admin_super_admins__user_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_tenants_api_v1_admin_tenants_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    create_tenant_api_v1_admin_tenants_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["backend__routers__admin_tenants__CreateTenantRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_tenant_detail_api_v1_admin_tenants__tenant_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_tenant_api_v1_admin_tenants__tenant_id__delete: {
+        parameters: {
+            query?: {
+                /** @description Must equal the path tenant_id; second-handshake guard so a stray DELETE URL cannot wipe a tenant. */
+                confirm?: string | null;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_tenant_api_v1_admin_tenants__tenant_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchTenantRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_usage_breakdown_by_project_api_v1_admin_usage_breakdown_get: {
+        parameters: {
+            query: {
+                /** @description Tenant id to compute the breakdown for. Must match TENANT_ID_PATTERN. */
+                tenant_id: string;
+                /** @description Lower bound (inclusive) on billing_usage_events.occurred_at (UNIX seconds). */
+                since?: number | null;
+                /** @description Upper bound (inclusive) on billing_usage_events.occurred_at (UNIX seconds). */
+                until?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -18610,6 +23285,73 @@ export interface operations {
             };
         };
     };
+    oauth_authorize_api_v1_auth_oauth__provider__authorize_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    oauth_callback_api_v1_auth_oauth__provider__callback_get: {
+        parameters: {
+            query?: {
+                code?: string | null;
+                state?: string | null;
+                error?: string | null;
+                error_description?: string | null;
+            };
+            header?: never;
+            path: {
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     oidc_redirect_api_v1_auth_oidc__provider__get: {
         parameters: {
             query?: never;
@@ -19193,6 +23935,76 @@ export interface operations {
             };
         };
     };
+    create_stripe_checkout_session_api_v1_billing_stripe_checkout_session_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckoutSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_stripe_billing_portal_session_api_v1_billing_stripe_portal_session_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BillingPortalSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     bootstrap_admin_password_api_v1_bootstrap_admin_password_post: {
         parameters: {
             query?: never;
@@ -19279,6 +24091,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FinalizeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_init_tenant_api_v1_bootstrap_init_tenant_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InitTenantRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InitTenantResponse"];
                 };
             };
             /** @description Validation Error */
@@ -19544,6 +24389,39 @@ export interface operations {
             };
         };
     };
+    bootstrap_vertical_setup_api_v1_bootstrap_vertical_setup_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VerticalSetupRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VerticalSetupResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     bootstrap_wait_ready_api_v1_bootstrap_wait_ready_post: {
         parameters: {
             query?: never;
@@ -19623,6 +24501,340 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_entries_api_v1_catalog_entries_get: {
+        parameters: {
+            query?: {
+                family?: string | null;
+                source?: string | null;
+                vendor?: string | null;
+                install_method?: string | null;
+                q?: string | null;
+                sort?: "id" | "vendor" | "family" | "display_name" | "created_at" | "updated_at";
+                order?: "asc" | "desc";
+                include_hidden?: boolean;
+                /** @description Max rows per page (1..500) */
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_entry_api_v1_catalog_entries_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EntryCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_entry_api_v1_catalog_entries__entry_id__get: {
+        parameters: {
+            query?: {
+                raw?: boolean;
+            };
+            header?: never;
+            path: {
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_entry_api_v1_catalog_entries__entry_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_entry_api_v1_catalog_entries__entry_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EntryPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_sources_api_v1_catalog_sources_get: {
+        parameters: {
+            query?: {
+                enabled_only?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_source_api_v1_catalog_sources_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubscriptionCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_source_api_v1_catalog_sources__sub_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sub_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_source_api_v1_catalog_sources__sub_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sub_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubscriptionPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sync_source_api_v1_catalog_sources__sub_id__sync_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sub_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -20629,6 +25841,43 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ConnTestRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    force_turbo_api_v1_coordinator_force_turbo_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ForceTurboRequest"];
             };
         };
         responses: {
@@ -22309,7 +27558,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateTenantRequest"];
+                "application/json": components["schemas"]["backend__routers__enterprise_web_stack__CreateTenantRequest"];
             };
         };
         responses: {
@@ -23046,6 +28295,232 @@ export interface operations {
             };
             header?: never;
             path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_git_accounts_api_v1_git_accounts_get: {
+        parameters: {
+            query?: {
+                platform?: string | null;
+                enabled_only?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_git_account_api_v1_git_accounts_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GitAccountCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_account_for_url_api_v1_git_accounts_resolve_post: {
+        parameters: {
+            query: {
+                url: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_git_account_api_v1_git_accounts__account_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_git_account_api_v1_git_accounts__account_id__delete: {
+        parameters: {
+            query?: {
+                auto_elect_new_default?: boolean;
+            };
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_git_account_api_v1_git_accounts__account_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GitAccountUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_git_account_api_v1_git_accounts__account_id__test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -24519,6 +29994,328 @@ export interface operations {
             };
         };
     };
+    list_installed_entries_api_v1_installer_installed_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_entry_dependents_api_v1_installer_installed__entry_id__dependents_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entry_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_jobs_api_v1_installer_jobs_get: {
+        parameters: {
+            query?: {
+                state?: string | null;
+                entry_id?: string | null;
+                sidecar_id?: string | null;
+                /** @description Max rows per page (1..500) */
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_job_api_v1_installer_jobs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallJobCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    poll_for_job_api_v1_installer_jobs_poll_get: {
+        parameters: {
+            query: {
+                sidecar_id: string;
+                protocol_version?: number;
+                timeout_s?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_api_v1_installer_jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_job_api_v1_installer_jobs__job_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["InstallJobCancelBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    report_progress_api_v1_installer_jobs__job_id__progress_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallJobProgress"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_job_api_v1_installer_jobs__job_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallJobRetryBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bulk_uninstall_api_v1_installer_uninstall_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkUninstallBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     clarify_api_v1_intent_clarify_post: {
         parameters: {
             query?: never;
@@ -24659,6 +30456,41 @@ export interface operations {
             };
         };
     };
+    accept_invite_api_v1_invites__invite_id__accept_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                invite_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcceptInviteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     invoke_sync_api_v1_invoke_post: {
         parameters: {
             query?: {
@@ -24734,6 +30566,7 @@ export interface operations {
         parameters: {
             query?: {
                 command?: string | null;
+                suppress_coach?: string | null;
             };
             header?: never;
             path?: never;
@@ -24779,6 +30612,201 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    list_llm_credentials_api_v1_llm_credentials_get: {
+        parameters: {
+            query?: {
+                provider?: string | null;
+                enabled_only?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_llm_credential_api_v1_llm_credentials_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LLMCredentialCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_llm_credential_endpoint_api_v1_llm_credentials__credential_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                credential_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_llm_credential_api_v1_llm_credentials__credential_id__delete: {
+        parameters: {
+            query?: {
+                auto_elect_new_default?: boolean;
+            };
+            header?: never;
+            path: {
+                credential_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_llm_credential_api_v1_llm_credentials__credential_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                credential_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LLMCredentialUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_llm_credential_api_v1_llm_credentials__credential_id__test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                credential_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -29308,6 +35336,72 @@ export interface operations {
             };
         };
     };
+    create_access_request_api_v1_privacy_access_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    create_erasure_request_api_v1_privacy_erasure_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    create_portability_request_api_v1_privacy_portability_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     get_profile_api_v1_profile_get: {
         parameters: {
             query?: never;
@@ -31228,6 +37322,59 @@ export interface operations {
             };
         };
     };
+    get_live_test_status_api_v1_runtime_live_test_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LiveTestStatusResponse"];
+                };
+            };
+        };
+    };
+    post_live_test_status_api_v1_runtime_live_test_status_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LiveTestStatusWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_logs_api_v1_runtime_logs_get: {
         parameters: {
             query?: {
@@ -31486,6 +37633,26 @@ export interface operations {
             };
         };
     };
+    get_ollama_tool_failures_api_v1_runtime_ollama_tool_failures_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     advance_pipeline_endpoint_api_v1_runtime_pipeline_advance_post: {
         parameters: {
             query?: never;
@@ -31619,6 +37786,165 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    get_pricing_snapshot_api_v1_runtime_pricing_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    reload_pricing_table_api_v1_runtime_pricing_reload_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_prompt_versions_api_v1_runtime_prompts_get: {
+        parameters: {
+            query: {
+                agent_type: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptVersionsListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_prompt_diff_api_v1_runtime_prompts_diff_get: {
+        parameters: {
+            query: {
+                from: number;
+                to: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptDiffResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_providers_balance_batch_api_v1_runtime_providers_balance_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    get_provider_balance_api_v1_runtime_providers__provider__balance_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -32263,6 +38589,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TokenBurnRateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_token_heatmap_api_v1_runtime_tokens_heatmap_get: {
+        parameters: {
+            query?: {
+                window?: string;
+                model?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenHeatmapResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33571,9 +39929,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ArtifactDefinitionsResponse"];
                 };
             };
         };
@@ -33597,9 +39953,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ArtifactGenerationResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33632,9 +39986,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["AltitudeResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33663,9 +40015,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["BarometerDriversResponse"];
                 };
             };
         };
@@ -33687,9 +40037,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["BarometerDriverResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33718,9 +40066,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CalibrationProfilesResponse"];
                 };
             };
         };
@@ -33742,9 +40088,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CalibrationProfileResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33777,9 +40121,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CalibrationRunResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33808,9 +40150,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EKFProfilesResponse"];
                 };
             };
         };
@@ -33832,9 +40172,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EKFProfileResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33867,9 +40205,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EKFRunResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33902,9 +40238,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["NMEAParseResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33933,9 +40267,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["GPSProtocolsResponse"];
                 };
             };
         };
@@ -33957,9 +40289,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["GPSProtocolResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33992,9 +40322,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["UBXParseResponse"];
                 };
             };
             /** @description Validation Error */
@@ -34023,9 +40351,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["IMUDriversResponse"];
                 };
             };
         };
@@ -34047,9 +40373,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["IMUDriverResponse"];
                 };
             };
             /** @description Validation Error */
@@ -34082,9 +40406,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SocCompatResponse"];
                 };
             };
             /** @description Validation Error */
@@ -34116,9 +40438,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SensorTestRecipesResponse"];
                 };
             };
             /** @description Validation Error */
@@ -34149,9 +40469,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SensorTestRecipeResponse"];
                 };
             };
             /** @description Validation Error */
@@ -34184,9 +40502,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SensorTestRunResponse"];
                 };
             };
             /** @description Validation Error */
@@ -34219,9 +40535,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["TrajectoryEvaluationResponse"];
                 };
             };
             /** @description Validation Error */
@@ -34250,9 +40564,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["TrajectoryFixturesResponse"];
                 };
             };
         };
@@ -34274,9 +40586,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["TrajectoryFixtureResponse"];
                 };
             };
             /** @description Validation Error */
@@ -35931,6 +42241,631 @@ export interface operations {
             };
         };
     };
+    list_invites_api_v1_tenants__tenant_id__invites_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by invite status. One of (pending, accepted, revoked, expired, all). Default is 'pending', which also excludes rows whose wall-clock has passed expires_at (the housekeeping sweep flips them later). 'all' returns every status. */
+                status?: string;
+                /** @description Max rows to return (1..500). Default 100. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_invite_api_v1_tenants__tenant_id__invites_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInviteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_invite_api_v1_tenants__tenant_id__invites__invite_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                invite_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_members_api_v1_tenants__tenant_id__members_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by membership status. One of (active, suspended, all). Default is 'active' — the live members tab. 'all' returns every status. */
+                status?: string;
+                /** @description Max rows to return (1..500). Default 100. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_member_api_v1_tenants__tenant_id__members__user_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_member_api_v1_tenants__tenant_id__members__user_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchMemberRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_projects_api_v1_tenants__tenant_id__projects_get: {
+        parameters: {
+            query?: {
+                /** @description Filter to one product line. Must be one of (embedded, web, mobile, software, custom) or omitted. Other values 422 with the allowed list. */
+                product_line?: string | null;
+                /** @description Filter by archived state. ``false`` (default) returns only live projects (archived_at IS NULL); ``true`` returns only archived ones; ``all`` returns both. Other values 422 with the allowed list. */
+                archived?: string;
+                /** @description Max rows to return (1..500). Default 100. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_project_api_v1_tenants__tenant_id__projects_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_project_api_v1_tenants__tenant_id__projects__project_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    archive_project_api_v1_tenants__tenant_id__projects__project_id__archive_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_project_members_api_v1_tenants__tenant_id__projects__project_id__members_get: {
+        parameters: {
+            query?: {
+                /** @description Max rows to return (1..200). Default 50. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_project_member_api_v1_tenants__tenant_id__projects__project_id__members_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateProjectMemberRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_project_member_api_v1_tenants__tenant_id__projects__project_id__members__user_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_project_member_api_v1_tenants__tenant_id__projects__project_id__members__user_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchProjectMemberRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    restore_project_api_v1_tenants__tenant_id__projects__project_id__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_project_shares_api_v1_tenants__tenant_id__projects__project_id__shares_get: {
+        parameters: {
+            query?: {
+                /** @description Max rows to return (1..200). Default 50. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_project_share_api_v1_tenants__tenant_id__projects__project_id__shares_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateProjectShareRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_project_share_api_v1_tenants__tenant_id__projects__project_id__shares__share_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                project_id: string;
+                share_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_egress_api_v1_tenants__tid__egress_get: {
         parameters: {
             query?: never;
@@ -37394,6 +44329,301 @@ export interface operations {
             };
         };
     };
+    list_previews_api_v1_web_sandbox_preview_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    launch_preview_api_v1_web_sandbox_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LaunchPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_preview_api_v1_web_sandbox_preview__workspace_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stop_preview_api_v1_web_sandbox_preview__workspace_id__delete: {
+        parameters: {
+            query?: {
+                reason?: string | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    report_preview_error_api_v1_web_sandbox_preview__workspace_id__error_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ViteErrorReport"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_preview_errors_api_v1_web_sandbox_preview__workspace_id__errors_get: {
+        parameters: {
+            query?: {
+                /** @description Cap on the number of recent errors returned. */
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_preview_ready_api_v1_web_sandbox_preview__workspace_id__ready_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    touch_preview_api_v1_web_sandbox_preview__workspace_id__touch_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    email_feedback_webhook_api_v1_webhooks_email__provider__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     gerrit_webhook_api_v1_webhooks_gerrit_post: {
         parameters: {
             query?: never;
@@ -37455,6 +44685,26 @@ export interface operations {
         };
     };
     jira_webhook_api_v1_webhooks_jira_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    stripe_webhook_api_v1_webhooks_stripe_post: {
         parameters: {
             query?: never;
             header?: never;
