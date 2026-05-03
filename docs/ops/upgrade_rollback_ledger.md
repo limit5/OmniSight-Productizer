@@ -48,6 +48,21 @@ On **every quarterly third-party pentest** (KS.4.4):
 4. Follow `quarterly_pentest_sop.md` for vendor contracting, rules of
    engagement, retest, and delayed-quarter handling.
 
+On **every bug bounty program lifecycle change** (KS.4.5):
+
+1. Store the provider comparison, order form, scope profile, safe harbor,
+   payout policy, and disclosure policy in the private security evidence
+   vault; do not commit platform exports, researcher PII, exploit
+   payloads, secrets, or customer data.
+2. Append one row to the "Bug Bounty Programs" table when the program is
+   planned, launched, paused, publicly launched, closed, or materially
+   changed.
+3. Append one row to the "Bug Bounty Findings" table for each accepted
+   valid finding after managed triage. Record only finding ID, severity,
+   fingerprint, ticket link, bounty amount, and disposition.
+4. Follow `bug_bounty_program_sop.md` for HackerOne / Bugcrowd selection,
+   post-GA launch gates, payout caps, scope boundaries, and triage SLA.
+
 ## Upgrades
 
 | Cut-over (UTC) | Package | From → To | PR | Operator | Disposition | Notes |
@@ -75,6 +90,27 @@ On **every quarterly third-party pentest** (KS.4.4):
 Pentest rows are append-only. If a row is wrong, add a correction row
 with `correction -> <quarter/vendor/report-sha256>` in Notes.
 
+## Bug Bounty Programs
+
+| Quarter | Provider | Mode | Disposition | Reward pool USD | Scope SHA-256 | Remediation tracker | Notes |
+|---|---|---|---|---:|---|---|---|
+| _Q3 2026 (post-GA target)_ | _pending HackerOne/Bugcrowd decision_ | _private managed_ | _planned_ | _pending_ | _pending_ | _pending_ | _KS.4.5 policy effective 2026-05-03; launch only after GA gates pass_ |
+
+Bug bounty program rows are append-only. If a row is wrong, add a
+correction row with `correction -> <quarter/provider/scope-sha256>` in
+Notes.
+
+## Bug Bounty Findings
+
+| Validated (UTC) | Platform finding ID | Severity | Finding SHA-256 | Remediation ticket | Bounty USD | Disposition | Notes |
+|---|---|---|---|---|---:|---|---|
+| _(no accepted findings yet — KS.4.5 policy effective 2026-05-03)_ | | | | | | | |
+
+Bug bounty finding rows are append-only. Do not store exploit payloads,
+researcher PII, secrets, screenshots, or customer data in this ledger.
+Use `correction -> <platform-finding-id>` in Notes to correct a prior
+row.
+
 ## Trigger vocabulary (Rollbacks)
 
 Use one of these standard strings in the Rollbacks "Trigger" column so
@@ -97,6 +133,7 @@ the quarterly review can tally by cause:
 * Policy: [`dependency_upgrade_policy.md`](dependency_upgrade_policy.md)
 * Runbook: [`dependency_upgrade_runbook.md`](dependency_upgrade_runbook.md)
 * Quarterly pentest SOP: [`quarterly_pentest_sop.md`](quarterly_pentest_sop.md)
+* Bug bounty SOP: [`bug_bounty_program_sop.md`](bug_bounty_program_sop.md)
 * Deploy-time gate: [`../../scripts/check_bluegreen_gate.py`](../../scripts/check_bluegreen_gate.py)
 * Auto-label workflow: [`../../.github/workflows/blue-green-gate.yml`](../../.github/workflows/blue-green-gate.yml)
 * Fallback SOP (Path C hard rollback): [`fallback_branches.md`](fallback_branches.md)
