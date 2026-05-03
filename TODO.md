@@ -1540,7 +1540,7 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 - [x] Z.6.5 **Graceful fallback**：tool calling 失敗（model 不支援 / Ollama daemon 報錯 / parse 失敗）時退回純 chat + `SharedKV("ollama_tool_failures").incr()` 計數 + dashboard 警示，不直接 raise
 - [x] Z.6.6 `backend/tests/test_llm_adapter.py` 加 ollama tool_call mock test：mock `ChatOllama.invoke` 回 `tool_calls=[{"name": "...", "args": {...}, "id": "..."}]`、驗 adapter normalise 過後與其他 provider 對等
 - [x] Z.6.7 `backend/tests/test_ollama_tool_fallback.py`（新檔案）：unsupported model graceful degrade test、daemon 連不到 test、parse 失敗 test
-- [ ] Z.6.8 `docs/integrations/llm-observability.md` 矩陣加「Tool Calling」一欄（補既有 9 列只有 Balance + Rate-Limit 的維度）
+- [x] Z.6.8 `docs/integrations/llm-observability.md` 矩陣加「Tool Calling」一欄（補既有 9 列只有 Balance + Rate-Limit 的維度）
 
 預估：**1 day**
 
@@ -3163,8 +3163,8 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] KS.4.1 **Log secret scrubber 強化**：擴充 KS.1.7、加更多 pattern（API key prefix / OAuth token / JWT / cookie / database URL）
 - [x][G] KS.4.2 **CI pre-commit secret scanner**：`gitleaks` / `trufflehog` 整合 GitHub Actions、PR 帶 secret 直接 block
 - [x][G] KS.4.3 **Backup pipeline DLP 強化**：擴充 KS.1.8、backup at-rest encryption + DLP rule + off-site immutable backup（S3 Object Lock / Glacier）
-- [~][G] KS.4.4 **季度第三方 pentest SOP**：與外部 pentest vendor 簽約、每季 1 次、報告進 N10 ledger
-- [ ] KS.4.5 **Bug bounty program 評估**：HackerOne / Bugcrowd 比較、GA 後啟動（payout policy / scope / triage SOP）
+- [x][G] KS.4.4 **季度第三方 pentest SOP**：與外部 pentest vendor 簽約、每季 1 次、報告進 N10 ledger
+- [~][G] KS.4.5 **Bug bounty program 評估**：HackerOne / Bugcrowd 比較、GA 後啟動（payout policy / scope / triage SOP）
 - [ ] KS.4.6 **Incident response runbook**：24h SOP（detect / contain / rotate / notify customer / forensics / blameless postmortem）寫進 `docs/security/incident-response-runbook.md`
 - [ ] KS.4.7 **SOC 2 Type II 準備清單**：control mapping + evidence collection + 第三方 auditor 評估
 - [ ] KS.4.8 **GDPR / DSAR 對齊**：tenant data deletion 完整 purge DEK + audit trail metadata（保留 hash、刪 raw）+ DSAR export 流程

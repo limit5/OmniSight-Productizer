@@ -20,17 +20,17 @@ budget alarms, and the provider-dashboard link list).
 
 ## 1. Support matrix
 
-| Provider   | Balance API              | Rate-Limit Headers | Notes |
-|------------|--------------------------|--------------------|-------|
-| Anthropic  | ❌                       | ✅                 | 官方無 balance API |
-| OpenAI     | ❌（需 session cookie）  | ✅                 | `/v1/usage` 不支援 API key auth |
-| Google     | ❌（需 GCP）             | ⚠️                 | Gemini API 部分 model 無 header |
-| xAI        | ❌                       | ✅                 | |
-| Groq       | ❌                       | ✅                 | |
-| DeepSeek   | ✅                       | ✅                 | `/user/balance` |
-| Together   | ❌                       | ⚠️                 | |
-| OpenRouter | ✅                       | ✅                 | `/auth/key` 含 usage + credit_balance |
-| Ollama     | N/A                      | ❌                 | 本地部署無餘額概念 |
+| Provider   | Balance API              | Rate-Limit Headers | Tool Calling | Notes |
+|------------|--------------------------|--------------------|--------------|----- |
+| Anthropic  | ❌                       | ✅                 | ✅           | 官方無 balance API |
+| OpenAI     | ❌（需 session cookie）  | ✅                 | ✅           | `/v1/usage` 不支援 API key auth |
+| Google     | ❌（需 GCP）             | ⚠️                 | ✅           | Gemini API 部分 model 無 header |
+| xAI        | ❌                       | ✅                 | ✅           | |
+| Groq       | ❌                       | ✅                 | ✅           | OpenAI-compat tools；llama3.x / mixtral / gemma-v2 覆蓋主流 use case |
+| DeepSeek   | ✅                       | ✅                 | ✅           | `/user/balance` |
+| Together   | ❌                       | ⚠️                 | ⚠️           | tool calling model-dependent；僅 llama3.x / mistral 系有支援 |
+| OpenRouter | ✅                       | ✅                 | ✅           | `/auth/key` 含 usage + credit_balance；tool schema passthrough |
+| Ollama     | N/A                      | ❌                 | ⚠️           | 本地部署無餘額概念；tool calling model-dependent，見 `config/ollama_tool_calling.yaml` |
 
 ### Legend
 
@@ -99,6 +99,49 @@ version lands that mirrors them, the entry flips to ✅ without a schema
 change. Ollama is ❌ (and will stay ❌) because local inference has no
 remote rate to bound.
 
+### 2.3 Tool Calling
+
+"The provider's API — as accessed through OmniSight's adapter
+(`backend/llm_adapter.py::tool_call()`) — supports structured tool /
+function calls where the model returns a `tool_calls` block rather
+than (or in addition to) a natural-language reply."
+
+The criterion is whether `build_chat_model(...).bind_tools(tools)` and
+a subsequent `.invoke()` reliably produces a parseable `tool_calls`
+response field.  This is the mechanism agent dispatch uses: the
+specialist node calls `tool_call(messages, tools, provider=…)` and
+inspects `AdapterToolResponse.tool_calls`.
+
+Column values for Tool Calling:
+
+- **✅** — `bind_tools()` is fully wired and the provider's API
+  returns structured tool calls for all production-grade models
+  offered by that provider.  OmniSight passes tool schemas through
+  without special handling.
+- **⚠️** — Tool calling works for a *subset* of models or with
+  known limitations.  OmniSight's adapter handles the happy path but
+  callers should guard: Together only routes to models that themselves
+  support function calling; Ollama support is model-dependent (see
+  `config/ollama_tool_calling.yaml` for the per-model matrix) and
+  Z.6.5's graceful fallback degrades to pure-chat + dashboard warning
+  when the daemon or model cannot honour the `tool_calls` field.
+- **❌** — Provider does not support structured tool calls via the
+  API path OmniSight uses (not applicable to any provider in the
+  current matrix — all nine have at least partial support).
+- **N/A** — Not applicable for this provider (also not applicable in
+  the current matrix — even Ollama has partial support).
+
+**Ollama special case (Z.6)**: tool calling was not connected to the
+Ollama provider prior to Z.6.2.  As of Z.6.2, `ChatOllama.bind_tools()`
+is invoked on the same path as the other eight providers.  Z.6.5 adds
+the graceful-fallback safety net: if the daemon raises (model
+unsupported, connection failure) or the response cannot be parsed, the
+adapter degrades to `AdapterToolResponse(tool_calls=[])`, increments
+`SharedKV("ollama_tool_failures")`, and surfaces a dashboard alert — it
+does not raise.  `config/ollama_tool_calling.yaml` lists the nine
+confirmed-compatible models with `full` / `partial` support levels and
+minimum Ollama daemon versions.
+
 ---
 
 ## 3. How the matrix maps to the dashboard
@@ -112,10 +155,19 @@ remote rate to bound.
   every LLM turn; ⚠️ rows populate intermittently; ❌ / N/A rows render
   a grey dash. TTL is 60 s — the badge fades to "no recent data" if no
   turn touches that provider within the minute.
+- **Providers panel → Tool Calling badge** — rendered on the provider
+  card for Ollama (Z.6.4 catalog badge) showing per-model support level
+  sourced from `config/ollama_tool_calling.yaml`.  For remote providers
+  the badge is static (✅ / ⚠️ from the matrix) and does not require a
+  live API call.  When `SharedKV("ollama_tool_failures").total` exceeds
+  the alert threshold (Z.6.5), the badge flips to an amber warning icon
+  with "fallback active — N failures" tooltip.
 - **Roll-up tile** (Z.4 checkbox 5) — counts only providers where at
-  least one of the two columns is non-grey; Ollama is excluded from
-  the denominator so local-only deployments don't see a permanent
-  "1/9 providers healthy" red number.
+  least one of the two *observability* columns (Balance, Rate-limit) is
+  non-grey; Ollama is excluded from the denominator so local-only
+  deployments don't see a permanent "1/9 providers healthy" red number.
+  The Tool Calling column does not feed the health denominator — it is a
+  capability indicator, not a liveness signal.
 
 ---
 
@@ -136,16 +188,30 @@ adapter registration):
    `backend/llm_balance.py` returning a `BalanceInfo`, then register it
    in `SUPPORTED_BALANCE_PROVIDERS`. The endpoint + refresher pick it
    up automatically; no router change needed.
-4. **Update this matrix** — add a row with the correct ✅ / ⚠️ / ❌ /
-   N/A cells and any provider-specific caveat in the Notes column.
-   Keep the row order alphabetical within "remote providers", with
-   Ollama (and any future local runtime) at the bottom.
+4. **Tool calling** — verify that `build_chat_model(provider, model).bind_tools(tools)`
+   works end-to-end.  If the provider is a local runtime with per-model
+   variance (like Ollama), add a `config/<provider>_tool_calling.yaml`
+   matrix (use `config/ollama_tool_calling.yaml` as the template) and
+   wire a graceful fallback in `backend/llm_adapter.py` (see the
+   `_ollama_tool_call_fallback` pattern introduced in Z.6.5).  Remote
+   providers that have uniform tool-calling support across their model
+   catalogue do not need a per-model YAML.
+5. **Update this matrix** — add a row with the correct ✅ / ⚠️ / ❌ /
+   N/A cells across **all three signal columns** (Balance API,
+   Rate-Limit Headers, Tool Calling) and any provider-specific caveat
+   in the Notes column.  Keep the row order alphabetical within "remote
+   providers", with Ollama (and any future local runtime) at the bottom.
 
 ---
 
 ## 5. Related files
 
-- `backend/agents/llm.py` — rate-limit header parse + SharedKV mirror.
+- `backend/agents/llm.py` — rate-limit header parse + SharedKV mirror;
+  `_PROVIDER_RATELIMIT_HEADERS` is the canonical header-name registry.
+- `backend/llm_adapter.py` — `build_chat_model()` + `tool_call()`;
+  all nine providers route through the common `bind_tools` step here;
+  `_ollama_tool_call_fallback()` implements the Z.6.5 graceful-fallback
+  path (daemon error / unsupported model / parse failure).
 - `backend/llm_balance.py` — `SUPPORTED_BALANCE_PROVIDERS` registry +
   per-provider fetcher coroutines.
 - `backend/llm_balance_refresher.py` — lifespan-scoped 10-min refresh
@@ -154,10 +220,20 @@ adapter registration):
   endpoints (single + batch).
 - `config/llm_pricing.yaml` — authoritative per-model USD/1M-token
   pricing consumed by `backend/pricing.py::get_pricing`.
+- `config/ollama_tool_calling.yaml` — per-model tool-calling
+  compatibility matrix for the Ollama provider: `full` / `partial` /
+  `none` support levels + minimum Ollama daemon version (Z.6.4).
 - `backend/tests/test_ratelimit_capture.py` — the four-provider
-  end-to-end contract.
+  end-to-end rate-limit header contract.
 - `backend/tests/test_llm_balance.py` — DeepSeek + OpenRouter balance
   fetch contract + unsupported-provider envelope.
+- `backend/tests/test_llm_adapter.py` — Ollama tool_call mock tests;
+  validates that the adapter normalises `ChatOllama.invoke` tool_calls
+  output into `AdapterToolResponse` on the same contract as remote
+  providers (Z.6.6).
+- `backend/tests/test_ollama_tool_fallback.py` — graceful-fallback
+  test suite: unsupported model degrade, daemon-unreachable, parse
+  failure; confirms no exception surfaces to callers (Z.6.7).
 
 ---
 
@@ -412,10 +488,10 @@ level.
 
 ---
 
-*Last verified 2026-04-25 against `_PROVIDER_RATELIMIT_HEADERS`,
-`SUPPORTED_BALANCE_PROVIDERS`, and
-`DEFAULT_PROVIDER_DASHBOARD_URLS` at commit-HEAD. Re-verify whenever
-a provider is added, renamed, or has its fetcher / dashboard URL
-removed — the matrix and link list are human-maintained snapshots;
-the three source-of-truth tables (two Python, one TypeScript) are
-the runtime truth.*
+*Last verified 2026-05-03 against `_PROVIDER_RATELIMIT_HEADERS`,
+`SUPPORTED_BALANCE_PROVIDERS`, `DEFAULT_PROVIDER_DASHBOARD_URLS`, and
+`config/ollama_tool_calling.yaml` at commit-HEAD (Z.6.8). Re-verify
+whenever a provider is added, renamed, or has its fetcher / dashboard
+URL / tool-calling support changed — the matrix and link list are
+human-maintained snapshots; the four source-of-truth artefacts (two
+Python, one TypeScript, one YAML) are the runtime truth.*
