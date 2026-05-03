@@ -39,6 +39,13 @@ SC.7.5 (OWASP mitigation shared lib):
     fetch destination blocklist). Framework agnostic; callers own HTTP
     client redirect/final-IP controls and error mapping.
 
+SC.9.1 (per-jurisdiction privacy notice generator):
+  - privacy_notice_templates — pure GDPR privacy notice template for
+    generated apps. Emits legal-review-ready markdown plus
+    machine-readable sections / rights metadata for access,
+    portability, erasure, and objection. CCPA/PIPL/LGPD/PIPEDA,
+    SDK inference, and DSAR workflow scaffolding are separate rows.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
@@ -295,6 +302,7 @@ from . import oauth_revoke  # noqa: F401
 from . import oauth_vendors  # noqa: F401
 from . import path_ssrf  # noqa: F401
 from . import password_generator  # noqa: F401
+from . import privacy_notice_templates  # noqa: F401
 from . import token_vault  # noqa: F401
 from . import turnstile_form_verifier  # noqa: F401
 
@@ -319,6 +327,7 @@ __all__ = [
     "oauth_vendors",
     "path_ssrf",
     "password_generator",
+    "privacy_notice_templates",
     "redact",
     "token_vault",
     "turnstile_form_verifier",
