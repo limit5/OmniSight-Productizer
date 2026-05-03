@@ -174,7 +174,16 @@ def test_identity_subset_only_contains_integer_pk_tables():
     ``'global'``) must NEVER be in TABLES_WITH_IDENTITY_ID, because
     the sequence-reset logic assumes INTEGER PK and would crash on
     a TEXT id."""
-    non_integer_pks = {"bootstrap_state", "user_mfa", "adaptive_budget_state"}
+    non_integer_pks = {
+        "adaptive_budget_state",
+        "bootstrap_state",
+        "decryption_audits",
+        "kek_rotations",
+        "kms_keys",
+        "spend_thresholds",
+        "tenant_deks",
+        "user_mfa",
+    }
     for t in non_integer_pks:
         assert t in mig.TABLES_IN_ORDER, (
             f"sanity: {t} should be covered by migrator"

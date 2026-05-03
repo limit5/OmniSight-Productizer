@@ -1655,6 +1655,112 @@ CREATE INDEX IF NOT EXISTS idx_compliance_evidence_bundles_tenant_status
     ON compliance_evidence_bundles(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_compliance_evidence_bundles_requested_by
     ON compliance_evidence_bundles(requested_by);
+
+-- KS.1.10 (alembic 0106): envelope-encryption persistence tables.
+-- These mirror backend.security.{kms_adapters,envelope,
+-- decryption_audit,spend_anomaly} without wiring runtime callers here.
+-- Plaintext DEKs and plaintext customer secrets never enter these
+-- tables; ``tenant_deks`` stores wrapped DEKs only.
+CREATE TABLE IF NOT EXISTS kms_keys (
+    key_id        TEXT PRIMARY KEY,
+    provider      TEXT NOT NULL
+                       CHECK (provider IN ('aws-kms','gcp-kms',
+                                           'local-fernet','vault-transit')),
+    key_version   TEXT NOT NULL DEFAULT '1',
+    purpose       TEXT NOT NULL DEFAULT 'tenant-secret',
+    status        TEXT NOT NULL DEFAULT 'active'
+                       CHECK (status IN ('active','disabled','destroyed',
+                                         'retiring')),
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at    REAL NOT NULL,
+    rotated_at    REAL
+);
+CREATE INDEX IF NOT EXISTS idx_kms_keys_provider_status
+    ON kms_keys(provider, status);
+
+CREATE TABLE IF NOT EXISTS tenant_deks (
+    dek_id                  TEXT PRIMARY KEY,
+    tenant_id               TEXT NOT NULL
+                                  REFERENCES tenants(id) ON DELETE CASCADE,
+    key_id                  TEXT NOT NULL
+                                  REFERENCES kms_keys(key_id) ON DELETE RESTRICT,
+    provider                TEXT NOT NULL
+                                  CHECK (provider IN ('aws-kms','gcp-kms',
+                                                      'local-fernet',
+                                                      'vault-transit')),
+    wrapped_dek_b64         TEXT NOT NULL,
+    key_version             TEXT,
+    wrap_algorithm          TEXT NOT NULL DEFAULT '',
+    encryption_context_json TEXT NOT NULL DEFAULT '{}',
+    purpose                 TEXT NOT NULL DEFAULT 'tenant-secret',
+    schema_version          INTEGER NOT NULL DEFAULT 1,
+    created_at              REAL NOT NULL,
+    rotated_at              REAL,
+    revoked_at              REAL
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_deks_tenant_purpose
+    ON tenant_deks(tenant_id, purpose);
+CREATE INDEX IF NOT EXISTS idx_tenant_deks_key_version
+    ON tenant_deks(key_id, key_version);
+
+CREATE TABLE IF NOT EXISTS decryption_audits (
+    audit_id      TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL
+                         REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id       TEXT NOT NULL,
+    key_id        TEXT NOT NULL,
+    dek_id        TEXT,
+    request_id    TEXT NOT NULL,
+    purpose       TEXT NOT NULL DEFAULT '',
+    provider      TEXT NOT NULL
+                         CHECK (provider IN ('aws-kms','gcp-kms',
+                                             'local-fernet','vault-transit')),
+    audit_log_id  INTEGER,
+    decrypted_at  REAL NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_decryption_audits_tenant_time
+    ON decryption_audits(tenant_id, decrypted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_decryption_audits_request
+    ON decryption_audits(request_id);
+CREATE INDEX IF NOT EXISTS idx_decryption_audits_key_time
+    ON decryption_audits(key_id, decrypted_at DESC);
+
+CREATE TABLE IF NOT EXISTS spend_thresholds (
+    tenant_id           TEXT PRIMARY KEY
+                              REFERENCES tenants(id) ON DELETE CASCADE,
+    token_rate_limit    INTEGER NOT NULL CHECK (token_rate_limit > 0),
+    window_seconds      REAL NOT NULL CHECK (window_seconds > 0),
+    throttle_seconds    REAL NOT NULL CHECK (throttle_seconds > 0),
+    enabled             INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    alert_channels_json TEXT NOT NULL DEFAULT '[]',
+    created_at          REAL NOT NULL,
+    updated_at          REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kek_rotations (
+    rotation_id      TEXT PRIMARY KEY,
+    key_id           TEXT NOT NULL
+                           REFERENCES kms_keys(key_id) ON DELETE RESTRICT,
+    provider         TEXT NOT NULL
+                           CHECK (provider IN ('aws-kms','gcp-kms',
+                                               'local-fernet','vault-transit')),
+    from_key_version TEXT NOT NULL,
+    to_key_version   TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'scheduled'
+                           CHECK (status IN ('cancelled','completed','failed',
+                                             'running','scheduled')),
+    scheduled_for    REAL,
+    started_at       REAL,
+    completed_at     REAL,
+    rotated_rows     INTEGER NOT NULL DEFAULT 0,
+    error            TEXT NOT NULL DEFAULT '',
+    metadata_json    TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_kek_rotations_status_schedule
+    ON kek_rotations(status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_kek_rotations_key
+    ON kek_rotations(key_id, started_at DESC);
 """
 
 

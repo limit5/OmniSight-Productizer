@@ -234,6 +234,19 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # NOT in TABLES_WITH_IDENTITY_ID. Empty until SC.11.2-SC.11.4 start
     # collecting SOC 2 / ISO 27001 evidence and writing export rows.
     "compliance_evidence_bundles",
+    # KS.1.10 (alembic 0106): envelope-encryption persistence tables.
+    # ``kms_keys`` has no FK and must replay before ``tenant_deks`` /
+    # ``kek_rotations`` because both reference it. ``tenant_deks``,
+    # ``decryption_audits``, and ``spend_thresholds`` FK to tenants;
+    # decryption rows also carry user_id as audit metadata but do not
+    # enforce a users FK so deleted-user forensics remain readable.
+    # All five PKs are TEXT or tenant_id TEXT, so none belong in
+    # TABLES_WITH_IDENTITY_ID.
+    "kms_keys",
+    "tenant_deks",
+    "decryption_audits",
+    "spend_thresholds",
+    "kek_rotations",
     "sessions",
     "github_installations",
     # Project runs (alembic 0006).
