@@ -6126,7 +6126,7 @@ BP.E GraphRAG / Neo4j
 
 - [x] FX.1.1 `backend/print_pipeline.py:527-528` 把 `_ipp_jobs` + `_ipp_job_counter` 搬到 SharedKV / DB；job ID 走 atomic counter
 - [x] FX.1.2 `backend/print_pipeline.py:1077` 把 `_queue_jobs` 搬到 DB row（per-tenant queue_jobs table）
-- [ ] FX.1.3 `backend/telemetry_backend.py:571` 把 `_TELEMETRY_CERTS` 搬到 SharedKV 或 DB
+- [x] FX.1.3 `backend/telemetry_backend.py:571` 把 `_TELEMETRY_CERTS` 搬到 SharedKV 或 DB
 - [ ] FX.1.4 `backend/agents/runner_handlers.py:133` `subprocess.run(shell=True)` 改 `shlex.split` + `shell=False`；input validation
 - [ ] FX.1.5 `backend/skill_registry.py:243` validate_cmd 改 allowlist + `shell=False`
 - [ ] FX.1.6 `backend/skill_registry.py:320` install hook 同上

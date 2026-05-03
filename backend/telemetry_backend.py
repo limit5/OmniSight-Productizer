@@ -48,6 +48,8 @@ from typing import Any, Optional
 
 import yaml
 
+from backend.shared_state import SharedKV
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -568,19 +570,58 @@ def reload_telemetry_config_for_tests() -> None:
 
 # -- Cert registry --
 
-_TELEMETRY_CERTS: list[TelemetryCertArtifact] = []
+# FX.1.3 — cert registry moved off module-level list to SharedKV so
+# multi-worker uvicorn (``--workers N``) can no longer present disjoint
+# cert subsets to GET /certs depending on which worker handled the prior
+# POST /certs/generate. SOP Step 1 cross-worker rubric answer #2
+# (coordinated via Redis when ``OMNISIGHT_REDIS_URL`` is set; SharedKV's
+# in-memory fallback shares its namespace dict across all instances
+# within a single process via class-level ``_mem``, so the unit-test +
+# single-worker dev path still observes a single source of truth without
+# per-instance drift). Companion to FX.1.1 / FX.1.2 in print_pipeline.
+#
+# Field key = cert_id (already unique per soc_id × cert_type — see
+# ``generate_cert_artifacts`` which mints ``telemetry-tls-<soc>`` and
+# ``telemetry-signing-<soc>``); this gives us natural idempotency on
+# repeat POST /certs/generate for the same SoC, mirroring the previous
+# list-append behaviour's "last write wins per cert_id" semantics that
+# downstream code already implicitly assumed (``get_telemetry_certs``
+# returns them as a flat list with no de-dup).
+#
+# Field value = JSON of ``TelemetryCertArtifact.to_dict()`` — same shape
+# the public API has always returned, so router + tests are unchanged.
+# Insertion order is preserved by Redis HGETALL on Redis 6+ and by the
+# ``dict`` ordering guarantee in CPython 3.7+ for the in-memory fallback,
+# which keeps the old list-append iteration order observable.
+_TELEMETRY_CERTS_NS = "telemetry_certs"
+
+
+def _telemetry_certs_kv() -> SharedKV:
+    return SharedKV(_TELEMETRY_CERTS_NS)
 
 
 def register_telemetry_cert(cert: TelemetryCertArtifact) -> None:
-    _TELEMETRY_CERTS.append(cert)
+    _telemetry_certs_kv().set(cert.cert_id, json.dumps(cert.to_dict()))
 
 
 def get_telemetry_certs() -> list[dict[str, Any]]:
-    return [c.to_dict() for c in _TELEMETRY_CERTS]
+    out: list[dict[str, Any]] = []
+    for raw in _telemetry_certs_kv().get_all().values():
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
 
 
 def clear_telemetry_certs() -> None:
-    _TELEMETRY_CERTS.clear()
+    kv = _telemetry_certs_kv()
+    for field_name in list(kv.get_all().keys()):
+        kv.delete(field_name)
 
 
 # -- In-memory stores (for simulation) --
