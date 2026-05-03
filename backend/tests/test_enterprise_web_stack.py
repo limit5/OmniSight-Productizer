@@ -6,10 +6,12 @@ Import/Export, Workflow engine, Test recipes, Artifacts, Gate validation.
 
 from __future__ import annotations
 
+import io
 import json
 import time
 
 import pytest
+from openpyxl import load_workbook
 
 from backend import enterprise_web_stack as ews
 
@@ -420,12 +422,18 @@ class TestReports:
         assert "data" in parsed
         assert len(parsed["data"]) == 1
 
-    def test_export_xlsx_stub(self):
+    def test_export_xlsx(self):
         data = [{"name": "A", "value": 10}]
         report = ews.generate_report("tabular", data)
         export = ews.export_report(report, "xlsx")
         assert export.format == "xlsx"
         assert export.row_count == 1
+        workbook = load_workbook(io.BytesIO(export.content))
+        worksheet = workbook.active
+        assert worksheet.title == "Report"
+        assert [cell.value for cell in worksheet[1]] == ["name", "value"]
+        assert [cell.value for cell in worksheet[2]] == ["A", "10"]
+        assert export.content.startswith(b"PK")
 
     def test_export_pdf_stub(self):
         data = [{"name": "A"}]

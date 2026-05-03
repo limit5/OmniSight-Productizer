@@ -77,6 +77,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from openpyxl import Workbook
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -952,7 +953,7 @@ def export_report(report: ReportOutput, fmt: str) -> ExportOutput:
     elif fmt == ExportFormat.json.value:
         return _export_json(report)
     elif fmt == ExportFormat.xlsx.value:
-        return _export_xlsx_stub(report)
+        return _export_xlsx(report)
     elif fmt == ExportFormat.pdf.value:
         return _export_pdf_stub(report)
     raise ValueError(f"Unknown export format: {fmt}")
@@ -993,12 +994,22 @@ def _export_json(report: ReportOutput) -> ExportOutput:
     )
 
 
-def _export_xlsx_stub(report: ReportOutput) -> ExportOutput:
-    header = "\t".join(report.columns) + "\n"
-    rows = ""
-    for row in report.data:
-        rows += "\t".join(str(row.get(c, "")) for c in report.columns) + "\n"
-    content = (header + rows).encode("utf-8")
+def _export_xlsx(report: ReportOutput) -> ExportOutput:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Report"
+
+    if report.columns:
+        worksheet.append(report.columns)
+        for row in report.data:
+            worksheet.append([
+                "" if row.get(column) is None else str(row.get(column, ""))
+                for column in report.columns
+            ])
+
+    output = io.BytesIO()
+    workbook.save(output)
+    content = output.getvalue()
     return ExportOutput(
         format=ExportFormat.xlsx.value,
         content=content,

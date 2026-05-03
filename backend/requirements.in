@@ -47,6 +47,8 @@ anthropic==0.97.0
 # --- Reports (Jinja + PDF; weasyprint is non-Windows only) -------------
 jinja2==3.1.6
 markdown==3.10.2
+# FX.4.9: enterprise_web_stack report exports use openpyxl for real XLSX bytes.
+openpyxl==3.1.5
 weasyprint==68.1; sys_platform != 'win32'
 
 # --- Persistence / migrations -----------------------------------------
