@@ -494,31 +494,47 @@ class SensorFusionCertArtifact:
 
 # -- Config loading (cached) --
 
-_SF_CACHE: dict | None = None
+_SF_CACHE: tuple[float | None, dict] | None = None
 
 
 def _load_sensor_fusion_config() -> dict:
+    """Load sensor fusion profiles with file-mtime cache invalidation.
+
+    Module-global state audit: ``_SF_CACHE`` is per-worker process state,
+    keyed by ``configs/sensor_fusion_profiles.yaml`` mtime. Every worker
+    derives the same profile table from the same shared YAML and reloads
+    when another worker/operator updates the file.
+    """
     global _SF_CACHE
-    if _SF_CACHE is None:
-        try:
-            _SF_CACHE = yaml.safe_load(
+    try:
+        config_mtime = _SENSOR_FUSION_PATH.stat().st_mtime
+    except OSError:
+        config_mtime = None
+    if _SF_CACHE is not None and _SF_CACHE[0] == config_mtime:
+        return _SF_CACHE[1]
+    try:
+        if config_mtime is not None:
+            parsed = yaml.safe_load(
                 _SENSOR_FUSION_PATH.read_text(encoding="utf-8")
-            )
-        except Exception as exc:
-            logger.warning(
-                "sensor_fusion_profiles.yaml load failed: %s — using empty config", exc
-            )
-            _SF_CACHE = {
-                "imu_drivers": {},
-                "gps_protocols": {},
-                "barometer_drivers": {},
-                "ekf_profiles": {},
-                "calibration_profiles": {},
-                "test_recipes": [],
-                "trajectory_fixtures": {},
-                "artifact_definitions": {},
-            }
-    return _SF_CACHE
+            ) or {}
+            _SF_CACHE = (config_mtime, parsed)
+            return parsed
+    except Exception as exc:
+        logger.warning(
+            "sensor_fusion_profiles.yaml load failed: %s — using empty config", exc
+        )
+    fallback = {
+        "imu_drivers": {},
+        "gps_protocols": {},
+        "barometer_drivers": {},
+        "ekf_profiles": {},
+        "calibration_profiles": {},
+        "test_recipes": [],
+        "trajectory_fixtures": {},
+        "artifact_definitions": {},
+    }
+    _SF_CACHE = (config_mtime, fallback)
+    return fallback
 
 
 def reload_sensor_fusion_config_for_tests() -> None:

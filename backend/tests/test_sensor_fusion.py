@@ -7,6 +7,7 @@ logging, and REST endpoint smoke tests.
 """
 
 import math
+import os
 import struct
 
 import pytest
@@ -102,6 +103,35 @@ class TestConfigLoading:
     def test_artifact_definitions_loaded(self):
         defs = list_artifact_definitions()
         assert len(defs) == 5
+
+    def test_config_cache_invalidates_on_yaml_mtime(self, monkeypatch, tmp_path):
+        from backend import sensor_fusion
+
+        profiles = tmp_path / "sensor_fusion_profiles.yaml"
+        profiles.write_text(
+            "imu_drivers:\n"
+            "  first:\n"
+            "    name: First IMU\n"
+            "    vendor: Test Vendor\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sensor_fusion, "_SENSOR_FUSION_PATH", profiles)
+        reload_sensor_fusion_config_for_tests()
+
+        first = list_imu_drivers()
+        profiles.write_text(
+            "imu_drivers:\n"
+            "  second:\n"
+            "    name: Second IMU\n"
+            "    vendor: Test Vendor\n",
+            encoding="utf-8",
+        )
+        stat = profiles.stat()
+        os.utime(profiles, (stat.st_atime + 2.0, stat.st_mtime + 2.0))
+        later = list_imu_drivers()
+
+        assert [driver.driver_id for driver in first] == ["first"]
+        assert [driver.driver_id for driver in later] == ["second"]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
