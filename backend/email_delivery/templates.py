@@ -102,6 +102,7 @@ EMAIL_TEMPLATE_IDS: tuple[str, ...] = (
     "welcome",
     "email-verification",
     "password-reset",
+    "dsar-request-received",
     "dsar-export-ready",
     "invite",
     "mfa-code",
@@ -179,6 +180,35 @@ EMAIL_TEMPLATE_ITEMS: tuple[EmailTemplateItem, ...] = (
             "reset_url",
             "expires_in",
         ),
+    ),
+    EmailTemplateItem(
+        template_id="dsar-request-received",
+        display_name="DSAR request received",
+        subject="{product_name} privacy request {request_id} received",
+        text=(
+            "Hi {user_name},\n\n"
+            "We received your {request_type} privacy request {request_id}. "
+            "The response SLA is 30 days, and the current due date is "
+            "{due_at}.\n\n"
+            "If you did not submit this request, contact {support_email}."
+        ),
+        html=(
+            "<p>Hi {user_name},</p>"
+            "<p>We received your {request_type} privacy request "
+            "{request_id}. The response SLA is 30 days, and the current "
+            "due date is {due_at}.</p>"
+            "<p>If you did not submit this request, contact "
+            "{support_email}.</p>"
+        ),
+        required_variables=(
+            "user_name",
+            "product_name",
+            "request_type",
+            "request_id",
+            "due_at",
+            "support_email",
+        ),
+        category="privacy",
     ),
     EmailTemplateItem(
         template_id="dsar-export-ready",

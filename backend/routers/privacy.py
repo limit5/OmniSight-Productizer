@@ -1,4 +1,4 @@
-"""SC.10.2-SC.10.4 -- DSAR access, erasure, and portability endpoints.
+"""SC.10.2-SC.10.5 -- DSAR access, erasure, portability, and SLA metadata.
 
 POST /privacy/access
     Return the current user's account-owned data and write a completed
@@ -10,8 +10,9 @@ POST /privacy/portability
     Return a portable JSON export for the current user's account-owned
     data and write a completed ``dsar_requests`` receipt.
 
-These routes are intentionally narrow: SC.10.5 owns email/SLA
-background work.
+SC.10.5 adds the provider-neutral email template reference and the 30-day
+SLA timer metadata. Actual provider dispatch remains owned by the email
+delivery adapters.
 """
 from __future__ import annotations
 
@@ -27,7 +28,9 @@ from backend import auth
 
 router = APIRouter(prefix="/privacy", tags=["privacy"])
 
-_DSAR_SLA_SECONDS = 30 * 24 * 60 * 60
+_DSAR_SLA_DAYS = 30
+_DSAR_SLA_SECONDS = _DSAR_SLA_DAYS * 24 * 60 * 60
+_DSAR_RECEIVED_EMAIL_TEMPLATE_ID = "dsar-request-received"
 
 
 def _request_id() -> str:
@@ -40,6 +43,52 @@ def _erasure_request_id() -> str:
 
 def _portability_request_id() -> str:
     return f"dsar-portability-{uuid.uuid4().hex}"
+
+
+def _dsar_sla_timer(requested_at: float) -> dict:
+    """Return the SC.10.5 30-day SLA timer for a DSAR request.
+
+    Module-global state audit: immutable SLA constants are identical in
+    every worker; request-specific timer values are derived only from the
+    explicit ``requested_at`` argument.
+    """
+    due_at = requested_at + _DSAR_SLA_SECONDS
+    return {
+        "days": _DSAR_SLA_DAYS,
+        "seconds": _DSAR_SLA_SECONDS,
+        "due_at": due_at,
+    }
+
+
+def _dsar_payload_source(source: str) -> dict:
+    return {
+        "source": source,
+        "email_template_id": _DSAR_RECEIVED_EMAIL_TEMPLATE_ID,
+        "sla_days": _DSAR_SLA_DAYS,
+    }
+
+
+def _request_envelope(
+    request_id: str,
+    request_type: str,
+    status: str,
+    requested_at: float,
+    completed_at: float | None,
+    sla: dict,
+) -> dict:
+    return {
+        "id": request_id,
+        "type": request_type,
+        "status": status,
+        "requested_at": requested_at,
+        "due_at": sla["due_at"],
+        "completed_at": completed_at,
+        "sla": {
+            "days": sla["days"],
+            "seconds": sla["seconds"],
+        },
+        "email_template_id": _DSAR_RECEIVED_EMAIL_TEMPLATE_ID,
+    }
 
 
 def _row(row) -> dict:
@@ -264,7 +313,7 @@ async def create_access_request(
     request_id = _request_id()
     requested_at = time.time()
     completed_at = requested_at
-    due_at = requested_at + _DSAR_SLA_SECONDS
+    sla = _dsar_sla_timer(requested_at)
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             data = await _fetch_all_user_data(conn, user)
@@ -279,21 +328,21 @@ async def create_access_request(
                 user.tenant_id,
                 user.id,
                 requested_at,
-                due_at,
+                sla["due_at"],
                 completed_at,
-                json.dumps({"source": "privacy_access_endpoint"}),
+                json.dumps(_dsar_payload_source("privacy_access_endpoint")),
                 json.dumps(result),
             )
 
     return {
-        "request": {
-            "id": request_id,
-            "type": "access",
-            "status": "completed",
-            "requested_at": requested_at,
-            "due_at": due_at,
-            "completed_at": completed_at,
-        },
+        "request": _request_envelope(
+            request_id,
+            "access",
+            "completed",
+            requested_at,
+            completed_at,
+            sla,
+        ),
         "data": data,
         "result": result,
     }
@@ -308,7 +357,7 @@ async def create_erasure_request(
     request_id = _erasure_request_id()
     requested_at = time.time()
     completed_at = requested_at
-    due_at = requested_at + _DSAR_SLA_SECONDS
+    sla = _dsar_sla_timer(requested_at)
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             result = {"erased_counts": await _erase_user_data(conn, user)}
@@ -322,21 +371,21 @@ async def create_erasure_request(
                 user.tenant_id,
                 user.id,
                 requested_at,
-                due_at,
+                sla["due_at"],
                 completed_at,
-                json.dumps({"source": "privacy_erasure_endpoint"}),
+                json.dumps(_dsar_payload_source("privacy_erasure_endpoint")),
                 json.dumps(result),
             )
 
     return {
-        "request": {
-            "id": request_id,
-            "type": "erasure",
-            "status": "completed",
-            "requested_at": requested_at,
-            "due_at": due_at,
-            "completed_at": completed_at,
-        },
+        "request": _request_envelope(
+            request_id,
+            "erasure",
+            "completed",
+            requested_at,
+            completed_at,
+            sla,
+        ),
         "result": result,
     }
 
@@ -350,7 +399,7 @@ async def create_portability_request(
     request_id = _portability_request_id()
     requested_at = time.time()
     completed_at = requested_at
-    due_at = requested_at + _DSAR_SLA_SECONDS
+    sla = _dsar_sla_timer(requested_at)
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             data = await _fetch_all_user_data(conn, user)
@@ -370,21 +419,21 @@ async def create_portability_request(
                 user.tenant_id,
                 user.id,
                 requested_at,
-                due_at,
+                sla["due_at"],
                 completed_at,
-                json.dumps({"source": "privacy_portability_endpoint"}),
+                json.dumps(_dsar_payload_source("privacy_portability_endpoint")),
                 json.dumps(result),
             )
 
     return {
-        "request": {
-            "id": request_id,
-            "type": "portability",
-            "status": "completed",
-            "requested_at": requested_at,
-            "due_at": due_at,
-            "completed_at": completed_at,
-        },
+        "request": _request_envelope(
+            request_id,
+            "portability",
+            "completed",
+            requested_at,
+            completed_at,
+            sla,
+        ),
         "export": export,
         "result": result,
     }

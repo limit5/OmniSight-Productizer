@@ -1,4 +1,4 @@
-"""SC.10.2-SC.10.4 -- DSAR access, erasure, and portability contracts."""
+"""SC.10.2-SC.10.5 -- DSAR endpoint and SLA metadata contracts."""
 from __future__ import annotations
 
 import json
@@ -138,6 +138,11 @@ async def test_access_handler_smoke_uses_pool_and_redacted_shape(monkeypatch):
     )
 
     assert body["request"]["status"] == "completed"
+    assert body["request"]["sla"] == {
+        "days": 30,
+        "seconds": 30 * 24 * 60 * 60,
+    }
+    assert body["request"]["email_template_id"] == "dsar-request-received"
     assert body["data"]["profile"]["id"] == "u-dsar-alice"
     assert body["data"]["preferences"][0]["value"] == "en-US"
     assert body["data"]["oauth_connections"][0]["provider"] == "github"
@@ -145,6 +150,11 @@ async def test_access_handler_smoke_uses_pool_and_redacted_shape(monkeypatch):
     assert body["result"]["category_counts"]["preferences"] == 1
     assert conn.insert_args is not None
     assert conn.insert_args[2] == "u-dsar-alice"
+    assert json.loads(conn.insert_args[6]) == {
+        "source": "privacy_access_endpoint",
+        "email_template_id": "dsar-request-received",
+        "sla_days": 30,
+    }
 
     encoded = json.dumps(body, sort_keys=True)
     assert "password_hash" not in encoded
@@ -164,6 +174,7 @@ async def test_erasure_handler_smoke_uses_pool_and_records_counts(monkeypatch):
 
     assert body["request"]["type"] == "erasure"
     assert body["request"]["status"] == "completed"
+    assert body["request"]["email_template_id"] == "dsar-request-received"
     assert body["result"]["erased_counts"]["profile"] == 1
     assert body["result"]["erased_counts"]["oauth_connections"] == 1
     assert conn.insert_args is not None
@@ -188,6 +199,7 @@ async def test_portability_handler_smoke_returns_json_export(monkeypatch):
 
     assert body["request"]["type"] == "portability"
     assert body["request"]["status"] == "completed"
+    assert body["request"]["email_template_id"] == "dsar-request-received"
     assert body["export"]["format"] == "json"
     assert body["export"]["schema"] == "omnisight.dsar.portability.v1"
     assert body["export"]["subject"] == {
@@ -391,6 +403,11 @@ async def test_access_endpoint_returns_only_current_user_data(
         30 * 24 * 60 * 60,
         rel=1e-6,
     )
+    assert body["request"]["sla"] == {
+        "days": 30,
+        "seconds": 30 * 24 * 60 * 60,
+    }
+    assert body["request"]["email_template_id"] == "dsar-request-received"
 
     data = body["data"]
     assert data["profile"]["id"] == "u-dsar-alice"
@@ -437,6 +454,8 @@ async def test_access_endpoint_records_completed_dsar_request(
     assert row["status"] == "completed"
     assert row["error"] == ""
     assert row["payload_json"]["source"] == "privacy_access_endpoint"
+    assert row["payload_json"]["email_template_id"] == "dsar-request-received"
+    assert row["payload_json"]["sla_days"] == 30
     assert row["result_json"]["category_counts"]["profile"] == 1
     assert row["result_json"]["category_counts"]["preferences"] == 1
 
@@ -457,6 +476,11 @@ async def test_erasure_endpoint_redacts_user_data_and_records_receipt(
         30 * 24 * 60 * 60,
         rel=1e-6,
     )
+    assert body["request"]["sla"] == {
+        "days": 30,
+        "seconds": 30 * 24 * 60 * 60,
+    }
+    assert body["request"]["email_template_id"] == "dsar-request-received"
 
     counts = body["result"]["erased_counts"]
     assert counts["profile"] == 1
@@ -555,6 +579,8 @@ async def test_erasure_endpoint_redacts_user_data_and_records_receipt(
     assert receipt["request_type"] == "erasure"
     assert receipt["status"] == "completed"
     assert receipt["payload_json"]["source"] == "privacy_erasure_endpoint"
+    assert receipt["payload_json"]["email_template_id"] == "dsar-request-received"
+    assert receipt["payload_json"]["sla_days"] == 30
     assert receipt["result_json"]["erased_counts"]["profile"] == 1
 
 
@@ -574,6 +600,11 @@ async def test_portability_endpoint_returns_json_export_and_records_receipt(
         30 * 24 * 60 * 60,
         rel=1e-6,
     )
+    assert body["request"]["sla"] == {
+        "days": 30,
+        "seconds": 30 * 24 * 60 * 60,
+    }
+    assert body["request"]["email_template_id"] == "dsar-request-received"
 
     export = body["export"]
     assert export["format"] == "json"
@@ -616,6 +647,8 @@ async def test_portability_endpoint_returns_json_export_and_records_receipt(
     assert receipt["request_type"] == "portability"
     assert receipt["status"] == "completed"
     assert receipt["payload_json"]["source"] == "privacy_portability_endpoint"
+    assert receipt["payload_json"]["email_template_id"] == "dsar-request-received"
+    assert receipt["payload_json"]["sla_days"] == 30
     assert receipt["result_json"]["format"] == "json"
     assert receipt["result_json"]["schema"] == "omnisight.dsar.portability.v1"
     assert receipt["result_json"]["category_counts"]["profile"] == 1
