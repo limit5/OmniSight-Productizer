@@ -516,7 +516,7 @@ def test_total_re_export_count_pinned_at_275() -> None:
     # vite_self_fix symbols → 288. Each row's drift guard is
     # updated in lockstep so a future row that adds a new symbol
     # fails every guard until each one acknowledges the new total.
-    assert len(web_pkg.__all__) == 313
+    assert len(web_pkg.__all__) == 330
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

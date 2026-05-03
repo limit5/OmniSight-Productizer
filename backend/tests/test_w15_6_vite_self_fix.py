@@ -700,4 +700,4 @@ def test_total_re_export_count_pinned_at_288() -> None:
     in lock-step so a future row that adds a new symbol fails every
     guard until each one acknowledges the new total."""
 
-    assert len(web_pkg.__all__) == 313
+    assert len(web_pkg.__all__) == 330

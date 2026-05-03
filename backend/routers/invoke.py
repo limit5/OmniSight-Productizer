@@ -31,6 +31,11 @@ from backend.web.image_attachment import (
     ImageAttachmentRef,
     detect_image_attachments_in_text,
 )
+from backend.web.build_intent import (
+    BUILD_INTENT_TRIGGER_PREFIX,
+    BuildIntentRef,
+    detect_build_intents_in_text,
+)
 
 router = APIRouter(prefix="/invoke", tags=["invoke"])
 
@@ -1085,6 +1090,16 @@ def _detect_coaching_triggers(
     Detection / hashing / dedup is owned by
     :mod:`backend.web.image_attachment` so the W16.2 contract tests
     can pin the helper without round-tripping through the planner.
+
+    W16.3 — also emits one ``build_intent:<hash16>`` trigger when an
+    action keyword (蓋 / 做 / 建 / make / build / create) and a subject
+    keyword (網站 / landing / page / app + CJK variants) co-occur in
+    ``command``. The coach surfaces the four scaffold-kind options
+    (landing / site / page / app) pre-rendered with a
+    ``/scaffold <kind> --auto-preview`` slash command that auto-
+    triggers the W14 live-preview sandbox after scaffolding. Detection
+    / hashing / classification is owned by
+    :mod:`backend.web.build_intent`.
     """
     triggers: list[str] = []
     if (not state["agents"] and not state["tasks"]
@@ -1119,6 +1134,21 @@ def _detect_coaching_triggers(
     # does not silence a subsequent fresh paste.
     for ref in detect_image_attachments_in_text(command):
         key = ref.trigger_key()
+        if key in suppress:
+            continue
+        triggers.append(key)
+
+    # W16.3 — build-intent coaching trigger. Scans the live INVOKE
+    # ``command`` for action+subject co-occurrence (蓋/做/建/make/build/
+    # create + 網站/landing/page/app). Same scoping rationale as
+    # W16.1/W16.2 — only the freshly typed command is scanned so a
+    # mention of "build" / "page" buried in an old task description
+    # does not re-coach forever. Per-intent suppress is honoured via
+    # the ``build_intent:<hash16>`` key shape (hash covers verb +
+    # subject + classified scaffold_kind so a re-paste of the same
+    # intent stays suppressed but a different intent re-coaches).
+    for intent_ref in detect_build_intents_in_text(command):
+        key = intent_ref.trigger_key()
         if key in suppress:
             continue
         triggers.append(key)
@@ -1228,11 +1258,17 @@ def _plan_actions(
             # inside ``_detect_coaching_triggers`` — no caching layer
             # needed.
             image_refs = detect_image_attachments_in_text(command)
+            # W16.3 — same pure-function pattern as W16.2: re-detect
+            # build intents so the renderers can recover the
+            # (verb, subject, scaffold_kind) triple from the trigger
+            # key's hash without a caching layer.
+            build_intent_refs = detect_build_intents_in_text(command)
             actions.append({
                 "type": "coach",
                 "triggers": triggers,
                 "pending_count": pending_count,
                 "image_refs": image_refs,
+                "build_intent_refs": build_intent_refs,
                 "agent_count": len(state["agents"]),
                 "task_count": len(state["tasks"]),
             })
@@ -1557,12 +1593,14 @@ Triggers tell you what to coach about. Translate them to operator-facing languag
 - missing_toolchain:<entry-id>: the operator's INVOKE command (and/or the backlog tasks they queued) will need a vendor toolchain that this machine has not installed yet. The context block hands you the human display name (e.g. "Android SDK Platform Tools", "ESP-IDF v5", "Node.js LTS 20", "Python toolchain (uv)", "ARM GNU Toolchain 13"), a one-line hint about what the toolchain is for, and a one-click install URL of shape `/settings/platforms?entry=<entry-id>`. Surface each missing toolchain as its own bullet, render the install URL as a markdown link with a bilingual action label like `[安裝 / Install](url)` so a CJK or English operator both see a clear CTA, and ALWAYS use the display name — never paste the slug verbatim.
 - url_in_message:<url>: the operator pasted a URL into the chat. Ask which of the W11/W12/W13 capabilities they want to apply: clone the site (`/clone <url>`, builds a working scaffold from the live page), extract its brand style (`/brand <url>`, captures colours / fonts / spacing tokens for reuse), capture multi-breakpoint screenshots (`/screenshot <url>`, 320 / 768 / 1280 / 1920 PNGs into `.omnisight/`), or skip if the URL is just FYI. Render each option as its own bullet with a bilingual label and a backtick-wrapped slash command (e.g. `(a) 克隆網站 / Clone: /clone https://…`). Show the full URL in each command — operators copy-paste the bullet into the chat. Multiple URLs in one message → one option-set per URL, grouped under a "URL #N: <url>" sub-heading.
 - image_in_message:<hash16>: the operator attached / pasted a screenshot into the chat (data URL or `[image: <name>]` upload marker). The context block hands you the operator-facing label (filename for markers; ``<mime>:<hash16>`` for data URLs). Ask which vision-LLM-driven branch they want: (a) component — extract one isolated component from the shot (`/clone-image <hash16> --as=component`), (b) 整頁 / full page — scaffold an entire page from the design (`/clone-image <hash16> --as=page`), or (c) brand reference — extract colours / fonts / spacing tokens for reuse (`/brand-image <hash16>`). Render each option as its own bullet with a bilingual label. Multiple images in one message → one option-set per image, grouped under an "Image #N: <label>" sub-heading.
+- build_intent:<hash16>: the operator typed a freeform "蓋/做/建/make/build/create" + "網站/landing/page/app" intent without pasting a URL or attaching a screenshot. The context block hands you the detected verb + subject + the classifier's primary scaffold-kind suggestion. Offer the four scaffold options pre-rendered with the `--auto-preview` flag so W14 live-preview auto-launches: (a) Landing page — `/scaffold landing --auto-preview`, (b) 多頁網站 / Multi-page site — `/scaffold site --auto-preview`, (c) 單頁 / Single page — `/scaffold page --auto-preview`, (d) Web app — `/scaffold app --auto-preview`. Mark the classifier's primary suggestion with a ★ recommendation marker so the operator's eye lands on it first; still render the alternatives so a misclassification has a one-tap recovery.
 
 Trigger priority when several co-fire:
 - `missing_toolchain` always leads. The operator already declared intent by typing the command, so install-first-then-run is the productive path; SKIP the `empty_workspace` framing entirely whenever any `missing_toolchain` is present.
 - If `stale_pep` co-fires with `missing_toolchain`, mention pending PEPs as ONE short reminder line at the end (not a full sub-list) — the toolchain install is the headline.
 - `url_in_message` lands BETWEEN `missing_toolchain` and `empty_workspace`: when a URL is present and no toolchain is missing, lead with the URL menu (the operator declared intent — pick a capability for the URL); SKIP the `empty_workspace` framing in that case for the same reason missing-toolchain skips it. If both `missing_toolchain` AND `url_in_message` co-fire, the toolchain install still leads (cannot run any of the W11/W12/W13 capabilities without it) — append the URL menu as a secondary section after the install link.
 - `image_in_message` mirrors `url_in_message` priority: leads when only it + `empty_workspace` co-fire (operator pasted intent); appended as a secondary section when `missing_toolchain` co-fires (install first then run vision pass). When BOTH `url_in_message` and `image_in_message` co-fire (operator pasted both a link and a screenshot in the same message), render the URL menu first and the image menu second under a separator line — operators usually paste the URL as the canonical source and the screenshot as supporting reference, not the other way round.
+- `build_intent` is the *lowest* of the intent-bearing triggers: leads only when no `url_in_message` / `image_in_message` co-fires, since URL + screenshot carry richer context (an actual reference) than freeform phrasing. When `url_in_message` or `image_in_message` co-fires, render the concrete-reference menu first and the scaffold menu second under a separator line as the from-scratch alternative. When `missing_toolchain` co-fires, the install link still leads and the scaffold menu trails (cannot scaffold without nodejs-lts-20).
 - When only `empty_workspace` and `stale_pep` co-fire, lead with the PEP queue (it's already-started work) and offer the empty-workspace prompts as the secondary nudge.
 
 Match the operator's recent message language (CJK or English; default CJK if no recent operator messages). Do not apologise, do not over-explain, do not repeat what's already in the toast — your job is meta-narration + action prompts. Keep total length under 6 lines."""
@@ -1573,6 +1611,7 @@ def _build_coach_context(
     pending_count: int,
     *,
     image_refs: list[ImageAttachmentRef] | None = None,
+    build_intent_refs: list[BuildIntentRef] | None = None,
 ) -> str:
     """LLM context block. Each trigger is translated to a one-line
     operator-facing description so the LLM never has to guess what the
@@ -1600,6 +1639,15 @@ def _build_coach_context(
     attachment label / kind / hash plumbing lives in
     :mod:`backend.web.image_attachment`; this function only renders
     the LLM-facing context line.
+
+    W16.3 — ``build_intent:<hash16>`` triggers carry the detected verb
+    + subject + classified scaffold_kind plus the four scaffold-kind
+    options pre-rendered as ``/scaffold <kind> --auto-preview`` slash
+    commands. The classifier pre-selects the *primary* kind (first
+    matching subject keyword wins) so the LLM can lead with that
+    suggestion; the alternatives let the operator override if the
+    classifier guessed wrong. Classification + hashing is owned by
+    :mod:`backend.web.build_intent`.
     """
     parts = ["Triggers detected by the planner:"]
     for t in triggers:
@@ -1643,6 +1691,22 @@ def _build_coach_context(
                 f"{hash16} --as=page`), brand-reference extract "
                 f"(`/brand-image {hash16}`)."
             )
+        elif t.startswith(BUILD_INTENT_TRIGGER_PREFIX):
+            hash16 = t.split(":", 1)[1]
+            verb, subject, primary_kind = _resolve_build_intent_for_trigger(
+                hash16, build_intent_refs,
+            )
+            parts.append(
+                f"- build_intent: operator said **'{verb} {subject}'** "
+                f"(hash={hash16}) — primary scaffold suggestion "
+                f"`{primary_kind}`. Auto-preview slash commands: "
+                f"landing (`/scaffold landing --auto-preview`), "
+                f"site (`/scaffold site --auto-preview`), "
+                f"page (`/scaffold page --auto-preview`), "
+                f"app (`/scaffold app --auto-preview`). Each command "
+                f"runs the W11.9 framework adapter then auto-launches "
+                f"the W14 live-preview sandbox."
+            )
         else:
             parts.append(f"- {t}")
     return "\n".join(parts)
@@ -1669,6 +1733,30 @@ def _resolve_image_label_for_trigger(
             if ref.image_hash == hash16:
                 return ref.display_label, ref.kind
     return "image", "image_attachment"
+
+
+def _resolve_build_intent_for_trigger(
+    hash16: str,
+    build_intent_refs: list[BuildIntentRef] | None,
+) -> tuple[str, str, str]:
+    """Look up (verb, subject, scaffold_kind) for *hash16* in
+    *build_intent_refs*.
+
+    W16.3 sibling of :func:`_resolve_image_label_for_trigger`.  Falls
+    back to generic placeholders + ``BUILD_INTENT_KIND_PAGE`` (the
+    safest scaffold for unknown intent) when refs is missing /
+    mismatched, mirroring the W16.2 graceful-degradation pattern.
+    """
+    if build_intent_refs:
+        for ref in build_intent_refs:
+            if ref.intent_hash == hash16:
+                return ref.verb, ref.subject, ref.scaffold_kind
+    # Lazy import — avoids a top-level circular when the build_intent
+    # module ever needs to import from invoke (it does not today, but
+    # the symmetry with _resolve_image_label_for_trigger keeps the
+    # coupling minimal).
+    from backend.web.build_intent import BUILD_INTENT_KIND_PAGE
+    return "build", "page", BUILD_INTENT_KIND_PAGE
 
 
 # BS.10.2: human-friendly display labels per ``_TOOLCHAIN_KEYWORD_MAP``
@@ -1870,6 +1958,108 @@ def _render_image_action_bullets(hash16: str) -> list[str]:
     ]
 
 
+def _build_intent_in_message_hashes(triggers: list[str]) -> list[str]:
+    """Extract intent hash16 values from ``build_intent:<hash16>`` triggers.
+
+    W16.3 sibling of :func:`_image_in_message_hashes`. Order is
+    preserved so the rendered coach card walks the intents in the
+    same order the operator typed — matches the determinism contract
+    that the W16.3 tests assert on.
+    """
+    out: list[str] = []
+    for t in triggers:
+        if not t.startswith(BUILD_INTENT_TRIGGER_PREFIX):
+            continue
+        hash16 = t.split(":", 1)[1]
+        if hash16:
+            out.append(hash16)
+    return out
+
+
+def _render_build_intent_options_block(
+    intent_hashes: list[str],
+    build_intent_refs: list[BuildIntentRef] | None,
+    *,
+    single_intent_intro: bool,
+) -> list[str]:
+    """W16.3 — render the four-option scaffold menu (landing / site /
+    page / app + ``--auto-preview`` flag) for one or many detected
+    build intents.
+
+    Mirrors :func:`_render_image_options_block`.  ``build_intent_refs``
+    threads the (verb, subject, scaffold_kind) triple through the
+    action dict so the coach card can echo the operator's phrasing
+    back at them ("看起來你想 *蓋一個 landing page*…") and the
+    classifier's primary suggestion can lead the bullet list — but the
+    full set of alternatives is always offered so a misclassification
+    does not leave the operator stuck.
+    """
+    lines: list[str] = []
+    if single_intent_intro and len(intent_hashes) == 1:
+        h = intent_hashes[0]
+        verb, subject, primary_kind = _resolve_build_intent_for_trigger(
+            h, build_intent_refs,
+        )
+        lines.append(
+            f"看起來你想 **{verb}{subject}** — 我幫你開個 scaffold + "
+            "live preview，秒看到結果："
+        )
+        lines.extend(_render_build_intent_action_bullets(primary_kind))
+        return lines
+    if len(intent_hashes) > 1:
+        lines.append(
+            f"看到你提到 {len(intent_hashes)} 個想做的東西 — "
+            "每個都可以選一個 scaffold："
+        )
+    for idx, h in enumerate(intent_hashes, start=1):
+        verb, subject, primary_kind = _resolve_build_intent_for_trigger(
+            h, build_intent_refs,
+        )
+        prefix = f"Intent #{idx}: " if len(intent_hashes) > 1 else ""
+        lines.append(f"**{prefix}{verb}{subject}** (建議 `{primary_kind}`)")
+        lines.extend(_render_build_intent_action_bullets(primary_kind))
+    return lines
+
+
+def _render_build_intent_action_bullets(primary_kind: str) -> list[str]:
+    """The four canonical W16.3 scaffold options.
+
+    The classifier's *primary* suggestion is rendered with a 「★ 推薦」
+    marker so the operator's eye lands on it first; the alternatives
+    are listed below so a misclassified intent has a one-tap
+    recovery.  Bilingual labels mirror the W16.1 URL / W16.2 image
+    bullet shape so a CJK or English operator both see a clear CTA.
+
+    Slash commands all carry ``--auto-preview`` so the W14 live-
+    preview sandbox auto-launches after the scaffold completes — that
+    is the "auto-trigger W14" half of the W16.3 row spec.
+    """
+    # Lazy import keeps the bullet helper testable without dragging in
+    # the build_intent module (the calling planner has already imported
+    # it by the time this function runs in production).
+    from backend.web.build_intent import (
+        BUILD_INTENT_KINDS,
+        BUILD_INTENT_AUTO_PREVIEW_FLAG,
+        BUILD_INTENT_SCAFFOLD_COMMAND,
+    )
+    labels = {
+        "landing": "(a) Landing page / 落地頁",
+        "site": "(b) 多頁網站 / Multi-page site",
+        "page": "(c) 單頁 / Single page",
+        "app": "(d) Web app / 網頁應用",
+    }
+    out: list[str] = []
+    for kind in BUILD_INTENT_KINDS:
+        marker = " ★ 推薦" if kind == primary_kind else ""
+        cmd = (
+            f"{BUILD_INTENT_SCAFFOLD_COMMAND} {kind} "
+            f"{BUILD_INTENT_AUTO_PREVIEW_FLAG}"
+        )
+        label = labels.get(kind, kind)
+        out.append(f"- **{label}**{marker}: `{cmd}`")
+    return out
+
+
 def _toolchain_install_url(slug: str) -> str:
     """BS.10.4 deeplink — `Settings → Platforms` with the ``entry`` query
     param pre-filled. Slug is locked to ``_TOOLCHAIN_KEYWORD_MAP`` keys
@@ -1882,6 +2072,7 @@ def _build_templated_coach_message(
     triggers: list[str], pending_count: int,
     *,
     image_refs: list[ImageAttachmentRef] | None = None,
+    build_intent_refs: list[BuildIntentRef] | None = None,
 ) -> str:
     """LLM-unavailable fallback. CJK-default to match the operator base
     with bilingual action labels (``安裝 / Install``) so an English-only
@@ -1916,12 +2107,24 @@ def _build_templated_coach_message(
     triggers co-fire (URL is the canonical source, screenshot is
     supporting reference); appended after the toolchain install link
     when ``missing_toolchain`` co-fires.
+
+    W16.3 — recognises ``build_intent:<hash16>`` triggers and emits
+    the four-option scaffold menu (landing / site / page / app) with
+    the classifier's primary suggestion marked ``★ 推薦`` and every
+    option pre-rendered with the ``--auto-preview`` flag so the W14
+    live-preview sandbox auto-launches after the scaffold runs.
+    Priority: build_intent leads only when no intent-bearing trigger
+    (URL / image) co-fires, since URL / image carry richer context
+    (an actual reference) than the operator's freeform phrasing.
+    Appended after the toolchain install link when missing_toolchain
+    co-fires (cannot scaffold without nodejs-lts-20).
     """
     has_empty = "empty_workspace" in triggers
     has_pep = "stale_pep" in triggers
     missing_slugs = _missing_toolchain_slugs(triggers)
     urls = _url_in_message_urls(triggers)
     image_hashes = _image_in_message_hashes(triggers)
+    build_intent_hashes = _build_intent_in_message_hashes(triggers)
     lines: list[str] = []
     if missing_slugs:
         # Banner phrasing differs slightly for single vs many — a 1-of-1
@@ -1971,6 +2174,18 @@ def _build_templated_coach_message(
             lines.extend(_render_image_options_block(
                 image_hashes, image_refs, single_image_intro=False,
             ))
+        if build_intent_hashes:
+            # W16.3 — scaffold menu trails as a tertiary section after
+            # the toolchain install (and after URL / image menus if they
+            # co-fire), same install-first rationale: cannot scaffold
+            # without nodejs-lts-20.
+            lines.append(
+                "裝完 toolchain 之後，你說想做的也可以直接 scaffold："
+            )
+            lines.extend(_render_build_intent_options_block(
+                build_intent_hashes, build_intent_refs,
+                single_intent_intro=False,
+            ))
         if has_pep:
             lines.append(
                 f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
@@ -1990,6 +2205,20 @@ def _build_templated_coach_message(
             lines.extend(_render_image_options_block(
                 image_hashes, image_refs, single_image_intro=False,
             ))
+        if build_intent_hashes:
+            # W16.3 — when URL + build_intent co-fire (operator pasted a
+            # URL and *also* said "make me a website"), the URL menu
+            # leads (concrete reference beats freeform phrasing) and
+            # the scaffold menu trails as a fallback path for when the
+            # operator decides not to clone the URL after all.
+            lines.append("")
+            lines.append(
+                "或者你想從零 scaffold 一個 — 也可以直接走："
+            )
+            lines.extend(_render_build_intent_options_block(
+                build_intent_hashes, build_intent_refs,
+                single_intent_intro=False,
+            ))
         if has_pep:
             lines.append(
                 f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
@@ -2001,6 +2230,36 @@ def _build_templated_coach_message(
         # so SKIP the empty_workspace framing.
         lines.extend(_render_image_options_block(
             image_hashes, image_refs, single_image_intro=True,
+        ))
+        if build_intent_hashes:
+            # W16.3 — when image + build_intent co-fire (operator
+            # pasted a screenshot AND said "build me a landing
+            # page"), the image menu leads (concrete reference beats
+            # freeform phrasing — same rationale as URL+build_intent)
+            # and the scaffold menu trails as the from-scratch
+            # alternative.
+            lines.append("")
+            lines.append(
+                "或者你想從零 scaffold 一個 — 也可以直接走："
+            )
+            lines.extend(_render_build_intent_options_block(
+                build_intent_hashes, build_intent_refs,
+                single_intent_intro=False,
+            ))
+        if has_pep:
+            lines.append(
+                f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
+                "決定等你 APPROVE / REJECT"
+            )
+    elif build_intent_hashes:
+        # W16.3 — scaffold menu leads when only it (+ optional
+        # ``empty_workspace`` / ``stale_pep``) co-fires.  Rationale
+        # mirrors the URL / image priority: an operator typing "蓋一個
+        # landing page" has declared intent, so SKIP the
+        # ``empty_workspace`` framing and let the scaffold menu drive.
+        lines.extend(_render_build_intent_options_block(
+            build_intent_hashes, build_intent_refs,
+            single_intent_intro=True,
         ))
         if has_pep:
             lines.append(
@@ -2064,8 +2323,11 @@ async def _generate_coach_message(action: dict) -> str:
     triggers = list(action.get("triggers") or [])
     pending = int(action.get("pending_count") or 0)
     image_refs = action.get("image_refs") or None
+    build_intent_refs = action.get("build_intent_refs") or None
     fallback = _build_templated_coach_message(
-        triggers, pending, image_refs=image_refs,
+        triggers, pending,
+        image_refs=image_refs,
+        build_intent_refs=build_intent_refs,
     )
     try:
         from backend.agents.nodes import _get_llm
@@ -2078,7 +2340,9 @@ async def _generate_coach_message(action: dict) -> str:
             content=INJECTION_GUARD_PRELUDE + "\n\n" + _COACH_SYSTEM_PROMPT,
         )
         ctx = HumanMessage(content=_build_coach_context(
-            triggers, pending, image_refs=image_refs,
+            triggers, pending,
+            image_refs=image_refs,
+            build_intent_refs=build_intent_refs,
         ))
         resp = llm.invoke([sys, ctx])
         out = (resp.content or "").strip() if hasattr(resp, "content") else ""  # type: ignore[union-attr]
