@@ -512,10 +512,11 @@ def test_w15_5_re_export_count_is_thirteen():
 
 def test_total_re_export_count_pinned_at_275() -> None:
     # W15.4 left __all__ at 262 symbols; W15.5 adds 13
-    # vite_config_injection symbols → 275. Each row's drift guard is
+    # vite_config_injection symbols → 275; W15.6 adds 13
+    # vite_self_fix symbols → 288. Each row's drift guard is
     # updated in lockstep so a future row that adds a new symbol
     # fails every guard until each one acknowledges the new total.
-    assert len(web_pkg.__all__) == 275
+    assert len(web_pkg.__all__) == 288
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

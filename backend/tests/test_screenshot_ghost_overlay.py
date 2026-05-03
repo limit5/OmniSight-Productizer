@@ -826,5 +826,6 @@ def test_package_total_symbol_count_pinned_at_233() -> None:
     row's drift guard re-pins at the current value. W15.2 adds 11
     vite_error_relay symbols → 244. W15.3 adds 8 vite_error_prompt
     symbols → 252. W15.4 adds 10 vite_retry_budget symbols → 262.
-    W15.5 adds 13 vite_config_injection symbols → 275."""
-    assert len(web_pkg.__all__) == 275
+    W15.5 adds 13 vite_config_injection symbols → 275.
+    W15.6 adds 13 vite_self_fix symbols → 288."""
+    assert len(web_pkg.__all__) == 288

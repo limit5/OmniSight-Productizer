@@ -764,10 +764,11 @@ def test_total_re_export_count_pinned_at_192():
     # W15.3 adds 8 vite_error_prompt symbols → 252;
     # W15.4 adds 10 vite_retry_budget symbols → 262.
     # W15.5 adds 13 vite_config_injection symbols → 275.
+    # W15.6 adds 13 vite_self_fix symbols → 288.
     # If this fails with a different count, audit whether you consciously
     # added / removed a public symbol and update the pin alongside the
     # current row's TODO entry.
-    assert len(web_pkg.__all__) == 275
+    assert len(web_pkg.__all__) == 288
 
 
 # ─── 14. Whole-spec invariants ────────────────────────────────────────
