@@ -20,6 +20,7 @@ from backend.auth_provisioning.base import (
 logger = logging.getLogger(__name__)
 
 CLERK_API_BASE = "https://api.clerk.com/v1"
+CLERK_REQUIRE_MFA_METADATA_KEY = "require_mfa"
 
 
 def _raise_for_clerk(resp: httpx.Response, provider: str = "clerk") -> None:
@@ -133,6 +134,23 @@ class ClerkAuthProvisionAdapter(AuthProvisionAdapter):
             body["private_metadata"] = private_metadata
         return await self._request("POST", "/organizations", json=body)
 
+    async def _set_require_mfa(self, organization: dict, require_mfa: bool) -> dict:
+        organization_id = organization.get("id") or ""
+        if not organization_id:
+            return organization
+        private_metadata = dict(organization.get("private_metadata") or {})
+        private_metadata[CLERK_REQUIRE_MFA_METADATA_KEY] = require_mfa
+        data = await self._request(
+            "PATCH",
+            f"/organizations/{organization_id}",
+            json={"private_metadata": private_metadata},
+        )
+        if data:
+            return data
+        updated = dict(organization)
+        updated["private_metadata"] = private_metadata
+        return updated
+
     async def setup_application(
         self,
         *,
@@ -142,16 +160,21 @@ class ClerkAuthProvisionAdapter(AuthProvisionAdapter):
         allowed_origins: tuple[str, ...] = (),
         public_metadata: Optional[dict[str, Any]] = None,
         private_metadata: Optional[dict[str, Any]] = None,
+        require_mfa: Optional[bool] = None,
         **kwargs: Any,
     ) -> AuthProviderSetupResult:
         existing = await self._find_organization(slug)
         created = False
         if existing:
             organization = existing
+            if require_mfa is not None:
+                organization = await self._set_require_mfa(organization, require_mfa)
         else:
             private = dict(private_metadata or {})
             private.setdefault("redirect_uris", list(redirect_uris))
             private.setdefault("allowed_origins", list(allowed_origins))
+            if require_mfa is not None:
+                private[CLERK_REQUIRE_MFA_METADATA_KEY] = require_mfa
             organization = await self._create_organization(
                 slug=slug,
                 max_allowed_memberships=max_allowed_memberships,
@@ -172,6 +195,12 @@ class ClerkAuthProvisionAdapter(AuthProvisionAdapter):
             issuer_url=self._issuer_url,
             redirect_uris=tuple(redirect_uris),
             allowed_origins=tuple(allowed_origins),
+            require_mfa=bool(
+                (organization.get("private_metadata") or {}).get(
+                    CLERK_REQUIRE_MFA_METADATA_KEY,
+                    False,
+                )
+            ),
             status="ready",
             created=created,
             raw=organization,

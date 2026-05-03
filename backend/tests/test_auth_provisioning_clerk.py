@@ -64,6 +64,26 @@ class TestSetupApplication:
         assert b'"redirect_uris":["https://app.example.com/sso-callback"]' in body
 
     @respx.mock
+    async def test_creates_organization_with_require_mfa_metadata_when_enabled(self):
+        respx.get(f"{C}/organizations").mock(return_value=_ok({"data": []}))
+        route = respx.post(f"{C}/organizations").mock(
+            return_value=_ok({
+                "id": "org_123",
+                "name": "tenant-demo",
+                "slug": "tenant-demo",
+                "private_metadata": {"require_mfa": True},
+            }, status=201),
+        )
+        result = await _mk_adapter().setup_application(
+            slug="tenant-demo",
+            require_mfa=True,
+        )
+        assert result.require_mfa is True
+        assert result.to_dict()["require_mfa"] is True
+        body = route.calls.last.request.read()
+        assert b'"private_metadata":{"redirect_uris":[],"allowed_origins":[],"require_mfa":true}' in body
+
+    @respx.mock
     async def test_reuses_existing_organization_by_slug(self):
         respx.get(f"{C}/organizations").mock(
             return_value=_ok({"data": [
@@ -75,6 +95,35 @@ class TestSetupApplication:
         assert result.created is False
         assert result.application_id == "org_123"
         assert result.status == "ready"
+
+    @respx.mock
+    async def test_reuses_existing_organization_and_updates_require_mfa_metadata(self):
+        respx.get(f"{C}/organizations").mock(
+            return_value=_ok({"data": [
+                {
+                    "id": "org_123",
+                    "name": "tenant-demo",
+                    "slug": "tenant-demo",
+                    "private_metadata": {"keep": "yes"},
+                },
+            ]}),
+        )
+        route = respx.patch(f"{C}/organizations/org_123").mock(
+            return_value=_ok({
+                "id": "org_123",
+                "name": "tenant-demo",
+                "slug": "tenant-demo",
+                "private_metadata": {"keep": "yes", "require_mfa": True},
+            }),
+        )
+        result = await _mk_adapter().setup_application(
+            slug="tenant-demo",
+            require_mfa=True,
+        )
+        assert result.created is False
+        assert result.require_mfa is True
+        body = route.calls.last.request.read()
+        assert b'"private_metadata":{"keep":"yes","require_mfa":true}' in body
 
     @respx.mock
     async def test_401_and_403_map_correctly(self):
@@ -119,3 +168,4 @@ class TestGetClientConfig:
         assert config is not None
         assert config["provider"] == "clerk"
         assert config["application_id"] == "org_123"
+        assert config["require_mfa"] is False

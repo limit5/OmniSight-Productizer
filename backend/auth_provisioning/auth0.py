@@ -20,6 +20,8 @@ from backend.auth_provisioning.base import (
 
 logger = logging.getLogger(__name__)
 
+AUTH0_REQUIRE_MFA_METADATA_KEY = "require_mfa"
+
 
 def _raise_for_auth0(resp: httpx.Response, provider: str = "auth0") -> None:
     if resp.status_code < 400:
@@ -120,6 +122,7 @@ class Auth0AuthProvisionAdapter(AuthProvisionAdapter):
         allowed_logout_urls: tuple[str, ...],
         allowed_origins: tuple[str, ...],
         grant_types: tuple[str, ...],
+        require_mfa: Optional[bool],
     ) -> dict:
         body = {
             "name": self._application_name,
@@ -130,8 +133,29 @@ class Auth0AuthProvisionAdapter(AuthProvisionAdapter):
             "oidc_conformant": True,
             "grant_types": list(grant_types),
         }
+        if require_mfa is not None:
+            body["client_metadata"] = {
+                AUTH0_REQUIRE_MFA_METADATA_KEY: str(require_mfa).lower(),
+            }
         data = await self._request("POST", "/clients", json=body)
         return data if isinstance(data, dict) else {}
+
+    async def _set_require_mfa(self, client: dict, require_mfa: bool) -> dict:
+        client_id = client.get("client_id") or ""
+        if not client_id:
+            return client
+        metadata = dict(client.get("client_metadata") or {})
+        metadata[AUTH0_REQUIRE_MFA_METADATA_KEY] = str(require_mfa).lower()
+        data = await self._request(
+            "PATCH",
+            f"/clients/{client_id}",
+            json={"client_metadata": metadata},
+        )
+        if isinstance(data, dict) and data:
+            return data
+        updated = dict(client)
+        updated["client_metadata"] = metadata
+        return updated
 
     async def setup_application(
         self,
@@ -141,18 +165,22 @@ class Auth0AuthProvisionAdapter(AuthProvisionAdapter):
         allowed_origins: tuple[str, ...] = (),
         grant_types: tuple[str, ...] = ("authorization_code", "refresh_token"),
         scopes: tuple[str, ...] = DEFAULT_OIDC_SCOPES,
+        require_mfa: Optional[bool] = None,
         **kwargs: Any,
     ) -> AuthProviderSetupResult:
         existing = await self._find_client()
         created = False
         if existing:
             client = existing
+            if require_mfa is not None:
+                client = await self._set_require_mfa(client, require_mfa)
         else:
             client = await self._create_client(
                 redirect_uris=redirect_uris,
                 allowed_logout_urls=allowed_logout_urls,
                 allowed_origins=allowed_origins,
                 grant_types=grant_types,
+                require_mfa=require_mfa,
             )
             created = True
         logger.info(
@@ -169,6 +197,12 @@ class Auth0AuthProvisionAdapter(AuthProvisionAdapter):
             redirect_uris=tuple(client.get("callbacks") or redirect_uris),
             allowed_origins=tuple(client.get("web_origins") or allowed_origins),
             scopes=tuple(scopes),
+            require_mfa=(
+                str((client.get("client_metadata") or {}).get(
+                    AUTH0_REQUIRE_MFA_METADATA_KEY,
+                    "false",
+                )).lower() == "true"
+            ),
             status=client.get("app_type") or self._app_type,
             created=created,
             raw=client,
