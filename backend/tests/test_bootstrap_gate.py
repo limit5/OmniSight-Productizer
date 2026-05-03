@@ -142,6 +142,33 @@ async def test_is_bootstrap_finalized_fails_open_on_probe_error(monkeypatch):
     assert await bootstrap.is_bootstrap_finalized() is True
 
 
+@pytest.mark.asyncio
+async def test_is_bootstrap_finalized_invalidates_sticky_green_on_marker_change(
+    monkeypatch, tmp_path,
+):
+    """A reset in another worker must break this worker's sticky-green cache."""
+
+    bootstrap._reset_for_tests(tmp_path / "marker.json")
+
+    async def _red():
+        return bootstrap.BootstrapStatus(
+            admin_password_default=True,
+            llm_provider_configured=False,
+            cf_tunnel_configured=False,
+            smoke_passed=False,
+        )
+
+    monkeypatch.setattr(bootstrap, "get_bootstrap_status", _red)
+    bootstrap._write_marker({"bootstrap_finalized": True})
+
+    assert await bootstrap.is_bootstrap_finalized() is True
+    assert bootstrap._gate_cache["finalized"] is True
+
+    bootstrap.clear_marker()
+
+    assert await bootstrap.is_bootstrap_finalized() is False
+
+
 # ── end-to-end middleware (using the `client` fixture) ──────────
 
 
