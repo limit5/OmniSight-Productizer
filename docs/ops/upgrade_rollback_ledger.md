@@ -63,6 +63,22 @@ On **every bug bounty program lifecycle change** (KS.4.5):
 4. Follow `bug_bounty_program_sop.md` for HackerOne / Bugcrowd selection,
    post-GA launch gates, payout caps, scope boundaries, and triage SLA.
 
+On **every SOC 2 Type II readiness milestone** (KS.4.7):
+
+1. Store the control matrix, GRC platform comparison, auditor scorecard,
+   engagement letter, evidence index, and auditor independence
+   confirmation in the private security evidence vault; do not commit
+   auditor requests, screenshots, raw logs, customer data, secrets, or
+   platform exports.
+2. Compute a SHA-256 fingerprint for the evidence index when the
+   observation window starts, ends, or materially changes.
+3. Append one row to the "SOC 2 Readiness" table when the program is
+   planned, ready for observation, observation starts, observation ends,
+   draft report arrives, final report is issued, delayed, or rescoped.
+4. Follow `soc2_type2_readiness_checklist.md` for control mapping,
+   evidence collection, GRC platform evaluation, and independent CPA
+   firm selection.
+
 ## Upgrades
 
 | Cut-over (UTC) | Package | From → To | PR | Operator | Disposition | Notes |
@@ -111,6 +127,17 @@ researcher PII, secrets, screenshots, or customer data in this ledger.
 Use `correction -> <platform-finding-id>` in Notes to correct a prior
 row.
 
+## SOC 2 Readiness
+
+| Quarter | GRC platform | Auditor | Criteria | Observation window (UTC) | Evidence index SHA-256 | Disposition | Notes |
+|---|---|---|---|---|---|---|---|
+| _Q3 2026 target_ | _pending Vanta/Drata/Secureframe decision_ | _pending independent CPA firm_ | _Security/Availability/Confidentiality target_ | _pending_ | _pending_ | _planned_ | _KS.4.7 policy effective 2026-05-03; observation window cannot start until readiness gates pass_ |
+
+SOC 2 readiness rows are append-only. Do not store auditor requests,
+raw evidence, screenshots, customer data, secrets, or platform exports
+in this ledger. Use `correction -> <quarter/auditor/evidence-index-sha256>`
+in Notes to correct a prior row.
+
 ## Trigger vocabulary (Rollbacks)
 
 Use one of these standard strings in the Rollbacks "Trigger" column so
@@ -134,6 +161,7 @@ the quarterly review can tally by cause:
 * Runbook: [`dependency_upgrade_runbook.md`](dependency_upgrade_runbook.md)
 * Quarterly pentest SOP: [`quarterly_pentest_sop.md`](quarterly_pentest_sop.md)
 * Bug bounty SOP: [`bug_bounty_program_sop.md`](bug_bounty_program_sop.md)
+* SOC 2 Type II readiness checklist: [`soc2_type2_readiness_checklist.md`](soc2_type2_readiness_checklist.md)
 * Deploy-time gate: [`../../scripts/check_bluegreen_gate.py`](../../scripts/check_bluegreen_gate.py)
 * Auto-label workflow: [`../../.github/workflows/blue-green-gate.yml`](../../.github/workflows/blue-green-gate.yml)
 * Fallback SOP (Path C hard rollback): [`fallback_branches.md`](fallback_branches.md)
