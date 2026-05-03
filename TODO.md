@@ -2352,7 +2352,7 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
 > 借 open-lovable `monitor-vite-logs` + `report-vite-error` pattern，串既有 LangGraph error_check_node。
 
 - [x] W15.1 `omnisight-vite-plugin` 自製 plugin（Rolldown/Webpack 等價版另寫），編譯/runtime error → POST `/web-sandbox/{id}/error`
-- [ ] W15.2 `backend/web/vite_error_relay.py` 接 error → 寫進 LangGraph state.error_history
+- [x] W15.2 `backend/web/vite_error_relay.py` 接 error → 寫進 LangGraph state.error_history
 - [ ] W15.3 Error 進 system prompt 模板：「上次 build 有 error: [file:line] [message]」
 - [ ] W15.4 Auto-retry budget：同 error pattern 連 3 次失敗 → escalate operator
 - [ ] W15.5 W6/W7/W8 scaffold 自動把 plugin 加進 vite.config 模板
