@@ -35,15 +35,18 @@ Public API:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from backend.shared_state import SharedKV
 
 logger = logging.getLogger(__name__)
 
@@ -523,15 +526,65 @@ def get_ipp_job_state(state_id: str) -> IPPJobStateDef | None:
     return None
 
 
-# IPP job management (in-memory simulation)
-_ipp_jobs: dict[str, IPPJob] = {}
-_ipp_job_counter: int = 0
+# FX.1.1 — IPP job state moved off module-level dict + counter to SharedKV
+# so multi-worker uvicorn (``--workers N``) can no longer mint colliding
+# job-ids or see disjoint job snapshots. SOP Step 1 cross-worker rubric
+# answer #2 (coordinated via Redis when ``OMNISIGHT_REDIS_URL`` is set;
+# the SharedKV in-memory fallback shares its namespace dict across all
+# instances within a single process via class-level ``_mem``, so unit
+# tests and the single-worker dev path keep observing the same data
+# without per-instance drift). The id counter lives in a sibling KV
+# namespace at field ``next_id`` so that ``HINCRBY`` is atomic on Redis
+# and ``SharedKV.incr`` stays atomic in the in-memory fallback — note
+# we deliberately avoid ``SharedCounter`` here because its in-memory
+# state is per-instance (not class-level shared) which would make every
+# call mint id 1.
+_IPP_JOBS_NS = "print_pipeline_ipp_jobs"
+_IPP_JOBS_COUNTER_NS = "print_pipeline_ipp_jobs_counter"
+_IPP_JOBS_COUNTER_FIELD = "next_id"
+
+
+def _ipp_jobs_kv() -> SharedKV:
+    return SharedKV(_IPP_JOBS_NS)
+
+
+def _ipp_job_id_counter_kv() -> SharedKV:
+    return SharedKV(_IPP_JOBS_COUNTER_NS)
+
+
+def _next_ipp_job_id() -> int:
+    return _ipp_job_id_counter_kv().incr(_IPP_JOBS_COUNTER_FIELD)
+
+
+def _serialise_ipp_job(job: IPPJob) -> str:
+    return json.dumps(asdict(job))
+
+
+def _deserialise_ipp_job(raw: str) -> IPPJob | None:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return IPPJob(**data)
+    except TypeError:
+        return None
+
+
+def _save_ipp_job(job: IPPJob) -> None:
+    _ipp_jobs_kv().set(job.job_id, _serialise_ipp_job(job))
 
 
 def _reset_ipp_jobs() -> None:
-    global _ipp_jobs, _ipp_job_counter
-    _ipp_jobs = {}
-    _ipp_job_counter = 0
+    kv = _ipp_jobs_kv()
+    for field_name in list(kv.get_all().keys()):
+        kv.delete(field_name)
+    counter_kv = _ipp_job_id_counter_kv()
+    counter_kv.delete(_IPP_JOBS_COUNTER_FIELD)
 
 
 def submit_ipp_job(
@@ -540,15 +593,14 @@ def submit_ipp_job(
     attributes: dict[str, Any] | None = None,
     document_data: bytes | None = None,
 ) -> IPPJob:
-    global _ipp_job_counter
-    _ipp_job_counter += 1
-    job_id = f"ipp-job-{_ipp_job_counter}"
-    now = time.time()
-
     valid_formats = [a.values for a in list_ipp_attributes() if a.id == "document_format"]
     flat_formats = valid_formats[0] if valid_formats else []
     if flat_formats and document_format not in flat_formats:
         raise ValueError(f"Unsupported document format: {document_format}")
+
+    next_id = _next_ipp_job_id()
+    job_id = f"ipp-job-{next_id}"
+    now = time.time()
 
     pages = 1
     size = len(document_data) if document_data else 0
@@ -567,7 +619,7 @@ def submit_ipp_job(
         size_bytes=size,
         state_history=[IPPJobState.pending.value],
     )
-    _ipp_jobs[job_id] = job
+    _save_ipp_job(job)
 
     _advance_ipp_job(job)
     return job
@@ -584,18 +636,24 @@ def _advance_ipp_job(job: IPPJob) -> None:
             job.state = state
             job.state_history.append(state)
     job.completed_at = time.time()
+    _save_ipp_job(job)
 
 
 def get_ipp_job(job_id: str) -> IPPJob | None:
-    return _ipp_jobs.get(job_id)
+    return _deserialise_ipp_job(_ipp_jobs_kv().get(job_id))
 
 
 def list_ipp_jobs() -> list[IPPJob]:
-    return list(_ipp_jobs.values())
+    out: list[IPPJob] = []
+    for raw in _ipp_jobs_kv().get_all().values():
+        job = _deserialise_ipp_job(raw)
+        if job is not None:
+            out.append(job)
+    return out
 
 
 def cancel_ipp_job(job_id: str) -> IPPJob | None:
-    job = _ipp_jobs.get(job_id)
+    job = get_ipp_job(job_id)
     if job is None:
         return None
     if job.state in (IPPJobState.completed.value, IPPJobState.canceled.value, IPPJobState.aborted.value):
@@ -603,22 +661,24 @@ def cancel_ipp_job(job_id: str) -> IPPJob | None:
     job.state = IPPJobState.canceled.value
     job.state_history.append(IPPJobState.canceled.value)
     job.completed_at = time.time()
+    _save_ipp_job(job)
     return job
 
 
 def hold_ipp_job(job_id: str) -> IPPJob | None:
-    job = _ipp_jobs.get(job_id)
+    job = get_ipp_job(job_id)
     if job is None:
         return None
     if job.state != IPPJobState.pending.value:
         raise ValueError(f"Can only hold pending jobs, current: {job.state}")
     job.state = IPPJobState.pending_held.value
     job.state_history.append(IPPJobState.pending_held.value)
+    _save_ipp_job(job)
     return job
 
 
 def release_ipp_job(job_id: str) -> IPPJob | None:
-    job = _ipp_jobs.get(job_id)
+    job = get_ipp_job(job_id)
     if job is None:
         return None
     if job.state != IPPJobState.pending_held.value:
