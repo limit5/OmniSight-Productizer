@@ -12,6 +12,13 @@ SC.7.1 (OWASP mitigation shared lib):
     range).  Framework agnostic; callers map
     InputValidationError.issue to HTTP / form / job errors.
 
+SC.7.2 (OWASP mitigation shared lib):
+  - output_encoding — pure context-specific encoders for generated apps
+    (HTML text, quoted HTML attribute, JavaScript string literal,
+    JSON-in-script body, URL component). Framework agnostic; callers
+    choose the encoder matching the sink and keep template autoescape
+    enabled.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
