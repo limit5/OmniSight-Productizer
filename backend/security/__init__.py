@@ -19,6 +19,12 @@ SC.7.2 (OWASP mitigation shared lib):
     choose the encoder matching the sink and keep template autoescape
     enabled.
 
+SC.7.3 (OWASP mitigation shared lib):
+  - query_templates — pure PostgreSQL / asyncpg-style parameterized
+    CRUD query templates for generated apps.  Framework agnostic;
+    callers execute QueryTemplate.sql with QueryTemplate.params and
+    keep arbitrary SQL expressions outside this helper.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
