@@ -1281,6 +1281,8 @@ from backend.routers import preferences as _prefs_router  # J4/USER-PREFS
 app.include_router(_prefs_router.router, prefix=settings.api_prefix)
 from backend.routers import drafts as _drafts_router  # Q.6 (#300) per-user composer drafts
 app.include_router(_drafts_router.router, prefix=settings.api_prefix)
+from backend.routers import privacy as _privacy_router  # SC.10.2 DSAR access
+app.include_router(_privacy_router.router, prefix=settings.api_prefix)
 from backend.routers import api_keys as _api_keys_router  # K6/BEARER-PER-KEY
 app.include_router(_api_keys_router.router, prefix=settings.api_prefix)
 from backend.routers import storage as _storage_router  # M2/DISK-QUOTA-LRU
