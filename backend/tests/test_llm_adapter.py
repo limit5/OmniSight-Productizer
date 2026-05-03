@@ -322,6 +322,171 @@ class TestToolCall:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Z.6.6 — Ollama tool_call mock tests
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestOllamaToolCall:
+    """Z.6.6: mock ChatOllama.invoke returning dict-format tool_calls and
+    verify the adapter normalises the result into AdapterToolCall objects
+    identical to any other provider."""
+
+    # ── helpers ─────────────────────────────────────────────
+
+    @staticmethod
+    def _fake_ollama_llm(tool_calls_payload: list, text: str = "") -> MagicMock:
+        """Return a MagicMock shaped like a bound ChatOllama instance whose
+        ``invoke()`` returns an AIMessage with the given ``tool_calls``."""
+        fake_resp = AIMessage(content=text)
+        fake_resp.tool_calls = tool_calls_payload  # type: ignore[attr-defined]
+        fake_llm = MagicMock()
+        fake_llm.bind_tools.return_value = fake_llm
+        fake_llm.invoke.return_value = fake_resp
+        return fake_llm
+
+    # ── single tool call ────────────────────────────────────
+
+    def test_ollama_dict_format_single_tool_call(self):
+        """ChatOllama.invoke returning dict-format tool_calls is normalised
+        to AdapterToolCall — name / arguments / call_id all preserved."""
+        fake_llm = self._fake_ollama_llm([
+            {"name": "get_weather", "args": {"city": "Tokyo"}, "id": "tc-01"},
+        ])
+        resp = tool_call(
+            [("user", "weather?")], tools=[object()],
+            llm=fake_llm, provider="ollama",
+        )
+        assert len(resp.tool_calls) == 1
+        tc = resp.tool_calls[0]
+        assert isinstance(tc, AdapterToolCall)
+        assert tc.name == "get_weather"
+        assert tc.arguments == {"city": "Tokyo"}
+        assert tc.call_id == "tc-01"
+
+    # ── multiple tool calls ──────────────────────────────────
+
+    def test_ollama_dict_format_multiple_tool_calls(self):
+        """Multiple tool_calls in a single Ollama response are all normalised."""
+        fake_llm = self._fake_ollama_llm([
+            {"name": "read_file",  "args": {"path": "/a"},                   "id": "tc-01"},
+            {"name": "write_file", "args": {"path": "/b", "content": "x"},   "id": "tc-02"},
+        ])
+        resp = tool_call(
+            [("user", "read then write")], tools=[object()],
+            llm=fake_llm, provider="ollama",
+        )
+        assert len(resp.tool_calls) == 2
+        assert resp.tool_calls[0].name == "read_file"
+        assert resp.tool_calls[0].call_id == "tc-01"
+        assert resp.tool_calls[1].name == "write_file"
+        assert resp.tool_calls[1].arguments == {"path": "/b", "content": "x"}
+
+    # ── parity with a non-ollama provider ───────────────────
+
+    def test_ollama_normalisation_parity_with_non_ollama(self):
+        """The same dict-format tool_calls payload produces identical
+        AdapterToolCall objects whether the provider is ollama or not —
+        the normalisation path is shared (Z.6.2 adapter flow)."""
+        payload = [{"name": "list_dir", "args": {"path": "/"}, "id": "tc-99"}]
+
+        # ollama path (provider="ollama" activates _is_ollama_model)
+        resp_oll = tool_call(
+            [("user", "q")], tools=[object()],
+            llm=self._fake_ollama_llm(payload), provider="ollama",
+        )
+
+        # generic path — same dict payload, no special ollama routing
+        fake_resp = AIMessage(content="")
+        fake_resp.tool_calls = payload  # type: ignore[attr-defined]
+        generic_llm = MagicMock()
+        generic_llm.bind_tools.return_value = generic_llm
+        generic_llm.invoke.return_value = fake_resp
+        resp_gen = tool_call([("user", "q")], tools=[object()], llm=generic_llm)
+
+        assert len(resp_oll.tool_calls) == len(resp_gen.tool_calls) == 1
+        tc_oll, tc_gen = resp_oll.tool_calls[0], resp_gen.tool_calls[0]
+        assert tc_oll.name      == tc_gen.name      == "list_dir"
+        assert tc_oll.arguments == tc_gen.arguments == {"path": "/"}
+        assert tc_oll.call_id   == tc_gen.call_id   == "tc-99"
+
+    # ── mixed text + tool calls ──────────────────────────────
+
+    def test_ollama_text_preserved_alongside_tool_calls(self):
+        """When Ollama returns both text content and tool_calls, the adapter
+        preserves both in AdapterToolResponse.text and .tool_calls."""
+        fake_llm = self._fake_ollama_llm(
+            [{"name": "search", "args": {"query": "cats"}, "id": "tc-42"}],
+            text="Let me search for that.",
+        )
+        resp = tool_call(
+            [("user", "find cats")], tools=[object()],
+            llm=fake_llm, provider="ollama",
+        )
+        assert resp.text == "Let me search for that."
+        assert len(resp.tool_calls) == 1
+        assert resp.tool_calls[0].name == "search"
+        assert resp.tool_calls[0].arguments == {"query": "cats"}
+
+    # ── no tool calls (text-only response) ──────────────────
+
+    def test_ollama_no_tool_calls_returns_text_only(self):
+        """When Ollama declines to call any tool the adapter returns an
+        empty tool_calls list and the text reply intact."""
+        fake_llm = self._fake_ollama_llm([], text="I can answer directly.")
+        resp = tool_call(
+            [("user", "q")], tools=[object()],
+            llm=fake_llm, provider="ollama",
+        )
+        assert resp.text == "I can answer directly."
+        assert resp.tool_calls == []
+
+    # ── raw_message preserved ────────────────────────────────
+
+    def test_ollama_raw_message_is_preserved(self):
+        """AdapterToolResponse.raw_message must hold the original AIMessage
+        so callers can inspect provider metadata without re-parsing."""
+        fake_llm = self._fake_ollama_llm(
+            [{"name": "ping", "args": {}, "id": "tc-raw"}]
+        )
+        resp = tool_call(
+            [("user", "ping")], tools=[object()],
+            llm=fake_llm, provider="ollama",
+        )
+        assert resp.raw_message is not None
+        assert isinstance(resp.raw_message, AIMessage)
+
+    # ── factory + mock path ──────────────────────────────────
+
+    def test_ollama_via_build_chat_model_factory(self, monkeypatch):
+        """End-to-end: monkeypatch ChatOllama at module level, call
+        build_chat_model('ollama') + bind_tools, then feed the bound model
+        into tool_call() — verifies the full factory-to-normalise path."""
+        import langchain_ollama
+
+        payload = [{"name": "get_time", "args": {"tz": "UTC"}, "id": "tc-factory-01"}]
+        fake_resp = AIMessage(content="")
+        fake_resp.tool_calls = payload  # type: ignore[attr-defined]
+
+        fake_instance = MagicMock()
+        fake_instance.bind_tools.return_value = fake_instance
+        fake_instance.invoke.return_value = fake_resp
+        monkeypatch.setattr(langchain_ollama, "ChatOllama", MagicMock(return_value=fake_instance))
+
+        bound = build_chat_model("ollama", model="qwen2.5", bind_tools=[object()])
+        assert bound is fake_instance
+
+        resp = tool_call(
+            [("user", "what time?")], tools=[object()],
+            llm=bound, provider="ollama",
+        )
+        assert len(resp.tool_calls) == 1
+        tc = resp.tool_calls[0]
+        assert tc.name == "get_time"
+        assert tc.arguments == {"tz": "UTC"}
+        assert tc.call_id == "tc-factory-01"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  embed
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
