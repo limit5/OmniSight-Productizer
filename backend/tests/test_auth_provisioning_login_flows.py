@@ -204,6 +204,7 @@ class TestSelfHostedLoginFlows:
             assert "auth/nextauth.config.ts" in [f.path for f in result.files]
             assert 'checks: ["pkce", "state"]' in text
             assert "pkceCodeVerifier" in text
+            assert "nextAuthMfaCallbacks" in text
         else:
             assert "app/api/auth/auth0/route.ts" in [f.path for f in result.files]
             assert "beginAuthorization" in text
