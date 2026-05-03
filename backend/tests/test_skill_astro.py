@@ -229,6 +229,29 @@ class TestScaffoldRender:
         assert (project_dir / "src/lib/cms/sanity.ts").is_file()
         assert (project_dir / "src/pages/api/webhooks/sanity.ts").is_file()
 
+    def test_fs73_fullstack_bundle(self, project_dir):
+        opts = _default_opts(islands="react", cms="sanity", target="all", compliance=True)
+        render_project(project_dir, opts)
+        pkg = json.loads((project_dir / "package.json").read_text())
+        for dep in ("astro", "@astrojs/mdx", "@sanity/client", "@astrojs/react"):
+            assert dep in pkg["dependencies"]
+        assert (project_dir / "src/content/config.ts").is_file()
+        assert (project_dir / "src/content/blog/hello-world.mdx").is_file()
+        assert (project_dir / "src/lib/cms/sanity.ts").is_file()
+        assert (project_dir / "src/pages/api/webhooks/sanity.ts").is_file()
+        assert (project_dir / "tests/unit/cms.test.ts").is_file()
+        assert (project_dir / "vercel.json").is_file()
+        assert (project_dir / "wrangler.toml").is_file()
+        assert (project_dir / "Dockerfile").is_file()
+        content = (project_dir / "src/content/config.ts").read_text()
+        sanity = (project_dir / "src/lib/cms/sanity.ts").read_text()
+        webhook = (project_dir / "src/pages/api/webhooks/sanity.ts").read_text()
+        assert "defineCollection" in content
+        assert "collections = { blog }" in content
+        assert "createClient" in sanity
+        assert "fetchEntries" in sanity
+        assert "verifyWebhook" in webhook
+
     def test_package_json_branches_on_cms_contentful(self, project_dir):
         render_project(project_dir, _default_opts(cms="contentful"))
         pkg = json.loads((project_dir / "package.json").read_text())

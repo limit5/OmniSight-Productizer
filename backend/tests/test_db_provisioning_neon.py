@@ -1,0 +1,153 @@
+"""FS.1.1 — Neon DB provisioning adapter tests (respx-mocked)."""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+import respx
+
+from backend.db_provisioning.base import (
+    DBProvisionConflictError,
+    DBProvisionRateLimitError,
+    InvalidDBProvisionTokenError,
+    MissingDBProvisionScopeError,
+)
+from backend.db_provisioning.neon import NEON_API_BASE, NeonDBProvisionAdapter
+
+N = NEON_API_BASE
+
+
+def _ok(result=None, status=200):
+    return httpx.Response(status, json=result if result is not None else {})
+
+
+def _err(status, msg="err"):
+    return httpx.Response(status, json={"message": msg})
+
+
+def _mk_adapter(**kw):
+    return NeonDBProvisionAdapter(
+        token="napi_ABCDEF0123456789",
+        database_name="tenant-demo",
+        **kw,
+    )
+
+
+class TestProvision:
+
+    @respx.mock
+    async def test_creates_project_when_absent(self):
+        respx.get(f"{N}/projects").mock(return_value=_ok({"projects": []}))
+        route = respx.post(f"{N}/projects").mock(
+            return_value=_ok({
+                "project": {
+                    "id": "prj_123",
+                    "name": "tenant-demo",
+                    "region_id": "aws-us-east-1",
+                },
+                "connection_uris": [
+                    {"connection_uri": "postgresql://user:pass@ep.example/neondb"},
+                ],
+            }, status=201),
+        )
+        result = await _mk_adapter().provision_database(pg_version=16)
+        assert result.created is True
+        assert result.database_id == "prj_123"
+        assert result.encryption_at_rest is not None
+        assert result.encryption_at_rest.provider_tier == "free"
+        assert result.encryption_at_rest.enabled is True
+        assert result.backup_schedule is not None
+        assert result.backup_schedule.provider_tier == "free"
+        assert result.backup_schedule.enabled is True
+        assert result.backup_schedule.schedule == "continuous-wal-retention"
+        assert result.pep_hold is not None
+        assert result.pep_hold.provider_tier == "free"
+        assert result.pep_hold.required is True
+        assert result.pep_hold.cost_estimate.monthly_low_usd == 0.0
+        assert result.connection_url == "postgresql://user:pass@ep.example/neondb"
+        body = route.calls.last.request.read()
+        assert b'"name":"tenant-demo"' in body
+        assert b'"pg_version":16' in body
+
+    @respx.mock
+    async def test_reuses_existing_project_by_name(self):
+        respx.get(f"{N}/projects").mock(
+            return_value=_ok({"projects": [
+                {"id": "other", "name": "other"},
+                {"id": "prj_123", "name": "tenant-demo", "region_id": "aws-us-east-1"},
+            ]}),
+        )
+        result = await _mk_adapter().provision_database()
+        assert result.created is False
+        assert result.database_id == "prj_123"
+        assert result.connection_url is None
+
+    @respx.mock
+    async def test_provider_tier_controls_encryption_policy_metadata(self):
+        respx.get(f"{N}/projects").mock(
+            return_value=_ok({"projects": [
+                {"id": "prj_123", "name": "tenant-demo", "region_id": "aws-us-east-1"},
+            ]}),
+        )
+        result = await _mk_adapter(provider_tier="business").provision_database()
+        assert result.encryption_at_rest is not None
+        assert result.encryption_at_rest.provider_tier == "business"
+
+    @respx.mock
+    async def test_provider_tier_controls_backup_schedule_metadata(self):
+        respx.get(f"{N}/projects").mock(
+            return_value=_ok({"projects": [
+                {"id": "prj_123", "name": "tenant-demo", "region_id": "aws-us-east-1"},
+            ]}),
+        )
+        result = await _mk_adapter(provider_tier="business").provision_database()
+        assert result.backup_schedule is not None
+        assert result.backup_schedule.provider_tier == "business"
+        assert result.backup_schedule.mode == "provider-managed-pitr"
+        assert result.backup_schedule.schedule == "continuous-wal-retention"
+        assert result.pep_hold is not None
+        assert result.pep_hold.provider_tier == "business"
+        assert result.pep_hold.cost_estimate.currency == "USD"
+
+    @respx.mock
+    async def test_401_and_403_map_correctly(self):
+        respx.get(f"{N}/projects").mock(return_value=_err(401, "bad"))
+        with pytest.raises(InvalidDBProvisionTokenError):
+            await _mk_adapter().provision_database()
+        respx.get(f"{N}/projects").mock(return_value=_err(403, "scope"))
+        with pytest.raises(MissingDBProvisionScopeError):
+            await _mk_adapter().provision_database()
+
+    @respx.mock
+    async def test_409_maps_to_conflict(self):
+        respx.get(f"{N}/projects").mock(return_value=_ok({"projects": []}))
+        respx.post(f"{N}/projects").mock(return_value=_err(409, "taken"))
+        with pytest.raises(DBProvisionConflictError):
+            await _mk_adapter().provision_database()
+
+    @respx.mock
+    async def test_429_is_rate_limit(self):
+        respx.get(f"{N}/projects").mock(
+            return_value=httpx.Response(
+                429, headers={"Retry-After": "11"}, json={"message": "slow"},
+            ),
+        )
+        with pytest.raises(DBProvisionRateLimitError) as excinfo:
+            await _mk_adapter().provision_database()
+        assert excinfo.value.retry_after == 11
+
+
+class TestGetConnectionUrl:
+
+    @respx.mock
+    async def test_url_cached_after_create(self):
+        respx.get(f"{N}/projects").mock(return_value=_ok({"projects": []}))
+        respx.post(f"{N}/projects").mock(
+            return_value=_ok({
+                "project": {"id": "prj_123", "name": "tenant-demo"},
+                "connection_uri": "postgresql://user:pass@ep.example/neondb",
+            }, status=201),
+        )
+        adapter = _mk_adapter()
+        await adapter.provision_database()
+        assert adapter.get_connection_url() == "postgresql://user:pass@ep.example/neondb"

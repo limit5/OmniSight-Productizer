@@ -20,6 +20,14 @@ test_suites:
         name: "Render: nextauth + trpc on both targets"
         type: unit
         target: backend.nextjs_scaffolder.render_project
+      - id: scaffold-fs71-fullstack-bundle
+        name: "Render: Next.js + Prisma + Auth.js + tRPC + Resend bundle"
+        type: unit
+        target: backend.nextjs_scaffolder.render_project
+      - id: scaffold-fs74-todo-example-bundle
+        name: "Render: FS.7.4 todo example app bundle"
+        type: integration
+        target: backend.nextjs_scaffolder.pilot_report
       - id: scaffold-turbopack-root-pin
         name: "Rendered next.config.mjs pins turbopack.root"
         type: unit

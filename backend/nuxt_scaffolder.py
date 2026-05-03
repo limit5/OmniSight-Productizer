@@ -13,6 +13,8 @@ environment, same ``dry_run_deploy`` / ``pilot_report`` entry
 points. Where the two diverge is the set of knobs — Nuxt has:
 
 * ``pinia``        — on/off Pinia store bundle (Vue state mgmt).
+* ``drizzle``      — on/off Drizzle ORM data layer for FS.7.2.
+* ``postmark``     — on/off Postmark contact-email route for FS.7.2.
 * ``target``       — one of ``node`` / ``vercel`` / ``cloudflare`` /
                      ``bun`` / ``all``. Maps 1:1 to a Nitro preset
                      (``node-server`` / ``vercel`` / ``cloudflare-pages``
@@ -106,6 +108,16 @@ _PINIA_ONLY_FILES: frozenset[str] = frozenset({
     "tests/unit/setup.ts",
 })
 
+_DRIZZLE_ONLY_FILES: frozenset[str] = frozenset({
+    "drizzle/schema.ts",
+    "server/db.ts",
+})
+
+_POSTMARK_ONLY_FILES: frozenset[str] = frozenset({
+    "server/email.ts",
+    "server/api/contact.post.ts.j2",
+})
+
 # Target-gated build configs: path → {targets that want this file}
 _TARGET_ONLY_FILES: dict[str, frozenset[str]] = {
     "vercel.json.j2":   frozenset({"vercel", "all"}),
@@ -134,6 +146,8 @@ class ScaffoldOptions:
     project_name: str
     auth: str = "sidebase"         # sidebase | clerk | none
     pinia: bool = True
+    drizzle: bool = False
+    postmark: bool = False
     target: str = "all"            # node | vercel | cloudflare | bun | all
     compliance: bool = True
     backend_url: str = "http://localhost:8000"
@@ -192,6 +206,12 @@ def _should_skip(rel_path: str, opts: ScaffoldOptions) -> bool:
     # Pinia-gated files
     if rel_path in _PINIA_ONLY_FILES and not opts.pinia:
         return True
+    # Drizzle-gated files
+    if rel_path in _DRIZZLE_ONLY_FILES and not opts.drizzle:
+        return True
+    # Postmark-gated files
+    if rel_path in _POSTMARK_ONLY_FILES and not opts.postmark:
+        return True
     # Target-gated build configs
     for marker, wanted in _TARGET_ONLY_FILES.items():
         if rel_path == marker and opts.target not in wanted:
@@ -216,6 +236,8 @@ def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
         "project_name": opts.project_name,
         "auth": opts.auth,
         "pinia": opts.pinia,
+        "drizzle": opts.drizzle,
+        "postmark": opts.postmark,
         "target": opts.target,
         "compliance": opts.compliance,
         "backend_url": opts.backend_url,
@@ -479,6 +501,8 @@ def pilot_report(
             "project_name": options.project_name,
             "auth": options.auth,
             "pinia": options.pinia,
+            "drizzle": options.drizzle,
+            "postmark": options.postmark,
             "target": options.target,
             "compliance": options.compliance,
         },

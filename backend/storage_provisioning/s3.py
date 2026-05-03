@@ -1,0 +1,323 @@
+"""FS.3.1 -- AWS S3 object storage provisioning adapter."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import logging
+from xml.sax.saxutils import escape
+from datetime import datetime, timezone
+from typing import Any, Optional
+from urllib.parse import parse_qsl, quote, urlencode, urlparse
+
+import httpx
+
+from backend.storage_provisioning.base import (
+    InvalidStorageProvisionTokenError,
+    MissingStorageProvisionScopeError,
+    PresignedStorageUrl,
+    StorageCorsConfig,
+    StorageCorsResult,
+    StorageProvisionAdapter,
+    StorageProvisionConflictError,
+    StorageProvisionError,
+    StorageProvisionRateLimitError,
+    StorageProvisionResult,
+)
+
+logger = logging.getLogger(__name__)
+
+S3_API_BASE = "https://s3.amazonaws.com"
+S3_SERVICE = "s3"
+
+
+def _raise_for_s3(resp: httpx.Response, provider: str) -> None:
+    if resp.status_code < 400:
+        return
+    msg = resp.text or resp.reason_phrase or "unknown error"
+    if resp.status_code == 401:
+        raise InvalidStorageProvisionTokenError(msg, status=401, provider=provider)
+    if resp.status_code == 403:
+        raise MissingStorageProvisionScopeError(msg, status=403, provider=provider)
+    if resp.status_code in (409, 422):
+        raise StorageProvisionConflictError(msg, status=resp.status_code, provider=provider)
+    if resp.status_code == 429:
+        retry = int(resp.headers.get("Retry-After", "60"))
+        raise StorageProvisionRateLimitError(
+            msg,
+            retry_after=retry,
+            status=429,
+            provider=provider,
+        )
+    raise StorageProvisionError(msg, status=resp.status_code, provider=provider)
+
+
+def _signing_key(secret: str, datestamp: str, region: str, service: str) -> bytes:
+    key_date = hmac.new(f"AWS4{secret}".encode(), datestamp.encode(), hashlib.sha256).digest()
+    key_region = hmac.new(key_date, region.encode(), hashlib.sha256).digest()
+    key_service = hmac.new(key_region, service.encode(), hashlib.sha256).digest()
+    return hmac.new(key_service, b"aws4_request", hashlib.sha256).digest()
+
+
+def _canonical_query_string(query: str) -> str:
+    if not query:
+        return ""
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if query and not pairs:
+        pairs = [(query, "")]
+    return urlencode(sorted(pairs), quote_via=quote, safe="")
+
+
+class S3CompatibleStorageProvisionAdapter(StorageProvisionAdapter):
+    """Shared S3-compatible bucket provisioning implementation."""
+
+    service = S3_SERVICE
+
+    def _configure(
+        self,
+        *,
+        access_key_id: str,
+        region: str = "us-east-1",
+        endpoint_url: str = S3_API_BASE,
+        public_url: Optional[str] = None,
+        **_: Any,
+    ) -> None:
+        if not access_key_id:
+            raise ValueError(f"{type(self).__name__} requires access_key_id")
+        self._access_key_id = access_key_id
+        self._region = region
+        self._endpoint_url = endpoint_url.rstrip("/")
+        self._public_url = public_url.rstrip("/") if public_url else None
+
+    def _bucket_url(self) -> str:
+        return f"{self._endpoint_url}/{quote(self._bucket_name, safe='')}"
+
+    def _cors_url(self) -> str:
+        return f"{self._bucket_url()}?cors"
+
+    def _object_url(self, object_key: str) -> str:
+        key = object_key.lstrip("/")
+        if not key:
+            raise ValueError("object_key is required")
+        return f"{self._bucket_url()}/{quote(key, safe='/')}"
+
+    def _payload(self) -> bytes:
+        if self._region == "us-east-1":
+            return b""
+        return (
+            b"<CreateBucketConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+            b"<LocationConstraint>"
+            + self._region.encode()
+            + b"</LocationConstraint></CreateBucketConfiguration>"
+        )
+
+    def _headers(self, method: str, url: str, payload: bytes) -> dict[str, str]:
+        now = datetime.now(timezone.utc)
+        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+        datestamp = now.strftime("%Y%m%d")
+        payload_hash = hashlib.sha256(payload).hexdigest()
+        parsed = urlparse(url)
+        host = parsed.netloc
+        canonical_uri = parsed.path or "/"
+        canonical_query = _canonical_query_string(parsed.query)
+        headers = {
+            "host": host,
+            "x-amz-content-sha256": payload_hash,
+            "x-amz-date": amz_date,
+        }
+        signed_headers = ";".join(sorted(headers))
+        canonical_headers = "".join(f"{key}:{headers[key]}\n" for key in sorted(headers))
+        canonical_request = "\n".join([
+            method,
+            canonical_uri,
+            canonical_query,
+            canonical_headers,
+            signed_headers,
+            payload_hash,
+        ])
+        scope = f"{datestamp}/{self._region}/{self.service}/aws4_request"
+        string_to_sign = "\n".join([
+            "AWS4-HMAC-SHA256",
+            amz_date,
+            scope,
+            hashlib.sha256(canonical_request.encode()).hexdigest(),
+        ])
+        signature = hmac.new(
+            _signing_key(self._token, datestamp, self._region, self.service),
+            string_to_sign.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        headers["authorization"] = (
+            "AWS4-HMAC-SHA256 "
+            f"Credential={self._access_key_id}/{scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        return headers
+
+    def _presigned_query(
+        self,
+        method: str,
+        url: str,
+        expires_in: int,
+    ) -> dict[str, str]:
+        if expires_in < 1 or expires_in > 604800:
+            raise ValueError("expires_in must be between 1 and 604800 seconds")
+        now = datetime.now(timezone.utc)
+        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+        datestamp = now.strftime("%Y%m%d")
+        parsed = urlparse(url)
+        host = parsed.netloc
+        canonical_uri = parsed.path or "/"
+        scope = f"{datestamp}/{self._region}/{self.service}/aws4_request"
+        signed_headers = "host"
+        params = {
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Credential": f"{self._access_key_id}/{scope}",
+            "X-Amz-Date": amz_date,
+            "X-Amz-Expires": str(expires_in),
+            "X-Amz-SignedHeaders": signed_headers,
+        }
+        canonical_query = urlencode(sorted(params.items()), quote_via=quote, safe="")
+        canonical_request = "\n".join([
+            method,
+            canonical_uri,
+            canonical_query,
+            f"host:{host}\n",
+            signed_headers,
+            "UNSIGNED-PAYLOAD",
+        ])
+        string_to_sign = "\n".join([
+            "AWS4-HMAC-SHA256",
+            amz_date,
+            scope,
+            hashlib.sha256(canonical_request.encode()).hexdigest(),
+        ])
+        signature = hmac.new(
+            _signing_key(self._token, datestamp, self._region, self.service),
+            string_to_sign.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        params["X-Amz-Signature"] = signature
+        return params
+
+    async def _request(self, method: str, url: str, payload: bytes = b"") -> httpx.Response:
+        headers = self._headers(method, url, payload)
+        async with httpx.AsyncClient(timeout=self._timeout) as c:
+            return await c.request(method, url, headers=headers, content=payload)
+
+    def _cors_payload(self, config: StorageCorsConfig) -> bytes:
+        lines = [
+            '<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">',
+            "<CORSRule>",
+        ]
+        for origin in config.allowed_origins:
+            lines.append(f"<AllowedOrigin>{escape(origin)}</AllowedOrigin>")
+        for method in config.allowed_methods:
+            lines.append(f"<AllowedMethod>{escape(method)}</AllowedMethod>")
+        for header in config.allowed_headers:
+            lines.append(f"<AllowedHeader>{escape(header)}</AllowedHeader>")
+        for header in config.expose_headers:
+            lines.append(f"<ExposeHeader>{escape(header)}</ExposeHeader>")
+        lines.append(f"<MaxAgeSeconds>{config.max_age_seconds}</MaxAgeSeconds>")
+        lines.append("</CORSRule>")
+        lines.append("</CORSConfiguration>")
+        return "".join(lines).encode()
+
+    async def _bucket_exists(self) -> bool:
+        resp = await self._request("HEAD", self._bucket_url())
+        if resp.status_code == 404:
+            return False
+        _raise_for_s3(resp, self.provider)
+        return True
+
+    async def provision_bucket(self, **kwargs: Any) -> StorageProvisionResult:
+        created = False
+        if not await self._bucket_exists():
+            payload = self._payload()
+            resp = await self._request("PUT", self._bucket_url(), payload)
+            _raise_for_s3(resp, self.provider)
+            created = True
+        logger.info(
+            "%s.storage_provision bucket=%s created=%s fp=%s",
+            self.provider, self._bucket_name, created, self.token_fp(),
+        )
+        result = StorageProvisionResult(
+            provider=self.provider,
+            bucket_name=self._bucket_name,
+            bucket_id=self._bucket_name,
+            endpoint_url=self._endpoint_url,
+            public_url=self._public_url,
+            status="ready",
+            created=created,
+            region=self._region,
+            raw={"bucket_url": self._bucket_url()},
+        )
+        self._cached_result = result
+        await self._configure_cors_if_requested()
+        return result
+
+    async def generate_presigned_url(
+        self,
+        object_key: str,
+        *,
+        method: str = "GET",
+        expires_in: int = 3600,
+        **kwargs: Any,
+    ) -> PresignedStorageUrl:
+        del kwargs
+        verb = method.upper()
+        if verb not in ("GET", "PUT"):
+            raise ValueError("method must be GET or PUT")
+        url = self._object_url(object_key)
+        params = self._presigned_query(verb, url, expires_in)
+        signed_url = f"{url}?{urlencode(sorted(params.items()), quote_via=quote, safe='')}"
+        logger.info(
+            "%s.storage_presign bucket=%s key=%s method=%s expires_in=%s fp=%s",
+            self.provider, self._bucket_name, object_key, verb, expires_in, self.token_fp(),
+        )
+        return PresignedStorageUrl(
+            provider=self.provider,
+            bucket_name=self._bucket_name,
+            object_key=object_key.lstrip("/"),
+            url=signed_url,
+            method=verb,
+            expires_in=expires_in,
+            raw={"endpoint_url": self._endpoint_url},
+        )
+
+    async def configure_cors(
+        self,
+        config: Optional[StorageCorsConfig] = None,
+        **kwargs: Any,
+    ) -> StorageCorsResult:
+        del kwargs
+        cors = config or self._cors_config
+        if cors is None:
+            raise ValueError("cors config is required")
+        payload = self._cors_payload(cors)
+        resp = await self._request("PUT", self._cors_url(), payload)
+        _raise_for_s3(resp, self.provider)
+        logger.info(
+            "%s.storage_cors bucket=%s origins=%s fp=%s",
+            self.provider, self._bucket_name, len(cors.allowed_origins), self.token_fp(),
+        )
+        return StorageCorsResult(
+            provider=self.provider,
+            bucket_name=self._bucket_name,
+            configured=True,
+            cors=cors,
+            raw={"cors_url": self._cors_url()},
+        )
+
+
+class S3StorageProvisionAdapter(S3CompatibleStorageProvisionAdapter):
+    """AWS S3 REST API adapter (``provider='s3'``)."""
+
+    provider = "s3"
+
+
+__all__ = [
+    "S3_API_BASE",
+    "S3StorageProvisionAdapter",
+    "S3CompatibleStorageProvisionAdapter",
+]

@@ -15,6 +15,8 @@ outcome = render_project(
         project_name="acme-nuxt",
         auth="sidebase",        # or "clerk" or "none"
         pinia=True,
+        drizzle=True,
+        postmark=True,
         target="all",           # node + vercel + cloudflare + bun
         compliance=True,
     ),
@@ -43,15 +45,20 @@ acme-nuxt/
 │   └── consent/CookieBanner.vue    (compliance=on)
 ├── composables/
 │   └── useBackend.ts         (typed $fetch wrapper)
+├── drizzle/
+│   └── schema.ts             (drizzle=on)
 ├── stores/
 │   └── counter.ts            (pinia=on)
 ├── server/
 │   └── api/
 │       ├── health.get.ts
+│       ├── contact.post.ts   (postmark=on)
 │       ├── v1/
 │       │   └── [...slug].ts  (backend proxy)
 │       └── privacy/
 │           └── erasure.post.ts    (compliance=on)
+│   ├── db.ts                 (drizzle=on)
+│   └── email.ts              (postmark=on)
 ├── middleware/
 │   └── auth.global.ts        (auth=sidebase)
 ├── auth/
@@ -123,6 +130,7 @@ NITRO_PRESET=bun npm run build
 | W5 WCAG                    | axe-core scan passes on rendered project                       |
 | W5 GDPR                    | retention.md / DPA / erasure Nitro route shipped               |
 | W5 SPDX                    | allowlist.json narrows deny list                               |
+| FS.7.2 bundle              | Drizzle schema/client + sidebase auth + Postmark contact route |
 
 ## Cross-stack validation
 

@@ -39,7 +39,9 @@ from backend.deploy.base import BuildArtifact
 from backend.nuxt_scaffolder import (
     ScaffoldOptions,
     _COMPLIANCE_PATHS,
+    _DRIZZLE_ONLY_FILES,
     _PINIA_ONLY_FILES,
+    _POSTMARK_ONLY_FILES,
     _SCAFFOLDS_DIR,
     _SKILL_DIR,
     _render_context,
@@ -63,6 +65,8 @@ def _default_opts(**overrides) -> ScaffoldOptions:
         project_name="nuxt-app",
         auth="sidebase",
         pinia=True,
+        drizzle=False,
+        postmark=False,
         target="all",
         compliance=True,
     )
@@ -106,7 +110,7 @@ class TestSkillPackRegistry:
         # Pilot-aware keywords so operators can find the pack by
         # the shape of the problem ("nitro preset", "pinia state",
         # "vue 3 skill pack").
-        assert {"nuxt", "nitro", "pinia", "w7"}.issubset(kws)
+        assert {"nuxt", "nitro", "pinia", "drizzle", "postmark", "fs-7-2", "w7"}.issubset(kws)
 
     def test_validate_pack_helper(self):
         result = validate_pack()
@@ -194,6 +198,38 @@ class TestScaffoldRender:
         assert "@pinia/nuxt" in pkg["dependencies"]
         assert (project_dir / "stores" / "counter.ts").is_file()
 
+    def test_package_json_branches_on_drizzle(self, project_dir):
+        render_project(project_dir, _default_opts(drizzle=True))
+        pkg = json.loads((project_dir / "package.json").read_text())
+        assert "drizzle-orm" in pkg["dependencies"]
+        assert "postgres" in pkg["dependencies"]
+        assert "drizzle-kit" in pkg["devDependencies"]
+        assert "db:generate" in pkg["scripts"]
+        assert (project_dir / "drizzle" / "schema.ts").is_file()
+        assert (project_dir / "server" / "db.ts").is_file()
+
+    def test_package_json_branches_on_postmark(self, project_dir):
+        render_project(project_dir, _default_opts(postmark=True))
+        pkg = json.loads((project_dir / "package.json").read_text())
+        assert "postmark" in pkg["dependencies"]
+        assert (project_dir / "server" / "email.ts").is_file()
+        assert (project_dir / "server" / "api" / "contact.post.ts").is_file()
+
+    def test_fs72_fullstack_bundle(self, project_dir):
+        opts = _default_opts(auth="sidebase", pinia=True, drizzle=True, postmark=True)
+        render_project(project_dir, opts)
+        pkg = json.loads((project_dir / "package.json").read_text())
+        for dep in ("@sidebase/nuxt-auth", "drizzle-orm", "postgres", "postmark"):
+            assert dep in pkg["dependencies"]
+        assert (project_dir / "auth" / "nuxt-auth.config.ts").is_file()
+        assert (project_dir / "middleware" / "auth.global.ts").is_file()
+        assert (project_dir / "drizzle" / "schema.ts").is_file()
+        assert (project_dir / "server" / "db.ts").is_file()
+        assert (project_dir / "server" / "email.ts").is_file()
+        contact = (project_dir / "server" / "api" / "contact.post.ts").read_text()
+        assert "sendContactEmail" in contact
+        assert "getDb().insert(messages)" in contact
+
     def test_pinia_off_skips_store_files(self, project_dir):
         render_project(project_dir, _default_opts(pinia=False))
         for rel in _PINIA_ONLY_FILES:
@@ -201,6 +237,17 @@ class TestScaffoldRender:
         pkg = json.loads((project_dir / "package.json").read_text())
         assert "pinia" not in pkg["dependencies"]
         assert "@pinia/nuxt" not in pkg["dependencies"]
+
+    def test_drizzle_off_skips_drizzle_files(self, project_dir):
+        render_project(project_dir, _default_opts(drizzle=False))
+        for rel in _DRIZZLE_ONLY_FILES:
+            assert not (project_dir / rel).exists(), f"{rel} leaked through"
+
+    def test_postmark_off_skips_postmark_files(self, project_dir):
+        render_project(project_dir, _default_opts(postmark=False))
+        for rel in _POSTMARK_ONLY_FILES:
+            rendered_rel = rel.removesuffix(".j2")
+            assert not (project_dir / rendered_rel).exists(), f"{rendered_rel} leaked through"
 
     def test_auth_sidebase_skips_clerk_files(self, project_dir):
         render_project(project_dir, _default_opts(auth="sidebase"))

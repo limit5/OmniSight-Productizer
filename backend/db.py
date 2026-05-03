@@ -1542,6 +1542,59 @@ CREATE INDEX IF NOT EXISTS idx_web_sandbox_instances_idle
     ON web_sandbox_instances (status, last_request_at);
 CREATE INDEX IF NOT EXISTS idx_web_sandbox_instances_sandbox
     ON web_sandbox_instances (sandbox_id);
+
+-- FS.1.3 (alembic 0061): tenant-owned DB provisioning registry.
+-- The encrypted connection URL is stored as ciphertext only; plaintext
+-- DSNs stay in transient adapter / migration-runner memory.  Composite
+-- PK ``(tenant_id, provider)`` mirrors alembic 0061 and keeps the table
+-- within the five-column TODO surface while allowing one recorded DB per
+-- tenant/provider pair.
+CREATE TABLE IF NOT EXISTS provisioned_databases (
+    tenant_id          TEXT NOT NULL
+                            REFERENCES tenants(id) ON DELETE CASCADE,
+    provider           TEXT NOT NULL
+                            CHECK (provider IN ('neon','planetscale','supabase')),
+    connection_url_enc TEXT NOT NULL,
+    created_at         REAL NOT NULL,
+    status             TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, provider)
+);
+
+-- FS.3.2 (alembic 0062): tenant-owned object storage registry.
+-- Bucket name is not secret material; credentials stay with provider
+-- config / vault callers.  Composite PK ``(tenant_id, provider)``
+-- mirrors alembic 0062 and allows one recorded bucket per tenant/provider
+-- pair without adding a synthetic id beyond the TODO surface.
+CREATE TABLE IF NOT EXISTS provisioned_storage (
+    tenant_id   TEXT NOT NULL
+                    REFERENCES tenants(id) ON DELETE CASCADE,
+    provider    TEXT NOT NULL
+                    CHECK (provider IN ('r2','s3','supabase-storage')),
+    bucket_name TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (tenant_id, provider)
+);
+
+-- FS.8.3 (alembic 0063): tenant-owned Stripe billing registry.
+-- Stores Stripe customer/subscription identifiers and current
+-- subscription state only; API keys and webhook secrets stay in env /
+-- AS.2 vault paths.  Composite PK ``(tenant_id, provider)`` mirrors
+-- alembic 0063 and allows one billing provider record per tenant.
+CREATE TABLE IF NOT EXISTS provisioned_billing (
+    tenant_id              TEXT NOT NULL
+                                REFERENCES tenants(id) ON DELETE CASCADE,
+    provider               TEXT NOT NULL
+                                CHECK (provider IN ('stripe')),
+    stripe_customer_id     TEXT NOT NULL,
+    stripe_subscription_id TEXT NOT NULL,
+    stripe_price_id        TEXT NOT NULL DEFAULT '',
+    status                 TEXT NOT NULL,
+    current_period_end     REAL,
+    cancel_at_period_end   INTEGER NOT NULL DEFAULT 0,
+    created_at             REAL NOT NULL,
+    updated_at             REAL NOT NULL,
+    PRIMARY KEY (tenant_id, provider)
+);
 """
 
 

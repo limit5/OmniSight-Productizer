@@ -206,6 +206,19 @@ class Settings(BaseSettings):
     github_webhook_secret: str = ""     # HMAC-SHA256 signature verification
     gitlab_webhook_secret: str = ""     # X-Gitlab-Token header verification
     jira_webhook_secret: str = ""       # Bearer token verification
+    email_webhook_secret: str = ""      # FS.4.3 email bounce/complaint webhook token
+
+    # ── FS.8 Stripe / Billing ──
+    # Read per request by ``backend.stripe_billing``. There is no
+    # module-global cache; every worker derives the same values from
+    # Settings/env and sends Stripe-hosted sessions to the caller.
+    stripe_secret_key: str = ""
+    stripe_checkout_price_id: str = ""
+    stripe_checkout_success_url: str = ""
+    stripe_checkout_cancel_url: str = ""
+    stripe_billing_portal_return_url: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_api_base_url: str = "https://api.stripe.com/v1"
 
     # ── CI/CD Pipeline Triggers ──
     ci_github_actions_enabled: bool = False

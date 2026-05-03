@@ -1214,6 +1214,8 @@ from backend.routers import llm_credentials as _llm_credentials_router  # Phase 
 app.include_router(_llm_credentials_router.router, prefix=settings.api_prefix)
 from backend.routers import llm_balance as _llm_balance_router  # Z.2 (#291) provider balance endpoint
 app.include_router(_llm_balance_router.router, prefix=settings.api_prefix)
+from backend.routers import billing as _billing_router  # FS.8.1 Stripe checkout / portal scaffold
+app.include_router(_billing_router.router, prefix=settings.api_prefix)
 from backend.routers import admin_tenants as _admin_tenants_router  # Y2 (#278) tenant CRUD admin REST
 app.include_router(_admin_tenants_router.router, prefix=settings.api_prefix)
 from backend.routers import tenant_invites as _tenant_invites_router  # Y3 (#279) row 1 — invite issuance

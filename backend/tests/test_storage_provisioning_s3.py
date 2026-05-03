@@ -1,0 +1,210 @@
+"""FS.3.1 -- AWS S3 storage provisioning adapter tests (respx-mocked)."""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+import respx
+from urllib.parse import parse_qs, urlparse
+
+from backend.storage_provisioning.base import (
+    InvalidStorageProvisionTokenError,
+    MissingStorageProvisionScopeError,
+    StorageCorsConfig,
+    StorageProvisionConflictError,
+    StorageProvisionRateLimitError,
+)
+from backend.storage_provisioning.s3 import S3_API_BASE, S3StorageProvisionAdapter
+
+S = S3_API_BASE
+
+
+def _mk_adapter(**kw):
+    return S3StorageProvisionAdapter(
+        token="aws_secret_ABCDEF0123456789",
+        access_key_id="AKIA0123456789",
+        bucket_name="tenant-demo",
+        **kw,
+    )
+
+
+class TestProvision:
+
+    @respx.mock
+    async def test_creates_bucket_when_absent(self):
+        respx.head(f"{S}/tenant-demo").mock(return_value=httpx.Response(404))
+        route = respx.put(f"{S}/tenant-demo").mock(return_value=httpx.Response(200))
+
+        result = await _mk_adapter(region="us-west-2").provision_bucket()
+
+        assert result.created is True
+        assert result.bucket_id == "tenant-demo"
+        assert result.endpoint_url == S
+        assert result.region == "us-west-2"
+        assert result.status == "ready"
+        req = route.calls.last.request
+        assert req.headers["authorization"].startswith("AWS4-HMAC-SHA256")
+        assert "Credential=AKIA0123456789/" in req.headers["authorization"]
+        assert b"<LocationConstraint>us-west-2</LocationConstraint>" in req.read()
+
+    @respx.mock
+    async def test_reuses_existing_bucket(self):
+        respx.head(f"{S}/tenant-demo").mock(return_value=httpx.Response(200))
+
+        result = await _mk_adapter().provision_bucket()
+
+        assert result.created is False
+        assert result.bucket_name == "tenant-demo"
+        assert result.region == "us-east-1"
+
+    @respx.mock
+    async def test_401_and_403_map_correctly(self):
+        respx.head(f"{S}/tenant-demo").mock(return_value=httpx.Response(401, text="bad"))
+        with pytest.raises(InvalidStorageProvisionTokenError):
+            await _mk_adapter().provision_bucket()
+
+        respx.head(f"{S}/tenant-demo").mock(return_value=httpx.Response(403, text="scope"))
+        with pytest.raises(MissingStorageProvisionScopeError):
+            await _mk_adapter().provision_bucket()
+
+    @respx.mock
+    async def test_409_maps_to_conflict(self):
+        respx.head(f"{S}/tenant-demo").mock(return_value=httpx.Response(404))
+        respx.put(f"{S}/tenant-demo").mock(return_value=httpx.Response(409, text="taken"))
+
+        with pytest.raises(StorageProvisionConflictError):
+            await _mk_adapter().provision_bucket()
+
+    @respx.mock
+    async def test_429_is_rate_limit(self):
+        respx.head(f"{S}/tenant-demo").mock(
+            return_value=httpx.Response(429, headers={"Retry-After": "11"}, text="slow"),
+        )
+
+        with pytest.raises(StorageProvisionRateLimitError) as excinfo:
+            await _mk_adapter().provision_bucket()
+        assert excinfo.value.retry_after == 11
+
+
+class TestGetBucketConfig:
+
+    @respx.mock
+    async def test_config_cached_after_provision(self):
+        respx.head(f"{S}/tenant-demo").mock(return_value=httpx.Response(200))
+
+        adapter = _mk_adapter(public_url="https://cdn.example.com/tenant-demo")
+        await adapter.provision_bucket()
+
+        assert adapter.get_bucket_config() == {
+            "provider": "s3",
+            "bucket_name": "tenant-demo",
+            "bucket_id": "tenant-demo",
+            "endpoint_url": S,
+            "public_url": "https://cdn.example.com/tenant-demo",
+            "status": "ready",
+            "created": False,
+            "region": "us-east-1",
+        }
+
+
+class TestCorsConfig:
+
+    @respx.mock
+    async def test_configures_cors_after_bucket_provision_when_requested(self):
+        respx.head(f"{S}/tenant-demo").mock(return_value=httpx.Response(200))
+        route = respx.put(f"{S}/tenant-demo?cors").mock(return_value=httpx.Response(200))
+
+        result = await _mk_adapter(
+            cors_allowed_origins=["https://app.example.com"],
+        ).provision_bucket()
+
+        body = route.calls.last.request.read()
+        assert result.bucket_name == "tenant-demo"
+        assert b"<AllowedOrigin>https://app.example.com</AllowedOrigin>" in body
+        assert b"<AllowedMethod>GET</AllowedMethod>" in body
+        assert b"<AllowedMethod>PUT</AllowedMethod>" in body
+        assert b"<AllowedHeader>*</AllowedHeader>" in body
+        assert b"<ExposeHeader>ETag</ExposeHeader>" in body
+        assert b"<MaxAgeSeconds>3600</MaxAgeSeconds>" in body
+        assert "Credential=AKIA0123456789/" in route.calls.last.request.headers["authorization"]
+
+    @respx.mock
+    async def test_configure_cors_accepts_explicit_config(self):
+        route = respx.put(f"{S}/tenant-demo?cors").mock(return_value=httpx.Response(200))
+
+        result = await _mk_adapter().configure_cors(
+            StorageCorsConfig(
+                allowed_origins=["https://studio.example.com"],
+                allowed_methods=["GET"],
+                allowed_headers=["authorization"],
+                expose_headers=[],
+                max_age_seconds=60,
+            ),
+        )
+
+        body = route.calls.last.request.read()
+        assert result.configured is True
+        assert result.cors.allowed_origins == ["https://studio.example.com"]
+        assert b"<AllowedMethod>GET</AllowedMethod>" in body
+        assert b"<AllowedMethod>PUT</AllowedMethod>" not in body
+        assert b"<AllowedHeader>authorization</AllowedHeader>" in body
+        assert b"<MaxAgeSeconds>60</MaxAgeSeconds>" in body
+
+    @respx.mock
+    async def test_configure_cors_maps_provider_errors(self):
+        respx.put(f"{S}/tenant-demo?cors").mock(return_value=httpx.Response(403, text="scope"))
+
+        with pytest.raises(MissingStorageProvisionScopeError):
+            await _mk_adapter().configure_cors(
+                StorageCorsConfig(allowed_origins=["https://app.example.com"]),
+            )
+
+
+class TestPresignedUrl:
+
+    async def test_generates_get_url_without_network_call(self):
+        result = await _mk_adapter().generate_presigned_url(
+            "reports/final.pdf",
+            expires_in=900,
+        )
+
+        parsed = urlparse(result.url)
+        query = parse_qs(parsed.query)
+        assert result.provider == "s3"
+        assert result.bucket_name == "tenant-demo"
+        assert result.object_key == "reports/final.pdf"
+        assert result.method == "GET"
+        assert result.expires_in == 900
+        assert parsed.scheme == "https"
+        assert parsed.netloc == "s3.amazonaws.com"
+        assert parsed.path == "/tenant-demo/reports/final.pdf"
+        assert query["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+        assert query["X-Amz-Expires"] == ["900"]
+        assert query["X-Amz-SignedHeaders"] == ["host"]
+        assert query["X-Amz-Credential"][0].startswith("AKIA0123456789/")
+        assert query["X-Amz-Signature"][0]
+
+    async def test_generates_put_url_for_upload(self):
+        result = await _mk_adapter(region="us-west-2").generate_presigned_url(
+            "/uploads/a.txt",
+            method="PUT",
+            expires_in=60,
+        )
+
+        query = parse_qs(urlparse(result.url).query)
+        assert result.object_key == "uploads/a.txt"
+        assert result.method == "PUT"
+        assert "/us-west-2/s3/aws4_request" in query["X-Amz-Credential"][0]
+
+    @pytest.mark.parametrize("method", ["DELETE", "POST"])
+    async def test_rejects_unsupported_method(self, method):
+        with pytest.raises(ValueError, match="method must be GET or PUT"):
+            await _mk_adapter().generate_presigned_url("a.txt", method=method)
+
+    async def test_rejects_invalid_expiry(self):
+        with pytest.raises(ValueError, match="expires_in"):
+            await _mk_adapter().generate_presigned_url("a.txt", expires_in=604801)
+
+    async def test_rejects_empty_object_key(self):
+        with pytest.raises(ValueError, match="object_key is required"):
+            await _mk_adapter().generate_presigned_url("/")

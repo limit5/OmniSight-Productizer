@@ -30,7 +30,8 @@ name: skill-nuxt
 description: >
   Nuxt 4 skill pack. Generates a production-ready Vue 3 / Nitro app
   with Pinia state, Vue Router via pages directory, auto-imported
-  composables, Nitro server routes, multi-target deploy (node-server /
+  composables, Nitro server routes, optional Drizzle + Postmark
+  full-stack bundle, multi-target deploy (node-server /
   vercel / cloudflare-pages / bun) via Nitro preset selection, Vitest
   unit + Playwright E2E harness, and WCAG / GDPR / SPDX compliance
   gates enabled by default. Second web skill; re-exercises the W0-W5
@@ -77,6 +78,9 @@ keywords:
   - vue3
   - composition-api
   - pinia
+  - drizzle
+  - postmark
+  - fs-7-2
   - vue-router
   - auto-imports
   - server-routes
