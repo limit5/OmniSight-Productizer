@@ -488,6 +488,203 @@ level.
 
 ---
 
+## 10. Live integration test — coverage matrix + pass/fail SOP
+
+Z.7 (2026-04-29 audit) wired a nightly live-test suite that hits the
+three primary providers with real API keys to catch silent breaks caused
+by LangChain upgrades, provider-side schema changes, and multi-turn
+tool-use regressions.  This section documents **what is tested, what is
+not, and how to triage failures**.
+
+### 10.1 Coverage matrix
+
+The test file is `backend/tests/test_llm_adapter_live.py`.  All tests
+carry `@pytest.mark.live` and are skipped by default unless the
+corresponding CI key environment variable is set.
+
+| Scenario | Anthropic | OpenAI | Google Gemini | Notes |
+|---|---|---|---|---|
+| **basic\_invoke** — plain chat round-trip | ✅ | ✅ | ✅ | Sanity: LangChain adapter returns non-empty text |
+| **tool\_call** — single-turn `get_weather` | ✅ | ✅ | ✅ | Validates `tool_calls[0].name`, `.args`, `.call_id` across all three |
+| **multi\_turn\_tool\_loop** — tool\_use → fake `tool_result` → final text | ✅ | ✅ | ✅ | **Core gap pre-Z.7**: verifies the loop closes and the LLM reads the result |
+| **streaming\_tool\_call** — stream mode delivers `tool_calls` | ✅ | ✅ | ⚠️ | Gemini skips with `pytest.skip` when the model/SDK version does not support streaming tool calls |
+| **nested\_schema** — `book_flight` with `list[Passenger]` + enum | ✅ | ✅ | ⚠️ | Checks for silent field truncation; Gemini skips if `InvalidArgument` is raised |
+
+**Models used in CI** (cheapest tier per provider to minimise spend):
+
+| Provider | Model | Env var |
+|---|---|---|
+| Anthropic | `claude-haiku-4-5-20251001` | `ANTHROPIC_API_KEY_CI` |
+| OpenAI | `gpt-3.5-turbo` | `OPENAI_API_KEY_CI` |
+| Google Gemini | `gemini-1.5-flash` | `GOOGLE_API_KEY_CI` |
+
+**Out-of-scope for Z.7** (intentional — see Non-goals in the Z.7 TODO row):
+
+- The five OpenAI-compatible providers (xAI, Groq, DeepSeek, Together,
+  OpenRouter) share the OpenAI code path and are covered transitively
+  by the OpenAI live tests; they do not have dedicated live-test classes.
+- Ollama (self-hosted) is not included — the Z.6 test suite
+  (`test_ollama_tool_fallback.py`) covers it with mocks; a live
+  Ollama test would require a daemon in CI, which is out of scope.
+- Multi-tenant key isolation is not tested here (deferred to Y4 / Phase 5b).
+
+### 10.2 Budget guard
+
+Two enforcement layers keep a single nightly run well under USD $0.50:
+
+1. **Per-call token ceiling** — `OMNISIGHT_CI_MAX_TOKENS_PER_CALL=2000`
+   is read by `_ci_max_tokens()` and passed as `max_tokens` (Anthropic /
+   OpenAI) or `max_output_tokens` (Google) to every `build_chat_model()`
+   call.  Locally (key absent) the default fallback is 256 tokens.
+2. **Max iterations cap** — `_MAX_LIVE_TEST_ITERATIONS=3` (env
+   `OMNISIGHT_CI_MAX_ITER`) limits how many LLM round-trips any single
+   multi-turn test may make.  Each multi-turn test asserts
+   `_turns_used ≤ _MAX_LIVE_TEST_ITERATIONS` and fails immediately if
+   the model exceeds the cap rather than silently burning budget.
+
+`scripts/ci_budget_guard.py` runs in the `budget-guard` CI job after the
+tests complete.  It computes a worst-case cost estimate from the caps
+above; if the estimate exceeds `OMNISIGHT_CI_BUDGET_USD` (default $0.50),
+the job fails with a `::error::` annotation and the `gate` job blocks
+the workflow.
+
+### 10.3 Running the live tests locally
+
+```bash
+# Run all live tests against Anthropic only:
+ANTHROPIC_API_KEY_CI=sk-ant-... \
+  pytest backend/tests/test_llm_adapter_live.py -m live -k anthropic -v
+
+# Run all three providers:
+ANTHROPIC_API_KEY_CI=sk-ant-... \
+OPENAI_API_KEY_CI=sk-... \
+GOOGLE_API_KEY_CI=AI... \
+  pytest backend/tests/test_llm_adapter_live.py -m live -v
+
+# Full suite with explicit budget caps (mirrors CI):
+OMNISIGHT_CI_MAX_TOKENS_PER_CALL=2000 \
+OMNISIGHT_CI_MAX_ITER=3 \
+  pytest backend/tests/test_llm_adapter_live.py -m live -v
+```
+
+Without any of the three key environment variables set, all live tests
+are skipped automatically by the `conftest.py` collection hook — running
+`pytest` normally will not incur any API costs.
+
+### 10.4 Nightly CI schedule and result surface
+
+The workflow `.github/workflows/llm-live-tests.yml` triggers at
+**06:00 UTC (14:00 Asia/Taipei)** daily.  Four jobs run in sequence:
+
+| Job | Purpose |
+|---|---|
+| `live-tests` | Run `pytest -m live`; capture exit code + JSON report |
+| `budget-guard` | Verify worst-case spend ≤ $0.50 |
+| `report` | POST result to `SharedKV("llm_live_test_status")` + write GitHub step summary |
+| `gate` | Propagate failure to workflow result so GitHub UI marks the run red |
+| `escalate` | Fires only on failure: checks whether the *previous* completed run also failed; if so, invokes `scripts/llm_adapter_debug_bot.py` |
+
+Results are visible in three places:
+
+1. **GitHub Actions** — the workflow run page under
+   `.github/workflows/llm-live-tests.yml` shows per-job status and the
+   step summary table (provider pass/fail counts, budget headroom).
+2. **Dashboard chip** — `components/omnisight/live-test-status-chip.tsx`
+   polls `GET /api/v1/runtime/live-test-status` every 5 minutes and
+   displays "Last live-test pass: Xh ago" (green) or "Live-test FAILING"
+   (red) in the `Z provider observability` chip area of the
+   `TokenUsageStats` panel.
+3. **SharedKV** — `SharedKV("llm_live_test_status")` is readable
+   programmatically for integration with external monitoring systems.
+
+### 10.5 Pass/fail SOP — single failure
+
+When a nightly run fails for the first time:
+
+1. **Check which provider failed** — open the GitHub Actions run →
+   `live-tests` job → "Run pytest" step output.  The JSON report and
+   step summary table list per-provider pass/fail/skip counts.
+2. **Check provider status pages** — a provider-side outage is the most
+   common cause of a one-off failure.
+
+   | Provider | Status page |
+   |---|---|
+   | Anthropic | https://status.anthropic.com |
+   | OpenAI | https://status.openai.com |
+   | Google | https://status.cloud.google.com |
+
+3. **Check for a LangChain / SDK version bump** — look at `git log
+   backend/requirements.txt` or recent Dependabot PRs.  If `langchain`,
+   `langchain-anthropic`, `langchain-openai`, or `langchain-google-genai`
+   was bumped, the new version may have reshaped tool-call response
+   objects.  Re-run the failing test class locally against the same SDK
+   version.
+4. **Check CI key expiry** — sandbox keys may have zero remaining credit
+   or been rotated.  A 401 / 403 in the test output is the signal.
+   Rotate the key in GitHub Actions repo secrets
+   (Settings → Secrets and variables → Actions) and re-trigger the
+   workflow with `workflow_dispatch`.
+5. **One-off transient** — if status pages are green, SDK version is
+   unchanged, and keys are valid, the failure is likely a transient API
+   hiccup.  The next nightly run will confirm.  No action required.
+
+### 10.6 Pass/fail SOP — consecutive failures (escalation)
+
+When **two consecutive** nightly runs both fail, the `escalate` job in
+the workflow automatically:
+
+1. Invokes `scripts/llm_adapter_debug_bot.py` with the current and
+   previous run IDs.
+2. The bot downloads both runs' pytest JSON reports, classifies the
+   failure pattern (isolated single provider / all-three / new-failure /
+   no-data), and generates a structured RCA checklist.
+3. The bot opens a GitHub issue labelled `llm-live-test-failure` with
+   the checklist.  It rate-limits itself: if an open issue with that
+   label already exists, it skips the `gh issue create` call (no spam).
+
+The `consecutive_failures` counter is also incremented in
+`SharedKV("llm_live_test_status")` and surfaced in the dashboard chip
+tooltip and the `GET /api/v1/runtime/live-test-status` response body.
+
+**SOP for the on-call engineer receiving the escalation issue:**
+
+1. Read the RCA checklist in the issue body — it calls out which provider
+   failed and lists the most common root causes in priority order.
+2. Work through the checklist items (provider status, SDK version,
+   key validity, schema regression) and close the issue once the root
+   cause is identified and resolved.
+3. Trigger a manual `workflow_dispatch` run to confirm the fix before
+   the next nightly window.
+4. If the fix requires a code change, the PR description should reference
+   the auto-filed issue number so the escalation trail is complete.
+
+To **re-arm** the escalation after the issue is closed: simply close the
+existing `llm-live-test-failure` issue.  The next consecutive-failure
+streak will open a fresh one.
+
+### 10.7 Pass/fail SOP — budget guard trip
+
+If the `budget-guard` job fails:
+
+1. The `gate` job propagates the failure — the overall workflow run is
+   marked as failed in GitHub UI even if all tests passed.
+2. Open the `budget-guard` job step output.  `ci_budget_guard.py` prints
+   the estimated cost breakdown: tokens-per-call × iterations × providers
+   × tests × USD-per-1M-tokens.
+3. Common causes:
+   - `OMNISIGHT_CI_MAX_TOKENS_PER_CALL` was raised above the safe
+     threshold in the workflow env block.
+   - `OMNISIGHT_CI_MAX_ITER` was raised above 3.
+   - A new test class or test method was added without updating the
+     estimator's test-count constant in `ci_budget_guard.py`.
+   - Model pricing in `config/llm_pricing.yaml` changed and the
+     estimator's hard-coded price constants are stale.
+4. Fix whichever cause applies and re-trigger.  The estimator does **not**
+   use actual token counts from the run — it is a static worst-case
+   formula to catch configuration drift before real overspend occurs.
+
+---
+
 *Last verified 2026-05-03 against `_PROVIDER_RATELIMIT_HEADERS`,
 `SUPPORTED_BALANCE_PROVIDERS`, `DEFAULT_PROVIDER_DASHBOARD_URLS`, and
 `config/ollama_tool_calling.yaml` at commit-HEAD (Z.6.8). Re-verify
