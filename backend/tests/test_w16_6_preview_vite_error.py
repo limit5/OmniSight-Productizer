@@ -701,4 +701,4 @@ def test_w16_6_module_all_count() -> None:
 
 def test_total_re_export_count_matches_w16_6_baseline() -> None:
     # Bumped from 374 (W16.5 baseline) → 396 (W16.6 +22 preview_vite_error).
-    assert len(web_pkg.__all__) == 426
+    assert len(web_pkg.__all__) == 466

@@ -469,6 +469,34 @@ async def _prefetch_codebase_context(task_text: str, workspace_path: str | None)
     return await asyncio.to_thread(_search_sync)
 
 
+def _load_reference_attachment_context(workspace_path: str | None) -> str:
+    """W16.8 — read the workspace's persisted reference-attachment index
+    and render a markdown block to prepend onto the agent's pre-fetched
+    context.
+
+    Returns ``""`` when ``workspace_path`` is falsy / not a directory /
+    has no ``.omnisight/references/index.json`` so the caller can
+    unconditionally concatenate the result.  Any
+    :class:`ReferenceAttachmentError` is swallowed (a malformed index
+    must not break the agent invocation — operator can still proceed
+    without reference context).
+    """
+    if not workspace_path:
+        return ""
+    try:
+        from pathlib import Path
+        root = Path(workspace_path)
+        if not root.is_dir():
+            return ""
+        from backend.web.reference_attachment import (
+            render_reference_attachment_context,
+        )
+        return render_reference_attachment_context(project_root=root)
+    except Exception as exc:  # noqa: BLE001 — best-effort, never fatal
+        logger.debug("reference attachment context load failed: %s", exc)
+        return ""
+
+
 # ─── Background task execution ───
 
 
@@ -505,6 +533,16 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 handoff_ctx = f"## Pre-Fetched Codebase Context\n\n{pre_ctx}\n\n{handoff_ctx}"
         except Exception as exc:
             logger.debug("codebase prefetch failed for %s: %s", task.id, exc)
+        # W16.8 — auto-inject persisted reference attachments (W11 clone
+        # specs / W12 image LayoutSpecs / W13 screenshot manifests) into
+        # the agent's prompt context so the agent edits / scaffolds with
+        # the operator's reference material in scope.
+        try:
+            ref_ctx = _load_reference_attachment_context(workspace_path)
+            if ref_ctx:
+                handoff_ctx = f"{ref_ctx}\n{handoff_ctx}"
+        except Exception as exc:
+            logger.debug("reference attachment context inject failed for %s: %s", task.id, exc)
         # Smart model routing: select best model for this task
         from backend.model_router import select_model_for_task
         agent_type_str = agent.type.value if hasattr(agent.type, "value") else str(agent.type)

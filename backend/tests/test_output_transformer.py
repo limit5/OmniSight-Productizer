@@ -927,7 +927,7 @@ def test_package_total_re_export_count_pinned() -> None:
     W15.5 adds 13 new ones (vite_config_injection surface) → 275.
     W15.6 adds 13 new ones (vite_self_fix surface) → 288.
     Any future re-export drift is an obvious diff."""
-    assert len(web_pkg.__all__) == 426
+    assert len(web_pkg.__all__) == 466
 
 
 # ── Whole-spec invariants ──────────────────────────────────────────────

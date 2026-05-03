@@ -824,7 +824,7 @@ def test_w16_7_symbol_re_exported(symbol: str) -> None:
 def test_total_re_export_count_matches_w16_7_baseline() -> None:
     # Bumped from 396 (W16.6 baseline) → 426 (W16.7 +30
     # preview_next_steps).
-    assert len(web_pkg.__all__) == 426
+    assert len(web_pkg.__all__) == 466
 
 
 def test_w16_7_symbol_count_matches_module_all() -> None:

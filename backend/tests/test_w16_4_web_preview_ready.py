@@ -717,7 +717,7 @@ def test_total_re_export_count_matches_w16_4_baseline() -> None:
     # 426 (W16.7 +30 preview_next_steps).
     # Drift here means the W16 epic added/removed surface without the
     # lock-step bump landing across all neighbour test files.
-    assert len(web_pkg.__all__) == 426
+    assert len(web_pkg.__all__) == 466
 
 
 def test_w16_4_symbol_count_matches_module_all() -> None:
