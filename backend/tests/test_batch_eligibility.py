@@ -326,6 +326,35 @@ async def test_accumulator_buckets_by_kind_model_tools():
 
 
 @pytest.mark.asyncio
+async def test_accumulator_flush_due_only_flushes_expired_buckets():
+    received: list[BatchableTask] = []
+
+    async def enqueue(t: BatchableTask) -> None:
+        received.append(t)
+
+    fake_t = [1000.0]
+    reg = EligibilityRegistry()
+    acc = AutoBatchAccumulator(
+        reg,
+        dispatcher_enqueue=enqueue,
+        max_age_seconds=10.0,
+        clock=lambda: fake_t[0],
+    )
+
+    await acc.add(_task("old", task_kind="hd_parse_kicad", model="claude-opus-4-7"))
+    fake_t[0] = 1005.0
+    await acc.add(_task("new", task_kind="hd_parse_altium", model="claude-opus-4-7"))
+
+    fake_t[0] = 1011.0
+    flushed = await acc.flush_due()
+
+    assert flushed == 1
+    assert [task.task_id for task in received] == ["old"]
+    assert acc.pending_count == 1
+    assert acc.bucket_keys() == [("hd_parse_altium", "claude-opus-4-7", "")]
+
+
+@pytest.mark.asyncio
 async def test_accumulator_realtime_task_forwarded_not_buffered():
     """If caller hands a non-batch-eligible task, accumulator forwards it."""
     received: list[BatchableTask] = []
