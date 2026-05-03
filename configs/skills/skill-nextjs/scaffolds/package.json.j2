@@ -40,7 +40,8 @@
     "@testing-library/react": "^16.0.0",
     "@testing-library/jest-dom": "^6.5.0",
     "jsdom": "^25.0.0",
-    "@playwright/test": "^1.48.0"{% if target in ["cloudflare", "both"] %},
+    "@playwright/test": "^1.48.0",
+    "@omnisight/vite-plugin": "^0.1.0"{% if target in ["cloudflare", "both"] %},
     "@cloudflare/next-on-pages": "^1.13.0",
     "wrangler": "^3.80.0"{% endif %}{% if target in ["vercel", "both"] %},
     "vercel": "^37.0.0"{% endif %}

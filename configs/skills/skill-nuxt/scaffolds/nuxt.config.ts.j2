@@ -8,6 +8,13 @@
 // of the W4 multi-adapter wiring is that `NITRO_PRESET` is the
 // single lever that flips targets.
 
+// W15.5 — omnisight-vite-plugin (W15.1) self-healing bootstrap.
+// Nuxt 4 uses Vite under the hood; plugins flow through `vite.plugins`
+// in `defineNuxtConfig`.  `makeOmnisightVitePlugin()` returns null
+// outside the W14.1 sidecar so `.filter(Boolean)` keeps the plugin
+// off the local-dev path.
+import { makeOmnisightVitePlugin } from "./scripts/omnisight-vite-plugin.mjs"
+
 export default defineNuxtConfig({
   compatibilityDate: "2025-01-01",
   devtools: { enabled: true },
@@ -30,6 +37,16 @@ export default defineNuxtConfig({
     // Server bundle budget — matches the W1 profile's bundle_size_budget.
     // If the build exceeds this the W2 simulate-track bundle gate fires.
     sourceMap: false,
+  },
+
+  // W15.5 — Vite plugins.  `makeOmnisightVitePlugin()` returns null
+  // outside the W14.1 sidecar so the array is empty in local-dev /
+  // CI runs (build stays byte-identical to a project without the
+  // plugin).  Inside the sidecar the plugin posts compile-time and
+  // runtime build errors back to the OmniSight backend's W15
+  // self-healing loop.
+  vite: {
+    plugins: [makeOmnisightVitePlugin()].filter(Boolean) as any[],
   },
 
   modules: [

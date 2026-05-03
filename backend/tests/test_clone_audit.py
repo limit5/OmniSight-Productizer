@@ -927,10 +927,11 @@ def test_total_re_export_count_pinned_at_192() -> None:
     217. W13.4 adds 16 screenshot-ghost-overlay symbols → 233. W15.2
     adds 11 vite_error_relay symbols → 244. W15.3 adds 8
     vite_error_prompt symbols → 252. W15.4 adds 10 vite_retry_budget
-    symbols → 262. Each row's drift guard is updated in lockstep so a
-    future row that adds a new symbol fails every guard until each one
-    acknowledges the new total."""
-    assert len(web_pkg.__all__) == 262
+    symbols → 262. W15.5 adds 13 vite_config_injection symbols → 275.
+    Each row's drift guard is updated in lockstep so a future row that
+    adds a new symbol fails every guard until each one acknowledges the
+    new total."""
+    assert len(web_pkg.__all__) == 275
 
 
 # ── Whole-spec invariants ───────────────────────────────────────────────

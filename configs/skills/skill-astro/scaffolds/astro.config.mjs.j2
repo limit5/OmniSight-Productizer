@@ -11,6 +11,10 @@
 import { defineConfig } from "astro/config"
 import mdx from "@astrojs/mdx"
 import sitemap from "@astrojs/sitemap"
+// W15.5 — omnisight-vite-plugin (W15.1) self-healing bootstrap.
+// `makeOmnisightVitePlugin()` returns null outside the W14.1 sidecar,
+// so `.filter(Boolean)` keeps the plugin off the local-dev path.
+import { makeOmnisightVitePlugin } from "./scripts/omnisight-vite-plugin.mjs"
 {%- if islands == "react" %}
 import react from "@astrojs/react"
 {%- endif %}
@@ -91,5 +95,12 @@ export default defineConfig({
     build: {
       chunkSizeWarningLimit: 1024,
     },
+    // W15.5 — Vite plugins.  `makeOmnisightVitePlugin()` returns null
+    // outside the W14.1 sidecar so the array is empty in local-dev /
+    // CI runs (build stays byte-identical to a project without the
+    // plugin).  Inside the sidecar the plugin posts compile-time and
+    // runtime build errors back to the OmniSight backend's W15
+    // self-healing loop.
+    plugins: [makeOmnisightVitePlugin()].filter(Boolean),
   },
 })

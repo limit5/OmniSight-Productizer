@@ -53,6 +53,13 @@ import jinja2
 from backend import platform as _platform
 from backend.deploy.base import BuildArtifact
 from backend.skill_registry import get_skill, validate_skill
+from backend.web.vite_config_injection import (
+    OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH,
+    OMNISIGHT_VITE_PLUGIN_PACKAGE,
+    OMNISIGHT_VITE_PLUGIN_PACKAGE_VERSION,
+    ViteConfigInjectionResult,
+    render_omnisight_plugin_bootstrap_module,
+)
 from backend.web_compliance import run_all as run_compliance_all
 from backend.web_simulator import parse_budget
 
@@ -296,6 +303,34 @@ def _write_file(dest: Path, content: bytes | str) -> int:
     return len(content)
 
 
+def _write_omnisight_vite_plugin_bootstrap(
+    out_dir: Path, *, overwrite: bool,
+) -> tuple[Optional[ViteConfigInjectionResult], Optional[Path]]:
+    """W15.5 — write the omnisight-vite-plugin bootstrap module into
+    ``<out_dir>/scripts/omnisight-vite-plugin.mjs``.
+
+    Returns a ``(result, dest_path)`` tuple where ``result`` describes
+    what landed (``None`` when skipped because the file existed and
+    ``overwrite=False``).  The bootstrap is sourced from
+    :func:`backend.web.vite_config_injection.render_omnisight_plugin_bootstrap_module`
+    so the W6/W7/W8 scaffolders all write byte-identical content.
+    """
+    bootstrap_dest = out_dir / OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH
+    if bootstrap_dest.exists() and not overwrite:
+        return None, bootstrap_dest
+    bootstrap_text = render_omnisight_plugin_bootstrap_module()
+    written = _write_file(bootstrap_dest, bootstrap_text)
+    return (
+        ViteConfigInjectionResult(
+            bootstrap_relative_path=OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH,
+            bootstrap_bytes=written,
+            package_name=OMNISIGHT_VITE_PLUGIN_PACKAGE,
+            package_version=OMNISIGHT_VITE_PLUGIN_PACKAGE_VERSION,
+        ),
+        bootstrap_dest,
+    )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -356,6 +391,23 @@ def render_project(
                 continue
             outcome.bytes_written += _write_file(dest, src.read_bytes())
         outcome.files_written.append(dest)
+
+    # W15.5 — write the omnisight-vite-plugin bootstrap module so the
+    # rendered astro.config.mjs's `./scripts/omnisight-vite-plugin.mjs`
+    # import resolves.  Idempotent: re-rendering with overwrite=True
+    # rewrites the file from the central template so a future bump
+    # propagates on the next render; overwrite=False preserves any
+    # operator edits that happened to land at the same relative path.
+    bootstrap_result, bootstrap_dest = _write_omnisight_vite_plugin_bootstrap(
+        out_dir, overwrite=overwrite,
+    )
+    if bootstrap_result is not None and bootstrap_dest is not None:
+        outcome.bytes_written += bootstrap_result.bootstrap_bytes
+        outcome.files_written.append(bootstrap_dest)
+    elif bootstrap_dest is not None:
+        outcome.warnings.append(
+            f"skipped existing: {OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH}"
+        )
 
     logger.info(
         "SKILL-ASTRO rendered %d files (%d bytes) into %s",
