@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import inspect
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -134,6 +135,36 @@ class FakeAWSKMSClient:
         return {"Plaintext": kwargs["CiphertextBlob"].removeprefix(b"aws-wrapped-")}
 
 
+class FakeAWSSTSClient:
+    def __init__(self):
+        self.assume_role_calls = []
+
+    def assume_role(self, **kwargs):
+        self.assume_role_calls.append(kwargs)
+        return {
+            "Credentials": {
+                "AccessKeyId": "ASIAFAKE",
+                "SecretAccessKey": "fake-secret",
+                "SessionToken": "fake-session-token",
+            }
+        }
+
+
+class FakeBoto3Module:
+    def __init__(self):
+        self.sts = FakeAWSSTSClient()
+        self.kms = FakeAWSKMSClient()
+        self.client_calls = []
+
+    def client(self, service_name, **kwargs):
+        self.client_calls.append((service_name, kwargs))
+        if service_name == "sts":
+            return self.sts
+        if service_name == "kms":
+            return self.kms
+        raise AssertionError(f"unexpected boto3 service {service_name}")
+
+
 class TestAWSKMSAdapter:
 
     def test_wrap_and_unwrap_delegates_to_boto3_client_shape(self):
@@ -152,6 +183,41 @@ class TestAWSKMSAdapter:
         assert wrapped.algorithm == "SYMMETRIC_DEFAULT"
         assert fake.encrypt_calls[0]["EncryptionContext"] == {"tenant_id": "t1"}
         assert fake.decrypt_calls[0]["KeyId"] == adapter.key_id
+
+    def test_assume_role_builds_kms_client_with_temporary_credentials(self, monkeypatch):
+        fake_boto3 = FakeBoto3Module()
+        monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+        adapter = kms.AWSKMSAdapter(
+            key_id="arn:aws:kms:us-east-1:111122223333:key/demo",
+            region_name="us-east-1",
+            role_arn="arn:aws:iam::111122223333:role/OmniSightKMS",
+            external_id="tenant-a",
+            session_name="omnisight-tenant-a",
+        )
+
+        wrapped = adapter.wrap_dek(b"dek-aws", encryption_context={"tenant_id": "t1"})
+
+        assert wrapped.provider == "aws-kms"
+        assert fake_boto3.sts.assume_role_calls == [
+            {
+                "RoleArn": "arn:aws:iam::111122223333:role/OmniSightKMS",
+                "RoleSessionName": "omnisight-tenant-a",
+                "ExternalId": "tenant-a",
+            }
+        ]
+        assert fake_boto3.client_calls == [
+            ("sts", {"region_name": "us-east-1"}),
+            (
+                "kms",
+                {
+                    "region_name": "us-east-1",
+                    "aws_access_key_id": "ASIAFAKE",
+                    "aws_secret_access_key": "fake-secret",
+                    "aws_session_token": "fake-session-token",
+                },
+            ),
+        ]
+        assert fake_boto3.kms.encrypt_calls[0]["KeyId"] == adapter.key_id
 
 
 class FakeGCPKMSClient:
@@ -252,4 +318,3 @@ class TestConfigAndDriftGuards:
         module_globals = vars(kms)
         assert "_client" not in module_globals
         assert "_adapter_registry" not in module_globals
-
