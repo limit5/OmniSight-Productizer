@@ -337,7 +337,7 @@ TODO 寫「K-rest 既有 CF Access SSO」，但：
 |---|---|---|
 | R10 | RLM-pattern 採納（context >100K + analysis） | ADR Option B 採納（2026-04-24） |
 | R11 | docker `\|\| true` swallow | BP.R.1 `[ ]` 待做 |
-| R12 | gVisor cost-weight only（非實際 runtime） | BP.S.5 待 record |
+| R12 | gVisor cost-weight only（非實際 runtime） | BP.S.5 landed 2026-05-03 → `docs/security/r12-gvisor-cost-weight-only.md`；Phase U / BP.W3.13 close-out |
 | R13 | Hardware Bridge Daemon 缺 + gVisor Tier 1 沒 schedule | BP.W3.12-13 v1.0 後 |
 | R14 | （unused） | — |
 | R15 | Header overflow + WSL2 N/A neutral | 30ef0238 fix |
