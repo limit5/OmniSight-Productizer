@@ -25,7 +25,9 @@ from collections import defaultdict, deque
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
 
 from backend import auth
 from backend.rate_limit import ip_limiter, email_limiter
@@ -124,14 +126,22 @@ def _record_failed_login(request: Request) -> None:
 
 
 class LoginRequest(BaseModel):
-    # AS.6.4 — honeypot field name rotates per (form_path, tenant_id,
-    # 30-day epoch) so it's not declared as a typed field on this
-    # model. ``extra="allow"`` lets the unknown field round-trip into
-    # ``model_dump()`` so :func:`honeypot.validate_honeypot` can
-    # detect a filled-by-bot value. Per AS.0.7 §3.4 the field name
+    # FX.1.15 — tightened from ``extra="allow"`` to ``extra="forbid"``
+    # to close the security-boundary gap flagged in the 2026-05-03
+    # audit (arbitrary unknown fields silently round-tripping into
+    # ``model_dump()``). The AS.6.4 rotated honeypot field is still
+    # supported via :meth:`_capture_honeypot_fields` below — that
+    # ``mode="before"`` validator strips the (deterministically
+    # computable) current/previous-epoch honeypot field name from the
+    # raw payload BEFORE pydantic enforces ``extra="forbid"``, stashes
+    # it on the typed :attr:`honeypot_fields` dict, and the route
+    # handler merges it back into the dict passed to
+    # :func:`honeypot.validate_honeypot`. Net behaviour: legitimate
+    # rotated honeypot field round-trips as before; ANY other unknown
+    # field now raises 422. Per AS.0.7 §3.4 the honeypot field name
     # itself is not PII; the value (if filled) IS treated as PII and
     # only its length lands in the audit row metadata.
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "forbid"}
 
     email: str = Field(min_length=3)
     password: str = Field(min_length=1)
@@ -144,6 +154,51 @@ class LoginRequest(BaseModel):
     # doesn't need to change. Field name pinned by
     # :data:`backend.security.turnstile_form_verifier.TURNSTILE_TOKEN_BODY_FIELD`.
     turnstile_token: str | None = None
+    # FX.1.15 — AS.6.4 honeypot capture slot. Populated by the
+    # ``mode="before"`` validator below; ``exclude=True`` keeps it
+    # out of ``model_dump()`` (the route merges it back explicitly
+    # for the honeypot validator only). Keys are the rotated field
+    # name(s) for current/previous epoch; values mirror what the
+    # client sent (any non-empty value → bot per AS.0.7 §3.1).
+    honeypot_fields: dict[str, Any] = Field(
+        default_factory=dict, exclude=True, repr=False,
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _capture_honeypot_fields(cls, data: Any) -> Any:
+        """FX.1.15 — siphon the AS.6.4 rotated honeypot field name(s)
+        out of the raw payload before ``extra="forbid"`` runs.
+
+        Computes the current and previous-epoch honeypot field name
+        for ``(FORM_PATH_LOGIN, ANONYMOUS_TENANT_ID)`` and pops any
+        matching key into :attr:`honeypot_fields`. Anything else stays
+        in the dict for the normal pydantic field validation pass —
+        unknown keys then trigger the 422 the audit asked for.
+        """
+        if not isinstance(data, dict):
+            return data
+        # Local imports keep the module-import side-effect free and
+        # avoid a circular import with backend.security at boot.
+        from backend.security import honeypot as _hp
+        from backend.security import honeypot_form_verifier as _hpv
+
+        epoch = _hp.current_epoch()
+        valid_names = {
+            _hp.honeypot_field_name(
+                _hpv.FORM_PATH_LOGIN, _hpv.ANONYMOUS_TENANT_ID, e,
+            )
+            for e in (epoch, epoch - 1)
+        }
+        captured: dict[str, Any] = {}
+        cleaned: dict[str, Any] = {}
+        for key, value in data.items():
+            if key in valid_names and key != "honeypot_fields":
+                captured[key] = value
+            else:
+                cleaned[key] = value
+        cleaned["honeypot_fields"] = captured
+        return cleaned
 
 
 def _mask_email(email: str) -> str:
@@ -189,9 +244,14 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
     from backend.security import honeypot as _hp
     from backend.security import honeypot_form_verifier as _hpv
     try:
+        # FX.1.15 — merge the captured rotated honeypot field back
+        # into the dict the validator inspects. ``model_dump()`` skips
+        # ``honeypot_fields`` (Field(exclude=True)) so the merge is
+        # the only path the rotated key reaches
+        # :func:`honeypot.validate_honeypot`.
         await _hpv.verify_form_honeypot_or_reject(
             _hpv.FORM_ACTION_LOGIN,
-            submitted=req.model_dump(),
+            submitted={**req.model_dump(), **req.honeypot_fields},
             request=request,
             actor=email_key or "anonymous",
         )

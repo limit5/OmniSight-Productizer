@@ -455,7 +455,12 @@ class SystemInfoResponse(BaseModel):
     wsl: bool = False
     docker: bool = False
 
-    model_config = {"extra": "allow"}
+    # FX.1.15 — tighten the API-contract boundary so unknown fields
+    # round-tripping through ``GET /runtime/info`` raise on serialise
+    # rather than silently leaking. The producer at
+    # ``backend/routers/system.py:get_system_info`` returns only the
+    # known field set above; any new field MUST be declared here.
+    model_config = {"extra": "forbid"}
 
 
 class SystemStatusResponse(BaseModel):
