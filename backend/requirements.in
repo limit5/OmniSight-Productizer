@@ -132,4 +132,15 @@ redis[hiredis]==7.4.0
 # and raises a clear error at call time if missing — so the system
 # starts and runs fine without it. Install when you need SSH:
 #   pip install paramiko
-paramiko==4.0.0
+#
+# FX.6.4 (2026-05-04): paramiko is NOT pinned here. Earlier revisions
+# kept ``paramiko==4.0.0`` as a hard pin under this header, which made
+# it land in ``requirements.txt`` (a "ghost" — present in the lockfile
+# but the surrounding comment said it should be optional). The pin
+# also dragged ``bcrypt`` into the runtime image purely for paramiko's
+# own host-key handling — neither is used by any non-SSH code path.
+# To install on a host that actually needs SSH:
+#   ./backend/.venv/bin/pip install paramiko==4.0.0
+# (test_ssh_runner.py uses ``pytest.importorskip('paramiko')`` so the
+#  unit suite stays green without it; ssh_runner.py itself raises
+#  RuntimeError with an actionable install hint at call time.)
