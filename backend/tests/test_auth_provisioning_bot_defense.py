@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from backend.auth_provisioning import (
@@ -12,6 +14,13 @@ from backend.auth_provisioning import (
 )
 from backend.security import bot_challenge
 from backend.security import honeypot
+from backend.security import turnstile_form_verifier as turnstile_forms
+
+
+def _dashboard_bucket(content: str, name: str) -> set[str]:
+    start = content.index(f"export const {name} = Object.freeze(new Set<string>([")
+    end = content.index("]))", start)
+    return set(re.findall(r"\bOUTCOME_[A-Z0-9_]+\b", content[start:end]))
 
 
 def test_lists_as3_bot_challenge_providers() -> None:
@@ -137,6 +146,47 @@ def test_render_sc_13_4_challenge_ratio_dashboard() -> None:
     assert "fallbackRatio: safeRatio(fallbackCount, total)" in content
     assert "OUTCOME_JSFAIL_FALLBACK_RECAPTCHA" in content
     assert "OUTCOME_JSFAIL_FALLBACK_HCAPTCHA" in content
+
+
+def test_sc_13_5_form_belt_tracks_as6_form_constants() -> None:
+    result = render_bot_defense_scaffold()
+    forms = {item.form: item for item in result.forms}
+
+    assert forms["login"].widget_action == turnstile_forms.FORM_ACTION_LOGIN
+    assert forms["signup"].widget_action == turnstile_forms.FORM_ACTION_SIGNUP
+    assert forms["password-reset"].widget_action == turnstile_forms.FORM_ACTION_PASSWORD_RESET
+    assert forms["contact"].widget_action == turnstile_forms.FORM_ACTION_CONTACT
+    assert forms["login"].honeypot_form_path == turnstile_forms.FORM_PATH_LOGIN
+    assert forms["signup"].honeypot_form_path == turnstile_forms.FORM_PATH_SIGNUP
+    assert forms["password-reset"].honeypot_form_path == turnstile_forms.FORM_PATH_PASSWORD_RESET
+    assert forms["contact"].honeypot_form_path == turnstile_forms.FORM_PATH_CONTACT
+
+
+def test_sc_13_5_dashboard_buckets_cover_every_as3_outcome_once() -> None:
+    content = render_bot_defense_scaffold().files[3].content
+    pass_bucket = _dashboard_bucket(content, "botDefensePassOutcomes")
+    fail_bucket = _dashboard_bucket(content, "botDefenseFailOutcomes")
+    fallback_bucket = _dashboard_bucket(content, "botDefenseFallbackOutcomes")
+
+    assert not (pass_bucket & fail_bucket)
+    assert not (pass_bucket & fallback_bucket)
+    assert not (fail_bucket & fallback_bucket)
+    assert pass_bucket | fail_bucket | fallback_bucket == {
+        name
+        for name, value in vars(bot_challenge).items()
+        if name.startswith("OUTCOME_") and value in bot_challenge.ALL_OUTCOMES
+    }
+
+
+def test_sc_13_5_result_notes_name_each_sc_13_layer() -> None:
+    result = render_bot_defense_scaffold()
+    notes = "\n".join(result.notes)
+    forms = result.to_dict()["forms"]
+
+    assert "SC.13.2 defaults cover login/signup/password-reset/contact/comment forms" in notes
+    assert "reuses AS.4 templates/_shared/honeypot" in notes
+    assert "SC.13.4 dashboard exposes challenge pass/fail/fallback ratios" in notes
+    assert {item["source"] for item in forms} == {"sc.13.2"}
 
 
 def test_provider_env_manifest_reuses_as3_secret_env_names() -> None:
