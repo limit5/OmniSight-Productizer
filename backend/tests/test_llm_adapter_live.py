@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Literal
 
 import pytest
+from pydantic import BaseModel, Field
 
 import asyncio
 
@@ -82,6 +84,105 @@ def get_weather(city: str) -> dict:
     # Body is never executed in tool-call tests — the LLM only emits the
     # call request; we validate the request shape (name / args / id).
     return {"city": city, "temperature": 22, "condition": "sunny"}
+
+
+# ── Z.7.6 — book_flight nested-schema + enum tool ────────────────────────────
+
+
+class Passenger(BaseModel):
+    """One passenger in a flight booking (Z.7.6 nested schema test)."""
+
+    name: str = Field(description="Passenger's full name")
+    age: int = Field(description="Passenger's age in years")
+    seat_class: Literal["economy", "business", "first"] = Field(
+        description="Seat class: must be one of 'economy', 'business', or 'first'"
+    )
+
+
+class BookFlightArgs(BaseModel):
+    """Schema for the book_flight tool (Z.7.6 nested schema + enum test)."""
+
+    origin: str = Field(
+        description="Departure city or airport IATA code (the 'from' location)"
+    )
+    destination: str = Field(
+        description="Destination city or airport IATA code (the 'to' location)"
+    )
+    date: str = Field(description="Travel date in YYYY-MM-DD format, e.g. 2026-06-15")
+    passengers: list[Passenger] = Field(
+        description=(
+            "List of passengers to book seats for. "
+            "Each entry must include: name (full name string), age (integer), "
+            "and seat_class (one of: economy, business, first)."
+        )
+    )
+
+
+@tool(args_schema=BookFlightArgs)
+def book_flight(origin: str, destination: str, date: str, passengers: list) -> dict:
+    """Book a flight for one or more passengers from origin to destination.
+
+    Use this to reserve airline seats.  You must specify the departure city
+    (origin), arrival city (destination), the travel date, and a list of
+    passenger records — each passenger needs a name, age, and seat_class.
+    """
+    # Body never executes in tool-calling tests; we only validate request shape.
+    return {"booking_id": "BK-001", "status": "confirmed"}
+
+
+_VALID_SEAT_CLASSES = {"economy", "business", "first"}
+
+_BOOK_FLIGHT_PROMPT = (
+    "Book a flight from New York to London on 2026-06-15 for 2 passengers: "
+    "Alice Smith aged 30 in economy class, and Bob Johnson aged 45 in business class."
+)
+
+
+def _assert_book_flight_response(resp: AdapterToolResponse, provider: str) -> None:
+    """Shared Z.7.6 assertion: verify nested schema fields are not silently truncated."""
+    assert len(resp.tool_calls) >= 1, (
+        f"{provider} nested schema: expected ≥1 tool call; "
+        f"got {resp.tool_calls!r}; text={resp.text!r}"
+    )
+    tc = resp.tool_calls[0]
+    assert isinstance(tc, AdapterToolCall)
+    assert tc.name == "book_flight", (
+        f"{provider} nested schema: expected name='book_flight', got {tc.name!r}"
+    )
+    assert tc.call_id is not None, (
+        f"{provider} nested schema: expected non-None call_id; got {tc.call_id!r}"
+    )
+    args = tc.arguments
+
+    # Top-level fields must all be present (no silent schema truncation)
+    for field_name in ("origin", "destination", "date", "passengers"):
+        assert field_name in args, (
+            f"{provider} nested schema: field '{field_name}' silently truncated; "
+            f"args keys={list(args.keys())!r}"
+        )
+
+    # Nested: passengers must be a non-empty list
+    passengers = args["passengers"]
+    assert isinstance(passengers, list), (
+        f"{provider} nested schema: 'passengers' expected list, "
+        f"got {type(passengers).__name__!r}; value={passengers!r}"
+    )
+    assert len(passengers) >= 1, (
+        f"{provider} nested schema: 'passengers' list is empty — silent truncation; "
+        f"full args={args!r}"
+    )
+
+    # Each passenger must be a dict; seat_class must be a valid enum value when present
+    for i, p in enumerate(passengers):
+        assert isinstance(p, dict), (
+            f"{provider} nested schema: passengers[{i}] expected dict, "
+            f"got {type(p).__name__!r}; value={p!r}"
+        )
+        if "seat_class" in p:
+            assert p["seat_class"] in _VALID_SEAT_CLASSES, (
+                f"{provider} nested schema: passengers[{i}].seat_class={p['seat_class']!r} "
+                f"not in {_VALID_SEAT_CLASSES!r} — enum constraint violated"
+            )
 
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
@@ -211,6 +312,19 @@ class TestAnthropicLive:
             f"Anthropic streaming: expected non-None call_id; got {tc.call_id!r}"
         )
 
+    def test_nested_schema(self):
+        """Z.7.6: Anthropic — book_flight nested schema + enum; no silent truncation.
+
+        Sends a BookFlightArgs schema (nested passengers list with Literal seat_class
+        enum) to Claude and asserts all fields survive intact: top-level origin /
+        destination / date / passengers, the list is non-empty, and any seat_class
+        value is one of the declared enum literals.
+        """
+        key = _require_key(_KEY_ANTHROPIC, "Anthropic")
+        llm = build_chat_model("anthropic", self._MODEL, api_key=key, max_tokens=512)
+        resp = tool_call([("user", _BOOK_FLIGHT_PROMPT)], tools=[book_flight], llm=llm)
+        _assert_book_flight_response(resp, "Anthropic")
+
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 
@@ -335,6 +449,19 @@ class TestOpenAILive:
         assert tc.call_id is not None, (
             f"OpenAI streaming: expected non-None call_id; got {tc.call_id!r}"
         )
+
+    def test_nested_schema(self):
+        """Z.7.6: OpenAI — book_flight nested schema + enum; no silent truncation.
+
+        Sends a BookFlightArgs schema (nested passengers list with Literal seat_class
+        enum) to GPT-4o-mini and asserts all fields survive intact: top-level origin /
+        destination / date / passengers, the list is non-empty, and any seat_class
+        value is one of the declared enum literals.
+        """
+        key = _require_key(_KEY_OPENAI, "OpenAI")
+        llm = build_chat_model("openai", self._MODEL, api_key=key, max_tokens=512)
+        resp = tool_call([("user", _BOOK_FLIGHT_PROMPT)], tools=[book_flight], llm=llm)
+        _assert_book_flight_response(resp, "OpenAI")
 
 
 # ── Google Gemini ─────────────────────────────────────────────────────────────
@@ -481,3 +608,33 @@ class TestGeminiLive:
         assert tc.call_id is not None, (
             f"Gemini streaming: expected non-None call_id; got {tc.call_id!r}"
         )
+
+    def test_nested_schema(self):
+        """Z.7.6: Gemini — book_flight nested schema + enum; detect silent truncation.
+
+        Sends a BookFlightArgs schema (nested passengers list with Literal seat_class
+        enum) to Gemini.  Gemini has been known to reject or silently flatten complex
+        nested schemas; this test catches both failure modes:
+
+        - Schema rejection (InvalidArgument / similar API error) → ``pytest.skip``
+          with the error message so the nightly CI job records it as "unsupported"
+          rather than a hard test failure.
+        - Silent truncation (passengers list empty, fields missing, enum violated)
+          → assertion failure with a descriptive message pinpointing the deviation.
+        """
+        key = _require_key(_KEY_GOOGLE, "Google Gemini")
+        llm = build_chat_model("google", self._MODEL, api_key=key)
+        try:
+            resp = tool_call([("user", _BOOK_FLIGHT_PROMPT)], tools=[book_flight], llm=llm)
+        except NotImplementedError as exc:
+            pytest.skip(
+                f"Gemini nested schema not supported by {self._MODEL!r}: {exc}"
+            )
+        except Exception as exc:
+            exc_str = str(exc).lower()
+            if any(kw in exc_str for kw in ("not support", "invalid argument", "unsupported", "invalid schema", "bad request")):
+                pytest.skip(
+                    f"Gemini rejects book_flight nested schema on {self._MODEL!r}: {exc}"
+                )
+            raise
+        _assert_book_flight_response(resp, "Gemini")
