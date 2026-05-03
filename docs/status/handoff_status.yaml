@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 236
+entry_count: 237
 status_counts:
-  dev-only: 231
+  dev-only: 232
   deployed-inactive: 3
   deployed-active: 0
   deployed-observed: 0
@@ -2265,3 +2265,13 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — FX.5 coverage 補測全部合併後，由 runner/CI 在 production-equivalent test image 重跑 FX.5 subset；本項無獨立
     deploy 動作。
+- id: 2026-05-04--FX.7.9
+  header_line: 42738
+  date: '2026-05-04'
+  author: Claude/Opus
+  task_id: FX.7.9
+  title: FX.7.9 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — `deploy/prod-deploy-signers.txt` 必須由 ops 加上至少一條真實 release-signing key fingerprint（PR review）+
+    對應公鑰 import 進 prod host gpg keyring，才能去掉 `--insecure-skip-verify` flag 跑第一次嚴格 deploy。在那之前每次 prod deploy 都會印 6 行 stderr
+    loud warning（且應在 post-deploy review 提）。

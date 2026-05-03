@@ -11,6 +11,10 @@
 #   ./scripts/deploy-prod.sh --tag v1.2.0       # 部署特定 tag
 #   ./scripts/deploy-prod.sh --skip-build       # 跳過 build（已有 GHCR image）
 #   ./scripts/deploy-prod.sh --dry-run          # 只印步驟不執行
+#   ./scripts/deploy-prod.sh --insecure-skip-verify
+#                                               # FX.7.9 emergency escape
+#                                               # hatch — bypass ref allow-
+#                                               # list + GPG signature check
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 set -euo pipefail
@@ -20,6 +24,7 @@ BRANCH="${OMNISIGHT_DEPLOY_BRANCH:-master}"
 TAG=""
 SKIP_BUILD=false
 DRY_RUN=false
+INSECURE_SKIP_VERIFY=false
 HEALTH_RETRIES=30
 HEALTH_INTERVAL=3
 
@@ -37,8 +42,9 @@ for arg in "$@"; do
         --branch=*) BRANCH="${arg#*=}" ;;
         --skip-build) SKIP_BUILD=true ;;
         --dry-run) DRY_RUN=true ;;
+        --insecure-skip-verify) INSECURE_SKIP_VERIFY=true ;;
         --help|-h)
-            echo "Usage: $0 [--branch=master] [--tag=v1.2.0] [--skip-build] [--dry-run]"
+            echo "Usage: $0 [--branch=master] [--tag=v1.2.0] [--skip-build] [--dry-run] [--insecure-skip-verify]"
             exit 0 ;;
     esac
 done
@@ -59,10 +65,28 @@ echo ""
 # ── Step 1: Pull latest code ──
 step "Step 1: 拉取最新程式碼"
 
+# FX.7.9: ref allowlist + GPG signature verification.
+# Strict by default — the verifier aborts the deploy unless:
+#   (1) the requested ref matches a rule in deploy/prod-deploy-allowlist.txt
+#   (2) the tag (annotated) or branch-tip commit is GPG-signed by a
+#       fingerprint listed in deploy/prod-deploy-signers.txt
+# `--dry-run` runs only Layer 1 (ref doesn't need to be locally fetched).
+# `--insecure-skip-verify` is an audit-trailed emergency escape hatch.
+verify_args=()
+if [ "$DRY_RUN" = true ]; then
+    verify_args+=("--allowlist-only")
+elif [ "$INSECURE_SKIP_VERIFY" = true ]; then
+    verify_args+=("--insecure-skip-verify")
+fi
+
 if [ -n "$TAG" ]; then
-    _run "git fetch origin && git checkout '$TAG'"
+    _run "git fetch origin --tags"
+    scripts/check_deploy_ref.sh --kind tag --ref "$TAG" "${verify_args[@]}"
+    _run "git checkout '$TAG'"
 else
-    _run "git fetch origin $BRANCH && git merge origin/$BRANCH --ff-only"
+    _run "git fetch origin $BRANCH"
+    scripts/check_deploy_ref.sh --kind branch --ref "$BRANCH" "${verify_args[@]}"
+    _run "git merge origin/$BRANCH --ff-only"
 fi
 log "Code 更新完成：$(git log --oneline -1)"
 

@@ -1,0 +1,35 @@
+# OmniSight production deploy GPG signers (FX.7.9)
+#
+# Used by scripts/check_deploy_ref.sh + scripts/deploy-prod.sh to gate
+# which GPG keys may sign a deploy-eligible git tag or branch tip.
+# Intent: prevent a compromised forge account from pushing an
+# unsigned (or attacker-signed) ref and having it deployed.
+#
+# Format: one trusted full GPG fingerprint per line (40 hex chars,
+# uppercase, no spaces). Lines starting with `#` and blank lines are
+# ignored. Use `gpg --list-keys --fingerprint --with-colons` and copy
+# the `fpr` field's 10th column (40-char form, no spaces). Both upper-
+# and lower-case hex are accepted; the verifier normalises to upper.
+#
+# Adding / removing a fingerprint is a deliberate change reviewed in
+# a PR — that is the audit trail for "who is allowed to authorise a
+# production deploy by signing the tag / branch tip".
+#
+# NOTE: this file is intentionally committed (fingerprints are not
+# secret). The matching public keys must also be imported into the
+# prod host's gpg keyring (`gpg --import release-signers.asc`) for
+# the verifier to accept a signature — listing a fingerprint here
+# without importing the public key fails closed (correct outcome).
+#
+# === RELEASE SIGNERS ===
+# Until the first real release-signing key is provisioned, this file
+# has zero entries. The verifier will reject every deploy unless an
+# operator passes `--insecure-skip-verify` (or sets
+# OMNISIGHT_DEPLOY_INSECURE_SKIP_VERIFY=1) — a loud, audit-trailed
+# escape hatch documented in .env.example § FX.7.9.
+#
+# Replace this comment block with one fingerprint per line via PR
+# once the release signing key exists. Example shape (do NOT copy —
+# replace before any prod deploy):
+#
+# 0123456789ABCDEF0123456789ABCDEF01234567

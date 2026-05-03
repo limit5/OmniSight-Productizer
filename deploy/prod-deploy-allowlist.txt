@@ -1,0 +1,30 @@
+# OmniSight production deploy ref allowlist (FX.7.9)
+#
+# Used by scripts/check_deploy_ref.sh + scripts/deploy-prod.sh to gate
+# which git refs may be deployed to production. Intent: prevent a
+# misconfigured operator (or compromised CI runner) from shipping an
+# arbitrary feature branch / personal fork to prod.
+#
+# Format: one rule per line. Lines starting with `#` and blank lines
+# are ignored. Each rule is one of:
+#
+#   branch       <exact-branch-name>     # match this branch literally
+#   branch-regex <ERE-regex>             # match branch name by ERE regex
+#   tag-regex    <ERE-regex>             # match tag name by ERE regex
+#
+# Rules are evaluated top-to-bottom; first match wins. If no rule
+# matches the requested ref, the deploy aborts.
+#
+# Adding a new entry is a deliberate change reviewed in a PR — that
+# is the audit trail for "who said this branch is allowed to ship".
+
+# Long-lived production lines.
+branch master
+branch main
+
+# Hotfix and release branches keyed off a semver-shaped name.
+branch-regex ^hotfix/[0-9]+\.[0-9]+\.[0-9]+$
+branch-regex ^release/[0-9]+\.[0-9]+(\.[0-9]+)?$
+
+# Semver release tags (v1.2.3, optional -rc.N / -hotfix.N suffix).
+tag-regex ^v[0-9]+\.[0-9]+\.[0-9]+(-(rc|hotfix)\.[0-9]+)?$
