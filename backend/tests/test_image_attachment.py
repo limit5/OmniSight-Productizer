@@ -624,4 +624,4 @@ def test_total_re_export_count_pinned_at_313() -> None:
     # → 313. If this fails with a different count, audit whether you
     # consciously added / removed a public symbol and update the pin
     # alongside the row's TODO entry.
-    assert len(web_pkg.__all__) == 345
+    assert len(web_pkg.__all__) == 374

@@ -36,6 +36,13 @@ from backend.web.build_intent import (
     BuildIntentRef,
     detect_build_intents_in_text,
 )
+from backend.web.edit_intent import (
+    EDIT_INTENT_DRY_RUN_FLAG,
+    EDIT_INTENT_SLASH_COMMAND,
+    EDIT_INTENT_TRIGGER_PREFIX,
+    EditIntentRef,
+    detect_edit_intents_in_text,
+)
 
 router = APIRouter(prefix="/invoke", tags=["invoke"])
 
@@ -1100,6 +1107,16 @@ def _detect_coaching_triggers(
     triggers the W14 live-preview sandbox after scaffolding. Detection
     / hashing / classification is owned by
     :mod:`backend.web.build_intent`.
+
+    W16.5 — also emits one ``edit_while_preview:<hash16>`` trigger
+    when an edit verb / modifier keyword (改 / 換 / 修 / 加 / move /
+    resize / bigger / smaller / colour / font / ...) co-occurs with
+    a UI-element target noun (header / footer / button / nav / 標題
+    / 按鈕 / ...) in ``command``. The coach surfaces the three
+    apply-options (apply now / dry-run / chat) pre-rendered with the
+    ``/edit-preview`` slash command so the agent edit pipeline runs
+    against the live workspace and vite HMR auto-reloads the iframe.
+    Detection / hashing is owned by :mod:`backend.web.edit_intent`.
     """
     triggers: list[str] = []
     if (not state["agents"] and not state["tasks"]
@@ -1149,6 +1166,23 @@ def _detect_coaching_triggers(
     # intent stays suppressed but a different intent re-coaches).
     for intent_ref in detect_build_intents_in_text(command):
         key = intent_ref.trigger_key()
+        if key in suppress:
+            continue
+        triggers.append(key)
+
+    # W16.5 — edit-while-preview coaching trigger. Scans the live
+    # INVOKE ``command`` for an edit verb / modifier + UI-element
+    # target co-occurrence (e.g. 「header 大一點」, 「改 button 顏色」,
+    # "make the hero font bigger"). Same scoping rationale as W16.1/
+    # W16.2/W16.3 — only the freshly typed command is scanned so an
+    # off-hand mention of "header" buried in an old task description
+    # does not re-coach forever. Per-intent suppress is honoured via
+    # the ``edit_while_preview:<hash16>`` key shape (hash covers
+    # trigger keyword + normalised target so a re-paste of the same
+    # intent stays suppressed but a different target / different
+    # modifier re-coaches).
+    for edit_ref in detect_edit_intents_in_text(command):
+        key = edit_ref.trigger_key()
         if key in suppress:
             continue
         triggers.append(key)
@@ -1263,12 +1297,17 @@ def _plan_actions(
             # (verb, subject, scaffold_kind) triple from the trigger
             # key's hash without a caching layer.
             build_intent_refs = detect_build_intents_in_text(command)
+            # W16.5 — same pure-function pattern as W16.3: re-detect
+            # edit intents so the renderers can recover the
+            # (trigger, target) pair from the trigger key's hash.
+            edit_intent_refs = detect_edit_intents_in_text(command)
             actions.append({
                 "type": "coach",
                 "triggers": triggers,
                 "pending_count": pending_count,
                 "image_refs": image_refs,
                 "build_intent_refs": build_intent_refs,
+                "edit_intent_refs": edit_intent_refs,
                 "agent_count": len(state["agents"]),
                 "task_count": len(state["tasks"]),
             })
@@ -1594,6 +1633,7 @@ Triggers tell you what to coach about. Translate them to operator-facing languag
 - url_in_message:<url>: the operator pasted a URL into the chat. Ask which of the W11/W12/W13 capabilities they want to apply: clone the site (`/clone <url>`, builds a working scaffold from the live page), extract its brand style (`/brand <url>`, captures colours / fonts / spacing tokens for reuse), capture multi-breakpoint screenshots (`/screenshot <url>`, 320 / 768 / 1280 / 1920 PNGs into `.omnisight/`), or skip if the URL is just FYI. Render each option as its own bullet with a bilingual label and a backtick-wrapped slash command (e.g. `(a) 克隆網站 / Clone: /clone https://…`). Show the full URL in each command — operators copy-paste the bullet into the chat. Multiple URLs in one message → one option-set per URL, grouped under a "URL #N: <url>" sub-heading.
 - image_in_message:<hash16>: the operator attached / pasted a screenshot into the chat (data URL or `[image: <name>]` upload marker). The context block hands you the operator-facing label (filename for markers; ``<mime>:<hash16>`` for data URLs). Ask which vision-LLM-driven branch they want: (a) component — extract one isolated component from the shot (`/clone-image <hash16> --as=component`), (b) 整頁 / full page — scaffold an entire page from the design (`/clone-image <hash16> --as=page`), or (c) brand reference — extract colours / fonts / spacing tokens for reuse (`/brand-image <hash16>`). Render each option as its own bullet with a bilingual label. Multiple images in one message → one option-set per image, grouped under an "Image #N: <label>" sub-heading.
 - build_intent:<hash16>: the operator typed a freeform "蓋/做/建/make/build/create" + "網站/landing/page/app" intent without pasting a URL or attaching a screenshot. The context block hands you the detected verb + subject + the classifier's primary scaffold-kind suggestion. Offer the four scaffold options pre-rendered with the `--auto-preview` flag so W14 live-preview auto-launches: (a) Landing page — `/scaffold landing --auto-preview`, (b) 多頁網站 / Multi-page site — `/scaffold site --auto-preview`, (c) 單頁 / Single page — `/scaffold page --auto-preview`, (d) Web app — `/scaffold app --auto-preview`. Mark the classifier's primary suggestion with a ★ recommendation marker so the operator's eye lands on it first; still render the alternatives so a misclassification has a one-tap recovery.
+- edit_while_preview:<hash16>: the operator typed an edit-style instruction targeting a UI element ("header 大一點", "改 button 顏色", "make the hero font bigger") while a live preview iframe is mounted. The context block hands you the detected trigger keyword (verb or modifier) + the normalised UI-element target (header / footer / button / nav / ...) + the operator's raw excerpt. Offer three apply-options so the operator picks the right blast radius: (a) 直接套用 / Apply now — `/edit-preview <ws> "<excerpt>"`, (b) 預覽影響範圍 / Dry-run — `/edit-preview <ws> "<excerpt>" --dry`, (c) 改用對話 / Send to chat — keep typing for a longer brief. Render each option as its own bullet with a bilingual label. The downstream `/edit-preview` router runs the agent edit pipeline against the named workspace; vite HMR auto-reloads the iframe so the operator sees the change without refreshing.
 
 Trigger priority when several co-fire:
 - `missing_toolchain` always leads. The operator already declared intent by typing the command, so install-first-then-run is the productive path; SKIP the `empty_workspace` framing entirely whenever any `missing_toolchain` is present.
@@ -1601,6 +1641,7 @@ Trigger priority when several co-fire:
 - `url_in_message` lands BETWEEN `missing_toolchain` and `empty_workspace`: when a URL is present and no toolchain is missing, lead with the URL menu (the operator declared intent — pick a capability for the URL); SKIP the `empty_workspace` framing in that case for the same reason missing-toolchain skips it. If both `missing_toolchain` AND `url_in_message` co-fire, the toolchain install still leads (cannot run any of the W11/W12/W13 capabilities without it) — append the URL menu as a secondary section after the install link.
 - `image_in_message` mirrors `url_in_message` priority: leads when only it + `empty_workspace` co-fire (operator pasted intent); appended as a secondary section when `missing_toolchain` co-fires (install first then run vision pass). When BOTH `url_in_message` and `image_in_message` co-fire (operator pasted both a link and a screenshot in the same message), render the URL menu first and the image menu second under a separator line — operators usually paste the URL as the canonical source and the screenshot as supporting reference, not the other way round.
 - `build_intent` is the *lowest* of the intent-bearing triggers: leads only when no `url_in_message` / `image_in_message` co-fires, since URL + screenshot carry richer context (an actual reference) than freeform phrasing. When `url_in_message` or `image_in_message` co-fires, render the concrete-reference menu first and the scaffold menu second under a separator line as the from-scratch alternative. When `missing_toolchain` co-fires, the install link still leads and the scaffold menu trails (cannot scaffold without nodejs-lts-20).
+- `edit_while_preview` is *orthogonal* to the build/clone family: it leads when the operator's intent is to MODIFY existing UI rather than create new things. Surface it whenever an edit verb / modifier + UI-element target co-occurs in the message — even if `url_in_message` / `image_in_message` / `build_intent` also fire, render the edit menu FIRST because the edit signal is the most direct ("header 大一點" is unambiguous; the URL / image / build_intent are usually just supporting context). Skip the `empty_workspace` framing whenever `edit_while_preview` fires (the operator declared edit intent — they're not stuck on "how to start"). When `missing_toolchain` co-fires, the install link still leads (cannot run the agent edit pipeline without the toolchain) and the edit menu trails as a secondary section.
 - When only `empty_workspace` and `stale_pep` co-fire, lead with the PEP queue (it's already-started work) and offer the empty-workspace prompts as the secondary nudge.
 
 Match the operator's recent message language (CJK or English; default CJK if no recent operator messages). Do not apologise, do not over-explain, do not repeat what's already in the toast — your job is meta-narration + action prompts. Keep total length under 6 lines."""
@@ -1612,6 +1653,7 @@ def _build_coach_context(
     *,
     image_refs: list[ImageAttachmentRef] | None = None,
     build_intent_refs: list[BuildIntentRef] | None = None,
+    edit_intent_refs: list[EditIntentRef] | None = None,
 ) -> str:
     """LLM context block. Each trigger is translated to a one-line
     operator-facing description so the LLM never has to guess what the
@@ -1648,6 +1690,15 @@ def _build_coach_context(
     suggestion; the alternatives let the operator override if the
     classifier guessed wrong. Classification + hashing is owned by
     :mod:`backend.web.build_intent`.
+
+    W16.5 — ``edit_while_preview:<hash16>`` triggers carry the detected
+    trigger keyword (verb or modifier) + normalised UI-element target
+    + the operator's raw excerpt + the three apply-options pre-
+    rendered as ``/edit-preview <ws> "<excerpt>"`` slash commands
+    (apply now / dry-run / chat).  The downstream router runs the
+    agent edit pipeline against the workspace's source tree; vite
+    HMR auto-reloads the iframe.  Detection / hashing is owned by
+    :mod:`backend.web.edit_intent`.
     """
     parts = ["Triggers detected by the planner:"]
     for t in triggers:
@@ -1707,6 +1758,25 @@ def _build_coach_context(
                 f"runs the W11.9 framework adapter then auto-launches "
                 f"the W14 live-preview sandbox."
             )
+        elif t.startswith(EDIT_INTENT_TRIGGER_PREFIX):
+            hash16 = t.split(":", 1)[1]
+            trigger_kw, target, excerpt = _resolve_edit_intent_for_trigger(
+                hash16, edit_intent_refs,
+            )
+            parts.append(
+                f"- edit_while_preview: operator said "
+                f"**'{excerpt}'** (trigger={trigger_kw!r}, "
+                f"target={target!r}, hash={hash16}) — apply slash "
+                f"commands: apply now "
+                f"(`{EDIT_INTENT_SLASH_COMMAND} <workspace_id> "
+                f'"{excerpt}"`), dry-run '
+                f"(`{EDIT_INTENT_SLASH_COMMAND} <workspace_id> "
+                f'"{excerpt}" {EDIT_INTENT_DRY_RUN_FLAG}`). The '
+                f"downstream router invokes the agent edit pipeline "
+                f"against the workspace's source files; vite HMR "
+                f"auto-reloads the iframe so the operator sees the "
+                f"change without refreshing."
+            )
         else:
             parts.append(f"- {t}")
     return "\n".join(parts)
@@ -1757,6 +1827,26 @@ def _resolve_build_intent_for_trigger(
     # coupling minimal).
     from backend.web.build_intent import BUILD_INTENT_KIND_PAGE
     return "build", "page", BUILD_INTENT_KIND_PAGE
+
+
+def _resolve_edit_intent_for_trigger(
+    hash16: str,
+    edit_intent_refs: list[EditIntentRef] | None,
+) -> tuple[str, str, str]:
+    """Look up (trigger_keyword, normalised_target, raw_excerpt) for
+    *hash16* in *edit_intent_refs*.
+
+    W16.5 sibling of :func:`_resolve_build_intent_for_trigger`.  Falls
+    back to generic placeholders ("edit", "ui", "edit ui") when refs
+    is missing / mismatched, mirroring the W16.3 graceful-degradation
+    pattern.  Returning a tuple keeps the call site stable across the
+    LLM context renderer + the templated fallback.
+    """
+    if edit_intent_refs:
+        for ref in edit_intent_refs:
+            if ref.edit_hash == hash16:
+                return ref.trigger, ref.target, ref.raw_excerpt
+    return "edit", "ui", "edit ui"
 
 
 # BS.10.2: human-friendly display labels per ``_TOOLCHAIN_KEYWORD_MAP``
@@ -2021,6 +2111,91 @@ def _render_build_intent_options_block(
     return lines
 
 
+def _edit_in_message_hashes(triggers: list[str]) -> list[str]:
+    """Extract edit-intent hash16 values from
+    ``edit_while_preview:<hash16>`` triggers.
+
+    W16.5 sibling of :func:`_build_intent_in_message_hashes`. Order is
+    preserved so the rendered coach card walks the intents in the
+    same order the operator typed — matches the determinism contract
+    that the W16.5 tests assert on.
+    """
+    out: list[str] = []
+    for t in triggers:
+        if not t.startswith(EDIT_INTENT_TRIGGER_PREFIX):
+            continue
+        hash16 = t.split(":", 1)[1]
+        if hash16:
+            out.append(hash16)
+    return out
+
+
+def _render_edit_intent_options_block(
+    intent_hashes: list[str],
+    edit_intent_refs: list[EditIntentRef] | None,
+    *,
+    single_intent_intro: bool,
+) -> list[str]:
+    """W16.5 — render the three-option apply menu (apply now / dry-run
+    / chat) for one or many detected edit intents.
+
+    Mirrors :func:`_render_build_intent_options_block`.
+    ``edit_intent_refs`` threads the (trigger, target, raw_excerpt)
+    triple through the action dict so the coach card can echo the
+    operator's phrasing back at them ("看到你想 *header 大一點*…")
+    and the slash command carries the verbatim excerpt as the agent
+    edit-pipeline instruction.
+    """
+    lines: list[str] = []
+    if single_intent_intro and len(intent_hashes) == 1:
+        h = intent_hashes[0]
+        trigger_kw, target, excerpt = _resolve_edit_intent_for_trigger(
+            h, edit_intent_refs,
+        )
+        lines.append(
+            f"看到你想 **{excerpt}** — 我幫你 apply 到 live preview，"
+            "vite HMR 秒重新整理："
+        )
+        lines.extend(_render_edit_intent_action_bullets(excerpt))
+        return lines
+    if len(intent_hashes) > 1:
+        lines.append(
+            f"看到你想改 {len(intent_hashes)} 個 UI 區塊 — "
+            "每個都可以選一個 apply 方式："
+        )
+    for idx, h in enumerate(intent_hashes, start=1):
+        trigger_kw, target, excerpt = _resolve_edit_intent_for_trigger(
+            h, edit_intent_refs,
+        )
+        prefix = f"Edit #{idx}: " if len(intent_hashes) > 1 else ""
+        lines.append(f"**{prefix}{excerpt}** (target `{target}`)")
+        lines.extend(_render_edit_intent_action_bullets(excerpt))
+    return lines
+
+
+def _render_edit_intent_action_bullets(excerpt: str) -> list[str]:
+    """The three canonical W16.5 apply options for a single edit intent.
+
+    Bilingual labels mirror the W16.1 URL / W16.2 image / W16.3 build
+    bullet shape so a CJK or English operator both see a clear CTA.
+
+    Slash commands carry the verbatim ``excerpt`` as the instruction
+    body so the consumer-side ``/edit-preview`` router can shlex-
+    unescape and pass it straight to the agent edit pipeline; vite
+    inotify-watches the file tree and ships HMR patches automatically
+    once the agent saves.
+    """
+    safe_excerpt = excerpt.replace('"', '\\"')
+    return [
+        f'- **(a) 直接套用 / Apply now**: '
+        f'`{EDIT_INTENT_SLASH_COMMAND} <workspace_id> "{safe_excerpt}"`',
+        f'- **(b) 預覽影響範圍 / Dry-run**: '
+        f'`{EDIT_INTENT_SLASH_COMMAND} <workspace_id> "{safe_excerpt}" '
+        f'{EDIT_INTENT_DRY_RUN_FLAG}`',
+        "- **(c) 改用對話 / Send to chat**: 繼續打字描述更詳細的 brief",
+    ]
+
+
 def _render_build_intent_action_bullets(primary_kind: str) -> list[str]:
     """The four canonical W16.3 scaffold options.
 
@@ -2073,6 +2248,7 @@ def _build_templated_coach_message(
     *,
     image_refs: list[ImageAttachmentRef] | None = None,
     build_intent_refs: list[BuildIntentRef] | None = None,
+    edit_intent_refs: list[EditIntentRef] | None = None,
 ) -> str:
     """LLM-unavailable fallback. CJK-default to match the operator base
     with bilingual action labels (``安裝 / Install``) so an English-only
@@ -2118,6 +2294,19 @@ def _build_templated_coach_message(
     (an actual reference) than the operator's freeform phrasing.
     Appended after the toolchain install link when missing_toolchain
     co-fires (cannot scaffold without nodejs-lts-20).
+
+    W16.5 — recognises ``edit_while_preview:<hash16>`` triggers and
+    emits the three-option apply menu (apply now / dry-run / chat)
+    with the operator's raw excerpt threaded into the slash command
+    so a one-tap apply runs the agent edit pipeline against the live
+    workspace; vite HMR auto-reloads the iframe.  Priority:
+    edit_while_preview leads when present (the edit signal is
+    unambiguous and direct — ``"header 大一點"`` always means modify
+    the existing header).  Other intent-bearing triggers (URL /
+    image / build_intent) are appended as secondary sections under
+    a separator line.  Appended after the toolchain install link
+    when missing_toolchain co-fires (cannot run the agent edit
+    pipeline without nodejs-lts-20).
     """
     has_empty = "empty_workspace" in triggers
     has_pep = "stale_pep" in triggers
@@ -2125,6 +2314,7 @@ def _build_templated_coach_message(
     urls = _url_in_message_urls(triggers)
     image_hashes = _image_in_message_hashes(triggers)
     build_intent_hashes = _build_intent_in_message_hashes(triggers)
+    edit_intent_hashes = _edit_in_message_hashes(triggers)
     lines: list[str] = []
     if missing_slugs:
         # Banner phrasing differs slightly for single vs many — a 1-of-1
@@ -2182,6 +2372,54 @@ def _build_templated_coach_message(
             lines.append(
                 "裝完 toolchain 之後，你說想做的也可以直接 scaffold："
             )
+            lines.extend(_render_build_intent_options_block(
+                build_intent_hashes, build_intent_refs,
+                single_intent_intro=False,
+            ))
+        if edit_intent_hashes:
+            # W16.5 — edit menu trails as a final section after the
+            # toolchain install (and after every other intent-bearing
+            # menu if they co-fire). Same install-first rationale:
+            # cannot run the agent edit pipeline without nodejs-lts-20.
+            lines.append(
+                "裝完 toolchain 之後，你想改的 UI 也可以一鍵 apply："
+            )
+            lines.extend(_render_edit_intent_options_block(
+                edit_intent_hashes, edit_intent_refs,
+                single_intent_intro=False,
+            ))
+        if has_pep:
+            lines.append(
+                f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
+                "決定等你 APPROVE / REJECT"
+            )
+    elif edit_intent_hashes:
+        # W16.5 — edit menu leads when present and no toolchain install
+        # blocks it.  Same priority rationale as URL / image / build_intent:
+        # an operator typing "header 大一點" has declared intent, so
+        # SKIP the ``empty_workspace`` framing and let the edit menu
+        # drive.  When other intent-bearing triggers co-fire (URL /
+        # image / build_intent), render the edit menu first because
+        # the edit signal is the most direct ("header 大一點" is
+        # unambiguous) and append the others as secondary sections
+        # under a separator line.
+        lines.extend(_render_edit_intent_options_block(
+            edit_intent_hashes, edit_intent_refs,
+            single_intent_intro=True,
+        ))
+        if urls:
+            lines.append("")
+            lines.append("另外，你貼的網址也可以走 W11/W12/W13 路徑：")
+            lines.extend(_render_url_options_block(urls, single_url_intro=False))
+        if image_hashes:
+            lines.append("")
+            lines.append("或者你貼的圖片可以走 vision-LLM 路徑：")
+            lines.extend(_render_image_options_block(
+                image_hashes, image_refs, single_image_intro=False,
+            ))
+        if build_intent_hashes:
+            lines.append("")
+            lines.append("或者你想從零 scaffold 一個全新的 — 也可以走：")
             lines.extend(_render_build_intent_options_block(
                 build_intent_hashes, build_intent_refs,
                 single_intent_intro=False,
@@ -2324,10 +2562,12 @@ async def _generate_coach_message(action: dict) -> str:
     pending = int(action.get("pending_count") or 0)
     image_refs = action.get("image_refs") or None
     build_intent_refs = action.get("build_intent_refs") or None
+    edit_intent_refs = action.get("edit_intent_refs") or None
     fallback = _build_templated_coach_message(
         triggers, pending,
         image_refs=image_refs,
         build_intent_refs=build_intent_refs,
+        edit_intent_refs=edit_intent_refs,
     )
     try:
         from backend.agents.nodes import _get_llm
@@ -2343,6 +2583,7 @@ async def _generate_coach_message(action: dict) -> str:
             triggers, pending,
             image_refs=image_refs,
             build_intent_refs=build_intent_refs,
+            edit_intent_refs=edit_intent_refs,
         ))
         resp = llm.invoke([sys, ctx])
         out = (resp.content or "").strip() if hasattr(resp, "content") else ""  # type: ignore[union-attr]

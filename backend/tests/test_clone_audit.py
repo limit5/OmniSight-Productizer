@@ -933,7 +933,7 @@ def test_total_re_export_count_pinned_at_192() -> None:
     symbols → 330. Each row's drift guard is updated in lockstep so
     a future row that adds a new symbol fails every guard until each
     one acknowledges the new total."""
-    assert len(web_pkg.__all__) == 345
+    assert len(web_pkg.__all__) == 374
 
 
 # ── Whole-spec invariants ───────────────────────────────────────────────

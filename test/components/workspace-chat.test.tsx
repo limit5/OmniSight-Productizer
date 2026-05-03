@@ -26,6 +26,7 @@ import * as React from "react"
 import {
   WorkspaceChat,
   WORKSPACE_CHAT_MAX_FILE_BYTES,
+  applyPreviewHmrReloadToMessages,
   defaultChatIdFactory,
   defaultNowIso,
   filesToChatAttachments,
@@ -833,5 +834,112 @@ describe("W16.4 inline preview embed", () => {
     const sandbox = iframe.getAttribute("sandbox") ?? ""
     expect(sandbox).toContain("allow-scripts")
     expect(sandbox).toContain("allow-same-origin")
+  })
+})
+
+// ─── W16.5 — preview.hmr_reload reload-counter ───────────────────────────
+
+describe("W16.5 preview.hmr_reload iframe re-mount", () => {
+  function previewMsg(
+    id: string,
+    overrides: Partial<WorkspaceChatMessage["previewEmbed"]> = {},
+  ): WorkspaceChatMessage {
+    return makeMessage(id, {
+      role: "system",
+      text: "preview ready",
+      previewEmbed: {
+        url: "https://preview-abc.example.com",
+        workspaceId: "ws-99",
+        ...overrides,
+      },
+    })
+  }
+
+  it("renders a default reload-count of 0 in the data attribute", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[previewMsg("m-hmr-1")]}
+      />,
+    )
+    const container = screen.getByTestId(
+      "workspace-chat-message-preview-m-hmr-1",
+    )
+    expect(container.getAttribute("data-reload-count")).toBe("0")
+  })
+
+  it("threads a non-zero reloadCount through to the data attribute", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[previewMsg("m-hmr-2", { reloadCount: 3 })]}
+      />,
+    )
+    const container = screen.getByTestId(
+      "workspace-chat-message-preview-m-hmr-2",
+    )
+    expect(container.getAttribute("data-reload-count")).toBe("3")
+  })
+
+  it("applyPreviewHmrReloadToMessages bumps the matching workspace's counter", () => {
+    const initial: WorkspaceChatMessage[] = [
+      previewMsg("m-hmr-3", { workspaceId: "ws-99" }),
+    ]
+    const next = applyPreviewHmrReloadToMessages(initial, "ws-99")
+    expect(next).not.toBe(initial)
+    expect(next[0].previewEmbed?.reloadCount).toBe(1)
+    // Subsequent call bumps again.
+    const next2 = applyPreviewHmrReloadToMessages(next, "ws-99")
+    expect(next2[0].previewEmbed?.reloadCount).toBe(2)
+  })
+
+  it("applyPreviewHmrReloadToMessages is a no-op for an unknown workspace", () => {
+    const initial: WorkspaceChatMessage[] = [
+      previewMsg("m-hmr-4", { workspaceId: "ws-99" }),
+    ]
+    const next = applyPreviewHmrReloadToMessages(initial, "ws-other")
+    expect(next).toBe(initial)
+  })
+
+  it("applyPreviewHmrReloadToMessages bumps only the most recent matching iframe", () => {
+    const initial: WorkspaceChatMessage[] = [
+      previewMsg("m-hmr-old", { workspaceId: "ws-99" }),
+      makeMessage("text-only", { role: "user", text: "hi" }),
+      previewMsg("m-hmr-recent", { workspaceId: "ws-99" }),
+    ]
+    const next = applyPreviewHmrReloadToMessages(initial, "ws-99")
+    // The recent (last-matching) iframe bumps; the older one stays at 0.
+    const recent = next.find((m) => m.id === "m-hmr-recent")!
+    const old = next.find((m) => m.id === "m-hmr-old")!
+    expect(recent.previewEmbed?.reloadCount).toBe(1)
+    expect(old.previewEmbed?.reloadCount ?? 0).toBe(0)
+  })
+
+  it("applyPreviewHmrReloadToMessages with empty workspaceId is a no-op", () => {
+    const initial: WorkspaceChatMessage[] = [
+      previewMsg("m-hmr-5", { workspaceId: "ws-99" }),
+    ]
+    const next = applyPreviewHmrReloadToMessages(initial, "")
+    expect(next).toBe(initial)
+  })
+
+  it("changing reloadCount across renders re-mounts the iframe with a new key", () => {
+    const initial: WorkspaceChatMessage[] = [
+      previewMsg("m-hmr-6", { workspaceId: "ws-99", reloadCount: 0 }),
+    ]
+    const { rerender, container } = render(
+      <WorkspaceChat workspaceType="web" messages={initial} />,
+    )
+    const firstIframe = container.querySelector(
+      'iframe[data-testid="workspace-chat-message-preview-iframe-m-hmr-6"]',
+    )
+    expect(firstIframe).not.toBeNull()
+
+    const bumped = applyPreviewHmrReloadToMessages(initial, "ws-99")
+    rerender(<WorkspaceChat workspaceType="web" messages={bumped} />)
+    const containerEl = screen.getByTestId(
+      "workspace-chat-message-preview-m-hmr-6",
+    )
+    expect(containerEl.getAttribute("data-reload-count")).toBe("1")
   })
 })

@@ -997,7 +997,7 @@ def test_total_re_export_count_pinned_at_79():
     # symbols (vite_config_injection surface) → 275; W15.6 added 13
     # new symbols (vite_self_fix surface) → 288. Each row's own
     # drift guard re-pins at the new value.
-    assert len(web_pkg.__all__) == 345
+    assert len(web_pkg.__all__) == 374
 
 
 # ── Whole-spec invariants ───────────────────────────────────────────────

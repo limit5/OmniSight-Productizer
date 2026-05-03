@@ -711,10 +711,12 @@ def test_w16_4_symbol_re_exported(symbol: str) -> None:
 
 
 def test_total_re_export_count_matches_w16_4_baseline() -> None:
-    # Bumped from 330 (W16.3 baseline) to 345 (W16.4 +15 web_preview_ready
-    # symbols). Drift here means the W16 epic added/removed surface
-    # without the lock-step bump landing across all neighbour test files.
-    assert len(web_pkg.__all__) == 345
+    # Bumped from 330 (W16.3 baseline) → 345 (W16.4 +15
+    # web_preview_ready) → 374 (W16.5 +13 edit_intent + 16
+    # preview_hmr_reload).  Drift here means the W16 epic
+    # added/removed surface without the lock-step bump landing across
+    # all neighbour test files.
+    assert len(web_pkg.__all__) == 374
 
 
 def test_w16_4_symbol_count_matches_module_all() -> None:

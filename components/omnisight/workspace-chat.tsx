@@ -105,6 +105,16 @@ export interface WorkspaceChatPreviewEmbed {
   workspaceId?: string
   /** Optional human-facing label rendered above the iframe. */
   label?: string
+  /**
+   * W16.5 — bump on each ``preview.hmr_reload`` SSE event.  The iframe
+   * uses ``reloadCount`` as part of its React key so the FE consumer
+   * can force a full re-mount when vite HMR is stuck (vite plugin
+   * crash / out-of-band file edit / operator pressed "force reload").
+   * Defaults to 0; absent reads as 0.  The iframe is *not* re-mounted
+   * by HMR's normal path — vite's WebSocket patches the page in place
+   * — so this counter is only consulted for the escape hatch.
+   */
+  reloadCount?: number
 }
 
 export interface WorkspaceChatMessage {
@@ -258,11 +268,20 @@ function ChatPreviewEmbed({
   const iframeCls = fullscreen
     ? "h-full w-full flex-1 border-0"
     : "h-64 w-full rounded-b-md border-0"
+  // W16.5 — including ``reloadCount`` in the iframe key forces a full
+  // re-mount whenever the upstream SSE consumer bumps the counter
+  // (e.g. on a ``preview.hmr_reload`` event after a vite plugin
+  // crash).  The normal HMR path patches the page in place via vite's
+  // WebSocket and does NOT bump the key — the counter is only the
+  // escape hatch.
+  const reloadCount = embed.reloadCount ?? 0
+  const iframeKey = `iframe-${messageId}-${reloadCount}`
   return (
     <div
       data-testid={`workspace-chat-message-preview-${messageId}`}
       data-fullscreen={fullscreen ? "true" : "false"}
       data-workspace-id={embed.workspaceId ?? ""}
+      data-reload-count={String(reloadCount)}
       className={containerCls}
     >
       <div className="flex items-center justify-between gap-2 px-2 py-1 text-[11px] text-muted-foreground">
@@ -298,6 +317,7 @@ function ChatPreviewEmbed({
         </div>
       </div>
       <iframe
+        key={iframeKey}
         data-testid={`workspace-chat-message-preview-iframe-${messageId}`}
         src={embed.url}
         title={embed.label || "Live preview"}
@@ -308,6 +328,58 @@ function ChatPreviewEmbed({
       />
     </div>
   )
+}
+
+/**
+ * W16.5 — apply a ``preview.hmr_reload`` SSE event to a message log.
+ *
+ * Pure helper so the SSE consumer can call it from any layer without
+ * pulling in React state.  Finds the existing message whose
+ * ``previewEmbed.workspaceId`` matches *workspaceId* (the most recent
+ * one wins — the W14 sandbox is per-workspace 1:1) and bumps its
+ * ``reloadCount`` by one.  Optionally appends a fresh chat row when
+ * the operator wants a textual confirmation ("Preview updated:
+ * header bigger") in addition to the silent in-place HMR patch.
+ *
+ * Returns a NEW array with the bumped message; the input is not
+ * mutated (immutable update so React re-renders).  When no matching
+ * message exists, returns the input unchanged so a stray reload event
+ * for a never-mounted preview is a no-op.
+ */
+export function applyPreviewHmrReloadToMessages(
+  messages: WorkspaceChatMessage[],
+  workspaceId: string,
+): WorkspaceChatMessage[] {
+  if (!workspaceId) return messages
+  let mutated = false
+  // Walk newest-last so the *most recent* iframe matching the
+  // workspace id is the one that bumps — older history rows for the
+  // same workspace stay frozen.  We iterate in reverse, flip a flag
+  // on first match, then fall back to the original order.
+  let bumpedIdx = -1
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]
+    if (
+      m.previewEmbed &&
+      m.previewEmbed.workspaceId === workspaceId &&
+      m.previewEmbed.url
+    ) {
+      bumpedIdx = i
+      break
+    }
+  }
+  if (bumpedIdx < 0) return messages
+  const next = messages.slice()
+  const target = next[bumpedIdx]
+  const prevCount = target.previewEmbed?.reloadCount ?? 0
+  next[bumpedIdx] = {
+    ...target,
+    previewEmbed: target.previewEmbed
+      ? { ...target.previewEmbed, reloadCount: prevCount + 1 }
+      : target.previewEmbed,
+  }
+  mutated = true
+  return mutated ? next : messages
 }
 
 function useResolvedWorkspaceType(
