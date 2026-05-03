@@ -34,4 +34,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    # Reverse-of-upgrade order: index first, then columns from sessions
+    # (rotated_from / mfa_verified / metadata in reverse-of-add order),
+    # finally audit_log.session_id. Going through alembic schema ops
+    # (op.drop_index / op.drop_column) keeps identifier quoting on the
+    # dialect's IdentifierPreparer rather than f-string DDL — same
+    # SQLAlchemy-ops track FX.1.10 pulled 0106 onto. ALTER TABLE DROP
+    # COLUMN works natively on PostgreSQL and on SQLite >= 3.35; the
+    # upgrade likewise relies on ALTER TABLE ADD COLUMN, so any DB that
+    # ran upgrade() can run downgrade().
+    op.drop_index(
+        "idx_audit_log_session",
+        table_name="audit_log",
+        if_exists=True,
+    )
+    op.drop_column("sessions", "rotated_from")
+    op.drop_column("sessions", "mfa_verified")
+    op.drop_column("sessions", "metadata")
+    op.drop_column("audit_log", "session_id")
