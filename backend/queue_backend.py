@@ -35,7 +35,9 @@ Backend selection:
   * If ``OMNISIGHT_REDIS_URL`` is set + the ``redis`` package imports,
     the Redis Streams backend is used.
   * Otherwise the in-memory backend is used (single-process dev / tests).
-  * Both backends implement the same observable semantics; that
+  * ``rabbitmq`` / ``sqs`` are reserved names; selecting them raises
+    explicitly in the factory until real adapters exist.
+  * Both implemented backends share observable semantics; that
     equivalence is the contract the test suite enforces.
 """
 
@@ -50,7 +52,7 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable, NoReturn, Protocol
 
 from backend import metrics
 from backend.catc import TaskCard
@@ -260,9 +262,7 @@ class QueueBackend(Protocol):
     """Pluggable transport-level interface for a queue.
 
     Default implementation is ``RedisStreamsQueueBackend``; in-memory
-    backend is for dev / tests; ``RabbitMQQueueBackend`` and
-    ``SQSQueueBackend`` are declared here as adapter stubs to pin the
-    contract for future implementation.
+    backend is for dev / tests.
     """
 
     def push(self, card: TaskCard, priority: PriorityLevel) -> str: ...
@@ -911,73 +911,6 @@ class RedisStreamsQueueBackend:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Adapter stubs (RabbitMQ / SQS) — interface only
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#
-# These exist so the QueueBackend Protocol has at least three concrete
-# subclasses (or stubs) acknowledging the shape.  They do not implement
-# the transport — instantiating them raises NotImplementedError so
-# misconfigured deployments fail fast rather than silently degrading.
-
-
-class _UnimplementedAdapter:
-    """Common base — every method raises so callers fail fast."""
-
-    _BACKEND_NAME: str = "unspecified"
-
-    def __init__(self, *_args, **_kwargs) -> None:
-        raise NotImplementedError(
-            f"O2 queue adapter '{self._BACKEND_NAME}' is declared but not "
-            f"implemented yet — set OMNISIGHT_QUEUE_BACKEND=redis (default) "
-            f"or implement the adapter."
-        )
-
-    def push(self, card: TaskCard,
-             priority: PriorityLevel) -> str: ...    # pragma: no cover
-    def pull(self, consumer: str, count: int,
-             visibility_timeout_s: float
-             ) -> list[QueueMessage]: ...           # pragma: no cover
-    def ack(self, message_id: str) -> bool: ...     # pragma: no cover
-    def nack(self, message_id: str, reason: str,
-             stack: str | None = None
-             ) -> QueueMessage: ...                  # pragma: no cover
-    def set_state(self, message_id: str,
-                  new_state: TaskState
-                  ) -> QueueMessage: ...             # pragma: no cover
-    def get(self, message_id: str
-            ) -> QueueMessage | None: ...           # pragma: no cover
-    def depth(self, priority: PriorityLevel | None = None,
-              state: TaskState | None = None
-              ) -> int: ...                          # pragma: no cover
-    def sweep_visibility(self, now: float | None = None
-                         ) -> SweepResult: ...       # pragma: no cover
-    def dlq_list(self, limit: int
-                 ) -> list[DlqEntry]: ...            # pragma: no cover
-    def dlq_purge(self, message_id: str
-                  ) -> bool: ...                     # pragma: no cover
-    def dlq_redrive(self, message_id: str,
-                    new_priority: PriorityLevel | None = None
-                    ) -> str: ...                    # pragma: no cover
-    def clear_all(self) -> None: ...                 # pragma: no cover
-
-
-class RabbitMQQueueBackend(_UnimplementedAdapter):
-    """Adapter stub — real impl deferred (priority via ``x-priority``,
-    visibility via consumer-side timer + ``basic.nack(requeue=True)``).
-    """
-
-    _BACKEND_NAME = "rabbitmq"
-
-
-class SQSQueueBackend(_UnimplementedAdapter):
-    """Adapter stub — real impl deferred (priority via 4 separate queues
-    matching the AWS recommendation, visibility via SQS native VTO).
-    """
-
-    _BACKEND_NAME = "sqs"
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Singleton backend selection + public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -994,14 +927,22 @@ def _redacted(url: str) -> str:
     return url
 
 
+def _raise_unimplemented_backend(name: str) -> NoReturn:
+    raise NotImplementedError(
+        f"O2 queue backend '{name}' is declared but not implemented yet — "
+        f"set OMNISIGHT_QUEUE_BACKEND=redis (default) or memory, or implement "
+        f"the adapter."
+    )
+
+
 def _select_backend() -> QueueBackend:
     """Pick a backend based on env.  Same pattern as ``dist_lock.py``."""
     name = (os.environ.get("OMNISIGHT_QUEUE_BACKEND") or "auto").strip().lower()
     url = (os.environ.get("OMNISIGHT_REDIS_URL") or "").strip()
     if name in ("rabbitmq", "rabbit"):
-        return RabbitMQQueueBackend()  # raises NotImplementedError
+        _raise_unimplemented_backend("rabbitmq")
     if name == "sqs":
-        return SQSQueueBackend()
+        _raise_unimplemented_backend("sqs")
     if name == "memory":
         logger.info("O2 queue: using in-memory backend (forced)")
         return InMemoryQueueBackend()
@@ -1299,8 +1240,6 @@ __all__ = [
     "QueueBackend",
     "InMemoryQueueBackend",
     "RedisStreamsQueueBackend",
-    "RabbitMQQueueBackend",
-    "SQSQueueBackend",
     "set_backend_for_tests",
     "push",
     "pull",
