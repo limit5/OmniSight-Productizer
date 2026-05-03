@@ -6169,22 +6169,22 @@ BP.E GraphRAG / Neo4j
 - [~][G] FX.4.2 `backend/forecast.py:155` `_PRICING_CACHE` 同
 - [x][G] FX.4.3 `backend/sensor_fusion.py:497` `_SF_CACHE` 同
 - [x][G] FX.4.4 `backend/telemetry_backend.py:536` `_TELEMETRY_CACHE` 同
-- [~][G] FX.4.5 `backend/codeowners.py:39` `_rules` 加 file mtime 失效
-- [~][G] FX.4.6 `backend/prompt_loader.py:205` `_task_skills_cache` 同
-- [ ] FX.4.7 `backend/agents/llm.py:1221` `_OLLAMA_TOOL_COMPAT_CACHE` 同
+- [x][G] FX.4.5 `backend/codeowners.py:39` `_rules` 加 file mtime 失效
+- [x][G] FX.4.6 `backend/prompt_loader.py:205` `_task_skills_cache` 同
+- [x][G] FX.4.7 `backend/agents/llm.py:1221` `_OLLAMA_TOOL_COMPAT_CACHE` 同
 
 #### Stub → 真實作 OR 下架（5）
-- [ ] FX.4.8 `backend/orchestrator_gateway.py:234` `_gerrit_status_stub` 接 O6/O7 真實作 OR endpoint 改回 501
-- [ ] FX.4.9 `backend/enterprise_web_stack.py:988` `_export_xlsx_stub` 用 openpyxl 真出 XLSX OR 下架
-- [ ] FX.4.10 `backend/enterprise_web_stack.py:1517` `_preview_xlsx_stub` 同
-- [ ] FX.4.11 `backend/agents/sub_agent.py` run_in_background 真實作 OR docstring 明寫 unsupported 加 contract test
-- [ ] FX.4.12 `backend/agents/runner_handlers.py` bash_handler run_in_background 同
+- [x][G] FX.4.8 `backend/orchestrator_gateway.py:234` `_gerrit_status_stub` 接 O6/O7 真實作 OR endpoint 改回 501
+- [x][G] FX.4.9 `backend/enterprise_web_stack.py:988` `_export_xlsx_stub` 用 openpyxl 真出 XLSX OR 下架
+- [x][G] FX.4.10 `backend/enterprise_web_stack.py:1517` `_preview_xlsx_stub` 同
+- [x][G] FX.4.11 `backend/agents/sub_agent.py` run_in_background 真實作 OR docstring 明寫 unsupported 加 contract test
+- [~][G] FX.4.12 `backend/agents/runner_handlers.py` bash_handler run_in_background 同
 
 #### ABC 強制（5）
-- [ ] FX.4.13 `backend/build_adapters.py:448` BuildAdapter 改 `ABC` + `@abstractmethod`
-- [ ] FX.4.14 `backend/app_store_connect.py` Transport 同
-- [ ] FX.4.15 `backend/hmi_components.py` HALComponent 同（render_html / render_js / hal_endpoints）
-- [ ] FX.4.16 `backend/web/framework_adapter.py:602` _AdapterBase 同；移除 pragma:no-cover
+- [x][G] FX.4.13 `backend/build_adapters.py:448` BuildAdapter 改 `ABC` + `@abstractmethod`
+- [x][G] FX.4.14 `backend/app_store_connect.py` Transport 同
+- [x][G] FX.4.15 `backend/hmi_components.py` HALComponent 同（render_html / render_js / hal_endpoints）
+- [~][G] FX.4.16 `backend/web/framework_adapter.py:602` _AdapterBase 同；移除 pragma:no-cover
 - [ ] FX.4.17 `backend/queue_backend.py` _UnimplementedAdapter 拿掉、改 explicit factory raise
 
 #### API contract response_model（5）
@@ -6238,7 +6238,7 @@ BP.E GraphRAG / Neo4j
 
 > **runner**: 混合（Claude 主導 architectural decision，codex 跑 mechanical 部分）
 
-- [ ] FX.7.1 `backend/__init__.py:15-25` 清 25 個 dead re-export
+- [x] FX.7.1 `backend/__init__.py:15-25` 清 25 個 dead re-export — audit 報告為 false positive (`backend` 為 PEP 420 namespace package, 該檔不存在; "25" 是 backend 子套件 `__init__.py` 數)。實際 dead import 1 處：`backend/payment_compliance.py:1153` `from backend import audit_log` (audit_log module 從未存在, 所有 PCI-DSS gate audit row 因 ImportError 被吞而靜默丟失)。已改用 `backend.audit.log()`，並加 `backend/tests/test_backend_imports_drift_guard.py` 靜態掃所有 `from backend import X` 防再次發生。
 - [ ] FX.7.2 1768 個 function-內 local import 抽樣前 20 個重構（避免廣泛 circular）
 - [ ] FX.7.3 9 個 > 2000 行的大檔做 module split 規劃（不一定做完，先寫 ADR + 排程）
 - [ ] FX.7.4 HANDOFF.md 「Production status / Next gate」改 machine-readable manifest（YAML frontmatter 或獨立 status.yaml）

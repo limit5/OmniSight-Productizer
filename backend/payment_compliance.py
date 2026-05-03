@@ -1149,14 +1149,19 @@ def clear_payment_certs() -> None:
 # ── Audit log integration ───────────────────────────────────────────
 
 async def log_payment_gate_result(result: PaymentGateResult) -> None:
+    # FX.7.1: previously imported the non-existent ``backend.audit_log``
+    # module; the ImportError was swallowed and audit rows were never
+    # written. The real append-only chain lives in ``backend.audit``.
     try:
-        from backend import audit_log as _al
-        await _al.append(
-            event_type="payment_gate",
-            payload=result.to_dict(),
+        from backend import audit as _audit
+        await _audit.log(
+            action="payment_gate",
+            entity_kind="payment_compliance",
+            entity_id=f"{result.standard}/{result.level}",
+            after=result.to_dict(),
         )
-    except (ImportError, Exception) as exc:
-        logger.debug("audit_log unavailable: %s", exc)
+    except Exception as exc:
+        logger.debug("audit append failed: %s", exc)
 
 
 def log_payment_gate_result_sync(result: PaymentGateResult) -> None:
