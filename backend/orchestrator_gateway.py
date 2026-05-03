@@ -61,6 +61,7 @@ from backend.dag_schema import DAG, Task
 from backend.dag_validator import ValidationError as DagValError
 from backend.dag_validator import validate as dag_validate
 from backend.queue_backend import PriorityLevel
+from backend.security.llm_firewall import FirewallResult, enforce_input
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ class IntakeRejectReason(str, Enum):
     schema_invalid = "schema_invalid"
     semantic_invalid = "semantic_invalid"
     llm_unavailable = "llm_unavailable"
+    llm_firewall_blocked = "llm_firewall_blocked"
     missing_fields = "missing_fields"
     pending_human_review = "pending_human_review"
 
@@ -622,6 +624,7 @@ async def intake(
     priority: PriorityLevel = PriorityLevel.P2,
     forbidden_globs: list[str] | None = None,
     tenant_id: str | None = None,
+    firewall_result: FirewallResult | None = None,
 ) -> IntakeOutcome:
     """Main entry point — accepts a parsed Jira webhook and drives the
     full pipeline.  Raises ``IntakeError`` on any rejection.
@@ -642,6 +645,33 @@ async def intake(
             IntakeRejectReason.missing_fields,
             f"jira_ticket {jira_ticket!r} does not match PROJ-123 format",
         )
+
+    try:
+        from backend.config import settings
+        firewall = await enforce_input(
+            story,
+            result=firewall_result,
+            api_key=getattr(settings, "anthropic_api_key", "") or None,
+            actor="orchestrator_intake",
+            entity_id=jira_ticket,
+            session_id=jira_ticket,
+        )
+    except RuntimeError as exc:
+        if "ANTHROPIC_API_KEY" not in str(exc):
+            raise
+        firewall = None
+    if firewall and not firewall.allow_invocation:
+        raise IntakeError(
+            IntakeRejectReason.llm_firewall_blocked,
+            firewall.refusal_message,
+            {
+                "classification": firewall.classification,
+                "reasons": list(firewall.reasons),
+                "input_sha256": firewall.input_sha256,
+            },
+        )
+    if firewall and firewall.system_prompt_warning:
+        story = firewall.apply_system_prompt_warning(story)
 
     budget = _configured_token_budget(token_budget)
     session = IntakeSession(

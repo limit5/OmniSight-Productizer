@@ -325,6 +325,7 @@ async def enforce_input(
     *,
     result: FirewallResult | None = None,
     client: FirewallClientLike | None = None,
+    api_key: str | None = None,
     audit_sink: AuditSink | None = None,
     actor: str = "llm_firewall",
     entity_id: str | None = None,
@@ -339,7 +340,12 @@ async def enforce_input(
     the invocation before specialist routing.
     """
 
-    decision = result or classify_input(text, client=client, model=model)
+    decision = result or classify_input(
+        text,
+        client=client,
+        api_key=api_key,
+        model=model,
+    )
     digest = input_hash(text)
 
     if decision.safe:
