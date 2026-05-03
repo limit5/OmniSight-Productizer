@@ -245,3 +245,96 @@ def test_validate_schemas_catches_non_object_root(monkeypatch):
     monkeypatch.setitem(_REGISTRY, "_BadRootType", bad)
 
     assert _validate_schemas() >= 1
+
+
+# ─── FX.5.12 validator regression coverage ──────────────────────
+
+
+def test_validate_schemas_catches_non_dict_input_schema(monkeypatch):
+    """Input schema itself must be a dict, not a JSON-ish list/string."""
+    from backend.agents.tool_schemas import _REGISTRY, _validate_schemas, ToolSchema
+
+    bad = ToolSchema.model_construct(
+        name="_BadInputSchemaType",
+        description="x",
+        category="meta",
+        input_schema=["not", "a", "dict"],
+        deferred=False,
+    )
+    monkeypatch.setitem(_REGISTRY, "_BadInputSchemaType", bad)
+
+    assert _validate_schemas() >= 1
+
+
+def test_validate_schemas_catches_non_dict_properties(monkeypatch):
+    """properties must be an object map; Anthropic rejects array-shaped fields."""
+    from backend.agents.tool_schemas import _REGISTRY, _validate_schemas, ToolSchema
+
+    bad = ToolSchema(
+        name="_BadPropertiesType",
+        description="x",
+        category="meta",
+        input_schema={
+            "type": "object",
+            "properties": ["foo"],  # wrong
+        },
+    )
+    monkeypatch.setitem(_REGISTRY, "_BadPropertiesType", bad)
+
+    assert _validate_schemas() >= 1
+
+
+def test_validate_schemas_catches_required_not_list(monkeypatch):
+    """required must be a list, not a single string field name."""
+    from backend.agents.tool_schemas import _REGISTRY, _validate_schemas, ToolSchema
+
+    bad = ToolSchema(
+        name="_BadRequiredType",
+        description="x",
+        category="meta",
+        input_schema={
+            "type": "object",
+            "properties": {"foo": {"type": "string"}},
+            "required": "foo",  # wrong
+        },
+    )
+    monkeypatch.setitem(_REGISTRY, "_BadRequiredType", bad)
+
+    assert _validate_schemas() >= 1
+
+
+def test_validate_schemas_catches_required_non_string_entry(monkeypatch):
+    """required entries must be strings so schema names round-trip exactly."""
+    from backend.agents.tool_schemas import _REGISTRY, _validate_schemas, ToolSchema
+
+    bad = ToolSchema(
+        name="_BadRequiredEntryType",
+        description="x",
+        category="meta",
+        input_schema={
+            "type": "object",
+            "properties": {"foo": {"type": "string"}},
+            "required": ["foo", 123],  # wrong
+        },
+    )
+    monkeypatch.setitem(_REGISTRY, "_BadRequiredEntryType", bad)
+
+    assert _validate_schemas() >= 1
+
+
+def test_validate_schemas_catches_property_not_dict(monkeypatch):
+    """Each property definition must itself be a JSON Schema object."""
+    from backend.agents.tool_schemas import _REGISTRY, _validate_schemas, ToolSchema
+
+    bad = ToolSchema(
+        name="_BadPropertyDefinitionType",
+        description="x",
+        category="meta",
+        input_schema={
+            "type": "object",
+            "properties": {"foo": "string"},  # wrong
+        },
+    )
+    monkeypatch.setitem(_REGISTRY, "_BadPropertyDefinitionType", bad)
+
+    assert _validate_schemas() >= 1
