@@ -116,6 +116,7 @@ import html as _html_lib
 import json
 import logging
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple, runtime_checkable
@@ -544,7 +545,7 @@ def _build_traceability_html_scaffold(
 # ── Adapter base ───────────────────────────────────────────────────────
 
 
-class _AdapterBase:
+class _AdapterBase(ABC):
     """Shared rendering scaffolding the three concrete adapters reuse.
 
     Each subclass implements ``_render_files`` and pins ``framework`` /
@@ -592,14 +593,14 @@ class _AdapterBase:
             manifest_hash=manifest.manifest_hash if manifest is not None else None,
         )
 
-    # Subclasses override.
+    @abstractmethod
     def _render_files(
         self,
         transformed: TransformedSpec,
         *,
         manifest: Optional[CloneManifest],
     ) -> Sequence[RenderedFile]:
-        raise NotImplementedError  # pragma: no cover
+        raise NotImplementedError
 
 
 # ── Next.js 14 (app router) adapter ───────────────────────────────────
