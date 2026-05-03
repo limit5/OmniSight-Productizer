@@ -200,4 +200,55 @@ describe("ProjectReportPanel", () => {
     render(<ProjectReportPanel />)
     expect(screen.getByText(/No report loaded/)).toBeInTheDocument()
   })
+
+  it("sanitizes XSS payloads in markdown content (FX.2.1)", async () => {
+    const xssMarkdown = `# Malicious Report
+
+## 1. Specification
+
+<script>window.__pwned = true</script>
+
+<img src=x onerror="window.__pwned = true">
+
+[click me](javascript:alert('xss'))
+
+### Inline payload
+
+- <iframe src="https://evil.example/"></iframe>
+- normal item
+
+## 2. Execution
+
+\`\`\`
+ok
+\`\`\`
+
+## 3. Outcome
+
+done
+
+---
+`
+    mockGenerate.mockResolvedValue({
+      report_id: "rpt-xss00000001",
+      title: "Malicious",
+      generated_at: "2026-04-15T12:00:00+00:00",
+      markdown: xssMarkdown,
+    })
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).__pwned
+
+    const { container } = render(<ProjectReportPanel runId="wf-xss" />)
+    await screen.findByText("1. Specification")
+
+    const specSection = container.querySelector('[data-section="spec"]')!
+    expect(specSection.querySelector("script")).toBeNull()
+    expect(specSection.querySelector("iframe")).toBeNull()
+    expect(specSection.querySelector("img")).toBeNull()
+    expect(specSection.querySelector("[onerror]")).toBeNull()
+    expect(specSection.querySelector('a[href^="javascript:" i]')).toBeNull()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((window as any).__pwned).toBeUndefined()
+  })
 })

@@ -5,6 +5,7 @@ import {
   FileText, ChevronDown, ChevronRight, Download, Copy, Share2,
   Loader2, AlertCircle, Check, Link2,
 } from "lucide-react"
+import DOMPurify from "isomorphic-dompurify"
 import {
   generateReport, getReport, shareReport,
   type ReportResponse,
@@ -41,8 +42,18 @@ function extractSection(markdown: string, key: SectionKey): string {
   return markdown.slice(start, end).trim()
 }
 
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+}
+
 function markdownToHtml(md: string): string {
-  let html = md
+  const escaped = escapeHtml(md)
+  let html = escaped
     .replace(/^### (.+)$/gm, '<h4 class="font-mono text-[11px] font-bold text-[var(--neural-cyan,#67e8f9)] mt-3 mb-1">$1</h4>')
     .replace(/^## (.+)$/gm, "")
     .replace(/^\| (.+) \|$/gm, (match) => {
@@ -62,7 +73,10 @@ function markdownToHtml(md: string): string {
   html = html.replace(/(<li[\s\S]*?<\/li>\s*)+/g, (block) => {
     return `<ul class="list-none space-y-0.5 my-1">${block}</ul>`
   })
-  return html
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ["h4", "table", "tr", "td", "ul", "li", "strong", "code", "pre", "br"],
+    ALLOWED_ATTR: ["class"],
+  })
 }
 
 export function ProjectReportPanel({ runId, reportId, title }: ProjectReportPanelProps) {
