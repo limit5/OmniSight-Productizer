@@ -27,12 +27,14 @@ import {
   WorkspaceChat,
   WORKSPACE_CHAT_MAX_FILE_BYTES,
   applyPreviewHmrReloadToMessages,
+  applyPreviewViteErrorResolvedToMessages,
   defaultChatIdFactory,
   defaultNowIso,
   filesToChatAttachments,
   type WorkspaceChatAnnotation,
   type WorkspaceChatAttachment,
   type WorkspaceChatMessage,
+  type WorkspaceChatPreviewViteError,
   type WorkspaceChatSubmission,
 } from "@/components/omnisight/workspace-chat"
 import { WorkspaceProvider } from "@/components/omnisight/workspace-context"
@@ -941,5 +943,185 @@ describe("W16.5 preview.hmr_reload iframe re-mount", () => {
       "workspace-chat-message-preview-m-hmr-6",
     )
     expect(containerEl.getAttribute("data-reload-count")).toBe("1")
+  })
+})
+
+describe("W16.6 preview.vite_error trace card", () => {
+  function viteErrorMsg(
+    id: string,
+    overrides: Partial<WorkspaceChatPreviewViteError> = {},
+  ): WorkspaceChatMessage {
+    return makeMessage(id, {
+      role: "system",
+      text: overrides.label ?? "我看到 src/Header.tsx 有 syntax_error，正在修…",
+      previewViteError: {
+        workspaceId: "ws-99",
+        status: "detected",
+        label: overrides.label ?? "我看到 src/Header.tsx 有 syntax_error，正在修…",
+        ...overrides,
+      },
+    })
+  }
+
+  it("renders the in-flight detection card with status + label", () => {
+    const messages: WorkspaceChatMessage[] = [
+      viteErrorMsg("m-vite-1", {
+        errorClass: "syntax_error",
+        target: "src/Header.tsx",
+        sourcePath: "src/Header.tsx",
+        sourceLine: 42,
+      }),
+    ]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    const card = screen.getByTestId("workspace-chat-message-vite-error-m-vite-1")
+    expect(card.getAttribute("data-status")).toBe("detected")
+    expect(card.getAttribute("data-workspace-id")).toBe("ws-99")
+    expect(card.getAttribute("data-error-class")).toBe("syntax_error")
+    expect(
+      screen.getByTestId("workspace-chat-message-vite-error-status-m-vite-1")
+        .textContent,
+    ).toBe("In flight")
+    expect(
+      screen.getByTestId("workspace-chat-message-vite-error-class-m-vite-1")
+        .textContent,
+    ).toBe("syntax_error")
+    expect(
+      screen.getByTestId("workspace-chat-message-vite-error-source-m-vite-1")
+        .textContent,
+    ).toContain("src/Header.tsx:42")
+  })
+
+  it("renders the resolved card with status=resolved", () => {
+    const messages: WorkspaceChatMessage[] = [
+      viteErrorMsg("m-vite-2", {
+        status: "resolved",
+        label: "已修 ✓",
+      }),
+    ]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    const card = screen.getByTestId("workspace-chat-message-vite-error-m-vite-2")
+    expect(card.getAttribute("data-status")).toBe("resolved")
+    expect(
+      screen.getByTestId("workspace-chat-message-vite-error-status-m-vite-2")
+        .textContent,
+    ).toBe("Resolved")
+    expect(
+      screen.getByTestId("workspace-chat-message-vite-error-label-m-vite-2")
+        .textContent,
+    ).toBe("已修 ✓")
+  })
+
+  it("hides errorClass chip when omitted", () => {
+    const messages: WorkspaceChatMessage[] = [
+      viteErrorMsg("m-vite-3", { errorClass: undefined }),
+    ]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    expect(
+      screen.queryByTestId("workspace-chat-message-vite-error-class-m-vite-3"),
+    ).toBeNull()
+  })
+
+  it("hides source path block when omitted", () => {
+    const messages: WorkspaceChatMessage[] = [
+      viteErrorMsg("m-vite-4", { sourcePath: undefined }),
+    ]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    expect(
+      screen.queryByTestId("workspace-chat-message-vite-error-source-m-vite-4"),
+    ).toBeNull()
+  })
+
+  it("does not render the trace card for messages without previewViteError", () => {
+    const messages: WorkspaceChatMessage[] = [makeMessage("m-vite-5")]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    expect(
+      screen.queryByTestId("workspace-chat-message-vite-error-m-vite-5"),
+    ).toBeNull()
+  })
+
+  it("applyPreviewViteErrorResolvedToMessages flips the matching detection card", () => {
+    const initial: WorkspaceChatMessage[] = [
+      viteErrorMsg("m-vite-6", {
+        errorSignature: "vite[transform] src/A.tsx:1: compile:",
+      }),
+    ]
+    const next = applyPreviewViteErrorResolvedToMessages(
+      initial,
+      "ws-99",
+      "已修 ✓",
+      "vite[transform] src/A.tsx:1: compile:",
+    )
+    expect(next).not.toBe(initial)
+    expect(next[0].previewViteError?.status).toBe("resolved")
+    expect(next[0].previewViteError?.label).toBe("已修 ✓")
+    expect(next[0].text).toBe("已修 ✓")
+  })
+
+  it("applyPreviewViteErrorResolvedToMessages falls back to workspaceId-only match when signature is omitted", () => {
+    const initial: WorkspaceChatMessage[] = [
+      viteErrorMsg("m-vite-7", {
+        errorSignature: "vite[transform] src/B.tsx:9: compile:",
+      }),
+    ]
+    const next = applyPreviewViteErrorResolvedToMessages(
+      initial,
+      "ws-99",
+      "已修 ✓",
+    )
+    expect(next[0].previewViteError?.status).toBe("resolved")
+  })
+
+  it("applyPreviewViteErrorResolvedToMessages is a no-op for an unknown workspace", () => {
+    const initial: WorkspaceChatMessage[] = [
+      viteErrorMsg("m-vite-8", { workspaceId: "ws-other" }),
+    ]
+    const next = applyPreviewViteErrorResolvedToMessages(
+      initial,
+      "ws-99",
+      "已修 ✓",
+    )
+    expect(next).toBe(initial)
+  })
+
+  it("applyPreviewViteErrorResolvedToMessages skips already-resolved cards", () => {
+    const initial: WorkspaceChatMessage[] = [
+      viteErrorMsg("m-vite-9", { status: "resolved", label: "已修 ✓" }),
+    ]
+    const next = applyPreviewViteErrorResolvedToMessages(
+      initial,
+      "ws-99",
+      "已修 ✓",
+    )
+    expect(next).toBe(initial)
+  })
+
+  it("applyPreviewViteErrorResolvedToMessages with empty workspaceId is a no-op", () => {
+    const initial: WorkspaceChatMessage[] = [viteErrorMsg("m-vite-10")]
+    const next = applyPreviewViteErrorResolvedToMessages(
+      initial,
+      "",
+      "已修 ✓",
+    )
+    expect(next).toBe(initial)
+  })
+
+  it("applyPreviewViteErrorResolvedToMessages prefers signature match over workspaceId-only match", () => {
+    const initial: WorkspaceChatMessage[] = [
+      viteErrorMsg("m-vite-11a", {
+        errorSignature: "vite[transform] src/A.tsx:1: compile:",
+      }),
+      viteErrorMsg("m-vite-11b", {
+        errorSignature: "vite[transform] src/B.tsx:9: compile:",
+      }),
+    ]
+    const next = applyPreviewViteErrorResolvedToMessages(
+      initial,
+      "ws-99",
+      "已修 ✓",
+      "vite[transform] src/A.tsx:1: compile:",
+    )
+    // Older card with matching signature wins over newer card without.
+    expect(next[0].previewViteError?.status).toBe("resolved")
+    expect(next[1].previewViteError?.status).toBe("detected")
   })
 })

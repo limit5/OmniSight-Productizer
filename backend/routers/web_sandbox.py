@@ -950,6 +950,40 @@ async def report_preview_error(
         stored.file,
         stored.line,
     )
+    # W16.6 — surface a "我看到 X 有 error，正在修…" chat trace via
+    # SSE so the operator's orchestrator-chat surface can render the
+    # in-flight indicator without polling the W15.1 buffer.  Best-
+    # effort; transport failure does not break the W15.1 ingest.
+    try:
+        from backend.web.vite_error_relay import format_vite_error_for_history
+        from backend.web.preview_vite_error import (
+            preview_vite_error_payload_from_history_entry,
+            emit_preview_vite_error,
+            PREVIEW_VITE_ERROR_STATUS_DETECTED,
+        )
+        history_entry = format_vite_error_for_history(stored)
+        proj = preview_vite_error_payload_from_history_entry(
+            history_entry,
+            workspace_id=workspace_id,
+            status=PREVIEW_VITE_ERROR_STATUS_DETECTED,
+        )
+        if proj is not None:
+            emit_preview_vite_error(
+                workspace_id=proj.workspace_id,
+                status=proj.status,
+                label=proj.label,
+                error_class=proj.error_class,
+                target=proj.target,
+                error_signature=proj.error_signature,
+                source_path=proj.source_path,
+                source_line=proj.source_line,
+                broadcast_scope="session",
+            )
+    except Exception as exc:  # pragma: no cover - best-effort SSE
+        logger.warning(
+            "web_sandbox.vite_error: SSE emit failed for %s: %s",
+            workspace_id, exc,
+        )
     return {
         "schema_version": WEB_SANDBOX_VITE_ERROR_SCHEMA_VERSION,
         "workspace_id": workspace_id,

@@ -117,6 +117,44 @@ export interface WorkspaceChatPreviewEmbed {
   reloadCount?: number
 }
 
+/**
+ * W16.6 — vite-error trace carried inside a chat message.
+ *
+ * Mirrors the ``previewViteError`` field produced by
+ * ``backend.web.preview_vite_error.build_chat_message_for_preview_vite_error``.
+ * The backend emits two SSE event names — ``preview.vite_error`` (the
+ * "我看到 X 有 error，正在修…" detection card) and
+ * ``preview.vite_error_resolved`` (the "已修 ✓" badge card) — and the
+ * SSE consumer appends a system-role message with ``previewViteError``
+ * set so the chat surfaces the live trace.
+ *
+ * ``status`` discriminates which icon / colour bucket renders;
+ * ``errorClass`` (one of the W15.6 self-fix classes:
+ * ``syntax_error`` / ``undefined_symbol`` / ``import_path_typo`` /
+ * ``unclassified``) is supplied on detection cards and omitted on
+ * resolution cards (the operator already saw the class earlier).
+ */
+export type WorkspaceChatPreviewViteErrorStatus = "detected" | "resolved"
+
+export interface WorkspaceChatPreviewViteError {
+  /** W14 workspace id — scope key for the chat trace. */
+  workspaceId: string
+  /** Lifecycle status — drives the icon/colour bucket. */
+  status: WorkspaceChatPreviewViteErrorStatus
+  /** Pre-rendered chat-message body (e.g. "我看到 src/Header.tsx 有 syntax_error，正在修…"). */
+  label: string
+  /** Optional W15.6 class identifier (``syntax_error`` etc.). */
+  errorClass?: string
+  /** Optional human-friendly target identifier (typically a file path). */
+  target?: string
+  /** Optional W15.4 head-only signature for correlating detection ↔ resolution. */
+  errorSignature?: string
+  /** Optional repo-relative path of the file vite reported. */
+  sourcePath?: string
+  /** Optional 1-based line number inside ``sourcePath``. */
+  sourceLine?: number
+}
+
 export interface WorkspaceChatMessage {
   id: string
   role: WorkspaceChatRole
@@ -134,6 +172,14 @@ export interface WorkspaceChatMessage {
    * "preview ready" prose and the iframe.
    */
   previewEmbed?: WorkspaceChatPreviewEmbed
+  /**
+   * W16.6 — when set, the message renders a vite-error trace card
+   * ("我看到 X 有 error，正在修…" / "已修 ✓"). Distinct sibling field
+   * to {@link previewEmbed} and {@link previewHmrReload} — the three
+   * never co-render on a single message because the FE renderer
+   * treats them as mount / refresh / error-trace respectively.
+   */
+  previewViteError?: WorkspaceChatPreviewViteError
 }
 
 export interface WorkspaceChatSubmission {
@@ -328,6 +374,148 @@ function ChatPreviewEmbed({
       />
     </div>
   )
+}
+
+/**
+ * W16.6 — render a vite-error trace card for a chat message.
+ *
+ * Pulled out as a sub-component so the detection/resolution status
+ * variants live in one place and the chat row stays readable. The
+ * trace is *purely informational* — there is no operator action on
+ * the card itself; the agent is already auto-fixing in the
+ * background.  When the W15.6 self-fix succeeds the SSE consumer
+ * appends a sibling resolution message ("已修 ✓"); the FE may then
+ * choose to dim or fold the original detection card via the
+ * ``data-status`` attribute.
+ */
+function ChatPreviewViteError({
+  messageId,
+  trace,
+}: {
+  messageId: string
+  trace: WorkspaceChatPreviewViteError
+}) {
+  const isResolved = trace.status === "resolved"
+  // Detection cards lean amber (in-flight); resolution cards lean
+  // green (success).  Both stay subtle because the agent does the
+  // heavy lifting — the chat is just narration.
+  const containerCls = isResolved
+    ? "mt-2 flex flex-col gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/5 px-2 py-1.5 text-[12px]"
+    : "mt-2 flex flex-col gap-1 rounded-md border border-amber-500/40 bg-amber-500/5 px-2 py-1.5 text-[12px]"
+  return (
+    <div
+      data-testid={`workspace-chat-message-vite-error-${messageId}`}
+      data-status={trace.status}
+      data-workspace-id={trace.workspaceId}
+      data-error-class={trace.errorClass ?? ""}
+      data-error-signature={trace.errorSignature ?? ""}
+      className={containerCls}
+    >
+      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <span data-testid={`workspace-chat-message-vite-error-status-${messageId}`}>
+          {isResolved ? "Resolved" : "In flight"}
+        </span>
+        {trace.errorClass ? (
+          <span
+            data-testid={`workspace-chat-message-vite-error-class-${messageId}`}
+            className="rounded-sm border border-border/60 bg-background/60 px-1 py-0.5 font-mono text-[10px]"
+          >
+            {trace.errorClass}
+          </span>
+        ) : null}
+      </div>
+      <div
+        data-testid={`workspace-chat-message-vite-error-label-${messageId}`}
+        className="whitespace-pre-wrap break-words text-foreground"
+      >
+        {trace.label}
+      </div>
+      {trace.sourcePath ? (
+        <div
+          data-testid={`workspace-chat-message-vite-error-source-${messageId}`}
+          className="font-mono text-[10px] text-muted-foreground"
+        >
+          {trace.sourcePath}
+          {typeof trace.sourceLine === "number" ? `:${trace.sourceLine}` : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * W16.6 — apply a ``preview.vite_error_resolved`` SSE event to a
+ * message log so the matching in-flight detection card flips to
+ * resolved without the SSE consumer having to know which message id
+ * it lives at.
+ *
+ * Pure helper so the SSE consumer can call it from any layer without
+ * pulling in React state.  Walks newest-last for the most recent
+ * detection card whose ``previewViteError.workspaceId`` matches and
+ * whose ``errorSignature`` correlates (when present) — flips that
+ * card's ``status`` to ``"resolved"`` and swaps in the resolution
+ * label.  Returns a NEW array; input is not mutated.
+ *
+ * When no matching detection card exists this is a no-op (returns
+ * the input unchanged).  Match priority: same ``workspaceId`` and
+ * same ``errorSignature`` first; fall back to same ``workspaceId``
+ * with no signature filter when ``errorSignature`` is absent on the
+ * incoming event.
+ */
+export function applyPreviewViteErrorResolvedToMessages(
+  messages: WorkspaceChatMessage[],
+  workspaceId: string,
+  resolvedLabel: string,
+  errorSignature?: string,
+): WorkspaceChatMessage[] {
+  if (!workspaceId) return messages
+  // First pass — try to match on (workspaceId, errorSignature).
+  let bumpedIdx = -1
+  if (errorSignature) {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i]
+      const trace = m.previewViteError
+      if (
+        trace &&
+        trace.workspaceId === workspaceId &&
+        trace.status === "detected" &&
+        trace.errorSignature === errorSignature
+      ) {
+        bumpedIdx = i
+        break
+      }
+    }
+  }
+  // Fallback — match on workspaceId only.
+  if (bumpedIdx < 0) {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i]
+      const trace = m.previewViteError
+      if (
+        trace &&
+        trace.workspaceId === workspaceId &&
+        trace.status === "detected"
+      ) {
+        bumpedIdx = i
+        break
+      }
+    }
+  }
+  if (bumpedIdx < 0) return messages
+  const next = messages.slice()
+  const target = next[bumpedIdx]
+  next[bumpedIdx] = {
+    ...target,
+    text: resolvedLabel,
+    previewViteError: target.previewViteError
+      ? {
+          ...target.previewViteError,
+          status: "resolved",
+          label: resolvedLabel,
+        }
+      : target.previewViteError,
+  }
+  return next
 }
 
 /**
@@ -666,6 +854,12 @@ export function WorkspaceChat({
                 <ChatPreviewEmbed
                   messageId={m.id}
                   embed={m.previewEmbed}
+                />
+              ) : null}
+              {m.previewViteError && m.previewViteError.workspaceId ? (
+                <ChatPreviewViteError
+                  messageId={m.id}
+                  trace={m.previewViteError}
                 />
               ) : null}
             </li>
