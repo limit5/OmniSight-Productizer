@@ -152,6 +152,9 @@ def build_chat_model(
         }
         if api_key:
             kwargs["google_api_key"] = api_key
+        if max_tokens:
+            # ChatGoogleGenerativeAI uses max_output_tokens (not max_tokens).
+            kwargs["max_output_tokens"] = max_tokens
         llm = ChatGoogleGenerativeAI(**kwargs)
 
     elif p in ("openai", "xai", "deepseek", "openrouter"):

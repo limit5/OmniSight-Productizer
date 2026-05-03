@@ -16,6 +16,17 @@ specific provider, export its key and use ``-m live``:
 Nightly CI wires all three keys and runs ``pytest -m live``; see
 ``.github/workflows/llm-live-tests.yml`` (Z.7.7).
 
+Budget guard (Z.7.9): single nightly run cost estimate < USD $0.50.
+Two enforcement points:
+  1. Per-call token ceiling — ``_ci_max_tokens()`` reads
+     ``OMNISIGHT_CI_MAX_TOKENS_PER_CALL`` (default 256 locally, 2000
+     in CI) and passes it as ``max_tokens`` to every LLM build call.
+  2. Max iterations cap — ``_MAX_LIVE_TEST_ITERATIONS`` (default 3)
+     limits how many LLM round-trips any single test scenario may make.
+``ci_budget_guard.py`` (run after tests in the budget-guard CI job)
+verifies the total spend estimate stays under the configured threshold
+and fails the workflow with a ``::error::`` annotation if it exceeds it.
+
 This file is the scaffold; Z.7.3–Z.7.6 add the tool-call, multi-turn,
 streaming, and nested-schema test classes here.
 """
@@ -42,6 +53,33 @@ from backend.llm_adapter import (
     tool,
     tool_call,
 )
+
+# ── Z.7.9 Budget guard: per-call token ceiling + max iterations ──────────────
+
+
+def _ci_max_tokens(fallback: int = 256) -> int:
+    """Return the per-call output token ceiling enforced for CI budget control.
+
+    Reads ``OMNISIGHT_CI_MAX_TOKENS_PER_CALL`` (set to 2000 in the nightly
+    workflow).  Falls back to ``fallback`` when running locally without the
+    variable — this keeps local dev runs cheap without requiring env setup.
+    Clamped to [fallback, 4096] so the value is always valid for any provider.
+
+    Z.7.9: wires the budget-guard token cap into every LLM build call so that
+    no single live-test API call can generate more tokens than the configured
+    ceiling, regardless of what the model would otherwise produce.
+    """
+    raw = os.environ.get("OMNISIGHT_CI_MAX_TOKENS_PER_CALL", "").strip()
+    if raw.isdigit():
+        return max(fallback, min(int(raw), 4096))
+    return fallback
+
+
+# Maximum LLM round-trips any single multi-turn test scenario may make.
+# Capping at 3 prevents a runaway tool-calling loop from blowing the $0.50
+# per-run budget even when the model keeps emitting tool calls instead of
+# producing a final text response.  Override via OMNISIGHT_CI_MAX_ITER.
+_MAX_LIVE_TEST_ITERATIONS: int = int(os.environ.get("OMNISIGHT_CI_MAX_ITER", "3"))
 
 # ── per-provider CI-key helpers ───────────────────────────────────────────────
 
@@ -206,7 +244,7 @@ class TestAnthropicLive:
             "anthropic",
             model or self._MODEL,
             api_key=key,
-            max_tokens=256,
+            max_tokens=_ci_max_tokens(),  # Z.7.9: respect CI token ceiling
         )
 
     def test_basic_invoke(self):
@@ -240,8 +278,17 @@ class TestAnthropicLive:
 
         Verifies the LLM actually processes the ToolMessage payload and echoes
         content from it in the second-turn reply (i.e., it truly saw the result).
+
+        Z.7.9 iter guard: this test makes exactly 2 LLM round-trips which is
+        within the _MAX_LIVE_TEST_ITERATIONS=3 cap.
         """
+        _turns_used = 0  # track iterations against budget cap
+
         # Turn 1 — ask for weather, expect a tool call
+        _turns_used += 1
+        assert _turns_used <= _MAX_LIVE_TEST_ITERATIONS, (
+            f"Anthropic multi-turn: exceeded max iterations ({_MAX_LIVE_TEST_ITERATIONS})"
+        )
         user_msg = HumanMessage(content="What is the current weather in Tokyo?")
         first = tool_call([user_msg], tools=[get_weather], llm=self._llm())
 
@@ -266,6 +313,10 @@ class TestAnthropicLive:
         )
 
         # Turn 2 — full history: user → AI (tool_call) → tool result → final answer
+        _turns_used += 1
+        assert _turns_used <= _MAX_LIVE_TEST_ITERATIONS, (
+            f"Anthropic multi-turn: exceeded max iterations ({_MAX_LIVE_TEST_ITERATIONS})"
+        )
         history = [user_msg, first.raw_message, tool_msg]
         final_text = invoke_chat(history, llm=self._llm())
 
@@ -321,7 +372,10 @@ class TestAnthropicLive:
         value is one of the declared enum literals.
         """
         key = _require_key(_KEY_ANTHROPIC, "Anthropic")
-        llm = build_chat_model("anthropic", self._MODEL, api_key=key, max_tokens=512)
+        llm = build_chat_model(
+            "anthropic", self._MODEL, api_key=key,
+            max_tokens=_ci_max_tokens(fallback=512),  # Z.7.9: CI token ceiling
+        )
         resp = tool_call([("user", _BOOK_FLIGHT_PROMPT)], tools=[book_flight], llm=llm)
         _assert_book_flight_response(resp, "Anthropic")
 
@@ -346,7 +400,7 @@ class TestOpenAILive:
             "openai",
             model or self._MODEL,
             api_key=key,
-            max_tokens=256,
+            max_tokens=_ci_max_tokens(),  # Z.7.9: respect CI token ceiling
         )
 
     def test_basic_invoke(self):
@@ -380,8 +434,17 @@ class TestOpenAILive:
 
         Verifies the LLM actually processes the ToolMessage payload and echoes
         content from it in the second-turn reply (i.e., it truly saw the result).
+
+        Z.7.9 iter guard: this test makes exactly 2 LLM round-trips which is
+        within the _MAX_LIVE_TEST_ITERATIONS=3 cap.
         """
+        _turns_used = 0
+
         # Turn 1 — ask for weather, expect a tool call
+        _turns_used += 1
+        assert _turns_used <= _MAX_LIVE_TEST_ITERATIONS, (
+            f"OpenAI multi-turn: exceeded max iterations ({_MAX_LIVE_TEST_ITERATIONS})"
+        )
         user_msg = HumanMessage(content="What is the current weather in Tokyo?")
         first = tool_call([user_msg], tools=[get_weather], llm=self._llm())
 
@@ -405,6 +468,10 @@ class TestOpenAILive:
         )
 
         # Turn 2 — full history: user → AI (tool_call) → tool result → final answer
+        _turns_used += 1
+        assert _turns_used <= _MAX_LIVE_TEST_ITERATIONS, (
+            f"OpenAI multi-turn: exceeded max iterations ({_MAX_LIVE_TEST_ITERATIONS})"
+        )
         history = [user_msg, first.raw_message, tool_msg]
         final_text = invoke_chat(history, llm=self._llm())
 
@@ -459,7 +526,10 @@ class TestOpenAILive:
         value is one of the declared enum literals.
         """
         key = _require_key(_KEY_OPENAI, "OpenAI")
-        llm = build_chat_model("openai", self._MODEL, api_key=key, max_tokens=512)
+        llm = build_chat_model(
+            "openai", self._MODEL, api_key=key,
+            max_tokens=_ci_max_tokens(fallback=512),  # Z.7.9: CI token ceiling
+        )
         resp = tool_call([("user", _BOOK_FLIGHT_PROMPT)], tools=[book_flight], llm=llm)
         _assert_book_flight_response(resp, "OpenAI")
 
@@ -485,6 +555,7 @@ class TestGeminiLive:
             "google",
             model or self._MODEL,
             api_key=key,
+            max_tokens=_ci_max_tokens(),  # Z.7.9: CI token ceiling → max_output_tokens
         )
 
     def test_basic_invoke(self):
@@ -518,8 +589,17 @@ class TestGeminiLive:
 
         Verifies the LLM actually processes the ToolMessage payload and echoes
         content from it in the second-turn reply (i.e., it truly saw the result).
+
+        Z.7.9 iter guard: this test makes exactly 2 LLM round-trips which is
+        within the _MAX_LIVE_TEST_ITERATIONS=3 cap.
         """
+        _turns_used = 0
+
         # Turn 1 — ask for weather, expect a tool call
+        _turns_used += 1
+        assert _turns_used <= _MAX_LIVE_TEST_ITERATIONS, (
+            f"Gemini multi-turn: exceeded max iterations ({_MAX_LIVE_TEST_ITERATIONS})"
+        )
         user_msg = HumanMessage(content="What is the current weather in Tokyo?")
         first = tool_call([user_msg], tools=[get_weather], llm=self._llm())
 
@@ -543,6 +623,10 @@ class TestGeminiLive:
         )
 
         # Turn 2 — full history: user → AI (tool_call) → tool result → final answer
+        _turns_used += 1
+        assert _turns_used <= _MAX_LIVE_TEST_ITERATIONS, (
+            f"Gemini multi-turn: exceeded max iterations ({_MAX_LIVE_TEST_ITERATIONS})"
+        )
         history = [user_msg, first.raw_message, tool_msg]
         final_text = invoke_chat(history, llm=self._llm())
 
@@ -623,7 +707,10 @@ class TestGeminiLive:
           → assertion failure with a descriptive message pinpointing the deviation.
         """
         key = _require_key(_KEY_GOOGLE, "Google Gemini")
-        llm = build_chat_model("google", self._MODEL, api_key=key)
+        llm = build_chat_model(
+            "google", self._MODEL, api_key=key,
+            max_tokens=_ci_max_tokens(fallback=512),  # Z.7.9: CI token ceiling
+        )
         try:
             resp = tool_call([("user", _BOOK_FLIGHT_PROMPT)], tools=[book_flight], llm=llm)
         except NotImplementedError as exc:
