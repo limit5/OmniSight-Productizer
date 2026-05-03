@@ -6222,7 +6222,7 @@ BP.E GraphRAG / Neo4j
 
 > **runner**: Claude 訂閱
 
-- [ ] FX.6.1 `backend/requirements.in` 11 個 floating range (>=) 改 `==` pin
+- [x] FX.6.1 `backend/requirements.in` 11 個 floating range (>=) 改 `==` pin
 - [ ] FX.6.2 `backend/requirements.in` 移除 `redis>=5.0.0` 重複（保留 `redis[hiredis]>=5.0.0`）
 - [ ] FX.6.3 升 `anthropic` 從 0.95.0 到 1.x+ latest stable；改適配 langchain-anthropic
 - [ ] FX.6.4 移除 `paramiko==4.0.0` ghost from requirements.txt（regenerate via pip-compile）
