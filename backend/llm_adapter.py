@@ -109,17 +109,27 @@ def build_chat_model(
     api_key: str | None = None,
     base_url: str | None = None,
     default_headers: dict | None = None,
+    bind_tools: list | None = None,
 ) -> BaseChatModel:
     """Construct a configured chat model for the given provider.
 
     The exact LangChain class used per provider is an implementation
     detail of this adapter — callers must not depend on it.
 
+    bind_tools: Optional list of tools (LangChain ``@tool`` functions,
+        Pydantic schemas, or OpenAI function-spec dicts) to bind before
+        returning.  Callers that bind tools after construction (e.g.
+        ``get_llm()``) should leave this ``None``.  With
+        ``langchain-ollama >= 0.2`` (locked in Z.6.1), the ollama branch
+        supports ``bind_tools`` on the same path as the other seven
+        providers (Z.6.2).
+
     Raises:
         ValueError: if the provider is unknown.
         ImportError: if the provider's extras package is not installed.
     """
     p = provider.lower()
+    llm: BaseChatModel
 
     if p == "anthropic":
         from langchain_anthropic import ChatAnthropic
@@ -131,9 +141,9 @@ def build_chat_model(
         }
         if api_key:
             kwargs["anthropic_api_key"] = api_key
-        return ChatAnthropic(**kwargs)
+        llm = ChatAnthropic(**kwargs)
 
-    if p == "google":
+    elif p == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
         kwargs = {
             "model": model or "gemini-1.5-pro",
@@ -141,9 +151,9 @@ def build_chat_model(
         }
         if api_key:
             kwargs["google_api_key"] = api_key
-        return ChatGoogleGenerativeAI(**kwargs)
+        llm = ChatGoogleGenerativeAI(**kwargs)
 
-    if p in ("openai", "xai", "deepseek", "openrouter"):
+    elif p in ("openai", "xai", "deepseek", "openrouter"):
         from langchain_openai import ChatOpenAI
         defaults_by_provider = {
             "openai": ("gpt-4o", None),
@@ -164,9 +174,9 @@ def build_chat_model(
             kwargs["base_url"] = effective_base_url
         if default_headers:
             kwargs["default_headers"] = default_headers
-        return ChatOpenAI(**kwargs)
+        llm = ChatOpenAI(**kwargs)
 
-    if p == "groq":
+    elif p == "groq":
         from langchain_groq import ChatGroq
         kwargs = {
             "model": model or "llama-3.3-70b-versatile",
@@ -175,9 +185,9 @@ def build_chat_model(
         }
         if api_key:
             kwargs["groq_api_key"] = api_key
-        return ChatGroq(**kwargs)
+        llm = ChatGroq(**kwargs)
 
-    if p == "together":
+    elif p == "together":
         from langchain_together import ChatTogether
         kwargs = {
             "model": model or "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
@@ -185,9 +195,9 @@ def build_chat_model(
         }
         if api_key:
             kwargs["together_api_key"] = api_key
-        return ChatTogether(**kwargs)
+        llm = ChatTogether(**kwargs)
 
-    if p == "ollama":
+    elif p == "ollama":
         from langchain_ollama import ChatOllama
         kwargs = {
             "model": model or "llama3.1",
@@ -195,9 +205,25 @@ def build_chat_model(
         }
         if base_url:
             kwargs["base_url"] = base_url
-        return ChatOllama(**kwargs)
+        # Z.6.2: do NOT set format="json" — it conflicts with tool calling.
+        # ChatOllama.bind_tools() is supported as of langchain-ollama >= 0.2
+        # (locked in Z.6.1) for models that advertise function-calling
+        # capability (llama3.1/3.2, qwen2.5, qwen3, mistral-nemo, command-r,
+        # mixtral).  The common bind_tools step below handles this branch on
+        # the same path as the other seven providers.
+        llm = ChatOllama(**kwargs)
 
-    raise ValueError(f"Unknown provider: {provider!r}")
+    else:
+        raise ValueError(f"Unknown provider: {provider!r}")
+
+    # Z.6.2: common bind_tools step — applies to ollama on the same path as
+    # the other seven providers.  get_llm() leaves this None and calls
+    # llm.bind_tools() separately; direct factory callers can pass tools here
+    # to receive a ready-to-invoke bound model in one call.
+    # Module-global audit: bind_tools is a parameter; no module state touched.
+    if bind_tools:
+        llm = llm.bind_tools(bind_tools)
+    return llm
 
 
 # ──────────────────────────────────────────────────────────────────

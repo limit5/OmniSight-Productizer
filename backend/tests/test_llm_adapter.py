@@ -406,6 +406,61 @@ class TestBuildChatModel:
             "HTTP-Referer": "https://foo", "X-Title": "Bar",
         }
 
+    # ── Z.6.2: ollama bind_tools path ──────────────────────────────
+
+    def test_ollama_builds(self, monkeypatch):
+        """ChatOllama is constructed with model + temperature; base_url
+        is forwarded when provided."""
+        import langchain_ollama
+        fake_instance = MagicMock()
+        fake_cls = MagicMock(return_value=fake_instance)
+        monkeypatch.setattr(langchain_ollama, "ChatOllama", fake_cls, raising=True)
+        build_chat_model("ollama", model="qwen2.5", base_url="http://gpu-box:11434")
+        fake_cls.assert_called_once()
+        kw = fake_cls.call_args.kwargs
+        assert kw["model"] == "qwen2.5"
+        assert kw["base_url"] == "http://gpu-box:11434"
+
+    def test_ollama_bind_tools_forwarded(self, monkeypatch):
+        """Z.6.2: build_chat_model("ollama", bind_tools=...) must call
+        bind_tools on the ChatOllama instance and return the bound model —
+        same path as the other seven providers."""
+        import langchain_ollama
+        fake_instance = MagicMock()
+        bound_model = MagicMock()
+        fake_instance.bind_tools.return_value = bound_model
+        fake_cls = MagicMock(return_value=fake_instance)
+        monkeypatch.setattr(langchain_ollama, "ChatOllama", fake_cls, raising=True)
+        tools = [object(), object()]
+        result = build_chat_model("ollama", bind_tools=tools)
+        fake_instance.bind_tools.assert_called_once_with(tools)
+        assert result is bound_model
+
+    def test_bind_tools_not_called_when_none(self, monkeypatch):
+        """When bind_tools is not passed, the raw model is returned and
+        bind_tools() is never invoked (get_llm() handles that separately)."""
+        import langchain_ollama
+        fake_instance = MagicMock()
+        fake_cls = MagicMock(return_value=fake_instance)
+        monkeypatch.setattr(langchain_ollama, "ChatOllama", fake_cls, raising=True)
+        result = build_chat_model("ollama")
+        fake_instance.bind_tools.assert_not_called()
+        assert result is fake_instance
+
+    def test_bind_tools_common_step_applies_to_non_ollama(self, monkeypatch):
+        """The common bind_tools step applies uniformly to all providers,
+        not only to ollama — confirms the shared adapter tool_call() flow."""
+        import langchain_anthropic
+        fake_instance = MagicMock()
+        bound_model = MagicMock()
+        fake_instance.bind_tools.return_value = bound_model
+        fake_cls = MagicMock(return_value=fake_instance)
+        monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", fake_cls, raising=True)
+        tools = [object()]
+        result = build_chat_model("anthropic", api_key="sk-x", bind_tools=tools)
+        fake_instance.bind_tools.assert_called_once_with(tools)
+        assert result is bound_model
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Firewall CI script — detection + clean repo check

@@ -1534,7 +1534,7 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 > **影響**：目前等於「沒 internet 就退化成純 chat、不能跑 agent skill」。HD.21.5 air-gapped / self-hosted 客戶情境會中招（agent dispatcher 收到 ollama provider 時靜默 degrade、operator 看不到 fallback 警示）。
 
 - [x] Z.6.1 確認 `langchain-ollama` 鎖到 ≥ 0.2（`backend/requirements.txt` / `pnpm` 對應 lockfile 對齊），跑一次 `pip-audit` 確認沒引入新漏洞
-- [ ] Z.6.2 `backend/llm_adapter.py::build_chat_model()` ollama 分支接 `bind_tools` 路徑、與其他 7 家共用 adapter `tool_call()` 流
+- [x] Z.6.2 `backend/llm_adapter.py::build_chat_model()` ollama 分支接 `bind_tools` 路徑、與其他 7 家共用 adapter `tool_call()` 流
 - [ ] Z.6.3 `backend/agents/llm.py::AGENT_TOOLS` mapping 確認 ollama provider 不被短路、specialist node 拿到 `bind_tools_for=agent_type` 後正常 invoke
 - [ ] Z.6.4 **Model 兼容矩陣**寫進 `config/llm_pricing.yaml` 同層的 `config/ollama_tool_calling.yaml`：列 9 顆主流 model 對 tool_calls 的支援度（`full / partial / none`）+ 推薦最低版本；catalog UI 顯示 badge
 - [ ] Z.6.5 **Graceful fallback**：tool calling 失敗（model 不支援 / Ollama daemon 報錯 / parse 失敗）時退回純 chat + `SharedKV("ollama_tool_failures").incr()` 計數 + dashboard 警示，不直接 raise
@@ -3102,8 +3102,8 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] KS.1.6 **Spend anomaly detector**：per-tenant token rate threshold + 觸發後 auto-throttle + Slack / email alert
 - [x][G] KS.1.7 **Log secret scrubber**：custom logger filter 攔 secret pattern → `[REDACTED]`；CI pre-commit `gitleaks` / `trufflehog` 掃描
 - [x][G] KS.1.8 **Backup pipeline DLP**：backup encrypt + DLP scanner、防 secret 隨備份外流
-- [~][G] KS.1.9 **Memory zeroization**：Python `ctypes.memset` 用後抹除（best-effort、防 memory dump）
-- [ ] KS.1.10 **alembic 0106** — `kms_keys` / `tenant_deks` / `decryption_audits` / `spend_thresholds` / `kek_rotations`
+- [x][G] KS.1.9 **Memory zeroization**：Python `ctypes.memset` 用後抹除（best-effort、防 memory dump）
+- [~][G] KS.1.10 **alembic 0106** — `kms_keys` / `tenant_deks` / `decryption_audits` / `spend_thresholds` / `kek_rotations`
 - [ ] KS.1.11 **Compat regression**：既有 `oauth_tokens` / `customer_secrets` / future provider keys 全走新路徑、0 回歸；雙寫期間隨機 hard-restart 測試
 - [ ] KS.1.12 **Single knob**：`OMNISIGHT_KS_ENVELOPE_ENABLED=false` 退回 single Fernet 路徑（migration 雙寫期間有效、之後此 knob 永久 ON）
 - [ ] KS.1.13 **Test**：master KEK compromise 模擬、envelope round-trip、KEK rotation、雙讀雙寫 hard-restart、audit log 每筆 N10 對齊、anomaly 60 sec 內觸發、log scrubber 確認 sink 看到 redacted、backup DLP 攔截
