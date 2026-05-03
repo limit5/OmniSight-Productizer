@@ -17,6 +17,7 @@ even if no credential is attached.
 
 from __future__ import annotations
 
+import logging
 import re
 
 # (label, pattern, replacement). Keep ordering: specific → general.
@@ -48,10 +49,41 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     ),
     # Stripe
     ("stripe", re.compile(r"\b(?:sk|pk|rk)_(?:test|live)_[A-Za-z0-9]{20,}"), "[REDACTED:stripe_key]"),
+    # Provider API keys and key-like assignments
+    ("google_api_key", re.compile(r"\bAIza[A-Za-z0-9_\-]{35}"), "[REDACTED:google_api_key]"),
+    (
+        "api_key_assignment",
+        re.compile(
+            r"\b(?:api[_-]?key|x-api-key|client_secret|secret_key)\s*[:=]\s*"
+            r"['\"]?[A-Za-z0-9_.\-/+=]{20,}['\"]?",
+            re.I,
+        ),
+        "api_key=[REDACTED:api_key]",
+    ),
     # Anthropic — must run BEFORE openai because both start with sk-
     ("anthropic", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"), "[REDACTED:anthropic_key]"),
     # OpenAI
     ("openai", re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "[REDACTED:openai_key]"),
+    # OAuth tokens commonly logged as form fields / JSON keys
+    (
+        "oauth_token",
+        re.compile(
+            r"\b(?:access_token|refresh_token|id_token|oauth_token)\s*[:=]\s*"
+            r"['\"]?[A-Za-z0-9_.\-]{20,}['\"]?",
+            re.I,
+        ),
+        "oauth_token=[REDACTED:oauth_token]",
+    ),
+    # Database URLs with embedded credentials
+    (
+        "database_url",
+        re.compile(
+            r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://"
+            r"[^:\s/@]+:[^@\s]+@[^\s)'\"]+",
+            re.I,
+        ),
+        "[REDACTED:database_url]",
+    ),
     # Generic Bearer (any header value > 20 chars after "Bearer ")
     ("bearer", re.compile(r"\bBearer\s+[A-Za-z0-9_.\-]{20,}", re.I), "Bearer [REDACTED:token]"),
     # JWT (3 base64 segments separated by dots, starting with eyJ)
@@ -59,6 +91,18 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
         "jwt",
         re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
         "[REDACTED:jwt]",
+    ),
+    # Cookie / Set-Cookie headers carrying non-JWT session-like values.
+    # Ordered after JWT so token-shaped cookie values keep the more
+    # specific jwt label.
+    (
+        "cookie",
+        re.compile(
+            r"\b((?:Cookie|Set-Cookie):\s*)[^\r\n]*"
+            r"(?:session|sid|auth|token|jwt)[^=;]*=(?!\[REDACTED:)[^;\s]{12,}[^\r\n]*",
+            re.I,
+        ),
+        r"\1[REDACTED:cookie]",
     ),
     # Private key blocks (SSH/PGP) — redact entire block
     (
@@ -97,6 +141,9 @@ _ALLOWLIST = {
     "claude-opus-4-7",
     "claude-sonnet-4-6",
 }
+
+_LOG_REDACTED_RE = re.compile(r"\[REDACTED:[^\]]+\]")
+_LOGGER_FILTER_NAME = "omnisight_secret_scrubber"
 
 
 def redact(text: str) -> tuple[str, list[str]]:
@@ -140,3 +187,50 @@ def redact(text: str) -> tuple[str, list[str]]:
                 fired.append(label)
                 out = new_out
     return out, fired
+
+
+def redact_for_log(text: str) -> tuple[str, list[str]]:
+    """Redact known-secret patterns for log sinks.
+
+    Chat output keeps pattern labels for audit metrics. Logs use the
+    uniform ``[REDACTED]`` token required by KS.1.7 so downstream sinks
+    never receive a secret-shaped value or a provider-specific label.
+    """
+    out, fired = redact(text)
+    if fired:
+        out = _LOG_REDACTED_RE.sub("[REDACTED]", out)
+    return out, fired
+
+
+class SecretScrubbingFilter(logging.Filter):
+    """Stdlib logging filter that redacts secret-shaped message text.
+
+    Module-global state audit: the filter reads immutable regex tables
+    only; every worker derives identical scrubbed output from each log
+    record and does not share mutable process-local state.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        scrubbed, _ = redact_for_log(message)
+        if scrubbed != message:
+            record.msg = scrubbed
+            record.args = ()
+        return True
+
+
+def install_logging_filter(logger: logging.Logger | None = None) -> SecretScrubbingFilter:
+    """Install the KS.1.7 secret scrubber on ``logger`` once."""
+    target = logger or logging.getLogger()
+    filt: SecretScrubbingFilter | None = None
+    for existing in target.filters:
+        if getattr(existing, "name", "") == _LOGGER_FILTER_NAME:
+            filt = existing  # type: ignore[assignment]
+            break
+    if filt is None:
+        filt = SecretScrubbingFilter(_LOGGER_FILTER_NAME)
+        target.addFilter(filt)
+    for handler in target.handlers:
+        if not any(getattr(existing, "name", "") == _LOGGER_FILTER_NAME for existing in handler.filters):
+            handler.addFilter(filt)
+    return filt

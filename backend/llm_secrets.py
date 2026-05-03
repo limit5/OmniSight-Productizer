@@ -1,10 +1,13 @@
 """L3 Step 2 — LLM provider secrets, at-rest encrypted.
 
 Stores API keys and auxiliary credentials (Azure endpoint, Ollama
-base URL, model override) for each LLM provider in a Fernet-encrypted
+base URL, model override) for each LLM provider in a KS.1 envelope
 JSON marker under ``data/.llm_secrets.enc``. Values never land on disk
 in plaintext; only the last four chars of a key are ever shown back to
-callers (via :func:`fingerprint`).
+callers (via :func:`fingerprint`). Legacy Fernet markers remain
+readable during the KS.1.11 compatibility window.
+``OMNISIGHT_KS_ENVELOPE_ENABLED=false`` temporarily writes the same
+single-Fernet store payload during the migration rollback window.
 
 ``load_into_settings`` mirrors the decrypted values into
 :mod:`backend.config.settings` so the existing agent factory
@@ -36,11 +39,14 @@ from typing import Any, Optional
 import httpx
 
 from backend import secret_store
+from backend.security import envelope as tenant_envelope
 
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _SECRETS_PATH = _PROJECT_ROOT / "data" / ".llm_secrets.enc"
+_LLM_SECRET_TENANT_ID = "t-default"
+_LLM_SECRET_ENVELOPE_FORMAT_VERSION = 1
 
 # The four providers the bootstrap wizard offers. Keep in sync with
 # ``app/bootstrap/page.tsx``: the wizard menu only ships these four.
@@ -122,7 +128,7 @@ def _read_raw() -> dict[str, dict[str, str]]:
         ciphertext = _SECRETS_PATH.read_text(encoding="ascii").strip()
         if not ciphertext:
             return {}
-        plaintext = secret_store.decrypt(ciphertext)
+        plaintext = _decrypt_store_payload(ciphertext)
         data = json.loads(plaintext)
         return data if isinstance(data, dict) else {}
     except Exception as exc:
@@ -131,10 +137,57 @@ def _read_raw() -> dict[str, dict[str, str]]:
         return {}
 
 
+def _store_carrier(ciphertext: str, dek_ref: tenant_envelope.TenantDEKRef) -> str:
+    payload = {
+        "fmt": _LLM_SECRET_ENVELOPE_FORMAT_VERSION,
+        "ciphertext": ciphertext,
+        "dek_ref": dek_ref.to_dict(),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _load_store_carrier(
+    ciphertext: str,
+) -> tuple[str, tenant_envelope.TenantDEKRef]:
+    payload = json.loads(ciphertext)
+    if not isinstance(payload, dict):
+        raise ValueError("llm secret envelope must be an object")
+    if payload.get("fmt") != _LLM_SECRET_ENVELOPE_FORMAT_VERSION:
+        raise ValueError("unknown llm secret envelope format")
+    inner = payload.get("ciphertext")
+    if not isinstance(inner, str) or not inner:
+        raise ValueError("llm secret envelope missing ciphertext")
+    dek_ref_raw = payload.get("dek_ref")
+    if not isinstance(dek_ref_raw, dict):
+        raise ValueError("llm secret envelope missing dek_ref")
+    return inner, tenant_envelope.TenantDEKRef.from_dict(dek_ref_raw)
+
+
+def _encrypt_store_payload(payload: str) -> str:
+    if not tenant_envelope.is_enabled():
+        return secret_store.encrypt(payload)
+    ciphertext, dek_ref = tenant_envelope.encrypt(
+        payload,
+        _LLM_SECRET_TENANT_ID,
+        purpose="llm-provider-secrets",
+    )
+    return _store_carrier(ciphertext, dek_ref)
+
+
+def _decrypt_store_payload(ciphertext: str) -> str:
+    try:
+        inner, dek_ref = _load_store_carrier(ciphertext)
+    except (TypeError, ValueError, tenant_envelope.EnvelopeEncryptionError):
+        if isinstance(ciphertext, str) and not ciphertext.lstrip().startswith("{"):
+            return secret_store.decrypt(ciphertext)
+        raise
+    return tenant_envelope.decrypt(inner, dek_ref)
+
+
 def _write_raw(data: dict[str, dict[str, str]]) -> None:
     _SECRETS_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, sort_keys=True)
-    ciphertext = secret_store.encrypt(payload)
+    ciphertext = _encrypt_store_payload(payload)
     _SECRETS_PATH.write_text(ciphertext, encoding="ascii")
     try:
         _SECRETS_PATH.chmod(0o600)

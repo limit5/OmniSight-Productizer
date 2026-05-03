@@ -117,6 +117,8 @@ def _error_response(exc: og.IntakeError) -> JSONResponse:
         status = 503
     if exc.reason is og.IntakeRejectReason.token_budget_exceeded:
         status = 402
+    if exc.reason is og.IntakeRejectReason.llm_firewall_blocked:
+        status = 403
     if exc.reason is og.IntakeRejectReason.pending_human_review:
         status = 409
     return JSONResponse(

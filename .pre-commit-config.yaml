@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: omnisight-gitleaks
+        name: OmniSight gitleaks secret scan
+        entry: python3 -m backend.security_scanning.secrets --app-path . --scanner gitleaks
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: omnisight-trufflehog
+        name: OmniSight trufflehog secret scan
+        entry: python3 -m backend.security_scanning.secrets --app-path . --scanner trufflehog
+        language: system
+        pass_filenames: false
+        always_run: true

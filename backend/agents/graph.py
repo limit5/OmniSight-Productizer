@@ -62,6 +62,11 @@ from backend.agents.nodes import (
     context_compression_gate,
     summarizer_node,
 )
+from backend.security.llm_firewall import (
+    BLOCKED_REFUSAL_MESSAGE,
+    FirewallResult,
+    enforce_input,
+)
 
 
 _VALID_SPECIALISTS = {"firmware", "software", "validator", "reporter", "reviewer", "general"}
@@ -165,6 +170,39 @@ agent_graph = build_graph()
 GRAPH_TIMEOUT = 300  # 5 minutes max per graph execution
 
 
+async def _enforce_user_facing_firewall(
+    user_command: str,
+    *,
+    firewall_result: FirewallResult | None = None,
+    task_id: str | None = None,
+):
+    """Run KS.4.12's user-facing firewall before specialist routing.
+
+    Module-global / cross-worker audit: this helper stores no mutable state.
+    Each worker derives the same guard decision from request text plus the
+    configured classifier credentials at call time; internal graph node retries
+    do not re-enter this function.
+    """
+    from backend.config import settings
+
+    try:
+        return await enforce_input(
+            user_command,
+            result=firewall_result,
+            api_key=getattr(settings, "anthropic_api_key", "") or None,
+            actor="orchestrator_entry",
+            entity_id=task_id,
+            session_id=task_id,
+        )
+    except RuntimeError as exc:
+        # Fresh dev/test installs often have no firewall classifier key.
+        # Keep the entry point callable while production deployments with
+        # configured credentials still enforce through Haiku.
+        if "ANTHROPIC_API_KEY" not in str(exc):
+            raise
+        return None
+
+
 async def run_graph(
     user_command: str,
     workspace_path: str | None = None,
@@ -175,6 +213,8 @@ async def run_graph(
     task_id: str | None = None,
     soc_vendor: str = "",
     sdk_version: str = "",
+    firewall_result: FirewallResult | None = None,
+    firewall_trust: str = "external",
 ) -> GraphState:
     """Execute the full agent pipeline for a user command.
 
@@ -190,12 +230,43 @@ async def run_graph(
             so prefetch_for_sandbox_error can enforce the SDK
             hard-lock. Empty strings keep the gate permissive (the
             non-platform-aware default).
+        firewall_trust: ``external`` runs the KS.4.12 firewall before
+            routing. ``internal`` is reserved for specialist-to-specialist
+            traffic that has already passed the user-facing entry guard.
     """
     import asyncio
 
+    firewall = None
+    if firewall_trust != "internal":
+        firewall = await _enforce_user_facing_firewall(
+            user_command,
+            firewall_result=firewall_result,
+            task_id=task_id,
+        )
+        if firewall and not firewall.allow_invocation:
+            return GraphState(
+                user_command=user_command,
+                messages=[HumanMessage(content=user_command)],
+                workspace_path=workspace_path,
+                model_name=model_name,
+                task_id=task_id,
+                agent_sub_type=agent_sub_type,
+                handoff_context=handoff_context,
+                task_skill_context=task_skill_context,
+                soc_vendor=soc_vendor,
+                sdk_version=sdk_version,
+                answer=firewall.refusal_message or BLOCKED_REFUSAL_MESSAGE,
+                last_error="llm_firewall_blocked",
+            )
+        if firewall and firewall.system_prompt_warning:
+            handoff_context = firewall.apply_system_prompt_warning(
+                handoff_context,
+            )
+
+    messages = [HumanMessage(content=user_command)]
     initial_state = GraphState(
         user_command=user_command,
-        messages=[HumanMessage(content=user_command)],
+        messages=messages,
         workspace_path=workspace_path,
         model_name=model_name,
         task_id=task_id,

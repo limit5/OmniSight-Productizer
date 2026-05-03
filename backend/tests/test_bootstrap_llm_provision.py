@@ -18,6 +18,9 @@ Covers the LLM provider provisioning flow driven by the wizard:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 
 import httpx
 import pytest
@@ -426,6 +429,105 @@ def test_set_and_get_credentials_round_trip(tmp_path, monkeypatch):
     assert _secrets.get_provider_credentials("openai")["api_key"] == "sk-proj-unit-key"
     assert _secrets.get_provider_credentials("anthropic")["api_key"] == "sk-ant-another"
 
+    _secrets._reset_for_tests()
+    secret_store._reset_for_tests()
+
+
+def test_provider_credentials_use_ks_envelope_and_survive_hard_restart(
+    tmp_path, monkeypatch,
+):
+    """KS.1.11 compat regression for future provider keys.
+
+    The bootstrap provider-key marker is written as a KS envelope
+    carrier, and a fresh interpreter can decrypt it after a simulated
+    hard restart with only the shared ``OMNISIGHT_SECRET_KEY``.
+    """
+    monkeypatch.setenv(
+        "OMNISIGHT_SECRET_KEY",
+        "ks-1-11-llm-hard-restart-secret",
+    )
+    from backend import secret_store
+    secret_store._reset_for_tests()
+    path = tmp_path / "provider-creds.enc"
+    _secrets._reset_for_tests(path)
+
+    _secrets.set_provider_credentials(
+        "openai",
+        api_key="sk-proj-hard-restart",
+        model="gpt-4o-mini",
+    )
+    raw = path.read_text(encoding="ascii")
+    outer = json.loads(raw)
+    assert outer["fmt"] == _secrets._LLM_SECRET_ENVELOPE_FORMAT_VERSION
+    assert outer["dek_ref"]["tenant_id"] == "t-default"
+    assert (
+        outer["dek_ref"]["encryption_context"]["purpose"]
+        == "llm-provider-secrets"
+    )
+    assert "sk-proj-hard-restart" not in raw
+
+    code = """
+import json
+import os
+from pathlib import Path
+from backend import llm_secrets
+
+llm_secrets._reset_for_tests(Path(os.environ["KS111_LLM_SECRET_PATH"]))
+print(json.dumps(llm_secrets.get_provider_credentials("openai"), sort_keys=True))
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        capture_output=True,
+        check=True,
+        env={
+            **dict(os.environ),
+            "KS111_LLM_SECRET_PATH": str(path),
+        },
+    )
+    assert json.loads(proc.stdout)["api_key"] == "sk-proj-hard-restart"
+
+    _secrets._reset_for_tests()
+    secret_store._reset_for_tests()
+
+
+def test_legacy_fernet_provider_credentials_still_read(tmp_path, monkeypatch):
+    """Existing Fernet-only provider-key files remain readable during
+    the KS.1.11 compatibility window."""
+    monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-11-legacy-llm-secret")
+    from backend import secret_store
+    secret_store._reset_for_tests()
+    path = tmp_path / "legacy-creds.enc"
+    path.write_text(
+        secret_store.encrypt(json.dumps({
+            "anthropic": {"api_key": "sk-ant-legacy", "model": "claude"},
+        })),
+        encoding="ascii",
+    )
+    _secrets._reset_for_tests(path)
+    assert _secrets.get_provider_credentials("anthropic")["api_key"] == "sk-ant-legacy"
+    _secrets._reset_for_tests()
+    secret_store._reset_for_tests()
+
+
+def test_provider_credentials_envelope_disabled_writes_single_fernet(
+    tmp_path, monkeypatch,
+):
+    """KS.1.12: knob-off writes provider credentials in the legacy
+    single-Fernet marker format during the migration rollback window."""
+    monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-12-llm-rollback-secret")
+    from backend import secret_store
+    from backend.security import envelope as tenant_envelope
+    secret_store._reset_for_tests()
+    monkeypatch.setenv(tenant_envelope.ENVELOPE_ENABLED_ENV, "false")
+    path = tmp_path / "provider-creds-rollback.enc"
+    _secrets._reset_for_tests(path)
+
+    _secrets.set_provider_credentials("openai", api_key="sk-proj-rollback")
+    raw = path.read_text(encoding="ascii")
+
+    assert not raw.lstrip().startswith("{")
+    assert _secrets.get_provider_credentials("openai")["api_key"] == "sk-proj-rollback"
     _secrets._reset_for_tests()
     secret_store._reset_for_tests()
 

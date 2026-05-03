@@ -325,6 +325,7 @@ async def revoke_record(
     trigger: str = TRIGGER_USER_UNLINK,
     actor: Optional[str] = None,
     emit_audit: bool = True,
+    request_id: Optional[str] = None,
 ) -> RevokeOutcome:
     """Revoke the credentials in *record* at the IdP, emit audit row.
 
@@ -349,7 +350,7 @@ async def revoke_record(
          refresh_token).
 
     4. Decrypt the chosen ciphertext via
-       :func:`token_vault.decrypt_for_user`.  Any
+       :func:`token_vault.decrypt_for_user_with_audit`.  Any
        :class:`TokenVaultError` short-circuits with
        :data:`OUTCOME_VAULT_FAILURE`; audit emits ``oauth.unlink``
        outcome=``revocation_failed`` with ``error="vault:<class>"``
@@ -415,9 +416,21 @@ async def revoke_record(
 
     # Step 4 — decrypt via vault.
     try:
-        plaintext = token_vault.decrypt_for_user(
-            record.user_id, record.provider, chosen,
-        )
+        if emit_audit:
+            eff_actor = actor or (
+                f"dsar:{record.user_id}"
+                if trigger == TRIGGER_DSAR_ERASURE
+                else record.user_id
+            )
+            plaintext = await token_vault.decrypt_for_user_with_audit(
+                record.user_id, record.provider, chosen,
+                request_id=request_id,
+                actor=eff_actor,
+            )
+        else:
+            plaintext = token_vault.decrypt_for_user(
+                record.user_id, record.provider, chosen,
+            )
     except TokenVaultError as exc:
         outcome = RevokeOutcome(
             outcome=OUTCOME_VAULT_FAILURE,

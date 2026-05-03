@@ -5,6 +5,15 @@ R20 Phase 0 (chat-layer):
   - prompt_hardening.looks_like_injection(text) — heuristic detector
   - prompt_hardening.harden_user_message(text) — wrap suspicious input
   - secret_filter.redact(text) — output redaction (returns text + labels)
+  - secret_filter.SecretScrubbingFilter — KS.1.7 stdlib logger filter
+
+KS.4.10 (input firewall):
+  - llm_firewall.classify_input(text) — Haiku-backed classifier returning
+    safe / suspicious / blocked before untrusted text reaches specialist
+    agents.
+  - llm_firewall.enforce_input(text) — KS.4.11 three-tier enforcement:
+    safe passes, suspicious logs + returns a system-prompt warning, blocked
+    refuses invocation + emits audit_log. Persistence is a later KS.4.13 row.
 
 SC.7.1 (OWASP mitigation shared lib):
   - input_validation — pure allowlist-first scalar validators for
@@ -66,6 +75,29 @@ SC.12.1-SC.12.2 (PII detection / masking):
     and JSON-like response payloads while returning entity metadata.
     They do not install global logger or FastAPI middleware.
 
+KS.1.1 (Tier 1 envelope encryption):
+  - kms_adapters — provider-neutral KMSAdapter Protocol plus AWS KMS,
+    Google Cloud KMS, HashiCorp Vault Transit, and LocalFernet KEK
+    adapters. Adapter-only layer; KS.1.2 owns tenant DEK persistence and
+    envelope encrypt/decrypt helpers.
+
+KS.1.2 (Tier 1 envelope encryption):
+  - envelope — per-tenant ``TenantDEKRef`` schema plus pure
+    ``encrypt(plaintext, tenant_id)`` / ``decrypt(ciphertext, dek_ref)``
+    helpers. Uses KS.1.1 KMS adapters to wrap one AES-256-GCM DEK per
+    ciphertext. Persistence and caller migration stay in later KS rows.
+
+KS.1.5 (Tier 1 envelope encryption):
+  - decryption_audit — canonical decryption audit emit layer for the
+    N10 tamper-evident ledger. Writes tenant / user / ledger time /
+    key_id / request_id through ``backend.audit.log`` and restores the
+    tenant ContextVar after each emit.
+
+KS.1.6 (Tier 1 envelope encryption):
+  - spend_anomaly — per-tenant token-rate anomaly detector with
+    auto-throttle decisions and Slack / email notification fan-out
+    through the existing notification tier dispatcher.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
@@ -97,13 +129,13 @@ AS.1.4 (auth shared lib):
 
 AS.2.1 (auth shared lib):
   - token_vault — per-user / per-provider OAuth credential at-rest
-    encryption. Reuses `backend.secret_store._fernet` (single master
-    Fernet key invariant per AS.0.4 §3). Wraps plaintext in a binding
-    envelope so a DB-level row swap is caught by `decrypt_for_user`.
-    `key_version` column is reserved for the future KMS rotation hook
-    (defaults to 1 in this release). Provider whitelist mirrors
-    `account_linking._AS1_OAUTH_PROVIDERS` (drift-guarded). TS twin
-    lives at `templates/_shared/token-vault/` (AS.2.3).
+    encryption. KS.1.3 writes the KS.1.2 per-tenant DEK envelope and
+    keeps a 30-day read fallback for legacy Fernet rows. Wraps
+    plaintext in a binding envelope so a DB-level row swap is caught
+    by `decrypt_for_user`. `key_version` remains 1 until the future
+    KMS rotation hook changes column semantics. Provider whitelist
+    mirrors `account_linking._AS1_OAUTH_PROVIDERS` (drift-guarded).
+    TS twin lives at `templates/_shared/token-vault/` (AS.2.3).
 
 AS.2.4 (auth shared lib):
   - oauth_refresh_hook — stateless orchestrator that auto-refreshes
@@ -302,7 +334,12 @@ from .prompt_hardening import (
     harden_user_message,
     looks_like_injection,
 )
-from .secret_filter import redact
+from .secret_filter import (
+    SecretScrubbingFilter,
+    install_logging_filter,
+    redact,
+    redact_for_log,
+)
 
 # Re-export pure submodules by name (cheap — constants + functions, no IO).
 from . import auth_audit_bridge  # noqa: F401
@@ -311,9 +348,11 @@ from . import auth_event  # noqa: F401
 from . import bot_challenge  # noqa: F401
 from . import credential_vault  # noqa: F401
 from . import csrf_templates  # noqa: F401
+from . import envelope  # noqa: F401
 from . import honeypot  # noqa: F401
 from . import honeypot_form_verifier  # noqa: F401
 from . import input_validation  # noqa: F401
+from . import llm_firewall  # noqa: F401
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_login_handler  # noqa: F401
@@ -325,6 +364,7 @@ from . import password_generator  # noqa: F401
 from . import pii_auto_mask  # noqa: F401
 from . import pii_presidio  # noqa: F401
 from . import privacy_notice_templates  # noqa: F401
+from . import spend_anomaly  # noqa: F401
 from . import token_vault  # noqa: F401
 from . import turnstile_form_verifier  # noqa: F401
 
@@ -336,10 +376,12 @@ __all__ = [
     "bot_challenge",
     "credential_vault",
     "csrf_templates",
+    "envelope",
     "harden_user_message",
     "honeypot",
     "honeypot_form_verifier",
     "input_validation",
+    "llm_firewall",
     "looks_like_injection",
     "oauth_audit",
     "oauth_client",
@@ -353,6 +395,10 @@ __all__ = [
     "pii_presidio",
     "privacy_notice_templates",
     "redact",
+    "redact_for_log",
+    "SecretScrubbingFilter",
+    "install_logging_filter",
+    "spend_anomaly",
     "token_vault",
     "turnstile_form_verifier",
 ]

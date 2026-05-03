@@ -36,6 +36,65 @@ On **quarterly review** (first working day of new quarter):
    `dependency_upgrade_policy.md` trip (rollback rate > 25 % or mean
    soak < 24h).
 
+On **every quarterly third-party pentest** (KS.4.4):
+
+1. Store the vendor report in the private security evidence vault; do
+   not commit the report, screenshots, exploit payloads, or customer
+   data.
+2. Compute the stored report's SHA-256 fingerprint.
+3. Append one row to the "Pentest Reports" table with quarter, vendor,
+   test window, report fingerprint, finding counts, remediation tracker,
+   disposition, and notes.
+4. Follow `quarterly_pentest_sop.md` for vendor contracting, rules of
+   engagement, retest, and delayed-quarter handling.
+
+On **every bug bounty program lifecycle change** (KS.4.5):
+
+1. Store the provider comparison, order form, scope profile, safe harbor,
+   payout policy, and disclosure policy in the private security evidence
+   vault; do not commit platform exports, researcher PII, exploit
+   payloads, secrets, or customer data.
+2. Append one row to the "Bug Bounty Programs" table when the program is
+   planned, launched, paused, publicly launched, closed, or materially
+   changed.
+3. Append one row to the "Bug Bounty Findings" table for each accepted
+   valid finding after managed triage. Record only finding ID, severity,
+   fingerprint, ticket link, bounty amount, and disposition.
+4. Follow `bug_bounty_program_sop.md` for HackerOne / Bugcrowd selection,
+   post-GA launch gates, payout caps, scope boundaries, and triage SLA.
+
+On **every SOC 2 Type II readiness milestone** (KS.4.7):
+
+1. Store the control matrix, GRC platform comparison, auditor scorecard,
+   engagement letter, evidence index, and auditor independence
+   confirmation in the private security evidence vault; do not commit
+   auditor requests, screenshots, raw logs, customer data, secrets, or
+   platform exports.
+2. Compute a SHA-256 fingerprint for the evidence index when the
+   observation window starts, ends, or materially changes.
+3. Append one row to the "SOC 2 Readiness" table when the program is
+   planned, ready for observation, observation starts, observation ends,
+   draft report arrives, final report is issued, delayed, or rescoped.
+4. Follow `soc2_type2_readiness_checklist.md` for control mapping,
+   evidence collection, GRC platform evaluation, and independent CPA
+   firm selection.
+
+On **every GDPR / DSAR request lifecycle change** (KS.4.8):
+
+1. Store raw exports, tenant deletion evidence, DEK purge proof,
+   subprocessor receipts, and audit redaction summary in the private
+   security evidence vault; do not commit raw exports, customer data,
+   secrets, raw audit payloads, plaintext tokens, plaintext DEKs, or
+   wrapped DEK material.
+2. Compute SHA-256 fingerprints for the stored export, if one exists,
+   and for the deletion / redaction evidence bundle.
+3. Append one row to the "DSAR Evidence" table when a request is
+   received, exported, erased, delayed, legally held, completed, or
+   corrected.
+4. Follow `gdpr_dsar_alignment_sop.md` for tenant data deletion, DEK
+   purge, audit metadata retention, raw payload deletion, and DSAR export
+   workflow.
+
 ## Upgrades
 
 | Cut-over (UTC) | Package | From → To | PR | Operator | Disposition | Notes |
@@ -53,6 +112,59 @@ On **quarterly review** (first working day of new quarter):
 | Quarter | Majors shipped | Rollbacks | Rollback rate | Mean soak (h) | Waivers | Action |
 |---|---|---|---|---|---|---|
 | _Q2 2026 (Apr–Jun)_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _review scheduled 2026-07-01_ |
+
+## Pentest Reports
+
+| Quarter | Vendor | Test window (UTC) | Report SHA-256 | Findings C/H/M/L | Remediation tracker | Disposition | Notes |
+|---|---|---|---|---|---|---|---|
+| _Q2 2026 (Apr–Jun)_ | _pending vendor contract_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _KS.4.4 policy effective 2026-05-03; first row due by 2026-06-30_ |
+
+Pentest rows are append-only. If a row is wrong, add a correction row
+with `correction -> <quarter/vendor/report-sha256>` in Notes.
+
+## Bug Bounty Programs
+
+| Quarter | Provider | Mode | Disposition | Reward pool USD | Scope SHA-256 | Remediation tracker | Notes |
+|---|---|---|---|---:|---|---|---|
+| _Q3 2026 (post-GA target)_ | _pending HackerOne/Bugcrowd decision_ | _private managed_ | _planned_ | _pending_ | _pending_ | _pending_ | _KS.4.5 policy effective 2026-05-03; launch only after GA gates pass_ |
+
+Bug bounty program rows are append-only. If a row is wrong, add a
+correction row with `correction -> <quarter/provider/scope-sha256>` in
+Notes.
+
+## Bug Bounty Findings
+
+| Validated (UTC) | Platform finding ID | Severity | Finding SHA-256 | Remediation ticket | Bounty USD | Disposition | Notes |
+|---|---|---|---|---|---:|---|---|
+| _(no accepted findings yet — KS.4.5 policy effective 2026-05-03)_ | | | | | | | |
+
+Bug bounty finding rows are append-only. Do not store exploit payloads,
+researcher PII, secrets, screenshots, or customer data in this ledger.
+Use `correction -> <platform-finding-id>` in Notes to correct a prior
+row.
+
+## SOC 2 Readiness
+
+| Quarter | GRC platform | Auditor | Criteria | Observation window (UTC) | Evidence index SHA-256 | Disposition | Notes |
+|---|---|---|---|---|---|---|---|
+| _Q3 2026 target_ | _pending Vanta/Drata/Secureframe decision_ | _pending independent CPA firm_ | _Security/Availability/Confidentiality target_ | _pending_ | _pending_ | _planned_ | _KS.4.7 policy effective 2026-05-03; observation window cannot start until readiness gates pass_ |
+
+SOC 2 readiness rows are append-only. Do not store auditor requests,
+raw evidence, screenshots, customer data, secrets, or platform exports
+in this ledger. Use `correction -> <quarter/auditor/evidence-index-sha256>`
+in Notes to correct a prior row.
+
+## DSAR Evidence
+
+| Completed (UTC) | Request ID | Request type | Subject scope | Export SHA-256 | Evidence SHA-256 | DEKs purged | Audit rows redacted | Disposition | Notes |
+|---|---|---|---|---|---|---:|---:|---|---|
+| _(no DSAR evidence logged yet - KS.4.8 policy effective 2026-05-03)_ | | | | | | | | | |
+
+DSAR evidence rows are append-only. Do not store raw exports, customer
+data, raw audit payloads, secrets, plaintext tokens, plaintext DEKs, or
+wrapped DEK material in this ledger. Use
+`correction -> <request-id/evidence-sha256>` in Notes to correct a prior
+row.
 
 ## Trigger vocabulary (Rollbacks)
 
@@ -75,6 +187,10 @@ the quarterly review can tally by cause:
 
 * Policy: [`dependency_upgrade_policy.md`](dependency_upgrade_policy.md)
 * Runbook: [`dependency_upgrade_runbook.md`](dependency_upgrade_runbook.md)
+* Quarterly pentest SOP: [`quarterly_pentest_sop.md`](quarterly_pentest_sop.md)
+* Bug bounty SOP: [`bug_bounty_program_sop.md`](bug_bounty_program_sop.md)
+* SOC 2 Type II readiness checklist: [`soc2_type2_readiness_checklist.md`](soc2_type2_readiness_checklist.md)
+* GDPR / DSAR alignment SOP: [`gdpr_dsar_alignment_sop.md`](gdpr_dsar_alignment_sop.md)
 * Deploy-time gate: [`../../scripts/check_bluegreen_gate.py`](../../scripts/check_bluegreen_gate.py)
 * Auto-label workflow: [`../../.github/workflows/blue-green-gate.yml`](../../.github/workflows/blue-green-gate.yml)
 * Fallback SOP (Path C hard rollback): [`fallback_branches.md`](fallback_branches.md)

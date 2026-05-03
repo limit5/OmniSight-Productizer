@@ -47,6 +47,9 @@ def configure() -> None:
     global _CONFIGURED
     if _CONFIGURED:
         return
+    from backend.security.secret_filter import install_logging_filter
+
+    install_logging_filter()
     if not _AVAILABLE or not is_json():
         _CONFIGURED = True
         return
@@ -82,6 +85,7 @@ def configure() -> None:
         root.removeHandler(h)
     root.addHandler(handler)
     root.setLevel(getattr(logging, (os.environ.get("OMNISIGHT_LOG_LEVEL") or "INFO").upper(), logging.INFO))
+    install_logging_filter(root)
     _CONFIGURED = True
 
 

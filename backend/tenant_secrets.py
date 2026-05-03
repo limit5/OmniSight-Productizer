@@ -1,8 +1,8 @@
 """I4 — Tenant-scoped secrets management.
 
-CRUD API for storing encrypted credentials per tenant. Wraps
-``secret_store.encrypt/decrypt`` and persists ciphertext in the
-``tenant_secrets`` table. Secret types:
+CRUD API for storing encrypted credentials per tenant. KS.1.11 writes
+new values through the per-tenant DEK envelope while preserving legacy
+``secret_store`` Fernet reads during the migration window. Secret types:
 
   - ``git_credential``   — per-repo tokens (GitHub, GitLab, Gerrit…)
   - ``provider_key``     — LLM / SaaS API keys
@@ -27,25 +27,121 @@ cached per-worker from env / disk; all workers compute the same
 key from the same source, so ciphertext is interoperable across
 workers (the small race on first-boot key-file generation lives in
 secret_store.py, not here — flagged for follow-up).
+``OMNISIGHT_KS_ENVELOPE_ENABLED=false`` is read lazily per write and
+temporarily emits the same single-Fernet plaintext payload during the
+migration rollback window.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import uuid
 from typing import Any
 
 from backend.db_context import require_current_tenant
-from backend.secret_store import decrypt, encrypt, fingerprint
+from backend import secret_store
+from backend.security import envelope as tenant_envelope
 
 logger = logging.getLogger(__name__)
 
+
+SECRET_ENVELOPE_FORMAT_VERSION = 1
+SECRET_BINDING_FORMAT_VERSION = 1
 
 _SECRET_COLS = (
     "id, tenant_id, secret_type, key_name, encrypted_value, "
     "metadata, created_at, updated_at, version"
 )
+
+
+def _secret_carrier(ciphertext: str, dek_ref: tenant_envelope.TenantDEKRef) -> str:
+    payload = {
+        "fmt": SECRET_ENVELOPE_FORMAT_VERSION,
+        "ciphertext": ciphertext,
+        "dek_ref": dek_ref.to_dict(),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _load_secret_carrier(
+    encrypted_value: str,
+) -> tuple[str, tenant_envelope.TenantDEKRef]:
+    payload = json.loads(encrypted_value)
+    if not isinstance(payload, dict):
+        raise ValueError("secret envelope must be an object")
+    if payload.get("fmt") != SECRET_ENVELOPE_FORMAT_VERSION:
+        raise ValueError("unknown secret envelope format")
+    ciphertext = payload.get("ciphertext")
+    if not isinstance(ciphertext, str) or not ciphertext:
+        raise ValueError("secret envelope missing ciphertext")
+    dek_ref_raw = payload.get("dek_ref")
+    if not isinstance(dek_ref_raw, dict):
+        raise ValueError("secret envelope missing dek_ref")
+    return ciphertext, tenant_envelope.TenantDEKRef.from_dict(dek_ref_raw)
+
+
+def _binding_payload(
+    tid: str, secret_type: str, key_name: str, plaintext: str,
+) -> str:
+    payload = {
+        "fmt": SECRET_BINDING_FORMAT_VERSION,
+        "tid": tid,
+        "typ": secret_type,
+        "key": key_name,
+        "tok": plaintext,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _load_binding_payload(
+    payload: str, tid: str, secret_type: str, key_name: str,
+) -> str:
+    envelope = json.loads(payload)
+    if not isinstance(envelope, dict):
+        raise ValueError("secret binding must be an object")
+    if envelope.get("fmt") != SECRET_BINDING_FORMAT_VERSION:
+        raise ValueError("unknown secret binding format")
+    for field, expected in (
+        ("tid", tid),
+        ("typ", secret_type),
+        ("key", key_name),
+    ):
+        stored = envelope.get(field)
+        if not isinstance(stored, str) or not hmac.compare_digest(stored, expected):
+            raise ValueError(f"secret binding mismatch: {field}")
+    plaintext = envelope.get("tok")
+    if not isinstance(plaintext, str):
+        raise ValueError("secret binding missing plaintext")
+    return plaintext
+
+
+def _encrypt_secret_value(
+    tid: str, secret_type: str, key_name: str, plaintext: str,
+) -> str:
+    if not tenant_envelope.is_enabled():
+        return secret_store.encrypt(plaintext)
+    payload = _binding_payload(tid, secret_type, key_name, plaintext)
+    ciphertext, dek_ref = tenant_envelope.encrypt(
+        payload,
+        tid,
+        purpose="tenant-secret",
+    )
+    return _secret_carrier(ciphertext, dek_ref)
+
+
+def _decrypt_secret_value(
+    encrypted_value: str, tid: str, secret_type: str, key_name: str,
+) -> str:
+    try:
+        ciphertext, dek_ref = _load_secret_carrier(encrypted_value)
+    except (TypeError, ValueError, tenant_envelope.EnvelopeEncryptionError):
+        if isinstance(encrypted_value, str) and not encrypted_value.lstrip().startswith("{"):
+            return secret_store.decrypt(encrypted_value)
+        raise
+    payload = tenant_envelope.decrypt(ciphertext, dek_ref)
+    return _load_binding_payload(payload, tid, secret_type, key_name)
 
 
 async def _list_secrets_impl(
@@ -68,8 +164,13 @@ async def _list_secrets_impl(
     results: list[dict[str, Any]] = []
     for r in rows:
         try:
-            plain = decrypt(r["encrypted_value"])
-            fp = fingerprint(plain)
+            plain = _decrypt_secret_value(
+                r["encrypted_value"],
+                r["tenant_id"],
+                r["secret_type"],
+                r["key_name"],
+            )
+            fp = secret_store.fingerprint(plain)
         except Exception:
             fp = "****"
         meta: dict = {}
@@ -108,7 +209,7 @@ async def get_secret_value(secret_id: str, conn=None) -> str | None:
     """Retrieve the plaintext value of a secret (for internal use only)."""
     tid = require_current_tenant()
     sql = (
-        "SELECT encrypted_value FROM tenant_secrets "
+        "SELECT encrypted_value, secret_type, key_name FROM tenant_secrets "
         "WHERE id = $1 AND tenant_id = $2"
     )
     if conn is None:
@@ -119,7 +220,9 @@ async def get_secret_value(secret_id: str, conn=None) -> str | None:
         row = await conn.fetchrow(sql, secret_id, tid)
     if not row:
         return None
-    return decrypt(row["encrypted_value"])
+    return _decrypt_secret_value(
+        row["encrypted_value"], tid, row["secret_type"], row["key_name"],
+    )
 
 
 async def get_secret_by_name(
@@ -129,14 +232,14 @@ async def get_secret_by_name(
     tid = require_current_tenant()
     if secret_type:
         sql = (
-            "SELECT encrypted_value FROM tenant_secrets "
+            "SELECT encrypted_value, secret_type, key_name FROM tenant_secrets "
             "WHERE key_name = $1 AND tenant_id = $2 AND secret_type = $3 "
             "LIMIT 1"
         )
         args: tuple = (key_name, tid, secret_type)
     else:
         sql = (
-            "SELECT encrypted_value FROM tenant_secrets "
+            "SELECT encrypted_value, secret_type, key_name FROM tenant_secrets "
             "WHERE key_name = $1 AND tenant_id = $2 "
             "LIMIT 1"
         )
@@ -149,14 +252,16 @@ async def get_secret_by_name(
         row = await conn.fetchrow(sql, *args)
     if not row:
         return None
-    return decrypt(row["encrypted_value"])
+    return _decrypt_secret_value(
+        row["encrypted_value"], tid, row["secret_type"], row["key_name"],
+    )
 
 
 async def _upsert_secret_impl(
     conn, tid: str, key_name: str, plaintext: str,
     secret_type: str, metadata: dict[str, Any] | None,
 ) -> str:
-    enc = encrypt(plaintext)
+    enc = _encrypt_secret_value(tid, secret_type, key_name, plaintext)
     meta_json = json.dumps(metadata or {})
     candidate_id = f"sec-{uuid.uuid4().hex[:12]}"
     # Atomic upsert. On INSERT the candidate_id wins; on CONFLICT the

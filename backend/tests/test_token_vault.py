@@ -15,13 +15,14 @@ through. Pinned invariants:
    raises :class:`BindingMismatchError`. Defends against DB-level row
    shuffles.
 5. Key version — :data:`KEY_VERSION_CURRENT` is the only accepted
-   version this release; anything else raises
-   :class:`UnknownKeyVersionError` (AS.0.4 §3.1 reservation).
+   version on the landing date; future quarters advance via
+   :func:`current_key_version` and old rows return a lazy re-encrypt
+   replacement (AS.0.4 §3.1 / KS.1.4).
 6. Ciphertext corruption — Fernet auth failures + malformed inner
    envelopes are translated to :class:`CiphertextCorruptedError`.
-7. Single-master-key invariant — module source MUST go through
-   ``backend.secret_store`` and MUST NOT mention ``Fernet.generate_key``
-   or ``OMNISIGHT_OAUTH_SECRET_KEY`` (AS.0.4 §5.4 grep guard).
+7. KS.1.3 envelope invariant — module source MUST go through
+   ``backend.security.envelope`` for new writes and MUST NOT mention
+   ``Fernet.generate_key`` or ``OMNISIGHT_OAUTH_SECRET_KEY``.
 8. Module-global state audit — per SOP §1: no module-level mutable
    state, constants stable across :func:`importlib.reload`, no IO at
    import time, ``import secrets`` provenance grep (mirrors AS.1.1).
@@ -33,14 +34,17 @@ through. Pinned invariants:
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import inspect
 import json
 import pathlib
+import subprocess
+import sys
 
 import pytest
 
 from backend import account_linking, secret_store
+from backend.security import envelope as tenant_envelope
 from backend.security import token_vault as tv
 
 
@@ -104,18 +108,114 @@ def test_salt_lives_inside_envelope_not_in_dataclass() -> None:
 
 
 def test_envelope_carries_salt_field() -> None:
-    """Decrypt the ciphertext directly via secret_store (peek inside
-    the envelope) — the JSON MUST carry a base64 salt and the binding
-    fields. Pins the envelope shape so AS.2.3 TS twin can mirror it.
+    """Decrypt the KS.1.3 token envelope (peek inside the binding
+    payload) — the JSON MUST carry a base64 salt and the binding
+    fields.
     """
     encrypted = tv.encrypt_for_user("user-peek", "google", "tok-peek")
-    raw = secret_store.decrypt(encrypted.ciphertext)
+    outer = json.loads(encrypted.ciphertext)
+    raw = tenant_envelope.decrypt(
+        outer["ciphertext"],
+        tenant_envelope.TenantDEKRef.from_dict(outer["dek_ref"]),
+    )
     envelope = json.loads(raw)
     assert envelope["fmt"] == tv.BINDING_FORMAT_VERSION
     assert envelope["uid"] == "user-peek"
     assert envelope["prv"] == "google"
     assert envelope["tok"] == "tok-peek"
     assert isinstance(envelope["salt"], str) and len(envelope["salt"]) >= 16
+
+
+def test_token_envelope_shape_is_pinned() -> None:
+    """KS.1.3 writes only the new token envelope; the legacy Fernet
+    shape is produced only when the KS.1.12 rollback knob is off."""
+    encrypted = tv.encrypt_for_user("user-peek", "google", "tok-peek")
+    outer = json.loads(encrypted.ciphertext)
+    assert encrypted.key_version == tv.KEY_VERSION_CURRENT
+    assert outer["fmt"] == tv.TOKEN_ENVELOPE_FORMAT_VERSION
+    assert isinstance(outer["ciphertext"], str) and outer["ciphertext"].startswith("{")
+    assert set(outer["dek_ref"]) == {
+        "dek_id",
+        "encryption_context",
+        "key_id",
+        "key_version",
+        "provider",
+        "schema_version",
+        "tenant_id",
+        "wrap_algorithm",
+        "wrapped_dek_b64",
+    }
+    assert outer["dek_ref"]["tenant_id"] == "user-peek"
+    assert outer["dek_ref"]["encryption_context"]["purpose"] == "as-token-vault"
+
+
+def test_envelope_disabled_writes_legacy_fernet_token(monkeypatch) -> None:
+    """KS.1.12: migration rollback knob makes new OAuth token writes
+    use the same single-Fernet carrier accepted by the legacy reader."""
+    monkeypatch.setenv(tenant_envelope.ENVELOPE_ENABLED_ENV, "false")
+    encrypted = tv.encrypt_for_user("user-rollback", "google", "tok-rollback")
+
+    assert encrypted.key_version == tv.KEY_VERSION_CURRENT
+    assert not encrypted.ciphertext.lstrip().startswith("{")
+    assert tv.decrypt_for_user("user-rollback", "google", encrypted) == "tok-rollback"
+
+
+def test_encrypt_accepts_explicit_tenant_id() -> None:
+    encrypted = tv.encrypt_for_user(
+        "user-peek",
+        "google",
+        "tok-peek",
+        tenant_id="tenant-42",
+    )
+    outer = json.loads(encrypted.ciphertext)
+    assert outer["dek_ref"]["tenant_id"] == "tenant-42"
+    assert tv.decrypt_for_user("user-peek", "google", encrypted) == "tok-peek"
+
+
+def test_oauth_token_envelope_survives_hard_restart(monkeypatch) -> None:
+    """KS.1.11 compat regression: an ``oauth_tokens`` ciphertext
+    written on the new envelope path must decrypt in a fresh interpreter.
+
+    This simulates the dual-write window's random hard-restart case:
+    no module-global Fernet / KMS adapter cache is shared with the
+    reader process; both workers derive the same local KEK from
+    ``OMNISIGHT_SECRET_KEY``.
+    """
+    monkeypatch.setenv(
+        "OMNISIGHT_SECRET_KEY",
+        "ks-1-11-oauth-hard-restart-secret",
+    )
+    secret_store._reset_for_tests()
+    encrypted = tv.encrypt_for_user(
+        "user-restart",
+        "github",
+        "ghp_restart_token",
+        tenant_id="tenant-restart",
+    )
+    payload = json.dumps({
+        "ciphertext": encrypted.ciphertext,
+        "key_version": encrypted.key_version,
+    })
+    code = """
+import json
+import sys
+from backend.security import token_vault as tv
+
+raw = json.loads(sys.stdin.read())
+token = tv.EncryptedToken(
+    ciphertext=raw["ciphertext"],
+    key_version=raw["key_version"],
+)
+print(tv.decrypt_for_user("user-restart", "github", token))
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == "ghp_restart_token"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -194,15 +294,103 @@ def test_binding_mismatch_swapped_rows() -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def test_key_version_current_is_one() -> None:
-    """AS.0.4 §3.1: this release ships with key_version=1; the column
-    is reserved for future KMS rotation."""
+def test_key_version_current_stays_one() -> None:
+    """KS.1.3 keeps key_version=1 for schema compatibility; new vs
+    legacy rows are distinguished by ciphertext envelope shape."""
+    assert tv.KEY_VERSION_INITIAL == 1
     assert tv.KEY_VERSION_CURRENT == 1
+    assert tv.KEY_VERSION_LEGACY_FERNET == 1
+    assert tv.current_key_version(as_of=tv.KEY_VERSION_ROTATION_STARTED_ON) == 1
+
+
+def test_quarterly_key_version_schedule_advances() -> None:
+    """KS.1.4: quarterly automatic master-KEK rotation derives the
+    active epoch from UTC date constants, not from process memory."""
+    first_day_v2 = (
+        tv.KEY_VERSION_ROTATION_STARTED_ON
+        + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    )
+    assert tv.current_key_version(as_of=first_day_v2) == 2
+    assert tv.current_key_version(
+        as_of=first_day_v2 + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    ) == 3
+
+
+def test_future_quarter_encrypt_uses_scheduled_key_version() -> None:
+    first_day_v2 = (
+        tv.KEY_VERSION_ROTATION_STARTED_ON
+        + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    )
+    encrypted = tv.encrypt_for_user(
+        "u1",
+        "google",
+        "tok",
+        as_of=first_day_v2,
+    )
+    assert encrypted.key_version == 2
+    assert tv.decrypt_for_user("u1", "google", encrypted, as_of=first_day_v2) == "tok"
+
+
+def test_lazy_reencrypt_returns_replacement_for_old_row() -> None:
+    first_day_v2 = (
+        tv.KEY_VERSION_ROTATION_STARTED_ON
+        + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    )
+    old = tv.encrypt_for_user(
+        "u1",
+        "google",
+        "tok",
+        as_of=tv.KEY_VERSION_ROTATION_STARTED_ON,
+    )
+    result = tv.decrypt_for_user_with_lazy_reencrypt(
+        "u1",
+        "google",
+        old,
+        tenant_id="tenant-42",
+        as_of=first_day_v2,
+    )
+    assert result.plaintext == "tok"
+    assert result.key_version == 1
+    assert result.target_key_version == 2
+    assert result.replacement is not None
+    assert result.replacement.key_version == 2
+    outer = json.loads(result.replacement.ciphertext)
+    assert outer["dek_ref"]["tenant_id"] == "tenant-42"
+    assert tv.decrypt_for_user(
+        "u1",
+        "google",
+        result.replacement,
+        as_of=first_day_v2,
+    ) == "tok"
+
+
+def test_lazy_reencrypt_noops_for_current_row() -> None:
+    first_day_v2 = (
+        tv.KEY_VERSION_ROTATION_STARTED_ON
+        + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    )
+    current = tv.encrypt_for_user(
+        "u1",
+        "google",
+        "tok",
+        as_of=first_day_v2,
+    )
+    result = tv.decrypt_for_user_with_lazy_reencrypt(
+        "u1",
+        "google",
+        current,
+        as_of=first_day_v2,
+    )
+    assert result.plaintext == "tok"
+    assert result.replacement is None
+    assert tv.key_version_needs_lazy_reencrypt(1, as_of=first_day_v2) is True
+    assert tv.key_version_needs_lazy_reencrypt(2, as_of=first_day_v2) is False
 
 
 def test_unknown_key_version_rejected() -> None:
     encrypted = tv.encrypt_for_user("u1", "google", "tok")
-    fake = tv.EncryptedToken(ciphertext=encrypted.ciphertext, key_version=2)
+    future_version = tv.current_key_version() + 1
+    fake = tv.EncryptedToken(ciphertext=encrypted.ciphertext, key_version=future_version)
     with pytest.raises(tv.UnknownKeyVersionError):
         tv.decrypt_for_user("u1", "google", fake)
 
@@ -257,9 +445,39 @@ def test_envelope_missing_uid_raises_corrupted() -> None:
 
 def test_non_dict_envelope_raises_corrupted() -> None:
     ciphertext = secret_store.encrypt(json.dumps(["just", "a", "list"]))
-    fake = tv.EncryptedToken(ciphertext=ciphertext, key_version=1)
+    fake = tv.EncryptedToken(ciphertext=ciphertext, key_version=tv.KEY_VERSION_LEGACY_FERNET)
     with pytest.raises(tv.CiphertextCorruptedError):
         tv.decrypt_for_user("u1", "google", fake)
+
+
+def test_legacy_fernet_fallback_reads_old_rows() -> None:
+    """KS.1.3 migration window: key_version=1 old Fernet rows still
+    decrypt so operators can backfill existing oauth_tokens rows."""
+    legacy_payload = json.dumps(
+        {"fmt": 1, "uid": "u1", "prv": "google", "tok": "legacy", "salt": "AA=="},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    token = tv.EncryptedToken(
+        ciphertext=secret_store.encrypt(legacy_payload),
+        key_version=tv.KEY_VERSION_LEGACY_FERNET,
+    )
+    assert tv.decrypt_for_user("u1", "google", token) == "legacy"
+
+
+def test_legacy_fernet_fallback_deprecates_after_30_days(monkeypatch) -> None:
+    legacy_payload = json.dumps(
+        {"fmt": 1, "uid": "u1", "prv": "google", "tok": "legacy", "salt": "AA=="},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    token = tv.EncryptedToken(
+        ciphertext=secret_store.encrypt(legacy_payload),
+        key_version=tv.KEY_VERSION_LEGACY_FERNET,
+    )
+    monkeypatch.setattr(tv, "_utc_today", lambda: tv.LEGACY_FERNET_FALLBACK_DEPRECATES_ON)
+    with pytest.raises(tv.LegacyFernetFallbackDeprecatedError):
+        tv.decrypt_for_user("u1", "google", token)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -302,28 +520,26 @@ def test_fingerprint_matches_secret_store() -> None:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Family 9 — single-master-key invariant (AS.0.4 §5.4 grep guard)
+#  Family 9 — KS.1.3 envelope invariant
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def test_token_vault_uses_secret_store_fernet() -> None:
-    """AS.0.4 §3 hard invariant: vault MUST go through
-    ``backend.secret_store`` (single master Fernet key) and MUST NOT
-    introduce a second master key.
-
-    Mirrors the canonical drift guard in AS.0.4 §5.4 line 240,
-    adapted to the actual module path (``backend.security.token_vault``
-    per the AS.1.1 / AS.1.3 / AS.1.4 path-deviation precedent).
-    """
+def test_token_vault_uses_ks_envelope_for_new_writes() -> None:
+    """KS.1.3 / KS.1.12 invariant: default writes MUST go through
+    ``backend.security.envelope``; legacy Fernet is allowed only behind
+    the single rollback knob."""
     src = inspect.getsource(tv)
-    # MUST go through secret_store
-    assert (
-        "from backend import secret_store" in src
-        or "from backend.secret_store" in src
-    ), "vault must reuse backend.secret_store master key"
+    assert "from backend.security import envelope as tenant_envelope" in src
+    assert "tenant_envelope.encrypt" in src
+    assert "tenant_envelope.is_enabled()" in src, (
+        "KS.1.12 rollback must be controlled by the central envelope knob"
+    )
+    assert "os.environ" not in src, (
+        "token_vault must not parse the KS knob itself"
+    )
     # MUST NOT mint its own Fernet key
     assert "Fernet.generate_key" not in src, (
-        "vault must not introduce a second master key — see AS.0.4 §3"
+        "vault must not introduce a second Fernet master key"
     )
     # MUST NOT introduce a second env var
     assert "OMNISIGHT_OAUTH_SECRET_KEY" not in src, (
@@ -359,19 +575,41 @@ def test_no_module_level_mutable_state() -> None:
 
 
 def test_constants_stable_across_reload() -> None:
-    """``importlib.reload`` must not change the public constants.
+    """Loading a fresh module copy must not change public constants.
     Catches accidental introduction of import-time randomness in module
-    body (e.g. someone moves :func:`secrets.token_bytes` out of a
-    function and into a module-level call)."""
+    body without leaving a reloaded module object behind for tests that
+    imported ``TokenVaultError`` directly."""
     before = (
         tv.KEY_VERSION_CURRENT,
+        tv.KEY_VERSION_LEGACY_FERNET,
+        tv.KEY_VERSION_ROTATION_INTERVAL_DAYS,
+        tv.KEY_VERSION_ROTATION_STARTED_ON,
         tv.BINDING_FORMAT_VERSION,
+        tv.TOKEN_ENVELOPE_FORMAT_VERSION,
+        tv.LEGACY_FERNET_FALLBACK_STARTED_ON,
+        tv.LEGACY_FERNET_FALLBACK_DEPRECATES_ON,
         frozenset(tv.SUPPORTED_PROVIDERS),
     )
-    reloaded = importlib.reload(tv)
+    spec = importlib.util.spec_from_file_location(
+        "_token_vault_reload_probe",
+        pathlib.Path(tv.__file__ or ""),
+    )
+    assert spec is not None and spec.loader is not None
+    reloaded = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = reloaded
+    try:
+        spec.loader.exec_module(reloaded)
+    finally:
+        sys.modules.pop(spec.name, None)
     after = (
         reloaded.KEY_VERSION_CURRENT,
+        reloaded.KEY_VERSION_LEGACY_FERNET,
+        reloaded.KEY_VERSION_ROTATION_INTERVAL_DAYS,
+        reloaded.KEY_VERSION_ROTATION_STARTED_ON,
         reloaded.BINDING_FORMAT_VERSION,
+        reloaded.TOKEN_ENVELOPE_FORMAT_VERSION,
+        reloaded.LEGACY_FERNET_FALLBACK_STARTED_ON,
+        reloaded.LEGACY_FERNET_FALLBACK_DEPRECATES_ON,
         frozenset(reloaded.SUPPORTED_PROVIDERS),
     )
     assert before == after
@@ -394,16 +632,31 @@ def test_public_surface_matches_all() -> None:
         "BINDING_FORMAT_VERSION",
         "BindingMismatchError",
         "CiphertextCorruptedError",
+        "DecryptedToken",
         "EncryptedToken",
+        "KEY_VERSION_INITIAL",
         "KEY_VERSION_CURRENT",
+        "KEY_VERSION_LEGACY_FERNET",
+        "KEY_VERSION_ROTATION_INTERVAL_DAYS",
+        "KEY_VERSION_ROTATION_STARTED_ON",
+        "LEGACY_FERNET_FALLBACK_DEPRECATES_ON",
+        "LEGACY_FERNET_FALLBACK_STARTED_ON",
+        "LegacyFernetFallbackDeprecatedError",
         "SUPPORTED_PROVIDERS",
+        "TOKEN_ENVELOPE_FORMAT_VERSION",
         "TokenVaultError",
         "UnknownKeyVersionError",
+        "UnknownTokenEnvelopeVersionError",
         "UnsupportedProviderError",
+        "current_key_version",
         "decrypt_for_user",
+        "decrypt_for_user_with_audit",
+        "decrypt_for_user_with_lazy_reencrypt",
         "encrypt_for_user",
         "fingerprint",
         "is_enabled",
+        "key_version_needs_lazy_reencrypt",
+        "legacy_fernet_fallback_is_active",
     }
     assert set(tv.__all__) == expected
     for name in expected:
@@ -444,6 +697,46 @@ def test_pure_helpers_callable_when_knob_off() -> None:
     vault, not the vault itself."""
     encrypted = tv.encrypt_for_user("u1", "google", "tok")
     assert tv.decrypt_for_user("u1", "google", encrypted) == "tok"
+
+
+@pytest.mark.asyncio
+async def test_decrypt_for_user_with_audit_emits_key_metadata(monkeypatch) -> None:
+    """KS.1.5: audited decrypt writes tenant / user / key_id /
+    request_id metadata and never includes plaintext in the audit body."""
+    encrypted = tv.encrypt_for_user(
+        "u1",
+        "google",
+        "tok-secret",
+        tenant_id="t-ks15",
+    )
+    captured = {}
+
+    async def fake_emit(ctx):
+        captured["ctx"] = ctx
+        return 15
+
+    monkeypatch.setattr(
+        "backend.security.token_vault.decryption_audit.emit_decryption",
+        fake_emit,
+    )
+    plaintext = await tv.decrypt_for_user_with_audit(
+        "u1",
+        "google",
+        encrypted,
+        request_id="req-ks15",
+        actor="alice@example.com",
+    )
+
+    assert plaintext == "tok-secret"
+    ctx = captured["ctx"]
+    assert ctx.tenant_id == "t-ks15"
+    assert ctx.user_id == "u1"
+    assert ctx.request_id == "req-ks15"
+    assert ctx.key_id == "local-fernet"
+    assert ctx.provider == "local-fernet"
+    assert ctx.purpose == "as-token-vault"
+    assert ctx.actor == "alice@example.com"
+    assert "tok-secret" not in repr(ctx)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

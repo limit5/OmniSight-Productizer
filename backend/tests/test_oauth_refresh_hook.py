@@ -639,9 +639,9 @@ def test_refresh_record_knob_off_helper_runs_audit_silent_skip(monkeypatch):
     assert out.outcome == orh.OUTCOME_SUCCESS
     assert out.new_record is not None
     assert out.new_record.version == 3
-    # No audit row written (knob-off ⇒ silent skip across both
-    # AS.1.4 forensic + AS.5.1 rollup families)
-    assert events == []
+    # AS.1.4 forensic + AS.5.1 rollup rows silent-skip, but KS.1.5
+    # still records the two plaintext-returning decryptions.
+    assert [e["action"] for e in events] == ["ks.decryption", "ks.decryption"]
 
 
 def test_is_enabled_returns_oauth_client_value(monkeypatch):

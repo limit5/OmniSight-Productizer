@@ -27,6 +27,8 @@ Locks the load-bearing properties of the AS.2.2 table-add:
       * the secondary index ``idx_oauth_tokens_provider_expires``
         was created and is shaped for the AS.2.4 refresh-hook
         scan,
+      * the secondary index ``idx_oauth_tokens_key_version`` was
+        created for the KS.1.4 lazy re-encrypt scanner,
       * column DEFAULTs for the ciphertext / scope columns are
         the empty string (the vault never emits an empty
         ciphertext, so empty is unambiguous "not set yet"),
@@ -122,6 +124,21 @@ class TestMigrationFileStructure:
         # NULL-expiry rows must sort past the range so the hook can
         # stop early.
         assert "NULLS LAST" in m0057._PG_INDEX_EXPIRES
+
+    def test_key_version_index_declared(self, m0057) -> None:
+        # KS.1.4 lazy re-encrypt scans rows whose stored key_version
+        # lags the quarterly schedule; this must not full-scan
+        # oauth_tokens once customers are live.
+        assert (
+            "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_key_version"
+            in m0057._PG_INDEX_KEY_VERSION
+        )
+        assert "ON oauth_tokens(key_version)" in m0057._PG_INDEX_KEY_VERSION
+        assert (
+            "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_key_version"
+            in m0057._SQLITE_INDEX_KEY_VERSION
+        )
+        assert "ON oauth_tokens(key_version)" in m0057._SQLITE_INDEX_KEY_VERSION
 
     def test_sqlite_branch_uses_real(self, m0057) -> None:
         # SQLite has no DOUBLE PRECISION; REAL is the parallel
@@ -293,6 +310,13 @@ class TestSqliteUpgradeCreatesTable:
         ).fetchone()
         assert row is not None
 
+    def test_key_version_index_exists(self, upgraded_db) -> None:
+        row = upgraded_db.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND name='idx_oauth_tokens_key_version'"
+        ).fetchone()
+        assert row is not None
+
     def test_composite_pk_rejects_duplicate_pair(self, upgraded_db) -> None:
         upgraded_db.execute(
             "INSERT INTO oauth_tokens "
@@ -405,7 +429,7 @@ class TestIdempotentReupgrade:
         m0057.upgrade()
         m0057.upgrade()
         # A second upgrade should not have raised; sanity-check the
-        # table still exists with one PK index + one secondary index.
+        # table still exists with one PK index + two secondary indexes.
         idx = sorted(
             row[0]
             for row in conn.execute(
@@ -414,6 +438,7 @@ class TestIdempotentReupgrade:
             ).fetchall()
         )
         assert "idx_oauth_tokens_provider_expires" in idx
+        assert "idx_oauth_tokens_key_version" in idx
 
 
 # ─── Group 4: PG dialect branch executes ──────────────────────────────────
@@ -439,8 +464,9 @@ class TestPgBranchExecutes:
         monkeypatch.setattr(alembic_op, "get_bind", lambda: _PgBind())
         m0057.upgrade()
 
-        # CREATE TABLE + CREATE INDEX = exactly two statements on PG.
-        assert len(captured) == 2
+        # CREATE TABLE + two CREATE INDEX statements = exactly three
+        # statements on PG.
+        assert len(captured) == 3
         joined = "\n".join(captured)
         assert "CREATE TABLE IF NOT EXISTS oauth_tokens" in joined
         assert "DOUBLE PRECISION" in joined
@@ -448,6 +474,10 @@ class TestPgBranchExecutes:
         assert "PRIMARY KEY (user_id, provider)" in joined
         assert (
             "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_provider_expires"
+            in joined
+        )
+        assert (
+            "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_key_version"
             in joined
         )
         assert "NULLS LAST" in joined
@@ -480,11 +510,14 @@ class TestPgBranchExecutes:
         # Index drop precedes table drop (defensive — PG would let
         # DROP TABLE cascade-drop the index, but explicit ordering
         # documents intent).
+        assert "DROP INDEX IF EXISTS idx_oauth_tokens_key_version" in joined
         assert "DROP INDEX IF EXISTS idx_oauth_tokens_provider_expires" in joined
         assert "DROP TABLE IF EXISTS oauth_tokens" in joined
-        i_idx = joined.find("DROP INDEX IF EXISTS")
+        i_idx = joined.find("DROP INDEX IF EXISTS idx_oauth_tokens_key_version")
+        i_exp = joined.find("DROP INDEX IF EXISTS idx_oauth_tokens_provider_expires")
         i_tab = joined.find("DROP TABLE IF EXISTS")
         assert i_idx < i_tab, "index drop must precede table drop"
+        assert i_exp < i_tab, "index drop must precede table drop"
 
 
 # ─── Group 5: round-trip with the AS.2.1 token vault ─────────────────────
