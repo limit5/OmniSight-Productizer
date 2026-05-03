@@ -18782,6 +18782,35 @@ export interface components {
             /** Turnstile Token */
             turnstile_token?: string | null;
         };
+        /** LoginResponse */
+        LoginResponse: {
+            /** Csrf Token */
+            csrf_token?: string | null;
+            /** Mfa Methods */
+            mfa_methods?: string[] | null;
+            /** Mfa Required */
+            mfa_required?: boolean | null;
+            /** Mfa Token */
+            mfa_token?: string | null;
+            user: components["schemas"]["LoginUserResponse"];
+        };
+        /** LoginUserResponse */
+        LoginUserResponse: {
+            /** Email */
+            email: string;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Id */
+            id?: string | null;
+            /** Must Change Password */
+            must_change_password?: boolean | null;
+            /** Name */
+            name?: string | null;
+            /** Role */
+            role?: string | null;
+            /** Tenant Id */
+            tenant_id?: string | null;
+        };
         /** MFAChallengeRequest */
         MFAChallengeRequest: {
             /** Code */
@@ -23731,9 +23760,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["LoginResponse"];
                 };
             };
             /** @description Validation Error */

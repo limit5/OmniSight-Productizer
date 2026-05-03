@@ -201,14 +201,36 @@ class LoginRequest(BaseModel):
         return cleaned
 
 
+class LoginUserResponse(BaseModel):
+    id: str | None = None
+    email: str
+    name: str | None = None
+    role: str | None = None
+    enabled: bool | None = None
+    must_change_password: bool | None = None
+    tenant_id: str | None = None
+
+
+class LoginResponse(BaseModel):
+    user: LoginUserResponse
+    csrf_token: str | None = None
+    mfa_required: bool | None = None
+    mfa_token: str | None = None
+    mfa_methods: list[str] | None = None
+
+
 def _mask_email(email: str) -> str:
     if "@" in email:
         return email[:2] + "***@" + email.split("@")[-1]
     return email[:2] + "***"
 
 
-@router.post("/auth/login")
-async def login(req: LoginRequest, request: Request, response: Response) -> dict:
+@router.post(
+    "/auth/login",
+    response_model=LoginResponse,
+    response_model_exclude_none=True,
+)
+async def login(req: LoginRequest, request: Request, response: Response) -> dict[str, Any]:
     # AS.6.5 — wrap the legacy per-IP brute-force window so a 429 from
     # the early check ALSO emits the AS.5.1 ``auth.login_fail`` rollup
     # (reason=rate_limited).  The check itself stays bare so existing
