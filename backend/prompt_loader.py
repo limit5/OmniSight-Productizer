@@ -82,6 +82,14 @@ _MAX_HANDOFF = 4000
 # block (or a non-W11 caller that wants a custom cap) need not import
 # the W11 sub-package just to know the budget.
 _MAX_CLONE_SPEC_CONTEXT = 4000
+# W15.3 (#XXX): cap on the Vite build-error banner section injected
+# into the assembled system prompt.  Mirrors
+# ``backend.web.vite_error_prompt.MAX_VITE_ERROR_BANNER_BYTES`` (320 B
+# of body) plus headroom for the section header + two newlines.  Kept
+# here as an independent constant so callers that pass an already-
+# truncated banner (test harnesses, future W15.4 callers) need not
+# import the W15.3 module just to know the budget.
+_MAX_VITE_ERROR_BANNER_SECTION = 512
 
 # L1 Core Rules cache (loaded once)
 _core_rules_cache: str | None = None
@@ -868,6 +876,7 @@ def build_system_prompt(
     mode: str | None = None,
     domain_context: str = "",
     clone_spec_context: str = "",
+    last_vite_error_banner: str = "",
 ) -> str:
     """Assemble the full system prompt from model rules + role skill + task skill + handoff.
 
@@ -898,6 +907,20 @@ def build_system_prompt(
     the LLM ever touching source bytes. Truncated to
     :data:`_MAX_CLONE_SPEC_CONTEXT` defensively in case a non-W11 caller
     passes an oversized block.
+
+    W15.3 (#XXX) ``last_vite_error_banner``: pre-rendered Chinese-
+    localised banner from
+    :func:`backend.web.vite_error_prompt.build_last_vite_error_banner`.
+    When non-empty it is appended as a dedicated section using the
+    fixed header
+    :data:`backend.web.vite_error_prompt.VITE_ERROR_BANNER_SECTION_HEADER`
+    so the agent's next turn opens with a structured reminder of the
+    most recent Vite build / runtime error reported by the
+    omnisight-vite-plugin sidecar, without waiting for a tool-error
+    round trip. Truncated to :data:`_MAX_VITE_ERROR_BANNER_SECTION`
+    defensively in case a caller passes an oversized banner. Empty
+    string for non-W15 runs (or runs with no Vite errors yet) is a
+    no-op.
     """
     resolved_mode = _resolve_skill_loading_mode(mode)
     sections: list[str] = []
@@ -1051,6 +1074,33 @@ def build_system_prompt(
                 + "\n... [clone-spec context truncated]"
             )
         sections.append(clone_spec_context)
+
+    # 3b. W15.3: Vite build-error banner. The W15.2 relay folds the
+    # most-recent ``omnisight-vite-plugin`` error into
+    # ``state.error_history``; the W15.3 helper picks the newest such
+    # entry and renders the Chinese-localised banner the row spec
+    # mandates ("上次 build 有 error: [file:line] [message]"). Place it
+    # *after* the clone-spec context but still *before* the handoff so
+    # the agent sees the build-error reminder at the bottom of its
+    # context window where recency-bias gives it the most weight, while
+    # the handoff (typically a long prior-turn summary) sits last.
+    if last_vite_error_banner:
+        if len(last_vite_error_banner) > _MAX_VITE_ERROR_BANNER_SECTION:
+            last_vite_error_banner = (
+                last_vite_error_banner[:_MAX_VITE_ERROR_BANNER_SECTION]
+                + "\n... [vite error banner truncated]"
+            )
+        # Late import so a circular-import storm between prompt_loader
+        # and backend.web (which itself imports prompt_loader-adjacent
+        # modules transitively) cannot poison module bootstrap.  The
+        # constant is a frozen string literal anyway — no behaviour
+        # difference vs an eager import.
+        from backend.web.vite_error_prompt import (
+            VITE_ERROR_BANNER_SECTION_HEADER,
+        )
+        sections.append(
+            f"{VITE_ERROR_BANNER_SECTION_HEADER}\n\n{last_vite_error_banner}"
+        )
 
     # 4. Handoff context (truncated if too long)
     if handoff_context:

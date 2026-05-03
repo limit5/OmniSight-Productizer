@@ -646,10 +646,12 @@ def test_total_re_export_count_pinned_at_192() -> None:
     # symbols → 181; W11.12 adds 11 clone_audit symbols → 192;
     # W13.2 adds 7 screenshot-breakpoint symbols → 199; W13.3 adds 18
     # screenshot-writer symbols → 217; W13.4 adds 16 screenshot-ghost-
-    # overlay symbols → 233. If this fails with a different count,
-    # audit whether you consciously added / removed a public symbol
-    # and update the pin alongside the row's TODO entry.
-    assert len(web_pkg.__all__) == 233
+    # overlay symbols → 233; W15.2 adds 11 vite_error_relay symbols
+    # → 244; W15.3 adds 8 vite_error_prompt symbols → 252. If this
+    # fails with a different count, audit whether you consciously
+    # added / removed a public symbol and update the pin alongside
+    # the row's TODO entry.
+    assert len(web_pkg.__all__) == 252
 
 
 # ─── 12. Whole-spec invariants ───────────────────────────────────────

@@ -383,6 +383,16 @@ from backend.web.vite_error_relay import (
     vite_error_history_signature,
     vite_errors_for_history,
 )
+from backend.web.vite_error_prompt import (
+    MAX_VITE_ERROR_BANNER_BYTES,
+    VITE_ERROR_BANNER_NO_LINE_TOKEN,
+    VITE_ERROR_BANNER_SECTION_HEADER,
+    VITE_ERROR_BANNER_TEMPLATE,
+    VITE_ERROR_BANNER_UNKNOWN_TOKEN,
+    build_last_vite_error_banner,
+    extract_last_vite_error_from_history,
+    format_vite_error_banner,
+)
 
 
 # ── Backend selection ─────────────────────────────────────────────────
@@ -593,6 +603,7 @@ __all__ = [
     "MAX_REWRITE_TEXT_CHARS",
     "MAX_REWRITTEN_LIST_ITEMS",
     "MAX_TRANSFORM_RISK_LEVEL",
+    "MAX_VITE_ERROR_BANNER_BYTES",
     "MAX_VITE_ERROR_HISTORY_ENTRIES",
     "MAX_VITE_ERROR_HISTORY_LINE_BYTES",
     "META_AI_BOT_NAMES",
@@ -647,6 +658,10 @@ __all__ = [
     "TransformedSpec",
     "UnknownCloneBackendError",
     "UnknownFrameworkError",
+    "VITE_ERROR_BANNER_NO_LINE_TOKEN",
+    "VITE_ERROR_BANNER_SECTION_HEADER",
+    "VITE_ERROR_BANNER_TEMPLATE",
+    "VITE_ERROR_BANNER_UNKNOWN_TOKEN",
     "VITE_ERROR_HISTORY_KEY_PREFIX",
     "VITE_ERROR_HISTORY_MAX",
     "VITE_ERROR_HISTORY_NO_FILE_TOKEN",
@@ -662,6 +677,7 @@ __all__ = [
     "build_clone_manifest",
     "build_clone_spec_context",
     "build_clone_spec_from_capture",
+    "build_last_vite_error_banner",
     "build_vite_error_state_patch",
     "canonical_clone_target",
     "check_ai_txt",
@@ -682,7 +698,9 @@ __all__ = [
     "default_refusal_fetcher",
     "delete_screenshots",
     "extract_hostname",
+    "extract_last_vite_error_from_history",
     "finalise_manifest",
+    "format_vite_error_banner",
     "format_vite_error_for_history",
     "get_clone_rate_limiter",
     "ghost_overlay_diff_from_dict",

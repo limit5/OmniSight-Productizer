@@ -27,6 +27,7 @@ from backend.prompt_loader import (
     extract_load_skill_requests,
     _resolve_skill_loading_mode,
 )
+from backend.web.vite_error_prompt import build_last_vite_error_banner
 
 logger = logging.getLogger(__name__)
 
@@ -440,6 +441,18 @@ def _specialist_node_factory(agent_type: str):
                 # only / attribution mandatory / manifest fingerprint echoed).
                 # Empty string for non-W11 runs is a no-op in build_system_prompt.
                 clone_spec_context=state.clone_spec_context,
+                # W15.3 (#XXX): pick the most recent ``omnisight-vite-plugin``
+                # error from ``state.error_history`` (W15.2 folded it in) and
+                # render it as the Chinese-localised banner ("上次 build 有
+                # error: [file:line] [message]") so the agent's next turn opens
+                # with a structured reminder of the last build / runtime
+                # failure without waiting for a tool-error round trip. Empty
+                # string for graphs that have not seen a Vite error yet (the
+                # common case — most graphs never touch a sandboxed Vite
+                # preview) is a no-op in build_system_prompt.
+                last_vite_error_banner=build_last_vite_error_banner(
+                    state.error_history
+                ),
             )
             if state.last_verification_failure:
                 # M3 audit (2026-04-19): wrap error in XML so any jailbreak
