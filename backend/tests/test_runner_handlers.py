@@ -207,6 +207,49 @@ def test_bash_rejects_run_in_background(base_dir: Path) -> None:
         bash_handler({"command": "true", "run_in_background": True})
 
 
+@pytest.mark.parametrize(
+    "bad_cmd",
+    [
+        "echo hi; rm -rf /",
+        "echo hi | tee out",
+        "echo hi && false",
+        "echo $(whoami)",
+        "echo `whoami`",
+        "cat < /etc/passwd",
+        "echo hi > out.txt",
+        "echo hi\nrm -rf /",
+    ],
+)
+def test_bash_rejects_shell_metacharacters(base_dir: Path, bad_cmd: str) -> None:
+    """Shell metacharacters were the RCE vector pre-FX.1.4; reject outright."""
+    with pytest.raises(ValueError, match="shell metacharacter"):
+        bash_handler({"command": bad_cmd})
+
+
+@pytest.mark.parametrize("bad_cmd", ["", "   ", "\t\n"])
+def test_bash_rejects_empty_command(base_dir: Path, bad_cmd: str) -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        bash_handler({"command": bad_cmd})
+
+
+def test_bash_rejects_non_string_command(base_dir: Path) -> None:
+    with pytest.raises(ValueError, match="must be a string"):
+        bash_handler({"command": ["echo", "hi"]})
+
+
+def test_bash_handles_quoted_args(base_dir: Path) -> None:
+    """shlex.split honours quotes — multi-word quoted args stay intact."""
+    out = bash_handler({"command": 'echo "hello world"'})
+    assert "STDOUT:\nhello world" in out
+    assert "EXIT_CODE: 0" in out
+
+
+def test_bash_no_shell_means_glob_is_literal(base_dir: Path) -> None:
+    """With shell=False, `*` is not expanded — it reaches the program literally."""
+    out = bash_handler({"command": "echo *.py"})
+    assert "STDOUT:\n*.py" in out
+
+
 # ─── Grep ────────────────────────────────────────────────────────
 
 

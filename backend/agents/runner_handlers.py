@@ -16,6 +16,7 @@ Used by ``auto-runner-sdk.py`` to back ``AnthropicClient.run_with_tools``.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -115,9 +116,36 @@ _BASH_DEFAULT_TIMEOUT_MS = 30_000
 _BASH_MAX_STDOUT = 30_000
 _BASH_MAX_STDERR = 10_000
 
+# Shell metacharacters meaningful to /bin/sh but not to execvp. With
+# shell=False they would be passed as literal argv entries, silently
+# breaking the caller's intent — and with shell=True they were the
+# RCE vector that this hardening removes (audit B4).
+_SHELL_METACHARS = ("|", "&", ";", "(", ")", "<", ">", "$", "`", "\n", "\r")
+
+
+def _validate_bash_command(cmd: Any) -> str:
+    """Reject non-string, empty, or shell-metacharacter-bearing commands.
+
+    The runner's Bash tool runs without a shell, so metacharacters like
+    `|`, `>`, `;`, `$()` would either be misleading literals or, before
+    this hardening, an injection vector.
+    """
+    if not isinstance(cmd, str):
+        raise ValueError("command must be a string")
+    stripped = cmd.strip()
+    if not stripped:
+        raise ValueError("command must be a non-empty string")
+    for ch in _SHELL_METACHARS:
+        if ch in cmd:
+            raise ValueError(
+                "shell metacharacter "
+                f"{ch!r} is not allowed (the runner Bash tool runs "
+                "without a shell; split the work into separate calls)"
+            )
+    return stripped
+
 
 def bash_handler(payload: dict[str, Any]) -> str:
-    cmd = payload["command"]
     if payload.get("run_in_background"):
         # The runner has no Monitor channel — backgrounding would orphan
         # processes when the runner exits. Refuse explicitly.
@@ -125,12 +153,19 @@ def bash_handler(payload: dict[str, Any]) -> str:
             "run_in_background is not supported in the runner; "
             "use a foreground command with `timeout` instead"
         )
+    cmd = _validate_bash_command(payload.get("command"))
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as e:
+        raise ValueError(f"invalid command syntax: {e}") from e
+    if not argv:
+        raise ValueError("command parsed to empty argv")
     timeout_ms = int(payload.get("timeout") or _BASH_DEFAULT_TIMEOUT_MS)
     timeout_s = max(1, timeout_ms // 1000)
     try:
         result = subprocess.run(
-            cmd,
-            shell=True,
+            argv,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=timeout_s,
