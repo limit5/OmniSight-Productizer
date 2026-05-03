@@ -69,6 +69,7 @@ from backend.cf_ingress import (
     CFIngressMisconfigured,
 )
 from backend.config import Settings
+from backend.security_scanning import scan_web_preview_zap
 from backend.web_sandbox import (
     DEFAULT_DEV_COMMAND,
     DEFAULT_IMAGE_TAG,
@@ -369,6 +370,7 @@ def get_reaper() -> WebSandboxIdleReaper | None:
 # ``set_pep_evaluator_for_tests(fake)`` is observed by the next request
 # without rebinding ``backend.routers.web_sandbox`` symbols.
 _pep_evaluator: Any = evaluate_first_preview_hold
+_dast_preview_scanner: Any = scan_web_preview_zap
 
 
 def set_pep_evaluator_for_tests(evaluator: Any) -> None:
@@ -383,6 +385,24 @@ def get_pep_evaluator() -> Any:
     """Test helper — returns the active evaluator (default or injected)."""
 
     return _pep_evaluator
+
+
+def set_dast_preview_scanner_for_tests(scanner: Any) -> None:
+    """Test-only injection point for SC.2.2 lifecycle DAST scans."""
+
+    global _dast_preview_scanner
+    _dast_preview_scanner = scanner if scanner is not None else scan_web_preview_zap
+
+
+def get_dast_preview_scanner() -> Any:
+    """Return the scanner wired to the W14 ready lifecycle event.
+
+    Module-global state audit: this per-worker callable is test-only
+    mutable state; production workers all derive the same default from
+    ``backend.security_scanning.scan_web_preview_zap``.
+    """
+
+    return _dast_preview_scanner
 
 
 # ─────────────── Request / Response models ───────────────
@@ -754,13 +774,24 @@ async def mark_preview_ready(
 ) -> dict[str, Any]:
     """Caller signals that the dev server has reported ready."""
 
+    previous = manager.get(workspace_id)
     try:
         instance = manager.mark_ready(workspace_id)
     except WebSandboxNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except WebSandboxError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    return _instance_to_response(instance)
+    response = _instance_to_response(instance)
+    # SC.2.2 — wire DAST into the W14 lifecycle at the first ready
+    # transition. Repeated ready calls against an already-running
+    # sandbox are idempotent and do not re-run ZAP.
+    previous_status = getattr(previous, "status", None)
+    if hasattr(previous_status, "value"):
+        previous_status = previous_status.value
+    if previous_status != "running":
+        scan = get_dast_preview_scanner()(instance)
+        response["dast_scan"] = scan.to_dict()
+    return response
 
 
 @router.delete("/preview/{workspace_id}")
