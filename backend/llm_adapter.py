@@ -87,6 +87,7 @@ __all__ = [
     "stream_chat",
     "embed",
     "tool_call",
+    "stream_tool_call",
     "build_chat_model",
     "AdapterToolResponse",
     "AdapterToolCall",
@@ -550,6 +551,71 @@ def tool_call(
         text=_message_text(resp),
         tool_calls=calls,
         raw_message=resp if isinstance(resp, BaseMessage) else None,
+    )
+
+
+async def stream_tool_call(
+    messages: Sequence[Any],
+    tools: list,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    llm: BaseChatModel | None = None,
+) -> AdapterToolResponse:
+    """Stream a tool-calling request and return the accumulated result.
+
+    Uses ``astream`` internally so the request travels through the provider's
+    streaming path.  Accumulates all ``AIMessageChunk`` objects with the ``+``
+    operator and extracts tool_calls from the final chunk.
+
+    This is the streaming analogue of ``tool_call()``.  The difference is the
+    wire path — streaming delivery of tool calls is an important correctness
+    invariant: some providers send tool-call deltas across multiple chunks,
+    requiring proper accumulation.
+
+    Provider notes (Z.7.5):
+    - Anthropic (claude-*): streaming + function calling fully supported.
+    - OpenAI (gpt-4o*): streaming + function calling fully supported.
+    - Gemini (gemini-1.5-*): streaming + function calling supported since
+      gemini-1.5-flash/pro.  Earlier models (gemini-pro, gemini-1.0-*) raise
+      a google.api_core.exceptions.InvalidArgument or NotImplementedError —
+      callers should catch these and call ``pytest.skip(reason=...)`` in tests.
+
+    Module-global state: none — each call resolves its own chat model
+    instance (per-worker independent, no cross-worker coordination needed).
+    """
+    chat = _resolve_chat_model(provider, model, tools, llm)
+    if chat is None:
+        return AdapterToolResponse(text="", tool_calls=[], raw_message=None)
+    msgs = _coerce_messages(messages)
+
+    accumulated = None
+    async for chunk in chat.astream(msgs):
+        accumulated = chunk if accumulated is None else accumulated + chunk
+
+    if accumulated is None:
+        return AdapterToolResponse(text="", tool_calls=[], raw_message=None)
+
+    calls: list[AdapterToolCall] = []
+    raw_tc = getattr(accumulated, "tool_calls", None) or []
+    for tc in raw_tc:
+        if isinstance(tc, dict):
+            calls.append(AdapterToolCall(
+                name=tc.get("name", ""),
+                arguments=tc.get("args") or tc.get("arguments") or {},
+                call_id=tc.get("id"),
+            ))
+        else:
+            calls.append(AdapterToolCall(
+                name=getattr(tc, "name", ""),
+                arguments=getattr(tc, "args", None) or getattr(tc, "arguments", {}) or {},
+                call_id=getattr(tc, "id", None),
+            ))
+
+    return AdapterToolResponse(
+        text=_message_text(accumulated),
+        tool_calls=calls,
+        raw_message=accumulated if isinstance(accumulated, BaseMessage) else None,
     )
 
 

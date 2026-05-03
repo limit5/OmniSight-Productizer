@@ -27,6 +27,8 @@ import os
 
 import pytest
 
+import asyncio
+
 from backend.llm_adapter import (
     AdapterToolCall,
     AdapterToolResponse,
@@ -34,6 +36,7 @@ from backend.llm_adapter import (
     ToolMessage,
     build_chat_model,
     invoke_chat,
+    stream_tool_call,
     tool,
     tool_call,
 )
@@ -176,6 +179,38 @@ class TestAnthropicLive:
             f"final_text={final_text!r}"
         )
 
+    def test_streaming_tool_call(self):
+        """Z.7.5: Anthropic — streaming path delivers tool_calls correctly.
+
+        Verifies that ``stream_tool_call`` (which uses ``astream`` internally)
+        accumulates chunks and produces the same tool-call structure as the
+        non-streaming ``tool_call`` path.  This guards against providers that
+        only emit tool-call deltas in intermediate chunks.
+        """
+        llm = self._llm()
+        resp = asyncio.run(
+            stream_tool_call(
+                [("user", "What is the current weather in Paris?")],
+                tools=[get_weather],
+                llm=llm,
+            )
+        )
+        assert len(resp.tool_calls) >= 1, (
+            f"Anthropic streaming: expected ≥1 tool call; got {resp.tool_calls!r}; "
+            f"text={resp.text!r}"
+        )
+        tc = resp.tool_calls[0]
+        assert isinstance(tc, AdapterToolCall)
+        assert tc.name == "get_weather", (
+            f"Anthropic streaming: expected name='get_weather', got {tc.name!r}"
+        )
+        assert "city" in tc.arguments, (
+            f"Anthropic streaming: expected 'city' in arguments; got {tc.arguments!r}"
+        )
+        assert tc.call_id is not None, (
+            f"Anthropic streaming: expected non-None call_id; got {tc.call_id!r}"
+        )
+
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 
@@ -270,6 +305,37 @@ class TestOpenAILive:
             f"final_text={final_text!r}"
         )
 
+    def test_streaming_tool_call(self):
+        """Z.7.5: OpenAI — streaming path delivers tool_calls correctly.
+
+        OpenAI streams tool-call deltas across chunks; ``stream_tool_call``
+        accumulates them with the ``+`` operator.  This test verifies that
+        the accumulated result matches the expected tool-call structure.
+        """
+        llm = self._llm()
+        resp = asyncio.run(
+            stream_tool_call(
+                [("user", "What is the current weather in Paris?")],
+                tools=[get_weather],
+                llm=llm,
+            )
+        )
+        assert len(resp.tool_calls) >= 1, (
+            f"OpenAI streaming: expected ≥1 tool call; got {resp.tool_calls!r}; "
+            f"text={resp.text!r}"
+        )
+        tc = resp.tool_calls[0]
+        assert isinstance(tc, AdapterToolCall)
+        assert tc.name == "get_weather", (
+            f"OpenAI streaming: expected name='get_weather', got {tc.name!r}"
+        )
+        assert "city" in tc.arguments, (
+            f"OpenAI streaming: expected 'city' in arguments; got {tc.arguments!r}"
+        )
+        assert tc.call_id is not None, (
+            f"OpenAI streaming: expected non-None call_id; got {tc.call_id!r}"
+        )
+
 
 # ── Google Gemini ─────────────────────────────────────────────────────────────
 
@@ -362,4 +428,56 @@ class TestGeminiLive:
         assert "18" in final_text or "rainy" in lower or "tokyo" in lower, (
             f"Gemini does not appear to have incorporated the fake tool result; "
             f"final_text={final_text!r}"
+        )
+
+    def test_streaming_tool_call(self):
+        """Z.7.5: Gemini — streaming path delivers tool_calls (or skip if unsupported).
+
+        ``gemini-1.5-flash`` supports streaming + function calling.  Earlier
+        models (``gemini-pro``, ``gemini-1.0-*``) raise a
+        ``google.api_core.exceptions.InvalidArgument`` or raise
+        ``NotImplementedError`` — this test skips cleanly in that case so
+        the nightly CI job does not hard-fail on legacy model configs.
+
+        Gemini behaviour note: function-call results arrive in a single
+        final chunk (unlike OpenAI which streams argument deltas); the
+        accumulated ``tool_calls`` list is fully populated only after all
+        chunks are consumed.  This is not a bug — it is a documented
+        provider difference (Z.7.5 behavioural diff table).
+        """
+        llm = self._llm()
+        try:
+            resp = asyncio.run(
+                stream_tool_call(
+                    [("user", "What is the current weather in Paris?")],
+                    tools=[get_weather],
+                    llm=llm,
+                )
+            )
+        except NotImplementedError as exc:
+            pytest.skip(
+                f"Gemini streaming + tool_calls not supported by {self._MODEL!r}: {exc}"
+            )
+        except Exception as exc:
+            exc_str = str(exc).lower()
+            if any(kw in exc_str for kw in ("not support", "invalid argument", "unsupported")):
+                pytest.skip(
+                    f"Gemini streaming + tool_calls not supported by {self._MODEL!r}: {exc}"
+                )
+            raise
+
+        assert len(resp.tool_calls) >= 1, (
+            f"Gemini streaming: expected ≥1 tool call; got {resp.tool_calls!r}; "
+            f"text={resp.text!r}"
+        )
+        tc = resp.tool_calls[0]
+        assert isinstance(tc, AdapterToolCall)
+        assert tc.name == "get_weather", (
+            f"Gemini streaming: expected name='get_weather', got {tc.name!r}"
+        )
+        assert "city" in tc.arguments, (
+            f"Gemini streaming: expected 'city' in arguments; got {tc.arguments!r}"
+        )
+        assert tc.call_id is not None, (
+            f"Gemini streaming: expected non-None call_id; got {tc.call_id!r}"
         )
