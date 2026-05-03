@@ -106,7 +106,11 @@ hvac==2.4.0
 pynacl==1.6.2
 
 # --- I9/I10: Redis-backed rate limiting + multi-worker shared state ---
-redis==7.4.0
+# FX.6.2 (2026-05-04): removed duplicate ``redis==7.4.0`` line — kept only
+# the extras-form ``redis[hiredis]`` because pip resolves both lines to the
+# same redis package, so the bare line was a no-op that just made the file
+# look ambiguous. The extras form pulls in the C-accelerated ``hiredis``
+# parser, which is what backend code actually needs at runtime.
 redis[hiredis]==7.4.0
 
 # --- C1: SSH remote runner (optional) ----------------------------------
