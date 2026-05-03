@@ -15,6 +15,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.llm_adapter import (
@@ -29,6 +30,10 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+_OLLAMA_TOOL_COMPAT_PATH = (
+    Path(__file__).parents[2] / "config" / "ollama_tool_calling.yaml"
+)
 
 
 # ZZ.B1 #304-1 checkbox 3 (2026-04-24): LangChain message → turn.complete
@@ -1189,36 +1194,47 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
 def _load_ollama_tool_calling_compat() -> dict[str, dict]:
     """Load config/ollama_tool_calling.yaml and return a per-model compat dict.
 
-    Loaded once per worker at first call; the YAML is static config so
-    module-level caching is correct (answer #1: each worker derives the
-    same value from the same on-disk file — no cross-worker coordination
-    needed).  Returns an empty dict when the file is absent or unparseable
-    so list_providers() degrades gracefully instead of raising.
+    Loaded per worker and invalidated by file mtime. Returns an empty dict
+    when the file is absent or unparseable so list_providers() degrades
+    gracefully instead of raising.
 
-    Module-global audit: ``_OLLAMA_TOOL_COMPAT_CACHE`` is set once from
-    a deterministic file read.  All workers derive the same dict from the
-    same YAML source.  No cross-worker coordination needed (answer #1).
+    Module-global audit: ``_OLLAMA_TOOL_COMPAT_CACHE`` is per-worker
+    process state, keyed by ``config/ollama_tool_calling.yaml`` mtime.
+    Every worker derives the same compat matrix from the same shared YAML
+    and reloads when another worker/operator updates the file.
     """
     global _OLLAMA_TOOL_COMPAT_CACHE
-    if _OLLAMA_TOOL_COMPAT_CACHE is not None:
-        return _OLLAMA_TOOL_COMPAT_CACHE
-    import pathlib
+    try:
+        config_mtime = _OLLAMA_TOOL_COMPAT_PATH.stat().st_mtime
+    except OSError:
+        config_mtime = None
+    if (
+        _OLLAMA_TOOL_COMPAT_CACHE is not None
+        and _OLLAMA_TOOL_COMPAT_CACHE[0] == config_mtime
+    ):
+        return _OLLAMA_TOOL_COMPAT_CACHE[1]
     import yaml  # pyyaml — already a transitive dep via langchain
 
-    yaml_path = pathlib.Path(__file__).parents[2] / "config" / "ollama_tool_calling.yaml"
     try:
-        raw = yaml.safe_load(yaml_path.read_text())
-        _OLLAMA_TOOL_COMPAT_CACHE = raw.get("models", {}) if isinstance(raw, dict) else {}
+        raw = yaml.safe_load(_OLLAMA_TOOL_COMPAT_PATH.read_text(encoding="utf-8"))
+        parsed = raw.get("models", {}) if isinstance(raw, dict) else {}
+        _OLLAMA_TOOL_COMPAT_CACHE = (config_mtime, parsed)
+        return parsed
     except Exception as exc:  # noqa: BLE001
         logger.warning("ollama_tool_calling.yaml load failed: %s", exc)
-        _OLLAMA_TOOL_COMPAT_CACHE = {}
-    return _OLLAMA_TOOL_COMPAT_CACHE
+    _OLLAMA_TOOL_COMPAT_CACHE = (config_mtime, {})
+    return {}
+
+
+def reload_ollama_tool_calling_compat_for_tests() -> None:
+    global _OLLAMA_TOOL_COMPAT_CACHE
+    _OLLAMA_TOOL_COMPAT_CACHE = None
 
 
 # Populated on first call to _load_ollama_tool_calling_compat(); None means
-# "not yet loaded".  Each uvicorn worker populates its own copy from the
-# same on-disk file — consistent by construction (SOP answer #1).
-_OLLAMA_TOOL_COMPAT_CACHE: dict[str, dict] | None = None
+# "not yet loaded".  Each uvicorn worker populates its own copy from the same
+# on-disk file and invalidates when the shared YAML mtime changes.
+_OLLAMA_TOOL_COMPAT_CACHE: tuple[float | None, dict[str, dict]] | None = None
 
 
 def list_providers() -> list[dict]:
