@@ -57,12 +57,14 @@ SC.9.1-SC.9.6 (per-jurisdiction privacy notice generator):
     analytics, diagnostics, push, sign-in, payments, and advertising /
     tracking notice sections. DSAR workflow scaffolding is a separate row.
 
-SC.12.1 (PII detection / masking):
+SC.12.1-SC.12.2 (PII detection / masking):
   - pii_presidio — Microsoft Presidio adapter for framework-agnostic
     text analysis and masking. Provides normalized finding dataclasses
     and lazy-loads Presidio engines so module import has no NLP runtime
-    side effects. Log / response auto-mask wiring is intentionally left
-    to later SC.12 rows.
+    side effects.
+  - pii_auto_mask — opt-in helpers that mask strings, log event dicts,
+    and JSON-like response payloads while returning entity metadata.
+    They do not install global logger or FastAPI middleware.
 
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
@@ -320,6 +322,8 @@ from . import oauth_revoke  # noqa: F401
 from . import oauth_vendors  # noqa: F401
 from . import path_ssrf  # noqa: F401
 from . import password_generator  # noqa: F401
+from . import pii_auto_mask  # noqa: F401
+from . import pii_presidio  # noqa: F401
 from . import privacy_notice_templates  # noqa: F401
 from . import token_vault  # noqa: F401
 from . import turnstile_form_verifier  # noqa: F401
@@ -345,6 +349,8 @@ __all__ = [
     "oauth_vendors",
     "path_ssrf",
     "password_generator",
+    "pii_auto_mask",
+    "pii_presidio",
     "privacy_notice_templates",
     "redact",
     "token_vault",
