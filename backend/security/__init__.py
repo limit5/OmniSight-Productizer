@@ -57,6 +57,13 @@ SC.9.1-SC.9.6 (per-jurisdiction privacy notice generator):
     analytics, diagnostics, push, sign-in, payments, and advertising /
     tracking notice sections. DSAR workflow scaffolding is a separate row.
 
+SC.12.1 (PII detection / masking):
+  - pii_presidio — Microsoft Presidio adapter for framework-agnostic
+    text analysis and masking. Provides normalized finding dataclasses
+    and lazy-loads Presidio engines so module import has no NLP runtime
+    side effects. Log / response auto-mask wiring is intentionally left
+    to later SC.12 rows.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
