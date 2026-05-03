@@ -72,6 +72,12 @@ KS.1.1 (Tier 1 envelope encryption):
     adapters. Adapter-only layer; KS.1.2 owns tenant DEK persistence and
     envelope encrypt/decrypt helpers.
 
+KS.1.2 (Tier 1 envelope encryption):
+  - envelope — per-tenant ``TenantDEKRef`` schema plus pure
+    ``encrypt(plaintext, tenant_id)`` / ``decrypt(ciphertext, dek_ref)``
+    helpers. Uses KS.1.1 KMS adapters to wrap one AES-256-GCM DEK per
+    ciphertext. Persistence and caller migration stay in later KS rows.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
@@ -317,6 +323,7 @@ from . import auth_event  # noqa: F401
 from . import bot_challenge  # noqa: F401
 from . import credential_vault  # noqa: F401
 from . import csrf_templates  # noqa: F401
+from . import envelope  # noqa: F401
 from . import honeypot  # noqa: F401
 from . import honeypot_form_verifier  # noqa: F401
 from . import input_validation  # noqa: F401
@@ -342,6 +349,7 @@ __all__ = [
     "bot_challenge",
     "credential_vault",
     "csrf_templates",
+    "envelope",
     "harden_user_message",
     "honeypot",
     "honeypot_form_verifier",
