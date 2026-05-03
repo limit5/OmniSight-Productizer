@@ -6136,7 +6136,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.1.10 `backend/alembic/versions/0106_ks_envelope_tables.py:327` DROP 改 sqlalchemy `op.drop_table`
 - [x] FX.1.11 `backend/alembic/versions/0007_session_audit_enhancements.py` 補 downgrade
 - [x] FX.1.12 `backend/alembic/versions/0008_account_lockout.py` 補 downgrade
-- [ ] FX.1.13 `backend/alembic/versions/0009_workflow_run_version.py` 補 downgrade
+- [x] FX.1.13 `backend/alembic/versions/0009_workflow_run_version.py` 補 downgrade
 - [ ] FX.1.14 `backend/__init__.py:10,22` 修 `BuildArtifact` / `WebVital` 不存在的 re-export（找出實際符號或移除）
 - [ ] FX.1.15 `backend/models.py:458` SystemInfoResponse / `backend/routers/auth.py:126` LoginRequest 改 `extra="forbid"`
 - [ ] FX.1.16 `backend/tests/test_sse_scope_regression.py:351` user-leak xfail 改成真修；驗 SSE scope policy
