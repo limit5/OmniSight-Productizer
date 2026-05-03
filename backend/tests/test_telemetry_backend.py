@@ -7,6 +7,7 @@ flush on reconnect, retry queue, test recipe execution, SoC compatibility,
 cert artifacts, and REST endpoint smoke tests.
 """
 
+import os
 import time
 
 import pytest
@@ -88,6 +89,35 @@ class TestConfigLoading:
     def test_compatible_socs_loaded(self):
         socs = list_compatible_socs()
         assert len(socs) == 11
+
+    def test_config_cache_invalidates_on_yaml_mtime(self, monkeypatch, tmp_path):
+        from backend import telemetry_backend
+
+        config = tmp_path / "telemetry_backend.yaml"
+        config.write_text(
+            "sdk_profiles:\n"
+            "  first:\n"
+            "    name: First SDK\n"
+            "    languages: [python]\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(telemetry_backend, "_TELEMETRY_CONFIG_PATH", config)
+        reset_telemetry_state_for_tests()
+
+        first = list_sdk_profiles()
+        config.write_text(
+            "sdk_profiles:\n"
+            "  second:\n"
+            "    name: Second SDK\n"
+            "    languages: [python]\n",
+            encoding="utf-8",
+        )
+        stat = config.stat()
+        os.utime(config, (stat.st_atime + 2.0, stat.st_mtime + 2.0))
+        later = list_sdk_profiles()
+
+        assert [profile.profile_id for profile in first] == ["first"]
+        assert [profile.profile_id for profile in later] == ["second"]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -535,32 +535,48 @@ class TelemetryCertArtifact:
 
 # -- Config loading (cached) --
 
-_TELEMETRY_CACHE: dict | None = None
+_TELEMETRY_CACHE: tuple[float | None, dict] | None = None
 
 
 def _load_telemetry_config() -> dict:
+    """Load telemetry backend config with file-mtime cache invalidation.
+
+    Module-global state audit: ``_TELEMETRY_CACHE`` is per-worker process
+    state, keyed by ``configs/telemetry_backend.yaml`` mtime. Every worker
+    derives the same telemetry tables from the same shared YAML and reloads
+    when another worker/operator updates the file.
+    """
     global _TELEMETRY_CACHE
-    if _TELEMETRY_CACHE is None:
-        try:
-            _TELEMETRY_CACHE = yaml.safe_load(
+    try:
+        config_mtime = _TELEMETRY_CONFIG_PATH.stat().st_mtime
+    except OSError:
+        config_mtime = None
+    if _TELEMETRY_CACHE is not None and _TELEMETRY_CACHE[0] == config_mtime:
+        return _TELEMETRY_CACHE[1]
+    try:
+        if config_mtime is not None:
+            parsed = yaml.safe_load(
                 _TELEMETRY_CONFIG_PATH.read_text(encoding="utf-8")
-            )
-        except Exception as exc:
-            logger.warning(
-                "telemetry_backend.yaml load failed: %s — using empty config", exc
-            )
-            _TELEMETRY_CACHE = {
-                "sdk_profiles": {},
-                "event_types": {},
-                "ingestion": {},
-                "storage": {},
-                "privacy": {},
-                "dashboards": {},
-                "test_recipes": [],
-                "compatible_socs": {},
-                "artifact_definitions": {},
-            }
-    return _TELEMETRY_CACHE
+            ) or {}
+            _TELEMETRY_CACHE = (config_mtime, parsed)
+            return parsed
+    except Exception as exc:
+        logger.warning(
+            "telemetry_backend.yaml load failed: %s — using empty config", exc
+        )
+    fallback = {
+        "sdk_profiles": {},
+        "event_types": {},
+        "ingestion": {},
+        "storage": {},
+        "privacy": {},
+        "dashboards": {},
+        "test_recipes": [],
+        "compatible_socs": {},
+        "artifact_definitions": {},
+    }
+    _TELEMETRY_CACHE = (config_mtime, fallback)
+    return fallback
 
 
 def reload_telemetry_config_for_tests() -> None:
