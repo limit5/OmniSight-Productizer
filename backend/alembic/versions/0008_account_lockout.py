@@ -28,4 +28,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    # Reverse-of-upgrade: drop locked_until first (added second), then
+    # failed_login_count (added first). Going through alembic's
+    # op.drop_column keeps identifier quoting on the dialect's
+    # IdentifierPreparer rather than f-string DDL — same SQLAlchemy-ops
+    # track FX.1.10 / FX.1.11 pulled 0106 / 0007 onto. ALTER TABLE DROP
+    # COLUMN works natively on PostgreSQL (since 7.3) and on SQLite
+    # >= 3.35 (2021-03); the upgrade likewise relies on ALTER TABLE
+    # ADD COLUMN, so any DB that ran upgrade() can run downgrade().
+    op.drop_column("users", "locked_until")
+    op.drop_column("users", "failed_login_count")
