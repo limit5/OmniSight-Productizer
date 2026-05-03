@@ -25,6 +25,13 @@ SC.7.3 (OWASP mitigation shared lib):
     callers execute QueryTemplate.sql with QueryTemplate.params and
     keep arbitrary SQL expressions outside this helper.
 
+SC.7.4 (OWASP mitigation shared lib):
+  - csrf_templates — pure synchronizer-token helpers for generated
+    apps (token generation, hidden-input/header render context,
+    safe-method bypass, and constant-time submitted-token validation).
+    Framework agnostic; callers own session persistence, cookie setting,
+    and HTTP error mapping.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
@@ -269,6 +276,7 @@ from . import auth_dashboard  # noqa: F401
 from . import auth_event  # noqa: F401
 from . import bot_challenge  # noqa: F401
 from . import credential_vault  # noqa: F401
+from . import csrf_templates  # noqa: F401
 from . import honeypot  # noqa: F401
 from . import honeypot_form_verifier  # noqa: F401
 from . import input_validation  # noqa: F401
@@ -289,6 +297,7 @@ __all__ = [
     "auth_event",
     "bot_challenge",
     "credential_vault",
+    "csrf_templates",
     "harden_user_message",
     "honeypot",
     "honeypot_form_verifier",
