@@ -11,10 +11,9 @@ tool produced the data. When no tool is available, the report is marked
 ``source="mock"`` so later SC gates can treat that as skipped rather
 than clean.
 
-SC.4.1 deliberately stops at the forced scan contract: callers must pass
-a valid W4 ``BuildArtifact`` (or artifact path), and HIGH/CRITICAL
-findings fail the report by default. Wiring the result into deploy
-adapter blocking is left to SC.4.2.
+SC.4.2 wires the default HIGH/CRITICAL threshold into the W4 deploy
+adapter gate, so provider deploys fail before upload/copy side effects
+when this report has blocking findings.
 """
 
 from __future__ import annotations

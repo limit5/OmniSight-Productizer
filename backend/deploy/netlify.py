@@ -214,6 +214,7 @@ class NetlifyAdapter(WebDeployAdapter):
 
     async def deploy(self, build_artifact: BuildArtifact) -> DeployResult:
         build_artifact.validate()
+        self._enforce_container_vulnerability_gate(build_artifact)
         if not self._project_id:
             existing = await self._find_site()
             if existing:
