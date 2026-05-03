@@ -1,7 +1,7 @@
-"""SC.11.2-SC.11.3 -- compliance evidence mapping and collection helpers.
+"""SC.11.2-SC.11.4 -- compliance evidence mapping, collection, and export.
 
-This module deliberately owns only the SOC 2 and ISO 27001 mapping rows.
-Zip/signature export remains for SC.11.4.
+This module owns the SOC 2 / ISO 27001 mapping rows plus the zip/signature
+export path for collected bundle rows.
 
 Module-global / cross-worker state audit: the compliance mappings are
 immutable tuple data and every worker derives the same evidence plan from
@@ -11,9 +11,13 @@ in-memory state is used.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
+import os
 import time
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +26,23 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SOC2_MAPPING_VERSION = "2026-05-03.sc11.2"
 ISO27001_MAPPING_VERSION = "2026-05-03.sc11.3"
+EVIDENCE_EXPORT_VERSION = "2026-05-03.sc11.4"
+EVIDENCE_SIGNING_ENV = "OMNISIGHT_COMPLIANCE_EVIDENCE_HMAC_KEY"
+EVIDENCE_SIGNING_KEY_ID_ENV = "OMNISIGHT_COMPLIANCE_EVIDENCE_HMAC_KEY_ID"
+
+
+@dataclass(frozen=True)
+class EvidenceSigningKey:
+    key_id: str
+    secret: bytes
+
+    @classmethod
+    def from_env(cls) -> "EvidenceSigningKey | None":
+        raw = os.environ.get(EVIDENCE_SIGNING_ENV, "").strip()
+        if not raw:
+            return None
+        key_id = os.environ.get(EVIDENCE_SIGNING_KEY_ID_ENV, "").strip() or "k1"
+        return cls(key_id=key_id, secret=raw.encode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -631,3 +652,187 @@ async def collect_iso27001_evidence_for_bundle(
         json.dumps(manifest, sort_keys=True),
     )
     return manifest
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if value in (None, ""):
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("expected JSON object")
+
+
+def _safe_archive_name(rel_path: str) -> str:
+    path = Path(rel_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"unsafe evidence path: {rel_path!r}")
+    return path.as_posix()
+
+
+def _iter_available_policy_paths(manifest: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for control in manifest.get("controls", []):
+        for pointer in control.get("policy_evidence", []):
+            rel_path = str(pointer.get("path") or "")
+            if not rel_path or not pointer.get("available"):
+                continue
+            safe_path = _safe_archive_name(rel_path)
+            if safe_path not in seen:
+                seen.add(safe_path)
+                paths.append(safe_path)
+    return paths
+
+
+def _write_json_zip_entry(
+    archive: zipfile.ZipFile,
+    name: str,
+    payload: dict[str, Any],
+) -> None:
+    archive.writestr(
+        name,
+        json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+    )
+
+
+def _sign_file(path: Path, key: EvidenceSigningKey) -> dict[str, Any]:
+    sha = hashlib.sha256()
+    mac = hmac.new(key.secret, digestmod=hashlib.sha256)
+    size = 0
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            sha.update(chunk)
+            mac.update(chunk)
+            size += len(chunk)
+    return {
+        "version": EVIDENCE_EXPORT_VERSION,
+        "algorithm": "HMAC-SHA256",
+        "key_id": key.key_id,
+        "signed_at": time.time(),
+        "artifact_sha256": sha.hexdigest(),
+        "artifact_bytes": size,
+        "signature": base64.urlsafe_b64encode(mac.digest()).decode("ascii"),
+    }
+
+
+def verify_evidence_bundle_signature(
+    artifact_path: Path | str,
+    signature: dict[str, Any],
+    key: EvidenceSigningKey,
+) -> bool:
+    if signature.get("algorithm") != "HMAC-SHA256":
+        return False
+    if signature.get("key_id") != key.key_id:
+        return False
+    expected = _sign_file(Path(artifact_path), key)
+    return (
+        hmac.compare_digest(
+            str(signature.get("artifact_sha256", "")),
+            expected["artifact_sha256"],
+        )
+        and int(signature.get("artifact_bytes", -1)) == expected["artifact_bytes"]
+        and hmac.compare_digest(
+            str(signature.get("signature", "")),
+            expected["signature"],
+        )
+    )
+
+
+async def export_compliance_evidence_bundle(
+    conn,
+    bundle_id: str,
+    *,
+    output_dir: Path | str,
+    signing_key: EvidenceSigningKey | None = None,
+    root: Path | str = PROJECT_ROOT,
+) -> dict[str, Any]:
+    """Export a collected compliance evidence bundle as zip + HMAC signature.
+
+    Module-global / cross-worker state audit: export state is persisted in PG
+    on the bundle row and the signing key is injected per call or read from env;
+    no mutable in-process cache participates in worker coordination.
+    """
+    key = signing_key or EvidenceSigningKey.from_env()
+    if key is None:
+        raise ValueError(f"{EVIDENCE_SIGNING_ENV} is required to sign exports")
+
+    row = await conn.fetchrow(
+        "SELECT id, tenant_id, requested_by, standard, status, "
+        "control_mapping_json, evidence_manifest_json, version "
+        "FROM compliance_evidence_bundles WHERE id = $1",
+        bundle_id,
+    )
+    if row is None:
+        raise ValueError(f"Compliance evidence bundle not found: {bundle_id}")
+
+    mapping = _json_object(row["control_mapping_json"])
+    manifest = _json_object(row["evidence_manifest_json"])
+    if not mapping or not manifest:
+        raise ValueError(f"Compliance evidence bundle is not collected: {bundle_id}")
+    if mapping.get("standard") != row["standard"]:
+        raise ValueError("control mapping standard does not match bundle row")
+    if manifest.get("standard") != row["standard"]:
+        raise ValueError("evidence manifest standard does not match bundle row")
+    if manifest.get("tenant_id") != row["tenant_id"]:
+        raise ValueError("evidence manifest tenant_id does not match bundle row")
+
+    root_path = Path(root)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = out_dir / f"{bundle_id}.zip"
+    signature_path = out_dir / f"{bundle_id}.zip.sig.json"
+
+    bundle_json = {
+        "id": row["id"],
+        "tenant_id": row["tenant_id"],
+        "requested_by": row["requested_by"],
+        "standard": row["standard"],
+        "export_version": EVIDENCE_EXPORT_VERSION,
+        "source_status": row["status"],
+        "source_version": row["version"],
+        "exported_at": time.time(),
+    }
+
+    with zipfile.ZipFile(
+        artifact_path,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        _write_json_zip_entry(archive, "bundle.json", bundle_json)
+        _write_json_zip_entry(archive, "control_mapping.json", mapping)
+        _write_json_zip_entry(archive, "evidence_manifest.json", manifest)
+        for rel_path in _iter_available_policy_paths(manifest):
+            source = root_path / rel_path
+            if source.is_file():
+                archive.write(source, f"policies/{rel_path}")
+
+    signature = _sign_file(artifact_path, key)
+    signature_path.write_text(
+        json.dumps(signature, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    await conn.execute(
+        "UPDATE compliance_evidence_bundles "
+        "SET status = 'completed', "
+        "completed_at = $2, "
+        "artifact_uri = $3, "
+        "signature_json = $4, "
+        "error = '', "
+        "version = version + 1 "
+        "WHERE id = $1",
+        bundle_id,
+        signature["signed_at"],
+        str(artifact_path),
+        json.dumps(signature, sort_keys=True),
+    )
+    return {
+        "bundle_id": bundle_id,
+        "artifact_uri": str(artifact_path),
+        "signature_uri": str(signature_path),
+        "signature": signature,
+    }
