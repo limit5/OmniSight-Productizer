@@ -6105,3 +6105,157 @@ BP.E GraphRAG / Neo4j
 - [ ] HE.7.4 IDH 交付物 review agent（reuse HE.1.5 schematic review + HE.6.1 DfM）
 
 **Priority HE 範圍**：~3-6 個月 wall-clock（觸發後）；當前不計入 Total（仍為 ~727-938 day）。
+
+---
+
+## 🅵🆇 Priority FX — Audit Findings Fix（**現階段最高優先**）
+
+> **背景**：2026-05-03 深度審計（8 個維度，4 第一輪 + 5 第二輪 Explore agent 並行）發現 ~150+ 問題（22 BLOCKER / 35+ DEFECT / 70+ DEBT / 50+ COSMETIC）。詳見 `docs/audit/2026-05-03-deep-audit.md`。
+>
+> **健康分數**：5.2/10（介於 dev-OK 跟 production-ready 之間）
+>
+> **修復策略**：拆 7 sub-epic（FX.1-FX.7），訂閱版 + codex runner 並行修復；FX.5 純 additive 跟 FX.1 並行不衝突，FX.4 等 FX.1 完才開（共動 telemetry_backend / enterprise_web_stack / runner_handlers）。
+>
+> **預估**：~50-80 day 全部完工，BLOCKER wave 約 5-8 day。
+
+### FX.1 — Backend BLOCKER fixes（16 items, ~5 day）
+
+> **runner**: Claude 訂閱（Tier A 直接 master）
+> **檔案範圍**: print_pipeline / telemetry_backend / runner_handlers / skill_registry / enterprise_web_stack / db / alembic / __init__ / models / auth router / requirements
+> **不能跟 FX.4 同時跑**（共動檔太多）
+
+- [ ] FX.1.1 `backend/print_pipeline.py:527-528` 把 `_ipp_jobs` + `_ipp_job_counter` 搬到 SharedKV / DB；job ID 走 atomic counter
+- [ ] FX.1.2 `backend/print_pipeline.py:1077` 把 `_queue_jobs` 搬到 DB row（per-tenant queue_jobs table）
+- [ ] FX.1.3 `backend/telemetry_backend.py:571` 把 `_TELEMETRY_CERTS` 搬到 SharedKV 或 DB
+- [ ] FX.1.4 `backend/agents/runner_handlers.py:133` `subprocess.run(shell=True)` 改 `shlex.split` + `shell=False`；input validation
+- [ ] FX.1.5 `backend/skill_registry.py:243` validate_cmd 改 allowlist + `shell=False`
+- [ ] FX.1.6 `backend/skill_registry.py:320` install hook 同上
+- [ ] FX.1.7 `backend/skill_registry.py:366` enumerate_cmd 同上
+- [ ] FX.1.8 `backend/enterprise_web_stack.py:1393` `apply_rls()` 改 parameterized query
+- [ ] FX.1.9 `backend/db.py:238` ALTER TABLE 改 sqlalchemy operations
+- [ ] FX.1.10 `backend/alembic/versions/0106_ks_envelope_tables.py:327` DROP 改 sqlalchemy `op.drop_table`
+- [ ] FX.1.11 `backend/alembic/versions/0007_session_audit_enhancements.py` 補 downgrade
+- [ ] FX.1.12 `backend/alembic/versions/0008_account_lockout.py` 補 downgrade
+- [ ] FX.1.13 `backend/alembic/versions/0009_workflow_run_version.py` 補 downgrade
+- [ ] FX.1.14 `backend/__init__.py:10,22` 修 `BuildArtifact` / `WebVital` 不存在的 re-export（找出實際符號或移除）
+- [ ] FX.1.15 `backend/models.py:458` SystemInfoResponse / `backend/routers/auth.py:126` LoginRequest 改 `extra="forbid"`
+- [ ] FX.1.16 `backend/tests/test_sse_scope_regression.py:351` user-leak xfail 改成真修；驗 SSE scope policy
+
+### FX.2 — Frontend BLOCKER fixes（4 items, ~1 day）
+
+> **runner**: Claude 訂閱
+
+- [ ] FX.2.1 `components/omnisight/project-report-panel.tsx:44-66` markdownToHtml 引入 DOMPurify 或 marked 內建 sanitize
+- [ ] FX.2.2 `components/omnisight/cloudflare-tunnel-setup.tsx:272` Modal 加 onKeyDown(Escape) + focus trap + initial focus
+- [ ] FX.2.3 `components/omnisight/api-key-management-panel.tsx:160-174` 補 `<label>` / `aria-label`
+- [ ] FX.2.4 `components/omnisight/integration-settings.tsx:1529-1535` setInterval 加 cleanup + memoize callback
+
+### FX.3 — Infra / deploy BLOCKER fixes（4 items, ~1 day）
+
+> **runner**: Claude 訂閱
+
+- [ ] FX.3.1 `docker-compose.staging.yml:28,60` 拿掉 raw socket，改用 docker-socket-proxy（同 prod 模式）
+- [ ] FX.3.2 `docker-compose.staging.yml:90` 加 `mem_limit: 2g` + `mem_reservation`
+- [ ] FX.3.3 `deploy/reverse-proxy/Caddyfile:220` HSTS 條件式啟用（檢測 OMNISIGHT_PUBLIC_HOSTNAME ≠ localhost 時加上）
+- [ ] FX.3.4 SDK supply chain skew：升級 `anthropic` 到 1.x+；驗證 backend ↔ frontend ai-sdk@6 的 prompt 相容
+
+### FX.4 — Backend DEFECT fixes（25 items, ~10-12 day）
+
+> **runner**: Codex（Tier B worktree）
+> **依賴 FX.1 完成**（共動 telemetry_backend / enterprise_web_stack / runner_handlers）
+
+#### Lazy cache cross-worker sync（7）
+- [ ] FX.4.1 `backend/bootstrap.py:662` `_gate_cache` 加 mtime check 或 SharedKV
+- [ ] FX.4.2 `backend/forecast.py:155` `_PRICING_CACHE` 同
+- [ ] FX.4.3 `backend/sensor_fusion.py:497` `_SF_CACHE` 同
+- [ ] FX.4.4 `backend/telemetry_backend.py:536` `_TELEMETRY_CACHE` 同
+- [ ] FX.4.5 `backend/codeowners.py:39` `_rules` 加 file mtime 失效
+- [ ] FX.4.6 `backend/prompt_loader.py:205` `_task_skills_cache` 同
+- [ ] FX.4.7 `backend/agents/llm.py:1221` `_OLLAMA_TOOL_COMPAT_CACHE` 同
+
+#### Stub → 真實作 OR 下架（5）
+- [ ] FX.4.8 `backend/orchestrator_gateway.py:234` `_gerrit_status_stub` 接 O6/O7 真實作 OR endpoint 改回 501
+- [ ] FX.4.9 `backend/enterprise_web_stack.py:988` `_export_xlsx_stub` 用 openpyxl 真出 XLSX OR 下架
+- [ ] FX.4.10 `backend/enterprise_web_stack.py:1517` `_preview_xlsx_stub` 同
+- [ ] FX.4.11 `backend/agents/sub_agent.py` run_in_background 真實作 OR docstring 明寫 unsupported 加 contract test
+- [ ] FX.4.12 `backend/agents/runner_handlers.py` bash_handler run_in_background 同
+
+#### ABC 強制（5）
+- [ ] FX.4.13 `backend/build_adapters.py:448` BuildAdapter 改 `ABC` + `@abstractmethod`
+- [ ] FX.4.14 `backend/app_store_connect.py` Transport 同
+- [ ] FX.4.15 `backend/hmi_components.py` HALComponent 同（render_html / render_js / hal_endpoints）
+- [ ] FX.4.16 `backend/web/framework_adapter.py:602` _AdapterBase 同；移除 pragma:no-cover
+- [ ] FX.4.17 `backend/queue_backend.py` _UnimplementedAdapter 拿掉、改 explicit factory raise
+
+#### API contract response_model（5）
+- [ ] FX.4.18 `backend/routers/sensor_fusion.py:73-325` 25 endpoints 補 `response_model`
+- [ ] FX.4.19 `backend/routers/workflow.py` 7 stateful endpoints 補
+- [ ] FX.4.20 `backend/routers/payment.py` + `motion_control.py` 12+ endpoints 補
+- [ ] FX.4.21 `backend/routers/auth.py:156` login() 補 `LoginResponse` 模型
+- [ ] FX.4.22 `backend/models.py:90-91` Agent 從 `class Config` 統一改 `ConfigDict`
+
+#### Imports / circular workaround（3）
+- [ ] FX.4.23 `backend/vision_to_ui.py:755` invoke_chat circular 重構（提到 module 層）
+- [ ] FX.4.24 `backend/llm_adapter.py:103-114,325-344` max_tokens / bind_tools contract 一致化
+- [ ] FX.4.25 `backend/decision_rules.py` 跟其他 modules 統一 typed exception per AGENTS.md
+
+### FX.5 — Test coverage 補測（13 items, ~7-10 day）
+
+> **runner**: Codex（Tier B worktree）
+> **純 additive，跟 FX.1 並行安全**（只動 backend/tests/）
+
+- [ ] FX.5.1 `backend/tests/test_account_linking.py` 新增（OAuth state machine）
+- [ ] FX.5.2 `backend/tests/test_shell_safe.py` 新增（agents/_shell_safe.py，安全敏感）
+- [ ] FX.5.3 `backend/tests/test_batch_dispatcher.py` 新增
+- [ ] FX.5.4 `backend/tests/test_batch_eligibility.py` 新增
+- [ ] FX.5.5 `backend/tests/test_cost_guard.py` 新增（成本控管）
+- [ ] FX.5.6 `backend/tests/test_external_tool_registry.py` 新增
+- [ ] FX.5.7 `backend/tests/test_mcp_integration.py` 新增
+- [ ] FX.5.8 `backend/tests/test_postgres_stores.py` 新增
+- [ ] FX.5.9 `backend/tests/test_rate_limiter.py` 新增（限流）
+- [ ] FX.5.10 `backend/tests/test_tool_dispatcher.py` 新增（agent runtime 核心）
+- [ ] FX.5.11 `backend/tests/test_tools_patch.py` 新增
+- [ ] FX.5.12 `backend/tests/test_tool_schemas.py` 新增
+- [ ] FX.5.13 修弱 assertion test 6 條（test_anthropic_mode_manager.py / test_api_keys_legacy_migration.py / test_auth_dashboard_shape_drift.py / test_auto_runner_codex.py / test_ssh_runner.py / test_require_super_admin.py 改用 real call + assertion）
+
+### FX.6 — Dependency 衛生（8 items, ~2-3 day）
+
+> **runner**: Claude 訂閱
+
+- [ ] FX.6.1 `backend/requirements.in` 11 個 floating range (>=) 改 `==` pin
+- [ ] FX.6.2 `backend/requirements.in` 移除 `redis>=5.0.0` 重複（保留 `redis[hiredis]>=5.0.0`）
+- [ ] FX.6.3 升 `anthropic` 從 0.95.0 到 1.x+ latest stable；改適配 langchain-anthropic
+- [ ] FX.6.4 移除 `paramiko==4.0.0` ghost from requirements.txt（regenerate via pip-compile）
+- [ ] FX.6.5 安裝 `pip-audit` + `ruff` + `mypy` 進 backend/.venv，加進 backend/requirements.in
+- [ ] FX.6.6 `pnpm install` regenerate `pnpm-lock.yaml`，commit 新 lock
+- [ ] FX.6.7 `backend/requirements.txt` 把 test deps（pytest/respx/httpx）拆 `requirements-dev.txt`
+- [ ] FX.6.8 加 GitHub Actions workflow 跑 `pip-audit` + `ruff check` + `mypy backend/security backend/agents` nightly
+
+### FX.7 — Cross-module + DEBT（12 items, ~5-8 day）
+
+> **runner**: 混合（Claude 主導 architectural decision，codex 跑 mechanical 部分）
+
+- [ ] FX.7.1 `backend/__init__.py:15-25` 清 25 個 dead re-export
+- [ ] FX.7.2 1768 個 function-內 local import 抽樣前 20 個重構（避免廣泛 circular）
+- [ ] FX.7.3 9 個 > 2000 行的大檔做 module split 規劃（不一定做完，先寫 ADR + 排程）
+- [ ] FX.7.4 HANDOFF.md 「Production status / Next gate」改 machine-readable manifest（YAML frontmatter 或獨立 status.yaml）
+- [ ] FX.7.5 HANDOFF.md 10+ row 的 deployed-active 誇大條目校正成 deployed-inactive
+- [ ] FX.7.6 alembic enforcement：加 pre-commit hook 拒絕 downgrade=pass 的 migration
+- [ ] FX.7.7 docker / compose 補 mem_limit + mem_reservation 對所有 service
+- [ ] FX.7.8 docker-compose.prod.yml:699 Grafana 加 startup env 驗（admin password 必須非 default）
+- [ ] FX.7.9 scripts/deploy-prod.sh:63 加 git ref allowlist + GPG signature 驗
+- [ ] FX.7.10 scripts/backup_prod_db.sh:182 加 DLP scan 存在性驗
+- [ ] FX.7.11 frontend i18n machinery 引入（next-intl 或 react-i18next，先建 scaffolding）
+- [ ] FX.7.12 frontend a11y lint rule 引入（eslint-plugin-jsx-a11y）+ 修第一波 critical 違反
+
+### FX.8 — COSMETIC + tracking（5 items, ~2 day）
+
+> **低優先，等其他 wave 完才做**
+
+- [ ] FX.8.1 1735 個 TODO/FIXME marker 移到 GitHub issue tracker（生 export script + 批次建 issue）
+- [ ] FX.8.2 1167 個 NotImplementedError 自動 audit script（識別合理 vs stub）
+- [ ] FX.8.3 `backend/imaging_pipeline.py:978-1204` 清掉嵌入 C++ 風格 dead comment
+- [ ] FX.8.4 `backend/ipcam_rtsp_server.py:631` MD5 加註明 RTSP spec-required，免 lint 警
+- [ ] FX.8.5 `backend/onvif_device.py:699` SHA1 同上
+
+**Priority FX 範圍**：~50-80 day 全部完工；BLOCKER wave（FX.1+FX.2+FX.3+FX.4+FX.6）約 1-2 週並行。day-count 加進 Total。
