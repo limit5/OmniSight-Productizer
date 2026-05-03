@@ -15793,13 +15793,6 @@ export interface components {
             /** Name */
             name: string;
         };
-        /** ArtifactDefinitionsResponse */
-        ArtifactDefinitionsResponse: {
-            /** Artifacts */
-            artifacts: components["schemas"]["ArtifactDefinitionResponse"][];
-            /** Count */
-            count: number;
-        };
         /** ArtifactGenerationResponse */
         ArtifactGenerationResponse: {
             /** Artifacts */
@@ -15968,6 +15961,23 @@ export interface components {
              * @default
              */
             username: string;
+        };
+        /** AxisResponse */
+        AxisResponse: {
+            /** Axis Id */
+            axis_id: string;
+            /** Homing Feedrate Mm S */
+            homing_feedrate_mm_s: number;
+            /** Max Accel Mm S2 */
+            max_accel_mm_s2: number;
+            /** Max Feedrate Mm S */
+            max_feedrate_mm_s: number;
+            /** Name */
+            name: string;
+            /** Steps Per Mm */
+            steps_per_mm: number;
+            /** Travel Mm */
+            travel_mm: number;
         };
         /** BarometerDriverResponse */
         BarometerDriverResponse: {
@@ -16234,6 +16244,32 @@ export interface components {
              */
             width: number;
         };
+        /** CertArtifactBundleResponse */
+        CertArtifactBundleResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["CertArtifactItemResponse"][];
+            /** Gap Analysis */
+            gap_analysis: components["schemas"]["CertGapAnalysisResponse"][];
+            /** Level */
+            level: string;
+            /** Standard */
+            standard: string;
+            /** Status */
+            status: string;
+            /** Timestamp */
+            timestamp: number;
+        };
+        /** CertArtifactItemResponse */
+        CertArtifactItemResponse: {
+            /** Artifact Id */
+            artifact_id: string;
+            /** File Pattern */
+            file_pattern: string;
+            /** Name */
+            name: string;
+            /** Status */
+            status: string;
+        };
         /** CertArtifactRequest */
         CertArtifactRequest: {
             /**
@@ -16267,6 +16303,17 @@ export interface components {
             sensor_type: string;
             /** Status */
             status: string;
+        };
+        /** CertGapAnalysisResponse */
+        CertGapAnalysisResponse: {
+            /** Action */
+            action: string;
+            /** Artifact Id */
+            artifact_id: string;
+            /** Name */
+            name: string;
+            /** Priority */
+            priority: string;
         };
         /**
          * CfTunnelSkipRequest
@@ -16390,6 +16437,24 @@ export interface components {
             parsed: {
                 [key: string]: unknown;
             };
+        };
+        /** CompatibleSocResponse */
+        CompatibleSocResponse: {
+            /** Name */
+            name: string;
+            /** Notes */
+            notes: string;
+            /** Payment Capabilities */
+            payment_capabilities: string[];
+            /** Soc Id */
+            soc_id: string;
+        };
+        /** CompatibleSocsResponse */
+        CompatibleSocsResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["CompatibleSocResponse"][];
         };
         /** ComplianceCheckRequest */
         ComplianceCheckRequest: {
@@ -16785,6 +16850,13 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** DeleteMachineResponse */
+        DeleteMachineResponse: {
+            /** Deleted */
+            deleted: boolean;
+            /** Machine Id */
+            machine_id: string;
+        };
         /** DeltaApplyRequest */
         DeltaApplyRequest: {
             /**
@@ -16913,6 +16985,33 @@ export interface components {
              */
             content: string;
         };
+        /** DriverStatusResponse */
+        DriverStatusResponse: {
+            /** Axis Id */
+            axis_id: string;
+            /** Current Ma */
+            current_ma: number;
+            /** Driver Id */
+            driver_id: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Fault */
+            fault?: boolean | null;
+            /** Microsteps */
+            microsteps: number;
+            /** Position Mm */
+            position_mm: number;
+            /** Position Steps */
+            position_steps: number;
+            /** Sleep */
+            sleep?: boolean | null;
+            /** Stall Threshold */
+            stall_threshold?: number | null;
+            /** Stealthchop */
+            stealthchop?: boolean | null;
+            /** Step Count */
+            step_count: number;
+        };
         /** EKFProfileResponse */
         EKFProfileResponse: {
             /** Description */
@@ -17012,6 +17111,28 @@ export interface components {
              */
             level: string;
         };
+        /** EMVLevelResponse */
+        EMVLevelResponse: {
+            /** Description */
+            description: string;
+            /** Level Id */
+            level_id: string;
+            /** Name */
+            name: string;
+            /** Required Artifacts */
+            required_artifacts: string[];
+            /** Required Dag Tasks */
+            required_dag_tasks: string[];
+            /** Test Categories */
+            test_categories: string[];
+        };
+        /** EMVLevelsResponse */
+        EMVLevelsResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["EMVLevelResponse"][];
+        };
         /** EMVTestRequest */
         EMVTestRequest: {
             /**
@@ -17024,6 +17145,30 @@ export interface components {
              * @description Specific test category (optional)
              */
             test_category?: string | null;
+        };
+        /** EMVTestResultResponse */
+        EMVTestResultResponse: {
+            /** Level */
+            level: string;
+            /** Status */
+            status: string;
+            /** Summary */
+            summary: string;
+            /** Test Cases */
+            test_cases: {
+                [key: string]: unknown;
+            }[];
+            /** Test Category */
+            test_category: string;
+            /** Timestamp */
+            timestamp: number;
+        };
+        /** EMVTestResultsResponse */
+        EMVTestResultsResponse: {
+            /** Count */
+            count: number;
+            /** Results */
+            results: components["schemas"]["EMVTestResultResponse"][];
         };
         /** EmissionsTestRequest */
         EmissionsTestRequest: {
@@ -17071,6 +17216,30 @@ export interface components {
              * @default 1024
              */
             resolution: number;
+        };
+        /** EndstopStatusResponse */
+        EndstopStatusResponse: {
+            /** Axis Id */
+            axis_id: string;
+            /** Endstop Type */
+            endstop_type: string;
+            /** Trigger Position Mm */
+            trigger_position_mm: number;
+            /** Triggered */
+            triggered: boolean;
+        };
+        /** EndstopTypeResponse */
+        EndstopTypeResponse: {
+            /** Active Low */
+            active_low: boolean;
+            /** Debounce Ms */
+            debounce_ms: number;
+            /** Description */
+            description: string;
+            /** Endstop Type */
+            endstop_type: string;
+            /** Name */
+            name: string;
         };
         /** EnqueueRequest */
         EnqueueRequest: {
@@ -17180,6 +17349,12 @@ export interface components {
             vendor?: string | null;
             /** Version */
             version?: string | null;
+        };
+        /** ExecuteGCodeResponse */
+        ExecuteGCodeResponse: {
+            /** Machine Id */
+            machine_id: string;
+            trace: components["schemas"]["MotionTraceResponse"];
         };
         /** ExportExecuteRequest */
         ExportExecuteRequest: {
@@ -17356,6 +17531,19 @@ export interface components {
              */
             reason?: string | null;
         };
+        /** GCodeCommandResponse */
+        GCodeCommandResponse: {
+            /** Axes */
+            axes: string[];
+            /** Command Id */
+            command_id: string;
+            /** Description */
+            description: string;
+            /** Name */
+            name: string;
+            /** Parameters */
+            parameters: string[];
+        };
         /** GPSProtocolResponse */
         GPSProtocolResponse: {
             /** Baud Default */
@@ -17391,6 +17579,15 @@ export interface components {
             count: number;
             /** Protocols */
             protocols: components["schemas"]["GPSProtocolResponse"][];
+        };
+        /** GateFindingResponse */
+        GateFindingResponse: {
+            /** Category */
+            category: string;
+            /** Item */
+            item: string;
+            /** Message */
+            message: string;
         };
         /** GenerateReportRequest */
         GenerateReportRequest: {
@@ -17657,6 +17854,13 @@ export interface components {
              */
             required: boolean;
         };
+        /** HSMCloseResponse */
+        HSMCloseResponse: {
+            /** Session Id */
+            session_id: string;
+            /** Status */
+            status: string;
+        };
         /** HSMDecryptRequest */
         HSMDecryptRequest: {
             /**
@@ -17674,6 +17878,17 @@ export interface components {
              * @description Active HSM session ID
              */
             session_id: string;
+        };
+        /** HSMDecryptResponse */
+        HSMDecryptResponse: {
+            /** Command Used */
+            command_used: string;
+            /** Key Id */
+            key_id: string;
+            /** Plaintext */
+            plaintext: string;
+            /** Status */
+            status: string;
         };
         /** HSMEncryptRequest */
         HSMEncryptRequest: {
@@ -17693,6 +17908,17 @@ export interface components {
              */
             session_id: string;
         };
+        /** HSMEncryptResponse */
+        HSMEncryptResponse: {
+            /** Ciphertext */
+            ciphertext: string;
+            /** Command Used */
+            command_used: string;
+            /** Key Id */
+            key_id: string;
+            /** Status */
+            status: string;
+        };
         /** HSMKeyGenRequest */
         HSMKeyGenRequest: {
             /**
@@ -17711,6 +17937,23 @@ export interface components {
              */
             session_id: string;
         };
+        /** HSMKeyGenResponse */
+        HSMKeyGenResponse: {
+            /** Algorithm */
+            algorithm: string;
+            /** Check Value */
+            check_value: string;
+            /** Command Used */
+            command_used: string;
+            /** Hsm Vendor */
+            hsm_vendor: string;
+            /** Key Id */
+            key_id: string;
+            /** Key Type */
+            key_type: string;
+            /** Status */
+            status: string;
+        };
         /** HSMSessionRequest */
         HSMSessionRequest: {
             /**
@@ -17718,6 +17961,79 @@ export interface components {
              * @description HSM vendor (thales, utimaco, safenet)
              */
             vendor: string;
+        };
+        /** HSMSessionResponse */
+        HSMSessionResponse: {
+            /** Capabilities */
+            capabilities: string[];
+            /** Created At */
+            created_at: number;
+            /** Metadata */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Session Id */
+            session_id: string;
+            /** Status */
+            status: string;
+            /** Vendor */
+            vendor: string;
+        };
+        /** HSMSessionsResponse */
+        HSMSessionsResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["HSMSessionResponse"][];
+        };
+        /** HSMVendorResponse */
+        HSMVendorResponse: {
+            /** Commands */
+            commands: {
+                [key: string]: string;
+            };
+            /** Fips Level */
+            fips_level: string;
+            /** Key Types */
+            key_types: string[];
+            /** Name */
+            name: string;
+            /** Pci Pts Certified */
+            pci_pts_certified: boolean;
+            /** Protocols */
+            protocols: string[];
+            /** Supported Algorithms */
+            supported_algorithms: string[];
+            /** Type */
+            type: string;
+            /** Vendor Id */
+            vendor_id: string;
+        };
+        /** HSMVendorSummaryResponse */
+        HSMVendorSummaryResponse: {
+            /** Fips Level */
+            fips_level: string;
+            /** Key Types */
+            key_types: string[];
+            /** Name */
+            name: string;
+            /** Pci Pts Certified */
+            pci_pts_certified: boolean;
+            /** Protocols */
+            protocols: string[];
+            /** Supported Algorithms */
+            supported_algorithms: string[];
+            /** Type */
+            type: string;
+            /** Vendor Id */
+            vendor_id: string;
+        };
+        /** HSMVendorsResponse */
+        HSMVendorsResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["HSMVendorSummaryResponse"][];
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -17737,6 +18053,46 @@ export interface components {
             status: string;
             /** Version */
             version: string;
+        };
+        /** HeaterResponse */
+        HeaterResponse: {
+            /** Description */
+            description: string;
+            /** Heater Id */
+            heater_id: string;
+            /** Max Temp C */
+            max_temp_c: number;
+            /** Min Temp C */
+            min_temp_c: number;
+            /** Name */
+            name: string;
+            /** Pid Kd */
+            pid_kd: number;
+            /** Pid Ki */
+            pid_ki: number;
+            /** Pid Kp */
+            pid_kp: number;
+            /** Thermal Runaway Grace Period S */
+            thermal_runaway_grace_period_s: number;
+            /** Thermal Runaway Hysteresis C */
+            thermal_runaway_hysteresis_c: number;
+            /** Thermal Runaway Max Deviation C */
+            thermal_runaway_max_deviation_c: number;
+            /** Thermal Runaway Period S */
+            thermal_runaway_period_s: number;
+        };
+        /** HeaterStatusResponse */
+        HeaterStatusResponse: {
+            /** Current */
+            current: number;
+            /** Enabled */
+            enabled: boolean;
+            /** Heater Id */
+            heater_id: string;
+            /** Output */
+            output: number;
+            /** Target */
+            target: number;
         };
         /**
          * HumanVotePayload
@@ -18103,6 +18459,25 @@ export interface components {
              */
             tasks_cancelled: number;
         };
+        /** KeyInjectionResponse */
+        KeyInjectionResponse: {
+            /** Device Id */
+            device_id: string;
+            /** Error Message */
+            error_message: string;
+            /** Hsm Vendor */
+            hsm_vendor: string;
+            /** Ipek Check Value */
+            ipek_check_value: string;
+            /** Key Serial Number */
+            key_serial_number: string;
+            /** Status */
+            status: string;
+            /** Steps Completed */
+            steps_completed: string[];
+            /** Timestamp */
+            timestamp: number;
+        };
         /** LLMCredentialCreate */
         LLMCredentialCreate: {
             /**
@@ -18387,6 +18762,13 @@ export interface components {
              */
             program: string;
         };
+        /** LoadGCodeResponse */
+        LoadGCodeResponse: {
+            /** Lines Parsed */
+            lines_parsed: number;
+            /** Machine Id */
+            machine_id: string;
+        };
         /** LoginRequest */
         LoginRequest: {
             /** Email */
@@ -18421,6 +18803,37 @@ export interface components {
              * @default true
              */
             thermal_runaway_enabled: boolean;
+        };
+        /** MachineResponse */
+        MachineResponse: {
+            /** Machine Id */
+            machine_id: string;
+            status: components["schemas"]["MachineStatusResponse"];
+        };
+        /** MachineStatusResponse */
+        MachineStatusResponse: {
+            bed: components["schemas"]["HeaterStatusResponse"];
+            /** Drivers */
+            drivers: {
+                [key: string]: components["schemas"]["DriverStatusResponse"];
+            };
+            /** Endstops */
+            endstops: {
+                [key: string]: components["schemas"]["EndstopStatusResponse"];
+            };
+            /** Feedrate */
+            feedrate: number;
+            hotend: components["schemas"]["HeaterStatusResponse"];
+            /** Position */
+            position: {
+                [key: string]: number;
+            };
+            /** State */
+            state: string;
+            /** Thermal Monitors */
+            thermal_monitors: {
+                [key: string]: components["schemas"]["ThermalMonitorStatusResponse"];
+            };
         };
         /** ManifestCreateRequest */
         ManifestCreateRequest: {
@@ -18489,6 +18902,100 @@ export interface components {
              * @description One of manual | supervised | full_auto | turbo
              */
             mode: string;
+        };
+        /** MotionArtifactResponse */
+        MotionArtifactResponse: {
+            /** Artifact Id */
+            artifact_id: string;
+            /** Description */
+            description: string;
+            /** Kind */
+            kind: string;
+        };
+        /** MotionGateResponse */
+        MotionGateResponse: {
+            /** Recipes */
+            recipes: {
+                [key: string]: unknown;
+            }[];
+            /** Total Failed */
+            total_failed: number;
+            /** Total Passed */
+            total_passed: number;
+            /** Verdict */
+            verdict: string;
+        };
+        /** MotionStepResponse */
+        MotionStepResponse: {
+            /** Bed Target */
+            bed_target?: number | null;
+            /** Bed Temp */
+            bed_temp?: number | null;
+            /** Command */
+            command: string;
+            /** Event */
+            event: string;
+            /** Feedrate */
+            feedrate: number;
+            /** Hotend Target */
+            hotend_target?: number | null;
+            /** Hotend Temp */
+            hotend_temp?: number | null;
+            /** Line Number */
+            line_number: number;
+            /** Position */
+            position: {
+                [key: string]: number;
+            };
+            /** Timestamp Ms */
+            timestamp_ms: number;
+        };
+        /** MotionTestRecipeResponse */
+        MotionTestRecipeResponse: {
+            /** Description */
+            description: string;
+            /** Domains */
+            domains: string[];
+            /** Name */
+            name: string;
+            /** Recipe Id */
+            recipe_id: string;
+        };
+        /** MotionTestRecipeRunResponse */
+        MotionTestRecipeRunResponse: {
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            }[];
+            /** Duration Ms */
+            duration_ms: number;
+            /** Failed */
+            failed: number;
+            /** Passed */
+            passed: number;
+            /** Recipe Id */
+            recipe_id: string;
+            /** Skipped */
+            skipped: number;
+            /** Status */
+            status: string;
+            /** Total */
+            total: number;
+        };
+        /** MotionTraceResponse */
+        MotionTraceResponse: {
+            /** Errors */
+            errors: string[];
+            /** Final Position */
+            final_position: {
+                [key: string]: number;
+            };
+            /** Steps */
+            steps: components["schemas"]["MotionStepResponse"][];
+            /** Total Distance Mm */
+            total_distance_mm: number;
+            /** Total Time Ms */
+            total_time_ms: number;
         };
         /** MultiCheckRequest */
         MultiCheckRequest: {
@@ -18615,6 +19122,26 @@ export interface components {
             /** Timestamp */
             timestamp?: string;
         };
+        /** P2PEDomainResponse */
+        P2PEDomainResponse: {
+            /** Controls */
+            controls: {
+                [key: string]: unknown;
+            }[];
+            /** Description */
+            description: string;
+            /** Domain Id */
+            domain_id: string;
+            /** Name */
+            name: string;
+        };
+        /** P2PEDomainsResponse */
+        P2PEDomainsResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["P2PEDomainResponse"][];
+        };
         /** P2PEKeyInjectionRequest */
         P2PEKeyInjectionRequest: {
             /**
@@ -18653,6 +19180,48 @@ export interface components {
              */
             level: string;
         };
+        /** PCIDSSLevelResponse */
+        PCIDSSLevelResponse: {
+            /** Description */
+            description: string;
+            /** Level Id */
+            level_id: string;
+            /** Name */
+            name: string;
+            /** Required Artifacts */
+            required_artifacts: string[];
+            /** Required Dag Tasks */
+            required_dag_tasks: string[];
+            /** Validation Type */
+            validation_type: string;
+        };
+        /** PCIDSSLevelsResponse */
+        PCIDSSLevelsResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["PCIDSSLevelResponse"][];
+        };
+        /** PCIDSSRequirementResponse */
+        PCIDSSRequirementResponse: {
+            /** Artifacts */
+            artifacts: string[];
+            /** Description */
+            description: string;
+            /** Req Id */
+            req_id: string;
+            /** Tasks */
+            tasks: string[];
+            /** Title */
+            title: string;
+        };
+        /** PCIDSSRequirementsResponse */
+        PCIDSSRequirementsResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["PCIDSSRequirementResponse"][];
+        };
         /** PCIPTSGateRequest */
         PCIPTSGateRequest: {
             /**
@@ -18660,6 +19229,37 @@ export interface components {
              * @description List of artifact IDs produced
              */
             artifacts?: string[];
+        };
+        /** PCIPTSModuleResponse */
+        PCIPTSModuleResponse: {
+            /** Description */
+            description: string;
+            /** Module Id */
+            module_id: string;
+            /** Name */
+            name: string;
+            /** Rules */
+            rules: components["schemas"]["PCIPTSRuleResponse"][];
+        };
+        /** PCIPTSModulesResponse */
+        PCIPTSModulesResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["PCIPTSModuleResponse"][];
+        };
+        /** PCIPTSRuleResponse */
+        PCIPTSRuleResponse: {
+            /** Description */
+            description: string;
+            /** Required Artifacts */
+            required_artifacts: string[];
+            /** Rule Id */
+            rule_id: string;
+            /** Severity */
+            severity: string;
+            /** Title */
+            title: string;
         };
         /** PCLGenerateRequest */
         PCLGenerateRequest: {
@@ -18945,6 +19545,92 @@ export interface components {
             name?: string | null;
             /** Role */
             role?: string | null;
+        };
+        /** PaymentCertResponse */
+        PaymentCertResponse: {
+            /** Cert Id */
+            cert_id: string;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
+            /** Standard */
+            standard: string;
+            /** Status */
+            status: string;
+        };
+        /** PaymentCertsResponse */
+        PaymentCertsResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["PaymentCertResponse"][];
+        };
+        /** PaymentGateResponse */
+        PaymentGateResponse: {
+            /** Findings */
+            findings: components["schemas"]["GateFindingResponse"][];
+            /** Level */
+            level: string;
+            /** Metadata */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Missing Artifacts */
+            missing_artifacts: string[];
+            /** Missing Tasks */
+            missing_tasks: string[];
+            /** Passed */
+            passed: boolean;
+            /** Standard */
+            standard: string;
+            /** Timestamp */
+            timestamp: number;
+            /** Total Issues */
+            total_issues: number;
+            /** Verdict */
+            verdict: string;
+        };
+        /** PaymentTestRecipeResponse */
+        PaymentTestRecipeResponse: {
+            /** Description */
+            description: string;
+            /** Domain */
+            domain: string;
+            /** Name */
+            name: string;
+            /** Recipe Id */
+            recipe_id: string;
+            /** Steps */
+            steps: string[];
+        };
+        /** PaymentTestRecipeRunResponse */
+        PaymentTestRecipeRunResponse: {
+            /** Domain */
+            domain: string;
+            /** Passed Steps */
+            passed_steps: number;
+            /** Recipe Id */
+            recipe_id: string;
+            /** Recipe Name */
+            recipe_name: string;
+            /** Status */
+            status: string;
+            /** Step Results */
+            step_results: {
+                [key: string]: unknown;
+            }[];
+            /** Timestamp */
+            timestamp: number;
+            /** Total Steps */
+            total_steps: number;
+        };
+        /** PaymentTestRecipesResponse */
+        PaymentTestRecipesResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["PaymentTestRecipeResponse"][];
         };
         /** PepDecisionRequest */
         PepDecisionRequest: {
@@ -19391,6 +20077,13 @@ export interface components {
              * @description Certification status
              * @default Pending
              */
+            status: string;
+        };
+        /** RegisterCertResponse */
+        RegisterCertResponse: {
+            /** Standard */
+            standard: string;
+            /** Status */
             status: string;
         };
         /** ReleaseRequest */
@@ -20102,6 +20795,29 @@ export interface components {
             /** Tunnel Status */
             tunnel_status?: string | null;
         };
+        /** StepperDriverResponse */
+        StepperDriverResponse: {
+            /** Default Microsteps */
+            default_microsteps: number;
+            /** Default Stall Threshold */
+            default_stall_threshold?: number | null;
+            /** Description */
+            description: string;
+            /** Driver Id */
+            driver_id: string;
+            /** Features */
+            features: string[];
+            /** Interface */
+            interface: string;
+            /** Max Current Ma */
+            max_current_ma: number;
+            /** Microstep Options */
+            microstep_options: number[];
+            /** Name */
+            name: string;
+            /** Stall Threshold Range */
+            stall_threshold_range?: number[] | null;
+        };
         /** StereoCalibrationRequest */
         StereoCalibrationRequest: {
             /**
@@ -20532,6 +21248,15 @@ export interface components {
              * @default /tmp/telemetry-test
              */
             work_dir: string;
+        };
+        /** ThermalMonitorStatusResponse */
+        ThermalMonitorStatusResponse: {
+            /** Fault Reason */
+            fault_reason: string;
+            /** Heater Id */
+            heater_id: string;
+            /** Tripped */
+            tripped: boolean;
         };
         /** ThreatCoverageRequest */
         ThreatCoverageRequest: {
@@ -21798,6 +22523,13 @@ export interface components {
              */
             width: number;
         };
+        /** ArtifactDefinitionsResponse */
+        backend__routers__payment__ArtifactDefinitionsResponse: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["ArtifactDefinitionResponse"][];
+        };
         /** CertGenerateRequest */
         backend__routers__print_pipeline__CertGenerateRequest: {
             /**
@@ -21886,6 +22618,13 @@ export interface components {
              * @description Security domain
              */
             security_domain: string;
+        };
+        /** ArtifactDefinitionsResponse */
+        backend__routers__sensor_fusion__ArtifactDefinitionsResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["ArtifactDefinitionResponse"][];
+            /** Count */
+            count: number;
         };
         /** ArtifactGenRequest */
         backend__routers__sensor_fusion__ArtifactGenRequest: {
@@ -31073,9 +31812,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["MotionArtifactResponse"][];
                 };
             };
         };
@@ -31095,9 +31832,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["AxisResponse"][];
                 };
             };
         };
@@ -31117,9 +31852,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["StepperDriverResponse"][];
                 };
             };
         };
@@ -31139,9 +31872,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["EndstopTypeResponse"][];
                 };
             };
         };
@@ -31161,9 +31892,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["GCodeCommandResponse"][];
                 };
             };
         };
@@ -31183,9 +31912,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["HeaterResponse"][];
                 };
             };
         };
@@ -31209,9 +31936,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["MachineResponse"];
                 };
             };
             /** @description Validation Error */
@@ -31242,9 +31967,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["MachineResponse"];
                 };
             };
             /** @description Validation Error */
@@ -31275,9 +31998,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["DeleteMachineResponse"];
                 };
             };
             /** @description Validation Error */
@@ -31308,9 +32029,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["MachineResponse"];
                 };
             };
             /** @description Validation Error */
@@ -31341,9 +32060,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ExecuteGCodeResponse"];
                 };
             };
             /** @description Validation Error */
@@ -31378,9 +32095,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["LoadGCodeResponse"];
                 };
             };
             /** @description Validation Error */
@@ -31409,9 +32124,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["MotionTestRecipeResponse"][];
                 };
             };
         };
@@ -31433,9 +32146,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["MotionTestRecipeRunResponse"];
                 };
             };
             /** @description Validation Error */
@@ -31464,9 +32175,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["MotionGateResponse"];
                 };
             };
         };
@@ -32592,9 +33301,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["backend__routers__payment__ArtifactDefinitionsResponse"];
                 };
             };
         };
@@ -32616,9 +33323,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ArtifactDefinitionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -32647,9 +33352,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PaymentCertsResponse"];
                 };
             };
         };
@@ -32673,9 +33376,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CertArtifactBundleResponse"];
                 };
             };
             /** @description Validation Error */
@@ -32708,9 +33409,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RegisterCertResponse"];
                 };
             };
             /** @description Validation Error */
@@ -32739,9 +33438,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EMVLevelsResponse"];
                 };
             };
         };
@@ -32763,9 +33460,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EMVLevelResponse"];
                 };
             };
             /** @description Validation Error */
@@ -32798,9 +33493,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EMVTestResultsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -32833,9 +33526,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PaymentGateResponse"];
                 };
             };
             /** @description Validation Error */
@@ -32868,9 +33559,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HSMDecryptResponse"];
                 };
             };
             /** @description Validation Error */
@@ -32903,9 +33592,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HSMEncryptResponse"];
                 };
             };
             /** @description Validation Error */
@@ -32938,9 +33625,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HSMKeyGenResponse"];
                 };
             };
             /** @description Validation Error */
@@ -32969,9 +33654,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HSMSessionsResponse"];
                 };
             };
         };
@@ -32995,9 +33678,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HSMSessionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33028,9 +33709,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HSMCloseResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33059,9 +33738,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HSMVendorsResponse"];
                 };
             };
         };
@@ -33083,9 +33760,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HSMVendorResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33114,9 +33789,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["P2PEDomainsResponse"];
                 };
             };
         };
@@ -33140,9 +33813,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["KeyInjectionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33171,9 +33842,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PCIDSSLevelsResponse"];
                 };
             };
         };
@@ -33195,9 +33864,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PCIDSSLevelResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33226,9 +33893,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PCIDSSRequirementsResponse"];
                 };
             };
         };
@@ -33250,9 +33915,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PCIDSSRequirementResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33285,9 +33948,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PaymentGateResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33316,9 +33977,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PCIPTSModulesResponse"];
                 };
             };
         };
@@ -33340,9 +33999,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PCIPTSModuleResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33375,9 +34032,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PaymentGateResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33406,9 +34061,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CompatibleSocsResponse"];
                 };
             };
         };
@@ -33430,9 +34083,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CompatibleSocResponse"];
                 };
             };
             /** @description Validation Error */
@@ -33461,9 +34112,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PaymentTestRecipesResponse"];
                 };
             };
         };
@@ -33485,9 +34134,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PaymentTestRecipeRunResponse"];
                 };
             };
             /** @description Validation Error */
@@ -40027,7 +40674,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ArtifactDefinitionsResponse"];
+                    "application/json": components["schemas"]["backend__routers__sensor_fusion__ArtifactDefinitionsResponse"];
                 };
             };
         };

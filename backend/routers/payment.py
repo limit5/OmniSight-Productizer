@@ -86,9 +86,279 @@ class RegisterCertRequest(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+# ── Response models ──────────────────────────────────────────────────
+
+class PCIDSSLevelResponse(BaseModel):
+    level_id: str
+    name: str
+    description: str
+    validation_type: str
+    required_artifacts: list[str]
+    required_dag_tasks: list[str]
+
+
+class PCIDSSLevelsResponse(BaseModel):
+    items: list[PCIDSSLevelResponse]
+    count: int
+
+
+class PCIDSSRequirementResponse(BaseModel):
+    req_id: str
+    title: str
+    description: str
+    artifacts: list[str]
+    tasks: list[str]
+
+
+class PCIDSSRequirementsResponse(BaseModel):
+    items: list[PCIDSSRequirementResponse]
+    count: int
+
+
+class GateFindingResponse(BaseModel):
+    category: str
+    item: str
+    message: str
+
+
+class PaymentGateResponse(BaseModel):
+    standard: str
+    level: str
+    verdict: str
+    timestamp: float
+    passed: bool
+    total_issues: int
+    missing_artifacts: list[str]
+    missing_tasks: list[str]
+    findings: list[GateFindingResponse]
+    metadata: dict[str, Any]
+
+
+class PCIPTSRuleResponse(BaseModel):
+    rule_id: str
+    title: str
+    description: str
+    severity: str
+    required_artifacts: list[str]
+
+
+class PCIPTSModuleResponse(BaseModel):
+    module_id: str
+    name: str
+    description: str
+    rules: list[PCIPTSRuleResponse]
+
+
+class PCIPTSModulesResponse(BaseModel):
+    items: list[PCIPTSModuleResponse]
+    count: int
+
+
+class EMVLevelResponse(BaseModel):
+    level_id: str
+    name: str
+    description: str
+    test_categories: list[str]
+    required_artifacts: list[str]
+    required_dag_tasks: list[str]
+
+
+class EMVLevelsResponse(BaseModel):
+    items: list[EMVLevelResponse]
+    count: int
+
+
+class EMVTestResultResponse(BaseModel):
+    level: str
+    test_category: str
+    status: str
+    timestamp: float
+    test_cases: list[dict[str, Any]]
+    summary: str
+
+
+class EMVTestResultsResponse(BaseModel):
+    results: list[EMVTestResultResponse]
+    count: int
+
+
+class P2PEDomainResponse(BaseModel):
+    domain_id: str
+    name: str
+    description: str
+    controls: list[dict[str, Any]]
+
+
+class P2PEDomainsResponse(BaseModel):
+    items: list[P2PEDomainResponse]
+    count: int
+
+
+class KeyInjectionResponse(BaseModel):
+    device_id: str
+    hsm_vendor: str
+    status: str
+    timestamp: float
+    key_serial_number: str
+    ipek_check_value: str
+    steps_completed: list[str]
+    error_message: str
+
+
+class HSMVendorSummaryResponse(BaseModel):
+    vendor_id: str
+    name: str
+    type: str
+    fips_level: str
+    pci_pts_certified: bool
+    protocols: list[str]
+    key_types: list[str]
+    supported_algorithms: list[str]
+
+
+class HSMVendorResponse(HSMVendorSummaryResponse):
+    commands: dict[str, str]
+
+
+class HSMVendorsResponse(BaseModel):
+    items: list[HSMVendorSummaryResponse]
+    count: int
+
+
+class HSMSessionResponse(BaseModel):
+    session_id: str
+    vendor: str
+    status: str
+    created_at: float
+    capabilities: list[str]
+    metadata: dict[str, Any]
+
+
+class HSMSessionsResponse(BaseModel):
+    items: list[HSMSessionResponse]
+    count: int
+
+
+class HSMCloseResponse(BaseModel):
+    status: str
+    session_id: str
+
+
+class HSMKeyGenResponse(BaseModel):
+    status: str
+    key_id: str
+    key_type: str
+    algorithm: str
+    check_value: str
+    hsm_vendor: str
+    command_used: str
+
+
+class HSMEncryptResponse(BaseModel):
+    status: str
+    ciphertext: str
+    key_id: str
+    command_used: str
+
+
+class HSMDecryptResponse(BaseModel):
+    status: str
+    plaintext: str
+    key_id: str
+    command_used: str
+
+
+class PaymentTestRecipeResponse(BaseModel):
+    recipe_id: str
+    name: str
+    description: str
+    domain: str
+    steps: list[str]
+
+
+class PaymentTestRecipesResponse(BaseModel):
+    items: list[PaymentTestRecipeResponse]
+    count: int
+
+
+class PaymentTestRecipeRunResponse(BaseModel):
+    status: str
+    recipe_id: str
+    recipe_name: str
+    domain: str
+    total_steps: int
+    passed_steps: int
+    step_results: list[dict[str, Any]]
+    timestamp: float
+
+
+class CertArtifactItemResponse(BaseModel):
+    artifact_id: str
+    name: str
+    status: str
+    file_pattern: str
+
+
+class CertGapAnalysisResponse(BaseModel):
+    artifact_id: str
+    name: str
+    action: str
+    priority: str
+
+
+class CertArtifactBundleResponse(BaseModel):
+    standard: str
+    level: str
+    status: str
+    timestamp: float
+    artifacts: list[CertArtifactItemResponse]
+    gap_analysis: list[CertGapAnalysisResponse]
+
+
+class PaymentCertResponse(BaseModel):
+    standard: str
+    status: str
+    cert_id: str
+    details: dict[str, Any]
+
+
+class PaymentCertsResponse(BaseModel):
+    items: list[PaymentCertResponse]
+    count: int
+
+
+class RegisterCertResponse(BaseModel):
+    status: str
+    standard: str
+
+
+class ArtifactDefinitionResponse(BaseModel):
+    artifact_id: str
+    name: str
+    description: str
+    file_pattern: str
+
+
+class ArtifactDefinitionsResponse(BaseModel):
+    items: list[ArtifactDefinitionResponse]
+    count: int
+
+
+class CompatibleSocResponse(BaseModel):
+    soc_id: str
+    name: str
+    payment_capabilities: list[str]
+    notes: str
+
+
+class CompatibleSocsResponse(BaseModel):
+    items: list[CompatibleSocResponse]
+    count: int
+
+
 # ── PCI-DSS endpoints ───────────────────────────────────────────────
 
-@router.get("/pci-dss/levels")
+@router.get("/pci-dss/levels", response_model=PCIDSSLevelsResponse)
 async def list_pci_dss_levels(_user=Depends(_au.require_operator)) -> dict:
     levels = pc.list_pci_dss_levels()
     return {
@@ -107,7 +377,7 @@ async def list_pci_dss_levels(_user=Depends(_au.require_operator)) -> dict:
     }
 
 
-@router.get("/pci-dss/levels/{level_id}")
+@router.get("/pci-dss/levels/{level_id}", response_model=PCIDSSLevelResponse)
 async def get_pci_dss_level(level_id: str, _user=Depends(_au.require_operator)) -> dict:
     lv = pc.get_pci_dss_level(level_id)
     if lv is None:
@@ -122,7 +392,7 @@ async def get_pci_dss_level(level_id: str, _user=Depends(_au.require_operator)) 
     }
 
 
-@router.get("/pci-dss/requirements")
+@router.get("/pci-dss/requirements", response_model=PCIDSSRequirementsResponse)
 async def list_pci_dss_requirements(_user=Depends(_au.require_operator)) -> dict:
     reqs = pc.list_pci_dss_requirements()
     return {
@@ -140,7 +410,7 @@ async def list_pci_dss_requirements(_user=Depends(_au.require_operator)) -> dict
     }
 
 
-@router.get("/pci-dss/requirements/{req_id}")
+@router.get("/pci-dss/requirements/{req_id}", response_model=PCIDSSRequirementResponse)
 async def get_pci_dss_requirement(req_id: str, _user=Depends(_au.require_operator)) -> dict:
     req = pc.get_pci_dss_requirement(req_id)
     if req is None:
@@ -154,7 +424,7 @@ async def get_pci_dss_requirement(req_id: str, _user=Depends(_au.require_operato
     }
 
 
-@router.post("/pci-dss/validate")
+@router.post("/pci-dss/validate", response_model=PaymentGateResponse)
 async def validate_pci_dss(body: PCIDSSGateRequest, _user=Depends(_au.require_operator)) -> dict:
     from backend.dag_schema import DAG, Task
     dag = DAG(dag_id=body.dag_id or "inline", tasks=[
@@ -167,7 +437,7 @@ async def validate_pci_dss(body: PCIDSSGateRequest, _user=Depends(_au.require_op
 
 # ── PCI-PTS endpoints ───────────────────────────────────────────────
 
-@router.get("/pci-pts/modules")
+@router.get("/pci-pts/modules", response_model=PCIPTSModulesResponse)
 async def list_pci_pts_modules(_user=Depends(_au.require_operator)) -> dict:
     modules = pc.list_pci_pts_modules()
     return {
@@ -193,7 +463,7 @@ async def list_pci_pts_modules(_user=Depends(_au.require_operator)) -> dict:
     }
 
 
-@router.get("/pci-pts/modules/{module_id}")
+@router.get("/pci-pts/modules/{module_id}", response_model=PCIPTSModuleResponse)
 async def get_pci_pts_module(module_id: str, _user=Depends(_au.require_operator)) -> dict:
     mod = pc.get_pci_pts_module(module_id)
     if mod is None:
@@ -215,7 +485,7 @@ async def get_pci_pts_module(module_id: str, _user=Depends(_au.require_operator)
     }
 
 
-@router.post("/pci-pts/validate")
+@router.post("/pci-pts/validate", response_model=PaymentGateResponse)
 async def validate_pci_pts(body: PCIPTSGateRequest, _user=Depends(_au.require_operator)) -> dict:
     result = pc.validate_pci_pts_gate(body.artifacts)
     return result.to_dict()
@@ -223,7 +493,7 @@ async def validate_pci_pts(body: PCIPTSGateRequest, _user=Depends(_au.require_op
 
 # ── EMV endpoints ────────────────────────────────────────────────────
 
-@router.get("/emv/levels")
+@router.get("/emv/levels", response_model=EMVLevelsResponse)
 async def list_emv_levels(_user=Depends(_au.require_operator)) -> dict:
     levels = pc.list_emv_levels()
     return {
@@ -242,7 +512,7 @@ async def list_emv_levels(_user=Depends(_au.require_operator)) -> dict:
     }
 
 
-@router.get("/emv/levels/{level_id}")
+@router.get("/emv/levels/{level_id}", response_model=EMVLevelResponse)
 async def get_emv_level(level_id: str, _user=Depends(_au.require_operator)) -> dict:
     lv = pc.get_emv_level(level_id)
     if lv is None:
@@ -257,7 +527,7 @@ async def get_emv_level(level_id: str, _user=Depends(_au.require_operator)) -> d
     }
 
 
-@router.post("/emv/test")
+@router.post("/emv/test", response_model=EMVTestResultsResponse)
 async def run_emv_test(body: EMVTestRequest, _user=Depends(_au.require_operator)) -> dict:
     results = pc.run_emv_test_stub(body.level, body.test_category)
     return {
@@ -266,7 +536,7 @@ async def run_emv_test(body: EMVTestRequest, _user=Depends(_au.require_operator)
     }
 
 
-@router.post("/emv/validate")
+@router.post("/emv/validate", response_model=PaymentGateResponse)
 async def validate_emv(body: EMVGateRequest, _user=Depends(_au.require_operator)) -> dict:
     result = pc.validate_emv_gate(body.level, body.artifacts)
     return result.to_dict()
@@ -274,7 +544,7 @@ async def validate_emv(body: EMVGateRequest, _user=Depends(_au.require_operator)
 
 # ── P2PE endpoints ───────────────────────────────────────────────────
 
-@router.get("/p2pe/domains")
+@router.get("/p2pe/domains", response_model=P2PEDomainsResponse)
 async def list_p2pe_domains(_user=Depends(_au.require_operator)) -> dict:
     domains = pc.list_p2pe_domains()
     return {
@@ -291,7 +561,7 @@ async def list_p2pe_domains(_user=Depends(_au.require_operator)) -> dict:
     }
 
 
-@router.post("/p2pe/key-injection")
+@router.post("/p2pe/key-injection", response_model=KeyInjectionResponse)
 async def run_key_injection(body: P2PEKeyInjectionRequest, _user=Depends(_au.require_operator)) -> dict:
     result = pc.run_p2pe_key_injection(body.hsm_vendor, body.device_id, body.injection_method)
     return result.to_dict()
@@ -299,7 +569,7 @@ async def run_key_injection(body: P2PEKeyInjectionRequest, _user=Depends(_au.req
 
 # ── HSM endpoints ────────────────────────────────────────────────────
 
-@router.get("/hsm/vendors")
+@router.get("/hsm/vendors", response_model=HSMVendorsResponse)
 async def list_hsm_vendors(_user=Depends(_au.require_operator)) -> dict:
     vendors = pc.list_hsm_vendors()
     return {
@@ -320,7 +590,7 @@ async def list_hsm_vendors(_user=Depends(_au.require_operator)) -> dict:
     }
 
 
-@router.get("/hsm/vendors/{vendor_id}")
+@router.get("/hsm/vendors/{vendor_id}", response_model=HSMVendorResponse)
 async def get_hsm_vendor(vendor_id: str, _user=Depends(_au.require_operator)) -> dict:
     v = pc.get_hsm_vendor(vendor_id)
     if v is None:
@@ -338,7 +608,7 @@ async def get_hsm_vendor(vendor_id: str, _user=Depends(_au.require_operator)) ->
     }
 
 
-@router.post("/hsm/sessions")
+@router.post("/hsm/sessions", response_model=HSMSessionResponse)
 async def create_hsm_session(body: HSMSessionRequest, _user=Depends(_au.require_operator)) -> dict:
     session = pc.create_hsm_session(body.vendor)
     if session.status == pc.HSMSessionStatus.error:
@@ -346,7 +616,7 @@ async def create_hsm_session(body: HSMSessionRequest, _user=Depends(_au.require_
     return session.to_dict()
 
 
-@router.get("/hsm/sessions")
+@router.get("/hsm/sessions", response_model=HSMSessionsResponse)
 async def list_hsm_sessions(_user=Depends(_au.require_operator)) -> dict:
     sessions = pc.list_active_hsm_sessions()
     return {
@@ -355,7 +625,7 @@ async def list_hsm_sessions(_user=Depends(_au.require_operator)) -> dict:
     }
 
 
-@router.delete("/hsm/sessions/{session_id}")
+@router.delete("/hsm/sessions/{session_id}", response_model=HSMCloseResponse)
 async def close_hsm_session(session_id: str, _user=Depends(_au.require_operator)) -> dict:
     closed = pc.close_hsm_session(session_id)
     if not closed:
@@ -363,7 +633,7 @@ async def close_hsm_session(session_id: str, _user=Depends(_au.require_operator)
     return {"status": "closed", "session_id": session_id}
 
 
-@router.post("/hsm/generate-key")
+@router.post("/hsm/generate-key", response_model=HSMKeyGenResponse)
 async def hsm_generate_key(body: HSMKeyGenRequest, _user=Depends(_au.require_operator)) -> dict:
     result = pc.hsm_generate_key(body.session_id, body.key_type, body.algorithm)
     if result.get("status") == "failed":
@@ -371,7 +641,7 @@ async def hsm_generate_key(body: HSMKeyGenRequest, _user=Depends(_au.require_ope
     return result
 
 
-@router.post("/hsm/encrypt")
+@router.post("/hsm/encrypt", response_model=HSMEncryptResponse)
 async def hsm_encrypt(body: HSMEncryptRequest, _user=Depends(_au.require_operator)) -> dict:
     result = pc.hsm_encrypt(body.session_id, body.plaintext, body.key_id)
     if result.get("status") == "failed":
@@ -379,7 +649,7 @@ async def hsm_encrypt(body: HSMEncryptRequest, _user=Depends(_au.require_operato
     return result
 
 
-@router.post("/hsm/decrypt")
+@router.post("/hsm/decrypt", response_model=HSMDecryptResponse)
 async def hsm_decrypt(body: HSMDecryptRequest, _user=Depends(_au.require_operator)) -> dict:
     result = pc.hsm_decrypt(body.session_id, body.ciphertext, body.key_id)
     if result.get("status") == "failed":
@@ -389,7 +659,7 @@ async def hsm_decrypt(body: HSMDecryptRequest, _user=Depends(_au.require_operato
 
 # ── Test recipe endpoints ────────────────────────────────────────────
 
-@router.get("/test-recipes")
+@router.get("/test-recipes", response_model=PaymentTestRecipesResponse)
 async def list_test_recipes(_user=Depends(_au.require_operator)) -> dict:
     recipes = pc.list_test_recipes()
     return {
@@ -407,7 +677,7 @@ async def list_test_recipes(_user=Depends(_au.require_operator)) -> dict:
     }
 
 
-@router.post("/test-recipes/{recipe_id}/run")
+@router.post("/test-recipes/{recipe_id}/run", response_model=PaymentTestRecipeRunResponse)
 async def run_test_recipe(recipe_id: str, _user=Depends(_au.require_operator)) -> dict:
     result = pc.run_test_recipe(recipe_id)
     if result.get("status") == "error":
@@ -417,7 +687,7 @@ async def run_test_recipe(recipe_id: str, _user=Depends(_au.require_operator)) -
 
 # ── Cert artifact endpoints ──────────────────────────────────────────
 
-@router.post("/certs/generate")
+@router.post("/certs/generate", response_model=CertArtifactBundleResponse)
 async def generate_cert_artifacts(body: CertArtifactRequest, _user=Depends(_au.require_operator)) -> dict:
     bundle = pc.generate_cert_artifacts(body.standard, body.level, body.existing_artifacts)
     if bundle.status == pc.CertArtifactStatus.error:
@@ -425,13 +695,13 @@ async def generate_cert_artifacts(body: CertArtifactRequest, _user=Depends(_au.r
     return bundle.to_dict()
 
 
-@router.get("/certs")
+@router.get("/certs", response_model=PaymentCertsResponse)
 async def list_payment_certs(_user=Depends(_au.require_operator)) -> dict:
     certs = pc.get_payment_certs()
     return {"items": certs, "count": len(certs)}
 
 
-@router.post("/certs/register")
+@router.post("/certs/register", response_model=RegisterCertResponse)
 async def register_payment_cert(body: RegisterCertRequest, _user=Depends(_au.require_operator)) -> dict:
     pc.register_payment_cert(body.standard, body.status, body.cert_id, body.details)
     return {"status": "registered", "standard": body.standard}
@@ -439,7 +709,7 @@ async def register_payment_cert(body: RegisterCertRequest, _user=Depends(_au.req
 
 # ── Artifact definitions ─────────────────────────────────────────────
 
-@router.get("/artifacts")
+@router.get("/artifacts", response_model=ArtifactDefinitionsResponse)
 async def list_artifact_definitions(_user=Depends(_au.require_operator)) -> dict:
     defs = pc.list_artifact_definitions()
     return {
@@ -456,7 +726,7 @@ async def list_artifact_definitions(_user=Depends(_au.require_operator)) -> dict
     }
 
 
-@router.get("/artifacts/{artifact_id}")
+@router.get("/artifacts/{artifact_id}", response_model=ArtifactDefinitionResponse)
 async def get_artifact_definition(artifact_id: str, _user=Depends(_au.require_operator)) -> dict:
     d = pc.get_artifact_definition(artifact_id)
     if d is None:
@@ -471,13 +741,13 @@ async def get_artifact_definition(artifact_id: str, _user=Depends(_au.require_op
 
 # ── SoC compatibility ────────────────────────────────────────────────
 
-@router.get("/socs")
+@router.get("/socs", response_model=CompatibleSocsResponse)
 async def list_compatible_socs(_user=Depends(_au.require_operator)) -> dict:
     socs = pc.list_compatible_socs()
     return {"items": socs, "count": len(socs)}
 
 
-@router.get("/socs/{soc_id}")
+@router.get("/socs/{soc_id}", response_model=CompatibleSocResponse)
 async def get_compatible_soc(soc_id: str, _user=Depends(_au.require_operator)) -> dict:
     soc = pc.get_compatible_soc(soc_id)
     if soc is None:

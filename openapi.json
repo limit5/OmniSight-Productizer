@@ -491,27 +491,6 @@
         "title": "ArtifactDefinitionResponse",
         "type": "object"
       },
-      "ArtifactDefinitionsResponse": {
-        "properties": {
-          "artifacts": {
-            "items": {
-              "$ref": "#/components/schemas/ArtifactDefinitionResponse"
-            },
-            "title": "Artifacts",
-            "type": "array"
-          },
-          "count": {
-            "title": "Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "count",
-          "artifacts"
-        ],
-        "title": "ArtifactDefinitionsResponse",
-        "type": "object"
-      },
       "ArtifactGenerationResponse": {
         "properties": {
           "artifacts": {
@@ -769,6 +748,49 @@
           "provider_id"
         ],
         "title": "AuthenticateRequest",
+        "type": "object"
+      },
+      "AxisResponse": {
+        "properties": {
+          "axis_id": {
+            "title": "Axis Id",
+            "type": "string"
+          },
+          "homing_feedrate_mm_s": {
+            "title": "Homing Feedrate Mm S",
+            "type": "number"
+          },
+          "max_accel_mm_s2": {
+            "title": "Max Accel Mm S2",
+            "type": "number"
+          },
+          "max_feedrate_mm_s": {
+            "title": "Max Feedrate Mm S",
+            "type": "number"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "steps_per_mm": {
+            "title": "Steps Per Mm",
+            "type": "number"
+          },
+          "travel_mm": {
+            "title": "Travel Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis_id",
+          "name",
+          "steps_per_mm",
+          "max_feedrate_mm_s",
+          "max_accel_mm_s2",
+          "homing_feedrate_mm_s",
+          "travel_mm"
+        ],
+        "title": "AxisResponse",
         "type": "object"
       },
       "BarometerDriverResponse": {
@@ -1290,6 +1312,78 @@
         "title": "CameraConnectRequest",
         "type": "object"
       },
+      "CertArtifactBundleResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/CertArtifactItemResponse"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "gap_analysis": {
+            "items": {
+              "$ref": "#/components/schemas/CertGapAnalysisResponse"
+            },
+            "title": "Gap Analysis",
+            "type": "array"
+          },
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "standard",
+          "level",
+          "status",
+          "timestamp",
+          "artifacts",
+          "gap_analysis"
+        ],
+        "title": "CertArtifactBundleResponse",
+        "type": "object"
+      },
+      "CertArtifactItemResponse": {
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "file_pattern": {
+            "title": "File Pattern",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "name",
+          "status",
+          "file_pattern"
+        ],
+        "title": "CertArtifactItemResponse",
+        "type": "object"
+      },
       "CertArtifactRequest": {
         "properties": {
           "existing_artifacts": {
@@ -1354,6 +1448,34 @@
           "description"
         ],
         "title": "CertArtifactResponse",
+        "type": "object"
+      },
+      "CertGapAnalysisResponse": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "priority": {
+            "title": "Priority",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "name",
+          "action",
+          "priority"
+        ],
+        "title": "CertGapAnalysisResponse",
         "type": "object"
       },
       "CfTunnelSkipRequest": {
@@ -1593,6 +1715,58 @@
           "option_id"
         ],
         "title": "ClarifyRequest",
+        "type": "object"
+      },
+      "CompatibleSocResponse": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "notes": {
+            "title": "Notes",
+            "type": "string"
+          },
+          "payment_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Payment Capabilities",
+            "type": "array"
+          },
+          "soc_id": {
+            "title": "Soc Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "soc_id",
+          "name",
+          "payment_capabilities",
+          "notes"
+        ],
+        "title": "CompatibleSocResponse",
+        "type": "object"
+      },
+      "CompatibleSocsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CompatibleSocResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "CompatibleSocsResponse",
         "type": "object"
       },
       "ComplianceCheckRequest": {
@@ -2219,6 +2393,24 @@
         "title": "DashboardQueryRequest",
         "type": "object"
       },
+      "DeleteMachineResponse": {
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "machine_id",
+          "deleted"
+        ],
+        "title": "DeleteMachineResponse",
+        "type": "object"
+      },
       "DeltaApplyRequest": {
         "properties": {
           "engine_id": {
@@ -2406,6 +2598,98 @@
           }
         },
         "title": "DraftBody",
+        "type": "object"
+      },
+      "DriverStatusResponse": {
+        "properties": {
+          "axis_id": {
+            "title": "Axis Id",
+            "type": "string"
+          },
+          "current_ma": {
+            "title": "Current Ma",
+            "type": "integer"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "fault": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fault"
+          },
+          "microsteps": {
+            "title": "Microsteps",
+            "type": "integer"
+          },
+          "position_mm": {
+            "title": "Position Mm",
+            "type": "number"
+          },
+          "position_steps": {
+            "title": "Position Steps",
+            "type": "integer"
+          },
+          "sleep": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sleep"
+          },
+          "stall_threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stall Threshold"
+          },
+          "stealthchop": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stealthchop"
+          },
+          "step_count": {
+            "title": "Step Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "driver_id",
+          "axis_id",
+          "enabled",
+          "position_steps",
+          "position_mm",
+          "microsteps",
+          "current_ma",
+          "step_count"
+        ],
+        "title": "DriverStatusResponse",
         "type": "object"
       },
       "EKFProfileResponse": {
@@ -2634,6 +2918,74 @@
         "title": "EMVGateRequest",
         "type": "object"
       },
+      "EMVLevelResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "level_id": {
+            "title": "Level Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required_artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Artifacts",
+            "type": "array"
+          },
+          "required_dag_tasks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Dag Tasks",
+            "type": "array"
+          },
+          "test_categories": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Test Categories",
+            "type": "array"
+          }
+        },
+        "required": [
+          "level_id",
+          "name",
+          "description",
+          "test_categories",
+          "required_artifacts",
+          "required_dag_tasks"
+        ],
+        "title": "EMVLevelResponse",
+        "type": "object"
+      },
+      "EMVLevelsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EMVLevelResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "EMVLevelsResponse",
+        "type": "object"
+      },
       "EMVTestRequest": {
         "properties": {
           "level": {
@@ -2658,6 +3010,69 @@
           "level"
         ],
         "title": "EMVTestRequest",
+        "type": "object"
+      },
+      "EMVTestResultResponse": {
+        "properties": {
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "test_cases": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Test Cases",
+            "type": "array"
+          },
+          "test_category": {
+            "title": "Test Category",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "level",
+          "test_category",
+          "status",
+          "timestamp",
+          "test_cases",
+          "summary"
+        ],
+        "title": "EMVTestResultResponse",
+        "type": "object"
+      },
+      "EMVTestResultsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/EMVTestResultResponse"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "results",
+          "count"
+        ],
+        "title": "EMVTestResultsResponse",
         "type": "object"
       },
       "EmissionsTestRequest": {
@@ -2716,6 +3131,67 @@
           }
         },
         "title": "EncoderCreateRequest",
+        "type": "object"
+      },
+      "EndstopStatusResponse": {
+        "properties": {
+          "axis_id": {
+            "title": "Axis Id",
+            "type": "string"
+          },
+          "endstop_type": {
+            "title": "Endstop Type",
+            "type": "string"
+          },
+          "trigger_position_mm": {
+            "title": "Trigger Position Mm",
+            "type": "number"
+          },
+          "triggered": {
+            "title": "Triggered",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "axis_id",
+          "endstop_type",
+          "triggered",
+          "trigger_position_mm"
+        ],
+        "title": "EndstopStatusResponse",
+        "type": "object"
+      },
+      "EndstopTypeResponse": {
+        "properties": {
+          "active_low": {
+            "title": "Active Low",
+            "type": "boolean"
+          },
+          "debounce_ms": {
+            "title": "Debounce Ms",
+            "type": "integer"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "endstop_type": {
+            "title": "Endstop Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "endstop_type",
+          "name",
+          "description",
+          "debounce_ms",
+          "active_low"
+        ],
+        "title": "EndstopTypeResponse",
         "type": "object"
       },
       "EnqueueRequest": {
@@ -3064,6 +3540,23 @@
         "title": "EntryPatch",
         "type": "object"
       },
+      "ExecuteGCodeResponse": {
+        "properties": {
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          },
+          "trace": {
+            "$ref": "#/components/schemas/MotionTraceResponse"
+          }
+        },
+        "required": [
+          "machine_id",
+          "trace"
+        ],
+        "title": "ExecuteGCodeResponse",
+        "type": "object"
+      },
       "ExportExecuteRequest": {
         "properties": {
           "data": {
@@ -3343,6 +3836,45 @@
         "title": "ForceTurboRequest",
         "type": "object"
       },
+      "GCodeCommandResponse": {
+        "properties": {
+          "axes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Axes",
+            "type": "array"
+          },
+          "command_id": {
+            "title": "Command Id",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parameters": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Parameters",
+            "type": "array"
+          }
+        },
+        "required": [
+          "command_id",
+          "name",
+          "description",
+          "axes",
+          "parameters"
+        ],
+        "title": "GCodeCommandResponse",
+        "type": "object"
+      },
       "GPSProtocolResponse": {
         "properties": {
           "baud_default": {
@@ -3439,6 +3971,29 @@
           "protocols"
         ],
         "title": "GPSProtocolsResponse",
+        "type": "object"
+      },
+      "GateFindingResponse": {
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "item": {
+            "title": "Item",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "item",
+          "message"
+        ],
+        "title": "GateFindingResponse",
         "type": "object"
       },
       "GenerateReportRequest": {
@@ -3919,6 +4474,24 @@
         "title": "HALFieldReq",
         "type": "object"
       },
+      "HSMCloseResponse": {
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "session_id"
+        ],
+        "title": "HSMCloseResponse",
+        "type": "object"
+      },
       "HSMDecryptRequest": {
         "properties": {
           "ciphertext": {
@@ -3943,6 +4516,34 @@
           "key_id"
         ],
         "title": "HSMDecryptRequest",
+        "type": "object"
+      },
+      "HSMDecryptResponse": {
+        "properties": {
+          "command_used": {
+            "title": "Command Used",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "plaintext": {
+            "title": "Plaintext",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "plaintext",
+          "key_id",
+          "command_used"
+        ],
+        "title": "HSMDecryptResponse",
         "type": "object"
       },
       "HSMEncryptRequest": {
@@ -3971,6 +4572,34 @@
         "title": "HSMEncryptRequest",
         "type": "object"
       },
+      "HSMEncryptResponse": {
+        "properties": {
+          "ciphertext": {
+            "title": "Ciphertext",
+            "type": "string"
+          },
+          "command_used": {
+            "title": "Command Used",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "ciphertext",
+          "key_id",
+          "command_used"
+        ],
+        "title": "HSMEncryptResponse",
+        "type": "object"
+      },
       "HSMKeyGenRequest": {
         "properties": {
           "algorithm": {
@@ -3997,6 +4626,49 @@
         "title": "HSMKeyGenRequest",
         "type": "object"
       },
+      "HSMKeyGenResponse": {
+        "properties": {
+          "algorithm": {
+            "title": "Algorithm",
+            "type": "string"
+          },
+          "check_value": {
+            "title": "Check Value",
+            "type": "string"
+          },
+          "command_used": {
+            "title": "Command Used",
+            "type": "string"
+          },
+          "hsm_vendor": {
+            "title": "Hsm Vendor",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "key_type": {
+            "title": "Key Type",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "key_id",
+          "key_type",
+          "algorithm",
+          "check_value",
+          "hsm_vendor",
+          "command_used"
+        ],
+        "title": "HSMKeyGenResponse",
+        "type": "object"
+      },
       "HSMSessionRequest": {
         "properties": {
           "vendor": {
@@ -4009,6 +4681,212 @@
           "vendor"
         ],
         "title": "HSMSessionRequest",
+        "type": "object"
+      },
+      "HSMSessionResponse": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "number"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "vendor": {
+            "title": "Vendor",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "vendor",
+          "status",
+          "created_at",
+          "capabilities",
+          "metadata"
+        ],
+        "title": "HSMSessionResponse",
+        "type": "object"
+      },
+      "HSMSessionsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/HSMSessionResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "HSMSessionsResponse",
+        "type": "object"
+      },
+      "HSMVendorResponse": {
+        "properties": {
+          "commands": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Commands",
+            "type": "object"
+          },
+          "fips_level": {
+            "title": "Fips Level",
+            "type": "string"
+          },
+          "key_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Key Types",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pci_pts_certified": {
+            "title": "Pci Pts Certified",
+            "type": "boolean"
+          },
+          "protocols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Protocols",
+            "type": "array"
+          },
+          "supported_algorithms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supported Algorithms",
+            "type": "array"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "vendor_id": {
+            "title": "Vendor Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vendor_id",
+          "name",
+          "type",
+          "fips_level",
+          "pci_pts_certified",
+          "protocols",
+          "key_types",
+          "supported_algorithms",
+          "commands"
+        ],
+        "title": "HSMVendorResponse",
+        "type": "object"
+      },
+      "HSMVendorSummaryResponse": {
+        "properties": {
+          "fips_level": {
+            "title": "Fips Level",
+            "type": "string"
+          },
+          "key_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Key Types",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pci_pts_certified": {
+            "title": "Pci Pts Certified",
+            "type": "boolean"
+          },
+          "protocols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Protocols",
+            "type": "array"
+          },
+          "supported_algorithms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supported Algorithms",
+            "type": "array"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "vendor_id": {
+            "title": "Vendor Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vendor_id",
+          "name",
+          "type",
+          "fips_level",
+          "pci_pts_certified",
+          "protocols",
+          "key_types",
+          "supported_algorithms"
+        ],
+        "title": "HSMVendorSummaryResponse",
+        "type": "object"
+      },
+      "HSMVendorsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/HSMVendorSummaryResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "HSMVendorsResponse",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -4050,6 +4928,107 @@
           "version"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "HeaterResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "heater_id": {
+            "title": "Heater Id",
+            "type": "string"
+          },
+          "max_temp_c": {
+            "title": "Max Temp C",
+            "type": "number"
+          },
+          "min_temp_c": {
+            "title": "Min Temp C",
+            "type": "number"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pid_kd": {
+            "title": "Pid Kd",
+            "type": "number"
+          },
+          "pid_ki": {
+            "title": "Pid Ki",
+            "type": "number"
+          },
+          "pid_kp": {
+            "title": "Pid Kp",
+            "type": "number"
+          },
+          "thermal_runaway_grace_period_s": {
+            "title": "Thermal Runaway Grace Period S",
+            "type": "number"
+          },
+          "thermal_runaway_hysteresis_c": {
+            "title": "Thermal Runaway Hysteresis C",
+            "type": "number"
+          },
+          "thermal_runaway_max_deviation_c": {
+            "title": "Thermal Runaway Max Deviation C",
+            "type": "number"
+          },
+          "thermal_runaway_period_s": {
+            "title": "Thermal Runaway Period S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "heater_id",
+          "name",
+          "description",
+          "max_temp_c",
+          "min_temp_c",
+          "pid_kp",
+          "pid_ki",
+          "pid_kd",
+          "thermal_runaway_period_s",
+          "thermal_runaway_hysteresis_c",
+          "thermal_runaway_max_deviation_c",
+          "thermal_runaway_grace_period_s"
+        ],
+        "title": "HeaterResponse",
+        "type": "object"
+      },
+      "HeaterStatusResponse": {
+        "properties": {
+          "current": {
+            "title": "Current",
+            "type": "number"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "heater_id": {
+            "title": "Heater Id",
+            "type": "string"
+          },
+          "output": {
+            "title": "Output",
+            "type": "number"
+          },
+          "target": {
+            "title": "Target",
+            "type": "number"
+          }
+        },
+        "required": [
+          "heater_id",
+          "target",
+          "current",
+          "output",
+          "enabled"
+        ],
+        "title": "HeaterStatusResponse",
         "type": "object"
       },
       "HumanVotePayload": {
@@ -4722,6 +5701,57 @@
         "title": "InvokeHaltResponse",
         "type": "object"
       },
+      "KeyInjectionResponse": {
+        "properties": {
+          "device_id": {
+            "title": "Device Id",
+            "type": "string"
+          },
+          "error_message": {
+            "title": "Error Message",
+            "type": "string"
+          },
+          "hsm_vendor": {
+            "title": "Hsm Vendor",
+            "type": "string"
+          },
+          "ipek_check_value": {
+            "title": "Ipek Check Value",
+            "type": "string"
+          },
+          "key_serial_number": {
+            "title": "Key Serial Number",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "steps_completed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Steps Completed",
+            "type": "array"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "device_id",
+          "hsm_vendor",
+          "status",
+          "timestamp",
+          "key_serial_number",
+          "ipek_check_value",
+          "steps_completed",
+          "error_message"
+        ],
+        "title": "KeyInjectionResponse",
+        "type": "object"
+      },
       "LLMCredentialCreate": {
         "properties": {
           "auth_type": {
@@ -5342,6 +6372,24 @@
         "title": "LoadGCodeRequest",
         "type": "object"
       },
+      "LoadGCodeResponse": {
+        "properties": {
+          "lines_parsed": {
+            "title": "Lines Parsed",
+            "type": "integer"
+          },
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "machine_id",
+          "lines_parsed"
+        ],
+        "title": "LoadGCodeResponse",
+        "type": "object"
+      },
       "LoginRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5415,6 +6463,81 @@
           }
         },
         "title": "MachineConfigRequest",
+        "type": "object"
+      },
+      "MachineResponse": {
+        "properties": {
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MachineStatusResponse"
+          }
+        },
+        "required": [
+          "machine_id",
+          "status"
+        ],
+        "title": "MachineResponse",
+        "type": "object"
+      },
+      "MachineStatusResponse": {
+        "properties": {
+          "bed": {
+            "$ref": "#/components/schemas/HeaterStatusResponse"
+          },
+          "drivers": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DriverStatusResponse"
+            },
+            "title": "Drivers",
+            "type": "object"
+          },
+          "endstops": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/EndstopStatusResponse"
+            },
+            "title": "Endstops",
+            "type": "object"
+          },
+          "feedrate": {
+            "title": "Feedrate",
+            "type": "number"
+          },
+          "hotend": {
+            "$ref": "#/components/schemas/HeaterStatusResponse"
+          },
+          "position": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Position",
+            "type": "object"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "thermal_monitors": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ThermalMonitorStatusResponse"
+            },
+            "title": "Thermal Monitors",
+            "type": "object"
+          }
+        },
+        "required": [
+          "state",
+          "position",
+          "feedrate",
+          "hotend",
+          "bed",
+          "drivers",
+          "endstops",
+          "thermal_monitors"
+        ],
+        "title": "MachineStatusResponse",
         "type": "object"
       },
       "ManifestCreateRequest": {
@@ -5507,6 +6630,271 @@
           "mode"
         ],
         "title": "ModeRequest",
+        "type": "object"
+      },
+      "MotionArtifactResponse": {
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "kind",
+          "description"
+        ],
+        "title": "MotionArtifactResponse",
+        "type": "object"
+      },
+      "MotionGateResponse": {
+        "properties": {
+          "recipes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Recipes",
+            "type": "array"
+          },
+          "total_failed": {
+            "title": "Total Failed",
+            "type": "integer"
+          },
+          "total_passed": {
+            "title": "Total Passed",
+            "type": "integer"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict",
+          "total_passed",
+          "total_failed",
+          "recipes"
+        ],
+        "title": "MotionGateResponse",
+        "type": "object"
+      },
+      "MotionStepResponse": {
+        "properties": {
+          "bed_target": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Target"
+          },
+          "bed_temp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Temp"
+          },
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "feedrate": {
+            "title": "Feedrate",
+            "type": "number"
+          },
+          "hotend_target": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hotend Target"
+          },
+          "hotend_temp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hotend Temp"
+          },
+          "line_number": {
+            "title": "Line Number",
+            "type": "integer"
+          },
+          "position": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Position",
+            "type": "object"
+          },
+          "timestamp_ms": {
+            "title": "Timestamp Ms",
+            "type": "number"
+          }
+        },
+        "required": [
+          "line_number",
+          "command",
+          "position",
+          "feedrate",
+          "event",
+          "timestamp_ms"
+        ],
+        "title": "MotionStepResponse",
+        "type": "object"
+      },
+      "MotionTestRecipeResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Domains",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "name",
+          "description",
+          "domains"
+        ],
+        "title": "MotionTestRecipeResponse",
+        "type": "object"
+      },
+      "MotionTestRecipeRunResponse": {
+        "properties": {
+          "details": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Details",
+            "type": "array"
+          },
+          "duration_ms": {
+            "title": "Duration Ms",
+            "type": "number"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "integer"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "status",
+          "total",
+          "passed",
+          "failed",
+          "skipped",
+          "duration_ms",
+          "details"
+        ],
+        "title": "MotionTestRecipeRunResponse",
+        "type": "object"
+      },
+      "MotionTraceResponse": {
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "final_position": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Final Position",
+            "type": "object"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/MotionStepResponse"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "total_distance_mm": {
+            "title": "Total Distance Mm",
+            "type": "number"
+          },
+          "total_time_ms": {
+            "title": "Total Time Ms",
+            "type": "number"
+          }
+        },
+        "required": [
+          "steps",
+          "total_distance_mm",
+          "total_time_ms",
+          "final_position",
+          "errors"
+        ],
+        "title": "MotionTraceResponse",
         "type": "object"
       },
       "MultiCheckRequest": {
@@ -5735,6 +7123,59 @@
         "title": "OrchestratorMessage",
         "type": "object"
       },
+      "P2PEDomainResponse": {
+        "properties": {
+          "controls": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Controls",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "domain_id": {
+            "title": "Domain Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain_id",
+          "name",
+          "description",
+          "controls"
+        ],
+        "title": "P2PEDomainResponse",
+        "type": "object"
+      },
+      "P2PEDomainsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/P2PEDomainResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "P2PEDomainsResponse",
+        "type": "object"
+      },
       "P2PEKeyInjectionRequest": {
         "properties": {
           "device_id": {
@@ -5789,6 +7230,131 @@
         "title": "PCIDSSGateRequest",
         "type": "object"
       },
+      "PCIDSSLevelResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "level_id": {
+            "title": "Level Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required_artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Artifacts",
+            "type": "array"
+          },
+          "required_dag_tasks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Dag Tasks",
+            "type": "array"
+          },
+          "validation_type": {
+            "title": "Validation Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "level_id",
+          "name",
+          "description",
+          "validation_type",
+          "required_artifacts",
+          "required_dag_tasks"
+        ],
+        "title": "PCIDSSLevelResponse",
+        "type": "object"
+      },
+      "PCIDSSLevelsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PCIDSSLevelResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PCIDSSLevelsResponse",
+        "type": "object"
+      },
+      "PCIDSSRequirementResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "req_id": {
+            "title": "Req Id",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "req_id",
+          "title",
+          "description",
+          "artifacts",
+          "tasks"
+        ],
+        "title": "PCIDSSRequirementResponse",
+        "type": "object"
+      },
+      "PCIDSSRequirementsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PCIDSSRequirementResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PCIDSSRequirementsResponse",
+        "type": "object"
+      },
       "PCIPTSGateRequest": {
         "properties": {
           "artifacts": {
@@ -5801,6 +7367,94 @@
           }
         },
         "title": "PCIPTSGateRequest",
+        "type": "object"
+      },
+      "PCIPTSModuleResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "module_id": {
+            "title": "Module Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/PCIPTSRuleResponse"
+            },
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "module_id",
+          "name",
+          "description",
+          "rules"
+        ],
+        "title": "PCIPTSModuleResponse",
+        "type": "object"
+      },
+      "PCIPTSModulesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PCIPTSModuleResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PCIPTSModulesResponse",
+        "type": "object"
+      },
+      "PCIPTSRuleResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "required_artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Artifacts",
+            "type": "array"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_id",
+          "title",
+          "description",
+          "severity",
+          "required_artifacts"
+        ],
+        "title": "PCIPTSRuleResponse",
         "type": "object"
       },
       "PCLGenerateRequest": {
@@ -6260,6 +7914,233 @@
           }
         },
         "title": "PatchUserRequest",
+        "type": "object"
+      },
+      "PaymentCertResponse": {
+        "properties": {
+          "cert_id": {
+            "title": "Cert Id",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "standard",
+          "status",
+          "cert_id",
+          "details"
+        ],
+        "title": "PaymentCertResponse",
+        "type": "object"
+      },
+      "PaymentCertsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PaymentCertResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PaymentCertsResponse",
+        "type": "object"
+      },
+      "PaymentGateResponse": {
+        "properties": {
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/GateFindingResponse"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "missing_artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Artifacts",
+            "type": "array"
+          },
+          "missing_tasks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Tasks",
+            "type": "array"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          },
+          "total_issues": {
+            "title": "Total Issues",
+            "type": "integer"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "standard",
+          "level",
+          "verdict",
+          "timestamp",
+          "passed",
+          "total_issues",
+          "missing_artifacts",
+          "missing_tasks",
+          "findings",
+          "metadata"
+        ],
+        "title": "PaymentGateResponse",
+        "type": "object"
+      },
+      "PaymentTestRecipeResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "name",
+          "description",
+          "domain",
+          "steps"
+        ],
+        "title": "PaymentTestRecipeResponse",
+        "type": "object"
+      },
+      "PaymentTestRecipeRunResponse": {
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "passed_steps": {
+            "title": "Passed Steps",
+            "type": "integer"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "recipe_name": {
+            "title": "Recipe Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "step_results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Step Results",
+            "type": "array"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          },
+          "total_steps": {
+            "title": "Total Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "recipe_id",
+          "recipe_name",
+          "domain",
+          "total_steps",
+          "passed_steps",
+          "step_results",
+          "timestamp"
+        ],
+        "title": "PaymentTestRecipeRunResponse",
+        "type": "object"
+      },
+      "PaymentTestRecipesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PaymentTestRecipeResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PaymentTestRecipesResponse",
         "type": "object"
       },
       "PepDecisionRequest": {
@@ -6913,6 +8794,24 @@
           "standard"
         ],
         "title": "RegisterCertRequest",
+        "type": "object"
+      },
+      "RegisterCertResponse": {
+        "properties": {
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "standard"
+        ],
+        "title": "RegisterCertResponse",
         "type": "object"
       },
       "ReleaseRequest": {
@@ -8189,6 +10088,85 @@
         "title": "StatusResponse",
         "type": "object"
       },
+      "StepperDriverResponse": {
+        "properties": {
+          "default_microsteps": {
+            "title": "Default Microsteps",
+            "type": "integer"
+          },
+          "default_stall_threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Stall Threshold"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "features": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Features",
+            "type": "array"
+          },
+          "interface": {
+            "title": "Interface",
+            "type": "string"
+          },
+          "max_current_ma": {
+            "title": "Max Current Ma",
+            "type": "integer"
+          },
+          "microstep_options": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Microstep Options",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "stall_threshold_range": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stall Threshold Range"
+          }
+        },
+        "required": [
+          "driver_id",
+          "name",
+          "description",
+          "interface",
+          "microstep_options",
+          "default_microsteps",
+          "max_current_ma",
+          "features"
+        ],
+        "title": "StepperDriverResponse",
+        "type": "object"
+      },
       "StereoCalibrationRequest": {
         "properties": {
           "board_size": {
@@ -9164,6 +11142,29 @@
           "recipe_id"
         ],
         "title": "TelemetryTestRequest",
+        "type": "object"
+      },
+      "ThermalMonitorStatusResponse": {
+        "properties": {
+          "fault_reason": {
+            "title": "Fault Reason",
+            "type": "string"
+          },
+          "heater_id": {
+            "title": "Heater Id",
+            "type": "string"
+          },
+          "tripped": {
+            "title": "Tripped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "heater_id",
+          "tripped",
+          "fault_reason"
+        ],
+        "title": "ThermalMonitorStatusResponse",
         "type": "object"
       },
       "ThreatCoverageRequest": {
@@ -11348,6 +13349,27 @@
         "title": "CalibrationRequest",
         "type": "object"
       },
+      "backend__routers__payment__ArtifactDefinitionsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactDefinitionResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "ArtifactDefinitionsResponse",
+        "type": "object"
+      },
       "backend__routers__print_pipeline__CertGenerateRequest": {
         "properties": {
           "domain": {
@@ -11510,6 +13532,27 @@
           "security_domain"
         ],
         "title": "ArtifactGenRequest",
+        "type": "object"
+      },
+      "backend__routers__sensor_fusion__ArtifactDefinitionsResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactDefinitionResponse"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "artifacts"
+        ],
+        "title": "ArtifactDefinitionsResponse",
         "type": "object"
       },
       "backend__routers__sensor_fusion__ArtifactGenRequest": {
@@ -23846,8 +25889,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/MotionArtifactResponse"
                   },
                   "title": "Response Get Artifacts Api V1 Motion Artifacts Get",
                   "type": "array"
@@ -23872,8 +25914,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/AxisResponse"
                   },
                   "title": "Response Get Axes Api V1 Motion Axes Get",
                   "type": "array"
@@ -23898,8 +25939,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/StepperDriverResponse"
                   },
                   "title": "Response Get Stepper Drivers Api V1 Motion Drivers Get",
                   "type": "array"
@@ -23924,8 +25964,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/EndstopTypeResponse"
                   },
                   "title": "Response Get Endstop Types Api V1 Motion Endstop Types Get",
                   "type": "array"
@@ -23950,8 +25989,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/GCodeCommandResponse"
                   },
                   "title": "Response Get Gcode Commands Api V1 Motion Gcode Commands Get",
                   "type": "array"
@@ -23976,8 +26014,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/HeaterResponse"
                   },
                   "title": "Response Get Heaters Api V1 Motion Heaters Get",
                   "type": "array"
@@ -24018,9 +26055,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Machine Api V1 Motion Machines Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MachineResponse"
                 }
               }
             },
@@ -24062,9 +26097,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Delete Machine Api V1 Motion Machines  Machine Id  Delete",
-                  "type": "object"
+                  "$ref": "#/components/schemas/DeleteMachineResponse"
                 }
               }
             },
@@ -24104,9 +26137,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Machine Status Api V1 Motion Machines  Machine Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MachineResponse"
                 }
               }
             },
@@ -24148,9 +26179,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Emergency Stop Api V1 Motion Machines  Machine Id  Estop Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MachineResponse"
                 }
               }
             },
@@ -24192,9 +26221,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Execute Gcode Api V1 Motion Machines  Machine Id  Execute Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ExecuteGCodeResponse"
                 }
               }
             },
@@ -24246,9 +26273,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Load Gcode Api V1 Motion Machines  Machine Id  Load Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/LoadGCodeResponse"
                 }
               }
             },
@@ -24280,8 +26305,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/MotionTestRecipeResponse"
                   },
                   "title": "Response Get Test Recipes Api V1 Motion Recipes Get",
                   "type": "array"
@@ -24316,9 +26340,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Test Recipe Api V1 Motion Recipes  Recipe Id  Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MotionTestRecipeRunResponse"
                 }
               }
             },
@@ -24349,9 +26371,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Gate Api V1 Motion Validate Gate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MotionGateResponse"
                 }
               }
             },
@@ -25687,9 +27707,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Artifact Definitions Api V1 Payment Artifacts Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/backend__routers__payment__ArtifactDefinitionsResponse"
                 }
               }
             },
@@ -25721,9 +27739,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Artifact Definition Api V1 Payment Artifacts  Artifact Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ArtifactDefinitionResponse"
                 }
               }
             },
@@ -25754,9 +27770,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Payment Certs Api V1 Payment Certs Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentCertsResponse"
                 }
               }
             },
@@ -25787,9 +27801,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Generate Cert Artifacts Api V1 Payment Certs Generate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CertArtifactBundleResponse"
                 }
               }
             },
@@ -25830,9 +27842,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Register Payment Cert Api V1 Payment Certs Register Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RegisterCertResponse"
                 }
               }
             },
@@ -25863,9 +27873,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Emv Levels Api V1 Payment Emv Levels Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EMVLevelsResponse"
                 }
               }
             },
@@ -25897,9 +27905,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Emv Level Api V1 Payment Emv Levels  Level Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EMVLevelResponse"
                 }
               }
             },
@@ -25940,9 +27946,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Emv Test Api V1 Payment Emv Test Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EMVTestResultsResponse"
                 }
               }
             },
@@ -25983,9 +27987,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Emv Api V1 Payment Emv Validate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentGateResponse"
                 }
               }
             },
@@ -26026,9 +28028,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Hsm Decrypt Api V1 Payment Hsm Decrypt Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMDecryptResponse"
                 }
               }
             },
@@ -26069,9 +28069,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Hsm Encrypt Api V1 Payment Hsm Encrypt Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMEncryptResponse"
                 }
               }
             },
@@ -26112,9 +28110,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Hsm Generate Key Api V1 Payment Hsm Generate Key Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMKeyGenResponse"
                 }
               }
             },
@@ -26145,9 +28141,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Hsm Sessions Api V1 Payment Hsm Sessions Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMSessionsResponse"
                 }
               }
             },
@@ -26176,9 +28170,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Hsm Session Api V1 Payment Hsm Sessions Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMSessionResponse"
                 }
               }
             },
@@ -26220,9 +28212,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Close Hsm Session Api V1 Payment Hsm Sessions  Session Id  Delete",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMCloseResponse"
                 }
               }
             },
@@ -26253,9 +28243,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Hsm Vendors Api V1 Payment Hsm Vendors Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMVendorsResponse"
                 }
               }
             },
@@ -26287,9 +28275,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Hsm Vendor Api V1 Payment Hsm Vendors  Vendor Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMVendorResponse"
                 }
               }
             },
@@ -26320,9 +28306,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List P2Pe Domains Api V1 Payment P2Pe Domains Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/P2PEDomainsResponse"
                 }
               }
             },
@@ -26353,9 +28337,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Key Injection Api V1 Payment P2Pe Key Injection Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/KeyInjectionResponse"
                 }
               }
             },
@@ -26386,9 +28368,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Pci Dss Levels Api V1 Payment Pci Dss Levels Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIDSSLevelsResponse"
                 }
               }
             },
@@ -26420,9 +28400,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Pci Dss Level Api V1 Payment Pci Dss Levels  Level Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIDSSLevelResponse"
                 }
               }
             },
@@ -26453,9 +28431,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Pci Dss Requirements Api V1 Payment Pci Dss Requirements Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIDSSRequirementsResponse"
                 }
               }
             },
@@ -26487,9 +28463,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Pci Dss Requirement Api V1 Payment Pci Dss Requirements  Req Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIDSSRequirementResponse"
                 }
               }
             },
@@ -26530,9 +28504,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Pci Dss Api V1 Payment Pci Dss Validate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentGateResponse"
                 }
               }
             },
@@ -26563,9 +28535,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Pci Pts Modules Api V1 Payment Pci Pts Modules Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIPTSModulesResponse"
                 }
               }
             },
@@ -26597,9 +28567,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Pci Pts Module Api V1 Payment Pci Pts Modules  Module Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIPTSModuleResponse"
                 }
               }
             },
@@ -26640,9 +28608,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Pci Pts Api V1 Payment Pci Pts Validate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentGateResponse"
                 }
               }
             },
@@ -26673,9 +28639,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Compatible Socs Api V1 Payment Socs Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CompatibleSocsResponse"
                 }
               }
             },
@@ -26707,9 +28671,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Compatible Soc Api V1 Payment Socs  Soc Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CompatibleSocResponse"
                 }
               }
             },
@@ -26740,9 +28702,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Test Recipes Api V1 Payment Test Recipes Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentTestRecipesResponse"
                 }
               }
             },
@@ -26774,9 +28734,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Test Recipe Api V1 Payment Test Recipes  Recipe Id  Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentTestRecipeRunResponse"
                 }
               }
             },
@@ -35182,7 +37140,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ArtifactDefinitionsResponse"
+                  "$ref": "#/components/schemas/backend__routers__sensor_fusion__ArtifactDefinitionsResponse"
                 }
               }
             },
