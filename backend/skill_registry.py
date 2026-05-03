@@ -460,12 +460,11 @@ def enumerate_skill(name: str, skills_dir: Optional[Path] = None) -> dict:
 
         if info.manifest.hooks.enumerate_cmd:
             try:
-                proc = subprocess.run(
+                proc = _run_skill_hook(
                     info.manifest.hooks.enumerate_cmd,
-                    shell=True,
-                    capture_output=True,
+                    cwd=skill_path,
                     timeout=30,
-                    cwd=str(skill_path),
+                    hook_label="enumerate hook",
                 )
                 if proc.returncode == 0:
                     stdout = proc.stdout.decode("utf-8", errors="replace").strip()
@@ -473,6 +472,10 @@ def enumerate_skill(name: str, skills_dir: Optional[Path] = None) -> dict:
                         result["capabilities"] = yaml.safe_load(stdout)
                     except Exception:
                         result["capabilities_raw"] = stdout
+            except subprocess.TimeoutExpired:
+                result["enumerate_error"] = "enumerate hook timed out (30s)"
+            except ValueError as exc:
+                result["enumerate_error"] = f"enumerate hook rejected: {exc}"
             except Exception as exc:
                 result["enumerate_error"] = str(exc)
 
