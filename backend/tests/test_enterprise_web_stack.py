@@ -602,12 +602,24 @@ class TestMultiTenant:
     def test_apply_rls_no_where(self):
         rls = ews.apply_rls("SELECT * FROM orders", "ten-001")
         assert rls.applied is True
-        assert "tenant_id = 'ten-001'" in rls.filtered_query
-        assert "WHERE" in rls.filtered_query
+        assert "WHERE tenant_id = :tenant_id" in rls.filtered_query
+        assert rls.params == {"tenant_id": "ten-001"}
+        # Tenant id MUST NOT be concatenated into the SQL string (FX.1.8).
+        assert "ten-001" not in rls.filtered_query
 
     def test_apply_rls_with_where(self):
         rls = ews.apply_rls("SELECT * FROM orders WHERE status = 'active'", "ten-002")
-        assert "AND tenant_id = 'ten-002'" in rls.filtered_query
+        assert "AND tenant_id = :tenant_id" in rls.filtered_query
+        assert rls.params == {"tenant_id": "ten-002"}
+        assert "ten-002" not in rls.filtered_query
+
+    def test_apply_rls_rejects_sql_injection_in_tenant_id(self):
+        # FX.1.8: tenant_id is parameterized — injection payload is preserved
+        # verbatim in params, never spliced into the SQL string.
+        payload = "x'; DROP TABLE orders; --"
+        rls = ews.apply_rls("SELECT * FROM orders", payload)
+        assert "DROP TABLE" not in rls.filtered_query
+        assert rls.params == {"tenant_id": payload}
 
     def test_clear_tenants(self):
         ews.create_tenant("A", "a-clr", "free")
@@ -1150,4 +1162,5 @@ class TestIntegration:
         assert "流程" in title
 
         rls = ews.apply_rls("SELECT * FROM purchase_orders", tenant.id)
-        assert tenant.id in rls.filtered_query
+        assert rls.params.get("tenant_id") == tenant.id
+        assert ":tenant_id" in rls.filtered_query

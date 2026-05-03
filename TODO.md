@@ -6131,7 +6131,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.1.5 `backend/skill_registry.py:243` validate_cmd 改 allowlist + `shell=False`
 - [x] FX.1.6 `backend/skill_registry.py:320` install hook 同上
 - [x] FX.1.7 `backend/skill_registry.py:461` enumerate_cmd 同上
-- [ ] FX.1.8 `backend/enterprise_web_stack.py:1393` `apply_rls()` 改 parameterized query
+- [x] FX.1.8 `backend/enterprise_web_stack.py:1393` `apply_rls()` 改 parameterized query
 - [ ] FX.1.9 `backend/db.py:238` ALTER TABLE 改 sqlalchemy operations
 - [ ] FX.1.10 `backend/alembic/versions/0106_ks_envelope_tables.py:327` DROP 改 sqlalchemy `op.drop_table`
 - [ ] FX.1.11 `backend/alembic/versions/0007_session_audit_enhancements.py` 補 downgrade

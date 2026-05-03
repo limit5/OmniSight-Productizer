@@ -68,6 +68,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -379,6 +380,13 @@ class RLSQuery:
     tenant_id: str
     filtered_query: str = ""
     applied: bool = False
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+# SQL identifier allowlist for tenant column name (FX.1.8). SQL identifiers
+# cannot be parameterized, so the column name must be validated separately
+# from the tenant_id value, which IS parameterized.
+_SAFE_SQL_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
@@ -1386,17 +1394,30 @@ def delete_tenant(tenant_id: str) -> bool:
 
 
 def apply_rls(query: str, tenant_id: str) -> RLSQuery:
+    """Append a tenant RLS predicate as a parameterized binding (FX.1.8).
+
+    Why: tenant_id is caller-supplied (router accepts it from clients) and must
+    never be concatenated into the SQL string. The returned filtered_query uses
+    a SQLAlchemy-style ``:tenant_id`` named bind; callers execute it with
+    ``RLSQuery.params``. Column name comes from server config and is validated
+    against an identifier allowlist as defense-in-depth — identifiers cannot
+    be parameterized in SQL.
+    """
     mt_cfg = get_multi_tenant_config()
     col = mt_cfg.get("tenant_id_column", "tenant_id")
+    if not _SAFE_SQL_IDENT.match(col):
+        raise ValueError(f"invalid tenant_id_column identifier: {col!r}")
 
+    base = query.rstrip(";")
     if "WHERE" in query.upper():
-        filtered = query.rstrip(";") + f" AND {col} = '{tenant_id}'"
+        filtered = f"{base} AND {col} = :tenant_id"
     else:
-        filtered = query.rstrip(";") + f" WHERE {col} = '{tenant_id}'"
+        filtered = f"{base} WHERE {col} = :tenant_id"
 
     return RLSQuery(
         original_query=query, tenant_id=tenant_id,
         filtered_query=filtered, applied=True,
+        params={"tenant_id": tenant_id},
     )
 
 
