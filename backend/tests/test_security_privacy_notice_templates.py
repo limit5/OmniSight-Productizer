@@ -196,6 +196,84 @@ class TestPiplPrivacyNotice:
         assert payload["rights"][0]["id"] == "know_decide"
 
 
+class TestLgpdPrivacyNotice:
+    def test_builds_lgpd_notice_with_required_rights(self):
+        notice = pnt.build_lgpd_privacy_notice()
+        assert notice.jurisdiction == pnt.JURISDICTION_LGPD
+        assert notice.title == "LGPD Privacy Notice Template"
+
+        rights = {right.id: right for right in notice.rights}
+        assert set(rights) == {
+            "confirmation_access",
+            "correction",
+            "anonymization_blocking_deletion",
+            "portability",
+            "consent_based_deletion",
+            "sharing_information",
+            "consent_information",
+            "consent_revocation",
+            "petition_anpd",
+            "objection",
+            "automated_decision_review",
+        }
+        assert rights["confirmation_access"].article == "LGPD Articles 18 and 19"
+        assert rights["correction"].article == "LGPD Article 18"
+        assert rights["anonymization_blocking_deletion"].article == "LGPD Article 18"
+        assert rights["portability"].article == "LGPD Article 18"
+        assert rights["consent_based_deletion"].article == "LGPD Articles 16 and 18"
+        assert rights["sharing_information"].article == "LGPD Article 18"
+        assert rights["consent_information"].article == "LGPD Article 18"
+        assert rights["consent_revocation"].article == "LGPD Articles 8 and 18"
+        assert rights["petition_anpd"].article == "LGPD Article 18"
+        assert rights["objection"].article == "LGPD Article 18"
+        assert rights["automated_decision_review"].article == "LGPD Article 20"
+
+    def test_markdown_contains_lgpd_rights_and_transfer_sections(self):
+        notice = pnt.build_lgpd_privacy_notice()
+        markdown = notice.markdown
+
+        assert markdown.startswith("# LGPD Privacy Notice Template\n")
+        assert "## Your LGPD Rights" in markdown
+        assert "Right to confirmation and access" in markdown
+        assert "Right to correction" in markdown
+        assert "Right to anonymization, blocking, or deletion" in markdown
+        assert "Right to portability" in markdown
+        assert "Right to deletion of consent-based data" in markdown
+        assert "Right to information about sharing" in markdown
+        assert "Right to consent refusal information" in markdown
+        assert "Right to revoke consent" in markdown
+        assert "Right to petition the ANPD" in markdown
+        assert "Right to object" in markdown
+        assert "Right to review automated decisions" in markdown
+        assert "## International Transfers" in markdown
+        assert f"within {pnt.LGPD_ACCESS_RESPONSE_DEADLINE}" in markdown
+
+    def test_accepts_generated_app_lgpd_placeholders_or_concrete_values(self):
+        notice = pnt.build_lgpd_privacy_notice(
+            controller_name="Acme Robotics",
+            privacy_contact="privacy@example.com",
+            dpo_contact="dpo@example.com",
+            lgpd_request_endpoint="/api/v1/privacy/lgpd",
+            effective_date="2026-05-03",
+        )
+
+        markdown = notice.markdown
+        assert "Controller: Acme Robotics." in markdown
+        assert "Privacy contact: privacy@example.com." in markdown
+        assert "Data protection officer contact: dpo@example.com." in markdown
+        assert "LGPD request path: /api/v1/privacy/lgpd." in markdown
+        assert "Submit LGPD requests through /api/v1/privacy/lgpd" in markdown
+        assert "Effective date: 2026-05-03." in markdown
+
+    def test_to_dict_is_json_ready_and_includes_lgpd_metadata(self):
+        payload = pnt.build_lgpd_privacy_notice().to_dict()
+        assert payload["jurisdiction"] == "lgpd"
+        assert payload["markdown"]
+        assert len(payload["sections"]) == 9
+        assert len(payload["rights"]) == 11
+        assert payload["rights"][0]["id"] == "confirmation_access"
+
+
 class TestPrivacyNoticeTemplateShape:
     def test_gdpr_rights_constant_is_tuple_of_frozen_dataclasses(self):
         assert isinstance(pnt.GDPR_RIGHTS, tuple)
@@ -224,9 +302,11 @@ class TestPrivacyNoticeTemplateShape:
         assert reloaded.JURISDICTION_GDPR == "gdpr"
         assert reloaded.JURISDICTION_CCPA == "ccpa"
         assert reloaded.JURISDICTION_PIPL == "pipl"
+        assert reloaded.JURISDICTION_LGPD == "lgpd"
         assert reloaded.GDPR_RESPONSE_DEADLINE == "one month"
         assert reloaded.CCPA_RESPONSE_DEADLINE == "45 calendar days"
         assert reloaded.CCPA_OPT_OUT_LIMIT_DEADLINE == "15 business days"
+        assert reloaded.LGPD_ACCESS_RESPONSE_DEADLINE == "15 days"
         assert tuple(right.id for right in reloaded.GDPR_RIGHTS) == (
             "access",
             "portability",
@@ -251,6 +331,19 @@ class TestPrivacyNoticeTemplateShape:
             "explanation",
             "deceased_close_relative",
         )
+        assert tuple(right.id for right in reloaded.LGPD_RIGHTS) == (
+            "confirmation_access",
+            "correction",
+            "anonymization_blocking_deletion",
+            "portability",
+            "consent_based_deletion",
+            "sharing_information",
+            "consent_information",
+            "consent_revocation",
+            "petition_anpd",
+            "objection",
+            "automated_decision_review",
+        )
 
     def test_public_exports_are_pinned(self):
         assert set(pnt.__all__) == {
@@ -261,12 +354,16 @@ class TestPrivacyNoticeTemplateShape:
             "GDPR_RIGHTS",
             "JURISDICTION_CCPA",
             "JURISDICTION_GDPR",
+            "JURISDICTION_LGPD",
             "JURISDICTION_PIPL",
+            "LGPD_ACCESS_RESPONSE_DEADLINE",
+            "LGPD_RIGHTS",
             "PIPL_RIGHTS",
             "DataSubjectRight",
             "PrivacyNoticeSection",
             "PrivacyNoticeTemplate",
             "build_ccpa_privacy_notice",
             "build_gdpr_privacy_notice",
+            "build_lgpd_privacy_notice",
             "build_pipl_privacy_notice",
         }

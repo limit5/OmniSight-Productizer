@@ -2,8 +2,9 @@
 
 Small framework-agnostic privacy notice generator intended for generated
 web/service templates.  SC.9.1 covers GDPR notice text; SC.9.2 covers
-CCPA notice text; SC.9.3 covers PIPL notice text.  LGPD, PIPEDA, SDK
-inference, and DSAR workflow scaffolding are separate SC.9 / SC.10 rows.
+CCPA notice text; SC.9.3 covers PIPL notice text; SC.9.4 covers LGPD
+notice text.  PIPEDA, SDK inference, and DSAR workflow scaffolding are
+separate SC.9 / SC.10 rows.
 
 Security boundary:
 
@@ -17,6 +18,11 @@ Security boundary:
   * The PIPL individual rights covered here are know/decide,
     restrict/refuse, access/copy, portability, correction, deletion,
     explanation, and deceased close-relative rights.
+  * The LGPD data-subject rights covered here are confirmation/access,
+    correction, anonymization/blocking/deletion, portability, deletion
+    of consent-based data, information about sharing, consent refusal
+    information, consent revocation, petitioning the ANPD, objection,
+    and review of automated decisions.
   * Runtime request handling, identity verification, SLA timers, and
     export/delete endpoints are owned by SC.10.
 
@@ -34,9 +40,11 @@ from dataclasses import dataclass
 JURISDICTION_GDPR = "gdpr"
 JURISDICTION_CCPA = "ccpa"
 JURISDICTION_PIPL = "pipl"
+JURISDICTION_LGPD = "lgpd"
 GDPR_RESPONSE_DEADLINE = "one month"
 CCPA_RESPONSE_DEADLINE = "45 calendar days"
 CCPA_OPT_OUT_LIMIT_DEADLINE = "15 business days"
+LGPD_ACCESS_RESPONSE_DEADLINE = "15 days"
 
 
 @dataclass(frozen=True)
@@ -351,6 +359,155 @@ PIPL_RIGHTS = (
         request_prompt=(
             "Submit a close-relative request with documentation needed to "
             "verify identity, relationship, and lawful interest."
+        ),
+    ),
+)
+
+
+LGPD_RIGHTS = (
+    DataSubjectRight(
+        id="confirmation_access",
+        label="Right to confirmation and access",
+        article="LGPD Articles 18 and 19",
+        summary=(
+            "Data subjects may confirm whether personal data is processed "
+            "and access personal data held by the controller."
+        ),
+        request_prompt=(
+            "Submit a confirmation or access request through the LGPD request "
+            "path."
+        ),
+    ),
+    DataSubjectRight(
+        id="correction",
+        label="Right to correction",
+        article="LGPD Article 18",
+        summary=(
+            "Data subjects may request correction of incomplete, inaccurate, "
+            "or outdated personal data."
+        ),
+        request_prompt=(
+            "Submit a correction request and identify the incomplete, "
+            "inaccurate, or outdated account or service data."
+        ),
+    ),
+    DataSubjectRight(
+        id="anonymization_blocking_deletion",
+        label="Right to anonymization, blocking, or deletion",
+        article="LGPD Article 18",
+        summary=(
+            "Data subjects may request anonymization, blocking, or deletion "
+            "of unnecessary, excessive, or unlawfully processed personal data."
+        ),
+        request_prompt=(
+            "Submit an anonymization, blocking, or deletion request and "
+            "identify the processing activity being challenged."
+        ),
+    ),
+    DataSubjectRight(
+        id="portability",
+        label="Right to portability",
+        article="LGPD Article 18",
+        summary=(
+            "Data subjects may request portability of personal data to "
+            "another service or product provider, subject to ANPD regulation "
+            "and commercial or industrial secrets."
+        ),
+        request_prompt=(
+            "Submit a portability request and specify the recipient provider "
+            "and service scope."
+        ),
+    ),
+    DataSubjectRight(
+        id="consent_based_deletion",
+        label="Right to deletion of consent-based data",
+        article="LGPD Articles 16 and 18",
+        summary=(
+            "Data subjects may request deletion of personal data processed "
+            "with consent, subject to LGPD retention exceptions."
+        ),
+        request_prompt=(
+            "Submit a consent-based deletion request; the service may retain "
+            "records needed for legal, security, billing, dispute, or audit "
+            "obligations."
+        ),
+    ),
+    DataSubjectRight(
+        id="sharing_information",
+        label="Right to information about sharing",
+        article="LGPD Article 18",
+        summary=(
+            "Data subjects may request information about public and private "
+            "entities with which the controller shared personal data."
+        ),
+        request_prompt=(
+            "Submit a sharing-information request and identify the relevant "
+            "account, service, or processing activity."
+        ),
+    ),
+    DataSubjectRight(
+        id="consent_information",
+        label="Right to consent refusal information",
+        article="LGPD Article 18",
+        summary=(
+            "Data subjects may receive information about the possibility of "
+            "refusing consent and the consequences of refusal."
+        ),
+        request_prompt=(
+            "Review the consent prompt or contact the privacy team before "
+            "deciding whether to provide optional consent."
+        ),
+    ),
+    DataSubjectRight(
+        id="consent_revocation",
+        label="Right to revoke consent",
+        article="LGPD Articles 8 and 18",
+        summary=(
+            "Data subjects may revoke consent for consent-based processing "
+            "through a free and facilitated procedure."
+        ),
+        request_prompt=(
+            "Use the consent-management path or submit a revocation request "
+            "through the LGPD request path."
+        ),
+    ),
+    DataSubjectRight(
+        id="petition_anpd",
+        label="Right to petition the ANPD",
+        article="LGPD Article 18",
+        summary=(
+            "Data subjects may petition Brazil's national data protection "
+            "authority regarding their personal data."
+        ),
+        request_prompt=(
+            "Contact the privacy team first where appropriate, then petition "
+            "the ANPD if the issue remains unresolved."
+        ),
+    ),
+    DataSubjectRight(
+        id="objection",
+        label="Right to object",
+        article="LGPD Article 18",
+        summary=(
+            "Data subjects may object to processing carried out without "
+            "consent where the processing does not comply with LGPD."
+        ),
+        request_prompt=(
+            "Submit an objection request and identify the non-compliant "
+            "processing activity."
+        ),
+    ),
+    DataSubjectRight(
+        id="automated_decision_review",
+        label="Right to review automated decisions",
+        article="LGPD Article 20",
+        summary=(
+            "Data subjects may request review of decisions made solely on "
+            "automated processing of personal data that affect their interests."
+        ),
+        request_prompt=(
+            "Submit an automated-decision review request and identify the "
+            "decision, account, and service context."
         ),
     ),
 )
@@ -689,6 +846,124 @@ def build_pipl_privacy_notice(
     )
 
 
+def build_lgpd_privacy_notice(
+    *,
+    controller_name: str = "{{ controller_name }}",
+    privacy_contact: str = "{{ privacy_contact }}",
+    dpo_contact: str = "{{ dpo_contact }}",
+    lgpd_request_endpoint: str = "{{ lgpd_request_endpoint }}",
+    effective_date: str = "{{ effective_date }}",
+) -> PrivacyNoticeTemplate:
+    """Build the LGPD privacy-notice markdown template."""
+
+    sections = (
+        PrivacyNoticeSection(
+            id="scope",
+            title="Scope",
+            body=(
+                f"This notice explains how {controller_name} processes "
+                "personal data of data subjects in Brazil under the Lei Geral "
+                "de Protecao de Dados Pessoais (LGPD). It is a template and "
+                "must be reviewed against the generated application's actual "
+                "data flows before publication.\n\n"
+                f"Effective date: {effective_date}."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="controller",
+            title="Controller, DPO, and Contacts",
+            body=(
+                f"Controller: {controller_name}.\n\n"
+                f"Privacy contact: {privacy_contact}.\n\n"
+                f"Data protection officer contact: {dpo_contact}.\n\n"
+                f"LGPD request path: {lgpd_request_endpoint}."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="categories",
+            title="Personal Data We Process",
+            body=(
+                "List each personal-data category processed, including "
+                "account profile data, authentication identifiers, billing "
+                "records, support messages, device or log data, integration "
+                "data received from connected third-party services, and any "
+                "sensitive personal data. For sensitive personal data, "
+                "document the specific purpose and applicable LGPD basis."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="purposes_legal_bases",
+            title="Purposes and Legal Bases",
+            body=(
+                "Document each processing purpose and legal basis, including "
+                "contract performance, consent where required, compliance "
+                "with legal or regulatory obligations, regular exercise of "
+                "rights, legitimate interests, fraud prevention, security "
+                "monitoring, service analytics, and customer support."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="rights",
+            title="Your LGPD Rights",
+            body=_rights_markdown(LGPD_RIGHTS),
+        ),
+        PrivacyNoticeSection(
+            id="requests",
+            title="How to Exercise Your Rights",
+            body=(
+                f"Submit LGPD requests through {lgpd_request_endpoint} or by "
+                f"contacting {privacy_contact}. We verify requester identity "
+                "before confirming processing, disclosing, correcting, "
+                "anonymizing, blocking, deleting, porting, or reviewing "
+                "personal data. Confirmation of processing or access is "
+                "provided immediately in simplified form where available, or "
+                "through a clear and complete statement within "
+                f"{LGPD_ACCESS_RESPONSE_DEADLINE}. If immediate action is not "
+                "possible, we explain the factual or legal reasons."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="sharing_processors",
+            title="Sharing, Operators, and Joint Use",
+            body=(
+                "List operators, public or private entities, and third-party "
+                "recipients that receive personal data. For each recipient, "
+                "document the personal-data category, processing purpose, "
+                "sharing or operator role, and whether the recipient is "
+                "inside or outside Brazil."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="international_transfers",
+            title="International Transfers",
+            body=(
+                "If personal data is transferred outside Brazil, document the "
+                "destination, recipient, transfer purpose, personal-data "
+                "categories, and applicable LGPD transfer mechanism, such as "
+                "adequacy, contractual safeguards, global corporate rules, "
+                "ANPD-authorised clauses, consent, or another lawful basis."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="retention",
+            title="Retention and Deletion",
+            body=(
+                "List retention periods for each data category. Personal data "
+                "should be retained only as long as needed for the stated "
+                "purposes, unless longer retention is required for legal, "
+                "regulatory, security, billing, dispute, anonymization, or "
+                "audit obligations."
+            ),
+        ),
+    )
+    return PrivacyNoticeTemplate(
+        jurisdiction=JURISDICTION_LGPD,
+        title="LGPD Privacy Notice Template",
+        sections=sections,
+        rights=LGPD_RIGHTS,
+    )
+
+
 def _rights_markdown(rights: tuple[DataSubjectRight, ...]) -> str:
     lines: list[str] = []
     for right in rights:
@@ -707,12 +982,16 @@ __all__ = (
     "GDPR_RIGHTS",
     "JURISDICTION_CCPA",
     "JURISDICTION_GDPR",
+    "JURISDICTION_LGPD",
     "JURISDICTION_PIPL",
+    "LGPD_ACCESS_RESPONSE_DEADLINE",
+    "LGPD_RIGHTS",
     "PIPL_RIGHTS",
     "DataSubjectRight",
     "PrivacyNoticeSection",
     "PrivacyNoticeTemplate",
     "build_ccpa_privacy_notice",
     "build_gdpr_privacy_notice",
+    "build_lgpd_privacy_notice",
     "build_pipl_privacy_notice",
 )
