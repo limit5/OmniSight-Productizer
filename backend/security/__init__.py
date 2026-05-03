@@ -39,8 +39,8 @@ SC.7.5 (OWASP mitigation shared lib):
     fetch destination blocklist). Framework agnostic; callers own HTTP
     client redirect/final-IP controls and error mapping.
 
-SC.9.1-SC.9.4 (per-jurisdiction privacy notice generator):
-  - privacy_notice_templates — pure GDPR, CCPA, PIPL, and LGPD privacy
+SC.9.1-SC.9.5 (per-jurisdiction privacy notice generator):
+  - privacy_notice_templates — pure GDPR, CCPA, PIPL, LGPD, and PIPEDA privacy
     notice templates for generated apps. Emits legal-review-ready
     markdown plus machine-readable sections / rights metadata. GDPR
     covers access, portability, erasure, and objection. CCPA covers
@@ -51,8 +51,9 @@ SC.9.1-SC.9.4 (per-jurisdiction privacy notice generator):
     covers confirmation/access, correction, anonymization/blocking/
     deletion, portability, consent-based deletion, sharing information,
     consent refusal information, consent revocation, ANPD petition,
-    objection, and automated-decision review. PIPEDA, SDK inference, and
-    DSAR workflow scaffolding are separate rows.
+    objection, and automated-decision review. PIPEDA covers access,
+    correction, consent withdrawal, and challenging compliance. SDK
+    inference and DSAR workflow scaffolding are separate rows.
 
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib

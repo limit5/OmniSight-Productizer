@@ -3,8 +3,8 @@
 Small framework-agnostic privacy notice generator intended for generated
 web/service templates.  SC.9.1 covers GDPR notice text; SC.9.2 covers
 CCPA notice text; SC.9.3 covers PIPL notice text; SC.9.4 covers LGPD
-notice text.  PIPEDA, SDK inference, and DSAR workflow scaffolding are
-separate SC.9 / SC.10 rows.
+notice text; SC.9.5 covers PIPEDA notice text.  SDK inference and DSAR
+workflow scaffolding are separate SC.9 / SC.10 rows.
 
 Security boundary:
 
@@ -23,6 +23,8 @@ Security boundary:
     of consent-based data, information about sharing, consent refusal
     information, consent revocation, petitioning the ANPD, objection,
     and review of automated decisions.
+  * The PIPEDA individual rights covered here are access, correction,
+    withdrawal of consent, and challenging compliance.
   * Runtime request handling, identity verification, SLA timers, and
     export/delete endpoints are owned by SC.10.
 
@@ -41,10 +43,13 @@ JURISDICTION_GDPR = "gdpr"
 JURISDICTION_CCPA = "ccpa"
 JURISDICTION_PIPL = "pipl"
 JURISDICTION_LGPD = "lgpd"
+JURISDICTION_PIPEDA = "pipeda"
 GDPR_RESPONSE_DEADLINE = "one month"
 CCPA_RESPONSE_DEADLINE = "45 calendar days"
 CCPA_OPT_OUT_LIMIT_DEADLINE = "15 business days"
 LGPD_ACCESS_RESPONSE_DEADLINE = "15 days"
+PIPEDA_ACCESS_RESPONSE_DEADLINE = "30 calendar days"
+PIPEDA_ACCESS_EXTENSION_DEADLINE = "30 additional days"
 
 
 @dataclass(frozen=True)
@@ -513,6 +518,65 @@ LGPD_RIGHTS = (
 )
 
 
+PIPEDA_RIGHTS = (
+    DataSubjectRight(
+        id="access",
+        label="Right of access",
+        article="PIPEDA Principle 9",
+        summary=(
+            "Individuals may request information about the existence, use, "
+            "and disclosure of their personal information and receive access "
+            "to that information, subject to PIPEDA exceptions."
+        ),
+        request_prompt=(
+            "Submit an access request in writing through the PIPEDA request "
+            "path or privacy contact."
+        ),
+    ),
+    DataSubjectRight(
+        id="correction",
+        label="Right to correction or notation",
+        article="PIPEDA Principle 9",
+        summary=(
+            "Individuals may challenge the accuracy and completeness of "
+            "personal information and have it amended as appropriate; "
+            "unresolved challenges should be recorded where appropriate."
+        ),
+        request_prompt=(
+            "Submit a correction request and identify the incomplete, "
+            "inaccurate, or outdated account or service data."
+        ),
+    ),
+    DataSubjectRight(
+        id="withdraw_consent",
+        label="Right to withdraw consent",
+        article="PIPEDA Principle 3",
+        summary=(
+            "Individuals may withdraw consent at any time, subject to legal "
+            "or contractual restrictions and reasonable notice."
+        ),
+        request_prompt=(
+            "Use the consent-management path or contact the privacy team; "
+            "the service should explain the implications of withdrawal."
+        ),
+    ),
+    DataSubjectRight(
+        id="challenge_compliance",
+        label="Right to challenge compliance",
+        article="PIPEDA Principle 10",
+        summary=(
+            "Individuals may challenge an organization's compliance with "
+            "PIPEDA's fair information principles through the person "
+            "accountable for privacy compliance."
+        ),
+        request_prompt=(
+            "Submit a compliance challenge to the privacy officer or contact "
+            "the Office of the Privacy Commissioner of Canada where appropriate."
+        ),
+    ),
+)
+
+
 def build_gdpr_privacy_notice(
     *,
     controller_name: str = "{{ controller_name }}",
@@ -964,6 +1028,132 @@ def build_lgpd_privacy_notice(
     )
 
 
+def build_pipeda_privacy_notice(
+    *,
+    organization_name: str = "{{ organization_name }}",
+    privacy_contact: str = "{{ privacy_contact }}",
+    privacy_officer_contact: str = "{{ privacy_officer_contact }}",
+    pipeda_request_endpoint: str = "{{ pipeda_request_endpoint }}",
+    effective_date: str = "{{ effective_date }}",
+) -> PrivacyNoticeTemplate:
+    """Build the PIPEDA privacy-notice markdown template."""
+
+    sections = (
+        PrivacyNoticeSection(
+            id="scope",
+            title="Scope",
+            body=(
+                f"This notice explains how {organization_name} collects, "
+                "uses, and discloses personal information under Canada's "
+                "Personal Information Protection and Electronic Documents Act "
+                "(PIPEDA). It is a template and must be reviewed against the "
+                "generated application's actual data flows before publication.\n\n"
+                f"Effective date: {effective_date}."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="organization",
+            title="Organization, Privacy Officer, and Contacts",
+            body=(
+                f"Organization: {organization_name}.\n\n"
+                f"Privacy contact: {privacy_contact}.\n\n"
+                f"Person accountable for PIPEDA compliance: "
+                f"{privacy_officer_contact}.\n\n"
+                f"PIPEDA request path: {pipeda_request_endpoint}."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="categories",
+            title="Personal Information We Collect",
+            body=(
+                "List each personal-information category collected, including "
+                "account profile data, authentication identifiers, billing "
+                "records, support messages, device or log data, integration "
+                "data received from connected third-party services, and any "
+                "sensitive personal information. Collection should be limited "
+                "to information needed for identified purposes and collected "
+                "by fair and lawful means."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="purposes_consent",
+            title="Purposes, Consent, and Choices",
+            body=(
+                "Document each purpose for collection, use, and disclosure "
+                "before or at the time of collection. Explain the consent "
+                "path, whether express or implied consent is used, what "
+                "personal information is collected, which parties receive it, "
+                "the purposes, and any risks of harm or other consequences. "
+                "For non-integral collections, uses, or disclosures, provide "
+                "a clear and accessible choice."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="rights",
+            title="Your PIPEDA Rights",
+            body=_rights_markdown(PIPEDA_RIGHTS),
+        ),
+        PrivacyNoticeSection(
+            id="requests",
+            title="How to Exercise Your Rights",
+            body=(
+                f"Submit PIPEDA requests through {pipeda_request_endpoint} or "
+                f"by contacting {privacy_contact}. We verify requester "
+                "identity before disclosing, correcting, or annotating "
+                "personal information. We respond to access requests within "
+                f"{PIPEDA_ACCESS_RESPONSE_DEADLINE} unless a PIPEDA extension "
+                "applies; permitted extensions may allow up to "
+                f"{PIPEDA_ACCESS_EXTENSION_DEADLINE} or the time necessary to "
+                "convert information into an alternative format. If access is "
+                "refused or delayed, we explain the reason and the right to "
+                "complain to the Office of the Privacy Commissioner of Canada."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="sharing_service_providers",
+            title="Disclosure and Service Providers",
+            body=(
+                "List third parties, service providers, affiliates, or public "
+                "authorities that receive personal information. For each "
+                "recipient or category, document the personal-information "
+                "categories, disclosure purpose, whether consent is required, "
+                "and safeguards used to protect information under the "
+                "organization's control."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="retention_accuracy_safeguards",
+            title="Retention, Accuracy, and Safeguards",
+            body=(
+                "List retention periods for each data category. Personal "
+                "information should be kept only as long as required to serve "
+                "the identified purposes, unless longer retention is required "
+                "for legal, security, billing, dispute, or audit obligations. "
+                "Document accuracy controls and safeguards appropriate to the "
+                "sensitivity of the personal information."
+            ),
+        ),
+        PrivacyNoticeSection(
+            id="openness_complaints",
+            title="Openness and Complaints",
+            body=(
+                "Make information about privacy policies and practices readily "
+                "available, including how to contact the person accountable "
+                "for PIPEDA compliance. Individuals may challenge compliance "
+                f"through {privacy_officer_contact} and may contact the Office "
+                "of the Privacy Commissioner of Canada if the issue remains "
+                "unresolved."
+            ),
+        ),
+    )
+    return PrivacyNoticeTemplate(
+        jurisdiction=JURISDICTION_PIPEDA,
+        title="PIPEDA Privacy Notice Template",
+        sections=sections,
+        rights=PIPEDA_RIGHTS,
+    )
+
+
 def _rights_markdown(rights: tuple[DataSubjectRight, ...]) -> str:
     lines: list[str] = []
     for right in rights:
@@ -983,9 +1173,13 @@ __all__ = (
     "JURISDICTION_CCPA",
     "JURISDICTION_GDPR",
     "JURISDICTION_LGPD",
+    "JURISDICTION_PIPEDA",
     "JURISDICTION_PIPL",
     "LGPD_ACCESS_RESPONSE_DEADLINE",
     "LGPD_RIGHTS",
+    "PIPEDA_ACCESS_EXTENSION_DEADLINE",
+    "PIPEDA_ACCESS_RESPONSE_DEADLINE",
+    "PIPEDA_RIGHTS",
     "PIPL_RIGHTS",
     "DataSubjectRight",
     "PrivacyNoticeSection",
@@ -993,5 +1187,6 @@ __all__ = (
     "build_ccpa_privacy_notice",
     "build_gdpr_privacy_notice",
     "build_lgpd_privacy_notice",
+    "build_pipeda_privacy_notice",
     "build_pipl_privacy_notice",
 )

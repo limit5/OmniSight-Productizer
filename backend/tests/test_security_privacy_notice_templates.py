@@ -274,6 +274,67 @@ class TestLgpdPrivacyNotice:
         assert payload["rights"][0]["id"] == "confirmation_access"
 
 
+class TestPipedaPrivacyNotice:
+    def test_builds_pipeda_notice_with_required_rights(self):
+        notice = pnt.build_pipeda_privacy_notice()
+        assert notice.jurisdiction == pnt.JURISDICTION_PIPEDA
+        assert notice.title == "PIPEDA Privacy Notice Template"
+
+        rights = {right.id: right for right in notice.rights}
+        assert set(rights) == {
+            "access",
+            "correction",
+            "withdraw_consent",
+            "challenge_compliance",
+        }
+        assert rights["access"].article == "PIPEDA Principle 9"
+        assert rights["correction"].article == "PIPEDA Principle 9"
+        assert rights["withdraw_consent"].article == "PIPEDA Principle 3"
+        assert rights["challenge_compliance"].article == "PIPEDA Principle 10"
+
+    def test_markdown_contains_pipeda_rights_and_access_deadline(self):
+        notice = pnt.build_pipeda_privacy_notice()
+        markdown = notice.markdown
+
+        assert markdown.startswith("# PIPEDA Privacy Notice Template\n")
+        assert "## Your PIPEDA Rights" in markdown
+        assert "Right of access" in markdown
+        assert "Right to correction or notation" in markdown
+        assert "Right to withdraw consent" in markdown
+        assert "Right to challenge compliance" in markdown
+        assert "## Openness and Complaints" in markdown
+        assert f"within {pnt.PIPEDA_ACCESS_RESPONSE_DEADLINE}" in markdown
+        assert f"up to {pnt.PIPEDA_ACCESS_EXTENSION_DEADLINE}" in markdown
+
+    def test_accepts_generated_app_pipeda_placeholders_or_concrete_values(self):
+        notice = pnt.build_pipeda_privacy_notice(
+            organization_name="Acme Robotics",
+            privacy_contact="privacy@example.com",
+            privacy_officer_contact="privacy-officer@example.com",
+            pipeda_request_endpoint="/api/v1/privacy/pipeda",
+            effective_date="2026-05-03",
+        )
+
+        markdown = notice.markdown
+        assert "Organization: Acme Robotics." in markdown
+        assert "Privacy contact: privacy@example.com." in markdown
+        assert (
+            "Person accountable for PIPEDA compliance: "
+            "privacy-officer@example.com."
+        ) in markdown
+        assert "PIPEDA request path: /api/v1/privacy/pipeda." in markdown
+        assert "Submit PIPEDA requests through /api/v1/privacy/pipeda" in markdown
+        assert "Effective date: 2026-05-03." in markdown
+
+    def test_to_dict_is_json_ready_and_includes_pipeda_metadata(self):
+        payload = pnt.build_pipeda_privacy_notice().to_dict()
+        assert payload["jurisdiction"] == "pipeda"
+        assert payload["markdown"]
+        assert len(payload["sections"]) == 9
+        assert len(payload["rights"]) == 4
+        assert payload["rights"][0]["id"] == "access"
+
+
 class TestPrivacyNoticeTemplateShape:
     def test_gdpr_rights_constant_is_tuple_of_frozen_dataclasses(self):
         assert isinstance(pnt.GDPR_RIGHTS, tuple)
@@ -303,10 +364,13 @@ class TestPrivacyNoticeTemplateShape:
         assert reloaded.JURISDICTION_CCPA == "ccpa"
         assert reloaded.JURISDICTION_PIPL == "pipl"
         assert reloaded.JURISDICTION_LGPD == "lgpd"
+        assert reloaded.JURISDICTION_PIPEDA == "pipeda"
         assert reloaded.GDPR_RESPONSE_DEADLINE == "one month"
         assert reloaded.CCPA_RESPONSE_DEADLINE == "45 calendar days"
         assert reloaded.CCPA_OPT_OUT_LIMIT_DEADLINE == "15 business days"
         assert reloaded.LGPD_ACCESS_RESPONSE_DEADLINE == "15 days"
+        assert reloaded.PIPEDA_ACCESS_RESPONSE_DEADLINE == "30 calendar days"
+        assert reloaded.PIPEDA_ACCESS_EXTENSION_DEADLINE == "30 additional days"
         assert tuple(right.id for right in reloaded.GDPR_RIGHTS) == (
             "access",
             "portability",
@@ -344,6 +408,12 @@ class TestPrivacyNoticeTemplateShape:
             "objection",
             "automated_decision_review",
         )
+        assert tuple(right.id for right in reloaded.PIPEDA_RIGHTS) == (
+            "access",
+            "correction",
+            "withdraw_consent",
+            "challenge_compliance",
+        )
 
     def test_public_exports_are_pinned(self):
         assert set(pnt.__all__) == {
@@ -355,9 +425,13 @@ class TestPrivacyNoticeTemplateShape:
             "JURISDICTION_CCPA",
             "JURISDICTION_GDPR",
             "JURISDICTION_LGPD",
+            "JURISDICTION_PIPEDA",
             "JURISDICTION_PIPL",
             "LGPD_ACCESS_RESPONSE_DEADLINE",
             "LGPD_RIGHTS",
+            "PIPEDA_ACCESS_EXTENSION_DEADLINE",
+            "PIPEDA_ACCESS_RESPONSE_DEADLINE",
+            "PIPEDA_RIGHTS",
             "PIPL_RIGHTS",
             "DataSubjectRight",
             "PrivacyNoticeSection",
@@ -365,5 +439,6 @@ class TestPrivacyNoticeTemplateShape:
             "build_ccpa_privacy_notice",
             "build_gdpr_privacy_notice",
             "build_lgpd_privacy_notice",
+            "build_pipeda_privacy_notice",
             "build_pipl_privacy_notice",
         }
