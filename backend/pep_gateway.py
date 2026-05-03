@@ -43,6 +43,8 @@ from typing import Any, Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+_LLM_FIREWALL_RULE = "llm_firewall_blocked"
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Policy tables
@@ -476,8 +478,17 @@ async def evaluate(
     propose_fn: Callable[..., Any] | None = None,
     wait_for_decision: Callable[[str, float], Awaitable[Any]] | None = None,
     hold_timeout_s: float = 1800.0,
+    firewall_result: Any | None = None,
+    firewall_client: Any | None = None,
+    firewall_audit_sink: Callable[..., Awaitable[Optional[int]]] | None = None,
+    firewall_api_key: str | None = None,
 ) -> PepDecision:
     """Classify the tool call and apply the policy.
+
+    KS.4.15 places the input firewall in front of PEP rather than replacing
+    PEP.  Module-global / cross-worker audit: no firewall client or decision
+    cache is stored here; each worker derives the same flattened tool input
+    from request arguments and delegates durable coordination to audit.log.
 
     * ``auto_allow`` → returns immediately with action=auto_allow.
     * ``deny`` → returns immediately with action=deny (caller refuses).
@@ -491,8 +502,31 @@ async def evaluate(
     opens and subsequent calls fall back to a "degraded" HOLD→deny
     path so we fail closed.
     """
-    action, rule, reason, scope = classify(tool, arguments, tier)
     command_flat = _extract_command(tool, arguments)
+    firewall = await _enforce_firewall_before_pep(
+        command_flat,
+        result=firewall_result,
+        client=firewall_client,
+        audit_sink=firewall_audit_sink,
+        api_key=firewall_api_key,
+        agent_id=agent_id,
+        tool=tool,
+    )
+    if firewall is not None and not firewall.allow_invocation:
+        return PepDecision(
+            id=f"pep-{uuid.uuid4().hex[:10]}",
+            ts=time.time(),
+            agent_id=agent_id or "",
+            tool=tool,
+            command=f"input_sha256={firewall.input_sha256}",
+            tier=tier,
+            action=PepAction.deny,
+            rule=_LLM_FIREWALL_RULE,
+            reason=firewall.refusal_message or "LLM firewall blocked input",
+            impact_scope="destructive",
+        )
+
+    action, rule, reason, scope = classify(tool, arguments, tier)
     dec = PepDecision(
         id=f"pep-{uuid.uuid4().hex[:10]}",
         ts=time.time(),
@@ -585,6 +619,42 @@ async def evaluate(
         _bump_metric(dec)
 
     return dec
+
+
+async def _enforce_firewall_before_pep(
+    text: str,
+    *,
+    result: Any | None,
+    client: Any | None,
+    audit_sink: Callable[..., Awaitable[Optional[int]]] | None,
+    api_key: str | None,
+    agent_id: str,
+    tool: str,
+):
+    """Run KS.4.15's firewall layer before PEP classification.
+
+    Fresh dev/test installs often lack the classifier key; matching the
+    orchestrator entry pattern, only that local-setup case degrades to the
+    existing PEP path.  A real blocked result is audited by llm_firewall and
+    returns before PEP audit / SSE / proposal code sees the input.
+    """
+    from backend.security.llm_firewall import enforce_input
+
+    try:
+        return await enforce_input(
+            text,
+            result=result,
+            client=client,
+            api_key=api_key,
+            audit_sink=audit_sink,
+            actor="pep_firewall",
+            entity_id=f"pep:{agent_id or 'unknown'}:{tool}",
+            session_id=agent_id or None,
+        )
+    except RuntimeError as exc:
+        if "ANTHROPIC_API_KEY" not in str(exc):
+            raise
+        return None
 
 
 def _finalize(dec: PepDecision, *, skip_recent: bool = False) -> None:
