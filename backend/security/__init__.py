@@ -66,6 +66,12 @@ SC.12.1-SC.12.2 (PII detection / masking):
     and JSON-like response payloads while returning entity metadata.
     They do not install global logger or FastAPI middleware.
 
+KS.1.1 (Tier 1 envelope encryption):
+  - kms_adapters — provider-neutral KMSAdapter Protocol plus AWS KMS,
+    Google Cloud KMS, HashiCorp Vault Transit, and LocalFernet KEK
+    adapters. Adapter-only layer; KS.1.2 owns tenant DEK persistence and
+    envelope encrypt/decrypt helpers.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
