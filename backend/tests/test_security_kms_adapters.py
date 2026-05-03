@@ -308,6 +308,16 @@ class FakeVaultTransit:
         return {"data": {"plaintext": kwargs["ciphertext"].split(":", 2)[2]}}
 
 
+class FakeHVACModule:
+    def __init__(self):
+        self.client_creations = []
+        self.transit = FakeVaultTransit()
+
+    def Client(self, **kwargs):
+        self.client_creations.append(kwargs)
+        return SimpleNamespace(secrets=SimpleNamespace(transit=self.transit))
+
+
 class TestVaultTransitKMSAdapter:
 
     def test_wrap_and_unwrap_delegates_to_hvac_transit_shape(self):
@@ -329,6 +339,36 @@ class TestVaultTransitKMSAdapter:
         assert transit.encrypt_calls[0]["name"] == "tenant-dek"
         assert transit.encrypt_calls[0]["mount_point"] == "transit-prod"
         assert transit.decrypt_calls[0]["ciphertext"].startswith("vault:v7:")
+
+    def test_lazy_hvac_client_is_used_when_not_injected(self, monkeypatch):
+        fake_hvac = FakeHVACModule()
+        monkeypatch.setitem(sys.modules, "hvac", fake_hvac)
+        adapter = kms.VaultTransitKMSAdapter(
+            key_id="tenant-dek",
+            url="https://vault.example.com",
+            token="vault-token",
+            namespace="admin",
+            mount_point="transit-prod",
+        )
+
+        wrapped = adapter.wrap_dek(b"dek-vault", encryption_context={"tenant_id": "t1"})
+
+        assert wrapped.provider == "vault-transit"
+        assert fake_hvac.client_creations == [
+            {
+                "url": "https://vault.example.com",
+                "token": "vault-token",
+                "namespace": "admin",
+            }
+        ]
+        assert fake_hvac.transit.encrypt_calls[0]["name"] == "tenant-dek"
+        assert fake_hvac.transit.encrypt_calls[0]["mount_point"] == "transit-prod"
+        assert fake_hvac.transit.encrypt_calls[0]["plaintext"] == (
+            base64.b64encode(b"dek-vault").decode("ascii")
+        )
+        assert fake_hvac.transit.encrypt_calls[0]["context"] == (
+            base64.b64encode(b'{"tenant_id":"t1"}').decode("ascii")
+        )
 
 
 class TestConfigAndDriftGuards:
