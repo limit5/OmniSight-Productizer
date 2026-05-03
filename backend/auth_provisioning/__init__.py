@@ -22,6 +22,15 @@ from backend.auth_provisioning.self_hosted import (
     normalize_self_hosted_framework,
     render_self_hosted_auth_scaffold,
 )
+from backend.auth_provisioning.bot_defense import (
+    DEFAULT_BOT_CHALLENGE_BRIDGE_PATH,
+    DEFAULT_BOT_CHALLENGE_IMPORT,
+    BotDefenseProviderItem,
+    BotDefenseScaffoldOptions,
+    BotDefenseScaffoldResult,
+    list_bot_defense_providers,
+    render_bot_defense_scaffold,
+)
 from backend.auth_provisioning.account_linking import (
     AccountLinkingProviderStackItem,
     AccountLinkingStackOptions,
@@ -94,6 +103,11 @@ __all__ = [
     "MissingAuthProvisionScopeError",
     "AuthScaffoldEnvVar",
     "AuthScaffoldFile",
+    "BotDefenseProviderItem",
+    "BotDefenseScaffoldOptions",
+    "BotDefenseScaffoldResult",
+    "DEFAULT_BOT_CHALLENGE_BRIDGE_PATH",
+    "DEFAULT_BOT_CHALLENGE_IMPORT",
     "SelfHostedAuthScaffoldOptions",
     "SelfHostedAuthScaffoldResult",
     "UnsupportedSelfHostedAuthFrameworkError",
@@ -118,6 +132,7 @@ __all__ = [
     "get_adapter",
     "get_outbound_oauth_vendor",
     "list_account_linking_stack_providers",
+    "list_bot_defense_providers",
     "list_email_mfa_baseline_methods",
     "list_outbound_oauth_flow_providers",
     "list_vendor_oauth_plan_providers",
@@ -125,6 +140,7 @@ __all__ = [
     "list_providers",
     "normalize_self_hosted_framework",
     "render_account_linking_stack",
+    "render_bot_defense_scaffold",
     "render_email_mfa_baseline",
     "render_outbound_oauth_vendor_catalog",
     "render_outbound_oauth_flow_scaffold",
