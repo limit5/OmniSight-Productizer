@@ -63,6 +63,8 @@ Public API:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import csv
 import hashlib
 import io
@@ -77,7 +79,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -1476,13 +1478,13 @@ def list_export_steps() -> list[ExportStep]:
     return steps
 
 
-def preview_import(file_data: str, fmt: str, max_rows: int = 5) -> ImportPreview:
+def preview_import(file_data: str | bytes, fmt: str, max_rows: int = 5) -> ImportPreview:
     if fmt == ImportFormat.csv.value:
         return _preview_csv(file_data, max_rows)
     elif fmt == ImportFormat.json.value:
         return _preview_json(file_data, max_rows)
     elif fmt == ImportFormat.xlsx.value:
-        return _preview_xlsx_stub(file_data, max_rows)
+        return _preview_xlsx(file_data, max_rows)
     raise ValueError(f"Unknown import format: {fmt}")
 
 
@@ -1546,25 +1548,66 @@ def _preview_json(data: str, max_rows: int) -> ImportPreview:
     )
 
 
-def _preview_xlsx_stub(data: str, max_rows: int) -> ImportPreview:
-    lines = data.strip().split("\n")
-    if not lines:
+def _preview_xlsx(data: str | bytes, max_rows: int) -> ImportPreview:
+    raw = _xlsx_payload_bytes(data)
+    if not raw:
         return ImportPreview(format=ImportFormat.xlsx.value)
-    columns = lines[0].split("\t")
+
+    workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    worksheet = workbook.active
+    rows_iter = worksheet.iter_rows(values_only=True)
+    try:
+        header = next(rows_iter)
+    except StopIteration:
+        workbook.close()
+        return ImportPreview(format=ImportFormat.xlsx.value)
+
+    columns = ["" if value is None else str(value) for value in header]
     rows = []
-    for line in lines[1:max_rows + 1]:
-        vals = line.split("\t")
-        row = {columns[i]: vals[i] if i < len(vals) else "" for i in range(len(columns))}
-        rows.append(row)
+    total = 0
+    for values in rows_iter:
+        if values is None or all(value is None for value in values):
+            continue
+        total += 1
+        if len(rows) < max_rows:
+            row = {
+                columns[i]: values[i] if i < len(values) and values[i] is not None else ""
+                for i in range(len(columns))
+            }
+            rows.append(row)
+    workbook.close()
+
     return ImportPreview(
         format=ImportFormat.xlsx.value,
-        total_rows=len(lines) - 1, columns=columns,
+        total_rows=total, columns=columns,
         sample_rows=rows,
-        detected_types={c: "string" for c in columns},
+        detected_types=_detect_xlsx_types(columns, rows),
     )
 
 
-def execute_import(file_data: str, fmt: str, tenant_id: str = "",
+def _xlsx_payload_bytes(data: str | bytes) -> bytes:
+    if isinstance(data, bytes):
+        return data
+    if not data.strip():
+        return b""
+    try:
+        return base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        return data.encode("latin-1")
+
+
+def _detect_xlsx_types(columns: list[str], rows: list[dict[str, Any]]) -> dict[str, str]:
+    detected_types = {c: "string" for c in columns}
+    for c in columns:
+        vals = [r.get(c) for r in rows if r.get(c) not in (None, "")]
+        if vals and all(isinstance(v, bool) for v in vals):
+            detected_types[c] = "boolean"
+        elif vals and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+            detected_types[c] = "number"
+    return detected_types
+
+
+def execute_import(file_data: str | bytes, fmt: str, tenant_id: str = "",
                    column_mapping: dict[str, str] | None = None) -> ImportResult:
     preview = preview_import(file_data, fmt, max_rows=999999)
     import_id = f"imp-{uuid.uuid4().hex[:10]}"
@@ -1963,7 +2006,13 @@ def _run_import_export_recipe_step(action: str):
         result = execute_export(data, "xlsx")
         assert result.row_count == 1
     elif action == "import_xlsx":
-        result = execute_import("name\tage\nAlice\t30", "xlsx", "ten-test")
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["name", "age"])
+        worksheet.append(["Alice", 30])
+        output = io.BytesIO()
+        workbook.save(output)
+        result = execute_import(output.getvalue(), "xlsx", "ten-test")
         assert result.total_rows > 0
     else:
         raise ValueError(f"Unknown import/export recipe step: {action}")
