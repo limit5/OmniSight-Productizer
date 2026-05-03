@@ -1,8 +1,43 @@
 "use client"
 
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react"
+import { createContext, useContext, useState, useEffect, useMemo, type ReactNode } from "react"
+import { NextIntlClientProvider } from "next-intl"
 
-export type Locale = "en" | "zh-CN" | "zh-TW" | "ja"
+import enMessages from "@/messages/en.json"
+import zhCNMessages from "@/messages/zh-CN.json"
+import zhTWMessages from "@/messages/zh-TW.json"
+import jaMessages from "@/messages/ja.json"
+import {
+  DEFAULT_LOCALE,
+  LOCALES,
+  LOCALE_COOKIE,
+  isLocale,
+  type Locale,
+} from "@/i18n/routing"
+
+// FX.7.11 — the legacy bespoke `useI18n() / t()` API is preserved as a
+// thin facade so existing call sites (40+ components reference
+// `useI18n()` today) keep working. New code should prefer next-intl's
+// `useTranslations()` directly — both APIs read from the same
+// `messages/<locale>.json` bundles, so they cannot drift.
+//
+// Migration path (out of scope for FX.7.11 scaffolding):
+//   - Replace `const { t } = useI18n()` with
+//     `const t = useTranslations()` (or namespaced
+//     `useTranslations("header")`).
+//   - Locale-switcher UI keeps using `useI18n().setLocale(...)` because
+//     next-intl's locale source is the cookie that this provider sets.
+
+export type { Locale } from "@/i18n/routing"
+
+type MessageBundle = Record<string, unknown>
+
+const MESSAGES: Record<Locale, MessageBundle> = {
+  en: enMessages as MessageBundle,
+  "zh-CN": zhCNMessages as MessageBundle,
+  "zh-TW": zhTWMessages as MessageBundle,
+  ja: jaMessages as MessageBundle,
+}
 
 interface I18nContextType {
   locale: Locale
@@ -12,237 +47,52 @@ interface I18nContextType {
 
 const I18nContext = createContext<I18nContextType | null>(null)
 
-// Translation dictionaries
-const translations: Record<Locale, Record<string, string>> = {
-  en: {
-    // Header
-    "header.title": "OMNISIGHT PRODUCTIZER",
-    "header.subtitle": "NEURAL COMMAND CENTER v2.0",
-    "header.pipeline": "PROJECT PIPELINE",
-    "header.complete": "COMPLETE",
-    
-    // Panels
-    "panel.host": "Host & Devices",
-    "panel.spec": "Spec Matrix",
-    "panel.agents": "Agent Matrix",
-    "panel.orchestrator": "Orchestrator AI",
-    "panel.tasks": "Task Backlog",
-    "panel.source": "Source Control",
-    "panel.vitals": "Vitals & Artifacts",
-    
-    // Orchestrator
-    "orchestrator.title": "ORCHESTRATOR AI",
-    "orchestrator.subtitle": "CENTRAL COORDINATOR",
-    "orchestrator.agents": "AGENTS",
-    "orchestrator.suggestions": "AI SUGGESTIONS",
-    "orchestrator.placeholder": "Type command or message...",
-    "orchestrator.accept": "Accept",
-    "orchestrator.reject": "Reject",
-    "orchestrator.reassign": "Reassign",
-    
-    // Status
-    "status.idle": "Idle",
-    "status.running": "Running",
-    "status.completed": "Completed",
-    "status.error": "Error",
-    "status.pending": "Pending",
-    "status.synced": "SYNCED",
-    
-    // Actions
-    "action.spawn": "Spawn",
-    "action.assign": "Assign",
-    "action.stop": "HALT",
-    "action.resume": "RESUME",
-    
-    // Common
-    "common.loading": "Loading...",
-    "common.error": "Error",
-    "common.success": "Success",
-    "common.cancel": "Cancel",
-    "common.confirm": "Confirm",
-    "common.save": "Save",
-    "common.delete": "Delete",
-    "common.add": "Add",
-    "common.remove": "Remove",
-  },
-  
-  "zh-CN": {
-    // Header
-    "header.title": "全视产品化平台",
-    "header.subtitle": "神经指挥中心 v2.0",
-    "header.pipeline": "项目流水线",
-    "header.complete": "已完成",
-    
-    // Panels
-    "panel.host": "主机与设备",
-    "panel.spec": "规格矩阵",
-    "panel.agents": "代理矩阵",
-    "panel.orchestrator": "协调器 AI",
-    "panel.tasks": "任务积压",
-    "panel.source": "源代码控制",
-    "panel.vitals": "状态与产物",
-    
-    // Orchestrator
-    "orchestrator.title": "协调器 AI",
-    "orchestrator.subtitle": "中央协调员",
-    "orchestrator.agents": "代理",
-    "orchestrator.suggestions": "AI 建议",
-    "orchestrator.placeholder": "输入命令或消息...",
-    "orchestrator.accept": "接受",
-    "orchestrator.reject": "拒绝",
-    "orchestrator.reassign": "重新分配",
-    
-    // Status
-    "status.idle": "空闲",
-    "status.running": "运行中",
-    "status.completed": "已完成",
-    "status.error": "错误",
-    "status.pending": "待处理",
-    "status.synced": "已同步",
-    
-    // Actions
-    "action.spawn": "生成",
-    "action.assign": "分配",
-    "action.stop": "停止",
-    "action.resume": "恢复",
-    
-    // Common
-    "common.loading": "加载中...",
-    "common.error": "错误",
-    "common.success": "成功",
-    "common.cancel": "取消",
-    "common.confirm": "确认",
-    "common.save": "保存",
-    "common.delete": "删除",
-    "common.add": "添加",
-    "common.remove": "移除",
-  },
-  
-  "zh-TW": {
-    // Header
-    "header.title": "全視產品化平台",
-    "header.subtitle": "神經指揮中心 v2.0",
-    "header.pipeline": "專案流水線",
-    "header.complete": "已完成",
-    
-    // Panels
-    "panel.host": "主機與裝置",
-    "panel.spec": "規格矩陣",
-    "panel.agents": "代理矩陣",
-    "panel.orchestrator": "協調器 AI",
-    "panel.tasks": "任務積壓",
-    "panel.source": "原始碼控制",
-    "panel.vitals": "狀態與產物",
-    
-    // Orchestrator
-    "orchestrator.title": "協調器 AI",
-    "orchestrator.subtitle": "中央協調員",
-    "orchestrator.agents": "代理",
-    "orchestrator.suggestions": "AI 建議",
-    "orchestrator.placeholder": "輸入命令或訊息...",
-    "orchestrator.accept": "接受",
-    "orchestrator.reject": "拒絕",
-    "orchestrator.reassign": "重新指派",
-    
-    // Status
-    "status.idle": "閒置",
-    "status.running": "執行中",
-    "status.completed": "已完成",
-    "status.error": "錯誤",
-    "status.pending": "待處理",
-    "status.synced": "已同步",
-    
-    // Actions
-    "action.spawn": "產生",
-    "action.assign": "指派",
-    "action.stop": "停止",
-    "action.resume": "恢復",
-    
-    // Common
-    "common.loading": "載入中...",
-    "common.error": "錯誤",
-    "common.success": "成功",
-    "common.cancel": "取消",
-    "common.confirm": "確認",
-    "common.save": "儲存",
-    "common.delete": "刪除",
-    "common.add": "新增",
-    "common.remove": "移除",
-  },
-  
-  ja: {
-    // Header
-    "header.title": "オムニサイト プロダクタイザー",
-    "header.subtitle": "ニューラルコマンドセンター v2.0",
-    "header.pipeline": "プロジェクトパイプライン",
-    "header.complete": "完了",
-    
-    // Panels
-    "panel.host": "ホストとデバイス",
-    "panel.spec": "スペックマトリックス",
-    "panel.agents": "エージェントマトリックス",
-    "panel.orchestrator": "オーケストレーターAI",
-    "panel.tasks": "タスクバックログ",
-    "panel.source": "ソースコントロール",
-    "panel.vitals": "バイタルとアーティファクト",
-    
-    // Orchestrator
-    "orchestrator.title": "オーケストレーターAI",
-    "orchestrator.subtitle": "セントラルコーディネーター",
-    "orchestrator.agents": "エージェント",
-    "orchestrator.suggestions": "AI提案",
-    "orchestrator.placeholder": "コマンドまたはメッセージを入力...",
-    "orchestrator.accept": "承認",
-    "orchestrator.reject": "拒否",
-    "orchestrator.reassign": "再割当",
-    
-    // Status
-    "status.idle": "待機中",
-    "status.running": "実行中",
-    "status.completed": "完了",
-    "status.error": "エラー",
-    "status.pending": "保留中",
-    "status.synced": "同期済み",
-    
-    // Actions
-    "action.spawn": "生成",
-    "action.assign": "割当",
-    "action.stop": "停止",
-    "action.resume": "再開",
-    
-    // Common
-    "common.loading": "読み込み中...",
-    "common.error": "エラー",
-    "common.success": "成功",
-    "common.cancel": "キャンセル",
-    "common.confirm": "確認",
-    "common.save": "保存",
-    "common.delete": "削除",
-    "common.add": "追加",
-    "common.remove": "削除",
-  },
-}
-
-// Detect browser language
+// Detect browser language. Mirrors the negotiation logic that the
+// previous inline implementation used: exact match wins, otherwise
+// fall back by language prefix.
 function detectBrowserLocale(): Locale {
-  if (typeof window === "undefined") return "en"
-  
-  const browserLang = navigator.language || (navigator as unknown as { userLanguage?: string }).userLanguage || "en"
-  
-  // Check for exact match first
-  if (browserLang in translations) {
-    return browserLang as Locale
+  if (typeof window === "undefined") return DEFAULT_LOCALE
+
+  const browserLang = navigator.language || (navigator as unknown as { userLanguage?: string }).userLanguage || DEFAULT_LOCALE
+
+  if (isLocale(browserLang)) {
+    return browserLang
   }
-  
-  // Check for language prefix match
+
   const langPrefix = browserLang.split("-")[0]
   if (langPrefix === "zh") {
-    // Default to Simplified Chinese for zh without region
     return browserLang.includes("TW") || browserLang.includes("HK") ? "zh-TW" : "zh-CN"
   }
   if (langPrefix === "ja") return "ja"
-  
-  return "en"
+
+  return DEFAULT_LOCALE
+}
+
+// Walk a dot-separated key (`header.title`) into a nested message
+// object. Returns the leaf string when found, otherwise `undefined`.
+// Kept inline so the legacy `t()` shim does not depend on next-intl's
+// internal resolver.
+function resolveDotKey(bundle: MessageBundle, key: string): string | undefined {
+  const segments = key.split(".")
+  let cursor: unknown = bundle
+  for (const seg of segments) {
+    if (cursor && typeof cursor === "object" && seg in (cursor as Record<string, unknown>)) {
+      cursor = (cursor as Record<string, unknown>)[seg]
+    } else {
+      return undefined
+    }
+  }
+  return typeof cursor === "string" ? cursor : undefined
+}
+
+// Mirror locale changes into a cookie so next-intl's server-side
+// `getRequestConfig` resolver picks the same locale on subsequent
+// navigations. SameSite=Lax + 1y expiry matches typical preference
+// cookies; no auth significance, no httpOnly required.
+function persistLocaleCookie(locale: Locale): void {
+  if (typeof document === "undefined") return
+  const oneYearSec = 60 * 60 * 24 * 365
+  document.cookie = `${LOCALE_COOKIE}=${locale}; path=/; max-age=${oneYearSec}; samesite=lax`
 }
 
 interface I18nProviderProps {
@@ -250,55 +100,70 @@ interface I18nProviderProps {
 }
 
 export function I18nProvider({ children }: I18nProviderProps) {
-  const [locale, setLocaleState] = useState<Locale>("en")
+  const [locale, setLocaleState] = useState<Locale>(DEFAULT_LOCALE)
   const [mounted, setMounted] = useState(false)
-  
-  // Initialize locale from localStorage or browser detection after mount
+
+  // Initialize locale from localStorage / cookie / browser detection
+  // after mount. Falling back order: localStorage → cookie → navigator
+  // → DEFAULT_LOCALE. localStorage wins because it's the per-user
+  // explicit preference; cookie is only used as a server-readable
+  // mirror of that preference.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time hydration from localStorage/browser detection
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time hydration from localStorage/cookie/navigator
     setMounted(true)
     try {
-      const savedLocale = localStorage.getItem("omnisight-locale") as Locale | null
-      const detectedLocale = savedLocale || detectBrowserLocale()
-      setLocaleState(detectedLocale)
-      document.documentElement.lang = detectedLocale
+      const saved = localStorage.getItem(LOCALE_COOKIE)
+      const detected: Locale = isLocale(saved) ? saved : detectBrowserLocale()
+      setLocaleState(detected)
+      persistLocaleCookie(detected)
+      document.documentElement.lang = detected
     } catch {
-      // localStorage not available, use default
+      // localStorage / cookies not available — stay on the default.
     }
   }, [])
-  
-  // Persist locale changes
+
   const setLocale = (newLocale: Locale) => {
     setLocaleState(newLocale)
     try {
-      localStorage.setItem("omnisight-locale", newLocale)
+      localStorage.setItem(LOCALE_COOKIE, newLocale)
     } catch {
       // localStorage not available
     }
+    persistLocaleCookie(newLocale)
     if (typeof document !== "undefined") {
       document.documentElement.lang = newLocale
     }
   }
-  
-  // Translation function with parameter support
+
+  // Active bundle is the resolved locale once mounted; before mount we
+  // pin to `en` so SSR/CSR markup matches and React doesn't trigger a
+  // hydration mismatch warning.
+  const activeLocale: Locale = mounted ? locale : DEFAULT_LOCALE
+  const messages = MESSAGES[activeLocale] ?? MESSAGES[DEFAULT_LOCALE]
+
   const t = (key: string, params?: Record<string, string | number>): string => {
-    const currentLocale = mounted ? locale : "en"
-    const dict = translations[currentLocale] || translations.en
-    let text = dict[key] || translations.en[key] || key
-    
-    // Replace parameters like {name} with values
-    if (params) {
-      Object.entries(params).forEach(([paramKey, value]) => {
-        text = text.replace(new RegExp(`\\{${paramKey}\\}`, "g"), String(value))
-      })
+    const text = resolveDotKey(messages, key) ?? resolveDotKey(MESSAGES[DEFAULT_LOCALE], key) ?? key
+    if (!params) return text
+    let out = text
+    for (const [paramKey, value] of Object.entries(params)) {
+      out = out.replace(new RegExp(`\\{${paramKey}\\}`, "g"), String(value))
     }
-    
-    return text
+    return out
   }
-  
+
+  const ctxValue = useMemo<I18nContextType>(
+    () => ({ locale: activeLocale, setLocale, t }),
+    // `t` and `setLocale` are stable references for the lifetime of
+    // this provider; only `activeLocale` actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeLocale],
+  )
+
   return (
-    <I18nContext.Provider value={{ locale, setLocale, t }}>
-      {children}
+    <I18nContext.Provider value={ctxValue}>
+      <NextIntlClientProvider locale={activeLocale} messages={messages}>
+        {children}
+      </NextIntlClientProvider>
     </I18nContext.Provider>
   )
 }
@@ -310,3 +175,7 @@ export function useI18n() {
   }
   return context
 }
+
+// Re-export the canonical locale list so call sites that need to render
+// a locale picker can avoid hard-coding the array.
+export { LOCALES, DEFAULT_LOCALE }

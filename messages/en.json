@@ -1,0 +1,52 @@
+{
+  "header": {
+    "title": "OMNISIGHT PRODUCTIZER",
+    "subtitle": "NEURAL COMMAND CENTER v2.0",
+    "pipeline": "PROJECT PIPELINE",
+    "complete": "COMPLETE"
+  },
+  "panel": {
+    "host": "Host & Devices",
+    "spec": "Spec Matrix",
+    "agents": "Agent Matrix",
+    "orchestrator": "Orchestrator AI",
+    "tasks": "Task Backlog",
+    "source": "Source Control",
+    "vitals": "Vitals & Artifacts"
+  },
+  "orchestrator": {
+    "title": "ORCHESTRATOR AI",
+    "subtitle": "CENTRAL COORDINATOR",
+    "agents": "AGENTS",
+    "suggestions": "AI SUGGESTIONS",
+    "placeholder": "Type command or message...",
+    "accept": "Accept",
+    "reject": "Reject",
+    "reassign": "Reassign"
+  },
+  "status": {
+    "idle": "Idle",
+    "running": "Running",
+    "completed": "Completed",
+    "error": "Error",
+    "pending": "Pending",
+    "synced": "SYNCED"
+  },
+  "action": {
+    "spawn": "Spawn",
+    "assign": "Assign",
+    "stop": "HALT",
+    "resume": "RESUME"
+  },
+  "common": {
+    "loading": "Loading...",
+    "error": "Error",
+    "success": "Success",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "save": "Save",
+    "delete": "Delete",
+    "add": "Add",
+    "remove": "Remove"
+  }
+}

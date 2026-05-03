@@ -1,0 +1,52 @@
+{
+  "header": {
+    "title": "全视产品化平台",
+    "subtitle": "神经指挥中心 v2.0",
+    "pipeline": "项目流水线",
+    "complete": "已完成"
+  },
+  "panel": {
+    "host": "主机与设备",
+    "spec": "规格矩阵",
+    "agents": "代理矩阵",
+    "orchestrator": "协调器 AI",
+    "tasks": "任务积压",
+    "source": "源代码控制",
+    "vitals": "状态与产物"
+  },
+  "orchestrator": {
+    "title": "协调器 AI",
+    "subtitle": "中央协调员",
+    "agents": "代理",
+    "suggestions": "AI 建议",
+    "placeholder": "输入命令或消息...",
+    "accept": "接受",
+    "reject": "拒绝",
+    "reassign": "重新分配"
+  },
+  "status": {
+    "idle": "空闲",
+    "running": "运行中",
+    "completed": "已完成",
+    "error": "错误",
+    "pending": "待处理",
+    "synced": "已同步"
+  },
+  "action": {
+    "spawn": "生成",
+    "assign": "分配",
+    "stop": "停止",
+    "resume": "恢复"
+  },
+  "common": {
+    "loading": "加载中...",
+    "error": "错误",
+    "success": "成功",
+    "cancel": "取消",
+    "confirm": "确认",
+    "save": "保存",
+    "delete": "删除",
+    "add": "添加",
+    "remove": "移除"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "header": {
+    "title": "全視產品化平台",
+    "subtitle": "神經指揮中心 v2.0",
+    "pipeline": "專案流水線",
+    "complete": "已完成"
+  },
+  "panel": {
+    "host": "主機與裝置",
+    "spec": "規格矩陣",
+    "agents": "代理矩陣",
+    "orchestrator": "協調器 AI",
+    "tasks": "任務積壓",
+    "source": "原始碼控制",
+    "vitals": "狀態與產物"
+  },
+  "orchestrator": {
+    "title": "協調器 AI",
+    "subtitle": "中央協調員",
+    "agents": "代理",
+    "suggestions": "AI 建議",
+    "placeholder": "輸入命令或訊息...",
+    "accept": "接受",
+    "reject": "拒絕",
+    "reassign": "重新指派"
+  },
+  "status": {
+    "idle": "閒置",
+    "running": "執行中",
+    "completed": "已完成",
+    "error": "錯誤",
+    "pending": "待處理",
+    "synced": "已同步"
+  },
+  "action": {
+    "spawn": "產生",
+    "assign": "指派",
+    "stop": "停止",
+    "resume": "恢復"
+  },
+  "common": {
+    "loading": "載入中...",
+    "error": "錯誤",
+    "success": "成功",
+    "cancel": "取消",
+    "confirm": "確認",
+    "save": "儲存",
+    "delete": "刪除",
+    "add": "新增",
+    "remove": "移除"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "header": {
+    "title": "オムニサイト プロダクタイザー",
+    "subtitle": "ニューラルコマンドセンター v2.0",
+    "pipeline": "プロジェクトパイプライン",
+    "complete": "完了"
+  },
+  "panel": {
+    "host": "ホストとデバイス",
+    "spec": "スペックマトリックス",
+    "agents": "エージェントマトリックス",
+    "orchestrator": "オーケストレーターAI",
+    "tasks": "タスクバックログ",
+    "source": "ソースコントロール",
+    "vitals": "バイタルとアーティファクト"
+  },
+  "orchestrator": {
+    "title": "オーケストレーターAI",
+    "subtitle": "セントラルコーディネーター",
+    "agents": "エージェント",
+    "suggestions": "AI提案",
+    "placeholder": "コマンドまたはメッセージを入力...",
+    "accept": "承認",
+    "reject": "拒否",
+    "reassign": "再割当"
+  },
+  "status": {
+    "idle": "待機中",
+    "running": "実行中",
+    "completed": "完了",
+    "error": "エラー",
+    "pending": "保留中",
+    "synced": "同期済み"
+  },
+  "action": {
+    "spawn": "生成",
+    "assign": "割当",
+    "stop": "停止",
+    "resume": "再開"
+  },
+  "common": {
+    "loading": "読み込み中...",
+    "error": "エラー",
+    "success": "成功",
+    "cancel": "キャンセル",
+    "confirm": "確認",
+    "save": "保存",
+    "delete": "削除",
+    "add": "追加",
+    "remove": "削除"
+  }
+}

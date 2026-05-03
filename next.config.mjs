@@ -1,7 +1,16 @@
 import { fileURLToPath } from "node:url"
 import { dirname } from "node:path"
+import createNextIntlPlugin from "next-intl/plugin"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+
+// FX.7.11 — next-intl scaffolding. Points at `i18n/request.ts` which
+// resolves the request-scoped locale (cookie-driven) and loads the
+// matching `messages/<locale>.json` bundle. The plugin is a no-op for
+// pages that don't call `useTranslations()` / `getTranslations()`, so
+// adding it here is safe even before any component is migrated off the
+// legacy `lib/i18n/context.tsx::useI18n()` API.
+const withNextIntl = createNextIntlPlugin("./i18n/request.ts")
 
 /** @type {import('next').NextConfig} */
 const backendUrl = process.env.BACKEND_URL || "http://localhost:8000"
@@ -41,4 +50,4 @@ const nextConfig = {
   },
 }
 
-export default nextConfig
+export default withNextIntl(nextConfig)
