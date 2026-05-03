@@ -12,7 +12,7 @@ Locks:
     base > max all rejected
   - RateLimitTracker: per-(workspace, model) windows isolated, sliding
     eviction, would_exceed predicts rpm/input_tpm/output_tpm boundaries,
-    unknown model degrades to no-op
+    exact-limit boundary remains allowed, unknown model degrades to no-op
   - WorkspaceConfig: api_key never appears in repr
   - RetryableExecutor: success on first attempt, retry then succeed,
     max retries → DLQ + raise, non_retryable → DLQ immediately, rate-
@@ -338,6 +338,63 @@ def test_tracker_within_limits():
         input_tokens_estimated=1000, output_tokens_estimated=500,
     )
     assert not breached
+
+
+def test_tracker_allows_next_call_at_exact_rpm_boundary():
+    tracker = RateLimitTracker()
+    # Opus rpm is 4000. With 3999 recorded calls, the next call reaches
+    # exactly the cap and must still be allowed; only cap+1 breaches.
+    for _ in range(3999):
+        tracker.record(workspace="dev", model="claude-opus-4-7")
+
+    breached, reason = tracker.would_exceed(
+        workspace="dev", model="claude-opus-4-7"
+    )
+    assert not breached
+    assert reason == ""
+
+
+def test_tracker_allows_next_call_at_exact_token_boundary():
+    tracker = RateLimitTracker()
+    tracker.record(
+        workspace="dev",
+        model="claude-opus-4-7",
+        input_tokens=7_999_000,
+        output_tokens=999_000,
+    )
+
+    breached, reason = tracker.would_exceed(
+        workspace="dev",
+        model="claude-opus-4-7",
+        input_tokens_estimated=1_000,
+        output_tokens_estimated=1_000,
+    )
+    assert not breached
+    assert reason == ""
+
+
+def test_tracker_would_exceed_is_workspace_scoped():
+    tracker = RateLimitTracker()
+    for _ in range(4000):
+        tracker.record(workspace="dev", model="claude-opus-4-7")
+
+    breached, reason = tracker.would_exceed(
+        workspace="production", model="claude-opus-4-7"
+    )
+    assert not breached
+    assert reason == ""
+
+
+def test_tracker_would_exceed_is_model_scoped():
+    tracker = RateLimitTracker()
+    for _ in range(4000):
+        tracker.record(workspace="dev", model="claude-opus-4-7")
+
+    breached, reason = tracker.would_exceed(
+        workspace="dev", model="claude-sonnet-4-6"
+    )
+    assert not breached
+    assert reason == ""
 
 
 # ─── DeadLetterQueue ──────────────────────────────────────────────
