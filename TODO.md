@@ -2363,7 +2363,7 @@ I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上
 
 > Operator 不需學新 command，**自然語言就能觸發**全套 W11-W15 能力。
 
-- [ ] W16.1 **URL detection** — `_detect_coaching_triggers` 加新 trigger：訊息含 URL → coach 顯示 (a) 克隆 / (b) 抽品牌 / (c) 截圖 / (d) 不用
+- [x] W16.1 **URL detection** — `_detect_coaching_triggers` 加新 trigger：訊息含 URL → coach 顯示 (a) 克隆 / (b) 抽品牌 / (c) 截圖 / (d) 不用
 - [ ] W16.2 **Image attachment / paste** — vision LLM (Claude Sonnet 4.6 vision / GPT-4 Vision) 生成 layout spec → coach (a) component / (b) 整頁 / (c) brand reference
 - [ ] W16.3 **Build intent detection** — 「蓋/做/建/make/build/create」+「網站/landing/page/app」→ 自動 scaffold + auto-trigger W14
 - [ ] W16.4 **Inline preview iframe** — 新 SSE event `preview.ready` 帶 sandbox URL → frontend 在 chat message 內嵌 `<iframe>`，可全螢幕展開

@@ -860,6 +860,75 @@ _TOOLCHAIN_KEYWORD_MAP: dict[str, tuple[str, ...]] = {
 }
 
 
+# W16.1 (2026-05-03) — URL detection coaching trigger.
+#
+# When the operator pastes a URL into the orchestrator chat, we want
+# the coach to surface the four "what would you like to do with this
+# URL?" options that the W11–W13 capabilities collectively unlock:
+#   (a) clone the site            → /clone <url>     (W11)
+#   (b) extract brand style       → /brand <url>     (W12)
+#   (c) capture multi-bp shots    → /screenshot <url>(W13)
+#   (d) skip — operator dismisses (per-URL suppress)
+#
+# The trigger key shape mirrors ``missing_toolchain:<slug>`` so the
+# suppress-coach query param + per-suggestion dismissal pattern stays
+# uniform across coach families. Multiple URLs in one message emit one
+# trigger each (sorted, capped at ``_MAX_URL_TRIGGERS`` to keep coach
+# output bounded). Module-global state audit (per
+# docs/sop/implement_phase_step.md Step 1): ``_URL_PATTERN`` is a
+# compiled regex literal — every uvicorn worker derives the same value
+# from source code, no cross-worker coordination needed (Answer #1).
+_URL_PATTERN = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+_URL_TRAILING_PUNCT = ".,;:!?)]}>'\""
+_MAX_URL_TRIGGERS = 3
+_MAX_URL_DISPLAY_CHARS = 80
+
+
+def _detect_urls_in_text(text: str | None) -> list[str]:
+    """Return up to ``_MAX_URL_TRIGGERS`` distinct URLs found in *text*.
+
+    Strict ``http(s)://`` scheme — bare domain mentions
+    (``esp32-c3.local``, ``/path/to/file``) do **not** match, which keeps
+    the coach trigger free of the false positives that ``_collect_
+    toolchain_hints`` already absorbs. Trailing punctuation
+    (``.``, ``,``, ``)`` …) is stripped because operators typically
+    paste a URL inside a sentence.
+
+    Order is preserved so the rendered coach reads in the same order the
+    operator pasted, but duplicates are suppressed and the list is
+    capped — protects against a runaway paste from blowing up the
+    template / LLM context block.
+    """
+    if not text:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _URL_PATTERN.finditer(text):
+        raw = match.group(0)
+        url = raw.rstrip(_URL_TRAILING_PUNCT)
+        # Defensive: ensure the strip didn't reduce us to scheme-only.
+        if url.endswith("://") or url in seen:
+            continue
+        seen.add(url)
+        out.append(url)
+        if len(out) >= _MAX_URL_TRIGGERS:
+            break
+    return out
+
+
+def _truncate_url_for_display(url: str) -> str:
+    """Trim a URL to ``_MAX_URL_DISPLAY_CHARS`` with an ellipsis.
+
+    The full URL is preserved in the trigger key (for suppress / re-emit
+    accuracy) — only the *display* form is truncated. Used by the
+    templated fallback + LLM context block so a 500-char tracking URL
+    can't bloat the coach card.
+    """
+    if len(url) <= _MAX_URL_DISPLAY_CHARS:
+        return url
+    return url[: _MAX_URL_DISPLAY_CHARS - 1].rstrip() + "…"
+
+
 def _collect_toolchain_hints(text: str) -> set[str]:
     """Return catalog ``entry_id`` slugs hinted at by *text*.
 
@@ -995,6 +1064,14 @@ def _detect_coaching_triggers(
     (typically loaded via :func:`_load_installed_entry_ids`); when
     absent the missing-toolchain detection is a no-op so unit tests can
     drive the function without a PG round-trip.
+
+    W16.1 — also emits one ``url_in_message:<url>`` trigger per distinct
+    ``http(s)://`` URL pasted into ``command``. The coach uses the
+    triggers to surface the W11/W12/W13 capability menu (clone / brand
+    extract / screenshot / skip) so the operator never has to remember
+    a slash command. Per-URL suppress is honoured so a dismissed URL
+    won't re-coach the operator on every INVOKE press in the same
+    session.
     """
     triggers: list[str] = []
     if (not state["agents"] and not state["tasks"]
@@ -1008,6 +1085,18 @@ def _detect_coaching_triggers(
         pass
     if pending_count > 0 and "stale_pep" not in suppress:
         triggers.append("stale_pep")
+
+    # W16.1 — URL coaching trigger. Detected only on the live INVOKE
+    # ``command`` (operator's most recent intent). Backlog task text
+    # already gets the missing-toolchain coach; pasting URLs inside an
+    # *old* task description is a low-signal trigger and would cause
+    # the coach to keep nudging "do you want to clone X?" forever, so
+    # we deliberately scope the URL scan to the freshly typed command.
+    for url in _detect_urls_in_text(command):
+        key = f"url_in_message:{url}"
+        if key in suppress:
+            continue
+        triggers.append(key)
 
     # BS.10.1 — missing toolchain detection. ``installed_entries`` is
     # supplied by the caller (the INVOKE endpoint pre-loads it from
@@ -1432,10 +1521,12 @@ Triggers tell you what to coach about. Translate them to operator-facing languag
 - empty_workspace: 0 agents / 0 tasks. Suggest: ` + AGENT ` button, `/help`, `/tour`, or "tell me what you're building and I'll route it".
 - stale_pep:N: there are N PEP HOLD decisions waiting from earlier. Suggest: review them via the bottom-right toasts (each has a WHY? button now), or APPROVE / REJECT in bulk.
 - missing_toolchain:<entry-id>: the operator's INVOKE command (and/or the backlog tasks they queued) will need a vendor toolchain that this machine has not installed yet. The context block hands you the human display name (e.g. "Android SDK Platform Tools", "ESP-IDF v5", "Node.js LTS 20", "Python toolchain (uv)", "ARM GNU Toolchain 13"), a one-line hint about what the toolchain is for, and a one-click install URL of shape `/settings/platforms?entry=<entry-id>`. Surface each missing toolchain as its own bullet, render the install URL as a markdown link with a bilingual action label like `[安裝 / Install](url)` so a CJK or English operator both see a clear CTA, and ALWAYS use the display name — never paste the slug verbatim.
+- url_in_message:<url>: the operator pasted a URL into the chat. Ask which of the W11/W12/W13 capabilities they want to apply: clone the site (`/clone <url>`, builds a working scaffold from the live page), extract its brand style (`/brand <url>`, captures colours / fonts / spacing tokens for reuse), capture multi-breakpoint screenshots (`/screenshot <url>`, 320 / 768 / 1280 / 1920 PNGs into `.omnisight/`), or skip if the URL is just FYI. Render each option as its own bullet with a bilingual label and a backtick-wrapped slash command (e.g. `(a) 克隆網站 / Clone: /clone https://…`). Show the full URL in each command — operators copy-paste the bullet into the chat. Multiple URLs in one message → one option-set per URL, grouped under a "URL #N: <url>" sub-heading.
 
 Trigger priority when several co-fire:
 - `missing_toolchain` always leads. The operator already declared intent by typing the command, so install-first-then-run is the productive path; SKIP the `empty_workspace` framing entirely whenever any `missing_toolchain` is present.
 - If `stale_pep` co-fires with `missing_toolchain`, mention pending PEPs as ONE short reminder line at the end (not a full sub-list) — the toolchain install is the headline.
+- `url_in_message` lands BETWEEN `missing_toolchain` and `empty_workspace`: when a URL is present and no toolchain is missing, lead with the URL menu (the operator declared intent — pick a capability for the URL); SKIP the `empty_workspace` framing in that case for the same reason missing-toolchain skips it. If both `missing_toolchain` AND `url_in_message` co-fire, the toolchain install still leads (cannot run any of the W11/W12/W13 capabilities without it) — append the URL menu as a secondary section after the install link.
 - When only `empty_workspace` and `stale_pep` co-fire, lead with the PEP queue (it's already-started work) and offer the empty-workspace prompts as the secondary nudge.
 
 Match the operator's recent message language (CJK or English; default CJK if no recent operator messages). Do not apologise, do not over-explain, do not repeat what's already in the toast — your job is meta-narration + action prompts. Keep total length under 6 lines."""
@@ -1453,6 +1544,13 @@ def _build_coach_context(triggers: list[str], pending_count: int) -> str:
     back to the slug as both name and hint — the module-import-time
     drift assert at the bottom of this file pushes that case to CI red,
     so reaching it in prod implies an emergency hotfix.
+
+    W16.1 — ``url_in_message:<url>`` triggers carry the raw URL plus the
+    full slash-command set the operator can run against it (clone /
+    brand / screenshot), pre-rendered so the LLM never has to invent the
+    syntax. Display URL is truncated to ``_MAX_URL_DISPLAY_CHARS`` for
+    the coach card; the slash commands always use the full URL because
+    a truncated URL would 4xx the W11/W12/W13 routers.
     """
     parts = ["Triggers detected by the planner:"]
     for t in triggers:
@@ -1472,6 +1570,16 @@ def _build_coach_context(triggers: list[str], pending_count: int) -> str:
                 f"- missing_toolchain: operator's queued work needs "
                 f"**{name}** ({hint}); not installed on this machine. "
                 f"One-click install URL: {url}"
+            )
+        elif t.startswith("url_in_message:"):
+            url = t.split(":", 1)[1]
+            display = _truncate_url_for_display(url)
+            parts.append(
+                f"- url_in_message: operator pasted **{display}** — "
+                f"available capabilities: clone (`/clone {url}`), "
+                f"brand-style extract (`/brand {url}`), "
+                f"multi-breakpoint screenshot (`/screenshot {url}`), "
+                "or skip if FYI."
             )
         else:
             parts.append(f"- {t}")
@@ -1535,6 +1643,78 @@ def _missing_toolchain_slugs(triggers: list[str]) -> list[str]:
     return out
 
 
+def _url_in_message_urls(triggers: list[str]) -> list[str]:
+    """Extract pasted URLs from ``url_in_message:<url>`` triggers.
+
+    W16.1 sibling of :func:`_missing_toolchain_slugs`. Order is preserved
+    so the rendered coach card walks the URLs in the same order the
+    operator pasted them — keeps the deterministic-rendering invariant
+    that the BS.10.5 / W16.1 contract tests assert on.
+    """
+    out: list[str] = []
+    for t in triggers:
+        if not t.startswith("url_in_message:"):
+            continue
+        url = t.split(":", 1)[1]
+        if url:
+            out.append(url)
+    return out
+
+
+def _render_url_options_block(urls: list[str], *, single_url_intro: bool) -> list[str]:
+    """W16.1 — render the four-option menu (clone / brand / screenshot /
+    skip) for one or many pasted URLs.
+
+    Caller controls the headline:
+      * ``single_url_intro=True`` — render the 1-of-1 intro line + 4
+        bullets directly. Used when the URL menu is the leading section
+        of the coach card.
+      * ``single_url_intro=False`` — emit a "URL #N: <url>" sub-heading
+        per URL with the 4 options nested underneath, used when more
+        than one URL co-fires or when the menu is appended after another
+        leading section (e.g. missing_toolchain).
+
+    Bilingual labels (CJK headline + English action) so a single coach
+    card serves both audiences without doubling the line count.
+    """
+    lines: list[str] = []
+    if single_url_intro and len(urls) == 1:
+        url = urls[0]
+        display = _truncate_url_for_display(url)
+        lines.append(
+            f"看到你貼了一個網址 **{display}** — 想用 OmniSight 做什麼？"
+        )
+        lines.extend(_render_url_action_bullets(url))
+        return lines
+    # Multi-URL or appended-section path → group each URL under its own
+    # sub-heading so the operator can scan-and-pick.
+    if len(urls) > 1:
+        lines.append(
+            f"看到你貼了 {len(urls)} 個網址 — 每個都可以選一個動作："
+        )
+    for idx, url in enumerate(urls, start=1):
+        display = _truncate_url_for_display(url)
+        prefix = f"URL #{idx}: " if len(urls) > 1 else ""
+        lines.append(f"**{prefix}{display}**")
+        lines.extend(_render_url_action_bullets(url))
+    return lines
+
+
+def _render_url_action_bullets(url: str) -> list[str]:
+    """The four canonical W16.1 options for a single URL.
+
+    Kept as a tiny helper so :func:`_render_url_options_block` can reuse
+    the bullet shape across the single-URL and multi-URL paths without
+    drift.
+    """
+    return [
+        f"- **(a) 克隆網站 / Clone**: `/clone {url}`",
+        f"- **(b) 抽取品牌風格 / Extract brand**: `/brand {url}`",
+        f"- **(c) 多斷點截圖 / Screenshot**: `/screenshot {url}`",
+        "- **(d) 不用 / Skip**: 忽略這條 — 我繼續用你原本的訊息走 routing",
+    ]
+
+
 def _toolchain_install_url(slug: str) -> str:
     """BS.10.4 deeplink — `Settings → Platforms` with the ``entry`` query
     param pre-filled. Slug is locked to ``_TOOLCHAIN_KEYWORD_MAP`` keys
@@ -1561,10 +1741,20 @@ def _build_templated_coach_message(
     ``empty_workspace`` / ``stale_pep`` branches because a toolchain gap
     is the most specific blocker in front of the operator's intended
     work — install-first-then-run is the productive path.
+
+    W16.1 — recognises ``url_in_message:<url>`` triggers and emits the
+    four-option menu (clone / brand / screenshot / skip) per URL. The
+    URL menu sits between ``missing_toolchain`` and ``empty_workspace``
+    in priority: when it's the only intent signal, it leads (the
+    operator declared intent by pasting); when ``missing_toolchain``
+    co-fires, the install link still leads and the URL menu is appended
+    as a secondary section (you cannot run any of the W11/W12/W13
+    capabilities without the toolchain installed).
     """
     has_empty = "empty_workspace" in triggers
     has_pep = "stale_pep" in triggers
     missing_slugs = _missing_toolchain_slugs(triggers)
+    urls = _url_in_message_urls(triggers)
     lines: list[str] = []
     if missing_slugs:
         # Banner phrasing differs slightly for single vs many — a 1-of-1
@@ -1593,6 +1783,25 @@ def _build_templated_coach_message(
                     f"- {name} ({hint}): "
                     f"[安裝 / Install]({_toolchain_install_url(slug)})"
                 )
+        if urls:
+            # Toolchain install leads, URL menu trails as a secondary
+            # section so the operator sees the binding constraint first
+            # but still has the W11/W12/W13 menu available for after the
+            # install completes.
+            lines.append(
+                "裝完 toolchain 之後，你貼的網址也可以直接拿來用："
+            )
+            lines.extend(_render_url_options_block(urls, single_url_intro=False))
+        if has_pep:
+            lines.append(
+                f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
+                "決定等你 APPROVE / REJECT"
+            )
+    elif urls:
+        # URL menu leads (operator declared intent by pasting). Skip the
+        # empty_workspace framing for the same reason missing_toolchain
+        # skips it — pasting a URL is itself "tell me what to do next".
+        lines.extend(_render_url_options_block(urls, single_url_intro=True))
         if has_pep:
             lines.append(
                 f"- 順帶提醒：右下角還有 {pending_count} 個 PEP HOLD "
@@ -1720,7 +1929,9 @@ async def invoke_stream(
     trigger keys the frontend has already shown the operator this
     session (tracked in sessionStorage). Planner skips coaching for
     those triggers so the operator isn't re-coached on every INVOKE
-    press. Recognised keys: ``empty_workspace`` / ``stale_pep``.
+    press. Recognised keys: ``empty_workspace`` / ``stale_pep`` /
+    ``missing_toolchain:<slug>`` (BS.10.1) / ``url_in_message:<url>``
+    (W16.1, per-URL dismissal so re-pasting a fresh URL still coaches).
     """
     suppress_set: frozenset[str] = frozenset(
         t.strip() for t in (suppress_coach or "").split(",") if t.strip()
