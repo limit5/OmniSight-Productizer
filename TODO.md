@@ -130,7 +130,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.A — 4 Templates + Cognitive Load Scanner（~1.5-2 週）
 > 純 additive，零衝突；Blueprint 主線開頭
-- [ ] BP.A.1 `backend/templates/spec.py` — Pydantic SpecTemplate (system_boundaries / hardware_constraints / api_idl_schema / bdd_executable_specs / edge_cases_handled ≥ 3)
+- [x] BP.A.1 `backend/templates/spec.py` — Pydantic SpecTemplate (system_boundaries / hardware_constraints / api_idl_schema / bdd_executable_specs / edge_cases_handled ≥ 3) *(done 2026-05-03: `backend/templates/spec.py` ships frozen Pydantic-v2 model with `extra="forbid"` + `str_strip_whitespace`, schema_version pinned to `Literal["1.0.0"]`, all three list fields enforced ≥ 3 via `min_length`, both string fields require non-empty; 15-test contract suite `backend/tests/test_template_spec.py` 15/15 green in 0.11s. Production status: dev-only — pure additive Pydantic class with zero module-global state, cross-worker safe by construction; no migration / no env knob / no image rebuild needed. BP.A.7 will fold a superset of these checks into the unified ~150-test suite.)*
 - [ ] BP.A.2 `backend/templates/task.py` — Pydantic TaskTemplate (target_triple / allowed_dependencies / max_cognitive_load_tokens / guild_id / size)
 - [ ] BP.A.3 `backend/templates/impl.py` — Pydantic ImplTemplate (source_code_payload / compiled_exit_code / time_complexity / target_triple)
 - [ ] BP.A.4 `backend/templates/review.py` — Pydantic ReviewTemplate（強制 audit_type="advisory" + requires_human_signoff=true 的 Auxiliary disclaimer）
