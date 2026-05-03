@@ -18,13 +18,12 @@ This file owns the two "belt and braces" regression tests named in
   ``broadcast_scope="user"`` event addressed to user ``u1``, and
   asserts that subscriber ``u2`` never sees the frame. The assertion
   is the actual security contract (the lint above is the proxy).
-  Today the test is marked ``xfail(strict=True)`` — ``_deliver_local``
-  currently only enforces ``"tenant"`` filtering (``backend/events.py``
-  line ~161), so the frame leaks across users at the bus layer. When
-  §4.2 of the scope policy lands and the user filter starts dropping
-  cross-user frames, this test will XPASS; strict-mode then forces the
-  maintainer to strip the xfail marker, promoting the contract to a
-  hard gate.
+  As of FX.1.16 (2026-05-04) §4.2 of the scope policy has landed:
+  ``EventBus.subscribe(user_id=...)`` is now accepted and
+  ``EventBus._deliver_local`` drops ``broadcast_scope="user"`` frames
+  whose ``user_id`` does not match the subscriber. This test is the
+  hard contract gate for that behaviour — any regression that leaks
+  cross-user user-scoped frames flips this test red.
 
 References:
 * ``docs/design/sse-event-scope-policy.md`` §4.3 — normative spec.
@@ -42,8 +41,6 @@ from __future__ import annotations
 import ast
 import json
 import pathlib
-
-import pytest
 
 
 # ─── Shared: the 26 emit_* helpers under Q.4 enforcement ─────────────
@@ -326,28 +323,16 @@ def test_event_scope_baseline_entries_are_canonical():
 # Test 2 — Cross-user delivery isolation
 # ─────────────────────────────────────────────────────────────────────
 
-# Strict xfail: the assertion below is the Q.4 §4.3 security contract
-# for user-scoped SSE delivery. Today `EventBus._deliver_local` only
-# enforces the "tenant" filter (events.py:161), so a `broadcast_scope=
-# "user"` frame addressed to u1 is still fanned out to u2's SSE queue.
-# Once §4.2 lands — `subscribe(user_id=...)` + a user filter mirroring
-# the tenant one — this test flips to XPASS, strict-mode turns the
-# suite red, and the maintainer must remove the xfail marker as the
-# final step of that landing. That flip is the whole point of the
-# regression guard: it promotes the contract to a hard gate at exactly
-# the right moment.
+# FX.1.16 (2026-05-04): the previous ``xfail(strict=True)`` was promoted
+# to a hard assertion once §4.2 of docs/design/sse-event-scope-policy.md
+# landed: ``EventBus.subscribe(user_id=...)`` now records the
+# subscriber's user identity and ``EventBus._deliver_local`` drops
+# ``broadcast_scope="user"`` frames whose ``user_id`` doesn't match.
+# This test is the hard security gate for that behaviour — any
+# regression that leaks user-scoped frames across users will flip it
+# red on the first pytest run.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "_deliver_local() currently only filters 'tenant'; user-scoped "
-        "frames still leak to every subscriber. Remove this marker when "
-        "§4.2 of docs/design/sse-event-scope-policy.md lands "
-        "(subscribe(user_id=...) + matching user filter in "
-        "EventBus._deliver_local)."
-    ),
-)
 def test_user_scope_does_not_leak_across_users():
     """User ``u1``'s event must not be delivered to user ``u2``'s SSE.
 

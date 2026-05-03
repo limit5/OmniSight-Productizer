@@ -132,13 +132,48 @@ class EventBus:
     """
 
     def __init__(self) -> None:
-        self._subscribers: dict[asyncio.Queue, str | None] = {}
+        # Value is a ``(tenant_id, user_id)`` tuple; either component may
+        # be ``None`` meaning "subscriber doesn't filter on that axis".
+        self._subscribers: dict[asyncio.Queue, tuple[str | None, str | None]] = {}
         self._dropped_events: int = 0  # backpressure telemetry
         self._worker_id = f"w-{id(self):x}"
 
-    def subscribe(self, tenant_id: str | None = None) -> asyncio.Queue:
+    @staticmethod
+    def _normalise_sub_info(
+        info: object,
+    ) -> tuple[str | None, str | None]:
+        """Tolerate legacy direct-mutation shapes (``None`` / bare
+        tenant string) so out-of-tree pokers of ``bus._subscribers``
+        don't crash the filter loop. Internal :meth:`subscribe`
+        always stores the canonical 2-tuple."""
+        if info is None:
+            return (None, None)
+        if isinstance(info, str):
+            return (info, None)
+        if isinstance(info, tuple):
+            t = info[0] if len(info) > 0 else None
+            u = info[1] if len(info) > 1 else None
+            return (t, u)
+        return (None, None)
+
+    def subscribe(self, tenant_id: str | None = None,
+                  user_id: str | None = None) -> asyncio.Queue:
+        """Register a new SSE subscriber.
+
+        ``tenant_id`` and ``user_id`` are the subscriber's identity
+        used by :meth:`_deliver_local` to drop frames that don't
+        belong to this connection (per the SSE scope policy in
+        ``docs/design/sse-event-scope-policy.md`` §4.2).
+
+        ``user_id=None`` means "no user filter" — used by tests and
+        admin-style listeners that want to see every frame on the
+        bus. Production ``/events`` connections should always pass
+        the authenticated user's id so cross-user user-scoped frames
+        are dropped at the bus layer rather than relying on advisory
+        frontend filtering.
+        """
         q: asyncio.Queue = asyncio.Queue(maxsize=1000)
-        self._subscribers[q] = tenant_id
+        self._subscribers[q] = (tenant_id, user_id)
         try:
             from backend import metrics as _m
             _m.sse_subscribers.set(len(self._subscribers))
@@ -156,13 +191,37 @@ class EventBus:
 
     def _deliver_local(self, event: str, data_json: str,
                        broadcast_scope: str = "global",
-                       tenant_id: str | None = None) -> None:
-        """Fan out a pre-serialised event to this worker's SSE subscribers."""
+                       tenant_id: str | None = None,
+                       user_id: str | None = None) -> None:
+        """Fan out a pre-serialised event to this worker's SSE subscribers.
+
+        Filtering rules (first matching skip wins):
+
+        * ``broadcast_scope == "tenant"``: drop subscribers on a
+          different ``tenant_id`` (longstanding behaviour, §4.2 of
+          the scope policy).
+        * ``broadcast_scope == "user"``: drop subscribers whose
+          ``user_id`` differs from the frame's. Both sides must have
+          a non-empty user id for the filter to engage — a subscriber
+          that did not supply ``user_id=`` opts out of user filtering
+          (admin / test listener), and a frame published without
+          ``user_id=`` cannot be routed to a single user so it falls
+          back to the tenant-fan-out behaviour. As a belt-and-braces
+          safeguard, when both sides also have a tenant_id we still
+          enforce tenant equality on user-scoped frames so a
+          mis-tagged user id can't leak across tenants.
+        """
         msg = {"event": event, "data": data_json}
         dead: list[asyncio.Queue] = []
-        for q, sub_tenant in list(self._subscribers.items()):
+        for q, sub_info in list(self._subscribers.items()):
+            sub_tenant, sub_user = self._normalise_sub_info(sub_info)
             if broadcast_scope == "tenant" and tenant_id and sub_tenant and sub_tenant != tenant_id:
                 continue
+            if broadcast_scope == "user":
+                if user_id and sub_user and sub_user != user_id:
+                    continue
+                if tenant_id and sub_tenant and sub_tenant != tenant_id:
+                    continue
             try:
                 q.put_nowait(msg)
             except asyncio.QueueFull:
@@ -183,11 +242,29 @@ class EventBus:
     def publish(self, event: str, data: dict[str, Any],
                 session_id: str | None = None,
                 broadcast_scope: str = "global",
-                tenant_id: str | None = None) -> None:
+                tenant_id: str | None = None,
+                user_id: str | None = None) -> None:
+        """Publish a frame.
+
+        ``user_id`` is the routing key for ``broadcast_scope="user"``
+        frames; passing it threads through ``_deliver_local`` so
+        subscribers tagged with a different user are skipped. When
+        the caller doesn't pass it explicitly we best-effort lift
+        ``data["user_id"]`` so existing emit_* helpers (which already
+        carry user_id in the payload) gain bus-layer filtering for
+        free without each helper having to be touched. The payload
+        also gains a ``_user_id`` system field mirroring ``_tenant_id``
+        / ``_session_id`` for client-side audit.
+        """
+        if user_id is None:
+            payload_user = data.get("user_id")
+            if isinstance(payload_user, str) and payload_user:
+                user_id = payload_user
         data.setdefault("timestamp", datetime.now().isoformat())
         data["_session_id"] = session_id or ""
         data["_broadcast_scope"] = broadcast_scope
         data["_tenant_id"] = tenant_id or ""
+        data["_user_id"] = user_id or ""
         data_json = json.dumps(data)
 
         # I10: try cross-worker delivery via Redis Pub/Sub
@@ -199,13 +276,14 @@ class EventBus:
                 "data_json": data_json,
                 "broadcast_scope": broadcast_scope,
                 "tenant_id": tenant_id or "",
+                "user_id": user_id or "",
                 "origin_worker": self._worker_id,
             })
         except Exception:
             pass
 
         if not cross_worker:
-            self._deliver_local(event, data_json, broadcast_scope, tenant_id)
+            self._deliver_local(event, data_json, broadcast_scope, tenant_id, user_id)
 
         # Persist important events asynchronously
         if event in _PERSIST_EVENT_TYPES:
@@ -259,6 +337,7 @@ def _on_cross_worker_event(event: str, data: dict) -> None:
         data.get("data_json", "{}"),
         data.get("broadcast_scope", "global"),
         data.get("tenant_id") or None,
+        data.get("user_id") or None,
     )
 
 

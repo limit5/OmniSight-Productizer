@@ -71,12 +71,19 @@ async def event_stream(request: Request):
     without buffering.
     """
     tenant_id = _get_tenant_id()
-    queue = bus.subscribe(tenant_id=tenant_id)
 
     # Q.5 #299: record heartbeat on SSE connect + every heartbeat tick
     # so the presence endpoint can surface the user's active devices.
     # Best-effort — any failure here must not disrupt the stream.
     presence = await _resolve_presence(request)
+    # FX.1.16: thread the authenticated user_id into bus.subscribe so
+    # ``broadcast_scope="user"`` frames meant for someone else are
+    # dropped at the bus layer (per docs/design/sse-event-scope-policy.md
+    # §4.2). Anonymous / open-mode connections (no session cookie) get
+    # ``user_id=None`` and continue to receive every frame, preserving
+    # the legacy admin/test-listener behaviour.
+    sub_user_id: str | None = presence[0] if presence is not None else None
+    queue = bus.subscribe(tenant_id=tenant_id, user_id=sub_user_id)
     if presence is not None:
         try:
             from backend.shared_state import session_presence

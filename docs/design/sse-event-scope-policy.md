@@ -228,18 +228,29 @@ per-worker** (SOP Step 1 module-global audit answer #3): the reminder
 is diagnostic, not correctness-critical, and a missing-scope helper
 in one worker does not suppress the warning in another.
 
-### 4.2 Scope-filter enforcement (pending — Q.4 remaining work)
+### 4.2 Scope-filter enforcement (done — FX.1.16 / 2026-05-04)
 
-`EventBus._deliver_local` (`events.py`) currently enforces only the
-`"tenant"` filter; `"user"` and `"session"` are payload-only. The
-Q.4 sweep must extend the filter to drop frames whose
-`_broadcast_scope="user"` and `data._user_id` does not match the
-subscriber, and analogously for `"session"`. Until that lands the
-policy is declarative — it still reduces leaks once the `test_user_
-scope_does_not_leak_across_users` assertion (§4.3) forces the
-behaviour.
+`EventBus.subscribe(...)` now accepts `user_id=`, `EventBus.publish(...)`
+threads a `user_id=` (auto-lifted from `data["user_id"]` when not
+passed explicitly), and `EventBus._deliver_local` drops frames where
+`broadcast_scope="user"` and `frame.user_id != subscriber.user_id`.
+A belt-and-braces tenant check on user-scoped frames also rejects a
+mis-tagged user id from leaking across tenants. The cross-worker
+Pub/Sub envelope was extended with the same `user_id` field so the
+filter is consistent regardless of which worker materialised the
+delivery. The `/events` SSE endpoint now passes the authenticated
+user's id into `bus.subscribe`, so production connections enforce the
+filter without each emit_* helper having to be touched. Subscribers
+that don't pass `user_id=` (admin / test listeners / anonymous SSE)
+opt out of user filtering and continue to receive every frame —
+backwards-compatible with pre-FX.1.16 callers.
 
-### 4.3 Regression guards (pending — checkbox 4)
+`"session"` filtering is still payload-only and remains tracked under
+the next sweep round; the high-value contract (cross-user leakage of
+chat / notification / preferences / new-device-login frames) is now
+enforced.
+
+### 4.3 Regression guards (done — checkbox 4)
 
 Two tests, one belt and one braces:
 
@@ -251,7 +262,9 @@ Two tests, one belt and one braces:
   SSE subscribers with different `user_id`s (same tenant), publishes
   `broadcast_scope="user"` with `_user_id="u1"`, asserts subscriber
   `u1` receives and subscriber `u2` does not. Braces: this is the
-  actual security boundary; the lint is a proxy.
+  actual security boundary; the lint is a proxy. As of FX.1.16 this
+  test runs as a hard assertion (the prior `xfail(strict=True)` was
+  promoted to an unconditional `assert` once §4.2 enforcement landed).
 
 Both tests live in `backend/tests/` and run in the default `pytest`
 invocation — no opt-in gate.

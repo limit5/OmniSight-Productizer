@@ -122,7 +122,7 @@ def test_outbound_emits_sse_event(fake_discord):
             import json
             received.append((msg["event"], json.loads(msg["data"])))
 
-    events.bus._subscribers[_Q()] = None  # type: ignore[assignment]
+    events.bus._subscribers[_Q()] = (None, None)  # type: ignore[assignment]
     try:
         async def _go():
             await bridge.send_interactive("discord", "hi")
