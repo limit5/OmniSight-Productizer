@@ -7,12 +7,17 @@ SC.1 SAST, SC.3 SCA, and SC.4 container test shape.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
+from backend import workspace as workspace_mod
 from backend.security_scanning import (
     SecretFinding,
     SecretScanReport,
@@ -51,6 +56,26 @@ _TRUFFLEHOG_PAYLOAD = {
     "Raw": "AKIAIOSFODNN7EXAMPLE",
     "Redacted": "AKIAIOSF********AMPLE",
 }
+
+
+def _git(*args: str, cwd: Path) -> str:
+    return subprocess.check_output(
+        ["git", *args],
+        cwd=str(cwd),
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+
+
+def _init_git_repo(path: Path) -> Path:
+    path.mkdir()
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("config", "user.email", "secret-test@example.com", cwd=path)
+    _git("config", "user.name", "secret-test", cwd=path)
+    (path / "app.py").write_text("print('hello')\n")
+    _git("add", "app.py", cwd=path)
+    _git("commit", "-q", "-m", "initial", cwd=path)
+    return path
 
 
 class TestSecretSeverity:
@@ -255,3 +280,99 @@ class TestSecretScanCli:
         assert payload["passed"] is False
         assert "unknown scanner" in payload["error"]
         assert proc.returncode == 1
+
+
+class TestSecretPreCommitHook:
+    @staticmethod
+    def _stub_workspace_events(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(workspace_mod, "emit_pipeline_phase", lambda *a, **k: None)
+        monkeypatch.setattr(workspace_mod, "emit_workspace", lambda *a, **k: None)
+        monkeypatch.setattr(workspace_mod, "emit_agent_update", lambda *a, **k: None)
+
+    def test_workspace_provision_installs_pre_commit_hook(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        self._stub_workspace_events(monkeypatch)
+        source = _init_git_repo(tmp_path / "source")
+        ws_root = tmp_path / "ws-root"
+        ws_root.mkdir()
+        monkeypatch.setattr(workspace_mod, "_WORKSPACES_ROOT", ws_root, raising=True)
+        info = asyncio.run(
+            workspace_mod.provision(
+                agent_id="agent-secret-hook",
+                task_id="SC.5.2",
+                remote_url=str(source),
+            )
+        )
+        try:
+            hook = Path(
+                _git("rev-parse", "--git-path", "hooks/pre-commit", cwd=info.path)
+            )
+            if not hook.is_absolute():
+                hook = info.path / hook
+            text = hook.read_text()
+
+            assert hook.exists()
+            assert "backend.security_scanning.secrets" in text
+            assert "--app-path \"$PWD\"" in text
+        finally:
+            asyncio.run(workspace_mod.cleanup("agent-secret-hook"))
+
+    def test_pre_commit_hook_blocks_detected_secret(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        self._stub_workspace_events(monkeypatch)
+        source = _init_git_repo(tmp_path / "source")
+        ws_root = tmp_path / "ws-root"
+        ws_root.mkdir()
+        monkeypatch.setattr(workspace_mod, "_WORKSPACES_ROOT", ws_root, raising=True)
+        info = asyncio.run(
+            workspace_mod.provision(
+                agent_id="agent-secret-block",
+                task_id="SC.5.2",
+                remote_url=str(source),
+            )
+        )
+        try:
+            fake_bin = tmp_path / "bin"
+            fake_bin.mkdir()
+            gitleaks = fake_bin / "gitleaks"
+            gitleaks.write_text(
+                "#!/bin/sh\n"
+                "report=\"\"\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    --report-path) shift; report=\"$1\" ;;\n"
+                "  esac\n"
+                "  shift || true\n"
+                "done\n"
+                "printf '%s' '[{\"RuleID\":\"generic-api-key\","
+                "\"File\":\"app.py\",\"StartLine\":1,"
+                "\"Secret\":\"super-secret-token\"}]' > \"$report\"\n"
+                "exit 1\n"
+            )
+            gitleaks.chmod(0o755)
+            monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+            (info.path / "app.py").write_text("print('secret hook')\n")
+            _git("add", "app.py", cwd=info.path)
+            proc = subprocess.run(
+                ["git", "commit", "-m", "blocked secret"],
+                cwd=info.path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            assert proc.returncode != 0
+            assert "OmniSight secret scan blocked this commit." in proc.stderr
+            assert (
+                _git("rev-parse", "--verify", "HEAD", cwd=info.path)
+                == info.anchor_sha
+            )
+        finally:
+            asyncio.run(workspace_mod.cleanup("agent-secret-block"))
