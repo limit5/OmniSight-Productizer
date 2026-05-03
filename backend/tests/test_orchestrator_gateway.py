@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,11 +26,13 @@ from backend.dag_schema import DAG, Task
 from backend.orchestrator_gateway import (
     IntakeError,
     IntakeRejectReason,
+    PushedCard,
     build_catcs_from_dag,
     check_impact_scope_intersect,
     complexity_score,
     parse_jira_webhook,
 )
+from backend.queue_backend import PriorityLevel
 from backend.security.llm_firewall import FirewallResult
 
 
@@ -93,6 +96,17 @@ def _deterministic_split(dag: DAG, tokens: int = 100):
         d = dag.model_copy(update={"dag_id": ticket})
         return (d.model_dump_json(), tokens)
     return _fn
+
+
+def _pushed_card(task_id: str = "task-A") -> PushedCard:
+    return PushedCard(
+        task_id=task_id,
+        message_id=f"msg-{task_id}",
+        jira_subtask="PROJ-1001",
+        priority=PriorityLevel.P2,
+        allowed=["src/**"],
+        forbidden=[],
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -161,6 +175,76 @@ class TestBuildCatcs:
         )
         for c in cards:
             assert "test_assets/**" in c.navigation.impact_scope.forbidden
+
+
+class TestGerritStatus:
+    def test_unknown_bridge_record_returns_not_linked(self):
+        status = og._gerrit_status_from_o6_o7("PROJ-1", _pushed_card())
+        assert status == {
+            "status": "not_linked",
+            "change_id": None,
+            "review_url": "",
+            "patchset": None,
+            "ai_vote": 0,
+            "human_vote": 0,
+            "both_plus_2": False,
+        }
+
+    def test_awaiting_human_plus_two_reads_o6_o7_registry(self, monkeypatch):
+        from backend import orchestration_observability as obs
+        from backend.intent_source import IntentStatus
+
+        obs.reset_awaiting_for_tests()
+        try:
+            record = SimpleNamespace(
+                task_to_subtask={"task-A": "PROJ-1001"},
+                gerrit_change_for={"PROJ-1001": "Iabc123"},
+                subtask_status={"PROJ-1001": IntentStatus.reviewing},
+            )
+            monkeypatch.setattr(
+                "backend.intent_bridge.get_record",
+                lambda parent: record if parent == "PROJ-1" else None,
+            )
+            obs.register_awaiting_human(
+                change_id="Iabc123",
+                project="omnisight",
+                file_path="src/a.py",
+                merger_confidence=0.91,
+                review_url="https://gerrit/c/123",
+                push_sha="deadbeef",
+            )
+
+            status = og._gerrit_status_from_o6_o7("PROJ-1", _pushed_card())
+        finally:
+            obs.reset_awaiting_for_tests()
+
+        assert status["status"] == "awaiting_human_plus_two"
+        assert status["change_id"] == "Iabc123"
+        assert status["review_url"] == "https://gerrit/c/123"
+        assert status["patchset"] == "deadbeef"
+        assert status["ai_vote"] == 2
+        assert status["human_vote"] == 0
+        assert status["both_plus_2"] is False
+
+    def test_submitted_subtask_reports_dual_plus_two(self, monkeypatch):
+        from backend.intent_source import IntentStatus
+
+        record = SimpleNamespace(
+            task_to_subtask={"task-A": "PROJ-1001"},
+            gerrit_change_for={"PROJ-1001": "Iabc123"},
+            subtask_status={"PROJ-1001": IntentStatus.done},
+        )
+        monkeypatch.setattr(
+            "backend.intent_bridge.get_record",
+            lambda parent: record if parent == "PROJ-1" else None,
+        )
+
+        status = og._gerrit_status_from_o6_o7("PROJ-1", _pushed_card())
+        assert status["status"] == "submitted"
+        assert status["change_id"] == "Iabc123"
+        assert status["ai_vote"] == 2
+        assert status["human_vote"] == 2
+        assert status["both_plus_2"] is True
 
 
 # ──────────────────────────────────────────────────────────────

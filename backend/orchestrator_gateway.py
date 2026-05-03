@@ -216,7 +216,12 @@ class IntakeSession:
     last_updated_at: float = 0.0
 
     def status_snapshot(self) -> dict[str, Any]:
-        """Build the GET /status response payload."""
+        """Build the GET /status response payload.
+
+        Gerrit status reads process-local O5/O6/O7 registries that are
+        updated by the same worker-side events as this in-memory session
+        registry; no new cross-worker mutable state is introduced here.
+        """
         cards_payload: list[dict[str, Any]] = []
         for c in self.cards:
             msg = queue_backend.get(c.message_id)
@@ -231,7 +236,7 @@ class IntakeSession:
                 "delivery_count": delivery,
                 "allowed": list(c.allowed),
                 "forbidden": list(c.forbidden),
-                "gerrit": _gerrit_status_stub(c.task_id),
+                "gerrit": _gerrit_status_from_o6_o7(self.jira_ticket, c),
             })
         return {
             "jira_ticket": self.jira_ticket,
@@ -958,23 +963,85 @@ def _err_to_dict(e: DagValError) -> dict[str, Any]:
     return {"rule": e.rule, "task_id": e.task_id, "message": e.message}
 
 
-def _gerrit_status_stub(task_id: str) -> dict[str, Any]:
-    """Placeholder for the Gerrit patchset/review status.  The real
-    lookup lands in O6 (Merger Agent) + O7 (submit-rule arbiter); this
-    module exposes the shape so the ``GET /status`` response is stable
-    across versions.
+def _gerrit_status_from_o6_o7(
+    jira_ticket: str,
+    card: PushedCard,
+) -> dict[str, Any]:
+    """Return the real known Gerrit status for one pushed CATC.
 
     Shape matches the design doc:
       * ``patchset`` — commit sha when the worker has pushed
       * ``ai_vote`` / ``human_vote`` — +2 votes from Merger + human
       * ``both_plus_2`` — True when submit-rule is satisfied
+
+    The source of truth is intentionally event-driven:
+      * O5 ``intent_bridge`` maps CATC task ids to tracker subtasks and
+        Gerrit change ids after workers push patchsets.
+      * O6/O7 ``orchestration_observability`` tracks changes where the
+        Merger Agent has cast +2 and the submit-rule is waiting for a
+        human +2.
+      * O5 marks the subtask ``done`` only after Gerrit confirms submit.
     """
-    return {
+    status: dict[str, Any] = {
+        "status": "not_linked",
+        "change_id": None,
+        "review_url": "",
         "patchset": None,
         "ai_vote": 0,
         "human_vote": 0,
         "both_plus_2": False,
     }
+
+    try:
+        from backend import intent_bridge
+        from backend.intent_source import IntentStatus
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        logger.debug("orchestrator gerrit status import failed: %s", exc)
+        return status
+
+    record = intent_bridge.get_record(jira_ticket)
+    if record is None:
+        return status
+
+    subtask = record.task_to_subtask.get(card.task_id) or card.jira_subtask
+    change_id = record.gerrit_change_for.get(subtask, "")
+    subtask_state = record.subtask_status.get(subtask)
+    if subtask_state is not None:
+        status["status"] = subtask_state.value
+    if not change_id:
+        return status
+
+    status["change_id"] = change_id
+    if subtask_state is IntentStatus.done:
+        status.update({
+            "status": "submitted",
+            "ai_vote": 2,
+            "human_vote": 2,
+            "both_plus_2": True,
+        })
+        return status
+
+    try:
+        from backend import orchestration_observability as obs
+        awaiting = {
+            entry.change_id: entry
+            for entry in obs.list_awaiting_human()
+        }
+    except Exception as exc:  # pragma: no cover - dashboard state best effort
+        logger.debug("orchestrator awaiting-human lookup failed: %s", exc)
+        awaiting = {}
+
+    entry = awaiting.get(change_id)
+    if entry is not None:
+        status.update({
+            "status": "awaiting_human_plus_two",
+            "review_url": entry.review_url,
+            "patchset": entry.push_sha or None,
+            "ai_vote": 2,
+            "human_vote": 0,
+            "both_plus_2": False,
+        })
+    return status
 
 
 async def _notify_intent_bridge_queued(session: IntakeSession,
