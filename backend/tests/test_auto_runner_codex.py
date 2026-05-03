@@ -356,5 +356,9 @@ def test_codex_runner_loads_AGENTS_and_coordination_paths(
     monkeypatch.setenv("OMNISIGHT_CODEX_TIER", "A")
     monkeypatch.setenv("OMNISIGHT_CODEX_WORKTREE", str(tmp_path))
     mod = _load_codex_runner()
-    assert mod.AGENTS_FILE.endswith("AGENTS.md")
-    assert mod.COORDINATION_FILE.endswith("coordination.md")
+    agents = Path(mod.AGENTS_FILE)
+    coordination = Path(mod.COORDINATION_FILE)
+    assert agents.name == "AGENTS.md"
+    assert "codex-cli" in agents.read_text(encoding="utf-8")
+    assert coordination.name == "coordination.md"
+    assert "Tier B" in coordination.read_text(encoding="utf-8")

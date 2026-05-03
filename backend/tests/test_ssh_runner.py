@@ -82,10 +82,34 @@ def sample_targets():
 #  Credential loading
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def test_get_ssh_targets_returns_list(monkeypatch):
-    monkeypatch.setattr(sr, "_load_ssh_credentials", lambda: [])
+def test_get_ssh_targets_returns_list(monkeypatch, tmp_path):
+    from backend.config import settings
+
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    creds = configs / "ssh_credentials.yaml"
+    creds.write_text(
+        "targets:\n"
+        "  - id: rk3588-real-file\n"
+        "    arch: aarch64\n"
+        "    os: linux\n"
+        "    host: 192.0.2.10\n"
+        "    port: 2222\n"
+        "    user: root\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "ssh_credentials_file", "")
+    monkeypatch.setattr(sr, "_PROJECT_ROOT", tmp_path)
     sr.clear_ssh_credential_cache()
-    assert sr.get_ssh_targets() == []
+    targets = sr.get_ssh_targets()
+    assert targets == [{
+        "id": "rk3588-real-file",
+        "arch": "aarch64",
+        "os": "linux",
+        "host": "192.0.2.10",
+        "port": 2222,
+        "user": "root",
+    }]
 
 
 def test_find_target_for_arch_matches(monkeypatch, sample_targets):

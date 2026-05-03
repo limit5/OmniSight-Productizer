@@ -446,6 +446,40 @@ async def test_dispatcher_poll_skips_in_progress_batches(fake_sleep):
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_stream_results_failure_notifies_callbacks(fake_sleep):
+    sdk_msgs = _StubMessages()
+    sdk_msgs.batches.next_create = [_StubBatch(id="b_1")]
+    sdk_msgs.batches.next_retrieve = [
+        _StubBatch(id="b_1", processing_status="ended",
+                   request_counts={"succeeded": 2, "errored": 0, "canceled": 0, "expired": 0})
+    ]
+
+    def raise_results(batch_id):  # noqa: ANN001, ARG001
+        raise RuntimeError("results stream unavailable")
+
+    sdk_msgs.batches.results = raise_results
+    bc = BatchClient(sdk_msgs, persistence=InMemoryBatchPersistence())
+    dispatcher = BatchDispatcher(bc, sleep=fake_sleep)
+
+    received: list[BatchResult] = []
+
+    async def cb(r: BatchResult) -> None:
+        received.append(r)
+
+    await dispatcher.enqueue(_task("t1", callback=cb))
+    await dispatcher.enqueue(_task("t2", callback=cb))
+
+    await _run_one_iter(dispatcher)
+
+    assert dispatcher.results_processed == 0
+    assert dispatcher.errors_encountered >= 1
+    assert len(dispatcher._active) == 0
+    assert {r.task_id for r in received} == {"t1", "t2"}
+    assert all(r.status == "errored" for r in received)
+    assert all(r.error == {"type": "stream_results_failed"} for r in received)
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_stats():
     sdk_msgs = _StubMessages()
     bc = BatchClient(sdk_msgs)

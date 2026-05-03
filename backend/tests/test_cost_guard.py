@@ -292,6 +292,32 @@ async def test_check_daily_cap_blocks():
 
 
 @pytest.mark.asyncio
+async def test_check_monthly_cap_blocks():
+    g = CostGuard()
+    await g.configure_budget(
+        ScopeKey(kind="priority", key="HD"),
+        monthly_limit_usd=1.0,
+    )
+    est1 = estimate_cost(
+        model="claude-sonnet-4-6",
+        input_tokens=100_000, output_tokens=10_000,
+        priority="HD",
+    )
+    await g.record_estimate(est1)
+    await g.record_actual(CostActual(call_id=est1.call_id, input_tokens=100_000,
+                                      output_tokens=10_000, cost_usd=0.5))
+
+    est2 = estimate_cost(
+        model="claude-sonnet-4-6",
+        input_tokens=200_000, output_tokens=10_000,
+        priority="HD",
+    )
+    result = await g.check(est2)
+    assert not result.allowed
+    assert any(a.period == "monthly" for a in result.triggered_alerts)
+
+
+@pytest.mark.asyncio
 async def test_check_warn_80_does_not_block():
     """80% trip fires warn but doesn't block submission."""
     g = CostGuard()
@@ -447,6 +473,38 @@ async def test_spend_matches_priority_scope():
     wp_total = await store.spend_in_period(ScopeKey("priority", "WP"), "daily")
     assert hd_total == pytest.approx(est_hd.cost_usd_estimated)
     assert wp_total == pytest.approx(est_wp.cost_usd_estimated)
+
+
+@pytest.mark.asyncio
+async def test_spend_matches_workspace_scope():
+    store = InMemoryCostStore()
+    g = CostGuard(store=store)
+    est_prod = estimate_cost(model="claude-sonnet-4-6", input_tokens=1_000_000, output_tokens=0,
+                             workspace="prod")
+    est_dev = estimate_cost(model="claude-sonnet-4-6", input_tokens=2_000_000, output_tokens=0,
+                            workspace="dev")
+    await g.record_estimate(est_prod)
+    await g.record_estimate(est_dev)
+    prod_total = await store.spend_in_period(ScopeKey("workspace", "prod"), "daily")
+    dev_total = await store.spend_in_period(ScopeKey("workspace", "dev"), "daily")
+    assert prod_total == pytest.approx(est_prod.cost_usd_estimated)
+    assert dev_total == pytest.approx(est_dev.cost_usd_estimated)
+
+
+@pytest.mark.asyncio
+async def test_spend_matches_task_type_scope():
+    store = InMemoryCostStore()
+    g = CostGuard(store=store)
+    est_parse = estimate_cost(model="claude-sonnet-4-6", input_tokens=1_000_000, output_tokens=0,
+                              task_type="hd_parse_kicad")
+    est_diff = estimate_cost(model="claude-sonnet-4-6", input_tokens=2_000_000, output_tokens=0,
+                             task_type="hd_diff")
+    await g.record_estimate(est_parse)
+    await g.record_estimate(est_diff)
+    parse_total = await store.spend_in_period(ScopeKey("task_type", "hd_parse_kicad"), "daily")
+    diff_total = await store.spend_in_period(ScopeKey("task_type", "hd_diff"), "daily")
+    assert parse_total == pytest.approx(est_parse.cost_usd_estimated)
+    assert diff_total == pytest.approx(est_diff.cost_usd_estimated)
 
 
 @pytest.mark.asyncio
