@@ -1,4 +1,4 @@
-"""SC.10.2 -- DSAR access endpoint contract."""
+"""SC.10.2 / SC.10.3 -- DSAR access and erasure endpoint contracts."""
 from __future__ import annotations
 
 import json
@@ -107,6 +107,26 @@ class _FakeConn:
         return "INSERT 0 1"
 
 
+class _FakeErasureConn:
+    def __init__(self):
+        self.statements: list[tuple[str, tuple]] = []
+        self.insert_args = None
+
+    def transaction(self):
+        return _FakeTx()
+
+    async def execute(self, sql: str, *args):
+        self.statements.append((sql, args))
+        if "INSERT INTO dsar_requests" in sql:
+            self.insert_args = args
+            return "INSERT 0 1"
+        if sql.startswith("UPDATE users SET"):
+            return "UPDATE 1"
+        if sql.startswith("UPDATE projects SET"):
+            return "UPDATE 1"
+        return "DELETE 1"
+
+
 async def test_access_handler_smoke_uses_pool_and_redacted_shape(monkeypatch):
     conn = _FakeConn()
     from backend import db_pool as _db_pool
@@ -130,6 +150,30 @@ async def test_access_handler_smoke_uses_pool_and_redacted_shape(monkeypatch):
     assert "password_hash" not in encoded
     assert "access_token_enc" not in encoded
     assert "refresh_token_enc" not in encoded
+
+
+async def test_erasure_handler_smoke_uses_pool_and_records_counts(monkeypatch):
+    conn = _FakeErasureConn()
+    from backend import db_pool as _db_pool
+
+    monkeypatch.setattr(_db_pool, "_pool", _FakePool(conn))
+
+    body = await _privacy.create_erasure_request(
+        _user("u-dsar-alice", "alice-dsar@example.test")
+    )
+
+    assert body["request"]["type"] == "erasure"
+    assert body["request"]["status"] == "completed"
+    assert body["result"]["erased_counts"]["profile"] == 1
+    assert body["result"]["erased_counts"]["oauth_connections"] == 1
+    assert conn.insert_args is not None
+    assert conn.insert_args[2] == "u-dsar-alice"
+    assert any("UPDATE users SET" in sql for sql, _args in conn.statements)
+    assert any("DELETE FROM oauth_tokens" in sql for sql, _args in conn.statements)
+
+    encoded = json.dumps(body, sort_keys=True)
+    assert "alice-dsar@example.test" not in encoded
+    assert "password_hash" not in encoded
 
 
 @pytest.fixture
@@ -363,3 +407,120 @@ async def test_access_endpoint_records_completed_dsar_request(
     assert row["payload_json"]["source"] == "privacy_access_endpoint"
     assert row["result_json"]["category_counts"]["profile"] == 1
     assert row["result_json"]["category_counts"]["preferences"] == 1
+
+
+async def test_erasure_endpoint_redacts_user_data_and_records_receipt(
+    _privacy_client: AsyncClient,
+    pg_test_pool,
+):
+    resp = await _privacy_client.post("/api/v1/privacy/erasure")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    request_id = body["request"]["id"]
+
+    assert body["request"]["type"] == "erasure"
+    assert body["request"]["status"] == "completed"
+    assert request_id.startswith("dsar-erasure-")
+    assert body["request"]["due_at"] - body["request"]["requested_at"] == pytest.approx(
+        30 * 24 * 60 * 60,
+        rel=1e-6,
+    )
+
+    counts = body["result"]["erased_counts"]
+    assert counts["profile"] == 1
+    assert counts["preferences"] == 1
+    assert counts["drafts"] == 1
+    assert counts["chat_messages"] == 1
+    assert counts["chat_sessions"] == 1
+    assert counts["sessions"] == 1
+    assert counts["mfa_methods"] == 1
+    assert counts["mfa_backup_codes"] == 1
+    assert counts["password_history"] == 1
+    assert counts["api_keys_created"] == 1
+    assert counts["oauth_connections"] == 1
+    assert counts["projects_created"] == 1
+
+    async with pg_test_pool.acquire() as conn:
+        alice = await conn.fetchrow(
+            "SELECT email, name, password_hash, oidc_provider, oidc_subject, "
+            "enabled, last_login_at, auth_methods FROM users WHERE id = $1",
+            "u-dsar-alice",
+        )
+        bob_pref_count = await conn.fetchval(
+            "SELECT count(*) FROM user_preferences WHERE user_id = $1",
+            "u-dsar-bob",
+        )
+        remaining = {
+            "memberships": await conn.fetchval(
+                "SELECT count(*) FROM user_tenant_memberships WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "preferences": await conn.fetchval(
+                "SELECT count(*) FROM user_preferences WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "drafts": await conn.fetchval(
+                "SELECT count(*) FROM user_drafts WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "chat_messages": await conn.fetchval(
+                "SELECT count(*) FROM chat_messages WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "chat_sessions": await conn.fetchval(
+                "SELECT count(*) FROM chat_sessions WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "sessions": await conn.fetchval(
+                "SELECT count(*) FROM sessions WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "mfa_methods": await conn.fetchval(
+                "SELECT count(*) FROM user_mfa WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "mfa_backup_codes": await conn.fetchval(
+                "SELECT count(*) FROM mfa_backup_codes WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "password_history": await conn.fetchval(
+                "SELECT count(*) FROM password_history WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "api_keys": await conn.fetchval(
+                "SELECT count(*) FROM api_keys WHERE created_by = $1",
+                "u-dsar-alice",
+            ),
+            "oauth_tokens": await conn.fetchval(
+                "SELECT count(*) FROM oauth_tokens WHERE user_id = $1",
+                "u-dsar-alice",
+            ),
+            "projects_created": await conn.fetchval(
+                "SELECT count(*) FROM projects WHERE created_by = $1",
+                "u-dsar-alice",
+            ),
+        }
+        receipt = await conn.fetchrow(
+            "SELECT tenant_id, user_id, request_type, status, payload_json, "
+            "result_json FROM dsar_requests WHERE id = $1",
+            request_id,
+        )
+
+    assert alice is not None
+    assert alice["email"].startswith("redacted+")
+    assert alice["email"].endswith("@privacy.invalid")
+    assert alice["name"].startswith("redacted:")
+    assert alice["password_hash"] == ""
+    assert alice["oidc_provider"] == ""
+    assert alice["oidc_subject"] == ""
+    assert alice["enabled"] == 0
+    assert alice["last_login_at"] is None
+    assert alice["auth_methods"] == "[]"
+    assert set(remaining.values()) == {0}
+    assert bob_pref_count == 1
+    assert receipt["tenant_id"] == "t-dsar"
+    assert receipt["user_id"] == "u-dsar-alice"
+    assert receipt["request_type"] == "erasure"
+    assert receipt["status"] == "completed"
+    assert receipt["payload_json"]["source"] == "privacy_erasure_endpoint"
+    assert receipt["result_json"]["erased_counts"]["profile"] == 1

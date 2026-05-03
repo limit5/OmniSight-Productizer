@@ -1,15 +1,20 @@
-"""SC.10.2 -- DSAR access endpoint.
+"""SC.10.2 / SC.10.3 -- DSAR access and erasure endpoints.
 
 POST /privacy/access
     Return the current user's account-owned data and write a completed
     ``dsar_requests`` row with a count summary.
+POST /privacy/erasure
+    Erase the current user's account-owned data, redact the retained
+    ``users`` row, and write a completed ``dsar_requests`` receipt.
 
-This route is intentionally narrow: SC.10.3 owns erasure, SC.10.4 owns
-portable JSON exports, and SC.10.5 owns email/SLA background work.
+These routes are intentionally narrow: SC.10.4 owns portable JSON
+exports, and SC.10.5 owns email/SLA background work.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import time
 import uuid
 
@@ -24,6 +29,10 @@ _DSAR_SLA_SECONDS = 30 * 24 * 60 * 60
 
 def _request_id() -> str:
     return f"dsar-access-{uuid.uuid4().hex}"
+
+
+def _erasure_request_id() -> str:
+    return f"dsar-erasure-{uuid.uuid4().hex}"
 
 
 def _row(row) -> dict:
@@ -143,6 +152,78 @@ def _counts(data: dict) -> dict:
     return counts
 
 
+_EXECUTE_COUNT_RE = re.compile(r"\b(\d+)\s*$")
+
+
+def _execute_count(status: str) -> int:
+    match = _EXECUTE_COUNT_RE.search(status or "")
+    return int(match.group(1)) if match else 0
+
+
+def _redacted_email(user_id: str) -> str:
+    digest = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:24]
+    return f"redacted+{digest}@privacy.invalid"
+
+
+def _redacted_name(user_id: str) -> str:
+    digest = hashlib.sha256(f"{user_id}:name".encode("utf-8")).hexdigest()[:24]
+    return f"redacted:{digest}"
+
+
+_ERASURE_DELETE_STATEMENTS: tuple[tuple[str, str], ...] = (
+    ("tenant_memberships",
+        "DELETE FROM user_tenant_memberships WHERE user_id = $1"),
+    ("preferences",
+        "DELETE FROM user_preferences WHERE user_id = $1"),
+    ("drafts",
+        "DELETE FROM user_drafts WHERE user_id = $1"),
+    ("chat_messages",
+        "DELETE FROM chat_messages WHERE user_id = $1"),
+    ("chat_sessions",
+        "DELETE FROM chat_sessions WHERE user_id = $1"),
+    ("sessions",
+        "DELETE FROM sessions WHERE user_id = $1"),
+    ("mfa_methods",
+        "DELETE FROM user_mfa WHERE user_id = $1"),
+    ("mfa_backup_codes",
+        "DELETE FROM mfa_backup_codes WHERE user_id = $1"),
+    ("password_history",
+        "DELETE FROM password_history WHERE user_id = $1"),
+    ("api_keys_created",
+        "DELETE FROM api_keys WHERE created_by = $1"),
+    ("oauth_connections",
+        "DELETE FROM oauth_tokens WHERE user_id = $1"),
+)
+
+
+async def _erase_user_data(conn, user: auth.User) -> dict:
+    """Erase mutable user-owned records and redact the retained user row.
+
+    Module-global state audit: the immutable statement tuple is identical
+    in every worker; all mutable erasure state is coordinated by PG in one
+    transaction scoped to ``user.id``.
+    """
+    erased: dict[str, int] = {}
+    for category, sql in _ERASURE_DELETE_STATEMENTS:
+        erased[category] = _execute_count(await conn.execute(sql, user.id))
+
+    erased["projects_created"] = _execute_count(await conn.execute(
+        "UPDATE projects SET created_by = NULL WHERE created_by = $1",
+        user.id,
+    ))
+    erased["profile"] = _execute_count(await conn.execute(
+        "UPDATE users SET email = $2, name = $3, password_hash = '', "
+        "oidc_provider = '', oidc_subject = '', enabled = 0, "
+        "must_change_password = 0, failed_login_count = 0, "
+        "locked_until = NULL, last_login_at = NULL, auth_methods = '[]' "
+        "WHERE id = $1",
+        user.id,
+        _redacted_email(user.id),
+        _redacted_name(user.id),
+    ))
+    return erased
+
+
 @router.post("/access")
 async def create_access_request(
     user: auth.User = Depends(auth.current_user),
@@ -183,5 +264,47 @@ async def create_access_request(
             "completed_at": completed_at,
         },
         "data": data,
+        "result": result,
+    }
+
+
+@router.post("/erasure")
+async def create_erasure_request(
+    user: auth.User = Depends(auth.current_user),
+) -> dict:
+    from backend.db_pool import get_pool
+
+    request_id = _erasure_request_id()
+    requested_at = time.time()
+    completed_at = requested_at
+    due_at = requested_at + _DSAR_SLA_SECONDS
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            result = {"erased_counts": await _erase_user_data(conn, user)}
+            await conn.execute(
+                "INSERT INTO dsar_requests "
+                "(id, tenant_id, user_id, request_type, status, requested_at, "
+                "due_at, completed_at, payload_json, result_json) "
+                "VALUES ($1, $2, $3, 'erasure', 'completed', $4, $5, $6, "
+                "$7::jsonb, $8::jsonb)",
+                request_id,
+                user.tenant_id,
+                user.id,
+                requested_at,
+                due_at,
+                completed_at,
+                json.dumps({"source": "privacy_erasure_endpoint"}),
+                json.dumps(result),
+            )
+
+    return {
+        "request": {
+            "id": request_id,
+            "type": "erasure",
+            "status": "completed",
+            "requested_at": requested_at,
+            "due_at": due_at,
+            "completed_at": completed_at,
+        },
         "result": result,
     }
