@@ -7,6 +7,11 @@ R20 Phase 0 (chat-layer):
   - secret_filter.redact(text) — output redaction (returns text + labels)
   - secret_filter.SecretScrubbingFilter — KS.1.7 stdlib logger filter
 
+KS.4.10 (input firewall):
+  - llm_firewall.classify_input(text) — Haiku-backed classifier returning
+    safe / suspicious / blocked before untrusted text reaches specialist
+    agents. Enforcement/audit/persistence are later KS.4.11+ rows.
+
 SC.7.1 (OWASP mitigation shared lib):
   - input_validation — pure allowlist-first scalar validators for
     generated apps (bounded text, slug, identifier, email, enum, integer
@@ -344,6 +349,7 @@ from . import envelope  # noqa: F401
 from . import honeypot  # noqa: F401
 from . import honeypot_form_verifier  # noqa: F401
 from . import input_validation  # noqa: F401
+from . import llm_firewall  # noqa: F401
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_login_handler  # noqa: F401
@@ -372,6 +378,7 @@ __all__ = [
     "honeypot",
     "honeypot_form_verifier",
     "input_validation",
+    "llm_firewall",
     "looks_like_injection",
     "oauth_audit",
     "oauth_client",
