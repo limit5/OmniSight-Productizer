@@ -6,6 +6,12 @@ R20 Phase 0 (chat-layer):
   - prompt_hardening.harden_user_message(text) — wrap suspicious input
   - secret_filter.redact(text) — output redaction (returns text + labels)
 
+SC.7.1 (OWASP mitigation shared lib):
+  - input_validation — pure allowlist-first scalar validators for
+    generated apps (bounded text, slug, identifier, email, enum, integer
+    range).  Framework agnostic; callers map
+    InputValidationError.issue to HTTP / form / job errors.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
@@ -252,6 +258,7 @@ from . import bot_challenge  # noqa: F401
 from . import credential_vault  # noqa: F401
 from . import honeypot  # noqa: F401
 from . import honeypot_form_verifier  # noqa: F401
+from . import input_validation  # noqa: F401
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_login_handler  # noqa: F401
@@ -272,6 +279,7 @@ __all__ = [
     "harden_user_message",
     "honeypot",
     "honeypot_form_verifier",
+    "input_validation",
     "looks_like_injection",
     "oauth_audit",
     "oauth_client",
