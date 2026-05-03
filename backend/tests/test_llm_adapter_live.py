@@ -31,6 +31,7 @@ from backend.llm_adapter import (
     AdapterToolResponse,
     build_chat_model,
     invoke_chat,
+    tool,
     tool_call,
 )
 
@@ -60,6 +61,21 @@ def _require_key(env_var: str, provider_display: str) -> str:
             "Export the CI sandbox key and re-run with ``pytest -m live``."
         )
     return key  # type: ignore[return-value]  # mypy can't see pytest.skip noreturn
+
+
+# ── Z.7.3 — shared get_weather tool (all three provider tests) ───────────────
+
+
+@tool
+def get_weather(city: str) -> dict:
+    """Get the current weather for a city.
+
+    Args:
+        city: The name of the city to get weather for.
+    """
+    # Body is never executed in tool-call tests — the LLM only emits the
+    # call request; we validate the request shape (name / args / id).
+    return {"city": city, "temperature": 22, "condition": "sunny"}
 
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
@@ -93,6 +109,25 @@ class TestAnthropicLive:
         assert isinstance(result, str), f"expected str, got {type(result)}"
         assert result.strip(), "expected non-empty response from Anthropic"
 
+    def test_tool_call(self):
+        """Z.7.3: Anthropic returns a get_weather tool call with correct name/args/id."""
+        llm = self._llm()
+        resp = tool_call(
+            [("user", "What is the current weather in London?")],
+            tools=[get_weather],
+            llm=llm,
+        )
+        assert len(resp.tool_calls) >= 1, (
+            f"expected ≥1 tool call; got {resp.tool_calls!r}; text={resp.text!r}"
+        )
+        tc = resp.tool_calls[0]
+        assert isinstance(tc, AdapterToolCall)
+        assert tc.name == "get_weather", f"expected name='get_weather', got {tc.name!r}"
+        assert "city" in tc.arguments, (
+            f"expected 'city' key in arguments; got {tc.arguments!r}"
+        )
+        assert tc.call_id is not None, f"expected non-None call_id; got {tc.call_id!r}"
+
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 
@@ -124,6 +159,25 @@ class TestOpenAILive:
         assert isinstance(result, str), f"expected str, got {type(result)}"
         assert result.strip(), "expected non-empty response from OpenAI"
 
+    def test_tool_call(self):
+        """Z.7.3: OpenAI returns a get_weather tool call with correct name/args/id."""
+        llm = self._llm()
+        resp = tool_call(
+            [("user", "What is the current weather in London?")],
+            tools=[get_weather],
+            llm=llm,
+        )
+        assert len(resp.tool_calls) >= 1, (
+            f"expected ≥1 tool call; got {resp.tool_calls!r}; text={resp.text!r}"
+        )
+        tc = resp.tool_calls[0]
+        assert isinstance(tc, AdapterToolCall)
+        assert tc.name == "get_weather", f"expected name='get_weather', got {tc.name!r}"
+        assert "city" in tc.arguments, (
+            f"expected 'city' key in arguments; got {tc.arguments!r}"
+        )
+        assert tc.call_id is not None, f"expected non-None call_id; got {tc.call_id!r}"
+
 
 # ── Google Gemini ─────────────────────────────────────────────────────────────
 
@@ -154,3 +208,22 @@ class TestGeminiLive:
         result = invoke_chat([("user", "Reply with exactly the word: pong")], llm=llm)
         assert isinstance(result, str), f"expected str, got {type(result)}"
         assert result.strip(), "expected non-empty response from Google Gemini"
+
+    def test_tool_call(self):
+        """Z.7.3: Gemini returns a get_weather tool call with correct name/args/id."""
+        llm = self._llm()
+        resp = tool_call(
+            [("user", "What is the current weather in London?")],
+            tools=[get_weather],
+            llm=llm,
+        )
+        assert len(resp.tool_calls) >= 1, (
+            f"expected ≥1 tool call; got {resp.tool_calls!r}; text={resp.text!r}"
+        )
+        tc = resp.tool_calls[0]
+        assert isinstance(tc, AdapterToolCall)
+        assert tc.name == "get_weather", f"expected name='get_weather', got {tc.name!r}"
+        assert "city" in tc.arguments, (
+            f"expected 'city' key in arguments; got {tc.arguments!r}"
+        )
+        assert tc.call_id is not None, f"expected non-None call_id; got {tc.call_id!r}"
