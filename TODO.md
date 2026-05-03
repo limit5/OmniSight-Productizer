@@ -1560,7 +1560,7 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 - [O] Z.7.1 **CI secret pool 設立**：sandbox key（低額度限制 + 預算上限） — `ANTHROPIC_API_KEY_CI` / `OPENAI_API_KEY_CI` / `GOOGLE_API_KEY_CI`，存 GitHub Actions repo secrets；本地 dev 不需設、`pytest.mark.live` 預設 skip <!-- AI 完成：`pytest.mark.live` marker 已加入 backend/pytest.ini + 自動 skip hook 加入 backend/tests/conftest.py。Operator 需做：至三家 provider 平台建立低額度 sandbox key（Anthropic console / OpenAI platform / Google AI Studio）並加入 GitHub Actions repo Secrets（Settings → Secrets and variables → Actions → New repository secret）：ANTHROPIC_API_KEY_CI / OPENAI_API_KEY_CI / GOOGLE_API_KEY_CI。 -->
 - [x] Z.7.2 **新 test file** `backend/tests/test_llm_adapter_live.py`：`@pytest.mark.live` + 環境變數偵測 skip、`pytest -m live` 才跑
 - [x] Z.7.3 **三家 × 最小 tool_call test**：定義 `get_weather(city: str) -> dict` tool → invoke → 驗 `response.tool_calls[0]` 含正確 `name` / `args` / `id`，三家行為一致
-- [ ] Z.7.4 **三家 × multi-turn loop test**：tool_use → 餵 fake `tool_result` → LLM 二輪回應、驗 LLM 真的看到 tool_result 並產 final text（**核心 — 之前完全沒驗**）
+- [x] Z.7.4 **三家 × multi-turn loop test**：tool_use → 餵 fake `tool_result` → LLM 二輪回應、驗 LLM 真的看到 tool_result 並產 final text（**核心 — 之前完全沒驗**）
 - [ ] Z.7.5 **三家 × streaming + tool_calls test**：streaming 模式同時拿 tool_calls；Gemini 早期 model 不支援可走 `pytest.skip(reason=...)`、文件記錄
 - [ ] Z.7.6 **三家 × nested schema test**：定義 `book_flight(from: str, to: str, date: str, passengers: list[dict])` 巢狀 schema + enum → 驗三家 silent truncate / 錯誤行為（這條最容易抓 schema 跨家偏差）
 - [ ] Z.7.7 **GitHub Actions workflow** `.github/workflows/llm-live-tests.yml`：cron `0 6 * * *` UTC（每天 06:00 UTC = 台北 14:00）、單次 budget guard < USD $0.50、結果寫 `SharedKV("llm_live_test_status")` + dashboard `Z provider observability` 顯示「Last live-test pass: 2h ago」chip
@@ -3167,8 +3167,8 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] KS.4.5 **Bug bounty program 評估**：HackerOne / Bugcrowd 比較、GA 後啟動（payout policy / scope / triage SOP）
 - [x][G] KS.4.6 **Incident response runbook**：24h SOP（detect / contain / rotate / notify customer / forensics / blameless postmortem）寫進 `docs/security/incident-response-runbook.md`
 - [x][G] KS.4.7 **SOC 2 Type II 準備清單**：control mapping + evidence collection + 第三方 auditor 評估
-- [~][G] KS.4.8 **GDPR / DSAR 對齊**：tenant data deletion 完整 purge DEK + audit trail metadata（保留 hash、刪 raw）+ DSAR export 流程
-- [ ] KS.4.9 **Memory zeroization 升級**：擴充 KS.1.9、libsodium `sodium_memzero` 取代 ctypes.memset（更可靠）
+- [x][G] KS.4.8 **GDPR / DSAR 對齊**：tenant data deletion 完整 purge DEK + audit trail metadata（保留 hash、刪 raw）+ DSAR export 流程
+- [~][G] KS.4.9 **Memory zeroization 升級**：擴充 KS.1.9、libsodium `sodium_memzero` 取代 ctypes.memset（更可靠）
 - [ ] KS.4.10 **LLM-as-Firewall 輸入 guardrail**（**2026-05-02 新增 from Agentic Design Patterns Ch 18 Guardrails**）：`backend/security/llm_firewall.py` — Haiku-based fast classifier `classify_input(text) → {safe, suspicious, blocked}`，擋 prompt injection / jailbreak / PII / 違規 prompt。**為什麼必要**：KS.4.1 secret scrubber 是 **output** 端 (擋洩密)，KS.4.10 是 **input** 端 (擋攻擊)；untrusted user input (chat / GitHub issue / 客戶 ticket / 上傳文件) 進 specialist agent 前必過此層，否則 prompt injection 攻擊面巨大
 - [ ] KS.4.11 **三層攔截機制**：safe → pass、suspicious → log + 加 system prompt 警示 LLM 提高警覺、blocked → 拒絕 + 回報 audit_log + 阻 invocation
 - [ ] KS.4.12 **整合 Orchestrator entry**：所有 user-facing input (chat / API / webhook) 在進 specialist routing 前先過 firewall；後台內部 specialist↔specialist 通信豁免 (避免 over-blocking)；BP.A2A inbound endpoint 也走 firewall (外部 A2A caller 是 untrusted)

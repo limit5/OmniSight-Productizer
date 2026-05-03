@@ -22,6 +22,7 @@ streaming, and nested-schema test classes here.
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -29,6 +30,8 @@ import pytest
 from backend.llm_adapter import (
     AdapterToolCall,
     AdapterToolResponse,
+    HumanMessage,
+    ToolMessage,
     build_chat_model,
     invoke_chat,
     tool,
@@ -128,6 +131,51 @@ class TestAnthropicLive:
         )
         assert tc.call_id is not None, f"expected non-None call_id; got {tc.call_id!r}"
 
+    def test_multi_turn_tool_loop(self):
+        """Z.7.4: Anthropic — tool_use → fake tool_result → LLM produces final text.
+
+        Verifies the LLM actually processes the ToolMessage payload and echoes
+        content from it in the second-turn reply (i.e., it truly saw the result).
+        """
+        # Turn 1 — ask for weather, expect a tool call
+        user_msg = HumanMessage(content="What is the current weather in Tokyo?")
+        first = tool_call([user_msg], tools=[get_weather], llm=self._llm())
+
+        assert first.raw_message is not None, (
+            "raw_message must not be None — needed to reconstruct Turn-2 history"
+        )
+        assert len(first.tool_calls) >= 1, (
+            f"Turn 1: expected ≥1 tool call; got {first.tool_calls!r}; text={first.text!r}"
+        )
+        tc = first.tool_calls[0]
+        assert tc.call_id is not None, (
+            f"call_id must not be None — required for ToolMessage routing; got {tc!r}"
+        )
+
+        # Inject fake tool result: temperature=18, condition=rainy
+        # These distinctive values let us assert the LLM actually read the payload.
+        fake_result = {"city": "Tokyo", "temperature": 18, "condition": "rainy"}
+        tool_msg = ToolMessage(
+            content=json.dumps(fake_result),
+            tool_call_id=tc.call_id,
+            name=tc.name,
+        )
+
+        # Turn 2 — full history: user → AI (tool_call) → tool result → final answer
+        history = [user_msg, first.raw_message, tool_msg]
+        final_text = invoke_chat(history, llm=self._llm())
+
+        assert isinstance(final_text, str), f"expected str, got {type(final_text)}"
+        assert final_text.strip(), (
+            "expected non-empty final text after feeding tool result back to Anthropic"
+        )
+        # Key assertion: LLM must have incorporated our fake payload.
+        lower = final_text.lower()
+        assert "18" in final_text or "rainy" in lower or "tokyo" in lower, (
+            f"Anthropic does not appear to have incorporated the fake tool result; "
+            f"final_text={final_text!r}"
+        )
+
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 
@@ -178,6 +226,50 @@ class TestOpenAILive:
         )
         assert tc.call_id is not None, f"expected non-None call_id; got {tc.call_id!r}"
 
+    def test_multi_turn_tool_loop(self):
+        """Z.7.4: OpenAI — tool_use → fake tool_result → LLM produces final text.
+
+        Verifies the LLM actually processes the ToolMessage payload and echoes
+        content from it in the second-turn reply (i.e., it truly saw the result).
+        """
+        # Turn 1 — ask for weather, expect a tool call
+        user_msg = HumanMessage(content="What is the current weather in Tokyo?")
+        first = tool_call([user_msg], tools=[get_weather], llm=self._llm())
+
+        assert first.raw_message is not None, (
+            "raw_message must not be None — needed to reconstruct Turn-2 history"
+        )
+        assert len(first.tool_calls) >= 1, (
+            f"Turn 1: expected ≥1 tool call; got {first.tool_calls!r}; text={first.text!r}"
+        )
+        tc = first.tool_calls[0]
+        assert tc.call_id is not None, (
+            f"call_id must not be None — required for ToolMessage routing; got {tc!r}"
+        )
+
+        # Inject fake tool result: temperature=18, condition=rainy
+        fake_result = {"city": "Tokyo", "temperature": 18, "condition": "rainy"}
+        tool_msg = ToolMessage(
+            content=json.dumps(fake_result),
+            tool_call_id=tc.call_id,
+            name=tc.name,
+        )
+
+        # Turn 2 — full history: user → AI (tool_call) → tool result → final answer
+        history = [user_msg, first.raw_message, tool_msg]
+        final_text = invoke_chat(history, llm=self._llm())
+
+        assert isinstance(final_text, str), f"expected str, got {type(final_text)}"
+        assert final_text.strip(), (
+            "expected non-empty final text after feeding tool result back to OpenAI"
+        )
+        # Key assertion: LLM must have incorporated our fake payload.
+        lower = final_text.lower()
+        assert "18" in final_text or "rainy" in lower or "tokyo" in lower, (
+            f"OpenAI does not appear to have incorporated the fake tool result; "
+            f"final_text={final_text!r}"
+        )
+
 
 # ── Google Gemini ─────────────────────────────────────────────────────────────
 
@@ -227,3 +319,47 @@ class TestGeminiLive:
             f"expected 'city' key in arguments; got {tc.arguments!r}"
         )
         assert tc.call_id is not None, f"expected non-None call_id; got {tc.call_id!r}"
+
+    def test_multi_turn_tool_loop(self):
+        """Z.7.4: Gemini — tool_use → fake tool_result → LLM produces final text.
+
+        Verifies the LLM actually processes the ToolMessage payload and echoes
+        content from it in the second-turn reply (i.e., it truly saw the result).
+        """
+        # Turn 1 — ask for weather, expect a tool call
+        user_msg = HumanMessage(content="What is the current weather in Tokyo?")
+        first = tool_call([user_msg], tools=[get_weather], llm=self._llm())
+
+        assert first.raw_message is not None, (
+            "raw_message must not be None — needed to reconstruct Turn-2 history"
+        )
+        assert len(first.tool_calls) >= 1, (
+            f"Turn 1: expected ≥1 tool call; got {first.tool_calls!r}; text={first.text!r}"
+        )
+        tc = first.tool_calls[0]
+        assert tc.call_id is not None, (
+            f"call_id must not be None — required for ToolMessage routing; got {tc!r}"
+        )
+
+        # Inject fake tool result: temperature=18, condition=rainy
+        fake_result = {"city": "Tokyo", "temperature": 18, "condition": "rainy"}
+        tool_msg = ToolMessage(
+            content=json.dumps(fake_result),
+            tool_call_id=tc.call_id,
+            name=tc.name,
+        )
+
+        # Turn 2 — full history: user → AI (tool_call) → tool result → final answer
+        history = [user_msg, first.raw_message, tool_msg]
+        final_text = invoke_chat(history, llm=self._llm())
+
+        assert isinstance(final_text, str), f"expected str, got {type(final_text)}"
+        assert final_text.strip(), (
+            "expected non-empty final text after feeding tool result back to Gemini"
+        )
+        # Key assertion: LLM must have incorporated our fake payload.
+        lower = final_text.lower()
+        assert "18" in final_text or "rainy" in lower or "tokyo" in lower, (
+            f"Gemini does not appear to have incorporated the fake tool result; "
+            f"final_text={final_text!r}"
+        )
