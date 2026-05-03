@@ -29,6 +29,15 @@ The tenant id and DEK id are authenticated twice: first in the KMS wrap
 data. A row shuffle that pairs ciphertext with another tenant's
 ``TenantDEKRef`` fails before plaintext is returned.
 
+Memory zeroization (KS.1.9)
+───────────────────────────
+The helper keeps DEK bytes, nonce bytes, plaintext input bytes, and
+decrypted plaintext bytes in ``bytearray`` buffers where possible and
+clears those buffers with ``ctypes.memset`` in ``finally`` blocks after
+use. This is best-effort only: Python strings, temporary ``bytes``
+objects required by cryptography/KMS adapter APIs, and OpenSSL internal
+buffers are outside this module's direct control.
+
 Module-global state audit (per implement_phase_step.md SOP §1)
 ──────────────────────────────────────────────────────────────
 No module-level mutable state. Randomness comes from the kernel CSPRNG
@@ -47,6 +56,7 @@ no read-after-write timing surface in this helper.
 from __future__ import annotations
 
 import base64
+import ctypes
 import hmac
 import json
 import secrets
@@ -146,16 +156,23 @@ def encrypt(
     adapter = kms_adapter or kms_adapters.LocalFernetKMSAdapter()
     dek_id = _new_dek_id()
     context = _dek_context(tid, dek_id, purpose)
-    plaintext_dek = secrets.token_bytes(DEK_RAW_BYTES)
+    plaintext_dek = bytearray(secrets.token_bytes(DEK_RAW_BYTES))
+    nonce = bytearray(secrets.token_bytes(NONCE_RAW_BYTES))
+    plaintext_bytes = bytearray(plain.encode("utf-8"))
 
-    wrapped = adapter.wrap_dek(
-        plaintext_dek,
-        encryption_context=context,
-    )
-    nonce = secrets.token_bytes(NONCE_RAW_BYTES)
-    aesgcm = AESGCM(plaintext_dek)
-    aad = _aad(tid, dek_id)
-    encrypted = aesgcm.encrypt(nonce, plain.encode("utf-8"), aad)
+    try:
+        wrapped = adapter.wrap_dek(
+            bytes(plaintext_dek),
+            encryption_context=context,
+        )
+        aesgcm = AESGCM(bytes(plaintext_dek))
+        aad = _aad(tid, dek_id)
+        encrypted = aesgcm.encrypt(bytes(nonce), bytes(plaintext_bytes), aad)
+        nonce_b64 = base64.b64encode(bytes(nonce)).decode("ascii")
+    finally:
+        _zeroize_bytearray(plaintext_dek)
+        _zeroize_bytearray(nonce)
+        _zeroize_bytearray(plaintext_bytes)
 
     dek_ref = TenantDEKRef(
         dek_id=dek_id,
@@ -172,7 +189,7 @@ def encrypt(
         "alg": AES_GCM_ALGORITHM,
         "dek": dek_id,
         "tid": tid,
-        "nonce_b64": base64.b64encode(nonce).decode("ascii"),
+        "nonce_b64": nonce_b64,
         "ciphertext_b64": base64.b64encode(encrypted).decode("ascii"),
     }
     return json.dumps(envelope, sort_keys=True, separators=(",", ":")), dek_ref
@@ -206,24 +223,31 @@ def decrypt(
         algorithm=dek_ref.wrap_algorithm,
         encryption_context=dict(dek_ref.encryption_context),
     )
+    plaintext_dek = bytearray()
+    plaintext = bytearray()
     try:
-        plaintext_dek = adapter.unwrap_dek(
-            wrapped,
-            encryption_context=dek_ref.encryption_context,
+        plaintext_dek = bytearray(
+            adapter.unwrap_dek(
+                wrapped,
+                encryption_context=dek_ref.encryption_context,
+            )
         )
-        aesgcm = AESGCM(plaintext_dek)
-        plaintext = aesgcm.decrypt(
+        aesgcm = AESGCM(bytes(plaintext_dek))
+        plaintext = bytearray(aesgcm.decrypt(
             base64.b64decode(envelope["nonce_b64"].encode("ascii")),
             base64.b64decode(envelope["ciphertext_b64"].encode("ascii")),
             _aad(dek_ref.tenant_id, dek_ref.dek_id),
-        )
+        ))
+        return plaintext.decode("utf-8")
     except kms_adapters.KMSAdapterError:
         raise
     except Exception as exc:
         raise CiphertextCorruptedError(
             "ciphertext failed envelope authentication"
         ) from exc
-    return plaintext.decode("utf-8")
+    finally:
+        _zeroize_bytearray(plaintext_dek)
+        _zeroize_bytearray(plaintext)
 
 
 def _require_plaintext(value: str) -> str:
@@ -277,6 +301,15 @@ def _aad(tenant_id: str, dek_id: str) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _zeroize_bytearray(buffer: bytearray) -> None:
+    """Best-effort in-place wipe for mutable secret buffers."""
+
+    if not buffer:
+        return
+    ptr = ctypes.addressof(ctypes.c_char.from_buffer(buffer))
+    ctypes.memset(ptr, 0, len(buffer))
 
 
 def _load_ciphertext_envelope(ciphertext: str) -> dict[str, Any]:

@@ -195,6 +195,33 @@ def test_custom_kms_adapter_receives_tenant_dek_context() -> None:
     assert adapter.unwrap_calls[0][1] == dek_ref.encryption_context
 
 
+def test_zeroize_bytearray_uses_ctypes_memset() -> None:
+    buffer = bytearray(b"secret")
+
+    envelope._zeroize_bytearray(buffer)
+
+    assert buffer == b"\x00" * 6
+
+
+def test_encrypt_and_decrypt_zeroize_secret_buffers(monkeypatch) -> None:
+    calls: list[int] = []
+    original_memset = envelope.ctypes.memset
+
+    def recording_memset(ptr, value, size):
+        calls.append(size)
+        return original_memset(ptr, value, size)
+
+    monkeypatch.setattr(envelope.ctypes, "memset", recording_memset)
+    plaintext = "sk-ant-zeroize"
+
+    ciphertext, dek_ref = envelope.encrypt(plaintext, TENANT_A)
+    assert envelope.decrypt(ciphertext, dek_ref) == plaintext
+
+    assert envelope.DEK_RAW_BYTES in calls
+    assert envelope.NONCE_RAW_BYTES in calls
+    assert len(plaintext.encode("utf-8")) in calls
+
+
 def test_non_local_decrypt_requires_adapter() -> None:
     adapter = FakeKMSAdapter()
     ciphertext, dek_ref = envelope.encrypt("payload", TENANT_A, kms_adapter=adapter)
@@ -231,6 +258,7 @@ def test_unknown_versions_rejected(monkeypatch) -> None:
 def test_module_global_state_and_crypto_source_guards() -> None:
     source = inspect.getsource(envelope)
     assert "AESGCM" in source
+    assert "ctypes.memset" in source
     assert "secrets.token_bytes" in source
     assert "Fernet.generate_key" not in source
     assert "_adapter_registry" not in source
