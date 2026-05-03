@@ -124,6 +124,40 @@ upload_offsite_immutable() {
   die "OMNISIGHT_BACKUP_PASSPHRASE is required for encrypted backups"
 command -v gpg >/dev/null || die "gpg missing; cannot encrypt backup"
 
+# FX.7.10 — DLP scanner existence preflight.
+#
+# The DLP scan at line ~190 is the *only* gate stopping a plaintext
+# secret from being baked into the encrypted backup artefact. If the
+# scanner script is missing on the prod host (deploy bundle stripped,
+# script renamed, /scripts not mounted, etc.), the original `if !
+# python3 scripts/backup_dlp_scan.py "$PLAIN"` form would have failed
+# with the *same* "backup DLP scan failed" die message that a real
+# finding produces — silently demoting a deploy-artefact gap into a
+# normal-looking scan-block, then shredding the plaintext while the
+# operator believes "DLP works, just blocked something today".
+#
+# Worse: if the operator chases the message and rebuilds the deploy
+# bundle without the scanner, the next run hits the same path; the
+# DLP gate never actually runs, and any future plaintext secret
+# slides through into the .gpg artefact under the false impression
+# that DLP cleared it.
+#
+# Fail closed BEFORE plaintext extract:
+#   - The scanner file must exist and be non-empty (-s)
+#   - It must be readable (-r) by the user running the backup
+#   - python3 must be on PATH (also needed by the WAL backup steps)
+# A missing scanner is a deploy-artefact bug, not a scan-blocked
+# event; the die message says so explicitly so operators triage to
+# the right place (rebuild image / rsync scripts/) instead of going
+# hunting for a phantom secret.
+DLP_SCANNER="$REPO/scripts/backup_dlp_scan.py"
+[[ -s "$DLP_SCANNER" ]] || \
+  die "DLP scanner missing or empty: $DLP_SCANNER — deploy artefact incomplete; aborting BEFORE plaintext extract"
+[[ -r "$DLP_SCANNER" ]] || \
+  die "DLP scanner not readable: $DLP_SCANNER (perms?); aborting BEFORE plaintext extract"
+command -v python3 >/dev/null || \
+  die "python3 missing; DLP scanner cannot run; aborting BEFORE plaintext extract"
+
 # Prefer the docker-compose-managed volume (canonical live DB).
 # Fallback to host path if someone's running without compose.
 COMPOSE_FILE="$REPO/docker-compose.prod.yml"
@@ -179,7 +213,10 @@ fi
 # any Windows user on the host.
 chmod 600 "$PLAIN"
 
-if ! python3 scripts/backup_dlp_scan.py "$PLAIN"; then
+# Use $DLP_SCANNER (validated above) rather than re-stringifying the
+# path — keeps a single source of truth and prevents drift between
+# preflight check and actual invocation.
+if ! python3 "$DLP_SCANNER" "$PLAIN"; then
   shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
   die "backup DLP scan failed; plaintext backup shredded"
 fi

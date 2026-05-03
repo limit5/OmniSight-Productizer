@@ -164,7 +164,11 @@ def test_backup_prod_db_requires_passphrase_and_dlp() -> None:
     text = (PROJECT_ROOT / "scripts" / "backup_prod_db.sh").read_text()
 
     assert "OMNISIGHT_BACKUP_PASSPHRASE is required" in text
-    assert "python3 scripts/backup_dlp_scan.py \"$PLAIN\"" in text
+    # FX.7.10 — DLP scanner is invoked through the validated $DLP_SCANNER
+    # variable (not a bare relative path), so the preflight existence
+    # check and the actual call share one source of truth.
+    assert 'DLP_SCANNER="$REPO/scripts/backup_dlp_scan.py"' in text
+    assert 'python3 "$DLP_SCANNER" "$PLAIN"' in text
     assert "backup DLP scan failed; plaintext backup shredded" in text
     assert "OMNISIGHT_BACKUP_PASSPHRASE unset" not in text
 
