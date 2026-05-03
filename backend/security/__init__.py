@@ -32,6 +32,13 @@ SC.7.4 (OWASP mitigation shared lib):
     Framework agnostic; callers own session persistence, cookie setting,
     and HTTP error mapping.
 
+SC.7.5 (OWASP mitigation shared lib):
+  - path_ssrf — pure path-traversal and SSRF guard helpers for
+    generated apps (relative path normalisation, base-directory
+    containment, public URL canonicalisation, and static server-side
+    fetch destination blocklist). Framework agnostic; callers own HTTP
+    client redirect/final-IP controls and error mapping.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
@@ -286,6 +293,7 @@ from . import oauth_login_handler  # noqa: F401
 from . import oauth_refresh_hook  # noqa: F401
 from . import oauth_revoke  # noqa: F401
 from . import oauth_vendors  # noqa: F401
+from . import path_ssrf  # noqa: F401
 from . import password_generator  # noqa: F401
 from . import token_vault  # noqa: F401
 from . import turnstile_form_verifier  # noqa: F401
@@ -309,6 +317,7 @@ __all__ = [
     "oauth_refresh_hook",
     "oauth_revoke",
     "oauth_vendors",
+    "path_ssrf",
     "password_generator",
     "redact",
     "token_vault",
