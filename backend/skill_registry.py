@@ -26,6 +26,7 @@ Lifecycle hooks
 from __future__ import annotations
 
 import logging
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -43,6 +44,101 @@ logger = logging.getLogger(__name__)
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "configs" / "skills"
 _INTERNAL_PREFIXES = ("_",)
+
+# Shell metacharacters meaningful to /bin/sh but not to execvp. Under
+# shell=False they would silently become literal argv entries, breaking
+# author intent; under shell=True they were the RCE vector this hook
+# hardening removes (audit B4 / FX.1.5 BLOCKER).
+_SHELL_METACHARS = ("|", "&", ";", "(", ")", "<", ">", "$", "`", "\n", "\r")
+
+# Executables permitted as argv[0] in skill manifest lifecycle hooks
+# (validate / install / enumerate). Skill packs that need anything else
+# must ship a script inside the skill directory and reference it via a
+# relative path (e.g. "./validate.sh"); _run_skill_hook then verifies the
+# resolved path stays inside the skill directory.
+_HOOK_CMD_ALLOWLIST = frozenset({
+    "python", "python3", "pytest", "tox",
+    "make", "cmake", "ctest",
+    "bash", "sh",
+    "node", "npm", "npx", "yarn", "pnpm",
+    "go", "cargo", "mvn", "gradle",
+    "true", "false", "echo",
+})
+
+
+def _run_skill_hook(
+    cmd: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    hook_label: str,
+) -> subprocess.CompletedProcess:
+    """Run a skill manifest lifecycle-hook command safely.
+
+    Manifest hook strings come from ``skill.yaml`` — packs may be authored
+    by third parties and copied into the registry verbatim by
+    ``install_skill``. Running them with ``shell=True`` mapped any
+    author-controlled metacharacter into RCE on the registry host
+    (FX.1.5 / B4-class BLOCKER).
+
+    Hardening:
+
+    1. Reject non-string / empty / shell-metacharacter-bearing input.
+    2. ``shlex.split`` into argv.
+    3. Require ``argv[0]`` to be in :data:`_HOOK_CMD_ALLOWLIST` *or* a
+       relative path resolving to a file inside ``cwd`` (the skill
+       directory).
+    4. Run with ``shell=False`` so metacharacters lose shell semantics
+       defence-in-depth even if (1) is later relaxed.
+
+    Cross-worker rubric: N/A — function is stateless, no module-globals
+    read or written.
+    """
+    if not isinstance(cmd, str):
+        raise ValueError(f"{hook_label} must be a string")
+    stripped = cmd.strip()
+    if not stripped:
+        raise ValueError(f"{hook_label} must be a non-empty string")
+    for ch in _SHELL_METACHARS:
+        if ch in cmd:
+            raise ValueError(
+                f"{hook_label}: shell metacharacter {ch!r} is not allowed "
+                "(hook runs without a shell; wrap multi-step logic in a "
+                "script inside the skill directory and call it as ./script)"
+            )
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as e:
+        raise ValueError(f"{hook_label}: invalid command syntax: {e}") from e
+    if not argv:
+        raise ValueError(f"{hook_label}: parsed to empty argv")
+
+    exe = argv[0]
+    if exe not in _HOOK_CMD_ALLOWLIST:
+        if not (exe.startswith("./") or exe.startswith("../")):
+            raise ValueError(
+                f"{hook_label}: executable {exe!r} not in allowlist "
+                f"({sorted(_HOOK_CMD_ALLOWLIST)}) and not a relative path "
+                "(./script) inside the skill directory"
+            )
+        cwd_resolved = cwd.resolve()
+        resolved = (cwd / exe).resolve()
+        try:
+            resolved.relative_to(cwd_resolved)
+        except ValueError as e:
+            raise ValueError(
+                f"{hook_label}: relative path {exe!r} escapes skill directory"
+            ) from e
+        if not resolved.is_file():
+            raise ValueError(f"{hook_label}: script not found: {exe}")
+
+    return subprocess.run(
+        argv,
+        shell=False,
+        capture_output=True,
+        timeout=timeout,
+        cwd=str(cwd),
+    )
 
 
 @dataclass
@@ -238,12 +334,11 @@ def validate_skill(name: str, skills_dir: Optional[Path] = None) -> ValidationRe
 
     if manifest.hooks.validate_cmd:
         try:
-            result = subprocess.run(
+            result = _run_skill_hook(
                 manifest.hooks.validate_cmd,
-                shell=True,
-                capture_output=True,
+                cwd=skill_path,
                 timeout=30,
-                cwd=str(skill_path),
+                hook_label="validate hook",
             )
             if result.returncode != 0:
                 stderr = result.stderr.decode("utf-8", errors="replace").strip()
@@ -253,6 +348,8 @@ def validate_skill(name: str, skills_dir: Optional[Path] = None) -> ValidationRe
                 ))
         except subprocess.TimeoutExpired:
             issues.append(ValidationIssue("error", "validate hook timed out (30s)"))
+        except ValueError as exc:
+            issues.append(ValidationIssue("error", f"validate hook rejected: {exc}"))
         except Exception as exc:
             issues.append(ValidationIssue("error", f"validate hook error: {exc}"))
 

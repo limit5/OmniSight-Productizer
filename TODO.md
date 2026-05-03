@@ -6128,7 +6128,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.1.2 `backend/print_pipeline.py:1077` 把 `_queue_jobs` 搬到 DB row（per-tenant queue_jobs table）
 - [x] FX.1.3 `backend/telemetry_backend.py:571` 把 `_TELEMETRY_CERTS` 搬到 SharedKV 或 DB
 - [x] FX.1.4 `backend/agents/runner_handlers.py:133` `subprocess.run(shell=True)` 改 `shlex.split` + `shell=False`；input validation
-- [ ] FX.1.5 `backend/skill_registry.py:243` validate_cmd 改 allowlist + `shell=False`
+- [x] FX.1.5 `backend/skill_registry.py:243` validate_cmd 改 allowlist + `shell=False`
 - [ ] FX.1.6 `backend/skill_registry.py:320` install hook 同上
 - [ ] FX.1.7 `backend/skill_registry.py:366` enumerate_cmd 同上
 - [ ] FX.1.8 `backend/enterprise_web_stack.py:1393` `apply_rls()` 改 parameterized query
@@ -6208,12 +6208,12 @@ BP.E GraphRAG / Neo4j
 - [x][G] FX.5.2 `backend/tests/test_shell_safe.py` 新增（agents/_shell_safe.py，安全敏感）
 - [x][G] FX.5.3 `backend/tests/test_batch_dispatcher.py` 新增
 - [x][G] FX.5.4 `backend/tests/test_batch_eligibility.py` 新增
-- [~][G] FX.5.5 `backend/tests/test_cost_guard.py` 新增（成本控管）
-- [ ] FX.5.6 `backend/tests/test_external_tool_registry.py` 新增
-- [ ] FX.5.7 `backend/tests/test_mcp_integration.py` 新增
-- [ ] FX.5.8 `backend/tests/test_postgres_stores.py` 新增
-- [ ] FX.5.9 `backend/tests/test_rate_limiter.py` 新增（限流）
-- [ ] FX.5.10 `backend/tests/test_tool_dispatcher.py` 新增（agent runtime 核心）
+- [x][G] FX.5.5 `backend/tests/test_cost_guard.py` 新增（成本控管）
+- [x][G] FX.5.6 `backend/tests/test_external_tool_registry.py` 新增
+- [x][G] FX.5.7 `backend/tests/test_mcp_integration.py` 新增
+- [~][G] FX.5.8 `backend/tests/test_postgres_stores.py` 新增
+- [x][G] FX.5.9 `backend/tests/test_rate_limiter.py` 新增（限流）
+- [~][G] FX.5.10 `backend/tests/test_tool_dispatcher.py` 新增（agent runtime 核心）
 - [ ] FX.5.11 `backend/tests/test_tools_patch.py` 新增
 - [ ] FX.5.12 `backend/tests/test_tool_schemas.py` 新增
 - [ ] FX.5.13 修弱 assertion test 6 條（test_anthropic_mode_manager.py / test_api_keys_legacy_migration.py / test_auth_dashboard_shape_drift.py / test_auto_runner_codex.py / test_ssh_runner.py / test_require_super_admin.py 改用 real call + assertion）

