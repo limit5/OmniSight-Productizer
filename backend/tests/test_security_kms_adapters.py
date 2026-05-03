@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import inspect
 import sys
+from types import ModuleType
 from types import SimpleNamespace
 
 import pytest
@@ -237,6 +238,16 @@ class FakeGCPKMSClient:
         return SimpleNamespace(plaintext=request["ciphertext"].removeprefix(b"gcp-wrapped-"))
 
 
+class FakeGoogleCloudKMSModule:
+    def __init__(self):
+        self.client = FakeGCPKMSClient()
+        self.client_creations = 0
+
+    def KeyManagementServiceClient(self):
+        self.client_creations += 1
+        return self.client
+
+
 class TestGCPKMSAdapter:
 
     def test_wrap_and_unwrap_delegates_to_google_client_shape(self):
@@ -257,6 +268,28 @@ class TestGCPKMSAdapter:
             b'{"tenant_id":"t1"}'
         )
         assert fake.decrypt_requests[0]["additional_authenticated_data"] == (
+            b'{"tenant_id":"t1"}'
+        )
+
+    def test_lazy_google_cloud_kms_client_is_used_when_not_injected(self, monkeypatch):
+        fake_kms = FakeGoogleCloudKMSModule()
+        google_module = ModuleType("google")
+        cloud_module = ModuleType("google.cloud")
+        cloud_module.kms = fake_kms
+        monkeypatch.setitem(sys.modules, "google", google_module)
+        monkeypatch.setitem(sys.modules, "google.cloud", cloud_module)
+        monkeypatch.setitem(sys.modules, "google.cloud.kms", fake_kms)
+        adapter = kms.GCPKMSAdapter(
+            key_id="projects/p/locations/global/keyRings/r/cryptoKeys/k"
+        )
+
+        wrapped = adapter.wrap_dek(b"dek-gcp", encryption_context={"tenant_id": "t1"})
+
+        assert wrapped.provider == "gcp-kms"
+        assert fake_kms.client_creations == 1
+        assert fake_kms.client.encrypt_requests[0]["name"] == adapter.key_id
+        assert fake_kms.client.encrypt_requests[0]["plaintext"] == b"dek-gcp"
+        assert fake_kms.client.encrypt_requests[0]["additional_authenticated_data"] == (
             b'{"tenant_id":"t1"}'
         )
 
