@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+from pathlib import Path
 
 import pytest
 
@@ -121,9 +122,35 @@ async def test_security_headers_present(_k3_client):
 
     assert h.get("x-frame-options") == "DENY"
     assert h.get("x-content-type-options") == "nosniff"
-    assert "max-age=" in (h.get("strict-transport-security") or "")
+    assert h.get("strict-transport-security") == (
+        "max-age=31536000; includeSubDomains; preload"
+    )
     assert h.get("referrer-policy") == "strict-origin"
-    assert "camera=()" in (h.get("permissions-policy") or "")
+    assert h.get("permissions-policy") == (
+        "camera=(), microphone=(), geolocation=(), payment=()"
+    )
+    assert h.get("cross-origin-resource-policy") == "same-origin"
+    assert h.get("cross-origin-embedder-policy") == "require-corp"
+    assert h.get("cross-origin-opener-policy") == "same-origin"
+
+
+def test_frontend_middleware_security_headers_source_guard():
+    middleware = Path(__file__).resolve().parents[2] / "middleware.ts"
+    source = middleware.read_text(encoding="utf-8")
+
+    assert (
+        '"Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload"'
+        in source
+    )
+    assert '"X-Frame-Options", "DENY"' in source
+    assert '"Referrer-Policy", "strict-origin"' in source
+    assert (
+        '"Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"'
+        in source
+    )
+    assert '"Cross-Origin-Resource-Policy", "same-origin"' in source
+    assert '"Cross-Origin-Embedder-Policy", "require-corp"' in source
+    assert '"Cross-Origin-Opener-Policy", "same-origin"' in source
 
 
 @pytest.mark.asyncio
@@ -204,6 +231,17 @@ async def test_csp_hash_sources_auto_generated():
     assert f"'sha256-{expected_hash}'" in csp
     assert "script-src 'self'" in csp
     assert "'unsafe-inline'" not in csp.split("script-src", 1)[1].split(";", 1)[0]
+    assert resp.headers.get("strict-transport-security") == (
+        "max-age=31536000; includeSubDomains; preload"
+    )
+    assert resp.headers.get("x-frame-options") == "DENY"
+    assert resp.headers.get("referrer-policy") == "strict-origin"
+    assert resp.headers.get("permissions-policy") == (
+        "camera=(), microphone=(), geolocation=(), payment=()"
+    )
+    assert resp.headers.get("cross-origin-resource-policy") == "same-origin"
+    assert resp.headers.get("cross-origin-embedder-policy") == "require-corp"
+    assert resp.headers.get("cross-origin-opener-policy") == "same-origin"
 
 
 @pytest.mark.asyncio

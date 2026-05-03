@@ -499,6 +499,16 @@ _CSP_BASE_DIRECTIVES = (
     "base-uri 'self'",
     "form-action 'self'",
 )
+_SECURITY_HEADER_DEFAULTS = (
+    ("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload"),
+    ("X-Frame-Options", "DENY"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "strict-origin"),
+    ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Cross-Origin-Embedder-Policy", "require-corp"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+)
 _CONTENT_TYPE_CHARSET_RE = re.compile(r"charset=([^;\s]+)", re.IGNORECASE)
 
 
@@ -1149,29 +1159,12 @@ async def _security_headers(request, call_next):
             headers=dict(response.headers),
             background=getattr(response, "background", None),
         )
-    # Tell browsers "only come back over HTTPS for the next 6 months".
+    # Tell browsers "only come back over HTTPS".
     # Safe behind Cloudflare Tunnel (TLS is already terminated at CF's
-    # edge). Setting `includeSubDomains` protects api.* and staging.*
-    # on the same zone.
-    response.headers.setdefault(
-        "Strict-Transport-Security",
-        "max-age=15552000; includeSubDomains",
-    )
-    # Refuse to be framed — neutralises most clickjacking vectors.
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    # Disable MIME sniffing — stops browsers from reinterpreting a
-    # JSON response as HTML.
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    # Strip the Referer on cross-origin so our routes don't leak in
-    # other sites' analytics.
-    response.headers.setdefault(
-        "Referrer-Policy", "strict-origin",
-    )
-    # Minimal Permissions-Policy — we don't use these APIs, deny them.
-    response.headers.setdefault(
-        "Permissions-Policy",
-        "camera=(), microphone=(), geolocation=(), payment=()",
-    )
+    # edge). COOP/COEP/CORP make the document process-isolated and keep
+    # cross-origin resources from being consumed without an explicit opt-in.
+    for header, value in _SECURITY_HEADER_DEFAULTS:
+        response.headers.setdefault(header, value)
     # CSP. The dashboard is a single Next.js app talking to our own
     # API + optional Cloudflare tunnel subdomains. Kept strict but
     # allow inline styles (Tailwind generates some) and blob: for
