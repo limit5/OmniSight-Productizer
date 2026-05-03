@@ -6191,12 +6191,12 @@ BP.E GraphRAG / Neo4j
 - [x][G] FX.4.18 `backend/routers/sensor_fusion.py:73-325` 25 endpoints 補 `response_model`
 - [x][G] FX.4.19 `backend/routers/workflow.py` 7 stateful endpoints 補
 - [x][G] FX.4.20 `backend/routers/payment.py` + `motion_control.py` 12+ endpoints 補
-- [~][G] FX.4.21 `backend/routers/auth.py:156` login() 補 `LoginResponse` 模型
-- [ ] FX.4.22 `backend/models.py:90-91` Agent 從 `class Config` 統一改 `ConfigDict`
+- [x][G] FX.4.21 `backend/routers/auth.py:156` login() 補 `LoginResponse` 模型
+- [x][G] FX.4.22 `backend/models.py:90-91` Agent 從 `class Config` 統一改 `ConfigDict`
 
 #### Imports / circular workaround（3）
-- [ ] FX.4.23 `backend/vision_to_ui.py:755` invoke_chat circular 重構（提到 module 層）
-- [ ] FX.4.24 `backend/llm_adapter.py:103-114,325-344` max_tokens / bind_tools contract 一致化
+- [x][G] FX.4.23 `backend/vision_to_ui.py:755` invoke_chat circular 重構（提到 module 層）
+- [~][G] FX.4.24 `backend/llm_adapter.py:103-114,325-344` max_tokens / bind_tools contract 一致化
 - [ ] FX.4.25 `backend/decision_rules.py` 跟其他 modules 統一 typed exception per AGENTS.md
 
 ### FX.5 — Test coverage 補測（13 items, ~7-10 day）
@@ -6241,7 +6241,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.7.1 `backend/__init__.py:15-25` 清 25 個 dead re-export — audit 報告為 false positive (`backend` 為 PEP 420 namespace package, 該檔不存在; "25" 是 backend 子套件 `__init__.py` 數)。實際 dead import 1 處：`backend/payment_compliance.py:1153` `from backend import audit_log` (audit_log module 從未存在, 所有 PCI-DSS gate audit row 因 ImportError 被吞而靜默丟失)。已改用 `backend.audit.log()`，並加 `backend/tests/test_backend_imports_drift_guard.py` 靜態掃所有 `from backend import X` 防再次發生。
 - [x] FX.7.2 1768 個 function-內 local import 抽樣前 20 個重構（避免廣泛 circular） — 2026-05-04 done. Sampled top-20 `(file, import-line)` combos by repeat count, verified each target module (`db_pool`, `audit`, `db`, `metrics`, `auth_event`, plus stdlib `json`) has zero `backend.*` deps that would create cycles, hoisted to module level. Removed 216 local-import lines, added 18 module-level imports (`db_pool.get_pool` ×11, `audit as _audit` ×4, `metrics as _m` ×1, `db` ×1, `auth_event as _aevent` ×1, `json` ×1). All 18 modified modules import cleanly. Drift guard `backend/tests/test_local_import_drift_guard.py` pins both directions: (a) re-introducing the local form fails CI, (b) deleting the hoisted module-level form fails CI. Function-body local-import count in prod backend: 1744 → 1528 (12.4% reduction). Remaining 1528 deferred — most are genuine circular-avoidance or optional-dep guards; further waves require per-callsite cycle analysis.
 - [x] FX.7.3 9 個 > 2000 行的大檔做 module split 規劃（不一定做完，先寫 ADR + 排程） — 2026-05-04 done. ADR landed at `docs/design/fx-7-3-large-file-module-split.md`. Frozen 9 files (onvif_device 2389 / depth_sensing 3215 / db 3639 / tenant_projects 3878 / bootstrap 3351 / system 2530 / tools 2437 / invoke 2923 / auth 2169 = 26 531 LOC). 9-wave schedule (W0 prep + W1-W9 execution) paced 2026-05-05 → 2026-07-08, ordered risk-ascending (onvif first 0 importers, auth last 20+ importers + `_DUMMY_PASSWORD_HASH` import-time invariant). Per-file decomposition (sub-module names + line ranges + risk callouts), 4 split rules (frozen public API / router-as-package / 2-wave shim lifetime / no-behaviour-change), 4 drift guards specified (large-file LOC cap, OpenAPI route-set snapshot, per-module public-surface, nightly pylint cyclic-import). Execution waves become future Priority MS rows — not sub-bullets of FX.7.3. Index entry added to `docs/design/README.md`.
-- [ ] FX.7.4 HANDOFF.md 「Production status / Next gate」改 machine-readable manifest（YAML frontmatter 或獨立 status.yaml）
+- [x] FX.7.4 HANDOFF.md 「Production status / Next gate」改 machine-readable manifest（YAML frontmatter 或獨立 status.yaml） — 2026-05-04 done. 選獨立 `docs/status/handoff_status.yaml`（YAML frontmatter 不適用：HANDOFF.md 是單檔 ~230 entry，per-entry frontmatter 不工作）。新增 `scripts/extract_handoff_status.py`（parser 處理 6+ 種歷史 prose 變體 + canonical normalisation；`--write` / `--check` 雙模式）+ `backend/tests/test_handoff_status_manifest_drift_guard.py`（8 tests，invariants + entry-count floor + id uniqueness + canonical-status whitelist + count partition）。SOP §「HANDOFF.md 格式補強」加 manifest workflow 段落。Initial generation: 231 entries / 226 dev-only / 3 deployed-active / 1 planning-only / 1 unknown（escape hatch for "planning + audit doc landed" row）。
 - [ ] FX.7.5 HANDOFF.md 10+ row 的 deployed-active 誇大條目校正成 deployed-inactive
 - [ ] FX.7.6 alembic enforcement：加 pre-commit hook 拒絕 downgrade=pass 的 migration
 - [ ] FX.7.7 docker / compose 補 mem_limit + mem_reservation 對所有 service

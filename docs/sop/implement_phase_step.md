@@ -203,16 +203,52 @@ G4（SQLite → PostgreSQL，#1532-1539 已全 `[x]`）shipped 時帶 712 顆 co
 每次 entry 結尾新增固定欄位（放在「風險 / 已知問題」之後）：
 
 ```
-**Production status: [dev-only|deployed-inactive|deployed-active|deployed-observed]**
+**Production status:** [dev-only|deployed-inactive|deployed-active|deployed-observed]
 **Next gate:** ....（下一個要 flip 的狀態、需要做什麼、誰做、何時）
 ```
 
 `Next gate` 是為了讓閱讀者立刻知道「這 milestone 現在缺哪一步到 production」。例子：
 
-> Production status: dev-only  
+> Production status: dev-only
 > Next gate: deployed-inactive — 需要 (1) `pip-compile` 把 asyncpg + psycopg2 加進 production requirements.txt、(2) rebuild backend image。預估 30 min、不需 maintenance window。
 
 `Production status: deployed-observed` 之後這兩欄可以省略（milestone 已封閉）。
+
+#### Machine-readable status manifest（FX.7.4 新增 2026-05-04）
+
+HANDOFF.md 的 ~230 條 entry 累積出 6+ 種 "Production status" 寫法（`**Production status: dev-only**` / `**Production status:** dev-only` / `### Production status` 等），prose 層查不出「哪些 row 還是 `dev-only`」。FX.7.4 把兩條欄位 mirror 進獨立的 machine-readable manifest：
+
+- **Manifest**：`docs/status/handoff_status.yaml`（auto-generated；不要手改）
+- **Generator**：`scripts/extract_handoff_status.py`（parses HANDOFF.md → emits manifest）
+- **Drift guard**：`backend/tests/test_handoff_status_manifest_drift_guard.py`（CI 跑 `--check` 模式；HANDOFF.md 改了沒 regen → red）
+
+**作者工作流**（每次新增 / 更新 HANDOFF entry 時）：
+
+```bash
+# 1. 編輯 HANDOFF.md 照原本的 prose 格式 ship
+# 2. 重 generate 並 commit manifest
+python3 scripts/extract_handoff_status.py --write
+git add HANDOFF.md docs/status/handoff_status.yaml
+```
+
+**HANDOFF.md 仍是 source of truth** — manifest 只是 derivative view。Author 不需要碰 manifest，但 `--write` 步驟必跑、CI 會擋。Manifest 提供 grep / yq / SQL-like 查詢（"列出所有 deployed-active row" / "FX.7.x 系列還有幾個未上線" / "deployed-observed 但 next_gate 仍非空 = 漏清"）。
+
+Schema （v1）：
+
+```yaml
+schema_version: 1
+entries:
+  - id: 2026-05-04--FX.7.4         # <date>--<task-id>，stable
+    header_line: 12345              # 1-indexed line in HANDOFF.md
+    date: '2026-05-04'
+    author: Claude/Opus
+    task_id: FX.7.4                 # 從 title 抽出，可能 null
+    title: ...
+    production_status: dev-only     # 必為 canonical_statuses 之一或 'unknown'
+    next_gate: ...                  # one-line summary
+```
+
+非 canonical 值（例「planning + audit doc landed」）會被歸 `unknown` + 保留 `raw_status` 欄位，drift guard 不擋（escape hatch），但會在 generator stderr 印 `WARN`。新增穩定的非-canonical token（如 `planning-only`）時，請更新 generator 的 `EXTRA_STATUSES` 而非單條 escape。
 
 ### 給 AI 助手 / 未來自己的提醒
 
