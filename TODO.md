@@ -6148,7 +6148,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.2.1 `components/omnisight/project-report-panel.tsx:44-66` markdownToHtml 引入 DOMPurify 或 marked 內建 sanitize
 - [x] FX.2.2 `components/omnisight/cloudflare-tunnel-setup.tsx:272` Modal 加 onKeyDown(Escape) + focus trap + initial focus
 - [x] FX.2.3 `components/omnisight/api-key-management-panel.tsx:160-174` 補 `<label>` / `aria-label`
-- [ ] FX.2.4 `components/omnisight/integration-settings.tsx:1529-1535` setInterval 加 cleanup + memoize callback
+- [x] FX.2.4 `components/omnisight/integration-settings.tsx:1529-1535` setInterval 加 cleanup + memoize callback
 
 ### FX.3 — Infra / deploy BLOCKER fixes（4 items, ~1 day）
 

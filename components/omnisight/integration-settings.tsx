@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { createPortal } from "react-dom"
 import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy, Users, ShieldCheck, Webhook } from "lucide-react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -1515,23 +1515,34 @@ function CircuitBreakerSection() {
   const [data, setData] = useState<api.CircuitBreakerResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [resetting, setResetting] = useState(false)
+  // FX.2.4: guard against setState after unmount when an in-flight
+  // refresh resolves after clearInterval has run. Ref keeps the
+  // refresh callback identity stable (empty deps) — the interval
+  // never re-installs on re-render.
+  const mountedRef = useRef(true)
 
   const refresh = useCallback(async () => {
     try {
-      setError(null)
       const r = await api.getCircuitBreakers("tenant")
+      if (!mountedRef.current) return
+      setError(null)
       setData(r)
     } catch (e) {
+      if (!mountedRef.current) return
       setError(String(e))
     }
   }, [])
 
   useEffect(() => {
+    mountedRef.current = true
     refresh()
     // M3: cooldown ticks every second; refresh every 10s so stale state
     // doesn't linger after a key recovers without manual reload.
     const id = setInterval(refresh, 10_000)
-    return () => clearInterval(id)
+    return () => {
+      mountedRef.current = false
+      clearInterval(id)
+    }
   }, [refresh])
 
   const handleReset = useCallback(async (provider?: string, fingerprint?: string) => {
