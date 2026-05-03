@@ -447,6 +447,43 @@ async def test_registry_seed_does_not_overwrite_operator_binding():
 
 
 @pytest.mark.asyncio
+async def test_registry_seed_copies_default_config():
+    """Seeded binding config is operator-mutable, definition default stays immutable."""
+    registry = ExternalToolRegistry()
+    await registry.seed_default_bindings()
+    binding = await registry.store.get_binding("VisionParse")
+    assert binding is not None
+
+    binding.config["module"] = "operator_local_override"
+
+    assert _vision_def().default_config["module"] == "vision_parse"
+    assert registry.definitions["VisionParse"].default_config["module"] == "vision_parse"
+
+
+@pytest.mark.asyncio
+async def test_registry_seed_honors_enabled_by_default_false():
+    definition = ExternalToolDefinition(
+        tool_name="DisabledByDefault",
+        integration_type="python_lib",
+        license_tier="mit_apache_bsd",
+        sandbox_required=False,
+        description="disabled until operator opts in",
+        default_config={"module": "_fake_disabled_by_default"},
+        enabled_by_default=False,
+    )
+    registry = ExternalToolRegistry(definitions=(definition,))
+
+    inserted = await registry.seed_default_bindings()
+    binding = await registry.store.get_binding("DisabledByDefault")
+
+    assert inserted == 1
+    assert binding is not None
+    assert binding.enabled is False
+    with pytest.raises(ToolNotEnabledError, match="kill-switch"):
+        await registry.build_handler("DisabledByDefault")
+
+
+@pytest.mark.asyncio
 async def test_registry_build_handler_unknown_raises():
     registry = ExternalToolRegistry()
     with pytest.raises(ToolNotFoundError, match="not in registry"):
