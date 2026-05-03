@@ -78,6 +78,22 @@ def test_stripe_secret_is_redacted():
     assert "stripe" in fired
 
 
+def test_google_api_key_prefix_is_redacted():
+    text = "GOOGLE_API_KEY=AIzaSyDabcdefghijklmnopqrstuvwxy123456789"
+    out, fired = redact(text)
+    assert "AIzaSyD" not in out
+    assert "[REDACTED:google_api_key]" in out
+    assert "google_api_key" in fired
+
+
+def test_generic_api_key_assignment_is_redacted():
+    text = 'x-api-key="prod_live_abcdefghijklmnopqrstuvwxyz123456"'
+    out, fired = redact(text)
+    assert "prod_live_abcdefghijklmnopqrstuvwxyz" not in out
+    assert "[REDACTED:api_key]" in out
+    assert "api_key_assignment" in fired
+
+
 def test_anthropic_key_is_redacted_specifically():
     text = "ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
     out, fired = redact(text)
@@ -100,6 +116,14 @@ def test_bearer_header_is_redacted():
     assert "Bearer [REDACTED:token]" in out
 
 
+def test_oauth_token_assignment_is_redacted():
+    text = "refresh_token=rt_abcdefghijklmnopqrstuvwxyz1234567890"
+    out, fired = redact(text)
+    assert "rt_abcdefghijklmnopqrstuvwxyz" not in out
+    assert "[REDACTED:oauth_token]" in out
+    assert "oauth_token" in fired
+
+
 def test_jwt_is_redacted():
     text = (
         "Cookie: session=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0IiwibmFtZSI6IkpvZSJ9"
@@ -108,6 +132,22 @@ def test_jwt_is_redacted():
     out, fired = redact(text)
     assert "eyJhbGciOiJI" not in out
     assert "[REDACTED:jwt]" in out
+
+
+def test_cookie_header_session_is_redacted():
+    text = "Cookie: csrftoken=public; sessionid=abcdef1234567890abcdef1234567890; theme=dark"
+    out, fired = redact(text)
+    assert "abcdef1234567890" not in out
+    assert "Cookie: [REDACTED:cookie]" in out
+    assert "cookie" in fired
+
+
+def test_database_url_with_password_is_redacted():
+    text = "DATABASE_URL=postgresql://app_user:p@ssw0rd-value@pg-primary:5432/app"
+    out, fired = redact(text)
+    assert "p@ssw0rd-value" not in out
+    assert "[REDACTED:database_url]" in out
+    assert "database_url" in fired
 
 
 def test_private_key_block_is_redacted_whole():

@@ -49,10 +49,41 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     ),
     # Stripe
     ("stripe", re.compile(r"\b(?:sk|pk|rk)_(?:test|live)_[A-Za-z0-9]{20,}"), "[REDACTED:stripe_key]"),
+    # Provider API keys and key-like assignments
+    ("google_api_key", re.compile(r"\bAIza[A-Za-z0-9_\-]{35}"), "[REDACTED:google_api_key]"),
+    (
+        "api_key_assignment",
+        re.compile(
+            r"\b(?:api[_-]?key|x-api-key|client_secret|secret_key)\s*[:=]\s*"
+            r"['\"]?[A-Za-z0-9_.\-/+=]{20,}['\"]?",
+            re.I,
+        ),
+        "api_key=[REDACTED:api_key]",
+    ),
     # Anthropic — must run BEFORE openai because both start with sk-
     ("anthropic", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"), "[REDACTED:anthropic_key]"),
     # OpenAI
     ("openai", re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "[REDACTED:openai_key]"),
+    # OAuth tokens commonly logged as form fields / JSON keys
+    (
+        "oauth_token",
+        re.compile(
+            r"\b(?:access_token|refresh_token|id_token|oauth_token)\s*[:=]\s*"
+            r"['\"]?[A-Za-z0-9_.\-]{20,}['\"]?",
+            re.I,
+        ),
+        "oauth_token=[REDACTED:oauth_token]",
+    ),
+    # Database URLs with embedded credentials
+    (
+        "database_url",
+        re.compile(
+            r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://"
+            r"[^:\s/@]+:[^@\s]+@[^\s)'\"]+",
+            re.I,
+        ),
+        "[REDACTED:database_url]",
+    ),
     # Generic Bearer (any header value > 20 chars after "Bearer ")
     ("bearer", re.compile(r"\bBearer\s+[A-Za-z0-9_.\-]{20,}", re.I), "Bearer [REDACTED:token]"),
     # JWT (3 base64 segments separated by dots, starting with eyJ)
@@ -60,6 +91,18 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
         "jwt",
         re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
         "[REDACTED:jwt]",
+    ),
+    # Cookie / Set-Cookie headers carrying non-JWT session-like values.
+    # Ordered after JWT so token-shaped cookie values keep the more
+    # specific jwt label.
+    (
+        "cookie",
+        re.compile(
+            r"\b((?:Cookie|Set-Cookie):\s*)[^\r\n]*"
+            r"(?:session|sid|auth|token|jwt)[^=;]*=(?!\[REDACTED:)[^;\s]{12,}[^\r\n]*",
+            re.I,
+        ),
+        r"\1[REDACTED:cookie]",
     ),
     # Private key blocks (SSH/PGP) — redact entire block
     (
