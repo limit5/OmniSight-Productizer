@@ -28,7 +28,7 @@ Type hints (re-exported for callers that need them):
 
 High-level adapter functions (the actual firewall — stable across
 LangChain upgrades):
-    invoke_chat(messages, ...)   → str
+    invoke_chat(messages, ..., max_tokens=None, bind_tools=None) → str
     stream_chat(messages, ...)   → AsyncIterator[str]
     embed(texts, ...)            → list[list[float]]
     tool_call(messages, tools, ...) → AdapterToolResponse
@@ -178,6 +178,8 @@ def build_chat_model(
             kwargs["base_url"] = effective_base_url
         if default_headers:
             kwargs["default_headers"] = default_headers
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
         llm = ChatOpenAI(**kwargs)
 
     elif p == "groq":
@@ -189,6 +191,8 @@ def build_chat_model(
         }
         if api_key:
             kwargs["groq_api_key"] = api_key
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
         llm = ChatGroq(**kwargs)
 
     elif p == "together":
@@ -199,6 +203,8 @@ def build_chat_model(
         }
         if api_key:
             kwargs["together_api_key"] = api_key
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
         llm = ChatTogether(**kwargs)
 
     elif p == "ollama":
@@ -209,6 +215,9 @@ def build_chat_model(
         }
         if base_url:
             kwargs["base_url"] = base_url
+        if max_tokens:
+            # ChatOllama uses num_predict for the output-token cap.
+            kwargs["num_predict"] = max_tokens
         # Z.6.2: do NOT set format="json" — it conflicts with tool calling.
         # ChatOllama.bind_tools() is supported as of langchain-ollama >= 0.2
         # (locked in Z.6.1) for models that advertise function-calling
@@ -327,6 +336,8 @@ def invoke_chat(
     *,
     provider: str | None = None,
     model: str | None = None,
+    max_tokens: int | None = None,
+    bind_tools: list | None = None,
     llm: BaseChatModel | None = None,
 ) -> str:
     """Run a single synchronous chat turn and return the text reply.
@@ -336,9 +347,13 @@ def invoke_chat(
     logic").  Any exception raised by the provider propagates so the
     caller can classify / retry.
     """
-    chat = _resolve_chat_model(provider, model, None, llm)
+    chat = _resolve_chat_model(provider, model, bind_tools, llm)
     if chat is None:
         return ""
+    if max_tokens:
+        # Module-global audit: max_tokens/bind_tools are per-call inputs; no
+        # module state touched, so workers do not need cross-process sync.
+        chat = chat.bind(max_tokens=max_tokens)
     msgs = _coerce_messages(messages)
     resp = chat.invoke(msgs)
     return _message_text(resp)
