@@ -37,6 +37,12 @@ from backend.security_scanning.sca import (
     scan_sca,
     write_sca_fix_pr_artifact,
 )
+from backend.security_scanning.container import (
+    ContainerArtifactReport,
+    ContainerFinding,
+    ContainerSeverity,
+    scan_container_artifact,
+)
 
 __all__ = [
     "DEFAULT_FAIL_ON",
@@ -54,7 +60,11 @@ __all__ = [
     "SCA_FIX_PR_ARTIFACT",
     "SCAReport",
     "SCASeverity",
+    "ContainerArtifactReport",
+    "ContainerFinding",
+    "ContainerSeverity",
     "plan_sca_fix_prs",
+    "scan_container_artifact",
     "scan_web_preview_zap",
     "scan_generated_workspace_commit",
     "scan_sca",
