@@ -84,6 +84,11 @@ KS.1.5 (Tier 1 envelope encryption):
     key_id / request_id through ``backend.audit.log`` and restores the
     tenant ContextVar after each emit.
 
+KS.1.6 (Tier 1 envelope encryption):
+  - spend_anomaly — per-tenant token-rate anomaly detector with
+    auto-throttle decisions and Slack / email notification fan-out
+    through the existing notification tier dispatcher.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
@@ -344,6 +349,7 @@ from . import password_generator  # noqa: F401
 from . import pii_auto_mask  # noqa: F401
 from . import pii_presidio  # noqa: F401
 from . import privacy_notice_templates  # noqa: F401
+from . import spend_anomaly  # noqa: F401
 from . import token_vault  # noqa: F401
 from . import turnstile_form_verifier  # noqa: F401
 
@@ -373,6 +379,7 @@ __all__ = [
     "pii_presidio",
     "privacy_notice_templates",
     "redact",
+    "spend_anomaly",
     "token_vault",
     "turnstile_form_verifier",
 ]
