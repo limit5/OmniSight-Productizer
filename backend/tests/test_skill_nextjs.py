@@ -139,6 +139,7 @@ class TestScaffoldRender:
             "app/page.tsx",
             "app/globals.css",
             "app/actions.ts",
+            "middleware.ts",
             "app/api/health/route.ts",
             "app/api/v1/[...slug]/route.ts",
             "components/Counter.tsx",
@@ -161,6 +162,21 @@ class TestScaffoldRender:
         assert "root: __dirname" in config
         # And the __dirname line that powers the pin must also exist.
         assert "fileURLToPath" in config
+
+    def test_sc63_security_headers_middleware_auto_added(self, project_dir):
+        render_project(project_dir, _default_opts())
+        middleware = (project_dir / "middleware.ts").read_text()
+        assert "SC.6.3 security headers" in middleware
+        assert '"Content-Security-Policy"' in middleware
+        assert "script-src 'self'" in middleware
+        assert "'unsafe-eval'" not in middleware
+        assert '"Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload"' in middleware
+        assert '"X-Frame-Options", "DENY"' in middleware
+        assert '"Referrer-Policy", "strict-origin"' in middleware
+        assert '"Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"' in middleware
+        assert '"Cross-Origin-Resource-Policy", "same-origin"' in middleware
+        assert '"Cross-Origin-Embedder-Policy", "require-corp"' in middleware
+        assert '"Cross-Origin-Opener-Policy", "same-origin"' in middleware
 
     def test_package_json_branches_on_auth(self, project_dir):
         render_project(project_dir, _default_opts(auth="nextauth"))
