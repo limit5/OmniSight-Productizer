@@ -177,6 +177,11 @@ def make_agent_tool_handler(
 
     Returns:
       An async callable suitable for ``ToolDispatcher.register("Agent", h)``.
+
+    Contract:
+      ``run_in_background`` is intentionally unsupported. Sub-agent output is
+      the parent tool_result payload, so the handler rejects background
+      requests before dispatching the observer or nested client call.
     """
     types = types_map or DEFAULT_SUBAGENT_TYPES
     if "general-purpose" not in types:

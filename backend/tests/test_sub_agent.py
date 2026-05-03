@@ -218,8 +218,10 @@ def test_handler_empty_prompt_raises() -> None:
         asyncio.run(h({"description": "d", "prompt": "   "}))
 
 
-def test_handler_run_in_background_raises_notimplemented() -> None:
-    h = make_agent_tool_handler(client=_StubClient())
+def test_handler_run_in_background_raises_notimplemented_before_dispatch() -> None:
+    client = _StubClient()
+    observed: list[dict[str, Any]] = []
+    h = make_agent_tool_handler(client=client, on_dispatch=observed.append)
     with pytest.raises(NotImplementedError, match="background"):
         asyncio.run(
             h(
@@ -230,6 +232,8 @@ def test_handler_run_in_background_raises_notimplemented() -> None:
                 }
             )
         )
+    assert observed == []
+    assert client.captured.kwargs == {}
 
 
 def test_handler_isolation_hint_is_ignored_not_crashing(caplog) -> None:
