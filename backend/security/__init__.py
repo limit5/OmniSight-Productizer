@@ -109,13 +109,13 @@ AS.1.4 (auth shared lib):
 
 AS.2.1 (auth shared lib):
   - token_vault — per-user / per-provider OAuth credential at-rest
-    encryption. Reuses `backend.secret_store._fernet` (single master
-    Fernet key invariant per AS.0.4 §3). Wraps plaintext in a binding
-    envelope so a DB-level row swap is caught by `decrypt_for_user`.
-    `key_version` column is reserved for the future KMS rotation hook
-    (defaults to 1 in this release). Provider whitelist mirrors
-    `account_linking._AS1_OAUTH_PROVIDERS` (drift-guarded). TS twin
-    lives at `templates/_shared/token-vault/` (AS.2.3).
+    encryption. KS.1.3 writes the KS.1.2 per-tenant DEK envelope and
+    keeps a 30-day read fallback for legacy Fernet rows. Wraps
+    plaintext in a binding envelope so a DB-level row swap is caught
+    by `decrypt_for_user`. `key_version` remains 1 until the future
+    KMS rotation hook changes column semantics. Provider whitelist
+    mirrors `account_linking._AS1_OAUTH_PROVIDERS` (drift-guarded).
+    TS twin lives at `templates/_shared/token-vault/` (AS.2.3).
 
 AS.2.4 (auth shared lib):
   - oauth_refresh_hook — stateless orchestrator that auto-refreshes

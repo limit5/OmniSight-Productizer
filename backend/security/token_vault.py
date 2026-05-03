@@ -1,18 +1,18 @@
-"""AS.2.1 — OAuth token vault: per-user / per-provider at-rest encryption.
+"""AS.2.1 / KS.1.3 — OAuth token vault: per-user / per-provider encryption.
 
 Encrypts OAuth ``access_token`` / ``refresh_token`` material for storage
 in the ``oauth_tokens`` row that AS.2.2 will land. The vault is the
 *only* approved entry-point for OAuth-token ciphertext; every router
 that touches a stored OAuth credential must round-trip through
 :func:`encrypt_for_user` / :func:`decrypt_for_user` so the
-ciphertext-shuffling guard, the master-Fernet-key invariant, and the
-``key_version`` forward-promotion hook stay honoured uniformly.
+ciphertext-shuffling guard and the ``key_version`` promotion hook stay
+honoured uniformly.
 
 Cryptographic shape
 ───────────────────
-The vault wraps each plaintext in a small JSON envelope before handing
-it to ``backend.secret_store.encrypt`` (the project-wide Fernet cipher).
-The envelope is::
+The vault wraps each plaintext in a small JSON binding envelope before
+handing it to ``backend.security.envelope.encrypt`` (KS.1.2 per-tenant
+DEK envelope encryption). The binding payload is::
 
     {
       "fmt": 1,                # binding-format version
@@ -22,38 +22,41 @@ The envelope is::
       "tok":  "<plaintext token>"
     }
 
-On decrypt the envelope is parsed inside the Fernet authenticated
-boundary; ``uid`` and ``prv`` MUST match the values the caller claims
-the row belongs to, otherwise :class:`BindingMismatchError` is raised.
+On decrypt the binding payload is parsed inside the KS.1 envelope
+authenticated boundary; ``uid`` and ``prv`` MUST match the values the
+caller claims the row belongs to, otherwise
+:class:`BindingMismatchError` is raised.
 The salt is purely the "per-row" half of the binding — it gives every
 ciphertext a fresh nonce-like tag inside the auth-checked envelope so a
 DB-level row swap (attacker copies user-A's ``access_token_enc`` into
 user-B's row) decrypts but fails the binding check at the application
 layer.
 
-Why a binding envelope and not a derived sub-key
-────────────────────────────────────────────────
-AS.0.4 §3.1 hard invariant: the OAuth token vault MUST reuse
-``backend.secret_store._fernet`` and MUST NOT derive a per-row sub-key
-or introduce a second master key. The binding envelope satisfies the
-TODO row's "per-user salt" intent — defence against ciphertext
-shuffling — while staying inside the single-master-key contract:
+KS.1.3 migration window
+───────────────────────
+New writes store a compact JSON token envelope in
+``oauth_tokens.access_token_enc`` / ``refresh_token_enc``::
 
-  * Single Fernet key (audit-friendly, one key-rotation runbook).
-  * Per-row salt is *bound* to user_id+provider via the envelope, not
-    *used* to derive a separate Fernet key.
-  * Same primitives every other secret_store caller uses
-    (``git_credentials`` / ``llm_credentials`` / ``codesign_store``).
+    {
+      "fmt": 1,
+      "ciphertext": "<KS.1.2 ciphertext JSON>",
+      "dek_ref": { ... TenantDEKRef ... }
+    }
+
+Existing rows written by AS.2.1 carry the same ``key_version = 1`` but
+plain Fernet ciphertext from :mod:`backend.secret_store`. During the
+30-day KS.1.3 migration window, reads fall back to that legacy Fernet
+path only when the stored ciphertext is not a token-envelope JSON
+object. After ``LEGACY_FERNET_FALLBACK_DEPRECATES_ON`` the fallback
+raises :class:`LegacyFernetFallbackDeprecatedError`; writers never
+produce legacy Fernet ciphertext in this release.
 
 ``key_version`` reservation (AS.0.4 §3.1 / §3.2)
 ────────────────────────────────────────────────
-``oauth_tokens.key_version INTEGER DEFAULT 1`` is reserved as a future
-KMS-rotation hook. In this release every ciphertext is written and
-read at :data:`KEY_VERSION_CURRENT` = 1; any other value on read
-raises :class:`UnknownKeyVersionError`. The roadmap (AS.0.4 §3.1 #4)
-lays out the multi-version dual-read flow that will land alongside
-the first KMS migration; until then the vault refuses unknown
-versions instead of silently degrading.
+``oauth_tokens.key_version INTEGER DEFAULT 1`` remains unchanged so
+KS.1.3 does not require a schema migration. KS.1.4 owns future
+master-KEK rotation; this row only upgrades the AS token vault
+read/write path.
 
 Provider whitelist
 ──────────────────
@@ -76,11 +79,12 @@ to-package consolidation rolls these in together.
 Module-global state audit (per implement_phase_step.md SOP §1)
 ──────────────────────────────────────────────────────────────
 * No module-level mutable state — only frozen dataclasses, immutable
-  tuples / strings, and ``frozenset``s.
+  dates / tuples / strings, and ``frozenset``s.
 * All randomness comes from :mod:`secrets` (kernel CSPRNG).
-* The Fernet key fetch is delegated to :mod:`backend.secret_store`,
-  which already owns the ``fcntl.flock`` first-boot generation guard
-  (task #104 — answer #2 of SOP §1, coordinated via on-disk lock).
+* KS.1 envelope local fallback delegates KEK material to
+  :mod:`backend.secret_store`, which already owns the ``fcntl.flock``
+  first-boot generation guard (task #104 — answer #2 of SOP §1,
+  coordinated via on-disk lock).
 * No DB writes, no network IO. Persistence is the caller's job.
 * Importing the module is free of side effects.
 
@@ -108,14 +112,16 @@ short-circuit before reaching the vault when the knob is off.
 from __future__ import annotations
 
 import base64
+import datetime as _dt
 import hmac
 import json
 import logging
 import secrets
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from backend import secret_store
+from backend.security import envelope as tenant_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -124,16 +130,30 @@ logger = logging.getLogger(__name__)
 #  Constants
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-#: Active key version. AS.0.4 §3.1 reserves the column for future
-#: KMS migrations; the first KMS-rotation row will introduce a v2
-#: branch and the dual-read fallback. Any non-1 value on decrypt
-#: raises :class:`UnknownKeyVersionError`.
+#: Active token-vault key version. KS.1.3 keeps the existing schema
+#: default and distinguishes new rows by token-envelope ciphertext
+#: shape, not by bumping the column. KS.1.4 owns future key-version
+#: rotation semantics.
 KEY_VERSION_CURRENT: int = 1
+
+#: Legacy AS.2.1 rows used ``backend.secret_store`` Fernet ciphertext
+#: with ``key_version = 1``. KS.1.3 keeps a 30-day read fallback only.
+KEY_VERSION_LEGACY_FERNET: int = 1
 
 #: Binding envelope format. Bumped only when the wrapper shape itself
 #: changes (e.g. add a field). Changing this requires a dual-read
 #: phase; do NOT alter casually.
 BINDING_FORMAT_VERSION: int = 1
+
+#: Outer JSON format for the token-vault carrier stored in
+#: ``oauth_tokens.access_token_enc`` / ``refresh_token_enc``. The
+#: inner KS.1.2 ciphertext has its own ``fmt``.
+TOKEN_ENVELOPE_FORMAT_VERSION: int = 1
+
+#: KS.1.3 legacy fallback window. The start date is this row's landing
+#: date; the old Fernet reader deprecates 30 calendar days later.
+LEGACY_FERNET_FALLBACK_STARTED_ON = _dt.date(2026, 5, 3)
+LEGACY_FERNET_FALLBACK_DEPRECATES_ON = _dt.date(2026, 6, 2)
 
 #: Per-row salt size (bytes). 16 bytes / 128 bits is comfortably above
 #: the 64-bit collision floor for any realistic OmniSight-scale row
@@ -174,6 +194,10 @@ class UnknownKeyVersionError(TokenVaultError):
     dispatch; until then any unknown value is treated as corruption."""
 
 
+class LegacyFernetFallbackDeprecatedError(UnknownKeyVersionError):
+    """A legacy Fernet row was read after the KS.1.3 fallback deadline."""
+
+
 class BindingMismatchError(TokenVaultError):
     """The decrypted binding envelope's ``uid`` / ``prv`` did not match
     the values the caller claimed the row belongs to. Indicates either
@@ -189,6 +213,10 @@ class CiphertextCorruptedError(TokenVaultError):
     InvalidToken exception."""
 
 
+class UnknownTokenEnvelopeVersionError(TokenVaultError):
+    """The KS.1.3 token-envelope carrier is not a supported format."""
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Frozen dataclasses (public surface)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -200,11 +228,12 @@ class EncryptedToken:
 
     Round-tripped to / from the ``oauth_tokens`` row's
     ``access_token_enc`` (TEXT) + ``key_version`` (INTEGER) columns.
-    The ``ciphertext`` is the Fernet token (urlsafe-base64 ASCII), and
-    ``key_version`` MUST be :data:`KEY_VERSION_CURRENT` for this
-    release. The salt is intentionally NOT a public attribute — it
-    lives inside the Fernet-authenticated envelope, not in a separate
-    column.
+    For new KS.1.3 writes the ``ciphertext`` is the token envelope
+    JSON. For legacy AS.2.1 rows with the same ``key_version=1``, it
+    is the Fernet token accepted only during the migration fallback
+    window. The salt is
+    intentionally NOT a public attribute — it lives inside the
+    authenticated binding payload, not in a separate column.
     """
 
     ciphertext: str
@@ -282,6 +311,130 @@ def _b64_salt() -> tuple[bytes, str]:
     return raw, base64.b64encode(raw).decode("ascii")
 
 
+def _token_envelope(ciphertext: str, dek_ref: tenant_envelope.TenantDEKRef) -> str:
+    payload = {
+        "fmt": TOKEN_ENVELOPE_FORMAT_VERSION,
+        "ciphertext": ciphertext,
+        "dek_ref": dek_ref.to_dict(),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _load_token_envelope(ciphertext: str) -> tuple[str, tenant_envelope.TenantDEKRef]:
+    try:
+        payload = json.loads(ciphertext)
+    except (TypeError, ValueError) as exc:
+        raise CiphertextCorruptedError("token envelope is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise CiphertextCorruptedError(
+            f"token envelope must be an object, got {type(payload).__name__}"
+        )
+    if payload.get("fmt") != TOKEN_ENVELOPE_FORMAT_VERSION:
+        raise UnknownTokenEnvelopeVersionError(
+            f"unknown token envelope fmt={payload.get('fmt')!r}"
+        )
+    inner_ciphertext = payload.get("ciphertext")
+    if not isinstance(inner_ciphertext, str) or not inner_ciphertext:
+        raise CiphertextCorruptedError("token envelope missing ciphertext")
+    dek_ref_raw = payload.get("dek_ref")
+    if not isinstance(dek_ref_raw, dict):
+        raise CiphertextCorruptedError("token envelope missing dek_ref object")
+    try:
+        dek_ref = tenant_envelope.TenantDEKRef.from_dict(dek_ref_raw)
+    except tenant_envelope.UnknownEnvelopeVersionError as exc:
+        raise UnknownTokenEnvelopeVersionError(str(exc)) from exc
+    except tenant_envelope.EnvelopeEncryptionError as exc:
+        raise CiphertextCorruptedError("token envelope dek_ref is malformed") from exc
+    return inner_ciphertext, dek_ref
+
+
+def _tenant_id_for_user(user_id: str, tenant_id: Optional[str]) -> str:
+    return _check_user_id(tenant_id) if tenant_id is not None else user_id
+
+
+def _utc_today() -> _dt.date:
+    return _dt.datetime.now(_dt.timezone.utc).date()
+
+
+def legacy_fernet_fallback_is_active(*, as_of: Optional[_dt.date] = None) -> bool:
+    """Whether KS.1.3 should still read legacy Fernet token rows.
+
+    No shared runtime state: every worker derives the same answer from
+    UTC date constants baked into the row.
+    """
+
+    day = as_of or _utc_today()
+    return day < LEGACY_FERNET_FALLBACK_DEPRECATES_ON
+
+
+def _binding_payload(user_id: str, provider: str, plaintext: str) -> str:
+    _, salt_b64 = _b64_salt()
+    payload = {
+        "fmt": BINDING_FORMAT_VERSION,
+        "salt": salt_b64,
+        "uid": user_id,
+        "prv": provider,
+        "tok": plaintext,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _load_binding_payload(payload: str, user_id: str, provider: str) -> str:
+    try:
+        envelope = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise CiphertextCorruptedError("inner envelope is not valid JSON") from exc
+    if not isinstance(envelope, dict):
+        raise CiphertextCorruptedError(
+            f"inner envelope must be an object, got {type(envelope).__name__}"
+        )
+
+    fmt = envelope.get("fmt")
+    if fmt != BINDING_FORMAT_VERSION:
+        raise BindingMismatchError(
+            f"unknown binding format version: {fmt!r} "
+            f"(this release supports only {BINDING_FORMAT_VERSION})"
+        )
+
+    stored_uid = envelope.get("uid")
+    stored_prv = envelope.get("prv")
+    if not isinstance(stored_uid, str) or not isinstance(stored_prv, str):
+        raise CiphertextCorruptedError(
+            "envelope missing 'uid' / 'prv' string fields"
+        )
+
+    if not hmac.compare_digest(stored_uid, user_id):
+        raise BindingMismatchError(
+            "ciphertext bound to a different user_id"
+        )
+    if not hmac.compare_digest(stored_prv, provider):
+        raise BindingMismatchError(
+            "ciphertext bound to a different provider"
+        )
+
+    plaintext = envelope.get("tok")
+    if not isinstance(plaintext, str):
+        raise CiphertextCorruptedError(
+            "envelope 'tok' field missing or not a string"
+        )
+    return plaintext
+
+
+def _decrypt_legacy_fernet(user_id: str, provider: str, token: EncryptedToken) -> str:
+    if not legacy_fernet_fallback_is_active():
+        raise LegacyFernetFallbackDeprecatedError(
+            "legacy Fernet token fallback deprecated after "
+            f"{LEGACY_FERNET_FALLBACK_DEPRECATES_ON.isoformat()}"
+        )
+    try:
+        payload = secret_store.decrypt(token.ciphertext)
+    except Exception as exc:  # cryptography.fernet.InvalidToken et al.
+        raise CiphertextCorruptedError(
+            "ciphertext failed Fernet authentication"
+        ) from exc
+    return _load_binding_payload(payload, user_id, provider)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -291,15 +444,16 @@ def encrypt_for_user(
     user_id: str,
     provider: str,
     plaintext: str,
+    *,
+    tenant_id: Optional[str] = None,
 ) -> EncryptedToken:
     """Encrypt *plaintext* (an OAuth access_token / refresh_token) for
     storage in the ``oauth_tokens`` row owned by *user_id* + *provider*.
 
-    The plaintext is wrapped in a binding envelope (see module
-    docstring) before being handed to :func:`backend.secret_store.encrypt`,
-    so the resulting ciphertext is bound to this *(user_id, provider)*
-    pair: a row swap in the database will be caught by
-    :func:`decrypt_for_user`.
+    The plaintext is wrapped in a binding payload (see module
+    docstring) before being handed to the KS.1.2 envelope helper, so
+    the resulting ciphertext is bound to this *(user_id, provider)*
+    pair and to a tenant DEK.
 
     Raises
     ------
@@ -312,23 +466,15 @@ def encrypt_for_user(
     p = _check_provider(provider)
     uid = _check_user_id(user_id)
     tok = _check_plaintext(plaintext)
-    _, salt_b64 = _b64_salt()
-
-    envelope = {
-        "fmt": BINDING_FORMAT_VERSION,
-        "salt": salt_b64,
-        "uid": uid,
-        "prv": p,
-        "tok": tok,
-    }
-    # ``sort_keys`` + ``separators`` give a deterministic byte layout
-    # inside the ciphertext — useful for any future audit / forensic
-    # path that wants to assert envelope shape without re-running the
-    # encryption.
-    payload = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
-    ciphertext = secret_store.encrypt(payload)
+    tid = _tenant_id_for_user(uid, tenant_id)
+    payload = _binding_payload(uid, p, tok)
+    ciphertext, dek_ref = tenant_envelope.encrypt(
+        payload,
+        tid,
+        purpose="as-token-vault",
+    )
     return EncryptedToken(
-        ciphertext=ciphertext,
+        ciphertext=_token_envelope(ciphertext, dek_ref),
         key_version=KEY_VERSION_CURRENT,
     )
 
@@ -350,7 +496,8 @@ def decrypt_for_user(
     UnsupportedProviderError
         *provider* is not in :data:`SUPPORTED_PROVIDERS`.
     UnknownKeyVersionError
-        ``token.key_version`` is not :data:`KEY_VERSION_CURRENT`.
+        ``token.key_version`` is neither the KS.1.3 current version nor
+        an active legacy Fernet fallback version.
     BindingMismatchError
         The ciphertext was encrypted for a different *(user_id,
         provider)* pair, or for a different binding-format version.
@@ -372,57 +519,22 @@ def decrypt_for_user(
         )
 
     try:
-        payload = secret_store.decrypt(token.ciphertext)
-    except Exception as exc:  # cryptography.fernet.InvalidToken et al.
-        raise CiphertextCorruptedError(
-            "ciphertext failed Fernet authentication"
-        ) from exc
-
+        ciphertext, dek_ref = _load_token_envelope(token.ciphertext)
+    except CiphertextCorruptedError:
+        if token.ciphertext.lstrip().startswith("{"):
+            raise
+        return _decrypt_legacy_fernet(uid, p, token)
     try:
-        envelope = json.loads(payload)
-    except (TypeError, ValueError) as exc:
-        raise CiphertextCorruptedError("inner envelope is not valid JSON") from exc
-    if not isinstance(envelope, dict):
+        payload = tenant_envelope.decrypt(ciphertext, dek_ref)
+    except tenant_envelope.BindingMismatchError as exc:
+        raise BindingMismatchError(str(exc)) from exc
+    except tenant_envelope.UnknownEnvelopeVersionError as exc:
+        raise UnknownTokenEnvelopeVersionError(str(exc)) from exc
+    except tenant_envelope.EnvelopeEncryptionError as exc:
         raise CiphertextCorruptedError(
-            f"inner envelope must be an object, got {type(envelope).__name__}"
-        )
-
-    fmt = envelope.get("fmt")
-    if fmt != BINDING_FORMAT_VERSION:
-        # Treat as binding mismatch rather than corruption — the
-        # ciphertext decoded fine (Fernet auth passed), it just
-        # carries a shape this release doesn't understand.
-        raise BindingMismatchError(
-            f"unknown binding format version: {fmt!r} "
-            f"(this release supports only {BINDING_FORMAT_VERSION})"
-        )
-
-    stored_uid = envelope.get("uid")
-    stored_prv = envelope.get("prv")
-    if not isinstance(stored_uid, str) or not isinstance(stored_prv, str):
-        raise CiphertextCorruptedError(
-            "envelope missing 'uid' / 'prv' string fields"
-        )
-
-    # Constant-time compare — both sides are short ASCII strings; a
-    # timing leak here is theoretical at best (the attacker would need
-    # to already control encrypted-row-shuffling AND timing-side-channel
-    # a server response), but the stdlib gives it for free so we use it.
-    if not hmac.compare_digest(stored_uid, uid):
-        raise BindingMismatchError(
-            "ciphertext bound to a different user_id"
-        )
-    if not hmac.compare_digest(stored_prv, p):
-        raise BindingMismatchError(
-            "ciphertext bound to a different provider"
-        )
-
-    plaintext = envelope.get("tok")
-    if not isinstance(plaintext, str):
-        raise CiphertextCorruptedError(
-            "envelope 'tok' field missing or not a string"
-        )
-    return plaintext
+            "ciphertext failed KS.1 envelope authentication"
+        ) from exc
+    return _load_binding_payload(payload, uid, p)
 
 
 def fingerprint(token: str) -> str:
@@ -446,12 +558,19 @@ __all__ = [
     "CiphertextCorruptedError",
     "EncryptedToken",
     "KEY_VERSION_CURRENT",
+    "KEY_VERSION_LEGACY_FERNET",
+    "LEGACY_FERNET_FALLBACK_DEPRECATES_ON",
+    "LEGACY_FERNET_FALLBACK_STARTED_ON",
+    "LegacyFernetFallbackDeprecatedError",
     "SUPPORTED_PROVIDERS",
+    "TOKEN_ENVELOPE_FORMAT_VERSION",
     "TokenVaultError",
     "UnknownKeyVersionError",
+    "UnknownTokenEnvelopeVersionError",
     "UnsupportedProviderError",
     "decrypt_for_user",
     "encrypt_for_user",
     "fingerprint",
     "is_enabled",
+    "legacy_fernet_fallback_is_active",
 ]

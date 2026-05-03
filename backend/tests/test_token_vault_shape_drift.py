@@ -1,17 +1,17 @@
 """AS.2.3 — Token-vault contract drift guard (Python ↔ TS twin).
 
 Behavioural drift guard between
-:mod:`backend.security.token_vault` (Python, Fernet-based) and
+:mod:`backend.security.token_vault` (Python, KS.1 envelope-based) and
 ``templates/_shared/token-vault/index.ts`` (TS twin, Web Crypto
 AES-GCM-based).
 
 Why this test exists
 ────────────────────
-The two vaults deliberately use different cipher primitives — Fernet
-on the server, AES-256-GCM on the client (each side holds its own
-master key per AS.0.4 §3 hard invariant). Server-encrypted ciphertext
-and client-encrypted ciphertext are NOT interchangeable; what stays
-byte-equal is the **contract surface**:
+The two vaults deliberately use different cipher primitives —
+KS.1.2 per-tenant envelope encryption on the server, AES-256-GCM on
+the client. Server-encrypted ciphertext and client-encrypted
+ciphertext are NOT interchangeable; what stays byte-equal is the
+**contract surface**:
 
     * binding-envelope key set ``{fmt, salt, uid, prv, tok}``
     * numeric constants ``KEY_VERSION_CURRENT``, ``BINDING_FORMAT_VERSION``
@@ -421,7 +421,7 @@ def _python_run_fixture(fx: dict[str, Any]) -> dict[str, Any]:
             enc = tv.encrypt_for_user(
                 fx["userId"], fx["provider"], fx["plaintext"]
             )
-            # Flip the last two chars to break Fernet HMAC.
+            # Flip the last two chars to break the authenticated payload.
             tail = "AA" if not enc.ciphertext.endswith("AA") else "BB"
             tampered = tv.EncryptedToken(
                 ciphertext=enc.ciphertext[:-2] + tail, key_version=enc.key_version
@@ -429,12 +429,18 @@ def _python_run_fixture(fx: dict[str, Any]) -> dict[str, Any]:
             tv.decrypt_for_user(fx["userId"], fx["provider"], tampered)
             return {"ok": True}
         if kind == "envelope_shape":
-            from backend import secret_store
+            from backend.security import envelope as tenant_envelope
 
             enc = tv.encrypt_for_user(
                 fx["userId"], fx["provider"], fx["plaintext"]
             )
-            envelope = json.loads(secret_store.decrypt(enc.ciphertext))
+            outer = json.loads(enc.ciphertext)
+            envelope = json.loads(
+                tenant_envelope.decrypt(
+                    outer["ciphertext"],
+                    tenant_envelope.TenantDEKRef.from_dict(outer["dek_ref"]),
+                )
+            )
             return {
                 "ok": True,
                 "envelopeKeys": sorted(envelope.keys()),
