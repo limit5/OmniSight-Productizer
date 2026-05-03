@@ -24,6 +24,7 @@ import {
 } from "./provider-rollup"
 import { ProviderStatusBadge } from "./provider-status-badge"
 import { ProviderCardExpansion } from "./provider-card-expansion"
+import { LiveTestStatusChip } from "./live-test-status-chip"
 import {
   subscribeEvents,
   fetchTokenBurnRate,
@@ -1236,6 +1237,18 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
             }}
           />
         </div>
+      )}
+
+      {/* Z.7.7 — Nightly live integration test status chip.
+          Shows "Last live-test pass: Xh ago" after the ProviderRollup
+          so the operator sees the nightly provider health signal in the
+          same Z provider observability section without leaving this panel.
+          The chip polls GET /runtime/live-test-status every 5 minutes;
+          it self-manages its own fetch lifecycle so no prop wiring is
+          needed here. Only rendered when the panel is expanded so the
+          collapsed header stays compact. */}
+      {expanded && (
+        <LiveTestStatusChip className="border-t border-[var(--border)]" />
       )}
 
       {/* ZZ.C2 #305-2 (2026-04-24) checkbox 3 — collapsible Session

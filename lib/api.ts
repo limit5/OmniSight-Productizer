@@ -7158,6 +7158,38 @@ export async function stopWebSandbox(
 // from the FastAPI app's OpenAPI schema). The moment any of the referenced
 // routes or schemas is renamed, removed, or reshaped on the backend, `tsc
 // --noEmit` in CI fails — exactly the "FastAPI schema drifts → frontend
+// ─── Z.7.7 — LLM live integration test status ──────────────────────────────
+
+export interface LiveTestProviderResult {
+  status: "pass" | "fail" | "skip"
+  tests_run: number
+  tests_passed: number
+  tests_skipped: number
+}
+
+export interface LiveTestStatusResponse {
+  /** "pass" | "fail" | "unknown" | "never_run" */
+  status: string
+  /** ISO-8601 timestamp of the last nightly run, or null. */
+  timestamp: string | null
+  /** GitHub Actions run ID, or null. */
+  run_id: string | null
+  /** Per-provider pass/fail/skip breakdown, or null when not yet reported. */
+  providers: Record<string, LiveTestProviderResult> | null
+  /** Worst-case USD cost estimate for the run, or null. */
+  estimated_cost_usd: number | null
+  tests_run: number | null
+  tests_passed: number | null
+  tests_skipped: number | null
+}
+
+/** Fetch the most recent nightly LLM live integration test status.
+ *  Reads from SharedKV("llm_live_test_status") via the backend.
+ *  Returns status: "never_run" on the first boot before any CI run. */
+export async function fetchLiveTestStatus(): Promise<LiveTestStatusResponse> {
+  return request<LiveTestStatusResponse>("/runtime/live-test-status")
+}
+
 // compile blows up" contract N3 promises.
 //
 // Full replacement of the hand-rolled `ApiAgent` / `ApiTask` etc. with

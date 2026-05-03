@@ -1327,6 +1327,8 @@ from backend.routers import installer as _installer_router  # BS.2.2 — install
 app.include_router(_installer_router.router, prefix=settings.api_prefix)
 from backend.routers import web_sandbox as _web_sandbox_router  # W14.2 — live web preview launcher
 app.include_router(_web_sandbox_router.router, prefix=settings.api_prefix)
+from backend.routers import live_test_status as _live_test_status_router  # Z.7.7 LLM live-test status
+app.include_router(_live_test_status_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import

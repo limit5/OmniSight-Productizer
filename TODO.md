@@ -1563,7 +1563,7 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 - [x] Z.7.4 **三家 × multi-turn loop test**：tool_use → 餵 fake `tool_result` → LLM 二輪回應、驗 LLM 真的看到 tool_result 並產 final text（**核心 — 之前完全沒驗**）
 - [x] Z.7.5 **三家 × streaming + tool_calls test**：streaming 模式同時拿 tool_calls；Gemini 早期 model 不支援可走 `pytest.skip(reason=...)`、文件記錄
 - [x] Z.7.6 **三家 × nested schema test**：定義 `book_flight(from: str, to: str, date: str, passengers: list[dict])` 巢狀 schema + enum → 驗三家 silent truncate / 錯誤行為（這條最容易抓 schema 跨家偏差）
-- [ ] Z.7.7 **GitHub Actions workflow** `.github/workflows/llm-live-tests.yml`：cron `0 6 * * *` UTC（每天 06:00 UTC = 台北 14:00）、單次 budget guard < USD $0.50、結果寫 `SharedKV("llm_live_test_status")` + dashboard `Z provider observability` 顯示「Last live-test pass: 2h ago」chip
+- [x] Z.7.7 **GitHub Actions workflow** `.github/workflows/llm-live-tests.yml`：cron `0 6 * * *` UTC（每天 06:00 UTC = 台北 14:00）、單次 budget guard < USD $0.50、結果寫 `SharedKV("llm_live_test_status")` + dashboard `Z provider observability` 顯示「Last live-test pass: 2h ago」chip <!-- AI 完成：workflow `.github/workflows/llm-live-tests.yml` 建立（4 jobs: live-tests / budget-guard / report / gate）；`scripts/ci_budget_guard.py` 靜態 cost estimator；`scripts/report_live_test_status.py` CI reporter（POST 到 backend + step summary）；`backend/routers/live_test_status.py` GET+POST 端點寫 SharedKV("llm_live_test_status")；`components/omnisight/live-test-status-chip.tsx` 5min 輪詢 chip；`token-usage-stats.tsx` 加入 chip。Operator 需做：在 GitHub Actions repo Secrets 加入 ANTHROPIC_API_KEY_CI / OPENAI_API_KEY_CI / GOOGLE_API_KEY_CI（Z.7.1 已說明）+ OMNISIGHT_BACKEND_URL + OMNISIGHT_REPORTER_TOKEN + 後端加入 OMNISIGHT_REPORTER_TOKEN env var。 -->
 - [ ] Z.7.8 **Failure escalation**：連續 2 次 nightly fail → BP.B Guild 派 `llm-adapter-debug-bot` 自動診斷 + 開 issue
 - [ ] Z.7.9 **Budget guard**：單次 nightly run cost 預估 < USD $0.50（限 token 上限 + max iter = 3）、超過 budget 自動 fail + alert
 - [ ] Z.7.10 `docs/integrations/llm-observability.md` 補一節「Live integration test 涵蓋率 + pass/fail SOP」
@@ -3170,9 +3170,9 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] KS.4.8 **GDPR / DSAR 對齊**：tenant data deletion 完整 purge DEK + audit trail metadata（保留 hash、刪 raw）+ DSAR export 流程
 - [x][G] KS.4.9 **Memory zeroization 升級**：擴充 KS.1.9、libsodium `sodium_memzero` 取代 ctypes.memset（更可靠）
 - [x][G] KS.4.10 **LLM-as-Firewall 輸入 guardrail**（**2026-05-02 新增 from Agentic Design Patterns Ch 18 Guardrails**）：`backend/security/llm_firewall.py` — Haiku-based fast classifier `classify_input(text) → {safe, suspicious, blocked}`，擋 prompt injection / jailbreak / PII / 違規 prompt。**為什麼必要**：KS.4.1 secret scrubber 是 **output** 端 (擋洩密)，KS.4.10 是 **input** 端 (擋攻擊)；untrusted user input (chat / GitHub issue / 客戶 ticket / 上傳文件) 進 specialist agent 前必過此層，否則 prompt injection 攻擊面巨大
-- [~][G] KS.4.11 **三層攔截機制**：safe → pass、suspicious → log + 加 system prompt 警示 LLM 提高警覺、blocked → 拒絕 + 回報 audit_log + 阻 invocation
-- [ ] KS.4.12 **整合 Orchestrator entry**：所有 user-facing input (chat / API / webhook) 在進 specialist routing 前先過 firewall；後台內部 specialist↔specialist 通信豁免 (避免 over-blocking)；BP.A2A inbound endpoint 也走 firewall (外部 A2A caller 是 untrusted)
-- [ ] KS.4.13 **alembic 0187 `firewall_events` table**：`event_id / tenant_id / classification / input_hash / blocked_reason / created_at` (持久化 blocked + suspicious cases 給 review，input plain text 不入庫只存 hash 避免擴大洩露面)
+- [x][G] KS.4.11 **三層攔截機制**：safe → pass、suspicious → log + 加 system prompt 警示 LLM 提高警覺、blocked → 拒絕 + 回報 audit_log + 阻 invocation
+- [x][G] KS.4.12 **整合 Orchestrator entry**：所有 user-facing input (chat / API / webhook) 在進 specialist routing 前先過 firewall；後台內部 specialist↔specialist 通信豁免 (避免 over-blocking)；BP.A2A inbound endpoint 也走 firewall (外部 A2A caller 是 untrusted)
+- [~][G] KS.4.13 **alembic 0187 `firewall_events` table**：`event_id / tenant_id / classification / input_hash / blocked_reason / created_at` (持久化 blocked + suspicious cases 給 review，input plain text 不入庫只存 hash 避免擴大洩露面)
 - [ ] KS.4.14 **Tests** — `backend/tests/test_llm_firewall.py` ~40 test：經典 jailbreak corpus (DAN / system override / role play attacks 涵蓋公開 jailbreak 集) + safe negative case + false positive 校準 (避免擋掉合法 input) + per-tenant isolation
 - [ ] KS.4.15 **整合既有 PEP gateway**：firewall 是 PEP 的一個 layer (而非取代 PEP)；不通過 firewall 的 input 連 PEP 都不到、直接 audit log
 
