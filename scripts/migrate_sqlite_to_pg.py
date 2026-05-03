@@ -227,6 +227,13 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # TABLES_WITH_IDENTITY_ID. Empty until SC.10.2-SC.10.5 start writing
     # access / erasure / portability workflow rows.
     "dsar_requests",
+    # SC.11.1 (alembic 0065): tenant-owned compliance evidence bundle
+    # queue/catalog. FKs ``tenant_id → tenants.id`` (CASCADE) and
+    # ``requested_by → users.id`` (SET NULL) so it MUST replay after
+    # both parents. PK is the app-generated TEXT ``id`` (``ceb-*``);
+    # NOT in TABLES_WITH_IDENTITY_ID. Empty until SC.11.2-SC.11.4 start
+    # collecting SOC 2 / ISO 27001 evidence and writing export rows.
+    "compliance_evidence_bundles",
     "sessions",
     "github_installations",
     # Project runs (alembic 0006).
