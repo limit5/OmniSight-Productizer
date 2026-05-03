@@ -588,6 +588,7 @@ def test_public_surface_matches_all() -> None:
         "UnsupportedProviderError",
         "current_key_version",
         "decrypt_for_user",
+        "decrypt_for_user_with_audit",
         "decrypt_for_user_with_lazy_reencrypt",
         "encrypt_for_user",
         "fingerprint",
@@ -634,6 +635,46 @@ def test_pure_helpers_callable_when_knob_off() -> None:
     vault, not the vault itself."""
     encrypted = tv.encrypt_for_user("u1", "google", "tok")
     assert tv.decrypt_for_user("u1", "google", encrypted) == "tok"
+
+
+@pytest.mark.asyncio
+async def test_decrypt_for_user_with_audit_emits_key_metadata(monkeypatch) -> None:
+    """KS.1.5: audited decrypt writes tenant / user / key_id /
+    request_id metadata and never includes plaintext in the audit body."""
+    encrypted = tv.encrypt_for_user(
+        "u1",
+        "google",
+        "tok-secret",
+        tenant_id="t-ks15",
+    )
+    captured = {}
+
+    async def fake_emit(ctx):
+        captured["ctx"] = ctx
+        return 15
+
+    monkeypatch.setattr(
+        "backend.security.token_vault.decryption_audit.emit_decryption",
+        fake_emit,
+    )
+    plaintext = await tv.decrypt_for_user_with_audit(
+        "u1",
+        "google",
+        encrypted,
+        request_id="req-ks15",
+        actor="alice@example.com",
+    )
+
+    assert plaintext == "tok-secret"
+    ctx = captured["ctx"]
+    assert ctx.tenant_id == "t-ks15"
+    assert ctx.user_id == "u1"
+    assert ctx.request_id == "req-ks15"
+    assert ctx.key_id == "local-fernet"
+    assert ctx.provider == "local-fernet"
+    assert ctx.purpose == "as-token-vault"
+    assert ctx.actor == "alice@example.com"
+    assert "tok-secret" not in repr(ctx)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

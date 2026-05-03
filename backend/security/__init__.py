@@ -78,6 +78,12 @@ KS.1.2 (Tier 1 envelope encryption):
     helpers. Uses KS.1.1 KMS adapters to wrap one AES-256-GCM DEK per
     ciphertext. Persistence and caller migration stay in later KS rows.
 
+KS.1.5 (Tier 1 envelope encryption):
+  - decryption_audit — canonical decryption audit emit layer for the
+    N10 tamper-evident ledger. Writes tenant / user / ledger time /
+    key_id / request_id through ``backend.audit.log`` and restores the
+    tenant ContextVar after each emit.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no

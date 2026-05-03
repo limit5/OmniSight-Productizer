@@ -373,6 +373,7 @@ async def refresh_record(
     now: Optional[float] = None,
     trigger: str = "auto_refresh",
     emit_audit: bool = True,
+    request_id: Optional[str] = None,
 ) -> RefreshOutcome:
     """Refresh *record* via *refresh_fn*, re-encrypting the new tokens.
 
@@ -386,7 +387,7 @@ async def refresh_record(
        emits ``oauth.refresh`` outcome=``no_refresh_token`` so ops
        can track stuck rows.
     3. Decrypt the access + refresh ciphertext via
-       :func:`token_vault.decrypt_for_user`.  Any vault error short-
+       :func:`token_vault.decrypt_for_user_with_audit`.  Any vault error short-
        circuits with :data:`OUTCOME_VAULT_FAILURE`; audit emits
        ``oauth.refresh`` outcome=``provider_error`` (the audit
        vocabulary doesn't carry a "vault" outcome — operationally
@@ -446,12 +447,24 @@ async def refresh_record(
         return outcome
 
     try:
-        access_plaintext = token_vault.decrypt_for_user(
-            record.user_id, record.provider, record.access_token_enc,
-        )
-        refresh_plaintext = token_vault.decrypt_for_user(
-            record.user_id, record.provider, record.refresh_token_enc,
-        )
+        if emit_audit:
+            access_plaintext = await token_vault.decrypt_for_user_with_audit(
+                record.user_id, record.provider, record.access_token_enc,
+                request_id=request_id,
+                actor=record.user_id,
+            )
+            refresh_plaintext = await token_vault.decrypt_for_user_with_audit(
+                record.user_id, record.provider, record.refresh_token_enc,
+                request_id=request_id,
+                actor=record.user_id,
+            )
+        else:
+            access_plaintext = token_vault.decrypt_for_user(
+                record.user_id, record.provider, record.access_token_enc,
+            )
+            refresh_plaintext = token_vault.decrypt_for_user(
+                record.user_id, record.provider, record.refresh_token_enc,
+            )
     except TokenVaultError as exc:
         outcome = RefreshOutcome(
             outcome=OUTCOME_VAULT_FAILURE,

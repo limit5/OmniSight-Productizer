@@ -201,9 +201,10 @@ def test_revoke_record_success_emits_audit_with_revocation_attempted_true(monkey
     assert token == "1//alice-refresh"
     assert hint == "refresh_token"
 
-    # Audit row shape
-    assert len(events) == 1
-    ev = events[0]
+    # Audit row shape: KS.1.5 decryption row plus legacy oauth.unlink row.
+    assert len(events) == 2
+    assert events[0]["action"] == "ks.decryption"
+    ev = next(e for e in events if e["action"] == oauth_client.EVENT_OAUTH_UNLINK)
     assert ev["action"] == oauth_client.EVENT_OAUTH_UNLINK
     assert ev["after"]["outcome"] == oauth_audit.OUTCOME_SUCCESS
     assert ev["after"]["revocation_attempted"] is True
@@ -297,9 +298,10 @@ def test_revoke_record_idp_failure_returns_revocation_failed(monkeypatch):
     # revoke_fn WAS called (the error came from inside it)
     assert len(captured["calls"]) == 1
 
-    # Audit row carries the failure
-    assert len(events) == 1
-    ev = events[0]
+    # Audit row carries the failure alongside the KS.1.5 decrypt row.
+    assert len(events) == 2
+    assert events[0]["action"] == "ks.decryption"
+    ev = next(e for e in events if e["action"] == oauth_client.EVENT_OAUTH_UNLINK)
     assert ev["action"] == oauth_client.EVENT_OAUTH_UNLINK
     assert ev["after"]["outcome"] == oauth_audit.OUTCOME_REVOCATION_FAILED
     assert ev["after"]["revocation_attempted"] is True
@@ -535,7 +537,10 @@ def test_revoke_record_default_actor_is_dsar_prefixed_for_dsar(monkeypatch):
         rec, fn, revocation_endpoint="https://x/revoke",
         trigger=ovr.TRIGGER_DSAR_ERASURE,
     ))
-    assert events[0]["actor"] == "dsar:u-alice"
+    oauth_event = next(e for e in events if e["action"] == oauth_client.EVENT_OAUTH_UNLINK)
+    assert oauth_event["actor"] == "dsar:u-alice"
+    ks_event = next(e for e in events if e["action"] == "ks.decryption")
+    assert ks_event["actor"] == "dsar:u-alice"
 
 
 def test_revoke_record_explicit_actor_wins_over_default(monkeypatch):
@@ -578,8 +583,9 @@ def test_revoke_record_knob_off_audit_silent_skip(monkeypatch):
     assert out.outcome == ovr.OUTCOME_SUCCESS
     assert out.revocation_attempted is True
     assert len(captured["calls"]) == 1
-    # No audit row written
-    assert events == []
+    # AS.1.4 oauth.unlink silent-skips, but KS.1.5 still records the
+    # plaintext-returning decrypt.
+    assert [e["action"] for e in events] == ["ks.decryption"]
 
 
 def test_emit_not_linked_knob_off_audit_silent_skip(monkeypatch):

@@ -124,10 +124,12 @@ import hmac
 import json
 import logging
 import secrets
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from backend import secret_store
+from backend.security import decryption_audit
 from backend.security import envelope as tenant_envelope
 
 logger = logging.getLogger(__name__)
@@ -387,6 +389,10 @@ def _tenant_id_for_user(user_id: str, tenant_id: Optional[str]) -> str:
     return _check_user_id(tenant_id) if tenant_id is not None else user_id
 
 
+def _request_id_or_new(request_id: Optional[str]) -> str:
+    return _check_user_id(request_id) if request_id is not None else str(uuid.uuid4())
+
+
 def _utc_today() -> _dt.date:
     return _dt.datetime.now(_dt.timezone.utc).date()
 
@@ -517,6 +523,37 @@ def _decrypt_legacy_fernet(user_id: str, provider: str, token: EncryptedToken) -
     return _load_binding_payload(payload, user_id, provider)
 
 
+def _decryption_audit_ref(
+    token: EncryptedToken,
+    *,
+    fallback_tenant_id: str,
+) -> tuple[str, str, Optional[str], str]:
+    """Return ``tenant_id, key_id, dek_id, provider`` for KS.1.5 audit.
+
+    New KS.1.3 token envelopes carry the tenant DEK ref. Legacy Fernet
+    rows predate the DEK schema, so the audit row records the caller's
+    tenant fallback and the legacy key marker.
+    """
+
+    try:
+        _, dek_ref = _load_token_envelope(token.ciphertext)
+    except CiphertextCorruptedError:
+        if token.ciphertext.lstrip().startswith("{"):
+            raise
+        return (
+            fallback_tenant_id,
+            "legacy-fernet",
+            None,
+            "local-fernet",
+        )
+    return (
+        dek_ref.tenant_id,
+        dek_ref.key_id,
+        dek_ref.dek_id,
+        dek_ref.provider,
+    )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -618,6 +655,49 @@ def decrypt_for_user(
     return _load_binding_payload(payload, uid, p)
 
 
+async def decrypt_for_user_with_audit(
+    user_id: str,
+    provider: str,
+    token: EncryptedToken,
+    *,
+    tenant_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    actor: Optional[str] = None,
+    purpose: str = "as-token-vault",
+    as_of: Optional[_dt.date] = None,
+) -> str:
+    """Decrypt *token* and emit the KS.1.5 N10 audit row.
+
+    The underlying decrypt remains the same binding-checked helper.
+    After plaintext is recovered, this writes ``tenant_id`` /
+    ``user_id`` / ledger ``ts`` / ``key_id`` / ``request_id`` into the
+    tenant audit chain via :mod:`backend.security.decryption_audit`.
+    """
+
+    uid = _check_user_id(user_id)
+    p = _check_provider(provider)
+    fallback_tid = _tenant_id_for_user(uid, tenant_id)
+    req_id = _request_id_or_new(request_id)
+    plaintext = decrypt_for_user(uid, p, token, as_of=as_of)
+    audit_tenant_id, key_id, dek_id, key_provider = _decryption_audit_ref(
+        token,
+        fallback_tenant_id=fallback_tid,
+    )
+    await decryption_audit.emit_decryption(
+        decryption_audit.DecryptionAuditContext(
+            tenant_id=audit_tenant_id,
+            user_id=uid,
+            key_id=key_id,
+            request_id=req_id,
+            purpose=purpose,
+            provider=key_provider,
+            actor=actor or uid,
+            dek_id=dek_id,
+        )
+    )
+    return plaintext
+
+
 def decrypt_for_user_with_lazy_reencrypt(
     user_id: str,
     provider: str,
@@ -689,6 +769,7 @@ __all__ = [
     "UnsupportedProviderError",
     "current_key_version",
     "decrypt_for_user",
+    "decrypt_for_user_with_audit",
     "decrypt_for_user_with_lazy_reencrypt",
     "encrypt_for_user",
     "fingerprint",
