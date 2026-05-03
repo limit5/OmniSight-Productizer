@@ -6147,7 +6147,7 @@ BP.E GraphRAG / Neo4j
 
 - [x] FX.2.1 `components/omnisight/project-report-panel.tsx:44-66` markdownToHtml 引入 DOMPurify 或 marked 內建 sanitize
 - [x] FX.2.2 `components/omnisight/cloudflare-tunnel-setup.tsx:272` Modal 加 onKeyDown(Escape) + focus trap + initial focus
-- [ ] FX.2.3 `components/omnisight/api-key-management-panel.tsx:160-174` 補 `<label>` / `aria-label`
+- [x] FX.2.3 `components/omnisight/api-key-management-panel.tsx:160-174` 補 `<label>` / `aria-label`
 - [ ] FX.2.4 `components/omnisight/integration-settings.tsx:1529-1535` setInterval 加 cleanup + memoize callback
 
 ### FX.3 — Infra / deploy BLOCKER fixes（4 items, ~1 day）
@@ -6167,9 +6167,9 @@ BP.E GraphRAG / Neo4j
 #### Lazy cache cross-worker sync（7）
 - [x][G] FX.4.1 `backend/bootstrap.py:662` `_gate_cache` 加 mtime check 或 SharedKV
 - [~][G] FX.4.2 `backend/forecast.py:155` `_PRICING_CACHE` 同
-- [~][G] FX.4.3 `backend/sensor_fusion.py:497` `_SF_CACHE` 同
-- [ ] FX.4.4 `backend/telemetry_backend.py:536` `_TELEMETRY_CACHE` 同
-- [ ] FX.4.5 `backend/codeowners.py:39` `_rules` 加 file mtime 失效
+- [x][G] FX.4.3 `backend/sensor_fusion.py:497` `_SF_CACHE` 同
+- [x][G] FX.4.4 `backend/telemetry_backend.py:536` `_TELEMETRY_CACHE` 同
+- [~][G] FX.4.5 `backend/codeowners.py:39` `_rules` 加 file mtime 失效
 - [ ] FX.4.6 `backend/prompt_loader.py:205` `_task_skills_cache` 同
 - [ ] FX.4.7 `backend/agents/llm.py:1221` `_OLLAMA_TOOL_COMPAT_CACHE` 同
 

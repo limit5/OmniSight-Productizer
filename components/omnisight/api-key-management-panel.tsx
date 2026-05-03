@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useId, useState } from "react"
 import { Key, Plus, RotateCw, Trash2, ShieldOff, ShieldCheck, Copy, Eye, EyeOff } from "lucide-react"
 import {
   listApiKeys,
@@ -31,6 +31,8 @@ export function ApiKeyManagementPanel() {
   const [newSecret, setNewSecret] = useState("")
   const [showSecret, setShowSecret] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const newNameInputId = useId()
+  const newScopesInputId = useId()
 
   const refresh = useCallback(async () => {
     try {
@@ -157,17 +159,27 @@ export function ApiKeyManagementPanel() {
 
       {showCreate && (
         <div className="p-3 rounded border border-[var(--border)] space-y-2">
+          <label htmlFor={newNameInputId} className="sr-only">
+            API key name
+          </label>
           <input
+            id={newNameInputId}
             type="text"
             placeholder="Key name (e.g. CI pipeline)"
+            aria-label="API key name"
             value={newName}
             onChange={e => setNewName(e.target.value)}
             className="w-full px-2 py-1.5 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
             autoFocus
           />
+          <label htmlFor={newScopesInputId} className="sr-only">
+            API key scopes (comma-separated, asterisk for all)
+          </label>
           <input
+            id={newScopesInputId}
             type="text"
             placeholder="Scopes (comma-separated, * for all)"
+            aria-label="API key scopes (comma-separated, asterisk for all)"
             value={newScopes}
             onChange={e => setNewScopes(e.target.value)}
             className="w-full px-2 py-1.5 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
