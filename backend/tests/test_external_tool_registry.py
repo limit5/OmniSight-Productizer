@@ -419,6 +419,34 @@ async def test_registry_seed_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_registry_seed_does_not_overwrite_operator_binding():
+    """Existing store rows are operator-owned; seeding fills gaps only."""
+    store = InMemoryExternalToolRegistryStore()
+    registry = ExternalToolRegistry(store=store)
+    vision = _vision_def()
+    await store.upsert_binding(
+        ExternalToolBinding(
+            definition=vision,
+            config={"module": "operator_vision_parse", "callable": "CustomParser"},
+            enabled=False,
+            health_status="degraded",
+        )
+    )
+
+    inserted = await registry.seed_default_bindings()
+    binding = await store.get_binding("VisionParse")
+
+    assert inserted == 6
+    assert binding is not None
+    assert binding.config == {
+        "module": "operator_vision_parse",
+        "callable": "CustomParser",
+    }
+    assert binding.enabled is False
+    assert binding.health_status == "degraded"
+
+
+@pytest.mark.asyncio
 async def test_registry_build_handler_unknown_raises():
     registry = ExternalToolRegistry()
     with pytest.raises(ToolNotFoundError, match="not in registry"):
@@ -485,6 +513,20 @@ async def test_registry_list_for_task_kind_filters_disabled():
 
 
 @pytest.mark.asyncio
+async def test_registry_list_for_task_kind_only_enabled_false_keeps_disabled():
+    registry = ExternalToolRegistry()
+    await registry.seed_default_bindings()
+    binding = await registry.store.get_binding("KiCadMCP")
+    assert binding is not None
+    binding.enabled = False
+    await registry.store.upsert_binding(binding)
+
+    tools = await registry.list_for_task_kind("hd_parse_kicad", only_enabled=False)
+
+    assert tools == ["Read", "KiCadMCP", "SKILL_HD_PARSE"]
+
+
+@pytest.mark.asyncio
 async def test_registry_set_health_writes_to_store():
     store = InMemoryExternalToolRegistryStore()
     registry = ExternalToolRegistry(store=store)
@@ -503,3 +545,25 @@ def test_registry_definitions_property_returns_copy():
     defs["evil"] = None  # type: ignore[assignment]
     # Mutating returned dict should NOT affect registry internals.
     assert "evil" not in registry.definitions
+
+
+@pytest.mark.asyncio
+async def test_in_memory_store_list_bindings_enabled_only_filters_disabled():
+    store = InMemoryExternalToolRegistryStore()
+    await store.upsert_binding(_binding(_vision_def(), module="vision_parse"))
+    await store.upsert_binding(
+        ExternalToolBinding(
+            definition=_kicad_def(),
+            config={"docker_image": "ghcr.io/example/kicad-mcp:latest"},
+            enabled=False,
+        )
+    )
+
+    all_bindings = await store.list_bindings()
+    enabled_bindings = await store.list_bindings(enabled_only=True)
+
+    assert {b.definition.tool_name for b in all_bindings} == {
+        "VisionParse",
+        "KiCadMCP",
+    }
+    assert [b.definition.tool_name for b in enabled_bindings] == ["VisionParse"]
