@@ -1,0 +1,380 @@
+name: Nightly lint + type-check + supply-chain audit
+
+# FX.6.8 (TODO row 6234) — nightly informational gate that runs the
+# three FX.6.5 dev-tools (`pip-audit`, `ruff check`, `mypy`) against
+# their respective scopes and posts the results to the run summary +
+# an uploaded markdown report. The tools themselves are pinned in
+# ``backend/requirements-dev.txt`` (peeled out of the prod lockfile by
+# FX.6.7) so the nightly job and a developer's ``backend/.venv`` see
+# byte-for-byte the same wheel hashes — no version drift between local
+# repro and CI.
+#
+# Why nightly + informational (not a PR hard gate):
+#   * The CI ``lint`` job (``ci.yml``) already pins ``ruff==0.7.4`` as
+#     a per-PR hard gate — that line is the regression contract for
+#     code that lands. This workflow runs ``ruff==0.15.12`` (the
+#     newest stable, the same version local devs install via
+#     requirements-dev.txt) so the *gap* between the two surfaces is
+#     visible: every rule the newer ruff added gets reported here so
+#     the team can decide which to graduate to the hard gate (cf.
+#     existing ``ruff.toml`` ``[lint] ignore`` policy for E402/E741/
+#     E702). Hard-gating ``ruff==0.15.12`` overnight would red the PR
+#     check on day-one with 240+ pre-existing violations — so we
+#     surface them, don't block on them.
+#   * ``mypy`` has never been a CI gate on this repo. Backend has
+#     ~5,700 .py files, the security + agents subset is ~120 files
+#     and 126 type errors today. Same logic: surface the baseline
+#     so the team can pick a tightening cadence without overnight
+#     PR breakage.
+#   * ``pip-audit`` is the supply-chain CVE scanner for Python deps;
+#     OSV-Scanner (``cve-scan.yml``) covers the same surface from a
+#     different advisory feed (Google OSV vs PyPI Advisory DB), so
+#     running both gives defence in depth. ``pip-audit`` typically
+#     surfaces a Python-only CVE 12-48h before the GHSA mirror picks
+#     it up; OSV-Scanner is broader (npm + Python). Both are
+#     informational here — Renovate (``N2``) is the auto-PR vehicle.
+#
+# Cron slot: 04:00 UTC = 12:00 Asia/Taipei. Lunchtime in Taipei so
+# operators see the result while at desk; intentionally NOT colliding
+# with cve-scan (06:00 UTC) / dr-drill (17:00 UTC) / e2e-multi-device
+# (18:00 UTC) / ab-anthropic (03:00 UTC). Spreading nightly CI across
+# the day reduces concurrent runner pressure on the GitHub free-tier
+# minutes pool.
+#
+# Per-tool scope:
+#   pip-audit  → both ``backend/requirements.txt`` (prod) and
+#                ``backend/requirements-dev.txt`` (dev/CI). ``--no-deps``
+#                + ``--disable-pip`` so the audit reads the lockfile
+#                directly without a fresh resolve (the lockfile IS the
+#                resolved dep tree; re-resolving wastes 30s and risks
+#                pulling a different graph than the one prod runs).
+#   ruff check → entire ``backend/`` tree, honouring ``ruff.toml``
+#                (E402/E741/E702 already ignored as intentional
+#                patterns). Same exclude list (``backend/.venv``,
+#                ``backend/__pycache__``, ``backend/docker``) as the
+#                hard-gate ``lint`` job.
+#   mypy       → ``backend/security`` + ``backend/agents`` only —
+#                the two subdirectories the TODO row scopes, picked
+#                because they carry the highest blast-radius code
+#                (auth / OAuth / credential-vault / agent runtime
+#                / tool dispatcher). Flags:
+#                  --explicit-package-bases  → required because the
+#                    repo lacks ``backend/__init__.py`` (deliberate;
+#                    pytest discovers via rootdir, runtime treats
+#                    ``backend`` as a top-level package). Without
+#                    this flag mypy errors out with "Source file
+#                    found twice under different module names" on
+#                    the first file because it cannot pick between
+#                    ``security.X`` and ``backend.security.X``.
+#                  --ignore-missing-imports  → mypy can't see
+#                    untyped third-party packages without their
+#                    py.typed marker; this prevents 200+ noise
+#                    errors per missing-stub package and keeps the
+#                    report focused on first-party type bugs.
+#                  --no-strict-optional  → the codebase pre-dates
+#                    PEP 484 strict optional; flipping it on would
+#                    bury the real findings under thousands of
+#                    "Item 'None' of 'Optional[X]' has no attribute"
+#                    pseudo-errors. A future row can tighten this
+#                    once the existing 126 errors are triaged.
+#
+# Scope discipline (what this row does NOT do):
+#   * Does not flip ``ci.yml::lint`` from ``ruff==0.7.4`` to the
+#     newer pin. That's a separate ruff-version-bump PR that needs
+#     to clear ~240 violations first.
+#   * Does not auto-open issues on findings (cve-scan.yml's pattern).
+#     We start with summary + artefact only; if a future row decides
+#     this nightly should page on severe pip-audit findings, the
+#     issue-open block can be ported from cve-scan.yml.
+#   * Does not run on PR or push — strictly nightly (+ manual
+#     dispatch). Per-PR lint is ``ci.yml::lint``'s job; per-PR
+#     audit is Renovate's job.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    # Manual trigger so operators can re-run after fixing a finding
+    # to confirm the new wheel/code clears the report — without
+    # waiting for the next nightly slot.
+
+permissions:
+  # Least-privilege: read source, upload artefacts. No issues:write
+  # because we don't auto-file tickets (yet — see scope-discipline
+  # note in the header). Step summary writes use the implicit
+  # GITHUB_STEP_SUMMARY file, no extra scope needed.
+  contents: read
+
+concurrency:
+  # Queue runs — don't cancel an in-flight nightly because the
+  # report artefact is the point. Manual dispatch follows the same
+  # rule for predictability.
+  group: lint-audit-nightly
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────
+  # pip-audit — supply-chain CVE scan against the committed Python
+  # lockfiles. Reads the lockfile (no fresh resolve) so what's
+  # audited matches what prod actually installs.
+  # ─────────────────────────────────────────────────────────────────
+  pip-audit:
+    name: pip-audit (supply-chain CVE scan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: install dev tools (ruff / mypy / pip-audit) from dev lockfile
+        # Source-of-truth: the FX.6.7 dev lockfile. Same wheel hashes
+        # as a developer's local ``backend/.venv`` — version drift
+        # between local repro and nightly CI is impossible by
+        # construction. ``--require-hashes`` enforces it.
+        run: |
+          set -eu
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r backend/requirements-dev.txt
+
+      - name: pip-audit on backend/requirements.txt (prod)
+        id: audit-prod
+        continue-on-error: true
+        # ``--no-deps`` + ``--disable-pip`` makes pip-audit treat the
+        # lockfile as already-resolved (because pip-compile generated
+        # it that way with full transitive closure). Without these
+        # flags pip-audit runs a fresh ``pip download`` resolve which
+        # (a) takes 60-90s, (b) may pick different transitive
+        # versions than the locked ones if a newer release dropped
+        # in the interim, defeating the point of auditing the
+        # actually-deployed graph.
+        run: |
+          set -eu
+          mkdir -p audit-reports
+          pip-audit \
+            --requirement backend/requirements.txt \
+            --no-deps --disable-pip \
+            --format columns \
+            | tee audit-reports/pip-audit-prod.txt
+          # also generate JSON for machine-readable archival
+          pip-audit \
+            --requirement backend/requirements.txt \
+            --no-deps --disable-pip \
+            --format json \
+            --output audit-reports/pip-audit-prod.json || true
+
+      - name: pip-audit on backend/requirements-dev.txt (dev/CI)
+        id: audit-dev
+        continue-on-error: true
+        run: |
+          set -eu
+          pip-audit \
+            --requirement backend/requirements-dev.txt \
+            --no-deps --disable-pip \
+            --format columns \
+            | tee audit-reports/pip-audit-dev.txt
+          pip-audit \
+            --requirement backend/requirements-dev.txt \
+            --no-deps --disable-pip \
+            --format json \
+            --output audit-reports/pip-audit-dev.json || true
+
+      - name: write step summary
+        if: always()
+        run: |
+          set -eu
+          {
+            echo "## pip-audit — Python supply-chain CVE scan"
+            echo ""
+            echo "### backend/requirements.txt (production lockfile)"
+            echo ""
+            echo '```'
+            cat audit-reports/pip-audit-prod.txt 2>/dev/null || echo "(no report — step failed)"
+            echo '```'
+            echo ""
+            echo "### backend/requirements-dev.txt (dev/CI lockfile)"
+            echo ""
+            echo '```'
+            cat audit-reports/pip-audit-dev.txt 2>/dev/null || echo "(no report — step failed)"
+            echo '```'
+            echo ""
+            echo "_Findings drive Renovate (N2) auto-PRs and manual triage; this nightly is informational._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload pip-audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-${{ github.run_id }}
+          path: audit-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────
+  # ruff check — full backend/ lint with ruff 0.15.12, honouring
+  # the project ``ruff.toml`` ignore list. Informational because
+  # the per-PR hard gate is at the older ruff 0.7.4 pin.
+  # ─────────────────────────────────────────────────────────────────
+  ruff-check:
+    name: ruff check (full backend tree)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: install dev tools from dev lockfile
+        run: |
+          set -eu
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r backend/requirements-dev.txt
+
+      - name: ruff version (drift signal)
+        run: |
+          set -eu
+          ruff --version
+          echo "Note: ci.yml::lint pins ruff==0.7.4 as the per-PR hard gate."
+
+      - name: ruff check backend (informational)
+        id: ruff
+        continue-on-error: true
+        run: |
+          set -eu
+          mkdir -p audit-reports
+          # Two passes: (1) human-readable for the summary, (2) GitHub
+          # annotations for the Files-changed sidebar. The sidebar
+          # rendering caps annotation count at ~50 per job — anything
+          # past that lives in the text report only.
+          set +e
+          ruff check backend --output-format=concise > audit-reports/ruff-check.txt
+          ruff_exit=$?
+          ruff check backend --output-format=github || true
+          set -e
+          echo "ruff_exit=$ruff_exit" >> "$GITHUB_OUTPUT"
+          # Tally for the summary
+          tail -1 audit-reports/ruff-check.txt > audit-reports/ruff-summary.txt || true
+          echo "ruff exit code: $ruff_exit"
+
+      - name: write step summary
+        if: always()
+        run: |
+          set -eu
+          {
+            echo "## ruff check — full backend lint (informational)"
+            echo ""
+            echo "Ruff version (this nightly): \`$(ruff --version 2>&1 | tr -d '\n')\`"
+            echo "Ruff version (PR hard gate, ci.yml::lint): \`ruff 0.7.4\`"
+            echo "Exit code: \`${{ steps.ruff.outputs.ruff_exit }}\`"
+            echo ""
+            echo "### Summary"
+            echo ""
+            echo '```'
+            tail -50 audit-reports/ruff-check.txt 2>/dev/null || echo "(no report)"
+            echo '```'
+            echo ""
+            echo "_Full report in the uploaded artefact (\`ruff-check-${{ github.run_id }}\`)._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload ruff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruff-check-${{ github.run_id }}
+          path: audit-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────
+  # mypy — type check on backend/security + backend/agents (the two
+  # highest-blast-radius subtrees: auth + OAuth + credential vault +
+  # agent runtime + tool dispatcher). Informational baseline.
+  # ─────────────────────────────────────────────────────────────────
+  mypy-check:
+    name: mypy (backend/security + backend/agents)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: install dev tools + prod deps
+        # mypy needs the prod requirements installed too — otherwise
+        # every ``import fastapi`` / ``import anthropic`` / etc.
+        # surfaces as ``ModuleNotFoundError`` and the report is
+        # noise. ``--require-hashes`` for both keeps the install
+        # reproducible.
+        run: |
+          set -eu
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r backend/requirements.txt
+          pip install --require-hashes -r backend/requirements-dev.txt
+
+      - name: mypy version
+        run: mypy --version
+
+      - name: mypy backend/security backend/agents (informational)
+        id: mypy
+        continue-on-error: true
+        run: |
+          set -eu
+          mkdir -p audit-reports
+          # See workflow header for why each flag is needed:
+          #   --explicit-package-bases   PEP 420 namespace package handling
+          #   --ignore-missing-imports   no stubs for many runtime deps
+          #   --no-strict-optional       avoid burying findings under
+          #                              Optional[X] noise from pre-PEP484 code
+          set +e
+          mypy --explicit-package-bases \
+               --ignore-missing-imports \
+               --no-strict-optional \
+               backend/security backend/agents \
+               > audit-reports/mypy-check.txt 2>&1
+          mypy_exit=$?
+          set -e
+          echo "mypy_exit=$mypy_exit" >> "$GITHUB_OUTPUT"
+          tail -1 audit-reports/mypy-check.txt > audit-reports/mypy-summary.txt || true
+          echo "mypy exit code: $mypy_exit"
+
+      - name: write step summary
+        if: always()
+        run: |
+          set -eu
+          {
+            echo "## mypy — type check on backend/security + backend/agents (informational)"
+            echo ""
+            echo "Mypy version: \`$(mypy --version 2>&1 | tr -d '\n')\`"
+            echo "Exit code: \`${{ steps.mypy.outputs.mypy_exit }}\`"
+            echo "Flags: \`--explicit-package-bases --ignore-missing-imports --no-strict-optional\`"
+            echo ""
+            echo "### Summary (last 60 lines)"
+            echo ""
+            echo '```'
+            tail -60 audit-reports/mypy-check.txt 2>/dev/null || echo "(no report)"
+            echo '```'
+            echo ""
+            echo "_Full report in the uploaded artefact (\`mypy-check-${{ github.run_id }}\`)._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload mypy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mypy-check-${{ github.run_id }}
+          path: audit-reports/
+          retention-days: 30
+          if-no-files-found: warn
