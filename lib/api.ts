@@ -1245,6 +1245,20 @@ export async function updateFallbackChain(chain: string[]): Promise<{ status: st
   })
 }
 
+/** Z.6.5 — Ollama tool-call failure counters from SharedKV. */
+export interface OllamaToolFailuresResponse {
+  total: number
+  daemon_error: number
+  parse_error: number
+  unsupported: number
+  /** True when total > 0 — adapter degraded to pure-chat at least once. */
+  has_warning: boolean
+}
+
+export async function getOllamaToolFailures(): Promise<OllamaToolFailuresResponse> {
+  return request<OllamaToolFailuresResponse>("/runtime/ollama/tool-failures")
+}
+
 // M3 — Per-tenant per-provider per-key circuit breaker
 export interface CircuitBreakerEntry {
   tenant_id: string

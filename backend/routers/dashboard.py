@@ -116,6 +116,7 @@ async def get_dashboard_summary() -> dict[str, Any]:
         notifications_unread,
         compression,
         simulations,
+        ollama_tool_failures,
     ) = await asyncio.gather(
         _wrap(_system_router.get_system_status()),
         _wrap(_system_router.get_system_info()),
@@ -134,6 +135,8 @@ async def get_dashboard_summary() -> dict[str, Any]:
             status="",
             limit=50,
         )),
+        # Z.6.5: Ollama tool-call failure counters for dashboard warning.
+        _wrap(_system_router.get_ollama_tool_failures()),
     )
 
     return {
@@ -148,4 +151,5 @@ async def get_dashboard_summary() -> dict[str, Any]:
         "notificationsUnread": notifications_unread,
         "compression": compression,
         "simulations": simulations,
+        "ollamaToolFailures": ollama_tool_failures,
     }

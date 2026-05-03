@@ -2266,6 +2266,48 @@ async def reload_pricing_table():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Ollama tool-call observability (Z.6.5)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.get("/ollama/tool-failures")
+async def get_ollama_tool_failures():
+    """Return Ollama tool-call failure counters from SharedKV.
+
+    Z.6.5: when the ollama adapter degrades to pure-chat (model does not
+    support tool calling, daemon is unreachable, or the tool_calls block
+    cannot be parsed), it increments SharedKV("ollama_tool_failures")
+    counters.  This endpoint exposes those counts for the dashboard.
+
+    ``has_warning`` is True whenever total > 0, signalling that at least
+    one Ollama tool-call silently degraded since the last counter reset.
+
+    Module-global state: SharedKV reads from Redis (cross-worker) or
+    in-memory fallback (per-process in degraded mode — 故意每 worker 獨立
+    when Redis is absent, acceptable for observability counters).
+    """
+    from backend.models import OllamaToolFailuresResponse
+    from backend.shared_state import SharedKV
+    kv = SharedKV("ollama_tool_failures")
+    raw = kv.get_all()
+
+    def _int(key: str) -> int:
+        try:
+            return int(raw.get(key, 0))
+        except (ValueError, TypeError):
+            return 0
+
+    total = _int("total")
+    return OllamaToolFailuresResponse(
+        total=total,
+        daemon_error=_int("daemon_error"),
+        parse_error=_int("parse_error"),
+        unsupported=_int("unsupported"),
+        has_warning=total > 0,
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Notifications
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

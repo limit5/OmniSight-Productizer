@@ -711,6 +711,15 @@ class ProvidersListResponse(BaseModel):
     providers: list[ProviderInfo] = Field(default_factory=list)
 
 
+class OllamaToolFailuresResponse(BaseModel):
+    """Z.6.5 — Ollama tool-call failure counters from SharedKV."""
+    total: int = 0
+    daemon_error: int = 0
+    parse_error: int = 0
+    unsupported: int = 0
+    has_warning: bool = False
+
+
 class ProviderHealthItem(BaseModel):
     id: str
     name: str

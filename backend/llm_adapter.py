@@ -419,6 +419,68 @@ def embed(
     raise ValueError(f"embed(): provider {provider!r} not supported")
 
 
+def _is_ollama_model(
+    provider: str | None,
+    llm: BaseChatModel | None,
+    resolved: BaseChatModel,
+) -> bool:
+    """Return True if the resolved model is a ChatOllama instance.
+
+    Checks the provider string first; falls back to the class name of
+    the resolved model (which may be a RunnableBinding wrapping ChatOllama
+    after bind_tools() is applied — unwrap via .bound).
+    """
+    if provider and provider.lower() == "ollama":
+        return True
+    if llm is not None and type(llm).__name__ == "ChatOllama":
+        return True
+    # Unwrap a single level of RunnableBinding (added by bind_tools)
+    target = getattr(resolved, "bound", resolved)
+    return type(target).__name__ == "ChatOllama"
+
+
+def _ollama_tool_call_fallback(
+    msgs: list[BaseMessage],
+    exc: Exception,
+    failure_type: str,
+    provider: str | None,
+    model: str | None,
+    original_llm: BaseChatModel | None,
+) -> AdapterToolResponse:
+    """Handle an Ollama tool-call failure: count it, warn, degrade to pure chat.
+
+    failure_type: "daemon_error" | "parse_error" | "unsupported"
+    Never raises — returns an empty-tool-calls response so callers can
+    continue with plain text output.
+    """
+    from backend.shared_state import SharedKV  # lazy to avoid circular import
+    _kv = SharedKV("ollama_tool_failures")
+    _kv.incr(failure_type)
+    _kv.incr("total")
+    logger.warning(
+        "ollama tool_call fallback (%s): %s — degrading to pure chat",
+        failure_type,
+        exc,
+    )
+    # Attempt pure-chat fallback (no tools bound) so the caller gets
+    # at least a text reply instead of silence.
+    try:
+        # Re-use the original llm (unbound) or resolve a fresh one.
+        bare: BaseChatModel | None = original_llm
+        if bare is None:
+            bare = _resolve_chat_model(provider, model, None, None)
+        if bare is not None:
+            resp = bare.invoke(msgs)
+            return AdapterToolResponse(
+                text=_message_text(resp),
+                tool_calls=[],
+                raw_message=resp if isinstance(resp, BaseMessage) else None,
+            )
+    except Exception as chat_exc:  # noqa: BLE001
+        logger.warning("ollama pure-chat fallback also failed: %s", chat_exc)
+    return AdapterToolResponse(text="", tool_calls=[], raw_message=None)
+
+
 def tool_call(
     messages: Sequence[Any],
     tools: list,
@@ -435,28 +497,54 @@ def tool_call(
         `llm_adapter.tool`), or
       * any object accepted by LangChain's `bind_tools(...)` (OpenAI
         function specs, Pydantic schemas, etc.).
+
+    Z.6.5 — Ollama graceful fallback: if the Ollama daemon raises an
+    exception (daemon_error), or the response tool_calls block cannot be
+    parsed (parse_error), the adapter degrades to a pure-chat response
+    (no tool calls), increments SharedKV("ollama_tool_failures") counters
+    for dashboard observability, and returns without raising.
     """
     chat = _resolve_chat_model(provider, model, tools, llm)
     if chat is None:
         return AdapterToolResponse(text="", tool_calls=[], raw_message=None)
     msgs = _coerce_messages(messages)
-    resp = chat.invoke(msgs)
+
+    # Z.6.5: detect ollama before the invoke so we can route fallback
+    is_ollama = _is_ollama_model(provider, llm, chat)
+
+    try:
+        resp = chat.invoke(msgs)
+    except Exception as exc:  # noqa: BLE001
+        if is_ollama:
+            # Classify: connection errors are daemon_error; others may be
+            # "unsupported" (e.g. Ollama 400 on unsupported tool schema).
+            failure_type = "daemon_error"
+            exc_msg = str(exc).lower()
+            if any(kw in exc_msg for kw in ("not support", "unsupported", "400", "invalid tool")):
+                failure_type = "unsupported"
+            return _ollama_tool_call_fallback(msgs, exc, failure_type, provider, model, llm)
+        raise
 
     calls: list[AdapterToolCall] = []
     raw_tc = getattr(resp, "tool_calls", None) or []
-    for tc in raw_tc:
-        if isinstance(tc, dict):
-            calls.append(AdapterToolCall(
-                name=tc.get("name", ""),
-                arguments=tc.get("args") or tc.get("arguments") or {},
-                call_id=tc.get("id"),
-            ))
-        else:
-            calls.append(AdapterToolCall(
-                name=getattr(tc, "name", ""),
-                arguments=getattr(tc, "args", None) or getattr(tc, "arguments", {}) or {},
-                call_id=getattr(tc, "id", None),
-            ))
+    try:
+        for tc in raw_tc:
+            if isinstance(tc, dict):
+                calls.append(AdapterToolCall(
+                    name=tc.get("name", ""),
+                    arguments=tc.get("args") or tc.get("arguments") or {},
+                    call_id=tc.get("id"),
+                ))
+            else:
+                calls.append(AdapterToolCall(
+                    name=getattr(tc, "name", ""),
+                    arguments=getattr(tc, "args", None) or getattr(tc, "arguments", {}) or {},
+                    call_id=getattr(tc, "id", None),
+                ))
+    except Exception as exc:  # noqa: BLE001
+        if is_ollama:
+            return _ollama_tool_call_fallback(msgs, exc, "parse_error", provider, model, llm)
+        raise
 
     return AdapterToolResponse(
         text=_message_text(resp),

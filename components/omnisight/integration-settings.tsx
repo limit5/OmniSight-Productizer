@@ -8,6 +8,7 @@ import * as api from "@/lib/api"
 import { useTenantOptional } from "@/lib/tenant-context"
 import { useProjectOptional } from "@/lib/project-context"
 import { OllamaToolCallingBadge } from "@/components/omnisight/ollama-tool-calling-badge"
+import { OllamaToolFailureAlert } from "@/components/omnisight/ollama-tool-failure-alert"
 
 interface IntegrationSettingsProps {
   open: boolean
@@ -3652,6 +3653,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
   const [saving, setSaving] = useState(false)
   const [saveFeedback, setSaveFeedback] = useState<SaveFeedback>(null)
   const [providers, setProviders] = useState<api.ProviderConfig[]>([])
+  const [ollamaFailures, setOllamaFailures] = useState<api.OllamaToolFailuresResponse | null>(null)
   const [gerritWizardOpen, setGerritWizardOpen] = useState(false)
   // Y-prep.2 #288 — JIRA webhook secret rotate one-time-reveal dialog +
   // a local cache of the post-rotate masked preview. The settings GET
@@ -3667,6 +3669,8 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
   const refetchAll = useCallback(() => {
     api.getSettings().then(setSettingsData).catch(() => {})
     api.getProviders().then(r => setProviders(r.providers)).catch(() => {})
+    // Z.6.5: fetch ollama tool-call failure counters for dashboard warning.
+    api.getOllamaToolFailures().then(setOllamaFailures).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -4027,6 +4031,13 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                         />
                       </div>
                     )}
+                  {/* Z.6.5 — Ollama tool-call fallback warning. Shown when the
+                      adapter has degraded to pure-chat at least once (total > 0). */}
+                  {currentProvider === "ollama" && ollamaFailures?.has_warning && (
+                    <div className="pl-[88px]">
+                      <OllamaToolFailureAlert failures={ollamaFailures} />
+                    </div>
+                  )}
                 </>
               )
             })()}

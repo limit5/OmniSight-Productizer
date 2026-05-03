@@ -4,14 +4,14 @@ Pins the contract for the server-side fan-out that replaces the
 frontend ``useEngine`` hook's 11-endpoint ``Promise.allSettled`` loop
 (see ``hooks/use-engine.ts::fetchSystemData``).
 
-Happy path: all 11 sub-queries succeed → every key of the response
+Happy path: all 12 sub-queries succeed → every key of the response
 carries ``{"ok": True, "data": ...}``.
 
 Partial failure: a single sub-query raising must not take down the
 rest — the failing key returns ``{"ok": False, "error": "..."}`` and
 the envelope stays HTTP 200. This is the whole point of pushing the
 ``Promise.allSettled`` pattern to the server; if one sub-call fails
-the other 10 panels should still render live data.
+the other 11 panels should still render live data.
 
 The underlying sub-endpoints are monkeypatched because:
   - Many of them shell out (``/proc/cpuinfo`` reads, ``lsusb``, git
@@ -43,6 +43,8 @@ _SUB_KEYS = [
     "notificationsUnread",
     "compression",
     "simulations",
+    # Z.6.5 — Ollama tool-call failure counters for dashboard warning.
+    "ollamaToolFailures",
 ]
 
 
@@ -77,6 +79,8 @@ def _stub_all(monkeypatch):
         return {"total_original_bytes": 0, "estimated_tokens_saved": 0}
     async def _sims(*_a, **_k):
         return [{"id": "sim-1", "status": "pass"}]
+    async def _ollama_failures(*_a, **_k):
+        return {"total": 0, "daemon_error": 0, "parse_error": 0, "unsupported": 0, "has_warning": False}
 
     monkeypatch.setattr(_system_router, "get_system_status", _status)
     monkeypatch.setattr(_system_router, "get_system_info", _info)
@@ -89,6 +93,8 @@ def _stub_all(monkeypatch):
     monkeypatch.setattr(_system_router, "unread_count", _unread)
     monkeypatch.setattr(_system_router, "get_compression_stats", _compression)
     monkeypatch.setattr(_simulations_router, "list_simulations", _sims)
+    # Z.6.5: stub the ollama tool-failure counter sub-query.
+    monkeypatch.setattr(_system_router, "get_ollama_tool_failures", _ollama_failures)
 
 
 def _stub_pool_conn_passthrough(monkeypatch):
@@ -110,14 +116,14 @@ def _stub_pool_conn_passthrough(monkeypatch):
 # ─── happy path ────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_summary_happy_path_returns_all_11_ok(monkeypatch):
+async def test_summary_happy_path_returns_all_12_ok(monkeypatch):
     """Every sub-query succeeds → every key is ``{ok: True, data: ...}``."""
     _stub_all(monkeypatch)
     _stub_pool_conn_passthrough(monkeypatch)
 
     result = await _dash.get_dashboard_summary()
 
-    # All 11 keys present, in the contract order.
+    # All 12 keys present, in the contract order.
     assert list(result.keys()) == _SUB_KEYS
 
     # Every sub-key carries the ok envelope.
@@ -183,7 +189,7 @@ async def test_summary_partial_failure_keeps_200_and_marks_failed_key(monkeypatc
     assert "RuntimeError" in error_msg
     assert "token provider offline" in error_msg
 
-    # Other 10 keys remain ok.
+    # Other 11 keys remain ok.
     for key in _SUB_KEYS:
         if key == "tokenUsage":
             continue
@@ -221,10 +227,10 @@ async def test_summary_partial_failure_on_pg_subquery(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_summary_all_eleven_failing_still_returns_200_envelope(monkeypatch):
+async def test_summary_all_twelve_failing_still_returns_200_envelope(monkeypatch):
     """Pathological case: every sub-query raises. Aggregator should
     still return an HTTP 200 response (here: return normally, no
-    exception) with all 11 keys carrying error envelopes.
+    exception) with all 12 keys carrying error envelopes.
 
     The frontend renders empty-state panels per-subkey; a 500 would
     blank the whole dashboard, which is what Phase 4 is trying to
@@ -237,6 +243,8 @@ async def test_summary_all_eleven_failing_still_returns_200_envelope(monkeypatch
         "get_system_status", "get_system_info", "get_devices", "get_spec",
         "get_repos", "get_logs", "get_token_usage", "get_token_budget",
         "unread_count", "get_compression_stats",
+        # Z.6.5: also cover the new ollama-failures sub-query.
+        "get_ollama_tool_failures",
     ):
         monkeypatch.setattr(_system_router, fn_name, _boom)
     monkeypatch.setattr(_simulations_router, "list_simulations", _boom)

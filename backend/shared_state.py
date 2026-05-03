@@ -148,7 +148,22 @@ class SharedCounter:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class SharedKV:
-    """Simple key-value store backed by Redis hash."""
+    """Simple key-value store backed by Redis hash.
+
+    In-memory fallback uses class-level storage keyed by namespace so
+    that multiple ``SharedKV("same-ns")`` instances within the same
+    process share the same data — mirroring Redis behaviour.  This
+    matters for the ``incr()`` counter pattern used by Z.6.5's Ollama
+    fallback: the function that writes the counter and the endpoint
+    that reads it create separate instances; without shared in-memory
+    storage the counts would always read as zero when Redis is absent.
+
+    Cross-worker consistency answer (SOP Step 1):
+      Redis path → answer #2 (coordinated via Redis).
+      In-memory path → answer #3 (故意每 worker 獨立; acceptable for
+      observability counters like ollama_tool_failures where per-replica
+      drift is tolerable and operators can sum across replicas).
+    """
 
     # Per-field TTL is implemented by wrapping the user's payload in a
     # small envelope ``{_TTL_DATA_KEY: <value>, _TTL_EXPIRY_KEY: epoch}``
@@ -160,10 +175,31 @@ class SharedKV:
     _TTL_DATA_KEY = "_data"
     _TTL_EXPIRY_KEY = "_expires_at"
 
+    # Class-level in-memory store: namespace → {field: value}.
+    # Shared across all instances of the same namespace so that reads
+    # and writes from different code sites see the same data (Redis-like).
+    _mem: dict[str, dict[str, str]] = {}
+    _mem_lock: threading.Lock = threading.Lock()
+
     def __init__(self, namespace: str) -> None:
         self._ns = namespace
-        self._local: dict[str, str] = {}
-        self._lock = threading.Lock()
+        # Ensure namespace bucket exists; grab the per-namespace lock ref.
+        with self._mem_lock:
+            if namespace not in self._mem:
+                self._mem[namespace] = {}
+        # Use the class-level lock for all ops (simpler than per-ns locks).
+        self._lock = self._mem_lock
+
+    @property
+    def _local(self) -> dict[str, str]:
+        """Return the shared in-memory dict for this namespace."""
+        return self._mem[self._ns]
+
+    @_local.setter
+    def _local(self, value: dict[str, str]) -> None:
+        """Allow test fixtures to reset the namespace bucket via assignment."""
+        with self._mem_lock:
+            self._mem[self._ns] = value
 
     def _rkey(self) -> str:
         return _key(f"kv:{self._ns}")
@@ -210,6 +246,25 @@ class SharedKV:
                 pass
         with self._lock:
             self._local.pop(field, None)
+
+    def incr(self, field: str, delta: int = 1) -> int:
+        """Atomically increment a numeric counter stored at *field*.
+
+        Backed by Redis HINCRBY (cross-worker consistent when Redis is
+        available); falls back to the class-level in-memory store when
+        Redis is absent (per process — see class docstring).
+        """
+        r = get_sync_redis()
+        if r:
+            try:
+                return int(r.hincrby(self._rkey(), field, delta))
+            except Exception:
+                pass
+        with self._lock:
+            current = int(self._local.get(field, "0"))
+            new_val = current + delta
+            self._local[field] = str(new_val)
+            return new_val
 
     def set_with_ttl(
         self, field: str, value: Any, ttl_seconds: float,

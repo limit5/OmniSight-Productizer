@@ -1537,7 +1537,7 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 - [x] Z.6.2 `backend/llm_adapter.py::build_chat_model()` ollama 分支接 `bind_tools` 路徑、與其他 7 家共用 adapter `tool_call()` 流
 - [x] Z.6.3 `backend/agents/llm.py::AGENT_TOOLS` mapping 確認 ollama provider 不被短路、specialist node 拿到 `bind_tools_for=agent_type` 後正常 invoke
 - [x] Z.6.4 **Model 兼容矩陣**寫進 `config/llm_pricing.yaml` 同層的 `config/ollama_tool_calling.yaml`：列 9 顆主流 model 對 tool_calls 的支援度（`full / partial / none`）+ 推薦最低版本；catalog UI 顯示 badge
-- [ ] Z.6.5 **Graceful fallback**：tool calling 失敗（model 不支援 / Ollama daemon 報錯 / parse 失敗）時退回純 chat + `SharedKV("ollama_tool_failures").incr()` 計數 + dashboard 警示，不直接 raise
+- [x] Z.6.5 **Graceful fallback**：tool calling 失敗（model 不支援 / Ollama daemon 報錯 / parse 失敗）時退回純 chat + `SharedKV("ollama_tool_failures").incr()` 計數 + dashboard 警示，不直接 raise
 - [ ] Z.6.6 `backend/tests/test_llm_adapter.py` 加 ollama tool_call mock test：mock `ChatOllama.invoke` 回 `tool_calls=[{"name": "...", "args": {...}, "id": "..."}]`、驗 adapter normalise 過後與其他 provider 對等
 - [ ] Z.6.7 `backend/tests/test_ollama_tool_fallback.py`（新檔案）：unsupported model graceful degrade test、daemon 連不到 test、parse 失敗 test
 - [ ] Z.6.8 `docs/integrations/llm-observability.md` 矩陣加「Tool Calling」一欄（補既有 9 列只有 Balance + Rate-Limit 的維度）
@@ -3105,8 +3105,8 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] KS.1.9 **Memory zeroization**：Python `ctypes.memset` 用後抹除（best-effort、防 memory dump）
 - [x][G] KS.1.10 **alembic 0106** — `kms_keys` / `tenant_deks` / `decryption_audits` / `spend_thresholds` / `kek_rotations`
 - [x][G] KS.1.11 **Compat regression**：既有 `oauth_tokens` / `customer_secrets` / future provider keys 全走新路徑、0 回歸；雙寫期間隨機 hard-restart 測試
-- [~][G] KS.1.12 **Single knob**：`OMNISIGHT_KS_ENVELOPE_ENABLED=false` 退回 single Fernet 路徑（migration 雙寫期間有效、之後此 knob 永久 ON）
-- [ ] KS.1.13 **Test**：master KEK compromise 模擬、envelope round-trip、KEK rotation、雙讀雙寫 hard-restart、audit log 每筆 N10 對齊、anomaly 60 sec 內觸發、log scrubber 確認 sink 看到 redacted、backup DLP 攔截
+- [x][G] KS.1.12 **Single knob**：`OMNISIGHT_KS_ENVELOPE_ENABLED=false` 退回 single Fernet 路徑（migration 雙寫期間有效、之後此 knob 永久 ON）
+- [x][G] KS.1.13 **Test**：master KEK compromise 模擬、envelope round-trip、KEK rotation、雙讀雙寫 hard-restart、audit log 每筆 N10 對齊、anomaly 60 sec 內觸發、log scrubber 確認 sink 看到 redacted、backup DLP 攔截
 
 預估：**3 週**（Day 1-5 KMS adapter / Day 6-10 envelope + 雙寫 / Day 11-15 audit + anomaly + scrubber + DLP + test）
 
@@ -3160,8 +3160,8 @@ ls backend/alembic/versions/ | tail -3
 
 > **目標**：不分 tier 都要做的縱深防禦 + 出事 SOP。
 
-- [ ] KS.4.1 **Log secret scrubber 強化**：擴充 KS.1.7、加更多 pattern（API key prefix / OAuth token / JWT / cookie / database URL）
-- [ ] KS.4.2 **CI pre-commit secret scanner**：`gitleaks` / `trufflehog` 整合 GitHub Actions、PR 帶 secret 直接 block
+- [x][G] KS.4.1 **Log secret scrubber 強化**：擴充 KS.1.7、加更多 pattern（API key prefix / OAuth token / JWT / cookie / database URL）
+- [~][G] KS.4.2 **CI pre-commit secret scanner**：`gitleaks` / `trufflehog` 整合 GitHub Actions、PR 帶 secret 直接 block
 - [ ] KS.4.3 **Backup pipeline DLP 強化**：擴充 KS.1.8、backup at-rest encryption + DLP rule + off-site immutable backup（S3 Object Lock / Glacier）
 - [ ] KS.4.4 **季度第三方 pentest SOP**：與外部 pentest vendor 簽約、每季 1 次、報告進 N10 ledger
 - [ ] KS.4.5 **Bug bounty program 評估**：HackerOne / Bugcrowd 比較、GA 後啟動（payout policy / scope / triage SOP）
