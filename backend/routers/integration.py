@@ -12,6 +12,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+import json
+
 from backend import auth as _au
 from backend.config import (
     LEGACY_CREDENTIAL_FIELDS,
@@ -720,7 +722,6 @@ def _parse_token_map(raw: str) -> dict[str, str]:
     if not raw:
         return {}
     try:
-        import json
         data = json.loads(raw)
     except (ValueError, TypeError):
         return {}
@@ -788,7 +789,6 @@ async def update_git_token_map(
     Duplicate hosts in the payload are merged last-write-wins (the final
     entry in the list). Empty host strings are ignored.
     """
-    import json
 
     def _merge(
         new: list[TokenMapInstance], existing_raw: str,
@@ -926,7 +926,6 @@ async def _probe_gitlab_token(token: str, url: str) -> dict:
     stdout, _ = await proc.communicate()
     raw = stdout.decode(errors="replace")
     try:
-        import json
         data = json.loads(raw)
     except Exception:
         return {
@@ -980,7 +979,6 @@ async def _probe_github_token(token: str) -> dict:
     else:
         body = raw
     try:
-        import json
         data = json.loads(body)
     except Exception:
         return {
@@ -1894,7 +1892,6 @@ async def _test_github() -> dict:
                 break
         body = rest
     try:
-        import json
         data = json.loads(body)
         if "login" in data:
             return {"status": "ok", "user": data["login"], "scopes": scopes}
@@ -1932,7 +1929,6 @@ async def _test_gitlab() -> dict:
     )
     stdout, _ = await proc.communicate()
     try:
-        import json
         data = json.loads(stdout)
         if isinstance(data, dict) and "version" in data:
             result = {"status": "ok", "version": data["version"], "url": base}
@@ -1963,7 +1959,6 @@ async def _test_jira() -> dict:
     )
     stdout, _ = await proc.communicate()
     try:
-        import json
         data = json.loads(stdout)
         if isinstance(data, dict) and "version" in data:
             result = {"status": "ok", "version": data["version"]}
@@ -1981,7 +1976,6 @@ async def _test_jira() -> dict:
 async def _test_slack() -> dict:
     if not settings.notification_slack_webhook:
         return {"status": "not_configured", "message": "Slack webhook not set"}
-    import json
     proc = await asyncio.create_subprocess_exec(
         "curl", "-s", "-X", "POST", settings.notification_slack_webhook,
         "-H", "Content-Type: application/json",

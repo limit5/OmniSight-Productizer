@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +368,6 @@ async def get_user(user_id: str, conn=None) -> Optional[User]:
     ``get_user`` + later writes can pass their Depends conn.
     """
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _get_user_impl(owned_conn, user_id)
     return await _get_user_impl(conn, user_id)
@@ -383,7 +383,6 @@ async def _get_user_by_email_impl(conn, email: str) -> Optional[User]:
 
 async def get_user_by_email(email: str, conn=None) -> Optional[User]:
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _get_user_by_email_impl(owned_conn, email)
     return await _get_user_by_email_impl(conn, email)
@@ -411,7 +410,6 @@ async def find_admin_requiring_password_change(conn=None) -> Optional[User]:
         "ORDER BY created_at ASC LIMIT 1"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             r = await owned_conn.fetchrow(sql)
     else:
@@ -471,7 +469,6 @@ async def create_user(
     if role not in ROLES:
         raise ValueError(f"unknown role: {role}")
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _create_user_impl(
                 owned_conn, email, name, role, password,
@@ -515,7 +512,6 @@ async def check_password_history(
     already inside a tx that logically spans the history check).
     """
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _check_password_history_impl(
                 owned_conn, user_id, plain,
@@ -583,7 +579,6 @@ async def change_password(
     takes, keeping the retention window correct.
     """
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             async with owned_conn.transaction():
                 await _change_password_impl(owned_conn, user_id, new_password)
@@ -613,7 +608,6 @@ async def flag_user_must_change_password(
     """
     sql = "UPDATE users SET must_change_password = 1 WHERE id = $1"
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             status = await owned_conn.execute(sql, user_id)
     else:
@@ -653,7 +647,6 @@ async def flag_all_admins_must_change_password(conn=None) -> list[dict]:
         "RETURNING id, email"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             rows = await owned_conn.fetch(sql)
     else:
@@ -725,7 +718,6 @@ async def is_account_locked(email: str, conn=None) -> tuple[bool, float]:
     sql = "SELECT locked_until FROM users WHERE email = $1"
     normalised = email.lower().strip()
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             r = await owned_conn.fetchrow(sql, normalised)
     else:
@@ -767,7 +759,6 @@ async def authenticate_password(email: str, password: str) -> Optional[User]:
     The M1 timing-oracle defence is preserved verbatim — every branch
     runs argon2 verify (dummy or real) before touching control flow.
     """
-    from backend.db_pool import get_pool
     pool = get_pool()
     normalised = email.lower().strip()
 
@@ -943,7 +934,6 @@ async def fingerprint_seen_before(
     import time as _time
     cutoff = _time.time() - window
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             row = await owned_conn.fetchrow(
                 "SELECT 1 FROM session_fingerprints "
@@ -972,7 +962,6 @@ async def create_session(
     this internally in SP-4.3b) pass nothing and borrow from pool.
     """
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _create_session_impl(
                 owned_conn, user_id, ip, user_agent,
@@ -998,7 +987,6 @@ async def _new_device_alerts_enabled(user_id: str) -> bool:
     expired. Freshness is cheaper than cache invalidation here.
     """
     try:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT value FROM user_preferences "
@@ -1242,7 +1230,6 @@ async def get_session(token: str, conn=None) -> Optional[Session]:
     if not token:
         return None
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _get_session_impl(owned_conn, token)
     return await _get_session_impl(conn, token)
@@ -1299,7 +1286,6 @@ async def update_session_metadata(
     if not token:
         return {}
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             async with owned_conn.transaction():
                 return await _update_session_metadata_impl(
@@ -1313,7 +1299,6 @@ async def delete_session(token: str, conn=None) -> None:
     if not token:
         return
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             await owned_conn.execute(
                 "DELETE FROM sessions WHERE token = $1", token,
@@ -1325,7 +1310,6 @@ async def delete_session(token: str, conn=None) -> None:
 async def cleanup_expired_sessions(conn=None) -> int:
     cutoff = time.time()
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             status = await owned_conn.execute(
                 "DELETE FROM sessions WHERE expires_at < $1", cutoff,
@@ -1397,7 +1381,6 @@ async def rotate_session(
     and the winner's rotated_from pointer overwrites the other's.
     """
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             async with owned_conn.transaction():
                 return await _rotate_session_impl(
@@ -1486,7 +1469,6 @@ async def rotate_user_sessions(
     "Authentication required".
     """
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _rotate_user_sessions_impl(
                 owned_conn, user_id, exclude_token, reason, trigger,
@@ -1544,7 +1526,6 @@ async def get_session_revocation(token: str, conn=None) -> Optional[dict]:
     if not token:
         return None
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _get_session_revocation_impl(owned_conn, token)
     return await _get_session_revocation_impl(conn, token)
@@ -1582,7 +1563,6 @@ async def ensure_default_admin(conn=None) -> Optional[User]:
     exactly one admin row.
     """
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _ensure_default_admin_impl(owned_conn)
     return await _ensure_default_admin_impl(conn)
@@ -2037,7 +2017,6 @@ def require_project_member(min_role: str = "viewer"):
             set_tenant_id,
             set_user_role,
         )
-        from backend.db_pool import get_pool
 
         # Optional ``{tenant_id}`` from the same path. ``path_params``
         # is a plain dict; missing key → None (legitimate for routes
@@ -2157,7 +2136,6 @@ async def _list_sessions_impl(conn, user_id: str) -> list[dict]:
 
 async def list_sessions(user_id: str, conn=None) -> list[dict]:
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _list_sessions_impl(owned_conn, user_id)
     return await _list_sessions_impl(conn, user_id)
@@ -2166,7 +2144,6 @@ async def list_sessions(user_id: str, conn=None) -> list[dict]:
 async def revoke_session(token: str, conn=None) -> bool:
     sql = "DELETE FROM sessions WHERE token = $1"
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             status = await owned_conn.execute(sql, token)
     else:
@@ -2182,7 +2159,6 @@ async def revoke_other_sessions(
 ) -> int:
     sql = "DELETE FROM sessions WHERE user_id = $1 AND token != $2"
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             status = await owned_conn.execute(sql, user_id, keep_token)
     else:

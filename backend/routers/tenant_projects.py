@@ -129,6 +129,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend import auth
+from backend.db_pool import get_pool
+from backend import audit as _audit
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["tenant-projects"])
@@ -297,7 +299,6 @@ async def _user_can_create_project_in(
     if auth.role_at_least(user.role, "super_admin"):
         return True
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "SELECT role, status FROM user_tenant_memberships "
@@ -439,7 +440,6 @@ async def create_project(
     #    succeeds for super-admins regardless of whether the tenant
     #    exists, so the explicit existence probe is necessary even for
     #    that branch.
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
     if tenant_row is None:
@@ -570,7 +570,6 @@ async def create_project(
     #     callsite in this codebase).
     project = _row_to_project_dict(row)
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="tenant_project_created",
             entity_kind="project",
@@ -777,7 +776,6 @@ async def _resolve_list_visibility(
     if auth.role_at_least(user.role, "super_admin"):
         return True, True
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "SELECT role, status FROM user_tenant_memberships "
@@ -910,7 +908,6 @@ async def list_projects(
     #    members, ``may_list=True`` guarantees the membership row
     #    exists and FK-points at the tenant — but the explicit probe
     #    is cheap and keeps the failure mode uniform.)
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
     if tenant_row is None:
@@ -1289,7 +1286,6 @@ async def patch_project(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     # 6. Tenant existence probe — clean 404. Done outside the patch
     #    transaction so a 404 caller does not hold a write lock.
@@ -1510,7 +1506,6 @@ async def patch_project(
         after_blob[field] = new_row[field]
 
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="tenant_project_updated",
             entity_kind="project",
@@ -1752,7 +1747,6 @@ async def archive_project(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
@@ -1794,7 +1788,6 @@ async def archive_project(
         return JSONResponse(status_code=200, content=project)
 
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="tenant_project_archived",
             entity_kind="project",
@@ -1893,7 +1886,6 @@ async def restore_project(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
@@ -1930,7 +1922,6 @@ async def restore_project(
         return JSONResponse(status_code=200, content=project)
 
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="tenant_project_restored",
             entity_kind="project",
@@ -2013,7 +2004,6 @@ async def gc_archived_projects(
         "%Y-%m-%d %H:%M:%S",
     )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         eligible_rows = await conn.fetch(
@@ -2055,7 +2045,6 @@ async def gc_archived_projects(
         }
 
         try:
-            from backend import audit as _audit
             from backend.db_context import set_tenant_id, current_tenant_id
             prev_tid = current_tenant_id()
             try:
@@ -2299,7 +2288,6 @@ async def _user_can_manage_project_members(
     if auth.role_at_least(user.role, "super_admin"):
         return True
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         tm_row = await conn.fetchrow(
             "SELECT role, status FROM user_tenant_memberships "
@@ -2478,7 +2466,6 @@ async def create_project_member(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     # Tenant existence — clean 404.
     async with get_pool().acquire() as conn:
@@ -2575,7 +2562,6 @@ async def create_project_member(
     member = _row_to_project_member_dict(new_row)
     member["tenant_id"] = tenant_id
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="tenant_project_member_added",
             entity_kind="project_member",
@@ -2673,7 +2659,6 @@ async def patch_project_member(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
@@ -2749,7 +2734,6 @@ async def patch_project_member(
         )
 
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="tenant_project_member_updated",
             entity_kind="project_member",
@@ -2859,7 +2843,6 @@ async def delete_project_member(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
@@ -2902,7 +2885,6 @@ async def delete_project_member(
         )
 
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="tenant_project_member_removed",
             entity_kind="project_member",
@@ -3267,7 +3249,6 @@ async def create_project_share(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     # Owning tenant existence — 404.
     async with get_pool().acquire() as conn:
@@ -3357,7 +3338,6 @@ async def create_project_share(
     share = _row_to_project_share_dict(new_row)
     share["tenant_id"] = tenant_id
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="tenant_project_shared",
             entity_kind="project_share",
@@ -3595,7 +3575,6 @@ async def list_project_members(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
@@ -3723,7 +3702,6 @@ async def list_project_shares(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
@@ -3831,7 +3809,6 @@ async def delete_project_share(
             ),
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_FETCH_TENANT_SQL, tenant_id)
@@ -3873,7 +3850,6 @@ async def delete_project_share(
         )
 
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="tenant_project_share_revoked",
             entity_kind="project_share",

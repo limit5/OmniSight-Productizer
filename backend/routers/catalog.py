@@ -85,6 +85,7 @@ from pydantic import BaseModel, Field, field_validator
 from backend import auth as _au
 from backend.db_context import set_tenant_id
 from backend.routers._pagination import Limit
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/catalog", tags=["catalog"])
@@ -525,7 +526,6 @@ async def list_entries(
         f"SELECT COUNT(*) FROM catalog_entries WHERE {' AND '.join(where)}"
     )
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(sql, *params)
         # Count uses every WHERE param except the trailing limit/offset
@@ -592,7 +592,6 @@ async def get_entry(
         "  ELSE 4 END"
     )
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(sql, entry_id, tid)
 
@@ -646,7 +645,6 @@ async def create_entry(
 
     tid = _ensure_tenant(user)
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         if body.source == "override":
             # Validate the shipped base exists. Without this, an admin
@@ -755,7 +753,6 @@ async def patch_entry(
     tid = _ensure_tenant(user)
     fields = body.model_dump(exclude_unset=True)
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             # Locate an existing operator or override row for this
@@ -910,7 +907,6 @@ async def delete_entry(
         )
 
     tid = _ensure_tenant(user)
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             existing = await conn.fetchrow(
@@ -1006,7 +1002,6 @@ async def list_sources(
         f"WHERE {' AND '.join(where)} "
         "ORDER BY created_at ASC, id ASC"
     )
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(sql, *params)
     return JSONResponse(
@@ -1031,7 +1026,6 @@ async def create_source(
     """
     tid = _ensure_tenant(user)
     sub_id = _new_subscription_id()
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         try:
             row = await conn.fetchrow(
@@ -1101,7 +1095,6 @@ async def patch_source(
         "          enabled, created_at, updated_at"
     )
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         try:
             row = await conn.fetchrow(sql, *params)
@@ -1140,7 +1133,6 @@ async def delete_source(
     feed sync workflow has no audit dependency on the row beyond the
     audit_log entry below."""
     tid = _ensure_tenant(user)
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         deleted = await conn.fetchval(
             "DELETE FROM catalog_subscriptions "
@@ -1193,7 +1185,6 @@ async def sync_source(
     RETURNING in one tx; the response carries the post-commit row.
     """
     tid = _ensure_tenant(user)
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "UPDATE catalog_subscriptions "

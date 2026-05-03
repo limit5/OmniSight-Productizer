@@ -40,6 +40,7 @@ from typing import Optional
 
 from backend.dag_schema import DAG
 from backend.dag_validator import ValidationError as DagValidationError
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,6 @@ async def save_plan(
     if status not in _VALID_STATUSES:
         raise ValueError(f"unknown status {status!r}")
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             new_id = await _save_plan_impl(
                 owned, dag, run_id, parent_plan_id,
@@ -163,7 +163,6 @@ async def save_plan(
 async def get_plan(plan_id: int, conn=None) -> StoredPlan:
     sql = f"SELECT {_PLAN_COLS} FROM dag_plans WHERE id = $1"
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             row = await owned.fetchrow(sql, plan_id)
     else:
@@ -183,7 +182,6 @@ async def get_plan_by_run(
         "ORDER BY id DESC LIMIT 1"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             row = await owned.fetchrow(sql, run_id)
     else:
@@ -200,7 +198,6 @@ async def list_plans(
         "ORDER BY mutation_round, id"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             rows = await owned.fetch(sql, dag_id)
     else:
@@ -261,7 +258,6 @@ async def set_status(
     if new_status not in _VALID_STATUSES:
         raise ValueError(f"unknown status {new_status!r}")
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 await _set_status_impl(owned, plan_id, new_status, run_id)
@@ -303,7 +299,6 @@ async def attach_to_run(
     all-or-nothing.
     """
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 await _attach_to_run_impl(owned, plan_id, run_id)
@@ -321,7 +316,6 @@ async def link_successor(
     stays traceable for audit/replay."""
     sql = "UPDATE workflow_runs SET successor_run_id = $1 WHERE id = $2"
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             await owned.execute(sql, new_run_id, old_run_id)
     else:
@@ -335,7 +329,6 @@ async def get_dag_plan_id_for_run(
     needs the plan."""
     sql = "SELECT dag_plan_id FROM workflow_runs WHERE id = $1"
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             row = await owned.fetchrow(sql, run_id)
     else:

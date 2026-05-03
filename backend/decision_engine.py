@@ -21,6 +21,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
+from backend import audit as _audit
 
 logger = logging.getLogger(__name__)
 
@@ -276,7 +277,6 @@ def _emit_turbo_transition(event: str, payload: dict[str, Any]) -> None:
     is_derate = event.endswith("turbo_derate")
     direction = "engaged" if is_derate else "recovered"
     try:
-        from backend import audit as _audit
         _audit.log_sync(
             action=event,
             entity_kind="turbo_derate",
@@ -517,7 +517,6 @@ def _emit_sandbox_deferred(
     except Exception as exc:
         logger.debug("sandbox.deferred SSE publish failed: %s", exc)
     try:
-        from backend import audit as _audit
         _audit.log_sync(
             action="sandbox.deferred",
             entity_kind="sandbox_slot",
@@ -567,7 +566,6 @@ def _emit_capacity_deferred(
     except Exception as exc:
         logger.debug("sandbox.deferred (capacity) publish failed: %s", exc)
     try:
-        from backend import audit as _audit
         _audit.log_sync(
             action="sandbox.deferred",
             entity_kind="sandbox_slot",
@@ -1060,7 +1058,6 @@ async def set_session_mode(
         logger.warning("mode_changed publish failed: %s", _exc)
     logger.info("OperationMode (session): %s → %s", prev_mode.value, mode.value)
     try:
-        from backend import audit as _audit
         _audit.log_sync(
             action="mode_change", entity_kind="operation_mode",
             entity_id=f"session:{session_token[:8]}",
@@ -1119,7 +1116,6 @@ def set_mode(
         logger.warning("mode_changed publish failed: %s", _exc)
     logger.info("OperationMode: %s → %s", prev.value, mode.value)
     try:
-        from backend import audit as _audit
         _audit.log_sync(
             action="mode_change", entity_kind="operation_mode", entity_id="global",
             before={"mode": prev.value}, after={"mode": mode.value, "parallel_cap": new_cap},
@@ -1373,7 +1369,6 @@ def resolve(
     _emit("decision_resolved", dec)
     # Phase 53 audit
     try:
-        from backend import audit as _audit
         _audit.log_sync(
             action="decision_resolve", entity_kind="decision", entity_id=dec.id,
             before={"status": "pending", "kind": dec.kind, "severity": dec.severity.value},
@@ -1400,7 +1395,6 @@ def undo(decision_id: str) -> Decision | None:
                 d.resolved_at = time.time()
                 _emit("decision_undone", d)
                 try:
-                    from backend import audit as _audit
                     _audit.log_sync(
                         action="decision_undo", entity_kind="decision", entity_id=d.id,
                         before={"status": prev_status},

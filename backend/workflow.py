@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from backend.db_context import tenant_insert_value, tenant_where_pg
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,6 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
         started_at=time.time(),
         metadata=metadata or {},
     )
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         await conn.execute(
             "INSERT INTO workflow_runs "
@@ -230,7 +230,6 @@ async def get_run(run_id: str) -> Optional[WorkflowRun]:
         f"SELECT {_RUN_COLS} FROM workflow_runs "
         f"WHERE {' AND '.join(conditions)}"
     )
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(sql, *params)
     return _row_to_run(row) if row else None
@@ -250,7 +249,6 @@ async def list_runs(
         sql += " WHERE " + " AND ".join(conditions)
     p.append(limit)
     sql += f" ORDER BY started_at DESC LIMIT ${len(p)}"
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(sql, *p)
     return [_row_to_run(r) for r in rows]
@@ -267,7 +265,6 @@ def _row_to_step(r) -> "StepRecord":
 
 
 async def list_steps(run_id: str) -> list[StepRecord]:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
             f"SELECT {_STEP_COLS} FROM workflow_steps "
@@ -330,7 +327,6 @@ async def _bump_version(run_id: str, expected_version: int | None,
         f"UPDATE workflow_runs SET {', '.join(set_parts)} "
         f"WHERE {where} RETURNING version"
     )
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(sql, *params)
     if row is None:
@@ -461,7 +457,6 @@ async def update_run_metadata(run_id: str, expected_version: int,
 
 
 async def _get_step(run_id: str, idempotency_key: str) -> Optional[StepRecord]:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             f"SELECT {_STEP_COLS} FROM workflow_steps "
@@ -492,7 +487,6 @@ async def _record_step(run_id: str, idempotency_key: str,
         started_at=time.time(), completed_at=time.time(),
         output=output, error=error,
     )
-    from backend.db_pool import get_pool
     try:
         async with get_pool().acquire() as conn:
             async with conn.transaction():
@@ -592,7 +586,6 @@ async def list_in_flight_on_startup() -> list[WorkflowRun]:
 
 async def _reset_for_tests() -> None:
     """Clear both tables. NOT for production use."""
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             await conn.execute("DELETE FROM workflow_steps")

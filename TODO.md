@@ -6185,7 +6185,7 @@ BP.E GraphRAG / Neo4j
 - [x][G] FX.4.14 `backend/app_store_connect.py` Transport 同
 - [x][G] FX.4.15 `backend/hmi_components.py` HALComponent 同（render_html / render_js / hal_endpoints）
 - [~][G] FX.4.16 `backend/web/framework_adapter.py:602` _AdapterBase 同；移除 pragma:no-cover
-- [ ] FX.4.17 `backend/queue_backend.py` _UnimplementedAdapter 拿掉、改 explicit factory raise
+- [~][G] FX.4.17 `backend/queue_backend.py` _UnimplementedAdapter 拿掉、改 explicit factory raise
 
 #### API contract response_model（5）
 - [ ] FX.4.18 `backend/routers/sensor_fusion.py:73-325` 25 endpoints 補 `response_model`
@@ -6239,7 +6239,7 @@ BP.E GraphRAG / Neo4j
 > **runner**: 混合（Claude 主導 architectural decision，codex 跑 mechanical 部分）
 
 - [x] FX.7.1 `backend/__init__.py:15-25` 清 25 個 dead re-export — audit 報告為 false positive (`backend` 為 PEP 420 namespace package, 該檔不存在; "25" 是 backend 子套件 `__init__.py` 數)。實際 dead import 1 處：`backend/payment_compliance.py:1153` `from backend import audit_log` (audit_log module 從未存在, 所有 PCI-DSS gate audit row 因 ImportError 被吞而靜默丟失)。已改用 `backend.audit.log()`，並加 `backend/tests/test_backend_imports_drift_guard.py` 靜態掃所有 `from backend import X` 防再次發生。
-- [ ] FX.7.2 1768 個 function-內 local import 抽樣前 20 個重構（避免廣泛 circular）
+- [x] FX.7.2 1768 個 function-內 local import 抽樣前 20 個重構（避免廣泛 circular） — 2026-05-04 done. Sampled top-20 `(file, import-line)` combos by repeat count, verified each target module (`db_pool`, `audit`, `db`, `metrics`, `auth_event`, plus stdlib `json`) has zero `backend.*` deps that would create cycles, hoisted to module level. Removed 216 local-import lines, added 18 module-level imports (`db_pool.get_pool` ×11, `audit as _audit` ×4, `metrics as _m` ×1, `db` ×1, `auth_event as _aevent` ×1, `json` ×1). All 18 modified modules import cleanly. Drift guard `backend/tests/test_local_import_drift_guard.py` pins both directions: (a) re-introducing the local form fails CI, (b) deleting the hoisted module-level form fails CI. Function-body local-import count in prod backend: 1744 → 1528 (12.4% reduction). Remaining 1528 deferred — most are genuine circular-avoidance or optional-dep guards; further waves require per-callsite cycle analysis.
 - [ ] FX.7.3 9 個 > 2000 行的大檔做 module split 規劃（不一定做完，先寫 ADR + 排程）
 - [ ] FX.7.4 HANDOFF.md 「Production status / Next gate」改 machine-readable manifest（YAML frontmatter 或獨立 status.yaml）
 - [ ] FX.7.5 HANDOFF.md 10+ row 的 deployed-active 誇大條目校正成 deployed-inactive

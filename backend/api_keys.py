@@ -30,6 +30,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,6 @@ async def create_key(name: str, scopes: list[str] | None = None,
     scope_list = scopes or ["*"]
     scope_json = json.dumps(scope_list)
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         await conn.execute(
             "INSERT INTO api_keys "
@@ -124,7 +124,6 @@ async def create_key(name: str, scopes: list[str] | None = None,
 async def rotate_key(key_id: str) -> tuple[ApiKey | None, str]:
     """Generate a new secret for an existing key. Returns (ApiKey, new_raw)
     or (None, '') if key not found."""
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
             "SELECT id, name, scopes, created_by, enabled, created_at "
@@ -149,7 +148,6 @@ async def rotate_key(key_id: str) -> tuple[ApiKey | None, str]:
 
 
 async def revoke_key(key_id: str) -> bool:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "UPDATE api_keys SET enabled = 0 WHERE id = $1 RETURNING id",
@@ -162,7 +160,6 @@ async def revoke_key(key_id: str) -> bool:
 
 
 async def enable_key(key_id: str) -> bool:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "UPDATE api_keys SET enabled = 1 WHERE id = $1 RETURNING id",
@@ -172,7 +169,6 @@ async def enable_key(key_id: str) -> bool:
 
 
 async def delete_key(key_id: str) -> bool:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "DELETE FROM api_keys WHERE id = $1 RETURNING id",
@@ -185,7 +181,6 @@ async def delete_key(key_id: str) -> bool:
 
 
 async def list_keys() -> list[ApiKey]:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
             f"SELECT {_LIST_COLS} FROM api_keys ORDER BY created_at DESC"
@@ -194,7 +189,6 @@ async def list_keys() -> list[ApiKey]:
 
 
 async def get_key(key_id: str) -> ApiKey | None:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
             f"SELECT {_LIST_COLS} FROM api_keys WHERE id = $1",
@@ -208,7 +202,6 @@ async def validate_bearer(raw_token: str, ip: str = "") -> ApiKey | None:
     Updates last_used_ip and last_used_at on match. Returns None if
     no matching enabled key found."""
     hashed = _hash_key(raw_token)
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
             "SELECT id, name, key_prefix, scopes, created_by, enabled, created_at "
@@ -256,7 +249,6 @@ async def migrate_legacy_bearer() -> ApiKey | None:
     hashed = _hash_key(legacy)
     key_id = f"ak-legacy-{hashed[:12]}"
     prefix = legacy[:KEY_PREFIX_LEN] if len(legacy) >= KEY_PREFIX_LEN else legacy
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         inserted = await conn.fetchrow(
             "INSERT INTO api_keys "
@@ -280,7 +272,6 @@ async def migrate_legacy_bearer() -> ApiKey | None:
 
 
 async def update_scopes(key_id: str, scopes: list[str]) -> bool:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "UPDATE api_keys SET scopes = $1 WHERE id = $2 RETURNING id",

@@ -25,6 +25,7 @@ from pathlib import Path
 import hashlib
 
 from backend.events import emit_agent_update, emit_pipeline_phase, emit_container
+from backend import metrics as _m
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +248,6 @@ async def _lifetime_killswitch(agent_id: str, container_name: str,
     except Exception as exc:
         logger.debug("audit log for sandbox_killed failed: %s", exc)
     try:
-        from backend import metrics as _m
         _m.sandbox_lifetime_killed_total.labels(tier=tier).inc()
     except Exception:
         pass
@@ -379,7 +379,6 @@ async def _record_sandbox_oom(agent_id: str, container_name: str,
         container_name, tenant_id, memory_limit,
     )
     try:
-        from backend import metrics as _m
         _m.sandbox_oom_total.labels(tenant_id=tenant_id, tier=tier).inc()
     except Exception:
         pass
@@ -427,7 +426,6 @@ async def assert_image_trusted(image: str = DOCKER_IMAGE) -> None:
             "strict allow-list mode", image,
         )
         try:
-            from backend import metrics as _m
             _m.sandbox_image_rejected_total.labels(image=image).inc()
         except Exception:
             pass
@@ -441,7 +439,6 @@ async def assert_image_trusted(image: str = DOCKER_IMAGE) -> None:
             image, digest,
         )
         try:
-            from backend import metrics as _m
             _m.sandbox_image_rejected_total.labels(image=image).inc()
         except Exception:
             pass
@@ -574,7 +571,6 @@ async def start_container(agent_id: str, workspace_path: Path,
     except Exception as exc:
         if exc.__class__.__name__ == "QuotaExceeded":
             try:
-                from backend import metrics as _m
                 _m.sandbox_launch_total.labels(
                     tier=tier, runtime="?", result="quota_exceeded",
                 ).inc()
@@ -611,7 +607,6 @@ async def start_container(agent_id: str, workspace_path: Path,
         # S5: count + audit the rejection so an attacker swapping the
         # image is visible in both metrics and the hash-chained log.
         try:
-            from backend import metrics as _m
             _m.sandbox_launch_total.labels(
                 tier=tier, runtime="?", result="image_rejected",
             ).inc()
@@ -729,7 +724,6 @@ async def start_container(agent_id: str, workspace_path: Path,
     if rc != 0:
         # Phase 64-A S5: count the failed launch.
         try:
-            from backend import metrics as _m
             _m.sandbox_launch_total.labels(
                 tier=tier, runtime=runtime, result="error",
             ).inc()
@@ -762,7 +756,6 @@ async def start_container(agent_id: str, workspace_path: Path,
 
     # Phase 64-A S5: count the successful launch + write an audit row.
     try:
-        from backend import metrics as _m
         _m.sandbox_launch_total.labels(
             tier=tier, runtime=runtime, result="success",
         ).inc()
@@ -958,7 +951,6 @@ async def exec_in_container(
                 f"cap={cap} via OMNISIGHT_SANDBOX_MAX_OUTPUT_BYTES]"
             )
             try:
-                from backend import metrics as _m
                 _m.sandbox_output_truncated_total.labels(tier=tier).inc()
             except Exception:
                 pass

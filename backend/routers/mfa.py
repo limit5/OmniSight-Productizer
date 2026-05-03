@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from backend import auth, mfa
+from backend import audit as _audit
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["mfa"])
@@ -63,7 +64,6 @@ async def _rotate_peer_sessions(
         )
         if revoked <= 0:
             return
-        from backend import audit as _audit
         await _audit.log(
             action="session_rotated", entity_kind="session",
             entity_id=user.id,
@@ -116,7 +116,6 @@ async def totp_confirm(req: TOTPConfirmRequest,
         raise HTTPException(status_code=400, detail="Invalid TOTP code")
     codes = await mfa.regenerate_backup_codes(user.id)
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="mfa.totp.enrolled", entity_kind="mfa", entity_id=user.id,
             after={"method": "totp"}, actor=user.email,
@@ -134,7 +133,6 @@ async def totp_disable(request: Request,
     if not ok:
         raise HTTPException(status_code=404, detail="TOTP not enrolled")
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="mfa.totp.disabled", entity_kind="mfa", entity_id=user.id,
             after={"method": "totp"}, actor=user.email,
@@ -159,7 +157,6 @@ async def backup_codes_regenerate(request: Request,
     if not codes:
         raise HTTPException(status_code=400, detail="No MFA enrolled — cannot generate backup codes")
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="mfa.backup_codes.regenerated", entity_kind="mfa",
             entity_id=user.id, actor=user.email,
@@ -200,7 +197,6 @@ async def webauthn_register_complete(
     if not ok:
         raise HTTPException(status_code=400, detail="WebAuthn registration failed")
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="mfa.webauthn.registered", entity_kind="mfa",
             entity_id=user.id, after={"name": req.name or "Security Key"},
@@ -220,7 +216,6 @@ async def webauthn_remove(mfa_id: str,
     if not ok:
         raise HTTPException(status_code=404, detail="WebAuthn credential not found")
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="mfa.webauthn.removed", entity_kind="mfa",
             entity_id=user.id, after={"mfa_id": mfa_id},
@@ -310,7 +305,6 @@ async def mfa_challenge(req: MFAChallengeRequest,
 
     user = await auth.get_user(user_id)
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="mfa.challenge.passed", entity_kind="auth",
             entity_id=user_id,
@@ -428,7 +422,6 @@ async def webauthn_challenge_complete(
 
     user = await auth.get_user(user_id)
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="mfa.challenge.passed", entity_kind="auth",
             entity_id=user_id, after={"method": "webauthn"},

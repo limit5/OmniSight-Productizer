@@ -30,6 +30,8 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from backend import auth
+from backend import audit as _audit
+from backend.security import auth_event as _aevent
 from backend.rate_limit import ip_limiter, email_limiter
 
 logger = logging.getLogger(__name__)
@@ -218,7 +220,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
     except HTTPException as exc:
         if exc.status_code == 429:
             from backend.security import auth_audit_bridge as _bridge
-            from backend.security import auth_event as _aevent
             await _bridge.emit_login_fail_event(
                 attempted_user=(req.email or "").lower().strip() or "anonymous",
                 fail_reason=_aevent.LOGIN_FAIL_RATE_LIMITED,
@@ -295,7 +296,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         # ``rate_limited`` so AS.5.2 dashboard counts rate-limit-shed
         # attempts toward the per-tenant fail rate.  Best-effort.
         from backend.security import auth_audit_bridge as _bridge
-        from backend.security import auth_event as _aevent
         await _bridge.emit_login_fail_event(
             attempted_user=email_key or "anonymous",
             fail_reason=_aevent.LOGIN_FAIL_RATE_LIMITED,
@@ -312,7 +312,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         # AS.6.5 — fan AS.5.1 ``auth.login_fail`` rollup; same shape
         # as the IP-limit branch above.
         from backend.security import auth_audit_bridge as _bridge
-        from backend.security import auth_event as _aevent
         await _bridge.emit_login_fail_event(
             attempted_user=email_key or "anonymous",
             fail_reason=_aevent.LOGIN_FAIL_RATE_LIMITED,
@@ -327,7 +326,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
     locked, lock_remaining = await auth.is_account_locked(email_key)
     if locked:
         try:
-            from backend import audit as _audit
             await _audit.log(
                 action="auth.lockout", entity_kind="auth",
                 entity_id=_mask_email(req.email),
@@ -341,7 +339,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         # login_fail rate. Best-effort; the legacy ``auth.lockout``
         # row above stays the forensic SoT.
         from backend.security import auth_audit_bridge as _bridge
-        from backend.security import auth_event as _aevent
         await _bridge.emit_login_fail_event(
             attempted_user=email_key,
             fail_reason=_aevent.LOGIN_FAIL_ACCOUNT_LOCKED,
@@ -358,7 +355,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         _record_failed_login(request)
         masked = _mask_email(req.email)
         try:
-            from backend import audit as _audit
             await _audit.log(
                 action="auth.login.fail", entity_kind="auth", entity_id=masked,
                 before={"ip": client_ip},
@@ -375,7 +371,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         # but the AS.5.1 vocabulary keeps two separate reasons available
         # for future telemetry that wants to split.
         from backend.security import auth_audit_bridge as _bridge
-        from backend.security import auth_event as _aevent
         await _bridge.emit_login_fail_event(
             attempted_user=email_key,
             fail_reason=_aevent.LOGIN_FAIL_BAD_PASSWORD,
@@ -385,7 +380,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         new_locked, _ = await auth.is_account_locked(email_key)
         if new_locked:
             try:
-                from backend import audit as _audit
                 await _audit.log(
                     action="auth.lockout", entity_kind="auth",
                     entity_id=masked,
@@ -416,7 +410,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         methods = await _mfa.get_user_mfa_methods(user.id)
         available = [m["method"] for m in methods if m["verified"]]
         try:
-            from backend import audit as _audit
             await _audit.log(
                 action="login_mfa_required", entity_kind="auth",
                 entity_id=user.id,
@@ -436,7 +429,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         # measure "users that authenticated password but didn't finish"
         # — a useful retention proxy.
         from backend.security import auth_audit_bridge as _bridge
-        from backend.security import auth_event as _aevent
         await _bridge.emit_login_fail_event(
             attempted_user=email_key,
             fail_reason=_aevent.LOGIN_FAIL_MFA_REQUIRED,
@@ -457,7 +449,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         user_agent=ua_header,
     )
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="login_ok", entity_kind="auth", entity_id=user.id,
             before={"ip": client_ip},
@@ -473,7 +464,6 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
     # response). The MFA-satisfied success row fires from routers/mfa.py
     # after the MFA challenge handler completes.
     from backend.security import auth_audit_bridge as _bridge
-    from backend.security import auth_event as _aevent
     await _bridge.emit_login_success_event(
         user_id=user.id,
         request=request,
@@ -630,7 +620,6 @@ async def change_password(req: ChangePasswordRequest, request: Request,
 
     await auth.change_password(user.id, req.new_password)
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="password_changed", entity_kind="auth", entity_id=user.id,
             before={"must_change_password": user.must_change_password},
@@ -664,7 +653,6 @@ async def change_password(req: ChangePasswordRequest, request: Request,
             )
             new_csrf = new_sess.csrf_token
             try:
-                from backend import audit as _audit
                 await _audit.log(
                     action="session_rotated", entity_kind="session",
                     entity_id=user.id,
@@ -693,7 +681,6 @@ async def change_password(req: ChangePasswordRequest, request: Request,
             reason="user_security_event", trigger="password_change",
         )
         if revoked_count > 0:
-            from backend import audit as _audit
             await _audit.log(
                 action="session_rotated", entity_kind="session",
                 entity_id=user.id,
@@ -905,7 +892,6 @@ async def oauth_callback(
     """
     from backend.security import oauth_login_handler as _olh
     from backend.security import oauth_audit as _oaudit
-    from backend.security import auth_event as _aevent
     from backend.security.oauth_client import (
         StateMismatchError,
         StateExpiredError,
@@ -1264,7 +1250,6 @@ async def patch_user(user_id: str, req: PatchUserRequest,
             reason="user_security_event", trigger="role_change",
         )
         try:
-            from backend import audit as _audit
             await _audit.log(
                 action="session_rotated", entity_kind="session",
                 entity_id=user_id,
@@ -1289,7 +1274,6 @@ async def patch_user(user_id: str, req: PatchUserRequest,
             reason="user_security_event", trigger="account_disabled",
         )
         try:
-            from backend import audit as _audit
             await _audit.log(
                 action="session_rotated", entity_kind="session",
                 entity_id=user_id,
@@ -1530,7 +1514,6 @@ async def revoke_session(token_hint: str, request: Request,
 
     await auth.revoke_session(target_token)
     try:
-        from backend import audit as _audit
         await _audit.write_audit(
             request, action="session_revoke", entity_kind="session",
             entity_id=token_hint, actor=user.email,
@@ -1570,7 +1553,6 @@ async def revoke_session(token_hint: str, request: Request,
         )
 
     try:
-        from backend import audit as _audit
         await _audit.log(
             action="session_rotated", entity_kind="session",
             entity_id=user.id,
@@ -1607,7 +1589,6 @@ async def revoke_all_other_sessions(request: Request,
     current_token = request.cookies.get(auth.SESSION_COOKIE) or ""
     count = await auth.revoke_other_sessions(user.id, current_token)
     try:
-        from backend import audit as _audit
         await _audit.write_audit(
             request, action="sessions_revoke_all_others", entity_kind="session",
             entity_id=user.id, after={"revoked_count": count},

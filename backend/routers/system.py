@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from backend.config import settings as _settings
+from backend import db
 
 logger = logging.getLogger(__name__)
 
@@ -577,7 +578,6 @@ async def get_debug_state(
     conn=Depends(_get_conn),
 ):
     """Comprehensive debug state: agent errors, blocked tasks, debug findings."""
-    from backend import db
     from backend.routers.agents import _agents
     from backend.routers.tasks import _tasks
     from backend.models import AgentStatus, TaskStatus
@@ -1262,7 +1262,6 @@ async def _persist_token_usage(data: dict) -> None:
     # from the pool just for this single upsert. DB failures stay
     # non-fatal (a missed persist causes memory/DB drift, recovered
     # on next cold start via load_token_usage_from_db).
-    from backend import db
     from backend.db_pool import get_pool
     try:
         async with get_pool().acquire() as _conn:
@@ -1423,7 +1422,6 @@ async def load_token_usage_from_db(conn) -> None:
     mirrors the ``seed_defaults_if_empty(conn)`` shape for agents /
     tasks. Lifespan acquires from the pool and passes conn here.
     """
-    from backend import db
     for row in await db.list_token_usage(conn):
         _token_usage[row["model"]] = row
     if _token_usage:
@@ -1826,7 +1824,6 @@ async def get_turn_history(
     ORDER BY id DESC LIMIT N already caps the scan.
     """
     import json as _json
-    from backend import db
 
     # Clamp to the ring-buffer size so a misconfigured client can't
     # request a huge batch. Minimum 1 so a pathological ``limit=0``
@@ -2143,7 +2140,6 @@ async def reset_token_usage(
     _last_budget_level = ""
     _budget_flags.set("level", "normal")
     _hourly_ledger_shared.clear()
-    from backend import db
     await db.clear_token_usage(conn)
     from backend.events import emit_token_warning
     emit_token_warning("reset", "Token usage and freeze state cleared.")
@@ -2317,7 +2313,6 @@ async def unread_count(
     conn=Depends(_get_conn),
 ):
     """Count unread notifications (L2+)."""
-    from backend import db
     count = await db.count_unread_notifications(conn, "warning")
     return {"count": count}
 
@@ -2329,7 +2324,6 @@ async def get_notifications(
     conn=Depends(_get_conn),
 ):
     """List notifications, optionally filtered by level."""
-    from backend import db
     return await db.list_notifications(conn, limit=limit, level=level)
 
 
@@ -2349,7 +2343,6 @@ async def mark_read(
     Q.4 #298) and is swallowed on failure — the PG row is the
     source of truth, the SSE push is latency-optimisation only.
     """
-    from backend import db
     ok = await db.mark_notification_read(conn, notification_id)
     if ok:
         try:
@@ -2398,7 +2391,6 @@ async def get_npi_state(
     Q.7 #301: response now carries ``version`` so the frontend can
     echo it back in ``If-Match`` on the PUT.
     """
-    from backend import db
     state = await db.get_npi_state(conn)
     version = await db.get_npi_state_version(conn)
     if state:
@@ -2438,7 +2430,6 @@ async def update_npi_state(
     """
     from backend import optimistic_lock as _ol
     expected_version = _ol.parse_if_match(if_match)
-    from backend import db
     state = await db.get_npi_state(conn)
     if not state:
         state = {"business_model": "odm", "phases": [], "current_phase_id": None}
@@ -2473,7 +2464,6 @@ async def update_npi_phase(
     """Update a specific NPI phase."""
     if status is not None and status not in _VALID_PHASE_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid phase status: {status}. Must be one of {_VALID_PHASE_STATUSES}")
-    from backend import db
     state = await db.get_npi_state(conn)
     if not state:
         raise HTTPException(status_code=404, detail="NPI state not initialized")
@@ -2498,7 +2488,6 @@ async def update_npi_milestone(
     """Update a specific NPI milestone."""
     if status is not None and status not in _VALID_MILESTONE_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid milestone status: {status}. Must be one of {_VALID_MILESTONE_STATUSES}")
-    from backend import db
     state = await db.get_npi_state(conn)
     if not state:
         raise HTTPException(status_code=404, detail="NPI state not initialized")

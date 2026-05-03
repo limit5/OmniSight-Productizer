@@ -41,6 +41,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -392,7 +393,6 @@ async def register_active(
     """
     rel = _normalise_path(path)
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 new_id = await _register_active_impl(owned, rel, body)
@@ -455,7 +455,6 @@ async def register_canary(
     """
     rel = _normalise_path(path)
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 new_id = await _register_canary_impl(owned, rel, body)
@@ -475,7 +474,6 @@ _VERSION_COLS = (
 async def get_by_id(vid: int, conn=None) -> PromptVersion:
     sql = f"SELECT {_VERSION_COLS} FROM prompt_versions WHERE id = $1"
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             row = await owned.fetchrow(sql, vid)
     else:
@@ -494,7 +492,6 @@ async def get_active(
         "WHERE path = $1 AND role = 'active'"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             row = await owned.fetchrow(sql, rel)
     else:
@@ -511,7 +508,6 @@ async def get_canary(
         "WHERE path = $1 AND role = 'canary'"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             row = await owned.fetchrow(sql, rel)
     else:
@@ -528,7 +524,6 @@ async def list_all(
         "WHERE path = $1 ORDER BY version DESC"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             rows = await owned.fetch(sql, rel)
     else:
@@ -588,7 +583,6 @@ async def record_outcome(
         f"UPDATE prompt_versions SET {col} = {col} + 1 WHERE id = $1"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             await owned.execute(sql, version_id)
     else:
@@ -670,7 +664,6 @@ async def evaluate_canary(
             )
 
         if conn is None:
-            from backend.db_pool import get_pool
             async with get_pool().acquire() as owned:
                 async with owned.transaction():
                     await _do_rollback(owned)
@@ -787,7 +780,6 @@ async def capture_prompt_snapshot(
     """
     rel = _normalise_path(path)
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 return await _capture_snapshot_impl(owned, rel, body)
@@ -885,7 +877,6 @@ async def promote_canary(
     top of this operation.
     """
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 return await _promote_canary_impl(owned, path)

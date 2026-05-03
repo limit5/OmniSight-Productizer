@@ -76,6 +76,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend import auth
+from backend.db_pool import get_pool
 from backend.tenant_quota import (
     PLAN_DISK_QUOTAS,
     load_quota,
@@ -183,7 +184,6 @@ async def create_tenant(
                                f"must be one of {list(VALID_PLANS)}"},
         )
 
-    from backend.db_pool import get_pool
     enabled_int = 1 if req.enabled else 0
 
     # AS.0.2: 新 tenant 預設全開 — explicit ``true`` for the three AS
@@ -397,7 +397,6 @@ async def list_tenants(
       ``audit_log`` row for this tenant (``ts`` column, REAL). NULL
       for tenants that have never recorded an audit row.
     """
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(_LIST_TENANTS_SQL)
@@ -668,7 +667,6 @@ async def get_tenant_detail(
                                f"must match {TENANT_ID_PATTERN}"},
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         tenant_row = await conn.fetchrow(_GET_TENANT_SQL, tenant_id)
@@ -891,7 +889,6 @@ async def patch_tenant(
                                "'name', 'plan', or 'enabled'."},
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         cur_row = await conn.fetchrow(
@@ -1218,7 +1215,6 @@ async def _run_tenant_cascade_delete(
     the cascade outcome without re-querying.
     """
     from backend import audit as _audit
-    from backend.db_pool import get_pool
 
     deleted_counts: dict[str, int] = {}
     started = time.time()
@@ -1416,7 +1412,6 @@ async def delete_tenant(
             },
         )
 
-    from backend.db_pool import get_pool
 
     async with get_pool().acquire() as conn:
         cur_row = await conn.fetchrow(
@@ -1579,7 +1574,6 @@ async def _user_can_query_tenant_audit(
     if auth.role_at_least(user.role, "super_admin"):
         return True
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "SELECT role, status FROM user_tenant_memberships "
@@ -1777,7 +1771,6 @@ async def get_tenant_audit_events(
             },
         )
 
-    from backend.db_pool import get_pool
 
     # Tenant-existence probe. Done AFTER authz so a non-super-admin
     # probing arbitrary ids cannot enumerate which tenants exist via
@@ -2028,7 +2021,6 @@ async def get_usage_breakdown_by_project(
             },
         )
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         exists = await conn.fetchrow(
             "SELECT id FROM tenants WHERE id = $1", tenant_id,

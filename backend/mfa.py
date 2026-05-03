@@ -36,6 +36,7 @@ from typing import Optional
 
 import pyotp
 import qrcode
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,6 @@ def _hash_code(code: str) -> str:
 
 
 async def get_user_mfa_methods(user_id: str) -> list[dict]:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, method, name, verified, created_at, last_used "
@@ -75,7 +75,6 @@ async def get_user_mfa_methods(user_id: str) -> list[dict]:
 
 
 async def has_verified_mfa(user_id: str) -> bool:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         n = await conn.fetchval(
             "SELECT COUNT(*) FROM user_mfa "
@@ -122,7 +121,6 @@ async def totp_begin_enroll(user_id: str, user_email: str) -> dict:
     qr_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
     mfa_id = f"mfa-{uuid.uuid4().hex[:12]}"
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -146,7 +144,6 @@ async def totp_begin_enroll(user_id: str, user_email: str) -> dict:
 
 async def totp_confirm_enroll(user_id: str, code: str) -> bool:
     """Verify the code matches the pending TOTP secret and activate it."""
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
             "SELECT id, secret FROM user_mfa "
@@ -175,7 +172,6 @@ async def totp_disable(user_id: str) -> bool:
     (which would make the codes unverifiable — UI says 'no MFA' but
     DB still has backup code rows).
     """
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             status = await conn.execute(
@@ -199,7 +195,6 @@ async def totp_disable(user_id: str) -> bool:
 
 
 async def verify_totp(user_id: str, code: str) -> bool:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
             "SELECT id, secret FROM user_mfa "
@@ -237,7 +232,6 @@ async def _generate_backup_codes(user_id: str) -> list[str]:
     loop can't leave the user with a half-regenerated code set
     (would be worse than keeping the old set intact)."""
     codes = [_generate_code() for _ in range(BACKUP_CODE_COUNT)]
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -261,7 +255,6 @@ async def regenerate_backup_codes(user_id: str) -> list[str]:
 
 
 async def get_backup_codes_status(user_id: str) -> dict:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
             "SELECT COUNT(*) AS total, "
@@ -282,7 +275,6 @@ async def verify_backup_code(user_id: str, code: str) -> bool:
     can't both succeed — whoever commits second sees 0 rows
     updated and returns False."""
     h = _hash_code(code)
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -328,7 +320,6 @@ async def _challenge_put(kind: str, key: str, payload: bytes | str) -> None:
         payload_str = base64.b64encode(payload).decode("ascii")
     else:
         payload_str = payload
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         await conn.execute(
             "INSERT INTO mfa_challenges (id, kind, payload, created_at) "
@@ -344,7 +335,6 @@ async def _challenge_put(kind: str, key: str, payload: bytes | str) -> None:
 async def _challenge_pop(kind: str, key: str) -> bytes | None:
     """Read-and-delete a challenge under TTL. Returns None if missing
     or stale. Matches ``dict.pop(key, None)`` + TTL check."""
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "DELETE FROM mfa_challenges "
@@ -366,7 +356,6 @@ async def _challenge_pop(kind: str, key: str) -> bytes | None:
 async def _challenge_get_json(kind: str, key: str) -> dict | None:
     """Read-without-delete for mfa_pending's get-then-maybe-consume
     flow. Returns the JSON payload dict or None if missing/stale."""
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "SELECT payload FROM mfa_challenges "
@@ -468,7 +457,6 @@ async def webauthn_complete_register(
     }
 
     mfa_id = f"mfa-{uuid.uuid4().hex[:12]}"
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         await conn.execute(
             "INSERT INTO user_mfa "
@@ -546,7 +534,6 @@ async def webauthn_complete_authenticate(user_id: str, credential_json: dict) ->
         logger.warning("[MFA] WebAuthn authentication failed: %s", exc)
         return False
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         await conn.execute(
             "UPDATE user_mfa SET "
@@ -558,7 +545,6 @@ async def webauthn_complete_authenticate(user_id: str, credential_json: dict) ->
 
 
 async def webauthn_remove(user_id: str, mfa_id: str) -> bool:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "DELETE FROM user_mfa "
@@ -570,7 +556,6 @@ async def webauthn_remove(user_id: str, mfa_id: str) -> bool:
 
 
 async def _get_webauthn_credentials(user_id: str) -> list[dict]:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, credential FROM user_mfa "
@@ -589,7 +574,6 @@ async def _get_webauthn_credentials(user_id: str) -> list[dict]:
 
 
 async def _has_backup_codes(user_id: str) -> bool:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         n = await conn.fetchval(
             "SELECT COUNT(*) FROM mfa_backup_codes WHERE user_id = $1",
@@ -633,7 +617,6 @@ async def get_mfa_challenge(token: str) -> Optional[dict]:
 
 async def consume_mfa_challenge(token: str) -> Optional[dict]:
     """Read-and-delete under TTL. Returns None if missing or stale."""
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "DELETE FROM mfa_challenges "
@@ -655,7 +638,6 @@ async def cleanup_stale_mfa_challenges() -> int:
     """Background-sweep helper: delete rows past the TTL. Not
     strictly needed (every read-path has a TTL guard), but
     callable from a nightly job to keep the table bounded."""
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         status = await conn.execute(
             "DELETE FROM mfa_challenges "
@@ -669,7 +651,6 @@ async def cleanup_stale_mfa_challenges() -> int:
 
 
 async def mark_session_mfa_verified(token: str) -> None:
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         await conn.execute(
             "UPDATE sessions SET mfa_verified = 1 WHERE token = $1",

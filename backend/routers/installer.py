@@ -117,6 +117,7 @@ from backend import auth as _au
 from backend import pep_gateway as _pep
 from backend.db_context import set_tenant_id
 from backend.routers._pagination import Limit
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/installer", tags=["installer"])
@@ -502,7 +503,6 @@ async def create_job(
     """
     tid = _ensure_tenant(user)
 
-    from backend.db_pool import get_pool
     pool = get_pool()
     async with pool.acquire() as conn:
         # 1. Catalog entry must exist + be installable in this tenant.
@@ -707,7 +707,6 @@ async def list_jobs(
         f"SELECT COUNT(*) FROM install_jobs WHERE {' AND '.join(where)}"
     )
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(sql, *params)
         total = await conn.fetchval(count_sql, *params[:-2])
@@ -769,7 +768,6 @@ async def poll_for_job(
         )
 
     deadline = time.monotonic() + float(timeout_s)
-    from backend.db_pool import get_pool
     pool = get_pool()
 
     while True:
@@ -829,7 +827,6 @@ async def get_job(
                    f"{INSTALL_JOB_ID_PATTERN}",
         )
     tid = _ensure_tenant(user)
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             f"SELECT {_INSTALL_JOB_RETURNING_COLS} "
@@ -911,7 +908,6 @@ async def report_progress(
             ),
         )
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             existing = await conn.fetchrow(
@@ -1047,7 +1043,6 @@ async def cancel_job(
     tid = _ensure_tenant(user)
     reason = (body.reason if body is not None else None) or "operator_cancelled"
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             existing = await conn.fetchrow(
@@ -1165,7 +1160,6 @@ async def retry_job(
 
     # Use the same router as POST /installer/jobs once the source row is
     # validated — this keeps PEP gating + idempotency dedup centralised.
-    from backend.db_pool import get_pool
     pool = get_pool()
     async with pool.acquire() as conn:
         src = await conn.fetchrow(
@@ -1310,7 +1304,6 @@ async def list_installed_entries(
         ORDER BY j.entry_id, j.queued_at DESC
     """
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(sql, tid)
 
@@ -1497,7 +1490,6 @@ async def bulk_uninstall(
     #   • result_json discriminator so GET /installer/installed filters
     #   • state='completed' on approve, 'cancelled' on deny
     items: list[dict[str, Any]] = []
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             for eid in deduped:
@@ -1687,7 +1679,6 @@ async def list_entry_dependents(
     """
     depends_on_literal = json.dumps([eid])
 
-    from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(sql, tid, depends_on_literal, eid)
 

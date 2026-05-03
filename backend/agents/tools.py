@@ -25,6 +25,7 @@ from pathlib import Path
 import yaml
 
 from backend.llm_adapter import tool
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -859,7 +860,6 @@ async def get_next_task(label_filter: str = "") -> str:
     # Include up to 3 recent comments
     # SP-3.2: worker context — acquire a pool-scoped conn just for this read.
     try:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as _conn:
             comments = await db.list_task_comments(_conn, task.id, limit=3)
         if comments:
@@ -942,7 +942,6 @@ async def add_task_comment(task_id: str, content: str) -> str:
     }
     # SP-3.2: worker context — acquire pool conn just for this write.
     try:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as _conn:
             await db.insert_task_comment(_conn, comment)
     except Exception as exc:
@@ -1074,7 +1073,6 @@ async def register_build_artifact(
         # no request conn in scope, acquire from pool for this single
         # write. tenant_id is derived from the active request's
         # contextvar inside db.insert_artifact().
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as _conn:
             await db.insert_artifact(_conn, artifact_data)
     except Exception as exc:
@@ -1630,7 +1628,6 @@ async def search_past_solutions(
         limit: Max number of results to return.
     """
     from backend import db
-    from backend.db_pool import get_pool
 
     # SP-3.12: agent-tool search is a worker context — acquire pool
     # conn for the search call. The inner access-count UPDATEs ride
@@ -1697,7 +1694,6 @@ async def save_solution(
 
     memory_id = f"mem-{uuid.uuid4().hex[:12]}"
     try:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as _conn:
             await db.insert_episodic_memory(_conn, {
                 "id": memory_id,
@@ -1768,7 +1764,6 @@ async def run_simulation(
     # error/final) are independent writes, not a transaction, so per-
     # op acquires are correct: a slow subprocess.run between updates
     # doesn't pin a pool conn.
-    from backend.db_pool import get_pool
     try:
         async with get_pool().acquire() as _conn:
             await db.insert_simulation(_conn, {
@@ -2335,7 +2330,6 @@ async def image_generate(
             import shutil as _shutil
             from backend import db as _db
             from backend.routers.artifacts import get_artifacts_root
-            from backend.db_pool import get_pool
 
             artifacts_root = get_artifacts_root()
             task_dir = artifacts_root / (task_id or "general")

@@ -51,6 +51,7 @@ import uuid
 from typing import Iterable, Sequence
 
 from backend.db_context import current_tenant_id
+from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +211,6 @@ async def get_policy(
         "WHERE tenant_id = $1"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             row = await owned.fetchrow(sql, tid)
     else:
@@ -229,7 +229,6 @@ async def list_policies(conn=None) -> list[EgressPolicy]:
         "ORDER BY tenant_id"
     )
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             rows = await owned.fetch(sql)
     else:
@@ -309,7 +308,6 @@ async def upsert_policy(
         return current, new
 
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 current, new = await _impl(owned)
@@ -395,7 +393,6 @@ async def submit_request(
         return rid, True
 
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 rid, created = await _impl(owned)
@@ -432,7 +429,6 @@ async def list_requests(
         sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY created_at DESC"
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             rows = await owned.fetch(sql, *params)
     else:
@@ -445,7 +441,6 @@ async def _get_request(
 ) -> EgressRequest:
     sql = f"SELECT {_REQUEST_COLS} FROM tenant_egress_requests WHERE id = $1"
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             row = await owned.fetchrow(sql, request_id)
     else:
@@ -508,7 +503,6 @@ async def approve_request(
         )
 
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 await _impl(owned)
@@ -576,7 +570,6 @@ async def reject_request(
         return dict(row)
 
     if conn is None:
-        from backend.db_pool import get_pool
         async with get_pool().acquire() as owned:
             async with owned.transaction():
                 req_snapshot = await _impl(owned)
