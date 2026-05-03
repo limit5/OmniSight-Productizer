@@ -1557,7 +1557,7 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 >
 > **範圍**：先做 Anthropic / OpenAI / Gemini 三家主力（其他 5 家 OpenAI-compat 共享 OpenAI 路徑、由它代驗）。Nightly CI 跑、不阻塞 PR。
 
-- [ ] Z.7.1 **CI secret pool 設立**：sandbox key（低額度限制 + 預算上限） — `ANTHROPIC_API_KEY_CI` / `OPENAI_API_KEY_CI` / `GOOGLE_API_KEY_CI`，存 GitHub Actions repo secrets；本地 dev 不需設、`pytest.mark.live` 預設 skip
+- [O] Z.7.1 **CI secret pool 設立**：sandbox key（低額度限制 + 預算上限） — `ANTHROPIC_API_KEY_CI` / `OPENAI_API_KEY_CI` / `GOOGLE_API_KEY_CI`，存 GitHub Actions repo secrets；本地 dev 不需設、`pytest.mark.live` 預設 skip <!-- AI 完成：`pytest.mark.live` marker 已加入 backend/pytest.ini + 自動 skip hook 加入 backend/tests/conftest.py。Operator 需做：至三家 provider 平台建立低額度 sandbox key（Anthropic console / OpenAI platform / Google AI Studio）並加入 GitHub Actions repo Secrets（Settings → Secrets and variables → Actions → New repository secret）：ANTHROPIC_API_KEY_CI / OPENAI_API_KEY_CI / GOOGLE_API_KEY_CI。 -->
 - [ ] Z.7.2 **新 test file** `backend/tests/test_llm_adapter_live.py`：`@pytest.mark.live` + 環境變數偵測 skip、`pytest -m live` 才跑
 - [ ] Z.7.3 **三家 × 最小 tool_call test**：定義 `get_weather(city: str) -> dict` tool → invoke → 驗 `response.tool_calls[0]` 含正確 `name` / `args` / `id`，三家行為一致
 - [ ] Z.7.4 **三家 × multi-turn loop test**：tool_use → 餵 fake `tool_result` → LLM 二輪回應、驗 LLM 真的看到 tool_result 並產 final text（**核心 — 之前完全沒驗**）
@@ -3164,8 +3164,8 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] KS.4.2 **CI pre-commit secret scanner**：`gitleaks` / `trufflehog` 整合 GitHub Actions、PR 帶 secret 直接 block
 - [x][G] KS.4.3 **Backup pipeline DLP 強化**：擴充 KS.1.8、backup at-rest encryption + DLP rule + off-site immutable backup（S3 Object Lock / Glacier）
 - [x][G] KS.4.4 **季度第三方 pentest SOP**：與外部 pentest vendor 簽約、每季 1 次、報告進 N10 ledger
-- [~][G] KS.4.5 **Bug bounty program 評估**：HackerOne / Bugcrowd 比較、GA 後啟動（payout policy / scope / triage SOP）
-- [ ] KS.4.6 **Incident response runbook**：24h SOP（detect / contain / rotate / notify customer / forensics / blameless postmortem）寫進 `docs/security/incident-response-runbook.md`
+- [x][G] KS.4.5 **Bug bounty program 評估**：HackerOne / Bugcrowd 比較、GA 後啟動（payout policy / scope / triage SOP）
+- [~][G] KS.4.6 **Incident response runbook**：24h SOP（detect / contain / rotate / notify customer / forensics / blameless postmortem）寫進 `docs/security/incident-response-runbook.md`
 - [ ] KS.4.7 **SOC 2 Type II 準備清單**：control mapping + evidence collection + 第三方 auditor 評估
 - [ ] KS.4.8 **GDPR / DSAR 對齊**：tenant data deletion 完整 purge DEK + audit trail metadata（保留 hash、刪 raw）+ DSAR export 流程
 - [ ] KS.4.9 **Memory zeroization 升級**：擴充 KS.1.9、libsodium `sodium_memzero` 取代 ctypes.memset（更可靠）

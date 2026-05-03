@@ -143,16 +143,54 @@ def _p0_marker_selects_skip(marker) -> tuple[bool, str]:
     return False, ""
 
 
-def pytest_collection_modifyitems(config, items):
-    """Fail collection if a ``p0`` test carries a static skip marker.
+# ─── Z.7.1 — ``live`` marker: auto-skip when CI keys are absent ─────────────
+#
+# Tests decorated with ``@pytest.mark.live`` hit real provider APIs.
+# They require sandbox keys stored as GitHub Actions secrets:
+#   ANTHROPIC_API_KEY_CI  (Anthropic Claude sandbox — low credit limit)
+#   OPENAI_API_KEY_CI     (OpenAI sandbox — low credit limit)
+#   GOOGLE_API_KEY_CI     (Google Gemini sandbox — low credit limit)
+#
+# Locally those vars are intentionally NOT set (developer workstation uses
+# personal keys via .env, not CI sandbox keys). The hook below detects
+# absence of ALL three CI keys and defers a skip marker onto every ``live``
+# test at collection time — this way ``pytest`` (no -m flag) always skips
+# them silently rather than failing or trying to hit an API without a key.
+#
+# To run live tests explicitly:
+#   ANTHROPIC_API_KEY_CI=sk-... OPENAI_API_KEY_CI=sk-... GOOGLE_API_KEY_CI=... \
+#       pytest -m live
+#
+# Nightly CI wires in all three vars and runs ``pytest -m live``; see
+# .github/workflows/llm-live-tests.yml (Z.7.7).
 
-    Y-prep.1 #287 CI gate — see the block comment at the top of this
-    section for the full policy rationale.
+_LIVE_CI_KEYS = ("ANTHROPIC_API_KEY_CI", "OPENAI_API_KEY_CI", "GOOGLE_API_KEY_CI")
+
+_live_keys_missing = not any(os.environ.get(k, "").strip() for k in _LIVE_CI_KEYS)
+
+_skip_live = pytest.mark.skip(
+    reason=(
+        "live provider API test — set at least one of "
+        + " / ".join(_LIVE_CI_KEYS)
+        + " to run. Use ``pytest -m live`` with CI sandbox keys."
+    )
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Apply auto-skip to ``live`` tests when CI keys are absent, and fail
+    collection if a ``p0`` test carries a static skip marker.
+
+    Z.7.1: ``live`` marker auto-skip — Y-prep.1 #287 CI gate.
     """
     import pytest
 
     offenders = []
     for item in items:
+        # ── Z.7.1: skip live tests when no CI key is present ──────────────
+        if _live_keys_missing and item.get_closest_marker("live") is not None:
+            item.add_marker(_skip_live)
+            continue
         if item.get_closest_marker("p0") is None:
             continue
         for marker in item.iter_markers():
