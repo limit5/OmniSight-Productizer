@@ -19,6 +19,7 @@ This directory contains all design specifications and architecture documents for
 | [edge-ai-npu-deploy.md](edge-ai-npu-deploy.md) | Edge AI NPU 模型部署自動化（Inference HAL + MLOps 第四軌 + AI Skill Kits + 精度閉環） | Phase 36 |
 | [r8-idempotent-retry-worktree.md](r8-idempotent-retry-worktree.md) | Retry 以 `git worktree` discard + recreate from anchor commit（覆寫白皮書 §三.2 的 `git clean` 指引） | R8 (#314) |
 | [bs-bootstrap-vertical-aware.md](bs-bootstrap-vertical-aware.md) | Bootstrap Vertical-Aware Setup & Platform Catalog（4 設計核心 + 8 層動畫 spec + sidecar protocol v1 + catalog 三層 source 模型 + reduce-motion 合規） | Priority BS (BS.0.1) |
+| [fx-7-3-large-file-module-split.md](fx-7-3-large-file-module-split.md) | ADR — module-split plan + 9-wave schedule for the 9 backend files > 2000 LOC（onvif_device, depth_sensing, db, tenant_projects, bootstrap, system, tools, invoke, auth）；planning only, execution under future Priority MS | Priority FX (FX.7.3) |
 
 ## Adding New Documents
 
