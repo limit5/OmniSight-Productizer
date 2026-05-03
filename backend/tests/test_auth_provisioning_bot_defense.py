@@ -6,6 +6,7 @@ import pytest
 
 from backend.auth_provisioning import (
     BotDefenseScaffoldOptions,
+    list_bot_defense_forms,
     list_bot_defense_providers,
     render_bot_defense_scaffold,
 )
@@ -21,12 +22,25 @@ def test_lists_as3_bot_challenge_providers() -> None:
     ]
 
 
+def test_lists_sc_13_2_default_forms() -> None:
+    assert list_bot_defense_forms() == [
+        "login",
+        "signup",
+        "password-reset",
+        "contact",
+        "comment",
+    ]
+
+
 def test_render_reuses_as3_generated_app_bridge() -> None:
     result = render_bot_defense_scaffold(
         BotDefenseScaffoldOptions(bot_challenge_import="../bot-challenge")
     )
 
-    assert [item.path for item in result.files] == ["auth/bot-challenge.ts"]
+    assert [item.path for item in result.files] == [
+        "auth/bot-challenge.ts",
+        "auth/bot-defense-forms.ts",
+    ]
     content = result.files[0].content
     assert 'from "../bot-challenge"' in content
     assert "verifyWithFallback" in content
@@ -36,6 +50,32 @@ def test_render_reuses_as3_generated_app_bridge() -> None:
     assert "https://challenges.cloudflare.com" not in content
     assert "https://www.google.com/recaptcha" not in content
     assert "https://hcaptcha.com/siteverify" not in content
+
+
+def test_render_sc_13_2_default_form_belt() -> None:
+    result = render_bot_defense_scaffold()
+    forms = {item.form: item for item in result.forms}
+    content = result.files[1].content
+
+    assert list(forms) == [
+        "login",
+        "signup",
+        "password-reset",
+        "contact",
+        "comment",
+    ]
+    assert forms["login"].widget_action == "login"
+    assert forms["signup"].widget_action == "signup"
+    assert forms["password-reset"].widget_action == "pwreset"
+    assert forms["contact"].widget_action == "contact"
+    assert forms["comment"].widget_action == "comment"
+    assert set(item.token_body_field for item in forms.values()) == {"turnstile_token"}
+    assert 'from "./bot-challenge"' in content
+    assert "botDefenseDefaultForms" in content
+    assert 'form: "password-reset", widgetAction: "pwreset"' in content
+    assert 'form: "comment", widgetAction: "comment"' in content
+    assert "botDefenseVerifyContextForForm" in content
+    assert "expectedAction: form.widgetAction" in content
 
 
 def test_provider_env_manifest_reuses_as3_secret_env_names() -> None:
@@ -77,14 +117,17 @@ def test_result_to_dict_is_json_ready() -> None:
     result = render_bot_defense_scaffold().to_dict()
 
     assert result["files"][0]["path"] == "auth/bot-challenge.ts"
+    assert result["files"][1]["path"] == "auth/bot-defense-forms.ts"
     assert result["providers"][0]["provider"] == "turnstile"
+    assert result["forms"][0]["form"] == "login"
+    assert result["forms"][2]["widget_action"] == "pwreset"
     assert result["env"][0]["name"] == "BOT_CHALLENGE_PROVIDER"
     assert result["dependencies"] == []
 
 
 @pytest.mark.parametrize(
     "field",
-    ["bot_challenge_import", "bridge_path"],
+    ["bot_challenge_import", "bridge_path", "forms_path"],
 )
 def test_options_validate_required_fields(field: str) -> None:
     kwargs = {field: "   "}
