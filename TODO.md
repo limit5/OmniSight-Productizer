@@ -6224,7 +6224,7 @@ BP.E GraphRAG / Neo4j
 
 - [x] FX.6.1 `backend/requirements.in` 11 個 floating range (>=) 改 `==` pin
 - [x] FX.6.2 `backend/requirements.in` 移除 `redis>=5.0.0` 重複（保留 `redis[hiredis]>=5.0.0`） <!-- 2026-05-04 done: removed bare ``redis==7.4.0`` line; only ``redis[hiredis]==7.4.0`` remains. requirements.txt unaffected (pip-compile already resolved the duplicate to a single redis lock entry). -->
-- [ ] FX.6.3 升 `anthropic` 從 0.95.0 到 1.x+ latest stable；改適配 langchain-anthropic
+- [x] FX.6.3 升 `anthropic` 從 0.95.0 到 1.x+ latest stable；改適配 langchain-anthropic <!-- 2026-05-04 done: bumped ``anthropic`` 0.95.0 → 0.97.0 (latest stable on PyPI; the TODO's "1.x+" was a misnomer — there is no 1.x release of the ``anthropic`` SDK, the 1.x line referenced was actually ``langchain-anthropic``). Promoted ``anthropic`` to an explicit top-level pin in requirements.in (was previously transitive via langchain-anthropic). No langchain-anthropic adaptation needed: ``langchain-anthropic==1.4.0`` declares ``anthropic<1.0.0,>=0.85.0`` so 0.97.0 is in-spec. Code uses only the stable surface (``anthropic.Anthropic(api_key=...)`` + ``client.messages.create()`` + ``usage.input_tokens/output_tokens``) which is unchanged across 0.85→0.97. test_llm_firewall + test_anthropic_native_client + test_anthropic_mode_manager + test_llm_adapter + test_batch_* + test_tool_schemas + test_cost_guard + test_rate_limiter all green (317/318; the lone failure is a pre-existing N4-firewall lint baseline unrelated to this bump). -->
 - [ ] FX.6.4 移除 `paramiko==4.0.0` ghost from requirements.txt（regenerate via pip-compile）
 - [ ] FX.6.5 安裝 `pip-audit` + `ruff` + `mypy` 進 backend/.venv，加進 backend/requirements.in
 - [ ] FX.6.6 `pnpm install` regenerate `pnpm-lock.yaml`，commit 新 lock

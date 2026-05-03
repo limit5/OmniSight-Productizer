@@ -30,6 +30,19 @@ langchain-openai==1.1.12
 langchain-groq==1.1.2
 langchain-together==0.4.0
 langchain-ollama==1.1.0
+# FX.6.3 (2026-05-04): explicit top-level pin for the ``anthropic`` SDK
+# so the version is controlled here rather than left to whatever
+# ``langchain-anthropic`` happens to resolve. Bumped from the previously
+# transitive 0.95.0 to the latest stable 0.97.0. NOTE: the TODO entry
+# said "1.x+ latest stable" but PyPI has no 1.x release of ``anthropic``
+# (top of the stable line is 0.97.0 as of 2026-05-04 — the 1.x family
+# the TODO author was thinking of is ``langchain-anthropic``, not the
+# raw SDK). No code adaptation needed: the SDK surface we use
+# (``anthropic.Anthropic(api_key=...)`` + ``client.messages.create()``
+# + ``usage.input_tokens / output_tokens``) has been stable across the
+# 0.85 → 0.97 range. ``langchain-anthropic==1.4.0`` declares
+# ``anthropic<1.0.0,>=0.85.0`` so 0.97.0 is in-spec.
+anthropic==0.97.0
 
 # --- Reports (Jinja + PDF; weasyprint is non-Windows only) -------------
 jinja2==3.1.6
