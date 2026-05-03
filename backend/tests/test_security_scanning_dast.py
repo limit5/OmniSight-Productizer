@@ -159,6 +159,31 @@ class TestZAPBaseline:
 
         assert report.passed
 
+    def test_unknown_scanner_name_is_rejected(self):
+        report = scan_zap_baseline(
+            "https://preview.example.test/",
+            scanner="nikto",
+        )
+
+        assert report.error == "unknown scanner 'nikto' (supported: zap)"
+        assert not report.passed
+
+    def test_zap_runner_error_is_reported(self):
+        with mock.patch(
+            "backend.security_scanning.dast.shutil.which",
+            lambda x: "/fake/zap-baseline.py" if x == "zap-baseline.py" else None,
+        ), mock.patch(
+            "backend.security_scanning.dast._run",
+            return_value=(3, "", "zap failed"),
+        ):
+            report = scan_zap_baseline("https://preview.example.test/")
+
+        assert report.source == "zap"
+        assert report.scanner_binary == "/fake/zap-baseline.py"
+        assert report.error == "zap failed"
+        assert report.total_findings == 0
+        assert not report.passed
+
     def test_uses_docker_fallback_when_zap_script_missing(self):
         calls: list[list[str]] = []
 
@@ -199,6 +224,28 @@ class TestZAPBaseline:
 
         assert report.error
         assert not report.passed
+
+    def test_report_to_dict_exposes_blocking_count(self):
+        report = DASTReport(
+            source="zap",
+            target_url="https://preview.example.test/",
+            fail_on=["HIGH"],
+            findings=[
+                DASTFinding(
+                    rule_id="40012",
+                    name="Reflected XSS",
+                    severity="HIGH",
+                )
+            ],
+            total_findings=1,
+            severity_counts={"HIGH": 1},
+        )
+
+        payload = report.to_dict()
+
+        assert payload["passed"] is False
+        assert payload["blocking_count"] == 1
+        assert payload["findings"][0]["rule_id"] == "40012"
 
 
 class TestWebPreviewZAP:
@@ -257,6 +304,61 @@ class TestWebPreviewZAP:
         assert scan.triggered
         assert scan.target_url == "http://127.0.0.1:40123/"
         assert calls == ["http://127.0.0.1:40123/"]
+
+    def test_forwards_scanner_options_to_zap_baseline(self):
+        calls: list[dict[str, object]] = []
+
+        def fake_scan(target_url: str, **kwargs):
+            calls.append({"target_url": target_url, **kwargs})
+            return DASTReport(source="mock", target_url=target_url, fail_on=["MEDIUM"])
+
+        with mock.patch(
+            "backend.security_scanning.dast.scan_zap_baseline",
+            side_effect=fake_scan,
+        ):
+            scan = scan_web_preview_zap(
+                self._instance(),
+                scanner="zap",
+                fail_on={"MEDIUM"},
+                timeout=17,
+            )
+
+        assert scan.triggered
+        assert calls == [
+            {
+                "target_url": "https://preview-ws-42.example.test/",
+                "scanner": "zap",
+                "fail_on": {"MEDIUM"},
+                "timeout": 17,
+            }
+        ]
+
+    def test_high_finding_report_stays_triggered_but_not_passed(self):
+        def fake_scan(target_url: str, **_kwargs):
+            return DASTReport(
+                source="zap",
+                target_url=target_url,
+                fail_on=["HIGH"],
+                findings=[
+                    DASTFinding(
+                        rule_id="40012",
+                        name="Reflected XSS",
+                        severity="HIGH",
+                    )
+                ],
+                total_findings=1,
+                severity_counts={"HIGH": 1},
+            )
+
+        with mock.patch(
+            "backend.security_scanning.dast.scan_zap_baseline",
+            side_effect=fake_scan,
+        ):
+            scan = scan_web_preview_zap(self._instance())
+
+        assert scan.triggered
+        assert not scan.passed
+        assert scan.report.blocking_findings[0].rule_id == "40012"
 
     def test_rejects_preview_before_ready(self):
         scan = scan_web_preview_zap(self._instance(status=WebSandboxStatus.installing))
