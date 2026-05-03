@@ -18,10 +18,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+import sqlalchemy as sa
+from alembic.ddl.base import AddColumn as _AlembicAddColumn
+from sqlalchemy.dialects import sqlite as _sqlite_dialect_mod
 
 from backend.db_context import (
     current_tenant_id,
@@ -31,6 +35,79 @@ from backend.db_context import (
 )
 
 logger = logging.getLogger(__name__)
+
+# FX.1.9: dialect-aware DDL rendering for the in-process SQLite migrator
+# below. We render ALTER TABLE statements via SQLAlchemy / alembic's DDL
+# compiler instead of f-string interpolation so identifier quoting and
+# type/default rendering go through the dialect's escape logic. The
+# migration list is hardcoded in source (no user-controlled identifiers),
+# but the audit row asked us to take the f-string out of the loop on
+# principle — these are the rails the rest of the codebase already uses
+# for schema operations (alembic ``op.add_column``).
+_SQLITE_DIALECT = _sqlite_dialect_mod.dialect()
+_SQLITE_PREPARER = _SQLITE_DIALECT.identifier_preparer
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# SQLite-accepted ON DELETE / ON UPDATE actions; reject anything else
+# rather than splice an attacker-controlled string into DDL even though
+# every current call passes a hardcoded literal.
+_FK_ACTIONS = {"CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT", "NO ACTION"}
+
+
+def _validate_ident(name: str) -> str:
+    if not _IDENT_RE.match(name):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return name
+
+
+def _render_add_column(table: str, column: sa.Column) -> str:
+    """Render ``ALTER TABLE <t> ADD COLUMN <c> ...`` via the SQLite dialect.
+
+    Uses alembic's ``AddColumn`` DDL construct so identifier quoting,
+    type rendering, and default-clause escaping all go through the
+    SQLAlchemy compiler instead of f-string composition. SQLite has no
+    ``ALTER TABLE ADD CONSTRAINT`` form, so any ``ForeignKey`` on
+    ``column`` is appended as an inline ``REFERENCES`` clause built
+    through the dialect's ``IdentifierPreparer`` (alembic's AddColumn
+    intentionally drops FK because most other dialects need a separate
+    ADD CONSTRAINT round-trip — for SQLite the inline form is the only
+    option).
+    """
+    _validate_ident(table)
+    _validate_ident(column.name)
+    if column.table is None:
+        # FK / DDL bookkeeping wants a parent Table; a throwaway one is fine.
+        sa.Table(table, sa.MetaData(), column)
+    sql = str(_AlembicAddColumn(table, column).compile(dialect=_SQLITE_DIALECT))
+
+    fk_parts: list[str] = []
+    for fk in column.foreign_keys:
+        # Use ``target_fullname`` (string form) rather than ``fk.column``
+        # so we don't trigger SQLAlchemy's MetaData lookup — the parent
+        # tables aren't registered in our throwaway MetaData.
+        spec = fk.target_fullname
+        if spec.count(".") != 1:
+            raise ValueError(f"Unsupported FK target: {spec!r}")
+        target_table, target_col = spec.split(".", 1)
+        _validate_ident(target_table)
+        _validate_ident(target_col)
+        clause = (
+            f"REFERENCES {_SQLITE_PREPARER.quote(target_table)} "
+            f"({_SQLITE_PREPARER.quote(target_col)})"
+        )
+        if fk.ondelete:
+            action = fk.ondelete.upper()
+            if action not in _FK_ACTIONS:
+                raise ValueError(f"Unsupported ON DELETE action: {fk.ondelete!r}")
+            clause += f" ON DELETE {action}"
+        if fk.onupdate:
+            action = fk.onupdate.upper()
+            if action not in _FK_ACTIONS:
+                raise ValueError(f"Unsupported ON UPDATE action: {fk.onupdate!r}")
+            clause += f" ON UPDATE {action}"
+        fk_parts.append(clause)
+    if fk_parts:
+        sql = f"{sql} {' '.join(fk_parts)}"
+    return sql
 
 def _resolve_db_path() -> Path:
     from backend.config import settings
@@ -132,74 +209,88 @@ async def init() -> None:
 
 
 async def _migrate(conn: aiosqlite.Connection) -> None:
-    """Add columns that may be missing in older databases."""
-    # Collect existing columns per table
-    migrations = [
-        ("agents", "sub_type", "TEXT NOT NULL DEFAULT ''"),
-        ("tasks", "suggested_sub_type", "TEXT"),
-        ("tasks", "parent_task_id", "TEXT"),
-        ("tasks", "child_task_ids", "TEXT NOT NULL DEFAULT '[]'"),
-        ("tasks", "external_issue_id", "TEXT"),
-        ("tasks", "issue_url", "TEXT"),
-        ("tasks", "acceptance_criteria", "TEXT"),
-        ("tasks", "labels", "TEXT NOT NULL DEFAULT '[]'"),
-        ("tasks", "depends_on", "TEXT NOT NULL DEFAULT '[]'"),
-        ("tasks", "external_issue_platform", "TEXT"),
-        ("tasks", "last_external_sync_at", "TEXT"),
+    """Add columns that may be missing in older databases.
+
+    FX.1.9: column specs are SQLAlchemy ``Column`` objects so the ALTER
+    TABLE rendering goes through the SQLite dialect's DDL compiler
+    (see :func:`_render_add_column`) rather than f-string composition.
+    Numeric defaults use ``sa.text(...)`` to render unquoted (matching
+    the prior raw-SQL form ``DEFAULT 0`` / ``DEFAULT 0.0``); string
+    defaults are passed as plain Python strings so the compiler quotes
+    them (``DEFAULT '...'``).
+    """
+    _t = sa.Text
+    _i = sa.Integer
+    _f = sa.Float
+    _txt = sa.text
+    _fk_proj = lambda: sa.ForeignKey("projects.id", ondelete="SET NULL")  # noqa: E731
+
+    migrations: list[tuple[str, sa.Column]] = [
+        ("agents", sa.Column("sub_type", _t(), nullable=False, server_default="")),
+        ("tasks", sa.Column("suggested_sub_type", _t())),
+        ("tasks", sa.Column("parent_task_id", _t())),
+        ("tasks", sa.Column("child_task_ids", _t(), nullable=False, server_default="[]")),
+        ("tasks", sa.Column("external_issue_id", _t())),
+        ("tasks", sa.Column("issue_url", _t())),
+        ("tasks", sa.Column("acceptance_criteria", _t())),
+        ("tasks", sa.Column("labels", _t(), nullable=False, server_default="[]")),
+        ("tasks", sa.Column("depends_on", _t(), nullable=False, server_default="[]")),
+        ("tasks", sa.Column("external_issue_platform", _t())),
+        ("tasks", sa.Column("last_external_sync_at", _t())),
         # Pipeline linkage (Phase 46)
-        ("tasks", "npi_phase_id", "TEXT"),
-        ("notifications", "dispatch_status", "TEXT NOT NULL DEFAULT 'pending'"),
-        ("notifications", "send_attempts", "INTEGER NOT NULL DEFAULT 0"),
-        ("notifications", "last_error", "TEXT"),
+        ("tasks", sa.Column("npi_phase_id", _t())),
+        ("notifications", sa.Column("dispatch_status", _t(), nullable=False, server_default="pending")),
+        ("notifications", sa.Column("send_attempts", _i(), nullable=False, server_default=_txt("0"))),
+        ("notifications", sa.Column("last_error", _t())),
         # R9 row 2935 (#315) — operational-priority tag (P1/P2/P3).
         # NULLable so legacy callers without severity awareness keep
         # working unchanged; dispatcher consumes this in row 2939.
-        ("notifications", "severity", "TEXT"),
+        ("notifications", sa.Column("severity", _t())),
         # Artifact version/checksum (Phase 39)
-        ("artifacts", "version", "TEXT NOT NULL DEFAULT ''"),
-        ("artifacts", "checksum", "TEXT NOT NULL DEFAULT ''"),
+        ("artifacts", sa.Column("version", _t(), nullable=False, server_default="")),
+        ("artifacts", sa.Column("checksum", _t(), nullable=False, server_default="")),
         # NPU simulation fields (Phase 36)
-        ("simulations", "npu_latency_ms", "REAL NOT NULL DEFAULT 0.0"),
-        ("simulations", "npu_throughput_fps", "REAL NOT NULL DEFAULT 0.0"),
-        ("simulations", "accuracy_delta", "REAL NOT NULL DEFAULT 0.0"),
-        ("simulations", "model_size_kb", "INTEGER NOT NULL DEFAULT 0"),
-        ("simulations", "npu_framework", "TEXT NOT NULL DEFAULT ''"),
+        ("simulations", sa.Column("npu_latency_ms", _f(), nullable=False, server_default=_txt("0.0"))),
+        ("simulations", sa.Column("npu_throughput_fps", _f(), nullable=False, server_default=_txt("0.0"))),
+        ("simulations", sa.Column("accuracy_delta", _f(), nullable=False, server_default=_txt("0.0"))),
+        ("simulations", sa.Column("model_size_kb", _i(), nullable=False, server_default=_txt("0"))),
+        ("simulations", sa.Column("npu_framework", _t(), nullable=False, server_default="")),
         # Phase 56-DAG-B — DAG planner ↔ workflow linkage.
-        ("workflow_runs", "dag_plan_id", "INTEGER"),
-        ("workflow_runs", "successor_run_id", "TEXT"),
-        ("workflow_steps", "dag_task_id", "TEXT"),
+        ("workflow_runs", sa.Column("dag_plan_id", _i())),
+        ("workflow_runs", sa.Column("successor_run_id", _t())),
+        ("workflow_steps", sa.Column("dag_task_id", _t())),
         # Phase 63-E — Memory quality decay.
-        ("episodic_memory", "decayed_score", "REAL NOT NULL DEFAULT 0.0"),
-        ("episodic_memory", "last_used_at", "TEXT"),
+        ("episodic_memory", sa.Column("decayed_score", _f(), nullable=False, server_default=_txt("0.0"))),
+        ("episodic_memory", sa.Column("last_used_at", _t())),
         # S0 — session/audit enhancements.
-        ("audit_log", "session_id", "TEXT"),
-        ("sessions", "metadata", "TEXT NOT NULL DEFAULT '{}'"),
-        ("sessions", "mfa_verified", "INTEGER NOT NULL DEFAULT 0"),
-        ("sessions", "rotated_from", "TEXT"),
+        ("audit_log", sa.Column("session_id", _t())),
+        ("sessions", sa.Column("metadata", _t(), nullable=False, server_default="{}")),
+        ("sessions", sa.Column("mfa_verified", _i(), nullable=False, server_default=_txt("0"))),
+        ("sessions", sa.Column("rotated_from", _t())),
         # K1 — force password change for default-credential admins.
-        ("users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"),
+        ("users", sa.Column("must_change_password", _i(), nullable=False, server_default=_txt("0"))),
         # K2 — account lockout after consecutive login failures.
-        ("users", "failed_login_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("users", "locked_until", "REAL"),
+        ("users", sa.Column("failed_login_count", _i(), nullable=False, server_default=_txt("0"))),
+        ("users", sa.Column("locked_until", _f())),
         # K4 — session rotation + UA binding.
-        ("sessions", "ua_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("sessions", sa.Column("ua_hash", _t(), nullable=False, server_default="")),
         # I1 — multi-tenancy: tenant_id on all business tables.
-        ("users", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
-        ("workflow_runs", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
-        ("debug_findings", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
-        ("decision_rules", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
-        ("event_log", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
-        ("audit_log", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
-        ("artifacts", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
-        ("user_preferences", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        ("users", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
+        ("workflow_runs", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
+        ("debug_findings", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
+        ("decision_rules", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
+        ("event_log", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
+        ("audit_log", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
+        ("artifacts", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
+        ("user_preferences", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
         # I4: tenant_id on api_keys
-        ("api_keys", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        ("api_keys", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
         # Q.7 #301 — optimistic-lock version column expansion (mirrors
         # alembic 0023_optimistic_lock_expansion for SQLite bootstrap).
-        ("tasks", "version", "INTEGER NOT NULL DEFAULT 0"),
-        ("npi_state", "version", "INTEGER NOT NULL DEFAULT 0"),
-        ("tenant_secrets", "version", "INTEGER NOT NULL DEFAULT 0"),
-        ("project_runs", "version", "INTEGER NOT NULL DEFAULT 0"),
+        ("tasks", sa.Column("version", _i(), nullable=False, server_default=_txt("0"))),
+        ("npi_state", sa.Column("version", _i(), nullable=False, server_default=_txt("0"))),
+        ("tenant_secrets", sa.Column("version", _i(), nullable=False, server_default=_txt("0"))),
+        ("project_runs", sa.Column("version", _i(), nullable=False, server_default=_txt("0"))),
         # Y1 row 7 (#277): project_id on business tables. NULLable,
         # FK to projects(id) ON DELETE SET NULL — same set as alembic
         # 0038's _TABLES_NEEDING_PROJECT_ID. Backfill is *not* done
@@ -209,15 +300,15 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         # this in-process migrator does NOT run because dev SQLite
         # doesn't go through alembic). The next-release NOT NULL flip
         # will need a parallel UPDATE here when it lands.
-        ("workflow_runs", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
-        ("debug_findings", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
-        ("decision_rules", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
-        ("event_log", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
-        ("artifacts", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
-        ("user_preferences", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL"),
+        ("workflow_runs", sa.Column("project_id", _t(), _fk_proj())),
+        ("debug_findings", sa.Column("project_id", _t(), _fk_proj())),
+        ("decision_rules", sa.Column("project_id", _t(), _fk_proj())),
+        ("event_log", sa.Column("project_id", _t(), _fk_proj())),
+        ("artifacts", sa.Column("project_id", _t(), _fk_proj())),
+        ("user_preferences", sa.Column("project_id", _t(), _fk_proj())),
         # AS.0.2 (alembic 0056): per-tenant auth feature gating. TEXT-of-JSON
         # on SQLite, JSONB on PG. Default '{}' = no AS opinion.
-        ("tenants", "auth_features", "TEXT NOT NULL DEFAULT '{}'"),
+        ("tenants", sa.Column("auth_features", _t(), nullable=False, server_default="{}")),
         # AS.0.3 (alembic 0058): per-user auth-methods array (account
         # linking takeover-prevention).  TEXT-of-JSON on SQLite, JSONB
         # on PG.  Default '[]' = no method recorded; the helper
@@ -227,21 +318,21 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         # because the in-process SQLite migrator only adds columns and
         # the dev DB is per-test ephemeral so seeded rows go through
         # the AS-aware INSERT path (auth.py::_create_user_impl).
-        ("users", "auth_methods", "TEXT NOT NULL DEFAULT '[]'"),
+        ("users", sa.Column("auth_methods", _t(), nullable=False, server_default="[]")),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
     # silently letting the ORM raise IntegrityError on every insert.
     REQUIRED = {("tasks", "npi_phase_id"), ("agents", "sub_type")}
-    for table, column, typedef in migrations:
+    for table, column in migrations:
         try:
-            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
-            logger.info("Migration: added %s.%s", table, column)
+            await conn.execute(_render_add_column(table, column))
+            logger.info("Migration: added %s.%s", table, column.name)
         except Exception as exc:
             if "duplicate column" in str(exc).lower() or "already exists" in str(exc).lower():
                 pass  # Column already exists — expected
             else:
-                logger.warning("Migration %s.%s failed: %s", table, column, exc)
+                logger.warning("Migration %s.%s failed: %s", table, column.name, exc)
 
     # Phase 63-E fix: index for decay worker's last_used_at filter.
     try:
