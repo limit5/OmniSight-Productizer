@@ -43,22 +43,33 @@ _RULES_LOCK = threading.Lock()
 _RULES: list[dict[str, Any]] = []
 
 
+class DecisionRulesError(Exception):
+    """Base for all decision-rules engine errors."""
+
+
+class DecisionRuleValidationError(DecisionRulesError, ValueError):
+    """Raised when an operator-authored decision rule is invalid."""
+
+
 def _normalise(rule: dict[str, Any]) -> dict[str, Any]:
-    """Validate + normalise a rule dict. Raises ValueError on bad input."""
+    """Validate + normalise a rule dict.
+
+    Raises DecisionRuleValidationError on bad input.
+    """
     if "kind_pattern" not in rule or not isinstance(rule["kind_pattern"], str) or not rule["kind_pattern"].strip():
-        raise ValueError("kind_pattern is required")
+        raise DecisionRuleValidationError("kind_pattern is required")
     sev = rule.get("severity")
     if sev is not None:
         try:
             DecisionSeverity(sev)
         except ValueError as exc:
-            raise ValueError(f"unknown severity: {sev}") from exc
+            raise DecisionRuleValidationError(f"unknown severity: {sev}") from exc
     modes = rule.get("auto_in_modes") or []
     if not isinstance(modes, list):
-        raise ValueError("auto_in_modes must be a list")
+        raise DecisionRuleValidationError("auto_in_modes must be a list")
     bad = [m for m in modes if m not in {e.value for e in OperationMode}]
     if bad:
-        raise ValueError(f"unknown mode(s): {bad}")
+        raise DecisionRuleValidationError(f"unknown mode(s): {bad}")
     return {
         "id": rule.get("id") or f"rule-{uuid.uuid4().hex[:8]}",
         "kind_pattern": rule["kind_pattern"].strip(),
@@ -89,7 +100,7 @@ def replace_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # Reject duplicate ids.
     ids = [r["id"] for r in normalised]
     if len(ids) != len(set(ids)):
-        raise ValueError("duplicate rule id")
+        raise DecisionRuleValidationError("duplicate rule id")
     with _RULES_LOCK:
         _RULES[:] = normalised
     # Schedule DB write on the running loop if available; best-effort.
@@ -135,7 +146,7 @@ async def load_from_db() -> int:
     for r in rows:
         try:
             normalised.append(_normalise(r))
-        except ValueError as exc:
+        except DecisionRuleValidationError as exc:
             logger.warning("skipping invalid persisted rule %r: %s", r.get("id"), exc)
     with _RULES_LOCK:
         _RULES[:] = normalised
