@@ -36,6 +36,18 @@ On **quarterly review** (first working day of new quarter):
    `dependency_upgrade_policy.md` trip (rollback rate > 25 % or mean
    soak < 24h).
 
+On **every quarterly third-party pentest** (KS.4.4):
+
+1. Store the vendor report in the private security evidence vault; do
+   not commit the report, screenshots, exploit payloads, or customer
+   data.
+2. Compute the stored report's SHA-256 fingerprint.
+3. Append one row to the "Pentest Reports" table with quarter, vendor,
+   test window, report fingerprint, finding counts, remediation tracker,
+   disposition, and notes.
+4. Follow `quarterly_pentest_sop.md` for vendor contracting, rules of
+   engagement, retest, and delayed-quarter handling.
+
 ## Upgrades
 
 | Cut-over (UTC) | Package | From → To | PR | Operator | Disposition | Notes |
@@ -53,6 +65,15 @@ On **quarterly review** (first working day of new quarter):
 | Quarter | Majors shipped | Rollbacks | Rollback rate | Mean soak (h) | Waivers | Action |
 |---|---|---|---|---|---|---|
 | _Q2 2026 (Apr–Jun)_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _review scheduled 2026-07-01_ |
+
+## Pentest Reports
+
+| Quarter | Vendor | Test window (UTC) | Report SHA-256 | Findings C/H/M/L | Remediation tracker | Disposition | Notes |
+|---|---|---|---|---|---|---|---|
+| _Q2 2026 (Apr–Jun)_ | _pending vendor contract_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _KS.4.4 policy effective 2026-05-03; first row due by 2026-06-30_ |
+
+Pentest rows are append-only. If a row is wrong, add a correction row
+with `correction -> <quarter/vendor/report-sha256>` in Notes.
 
 ## Trigger vocabulary (Rollbacks)
 
@@ -75,6 +96,7 @@ the quarterly review can tally by cause:
 
 * Policy: [`dependency_upgrade_policy.md`](dependency_upgrade_policy.md)
 * Runbook: [`dependency_upgrade_runbook.md`](dependency_upgrade_runbook.md)
+* Quarterly pentest SOP: [`quarterly_pentest_sop.md`](quarterly_pentest_sop.md)
 * Deploy-time gate: [`../../scripts/check_bluegreen_gate.py`](../../scripts/check_bluegreen_gate.py)
 * Auto-label workflow: [`../../.github/workflows/blue-green-gate.yml`](../../.github/workflows/blue-green-gate.yml)
 * Fallback SOP (Path C hard rollback): [`fallback_branches.md`](fallback_branches.md)
