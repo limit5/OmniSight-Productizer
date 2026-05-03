@@ -126,6 +126,18 @@ class GraphState(BaseModel):
     loop_breaker_triggered: bool = False
     rtk_bypass: bool = False  # When True, skip output compression (fallback for debug)
 
+    # W15.4 #XXX — per-graph-run idempotency gate for the Vite 3-strike
+    # auto-retry budget escalation.  Each entry is a W15.2 head-only
+    # signature (e.g. ``vite[transform] src/App.tsx:42: compile:``)
+    # the runtime has already escalated to the operator this run, so a
+    # subsequent LLM turn that observes the same trailing signature
+    # does not re-emit the alert.  Reset semantics: list is REPLACE-
+    # reduced like ``error_history`` so each specialist-node return
+    # carries the full accumulated list.  Empty default — most graph
+    # runs never touch a sandboxed Vite preview.  See
+    # :mod:`backend.web.vite_retry_budget` for the gate.
+    vite_escalated_signatures: list[str] = Field(default_factory=list)
+
     # Verification loop: separate from retry_count (which tracks tool execution errors)
     # This tracks "generate → verify → [FAIL] → fix → verify" iterations
     verification_loop_iteration: int = 0

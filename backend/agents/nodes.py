@@ -28,6 +28,10 @@ from backend.prompt_loader import (
     _resolve_skill_loading_mode,
 )
 from backend.web.vite_error_prompt import build_last_vite_error_banner
+from backend.web.vite_retry_budget import (
+    emit_vite_pattern_escalation,
+    should_escalate_vite_pattern,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -419,12 +423,57 @@ async def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) ->
 _MAX_SKILL_LOAD_ITERATIONS = 3
 
 
+def _maybe_emit_vite_retry_budget(state: GraphState) -> dict:
+    """W15.4 #XXX — Detect a 3-strike Vite-pattern repeat in
+    ``state.error_history`` and, if found, emit the operator escalation
+    once per (graph run, signature) tuple.
+
+    Returns a partial state-update dict shaped for direct
+    ``**spread`` into the specialist node's return value:
+
+      * ``{}`` — no escalation fired this turn (the common case).
+      * ``{"vite_escalated_signatures": [...]}`` — the freshly-escalated
+        signature is appended; the caller spreads it into its return so
+        the next LLM turn observes the gate.
+
+    The detection delegates entirely to
+    :func:`backend.web.vite_retry_budget.should_escalate_vite_pattern`
+    so the threshold + idempotency semantics live in one place — this
+    helper only handles the LangGraph-state plumbing and the call to
+    :func:`backend.web.vite_retry_budget.emit_vite_pattern_escalation`.
+    """
+
+    decision = should_escalate_vite_pattern(
+        state.error_history,
+        already_escalated=tuple(state.vite_escalated_signatures),
+    )
+    if decision is None:
+        return {}
+    emit_vite_pattern_escalation(
+        task_id=state.task_id or "",
+        agent_id=state.routed_to or "",
+        decision=decision,
+    )
+    return {
+        "vite_escalated_signatures": (
+            list(state.vite_escalated_signatures) + [decision.pattern]
+        ),
+    }
+
+
 def _specialist_node_factory(agent_type: str):
     """Create a specialist node that can request tool calls."""
 
     async def node(state: GraphState) -> dict:
         cmd = state.user_command
         llm = _get_llm(bind_tools_for=agent_type, model_name=state.model_name)
+        # W15.4 #XXX — detect 3-strike same-pattern Vite errors and
+        # escalate to the operator once per (graph run, signature)
+        # before the LLM call.  The merged dict carries
+        # ``vite_escalated_signatures`` only when a fresh emission
+        # fired; legacy / non-Vite graph runs see ``{}`` and the
+        # spread is a no-op.
+        vite_extra = _maybe_emit_vite_retry_budget(state)
 
         # ── LLM mode: let the model decide which tools to call ──
         if llm:
@@ -562,6 +611,7 @@ def _specialist_node_factory(agent_type: str):
                                 detail=json.dumps({"sub_tasks": _build_sub_tasks(tool_calls)}),
                             )
                         ],
+                        **vite_extra,
                     }
 
                 # No tool calls — LLM gave a direct answer
@@ -581,12 +631,17 @@ def _specialist_node_factory(agent_type: str):
                         )
                     ],
                     "messages": [*extra_messages, AIMessage(content=answer)],
+                    **vite_extra,
                 }
 
             except Exception as exc:
                 # Classify the error and attempt intelligent recovery
                 resp = await _handle_llm_error(exc, agent_type, state.model_name)
                 if resp is not None:
+                    if vite_extra:
+                        merged = dict(resp)
+                        merged.update(vite_extra)
+                        return merged
                     return resp
                 # Fall through to rule-based
 
@@ -614,6 +669,7 @@ def _specialist_node_factory(agent_type: str):
                         detail=json.dumps({"sub_tasks": _build_sub_tasks(tool_calls)}),
                     )
                 ],
+                **vite_extra,
             }
 
         # No tools matched — produce a static answer
@@ -629,6 +685,7 @@ def _specialist_node_factory(agent_type: str):
                 )
             ],
             "messages": [AIMessage(content=answer)],
+            **vite_extra,
         }
 
     node.__name__ = f"{agent_type}_node"
