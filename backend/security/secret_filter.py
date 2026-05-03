@@ -17,6 +17,7 @@ even if no credential is attached.
 
 from __future__ import annotations
 
+import logging
 import re
 
 # (label, pattern, replacement). Keep ordering: specific → general.
@@ -98,6 +99,9 @@ _ALLOWLIST = {
     "claude-sonnet-4-6",
 }
 
+_LOG_REDACTED_RE = re.compile(r"\[REDACTED:[^\]]+\]")
+_LOGGER_FILTER_NAME = "omnisight_secret_scrubber"
+
 
 def redact(text: str) -> tuple[str, list[str]]:
     """Redact known-secret patterns from ``text``.
@@ -140,3 +144,50 @@ def redact(text: str) -> tuple[str, list[str]]:
                 fired.append(label)
                 out = new_out
     return out, fired
+
+
+def redact_for_log(text: str) -> tuple[str, list[str]]:
+    """Redact known-secret patterns for log sinks.
+
+    Chat output keeps pattern labels for audit metrics. Logs use the
+    uniform ``[REDACTED]`` token required by KS.1.7 so downstream sinks
+    never receive a secret-shaped value or a provider-specific label.
+    """
+    out, fired = redact(text)
+    if fired:
+        out = _LOG_REDACTED_RE.sub("[REDACTED]", out)
+    return out, fired
+
+
+class SecretScrubbingFilter(logging.Filter):
+    """Stdlib logging filter that redacts secret-shaped message text.
+
+    Module-global state audit: the filter reads immutable regex tables
+    only; every worker derives identical scrubbed output from each log
+    record and does not share mutable process-local state.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        scrubbed, _ = redact_for_log(message)
+        if scrubbed != message:
+            record.msg = scrubbed
+            record.args = ()
+        return True
+
+
+def install_logging_filter(logger: logging.Logger | None = None) -> SecretScrubbingFilter:
+    """Install the KS.1.7 secret scrubber on ``logger`` once."""
+    target = logger or logging.getLogger()
+    filt: SecretScrubbingFilter | None = None
+    for existing in target.filters:
+        if getattr(existing, "name", "") == _LOGGER_FILTER_NAME:
+            filt = existing  # type: ignore[assignment]
+            break
+    if filt is None:
+        filt = SecretScrubbingFilter(_LOGGER_FILTER_NAME)
+        target.addFilter(filt)
+    for handler in target.handlers:
+        if not any(getattr(existing, "name", "") == _LOGGER_FILTER_NAME for existing in handler.filters):
+            handler.addFilter(filt)
+    return filt

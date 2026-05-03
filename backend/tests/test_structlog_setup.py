@@ -39,6 +39,7 @@ def test_configure_is_idempotent(monkeypatch):
 
 def test_configure_skipped_when_not_json(monkeypatch):
     from backend import structlog_setup as sl
+    from backend.security.secret_filter import SecretScrubbingFilter
     sl._CONFIGURED = False
     monkeypatch.delenv("OMNISIGHT_LOG_FORMAT", raising=False)
     sl.configure()
@@ -49,6 +50,7 @@ def test_configure_skipped_when_not_json(monkeypatch):
     root = logging.getLogger()
     # Just exercise the API without strict assertions on handler count.
     assert root is not None
+    assert any(isinstance(f, SecretScrubbingFilter) for f in root.filters)
 
 
 def test_bind_logger_returns_callable_logger():

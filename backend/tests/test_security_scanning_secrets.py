@@ -376,3 +376,21 @@ class TestSecretPreCommitHook:
             )
         finally:
             asyncio.run(workspace_mod.cleanup("agent-secret-block"))
+
+
+class TestRepoSecretPreCommitConfig:
+    def test_repo_pre_commit_runs_gitleaks_and_trufflehog(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        config = (repo_root / ".pre-commit-config.yaml").read_text()
+
+        assert "id: omnisight-gitleaks" in config
+        assert "--scanner gitleaks" in config
+        assert "id: omnisight-trufflehog" in config
+        assert "--scanner trufflehog" in config
+
+    def test_ci_runs_secret_pre_commit_hooks(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github/workflows/ci.yml").read_text()
+
+        assert "secret-pre-commit:" in workflow
+        assert "pre-commit run --all-files" in workflow

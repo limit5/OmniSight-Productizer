@@ -5,6 +5,7 @@ R20 Phase 0 (chat-layer):
   - prompt_hardening.looks_like_injection(text) — heuristic detector
   - prompt_hardening.harden_user_message(text) — wrap suspicious input
   - secret_filter.redact(text) — output redaction (returns text + labels)
+  - secret_filter.SecretScrubbingFilter — KS.1.7 stdlib logger filter
 
 SC.7.1 (OWASP mitigation shared lib):
   - input_validation — pure allowlist-first scalar validators for
@@ -325,7 +326,12 @@ from .prompt_hardening import (
     harden_user_message,
     looks_like_injection,
 )
-from .secret_filter import redact
+from .secret_filter import (
+    SecretScrubbingFilter,
+    install_logging_filter,
+    redact,
+    redact_for_log,
+)
 
 # Re-export pure submodules by name (cheap — constants + functions, no IO).
 from . import auth_audit_bridge  # noqa: F401
@@ -379,6 +385,9 @@ __all__ = [
     "pii_presidio",
     "privacy_notice_templates",
     "redact",
+    "redact_for_log",
+    "SecretScrubbingFilter",
+    "install_logging_filter",
     "spend_anomaly",
     "token_vault",
     "turnstile_form_verifier",

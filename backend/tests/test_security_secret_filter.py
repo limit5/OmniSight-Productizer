@@ -7,9 +7,15 @@ a regression suite when adding new patterns.
 
 from __future__ import annotations
 
-import pytest
+import io
+import logging
 
-from backend.security.secret_filter import redact
+from backend.security.secret_filter import (
+    SecretScrubbingFilter,
+    install_logging_filter,
+    redact,
+    redact_for_log,
+)
 
 
 # ─── Provider-specific tokens ───
@@ -162,6 +168,53 @@ def test_empty_string_returns_empty():
     out, fired = redact("")
     assert out == ""
     assert fired == []
+
+
+# ─── KS.1.7 logger scrubber ───
+
+
+def test_redact_for_log_uses_uniform_placeholder():
+    out, fired = redact_for_log("OpenAI key sk-abcdefghijklmnopqrstuvwxyz123456")
+    assert out == "OpenAI key [REDACTED]"
+    assert fired == ["openai"]
+
+
+def test_secret_scrubbing_filter_redacts_formatted_log_args():
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.addFilter(SecretScrubbingFilter())
+    logger = logging.getLogger("backend.tests.secret_scrubber")
+    old_handlers = list(logger.handlers)
+    old_propagate = logger.propagate
+    logger.handlers = [handler]
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    try:
+        logger.info("token=%s", "sk-abcdefghijklmnopqrstuvwxyz123456")
+    finally:
+        logger.handlers = old_handlers
+        logger.propagate = old_propagate
+
+    logged = stream.getvalue()
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in logged
+    assert "[REDACTED]" in logged
+
+
+def test_install_logging_filter_is_idempotent_on_logger_and_handlers():
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = logging.getLogger("backend.tests.install_secret_scrubber")
+    old_handlers = list(logger.handlers)
+    logger.handlers = [handler]
+    try:
+        first = install_logging_filter(logger)
+        second = install_logging_filter(logger)
+    finally:
+        logger.handlers = old_handlers
+
+    assert first is second
+    assert len([f for f in logger.filters if isinstance(f, SecretScrubbingFilter)]) == 1
+    assert len([f for f in handler.filters if isinstance(f, SecretScrubbingFilter)]) == 1
 
 
 # ─── Multi-secret regression ───
