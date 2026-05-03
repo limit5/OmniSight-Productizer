@@ -1,17 +1,19 @@
-"""SC.13.1 / SC.13.2 -- Bot defense scaffold bridge onto AS.3 bot_challenge.
+"""SC.13.1 / SC.13.2 / SC.13.3 -- Bot defense scaffold bridge.
 
 This module emits a small generated-app manifest that reuses the AS.3
 TypeScript twin under ``templates/_shared/bot-challenge``. SC.13.2 adds
 the default form belt for login / signup / password-reset / contact /
-comment forms. It does not reimplement siteverify, score classification,
-fallback, or reject logic; generated forms import those primitives from
-the AS.3 bridge this module creates.
+comment forms. SC.13.3 adds the AS.4 honeypot field bridge for the AS.4
+supported form namespaces. It does not reimplement siteverify, score
+classification, fallback, reject, or honeypot field-name logic; generated
+forms import those primitives from the AS.3 / AS.4 bridges this module
+creates.
 
 Module-global state audit (per implement_phase_step.md SOP Step 1):
 constants are immutable tuples / frozen dataclasses derived from AS.3 and
-AS.6 source constants.  No module-level cache, singleton, env read, network
-call, or DB write is introduced; every worker derives the same manifest from
-source code.
+AS.4 / AS.6 source constants.  No module-level cache, singleton, env read,
+network call, or DB write is introduced; every worker derives the same
+manifest from source code.
 
 Read-after-write timing audit: N/A -- render helpers are pure manifest
 generation and do not read after writes.
@@ -24,11 +26,14 @@ from typing import Any, Optional
 
 from backend.auth_provisioning.self_hosted import AuthScaffoldEnvVar, AuthScaffoldFile
 from backend.security import bot_challenge
+from backend.security import honeypot
 from backend.security import turnstile_form_verifier as turnstile_forms
 
 
 DEFAULT_BOT_CHALLENGE_IMPORT = "@/shared/bot-challenge"
+DEFAULT_HONEYPOT_IMPORT = "@/shared/honeypot"
 DEFAULT_BOT_CHALLENGE_BRIDGE_PATH = "auth/bot-challenge.ts"
+DEFAULT_HONEYPOT_BRIDGE_PATH = "auth/honeypot.ts"
 DEFAULT_BOT_DEFENSE_FORMS_PATH = "auth/bot-defense-forms.ts"
 
 _SITE_KEY_ENVS: tuple[tuple[bot_challenge.Provider, str], ...] = (
@@ -43,12 +48,16 @@ _DEFAULT_FALLBACK_PROVIDERS: tuple[bot_challenge.Provider, ...] = (
     bot_challenge.Provider.HCAPTCHA,
 )
 
-_DEFAULT_FORM_ITEMS: tuple[tuple[str, str], ...] = (
-    ("login", turnstile_forms.FORM_ACTION_LOGIN),
-    ("signup", turnstile_forms.FORM_ACTION_SIGNUP),
-    ("password-reset", turnstile_forms.FORM_ACTION_PASSWORD_RESET),
-    ("contact", turnstile_forms.FORM_ACTION_CONTACT),
-    ("comment", "comment"),
+_DEFAULT_FORM_ITEMS: tuple[tuple[str, str, Optional[str]], ...] = (
+    ("login", turnstile_forms.FORM_ACTION_LOGIN, turnstile_forms.FORM_PATH_LOGIN),
+    ("signup", turnstile_forms.FORM_ACTION_SIGNUP, turnstile_forms.FORM_PATH_SIGNUP),
+    (
+        "password-reset",
+        turnstile_forms.FORM_ACTION_PASSWORD_RESET,
+        turnstile_forms.FORM_PATH_PASSWORD_RESET,
+    ),
+    ("contact", turnstile_forms.FORM_ACTION_CONTACT, turnstile_forms.FORM_PATH_CONTACT),
+    ("comment", "comment", None),
 )
 
 
@@ -75,13 +84,15 @@ class BotDefenseFormItem:
     form: str
     widget_action: str
     token_body_field: str
+    honeypot_form_path: Optional[str] = None
     source: str = "sc.13.2"
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "form": self.form,
             "widget_action": self.widget_action,
             "token_body_field": self.token_body_field,
+            "honeypot_form_path": self.honeypot_form_path,
             "source": self.source,
         }
 
@@ -91,14 +102,20 @@ class BotDefenseScaffoldOptions:
     """Inputs for rendering the SC.13 bot defense scaffold bridge."""
 
     bot_challenge_import: str = DEFAULT_BOT_CHALLENGE_IMPORT
+    honeypot_import: str = DEFAULT_HONEYPOT_IMPORT
     bridge_path: str = DEFAULT_BOT_CHALLENGE_BRIDGE_PATH
+    honeypot_bridge_path: str = DEFAULT_HONEYPOT_BRIDGE_PATH
     forms_path: str = DEFAULT_BOT_DEFENSE_FORMS_PATH
 
     def validate(self) -> None:
         if not self.bot_challenge_import or not self.bot_challenge_import.strip():
             raise ValueError("bot_challenge_import is required")
+        if not self.honeypot_import or not self.honeypot_import.strip():
+            raise ValueError("honeypot_import is required")
         if not self.bridge_path or not self.bridge_path.strip():
             raise ValueError("bridge_path is required")
+        if not self.honeypot_bridge_path or not self.honeypot_bridge_path.strip():
+            raise ValueError("honeypot_bridge_path is required")
         if not self.forms_path or not self.forms_path.strip():
             raise ValueError("forms_path is required")
 
@@ -134,7 +151,7 @@ def list_bot_defense_providers() -> list[str]:
 def list_bot_defense_forms() -> list[str]:
     """Return the SC.13.2 default form ids in generated-app UI order."""
 
-    return [form for form, _ in _DEFAULT_FORM_ITEMS]
+    return [form for form, _, _ in _DEFAULT_FORM_ITEMS]
 
 
 def render_bot_defense_scaffold(
@@ -157,8 +174,16 @@ def render_bot_defense_scaffold(
                 _bot_challenge_bridge_file(opts.bot_challenge_import),
             ),
             AuthScaffoldFile(
+                opts.honeypot_bridge_path.strip("/"),
+                _honeypot_bridge_file(opts.honeypot_import),
+            ),
+            AuthScaffoldFile(
                 opts.forms_path.strip("/"),
-                _bot_defense_forms_file(opts.bridge_path, opts.forms_path),
+                _bot_defense_forms_file(
+                    opts.bridge_path,
+                    opts.honeypot_bridge_path,
+                    opts.forms_path,
+                ),
             ),
         ),
         env=_env_vars(providers),
@@ -167,6 +192,7 @@ def render_bot_defense_scaffold(
         notes=(
             "reuses AS.3 templates/_shared/bot-challenge for verify/fallback/reject logic",
             "SC.13.2 defaults cover login/signup/password-reset/contact/comment forms",
+            "reuses AS.4 templates/_shared/honeypot for auto hidden-field generation",
         ),
     )
 
@@ -188,8 +214,10 @@ def _form_items() -> tuple[BotDefenseFormItem, ...]:
             form=form,
             widget_action=widget_action,
             token_body_field=turnstile_forms.TURNSTILE_TOKEN_BODY_FIELD,
+            honeypot_form_path=honeypot_form_path,
         )
-        for form, widget_action in _DEFAULT_FORM_ITEMS
+        for form, widget_action, honeypot_form_path in _DEFAULT_FORM_ITEMS
+        if honeypot_form_path is None or honeypot_form_path in honeypot._FORM_PREFIXES
     )
 
 
@@ -259,19 +287,50 @@ export const botChallengeSiteKeyEnv = Object.freeze({{
 """
 
 
-def _bot_defense_forms_file(bridge_path: str, forms_path: str) -> str:
+def _honeypot_bridge_file(honeypot_import: str) -> str:
+    imported = _ts_string(honeypot_import)
+    return f"""// SC.13.3 honeypot bridge.
+// Reuses the AS.4 generated-app honeypot twin; do not copy field-name logic here.
+
+export {{
+  HONEYPOT_HIDE_CSS,
+  HONEYPOT_INPUT_ATTRS,
+  OS_HONEYPOT_CLASS,
+  currentEpoch,
+  expectedFieldNames,
+  honeypotFieldName,
+  validateAndEnforce as validateHoneypotAndEnforce,
+  validateHoneypot,
+  type HoneypotResult,
+}} from "{imported}"
+
+export const ANONYMOUS_TENANT_ID = "_anonymous"
+"""
+
+
+def _bot_defense_forms_file(
+    bridge_path: str,
+    honeypot_bridge_path: str,
+    forms_path: str,
+) -> str:
     bridge_import = _relative_ts_import(bridge_path, forms_path)
+    honeypot_import = _relative_ts_import(honeypot_bridge_path, forms_path)
     form_rows = "\n".join(
         "  "
         + "{ "
         + f'form: "{_ts_string(item.form)}", '
         + f'widgetAction: "{_ts_string(item.widget_action)}", '
-        + f'tokenBodyField: "{_ts_string(item.token_body_field)}"'
+        + f'tokenBodyField: "{_ts_string(item.token_body_field)}", '
+        + (
+            f'honeypotFormPath: "{_ts_string(item.honeypot_form_path)}"'
+            if item.honeypot_form_path
+            else "honeypotFormPath: null"
+        )
         + " },"
         for item in _form_items()
     )
-    return f"""// SC.13.2 bot defense default form belt.
-// Generated forms share one VerifyContext shape and the AS.3 bridge.
+    return f"""// SC.13.2 / SC.13.3 bot defense default form belt.
+// Generated forms share one VerifyContext shape plus the AS.3 / AS.4 bridges.
 
 import {{
   botChallengeFallbackOrder,
@@ -280,6 +339,15 @@ import {{
   Provider,
   type VerifyContext,
 }} from "{bridge_import}"
+
+import {{
+  ANONYMOUS_TENANT_ID,
+  HONEYPOT_HIDE_CSS,
+  HONEYPOT_INPUT_ATTRS,
+  OS_HONEYPOT_CLASS,
+  currentEpoch,
+  honeypotFieldName,
+}} from "{honeypot_import}"
 
 export const botDefenseDefaultForms = Object.freeze([
 {form_rows}
@@ -317,11 +385,43 @@ export function botDefenseVerifyContextForForm(opts: {{
   }}
 }}
 
+export interface BotDefenseHoneypotField {{
+  readonly type: "text"
+  readonly name: string
+  readonly defaultValue: ""
+  readonly className: string
+  readonly inputAttrs: typeof HONEYPOT_INPUT_ATTRS
+  readonly styleText: string
+  readonly formPath: string
+}}
+
+export function botDefenseHoneypotFieldForForm(opts: {{
+  form: BotDefenseFormId
+  tenantId?: string | null
+  nowMs?: number
+}}): BotDefenseHoneypotField | null {{
+  const form = botDefenseFormDefaults(opts.form)
+  if (!form.honeypotFormPath) return null
+  const tenantId = opts.tenantId ?? ANONYMOUS_TENANT_ID
+  const name = honeypotFieldName(form.honeypotFormPath, tenantId, currentEpoch(opts.nowMs))
+  return Object.freeze({{
+    type: "text",
+    name,
+    defaultValue: "",
+    className: OS_HONEYPOT_CLASS,
+    inputAttrs: HONEYPOT_INPUT_ATTRS,
+    styleText: `.${{OS_HONEYPOT_CLASS}}{{${{HONEYPOT_HIDE_CSS}}}}`,
+    formPath: form.honeypotFormPath,
+  }})
+}}
+
 export const botDefenseFormBelt = Object.freeze({{
   forms: botDefenseDefaultForms,
   providerOrder: botChallengeProviderOrder,
   fallbackOrder: botChallengeFallbackOrder,
   siteKeyEnv: botChallengeSiteKeyEnv,
+  honeypotInputAttrs: HONEYPOT_INPUT_ATTRS,
+  honeypotHideCss: HONEYPOT_HIDE_CSS,
 }})
 """
 
@@ -346,6 +446,8 @@ __all__ = [
     "DEFAULT_BOT_CHALLENGE_BRIDGE_PATH",
     "DEFAULT_BOT_CHALLENGE_IMPORT",
     "DEFAULT_BOT_DEFENSE_FORMS_PATH",
+    "DEFAULT_HONEYPOT_BRIDGE_PATH",
+    "DEFAULT_HONEYPOT_IMPORT",
     "list_bot_defense_forms",
     "list_bot_defense_providers",
     "render_bot_defense_scaffold",

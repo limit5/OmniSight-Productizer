@@ -11,6 +11,7 @@ from backend.auth_provisioning import (
     render_bot_defense_scaffold,
 )
 from backend.security import bot_challenge
+from backend.security import honeypot
 
 
 def test_lists_as3_bot_challenge_providers() -> None:
@@ -39,6 +40,7 @@ def test_render_reuses_as3_generated_app_bridge() -> None:
 
     assert [item.path for item in result.files] == [
         "auth/bot-challenge.ts",
+        "auth/honeypot.ts",
         "auth/bot-defense-forms.ts",
     ]
     content = result.files[0].content
@@ -55,7 +57,7 @@ def test_render_reuses_as3_generated_app_bridge() -> None:
 def test_render_sc_13_2_default_form_belt() -> None:
     result = render_bot_defense_scaffold()
     forms = {item.form: item for item in result.forms}
-    content = result.files[1].content
+    content = result.files[2].content
 
     assert list(forms) == [
         "login",
@@ -76,6 +78,45 @@ def test_render_sc_13_2_default_form_belt() -> None:
     assert 'form: "comment", widgetAction: "comment"' in content
     assert "botDefenseVerifyContextForForm" in content
     assert "expectedAction: form.widgetAction" in content
+
+
+def test_render_sc_13_3_honeypot_bridge_reuses_as4_generated_app_twin() -> None:
+    result = render_bot_defense_scaffold(
+        BotDefenseScaffoldOptions(honeypot_import="../honeypot")
+    )
+
+    content = result.files[1].content
+    assert result.files[1].path == "auth/honeypot.ts"
+    assert 'from "../honeypot"' in content
+    assert "honeypotFieldName" in content
+    assert "HONEYPOT_INPUT_ATTRS" in content
+    assert "OS_HONEYPOT_CLASS" in content
+    assert 'export const ANONYMOUS_TENANT_ID = "_anonymous"' in content
+    assert "validateHoneypotAndEnforce" in content
+
+
+def test_render_sc_13_3_default_forms_carry_as4_honeypot_paths() -> None:
+    result = render_bot_defense_scaffold()
+    forms = {item.form: item for item in result.forms}
+    content = result.files[2].content
+
+    assert forms["login"].honeypot_form_path == "/api/v1/auth/login"
+    assert forms["signup"].honeypot_form_path == "/api/v1/auth/signup"
+    assert forms["password-reset"].honeypot_form_path == "/api/v1/auth/password-reset"
+    assert forms["contact"].honeypot_form_path == "/api/v1/auth/contact"
+    assert forms["comment"].honeypot_form_path is None
+    assert set(
+        item.honeypot_form_path
+        for item in forms.values()
+        if item.honeypot_form_path is not None
+    ) == set(honeypot._FORM_PREFIXES.keys())
+    assert 'honeypotFormPath: "/api/v1/auth/login"' in content
+    assert 'honeypotFormPath: "/api/v1/auth/password-reset"' in content
+    assert 'form: "comment", widgetAction: "comment", tokenBodyField: "turnstile_token", honeypotFormPath: null' in content
+    assert "botDefenseHoneypotFieldForForm" in content
+    assert "honeypotFieldName(form.honeypotFormPath" in content
+    assert "inputAttrs: HONEYPOT_INPUT_ATTRS" in content
+    assert "styleText: `.${OS_HONEYPOT_CLASS}{${HONEYPOT_HIDE_CSS}}`" in content
 
 
 def test_provider_env_manifest_reuses_as3_secret_env_names() -> None:
@@ -117,17 +158,26 @@ def test_result_to_dict_is_json_ready() -> None:
     result = render_bot_defense_scaffold().to_dict()
 
     assert result["files"][0]["path"] == "auth/bot-challenge.ts"
-    assert result["files"][1]["path"] == "auth/bot-defense-forms.ts"
+    assert result["files"][1]["path"] == "auth/honeypot.ts"
+    assert result["files"][2]["path"] == "auth/bot-defense-forms.ts"
     assert result["providers"][0]["provider"] == "turnstile"
     assert result["forms"][0]["form"] == "login"
     assert result["forms"][2]["widget_action"] == "pwreset"
+    assert result["forms"][2]["honeypot_form_path"] == "/api/v1/auth/password-reset"
+    assert result["forms"][4]["honeypot_form_path"] is None
     assert result["env"][0]["name"] == "BOT_CHALLENGE_PROVIDER"
     assert result["dependencies"] == []
 
 
 @pytest.mark.parametrize(
     "field",
-    ["bot_challenge_import", "bridge_path", "forms_path"],
+    [
+        "bot_challenge_import",
+        "honeypot_import",
+        "bridge_path",
+        "honeypot_bridge_path",
+        "forms_path",
+    ],
 )
 def test_options_validate_required_fields(field: str) -> None:
     kwargs = {field: "   "}
