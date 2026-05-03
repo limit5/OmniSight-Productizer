@@ -206,6 +206,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Defensive no-op: dropping these tables would lose budget config
-    # and alert history. Hand-rolled rollback required.
+    # alembic-allow-noop-downgrade: dropping the cost-guard tables
+    # would lose accumulated budget config and the alert history that
+    # fed the cost-attribution dashboards. Hand-rolled migration
+    # required for rollback (see FX.7.6 contract).
     pass

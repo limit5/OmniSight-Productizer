@@ -111,6 +111,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Defensive no-op: dropping the table would orphan deployed handler
-    # configurations. Hand-rolled rollback required.
+    # alembic-allow-noop-downgrade: dropping the external_tool_registry
+    # would orphan every deployed handler configuration and break the
+    # already-active firewall reference. Hand-rolled migration required
+    # for rollback (see FX.7.6 contract).
     pass

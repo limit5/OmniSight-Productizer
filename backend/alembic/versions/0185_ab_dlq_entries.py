@@ -96,6 +96,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Defensive no-op: dropping the DLQ would lose forensic history of
-    # exhausted retries. Hand-rolled rollback required.
+    # alembic-allow-noop-downgrade: dropping the dlq_entries table
+    # would lose the forensic history of exhausted retries — the only
+    # record of which Anthropic batch failures hit hard limits. Hand-
+    # rolled migration required for rollback (see FX.7.6 contract).
     pass

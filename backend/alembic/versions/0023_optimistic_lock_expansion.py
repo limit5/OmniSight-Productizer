@@ -76,8 +76,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Defensive no-op: Postgres supports DROP COLUMN but losing the
-    # version column would silently re-open the last-write-wins race
-    # on live rows and break in-flight clients still sending
-    # ``If-Match``. Require a hand-rolled migration for rollback.
+    # alembic-allow-noop-downgrade: dropping the `version` column would
+    # silently re-open the last-write-wins race on live rows and break
+    # in-flight clients still sending `If-Match`. Hand-rolled migration
+    # required to roll back this revision (see FX.7.6 contract).
     pass

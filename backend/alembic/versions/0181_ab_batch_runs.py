@@ -162,7 +162,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Defensive no-op: dropping these tables would orphan in-flight batch
-    # tasks and leak Anthropic batch_id references. Hand-rolled migration
-    # required for rollback.
+    # alembic-allow-noop-downgrade: dropping batch_runs / batch_results
+    # would orphan in-flight Anthropic batch tasks and leak batch_id
+    # references the dispatcher is still polling on. Hand-rolled
+    # migration required for rollback (see FX.7.6 contract).
     pass

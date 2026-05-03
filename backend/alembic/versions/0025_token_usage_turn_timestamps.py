@@ -85,8 +85,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Defensive no-op: dropping the columns would lose accumulated
-    # per-turn boundary data and break hot workers still writing
-    # via the ported track(). Hand-rolled migration required for
-    # rollback.
+    # alembic-allow-noop-downgrade: dropping the per-turn boundary
+    # columns would lose accumulated turn-timing data and break hot
+    # workers still writing via the ported track(). Hand-rolled
+    # migration required for rollback (see FX.7.6 contract).
     pass
