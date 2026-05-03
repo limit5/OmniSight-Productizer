@@ -60,6 +60,11 @@ def _get_llm(bind_tools_for: str | None = None, model_name: str = ""):
         bind_tools_for: Agent type for tool binding.
         model_name: Per-agent model spec (e.g. "openrouter:qwen/qwen3-235b").
                     If empty, uses global settings.llm_provider/model.
+
+    Z.6.3: ollama is not short-circuited here — AGENT_TOOLS is provider-agnostic
+    (keyed by agent_type, not provider).  ``get_llm()`` applies
+    ``llm.bind_tools()`` uniformly for every provider including ollama, using
+    the path established in Z.6.2.
     """
     tools = AGENT_TOOLS.get(bind_tools_for, []) if bind_tools_for else None
     provider, model = _parse_model_spec(model_name)
