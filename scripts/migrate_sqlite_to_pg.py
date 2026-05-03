@@ -247,6 +247,12 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "decryption_audits",
     "spend_thresholds",
     "kek_rotations",
+    # KS.4.13 (alembic 0187): LLM firewall review events. FK
+    # ``tenant_id -> tenants.id`` (CASCADE) so it MUST replay after
+    # tenants. PK is app-generated TEXT ``event_id``; raw input is not
+    # present in the table, only ``input_hash`` for review correlation.
+    # NOT in TABLES_WITH_IDENTITY_ID.
+    "firewall_events",
     "sessions",
     "github_installations",
     # Project runs (alembic 0006).

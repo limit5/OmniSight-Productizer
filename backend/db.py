@@ -1761,6 +1761,25 @@ CREATE INDEX IF NOT EXISTS idx_kek_rotations_status_schedule
     ON kek_rotations(status, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_kek_rotations_key
     ON kek_rotations(key_id, started_at DESC);
+
+-- KS.4.13 (alembic 0187): durable LLM firewall review events.
+-- Stores only suspicious / blocked decisions and input hashes; raw
+-- input text is intentionally absent so persistence does not expand
+-- the leakage surface.
+CREATE TABLE IF NOT EXISTS firewall_events (
+    event_id       TEXT PRIMARY KEY,
+    tenant_id      TEXT NOT NULL
+                         REFERENCES tenants(id) ON DELETE CASCADE,
+    classification TEXT NOT NULL
+                         CHECK (classification IN ('blocked','suspicious')),
+    input_hash     TEXT NOT NULL,
+    blocked_reason TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_firewall_events_tenant_class_time
+    ON firewall_events(tenant_id, classification, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_firewall_events_input_hash
+    ON firewall_events(input_hash);
 """
 
 

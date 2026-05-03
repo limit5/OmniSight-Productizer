@@ -50,7 +50,6 @@ consequences and must be justified in a PR comment.
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -178,6 +177,7 @@ def test_identity_subset_only_contains_integer_pk_tables():
         "adaptive_budget_state",
         "bootstrap_state",
         "decryption_audits",
+        "firewall_events",
         "kek_rotations",
         "kms_keys",
         "spend_thresholds",
