@@ -6196,8 +6196,8 @@ BP.E GraphRAG / Neo4j
 
 #### Imports / circular workaround（3）
 - [x][G] FX.4.23 `backend/vision_to_ui.py:755` invoke_chat circular 重構（提到 module 層）
-- [~][G] FX.4.24 `backend/llm_adapter.py:103-114,325-344` max_tokens / bind_tools contract 一致化
-- [ ] FX.4.25 `backend/decision_rules.py` 跟其他 modules 統一 typed exception per AGENTS.md
+- [x][G] FX.4.24 `backend/llm_adapter.py:103-114,325-344` max_tokens / bind_tools contract 一致化
+- [x][G] FX.4.25 `backend/decision_rules.py` 跟其他 modules 統一 typed exception per AGENTS.md
 
 ### FX.5 — Test coverage 補測（13 items, ~7-10 day）
 
@@ -6242,7 +6242,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.7.2 1768 個 function-內 local import 抽樣前 20 個重構（避免廣泛 circular） — 2026-05-04 done. Sampled top-20 `(file, import-line)` combos by repeat count, verified each target module (`db_pool`, `audit`, `db`, `metrics`, `auth_event`, plus stdlib `json`) has zero `backend.*` deps that would create cycles, hoisted to module level. Removed 216 local-import lines, added 18 module-level imports (`db_pool.get_pool` ×11, `audit as _audit` ×4, `metrics as _m` ×1, `db` ×1, `auth_event as _aevent` ×1, `json` ×1). All 18 modified modules import cleanly. Drift guard `backend/tests/test_local_import_drift_guard.py` pins both directions: (a) re-introducing the local form fails CI, (b) deleting the hoisted module-level form fails CI. Function-body local-import count in prod backend: 1744 → 1528 (12.4% reduction). Remaining 1528 deferred — most are genuine circular-avoidance or optional-dep guards; further waves require per-callsite cycle analysis.
 - [x] FX.7.3 9 個 > 2000 行的大檔做 module split 規劃（不一定做完，先寫 ADR + 排程） — 2026-05-04 done. ADR landed at `docs/design/fx-7-3-large-file-module-split.md`. Frozen 9 files (onvif_device 2389 / depth_sensing 3215 / db 3639 / tenant_projects 3878 / bootstrap 3351 / system 2530 / tools 2437 / invoke 2923 / auth 2169 = 26 531 LOC). 9-wave schedule (W0 prep + W1-W9 execution) paced 2026-05-05 → 2026-07-08, ordered risk-ascending (onvif first 0 importers, auth last 20+ importers + `_DUMMY_PASSWORD_HASH` import-time invariant). Per-file decomposition (sub-module names + line ranges + risk callouts), 4 split rules (frozen public API / router-as-package / 2-wave shim lifetime / no-behaviour-change), 4 drift guards specified (large-file LOC cap, OpenAPI route-set snapshot, per-module public-surface, nightly pylint cyclic-import). Execution waves become future Priority MS rows — not sub-bullets of FX.7.3. Index entry added to `docs/design/README.md`.
 - [x] FX.7.4 HANDOFF.md 「Production status / Next gate」改 machine-readable manifest（YAML frontmatter 或獨立 status.yaml） — 2026-05-04 done. 選獨立 `docs/status/handoff_status.yaml`（YAML frontmatter 不適用：HANDOFF.md 是單檔 ~230 entry，per-entry frontmatter 不工作）。新增 `scripts/extract_handoff_status.py`（parser 處理 6+ 種歷史 prose 變體 + canonical normalisation；`--write` / `--check` 雙模式）+ `backend/tests/test_handoff_status_manifest_drift_guard.py`（8 tests，invariants + entry-count floor + id uniqueness + canonical-status whitelist + count partition）。SOP §「HANDOFF.md 格式補強」加 manifest workflow 段落。Initial generation: 231 entries / 226 dev-only / 3 deployed-active / 1 planning-only / 1 unknown（escape hatch for "planning + audit doc landed" row）。
-- [ ] FX.7.5 HANDOFF.md 10+ row 的 deployed-active 誇大條目校正成 deployed-inactive
+- [x] FX.7.5 HANDOFF.md 10+ row 的 deployed-active 誇大條目校正成 deployed-inactive — 2026-05-04 done. 全文掃出 12 條 `Production status: deployed-active`：11 條校正為 `deployed-inactive`（FX.7.2 / FX.7.1 / FX.3.4 / AS.8.2 / Y10 row 1-6 / Y9 row 5），1 條保留（Phase-3-Runtime PG cutover @ HANDOFF line ~26376 — entry 內列舉真 live verification: `/readyz migrations.current=0016` + `40/40 × 200 burst 0 failure` + `pg_stat_replication` streaming async + `這是 OmniSight 第一次在 production 跑 PostgreSQL`）。每條校正在 Production status 行加 `(FX.7.5 校正：原 deployed-active 為誇大——<原因>)` parenthetical + Next gate 改成 `deployed-active` + 真正的觸發條件（image rebuild + prod CI lane 跑綠 / first oauth_audit row 入 chain / 第一條 PCI-DSS gate audit row 入 chain），讓 milestone closure path 從「`[x]` 直接 ship」改成「`[x]` → image rebuild → live smoke → `deployed-active`」符合 Production Readiness Gate SOP。Manifest regenerate: 232 → 233 entries，status_counts.deployed-active 3 → 0、deployed-inactive 0 → 3（manifest parser 只看 `[Author]` brackets 格式、Y10 / Y9 / AS.8.2 / PG-cutover row 不入 manifest 但 prose 校正仍對人類讀者 + `grep` 有效）。`scripts/extract_handoff_status.py --check` 綠 + drift guard `test_handoff_status_manifest_drift_guard.py` 8/8 test 全綠。
 - [ ] FX.7.6 alembic enforcement：加 pre-commit hook 拒絕 downgrade=pass 的 migration
 - [ ] FX.7.7 docker / compose 補 mem_limit + mem_reservation 對所有 service
 - [ ] FX.7.8 docker-compose.prod.yml:699 Grafana 加 startup env 驗（admin password 必須非 default）
@@ -6255,8 +6255,8 @@ BP.E GraphRAG / Neo4j
 
 > **低優先，等其他 wave 完才做**
 
-- [ ] FX.8.1 1735 個 TODO/FIXME marker 移到 GitHub issue tracker（生 export script + 批次建 issue）
-- [ ] FX.8.2 1167 個 NotImplementedError 自動 audit script（識別合理 vs stub）
+- [x][G] FX.8.1 1735 個 TODO/FIXME marker 移到 GitHub issue tracker（生 export script + 批次建 issue）
+- [~][G] FX.8.2 1167 個 NotImplementedError 自動 audit script（識別合理 vs stub）
 - [ ] FX.8.3 `backend/imaging_pipeline.py:978-1204` 清掉嵌入 C++ 風格 dead comment
 - [ ] FX.8.4 `backend/ipcam_rtsp_server.py:631` MD5 加註明 RTSP spec-required，免 lint 警
 - [ ] FX.8.5 `backend/onvif_device.py:699` SHA1 同上
