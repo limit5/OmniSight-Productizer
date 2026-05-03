@@ -93,6 +93,19 @@ httpx==0.28.1
 # codex-authored FS commits — see docs/operations/codex-collaboration.md.
 respx==0.23.1
 
+# --- Lint / type-check / supply-chain audit ---------------------------
+# FX.6.5 (2026-05-04): toolchain prerequisites for FX.6.8 nightly CI
+# workflow (`pip-audit` + `ruff check` + `mypy backend/security
+# backend/agents`). Pinned to latest stable on PyPI as of 2026-05-04
+# so that local ``backend/.venv`` and the future Actions runner agree
+# byte-for-byte. These are dev-time tools (no runtime import path);
+# FX.6.7 will eventually peel them out into ``requirements-dev.txt``
+# alongside pytest / respx / httpx — keeping them here for now keeps
+# the single-lockfile invariant during the FX.6.* sweep.
+pip-audit==2.10.0
+ruff==0.15.12
+mypy==1.20.2
+
 # --- K5: MFA (TOTP + WebAuthn) ----------------------------------------
 pyotp==2.9.0
 qrcode[pil]==8.0
