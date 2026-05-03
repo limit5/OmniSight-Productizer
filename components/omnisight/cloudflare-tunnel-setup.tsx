@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { createPortal } from "react-dom"
 import {
   X, Check, AlertTriangle, Loader, Shield, Globe, Server,
@@ -98,6 +98,12 @@ export default function CloudflareTunnelSetup({ open, onClose }: CloudflareTunne
   const [existingStatus, setExistingStatus] = useState<TunnelStatus | null>(null)
   const [showManage, setShowManage] = useState(false)
 
+  // FX.2.2 — Modal a11y: dialog container ref (focus trap root + initial focus
+  // target via tabindex=-1) and a snapshot of the trigger element so we can
+  // restore focus to it when the modal closes.
+  const dialogRef = useRef<HTMLDivElement | null>(null)
+  const previousActiveRef = useRef<HTMLElement | null>(null)
+
   const checkExisting = useCallback(async () => {
     try {
       const resp = await fetch("/api/v1/cloudflare/status")
@@ -114,6 +120,72 @@ export default function CloudflareTunnelSetup({ open, onClose }: CloudflareTunne
   useEffect(() => {
     if (open) checkExisting()
   }, [open, checkExisting])
+
+  // FX.2.2 — Initial focus + focus-restore.
+  // On open: snapshot the previously-focused element (the trigger button on
+  // the parent surface), then move focus to the dialog root so screen readers
+  // announce the dialog title and the first Tab lands on the first focusable
+  // child. On close: restore focus to the trigger so keyboard users don't
+  // fall back to <body>.
+  useEffect(() => {
+    if (!open) return
+    if (typeof document === "undefined") return
+    previousActiveRef.current = (document.activeElement as HTMLElement | null) ?? null
+    // setTimeout(0) lets the portal mount + layout settle before focus().
+    const t = setTimeout(() => {
+      dialogRef.current?.focus()
+    }, 0)
+    return () => {
+      clearTimeout(t)
+      const prev = previousActiveRef.current
+      if (prev && typeof prev.focus === "function") {
+        prev.focus()
+      }
+    }
+  }, [open])
+
+  // FX.2.2 — Escape closes; Tab / Shift+Tab cycle focus inside the dialog.
+  // Listener is attached to the dialog root (not window) so background
+  // surfaces' shortcuts still see Escape when the modal is closed.
+  const onDialogKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.key === "Escape") {
+        e.preventDefault()
+        e.stopPropagation()
+        onClose()
+        return
+      }
+      if (e.key !== "Tab") return
+      const root = dialogRef.current
+      if (!root) return
+      const focusables = Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter(el => el.getAttribute("aria-hidden") !== "true")
+      if (focusables.length === 0) {
+        // Nothing tabbable — keep focus on the dialog itself.
+        e.preventDefault()
+        root.focus()
+        return
+      }
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      const active = document.activeElement as HTMLElement | null
+      if (e.shiftKey) {
+        if (active === first || active === root || !root.contains(active)) {
+          e.preventDefault()
+          last.focus()
+        }
+      } else {
+        if (active === last || !root.contains(active)) {
+          e.preventDefault()
+          first.focus()
+        }
+      }
+    },
+    [onClose],
+  )
 
   const resetWizard = useCallback(() => {
     setStep("token")
@@ -271,18 +343,32 @@ export default function CloudflareTunnelSetup({ open, onClose }: CloudflareTunne
   const content = (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="bg-[var(--background)] border border-[var(--border)] rounded-lg shadow-xl w-full max-w-lg max-h-[80vh] overflow-y-auto"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cf-tunnel-wizard-title"
+        tabIndex={-1}
+        onKeyDown={onDialogKeyDown}
+        data-testid="cf-tunnel-dialog"
+        className="bg-[var(--background)] border border-[var(--border)] rounded-lg shadow-xl w-full max-w-lg max-h-[80vh] overflow-y-auto outline-none"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
           <div className="flex items-center gap-2">
             <Shield size={14} className="text-[var(--neural-blue)]" />
-            <span className="font-mono text-[11px] font-bold text-[var(--foreground)]">
+            <span
+              id="cf-tunnel-wizard-title"
+              className="font-mono text-[11px] font-bold text-[var(--foreground)]"
+            >
               Cloudflare Tunnel Wizard
             </span>
           </div>
-          <button onClick={onClose} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+          <button
+            onClick={onClose}
+            aria-label="Close Cloudflare Tunnel Wizard"
+            className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+          >
             <X size={14} />
           </button>
         </div>
