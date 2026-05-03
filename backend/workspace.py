@@ -232,6 +232,61 @@ async def _install_sast_post_commit_hook(workspace_path: Path) -> None:
     hook_path.chmod(0o755)
 
 
+SAST_PEP_HOLD_TIMEOUT_S = 600.0
+
+
+def _sast_blocking_findings_from_payload(sast_scan: dict | None) -> list[dict]:
+    payload = sast_scan or {}
+    report = payload.get("report") if isinstance(payload, dict) else {}
+    if not isinstance(report, dict):
+        return []
+    fail_on = {str(s).upper() for s in report.get("fail_on") or ("HIGH", "CRITICAL")}
+    findings = report.get("findings") or []
+    blocking: list[dict] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        if str(finding.get("severity") or "").upper() in fail_on:
+            blocking.append(finding)
+    return blocking
+
+
+async def _maybe_hold_sast_scan(
+    *,
+    agent_id: str,
+    task_id: str | None,
+    sast_scan: dict | None,
+) -> dict | None:
+    """SC.1.3: raise a PEP HOLD when SAST reports HIGH/CRITICAL findings.
+
+    Module-global state audit: this helper introduces no mutable module-global
+    state; each worker derives the HOLD payload from the finalized scan dict
+    and coordinates operator review through the existing PEP/Decision Engine.
+    """
+    blocking = _sast_blocking_findings_from_payload(sast_scan)
+    if not blocking:
+        return None
+
+    from backend import pep_gateway as _pep
+
+    report = (sast_scan or {}).get("report") or {}
+    decision = await _pep.evaluate(
+        tool="sast_high_severity_finding",
+        arguments={
+            "task_id": task_id or "",
+            "commit_sha": str((sast_scan or {}).get("commit_sha") or ""),
+            "scanner": str(report.get("source") or ""),
+            "workspace_path": str((sast_scan or {}).get("workspace_path") or ""),
+            "blocking_count": len(blocking),
+            "blocking_findings": blocking[:10],
+        },
+        agent_id=agent_id,
+        tier="t1",
+        hold_timeout_s=SAST_PEP_HOLD_TIMEOUT_S,
+    )
+    return decision.to_dict()
+
+
 async def provision(
     agent_id: str | None = None,
     task_id: str | None = None,
@@ -711,6 +766,25 @@ async def finalize(agent_id: str) -> dict:
         "conflict_files": conflict_files,
         "sast_scan": sast_scan,
     }
+
+    try:
+        sast_pep_decision = await _maybe_hold_sast_scan(
+            agent_id=agent_id,
+            task_id=info.task_id,
+            sast_scan=sast_scan,
+        )
+        if sast_pep_decision is not None:
+            result["sast_pep_decision"] = sast_pep_decision
+            logger.warning(
+                "SAST PEP HOLD for %s commit=%s action=%s blocking=%d",
+                agent_id,
+                str(sast_scan.get("commit_sha", ""))[:12] if isinstance(sast_scan, dict) else "",
+                sast_pep_decision.get("action", ""),
+                len(_sast_blocking_findings_from_payload(sast_scan)),
+            )
+    except Exception as exc:
+        logger.warning("SAST PEP HOLD failed for %s: %s", agent_id, exc)
+        result["sast_pep_decision"] = {"error": str(exc)}
 
     # Auto-generate handoff document
     try:

@@ -303,6 +303,15 @@ def classify(tool: str, arguments: dict[str, Any], tier: str) -> tuple[PepAction
     for rule_id, rx in _PROD_HOLD_RULES:
         if rx.search(command):
             return PepAction.hold, rule_id, f"production-scope: {rule_id}", "prod"
+    # SC.1.3: generated-workspace SAST scans with HIGH/CRITICAL findings
+    # always require an operator HOLD, independent of sandbox tier.
+    if tool == "sast_high_severity_finding":
+        return (
+            PepAction.hold,
+            "sast_high_severity",
+            "SAST high-severity finding requires operator review",
+            "local",
+        )
     # 3. Tier whitelist membership.
     allow = tier_whitelist(tier)
     if tool in allow:
@@ -635,6 +644,12 @@ _TOOL_COACHING: dict[str, dict[str, str]] = {
         "if_approve": "Review is posted; vote may unblock or block the change per Gerrit's submit rules.",
         "if_reject": "No review is posted; the change-set keeps its current vote tally.",
     },
+    "sast_high_severity_finding": {
+        "what": "Reports HIGH or CRITICAL static-analysis findings from a generated workspace commit.",
+        "why_default": "High-severity SAST findings can ship exploitable code paths — held so the operator can inspect the findings before accepting the generated commit.",
+        "if_approve": "The finalized workspace result records the approval and downstream review can proceed with the SAST report attached.",
+        "if_reject": "The finalized workspace result records a PEP denial so downstream automation treats the generated commit as blocked.",
+    },
 }
 
 # Rule-specific override for the "why" line. When the prod-scope rule
@@ -668,6 +683,7 @@ DEFAULT_PEP_INTERCEPT_CATEGORY: str = "pep_tool_intercept"
 # coaching card naming the workspace + size/ETA estimate so they know
 # what they're approving before the sidecar starts pulling tarballs.
 WEB_PREVIEW_INTERCEPT_CATEGORY: str = "web_preview_intercept"
+SAST_INTERCEPT_CATEGORY: str = "sast_high_severity_intercept"
 
 # Install-method human label for the "why" line. Catalog entries land
 # with one of four DB-CHECK methods; the operator-facing copy spells out
@@ -873,6 +889,8 @@ def _propose_hold(
         category = INSTALL_INTERCEPT_CATEGORY
     elif dec.tool == "web_sandbox_preview":
         category = WEB_PREVIEW_INTERCEPT_CATEGORY
+    elif dec.tool == "sast_high_severity_finding":
+        category = SAST_INTERCEPT_CATEGORY
     else:
         category = DEFAULT_PEP_INTERCEPT_CATEGORY
     prop = fn(
