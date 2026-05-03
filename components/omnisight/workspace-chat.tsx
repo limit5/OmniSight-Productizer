@@ -155,6 +155,50 @@ export interface WorkspaceChatPreviewViteError {
   sourceLine?: number
 }
 
+/**
+ * W16.7 — next-step coaching menu carried inside a chat message.
+ *
+ * Mirrors the ``previewNextSteps`` field produced by
+ * ``backend.web.preview_next_steps.build_chat_message_for_preview_next_steps``.
+ * Once the W14 dev server reports ready, the backend fires
+ * ``preview.next_steps`` carrying the four canonical follow-up
+ * options (Vercel deploy / a11y scan / commit+PR / 繼續編輯). The SSE
+ * consumer appends a system-role message with ``previewNextSteps``
+ * set so the chat surface can render the coach card.
+ *
+ * The menu is purely advisory — clicking an option pre-fills the
+ * composer with the matching slash command; the operator may also
+ * dismiss the card and keep typing.  The agent never blocks on the
+ * pick.
+ */
+export type WorkspaceChatPreviewNextStepKind =
+  | "vercel_deploy"
+  | "a11y_scan"
+  | "commit_pr"
+  | "continue_edit"
+
+export interface WorkspaceChatPreviewNextStepOption {
+  /** Stable identifier — drives icon / colour bucket on the FE. */
+  kind: WorkspaceChatPreviewNextStepKind
+  /** Bilingual human-facing display label. */
+  label: string
+  /** Pre-rendered slash command the FE pre-fills on click. */
+  slashCommand: string
+  /** When true the FE marks this row as the recommended choice (★). */
+  recommended?: boolean
+}
+
+export interface WorkspaceChatPreviewNextSteps {
+  /** W14 workspace id — scope key for the menu. */
+  workspaceId: string
+  /** Pre-rendered chat-message body (e.g. "Preview is live — what next?"). */
+  label: string
+  /** Row-spec-ordered four-option tuple. */
+  options: WorkspaceChatPreviewNextStepOption[]
+  /** Optional sandbox URL the menu deep-links to. */
+  previewUrl?: string
+}
+
 export interface WorkspaceChatMessage {
   id: string
   role: WorkspaceChatRole
@@ -180,6 +224,14 @@ export interface WorkspaceChatMessage {
    * treats them as mount / refresh / error-trace respectively.
    */
   previewViteError?: WorkspaceChatPreviewViteError
+  /**
+   * W16.7 — when set, the message renders a "what next?" coach card
+   * after the preview goes live (Vercel deploy / a11y scan /
+   * commit+PR / 繼續編輯). Sibling field to the other preview-flavour
+   * extensions; never co-renders with iframe / HMR / error-trace on
+   * a single message.
+   */
+  previewNextSteps?: WorkspaceChatPreviewNextSteps
 }
 
 export interface WorkspaceChatSubmission {
@@ -439,6 +491,86 @@ function ChatPreviewViteError({
           {typeof trace.sourceLine === "number" ? `:${trace.sourceLine}` : null}
         </div>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * W16.7 — render the "what next?" coach menu for a chat message.
+ *
+ * Pulled out as a sub-component so the four-option layout lives in
+ * one place and the chat row stays readable. The menu surfaces the
+ * row-spec-ordered options (Vercel deploy / a11y scan / commit+PR /
+ * 繼續編輯) and pre-fills the composer with the matching slash command
+ * when the operator clicks an option.
+ *
+ * The card is purely advisory — clicking does *not* commit the
+ * action; it just primes the composer so the operator can review,
+ * edit, and submit. Dismissal is implicit (operator types something
+ * else and the card scrolls away).
+ *
+ * The recommended option is marked with a ★ glyph so the operator's
+ * eye lands on the most common pick first.
+ */
+function ChatPreviewNextSteps({
+  messageId,
+  steps,
+  onPickOption,
+}: {
+  messageId: string
+  steps: WorkspaceChatPreviewNextSteps
+  onPickOption?: (slashCommand: string) => void
+}) {
+  return (
+    <div
+      data-testid={`workspace-chat-message-next-steps-${messageId}`}
+      data-workspace-id={steps.workspaceId}
+      className="mt-2 flex flex-col gap-1 rounded-md border border-sky-500/40 bg-sky-500/5 px-2 py-1.5 text-[12px]"
+    >
+      <div
+        data-testid={`workspace-chat-message-next-steps-label-${messageId}`}
+        className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground"
+      >
+        {steps.label}
+      </div>
+      <ul
+        data-testid={`workspace-chat-message-next-steps-options-${messageId}`}
+        className="flex flex-col gap-1"
+      >
+        {steps.options.map((opt) => (
+          <li
+            key={opt.kind}
+            data-testid={`workspace-chat-message-next-steps-option-${messageId}-${opt.kind}`}
+            data-kind={opt.kind}
+            data-recommended={opt.recommended ? "true" : "false"}
+            className="flex items-center justify-between gap-2"
+          >
+            <button
+              type="button"
+              data-testid={`workspace-chat-message-next-steps-button-${messageId}-${opt.kind}`}
+              aria-label={`Pick ${opt.label}`}
+              onClick={() => onPickOption?.(opt.slashCommand)}
+              className={cn(
+                "flex flex-1 items-center justify-between gap-2 rounded-sm border px-2 py-1 text-left text-foreground transition-colors hover:bg-accent/40",
+                opt.recommended
+                  ? "border-sky-500/60 bg-background/60"
+                  : "border-border/60 bg-background/40",
+              )}
+            >
+              <span className="truncate">
+                {opt.recommended ? "★ " : null}
+                {opt.label}
+              </span>
+              <span
+                data-testid={`workspace-chat-message-next-steps-slash-${messageId}-${opt.kind}`}
+                className="ml-2 truncate font-mono text-[10px] text-muted-foreground"
+              >
+                {opt.slashCommand}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -860,6 +992,13 @@ export function WorkspaceChat({
                 <ChatPreviewViteError
                   messageId={m.id}
                   trace={m.previewViteError}
+                />
+              ) : null}
+              {m.previewNextSteps && m.previewNextSteps.workspaceId ? (
+                <ChatPreviewNextSteps
+                  messageId={m.id}
+                  steps={m.previewNextSteps}
+                  onPickOption={(slash) => setDraftText(slash)}
                 />
               ) : null}
             </li>

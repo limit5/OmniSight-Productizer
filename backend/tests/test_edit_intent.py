@@ -301,4 +301,4 @@ def test_total_re_export_count_matches_w16_5_baseline() -> None:
     # +16 preview_hmr_reload).  Drift here means the W16 epic
     # added/removed surface without the lock-step bump landing across
     # all neighbour test files.
-    assert len(web_pkg.__all__) == 396
+    assert len(web_pkg.__all__) == 426

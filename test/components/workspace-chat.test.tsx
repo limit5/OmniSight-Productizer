@@ -34,6 +34,7 @@ import {
   type WorkspaceChatAnnotation,
   type WorkspaceChatAttachment,
   type WorkspaceChatMessage,
+  type WorkspaceChatPreviewNextSteps,
   type WorkspaceChatPreviewViteError,
   type WorkspaceChatSubmission,
 } from "@/components/omnisight/workspace-chat"
@@ -1123,5 +1124,180 @@ describe("W16.6 preview.vite_error trace card", () => {
     // Older card with matching signature wins over newer card without.
     expect(next[0].previewViteError?.status).toBe("resolved")
     expect(next[1].previewViteError?.status).toBe("detected")
+  })
+})
+
+describe("W16.7 preview.next_steps coach card", () => {
+  function nextStepsMsg(
+    id: string,
+    overrides: Partial<WorkspaceChatPreviewNextSteps> = {},
+  ): WorkspaceChatMessage {
+    return makeMessage(id, {
+      role: "system",
+      text: overrides.label ?? "Preview is live — what next?",
+      previewNextSteps: {
+        workspaceId: "ws-99",
+        label: overrides.label ?? "Preview is live — what next?",
+        options: overrides.options ?? [
+          {
+            kind: "vercel_deploy",
+            label: "Vercel 部署 / Deploy to Vercel",
+            slashCommand: "/deploy-preview ws-99 --target=vercel",
+            recommended: true,
+          },
+          {
+            kind: "a11y_scan",
+            label: "無障礙掃描 / a11y scan",
+            slashCommand: "/a11y-scan ws-99",
+          },
+          {
+            kind: "commit_pr",
+            label: "Commit + PR / Create commit & PR",
+            slashCommand: "/commit-and-pr ws-99",
+          },
+          {
+            kind: "continue_edit",
+            label: "繼續編輯 / Keep editing",
+            slashCommand: "/edit-preview ws-99",
+          },
+        ],
+        ...overrides,
+      },
+    })
+  }
+
+  it("renders the four-option coach card after preview live", () => {
+    const messages: WorkspaceChatMessage[] = [nextStepsMsg("m-ns-1")]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    const card = screen.getByTestId("workspace-chat-message-next-steps-m-ns-1")
+    expect(card.getAttribute("data-workspace-id")).toBe("ws-99")
+    expect(
+      screen.getByTestId("workspace-chat-message-next-steps-label-m-ns-1")
+        .textContent,
+    ).toContain("what next?")
+    // All four kinds rendered.
+    for (const kind of [
+      "vercel_deploy",
+      "a11y_scan",
+      "commit_pr",
+      "continue_edit",
+    ]) {
+      const opt = screen.getByTestId(
+        `workspace-chat-message-next-steps-option-m-ns-1-${kind}`,
+      )
+      expect(opt.getAttribute("data-kind")).toBe(kind)
+    }
+  })
+
+  it("marks the recommended option with data-recommended=true", () => {
+    const messages: WorkspaceChatMessage[] = [nextStepsMsg("m-ns-2")]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    const recommended = screen.getByTestId(
+      "workspace-chat-message-next-steps-option-m-ns-2-vercel_deploy",
+    )
+    expect(recommended.getAttribute("data-recommended")).toBe("true")
+    const a11y = screen.getByTestId(
+      "workspace-chat-message-next-steps-option-m-ns-2-a11y_scan",
+    )
+    expect(a11y.getAttribute("data-recommended")).toBe("false")
+  })
+
+  it("renders the slash command for each option", () => {
+    const messages: WorkspaceChatMessage[] = [nextStepsMsg("m-ns-3")]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    expect(
+      screen.getByTestId(
+        "workspace-chat-message-next-steps-slash-m-ns-3-vercel_deploy",
+      ).textContent,
+    ).toBe("/deploy-preview ws-99 --target=vercel")
+    expect(
+      screen.getByTestId(
+        "workspace-chat-message-next-steps-slash-m-ns-3-a11y_scan",
+      ).textContent,
+    ).toBe("/a11y-scan ws-99")
+    expect(
+      screen.getByTestId(
+        "workspace-chat-message-next-steps-slash-m-ns-3-commit_pr",
+      ).textContent,
+    ).toBe("/commit-and-pr ws-99")
+    expect(
+      screen.getByTestId(
+        "workspace-chat-message-next-steps-slash-m-ns-3-continue_edit",
+      ).textContent,
+    ).toBe("/edit-preview ws-99")
+  })
+
+  it("clicking an option pre-fills the composer with the slash command", () => {
+    const messages: WorkspaceChatMessage[] = [nextStepsMsg("m-ns-4")]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    const button = screen.getByTestId(
+      "workspace-chat-message-next-steps-button-m-ns-4-a11y_scan",
+    )
+    fireEvent.click(button)
+    const composer = screen.getByTestId(
+      "workspace-chat-input",
+    ) as HTMLTextAreaElement
+    expect(composer.value).toBe("/a11y-scan ws-99")
+  })
+
+  it("does not render the coach card for messages without previewNextSteps", () => {
+    const messages: WorkspaceChatMessage[] = [makeMessage("m-ns-5")]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    expect(
+      screen.queryByTestId("workspace-chat-message-next-steps-m-ns-5"),
+    ).toBeNull()
+  })
+
+  it("renders all four options in row-spec order", () => {
+    const messages: WorkspaceChatMessage[] = [nextStepsMsg("m-ns-6")]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    const list = screen.getByTestId(
+      "workspace-chat-message-next-steps-options-m-ns-6",
+    )
+    const items = Array.from(list.querySelectorAll("[data-kind]"))
+    expect(items.map((el) => el.getAttribute("data-kind"))).toEqual([
+      "vercel_deploy",
+      "a11y_scan",
+      "commit_pr",
+      "continue_edit",
+    ])
+  })
+
+  it("recommended row prefixes the label with ★", () => {
+    const messages: WorkspaceChatMessage[] = [nextStepsMsg("m-ns-7")]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    const button = screen.getByTestId(
+      "workspace-chat-message-next-steps-button-m-ns-7-vercel_deploy",
+    )
+    expect(button.textContent).toContain("★")
+    expect(button.textContent).toContain("Vercel")
+    const a11yButton = screen.getByTestId(
+      "workspace-chat-message-next-steps-button-m-ns-7-a11y_scan",
+    )
+    expect(a11yButton.textContent ?? "").not.toContain("★")
+  })
+
+  it("does not render the card when workspaceId is empty", () => {
+    const messages: WorkspaceChatMessage[] = [
+      makeMessage("m-ns-8", {
+        role: "system",
+        text: "what next?",
+        previewNextSteps: {
+          workspaceId: "",
+          label: "what next?",
+          options: [
+            {
+              kind: "vercel_deploy",
+              label: "Vercel 部署 / Deploy to Vercel",
+              slashCommand: "/deploy-preview ws --target=vercel",
+            },
+          ],
+        },
+      }),
+    ]
+    render(<WorkspaceChat workspaceType="web" messages={messages} />)
+    expect(
+      screen.queryByTestId("workspace-chat-message-next-steps-m-ns-8"),
+    ).toBeNull()
   })
 })

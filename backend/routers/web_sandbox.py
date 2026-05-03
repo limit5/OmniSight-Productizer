@@ -789,6 +789,29 @@ async def mark_preview_ready(
             "web_sandbox.preview_ready: SSE emit failed for %s: %s",
             workspace_id, exc,
         )
+    # W16.7 — once the iframe is mountable, surface the four-option
+    # "what next?" coach card (Vercel deploy / a11y scan / commit+PR /
+    # continue edit). Best-effort; emit failure does not break the
+    # operator-tier ready signal contract.
+    try:
+        from backend.web.preview_next_steps import emit_preview_next_steps
+        chosen_url: str | None = None
+        ingress = response.get("ingress_url")
+        host = response.get("preview_url")
+        if isinstance(ingress, str) and ingress:
+            chosen_url = ingress
+        elif isinstance(host, str) and host:
+            chosen_url = host
+        emit_preview_next_steps(
+            workspace_id=workspace_id,
+            preview_url=chosen_url,
+            broadcast_scope="session",
+        )
+    except Exception as exc:  # pragma: no cover - best-effort SSE
+        logger.warning(
+            "web_sandbox.preview_next_steps: SSE emit failed for %s: %s",
+            workspace_id, exc,
+        )
     return response
 
 
