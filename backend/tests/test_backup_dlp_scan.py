@@ -81,6 +81,61 @@ def test_scan_backup_db_skips_encrypted_secret_columns(tmp_path: Path) -> None:
     assert report.total_findings == 0
 
 
+def test_scan_backup_db_skips_token_ciphertext_suffix(tmp_path: Path) -> None:
+    db_path = tmp_path / "oauth.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE oauth_tokens ("
+            "id INTEGER PRIMARY KEY, "
+            "access_token_enc TEXT NOT NULL, "
+            "refresh_token_enc TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO oauth_tokens (access_token_enc, refresh_token_enc) "
+            "VALUES (:access_token_enc, :refresh_token_enc)",
+            {
+                "access_token_enc": "short-token-that-would-be-sensitive",
+                "refresh_token_enc": "another-short-token",
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = backup_dlp_scan.scan_backup_db(db_path)
+
+    assert report.passed is True
+    assert report.total_findings == 0
+
+
+def test_scan_backup_db_blocks_plaintext_sensitive_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "plaintext-token.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE webhook_deliveries ("
+            "id INTEGER PRIMARY KEY, "
+            "access_token TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO webhook_deliveries (access_token) VALUES (:access_token)",
+            {"access_token": "short-token-that-missed-secret-regex"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = backup_dlp_scan.scan_backup_db(db_path)
+
+    assert report.passed is False
+    assert report.total_findings == 1
+    finding = report.findings[0]
+    assert finding.table == "webhook_deliveries"
+    assert finding.column == "access_token"
+    assert finding.labels == ["sensitive_column_plaintext"]
+
+
 def test_cli_json_returns_nonzero_without_raw_secret(tmp_path: Path) -> None:
     db_path = tmp_path / "leaky.db"
     _write_db(db_path, [("token ghp_AbCdEf1234567890qrstuvwxyzABCDEF12", "")])
@@ -112,3 +167,17 @@ def test_backup_prod_db_requires_passphrase_and_dlp() -> None:
     assert "python3 scripts/backup_dlp_scan.py \"$PLAIN\"" in text
     assert "backup DLP scan failed; plaintext backup shredded" in text
     assert "OMNISIGHT_BACKUP_PASSPHRASE unset" not in text
+
+
+def test_backup_prod_db_uploads_immutable_s3_with_encryption() -> None:
+    text = (PROJECT_ROOT / "scripts" / "backup_prod_db.sh").read_text()
+
+    assert "OMNISIGHT_BACKUP_S3_URI" in text
+    assert "aws s3api put-object" in text
+    assert "--server-side-encryption AES256" in text
+    assert "--server-side-encryption aws:kms" in text
+    assert "--object-lock-mode COMPLIANCE" in text
+    assert "--object-lock-retain-until-date" in text
+    assert "--storage-class \"$storage_class\"" in text
+    assert "GLACIER_IR" in text
+    assert "upload_offsite_immutable \"$FINAL\"" in text

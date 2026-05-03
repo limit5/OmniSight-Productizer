@@ -42,7 +42,22 @@ SKIPPED_COLUMN_PREFIXES = (
 
 SKIPPED_COLUMN_SUFFIXES = (
     "_ciphertext",
+    "_enc",
+    "_fingerprint",
     "_hash",
+    "_ref",
+)
+
+SENSITIVE_COLUMN_MARKERS = (
+    "api_key",
+    "access_token",
+    "client_secret",
+    "credential",
+    "password_plaintext",
+    "private_key",
+    "refresh_token",
+    "secret_value",
+    "webhook_secret",
 )
 
 
@@ -89,6 +104,11 @@ def _is_skipped_column(name: str) -> bool:
         or any(key.startswith(prefix) for prefix in SKIPPED_COLUMN_PREFIXES)
         or any(key.endswith(suffix) for suffix in SKIPPED_COLUMN_SUFFIXES)
     )
+
+
+def _is_sensitive_plaintext_column(name: str) -> bool:
+    key = name.strip().lower()
+    return any(marker in key for marker in SENSITIVE_COLUMN_MARKERS)
 
 
 def _iter_user_tables(conn: sqlite3.Connection) -> Iterable[str]:
@@ -152,6 +172,15 @@ def scan_backup_db(db_path: Path | str) -> BackupDLPReport:
                                 column=column,
                                 rowid=rowid,
                                 labels=labels,
+                            )
+                        )
+                    elif _is_sensitive_plaintext_column(column):
+                        findings.append(
+                            BackupDLPFinding(
+                                table=table,
+                                column=column,
+                                rowid=rowid,
+                                labels=["sensitive_column_plaintext"],
                             )
                         )
     except sqlite3.Error as exc:

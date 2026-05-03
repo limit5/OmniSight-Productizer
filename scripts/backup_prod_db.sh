@@ -13,6 +13,17 @@
 #                                   password manager alongside the .gpg
 #                                   file to preserve restore capability.
 #                                   Unset → fail closed.
+#   OMNISIGHT_BACKUP_S3_URI        — optional s3://bucket/prefix for
+#                                   off-site immutable encrypted backup.
+#                                   When set, upload uses aws s3api
+#                                   put-object with Object Lock retention
+#                                   and server-side encryption.
+#   OMNISIGHT_BACKUP_S3_KMS_KEY_ID — optional KMS key id/arn. When set,
+#                                   S3 SSE uses aws:kms; otherwise AES256.
+#   OMNISIGHT_BACKUP_S3_RETAIN_DAYS — Object Lock retention days
+#                                   (default 365).
+#   OMNISIGHT_BACKUP_S3_STORAGE_CLASS — cold storage class
+#                                   (default GLACIER_IR).
 #
 # Flags:
 #   --label <STR>   appends to filename (default "manual")
@@ -49,6 +60,65 @@ fi
 ok()   { printf '  %s[OK]%s   %s\n' "$C_OK" "$C_OFF" "$*"; }
 warn() { printf '  %s[WARN]%s %s\n' "$C_WARN" "$C_OFF" "$*"; }
 die()  { printf '  %s[FAIL]%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+
+utc_days_from_now() {
+  local days="$1"
+  date -u -d "+${days} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || python3 - "$days" <<'PY'
+import datetime
+import sys
+
+days = int(sys.argv[1])
+now = datetime.datetime.now(datetime.timezone.utc)
+print((now + datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+upload_offsite_immutable() {
+  local src="$1"
+  [[ -n "${OMNISIGHT_BACKUP_S3_URI:-}" ]] || {
+    warn "off-site immutable backup skipped (OMNISIGHT_BACKUP_S3_URI unset)"
+    return 0
+  }
+  command -v aws >/dev/null || die "aws CLI missing; cannot upload immutable off-site backup"
+  [[ "$OMNISIGHT_BACKUP_S3_URI" == s3://* ]] || die "OMNISIGHT_BACKUP_S3_URI must start with s3://"
+
+  local retain_days="${OMNISIGHT_BACKUP_S3_RETAIN_DAYS:-365}"
+  [[ "$retain_days" =~ ^[1-9][0-9]*$ ]] || die "OMNISIGHT_BACKUP_S3_RETAIN_DAYS must be a positive integer"
+  local storage_class="${OMNISIGHT_BACKUP_S3_STORAGE_CLASS:-GLACIER_IR}"
+  local retain_until
+  retain_until="$(utc_days_from_now "$retain_days")"
+
+  local without_scheme="${OMNISIGHT_BACKUP_S3_URI#s3://}"
+  local bucket="${without_scheme%%/*}"
+  local prefix=""
+  if [[ "$without_scheme" == */* ]]; then
+    prefix="${without_scheme#*/}"
+  fi
+  [[ -n "$bucket" ]] || die "OMNISIGHT_BACKUP_S3_URI is missing bucket"
+  prefix="${prefix%/}"
+  local key
+  if [[ -n "$prefix" ]]; then
+    key="${prefix}/$(basename "$src")"
+  else
+    key="$(basename "$src")"
+  fi
+
+  local sse_args=(--server-side-encryption AES256)
+  if [[ -n "${OMNISIGHT_BACKUP_S3_KMS_KEY_ID:-}" ]]; then
+    sse_args=(--server-side-encryption aws:kms --ssekms-key-id "$OMNISIGHT_BACKUP_S3_KMS_KEY_ID")
+  fi
+
+  aws s3api put-object \
+    --bucket "$bucket" \
+    --key "$key" \
+    --body "$src" \
+    --storage-class "$storage_class" \
+    --object-lock-mode COMPLIANCE \
+    --object-lock-retain-until-date "$retain_until" \
+    "${sse_args[@]}" >/dev/null || die "immutable off-site backup upload failed"
+  ok "off-site immutable backup: s3://${bucket}/${key} (storage=${storage_class}, retain-until=${retain_until})"
+}
 
 [[ -n "${OMNISIGHT_BACKUP_PASSPHRASE:-}" ]] || \
   die "OMNISIGHT_BACKUP_PASSPHRASE is required for encrypted backups"
@@ -139,6 +209,7 @@ FINAL="$ENC"
 SIZE="$(du -h "$FINAL" | cut -f1)"
 ok "backup (encrypted): $FINAL ($SIZE)"
 ok "restore: printf '%s' \"\$OMNISIGHT_BACKUP_PASSPHRASE\" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --decrypt $FINAL > <out.db>"
+upload_offsite_immutable "$FINAL"
 
 # Prune — keep newest $PRUNE, delete older. Applies to any backup file
 # matching our label prefix (both short-lived .db and final .db.gpg).
