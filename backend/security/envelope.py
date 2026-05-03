@@ -33,8 +33,8 @@ Memory zeroization (KS.1.9)
 ───────────────────────────
 The helper keeps DEK bytes, nonce bytes, plaintext input bytes, and
 decrypted plaintext bytes in ``bytearray`` buffers where possible and
-clears those buffers with ``ctypes.memset`` in ``finally`` blocks after
-use. This is best-effort only: Python strings, temporary ``bytes``
+clears those buffers with libsodium ``sodium_memzero`` in ``finally``
+blocks after use. This is best-effort only: Python strings, temporary ``bytes``
 objects required by cryptography/KMS adapter APIs, and OpenSSL internal
 buffers are outside this module's direct control.
 
@@ -56,7 +56,6 @@ no read-after-write timing surface in this helper.
 from __future__ import annotations
 
 import base64
-import ctypes
 import hmac
 import json
 import os
@@ -65,6 +64,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from nacl.bindings import sodium_core
 
 from backend.security import kms_adapters
 
@@ -322,8 +322,15 @@ def _zeroize_bytearray(buffer: bytearray) -> None:
 
     if not buffer:
         return
-    ptr = ctypes.addressof(ctypes.c_char.from_buffer(buffer))
-    ctypes.memset(ptr, 0, len(buffer))
+    _sodium_memzero(buffer)
+
+
+def _sodium_memzero(buffer: bytearray) -> None:
+    view = sodium_core.ffi.from_buffer(buffer)
+    try:
+        sodium_core.lib.sodium_memzero(view, len(buffer))
+    finally:
+        del view
 
 
 def _load_ciphertext_envelope(ciphertext: str) -> dict[str, Any]:

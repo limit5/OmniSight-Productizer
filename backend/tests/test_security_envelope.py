@@ -195,7 +195,7 @@ def test_custom_kms_adapter_receives_tenant_dek_context() -> None:
     assert adapter.unwrap_calls[0][1] == dek_ref.encryption_context
 
 
-def test_zeroize_bytearray_uses_ctypes_memset() -> None:
+def test_zeroize_bytearray_uses_libsodium_memzero() -> None:
     buffer = bytearray(b"secret")
 
     envelope._zeroize_bytearray(buffer)
@@ -205,13 +205,13 @@ def test_zeroize_bytearray_uses_ctypes_memset() -> None:
 
 def test_encrypt_and_decrypt_zeroize_secret_buffers(monkeypatch) -> None:
     calls: list[int] = []
-    original_memset = envelope.ctypes.memset
+    original_memzero = envelope._sodium_memzero
 
-    def recording_memset(ptr, value, size):
-        calls.append(size)
-        return original_memset(ptr, value, size)
+    def recording_memzero(buffer: bytearray) -> None:
+        calls.append(len(buffer))
+        original_memzero(buffer)
 
-    monkeypatch.setattr(envelope.ctypes, "memset", recording_memset)
+    monkeypatch.setattr(envelope, "_sodium_memzero", recording_memzero)
     plaintext = "sk-ant-zeroize"
 
     ciphertext, dek_ref = envelope.encrypt(plaintext, TENANT_A)
@@ -275,7 +275,8 @@ def test_envelope_enabled_knob_true_values(monkeypatch, raw: str) -> None:
 def test_module_global_state_and_crypto_source_guards() -> None:
     source = inspect.getsource(envelope)
     assert "AESGCM" in source
-    assert "ctypes.memset" in source
+    assert "sodium_memzero" in source
+    assert "ctypes" not in source
     assert "secrets.token_bytes" in source
     assert "Fernet.generate_key" not in source
     assert "_adapter_registry" not in source
