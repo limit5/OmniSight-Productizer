@@ -1030,7 +1030,7 @@ def test_package_total_symbol_count_pinned_at_192():
     # W15.6 adds 13 vite_self_fix symbols → 288.
     # If this test fails with a DIFFERENT count, audit whether you
     # consciously added / removed a public symbol and update the pin.
-    assert len(web_pkg.__all__) == 330
+    assert len(web_pkg.__all__) == 345
 
 
 # ── 11. Whole-spec invariants ────────────────────────────────────────────

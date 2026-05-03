@@ -88,6 +88,25 @@ export interface WorkspaceChatAnnotation {
   description?: string
 }
 
+/**
+ * W16.4 — inline preview embed carried inside a chat message.
+ *
+ * The backend's `preview.ready` SSE event (emitted by
+ * `backend.web.web_preview_ready.emit_preview_ready`) carries the
+ * sandbox URL once the W14 dev server reports ready; the SSE consumer
+ * appends a system-role message with this `previewEmbed` set, and the
+ * message renderer mounts an `<iframe>` plus a fullscreen toggle so
+ * the operator never has to copy-paste the URL.
+ */
+export interface WorkspaceChatPreviewEmbed {
+  /** Sandbox URL the iframe loads (host-port or W14.3 ingress). */
+  url: string
+  /** W14 workspace id — useful for the FE to dedupe across rebuilds. */
+  workspaceId?: string
+  /** Optional human-facing label rendered above the iframe. */
+  label?: string
+}
+
 export interface WorkspaceChatMessage {
   id: string
   role: WorkspaceChatRole
@@ -98,6 +117,13 @@ export interface WorkspaceChatMessage {
   pending?: boolean
   attachments?: WorkspaceChatAttachment[]
   annotationIds?: string[]
+  /**
+   * W16.4 — when set, the message renders an inline iframe loading the
+   * sandbox URL, with a fullscreen-expand toggle. Mutually compatible
+   * with `text`/`attachments` so a system message can carry both
+   * "preview ready" prose and the iframe.
+   */
+  previewEmbed?: WorkspaceChatPreviewEmbed
 }
 
 export interface WorkspaceChatSubmission {
@@ -209,6 +235,79 @@ export function filesToChatAttachments(
         previewUrl,
       }
     })
+}
+
+/**
+ * W16.4 — render an iframe + fullscreen toggle for a chat-message
+ * preview embed. Pulled out as a sub-component so the fullscreen
+ * state is local to the message (each preview message has its own
+ * toggle independent of siblings).
+ */
+function ChatPreviewEmbed({
+  messageId,
+  embed,
+}: {
+  messageId: string
+  embed: WorkspaceChatPreviewEmbed
+}) {
+  const [fullscreen, setFullscreen] = React.useState<boolean>(false)
+  const titleId = `workspace-chat-preview-title-${messageId}`
+  const containerCls = fullscreen
+    ? "fixed inset-0 z-50 flex flex-col bg-background"
+    : "mt-2 flex flex-col gap-1 rounded-md border border-border bg-background"
+  const iframeCls = fullscreen
+    ? "h-full w-full flex-1 border-0"
+    : "h-64 w-full rounded-b-md border-0"
+  return (
+    <div
+      data-testid={`workspace-chat-message-preview-${messageId}`}
+      data-fullscreen={fullscreen ? "true" : "false"}
+      data-workspace-id={embed.workspaceId ?? ""}
+      className={containerCls}
+    >
+      <div className="flex items-center justify-between gap-2 px-2 py-1 text-[11px] text-muted-foreground">
+        <span
+          id={titleId}
+          data-testid={`workspace-chat-message-preview-label-${messageId}`}
+          className="truncate"
+        >
+          {embed.label || "Live preview"}
+        </span>
+        <div className="flex items-center gap-1">
+          <a
+            data-testid={`workspace-chat-message-preview-open-${messageId}`}
+            href={embed.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded px-1.5 py-0.5 text-[11px] text-muted-foreground underline-offset-2 hover:underline"
+          >
+            Open in new tab
+          </a>
+          <button
+            type="button"
+            data-testid={`workspace-chat-message-preview-toggle-${messageId}`}
+            aria-pressed={fullscreen}
+            aria-label={
+              fullscreen ? "Exit fullscreen preview" : "Expand preview to fullscreen"
+            }
+            onClick={() => setFullscreen((f) => !f)}
+            className="rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent"
+          >
+            {fullscreen ? "Exit fullscreen" : "Fullscreen"}
+          </button>
+        </div>
+      </div>
+      <iframe
+        data-testid={`workspace-chat-message-preview-iframe-${messageId}`}
+        src={embed.url}
+        title={embed.label || "Live preview"}
+        aria-labelledby={titleId}
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+        loading="lazy"
+        className={iframeCls}
+      />
+    </div>
+  )
 }
 
 function useResolvedWorkspaceType(
@@ -491,6 +590,12 @@ export function WorkspaceChat({
                   ))}
                 </ul>
               )}
+              {m.previewEmbed && m.previewEmbed.url ? (
+                <ChatPreviewEmbed
+                  messageId={m.id}
+                  embed={m.previewEmbed}
+                />
+              ) : null}
             </li>
           ))
         )}

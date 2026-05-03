@@ -667,3 +667,171 @@ describe("placeholder", () => {
     ).toBe("hello there")
   })
 })
+
+// ─── W16.4 — inline preview iframe ────────────────────────────────────────
+
+describe("W16.4 inline preview embed", () => {
+  function previewMessage(
+    id: string,
+    overrides: Partial<WorkspaceChatMessage["previewEmbed"]> = {},
+  ): WorkspaceChatMessage {
+    return makeMessage(id, {
+      role: "system",
+      text: "Live preview ready",
+      previewEmbed: {
+        url: "https://preview-abc.example.com",
+        workspaceId: "ws-42",
+        label: "Live preview ready",
+        ...overrides,
+      },
+    })
+  }
+
+  it("renders an iframe sourced from the embed url when previewEmbed is set", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[previewMessage("m-preview-1")]}
+      />,
+    )
+    const iframe = screen.getByTestId(
+      "workspace-chat-message-preview-iframe-m-preview-1",
+    ) as HTMLIFrameElement
+    expect(iframe.tagName.toLowerCase()).toBe("iframe")
+    expect(iframe.src).toBe("https://preview-abc.example.com/")
+  })
+
+  it("does NOT render the embed when previewEmbed is absent", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[
+          makeMessage("m-noembed-1", {
+            role: "agent",
+            text: "no embed here",
+          }),
+        ]}
+      />,
+    )
+    expect(
+      screen.queryByTestId("workspace-chat-message-preview-iframe-m-noembed-1"),
+    ).toBeNull()
+  })
+
+  it("renders the label above the iframe", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[previewMessage("m-preview-2", { label: "Landing page ready" })]}
+      />,
+    )
+    const label = screen.getByTestId(
+      "workspace-chat-message-preview-label-m-preview-2",
+    )
+    expect(label.textContent).toBe("Landing page ready")
+  })
+
+  it("falls back to a default label when none is supplied", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[
+          makeMessage("m-preview-3", {
+            role: "system",
+            text: "x",
+            previewEmbed: {
+              url: "https://x.example.com",
+            },
+          }),
+        ]}
+      />,
+    )
+    const label = screen.getByTestId(
+      "workspace-chat-message-preview-label-m-preview-3",
+    )
+    expect((label.textContent ?? "").trim().length).toBeGreaterThan(0)
+  })
+
+  it("toggles fullscreen via the expand button", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[previewMessage("m-preview-4")]}
+      />,
+    )
+    const container = screen.getByTestId(
+      "workspace-chat-message-preview-m-preview-4",
+    )
+    expect(container.getAttribute("data-fullscreen")).toBe("false")
+    const toggle = screen.getByTestId(
+      "workspace-chat-message-preview-toggle-m-preview-4",
+    )
+    fireEvent.click(toggle)
+    expect(container.getAttribute("data-fullscreen")).toBe("true")
+    expect(toggle.getAttribute("aria-pressed")).toBe("true")
+    fireEvent.click(toggle)
+    expect(container.getAttribute("data-fullscreen")).toBe("false")
+    expect(toggle.getAttribute("aria-pressed")).toBe("false")
+  })
+
+  it("renders an Open-in-new-tab link pointing at the embed url", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[previewMessage("m-preview-5")]}
+      />,
+    )
+    const link = screen.getByTestId(
+      "workspace-chat-message-preview-open-m-preview-5",
+    ) as HTMLAnchorElement
+    expect(link.href).toBe("https://preview-abc.example.com/")
+    expect(link.target).toBe("_blank")
+    expect(link.rel).toContain("noopener")
+  })
+
+  it("threads the workspaceId onto the container for FE dedupe", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[previewMessage("m-preview-6", { workspaceId: "ws-99" })]}
+      />,
+    )
+    const container = screen.getByTestId(
+      "workspace-chat-message-preview-m-preview-6",
+    )
+    expect(container.getAttribute("data-workspace-id")).toBe("ws-99")
+  })
+
+  it("ignores an embed that has no url", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[
+          makeMessage("m-preview-7", {
+            role: "system",
+            text: "no url",
+            previewEmbed: { url: "" },
+          }),
+        ]}
+      />,
+    )
+    expect(
+      screen.queryByTestId("workspace-chat-message-preview-iframe-m-preview-7"),
+    ).toBeNull()
+  })
+
+  it("locks the iframe with a sandbox attribute", () => {
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        messages={[previewMessage("m-preview-8")]}
+      />,
+    )
+    const iframe = screen.getByTestId(
+      "workspace-chat-message-preview-iframe-m-preview-8",
+    ) as HTMLIFrameElement
+    const sandbox = iframe.getAttribute("sandbox") ?? ""
+    expect(sandbox).toContain("allow-scripts")
+    expect(sandbox).toContain("allow-same-origin")
+  })
+})

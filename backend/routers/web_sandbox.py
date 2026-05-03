@@ -752,7 +752,14 @@ async def mark_preview_ready(
     user: _au.User = Depends(_au.require_operator),
     manager: WebSandboxManager = Depends(get_manager),
 ) -> dict[str, Any]:
-    """Caller signals that the dev server has reported ready."""
+    """Caller signals that the dev server has reported ready.
+
+    W16.4 — emits a ``preview.ready`` SSE event carrying the sandbox
+    URL so the orchestrator-chat surface can append an inline-iframe
+    message without polling docker logs from the browser.  The emit is
+    best-effort; a transport failure does not break the existing
+    operator-tier ready signal contract.
+    """
 
     try:
         instance = manager.mark_ready(workspace_id)
@@ -760,7 +767,29 @@ async def mark_preview_ready(
         raise HTTPException(status_code=404, detail=str(exc))
     except WebSandboxError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    return _instance_to_response(instance)
+    response = _instance_to_response(instance)
+    try:
+        from backend.web.web_preview_ready import (
+            preview_ready_payload_from_instance_dict,
+            emit_preview_ready,
+        )
+        payload = preview_ready_payload_from_instance_dict(response)
+        if payload is not None:
+            emit_preview_ready(
+                workspace_id=payload.workspace_id,
+                preview_url=payload.preview_url,
+                label=payload.label,
+                sandbox_id=payload.sandbox_id,
+                ingress_url=payload.ingress_url,
+                host_port=payload.host_port,
+                broadcast_scope="session",
+            )
+    except Exception as exc:  # pragma: no cover - best-effort SSE
+        logger.warning(
+            "web_sandbox.preview_ready: SSE emit failed for %s: %s",
+            workspace_id, exc,
+        )
+    return response
 
 
 @router.delete("/preview/{workspace_id}")
