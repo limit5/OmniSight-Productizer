@@ -1,13 +1,14 @@
-"""SC.13.1 / SC.13.2 / SC.13.3 -- Bot defense scaffold bridge.
+"""SC.13.1 / SC.13.2 / SC.13.3 / SC.13.4 -- Bot defense scaffold bridge.
 
 This module emits a small generated-app manifest that reuses the AS.3
 TypeScript twin under ``templates/_shared/bot-challenge``. SC.13.2 adds
 the default form belt for login / signup / password-reset / contact /
 comment forms. SC.13.3 adds the AS.4 honeypot field bridge for the AS.4
-supported form namespaces. It does not reimplement siteverify, score
-classification, fallback, reject, or honeypot field-name logic; generated
-forms import those primitives from the AS.3 / AS.4 bridges this module
-creates.
+supported form namespaces. SC.13.4 adds a small observability dashboard
+helper for challenge pass / fail / fallback ratios. It does not reimplement
+siteverify, score classification, fallback, reject, or honeypot field-name
+logic; generated forms import those primitives from the AS.3 / AS.4 bridges
+this module creates.
 
 Module-global state audit (per implement_phase_step.md SOP Step 1):
 constants are immutable tuples / frozen dataclasses derived from AS.3 and
@@ -35,6 +36,7 @@ DEFAULT_HONEYPOT_IMPORT = "@/shared/honeypot"
 DEFAULT_BOT_CHALLENGE_BRIDGE_PATH = "auth/bot-challenge.ts"
 DEFAULT_HONEYPOT_BRIDGE_PATH = "auth/honeypot.ts"
 DEFAULT_BOT_DEFENSE_FORMS_PATH = "auth/bot-defense-forms.ts"
+DEFAULT_BOT_DEFENSE_DASHBOARD_PATH = "auth/bot-defense-dashboard.ts"
 
 _SITE_KEY_ENVS: tuple[tuple[bot_challenge.Provider, str], ...] = (
     (bot_challenge.Provider.TURNSTILE, "NEXT_PUBLIC_TURNSTILE_SITE_KEY"),
@@ -106,6 +108,7 @@ class BotDefenseScaffoldOptions:
     bridge_path: str = DEFAULT_BOT_CHALLENGE_BRIDGE_PATH
     honeypot_bridge_path: str = DEFAULT_HONEYPOT_BRIDGE_PATH
     forms_path: str = DEFAULT_BOT_DEFENSE_FORMS_PATH
+    dashboard_path: str = DEFAULT_BOT_DEFENSE_DASHBOARD_PATH
 
     def validate(self) -> None:
         if not self.bot_challenge_import or not self.bot_challenge_import.strip():
@@ -118,6 +121,8 @@ class BotDefenseScaffoldOptions:
             raise ValueError("honeypot_bridge_path is required")
         if not self.forms_path or not self.forms_path.strip():
             raise ValueError("forms_path is required")
+        if not self.dashboard_path or not self.dashboard_path.strip():
+            raise ValueError("dashboard_path is required")
 
 
 @dataclass(frozen=True)
@@ -185,6 +190,13 @@ def render_bot_defense_scaffold(
                     opts.forms_path,
                 ),
             ),
+            AuthScaffoldFile(
+                opts.dashboard_path.strip("/"),
+                _bot_defense_dashboard_file(
+                    opts.bridge_path,
+                    opts.dashboard_path,
+                ),
+            ),
         ),
         env=_env_vars(providers),
         providers=providers,
@@ -193,6 +205,7 @@ def render_bot_defense_scaffold(
             "reuses AS.3 templates/_shared/bot-challenge for verify/fallback/reject logic",
             "SC.13.2 defaults cover login/signup/password-reset/contact/comment forms",
             "reuses AS.4 templates/_shared/honeypot for auto hidden-field generation",
+            "SC.13.4 dashboard exposes challenge pass/fail/fallback ratios",
         ),
     )
 
@@ -267,6 +280,21 @@ def _bot_challenge_bridge_file(bot_challenge_import: str) -> str:
 export {{
   BOT_CHALLENGE_REJECTED_CODE,
   BOT_CHALLENGE_REJECTED_HTTP_STATUS,
+  OUTCOME_BLOCKED_LOWSCORE,
+  OUTCOME_BYPASS_APIKEY,
+  OUTCOME_BYPASS_BOOTSTRAP,
+  OUTCOME_BYPASS_CHATOPS,
+  OUTCOME_BYPASS_IP_ALLOWLIST,
+  OUTCOME_BYPASS_PROBE,
+  OUTCOME_BYPASS_TEST_TOKEN,
+  OUTCOME_BYPASS_WEBHOOK,
+  OUTCOME_JSFAIL_FALLBACK_HCAPTCHA,
+  OUTCOME_JSFAIL_FALLBACK_RECAPTCHA,
+  OUTCOME_JSFAIL_HONEYPOT_FAIL,
+  OUTCOME_JSFAIL_HONEYPOT_PASS,
+  OUTCOME_PASS,
+  OUTCOME_UNVERIFIED_LOWSCORE,
+  OUTCOME_UNVERIFIED_SERVERERR,
   Provider,
   pickProvider,
   secretEnvFor,
@@ -284,6 +312,111 @@ export const botChallengeFallbackOrder = Object.freeze([{fallback_order}])
 export const botChallengeSiteKeyEnv = Object.freeze({{
 {site_key_pairs}
 }})
+"""
+
+
+def _bot_defense_dashboard_file(
+    bridge_path: str,
+    dashboard_path: str,
+) -> str:
+    bridge_import = _relative_ts_import(bridge_path, dashboard_path)
+    return f"""// SC.13.4 bot defense observability dashboard.
+// Buckets AS.3 outcomes into challenge pass/fail/fallback ratios.
+
+import {{
+  OUTCOME_BLOCKED_LOWSCORE,
+  OUTCOME_BYPASS_APIKEY,
+  OUTCOME_BYPASS_BOOTSTRAP,
+  OUTCOME_BYPASS_CHATOPS,
+  OUTCOME_BYPASS_IP_ALLOWLIST,
+  OUTCOME_BYPASS_PROBE,
+  OUTCOME_BYPASS_TEST_TOKEN,
+  OUTCOME_BYPASS_WEBHOOK,
+  OUTCOME_JSFAIL_FALLBACK_HCAPTCHA,
+  OUTCOME_JSFAIL_FALLBACK_RECAPTCHA,
+  OUTCOME_JSFAIL_HONEYPOT_FAIL,
+  OUTCOME_JSFAIL_HONEYPOT_PASS,
+  OUTCOME_PASS,
+  OUTCOME_UNVERIFIED_LOWSCORE,
+  OUTCOME_UNVERIFIED_SERVERERR,
+  type BotChallengeResult,
+}} from "{bridge_import}"
+
+export interface BotDefenseChallengeDashboardSummary {{
+  readonly total: number
+  readonly passCount: number
+  readonly failCount: number
+  readonly fallbackCount: number
+  readonly passRatio: number | null
+  readonly failRatio: number | null
+  readonly fallbackRatio: number | null
+}}
+
+export type BotDefenseChallengeDashboardEvent = Pick<BotChallengeResult, "outcome">
+
+export const botDefensePassOutcomes = Object.freeze(new Set<string>([
+  OUTCOME_PASS,
+  OUTCOME_BYPASS_APIKEY,
+  OUTCOME_BYPASS_WEBHOOK,
+  OUTCOME_BYPASS_CHATOPS,
+  OUTCOME_BYPASS_BOOTSTRAP,
+  OUTCOME_BYPASS_PROBE,
+  OUTCOME_BYPASS_IP_ALLOWLIST,
+  OUTCOME_BYPASS_TEST_TOKEN,
+  OUTCOME_JSFAIL_HONEYPOT_PASS,
+]))
+
+export const botDefenseFailOutcomes = Object.freeze(new Set<string>([
+  OUTCOME_UNVERIFIED_LOWSCORE,
+  OUTCOME_UNVERIFIED_SERVERERR,
+  OUTCOME_BLOCKED_LOWSCORE,
+  OUTCOME_JSFAIL_HONEYPOT_FAIL,
+]))
+
+export const botDefenseFallbackOutcomes = Object.freeze(new Set<string>([
+  OUTCOME_JSFAIL_FALLBACK_RECAPTCHA,
+  OUTCOME_JSFAIL_FALLBACK_HCAPTCHA,
+]))
+
+export const botDefenseChallengeDashboardBuckets = Object.freeze({{
+  pass: botDefensePassOutcomes,
+  fail: botDefenseFailOutcomes,
+  fallback: botDefenseFallbackOutcomes,
+}})
+
+function safeRatio(count: number, total: number): number | null {{
+  return total === 0 ? null : count / total
+}}
+
+export function botDefenseChallengeDashboard(
+  events: ReadonlyArray<BotDefenseChallengeDashboardEvent>,
+): BotDefenseChallengeDashboardSummary {{
+  let passCount = 0
+  let failCount = 0
+  let fallbackCount = 0
+
+  for (const event of events) {{
+    const outcome = event.outcome
+    if (botDefenseFallbackOutcomes.has(outcome)) {{
+      fallbackCount += 1
+    }} else if (botDefensePassOutcomes.has(outcome)) {{
+      passCount += 1
+    }} else if (botDefenseFailOutcomes.has(outcome)) {{
+      failCount += 1
+    }}
+  }}
+
+  const total = passCount + failCount + fallbackCount
+  return Object.freeze({{
+    total,
+    passCount,
+    failCount,
+    fallbackCount,
+    passRatio: safeRatio(passCount, total),
+    failRatio: safeRatio(failCount, total),
+    fallbackRatio: safeRatio(fallbackCount, total),
+  }})
+}}
 """
 
 
@@ -445,6 +578,7 @@ __all__ = [
     "BotDefenseScaffoldResult",
     "DEFAULT_BOT_CHALLENGE_BRIDGE_PATH",
     "DEFAULT_BOT_CHALLENGE_IMPORT",
+    "DEFAULT_BOT_DEFENSE_DASHBOARD_PATH",
     "DEFAULT_BOT_DEFENSE_FORMS_PATH",
     "DEFAULT_HONEYPOT_BRIDGE_PATH",
     "DEFAULT_HONEYPOT_IMPORT",
