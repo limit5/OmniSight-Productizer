@@ -220,6 +220,13 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # subscription identifiers and current subscription status for
     # FS.8.4 state sync; no API keys or webhook secrets live here.
     "provisioned_billing",
+    # SC.10.1 (alembic 0064): per-user data-subject request workflow
+    # queue. FKs ``tenant_id → tenants.id`` and ``user_id → users.id``
+    # (both CASCADE) so it MUST replay after both parents. PK is the
+    # app-generated TEXT ``id`` (``dsar-*``); NOT in
+    # TABLES_WITH_IDENTITY_ID. Empty until SC.10.2-SC.10.5 start writing
+    # access / erasure / portability workflow rows.
+    "dsar_requests",
     "sessions",
     "github_installations",
     # Project runs (alembic 0006).
