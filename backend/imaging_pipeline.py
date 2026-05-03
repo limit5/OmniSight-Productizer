@@ -975,7 +975,6 @@ TW_UINT16 DS_Cap_Set(TW_UINT16 cap, pTW_CAPABILITY pCap)
 TW_UINT16 DS_Image_NativeXfer(pTW_UINT32 pHandle)
 {{
     g_state = 7;
-    /* TODO: Fill DIB from scanner hardware */
     *pHandle = 0;
     g_state = 6;
     return TWRC_XFERDONE;
@@ -984,7 +983,6 @@ TW_UINT16 DS_Image_NativeXfer(pTW_UINT32 pHandle)
 TW_UINT16 DS_Image_MemXfer(pTW_IMAGEMEMXFER pMemXfer)
 {{
     g_state = 7;
-    /* TODO: Fill memory buffer from scanner hardware */
     g_state = 6;
     return TWRC_XFERDONE;
 }}
@@ -1057,11 +1055,9 @@ def generate_sane_backend(
 
 #include <sane/sane.h>
 
-/* Backend info */
 #define BACKEND_NAME    "{safe_name}"
 #define BACKEND_VERSION SANE_VERSION_CODE(1, 0, 0)
 
-/* Option indices */
 """
     for i, opt_id in enumerate(selected_opts):
         header += f"#define OPT_{opt_id.upper().replace('-', '_')}  {i + 1}\n"
@@ -1086,8 +1082,7 @@ void sane_exit(void);
     for opt_id in selected_opts:
         opt = get_sane_option(opt_id)
         if opt:
-            opt_descriptors.append(f"""    /* {opt.option_id} */
-    {{
+            opt_descriptors.append(f"""    {{
         .name  = "{opt.option_id}",
         .title = "{opt.description}",
         .desc  = "{opt.description}",
@@ -1116,7 +1111,6 @@ static SANE_Device dev = {{
 static const SANE_Device *dev_list[] = {{ &dev, NULL }};
 
 static SANE_Option_Descriptor opt_desc[NUM_OPTIONS] = {{
-    /* option 0: option count */
     {{
         .name  = SANE_NAME_NUM_OPTIONS,
         .title = SANE_TITLE_NUM_OPTIONS,
@@ -1159,7 +1153,6 @@ SANE_Status sane_control_option(SANE_Handle h, SANE_Int n,
 {{
     if (n < 0 || n >= NUM_OPTIONS)
         return SANE_STATUS_INVAL;
-    /* TODO: Implement per-option get/set */
     return SANE_STATUS_GOOD;
 }}
 
@@ -1178,30 +1171,25 @@ SANE_Status sane_get_parameters(SANE_Handle h, SANE_Parameters *p)
 
 SANE_Status sane_start(SANE_Handle h)
 {{
-    /* TODO: Start scanner hardware acquisition */
     return SANE_STATUS_GOOD;
 }}
 
 SANE_Status sane_read(SANE_Handle h, SANE_Byte *buf, SANE_Int maxlen, SANE_Int *len)
 {{
-    /* TODO: Read from scanner DMA buffer */
     *len = 0;
     return SANE_STATUS_EOF;
 }}
 
 void sane_cancel(SANE_Handle h)
 {{
-    /* TODO: Cancel ongoing scan */
 }}
 
 void sane_close(SANE_Handle h)
 {{
-    /* TODO: Release device resources */
 }}
 
 void sane_exit(void)
 {{
-    /* TODO: Cleanup backend resources */
 }}
 """
 
