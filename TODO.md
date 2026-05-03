@@ -1533,7 +1533,7 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 >
 > **影響**：目前等於「沒 internet 就退化成純 chat、不能跑 agent skill」。HD.21.5 air-gapped / self-hosted 客戶情境會中招（agent dispatcher 收到 ollama provider 時靜默 degrade、operator 看不到 fallback 警示）。
 
-- [ ] Z.6.1 確認 `langchain-ollama` 鎖到 ≥ 0.2（`backend/requirements.txt` / `pnpm` 對應 lockfile 對齊），跑一次 `pip-audit` 確認沒引入新漏洞
+- [x] Z.6.1 確認 `langchain-ollama` 鎖到 ≥ 0.2（`backend/requirements.txt` / `pnpm` 對應 lockfile 對齊），跑一次 `pip-audit` 確認沒引入新漏洞
 - [ ] Z.6.2 `backend/llm_adapter.py::build_chat_model()` ollama 分支接 `bind_tools` 路徑、與其他 7 家共用 adapter `tool_call()` 流
 - [ ] Z.6.3 `backend/agents/llm.py::AGENT_TOOLS` mapping 確認 ollama provider 不被短路、specialist node 拿到 `bind_tools_for=agent_type` 後正常 invoke
 - [ ] Z.6.4 **Model 兼容矩陣**寫進 `config/llm_pricing.yaml` 同層的 `config/ollama_tool_calling.yaml`：列 9 顆主流 model 對 tool_calls 的支援度（`full / partial / none`）+ 推薦最低版本；catalog UI 顯示 badge
@@ -3098,11 +3098,11 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] KS.1.2 **Per-tenant DEK schema** + envelope wrap/unwrap helper（`encrypt(plaintext, tenant_id) → (ciphertext, dek_ref)` / 反向）
 - [x][G] KS.1.3 **AS Token Vault 升級**：雙讀雙寫 30 天遷移期 — 寫只走新 envelope、讀 fallback 到舊 Fernet；30 天後 deprecate 舊路徑
 - [x][G] KS.1.4 **Master KEK rotation hook**：季度自動 rotation、`key_version` column 啟用為索引、舊 row 後台 lazy re-encrypt
-- [~][G] KS.1.5 **Decryption audit log**：每筆 decryption 寫 `(tenant / user / time / key_id / request_id)` → N10 ledger（tamper-evident）
-- [ ] KS.1.6 **Spend anomaly detector**：per-tenant token rate threshold + 觸發後 auto-throttle + Slack / email alert
-- [ ] KS.1.7 **Log secret scrubber**：custom logger filter 攔 secret pattern → `[REDACTED]`；CI pre-commit `gitleaks` / `trufflehog` 掃描
-- [ ] KS.1.8 **Backup pipeline DLP**：backup encrypt + DLP scanner、防 secret 隨備份外流
-- [ ] KS.1.9 **Memory zeroization**：Python `ctypes.memset` 用後抹除（best-effort、防 memory dump）
+- [x][G] KS.1.5 **Decryption audit log**：每筆 decryption 寫 `(tenant / user / time / key_id / request_id)` → N10 ledger（tamper-evident）
+- [x][G] KS.1.6 **Spend anomaly detector**：per-tenant token rate threshold + 觸發後 auto-throttle + Slack / email alert
+- [x][G] KS.1.7 **Log secret scrubber**：custom logger filter 攔 secret pattern → `[REDACTED]`；CI pre-commit `gitleaks` / `trufflehog` 掃描
+- [x][G] KS.1.8 **Backup pipeline DLP**：backup encrypt + DLP scanner、防 secret 隨備份外流
+- [~][G] KS.1.9 **Memory zeroization**：Python `ctypes.memset` 用後抹除（best-effort、防 memory dump）
 - [ ] KS.1.10 **alembic 0106** — `kms_keys` / `tenant_deks` / `decryption_audits` / `spend_thresholds` / `kek_rotations`
 - [ ] KS.1.11 **Compat regression**：既有 `oauth_tokens` / `customer_secrets` / future provider keys 全走新路徑、0 回歸；雙寫期間隨機 hard-restart 測試
 - [ ] KS.1.12 **Single knob**：`OMNISIGHT_KS_ENVELOPE_ENABLED=false` 退回 single Fernet 路徑（migration 雙寫期間有效、之後此 knob 永久 ON）
