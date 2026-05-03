@@ -79,6 +79,22 @@ On **every SOC 2 Type II readiness milestone** (KS.4.7):
    evidence collection, GRC platform evaluation, and independent CPA
    firm selection.
 
+On **every GDPR / DSAR request lifecycle change** (KS.4.8):
+
+1. Store raw exports, tenant deletion evidence, DEK purge proof,
+   subprocessor receipts, and audit redaction summary in the private
+   security evidence vault; do not commit raw exports, customer data,
+   secrets, raw audit payloads, plaintext tokens, plaintext DEKs, or
+   wrapped DEK material.
+2. Compute SHA-256 fingerprints for the stored export, if one exists,
+   and for the deletion / redaction evidence bundle.
+3. Append one row to the "DSAR Evidence" table when a request is
+   received, exported, erased, delayed, legally held, completed, or
+   corrected.
+4. Follow `gdpr_dsar_alignment_sop.md` for tenant data deletion, DEK
+   purge, audit metadata retention, raw payload deletion, and DSAR export
+   workflow.
+
 ## Upgrades
 
 | Cut-over (UTC) | Package | From → To | PR | Operator | Disposition | Notes |
@@ -138,6 +154,18 @@ raw evidence, screenshots, customer data, secrets, or platform exports
 in this ledger. Use `correction -> <quarter/auditor/evidence-index-sha256>`
 in Notes to correct a prior row.
 
+## DSAR Evidence
+
+| Completed (UTC) | Request ID | Request type | Subject scope | Export SHA-256 | Evidence SHA-256 | DEKs purged | Audit rows redacted | Disposition | Notes |
+|---|---|---|---|---|---|---:|---:|---|---|
+| _(no DSAR evidence logged yet - KS.4.8 policy effective 2026-05-03)_ | | | | | | | | | |
+
+DSAR evidence rows are append-only. Do not store raw exports, customer
+data, raw audit payloads, secrets, plaintext tokens, plaintext DEKs, or
+wrapped DEK material in this ledger. Use
+`correction -> <request-id/evidence-sha256>` in Notes to correct a prior
+row.
+
 ## Trigger vocabulary (Rollbacks)
 
 Use one of these standard strings in the Rollbacks "Trigger" column so
@@ -162,6 +190,7 @@ the quarterly review can tally by cause:
 * Quarterly pentest SOP: [`quarterly_pentest_sop.md`](quarterly_pentest_sop.md)
 * Bug bounty SOP: [`bug_bounty_program_sop.md`](bug_bounty_program_sop.md)
 * SOC 2 Type II readiness checklist: [`soc2_type2_readiness_checklist.md`](soc2_type2_readiness_checklist.md)
+* GDPR / DSAR alignment SOP: [`gdpr_dsar_alignment_sop.md`](gdpr_dsar_alignment_sop.md)
 * Deploy-time gate: [`../../scripts/check_bluegreen_gate.py`](../../scripts/check_bluegreen_gate.py)
 * Auto-label workflow: [`../../.github/workflows/blue-green-gate.yml`](../../.github/workflows/blue-green-gate.yml)
 * Fallback SOP (Path C hard rollback): [`fallback_branches.md`](fallback_branches.md)
