@@ -1564,7 +1564,8 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 - [x] Z.7.5 **三家 × streaming + tool_calls test**：streaming 模式同時拿 tool_calls；Gemini 早期 model 不支援可走 `pytest.skip(reason=...)`、文件記錄
 - [x] Z.7.6 **三家 × nested schema test**：定義 `book_flight(from: str, to: str, date: str, passengers: list[dict])` 巢狀 schema + enum → 驗三家 silent truncate / 錯誤行為（這條最容易抓 schema 跨家偏差）
 - [x] Z.7.7 **GitHub Actions workflow** `.github/workflows/llm-live-tests.yml`：cron `0 6 * * *` UTC（每天 06:00 UTC = 台北 14:00）、單次 budget guard < USD $0.50、結果寫 `SharedKV("llm_live_test_status")` + dashboard `Z provider observability` 顯示「Last live-test pass: 2h ago」chip <!-- AI 完成：workflow `.github/workflows/llm-live-tests.yml` 建立（4 jobs: live-tests / budget-guard / report / gate）；`scripts/ci_budget_guard.py` 靜態 cost estimator；`scripts/report_live_test_status.py` CI reporter（POST 到 backend + step summary）；`backend/routers/live_test_status.py` GET+POST 端點寫 SharedKV("llm_live_test_status")；`components/omnisight/live-test-status-chip.tsx` 5min 輪詢 chip；`token-usage-stats.tsx` 加入 chip。Operator 需做：在 GitHub Actions repo Secrets 加入 ANTHROPIC_API_KEY_CI / OPENAI_API_KEY_CI / GOOGLE_API_KEY_CI（Z.7.1 已說明）+ OMNISIGHT_BACKEND_URL + OMNISIGHT_REPORTER_TOKEN + 後端加入 OMNISIGHT_REPORTER_TOKEN env var。 -->
-- [ ] Z.7.8 **Failure escalation**：連續 2 次 nightly fail → BP.B Guild 派 `llm-adapter-debug-bot` 自動診斷 + 開 issue
+- [x] Z.7.8 **Failure escalation**：連續 2 次 nightly fail → BP.B Guild 派 `llm-adapter-debug-bot` 自動診斷 + 開 issue <!-- AI 完成：新增 `scripts/llm_adapter_debug_bot.py`（standalone debug-bot：下載兩次 run 的 pytest artifact、分析三家 provider 失敗模式、生成 RCA checklist、gh issue create + rate-limit dedup）；`.github/workflows/llm-live-tests.yml` 新增 `escalate` job（issues: write 權限；Python step 用 gh run list 檢查前一次 run conclusion；consecutive == fail → 執行 bot）；`backend/routers/live_test_status.py` POST handler 加入 consecutive_failures 計數（fail 時 +1 / pass 時 reset 0）、GET response 加入 consecutive_failures 欄位；同步修正 Z.7.7 潛在 bug（from __future__ + FastAPI 0.115 204 response_model=None）；19 個單元測試全過。BP.B Guild dispatch 待 BP.B 落地後包裝，目前以 standalone script 實作。 -->
+
 - [ ] Z.7.9 **Budget guard**：單次 nightly run cost 預估 < USD $0.50（限 token 上限 + max iter = 3）、超過 budget 自動 fail + alert
 - [ ] Z.7.10 `docs/integrations/llm-observability.md` 補一節「Live integration test 涵蓋率 + pass/fail SOP」
 
@@ -3172,9 +3173,9 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] KS.4.10 **LLM-as-Firewall 輸入 guardrail**（**2026-05-02 新增 from Agentic Design Patterns Ch 18 Guardrails**）：`backend/security/llm_firewall.py` — Haiku-based fast classifier `classify_input(text) → {safe, suspicious, blocked}`，擋 prompt injection / jailbreak / PII / 違規 prompt。**為什麼必要**：KS.4.1 secret scrubber 是 **output** 端 (擋洩密)，KS.4.10 是 **input** 端 (擋攻擊)；untrusted user input (chat / GitHub issue / 客戶 ticket / 上傳文件) 進 specialist agent 前必過此層，否則 prompt injection 攻擊面巨大
 - [x][G] KS.4.11 **三層攔截機制**：safe → pass、suspicious → log + 加 system prompt 警示 LLM 提高警覺、blocked → 拒絕 + 回報 audit_log + 阻 invocation
 - [x][G] KS.4.12 **整合 Orchestrator entry**：所有 user-facing input (chat / API / webhook) 在進 specialist routing 前先過 firewall；後台內部 specialist↔specialist 通信豁免 (避免 over-blocking)；BP.A2A inbound endpoint 也走 firewall (外部 A2A caller 是 untrusted)
-- [~][G] KS.4.13 **alembic 0187 `firewall_events` table**：`event_id / tenant_id / classification / input_hash / blocked_reason / created_at` (持久化 blocked + suspicious cases 給 review，input plain text 不入庫只存 hash 避免擴大洩露面)
-- [ ] KS.4.14 **Tests** — `backend/tests/test_llm_firewall.py` ~40 test：經典 jailbreak corpus (DAN / system override / role play attacks 涵蓋公開 jailbreak 集) + safe negative case + false positive 校準 (避免擋掉合法 input) + per-tenant isolation
-- [ ] KS.4.15 **整合既有 PEP gateway**：firewall 是 PEP 的一個 layer (而非取代 PEP)；不通過 firewall 的 input 連 PEP 都不到、直接 audit log
+- [x][G] KS.4.13 **alembic 0187 `firewall_events` table**：`event_id / tenant_id / classification / input_hash / blocked_reason / created_at` (持久化 blocked + suspicious cases 給 review，input plain text 不入庫只存 hash 避免擴大洩露面)
+- [x][G] KS.4.14 **Tests** — `backend/tests/test_llm_firewall.py` ~40 test：經典 jailbreak corpus (DAN / system override / role play attacks 涵蓋公開 jailbreak 集) + safe negative case + false positive 校準 (避免擋掉合法 input) + per-tenant isolation
+- [~][G] KS.4.15 **整合既有 PEP gateway**：firewall 是 PEP 的一個 layer (而非取代 PEP)；不通過 firewall 的 input 連 PEP 都不到、直接 audit log
 
 預估：**1.5 週**（KS.4.1-9 約 1 週 + KS.4.10-15 LLM firewall ~0.5 週）
 
@@ -6035,3 +6036,72 @@ BP.E GraphRAG / Neo4j
 | **Total** | **~727-938 day**（含 BP 主線；BP.W3 不另計避免重複）|
 
 3-person team parallelized: **~7.5-10.5 months wall-clock**.
+
+---
+
+## 🅷🅴 Priority HE — Hardware Engineering Expansion（**未來擴張、現階段 hard-deferred**）
+
+> **狀態**：**規劃 placeholder，現在不啟動、不分配 runner、不投入工時**。
+>
+> **觸發條件**（HARD GATE，兩條都要滿足）：
+> 1. TODO.md 上**所有現有 Priority 完工**（W ✅ / SC ✅ / FS ✅ / BP / D / R / Z / KS / etc 全 [x]）
+> 2. 完工後**穩定運作 ≥ 6 個月**（沒重大 incident、沒大 refactor、customer-facing 跑得順）
+>
+> **預估觸發時間**：2027+。在那之前**只做 watch-list quarterly scan**，不寫 production code。
+>
+> **背景**（2026-05-03 strategic discussion）：系統目前涵蓋 user 自己擅長的領域。User 不熟的部分（hardware design generation / ID / 機構 / CAD 熱流力學）若提早 AI-ize，缺乏 staff-level 把關 → 客戶量產翻車風險。**先把擅長領域 100% AI-ize 跑穩 → 再擴張**。
+>
+> **詳細策略**：見 memory `project_hw_expansion_plan.md`（含業界 fork target / wrap target / watch-list 完整 snapshot）
+>
+> **Day-count**：**不計入 Total**（觸發前是 0，觸發後另排）
+
+### HE.0 — Watch-list quarterly scan（**唯一現在會做的事，每季 30 分鐘**）
+- [ ] HE.0.1 atopile + ato-cloud 進展（schematic-as-code agent，YC W24，最 fork-able）
+- [ ] HE.0.2 Quilter.ai PCB autoroute 是否進 GA
+- [ ] HE.0.3 Anthropic Computer Use on KiCad / Fusion 社群 demo 進度
+- [ ] HE.0.4 SUSTech EDA-LLM lab / Tencent Hunyuan-EDA 公開釋出
+- [ ] HE.0.5 Cadence Allegro X AI / Altium CoDesigner 客戶接受度
+- [ ] HE.0.6 Tripo / Hunyuan3D / Zoo.dev API 成熟度
+- 預估：每季 30 分鐘，不消耗 runner 工時
+
+### HE.1 — Schematic-as-code agent（觸發後第一條）
+- [ ] HE.1.1 Fork atopile，整合 ChatEDA agent loop（Apache-2.0 base）
+- [ ] HE.1.2 SoC reference design PDF 解析 → typical wiring 提取
+- [ ] HE.1.3 客戶 delta requirement → schematic 修改清單生成
+- [ ] HE.1.4 KiCad / Altium GUI 整合（OR netlist gen，看 Anthropic Computer Use 屆時成熟度）
+- [ ] HE.1.5 Schematic review agent（既有 HD priority 的延伸）
+
+### HE.2 — PCB layout assist
+- [ ] HE.2.1 Wrap Quilter.ai（如 GA）OR fork freerouting-ML
+- [ ] HE.2.2 SI / EMI rule-based linter（DfM 規則庫驅動）
+- [ ] HE.2.3 Auto-place + auto-route loop（人類 reviewer in-the-loop）
+
+### HE.3 — Industrial design (ID) generation
+- [ ] HE.3.1 Wrap Tripo / Hunyuan3D-2.5（text/image → 3D mesh + PBR）
+- [ ] HE.3.2 ID concept brief generator（從 product spec → 3 個 ID 方向 sketch）
+- [ ] HE.3.3 ID → mech CAD handoff 規格化
+
+### HE.4 — Mechanical CAD agent
+- [ ] HE.4.1 Onshape MCP / Zoo.dev API 整合
+- [ ] HE.4.2 Text-to-CAD parametric model gen（CADQuery / OpenSCAD 輸出）
+- [ ] HE.4.3 模具拔模 / 強度 rule-based check
+- [ ] HE.4.4 BREP-from-text via DeepCAD / SkexGen 評估
+
+### HE.5 — Simulation (thermal / structural / fluid)
+- [ ] HE.5.1 NVIDIA Modulus PINN 整合（surrogate 熱流模型）
+- [ ] HE.5.2 BoTorch + Ax Bayesian DOE loop
+- [ ] HE.5.3 Ansys Discovery / Neural Concept Shape 評估（proprietary alternative）
+
+### HE.6 — DfM / BOM / Gerber pipeline
+- [ ] HE.6.1 Wrap JLCPCB SmartEDA / PCBWay AI Review 為 DfM agent
+- [ ] HE.6.2 Octopart API + LLM wrapper（BOM sourcing + lifecycle 警告）
+- [ ] HE.6.3 Auto-DRC fix agent（KiCad DRC-LLM 社群 plugin 借鑑）
+- [ ] HE.6.4 Datasheet / regulatory submission 自動 gen（EU declaration / FCC / NCC）
+
+### HE.7 — Hardware partner ecosystem (IDH / ODM / fab)
+- [ ] HE.7.1 IDH onboarding sheet / 合作 SOP
+- [ ] HE.7.2 Fab partner DB（華晶 / 佳邦 / 智易 / JLCPCB / PCBWay 等）
+- [ ] HE.7.3 客戶旅程模板：訪談 → 規格化 → IDH 媒合 → 軟體 AI 化 → 量產
+- [ ] HE.7.4 IDH 交付物 review agent（reuse HE.1.5 schematic review + HE.6.1 DfM）
+
+**Priority HE 範圍**：~3-6 個月 wall-clock（觸發後）；當前不計入 Total（仍為 ~727-938 day）。
