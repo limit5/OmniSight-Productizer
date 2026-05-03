@@ -57,7 +57,7 @@ jobs:
         # committed file. Then `git diff --exit-code` is the whole gate.
         run: |
           set -eu
-          pip-compile --quiet --generate-hashes \
+          pip-compile --quiet --allow-unsafe --generate-hashes \
             --output-file=backend/requirements.txt \
             backend/requirements.in
       - name: working tree clean after lock regeneration
@@ -65,7 +65,7 @@ jobs:
           set -eu
           DIRTY="$(git status --porcelain | grep -E 'lock\.(json|yaml)$|requirements\.txt$' || true)"
           if [ -n "$DIRTY" ]; then
-            echo "::error::Lockfile drift detected — someone edited requirements.in or package.json without regenerating the lockfile. Run 'pip-compile --generate-hashes backend/requirements.in' (Python) or 'pnpm install' (JS) and commit the result."
+            echo "::error::Lockfile drift detected — someone edited requirements.in or package.json without regenerating the lockfile. Run 'pip-compile --allow-unsafe --generate-hashes backend/requirements.in' (Python) or 'pnpm install' (JS) and commit the result."
             echo "$DIRTY"
             git --no-pager diff backend/requirements.txt pnpm-lock.yaml | head -200
             exit 1

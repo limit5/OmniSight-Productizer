@@ -70,6 +70,7 @@ class AuthProviderSetupResult:
     redirect_uris: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()
     scopes: tuple[str, ...] = DEFAULT_OIDC_SCOPES
+    require_mfa: bool = False
     status: str = "ready"
     created: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
@@ -85,6 +86,7 @@ class AuthProviderSetupResult:
             "redirect_uris": list(self.redirect_uris),
             "allowed_origins": list(self.allowed_origins),
             "scopes": list(self.scopes),
+            "require_mfa": self.require_mfa,
             "status": self.status,
             "created": self.created,
         }

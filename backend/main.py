@@ -1,9 +1,15 @@
 """OmniSight Engine — FastAPI entry point."""
 
+import base64
 from contextlib import asynccontextmanager
+import hashlib
+from html.parser import HTMLParser
+import re
+import secrets
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response as StarletteResponse
 
 from backend.config import settings
 from backend.routers import agents, artifacts, chat, events, health, host as _host_router, integration, invoke, providers, simulations, system, tasks, tools, webhooks, workflow as wf_router, workspaces
@@ -483,6 +489,97 @@ _ha_observability.register_middleware(app)
 # Defense-in-depth for the exposed URL. Cloudflare's edge will add
 # some of these too; we set them at the origin so a future non-CF
 # path (custom domain, on-prem) still gets them.
+_CSP_NONCE_RAW_BYTES = 18
+_CSP_BASE_DIRECTIVES = (
+    "default-src 'self'",
+    "img-src 'self' data: blob:",
+    "style-src 'self' 'unsafe-inline'",
+    "connect-src 'self' https:",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+)
+_SECURITY_HEADER_DEFAULTS = (
+    ("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload"),
+    ("X-Frame-Options", "DENY"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "strict-origin"),
+    ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Cross-Origin-Embedder-Policy", "require-corp"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+)
+_CONTENT_TYPE_CHARSET_RE = re.compile(r"charset=([^;\s]+)", re.IGNORECASE)
+
+
+class _InlineScriptCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sources: list[str] = []
+        self._in_inline_script = False
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() != "script":
+            return
+        attr_names = {name.lower() for name, _ in attrs}
+        if "src" in attr_names:
+            return
+        self._in_inline_script = True
+        self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_inline_script:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "script" or not self._in_inline_script:
+            return
+        source = "".join(self._parts)
+        if source:
+            self.sources.append(source)
+        self._in_inline_script = False
+        self._parts = []
+
+
+def _generate_csp_nonce() -> str:
+    """Generate a per-request CSP nonce from the kernel CSPRNG."""
+    return base64.b64encode(secrets.token_bytes(_CSP_NONCE_RAW_BYTES)).decode("ascii")
+
+
+def _csp_sha256_source(source: str | bytes) -> str:
+    """Return a CSP ``sha256-...`` source expression for inline content."""
+    raw = source if isinstance(source, bytes) else source.encode("utf-8")
+    digest = base64.b64encode(hashlib.sha256(raw).digest()).decode("ascii")
+    return f"'sha256-{digest}'"
+
+
+def _build_content_security_policy(nonce: str, hash_sources) -> str:
+    script_sources = ["script-src 'self'", f"'nonce-{nonce}'"]
+    for source in hash_sources or ():
+        script_sources.append(_csp_sha256_source(source))
+    return "; ".join((*_CSP_BASE_DIRECTIVES, " ".join(script_sources)))
+
+
+def _html_charset(content_type: str) -> str:
+    match = _CONTENT_TYPE_CHARSET_RE.search(content_type or "")
+    return match.group(1) if match else "utf-8"
+
+
+def _inline_script_hash_sources(body: bytes, content_type: str) -> list[str]:
+    if "text/html" not in (content_type or "").lower():
+        return []
+    try:
+        html_text = body.decode(_html_charset(content_type), errors="strict")
+    except (LookupError, UnicodeDecodeError):
+        return []
+    collector = _InlineScriptCollector()
+    collector.feed(html_text)
+    return collector.sources
+
+
+async def _collect_response_body(response) -> bytes:
+    return b"".join([chunk async for chunk in response.body_iterator])
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  K1 — force password change middleware
@@ -1046,45 +1143,41 @@ async def _bootstrap_gate(request, call_next):
 
 @app.middleware("http")
 async def _security_headers(request, call_next):
+    # Per-request state is intentionally worker-local: every worker can
+    # independently derive the same policy shape from request state,
+    # while the nonce itself must be unique per response.
+    request.state.csp_nonce = _generate_csp_nonce()
     response = await call_next(request)
-    # Tell browsers "only come back over HTTPS for the next 6 months".
+    csp_hash_sources = []
+    content_type = response.headers.get("content-type", "")
+    if "text/html" in content_type.lower():
+        body = await _collect_response_body(response)
+        csp_hash_sources.extend(_inline_script_hash_sources(body, content_type))
+        response = StarletteResponse(
+            content=body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            background=getattr(response, "background", None),
+        )
+    # Tell browsers "only come back over HTTPS".
     # Safe behind Cloudflare Tunnel (TLS is already terminated at CF's
-    # edge). Setting `includeSubDomains` protects api.* and staging.*
-    # on the same zone.
-    response.headers.setdefault(
-        "Strict-Transport-Security",
-        "max-age=15552000; includeSubDomains",
-    )
-    # Refuse to be framed — neutralises most clickjacking vectors.
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    # Disable MIME sniffing — stops browsers from reinterpreting a
-    # JSON response as HTML.
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    # Strip the Referer on cross-origin so our routes don't leak in
-    # other sites' analytics.
-    response.headers.setdefault(
-        "Referrer-Policy", "strict-origin",
-    )
-    # Minimal Permissions-Policy — we don't use these APIs, deny them.
-    response.headers.setdefault(
-        "Permissions-Policy",
-        "camera=(), microphone=(), geolocation=(), payment=()",
-    )
+    # edge). COOP/COEP/CORP make the document process-isolated and keep
+    # cross-origin resources from being consumed without an explicit opt-in.
+    for header, value in _SECURITY_HEADER_DEFAULTS:
+        response.headers.setdefault(header, value)
     # CSP. The dashboard is a single Next.js app talking to our own
     # API + optional Cloudflare tunnel subdomains. Kept strict but
     # allow inline styles (Tailwind generates some) and blob: for
     # SVG/image previews. 'unsafe-eval' is intentionally omitted;
-    # Next 16 client bundles don't need it for prod builds.
+    # Next 16 client bundles don't need it for prod builds. HTML
+    # responses get inline script bodies hashed into script-src
+    # automatically.
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; "
-        "img-src 'self' data: blob:; "
-        "style-src 'self' 'unsafe-inline'; "
-        "script-src 'self'; "
-        "connect-src 'self' https:; "
-        "frame-ancestors 'none'; "
-        "base-uri 'self'; "
-        "form-action 'self'",
+        _build_content_security_policy(
+            request.state.csp_nonce,
+            csp_hash_sources,
+        ),
     )
     return response
 
@@ -1188,6 +1281,8 @@ from backend.routers import preferences as _prefs_router  # J4/USER-PREFS
 app.include_router(_prefs_router.router, prefix=settings.api_prefix)
 from backend.routers import drafts as _drafts_router  # Q.6 (#300) per-user composer drafts
 app.include_router(_drafts_router.router, prefix=settings.api_prefix)
+from backend.routers import privacy as _privacy_router  # SC.10.2 DSAR access
+app.include_router(_privacy_router.router, prefix=settings.api_prefix)
 from backend.routers import api_keys as _api_keys_router  # K6/BEARER-PER-KEY
 app.include_router(_api_keys_router.router, prefix=settings.api_prefix)
 from backend.routers import storage as _storage_router  # M2/DISK-QUOTA-LRU

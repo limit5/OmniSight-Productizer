@@ -340,6 +340,7 @@ class DockerNginxAdapter(WebDeployAdapter):
 
     async def deploy(self, build_artifact: BuildArtifact) -> DeployResult:
         build_artifact.validate()
+        self._enforce_container_vulnerability_gate(build_artifact)
         if not self._output_dir.exists():
             # deploy() called without provision() — render the context first.
             self._write_build_context()

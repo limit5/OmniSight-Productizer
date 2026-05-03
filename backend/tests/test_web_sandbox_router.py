@@ -35,6 +35,12 @@ from backend import web_sandbox as ws
 from backend import web_sandbox_pep as _wsp
 from backend import workspace as _ws
 from backend.routers import web_sandbox as web_sandbox_router
+from backend.security_scanning import (
+    DASTFinding,
+    DASTPreviewScan,
+    DASTReport,
+    scan_web_preview_zap,
+)
 from backend.tests.test_web_sandbox import (
     FakeClock,
     FakeDockerClient,
@@ -133,6 +139,15 @@ def stub_pep_evaluator() -> Any:
     web_sandbox_router.set_pep_evaluator_for_tests(_auto_approve)
     yield
     web_sandbox_router.set_pep_evaluator_for_tests(None)
+
+
+@pytest.fixture(autouse=True)
+def reset_dast_preview_scanner() -> Any:
+    """SC.2.2 scanner injection is a router module-global; reset it
+    between tests so one lifecycle assertion cannot leak to the next."""
+
+    yield
+    web_sandbox_router.set_dast_preview_scanner_for_tests(None)
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -442,6 +457,125 @@ def test_full_lifecycle(client: TestClient, tmp_path: Path) -> None:
     assert ready["status"] == WebSandboxStatus.running.value
     deleted = client.delete("/web-sandbox/preview/ws-42").json()
     assert deleted["status"] == WebSandboxStatus.stopped.value
+
+
+def test_ready_lifecycle_triggers_dast_scan_once(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def fake_scan(instance: Any) -> DASTPreviewScan:
+        calls.append(instance.workspace_id)
+        return DASTPreviewScan(
+            workspace_id=instance.workspace_id,
+            sandbox_id=instance.sandbox_id,
+            target_url=instance.ingress_url or instance.preview_url or "",
+            triggered=True,
+            reason="web_preview",
+            report=DASTReport(
+                source="mock",
+                target_url=instance.ingress_url or instance.preview_url or "",
+                fail_on=["CRITICAL", "HIGH"],
+            ),
+        )
+
+    web_sandbox_router.set_dast_preview_scanner_for_tests(fake_scan)
+    body = {"workspace_id": "ws-42", "workspace_path": str(tmp_path)}
+    assert client.post("/web-sandbox/preview", json=body).status_code == 200
+
+    ready = client.post("/web-sandbox/preview/ws-42/ready")
+    assert ready.status_code == 200, ready.text
+    assert ready.json()["dast_scan"]["triggered"] is True
+    assert ready.json()["dast_scan"]["workspace_id"] == "ws-42"
+
+    again = client.post("/web-sandbox/preview/ws-42/ready")
+    assert again.status_code == 200, again.text
+    assert "dast_scan" not in again.json()
+    assert calls == ["ws-42"]
+
+
+def test_ready_lifecycle_surfaces_failed_dast_report(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """SC.2.3 — ready response carries blocking ZAP findings so the
+    frontend / operator policy can decide whether the preview passed."""
+
+    def fake_scan(instance: Any) -> DASTPreviewScan:
+        return DASTPreviewScan(
+            workspace_id=instance.workspace_id,
+            sandbox_id=instance.sandbox_id,
+            target_url=instance.preview_url or "",
+            triggered=True,
+            reason="web_preview",
+            report=DASTReport(
+                source="zap",
+                target_url=instance.preview_url or "",
+                fail_on=["HIGH"],
+                findings=[
+                    DASTFinding(
+                        rule_id="40012",
+                        name="Reflected XSS",
+                        severity="HIGH",
+                    )
+                ],
+                total_findings=1,
+                severity_counts={"HIGH": 1},
+            ),
+        )
+
+    web_sandbox_router.set_dast_preview_scanner_for_tests(fake_scan)
+    body = {"workspace_id": "ws-42", "workspace_path": str(tmp_path)}
+    assert client.post("/web-sandbox/preview", json=body).status_code == 200
+
+    ready = client.post("/web-sandbox/preview/ws-42/ready")
+
+    assert ready.status_code == 200, ready.text
+    scan = ready.json()["dast_scan"]
+    assert scan["triggered"] is True
+    assert scan["passed"] is False
+    assert scan["report"]["source"] == "zap"
+    assert scan["report"]["blocking_count"] == 1
+    assert scan["report"]["findings"][0]["rule_id"] == "40012"
+
+
+def test_ready_lifecycle_passes_running_instance_to_dast_scanner(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    seen: list[str] = []
+
+    def fake_scan(instance: Any) -> DASTPreviewScan:
+        seen.append(instance.status.value)
+        return DASTPreviewScan(
+            workspace_id=instance.workspace_id,
+            sandbox_id=instance.sandbox_id,
+            target_url=instance.preview_url or "",
+            triggered=True,
+            reason="web_preview",
+            report=DASTReport(source="mock", target_url=instance.preview_url or ""),
+        )
+
+    web_sandbox_router.set_dast_preview_scanner_for_tests(fake_scan)
+    body = {"workspace_id": "ws-42", "workspace_path": str(tmp_path)}
+    assert client.post("/web-sandbox/preview", json=body).status_code == 200
+
+    ready = client.post("/web-sandbox/preview/ws-42/ready")
+
+    assert ready.status_code == 200, ready.text
+    assert seen == [WebSandboxStatus.running.value]
+
+
+def test_sc_2_2_dast_scanner_test_injection_resets_with_none() -> None:
+    def scanner(instance: Any) -> Any:
+        return instance
+
+    web_sandbox_router.set_dast_preview_scanner_for_tests(scanner)
+    assert web_sandbox_router.get_dast_preview_scanner() is scanner
+
+    web_sandbox_router.set_dast_preview_scanner_for_tests(None)
+    assert web_sandbox_router.get_dast_preview_scanner() is scan_web_preview_zap
 
 
 # ── Schema-version pin ────────────────────────────────────────────

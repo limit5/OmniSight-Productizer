@@ -145,6 +145,7 @@ class TestScaffoldRender:
             "components/Counter.vue",
             "composables/useBackend.ts",
             "stores/counter.ts",
+            "server/middleware/security-headers.ts",
             "server/api/health.get.ts",
             "server/api/v1/[...slug].ts",
             "playwright.config.ts",
@@ -168,6 +169,21 @@ class TestScaffoldRender:
         assert "process.env.NITRO_PRESET" in cfg
         # Default for target=all is node-server (lowest common denominator).
         assert '"node-server"' in cfg or "'node-server'" in cfg
+
+    def test_sc63_security_headers_middleware_auto_added(self, project_dir):
+        render_project(project_dir, _default_opts())
+        middleware = (project_dir / "server" / "middleware" / "security-headers.ts").read_text()
+        assert "SC.6.3 security headers" in middleware
+        assert '"Content-Security-Policy"' in middleware
+        assert "script-src 'self'" in middleware
+        assert "'unsafe-eval'" not in middleware
+        assert '"Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload"' in middleware
+        assert '"X-Frame-Options": "DENY"' in middleware
+        assert '"Referrer-Policy": "strict-origin"' in middleware
+        assert '"Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()"' in middleware
+        assert '"Cross-Origin-Resource-Policy": "same-origin"' in middleware
+        assert '"Cross-Origin-Embedder-Policy": "require-corp"' in middleware
+        assert '"Cross-Origin-Opener-Policy": "same-origin"' in middleware
 
     def test_nitro_preset_single_target_defaults(self, project_dir):
         """Single-target renders pin the default preset to that target."""

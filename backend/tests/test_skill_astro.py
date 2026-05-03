@@ -136,6 +136,7 @@ class TestScaffoldRender:
             ".gitignore",
             ".env.example",
             "src/env.d.ts",
+            "src/middleware.ts",
             "src/content/config.ts",
             "src/content/blog/hello-world.mdx",
             "src/layouts/BaseLayout.astro",
@@ -162,6 +163,21 @@ class TestScaffoldRender:
         assert "process.env.ASTRO_TARGET" in cfg
         # Default for target=all is static (lowest common denominator).
         assert '"static"' in cfg
+
+    def test_sc63_security_headers_middleware_auto_added(self, project_dir):
+        render_project(project_dir, _default_opts())
+        middleware = (project_dir / "src" / "middleware.ts").read_text()
+        assert "SC.6.3 security headers" in middleware
+        assert '"Content-Security-Policy"' in middleware
+        assert "script-src 'self'" in middleware
+        assert "'unsafe-eval'" not in middleware
+        assert '"Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload"' in middleware
+        assert '"X-Frame-Options", "DENY"' in middleware
+        assert '"Referrer-Policy", "strict-origin"' in middleware
+        assert '"Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"' in middleware
+        assert '"Cross-Origin-Resource-Policy", "same-origin"' in middleware
+        assert '"Cross-Origin-Embedder-Policy", "require-corp"' in middleware
+        assert '"Cross-Origin-Opener-Policy", "same-origin"' in middleware
 
     def test_astro_target_single_default(self, project_dir):
         """Single-target renders pin the default target in the config."""

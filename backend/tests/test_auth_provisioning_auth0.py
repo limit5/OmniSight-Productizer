@@ -65,6 +65,30 @@ class TestSetupApplication:
         assert b'"grant_types":["authorization_code","refresh_token"]' in body
 
     @respx.mock
+    async def test_creates_client_with_require_mfa_metadata_when_enabled(self):
+        respx.get(f"{A}/clients").mock(return_value=_ok([]))
+        route = respx.post(f"{A}/clients").mock(
+            return_value=_ok({
+                "client_id": "client_123",
+                "client_secret": "secret_123",
+                "name": "tenant-demo",
+                "app_type": "regular_web",
+                "callbacks": ["https://app.example.com/api/auth/callback/auth0"],
+                "web_origins": ["https://app.example.com"],
+                "client_metadata": {"require_mfa": "true"},
+            }, status=201),
+        )
+        result = await _mk_adapter().setup_application(
+            redirect_uris=("https://app.example.com/api/auth/callback/auth0",),
+            allowed_origins=("https://app.example.com",),
+            require_mfa=True,
+        )
+        assert result.require_mfa is True
+        assert result.to_dict()["require_mfa"] is True
+        body = route.calls.last.request.read()
+        assert b'"client_metadata":{"require_mfa":"true"}' in body
+
+    @respx.mock
     async def test_reuses_existing_client_by_name(self):
         respx.get(f"{A}/clients").mock(
             return_value=_ok([
@@ -82,6 +106,35 @@ class TestSetupApplication:
         assert result.created is False
         assert result.application_id == "client_123"
         assert result.redirect_uris == ("https://app.example.com/callback",)
+
+    @respx.mock
+    async def test_reuses_existing_client_and_updates_require_mfa_metadata(self):
+        respx.get(f"{A}/clients").mock(
+            return_value=_ok([
+                {
+                    "client_id": "client_123",
+                    "name": "tenant-demo",
+                    "callbacks": ["https://app.example.com/callback"],
+                    "client_metadata": {"keep": "yes"},
+                },
+            ]),
+        )
+        route = respx.patch(f"{A}/clients/client_123").mock(
+            return_value=_ok({
+                "client_id": "client_123",
+                "name": "tenant-demo",
+                "callbacks": ["https://app.example.com/callback"],
+                "client_metadata": {"keep": "yes", "require_mfa": "true"},
+            }),
+        )
+        result = await _mk_adapter().setup_application(
+            redirect_uris=("https://fallback.example.com/callback",),
+            require_mfa=True,
+        )
+        assert result.created is False
+        assert result.require_mfa is True
+        body = route.calls.last.request.read()
+        assert b'"client_metadata":{"keep":"yes","require_mfa":"true"}' in body
 
     @respx.mock
     async def test_401_and_403_map_correctly(self):
@@ -124,3 +177,4 @@ class TestGetClientConfig:
         assert config is not None
         assert config["provider"] == "auth0"
         assert config["client_id"] == "client_123"
+        assert config["require_mfa"] is False

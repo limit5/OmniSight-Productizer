@@ -5,12 +5,17 @@ from __future__ import annotations
 
 import pytest
 
-from backend.deploy import BuildArtifact, get_adapter
+from backend.deploy import (
+    BuildArtifact,
+    ContainerVulnerabilityBlockError,
+    get_adapter,
+)
 from backend.deploy.base import (
     DeployArtifactError,
     RollbackUnavailableError,
 )
 from backend.deploy.docker_nginx import DockerNginxAdapter
+from backend.security_scanning import ContainerArtifactReport, ContainerFinding
 
 
 @pytest.fixture
@@ -139,6 +144,41 @@ class TestDeployCopiesArtifact:
         empty_dir.mkdir()
         with pytest.raises(DeployArtifactError):
             await adapter.deploy(BuildArtifact(path=empty_dir))
+
+    async def test_high_container_cve_blocks_before_copy(
+        self,
+        tmp_path,
+        build_site,
+        monkeypatch,
+    ):
+        adapter = _mk(tmp_path)
+        await adapter.provision()
+
+        def fake_scan(artifact):
+            return ContainerArtifactReport(
+                source="grype",
+                artifact_path=str(artifact.path),
+                total_findings=1,
+                fail_on=["CRITICAL", "HIGH"],
+                severity_counts={"HIGH": 1},
+                findings=[
+                    ContainerFinding(
+                        vulnerability_id="CVE-2026-4242",
+                        package="openssl",
+                        severity="HIGH",
+                    )
+                ],
+            )
+
+        monkeypatch.setattr(
+            "backend.security_scanning.scan_container_artifact",
+            fake_scan,
+        )
+
+        with pytest.raises(ContainerVulnerabilityBlockError):
+            await adapter.deploy(BuildArtifact(path=build_site))
+
+        assert not (adapter.output_dir / "public" / "index.html").exists()
 
 
 class TestRollbackSemantics:

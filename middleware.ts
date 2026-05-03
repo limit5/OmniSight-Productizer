@@ -17,6 +17,16 @@ const BOOTSTRAP_PROBE_TIMEOUT_MS = 1500;
 // static asset / partial request. After bootstrap finalises it flips
 // permanently, so a short TTL is plenty.
 const BOOTSTRAP_CACHE_TTL_MS = 5_000;
+const SECURITY_HEADER_DEFAULTS: Array<[string, string]> = [
+  ["Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload"],
+  ["X-Frame-Options", "DENY"],
+  ["X-Content-Type-Options", "nosniff"],
+  ["Referrer-Policy", "strict-origin"],
+  ["Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"],
+  ["Cross-Origin-Resource-Policy", "same-origin"],
+  ["Cross-Origin-Embedder-Policy", "require-corp"],
+  ["Cross-Origin-Opener-Policy", "same-origin"],
+];
 let _bootstrapCache: { finalized: boolean; expiresAt: number } | null = null;
 
 function _resolveBackendUrl(): string {
@@ -91,13 +101,9 @@ export async function middleware(request: NextRequest) {
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("Content-Security-Policy", csp);
-  response.headers.set("X-Frame-Options", "DENY");
-  response.headers.set("X-Content-Type-Options", "nosniff");
-  response.headers.set("Referrer-Policy", "strict-origin");
-  response.headers.set(
-    "Permissions-Policy",
-    "camera=(), microphone=(), geolocation=(), payment=()"
-  );
+  for (const [header, value] of SECURITY_HEADER_DEFAULTS) {
+    response.headers.set(header, value);
+  }
   return response;
 }
 

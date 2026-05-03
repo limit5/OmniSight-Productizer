@@ -28,6 +28,8 @@ def _options(template_id: str, **context):
         "reset_url": "https://app.example.com/reset",
         "download_url": "https://app.example.com/export.zip",
         "request_id": "dsar_123",
+        "request_type": "access",
+        "due_at": "2026-06-02 00:00:00 UTC",
         "inviter_name": "Ops",
         "workspace_name": "Acme",
         "invite_url": "https://app.example.com/invite",
@@ -50,6 +52,7 @@ class TestEmailTemplateRegistry:
             "welcome",
             "email-verification",
             "password-reset",
+            "dsar-request-received",
             "dsar-export-ready",
             "invite",
             "mfa-code",
@@ -72,6 +75,7 @@ class TestEmailTemplateRegistry:
 
     def test_get_email_template_accepts_underscore_alias(self):
         assert get_email_template("password_reset").template_id == "password-reset"
+        assert get_email_template("DSAR_REQUEST_RECEIVED").template_id == "dsar-request-received"
         assert get_email_template("DSAR_EXPORT_READY").template_id == "dsar-export-ready"
 
     def test_get_email_template_rejects_unknown(self):
@@ -122,16 +126,16 @@ class TestEmailTemplateRender:
         assert "token=a&amp;next=/" in message.text
 
     def test_render_rejects_missing_required_variable(self):
-        context = dict(_options("dsar-export-ready").context)
-        context.pop("download_url")
+        context = dict(_options("dsar-request-received").context)
+        context.pop("due_at")
 
         with pytest.raises(
             MissingEmailTemplateVariableError,
-            match="download_url",
+            match="due_at",
         ):
             render_email_template(
                 EmailTemplateRenderOptions(
-                    template_id="dsar-export-ready",
+                    template_id="dsar-request-received",
                     sender=EmailAddress("ops@example.com"),
                     to=(EmailAddress("alice@example.com"),),
                     context=context,

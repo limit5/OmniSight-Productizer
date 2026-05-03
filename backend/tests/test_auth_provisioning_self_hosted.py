@@ -73,6 +73,7 @@ class TestNextAuthScaffold:
         assert result.dependencies == ("next-auth",)
         assert [f.path for f in result.files] == [
             "auth/oauth-client.ts",
+            "auth/nextauth.mfa.ts",
             "auth/nextauth.config.ts",
             "app/api/auth/[...nextauth]/route.ts",
         ]
@@ -80,11 +81,33 @@ class TestNextAuthScaffold:
     def test_nextauth_reuses_as1_oauth_client_bridge(self):
         result = render_self_hosted_auth_scaffold(_opts("nextauth"))
         bridge = result.files[0].content
-        config = result.files[1].content
+        mfa = result.files[1].content
+        config = result.files[2].content
         assert 'from "../oauth-client"' in bridge
         assert "DEFAULT_STATE_TTL_SECONDS" in bridge
+        assert "DEFAULT_STATE_TTL_SECONDS" in mfa
         assert 'import { DEFAULT_STATE_TTL_SECONDS } from "./oauth-client"' in config
         assert 'checks: ["pkce", "state"]' in config
+
+    def test_nextauth_renders_mfa_enforcement_scaffold_from_setup_toggle(self):
+        result = render_self_hosted_auth_scaffold(
+            _opts("nextauth", provider_setup=_setup_result(require_mfa=True))
+        )
+        mfa = result.files[1].content
+        config = result.files[2].content
+        env = {item.name: item for item in result.env}
+        assert "nextAuthMfaPosture" in mfa
+        assert "requiresNextAuthMfaStepUp" in mfa
+        assert "nextAuthMfaRedirectUrl" in mfa
+        assert "/api/v1/auth/mfa/challenge" in mfa
+        assert "/api/v1/auth/mfa/totp/enroll" in mfa
+        assert "/api/v1/auth/mfa/webauthn/challenge/complete" in mfa
+        assert "DEFAULT_STATE_TTL_SECONDS" in mfa
+        assert "|| true" in mfa
+        assert 'import { nextAuthMfaCallbacks } from "./nextauth.mfa"' in config
+        assert "callbacks: nextAuthMfaCallbacks" in config
+        assert env["AUTH_MFA_REQUIRED"].required is True
+        assert env["AUTH_MFA_REQUIRED"].source == "sc.8.2"
 
     def test_nextauth_manifest_does_not_emit_secret_values(self):
         result = render_self_hosted_auth_scaffold(_opts("nextauth"))
@@ -93,6 +116,7 @@ class TestNextAuthScaffold:
         env = {item.name: item for item in result.env}
         assert env["AUTH_CLIENT_SECRET"].sensitive is True
         assert env["AUTH_CLIENT_SECRET"].source == "fs.2.1"
+        assert env["AUTH_MFA_REQUIRED"].sensitive is False
 
 
 class TestLuciaScaffold:

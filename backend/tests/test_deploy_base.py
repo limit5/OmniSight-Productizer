@@ -9,6 +9,7 @@ import pytest
 from backend import secret_store
 from backend.deploy import (
     BuildArtifact,
+    ContainerVulnerabilityBlockError,
     DeployArtifactError,
     DeployError,
     WebDeployAdapter,
@@ -21,6 +22,7 @@ from backend.deploy.base import (
     ProvisionResult,
     RollbackUnavailableError,
 )
+from backend.security_scanning import ContainerArtifactReport, ContainerFinding
 
 
 class TestProviderFactory:
@@ -171,3 +173,104 @@ class TestInterfaceContract:
 
     def test_rollback_unavailable_error_is_deploy_error_subclass(self):
         assert issubclass(RollbackUnavailableError, DeployError)
+
+
+class _GateAdapter(WebDeployAdapter):
+    provider = "gate-test"
+
+    def _configure(self, **kwargs):
+        self.effects = kwargs.get("effects", [])
+
+    async def provision(self, *, env=None, **kwargs):
+        return ProvisionResult(
+            provider=self.provider,
+            project_id="gate-project",
+            project_name=self.project_name,
+        )
+
+    async def deploy(self, build_artifact: BuildArtifact) -> DeployResult:
+        build_artifact.validate()
+        self._enforce_container_vulnerability_gate(build_artifact)
+        self.effects.append("uploaded")
+        return DeployResult(
+            provider=self.provider,
+            deployment_id="gate-deploy",
+            url="https://gate.example.test",
+        )
+
+    async def rollback(self, *, deployment_id=None):
+        raise RollbackUnavailableError("no rollback", provider=self.provider)
+
+    def get_url(self):
+        return None
+
+
+class TestContainerVulnerabilityGate:
+
+    async def test_high_cve_blocks_before_deploy_side_effect(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        (tmp_path / "index.html").write_text("<html/>")
+        effects: list[str] = []
+
+        def fake_scan(artifact):
+            return ContainerArtifactReport(
+                source="trivy",
+                artifact_path=str(artifact.path),
+                total_findings=1,
+                fail_on=["CRITICAL", "HIGH"],
+                severity_counts={"HIGH": 1},
+                findings=[
+                    ContainerFinding(
+                        vulnerability_id="CVE-2026-4242",
+                        package="openssl",
+                        severity="HIGH",
+                    )
+                ],
+            )
+
+        monkeypatch.setattr(
+            "backend.security_scanning.scan_container_artifact",
+            fake_scan,
+        )
+        adapter = _GateAdapter(
+            token="tok_123456789",
+            project_name="demo",
+            effects=effects,
+        )
+
+        with pytest.raises(ContainerVulnerabilityBlockError) as excinfo:
+            await adapter.deploy(BuildArtifact(path=tmp_path, framework="static"))
+
+        assert "Container vulnerability scan blocked deploy" in str(excinfo.value)
+        assert "CVE-2026-4242:HIGH" in str(excinfo.value)
+        assert excinfo.value.provider == "gate-test"
+        assert effects == []
+
+    async def test_clean_container_scan_allows_deploy(self, tmp_path, monkeypatch):
+        (tmp_path / "index.html").write_text("<html/>")
+        effects: list[str] = []
+
+        def fake_scan(artifact):
+            return ContainerArtifactReport(
+                source="trivy",
+                artifact_path=str(artifact.path),
+                fail_on=["CRITICAL", "HIGH"],
+            )
+
+        monkeypatch.setattr(
+            "backend.security_scanning.scan_container_artifact",
+            fake_scan,
+        )
+        adapter = _GateAdapter(
+            token="tok_123456789",
+            project_name="demo",
+            effects=effects,
+        )
+
+        result = await adapter.deploy(BuildArtifact(path=tmp_path, framework="static"))
+
+        assert result.deployment_id == "gate-deploy"
+        assert effects == ["uploaded"]

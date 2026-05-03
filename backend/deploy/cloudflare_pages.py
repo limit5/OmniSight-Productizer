@@ -247,6 +247,7 @@ class CloudflarePagesAdapter(WebDeployAdapter):
 
     async def deploy(self, build_artifact: BuildArtifact) -> DeployResult:
         build_artifact.validate()
+        self._enforce_container_vulnerability_gate(build_artifact)
         manifest = self._collect_manifest(build_artifact.path)
         if not manifest:
             raise DeployArtifactError(

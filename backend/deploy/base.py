@@ -85,6 +85,10 @@ class DeployArtifactError(DeployError):
     """Local artifact (build output / Dockerfile dir) missing or malformed."""
 
 
+class ContainerVulnerabilityBlockError(DeployArtifactError):
+    """Container vulnerability scan failed before deploy side effects."""
+
+
 class RollbackUnavailableError(DeployError):
     """No previous deployment to roll back to."""
 
@@ -255,6 +259,42 @@ class WebDeployAdapter(ABC):
     def token_fp(self) -> str:
         return token_fingerprint(self._token)
 
+    def _enforce_container_vulnerability_gate(
+        self,
+        build_artifact: BuildArtifact,
+    ) -> None:
+        """Block deploys when SC.4 reports HIGH/CRITICAL artifact CVEs.
+
+        Module-global state audit: this helper reads no mutable
+        module-global state; every worker derives the gate decision from
+        the passed ``BuildArtifact`` and the scanner report produced for
+        that artifact.
+        """
+        from backend.security_scanning import scan_container_artifact
+
+        report = scan_container_artifact(build_artifact)
+        if report.passed:
+            return
+
+        blocking = report.blocking_findings
+        if blocking:
+            sample = ", ".join(
+                f"{finding.vulnerability_id or finding.package}:{finding.severity}"
+                for finding in blocking[:3]
+            )
+            suffix = f" ({sample})" if sample else ""
+            raise ContainerVulnerabilityBlockError(
+                "Container vulnerability scan blocked deploy: "
+                f"{len(blocking)} HIGH/CRITICAL finding(s){suffix}",
+                provider=self.provider,
+            )
+
+        raise ContainerVulnerabilityBlockError(
+            "Container vulnerability scan failed before deploy: "
+            f"{report.error or 'unknown scanner failure'}",
+            provider=self.provider,
+        )
+
     @property
     def project_name(self) -> str:
         return self._project_name
@@ -311,6 +351,7 @@ __all__ = [
     "DeployConflictError",
     "DeployRateLimitError",
     "DeployArtifactError",
+    "ContainerVulnerabilityBlockError",
     "RollbackUnavailableError",
     "token_fingerprint",
 ]

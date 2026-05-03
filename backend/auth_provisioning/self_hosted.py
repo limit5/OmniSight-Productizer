@@ -185,6 +185,11 @@ def _env_vars(
         return common + (
             AuthScaffoldEnvVar("AUTH_SECRET", True, True),
             AuthScaffoldEnvVar("NEXTAUTH_URL", True),
+            AuthScaffoldEnvVar(
+                "AUTH_MFA_REQUIRED",
+                bool(setup.require_mfa),
+                source="sc.8.2",
+            ),
         )
     return common + (
         AuthScaffoldEnvVar("AUTH_AUTHORIZE_ENDPOINT", True),
@@ -206,12 +211,17 @@ def _nextauth_files(options: SelfHostedAuthScaffoldOptions) -> tuple[AuthScaffol
             _oauth_client_reexport(options.oauth_client_import),
         ),
         AuthScaffoldFile(
+            f"{auth_dir}/nextauth.mfa.ts",
+            _nextauth_mfa_file(setup.require_mfa),
+        ),
+        AuthScaffoldFile(
             f"{auth_dir}/nextauth.config.ts",
             f"""// FS.2.2 self-hosted Auth.js scaffold.
 // Reuses the AS.1 OAuth client twin for PKCE/state TTL constants.
 
 import NextAuth, {{ type NextAuthConfig }} from "next-auth"
 import {{ DEFAULT_STATE_TTL_SECONDS }} from "./oauth-client"
+import {{ nextAuthMfaCallbacks }} from "./nextauth.mfa"
 
 const providerId = process.env.AUTH_PROVIDER || "{provider}"
 
@@ -236,6 +246,7 @@ export const authConfig = {{
     }},
   ],
   session: {{ strategy: "jwt" }},
+  callbacks: nextAuthMfaCallbacks,
   cookies: {{
     pkceCodeVerifier: {{
       name: "authjs.pkce.code_verifier",
@@ -264,6 +275,63 @@ export const { GET, POST } = handlers
         ),
     )
     return files
+
+
+def _nextauth_mfa_file(require_mfa: bool) -> str:
+    default_required = "true" if require_mfa else "false"
+    return f"""// SC.8.2 Auth.js self-hosted MFA scaffold.
+// Reuses the AS.1 OAuth client TTL so MFA step-up and OAuth state expire together.
+
+import type {{ NextAuthConfig }} from "next-auth"
+import {{ DEFAULT_STATE_TTL_SECONDS }} from "./oauth-client"
+
+export const nextAuthMfaPosture = {{
+  requireMfa: process.env.AUTH_MFA_REQUIRED === "true" || {default_required},
+  challengeTtlSeconds: DEFAULT_STATE_TTL_SECONDS,
+  challengePath: "/api/v1/auth/mfa/challenge",
+  totpEnrollPath: "/api/v1/auth/mfa/totp/enroll",
+  webauthnChallengePath: "/api/v1/auth/mfa/webauthn/challenge/complete",
+}} as const
+
+export type NextAuthMfaSession = {{
+  readonly mfaVerified?: boolean | null
+}}
+
+export function requiresNextAuthMfaStepUp(
+  session: NextAuthMfaSession | null | undefined,
+): boolean {{
+  return nextAuthMfaPosture.requireMfa && session?.mfaVerified !== true
+}}
+
+export function nextAuthMfaRedirectUrl(next = "/"): string {{
+  return `/mfa-challenge?next=${{encodeURIComponent(next)}}`
+}}
+
+export const nextAuthMfaCallbacks = {{
+  async jwt({{ token, trigger, session }}) {{
+    const nextToken = token as typeof token & {{ mfaVerified?: boolean }}
+    const nextSession = session as NextAuthMfaSession | undefined
+    if (trigger === "update" && nextSession?.mfaVerified === true) {{
+      nextToken.mfaVerified = true
+    }}
+    return nextToken
+  }},
+  async session({{ session, token }}) {{
+    const enriched = session as typeof session & {{
+      mfaRequired?: boolean
+      mfaVerified?: boolean
+    }}
+    const mfaToken = token as typeof token & {{ mfaVerified?: boolean }}
+    enriched.mfaRequired = nextAuthMfaPosture.requireMfa
+    enriched.mfaVerified = mfaToken.mfaVerified === true
+    return enriched
+  }},
+  async signIn({{ user }}) {{
+    if (!nextAuthMfaPosture.requireMfa) return true
+    return Boolean(user?.email)
+  }},
+}} satisfies Pick<NextAuthConfig, "callbacks">["callbacks"]
+"""
 
 
 def _lucia_files(options: SelfHostedAuthScaffoldOptions) -> tuple[AuthScaffoldFile, ...]:

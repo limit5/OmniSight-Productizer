@@ -9,6 +9,11 @@ same PG that pg_test_pool's TRUNCATE targets.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
+from pathlib import Path
+
 import pytest
 
 
@@ -117,9 +122,35 @@ async def test_security_headers_present(_k3_client):
 
     assert h.get("x-frame-options") == "DENY"
     assert h.get("x-content-type-options") == "nosniff"
-    assert "max-age=" in (h.get("strict-transport-security") or "")
+    assert h.get("strict-transport-security") == (
+        "max-age=31536000; includeSubDomains; preload"
+    )
     assert h.get("referrer-policy") == "strict-origin"
-    assert "camera=()" in (h.get("permissions-policy") or "")
+    assert h.get("permissions-policy") == (
+        "camera=(), microphone=(), geolocation=(), payment=()"
+    )
+    assert h.get("cross-origin-resource-policy") == "same-origin"
+    assert h.get("cross-origin-embedder-policy") == "require-corp"
+    assert h.get("cross-origin-opener-policy") == "same-origin"
+
+
+def test_frontend_middleware_security_headers_source_guard():
+    middleware = Path(__file__).resolve().parents[2] / "middleware.ts"
+    source = middleware.read_text(encoding="utf-8")
+
+    assert (
+        '"Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload"'
+        in source
+    )
+    assert '"X-Frame-Options", "DENY"' in source
+    assert '"Referrer-Policy", "strict-origin"' in source
+    assert (
+        '"Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"'
+        in source
+    )
+    assert '"Cross-Origin-Resource-Policy", "same-origin"' in source
+    assert '"Cross-Origin-Embedder-Policy", "require-corp"' in source
+    assert '"Cross-Origin-Opener-Policy", "same-origin"' in source
 
 
 @pytest.mark.asyncio
@@ -151,6 +182,66 @@ async def test_csp_script_src_no_unsafe_inline(_k3_client):
     assert script_src, "CSP must contain a script-src directive"
     assert "'unsafe-inline'" not in script_src, \
         "script-src must not contain 'unsafe-inline' (use nonce-based)"
+
+
+@pytest.mark.asyncio
+async def test_csp_script_src_contains_unique_nonce(_k3_client):
+    c = _k3_client
+    first = await c.get("/api/v1/health")
+    second = await c.get("/api/v1/health")
+
+    def _nonce(resp) -> str:
+        csp = resp.headers.get("content-security-policy") or ""
+        match = re.search(r"'nonce-([^']+)'", csp)
+        assert match, f"CSP must contain a nonce source: {csp}"
+        return match.group(1)
+
+    first_nonce = _nonce(first)
+    second_nonce = _nonce(second)
+
+    assert len(base64.b64decode(first_nonce)) == 18
+    assert first_nonce != second_nonce
+
+
+@pytest.mark.asyncio
+async def test_csp_hash_sources_auto_generated():
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from starlette.responses import HTMLResponse
+
+    from backend.main import _security_headers
+
+    inline_script = "console.log('SC.6.1')"
+    expected_hash = base64.b64encode(
+        hashlib.sha256(inline_script.encode("utf-8")).digest()
+    ).decode("ascii")
+
+    probe = FastAPI()
+    probe.middleware("http")(_security_headers)
+
+    @probe.get("/")
+    async def _probe():
+        return HTMLResponse(f"<script>{inline_script}</script>")
+
+    transport = ASGITransport(app=probe)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get("/")
+
+    csp = resp.headers.get("content-security-policy") or ""
+    assert f"'sha256-{expected_hash}'" in csp
+    assert "script-src 'self'" in csp
+    assert "'unsafe-inline'" not in csp.split("script-src", 1)[1].split(";", 1)[0]
+    assert resp.headers.get("strict-transport-security") == (
+        "max-age=31536000; includeSubDomains; preload"
+    )
+    assert resp.headers.get("x-frame-options") == "DENY"
+    assert resp.headers.get("referrer-policy") == "strict-origin"
+    assert resp.headers.get("permissions-policy") == (
+        "camera=(), microphone=(), geolocation=(), payment=()"
+    )
+    assert resp.headers.get("cross-origin-resource-policy") == "same-origin"
+    assert resp.headers.get("cross-origin-embedder-policy") == "require-corp"
+    assert resp.headers.get("cross-origin-opener-policy") == "same-origin"
 
 
 @pytest.mark.asyncio

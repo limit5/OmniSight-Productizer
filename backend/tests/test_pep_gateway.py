@@ -78,8 +78,12 @@ def _waiter(outcomes: dict[str, str]):
 
 
 @pytest.fixture(autouse=True)
-def _reset_pep():
+def _reset_pep(monkeypatch: pytest.MonkeyPatch):
     pep._reset_for_tests()
+    monkeypatch.setattr(pep, "_emit_sse", lambda *_a, **_k: None)
+    monkeypatch.setattr(pep, "_emit_audit", lambda *_a, **_k: None)
+    monkeypatch.setattr(pep, "_bump_metric", lambda *_a, **_k: None)
+    monkeypatch.setattr(pep, "_bump_hold_duration", lambda *_a, **_k: None)
     yield
     pep._reset_for_tests()
 
@@ -175,6 +179,17 @@ class TestClassify:
         # t2 inherits t1 and adds network-scoped tools
         assert "read_file" in pep.tier_whitelist("t2")
         assert "git_push" in pep.tier_whitelist("t2")
+
+    def test_sast_high_severity_tool_is_explicit_hold(self):
+        action, rule, reason, scope = pep.classify(
+            "sast_high_severity_finding",
+            {"blocking_count": 1},
+            "t3",
+        )
+        assert action is pep.PepAction.hold
+        assert rule == "sast_high_severity"
+        assert "SAST" in reason
+        assert scope == "local"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

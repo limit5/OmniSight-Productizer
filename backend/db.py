@@ -1595,6 +1595,66 @@ CREATE TABLE IF NOT EXISTS provisioned_billing (
     updated_at             REAL NOT NULL,
     PRIMARY KEY (tenant_id, provider)
 );
+
+-- SC.10.1 (alembic 0064): data-subject access / erasure /
+-- portability workflow queue.  Stores workflow state only; SC.10.2-
+-- SC.10.5 own the endpoint payloads, erasure execution, JSON export,
+-- and 30-day SLA timer.  TEXT PK avoids sequence-reset work during
+-- SQLite -> PG cutover.
+CREATE TABLE IF NOT EXISTS dsar_requests (
+    id            TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL
+                         REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id       TEXT NOT NULL
+                         REFERENCES users(id) ON DELETE CASCADE,
+    request_type  TEXT NOT NULL
+                         CHECK (request_type IN ('access','erasure','portability')),
+    status        TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('cancelled','completed','failed',
+                                           'pending','processing')),
+    requested_at  REAL NOT NULL,
+    due_at        REAL NOT NULL,
+    completed_at  REAL,
+    payload_json  TEXT NOT NULL DEFAULT '{}',
+    result_json   TEXT NOT NULL DEFAULT '{}',
+    error         TEXT NOT NULL DEFAULT '',
+    version       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_dsar_requests_user_status
+    ON dsar_requests(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_dsar_requests_tenant_due
+    ON dsar_requests(tenant_id, due_at)
+    WHERE status IN ('pending', 'processing');
+
+-- SC.11.1 (alembic 0065): compliance evidence bundle queue/catalog.
+-- Stores bundle lifecycle metadata only; SC.11.2-SC.11.4 own control
+-- mappings, evidence collection, zip export, and signatures.  TEXT PK
+-- avoids sequence-reset work during SQLite -> PG cutover.
+CREATE TABLE IF NOT EXISTS compliance_evidence_bundles (
+    id                     TEXT PRIMARY KEY,
+    tenant_id              TEXT NOT NULL
+                                  REFERENCES tenants(id) ON DELETE CASCADE,
+    requested_by           TEXT
+                                  REFERENCES users(id) ON DELETE SET NULL,
+    standard               TEXT NOT NULL
+                                  CHECK (standard IN ('iso27001','soc2')),
+    status                 TEXT NOT NULL DEFAULT 'pending'
+                                  CHECK (status IN ('cancelled','collecting',
+                                                    'completed','failed',
+                                                    'pending')),
+    requested_at           REAL NOT NULL,
+    completed_at           REAL,
+    control_mapping_json   TEXT NOT NULL DEFAULT '{}',
+    evidence_manifest_json TEXT NOT NULL DEFAULT '{}',
+    artifact_uri           TEXT NOT NULL DEFAULT '',
+    signature_json         TEXT NOT NULL DEFAULT '{}',
+    error                  TEXT NOT NULL DEFAULT '',
+    version                INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_compliance_evidence_bundles_tenant_status
+    ON compliance_evidence_bundles(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_compliance_evidence_bundles_requested_by
+    ON compliance_evidence_bundles(requested_by);
 """
 
 

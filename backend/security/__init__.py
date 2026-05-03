@@ -6,6 +6,66 @@ R20 Phase 0 (chat-layer):
   - prompt_hardening.harden_user_message(text) — wrap suspicious input
   - secret_filter.redact(text) — output redaction (returns text + labels)
 
+SC.7.1 (OWASP mitigation shared lib):
+  - input_validation — pure allowlist-first scalar validators for
+    generated apps (bounded text, slug, identifier, email, enum, integer
+    range).  Framework agnostic; callers map
+    InputValidationError.issue to HTTP / form / job errors.
+
+SC.7.2 (OWASP mitigation shared lib):
+  - output_encoding — pure context-specific encoders for generated apps
+    (HTML text, quoted HTML attribute, JavaScript string literal,
+    JSON-in-script body, URL component). Framework agnostic; callers
+    choose the encoder matching the sink and keep template autoescape
+    enabled.
+
+SC.7.3 (OWASP mitigation shared lib):
+  - query_templates — pure PostgreSQL / asyncpg-style parameterized
+    CRUD query templates for generated apps.  Framework agnostic;
+    callers execute QueryTemplate.sql with QueryTemplate.params and
+    keep arbitrary SQL expressions outside this helper.
+
+SC.7.4 (OWASP mitigation shared lib):
+  - csrf_templates — pure synchronizer-token helpers for generated
+    apps (token generation, hidden-input/header render context,
+    safe-method bypass, and constant-time submitted-token validation).
+    Framework agnostic; callers own session persistence, cookie setting,
+    and HTTP error mapping.
+
+SC.7.5 (OWASP mitigation shared lib):
+  - path_ssrf — pure path-traversal and SSRF guard helpers for
+    generated apps (relative path normalisation, base-directory
+    containment, public URL canonicalisation, and static server-side
+    fetch destination blocklist). Framework agnostic; callers own HTTP
+    client redirect/final-IP controls and error mapping.
+
+SC.9.1-SC.9.6 (per-jurisdiction privacy notice generator):
+  - privacy_notice_templates — pure GDPR, CCPA, PIPL, LGPD, and PIPEDA privacy
+    notice templates for generated apps. Emits legal-review-ready
+    markdown plus machine-readable sections / rights metadata. GDPR
+    covers access, portability, erasure, and objection. CCPA covers
+    know/access, deletion, correction, opt-out of sale/sharing, limiting
+    sensitive personal information, and non-discrimination. PIPL covers
+    know/decide, restrict/refuse, access/copy, portability, correction,
+    deletion, explanation, and deceased close-relative rights. LGPD
+    covers confirmation/access, correction, anonymization/blocking/
+    deletion, portability, consent-based deletion, sharing information,
+    consent refusal information, consent revocation, ANPD petition,
+    objection, and automated-decision review. PIPEDA covers access,
+    correction, consent withdrawal, and challenging compliance. SC.9.6
+    adds deterministic SDK / third-party dependency clause inference for
+    analytics, diagnostics, push, sign-in, payments, and advertising /
+    tracking notice sections. DSAR workflow scaffolding is a separate row.
+
+SC.12.1-SC.12.2 (PII detection / masking):
+  - pii_presidio — Microsoft Presidio adapter for framework-agnostic
+    text analysis and masking. Provides normalized finding dataclasses
+    and lazy-loads Presidio engines so module import has no NLP runtime
+    side effects.
+  - pii_auto_mask — opt-in helpers that mask strings, log event dicts,
+    and JSON-like response payloads while returning entity metadata.
+    They do not install global logger or FastAPI middleware.
+
 AS.0.10 (auth shared lib):
   - password_generator — pure-functional auto-gen password core lib
     (Random / Diceware / Pronounceable). Importable submodule, no
@@ -250,15 +310,21 @@ from . import auth_dashboard  # noqa: F401
 from . import auth_event  # noqa: F401
 from . import bot_challenge  # noqa: F401
 from . import credential_vault  # noqa: F401
+from . import csrf_templates  # noqa: F401
 from . import honeypot  # noqa: F401
 from . import honeypot_form_verifier  # noqa: F401
+from . import input_validation  # noqa: F401
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
 from . import oauth_login_handler  # noqa: F401
 from . import oauth_refresh_hook  # noqa: F401
 from . import oauth_revoke  # noqa: F401
 from . import oauth_vendors  # noqa: F401
+from . import path_ssrf  # noqa: F401
 from . import password_generator  # noqa: F401
+from . import pii_auto_mask  # noqa: F401
+from . import pii_presidio  # noqa: F401
+from . import privacy_notice_templates  # noqa: F401
 from . import token_vault  # noqa: F401
 from . import turnstile_form_verifier  # noqa: F401
 
@@ -269,9 +335,11 @@ __all__ = [
     "auth_event",
     "bot_challenge",
     "credential_vault",
+    "csrf_templates",
     "harden_user_message",
     "honeypot",
     "honeypot_form_verifier",
+    "input_validation",
     "looks_like_injection",
     "oauth_audit",
     "oauth_client",
@@ -279,7 +347,11 @@ __all__ = [
     "oauth_refresh_hook",
     "oauth_revoke",
     "oauth_vendors",
+    "path_ssrf",
     "password_generator",
+    "pii_auto_mask",
+    "pii_presidio",
+    "privacy_notice_templates",
     "redact",
     "token_vault",
     "turnstile_form_verifier",

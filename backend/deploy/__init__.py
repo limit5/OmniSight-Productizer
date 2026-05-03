@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from backend.deploy.base import (
     BuildArtifact,
+    ContainerVulnerabilityBlockError,
     DeployArtifactError,
     DeployConflictError,
     DeployError,
@@ -82,6 +83,7 @@ def get_adapter(provider: str) -> type[WebDeployAdapter]:
 
 __all__ = [
     "BuildArtifact",
+    "ContainerVulnerabilityBlockError",
     "DeployArtifactError",
     "DeployConflictError",
     "DeployError",
