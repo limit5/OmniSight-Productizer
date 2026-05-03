@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import * as api from "@/lib/api"
 import { useTenantOptional } from "@/lib/tenant-context"
 import { useProjectOptional } from "@/lib/project-context"
+import { OllamaToolCallingBadge } from "@/components/omnisight/ollama-tool-calling-badge"
 
 interface IntegrationSettingsProps {
   open: boolean
@@ -4013,6 +4014,19 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                       )}
                     </select>
                   </div>
+                  {/* Z.6.4 — Ollama tool-calling compat badge. Only rendered when
+                      the active provider is ollama AND the selected model has a
+                      known compat entry from config/ollama_tool_calling.yaml. */}
+                  {currentProvider === "ollama" &&
+                    selectedProvider?.tool_calling_compat &&
+                    currentModel &&
+                    selectedProvider.tool_calling_compat[currentModel] && (
+                      <div className="flex items-center gap-2 pl-[88px]">
+                        <OllamaToolCallingBadge
+                          compat={selectedProvider.tool_calling_compat[currentModel]}
+                        />
+                      </div>
+                    )}
                 </>
               )
             })()}

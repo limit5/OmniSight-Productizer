@@ -1189,6 +1189,13 @@ export async function clearChatHistory() {
 
 // ─── Providers ───
 
+/** Z.6.4 — one entry from config/ollama_tool_calling.yaml (ollama only). */
+export interface OllamaModelToolCallingCompat {
+  support: "full" | "partial" | "none"
+  min_ollama_version: string
+  notes?: string
+}
+
 export interface ProviderConfig {
   id: string
   name: string
@@ -1198,6 +1205,8 @@ export interface ProviderConfig {
   env_var: string | null
   configured: boolean
   base_url?: string
+  /** Z.6.4 — only present on the `ollama` provider; keyed by model name. */
+  tool_calling_compat?: Record<string, OllamaModelToolCallingCompat>
 }
 
 export interface ProvidersResponse {

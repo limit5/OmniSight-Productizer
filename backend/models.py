@@ -685,6 +685,13 @@ class PromptDiffResponse(BaseModel):
     diff: str = ""
 
 
+class ProviderToolCallingCompat(BaseModel):
+    """Per-model tool-calling support entry from config/ollama_tool_calling.yaml."""
+    support: str  # "full" | "partial" | "none"
+    min_ollama_version: str
+    notes: str = ""
+
+
 class ProviderInfo(BaseModel):
     id: str
     name: str
@@ -694,6 +701,8 @@ class ProviderInfo(BaseModel):
     env_var: Optional[str] = ""
     configured: bool = False
     base_url: Optional[str] = None
+    # Z.6.4: ollama-only field; None for all other providers.
+    tool_calling_compat: Optional[dict[str, ProviderToolCallingCompat]] = None
 
 
 class ProvidersListResponse(BaseModel):

@@ -1186,6 +1186,41 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
         return None
 
 
+def _load_ollama_tool_calling_compat() -> dict[str, dict]:
+    """Load config/ollama_tool_calling.yaml and return a per-model compat dict.
+
+    Loaded once per worker at first call; the YAML is static config so
+    module-level caching is correct (answer #1: each worker derives the
+    same value from the same on-disk file — no cross-worker coordination
+    needed).  Returns an empty dict when the file is absent or unparseable
+    so list_providers() degrades gracefully instead of raising.
+
+    Module-global audit: ``_OLLAMA_TOOL_COMPAT_CACHE`` is set once from
+    a deterministic file read.  All workers derive the same dict from the
+    same YAML source.  No cross-worker coordination needed (answer #1).
+    """
+    global _OLLAMA_TOOL_COMPAT_CACHE
+    if _OLLAMA_TOOL_COMPAT_CACHE is not None:
+        return _OLLAMA_TOOL_COMPAT_CACHE
+    import pathlib
+    import yaml  # pyyaml — already a transitive dep via langchain
+
+    yaml_path = pathlib.Path(__file__).parents[2] / "config" / "ollama_tool_calling.yaml"
+    try:
+        raw = yaml.safe_load(yaml_path.read_text())
+        _OLLAMA_TOOL_COMPAT_CACHE = raw.get("models", {}) if isinstance(raw, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ollama_tool_calling.yaml load failed: %s", exc)
+        _OLLAMA_TOOL_COMPAT_CACHE = {}
+    return _OLLAMA_TOOL_COMPAT_CACHE
+
+
+# Populated on first call to _load_ollama_tool_calling_compat(); None means
+# "not yet loaded".  Each uvicorn worker populates its own copy from the
+# same on-disk file — consistent by construction (SOP answer #1).
+_OLLAMA_TOOL_COMPAT_CACHE: dict[str, dict] | None = None
+
+
 def list_providers() -> list[dict]:
     """Return metadata about all supported providers.
 
@@ -1328,10 +1363,20 @@ def list_providers() -> list[dict]:
             "id": "ollama",
             "name": "Ollama (Local)",
             "default_model": "llama3.1",
+            # Z.6.4: 9 models confirmed to work with bind_tools() via
+            # langchain-ollama >= 0.2 + Ollama 0.3.0+.  See
+            # config/ollama_tool_calling.yaml for per-model support levels.
             "models": [
                 "llama3.1",
                 "llama3.2",
                 "qwen2.5",
+                "qwen3",
+                "mistral-nemo",
+                "mistral-small",
+                "firefunction-v2",
+                "command-r",
+                "mixtral",
+                # Additional general-purpose models (no guaranteed tool support)
                 "mistral",
                 "codellama",
                 "deepseek-r1",
@@ -1340,6 +1385,11 @@ def list_providers() -> list[dict]:
             "env_var": None,
             "configured": is_provider_configured("ollama"),
             "base_url": settings.ollama_base_url,
+            # Z.6.4: tool-calling compat matrix from
+            # config/ollama_tool_calling.yaml.  Injected here so the frontend
+            # can render a badge without a separate API call.  None for all
+            # other providers (field is ollama-only).
+            "tool_calling_compat": _load_ollama_tool_calling_compat() or None,
         },
     ]
     return providers

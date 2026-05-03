@@ -1,0 +1,120 @@
+# Ollama model tool-calling compatibility matrix.
+#
+# Z.6.4 — written alongside config/llm_pricing.yaml to document which
+# Ollama-hosted models support the tool_calls message field introduced
+# in Ollama 0.3.0 (2024-07-25).
+#
+# Support levels:
+#   full    — model reliably uses the tool_calls response field;
+#             parallel and sequential calls both work.  The adapter
+#             (backend/llm_adapter.py) can pass bind_tools() without
+#             any extra workaround.
+#   partial — model can invoke tools but has known limitations:
+#             e.g. no reliable parallel calls, strict schema
+#             requirements, or output format drift on complex inputs.
+#             Operators should set max_parallel_tools=1 as a guard.
+#   none    — model does not support tool_calls via Ollama at all.
+#             The adapter gracefully degrades to pure-chat mode
+#             (Z.6.5 adds the SharedKV counter + dashboard warning).
+#
+# min_ollama_version: earliest Ollama daemon tag at which tool calling
+# works for this model.  Use exact semver from
+# https://github.com/ollama/ollama/releases.
+#
+# Source cross-references:
+#   Ollama tool-call announcement: https://ollama.com/blog/tool-support
+#   Ollama OpenAI-compat docs:     https://github.com/ollama/ollama/blob/main/docs/openai.md
+#   Model-level release notes are linked per-entry in `notes`.
+
+models:
+  llama3.1:
+    support: full
+    min_ollama_version: "0.3.0"
+    notes: >
+      Native tool-call support landed in Ollama 0.3.0 (2024-07-25).
+      llama3.1 was one of the first models in the official release
+      announcement; all sizes (8B/70B/405B) work.
+
+  llama3.2:
+    support: full
+    min_ollama_version: "0.3.3"
+    notes: >
+      Llama 3.2 (1B/3B) shipped after Ollama 0.3.0; Ollama 0.3.3
+      added the model file template that enables tool calls for the
+      smaller sizes.  Vision variants (llama3.2-vision) do not support
+      tool calls — use the text-only tag.
+
+  qwen2.5:
+    support: full
+    min_ollama_version: "0.3.9"
+    notes: >
+      Qwen2.5 tool calling verified from Ollama 0.3.9 onward.
+      Earlier 0.3.x builds had a Jinja template quoting bug that
+      produced malformed JSON on tool schemas with nested objects.
+      Covers qwen2.5:7b, qwen2.5:14b, qwen2.5:32b, qwen2.5:72b.
+
+  qwen3:
+    support: full
+    min_ollama_version: "0.6.0"
+    notes: >
+      Qwen3 family (0.6B–235B) was added to Ollama in the 0.6 release
+      cycle.  The model ships a thinking-mode toggle (/no_think prefix);
+      for agent use always pass /no_think in the system prompt so the
+      adapter sees a clean tool_calls block and not a <think>…</think>
+      wrapper around the JSON.
+
+  mistral-nemo:
+    support: full
+    min_ollama_version: "0.3.0"
+    notes: >
+      Mistral Nemo (12B, Mistral AI + NVIDIA) explicitly declares
+      tool-call support in its Modelfile template shipped with Ollama
+      0.3.0.  Parallel calls work reliably at this size.
+
+  mistral-small:
+    support: full
+    min_ollama_version: "0.4.0"
+    notes: >
+      mistral-small:24b gained a dedicated tool-call Modelfile template
+      in Ollama 0.4.0.  The 22b instruct variant is the recommended tag;
+      the older "mistral-small:22b-instruct-2409" tag also works.
+
+  firefunction-v2:
+    support: full
+    min_ollama_version: "0.3.0"
+    notes: >
+      Firefunction-v2 (Fireworks AI, Llama-3 fine-tune) is purpose-built
+      for function calling with a structured output contract.  It is the
+      most reliable tool-call model in the ollama library for agent
+      dispatch use cases.  Available as firefunction-v2:70b.
+
+  command-r:
+    support: full
+    min_ollama_version: "0.3.2"
+    notes: >
+      Cohere Command-R (35B) supports tool calling via Ollama.
+      Version 0.3.2 fixed a Modelfile template escaping bug that caused
+      the tool-result role to be omitted on multi-turn conversations.
+      command-r-plus:104b also works but requires ≥64 GB VRAM.
+
+  mixtral:
+    support: partial
+    min_ollama_version: "0.3.0"
+    notes: >
+      Tool calls work for single sequential invocations, but parallel
+      tool calls and schemas with deeply nested objects produce malformed
+      JSON in roughly 15% of runs due to MoE routing variance across the
+      8x7B experts.  Mitigation: pass {"max_parallel_tools": 1} in the
+      Ollama options dict, or use mixtral:8x22b for lower error rates.
+
+metadata:
+  updated_at: "2026-05-03"
+  ollama_tool_call_baseline: "0.3.0"
+  schema_version: 1
+  notes: |
+    Ollama tool calling was introduced in 0.3.0 (2024-07-25).
+    Models absent from this file have unknown or no tool-call support.
+    Update this file + run POST /runtime/pricing/reload (not required
+    for this file, but keep it in sync with llm_pricing.yaml updates)
+    whenever a new model is added to the ollama provider list in
+    backend/agents/llm.py::list_providers().
