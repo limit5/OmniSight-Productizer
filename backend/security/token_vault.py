@@ -49,7 +49,9 @@ plain Fernet ciphertext from :mod:`backend.secret_store`. During the
 path only when the stored ciphertext is not a token-envelope JSON
 object. After ``LEGACY_FERNET_FALLBACK_DEPRECATES_ON`` the fallback
 raises :class:`LegacyFernetFallbackDeprecatedError`; writers never
-produce legacy Fernet ciphertext in this release.
+produce legacy Fernet ciphertext unless
+``OMNISIGHT_KS_ENVELOPE_ENABLED=false`` is set for the migration
+rollback window.
 
 ``key_version`` / master-KEK rotation (AS.0.4 §3.1 / KS.1.4)
 ────────────────────────────────────────────────────────────
@@ -588,6 +590,11 @@ def encrypt_for_user(
     tok = _check_plaintext(plaintext)
     tid = _tenant_id_for_user(uid, tenant_id)
     payload = _binding_payload(uid, p, tok)
+    if not tenant_envelope.is_enabled():
+        return EncryptedToken(
+            ciphertext=secret_store.encrypt(payload),
+            key_version=current_key_version(as_of=as_of),
+        )
     ciphertext, dek_ref = tenant_envelope.encrypt(
         payload,
         tid,

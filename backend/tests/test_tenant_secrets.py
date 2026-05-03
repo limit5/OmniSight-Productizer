@@ -96,6 +96,32 @@ def test_secret_value_legacy_fernet_helper_fallback(monkeypatch):
     ) == "sk-legacy-tenant"
 
 
+def test_secret_value_envelope_disabled_writes_single_fernet(monkeypatch):
+    """KS.1.12: knob-off writes the old single-Fernet tenant secret
+    format during the migration rollback window."""
+    monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-12-tenant-rollback-secret")
+    from backend import secret_store
+    from backend import tenant_secrets as sec
+    from backend.security import envelope as tenant_envelope
+    secret_store._reset_for_tests()
+    monkeypatch.setenv(tenant_envelope.ENVELOPE_ENABLED_ENV, "false")
+
+    stored = sec._encrypt_secret_value(
+        DEFAULT_TENANT,
+        "provider_key",
+        "openai",
+        "sk-proj-tenant-rollback",
+    )
+
+    assert not stored.lstrip().startswith("{")
+    assert sec._decrypt_secret_value(
+        stored,
+        DEFAULT_TENANT,
+        "provider_key",
+        "openai",
+    ) == "sk-proj-tenant-rollback"
+
+
 @pytest.fixture()
 async def _secrets_db(pg_test_pool, monkeypatch):
     # Fresh slate per test; tenant_secrets.tenant_id has an FK to

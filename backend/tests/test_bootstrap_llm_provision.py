@@ -510,6 +510,28 @@ def test_legacy_fernet_provider_credentials_still_read(tmp_path, monkeypatch):
     secret_store._reset_for_tests()
 
 
+def test_provider_credentials_envelope_disabled_writes_single_fernet(
+    tmp_path, monkeypatch,
+):
+    """KS.1.12: knob-off writes provider credentials in the legacy
+    single-Fernet marker format during the migration rollback window."""
+    monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-12-llm-rollback-secret")
+    from backend import secret_store
+    from backend.security import envelope as tenant_envelope
+    secret_store._reset_for_tests()
+    monkeypatch.setenv(tenant_envelope.ENVELOPE_ENABLED_ENV, "false")
+    path = tmp_path / "provider-creds-rollback.enc"
+    _secrets._reset_for_tests(path)
+
+    _secrets.set_provider_credentials("openai", api_key="sk-proj-rollback")
+    raw = path.read_text(encoding="ascii")
+
+    assert not raw.lstrip().startswith("{")
+    assert _secrets.get_provider_credentials("openai")["api_key"] == "sk-proj-rollback"
+    _secrets._reset_for_tests()
+    secret_store._reset_for_tests()
+
+
 def test_set_credentials_rejects_unknown_provider(tmp_path, monkeypatch):
     _secrets._reset_for_tests(tmp_path / "creds.enc")
     with pytest.raises(ValueError):

@@ -128,7 +128,7 @@ def test_envelope_carries_salt_field() -> None:
 
 def test_token_envelope_shape_is_pinned() -> None:
     """KS.1.3 writes only the new token envelope; the legacy Fernet
-    shape must never be produced by :func:`encrypt_for_user`."""
+    shape is produced only when the KS.1.12 rollback knob is off."""
     encrypted = tv.encrypt_for_user("user-peek", "google", "tok-peek")
     outer = json.loads(encrypted.ciphertext)
     assert encrypted.key_version == tv.KEY_VERSION_CURRENT
@@ -147,6 +147,17 @@ def test_token_envelope_shape_is_pinned() -> None:
     }
     assert outer["dek_ref"]["tenant_id"] == "user-peek"
     assert outer["dek_ref"]["encryption_context"]["purpose"] == "as-token-vault"
+
+
+def test_envelope_disabled_writes_legacy_fernet_token(monkeypatch) -> None:
+    """KS.1.12: migration rollback knob makes new OAuth token writes
+    use the same single-Fernet carrier accepted by the legacy reader."""
+    monkeypatch.setenv(tenant_envelope.ENVELOPE_ENABLED_ENV, "false")
+    encrypted = tv.encrypt_for_user("user-rollback", "google", "tok-rollback")
+
+    assert encrypted.key_version == tv.KEY_VERSION_CURRENT
+    assert not encrypted.ciphertext.lstrip().startswith("{")
+    assert tv.decrypt_for_user("user-rollback", "google", encrypted) == "tok-rollback"
 
 
 def test_encrypt_accepts_explicit_tenant_id() -> None:
@@ -514,13 +525,17 @@ def test_fingerprint_matches_secret_store() -> None:
 
 
 def test_token_vault_uses_ks_envelope_for_new_writes() -> None:
-    """KS.1.3 hard invariant: new writes MUST go through
-    ``backend.security.envelope`` and must not emit legacy Fernet."""
+    """KS.1.3 / KS.1.12 invariant: default writes MUST go through
+    ``backend.security.envelope``; legacy Fernet is allowed only behind
+    the single rollback knob."""
     src = inspect.getsource(tv)
     assert "from backend.security import envelope as tenant_envelope" in src
     assert "tenant_envelope.encrypt" in src
-    assert "secret_store.encrypt(payload)" not in src, (
-        "KS.1.3 writers must not emit legacy Fernet ciphertext"
+    assert "tenant_envelope.is_enabled()" in src, (
+        "KS.1.12 rollback must be controlled by the central envelope knob"
+    )
+    assert "os.environ" not in src, (
+        "token_vault must not parse the KS knob itself"
     )
     # MUST NOT mint its own Fernet key
     assert "Fernet.generate_key" not in src, (

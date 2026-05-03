@@ -6,6 +6,8 @@ JSON marker under ``data/.llm_secrets.enc``. Values never land on disk
 in plaintext; only the last four chars of a key are ever shown back to
 callers (via :func:`fingerprint`). Legacy Fernet markers remain
 readable during the KS.1.11 compatibility window.
+``OMNISIGHT_KS_ENVELOPE_ENABLED=false`` temporarily writes the same
+single-Fernet store payload during the migration rollback window.
 
 ``load_into_settings`` mirrors the decrypted values into
 :mod:`backend.config.settings` so the existing agent factory
@@ -162,6 +164,8 @@ def _load_store_carrier(
 
 
 def _encrypt_store_payload(payload: str) -> str:
+    if not tenant_envelope.is_enabled():
+        return secret_store.encrypt(payload)
     ciphertext, dek_ref = tenant_envelope.encrypt(
         payload,
         _LLM_SECRET_TENANT_ID,

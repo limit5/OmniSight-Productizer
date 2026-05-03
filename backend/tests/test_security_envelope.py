@@ -255,6 +255,23 @@ def test_unknown_versions_rejected(monkeypatch) -> None:
         envelope.TenantDEKRef.from_dict(data)
 
 
+def test_envelope_enabled_knob_defaults_true(monkeypatch) -> None:
+    monkeypatch.delenv(envelope.ENVELOPE_ENABLED_ENV, raising=False)
+    assert envelope.is_enabled() is True
+
+
+@pytest.mark.parametrize("raw", ["false", "FALSE", "0", "no", "off"])
+def test_envelope_enabled_knob_false_values(monkeypatch, raw: str) -> None:
+    monkeypatch.setenv(envelope.ENVELOPE_ENABLED_ENV, raw)
+    assert envelope.is_enabled() is False
+
+
+@pytest.mark.parametrize("raw", ["true", "1", "yes", "anything-else"])
+def test_envelope_enabled_knob_true_values(monkeypatch, raw: str) -> None:
+    monkeypatch.setenv(envelope.ENVELOPE_ENABLED_ENV, raw)
+    assert envelope.is_enabled() is True
+
+
 def test_module_global_state_and_crypto_source_guards() -> None:
     source = inspect.getsource(envelope)
     assert "AESGCM" in source

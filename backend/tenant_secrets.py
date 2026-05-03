@@ -27,6 +27,9 @@ cached per-worker from env / disk; all workers compute the same
 key from the same source, so ciphertext is interoperable across
 workers (the small race on first-boot key-file generation lives in
 secret_store.py, not here — flagged for follow-up).
+``OMNISIGHT_KS_ENVELOPE_ENABLED=false`` is read lazily per write and
+temporarily emits the same single-Fernet plaintext payload during the
+migration rollback window.
 """
 
 from __future__ import annotations
@@ -117,6 +120,8 @@ def _load_binding_payload(
 def _encrypt_secret_value(
     tid: str, secret_type: str, key_name: str, plaintext: str,
 ) -> str:
+    if not tenant_envelope.is_enabled():
+        return secret_store.encrypt(plaintext)
     payload = _binding_payload(tid, secret_type, key_name, plaintext)
     ciphertext, dek_ref = tenant_envelope.encrypt(
         payload,

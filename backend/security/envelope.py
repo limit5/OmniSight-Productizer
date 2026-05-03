@@ -59,6 +59,7 @@ import base64
 import ctypes
 import hmac
 import json
+import os
 import secrets
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
@@ -74,6 +75,7 @@ AES_GCM_ALGORITHM: str = "AES-256-GCM"
 DEK_RAW_BYTES: int = 32
 NONCE_RAW_BYTES: int = 12
 DEFAULT_PURPOSE: str = "tenant-secret"
+ENVELOPE_ENABLED_ENV: str = "OMNISIGHT_KS_ENVELOPE_ENABLED"
 
 
 class EnvelopeEncryptionError(Exception):
@@ -193,6 +195,18 @@ def encrypt(
         "ciphertext_b64": base64.b64encode(encrypted).decode("ascii"),
     }
     return json.dumps(envelope, sort_keys=True, separators=(",", ":")), dek_ref
+
+
+def is_enabled() -> bool:
+    """Whether KS.1 envelope writes are enabled.
+
+    The migration rollback knob is read lazily per call, so every
+    worker derives the same value from its process environment without
+    relying on shared module-global state.
+    """
+
+    raw = (os.environ.get(ENVELOPE_ENABLED_ENV) or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def decrypt(
@@ -364,6 +378,7 @@ __all__ = [
     "CiphertextCorruptedError",
     "DEFAULT_PURPOSE",
     "DEK_RAW_BYTES",
+    "ENVELOPE_ENABLED_ENV",
     "ENVELOPE_FORMAT_VERSION",
     "EnvelopeEncryptionError",
     "KEY_VERSION_CURRENT",
@@ -372,4 +387,5 @@ __all__ = [
     "UnknownEnvelopeVersionError",
     "decrypt",
     "encrypt",
+    "is_enabled",
 ]
