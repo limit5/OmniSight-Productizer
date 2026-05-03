@@ -43,6 +43,12 @@ from backend.security_scanning.container import (
     ContainerSeverity,
     scan_container_artifact,
 )
+from backend.security_scanning.secrets import (
+    SecretFinding,
+    SecretScanReport,
+    SecretSeverity,
+    scan_secrets,
+)
 
 __all__ = [
     "DEFAULT_FAIL_ON",
@@ -60,6 +66,9 @@ __all__ = [
     "SCA_FIX_PR_ARTIFACT",
     "SCAReport",
     "SCASeverity",
+    "SecretFinding",
+    "SecretScanReport",
+    "SecretSeverity",
     "ContainerArtifactReport",
     "ContainerFinding",
     "ContainerSeverity",
@@ -70,6 +79,7 @@ __all__ = [
     "scan_sca",
     "scan_sast",
     "scan_zap_baseline",
+    "scan_secrets",
     "write_sca_fix_pr_artifact",
     "write_sast_commit_scan_artifact",
 ]
