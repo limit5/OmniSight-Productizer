@@ -365,6 +365,118 @@ class TestSASTGeneratedWorkspaceCommit:
         assert result["sast_scan"]["triggered"] is True
         assert result["sast_scan"]["report"]["source"] == "mock"
 
+    def test_finalize_ignores_stale_sast_artifact_and_rescans(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        self._stub_workspace_events(monkeypatch)
+        workspace = _init_generated_workspace(tmp_path)
+        stale_scan = SASTCommitScan(
+            workspace_path=str(workspace.resolve()),
+            commit_sha="stale-sha",
+            triggered=True,
+            reason="commit",
+            report=SASTReport(source="semgrep", app_path=str(workspace)),
+        )
+        write_sast_commit_scan_artifact(stale_scan, workspace)
+        (workspace / "app.py").write_text("print('fresh')\n")
+        calls: list[tuple[Path, str]] = []
+
+        def fake_scan(path: Path | str, *, commit_sha: str = ""):
+            calls.append((Path(path).resolve(), commit_sha))
+            return SASTCommitScan(
+                workspace_path=str(Path(path).resolve()),
+                commit_sha=commit_sha,
+                triggered=True,
+                reason="commit",
+                report=SASTReport(source="mock", app_path=str(path)),
+            )
+
+        monkeypatch.setattr(
+            "backend.security_scanning.scan_generated_workspace_commit",
+            fake_scan,
+        )
+        monkeypatch.setitem(
+            workspace_mod._workspaces,
+            "agent-sast-stale-artifact",
+            workspace_mod.WorkspaceInfo(
+                agent_id="agent-sast-stale-artifact",
+                task_id="SC.1.4",
+                branch="main",
+                path=workspace,
+                repo_source=str(workspace),
+            ),
+        )
+        try:
+            result = asyncio.run(workspace_mod.finalize("agent-sast-stale-artifact"))
+        finally:
+            workspace_mod._workspaces.pop("agent-sast-stale-artifact", None)
+
+        assert calls == [(workspace.resolve(), result["sast_scan"]["commit_sha"])]
+        assert result["sast_scan"]["commit_sha"] != "stale-sha"
+        assert result["sast_scan"]["report"]["source"] == "mock"
+
+    def test_finalize_medium_severity_scan_does_not_trigger_pep_hold(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        self._stub_workspace_events(monkeypatch)
+        workspace = _init_generated_workspace(tmp_path)
+        (workspace / "app.py").write_text("print('medium')\n")
+
+        def fake_scan(path: Path | str, *, commit_sha: str = ""):
+            finding = SASTFinding(
+                rule_id="js/xss",
+                message="Unsanitized HTML",
+                path="pages/index.tsx",
+                line=44,
+                severity="MEDIUM",
+                tool="snyk-code",
+            )
+            return SASTCommitScan(
+                workspace_path=str(Path(path).resolve()),
+                commit_sha=commit_sha or "abc123",
+                triggered=True,
+                reason="commit",
+                report=SASTReport(
+                    source="snyk-code",
+                    app_path=str(path),
+                    total_findings=1,
+                    findings=[finding],
+                    severity_counts={"MEDIUM": 1},
+                    fail_on=["CRITICAL", "HIGH"],
+                ),
+            )
+
+        async def fail_evaluate(**_kwargs):
+            raise AssertionError("MEDIUM SAST finding should not trigger PEP")
+
+        monkeypatch.setattr(
+            "backend.security_scanning.scan_generated_workspace_commit",
+            fake_scan,
+        )
+        monkeypatch.setattr("backend.pep_gateway.evaluate", fail_evaluate)
+        monkeypatch.setitem(
+            workspace_mod._workspaces,
+            "agent-sast-medium",
+            workspace_mod.WorkspaceInfo(
+                agent_id="agent-sast-medium",
+                task_id="SC.1.4",
+                branch="main",
+                path=workspace,
+                repo_source=str(workspace),
+            ),
+        )
+        try:
+            result = asyncio.run(workspace_mod.finalize("agent-sast-medium"))
+        finally:
+            workspace_mod._workspaces.pop("agent-sast-medium", None)
+
+        assert result["sast_scan"]["report"]["blocking_count"] == 0
+        assert "sast_pep_decision" not in result
+
     def test_finalize_high_severity_scan_triggers_pep_hold(
         self,
         tmp_path: Path,
