@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 # backup_prod_db.sh — WAL-safe snapshot of the live prod SQLite DB with
-# owner-only perms and optional AES-256-GCM encryption.
+# owner-only perms, mandatory DLP scan, and mandatory AES-256 encryption.
 #
 # Run on the prod host (WSL Ubuntu-24.04). Reads the live DB through
 # backend-a's mounted volume (SQLite `.backup` online pragma — no
 # downtime, no lock contention with readers).
 #
 # Env:
-#   OMNISIGHT_BACKUP_PASSPHRASE   — if set, backup is encrypted with
-#                                   openssl AES-256-GCM + PBKDF2. The
+#   OMNISIGHT_BACKUP_PASSPHRASE   — backup is encrypted with gpg AES-256.
 #                                   passphrase is NEVER stored on disk
 #                                   by this script; keep it in the team
-#                                   password manager alongside the .enc
+#                                   password manager alongside the .gpg
 #                                   file to preserve restore capability.
-#                                   Unset → plaintext (0600 only).
+#                                   Unset → fail closed.
 #
 # Flags:
 #   --label <STR>   appends to filename (default "manual")
@@ -50,6 +49,10 @@ fi
 ok()   { printf '  %s[OK]%s   %s\n' "$C_OK" "$C_OFF" "$*"; }
 warn() { printf '  %s[WARN]%s %s\n' "$C_WARN" "$C_OFF" "$*"; }
 die()  { printf '  %s[FAIL]%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+
+[[ -n "${OMNISIGHT_BACKUP_PASSPHRASE:-}" ]] || \
+  die "OMNISIGHT_BACKUP_PASSPHRASE is required for encrypted backups"
+command -v gpg >/dev/null || die "gpg missing; cannot encrypt backup"
 
 # Prefer the docker-compose-managed volume (canonical live DB).
 # Fallback to host path if someone's running without compose.
@@ -106,41 +109,39 @@ fi
 # any Windows user on the host.
 chmod 600 "$PLAIN"
 
-if [[ -n "${OMNISIGHT_BACKUP_PASSPHRASE:-}" ]]; then
-  # gpg instead of `openssl enc` — OpenSSL 3 removed AEAD cipher support
-  # from `enc` (AES-256-GCM is no longer selectable) so we'd be left
-  # with CBC + manually-layered HMAC. gpg's symmetric mode is AES-256
-  # with integrated auth (MDC packet) and is stock on every Linux distro.
-  command -v gpg >/dev/null || die "OMNISIGHT_BACKUP_PASSPHRASE set but gpg missing"
-  ENC="${PLAIN}.gpg"
-  # --pinentry-mode loopback + --passphrase-fd 0 is the non-interactive
-  # pattern. Passphrase goes via stdin so it never appears in argv.
-  if ! printf '%s' "$OMNISIGHT_BACKUP_PASSPHRASE" | gpg --batch --yes \
-       --pinentry-mode loopback --passphrase-fd 0 \
-       --cipher-algo AES256 --symmetric \
-       --output "$ENC" "$PLAIN" 2>/tmp/gpg-err.$$; then
-    cat /tmp/gpg-err.$$ >&2 2>/dev/null
-    rm -f /tmp/gpg-err.$$
-    die "gpg encrypt failed (plaintext left at $PLAIN; remove manually)"
-  fi
-  rm -f /tmp/gpg-err.$$
-  chmod 600 "$ENC"
-  # Best-effort secure-wipe; fallback to rm if shred not installed
+if ! python3 scripts/backup_dlp_scan.py "$PLAIN"; then
   shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
-  FINAL="$ENC"
-  SIZE="$(du -h "$FINAL" | cut -f1)"
-  ok "backup (encrypted): $FINAL ($SIZE)"
-  ok "restore: printf '%s' \"\$OMNISIGHT_BACKUP_PASSPHRASE\" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --decrypt $FINAL > <out.db>"
-else
-  FINAL="$PLAIN"
-  SIZE="$(du -h "$FINAL" | cut -f1)"
-  warn "OMNISIGHT_BACKUP_PASSPHRASE unset — backup is plaintext (0600)"
-  warn "  set the env var to opt into AES-256-GCM encryption for future backups"
-  ok "backup: $FINAL ($SIZE)"
+  die "backup DLP scan failed; plaintext backup shredded"
 fi
+ok "backup DLP scan passed"
+
+# gpg instead of `openssl enc` — OpenSSL 3 removed AEAD cipher support
+# from `enc` (AES-256-GCM is no longer selectable) so we'd be left
+# with CBC + manually-layered HMAC. gpg's symmetric mode is AES-256
+# with integrated auth (MDC packet) and is stock on every Linux distro.
+ENC="${PLAIN}.gpg"
+# --pinentry-mode loopback + --passphrase-fd 0 is the non-interactive
+# pattern. Passphrase goes via stdin so it never appears in argv.
+if ! printf '%s' "$OMNISIGHT_BACKUP_PASSPHRASE" | gpg --batch --yes \
+     --pinentry-mode loopback --passphrase-fd 0 \
+     --cipher-algo AES256 --symmetric \
+     --output "$ENC" "$PLAIN" 2>/tmp/gpg-err.$$; then
+  cat /tmp/gpg-err.$$ >&2 2>/dev/null
+  rm -f /tmp/gpg-err.$$
+  shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
+  die "gpg encrypt failed"
+fi
+rm -f /tmp/gpg-err.$$
+chmod 600 "$ENC"
+# Best-effort secure-wipe; fallback to rm if shred not installed.
+shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
+FINAL="$ENC"
+SIZE="$(du -h "$FINAL" | cut -f1)"
+ok "backup (encrypted): $FINAL ($SIZE)"
+ok "restore: printf '%s' \"\$OMNISIGHT_BACKUP_PASSPHRASE\" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --decrypt $FINAL > <out.db>"
 
 # Prune — keep newest $PRUNE, delete older. Applies to any backup file
-# matching our label prefix (both .db and .db.enc).
+# matching our label prefix (both short-lived .db and final .db.gpg).
 KEEP_DIR_COUNT="$(ls -1t "$BKP_DIR"/${LABEL}-*.db* 2>/dev/null | wc -l)"
 if (( KEEP_DIR_COUNT > PRUNE )); then
   ls -1t "$BKP_DIR"/${LABEL}-*.db* | tail -n +$((PRUNE + 1)) | while read -r f; do
