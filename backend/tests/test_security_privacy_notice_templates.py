@@ -335,6 +335,94 @@ class TestPipedaPrivacyNotice:
         assert payload["rights"][0]["id"] == "access"
 
 
+class TestSdkPrivacyClauseInference:
+    def test_infers_required_clauses_from_known_sdk_dependencies(self):
+        clauses = pnt.infer_privacy_notice_clauses(
+            (
+                "FirebaseAnalytics",
+                "FirebaseCrashlytics",
+                "com.stripe:stripe-android",
+                "com.google.android.gms:play-services-ads",
+            )
+        )
+
+        by_id = {clause.id: clause for clause in clauses}
+        assert set(by_id) == {
+            "analytics_measurement",
+            "crash_diagnostics",
+            "payments_purchases",
+            "advertising_tracking",
+        }
+        assert by_id["analytics_measurement"].matched_dependencies == (
+            "FirebaseAnalytics",
+        )
+        assert by_id["payments_purchases"].matched_dependencies == (
+            "com.stripe:stripe-android",
+        )
+        assert "Do Not Sell or Share" in by_id["advertising_tracking"].body
+
+    def test_dependency_matching_handles_maven_versions_and_pod_subspecs(self):
+        clauses = pnt.infer_privacy_notice_clauses(
+            (
+                "FirebaseAnalytics/AdIdSupport",
+                "com.google.firebase:firebase-crashlytics-ktx:19.4.0",
+                "io.branch.sdk.android:library:5.12.0",
+            )
+        )
+
+        by_id = {clause.id: clause for clause in clauses}
+        assert by_id["analytics_measurement"].matched_dependencies == (
+            "FirebaseAnalytics/AdIdSupport",
+        )
+        assert by_id["crash_diagnostics"].matched_dependencies == (
+            "com.google.firebase:firebase-crashlytics-ktx:19.4.0",
+        )
+        assert by_id["advertising_tracking"].matched_dependencies == (
+            "io.branch.sdk.android:library:5.12.0",
+        )
+
+    def test_unknown_dependencies_do_not_create_false_clauses(self):
+        clauses = pnt.infer_privacy_notice_clauses(
+            ("androidx.core:core-ktx", "com.acme:private-sdk")
+        )
+        assert clauses == ()
+
+    def test_notice_builders_append_sdk_clause_section_when_dependencies_given(self):
+        notice = pnt.build_ccpa_privacy_notice(
+            sdk_dependencies=(
+                "Google-Mobile-Ads-SDK",
+                "FBSDKCoreKit",
+                "com.onesignal:OneSignal",
+            )
+        )
+
+        markdown = notice.markdown
+        assert len(notice.sections) == 10
+        assert "## SDK and Third-Party Clauses" in markdown
+        assert "Advertising, Attribution, and Tracking" in markdown
+        assert "Push Notifications and Messaging" in markdown
+        assert "Google-Mobile-Ads-SDK, FBSDKCoreKit" in markdown
+        assert [clause.id for clause in notice.inferred_clauses] == [
+            "push_messaging",
+            "oauth_identity",
+            "advertising_tracking",
+        ]
+
+    def test_to_dict_includes_inferred_clause_metadata(self):
+        payload = pnt.build_gdpr_privacy_notice(
+            sdk_dependencies=("Sentry",)
+        ).to_dict()
+
+        assert payload["inferred_clauses"] == [
+            {
+                "id": "crash_diagnostics",
+                "title": "Crash Reporting and Diagnostics",
+                "body": pnt.SDK_PRIVACY_CLAUSE_RULES[1].body,
+                "matched_dependencies": ["Sentry"],
+            }
+        ]
+
+
 class TestPrivacyNoticeTemplateShape:
     def test_gdpr_rights_constant_is_tuple_of_frozen_dataclasses(self):
         assert isinstance(pnt.GDPR_RIGHTS, tuple)
@@ -371,6 +459,14 @@ class TestPrivacyNoticeTemplateShape:
         assert reloaded.LGPD_ACCESS_RESPONSE_DEADLINE == "15 days"
         assert reloaded.PIPEDA_ACCESS_RESPONSE_DEADLINE == "30 calendar days"
         assert reloaded.PIPEDA_ACCESS_EXTENSION_DEADLINE == "30 additional days"
+        assert tuple(rule.id for rule in reloaded.SDK_PRIVACY_CLAUSE_RULES) == (
+            "analytics_measurement",
+            "crash_diagnostics",
+            "push_messaging",
+            "oauth_identity",
+            "payments_purchases",
+            "advertising_tracking",
+        )
         assert tuple(right.id for right in reloaded.GDPR_RIGHTS) == (
             "access",
             "portability",
@@ -433,12 +529,16 @@ class TestPrivacyNoticeTemplateShape:
             "PIPEDA_ACCESS_RESPONSE_DEADLINE",
             "PIPEDA_RIGHTS",
             "PIPL_RIGHTS",
+            "SDK_PRIVACY_CLAUSE_RULES",
             "DataSubjectRight",
             "PrivacyNoticeSection",
             "PrivacyNoticeTemplate",
+            "SdkPrivacyClause",
+            "SdkPrivacyClauseRule",
             "build_ccpa_privacy_notice",
             "build_gdpr_privacy_notice",
             "build_lgpd_privacy_notice",
             "build_pipeda_privacy_notice",
             "build_pipl_privacy_notice",
+            "infer_privacy_notice_clauses",
         }

@@ -3,8 +3,9 @@
 Small framework-agnostic privacy notice generator intended for generated
 web/service templates.  SC.9.1 covers GDPR notice text; SC.9.2 covers
 CCPA notice text; SC.9.3 covers PIPL notice text; SC.9.4 covers LGPD
-notice text; SC.9.5 covers PIPEDA notice text.  SDK inference and DSAR
-workflow scaffolding are separate SC.9 / SC.10 rows.
+notice text; SC.9.5 covers PIPEDA notice text; SC.9.6 infers required
+SDK / third-party clauses.  DSAR workflow scaffolding is a separate
+SC.10 row.
 
 Security boundary:
 
@@ -25,6 +26,9 @@ Security boundary:
     and review of automated decisions.
   * The PIPEDA individual rights covered here are access, correction,
     withdrawal of consent, and challenging compliance.
+  * The SDK / third-party clause inference covered here is a deterministic
+    static mapping from known dependency identifiers to notice clauses;
+    unknown dependencies still require human legal / privacy review.
   * Runtime request handling, identity verification, SLA timers, and
     export/delete endpoints are owned by SC.10.
 
@@ -37,6 +41,7 @@ singleton, or runtime mutation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 
 
 JURISDICTION_GDPR = "gdpr"
@@ -73,6 +78,26 @@ class PrivacyNoticeSection:
 
 
 @dataclass(frozen=True)
+class SdkPrivacyClause:
+    """One inferred SDK / third-party clause for generated notices."""
+
+    id: str
+    title: str
+    body: str
+    matched_dependencies: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SdkPrivacyClauseRule:
+    """Static dependency matcher for one SDK / third-party clause."""
+
+    id: str
+    title: str
+    identifiers: tuple[str, ...]
+    body: str
+
+
+@dataclass(frozen=True)
 class PrivacyNoticeTemplate:
     """Rendered privacy notice plus machine-readable section metadata."""
 
@@ -80,6 +105,7 @@ class PrivacyNoticeTemplate:
     title: str
     sections: tuple[PrivacyNoticeSection, ...]
     rights: tuple[DataSubjectRight, ...]
+    inferred_clauses: tuple[SdkPrivacyClause, ...] = ()
 
     @property
     def markdown(self) -> str:
@@ -114,7 +140,129 @@ class PrivacyNoticeTemplate:
                 }
                 for right in self.rights
             ],
+            "inferred_clauses": [
+                {
+                    "id": clause.id,
+                    "title": clause.title,
+                    "body": clause.body,
+                    "matched_dependencies": list(clause.matched_dependencies),
+                }
+                for clause in self.inferred_clauses
+            ],
         }
+
+
+SDK_PRIVACY_CLAUSE_RULES = (
+    SdkPrivacyClauseRule(
+        id="analytics_measurement",
+        title="Analytics and Product Measurement",
+        identifiers=(
+            "FirebaseAnalytics",
+            "com.google.firebase:firebase-analytics",
+            "com.google.firebase:firebase-analytics-ktx",
+            "Mixpanel",
+            "com.mixpanel.android:mixpanel-android",
+            "Amplitude",
+            "com.amplitude:analytics-android",
+            "Analytics-Swift",
+            "com.segment.analytics.kotlin:android",
+        ),
+        body=(
+            "Disclose analytics SDK use, the event, device, usage, and "
+            "identifier data collected, the measurement purposes, whether "
+            "analytics data is linked to an account or device, retention "
+            "periods, and any consent or opt-out control."
+        ),
+    ),
+    SdkPrivacyClauseRule(
+        id="crash_diagnostics",
+        title="Crash Reporting and Diagnostics",
+        identifiers=(
+            "FirebaseCrashlytics",
+            "com.google.firebase:firebase-crashlytics",
+            "com.google.firebase:firebase-crashlytics-ktx",
+            "Sentry",
+            "io.sentry:sentry-android",
+        ),
+        body=(
+            "Disclose crash and diagnostics SDK use, including device "
+            "identifiers, stack traces, logs, performance data, and the "
+            "support, security, reliability, and debugging purposes for "
+            "processing."
+        ),
+    ),
+    SdkPrivacyClauseRule(
+        id="push_messaging",
+        title="Push Notifications and Messaging",
+        identifiers=(
+            "FirebaseMessaging",
+            "com.google.firebase:firebase-messaging",
+            "OneSignal",
+            "com.onesignal:OneSignal",
+        ),
+        body=(
+            "Disclose push-notification SDK use, device tokens, notification "
+            "interaction data, delivery analytics, the purpose for sending "
+            "messages, and how users can change notification choices."
+        ),
+    ),
+    SdkPrivacyClauseRule(
+        id="oauth_identity",
+        title="Third-Party Sign-In",
+        identifiers=(
+            "GoogleSignIn",
+            "com.google.android.gms:play-services-auth",
+            "FBSDKCoreKit",
+            "FacebookCore",
+            "com.facebook.android:facebook-android-sdk",
+        ),
+        body=(
+            "Disclose third-party sign-in providers, account identifiers, "
+            "profile fields received from the provider, authentication "
+            "purposes, and how users can unlink or revoke connected accounts."
+        ),
+    ),
+    SdkPrivacyClauseRule(
+        id="payments_purchases",
+        title="Payments and Purchases",
+        identifiers=(
+            "StripePayments",
+            "StripePaymentSheet",
+            "StripeCore",
+            "com.stripe:stripe-android",
+            "RevenueCat",
+            "com.revenuecat.purchases:purchases",
+        ),
+        body=(
+            "Disclose payment or subscription processors, purchase history, "
+            "transaction identifiers, contact or billing data handled by the "
+            "processor, fraud-prevention purposes, and processor retention or "
+            "refund-support obligations."
+        ),
+    ),
+    SdkPrivacyClauseRule(
+        id="advertising_tracking",
+        title="Advertising, Attribution, and Tracking",
+        identifiers=(
+            "Google-Mobile-Ads-SDK",
+            "com.google.android.gms:play-services-ads",
+            "AppLovinSDK",
+            "com.applovin:applovin-sdk",
+            "Branch-SDK",
+            "io.branch.sdk.android:library",
+            "FBSDKCoreKit",
+            "FacebookCore",
+            "com.facebook.android:facebook-android-sdk",
+        ),
+        body=(
+            "Disclose advertising, attribution, or cross-context tracking "
+            "SDKs, identifiers and location or usage data collected, ad or "
+            "measurement purposes, sharing with advertising partners, and "
+            "the applicable consent, App Tracking Transparency, Do Not Sell "
+            "or Share, or opt-out controls."
+        ),
+    ),
+)
 
 
 GDPR_RIGHTS = (
@@ -584,6 +732,7 @@ def build_gdpr_privacy_notice(
     dpo_contact: str = "{{ dpo_contact }}",
     dsar_endpoint: str = "{{ dsar_endpoint }}",
     effective_date: str = "{{ effective_date }}",
+    sdk_dependencies: Iterable[str] = (),
 ) -> PrivacyNoticeTemplate:
     """Build the GDPR privacy-notice markdown template."""
 
@@ -668,11 +817,14 @@ def build_gdpr_privacy_notice(
             ),
         ),
     )
+    inferred_clauses = infer_privacy_notice_clauses(sdk_dependencies)
+    sections = sections + _sdk_clauses_sections(inferred_clauses)
     return PrivacyNoticeTemplate(
         jurisdiction=JURISDICTION_GDPR,
         title="GDPR Privacy Notice Template",
         sections=sections,
         rights=GDPR_RIGHTS,
+        inferred_clauses=inferred_clauses,
     )
 
 
@@ -684,6 +836,7 @@ def build_ccpa_privacy_notice(
     do_not_sell_or_share_link: str = "{{ do_not_sell_or_share_link }}",
     limit_sensitive_pi_link: str = "{{ limit_sensitive_pi_link }}",
     effective_date: str = "{{ effective_date }}",
+    sdk_dependencies: Iterable[str] = (),
 ) -> PrivacyNoticeTemplate:
     """Build the CCPA privacy-notice markdown template."""
 
@@ -784,11 +937,14 @@ def build_ccpa_privacy_notice(
             ),
         ),
     )
+    inferred_clauses = infer_privacy_notice_clauses(sdk_dependencies)
+    sections = sections + _sdk_clauses_sections(inferred_clauses)
     return PrivacyNoticeTemplate(
         jurisdiction=JURISDICTION_CCPA,
         title="CCPA Privacy Notice Template",
         sections=sections,
         rights=CCPA_RIGHTS,
+        inferred_clauses=inferred_clauses,
     )
 
 
@@ -799,6 +955,7 @@ def build_pipl_privacy_notice(
     pipl_request_endpoint: str = "{{ pipl_request_endpoint }}",
     china_representative_contact: str = "{{ china_representative_contact }}",
     effective_date: str = "{{ effective_date }}",
+    sdk_dependencies: Iterable[str] = (),
 ) -> PrivacyNoticeTemplate:
     """Build the PIPL privacy-notice markdown template."""
 
@@ -902,11 +1059,14 @@ def build_pipl_privacy_notice(
             ),
         ),
     )
+    inferred_clauses = infer_privacy_notice_clauses(sdk_dependencies)
+    sections = sections + _sdk_clauses_sections(inferred_clauses)
     return PrivacyNoticeTemplate(
         jurisdiction=JURISDICTION_PIPL,
         title="PIPL Privacy Notice Template",
         sections=sections,
         rights=PIPL_RIGHTS,
+        inferred_clauses=inferred_clauses,
     )
 
 
@@ -917,6 +1077,7 @@ def build_lgpd_privacy_notice(
     dpo_contact: str = "{{ dpo_contact }}",
     lgpd_request_endpoint: str = "{{ lgpd_request_endpoint }}",
     effective_date: str = "{{ effective_date }}",
+    sdk_dependencies: Iterable[str] = (),
 ) -> PrivacyNoticeTemplate:
     """Build the LGPD privacy-notice markdown template."""
 
@@ -1020,11 +1181,14 @@ def build_lgpd_privacy_notice(
             ),
         ),
     )
+    inferred_clauses = infer_privacy_notice_clauses(sdk_dependencies)
+    sections = sections + _sdk_clauses_sections(inferred_clauses)
     return PrivacyNoticeTemplate(
         jurisdiction=JURISDICTION_LGPD,
         title="LGPD Privacy Notice Template",
         sections=sections,
         rights=LGPD_RIGHTS,
+        inferred_clauses=inferred_clauses,
     )
 
 
@@ -1035,6 +1199,7 @@ def build_pipeda_privacy_notice(
     privacy_officer_contact: str = "{{ privacy_officer_contact }}",
     pipeda_request_endpoint: str = "{{ pipeda_request_endpoint }}",
     effective_date: str = "{{ effective_date }}",
+    sdk_dependencies: Iterable[str] = (),
 ) -> PrivacyNoticeTemplate:
     """Build the PIPEDA privacy-notice markdown template."""
 
@@ -1146,12 +1311,79 @@ def build_pipeda_privacy_notice(
             ),
         ),
     )
+    inferred_clauses = infer_privacy_notice_clauses(sdk_dependencies)
+    sections = sections + _sdk_clauses_sections(inferred_clauses)
     return PrivacyNoticeTemplate(
         jurisdiction=JURISDICTION_PIPEDA,
         title="PIPEDA Privacy Notice Template",
         sections=sections,
         rights=PIPEDA_RIGHTS,
+        inferred_clauses=inferred_clauses,
     )
+
+
+def infer_privacy_notice_clauses(
+    sdk_dependencies: Iterable[str],
+) -> tuple[SdkPrivacyClause, ...]:
+    """Infer notice clauses from SDK or third-party dependency identifiers."""
+
+    dependencies = tuple(str(dep).strip() for dep in sdk_dependencies if str(dep).strip())
+    clauses: list[SdkPrivacyClause] = []
+    for rule in SDK_PRIVACY_CLAUSE_RULES:
+        matched = tuple(
+            dep for dep in dependencies if _matches_sdk_clause_rule(dep, rule)
+        )
+        if matched:
+            clauses.append(
+                SdkPrivacyClause(
+                    id=rule.id,
+                    title=rule.title,
+                    body=rule.body,
+                    matched_dependencies=matched,
+                )
+            )
+    return tuple(clauses)
+
+
+def _matches_sdk_clause_rule(dep: str, rule: SdkPrivacyClauseRule) -> bool:
+    dep_lc = dep.lower()
+    dep_group = dep_lc.split(":", 1)[0] if ":" in dep_lc else ""
+    dep_subspec = dep_lc.split("/", 1)[0] if "/" in dep_lc else ""
+    for ident in rule.identifiers:
+        ident_lc = ident.lower()
+        if dep_lc == ident_lc:
+            return True
+        if dep_lc.startswith(ident_lc):
+            return True
+        if dep_subspec and dep_subspec == ident_lc:
+            return True
+        if dep_group and ":" not in ident_lc and dep_group == ident_lc:
+            return True
+    return False
+
+
+def _sdk_clauses_sections(
+    clauses: tuple[SdkPrivacyClause, ...],
+) -> tuple[PrivacyNoticeSection, ...]:
+    if not clauses:
+        return ()
+    return (
+        PrivacyNoticeSection(
+            id="sdk_third_party_clauses",
+            title="SDK and Third-Party Clauses",
+            body=_sdk_clauses_markdown(clauses),
+        ),
+    )
+
+
+def _sdk_clauses_markdown(clauses: tuple[SdkPrivacyClause, ...]) -> str:
+    lines: list[str] = []
+    for clause in clauses:
+        dependencies = ", ".join(clause.matched_dependencies)
+        lines.append(
+            f"- **{clause.title}** ({dependencies}): {clause.body}"
+        )
+    return "\n".join(lines)
 
 
 def _rights_markdown(rights: tuple[DataSubjectRight, ...]) -> str:
@@ -1181,12 +1413,16 @@ __all__ = (
     "PIPEDA_ACCESS_RESPONSE_DEADLINE",
     "PIPEDA_RIGHTS",
     "PIPL_RIGHTS",
+    "SDK_PRIVACY_CLAUSE_RULES",
     "DataSubjectRight",
     "PrivacyNoticeSection",
     "PrivacyNoticeTemplate",
+    "SdkPrivacyClause",
+    "SdkPrivacyClauseRule",
     "build_ccpa_privacy_notice",
     "build_gdpr_privacy_notice",
     "build_lgpd_privacy_notice",
     "build_pipeda_privacy_notice",
     "build_pipl_privacy_notice",
+    "infer_privacy_notice_clauses",
 )
