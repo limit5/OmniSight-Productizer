@@ -197,10 +197,16 @@ function RecoveryRow({
     >
       {state.supportsRetrySignIn ? (
         <a
-          href={retryDisabled ? undefined : loginHref}
+          // FX.7.12: href stays bound to loginHref even when disabled so
+          // the anchor is a valid link (jsx-a11y/anchor-is-valid). When
+          // retryDisabled, the onClick prevents navigation; aria-disabled
+          // + tabIndex=-1 communicate the disabled state to AT users and
+          // remove it from keyboard focus order.
+          href={loginHref}
           data-testid="as7-locked-retry-signin"
           data-as7-block-reason={retryBlocked ?? "ok"}
           aria-disabled={retryDisabled}
+          tabIndex={retryDisabled ? -1 : undefined}
           onClick={(e) => {
             if (retryDisabled) e.preventDefault()
           }}

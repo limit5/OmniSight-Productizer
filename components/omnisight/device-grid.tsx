@@ -405,9 +405,15 @@ export function DeviceGrid({
           {emptyLabel}
         </div>
       ) : (
+        // FX.7.12: when a selection callback is wired, this grid acts as
+        // a single-select listbox (each cell is a selectable option, so
+        // `aria-selected` is valid on the cell). When no selection
+        // callback is provided, fall back to the plain semantic `list`
+        // — `listitem` does not support `aria-selected`, so the cell's
+        // aria-selected attribute is also gated on `onSelectDevice`.
         <div
           className="omnisight-device-grid__grid"
-          role="list"
+          role={onSelectDevice ? "listbox" : "list"}
           style={gridStyle}
           onKeyDown={handleKeyDown}
           data-testid={testId ? `${testId}-grid` : undefined}
@@ -424,7 +430,7 @@ export function DeviceGrid({
             return (
               <div
                 key={item.device}
-                role="listitem"
+                role={onSelectDevice ? "option" : "listitem"}
                 className={cn(
                   "omnisight-device-grid__cell relative flex flex-col items-center justify-start rounded-md p-2 transition-colors",
                   isSelected &&

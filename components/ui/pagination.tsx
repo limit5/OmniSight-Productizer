@@ -46,9 +46,14 @@ function PaginationLink({
   className,
   isActive,
   size = 'icon',
+  children,
   ...props
 }: PaginationLinkProps) {
   return (
+    // FX.7.12: explicit `{children}` (instead of self-closing + children
+    // smuggled through `...props`) so jsx-a11y/anchor-has-content can
+    // statically see the anchor's content. Callers always pass children
+    // (icon + label) so this is the same runtime markup.
     <a
       aria-current={isActive ? 'page' : undefined}
       data-slot="pagination-link"
@@ -61,7 +66,9 @@ function PaginationLink({
         className,
       )}
       {...props}
-    />
+    >
+      {children}
+    </a>
   )
 }
 
