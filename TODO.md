@@ -6156,7 +6156,7 @@ BP.E GraphRAG / Neo4j
 
 - [x] FX.3.1 `docker-compose.staging.yml:28,60` 拿掉 raw socket，改用 docker-socket-proxy（同 prod 模式）
 - [x] FX.3.2 `docker-compose.staging.yml:90` 加 `mem_limit: 2g` + `mem_reservation`
-- [ ] FX.3.3 `deploy/reverse-proxy/Caddyfile:220` HSTS 條件式啟用（檢測 OMNISIGHT_PUBLIC_HOSTNAME ≠ localhost 時加上）
+- [x] FX.3.3 `deploy/reverse-proxy/Caddyfile:220` HSTS 條件式啟用（檢測 OMNISIGHT_PUBLIC_HOSTNAME ≠ localhost 時加上）
 - [ ] FX.3.4 SDK supply chain skew：升級 `anthropic` 到 1.x+；驗證 backend ↔ frontend ai-sdk@6 的 prompt 相容
 
 ### FX.4 — Backend DEFECT fixes（25 items, ~10-12 day）

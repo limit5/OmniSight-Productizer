@@ -219,14 +219,40 @@
 	# real hostname in OMNISIGHT_PUBLIC_HOSTNAME.
 	tls internal
 
-	# Standard hardening — HSTS only after a host is pinned; on bare `:443`
-	# the preload list would be a footgun, so keep it off by default.
+	# Standard hardening — always-on headers regardless of host.
 	header {
 		-Server
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "strict-origin-when-cross-origin"
 	}
+
+	# HSTS — emitted only when the request `Host` is a real public hostname
+	# (not localhost / 127.0.0.1). FX.3.3 (2026-05-04 deep audit BLOCKER).
+	#
+	# Why a Host matcher instead of an env-var conditional: the site address
+	# above is `{$OMNISIGHT_PUBLIC_HOSTNAME:localhost}, 127.0.0.1`, so this
+	# block always handles loopback in addition to the public host. Even when
+	# OMNISIGHT_PUBLIC_HOSTNAME is set to e.g. `sora-dev.app`, an in-cluster
+	# `curl https://127.0.0.1/readyz` healthcheck still lands here. Caddy's
+	# Caddyfile has no native env-var if/else, so we gate on the request Host
+	# at runtime — which is the correct dimension anyway: HSTS is a per-Host
+	# browser pin, not a per-server toggle.
+	#
+	# Effect:
+	#   - OMNISIGHT_PUBLIC_HOSTNAME unset → site = (localhost, 127.0.0.1).
+	#     Both names are loopback ⇒ matcher never fires ⇒ no HSTS, so a bare
+	#     `:443` deploy on an operator's laptop is never pinned to HTTPS-only.
+	#   - OMNISIGHT_PUBLIC_HOSTNAME=sora-dev.app → site = (sora-dev.app,
+	#     127.0.0.1). Browser to sora-dev.app gets HSTS; loopback smoke
+	#     (`curl https://127.0.0.1`) does not, so an operator's machine
+	#     can never be pinned by talking to its own origin.
+	#
+	# Value: max-age=31536000 (1 year, OWASP recommended), includeSubDomains
+	# so any future api.<host> / admin.<host> inherits the pin. NO `preload` —
+	# preload list submission is essentially permanent and out of scope.
+	@public_host not host localhost 127.0.0.1
+	header @public_host Strict-Transport-Security "max-age=31536000; includeSubDomains"
 
 	# Structured access log — JSON so the existing ELK / Loki stack (Phase 52
 	# observability sidecars in docker-compose.prod.yml) can ingest directly.
