@@ -73,6 +73,7 @@ import logging
 import re
 import time
 import uuid
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -293,13 +294,14 @@ class TransportResponse:
         return 200 <= self.status < 300
 
 
-class Transport:
+class Transport(ABC):
     """Abstract transport — the ``request`` method is what subclasses
     override.  Keeping this as a plain class (not a Protocol) lets the
     test suite subclass and add state-tracking fields without fighting
     typing.
     """
 
+    @abstractmethod
     def request(
         self,
         *,
@@ -308,7 +310,7 @@ class Transport:
         headers: Mapping[str, str],
         json_body: Mapping[str, Any] | None = None,
     ) -> TransportResponse:
-        raise NotImplementedError
+        """Send one normalised ASC request."""
 
 
 class HttpTransport(Transport):
