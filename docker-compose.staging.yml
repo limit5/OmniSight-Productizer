@@ -151,11 +151,25 @@ services:
     environment:
       - BACKEND_URL=http://backend-a:8000
       - NODE_ENV=production
-      - NODE_OPTIONS=--max-old-space-size=4096
+      # FX.3.2 (2026-05-04) — mirror prod M6 audit. V8 heap cap tightened
+      # from 4 GB → 1 GB so a malicious / buggy SSR request that triggers
+      # large JSON parsing cannot grow heap toward 4 GB before OOM kill.
+      # Steady-state SSR is ~200 MB; 1 GB is ample. Paired with mem_limit
+      # 2g below as the kernel-enforced hard ceiling — leaving the V8 cap
+      # at 4 GB while clamping cgroup at 2 GB would mismatch (V8 thinks
+      # it has 4 GB heap, cgroup SIGKILLs at 2 GB → restart loop).
+      - NODE_OPTIONS=--max-old-space-size=1024
     depends_on:
       backend-a:
         condition: service_healthy
     restart: always
+    # FX.3.2 — Linux OOM-killer hard cap. Complements the V8 heap cap
+    # above: if Node spawns a child or allocates large buffers outside
+    # the heap, the kernel stops runaway growth before it starves the
+    # other staging services on the host. mem_reservation 512m is the
+    # soft floor used by the scheduler under contention; matches prod.
+    mem_limit: 2g
+    mem_reservation: 512m
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
       interval: 30s
