@@ -452,27 +452,32 @@ class TestPgBranchExecutes:
     def test_pg_downgrade_drops_indexes_and_tables(self, monkeypatch, m0106) -> None:
         from alembic import op as alembic_op
 
-        captured: list[str] = []
+        dropped_indexes: list[tuple[str, dict]] = []
+        dropped_tables: list[tuple[str, dict]] = []
 
-        class _PgBind:
-            class _Dialect:
-                name = "postgresql"
+        def _drop_index(name, *args, **kwargs):
+            dropped_indexes.append((name, kwargs))
 
-            dialect = _Dialect()
+        def _drop_table(name, *args, **kwargs):
+            dropped_tables.append((name, kwargs))
 
-            def exec_driver_sql(self, sql, *a, **k):
-                captured.append(sql)
-
-        def _exec(sql):
-            captured.append(str(sql))
-
-        monkeypatch.setattr(alembic_op, "get_bind", lambda: _PgBind())
-        monkeypatch.setattr(alembic_op, "execute", _exec)
+        monkeypatch.setattr(alembic_op, "drop_index", _drop_index)
+        monkeypatch.setattr(alembic_op, "drop_table", _drop_table)
         m0106.downgrade()
-        joined = "\n".join(captured)
-        assert "DROP INDEX IF EXISTS idx_tenant_deks_key_version" in joined
-        assert "DROP TABLE IF EXISTS tenant_deks" in joined
-        assert "DROP TABLE IF EXISTS kms_keys" in joined
+
+        # All five KS tables get dropped via op.drop_table (no f-string SQL).
+        assert [name for name, _ in dropped_tables] == list(m0106._DROP_TABLES)
+        # Reverse order vs upgrade so FK children drop before parents.
+        assert dropped_tables[0][0] == "kek_rotations"
+        assert dropped_tables[-1][0] == "kms_keys"
+        # IF EXISTS semantics preserved (matches upgrade's CREATE IF NOT EXISTS).
+        for _, kwargs in dropped_tables:
+            assert kwargs.get("if_exists") is True
+
+        # All eight KS indexes dropped through op.drop_index, also IF EXISTS.
+        assert [name for name, _ in dropped_indexes] == list(m0106._DROP_INDEXES)
+        for _, kwargs in dropped_indexes:
+            assert kwargs.get("if_exists") is True
 
 
 # -- Group 5: migrator drift guard -----------------------------------------

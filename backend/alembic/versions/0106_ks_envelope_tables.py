@@ -320,8 +320,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    conn = op.get_bind()
     for idx in _DROP_INDEXES:
-        conn.exec_driver_sql(f"DROP INDEX IF EXISTS {idx}")
+        op.drop_index(idx, if_exists=True)
     for table in _DROP_TABLES:
-        op.execute(f"DROP TABLE IF EXISTS {table}")
+        op.drop_table(table, if_exists=True)
