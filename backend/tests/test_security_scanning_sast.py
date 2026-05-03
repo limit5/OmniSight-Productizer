@@ -6,11 +6,23 @@ monkey-patched so the adapter contract stays offline and deterministic.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import subprocess
 from pathlib import Path
 from unittest import mock
 
-from backend.security_scanning import scan_sast
+import pytest
+
+from backend import workspace as workspace_mod
+from backend.security_scanning import (
+    SAST_COMMIT_SCAN_ARTIFACT,
+    SASTCommitScan,
+    SASTReport,
+    scan_generated_workspace_commit,
+    scan_sast,
+    write_sast_commit_scan_artifact,
+)
 from backend.security_scanning.sast import _normalise_severity
 
 
@@ -90,6 +102,27 @@ _SNYK_PAYLOAD = {
         }
     ]
 }
+
+
+def _git(*args: str, cwd: Path) -> str:
+    return subprocess.check_output(
+        ["git", *args],
+        cwd=str(cwd),
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+
+
+def _init_generated_workspace(tmp_path: Path) -> Path:
+    workspace = tmp_path / "generated-app"
+    workspace.mkdir()
+    _git("init", "-q", "-b", "main", cwd=workspace)
+    _git("config", "user.email", "sast-test@example.com", cwd=workspace)
+    _git("config", "user.name", "sast-test", cwd=workspace)
+    (workspace / "app.py").write_text("print('hello')\n")
+    _git("add", "app.py", cwd=workspace)
+    _git("commit", "-q", "-m", "initial", cwd=workspace)
+    return workspace
 
 
 class TestSASTSeverity:
@@ -200,3 +233,124 @@ class TestSASTNoScanner:
     def test_invalid_app_path(self, tmp_path: Path):
         report = scan_sast(tmp_path / "missing")
         assert report.error
+
+
+class TestSASTGeneratedWorkspaceCommit:
+    def test_scans_git_workspace_after_commit(self, tmp_path: Path):
+        workspace = _init_generated_workspace(tmp_path)
+        head = _git("rev-parse", "HEAD", cwd=workspace)
+
+        with mock.patch(
+            "backend.security_scanning.sast.shutil.which",
+            lambda x: "/fake/semgrep" if x == "semgrep" else None,
+        ), mock.patch(
+            "backend.security_scanning.sast._run",
+            return_value=(1, json.dumps(_SEMGREP_PAYLOAD), ""),
+        ):
+            scan = scan_generated_workspace_commit(
+                workspace,
+                commit_sha=head,
+                scanner="semgrep",
+            )
+
+        assert scan.triggered
+        assert scan.reason == "commit"
+        assert scan.commit_sha == head
+        assert scan.workspace_path == str(workspace.resolve())
+        assert scan.report.source == "semgrep"
+        assert scan.report.total_findings == 1
+
+    def test_rejects_non_git_workspace(self, tmp_path: Path):
+        scan = scan_generated_workspace_commit(tmp_path)
+        assert not scan.triggered
+        assert scan.reason == "not_git_workspace"
+        assert scan.report.error
+
+    def test_commit_scan_artifact_is_written(self, tmp_path: Path):
+        workspace = _init_generated_workspace(tmp_path)
+        scan = SASTCommitScan(
+            workspace_path=str(workspace.resolve()),
+            commit_sha="abc123",
+            triggered=True,
+            reason="commit",
+            report=SASTReport(source="mock", app_path=str(workspace)),
+        )
+
+        out = write_sast_commit_scan_artifact(scan, workspace)
+        payload = json.loads(out.read_text())
+
+        assert out == workspace / SAST_COMMIT_SCAN_ARTIFACT
+        assert payload["triggered"] is True
+        assert payload["commit_sha"] == "abc123"
+
+    def test_workspace_provision_installs_post_commit_hook(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        source = _init_generated_workspace(tmp_path)
+        ws_root = tmp_path / "ws-root"
+        ws_root.mkdir()
+        monkeypatch.setattr(workspace_mod, "_WORKSPACES_ROOT", ws_root, raising=True)
+        info = asyncio.run(workspace_mod.provision(
+            agent_id="agent-sast-hook",
+            task_id="SC.1.2",
+            remote_url=str(source),
+        ))
+        try:
+            (info.path / "app.py").write_text("print('hook')\n")
+            _git("add", "app.py", cwd=info.path)
+            _git("commit", "-q", "-m", "hook scan", cwd=info.path)
+
+            artifact = info.path / SAST_COMMIT_SCAN_ARTIFACT
+            payload = json.loads(artifact.read_text())
+            assert payload["triggered"] is True
+            assert payload["reason"] == "commit"
+            assert payload["commit_sha"] == _git("rev-parse", "HEAD", cwd=info.path)
+            assert payload["report"]["source"] == "mock"
+        finally:
+            asyncio.run(workspace_mod.cleanup("agent-sast-hook"))
+
+    def test_finalize_auto_commit_includes_sast_scan(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        workspace = _init_generated_workspace(tmp_path)
+        (workspace / "app.py").write_text("print('finalized')\n")
+        calls: list[Path] = []
+
+        def fake_scan(path: Path | str, *, commit_sha: str = ""):
+            calls.append(Path(path).resolve())
+            return SASTCommitScan(
+                workspace_path=str(Path(path).resolve()),
+                commit_sha=commit_sha or "abc123",
+                triggered=True,
+                reason="commit",
+                report=SASTReport(source="mock", app_path=str(path)),
+            )
+
+        monkeypatch.setattr(
+            "backend.security_scanning.scan_generated_workspace_commit",
+            fake_scan,
+        )
+        monkeypatch.setitem(
+            workspace_mod._workspaces,
+            "agent-sast-finalize",
+            workspace_mod.WorkspaceInfo(
+                agent_id="agent-sast-finalize",
+                task_id="SC.1.2",
+                branch="main",
+                path=workspace,
+                repo_source=str(workspace),
+            ),
+        )
+        try:
+            result = asyncio.run(workspace_mod.finalize("agent-sast-finalize"))
+        finally:
+            workspace_mod._workspaces.pop("agent-sast-finalize", None)
+
+        assert calls == [workspace.resolve()]
+        assert result["commit_count"] == 1
+        assert result["sast_scan"]["triggered"] is True
+        assert result["sast_scan"]["report"]["source"] == "mock"

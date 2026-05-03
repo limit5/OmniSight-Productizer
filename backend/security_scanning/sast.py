@@ -1,4 +1,4 @@
-"""SC.1.1 — SAST scanner adapters.
+"""SC.1.1/SC.1.2 — SAST scanner adapters and commit triggers.
 
 Dispatches to whichever static-analysis scanner is on ``PATH``:
 
@@ -14,6 +14,10 @@ gates can treat that as skipped rather than clean.
 Severity thresholding mirrors ``software_compliance.cves``: ``HIGH``
 and ``CRITICAL`` findings block by default, while the raw finding list
 is preserved so downstream policy can tighten or loosen independently.
+
+SC.1.2 wires that adapter to generated workspaces after successful git
+commits.  The trigger only records scanner output; PEP/HOLD enforcement
+is deliberately left to SC.1.3.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import json
 import logging
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -35,6 +40,7 @@ SASTSeverity = str
 SEVERITY_ORDER: tuple[str, ...] = ("INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 DEFAULT_FAIL_ON: frozenset[str] = frozenset({"CRITICAL", "HIGH"})
+SAST_COMMIT_SCAN_ARTIFACT = Path(".omnisight/security/sast-last-scan.json")
 
 
 def _normalise_severity(raw: Any) -> SASTSeverity:
@@ -112,6 +118,29 @@ class SASTReport:
             "blocking_count": len(self.blocking_findings),
             "findings": [f.to_dict() for f in self.findings],
             "error": self.error,
+        }
+
+
+@dataclass
+class SASTCommitScan:
+    workspace_path: str
+    commit_sha: str = ""
+    triggered: bool = False
+    reason: str = ""
+    report: SASTReport = field(default_factory=SASTReport)
+
+    @property
+    def passed(self) -> bool:
+        return self.report.passed
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "workspace_path": self.workspace_path,
+            "commit_sha": self.commit_sha,
+            "triggered": self.triggered,
+            "reason": self.reason,
+            "passed": self.passed,
+            "report": self.report.to_dict(),
         }
 
 
@@ -432,11 +461,110 @@ def scan_sast(
     return report
 
 
+def _git_head(root: Path) -> str:
+    rc, out, _err = _run(["git", "rev-parse", "HEAD"], cwd=root, timeout=10)
+    if rc != 0:
+        return ""
+    return out.strip()
+
+
+def scan_generated_workspace_commit(
+    workspace_path: Path | str,
+    *,
+    commit_sha: str = "",
+    scanner: Optional[str] = None,
+    fail_on: Iterable[str] = DEFAULT_FAIL_ON,
+    timeout: int = 300,
+) -> SASTCommitScan:
+    """Run SAST for a generated workspace after a successful commit.
+
+    Module-global state audit: this helper reads no mutable module-global
+    state; every worker derives the same result from the workspace path,
+    current git HEAD, PATH-discovered scanner binary, and subprocess output.
+    """
+    root = Path(workspace_path).resolve()
+    report = SASTReport(app_path=str(root), fail_on=sorted({s.upper() for s in fail_on}))
+    if not root.is_dir():
+        report.error = f"workspace_path '{root}' is not a directory"
+        return SASTCommitScan(
+            workspace_path=str(root),
+            commit_sha=commit_sha,
+            reason="invalid_workspace",
+            report=report,
+        )
+    if not (root / ".git").exists():
+        report.error = f"workspace_path '{root}' is not a git workspace"
+        return SASTCommitScan(
+            workspace_path=str(root),
+            commit_sha=commit_sha,
+            reason="not_git_workspace",
+            report=report,
+        )
+    effective_sha = (commit_sha or _git_head(root)).strip()
+    if not effective_sha:
+        report.error = f"workspace_path '{root}' has no readable HEAD commit"
+        return SASTCommitScan(
+            workspace_path=str(root),
+            reason="missing_commit",
+            report=report,
+        )
+
+    report = scan_sast(root, scanner=scanner, fail_on=fail_on, timeout=timeout)
+    return SASTCommitScan(
+        workspace_path=str(root),
+        commit_sha=effective_sha,
+        triggered=True,
+        reason="commit",
+        report=report,
+    )
+
+
+def write_sast_commit_scan_artifact(
+    scan: SASTCommitScan,
+    workspace_path: Path | str,
+) -> Path:
+    out = Path(workspace_path).resolve() / SAST_COMMIT_SCAN_ARTIFACT
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(scan.to_dict(), indent=2, sort_keys=True) + "\n")
+    return out
+
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Run an OmniSight SAST scan for a generated workspace commit.",
+    )
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--commit", default="")
+    parser.add_argument("--scanner", default="")
+    parser.add_argument("--timeout", type=int, default=300)
+    args = parser.parse_args(argv)
+
+    scan = scan_generated_workspace_commit(
+        args.workspace,
+        commit_sha=args.commit,
+        scanner=args.scanner or None,
+        timeout=args.timeout,
+    )
+    write_sast_commit_scan_artifact(scan, args.workspace)
+    print(json.dumps(scan.to_dict(), sort_keys=True))
+    return 0
+
+
 __all__ = [
     "DEFAULT_FAIL_ON",
+    "SAST_COMMIT_SCAN_ARTIFACT",
     "SASTFinding",
+    "SASTCommitScan",
     "SASTReport",
     "SASTSeverity",
     "SEVERITY_ORDER",
+    "scan_generated_workspace_commit",
     "scan_sast",
+    "write_sast_commit_scan_artifact",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))

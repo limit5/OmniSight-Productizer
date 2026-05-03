@@ -10,16 +10,24 @@ from __future__ import annotations
 
 from backend.security_scanning.sast import (
     DEFAULT_FAIL_ON,
+    SASTCommitScan,
+    SAST_COMMIT_SCAN_ARTIFACT,
     SASTFinding,
     SASTReport,
     SASTSeverity,
+    scan_generated_workspace_commit,
     scan_sast,
+    write_sast_commit_scan_artifact,
 )
 
 __all__ = [
     "DEFAULT_FAIL_ON",
+    "SAST_COMMIT_SCAN_ARTIFACT",
+    "SASTCommitScan",
     "SASTFinding",
     "SASTReport",
     "SASTSeverity",
+    "scan_generated_workspace_commit",
     "scan_sast",
+    "write_sast_commit_scan_artifact",
 ]
