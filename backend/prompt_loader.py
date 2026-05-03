@@ -202,7 +202,7 @@ def load_role_skill(category: str, role_id: str) -> str:
 #  Task skill loading (Anthropic SKILL.md format)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-_task_skills_cache: dict[str, dict] | None = None
+_task_skills_cache: tuple[tuple[tuple[str, float], ...], dict[str, dict]] | None = None
 
 
 def load_task_skill(task_type: str) -> str:
@@ -248,21 +248,48 @@ def match_task_skill(task_title: str) -> str:
 
 
 def list_available_task_skills() -> list[dict]:
-    """Scan configs/skills/ and return all available task skill definitions. Cached."""
+    """Scan configs/skills/ and return all available task skill definitions.
+
+    Module-global state audit: ``_task_skills_cache`` is per-worker process
+    state, keyed by every ``configs/skills/*/SKILL.md`` file mtime. Every
+    worker derives the same skill catalog from the same shared files and
+    reloads when another worker/operator updates, adds, or removes a skill.
+    """
     global _task_skills_cache
-    if _task_skills_cache is not None:
-        return list(_task_skills_cache.values())
-    _task_skills_cache = {}
+    signature = _task_skills_signature()
+    if _task_skills_cache is not None and _task_skills_cache[0] == signature:
+        return list(_task_skills_cache[1].values())
+    parsed: dict[str, dict] = {}
     if not _SKILLS_DIR.is_dir():
+        _task_skills_cache = (signature, parsed)
         return []
     for skill_dir in sorted(_SKILLS_DIR.iterdir()):
         skill_file = skill_dir / "SKILL.md"
         if skill_dir.is_dir() and skill_file.exists():
             meta = _parse_frontmatter(skill_file)
             if meta.get("name"):
-                _task_skills_cache[meta["name"]] = meta
-    logger.info("Loaded %d task skill definitions", len(_task_skills_cache))
-    return list(_task_skills_cache.values())
+                parsed[meta["name"]] = meta
+    _task_skills_cache = (signature, parsed)
+    logger.info("Loaded %d task skill definitions", len(parsed))
+    return list(parsed.values())
+
+
+def _task_skills_signature() -> tuple[tuple[str, float], ...]:
+    """Return a deterministic mtime signature for Anthropic task skills."""
+    if not _SKILLS_DIR.is_dir():
+        return ()
+    entries: list[tuple[str, float]] = []
+    for skill_file in sorted(_SKILLS_DIR.glob("*/SKILL.md")):
+        try:
+            entries.append((skill_file.parent.name, skill_file.stat().st_mtime))
+        except OSError:
+            continue
+    return tuple(entries)
+
+
+def reload_task_skills_for_tests() -> None:
+    global _task_skills_cache
+    _task_skills_cache = None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
