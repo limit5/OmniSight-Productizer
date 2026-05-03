@@ -27,14 +27,14 @@ COPY backend/requirements.txt ./requirements.txt
 # into wheels whose hashes differ from the pypi-registered ones, so the
 # runner's `--require-hashes` install fails on any package lacking a
 # prebuilt wheel (zxcvbn-python et al).
+#
+# FX.6.7 (2026-05-04): the prod lockfile no longer carries pytest /
+# pytest-asyncio / pytest-cov / respx / pip-audit / ruff / mypy — those
+# moved to backend/requirements-dev.txt and are NOT copied into the
+# runtime image. The previous defensive ``pip uninstall -y pytest …``
+# step right after this install is gone (it was a no-op once the
+# packages stopped being resolved into the lockfile).
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
-
-# Drop test-only packages from the prod runtime — production code never
-# imports pytest (verified: `grep -rln '^import pytest\|^from pytest'
-# backend/` excluding tests/ returns empty). Run as a separate RUN so
-# a non-zero exit is immediately visible (an earlier draft used a long
-# `&& ... || true` chain that silently masked a hash-verification failure).
-RUN pip uninstall -y pytest pytest-asyncio pytest-cov coverage iniconfig pluggy
 
 # Strip pip itself + bytecode caches + unused WOFF2 compressors from
 # site-packages. The runtime never `pip install`s anything, so pip is

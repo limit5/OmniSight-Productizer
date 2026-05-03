@@ -131,7 +131,10 @@ jobs:
           set -eu
           pip install --upgrade pip
           pip install -r requirements.txt
-          # pytest-json-report is a test-only dep — not in requirements.in
+          # FX.6.7 (2026-05-04): pytest / respx moved to requirements-dev.txt.
+          pip install -r requirements-dev.txt
+          # pytest-json-report / pytest-timeout are live-suite-only deps —
+          # not in either lockfile, install ad hoc.
           pip install "pytest-json-report==1.5.0" "pytest-timeout==2.3.1"
 
       - name: Run live integration tests

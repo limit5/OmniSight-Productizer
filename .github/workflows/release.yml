@@ -20,6 +20,8 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
       - run: pip install --require-hashes -r backend/requirements.txt
+      # FX.6.7 (2026-05-04): pytest moved to requirements-dev.txt.
+      - run: pip install --require-hashes -r backend/requirements-dev.txt
 
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4

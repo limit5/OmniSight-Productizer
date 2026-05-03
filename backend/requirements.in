@@ -82,29 +82,25 @@ psutil==7.2.2
 # (Docker Desktop scenarios already fall through to the CLI).
 docker==7.1.0
 
-# --- Testing ----------------------------------------------------------
-pytest==8.3.5
-pytest-asyncio==1.0.0
-pytest-cov==6.0.0
+# --- HTTP client (production runtime; 47 backend modules import it) --
+# FX.6.7 (2026-05-04): httpx STAYS here. The TODO entry that landed
+# this Phase listed httpx alongside pytest/respx as a "test dep" but
+# audit found 47 production modules import it directly at runtime —
+# backend/security/oauth_client.py, backend/email_delivery/{postmark,
+# ses,resend,http}.py, backend/storage_provisioning/{s3,supabase}.py,
+# backend/cms/sanity.py, backend/llm_balance.py, etc. So the prod
+# image MUST carry httpx. The dev lockfile (requirements-dev.in) does
+# NOT re-pin httpx — pip-tools' ``-c requirements.txt`` constraint
+# pins respx's transitive httpx requirement to this version.
 httpx==0.28.1
-# respx: httpx mock library used by FS-series provider adapter tests
-# (FS.1 db_provisioning / FS.3 storage / FS.4 email / FS.5 jobs /
-# FS.6 search / FS.8 stripe-billing). Added 2026-05-03 alongside the
-# codex-authored FS commits — see docs/operations/codex-collaboration.md.
-respx==0.23.1
 
-# --- Lint / type-check / supply-chain audit ---------------------------
-# FX.6.5 (2026-05-04): toolchain prerequisites for FX.6.8 nightly CI
-# workflow (`pip-audit` + `ruff check` + `mypy backend/security
-# backend/agents`). Pinned to latest stable on PyPI as of 2026-05-04
-# so that local ``backend/.venv`` and the future Actions runner agree
-# byte-for-byte. These are dev-time tools (no runtime import path);
-# FX.6.7 will eventually peel them out into ``requirements-dev.txt``
-# alongside pytest / respx / httpx — keeping them here for now keeps
-# the single-lockfile invariant during the FX.6.* sweep.
-pip-audit==2.10.0
-ruff==0.15.12
-mypy==1.20.2
+# --- Testing / Lint / Audit (peeled out by FX.6.7 — 2026-05-04) -------
+# pytest / pytest-asyncio / pytest-cov / respx / pip-audit / ruff /
+# mypy moved to ``backend/requirements-dev.in`` so the prod lockfile
+# (``requirements.txt``) stays runtime-only. See that file's header
+# for the install pattern + rationale. The Dockerfile no longer needs
+# to ``pip uninstall -y pytest …`` after install — those packages are
+# never resolved into the prod lockfile in the first place.
 
 # --- K5: MFA (TOTP + WebAuthn) ----------------------------------------
 pyotp==2.9.0

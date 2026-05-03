@@ -85,9 +85,14 @@ jobs:
             # ABI tags and would refuse to resolve on py3.13. Drift
             # between .in and .txt is already gated by `lockfile-drift`
             # in `ci.yml`, so installing from .in is safe here.
+            # FX.6.7 (2026-05-04): pytest moved to requirements-dev.in.
+            # Both .in files are loose-installed here to surface forward-
+            # compat breakage on py3.13.
             pip install -r backend/requirements.in
+            pip install -r backend/requirements-dev.in
           else
             pip install --require-hashes -r backend/requirements.txt
+            pip install --require-hashes -r backend/requirements-dev.txt
           fi
 
       - name: pytest backend (capture log)
@@ -218,7 +223,11 @@ jobs:
         with: { python-version: "3.12", cache: pip }
 
       - name: install backend deps (hashed baseline)
-        run: pip install --require-hashes -r backend/requirements.txt
+        # FX.6.7 (2026-05-04): pytest moved to requirements-dev.txt.
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install --require-hashes -r backend/requirements-dev.txt
 
       - name: upgrade fastapi to latest minor
         if: matrix.fastapi == 'latest-minor'

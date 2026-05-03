@@ -35,6 +35,9 @@ jobs:
 
       - name: Install backend deps
         run: pip install -r backend/requirements.txt
+      # FX.6.7 (2026-05-04): pytest moved to requirements-dev.txt.
+      - name: Install dev deps (pytest)
+        run: pip install -r backend/requirements-dev.txt
 
       - name: Run AB.* test suite
         run: |
@@ -97,6 +100,9 @@ jobs:
 
       - name: Install backend deps
         run: pip install -r backend/requirements.txt
+      # FX.6.7 (2026-05-04): pytest moved to requirements-dev.txt.
+      - name: Install dev deps (pytest)
+        run: pip install -r backend/requirements-dev.txt
 
       - name: Skip if no sandbox key configured
         if: env.ANTHROPIC_API_KEY == ''

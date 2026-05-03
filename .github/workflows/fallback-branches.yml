@@ -181,7 +181,12 @@ jobs:
         # still resolve cleanly with pydantic 2.x — that's the entire
         # point of the gate. If it doesn't, this step red-Xs and the
         # operator gets a notification.
-        run: pip install --require-hashes -r backend/requirements.txt
+        # FX.6.7 (2026-05-04): pytest now lives in requirements-dev.txt;
+        # install both so the core-tests step below has a runner.
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install --require-hashes -r backend/requirements-dev.txt
 
       - name: pytest core (governance + adapter + smoke)
         # "Core tests" = the small, fast set that catches structural

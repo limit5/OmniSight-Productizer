@@ -1,0 +1,62 @@
+# backend/requirements-dev.in — dev-time tooling dependencies.
+#
+# FX.6.7 (2026-05-04): peeled out of ``backend/requirements.in`` so the
+# production lockfile (``requirements.txt``, consumed by Dockerfile.backend
+# + every prod-shaped CI job) no longer carries test runners and lint /
+# audit CLIs that the runtime never imports.
+#
+# The split:
+#   * ``backend/requirements.in``  — runtime imports only (FastAPI,
+#     SQLAlchemy, Alembic, asyncpg, anthropic, httpx, …). httpx STAYS
+#     in prod because backend code (47 files: backend/security/oauth_*,
+#     backend/email_delivery/*, backend/storage_provisioning/*, …)
+#     imports it directly at runtime — only ``pytest`` / ``respx`` are
+#     truly test-only.
+#   * ``backend/requirements-dev.in`` — pytest stack (test runners) +
+#     respx (httpx mock; no prod import) + pip-audit / ruff / mypy
+#     (FX.6.5 lint/audit toolchain, no runtime import path).
+#
+# Resolution / install pattern (pip-tools constraint mode):
+#   * pip-compile reads ``-c requirements.txt`` so any transitive dep
+#     shared with the prod lockfile (e.g. ``httpx`` pulled in by
+#     respx, ``typing-extensions`` pulled in by mypy) is pinned to the
+#     EXACT prod version + hashes. No ``==`` / ``--hash`` divergence
+#     between the two lockfiles.
+#   * Dev / CI test environments install BOTH:
+#       pip install --require-hashes -r backend/requirements.txt
+#       pip install --require-hashes -r backend/requirements-dev.txt
+#   * Production (Dockerfile.backend, openapi-contract job, backend-
+#     migrate job, frontend-e2e job) installs ONLY ``requirements.txt``
+#     and never sees pytest / respx / ruff / mypy / pip-audit.
+#
+# Regeneration:
+#   pip-compile --quiet --allow-unsafe --generate-hashes \
+#       --output-file=backend/requirements-dev.txt \
+#       backend/requirements-dev.in
+#
+# (CI's lockfile-drift gate runs the same command and `git diff
+# --exit-code` on the result; out-of-band edits to requirements-dev.txt
+# fail the build.)
+
+-c requirements.txt
+
+# --- Test runners -----------------------------------------------------
+pytest==8.3.5
+pytest-asyncio==1.0.0
+pytest-cov==6.0.0
+
+# --- HTTP mocking (httpx mock; httpx itself is a PROD dep, not here) --
+# Used by FS-series provider adapter tests (FS.1 db_provisioning /
+# FS.3 storage / FS.4 email / FS.5 jobs / FS.6 search / FS.8 stripe-
+# billing) — see docs/operations/codex-collaboration.md.
+respx==0.23.1
+
+# --- Lint / type-check / supply-chain audit (FX.6.5 toolchain) --------
+# Driven by the FX.6.8 nightly workflow (`pip-audit` + `ruff check` +
+# `mypy backend/security backend/agents`). No runtime imports — pure
+# CLI tools. Pinned to latest stable on PyPI as of 2026-05-04 so the
+# local ``backend/.venv`` and the future Actions runner agree
+# byte-for-byte.
+pip-audit==2.10.0
+ruff==0.15.12
+mypy==1.20.2

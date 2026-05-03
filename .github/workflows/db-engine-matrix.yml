@@ -298,6 +298,8 @@ jobs:
         run: |
           set -eu
           pip install --require-hashes -r backend/requirements.txt
+          # FX.6.7 (2026-05-04): pytest moved to requirements-dev.txt.
+          pip install --require-hashes -r backend/requirements-dev.txt
           pip install "psycopg2-binary==2.9.10" "asyncpg==0.30.0"
 
       - name: wait for postgres

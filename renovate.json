@@ -29,7 +29,10 @@
     "automerge": false
   },
   "pip-compile": {
-    "fileMatch": ["(^|/)backend/requirements\\.txt$"]
+    "fileMatch": [
+      "(^|/)backend/requirements\\.txt$",
+      "(^|/)backend/requirements-dev\\.txt$"
+    ]
   },
   "pip_requirements": {
     "enabled": false

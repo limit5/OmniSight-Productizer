@@ -65,7 +65,12 @@ jobs:
 
       # ── Baseline install (matches production lockfiles) ─────────────
       - name: install committed python deps (baseline)
-        run: pip install --require-hashes -r backend/requirements.txt
+        # FX.6.7 (2026-05-04): pytest now lives in requirements-dev.txt.
+        # The pytest step below needs both lockfiles installed.
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install --require-hashes -r backend/requirements-dev.txt
 
       - name: install committed js deps (baseline)
         run: pnpm install --frozen-lockfile --prefer-offline
@@ -88,14 +93,29 @@ jobs:
         run: |
           set -eu
           cp backend/requirements.txt "$WORK_DIR/req.committed.txt"
+          cp backend/requirements-dev.txt "$WORK_DIR/req-dev.committed.txt"
           # Use the SAME flags as `lockfile-drift` (N1) so the diff is
           # apples-to-apples with the file Renovate would commit.
           pip-compile --quiet --upgrade --generate-hashes \
               --output-file="$WORK_DIR/req.upgraded.txt" \
               backend/requirements.in
+          # FX.6.7 (2026-05-04): also trial-upgrade the dev lockfile.
+          # The constraint ``-c requirements.txt`` inside requirements-dev.in
+          # uses the in-tree path, but we want it to read the trial
+          # upgraded file so the dev lock pins to the trial-upgraded
+          # transitive deps. Substitute by overwriting requirements.txt
+          # in-place; the restore step at the end of the job puts the
+          # baseline back via git checkout (the runner is ephemeral
+          # anyway).
+          cp "$WORK_DIR/req.upgraded.txt" backend/requirements.txt
+          pip-compile --quiet --upgrade --generate-hashes \
+              --output-file="$WORK_DIR/req-dev.upgraded.txt" \
+              backend/requirements-dev.in
           # diff exits 1 when there are differences; that's expected.
           diff -u "$WORK_DIR/req.committed.txt" "$WORK_DIR/req.upgraded.txt" \
               > "$WORK_DIR/pip.diff" || true
+          diff -u "$WORK_DIR/req-dev.committed.txt" "$WORK_DIR/req-dev.upgraded.txt" \
+              > "$WORK_DIR/pip-dev.diff" || true
 
       # ── Trial pnpm update ──────────────────────────────────────────
       - name: trial pnpm update
@@ -117,6 +137,10 @@ jobs:
           # The upgraded file is hash-locked because pip-compile was
           # called with --generate-hashes; --require-hashes verifies it.
           pip install --require-hashes -r "$WORK_DIR/req.upgraded.txt"
+          # FX.6.7 (2026-05-04): pytest is in the dev lockfile now —
+          # install the trial-upgraded dev lock too so pytest below
+          # exercises the same upgraded-deps environment.
+          pip install --require-hashes -r "$WORK_DIR/req-dev.upgraded.txt"
 
       - name: install upgraded js deps
         id: install-js
@@ -166,6 +190,12 @@ jobs:
         run: |
           set -eu
           cp "$WORK_DIR/pnpm-lock.committed.yaml" pnpm-lock.yaml || true
+          # FX.6.7 (2026-05-04): the trial pip-compile step overwrites
+          # backend/requirements.txt in-place so the dev lockfile's
+          # ``-c requirements.txt`` constraint reads the trial-upgraded
+          # versions. Restore the baseline so the artifact comparison
+          # downstream sees the as-committed state.
+          cp "$WORK_DIR/req.committed.txt" backend/requirements.txt || true
 
       # ── Render the issue body ──────────────────────────────────────
       - name: render issue body
