@@ -1,0 +1,25 @@
+"""SC.1 — Security scanning adapters for generated apps.
+
+This package hosts optional scanner wrappers for the SC security
+compliance track.  Adapters normalise vendor output into small
+dataclasses so later rows can wire them into generated workspaces,
+commit triggers, and policy gates without depending on one CLI vendor.
+"""
+
+from __future__ import annotations
+
+from backend.security_scanning.sast import (
+    DEFAULT_FAIL_ON,
+    SASTFinding,
+    SASTReport,
+    SASTSeverity,
+    scan_sast,
+)
+
+__all__ = [
+    "DEFAULT_FAIL_ON",
+    "SASTFinding",
+    "SASTReport",
+    "SASTSeverity",
+    "scan_sast",
+]
