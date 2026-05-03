@@ -29,6 +29,7 @@ import pytest
 
 from backend.agents.mcp_integration import (
     DEFAULT_REMOTE_MCP_CATALOG,
+    ENV_TOKEN_VAR_BY_NAME,
     MCPServerConfig,
     RemoteMCPRegistry,
     build_default_server_config,
@@ -93,6 +94,12 @@ def test_catalog_has_four_known_servers():
         "claude_ai_Google_Calendar",
         "claude_ai_Google_Drive",
     }
+
+
+def test_env_token_aliases_cover_default_catalog():
+    """Each default managed MCP must have an env-token alias."""
+    names = {entry.name for entry in DEFAULT_REMOTE_MCP_CATALOG}
+    assert set(ENV_TOKEN_VAR_BY_NAME) == names
 
 
 def test_catalog_entries_have_url_description_sample_tools():
@@ -269,6 +276,12 @@ def test_parse_handles_underscores_in_method_name():
     )
 
 
+def test_parse_preserves_extra_separators_in_method_name():
+    assert parse_mcp_tool_name("mcp__custom_server__tools__list") == (
+        "custom_server", "tools__list",
+    )
+
+
 def test_parse_non_mcp_returns_none():
     assert parse_mcp_tool_name("Read") is None
     assert parse_mcp_tool_name("Bash") is None
@@ -413,6 +426,17 @@ def test_build_registry_from_env_single_token_creates_one_server():
     assert payload[0]["authorization_token"] == "tok-figma-abc"
 
 
+def test_build_registry_from_env_strips_token_whitespace():
+    from backend.agents.mcp_integration import build_registry_from_env
+
+    reg = build_registry_from_env(
+        env={"OMNISIGHT_MCP_FIGMA_TOKEN": "  tok-figma-abc  "}
+    )
+    cfg = reg.get("claude_ai_Figma")
+    assert cfg is not None
+    assert cfg.authorization_token == "tok-figma-abc"
+
+
 def test_build_registry_from_env_multiple_tokens():
     from backend.agents.mcp_integration import build_registry_from_env
 
@@ -453,6 +477,18 @@ def test_build_registry_from_env_master_disable(disable_value):
         env={
             "OMNISIGHT_MCP_FIGMA_TOKEN": "would-be-active",
             "OMNISIGHT_MCP_DISABLE_ALL": disable_value,
+        }
+    )
+    assert len(reg) == 0
+
+
+def test_build_registry_from_env_master_disable_strips_whitespace():
+    from backend.agents.mcp_integration import build_registry_from_env
+
+    reg = build_registry_from_env(
+        env={
+            "OMNISIGHT_MCP_FIGMA_TOKEN": "would-be-active",
+            "OMNISIGHT_MCP_DISABLE_ALL": "  yes  ",
         }
     )
     assert len(reg) == 0
