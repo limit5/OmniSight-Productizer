@@ -1,12 +1,12 @@
-"""SC.11.2 -- SOC 2 evidence mapping and collection helpers.
+"""SC.11.2-SC.11.3 -- compliance evidence mapping and collection helpers.
 
-This module deliberately owns only the SOC 2 row.  ISO 27001 remains
-for SC.11.3, and zip/signature export remains for SC.11.4.
+This module deliberately owns only the SOC 2 and ISO 27001 mapping rows.
+Zip/signature export remains for SC.11.4.
 
-Module-global / cross-worker state audit: the SOC 2 mapping is immutable
-tuple data and every worker derives the same evidence plan from the same
-repository files plus PG rows.  No singleton cache or mutable in-memory
-state is used.
+Module-global / cross-worker state audit: the compliance mappings are
+immutable tuple data and every worker derives the same evidence plan from
+the same repository files plus PG rows.  No singleton cache or mutable
+in-memory state is used.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SOC2_MAPPING_VERSION = "2026-05-03.sc11.2"
+ISO27001_MAPPING_VERSION = "2026-05-03.sc11.3"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,32 @@ class SOC2Control:
         return {
             "control_id": self.control_id,
             "trust_service_category": self.trust_service_category,
+            "title": self.title,
+            "description": self.description,
+            "evidence_sources": {
+                "policy_paths": list(self.policy_paths),
+                "audit_entity_kinds": list(self.audit_entity_kinds),
+                "audit_actions": list(self.audit_actions),
+                "event_types": list(self.event_types),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ISO27001Control:
+    control_id: str
+    domain: str
+    title: str
+    description: str
+    policy_paths: tuple[str, ...] = ()
+    audit_entity_kinds: tuple[str, ...] = ()
+    audit_actions: tuple[str, ...] = ()
+    event_types: tuple[str, ...] = ()
+
+    def to_mapping_dict(self) -> dict[str, Any]:
+        return {
+            "control_id": self.control_id,
+            "domain": self.domain,
             "title": self.title,
             "description": self.description,
             "evidence_sources": {
@@ -194,8 +221,120 @@ SOC2_CONTROLS: tuple[SOC2Control, ...] = (
 )
 
 
+ISO27001_CONTROLS: tuple[ISO27001Control, ...] = (
+    ISO27001Control(
+        control_id="A.5.1",
+        domain="organizational_controls",
+        title="Policies for information security",
+        description="Information security policies are documented and available.",
+        policy_paths=(
+            "docs/ops/security_baseline.md",
+            "docs/ops/o10_security_hardening.md",
+        ),
+        event_types=("debug.finding", "cross_agent/observation"),
+    ),
+    ISO27001Control(
+        control_id="A.5.15",
+        domain="organizational_controls",
+        title="Access control",
+        description="Logical access changes are auditable and policy-backed.",
+        policy_paths=(
+            "docs/security/as_0_1_auth_surface_inventory.md",
+            "docs/design/as-auth-security-shared-library.md",
+        ),
+        audit_entity_kinds=("user", "session", "api_key", "oauth_token"),
+        audit_actions=("login", "logout", "api_key.create", "api_key.revoke"),
+    ),
+    ISO27001Control(
+        control_id="A.5.16",
+        domain="organizational_controls",
+        title="Identity management",
+        description="Tenant, user, and OAuth identity lifecycle changes are logged.",
+        policy_paths=(
+            "docs/security/as_0_3_account_linking.md",
+            "docs/security/as_0_1_auth_surface_inventory.md",
+        ),
+        audit_entity_kinds=("tenant", "user", "oauth_provider", "git_account"),
+        audit_actions=("tenant.update", "user.update", "oauth_provider.update"),
+    ),
+    ISO27001Control(
+        control_id="A.5.23",
+        domain="organizational_controls",
+        title="Information security for cloud services",
+        description="Cloud service, sandbox, and integration boundaries are documented.",
+        policy_paths=(
+            "docs/design/sandbox-tier-audit.md",
+            "docs/operations/sandbox.md",
+        ),
+        audit_entity_kinds=("integration", "workflow_run", "project"),
+        audit_actions=("integration.update", "workflow_run.complete"),
+        event_types=("security.container", "workflow.step.complete"),
+    ),
+    ISO27001Control(
+        control_id="A.5.30",
+        domain="organizational_controls",
+        title="ICT readiness for business continuity",
+        description="Disaster recovery and failover procedures are retained.",
+        policy_paths=(
+            "docs/ops/dr_runbook.md",
+            "docs/ops/db_failover.md",
+            "docs/ops/dr_rto_rpo.md",
+        ),
+        audit_entity_kinds=("workflow_run", "task"),
+        audit_actions=("workflow_run.complete", "task.update"),
+        event_types=("workflow.step.complete", "turn.complete"),
+    ),
+    ISO27001Control(
+        control_id="A.8.15",
+        domain="technological_controls",
+        title="Logging",
+        description="Audit and event logs retain security-relevant activity.",
+        policy_paths=(
+            "docs/ops/observability_runbook.md",
+            "docs/design/sandbox-tier-audit.md",
+        ),
+        audit_entity_kinds=("tenant", "user", "api_key", "tenant_secret"),
+        audit_actions=("login", "logout", "secret.rotate", "api_key.revoke"),
+        event_types=("debug.finding", "security.sast", "security.sca"),
+    ),
+    ISO27001Control(
+        control_id="A.8.16",
+        domain="technological_controls",
+        title="Monitoring activities",
+        description="Security findings and scanner events are captured for review.",
+        policy_paths=(
+            "docs/ops/security_baseline.md",
+            "docs/ops/observability_runbook.md",
+        ),
+        event_types=(
+            "debug.finding",
+            "security.sast",
+            "security.sca",
+            "security.secrets",
+            "security.container",
+        ),
+    ),
+    ISO27001Control(
+        control_id="A.8.24",
+        domain="technological_controls",
+        title="Use of cryptography",
+        description="Key management and credential protection are documented.",
+        policy_paths=(
+            "docs/security/ks-multi-tenant-secret-management.md",
+            "docs/operations/key-management.md",
+        ),
+        audit_entity_kinds=("tenant_secret", "llm_credential", "oauth_token"),
+        audit_actions=("secret.rotate", "credential.update", "oauth_token.refresh"),
+    ),
+)
+
+
 def list_soc2_controls() -> list[SOC2Control]:
     return list(SOC2_CONTROLS)
+
+
+def list_iso27001_controls() -> list[ISO27001Control]:
+    return list(ISO27001_CONTROLS)
 
 
 def soc2_control_mapping() -> dict[str, Any]:
@@ -203,6 +342,14 @@ def soc2_control_mapping() -> dict[str, Any]:
         "standard": "soc2",
         "version": SOC2_MAPPING_VERSION,
         "controls": [control.to_mapping_dict() for control in SOC2_CONTROLS],
+    }
+
+
+def iso27001_control_mapping() -> dict[str, Any]:
+    return {
+        "standard": "iso27001",
+        "version": ISO27001_MAPPING_VERSION,
+        "controls": [control.to_mapping_dict() for control in ISO27001_CONTROLS],
     }
 
 
@@ -231,7 +378,7 @@ def _policy_pointer(root: Path, rel_path: str) -> EvidencePointer:
 async def _collect_audit_evidence(
     conn,
     tenant_id: str,
-    control: SOC2Control,
+    control: SOC2Control | ISO27001Control,
     *,
     limit: int,
 ) -> EvidencePointer | None:
@@ -252,7 +399,7 @@ async def _collect_audit_evidence(
     return EvidencePointer(
         source_id=f"{control.control_id}.audit_log",
         source_type="log",
-        description="Tenant audit_log rows matching SOC 2 control predicates",
+        description="Tenant audit_log rows matching compliance control predicates",
         available=bool(rows),
         table="audit_log",
         row_count=len(rows),
@@ -264,7 +411,7 @@ async def _collect_audit_evidence(
 async def _collect_event_evidence(
     conn,
     tenant_id: str,
-    control: SOC2Control,
+    control: SOC2Control | ISO27001Control,
     *,
     limit: int,
 ) -> EvidencePointer | None:
@@ -283,7 +430,7 @@ async def _collect_event_evidence(
     return EvidencePointer(
         source_id=f"{control.control_id}.event_log",
         source_type="log",
-        description="Tenant event_log rows matching SOC 2 control predicates",
+        description="Tenant event_log rows matching compliance control predicates",
         available=bool(rows),
         table="event_log",
         row_count=len(rows),
@@ -348,6 +495,62 @@ async def collect_soc2_evidence(
     }
 
 
+async def collect_iso27001_evidence(
+    conn,
+    tenant_id: str,
+    *,
+    root: Path | str = PROJECT_ROOT,
+    limit_per_source: int = 50,
+) -> dict[str, Any]:
+    root_path = Path(root)
+    controls: list[ControlEvidence] = []
+    for control in ISO27001_CONTROLS:
+        item = ControlEvidence(
+            control_id=control.control_id,
+            title=control.title,
+            policy_evidence=[
+                _policy_pointer(root_path, rel_path)
+                for rel_path in control.policy_paths
+            ],
+        )
+        audit_pointer = await _collect_audit_evidence(
+            conn, tenant_id, control, limit=limit_per_source,
+        )
+        event_pointer = await _collect_event_evidence(
+            conn, tenant_id, control, limit=limit_per_source,
+        )
+        for pointer in (audit_pointer, event_pointer):
+            if pointer is not None:
+                item.log_evidence.append(pointer)
+        controls.append(item)
+
+    return {
+        "standard": "iso27001",
+        "version": ISO27001_MAPPING_VERSION,
+        "tenant_id": tenant_id,
+        "collected_at": time.time(),
+        "controls": [control.to_dict() for control in controls],
+        "summary": {
+            "controls_total": len(controls),
+            "controls_collected": sum(
+                1 for control in controls if control.status == "collected"
+            ),
+            "controls_partial": sum(
+                1 for control in controls if control.status == "partial"
+            ),
+            "controls_missing": sum(
+                1 for control in controls if control.status == "missing"
+            ),
+            "controls_with_policy": sum(
+                1 for control in controls if control.has_policy
+            ),
+            "controls_with_logs": sum(
+                1 for control in controls if control.has_logs
+            ),
+        },
+    }
+
+
 async def collect_soc2_evidence_for_bundle(
     conn,
     bundle_id: str,
@@ -369,6 +572,47 @@ async def collect_soc2_evidence_for_bundle(
 
     mapping = soc2_control_mapping()
     manifest = await collect_soc2_evidence(
+        conn,
+        row["tenant_id"],
+        root=root,
+        limit_per_source=limit_per_source,
+    )
+    await conn.execute(
+        "UPDATE compliance_evidence_bundles "
+        "SET status = 'collecting', "
+        "control_mapping_json = $2, "
+        "evidence_manifest_json = $3, "
+        "error = '', "
+        "version = version + 1 "
+        "WHERE id = $1",
+        bundle_id,
+        json.dumps(mapping, sort_keys=True),
+        json.dumps(manifest, sort_keys=True),
+    )
+    return manifest
+
+
+async def collect_iso27001_evidence_for_bundle(
+    conn,
+    bundle_id: str,
+    *,
+    root: Path | str = PROJECT_ROOT,
+    limit_per_source: int = 50,
+) -> dict[str, Any]:
+    row = await conn.fetchrow(
+        "SELECT id, tenant_id, standard "
+        "FROM compliance_evidence_bundles WHERE id = $1",
+        bundle_id,
+    )
+    if row is None:
+        raise ValueError(f"Compliance evidence bundle not found: {bundle_id}")
+    if row["standard"] != "iso27001":
+        raise ValueError(
+            f"SC.11.3 only collects iso27001 bundles, got {row['standard']!r}"
+        )
+
+    mapping = iso27001_control_mapping()
+    manifest = await collect_iso27001_evidence(
         conn,
         row["tenant_id"],
         root=root,
