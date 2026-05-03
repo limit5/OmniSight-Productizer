@@ -3175,7 +3175,7 @@ ls backend/alembic/versions/ | tail -3
 - [x][G] KS.4.12 **整合 Orchestrator entry**：所有 user-facing input (chat / API / webhook) 在進 specialist routing 前先過 firewall；後台內部 specialist↔specialist 通信豁免 (避免 over-blocking)；BP.A2A inbound endpoint 也走 firewall (外部 A2A caller 是 untrusted)
 - [x][G] KS.4.13 **alembic 0187 `firewall_events` table**：`event_id / tenant_id / classification / input_hash / blocked_reason / created_at` (持久化 blocked + suspicious cases 給 review，input plain text 不入庫只存 hash 避免擴大洩露面)
 - [x][G] KS.4.14 **Tests** — `backend/tests/test_llm_firewall.py` ~40 test：經典 jailbreak corpus (DAN / system override / role play attacks 涵蓋公開 jailbreak 集) + safe negative case + false positive 校準 (避免擋掉合法 input) + per-tenant isolation
-- [~][G] KS.4.15 **整合既有 PEP gateway**：firewall 是 PEP 的一個 layer (而非取代 PEP)；不通過 firewall 的 input 連 PEP 都不到、直接 audit log
+- [x][G] KS.4.15 **整合既有 PEP gateway**：firewall 是 PEP 的一個 layer (而非取代 PEP)；不通過 firewall 的 input 連 PEP 都不到、直接 audit log
 
 預估：**1.5 週**（KS.4.1-9 約 1 週 + KS.4.10-15 LLM firewall ~0.5 週）
 
