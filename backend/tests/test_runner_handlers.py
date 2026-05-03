@@ -202,9 +202,19 @@ def test_bash_timeout_returns_message(base_dir: Path) -> None:
     assert "timed out" in out
 
 
-def test_bash_rejects_run_in_background(base_dir: Path) -> None:
-    with pytest.raises(NotImplementedError):
+def test_bash_rejects_run_in_background_before_subprocess(
+    base_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        raise AssertionError("subprocess.run must not be called")
+
+    monkeypatch.setattr(runner_handlers.subprocess, "run", fake_run)
+    with pytest.raises(NotImplementedError, match="background"):
         bash_handler({"command": "true", "run_in_background": True})
+    assert calls == []
 
 
 @pytest.mark.parametrize(

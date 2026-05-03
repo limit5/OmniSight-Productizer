@@ -146,6 +146,14 @@ def _validate_bash_command(cmd: Any) -> str:
 
 
 def bash_handler(payload: dict[str, Any]) -> str:
+    """Run a foreground command inside ``BASE_DIR``.
+
+    Contract:
+      ``run_in_background`` is intentionally unsupported. The runner has
+      no monitor channel for detached process lifecycle, so the handler
+      rejects background requests before command parsing or subprocess
+      dispatch.
+    """
     if payload.get("run_in_background"):
         # The runner has no Monitor channel — backgrounding would orphan
         # processes when the runner exits. Refuse explicitly.
