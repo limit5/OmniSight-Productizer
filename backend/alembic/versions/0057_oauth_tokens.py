@@ -104,6 +104,11 @@ Index choices
   ``NULLS LAST`` on PG so NULL-expiry rows sort to the end of the
   range scan and the hook can stop early.
 
+* Secondary ``idx_oauth_tokens_key_version`` on ``(key_version)``
+  shapes the KS.1.4 lazy re-encrypt scanner. After the quarterly
+  master-KEK schedule advances, background workers can scan
+  ``WHERE key_version < current_version`` without a full table walk.
+
 Module-global / cross-worker state audit
 ────────────────────────────────────────
 Pure DDL migration — no module-level state, no in-memory cache.
@@ -203,6 +208,11 @@ _PG_INDEX_EXPIRES = (
     "ON oauth_tokens(provider, expires_at NULLS LAST)"
 )
 
+_PG_INDEX_KEY_VERSION = (
+    "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_key_version "
+    "ON oauth_tokens(key_version)"
+)
+
 
 # ─── SQLite branch ───────────────────────────────────────────────────────
 
@@ -236,6 +246,11 @@ _SQLITE_INDEX_EXPIRES = (
     "ON oauth_tokens(provider, expires_at)"
 )
 
+_SQLITE_INDEX_KEY_VERSION = (
+    "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_key_version "
+    "ON oauth_tokens(key_version)"
+)
+
 
 # ─── upgrade / downgrade ─────────────────────────────────────────────────
 
@@ -245,6 +260,7 @@ def upgrade() -> None:
     if conn.dialect.name == "postgresql":
         conn.exec_driver_sql(_PG_CREATE_TABLE)
         conn.exec_driver_sql(_PG_INDEX_EXPIRES)
+        conn.exec_driver_sql(_PG_INDEX_KEY_VERSION)
         return
 
     # SQLite path.  ``CREATE TABLE IF NOT EXISTS`` keeps the migration
@@ -253,6 +269,7 @@ def upgrade() -> None:
     # call to be a no-op.
     conn.exec_driver_sql(_SQLITE_CREATE_TABLE)
     conn.exec_driver_sql(_SQLITE_INDEX_EXPIRES)
+    conn.exec_driver_sql(_SQLITE_INDEX_KEY_VERSION)
 
 
 def downgrade() -> None:
@@ -263,5 +280,6 @@ def downgrade() -> None:
     # the only persistent home for the vault ciphertext, so a
     # downgrade is by definition a "drop the OAuth login surface
     # entirely" operation.
+    op.execute("DROP INDEX IF EXISTS idx_oauth_tokens_key_version")
     op.execute("DROP INDEX IF EXISTS idx_oauth_tokens_provider_expires")
     op.execute("DROP TABLE IF EXISTS oauth_tokens")

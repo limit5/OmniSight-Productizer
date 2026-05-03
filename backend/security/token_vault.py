@@ -51,12 +51,19 @@ object. After ``LEGACY_FERNET_FALLBACK_DEPRECATES_ON`` the fallback
 raises :class:`LegacyFernetFallbackDeprecatedError`; writers never
 produce legacy Fernet ciphertext in this release.
 
-``key_version`` reservation (AS.0.4 §3.1 / §3.2)
-────────────────────────────────────────────────
-``oauth_tokens.key_version INTEGER DEFAULT 1`` remains unchanged so
-KS.1.3 does not require a schema migration. KS.1.4 owns future
-master-KEK rotation; this row only upgrades the AS token vault
-read/write path.
+``key_version`` / master-KEK rotation (AS.0.4 §3.1 / KS.1.4)
+────────────────────────────────────────────────────────────
+``oauth_tokens.key_version`` is the coarse-grained master-KEK epoch
+for token-vault rows. New writes call :func:`current_key_version`,
+which derives the active version from a fixed quarterly UTC schedule
+(``KEY_VERSION_ROTATION_INTERVAL_DAYS = 90``). Reads accept any
+version from :data:`KEY_VERSION_INITIAL` through the current scheduled
+version, so old rows keep decrypting after a quarter flips. Callers
+that want background lazy re-encrypt use
+:func:`decrypt_for_user_with_lazy_reencrypt`: it returns plaintext and
+an optional replacement :class:`EncryptedToken` when the stored
+``key_version`` lags the schedule. The caller owns the SQL
+``UPDATE ... WHERE version = old_version`` optimistic-lock write.
 
 Provider whitelist
 ──────────────────
@@ -130,15 +137,28 @@ logger = logging.getLogger(__name__)
 #  Constants
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-#: Active token-vault key version. KS.1.3 keeps the existing schema
-#: default and distinguishes new rows by token-envelope ciphertext
-#: shape, not by bumping the column. KS.1.4 owns future key-version
-#: rotation semantics.
+#: First token-vault master-KEK epoch. Existing KS.1.3 rows and legacy
+#: Fernet fallback rows both carry this value.
+KEY_VERSION_INITIAL: int = 1
+
+#: Active token-vault key version at this release's landing date.
+#: Runtime writes call :func:`current_key_version` so the quarterly
+#: schedule can advance without a deploy.
 KEY_VERSION_CURRENT: int = 1
 
 #: Legacy AS.2.1 rows used ``backend.secret_store`` Fernet ciphertext
 #: with ``key_version = 1``. KS.1.3 keeps a 30-day read fallback only.
 KEY_VERSION_LEGACY_FERNET: int = 1
+
+#: KS.1.4 quarterly rotation cadence. Every worker derives the same
+#: answer from UTC dates; no module-global mutable state or scheduler
+#: singleton is used.
+KEY_VERSION_ROTATION_INTERVAL_DAYS: int = 90
+
+#: First day the KS.1.4 automatic rotation schedule is active. The
+#: first interval (2026-05-03 through 2026-07-31 UTC) remains v1; the
+#: schedule flips to v2 on 2026-08-01 UTC.
+KEY_VERSION_ROTATION_STARTED_ON = _dt.date(2026, 5, 3)
 
 #: Binding envelope format. Bumped only when the wrapper shape itself
 #: changes (e.g. add a field). Changing this requires a dual-read
@@ -189,9 +209,8 @@ class UnsupportedProviderError(TokenVaultError, ValueError):
 
 
 class UnknownKeyVersionError(TokenVaultError):
-    """``key_version`` on a stored row is not :data:`KEY_VERSION_CURRENT`.
-    The first KMS migration will replace this with a multi-version
-    dispatch; until then any unknown value is treated as corruption."""
+    """``key_version`` on a stored row is outside the supported
+    quarterly master-KEK schedule."""
 
 
 class LegacyFernetFallbackDeprecatedError(UnknownKeyVersionError):
@@ -238,6 +257,22 @@ class EncryptedToken:
 
     ciphertext: str
     key_version: int
+
+
+@dataclass(frozen=True)
+class DecryptedToken:
+    """Plaintext plus an optional lazy-reencrypt replacement.
+
+    ``replacement`` is ``None`` when the stored row is already at the
+    current scheduled key version. When present, the caller persists it
+    back to ``oauth_tokens`` with the row's existing optimistic-lock
+    ``version`` guard; this helper deliberately performs no DB IO.
+    """
+
+    plaintext: str
+    replacement: Optional[EncryptedToken]
+    key_version: int
+    target_key_version: int
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -356,6 +391,35 @@ def _utc_today() -> _dt.date:
     return _dt.datetime.now(_dt.timezone.utc).date()
 
 
+def current_key_version(*, as_of: Optional[_dt.date] = None) -> int:
+    """Return the quarterly scheduled master-KEK version.
+
+    No shared runtime state: every worker derives the same value from
+    UTC date constants, so cross-worker consistency does not depend on
+    an in-memory singleton.
+    """
+
+    day = as_of or _utc_today()
+    if day < KEY_VERSION_ROTATION_STARTED_ON:
+        return KEY_VERSION_INITIAL
+    elapsed_days = (day - KEY_VERSION_ROTATION_STARTED_ON).days
+    return KEY_VERSION_INITIAL + (
+        elapsed_days // KEY_VERSION_ROTATION_INTERVAL_DAYS
+    )
+
+
+def key_version_needs_lazy_reencrypt(
+    key_version: int,
+    *,
+    as_of: Optional[_dt.date] = None,
+) -> bool:
+    """Whether a stored row lags the active quarterly KEK epoch."""
+
+    return _check_key_version(key_version, as_of=as_of) < current_key_version(
+        as_of=as_of
+    )
+
+
 def legacy_fernet_fallback_is_active(*, as_of: Optional[_dt.date] = None) -> bool:
     """Whether KS.1.3 should still read legacy Fernet token rows.
 
@@ -365,6 +429,24 @@ def legacy_fernet_fallback_is_active(*, as_of: Optional[_dt.date] = None) -> boo
 
     day = as_of or _utc_today()
     return day < LEGACY_FERNET_FALLBACK_DEPRECATES_ON
+
+
+def _check_key_version(
+    key_version: int,
+    *,
+    as_of: Optional[_dt.date] = None,
+) -> int:
+    if not isinstance(key_version, int):
+        raise UnknownKeyVersionError(
+            f"key_version must be an integer, got {type(key_version).__name__}"
+        )
+    current = current_key_version(as_of=as_of)
+    if key_version < KEY_VERSION_INITIAL or key_version > current:
+        raise UnknownKeyVersionError(
+            f"unknown key_version={key_version!r} "
+            f"(this release supports {KEY_VERSION_INITIAL}..{current})"
+        )
+    return key_version
 
 
 def _binding_payload(user_id: str, provider: str, plaintext: str) -> str:
@@ -446,6 +528,7 @@ def encrypt_for_user(
     plaintext: str,
     *,
     tenant_id: Optional[str] = None,
+    as_of: Optional[_dt.date] = None,
 ) -> EncryptedToken:
     """Encrypt *plaintext* (an OAuth access_token / refresh_token) for
     storage in the ``oauth_tokens`` row owned by *user_id* + *provider*.
@@ -475,7 +558,7 @@ def encrypt_for_user(
     )
     return EncryptedToken(
         ciphertext=_token_envelope(ciphertext, dek_ref),
-        key_version=KEY_VERSION_CURRENT,
+        key_version=current_key_version(as_of=as_of),
     )
 
 
@@ -483,6 +566,8 @@ def decrypt_for_user(
     user_id: str,
     provider: str,
     token: EncryptedToken,
+    *,
+    as_of: Optional[_dt.date] = None,
 ) -> str:
     """Decrypt *token* and return its plaintext.
 
@@ -496,8 +581,8 @@ def decrypt_for_user(
     UnsupportedProviderError
         *provider* is not in :data:`SUPPORTED_PROVIDERS`.
     UnknownKeyVersionError
-        ``token.key_version`` is neither the KS.1.3 current version nor
-        an active legacy Fernet fallback version.
+        ``token.key_version`` is outside the accepted quarterly
+        master-KEK schedule.
     BindingMismatchError
         The ciphertext was encrypted for a different *(user_id,
         provider)* pair, or for a different binding-format version.
@@ -512,11 +597,7 @@ def decrypt_for_user(
         raise TokenVaultError(
             f"token must be an EncryptedToken, got {type(token).__name__}"
         )
-    if token.key_version != KEY_VERSION_CURRENT:
-        raise UnknownKeyVersionError(
-            f"unknown key_version={token.key_version!r} "
-            f"(this release supports only {KEY_VERSION_CURRENT})"
-        )
+    _check_key_version(token.key_version, as_of=as_of)
 
     try:
         ciphertext, dek_ref = _load_token_envelope(token.ciphertext)
@@ -535,6 +616,40 @@ def decrypt_for_user(
             "ciphertext failed KS.1 envelope authentication"
         ) from exc
     return _load_binding_payload(payload, uid, p)
+
+
+def decrypt_for_user_with_lazy_reencrypt(
+    user_id: str,
+    provider: str,
+    token: EncryptedToken,
+    *,
+    tenant_id: Optional[str] = None,
+    as_of: Optional[_dt.date] = None,
+) -> DecryptedToken:
+    """Decrypt and prepare a replacement when the row's KEK epoch is old.
+
+    This is the KS.1.4 lazy re-encrypt hook. It is intentionally pure:
+    callers can run it in request-time or background scans, then persist
+    ``result.replacement`` with their existing optimistic-lock SQL.
+    """
+
+    plaintext = decrypt_for_user(user_id, provider, token, as_of=as_of)
+    target = current_key_version(as_of=as_of)
+    replacement: Optional[EncryptedToken] = None
+    if token.key_version < target:
+        replacement = encrypt_for_user(
+            user_id,
+            provider,
+            plaintext,
+            tenant_id=tenant_id,
+            as_of=as_of,
+        )
+    return DecryptedToken(
+        plaintext=plaintext,
+        replacement=replacement,
+        key_version=token.key_version,
+        target_key_version=target,
+    )
 
 
 def fingerprint(token: str) -> str:
@@ -556,9 +671,13 @@ __all__ = [
     "BINDING_FORMAT_VERSION",
     "BindingMismatchError",
     "CiphertextCorruptedError",
+    "DecryptedToken",
     "EncryptedToken",
+    "KEY_VERSION_INITIAL",
     "KEY_VERSION_CURRENT",
     "KEY_VERSION_LEGACY_FERNET",
+    "KEY_VERSION_ROTATION_INTERVAL_DAYS",
+    "KEY_VERSION_ROTATION_STARTED_ON",
     "LEGACY_FERNET_FALLBACK_DEPRECATES_ON",
     "LEGACY_FERNET_FALLBACK_STARTED_ON",
     "LegacyFernetFallbackDeprecatedError",
@@ -568,9 +687,12 @@ __all__ = [
     "UnknownKeyVersionError",
     "UnknownTokenEnvelopeVersionError",
     "UnsupportedProviderError",
+    "current_key_version",
     "decrypt_for_user",
+    "decrypt_for_user_with_lazy_reencrypt",
     "encrypt_for_user",
     "fingerprint",
     "is_enabled",
+    "key_version_needs_lazy_reencrypt",
     "legacy_fernet_fallback_is_active",
 ]

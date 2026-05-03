@@ -15,8 +15,9 @@ through. Pinned invariants:
    raises :class:`BindingMismatchError`. Defends against DB-level row
    shuffles.
 5. Key version — :data:`KEY_VERSION_CURRENT` is the only accepted
-   version this release; anything else raises
-   :class:`UnknownKeyVersionError` (AS.0.4 §3.1 reservation).
+   version on the landing date; future quarters advance via
+   :func:`current_key_version` and old rows return a lazy re-encrypt
+   replacement (AS.0.4 §3.1 / KS.1.4).
 6. Ciphertext corruption — Fernet auth failures + malformed inner
    envelopes are translated to :class:`CiphertextCorruptedError`.
 7. KS.1.3 envelope invariant — module source MUST go through
@@ -238,13 +239,100 @@ def test_binding_mismatch_swapped_rows() -> None:
 def test_key_version_current_stays_one() -> None:
     """KS.1.3 keeps key_version=1 for schema compatibility; new vs
     legacy rows are distinguished by ciphertext envelope shape."""
+    assert tv.KEY_VERSION_INITIAL == 1
     assert tv.KEY_VERSION_CURRENT == 1
     assert tv.KEY_VERSION_LEGACY_FERNET == 1
+    assert tv.current_key_version(as_of=tv.KEY_VERSION_ROTATION_STARTED_ON) == 1
+
+
+def test_quarterly_key_version_schedule_advances() -> None:
+    """KS.1.4: quarterly automatic master-KEK rotation derives the
+    active epoch from UTC date constants, not from process memory."""
+    first_day_v2 = (
+        tv.KEY_VERSION_ROTATION_STARTED_ON
+        + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    )
+    assert tv.current_key_version(as_of=first_day_v2) == 2
+    assert tv.current_key_version(
+        as_of=first_day_v2 + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    ) == 3
+
+
+def test_future_quarter_encrypt_uses_scheduled_key_version() -> None:
+    first_day_v2 = (
+        tv.KEY_VERSION_ROTATION_STARTED_ON
+        + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    )
+    encrypted = tv.encrypt_for_user(
+        "u1",
+        "google",
+        "tok",
+        as_of=first_day_v2,
+    )
+    assert encrypted.key_version == 2
+    assert tv.decrypt_for_user("u1", "google", encrypted, as_of=first_day_v2) == "tok"
+
+
+def test_lazy_reencrypt_returns_replacement_for_old_row() -> None:
+    first_day_v2 = (
+        tv.KEY_VERSION_ROTATION_STARTED_ON
+        + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    )
+    old = tv.encrypt_for_user(
+        "u1",
+        "google",
+        "tok",
+        as_of=tv.KEY_VERSION_ROTATION_STARTED_ON,
+    )
+    result = tv.decrypt_for_user_with_lazy_reencrypt(
+        "u1",
+        "google",
+        old,
+        tenant_id="tenant-42",
+        as_of=first_day_v2,
+    )
+    assert result.plaintext == "tok"
+    assert result.key_version == 1
+    assert result.target_key_version == 2
+    assert result.replacement is not None
+    assert result.replacement.key_version == 2
+    outer = json.loads(result.replacement.ciphertext)
+    assert outer["dek_ref"]["tenant_id"] == "tenant-42"
+    assert tv.decrypt_for_user(
+        "u1",
+        "google",
+        result.replacement,
+        as_of=first_day_v2,
+    ) == "tok"
+
+
+def test_lazy_reencrypt_noops_for_current_row() -> None:
+    first_day_v2 = (
+        tv.KEY_VERSION_ROTATION_STARTED_ON
+        + tv._dt.timedelta(days=tv.KEY_VERSION_ROTATION_INTERVAL_DAYS)
+    )
+    current = tv.encrypt_for_user(
+        "u1",
+        "google",
+        "tok",
+        as_of=first_day_v2,
+    )
+    result = tv.decrypt_for_user_with_lazy_reencrypt(
+        "u1",
+        "google",
+        current,
+        as_of=first_day_v2,
+    )
+    assert result.plaintext == "tok"
+    assert result.replacement is None
+    assert tv.key_version_needs_lazy_reencrypt(1, as_of=first_day_v2) is True
+    assert tv.key_version_needs_lazy_reencrypt(2, as_of=first_day_v2) is False
 
 
 def test_unknown_key_version_rejected() -> None:
     encrypted = tv.encrypt_for_user("u1", "google", "tok")
-    fake = tv.EncryptedToken(ciphertext=encrypted.ciphertext, key_version=2)
+    future_version = tv.current_key_version() + 1
+    fake = tv.EncryptedToken(ciphertext=encrypted.ciphertext, key_version=future_version)
     with pytest.raises(tv.UnknownKeyVersionError):
         tv.decrypt_for_user("u1", "google", fake)
 
@@ -432,6 +520,8 @@ def test_constants_stable_across_reload() -> None:
     before = (
         tv.KEY_VERSION_CURRENT,
         tv.KEY_VERSION_LEGACY_FERNET,
+        tv.KEY_VERSION_ROTATION_INTERVAL_DAYS,
+        tv.KEY_VERSION_ROTATION_STARTED_ON,
         tv.BINDING_FORMAT_VERSION,
         tv.TOKEN_ENVELOPE_FORMAT_VERSION,
         tv.LEGACY_FERNET_FALLBACK_STARTED_ON,
@@ -452,6 +542,8 @@ def test_constants_stable_across_reload() -> None:
     after = (
         reloaded.KEY_VERSION_CURRENT,
         reloaded.KEY_VERSION_LEGACY_FERNET,
+        reloaded.KEY_VERSION_ROTATION_INTERVAL_DAYS,
+        reloaded.KEY_VERSION_ROTATION_STARTED_ON,
         reloaded.BINDING_FORMAT_VERSION,
         reloaded.TOKEN_ENVELOPE_FORMAT_VERSION,
         reloaded.LEGACY_FERNET_FALLBACK_STARTED_ON,
@@ -478,9 +570,13 @@ def test_public_surface_matches_all() -> None:
         "BINDING_FORMAT_VERSION",
         "BindingMismatchError",
         "CiphertextCorruptedError",
+        "DecryptedToken",
         "EncryptedToken",
+        "KEY_VERSION_INITIAL",
         "KEY_VERSION_CURRENT",
         "KEY_VERSION_LEGACY_FERNET",
+        "KEY_VERSION_ROTATION_INTERVAL_DAYS",
+        "KEY_VERSION_ROTATION_STARTED_ON",
         "LEGACY_FERNET_FALLBACK_DEPRECATES_ON",
         "LEGACY_FERNET_FALLBACK_STARTED_ON",
         "LegacyFernetFallbackDeprecatedError",
@@ -490,10 +586,13 @@ def test_public_surface_matches_all() -> None:
         "UnknownKeyVersionError",
         "UnknownTokenEnvelopeVersionError",
         "UnsupportedProviderError",
+        "current_key_version",
         "decrypt_for_user",
+        "decrypt_for_user_with_lazy_reencrypt",
         "encrypt_for_user",
         "fingerprint",
         "is_enabled",
+        "key_version_needs_lazy_reencrypt",
         "legacy_fernet_fallback_is_active",
     }
     assert set(tv.__all__) == expected
