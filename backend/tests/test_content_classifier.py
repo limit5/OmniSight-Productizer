@@ -990,9 +990,12 @@ def test_total_re_export_count_pinned_at_79():
     # (clone_audit surface) → 192; W13.2 added 7 new symbols
     # (screenshot_breakpoints surface) → 199; W13.3 added 18 new symbols
     # (screenshot_writer surface) → 217; W13.4 added 16 new symbols
-    # (screenshot_ghost_overlay surface) → 233. Each row's own drift
+    # (screenshot_ghost_overlay surface) → 233; W15.2 added 11 new
+    # symbols (vite_error_relay surface) → 244; W15.3 added 8 new
+    # symbols (vite_error_prompt surface) → 252; W15.4 added 10 new
+    # symbols (vite_retry_budget surface) → 262. Each row's own drift
     # guard re-pins at the new value.
-    assert len(web_pkg.__all__) == 233
+    assert len(web_pkg.__all__) == 262
 
 
 # ── Whole-spec invariants ───────────────────────────────────────────────

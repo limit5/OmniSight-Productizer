@@ -273,8 +273,11 @@ def test_total_re_exports_drift_guard() -> None:
     a new symbol an explicit code-review event (matches W11.5/W11.6
     pattern). W13.2 adds 7 screenshot-breakpoint symbols → 199.
     W13.3 adds 18 screenshot-writer symbols → 217.
-    W13.4 adds 16 screenshot-ghost-overlay symbols → 233."""
-    assert len(web_pkg.__all__) == 233, (
+    W13.4 adds 16 screenshot-ghost-overlay symbols → 233.
+    W15.2 adds 11 vite_error_relay symbols → 244.
+    W15.3 adds 8 vite_error_prompt symbols → 252.
+    W15.4 adds 10 vite_retry_budget symbols → 262."""
+    assert len(web_pkg.__all__) == 262, (
         "If you added/removed a public symbol, update this expectation "
         "alongside the W11/W13 row's TODO entry — drift here is a code-review "
         "trigger, not a test bug."

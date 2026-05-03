@@ -921,8 +921,11 @@ def test_package_total_re_export_count_pinned() -> None:
     W13.2 adds 7 new ones (screenshot_breakpoints surface) → 199.
     W13.3 adds 18 new ones (screenshot_writer surface) → 217.
     W13.4 adds 16 new ones (screenshot_ghost_overlay surface) → 233.
+    W15.2 adds 11 new ones (vite_error_relay surface) → 244.
+    W15.3 adds 8 new ones (vite_error_prompt surface) → 252.
+    W15.4 adds 10 new ones (vite_retry_budget surface) → 262.
     Any future re-export drift is an obvious diff."""
-    assert len(web_pkg.__all__) == 233
+    assert len(web_pkg.__all__) == 262
 
 
 # ── Whole-spec invariants ──────────────────────────────────────────────
