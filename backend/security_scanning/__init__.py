@@ -19,15 +19,29 @@ from backend.security_scanning.sast import (
     scan_sast,
     write_sast_commit_scan_artifact,
 )
+from backend.security_scanning.dast import (
+    DASTFinding,
+    DASTPreviewScan,
+    DASTReport,
+    DASTSeverity,
+    scan_web_preview_zap,
+    scan_zap_baseline,
+)
 
 __all__ = [
     "DEFAULT_FAIL_ON",
+    "DASTFinding",
+    "DASTPreviewScan",
+    "DASTReport",
+    "DASTSeverity",
     "SAST_COMMIT_SCAN_ARTIFACT",
     "SASTCommitScan",
     "SASTFinding",
     "SASTReport",
     "SASTSeverity",
+    "scan_web_preview_zap",
     "scan_generated_workspace_commit",
     "scan_sast",
+    "scan_zap_baseline",
     "write_sast_commit_scan_artifact",
 ]
