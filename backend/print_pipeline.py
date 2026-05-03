@@ -46,6 +46,7 @@ from typing import Any
 
 import yaml
 
+from backend.db_context import current_tenant_id
 from backend.shared_state import SharedKV
 
 logger = logging.getLogger(__name__)
@@ -1134,14 +1135,102 @@ def get_job_lifecycle_state(state_id: str) -> JobLifecycleState | None:
     return None
 
 
-_queue_jobs: dict[str, QueueJob] = {}
-_queue_counter: int = 0
+# FX.1.2 — print queue moved off module-level dict + counter to SharedKV
+# (per-tenant namespaces) so multi-worker uvicorn (``--workers N``) can no
+# longer mint colliding ``queue-job-N`` ids or see disjoint queue snapshots.
+# SOP Step 1 cross-worker rubric answer #2 (coordinated via Redis when
+# ``OMNISIGHT_REDIS_URL`` is set; the SharedKV in-memory fallback shares
+# its namespace dict across all instances within a single process via
+# class-level ``_mem``, so unit tests and the single-worker dev path keep
+# observing the same data without per-instance drift).
+#
+# Per-tenant scoping (TODO FX.1.2 "per-tenant queue_jobs table"): each
+# tenant gets its own namespace ``print_pipeline_queue_jobs:<tenant_id>``
+# so job-id counters and state are isolated across tenants. The tenant
+# is resolved from ``backend.db_context.current_tenant_id()`` at call
+# time; routes that go through ``require_tenant`` set this contextvar
+# before reaching the print_pipeline functions, and tests / sync paths
+# without a context fall back to ``t-default`` to match the seeded
+# default tenant in ``backend/db.py``. The TODO row says "DB row" but
+# the audit doc (line 73) explicitly lists "SharedKV / SQLite WAL / DB
+# row" interchangeably as the cross-worker fix shape; SharedKV mirrors
+# FX.1.1's choice in this same module, preserves the sync API contract
+# (router + tests are sync-friendly), and Redis-backed gives the same
+# cross-worker safety property a per-tenant DB table would.
+_QUEUE_JOBS_NS_PREFIX = "print_pipeline_queue_jobs"
+_QUEUE_COUNTER_NS_PREFIX = "print_pipeline_queue_counter"
+_QUEUE_COUNTER_FIELD = "next_id"
+
+
+def _queue_tenant() -> str:
+    return current_tenant_id() or "t-default"
+
+
+def _queue_jobs_kv(tenant_id: str | None = None) -> SharedKV:
+    tid = tenant_id if tenant_id is not None else _queue_tenant()
+    return SharedKV(f"{_QUEUE_JOBS_NS_PREFIX}:{tid}")
+
+
+def _queue_counter_kv(tenant_id: str | None = None) -> SharedKV:
+    tid = tenant_id if tenant_id is not None else _queue_tenant()
+    return SharedKV(f"{_QUEUE_COUNTER_NS_PREFIX}:{tid}")
+
+
+def _next_queue_job_id() -> int:
+    return _queue_counter_kv().incr(_QUEUE_COUNTER_FIELD)
+
+
+def _serialise_queue_job(job: QueueJob) -> str:
+    return json.dumps(asdict(job))
+
+
+def _deserialise_queue_job(raw: str) -> QueueJob | None:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return QueueJob(**data)
+    except TypeError:
+        return None
+
+
+def _save_queue_job(job: QueueJob) -> None:
+    _queue_jobs_kv().set(job.job_id, _serialise_queue_job(job))
+
+
+def _load_queue_job(job_id: str) -> QueueJob | None:
+    return _deserialise_queue_job(_queue_jobs_kv().get(job_id))
+
+
+def _queue_jobs_count() -> int:
+    return len(_queue_jobs_kv().get_all())
 
 
 def _reset_queue() -> None:
-    global _queue_jobs, _queue_counter
-    _queue_jobs = {}
-    _queue_counter = 0
+    """Clear print queue state across all tenants (test-only).
+
+    Iterates the SharedKV class-level in-memory store to find every
+    namespace this module owns and deletes its fields. This mirrors
+    the pre-FX.1.2 behaviour of ``_queue_jobs = {}; _queue_counter = 0``
+    while supporting the per-tenant namespace split — a single test
+    that touched multiple tenants would otherwise leak counters into
+    later tests. Redis-backed state is intentionally NOT scanned here
+    because tests don't run with Redis (``OMNISIGHT_REDIS_URL`` is
+    unset in CI) and a SCAN-then-DELETE would be a footgun if it ever
+    accidentally ran against a shared dev Redis.
+    """
+    for ns in list(SharedKV._mem.keys()):
+        if ns.startswith(f"{_QUEUE_JOBS_NS_PREFIX}:") or ns.startswith(
+            f"{_QUEUE_COUNTER_NS_PREFIX}:"
+        ):
+            kv = SharedKV(ns)
+            for field_name in list(kv.get_all().keys()):
+                kv.delete(field_name)
 
 
 def enqueue_print_job(
@@ -1151,12 +1240,10 @@ def enqueue_print_job(
     size_bytes: int = 0,
     pages: int = 1,
 ) -> QueueJob:
-    global _queue_counter
-
     spool_cfg = get_spooler_config()
     if size_bytes > spool_cfg.max_job_size_mb * 1024 * 1024:
-        job_id = f"queue-job-{_queue_counter + 1}"
-        _queue_counter += 1
+        next_id = _next_queue_job_id()
+        job_id = f"queue-job-{next_id}"
         job = QueueJob(
             job_id=job_id,
             document_name=document_name,
@@ -1169,14 +1256,14 @@ def enqueue_print_job(
             state_history=[SpoolerJobState.submitted.value, SpoolerJobState.rejected.value],
             error_message=f"Job size {size_bytes} exceeds max {spool_cfg.max_job_size_mb}MB",
         )
-        _queue_jobs[job_id] = job
+        _save_queue_job(job)
         return job
 
-    if len(_queue_jobs) >= spool_cfg.max_queue_depth:
+    if _queue_jobs_count() >= spool_cfg.max_queue_depth:
         raise ValueError("Queue is full")
 
-    _queue_counter += 1
-    job_id = f"queue-job-{_queue_counter}"
+    next_id = _next_queue_job_id()
+    job_id = f"queue-job-{next_id}"
     now = time.time()
 
     job = QueueJob(
@@ -1190,13 +1277,24 @@ def enqueue_print_job(
         submitted_at=now,
         state_history=[SpoolerJobState.submitted.value],
     )
-    _queue_jobs[job_id] = job
+    _save_queue_job(job)
 
     _transition_queue_job(job, SpoolerJobState.queued.value)
     return job
 
 
 def _transition_queue_job(job: QueueJob, target_state: str) -> None:
+    """Mutate ``job`` to ``target_state`` and persist back to SharedKV.
+
+    Pre-FX.1.2 this was an in-memory mutation only; persistence happened
+    implicitly because ``_queue_jobs[job_id]`` shared the same dict
+    reference. With SharedKV-backed storage every read deserialises a
+    fresh ``QueueJob``, so an external caller (e.g. tests that import
+    this helper directly to set up multi-step state) needs the mutation
+    to be saved here or else a follow-up ``_load_queue_job(job_id)``
+    would see stale state. Saving inside the transition helper keeps
+    the public wrappers simple and the test surface unchanged.
+    """
     lifecycle = get_job_lifecycle_state(job.state)
     if lifecycle is None:
         raise ValueError(f"Unknown job state: {job.state}")
@@ -1204,10 +1302,11 @@ def _transition_queue_job(job: QueueJob, target_state: str) -> None:
         raise ValueError(f"Invalid transition: {job.state} → {target_state}")
     job.state = target_state
     job.state_history.append(target_state)
+    _save_queue_job(job)
 
 
 def advance_queue_job_to_completion(job_id: str) -> QueueJob | None:
-    job = _queue_jobs.get(job_id)
+    job = _load_queue_job(job_id)
     if job is None:
         return None
     path = ["spooling", "rendering", "sending", "printing", "completed"]
@@ -1220,11 +1319,12 @@ def advance_queue_job_to_completion(job_id: str) -> QueueJob | None:
             break
     if job.state == SpoolerJobState.completed.value:
         job.completed_at = time.time()
+        _save_queue_job(job)
     return job
 
 
 def hold_queue_job(job_id: str) -> QueueJob | None:
-    job = _queue_jobs.get(job_id)
+    job = _load_queue_job(job_id)
     if job is None:
         return None
     _transition_queue_job(job, SpoolerJobState.held.value)
@@ -1232,7 +1332,7 @@ def hold_queue_job(job_id: str) -> QueueJob | None:
 
 
 def release_queue_job(job_id: str) -> QueueJob | None:
-    job = _queue_jobs.get(job_id)
+    job = _load_queue_job(job_id)
     if job is None:
         return None
     _transition_queue_job(job, SpoolerJobState.queued.value)
@@ -1240,7 +1340,7 @@ def release_queue_job(job_id: str) -> QueueJob | None:
 
 
 def cancel_queue_job(job_id: str) -> QueueJob | None:
-    job = _queue_jobs.get(job_id)
+    job = _load_queue_job(job_id)
     if job is None:
         return None
     if job.state in (SpoolerJobState.completed.value, SpoolerJobState.canceled.value, SpoolerJobState.rejected.value):
@@ -1250,27 +1350,33 @@ def cancel_queue_job(job_id: str) -> QueueJob | None:
 
 
 def error_queue_job(job_id: str, message: str = "Simulated error") -> QueueJob | None:
-    job = _queue_jobs.get(job_id)
+    job = _load_queue_job(job_id)
     if job is None:
         return None
     _transition_queue_job(job, SpoolerJobState.error.value)
     job.error_message = message
+    _save_queue_job(job)
     return job
 
 
 def requeue_error_job(job_id: str) -> QueueJob | None:
-    job = _queue_jobs.get(job_id)
+    job = _load_queue_job(job_id)
     if job is None:
         return None
     if job.state != SpoolerJobState.error.value:
         raise ValueError(f"Can only requeue error jobs, current: {job.state}")
     _transition_queue_job(job, SpoolerJobState.queued.value)
     job.error_message = ""
+    _save_queue_job(job)
     return job
 
 
 def list_queue_jobs(policy: str = "fifo") -> list[QueueJob]:
-    jobs = list(_queue_jobs.values())
+    jobs: list[QueueJob] = []
+    for raw in _queue_jobs_kv().get_all().values():
+        job = _deserialise_queue_job(raw)
+        if job is not None:
+            jobs.append(job)
     if policy == "priority":
         jobs.sort(key=lambda j: -j.priority)
     elif policy == "shortest_first":
@@ -1281,7 +1387,7 @@ def list_queue_jobs(policy: str = "fifo") -> list[QueueJob]:
 
 
 def get_queue_job(job_id: str) -> QueueJob | None:
-    return _queue_jobs.get(job_id)
+    return _load_queue_job(job_id)
 
 
 # ── Test recipes ──────────────────────────────────────────────────────

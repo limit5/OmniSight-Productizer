@@ -6125,7 +6125,7 @@ BP.E GraphRAG / Neo4j
 > **不能跟 FX.4 同時跑**（共動檔太多）
 
 - [x] FX.1.1 `backend/print_pipeline.py:527-528` 把 `_ipp_jobs` + `_ipp_job_counter` 搬到 SharedKV / DB；job ID 走 atomic counter
-- [ ] FX.1.2 `backend/print_pipeline.py:1077` 把 `_queue_jobs` 搬到 DB row（per-tenant queue_jobs table）
+- [x] FX.1.2 `backend/print_pipeline.py:1077` 把 `_queue_jobs` 搬到 DB row（per-tenant queue_jobs table）
 - [ ] FX.1.3 `backend/telemetry_backend.py:571` 把 `_TELEMETRY_CERTS` 搬到 SharedKV 或 DB
 - [ ] FX.1.4 `backend/agents/runner_handlers.py:133` `subprocess.run(shell=True)` 改 `shlex.split` + `shell=False`；input validation
 - [ ] FX.1.5 `backend/skill_registry.py:243` validate_cmd 改 allowlist + `shell=False`
@@ -6205,10 +6205,10 @@ BP.E GraphRAG / Neo4j
 > **純 additive，跟 FX.1 並行安全**（只動 backend/tests/）
 
 - [x][G] FX.5.1 `backend/tests/test_account_linking.py` 新增（OAuth state machine）
-- [~][G] FX.5.2 `backend/tests/test_shell_safe.py` 新增（agents/_shell_safe.py，安全敏感）
-- [ ] FX.5.3 `backend/tests/test_batch_dispatcher.py` 新增
-- [ ] FX.5.4 `backend/tests/test_batch_eligibility.py` 新增
-- [ ] FX.5.5 `backend/tests/test_cost_guard.py` 新增（成本控管）
+- [x][G] FX.5.2 `backend/tests/test_shell_safe.py` 新增（agents/_shell_safe.py，安全敏感）
+- [x][G] FX.5.3 `backend/tests/test_batch_dispatcher.py` 新增
+- [x][G] FX.5.4 `backend/tests/test_batch_eligibility.py` 新增
+- [~][G] FX.5.5 `backend/tests/test_cost_guard.py` 新增（成本控管）
 - [ ] FX.5.6 `backend/tests/test_external_tool_registry.py` 新增
 - [ ] FX.5.7 `backend/tests/test_mcp_integration.py` 新增
 - [ ] FX.5.8 `backend/tests/test_postgres_stores.py` 新增
