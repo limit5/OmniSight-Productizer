@@ -1,4 +1,4 @@
-"""SC.1 — Security scanning adapters for generated apps.
+"""SC — Security scanning adapters for generated apps.
 
 This package hosts optional scanner wrappers for the SC security
 compliance track.  Adapters normalise vendor output into small
@@ -27,6 +27,12 @@ from backend.security_scanning.dast import (
     scan_web_preview_zap,
     scan_zap_baseline,
 )
+from backend.security_scanning.sca import (
+    SCAFinding,
+    SCAReport,
+    SCASeverity,
+    scan_sca,
+)
 
 __all__ = [
     "DEFAULT_FAIL_ON",
@@ -39,8 +45,12 @@ __all__ = [
     "SASTFinding",
     "SASTReport",
     "SASTSeverity",
+    "SCAFinding",
+    "SCAReport",
+    "SCASeverity",
     "scan_web_preview_zap",
     "scan_generated_workspace_commit",
+    "scan_sca",
     "scan_sast",
     "scan_zap_baseline",
     "write_sast_commit_scan_artifact",
