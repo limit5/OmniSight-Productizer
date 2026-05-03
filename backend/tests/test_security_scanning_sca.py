@@ -14,9 +14,13 @@ from pathlib import Path
 from unittest import mock
 
 from backend.security_scanning import (
+    SCA_FIX_PR_ARTIFACT,
     SCAFinding,
+    SCAFixPR,
     SCAReport,
+    plan_sca_fix_prs,
     scan_sca,
+    write_sca_fix_pr_artifact,
 )
 from backend.security_scanning.sca import _normalise_severity
 
@@ -311,8 +315,129 @@ class TestSCANoScanner:
         assert payload["findings"][0]["package"] == "x"
 
     def test_exports_sca_symbols_from_package(self):
+        assert SCA_FIX_PR_ARTIFACT
         assert SCAFinding
+        assert SCAFixPR
         assert SCAReport
+        assert plan_sca_fix_prs
+
+
+class TestSCAFixPrPlan:
+    def test_plans_dependabot_style_security_pr_for_fixable_blocker(self):
+        report = SCAReport(
+            source="osv-scanner",
+            app_path="/tmp/generated-app",
+            fail_on=["CRITICAL", "HIGH"],
+            findings=[
+                SCAFinding(
+                    vulnerability_id="GHSA-xxxx",
+                    package="lodash",
+                    version="4.17.20",
+                    fixed_version="4.17.21",
+                    severity="HIGH",
+                    ecosystem="npm",
+                    path="package-lock.json",
+                    tool="osv-scanner",
+                ),
+                SCAFinding(
+                    vulnerability_id="CVE-2021-23337",
+                    package="lodash",
+                    version="4.17.20",
+                    fixed_version=">=4.17.21",
+                    severity="CRITICAL",
+                    ecosystem="npm",
+                    path="package-lock.json",
+                    tool="osv-scanner",
+                ),
+            ],
+            total_findings=2,
+            severity_counts={"CRITICAL": 1, "HIGH": 1},
+        )
+
+        fixes = plan_sca_fix_prs(report, base_branch="main")
+
+        assert len(fixes) == 1
+        fix = fixes[0]
+        assert fix.package == "lodash"
+        assert fix.ecosystem == "npm"
+        assert fix.fixed_version == "4.17.21"
+        assert fix.severity == "CRITICAL"
+        assert fix.base_branch == "main"
+        assert fix.branch == "omnisight/sca-fix/npm/lodash-4.17.21"
+        assert fix.title == "fix(deps): bump lodash to 4.17.21"
+        assert fix.update_command == "npm install lodash@4.17.21 --package-lock-only"
+        assert fix.labels == [
+            "security",
+            "dependencies",
+            "auto-merge",
+            "priority/critical",
+        ]
+        assert fix.vulnerability_ids == ["CVE-2021-23337", "GHSA-xxxx"]
+        assert "docs/ops/dependency_upgrade_runbook.md" in fix.body
+
+    def test_ignores_non_blocking_or_unfixable_findings(self):
+        report = SCAReport(
+            fail_on=["HIGH"],
+            findings=[
+                SCAFinding(
+                    vulnerability_id="LOW-1",
+                    package="debug",
+                    fixed_version="4.3.7",
+                    severity="LOW",
+                    ecosystem="npm",
+                ),
+                SCAFinding(
+                    vulnerability_id="HIGH-1",
+                    package="left-pad",
+                    severity="HIGH",
+                    ecosystem="npm",
+                ),
+            ],
+        )
+
+        assert plan_sca_fix_prs(report) == []
+
+    def test_python_ecosystem_command_uses_pip_compile(self):
+        report = SCAReport(
+            fail_on=["HIGH"],
+            findings=[
+                SCAFinding(
+                    vulnerability_id="PYSEC-1",
+                    package="jinja2",
+                    version="3.1.2",
+                    fixed_version="3.1.4",
+                    severity="HIGH",
+                    ecosystem="PyPI",
+                    path="backend/requirements.txt",
+                )
+            ],
+        )
+
+        fix = plan_sca_fix_prs(report)[0]
+
+        assert fix.ecosystem == "pypi"
+        assert fix.update_command == (
+            "pip-compile --upgrade-package jinja2==3.1.4 "
+            "backend/requirements.in"
+        )
+
+    def test_fix_pr_artifact_is_written(self, tmp_path: Path):
+        fix = SCAFixPR(
+            package="minimist",
+            ecosystem="npm",
+            fixed_version="1.2.6",
+            vulnerability_ids=["SNYK-JS-MINIMIST-2429795"],
+            severity="CRITICAL",
+            branch="omnisight/sca-fix/npm/minimist-1.2.6",
+            title="fix(deps): bump minimist to 1.2.6",
+        )
+
+        out = write_sca_fix_pr_artifact([fix], tmp_path)
+        payload = json.loads(out.read_text())
+
+        assert out == tmp_path.resolve() / SCA_FIX_PR_ARTIFACT
+        assert payload["fix_pr_count"] == 1
+        assert payload["fix_prs"][0]["package"] == "minimist"
 
 
 class TestSCACli:

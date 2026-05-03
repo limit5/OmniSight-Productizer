@@ -126,6 +126,7 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **Self-healing**: error_check → retry (3x) → loop detection → human escalation
 - **Verification loop**: simulation [FAIL] → auto-fix code → re-verify (2x max)
 - **Security SCA adapters (SC.3.1)**: `backend/security_scanning/sca.py` adds dependency-vulnerability wrappers for `npm audit`, `osv-scanner`, and `snyk test`, matching the SC.1 SAST / SC.2 DAST report contract. `scan_sca(app_path, scanner=None, fail_on={"CRITICAL","HIGH"})` probes npm-audit → OSV → Snyk, returns `source="mock"` when no scanner is available, and can be smoke-run with `python3 -m backend.security_scanning.sca --app-path ./generated-app --scanner osv-scanner`.
+- **SCA fix-PR planner (SC.3.2)**: `plan_sca_fix_prs(report)` turns fixable HIGH/CRITICAL SCA findings into dependabot-style PR metadata (branch, title, labels, body, update command) and can write `.omnisight/security/sca-fix-prs.json` via `python3 -m backend.security_scanning.sca --app-path ./generated-app --fix-pr-out ./generated-app`.
 
 ### Simulation & Verification
 - **Multi-track**: algo (data-driven replay + Valgrind) / hw (mock sysfs + QEMU cross-run) / npu / deploy / **hmi** (C26 — constrained HMI bundle + IEC 62443 gate + budget gate) / web (W2 — Lighthouse / bundle / a11y / SEO / E2E / visual) / mobile (P2 — iOS Simulator + Android Emulator + UI test + device farm + screenshot matrix) / **software** (X1 — per-language pytest / go test / cargo test / mvn test / npm test / dotnet test + coverage gate + optional benchmark regression)

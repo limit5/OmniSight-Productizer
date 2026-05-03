@@ -28,10 +28,14 @@ from backend.security_scanning.dast import (
     scan_zap_baseline,
 )
 from backend.security_scanning.sca import (
+    SCA_FIX_PR_ARTIFACT,
     SCAFinding,
+    SCAFixPR,
     SCAReport,
     SCASeverity,
+    plan_sca_fix_prs,
     scan_sca,
+    write_sca_fix_pr_artifact,
 )
 
 __all__ = [
@@ -46,12 +50,16 @@ __all__ = [
     "SASTReport",
     "SASTSeverity",
     "SCAFinding",
+    "SCAFixPR",
+    "SCA_FIX_PR_ARTIFACT",
     "SCAReport",
     "SCASeverity",
+    "plan_sca_fix_prs",
     "scan_web_preview_zap",
     "scan_generated_workspace_commit",
     "scan_sca",
     "scan_sast",
     "scan_zap_baseline",
+    "write_sca_fix_pr_artifact",
     "write_sast_commit_scan_artifact",
 ]
