@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import inspect
+import json
 import sys
 from types import ModuleType
 from types import SimpleNamespace
@@ -115,6 +116,31 @@ class TestLocalFernetKMSAdapter:
 
         with pytest.raises(kms.KMSOperationError, match="does not match"):
             adapter.unwrap_dek(wrapped)
+
+    def test_ciphertext_is_existing_secret_store_fernet_payload(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-1-local-fernet-equivalent")
+        secret_store._reset_for_tests()
+        adapter = kms.LocalFernetKMSAdapter()
+        plaintext = b"dek-local-fernet-equivalence"
+
+        wrapped = adapter.wrap_dek(
+            plaintext,
+            encryption_context={"tenant_id": "tenant-a", "purpose": "oauth"},
+        )
+
+        payload = json.loads(secret_store.decrypt(wrapped.ciphertext.decode("ascii")))
+        assert payload == {
+            "ctx": {"tenant_id": "tenant-a", "purpose": "oauth"},
+            "dek_b64": base64.b64encode(plaintext).decode("ascii"),
+        }
+
+    def test_local_fernet_does_not_mint_a_second_key(self):
+        source = inspect.getsource(kms.LocalFernetKMSAdapter)
+
+        assert "secret_store.encrypt" in source
+        assert "secret_store.decrypt" in source
+        assert "Fernet.generate_key" not in source
+        assert "OMNISIGHT_LOCAL_FERNET" not in source
 
 
 class FakeAWSKMSClient:
