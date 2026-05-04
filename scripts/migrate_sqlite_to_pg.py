@@ -247,6 +247,13 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "decryption_audits",
     "spend_thresholds",
     "kek_rotations",
+    # KS.2.11 (alembic 0107): Tier 2 CMEK persistence. All three FK
+    # to ``tenants``; ``tier_assignments`` and ``cmek_revoke_events``
+    # also FK to ``cmek_configs`` so configs replay first. PKs are
+    # TEXT / tenant_id TEXT, so none belong in TABLES_WITH_IDENTITY_ID.
+    "cmek_configs",
+    "tier_assignments",
+    "cmek_revoke_events",
     # KS.4.13 (alembic 0187): LLM firewall review events. FK
     # ``tenant_id -> tenants.id`` (CASCADE) so it MUST replay after
     # tenants. PK is app-generated TEXT ``event_id``; raw input is not
