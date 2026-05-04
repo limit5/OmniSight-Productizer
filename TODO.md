@@ -6275,7 +6275,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.9.1 `backend/alembic/versions/0052_catalog_seed.py` upgrade() 改 `op.execute()` 取代 `conn.exec_driver_sql()`，繞 SQLAlchemy 2.x + sqlite3 cython 對 immutabledict params 不相容
 - [x] FX.9.2 `backend/alembic/env.py:90` 改 `from backend.alembic_pg_compat import` (絕對 import)，避免 alembic 啟動時把 `/app/backend` 推進 sys.path 導致 platform.py shadow stdlib
 - [x] FX.9.3 `backend/platform.py` rename → `backend/platform_profile.py`（永久解 stdlib 衝突）+ 全 codebase update import
-- [ ] FX.9.4 `backend/alembic/versions/` 寫一條 merge migration 把 0059 / 0106 / 0183 / 0187 四 head 收成單 head（避免 `alembic upgrade head` 撞 MultipleHeads error）
+- [x] FX.9.4 `backend/alembic/versions/` 寫一條 merge migration 把 0059 / 0106 / 0183 / 0187 四 head 收成單 head（避免 `alembic upgrade head` 撞 MultipleHeads error）
 - [ ] FX.9.5 deploy 流程加 `alembic upgrade heads` 步驟（在 Step 2.5 build 完之後、Step 3 rolling restart 之前，避免 readyz fail）
 - [ ] FX.9.6 `docker-compose.prod.yml` 拿掉 obsolete `version:` field + `--remove-orphans`（清 omnisight-productizer-backend-1 / omnisight-pg-test 殘骸）
 
