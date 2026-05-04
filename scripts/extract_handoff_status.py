@@ -112,7 +112,7 @@ _TASK_ID_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     for p in (
         r"\b(FX\.\d+\.\d+(?:[a-z])?)\b",
         r"\b(MS\.\d+(?:[a-z])?)\b",
-        r"\b(BP\.[A-Z]\.\d+(?:[a-z])?)\b",
+        r"\b(BP\.[A-Z]\.\d+(?:\.[a-z]|[a-z])?)\b",
         r"\b(SP\.\d+\.\d+(?:[a-z])?)\b",
         r"\b(W\d+\.\d+(?:[a-z])?)\b",
         r"\b(W\d+)\b",
