@@ -346,6 +346,12 @@ async def lifespan(app: FastAPI):
     # serve cached values without per-request vendor calls.
     from backend import llm_balance_refresher as _lbr
     balance_task = asyncio.create_task(_lbr.run_refresh_loop())
+    # KS.2.5: per-worker CMEK revoke detector. Each worker polls the
+    # same external KMS/Vault source on a <=60s cadence; the in-process
+    # latest snapshot is observability-only until KS.2.6/KS.2.11 wire
+    # graceful 403s and durable revoke events.
+    from backend.security import cmek_revoke_detector as _cmek_revoke
+    cmek_revoke_task = asyncio.create_task(_cmek_revoke.run_detection_loop())
     # I6: DRF per-tenant sandbox capacity grace deadline sweep
     from backend import sandbox_capacity as _sc
     drf_task = asyncio.create_task(_sc.run_sweep_loop())
@@ -397,7 +403,7 @@ async def lifespan(app: FastAPI):
         _log.info("[lifecycle] graceful_shutdown result: %s", result)
     except Exception as exc:
         _log.warning("[lifecycle] graceful_shutdown raised: %s", exc)
-    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task, iq_task, ft_task, md_task, balance_task, drf_task, quota_task, drafts_gc_task, workspace_gc_task, host_metrics_task, host_ringbuf_task):
+    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task, iq_task, ft_task, md_task, balance_task, cmek_revoke_task, drf_task, quota_task, drafts_gc_task, workspace_gc_task, host_metrics_task, host_ringbuf_task):
         t.cancel()
         try:
             await t
