@@ -5,6 +5,7 @@ Locks:
     missing / empty
   * load_project_memory walks current dir + up to three parents with
     distance-derived weights
+  * project_rule_signature changes when watched rule files change
   * load_user_memory reads from ~/.claude/ with home override
   * load_all_memory yields user-level first, then project-level
   * render_for_prompt: empty list → empty string; populated list emits
@@ -27,6 +28,7 @@ from backend.agents.project_memory import (
     load_project_memory,
     load_user_memory,
     project_rule_dirs,
+    project_rule_signature,
     render_for_prompt,
 )
 
@@ -111,6 +113,32 @@ def test_load_project_walks_parents_by_distance_weight(tmp_path: Path) -> None:
     ]
     assert [m.distance for m in out] == [0, 1, 2, 3]
     assert [m.weight for m in out] == [4, 3, 2, 1]
+
+
+def test_project_rule_signature_tracks_content_changes(tmp_path: Path) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("first\n")
+    first = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    rule_file.write_text("second rules\n")
+    second = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    assert first != second
+
+
+def test_project_rule_signature_tracks_add_and_remove(tmp_path: Path) -> None:
+    first = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("rules\n")
+    second = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    rule_file.unlink()
+    third = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    assert first == ()
+    assert second != first
+    assert third == first
 
 
 # ─── load_user_memory ────────────────────────────────────────────

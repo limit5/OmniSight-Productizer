@@ -37,7 +37,11 @@ import re
 import time
 from pathlib import Path
 
-from backend.agents.project_memory import PROJECT_RULE_FILENAMES, project_rule_dirs
+from backend.agents.project_memory import (
+    PROJECT_RULE_FILENAMES,
+    project_rule_dirs,
+    project_rule_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,20 +96,22 @@ _MAX_CLONE_SPEC_CONTEXT = 4000
 # import the W15.3 module just to know the budget.
 _MAX_VITE_ERROR_BANNER_SECTION = 512
 
-# L1 Core Rules cache (loaded once)
-_core_rules_cache: str | None = None
+# L1 Core Rules cache (invalidated by watched rule-file signature)
+_core_rules_cache: tuple[tuple[tuple[str, int, int, int], ...], str] | None = None
 
 
 def load_core_rules() -> str:
-    """Load project rule files (L1 Memory). Cached after first call.
+    """Load project rule files (L1 Memory). Cached by file signature.
 
     Module-global audit (SOP Step 1): the cache is PER-WORKER and is
-    derived from immutable project files on disk at startup. Cross-worker
-    consistency is guaranteed because each worker reads the same files.
+    derived from watched project files on disk. Cross-worker consistency
+    is guaranteed because each worker reads the same files and invalidates
+    when another worker/operator updates, adds, or removes a rule file.
     """
     global _core_rules_cache
-    if _core_rules_cache is not None:
-        return _core_rules_cache
+    signature = project_rule_signature(_PROJECT_ROOT)
+    if _core_rules_cache is not None and _core_rules_cache[0] == signature:
+        return _core_rules_cache[1]
     parts: list[str] = []
     for base, distance, weight in project_rule_dirs(_PROJECT_ROOT):
         for filename in PROJECT_RULE_FILENAMES:
@@ -115,14 +121,15 @@ def load_core_rules() -> str:
                     f"## {filename} (distance={distance}, weight={weight})"
                     f"\n\n{content}"
                 )
-    _core_rules_cache = "\n\n".join(parts)
-    if _core_rules_cache:
+    core_rules = "\n\n".join(parts)
+    _core_rules_cache = (signature, core_rules)
+    if core_rules:
         logger.info(
             "Loaded L1 core rules from %d project rule file(s) (%d chars)",
             len(parts),
-            len(_core_rules_cache),
+            len(core_rules),
         )
-    return _core_rules_cache
+    return core_rules
 
 
 def _strip_frontmatter(text: str) -> str:

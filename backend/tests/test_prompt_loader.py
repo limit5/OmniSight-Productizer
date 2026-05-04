@@ -131,6 +131,39 @@ class TestBuildSystemPrompt:
         assert "distance=0, weight=4" in content
         assert "distance=3, weight=1" in content
 
+    def test_load_core_rules_reloads_when_rule_file_changes(self, tmp_path, monkeypatch):
+        import backend.prompt_loader as prompt_loader
+
+        rule_file = tmp_path / "CLAUDE.md"
+        rule_file.write_text("first rules\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        first = prompt_loader.load_core_rules()
+        rule_file.write_text("second rules are longer\n")
+        second = prompt_loader.load_core_rules()
+
+        assert "first rules" in first
+        assert "second rules are longer" in second
+        assert "first rules" not in second
+
+    def test_load_core_rules_reloads_when_rule_file_is_added(self, tmp_path, monkeypatch):
+        import backend.prompt_loader as prompt_loader
+
+        (tmp_path / "CLAUDE.md").write_text("claude rules\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        first = prompt_loader.load_core_rules()
+        (tmp_path / "AGENTS.md").write_text("agents rules\n")
+        second = prompt_loader.load_core_rules()
+
+        assert "claude rules" in first
+        assert "agents rules" not in first
+        assert "agents rules" in second
+
     def test_with_model_and_role(self):
         prompt = build_system_prompt(
             model_name="claude-sonnet-4",

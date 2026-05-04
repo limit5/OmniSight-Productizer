@@ -128,6 +128,36 @@ def project_rule_dirs(
     return out
 
 
+def project_rule_signature(
+    project_root: Path,
+    *,
+    filenames: tuple[str, ...] = PROJECT_RULE_FILENAMES,
+    max_parent_depth: int = PROJECT_RULE_PARENT_DEPTH,
+) -> tuple[tuple[str, int, int, int], ...]:
+    """Return a deterministic file signature for watched project rules.
+
+    The signature is derived from the same current-directory + parent
+    walk as :func:`load_project_memory`, so each worker independently
+    invalidates its local prompt cache when an operator edits, adds, or
+    removes a rule file on the shared filesystem.
+    """
+    entries: list[tuple[str, int, int, int]] = []
+    for base, distance, _weight in project_rule_dirs(
+        project_root,
+        max_parent_depth=max_parent_depth,
+    ):
+        for fn in filenames:
+            path = base / fn
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if not path.is_file():
+                continue
+            entries.append((str(path), distance, stat.st_mtime_ns, stat.st_size))
+    return tuple(entries)
+
+
 def load_project_memory(
     project_root: Path,
     *,
