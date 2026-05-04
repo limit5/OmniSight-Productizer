@@ -48,13 +48,13 @@ name: K8s + Helm smoke
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'deploy/k8s/**'
       - 'deploy/helm/omnisight/**'
       - '.github/workflows/k8s-helm-smoke.yml'
   pull_request:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'deploy/k8s/**'
       - 'deploy/helm/omnisight/**'

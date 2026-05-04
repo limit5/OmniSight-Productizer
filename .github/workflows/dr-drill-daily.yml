@@ -75,7 +75,7 @@ on:
     # Manual trigger so operators can re-run on-demand when a backup
     # pipeline change lands, or when investigating a prior red run.
   push:
-    branches: [main, master]
+    branches: [main]
     paths:
       # Only fire on-push when the drill or its inputs change — we do
       # not want every backend commit to re-run the full round-trip.

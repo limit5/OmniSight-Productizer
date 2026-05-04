@@ -52,7 +52,7 @@ concurrency:
 jobs:
 
   discover:
-    # Read .fallback/manifests/*.toml from master and emit a JSON list
+    # Read .fallback/manifests/*.toml from main and emit a JSON list
     # of {branch, framework, pin_version, manifest_paths}. The build job
     # below fans out from this matrix.
     name: discover fallback branches
@@ -61,10 +61,10 @@ jobs:
     outputs:
       branches: ${{ steps.list.outputs.branches }}
     steps:
-      - name: checkout master (manifests live here)
+      - name: checkout main (manifests live here)
         uses: actions/checkout@v4
         with:
-          ref: master
+          ref: main
       - name: list manifests
         id: list
         env:
@@ -135,14 +135,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
-          # Need the manifest from master in case this branch's tree
+          # Need the manifest from main in case this branch's tree
           # somehow drifted — second checkout below.
           fetch-depth: 0
 
-      - name: pull manifest from master
+      - name: pull manifest from main
         # Fallback branches MAY shed `.fallback/` (e.g. if an early
-        # rebase squashed it). The manifest is canonical on master, so
-        # we re-fetch the file from master into a temp path. The
+        # rebase squashed it). The manifest is canonical on main, so
+        # we re-fetch the file from main into a temp path. The
         # workflow uses the manifest only to log the pin/scope and to
         # decide which jobs to skip — never to mutate the branch tree.
         run: |
@@ -152,11 +152,11 @@ jobs:
           MANIFEST_NAME="${BRANCH#compat/}.toml"
           # `.fallback/` may exist on the branch already; copy it in.
           if [ -d ".fallback" ]; then cp -r .fallback _manifest/; fi
-          # Always also pull master's copy (authoritative).
-          git fetch --depth 1 origin master
-          git show "origin/master:.fallback/manifests/${MANIFEST_NAME}" \
+          # Always also pull main's copy (authoritative).
+          git fetch --depth 1 origin main
+          git show "origin/main:.fallback/manifests/${MANIFEST_NAME}" \
               > "_manifest/${MANIFEST_NAME}" 2>/dev/null \
-              || echo "::warning::manifest ${MANIFEST_NAME} not found on master"
+              || echo "::warning::manifest ${MANIFEST_NAME} not found on main"
           ls -la _manifest/ || true
         env:
           BRANCH: ${{ matrix.branch }}
@@ -170,7 +170,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           # `engines.node` may sit on the branch's pinned major (which
-          # could differ from master). Use `.nvmrc` from the branch.
+          # could differ from main). Use `.nvmrc` from the branch.
           node-version-file: ".nvmrc"
           cache: pnpm
 
@@ -196,7 +196,7 @@ jobs:
         #   * test_dependency_governance.py    → lockfile + workflow shape
         #   * test_llm_adapter.py              → langchain firewall (N4)
         #   * test_openapi_contract.py         → schema drift
-        # Full suite stays nightly via ci.yml on master.
+        # Full suite stays nightly via ci.yml on main.
         env:
           OMNISIGHT_DATABASE_PATH: /tmp/n9-fallback-${{ matrix.branch }}.db
         run: |

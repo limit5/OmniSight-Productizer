@@ -46,7 +46,7 @@ name: DB Engine Compatibility Matrix
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'backend/alembic/**'
       - 'backend/alembic_pg_compat.py'
@@ -60,7 +60,7 @@ on:
       - 'scripts/scan_sqlite_isms.py'
       - '.github/workflows/db-engine-matrix.yml'
   pull_request:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'backend/alembic/**'
       - 'backend/alembic_pg_compat.py'

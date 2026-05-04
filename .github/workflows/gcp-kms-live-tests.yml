@@ -5,7 +5,7 @@ on:
     - cron: "45 6 * * *"
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main]
     paths:
       - ".github/workflows/gcp-kms-live-tests.yml"
       - "backend/security/kms_adapters.py"

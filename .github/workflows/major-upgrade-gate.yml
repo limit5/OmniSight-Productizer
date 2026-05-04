@@ -23,7 +23,7 @@ name: Major Upgrade Gate
 on:
   pull_request:
     types: [labeled, unlabeled, opened, synchronize, reopened]
-    branches: [main, master]
+    branches: [main]
 
 permissions:
   contents:      read

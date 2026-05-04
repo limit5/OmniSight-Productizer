@@ -50,7 +50,7 @@ on:
     # fix without waiting for the next nightly window.
   push:
     # Fire on-push only when the workflow or the live-test source changes.
-    branches: [main, master]
+    branches: [main]
     paths:
       - ".github/workflows/llm-live-tests.yml"
       - "backend/tests/test_llm_adapter_live.py"

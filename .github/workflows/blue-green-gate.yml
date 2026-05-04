@@ -27,7 +27,7 @@ name: Blue-Green Gate
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, labeled, unlabeled]
-    branches: [main, master]
+    branches: [main]
 
 permissions:
   contents: read
