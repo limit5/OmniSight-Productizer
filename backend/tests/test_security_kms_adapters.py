@@ -330,6 +330,7 @@ class FakeGCPKMSClient:
     def __init__(self):
         self.encrypt_requests = []
         self.decrypt_requests = []
+        self.get_crypto_key_requests = []
 
     def encrypt(self, *, request):
         self.encrypt_requests.append(request)
@@ -341,6 +342,13 @@ class FakeGCPKMSClient:
     def decrypt(self, *, request):
         self.decrypt_requests.append(request)
         return SimpleNamespace(plaintext=request["ciphertext"].removeprefix(b"gcp-wrapped-"))
+
+    def get_crypto_key(self, *, request):
+        self.get_crypto_key_requests.append(request)
+        return SimpleNamespace(
+            name=request["name"],
+            primary=SimpleNamespace(name=request["name"] + "/cryptoKeyVersions/1"),
+        )
 
 
 class FakeGoogleCloudKMSModule:
@@ -397,6 +405,62 @@ class TestGCPKMSAdapter:
         assert fake_kms.client.encrypt_requests[0]["additional_authenticated_data"] == (
             b'{"tenant_id":"t1"}'
         )
+
+    def test_describe_key_delegates_to_google_client_shape(self):
+        fake = FakeGCPKMSClient()
+        adapter = kms.GCPKMSAdapter(
+            key_id="projects/p/locations/global/keyRings/r/cryptoKeys/k"
+        )
+        adapter._client = fake
+
+        metadata = adapter.describe_key()
+
+        assert metadata.name == adapter.key_id
+        assert metadata.primary.name.endswith("/cryptoKeyVersions/1")
+        assert fake.get_crypto_key_requests == [{"name": adapter.key_id}]
+
+    def test_from_environment_reads_gcp_key_id(self, monkeypatch):
+        monkeypatch.setenv(
+            "OMNISIGHT_GCP_KMS_KEY_ID",
+            "projects/p/locations/global/keyRings/r/cryptoKeys/k",
+        )
+
+        adapter = kms.GCPKMSAdapter.from_environment()
+
+        assert adapter.key_id == "projects/p/locations/global/keyRings/r/cryptoKeys/k"
+
+    def test_from_environment_requires_gcp_key_id(self, monkeypatch):
+        monkeypatch.delenv("OMNISIGHT_GCP_KMS_KEY_ID", raising=False)
+
+        with pytest.raises(kms.KMSConfigurationError, match="OMNISIGHT_GCP_KMS_KEY_ID"):
+            kms.GCPKMSAdapter.from_environment()
+
+
+GCP_LIVE_PREFIX = "OMNISIGHT_TEST_GCP_KMS"
+GCP_LIVE_KEY_ID = os.environ.get(f"{GCP_LIVE_PREFIX}_KEY_ID", "").strip()
+
+
+class TestGCPKMSLiveIntegration:
+    pytestmark = pytest.mark.skipif(
+        not GCP_LIVE_KEY_ID,
+        reason=f"{GCP_LIVE_PREFIX}_KEY_ID not set — skip GCP KMS sandbox live test",
+    )
+
+    def test_ci_sandbox_describe_encrypt_decrypt_round_trip(self):
+        adapter = kms.GCPKMSAdapter.from_environment(prefix=GCP_LIVE_PREFIX)
+        metadata = adapter.describe_key()
+        assert getattr(metadata, "name", "") == adapter.key_id
+
+        context = {
+            "tenant_id": "ci-sandbox",
+            "dek_id": "ks-2-3-live",
+            "purpose": "cmek-verify:gcp-kms",
+            "schema": "ks.1.2",
+        }
+        wrapped = adapter.wrap_dek(b"ks-2-3-live-dek", encryption_context=context)
+        assert wrapped.provider == "gcp-kms"
+        assert wrapped.ciphertext != b"ks-2-3-live-dek"
+        assert adapter.unwrap_dek(wrapped, encryption_context=context) == b"ks-2-3-live-dek"
 
 
 class FakeVaultTransit:

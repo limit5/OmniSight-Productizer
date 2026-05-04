@@ -320,6 +320,17 @@ class GCPKMSAdapter(BaseKMSAdapter):
         super().__post_init__()
         self._client: Any = None
 
+    @classmethod
+    def from_environment(cls, *, prefix: str = "OMNISIGHT_GCP_KMS") -> "GCPKMSAdapter":
+        """Build the GCP adapter from ADC-backed environment configuration.
+
+        ``OMNISIGHT_GCP_KMS_*`` is the production prefix. Tests pass
+        ``prefix="OMNISIGHT_TEST_GCP_KMS"`` for the CI sandbox key;
+        credentials stay in Google ADC / ``GOOGLE_APPLICATION_CREDENTIALS``.
+        """
+
+        return cls(key_id=_env_required(f"{prefix}_KEY_ID", provider=cls.provider))
+
     def _kms_client(self) -> Any:
         if self._client is not None:
             return self._client
@@ -333,6 +344,14 @@ class GCPKMSAdapter(BaseKMSAdapter):
             ) from exc
         self._client = kms.KeyManagementServiceClient()
         return self._client
+
+    def describe_key(self) -> Any:
+        """Return Google Cloud KMS CryptoKey metadata for live checks."""
+
+        try:
+            return self._kms_client().get_crypto_key(request={"name": self.key_id})
+        except Exception as exc:  # pragma: no cover - SDK-specific subclasses.
+            raise KMSOperationError(str(exc), provider=self.provider, key_id=self.key_id) from exc
 
     def wrap_dek(
         self,
