@@ -8,9 +8,10 @@ from backend.agents.nodes import (
     _rule_based_route,
     _rule_based_tool_calls,
     error_check_node,
+    tool_executor_node,
     _should_retry,
 )
-from backend.agents.state import GraphState, ToolResult
+from backend.agents.state import GraphState, ToolCall, ToolResult
 
 
 # ─── Rule-based routing ───
@@ -192,6 +193,56 @@ class TestErrorCheckNode:
             max_retries=3,
         )
         assert _should_retry(state) == "summarizer"
+
+    @pytest.mark.asyncio
+    async def test_patch_failed_tool_output_enters_self_correction(
+        self,
+        monkeypatch,
+    ):
+        """WP.3.5: patch failures must be explicit tool errors so the
+        existing error_check retry loop can ask the agent to correct
+        the SEARCH context instead of silently treating the edit as done.
+        """
+        from backend.agents import nodes as _nodes
+        from backend import pep_gateway as _pep
+
+        class _FakePatchTool:
+            async def ainvoke(self, _args):
+                return "[PATCH-FAILED] PatchNotFound: SEARCH block did not match"
+
+        async def _allow_pep(**kwargs):
+            return _pep.PepDecision(
+                id="pep-test",
+                ts=0.0,
+                agent_id=kwargs.get("agent_id", ""),
+                tool=kwargs["tool"],
+                command="",
+                tier=kwargs["tier"],
+                action=_pep.PepAction.auto_allow,
+            )
+
+        monkeypatch.setitem(_nodes.TOOL_MAP, "patch_file", _FakePatchTool())
+        monkeypatch.setattr(_pep, "evaluate", _allow_pep)
+        monkeypatch.setattr(_nodes, "emit_pipeline_phase", lambda *a, **kw: None)
+        monkeypatch.setattr(_nodes, "emit_tool_progress", lambda *a, **kw: None)
+
+        state = GraphState(
+            routed_to="software",
+            tool_calls=[ToolCall(tool_name="patch_file", arguments={})],
+            retry_count=0,
+            max_retries=2,
+        )
+
+        executor_update = await tool_executor_node(state)
+        result = executor_update["tool_results"][0]
+        assert result.success is False
+        assert result.output.startswith("[PATCH-FAILED]")
+
+        retry_update = await error_check_node(
+            state.model_copy(update={"tool_results": executor_update["tool_results"]})
+        )
+        assert retry_update["retry_count"] == 1
+        assert "patch_file" in retry_update["last_error"]
 
 
 # ─── B15 #350: Skill-on-demand ReAct loop ───
