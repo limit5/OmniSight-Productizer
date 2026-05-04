@@ -203,6 +203,23 @@ jobs:
       - name: run secret scan hooks
         run: pre-commit run --all-files --show-diff-on-failure
 
+  proxy-tests:
+    # KS.3.6 — the customer-side BYOG proxy has its own Go test gate so
+    # PR CI continuously verifies the proxy-hop p95 latency budget with
+    # mTLS connection reuse, instead of only exercising Go tests during
+    # release image builds.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: omnisight-proxy/go.mod
+      - name: go test omnisight-proxy
+        run: go test ./...
+        working-directory: omnisight-proxy
+
   catalog-schema:
     # BS.1.3 — JSON-Schema lint for `configs/embedded_catalog/*.yaml`.
     # Validates every per-family yaml against `_schema.yaml`

@@ -3,18 +3,32 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/omnisight/productizer/omnisight-proxy/internal/auth"
 	"github.com/omnisight/productizer/omnisight-proxy/internal/config"
 )
 
@@ -221,6 +235,74 @@ func TestLLMForwarderStreamsResponseWithoutBufferingPayload(t *testing.T) {
 
 }
 
+func TestLLMForwarderProxyHopP95UnderLatencyBudgetWithMTLSReuse(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	ca := newProxyCertificate(t, nil, "ca", x509.ExtKeyUsageAny, now.Add(-time.Hour), now.Add(time.Hour))
+	serverCert := newProxyCertificate(t, &ca, "127.0.0.1", x509.ExtKeyUsageServerAuth, now.Add(-time.Hour), now.Add(time.Hour))
+	clientCert := newProxyCertificate(t, &ca, "client", x509.ExtKeyUsageClientAuth, now.Add(-time.Hour), now.Add(time.Hour))
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	cfg := authForwardingConfig(t, upstream.URL, ca.certPEM, auth.CertificateFingerprint(clientCert.leaf))
+	tlsConfig, err := auth.ServerTLSConfig(cfg)
+	if err != nil {
+		t.Fatalf("ServerTLSConfig: %v", err)
+	}
+	tlsConfig.Certificates = []tls.Certificate{serverCert.tlsCert}
+	proxy := httptest.NewUnstartedServer(NewHandler(cfg))
+	proxy.TLS = tlsConfig
+	proxy.StartTLS()
+	defer proxy.Close()
+
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.leaf)
+	client := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        1,
+			MaxIdleConnsPerHost: 1,
+			TLSClientConfig: &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				RootCAs:      roots,
+				Certificates: []tls.Certificate{clientCert.tlsCert},
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+
+	if _, err := signedProxyRequest(t, client, proxy.URL, "warmup", now); err != nil {
+		t.Fatalf("warmup request failed: %v", err)
+	}
+
+	const sampleCount = 64
+	const budget = 50 * time.Millisecond
+	latencies := make([]time.Duration, 0, sampleCount)
+	for i := range sampleCount {
+		nonce := fmt.Sprintf("latency-%02d", i)
+		reused := false
+		start := time.Now()
+		if _, err := signedProxyRequestWithTrace(t, client, proxy.URL, nonce, now, func(info httptrace.GotConnInfo) {
+			reused = info.Reused
+		}); err != nil {
+			t.Fatalf("latency request %d failed: %v", i, err)
+		}
+		if !reused {
+			t.Fatalf("latency request %d did not reuse the mTLS connection", i)
+		}
+		latencies = append(latencies, time.Since(start))
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	p95 := latencies[int(math.Ceil(float64(len(latencies))*0.95))-1]
+	if p95 >= budget {
+		t.Fatalf("proxy hop p95 = %s, want < %s with mTLS connection reuse", p95, budget)
+	}
+}
+
 func TestHeartbeatClientPostsHealthPayload(t *testing.T) {
 	got := make(chan map[string]any, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +401,139 @@ func forwardingConfig(t *testing.T, baseURL string) *config.Settings {
 		},
 	}
 	return cfg
+}
+
+func authForwardingConfig(t *testing.T, baseURL string, caPEM []byte, pinnedFingerprint string) *config.Settings {
+	t.Helper()
+	cfg := forwardingConfig(t, baseURL)
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.crt")
+	keyPath := filepath.Join(dir, "nonce.key")
+	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	if err := os.WriteFile(keyPath, proxyNonceKey(), 0o600); err != nil {
+		t.Fatalf("write nonce key: %v", err)
+	}
+	cfg.AuthEnabled = true
+	cfg.TenantID = "tenant-a"
+	cfg.ClientCAFile = caPath
+	cfg.PinnedClientCertSHA256 = pinnedFingerprint
+	cfg.NonceHMACKeyFile = keyPath
+	return cfg
+}
+
+func signedProxyRequest(t *testing.T, client *http.Client, baseURL string, nonce string, now time.Time) (*http.Response, error) {
+	t.Helper()
+	return signedProxyRequestWithTrace(t, client, baseURL, nonce, now, nil)
+}
+
+func signedProxyRequestWithTrace(
+	t *testing.T,
+	client *http.Client,
+	baseURL string,
+	nonce string,
+	now time.Time,
+	gotConn func(httptrace.GotConnInfo),
+) (*http.Response, error) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/llm/openai/v1/chat/completions", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("new proxy request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(auth.HeaderTenantID, "tenant-a")
+	req.Header.Set(auth.HeaderNonce, nonce)
+	req.Header.Set(auth.HeaderTimestamp, strconv.FormatInt(now.Unix(), 10))
+	req.Header.Set(auth.HeaderSignature, auth.Sign(proxyNonceKey(), req.Method, req.URL.RequestURI(), "tenant-a", nonce, now.Unix()))
+	if gotConn != nil {
+		trace := &httptrace.ClientTrace{GotConn: gotConn}
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status = %d", resp.StatusCode)
+	}
+	return resp, nil
+}
+
+func proxyNonceKey() []byte {
+	return []byte("0123456789abcdef0123456789abcdef")
+}
+
+type proxyCertificate struct {
+	tlsCert tls.Certificate
+	leaf    *x509.Certificate
+	certPEM []byte
+	key     *ecdsa.PrivateKey
+}
+
+func newProxyCertificate(t *testing.T, ca *proxyCertificate, commonName string, usage x509.ExtKeyUsage, notBefore time.Time, notAfter time.Time) proxyCertificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		t.Fatalf("generate serial: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName: commonName,
+		},
+		NotBefore: notBefore,
+		NotAfter:  notAfter,
+		KeyUsage:  x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			usage,
+		},
+	}
+	parent := template
+	signer := key
+	if ca == nil {
+		template.IsCA = true
+		template.KeyUsage |= x509.KeyUsageCertSign
+		template.BasicConstraintsValid = true
+	} else {
+		parent = ca.leaf
+		signer = ca.key
+	}
+	if usage == x509.ExtKeyUsageServerAuth {
+		template.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
+	}
+	raw, err := x509.CreateCertificate(rand.Reader, template, parent, &key.PublicKey, signer)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(raw)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	keyBytes, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: raw})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("tls key pair: %v", err)
+	}
+	tlsCert.Leaf = leaf
+	return proxyCertificate{
+		tlsCert: tlsCert,
+		leaf:    leaf,
+		certPEM: certPEM,
+		key:     key,
+	}
 }
 
 func nilLogger() *slog.Logger {

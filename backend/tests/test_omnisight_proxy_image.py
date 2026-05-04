@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE_PROXY = REPO_ROOT / "Dockerfile.omnisight-proxy"
 PROXY_ROOT = REPO_ROOT / "omnisight-proxy"
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "docker-publish.yml"
+CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 PROXY_BUDGET_MIB = 100
 PROXY_IMAGE_TAG = "omnisight-proxy:ks3.1-test"
@@ -97,6 +98,15 @@ def test_publish_workflow_builds_proxy_image() -> None:
         "Docker publish workflow must include the customer-side proxy image"
     )
     assert "Dockerfile.omnisight-proxy" in workflow
+
+
+def test_ci_runs_proxy_go_tests_for_latency_budget() -> None:
+    workflow = CI_WORKFLOW_PATH.read_text()
+    assert "proxy-tests:" in workflow, (
+        "CI must continuously run the BYOG proxy Go tests, including KS.3.6 latency budget"
+    )
+    assert "working-directory: omnisight-proxy" in workflow
+    assert "go test ./..." in workflow
 
 
 def _live_image_check_enabled() -> bool:
