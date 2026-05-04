@@ -15,6 +15,7 @@ Locks:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,19 @@ def test_registry_add_first_wins() -> None:
     assert reg.get("a").scope == "project"
 
 
+def test_registry_higher_provider_rank_overrides_lower(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="backend.agents.skills_loader")
+    reg = SkillRegistry()
+    low = _skill("a", "bundled", body="low-body")
+    high = _skill("a", "project", body="high-body")
+    assert reg.add(low, provider_rank=100)
+    assert reg.add(high, provider_rank=300)
+    assert reg.get("a").body == "high-body"
+    assert reg.provider_rank("a") == 300
+    assert "overrides" in caplog.text
+    assert "rank=300" in caplog.text
+
+
 def test_registry_basic_ops() -> None:
     reg = SkillRegistry()
     reg.add(_skill("z", "bundled"))
@@ -194,6 +208,33 @@ def test_load_default_scopes_project_omnisight_shadows_bundled(
     assert "from-project-omnisight" in sk.description
 
 
+def test_load_default_scopes_omnisight_provider_shadows_claude_with_warn(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="backend.agents.skills_loader")
+    project = tmp_path / "proj"
+    home = tmp_path / "fakehome"
+    (project / ".claude" / "skills" / "shared").mkdir(parents=True)
+    (project / ".claude" / "skills" / "shared" / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: from-claude\n---\nbody-claude\n"
+    )
+    (project / ".omnisight" / "skills" / "shared").mkdir(parents=True)
+    (project / ".omnisight" / "skills" / "shared" / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: from-omnisight\n---\nbody-omni\n"
+    )
+    home.mkdir()
+    reg = load_default_scopes(project, home=home)
+    sk = reg.get("shared")
+    assert sk is not None
+    assert sk.scope == "project"
+    assert sk.body == "body-omni\n"
+    assert reg.provider_rank("shared") == 320
+    assert "overrides" in caplog.text
+    assert ".omnisight" in caplog.text
+    assert ".claude" in caplog.text
+
+
 def test_load_default_scopes_home_between_project_and_bundled(
     tmp_path: Path,
 ) -> None:
@@ -209,6 +250,32 @@ def test_load_default_scopes_home_between_project_and_bundled(
     )
     reg = load_default_scopes(project, home=home)
     assert reg.get("homed").scope == "home"
+
+
+def test_load_default_scopes_project_shadows_home_with_warn(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="backend.agents.skills_loader")
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    (home / ".omnisight" / "skills" / "shared").mkdir(parents=True)
+    (home / ".omnisight" / "skills" / "shared" / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: home\n---\nhome-body\n"
+    )
+    (project / ".claude" / "skills" / "shared").mkdir(parents=True)
+    (project / ".claude" / "skills" / "shared" / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: project\n---\nproject-body\n"
+    )
+    reg = load_default_scopes(project, home=home)
+    sk = reg.get("shared")
+    assert sk is not None
+    assert sk.scope == "project"
+    assert sk.body == "project-body\n"
+    assert reg.provider_rank("shared") == 310
+    assert "shadowed by" in caplog.text
+    assert "rank=220" in caplog.text
+    assert "rank=310" in caplog.text
 
 
 def test_load_default_scopes_home_omnisight_between_project_and_bundled(

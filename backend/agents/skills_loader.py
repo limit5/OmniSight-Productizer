@@ -13,7 +13,9 @@ from three precedence layers:
 
 Same skill name in a higher scope shadows lower scopes — operators can
 override a bundled skill by dropping a same-named ``SKILL.md`` into
-their project ``.claude/skills/``.
+their project ``.claude/skills/`` or ``.omnisight/skills/``. Within the
+same scope, ``.omnisight/skills`` has higher provider rank than
+``.claude/skills``.
 
 Format support:
 
@@ -58,6 +60,7 @@ logger = logging.getLogger(__name__)
 # (resolver, scope_label) pair — resolver takes the project_root and
 # returns a list of directories to scan. Lower index = higher priority.
 SCOPE_ORDER: tuple[str, ...] = ("project", "home", "bundled")
+_DEFAULT_PROVIDER_RANK = 0
 
 
 @dataclass(frozen=True)
@@ -232,23 +235,60 @@ def parse_skill_file(path: Path, scope: str) -> Skill | None:
 class SkillRegistry:
     """In-memory skill catalog with shadowing semantics.
 
-    Add skills in **highest-priority-first** order (project → home →
-    bundled); :meth:`add` is a no-op when a higher-priority entry with
-    the same name already exists. Iteration order is alphabetical.
+    Add skills with a provider rank; higher rank wins, equal/lower rank
+    conflicts are shadowed. Iteration order is alphabetical.
+
+    Module-global state audit: registry instances are caller-local. Every
+    worker rebuilds rank decisions from the same filesystem sources.
     """
 
     def __init__(self) -> None:
         self._skills: dict[str, Skill] = {}
+        self._provider_ranks: dict[str, int] = {}
 
-    def add(self, skill: Skill) -> bool:
-        """Add ``skill`` unless a higher-priority entry already won.
+    def add(self, skill: Skill, *, provider_rank: int = _DEFAULT_PROVIDER_RANK) -> bool:
+        """Add ``skill`` unless a higher/equal-priority entry already won.
 
-        Returns True if accepted, False if shadowed.
+        Returns True if accepted, False if shadowed. Duplicate names always
+        WARN so operators can see which on-disk source became effective.
         """
-        if skill.name in self._skills:
-            return False
+        previous = self._skills.get(skill.name)
+        if previous is not None:
+            previous_rank = self._provider_ranks.get(
+                skill.name, _DEFAULT_PROVIDER_RANK
+            )
+            if provider_rank <= previous_rank:
+                logger.warning(
+                    "skills_loader: skill %r from %s (%s, rank=%d) "
+                    "shadowed by %s (%s, rank=%d)",
+                    skill.name,
+                    skill.source_path,
+                    skill.scope,
+                    provider_rank,
+                    previous.source_path,
+                    previous.scope,
+                    previous_rank,
+                )
+                return False
+            logger.warning(
+                "skills_loader: skill %r from %s (%s, rank=%d) "
+                "overrides %s (%s, rank=%d)",
+                skill.name,
+                skill.source_path,
+                skill.scope,
+                provider_rank,
+                previous.source_path,
+                previous.scope,
+                previous_rank,
+            )
         self._skills[skill.name] = skill
+        self._provider_ranks[skill.name] = provider_rank
         return True
+
+    def provider_rank(self, name: str) -> int | None:
+        if name not in self._skills:
+            return None
+        return self._provider_ranks.get(name, _DEFAULT_PROVIDER_RANK)
 
     def get(self, name: str) -> Skill | None:
         return self._skills.get(name)
@@ -305,25 +345,25 @@ def _scan_dir_for_skills(
     return out
 
 
-def _project_scope_dirs(project_root: Path) -> list[Path]:
+def _project_scope_dirs(project_root: Path) -> list[tuple[Path, int]]:
     return [
-        project_root / ".claude" / "skills",
-        project_root / ".omnisight" / "skills",
+        (project_root / ".claude" / "skills", 310),
+        (project_root / ".omnisight" / "skills", 320),
     ]
 
 
-def _home_scope_dirs(home: Path | None = None) -> list[Path]:
+def _home_scope_dirs(home: Path | None = None) -> list[tuple[Path, int]]:
     h = home or Path.home()
     return [
-        h / ".claude" / "skills",
-        h / ".omnisight" / "skills",
+        (h / ".claude" / "skills", 210),
+        (h / ".omnisight" / "skills", 220),
     ]
 
 
-def _bundled_scope_dirs(project_root: Path) -> list[Path]:
+def _bundled_scope_dirs(project_root: Path) -> list[tuple[Path, int]]:
     return [
-        project_root / "omnisight" / "agents" / "skills",
-        project_root / "configs" / "skills",
+        (project_root / "omnisight" / "agents" / "skills", 120),
+        (project_root / "configs" / "skills", 110),
     ]
 
 
@@ -345,17 +385,17 @@ def load_default_scopes(
     """
     registry = SkillRegistry()
 
-    def _add_all(dirs: list[Path], scope: str) -> None:
-        for d in dirs:
+    def _add_all(dirs: list[tuple[Path, int]], scope: str) -> None:
+        for d, provider_rank in dirs:
             for sk in _scan_dir_for_skills(d, scope):
-                registry.add(sk)
+                registry.add(sk, provider_rank=provider_rank)
 
     _add_all(_project_scope_dirs(project_root), "project")
     _add_all(_home_scope_dirs(home), "home")
     _add_all(_bundled_scope_dirs(project_root), "bundled")
     for extra_dir, label in extra_dirs:
         for sk in _scan_dir_for_skills(extra_dir, label):
-            registry.add(sk)
+            registry.add(sk, provider_rank=_DEFAULT_PROVIDER_RANK)
 
     if len(registry) > 0:
         scope_counts: dict[str, int] = {}
