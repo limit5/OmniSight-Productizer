@@ -73,15 +73,25 @@ async def _sessions_db(pg_test_pool, monkeypatch):
 
 async def _insert_session(pool, token, user_id="u1", metadata=None):
     """Insert a minimal session row via the pool — matches the
-    schema auth.create_session uses in production."""
+    schema auth.create_session uses in production.
+
+    FX.11.2: prod ``sessions.token`` is KS-envelope JSON and lookups
+    go through ``sessions.token_lookup_index``. For a synthetic
+    fixture row we still treat ``token`` as the addressable identifier
+    (the test never decrypts it), so we mirror it into
+    ``token_lookup_index`` so ``auth.update_session_metadata(token)``
+    can find the row through its production lookup-by-hash code path.
+    """
+    from backend.auth import _token_lookup_hash
     now = time.time()
     meta = json.dumps(metadata or {})
+    lookup = _token_lookup_hash(token)
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO sessions (token, user_id, csrf_token, "
-            "created_at, expires_at, last_seen_at, metadata) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            token, user_id, "csrf", now, now + 86400, now, meta,
+            "INSERT INTO sessions (token, token_lookup_index, user_id, "
+            "csrf_token, created_at, expires_at, last_seen_at, metadata) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            token, lookup, user_id, "csrf", now, now + 86400, now, meta,
         )
 
 
@@ -130,10 +140,17 @@ class TestUpdateSessionMetadata:
         assert result["foo"] == "bar"
         assert result["operation_mode"] == "turbo"
         # Verify persistence by re-reading through the pool.
+        # FX.11.2: SELECT keys on ``token_lookup_index`` because
+        # ``sessions.token`` is now KS-envelope JSON in prod (here
+        # the fixture stores the synthetic token as both the literal
+        # value and its hash, so either column would work — we use
+        # the lookup column to match the production read path).
+        from backend.auth import _token_lookup_hash
         async with _sessions_db.acquire() as conn:
             stored_json = await conn.fetchval(
-                "SELECT metadata FROM sessions WHERE token = $1",
-                "tok1",
+                "SELECT metadata FROM sessions "
+                "WHERE token_lookup_index = $1",
+                _token_lookup_hash("tok1"),
             )
         stored = json.loads(stored_json)
         assert stored["operation_mode"] == "turbo"

@@ -106,9 +106,12 @@ async def test_expired_session_is_purged(_auth_db, monkeypatch):
     sess = await auth.create_session(u.id)
     from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
+        # FX.11.2: direct UPDATE keys on the lookup hash because
+        # ``sessions.token`` now stores KS-envelope JSON.
         await conn.execute(
-            "UPDATE sessions SET expires_at = $1 WHERE token = $2",
-            0.0, sess.token,
+            "UPDATE sessions SET expires_at = $1 "
+            "WHERE token_lookup_index = $2",
+            0.0, auth._token_lookup_hash(sess.token),
         )
     assert (await auth.get_session(sess.token)) is None
 
@@ -247,9 +250,11 @@ async def test_rotate_session_grace_window_expires(_auth_db):
 
     from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
+        # FX.11.2: lookup index keyed UPDATE.
         await conn.execute(
-            "UPDATE sessions SET expires_at = $1 WHERE token = $2",
-            0.0, old_sess.token,
+            "UPDATE sessions SET expires_at = $1 "
+            "WHERE token_lookup_index = $2",
+            0.0, auth._token_lookup_hash(old_sess.token),
         )
     assert (await auth.get_session(old_sess.token)) is None, \
         "old token must expire after grace window"

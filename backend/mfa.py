@@ -651,8 +651,13 @@ async def cleanup_stale_mfa_challenges() -> int:
 
 
 async def mark_session_mfa_verified(token: str) -> None:
+    # FX.11.2: ``sessions.token`` is now KS-envelope JSON; lookup is
+    # by ``token_lookup_index`` (sha256-hex of the cookie plaintext).
+    from backend.auth import _token_lookup_hash
+    lookup = _token_lookup_hash(token)
     async with get_pool().acquire() as conn:
         await conn.execute(
-            "UPDATE sessions SET mfa_verified = 1 WHERE token = $1",
-            token,
+            "UPDATE sessions SET mfa_verified = 1 "
+            "WHERE token_lookup_index = $1",
+            lookup,
         )

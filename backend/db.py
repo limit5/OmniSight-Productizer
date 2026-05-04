@@ -1008,21 +1008,30 @@ CREATE INDEX IF NOT EXISTS idx_project_shares_expiry_sweep
     WHERE expires_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sessions (
-    token           TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL,
-    csrf_token      TEXT NOT NULL,
-    created_at      REAL NOT NULL,
-    expires_at      REAL NOT NULL,
-    last_seen_at    REAL NOT NULL,
-    ip              TEXT NOT NULL DEFAULT '',
-    user_agent      TEXT NOT NULL DEFAULT '',
-    ua_hash         TEXT NOT NULL DEFAULT '',
-    metadata        TEXT NOT NULL DEFAULT '{}',
-    mfa_verified    INTEGER NOT NULL DEFAULT 0,
-    rotated_from    TEXT
+    token               TEXT PRIMARY KEY,
+    -- FX.11.2 (alembic 0189): ``token`` now stores the KS-envelope
+    -- packed JSON ``{"ciphertext", "dek_ref"}`` for plaintext at
+    -- rest; cookie-keyed lookups hit ``token_lookup_index``
+    -- (sha256-hex of the cookie plaintext). Mirrored into _SCHEMA
+    -- here so fresh dev SQLite DBs match the post-migration prod
+    -- shape — the auth.py runtime now always populates both columns.
+    token_lookup_index  TEXT,
+    user_id             TEXT NOT NULL,
+    csrf_token          TEXT NOT NULL,
+    created_at          REAL NOT NULL,
+    expires_at          REAL NOT NULL,
+    last_seen_at        REAL NOT NULL,
+    ip                  TEXT NOT NULL DEFAULT '',
+    user_agent          TEXT NOT NULL DEFAULT '',
+    ua_hash             TEXT NOT NULL DEFAULT '',
+    metadata            TEXT NOT NULL DEFAULT '{}',
+    mfa_verified        INTEGER NOT NULL DEFAULT 0,
+    rotated_from        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_lookup_index
+    ON sessions(token_lookup_index);
 
 CREATE TABLE IF NOT EXISTS user_mfa (
     id              TEXT PRIMARY KEY,

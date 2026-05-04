@@ -19,11 +19,19 @@ from backend.db_context import current_tenant_id
 from backend.routers import _pagination as _pg
 
 async def _resolve_session_hint(user_id: str, token_hint: str) -> str | None:
-    """Resolve a masked token_hint back to the full session token."""
+    """Resolve a masked token_hint back to the row's lookup hash.
+
+    FX.11.2: ``sessions.token`` is now KS-envelope JSON; the addressable
+    identifier is ``token_lookup_index`` (sha256 hex of the cookie
+    plaintext). Returning that hash keeps the audit-log session filter
+    on the same surface as the listing API. Note that pre-FX.11.2
+    ``audit_log.session_id`` rows hold plaintext tokens and will not
+    match this hash — that lookup degradation is a known follow-up
+    (see HANDOFF FX.11.2 known limitations)."""
     sessions = await _au.list_sessions(user_id)
     for s in sessions:
         if s["token_hint"] == token_hint:
-            return s["token"]
+            return s.get("token_lookup_index")
     return None
 
 router = APIRouter(prefix="/audit", tags=["audit"])

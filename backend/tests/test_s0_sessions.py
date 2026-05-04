@@ -44,12 +44,15 @@ async def test_list_sessions_returns_active(_s0_db):
     s2 = await auth.create_session(u.id, ip="5.6.7.8", user_agent="Firefox")
     items = await auth.list_sessions(u.id)
     assert len(items) == 2
-    tokens = {s["token"] for s in items}
-    assert s1.token in tokens
-    assert s2.token in tokens
+    # FX.11.2: list_sessions exposes token_lookup_index (sha256 hex)
+    # in place of the raw plaintext, so compare against the hash of
+    # each session's plaintext cookie token.
+    lookups = {s["token_lookup_index"] for s in items}
+    assert auth._token_lookup_hash(s1.token) in lookups
+    assert auth._token_lookup_hash(s2.token) in lookups
     for s in items:
         assert "token_hint" in s
-        assert s["token_hint"].startswith(s["token"][:4])
+        assert s["token_hint"].startswith(s["token_lookup_index"][:4])
 
 
 @pytest.mark.asyncio
@@ -58,16 +61,18 @@ async def test_list_sessions_excludes_expired(_s0_db):
     u = await auth.create_user("e@t.com", "E", role="viewer", password="pw")
     s1 = await auth.create_session(u.id)
     # SP-4.3a: force-expire via the pool (direct sessions UPDATE).
+    # FX.11.2: lookup-index keyed UPDATE post-envelope migration.
     from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         await conn.execute(
-            "UPDATE sessions SET expires_at = 0 WHERE token = $1",
-            s1.token,
+            "UPDATE sessions SET expires_at = 0 "
+            "WHERE token_lookup_index = $1",
+            auth._token_lookup_hash(s1.token),
         )
     s2 = await auth.create_session(u.id)
     items = await auth.list_sessions(u.id)
     assert len(items) == 1
-    assert items[0]["token"] == s2.token
+    assert items[0]["token_lookup_index"] == auth._token_lookup_hash(s2.token)
 
 
 # ── session revocation ───────────────────────────────────────────
@@ -271,17 +276,22 @@ async def test_rotate_session_concurrent_same_token_single_winner(_s0_db):
 
     # Exactly one fresh session row in the DB for this user besides
     # the rotated-old one (the grace-window survivor).
+    # FX.11.2: select the lookup hash, not the encrypted ``token``
+    # column, so we can match rows back to their plaintext cookie
+    # tokens via ``_token_lookup_hash``.
     from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
-            "SELECT token, rotated_from FROM sessions "
+            "SELECT token_lookup_index, rotated_from FROM sessions "
             "WHERE user_id = $1 ORDER BY created_at ASC",
             u.id,
         )
     # Expect: old (rotated_from=new), new (rotated_from=None).
     assert len(rows) == 2, f"expected 2 rows, got {len(rows)}: {rows}"
     winner_token = next(iter(new_tokens))
-    old_row = next(r for r in rows if r["token"] == old.token)
-    new_row = next(r for r in rows if r["token"] == winner_token)
+    old_lookup = auth._token_lookup_hash(old.token)
+    winner_lookup = auth._token_lookup_hash(winner_token)
+    old_row = next(r for r in rows if r["token_lookup_index"] == old_lookup)
+    new_row = next(r for r in rows if r["token_lookup_index"] == winner_lookup)
     assert old_row["rotated_from"] == winner_token
     assert new_row["rotated_from"] is None

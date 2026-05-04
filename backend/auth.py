@@ -210,6 +210,61 @@ CSRF_COOKIE = "omnisight_csrf"
 CSRF_HEADER = "X-CSRF-Token"
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  FX.11.2 — KS envelope wrapping for sessions.token
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Plaintext URL-safe session tokens remain the cookie value handed to
+# the browser; what lands in ``sessions.token`` at rest is the packed
+# envelope JSON ``{"ciphertext": "<envelope>", "dek_ref": {...}}`` that
+# alembic 0189 backfilled. Cookie-token lookups go through the
+# ``sessions.token_lookup_index`` column (sha256-hex of the plaintext)
+# so the hot read path is a unique-index probe, not a scan over an
+# encrypted JSON column.
+#
+# Module-global state audit (per implement_phase_step.md SOP §1):
+# ``_token_lookup_hash`` is a pure ``hashlib`` call and
+# ``_pack_session_token_envelope`` lazy-imports
+# :mod:`backend.security.envelope` (audited at envelope.py:42 — no
+# module-level mutable state). Each uvicorn worker derives identical
+# values from identical inputs, so the helpers are safe under
+# multi-worker prod (no cross-worker coordination required).
+
+
+def _token_lookup_hash(plaintext: str) -> str:
+    """sha256-hex of *plaintext* session token. Stored in
+    ``sessions.token_lookup_index`` (alembic 0189) so cookie tokens
+    can be resolved without scanning encrypted JSON."""
+    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+
+def _pack_session_token_envelope(plaintext: str, tenant_id: str) -> str:
+    """Encrypt *plaintext* session token via KS envelope helpers and
+    return the packed ``{ciphertext, dek_ref}`` JSON shape — exact
+    mirror of ``alembic 0189``'s backfill packing so reads do not need
+    a ``tenant_deks`` JOIN to decrypt."""
+    import json as _json
+    from backend.security import envelope as ks_envelope
+    ciphertext, dek_ref = ks_envelope.encrypt(plaintext, tenant_id)
+    return _json.dumps(
+        {"ciphertext": ciphertext, "dek_ref": dek_ref.to_dict()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+async def _resolve_tenant_id_for_user(conn, user_id: str) -> str:
+    """Resolve a user's ``tenant_id`` for KS envelope encryption_context.
+    Falls back to ``t-default`` for orphan / pre-tenant rows — same
+    ``COALESCE(u.tenant_id, 't-default')`` rule as alembic 0189."""
+    row = await conn.fetchrow(
+        "SELECT tenant_id FROM users WHERE id = $1", user_id,
+    )
+    if row is None or not row["tenant_id"]:
+        return "t-default"
+    return row["tenant_id"]
+
+
 def compute_ua_hash(user_agent: str) -> str:
     if not user_agent:
         return ""
@@ -847,11 +902,19 @@ async def _create_session_impl(
     expires = now + SESSION_TTL_S
     ua = (user_agent or "")[:240]
     ua_h = compute_ua_hash(ua)
+    # FX.11.2: store the envelope-packed token at rest plus a sha256
+    # lookup index for cookie-keyed reads. The plaintext ``token`` is
+    # what the caller hands back to the browser as the cookie value;
+    # the DB never sees plaintext after this row commits.
+    tenant_id = await _resolve_tenant_id_for_user(conn, user_id)
+    packed = _pack_session_token_envelope(token, tenant_id)
+    lookup = _token_lookup_hash(token)
     await conn.execute(
-        "INSERT INTO sessions (token, user_id, csrf_token, created_at, "
-        "expires_at, last_seen_at, ip, user_agent, ua_hash) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        token, user_id, csrf, now, expires, now, ip, ua, ua_h,
+        "INSERT INTO sessions (token, token_lookup_index, user_id, "
+        "csrf_token, created_at, expires_at, last_seen_at, ip, "
+        "user_agent, ua_hash) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        packed, lookup, user_id, csrf, now, expires, now, ip, ua, ua_h,
     )
     is_new_device = await _record_session_fingerprint(
         conn, user_id, ua_h, compute_ip_subnet(ip), now,
@@ -1127,7 +1190,10 @@ async def notify_new_device_login(
         return
     try:
         from backend.events import emit_new_device_login as _emit
-        token_hint = _mask_token(sess.token)
+        # FX.11.2: route plaintext through session_token_hint so the
+        # SSE-emitted hint matches the value list_sessions exposes
+        # (both derive from the sha256 lookup hash).
+        token_hint = session_token_hint(sess.token)
         _emit(
             user_id=user.id,
             token_hint=token_hint,
@@ -1172,11 +1238,16 @@ _SESSION_LAST_SEEN_MIN_AGE_S = 60.0
 
 
 async def _get_session_impl(conn, token: str) -> Optional[Session]:
+    # FX.11.2: cookie carries plaintext; the row is keyed by sha256
+    # lookup index. We never SELECT the encrypted ``token`` column
+    # here — the plaintext ``token`` parameter IS the value we hand
+    # back on Session.token.
+    lookup = _token_lookup_hash(token)
     r = await conn.fetchrow(
-        "SELECT token, user_id, csrf_token, created_at, expires_at, "
+        "SELECT user_id, csrf_token, created_at, expires_at, "
         "ip, user_agent, last_seen_at, metadata, mfa_verified, "
-        "rotated_from FROM sessions WHERE token = $1",
-        token,
+        "rotated_from FROM sessions WHERE token_lookup_index = $1",
+        lookup,
     )
     if not r:
         return None
@@ -1184,7 +1255,7 @@ async def _get_session_impl(conn, token: str) -> Optional[Session]:
         # Expired → evict + treat as not-found. Reuse the conn we
         # already hold; no separate DELETE tx needed.
         await conn.execute(
-            "DELETE FROM sessions WHERE token = $1", token,
+            "DELETE FROM sessions WHERE token_lookup_index = $1", lookup,
         )
         return None
     now = time.time()
@@ -1197,8 +1268,9 @@ async def _get_session_impl(conn, token: str) -> Optional[Session]:
     if now - stored_last_seen >= _SESSION_LAST_SEEN_MIN_AGE_S:
         try:
             await conn.execute(
-                "UPDATE sessions SET last_seen_at = $1 WHERE token = $2",
-                now, token,
+                "UPDATE sessions SET last_seen_at = $1 "
+                "WHERE token_lookup_index = $2",
+                now, lookup,
             )
             effective_last_seen = now
         except Exception as exc:
@@ -1209,7 +1281,7 @@ async def _get_session_impl(conn, token: str) -> Optional[Session]:
                 token[-6:], exc,
             )
     return Session(
-        token=r["token"], user_id=r["user_id"], csrf_token=r["csrf_token"],
+        token=token, user_id=r["user_id"], csrf_token=r["csrf_token"],
         created_at=r["created_at"], expires_at=r["expires_at"],
         ip=r["ip"] or "", user_agent=r["user_agent"] or "",
         last_seen_at=effective_last_seen, metadata=r["metadata"] or "{}",
@@ -1254,9 +1326,11 @@ async def _update_session_metadata_impl(
     # Without it, two updates can both see the same baseline,
     # compute different merged dicts, and the later UPDATE clobbers
     # the earlier one.
+    lookup = _token_lookup_hash(token)
     r = await conn.fetchrow(
-        "SELECT metadata FROM sessions WHERE token = $1 FOR UPDATE",
-        token,
+        "SELECT metadata FROM sessions "
+        "WHERE token_lookup_index = $1 FOR UPDATE",
+        lookup,
     )
     if not r:
         return {}
@@ -1267,8 +1341,8 @@ async def _update_session_metadata_impl(
     meta.update(updates)
     dumped = json.dumps(meta)
     await conn.execute(
-        "UPDATE sessions SET metadata = $1 WHERE token = $2",
-        dumped, token,
+        "UPDATE sessions SET metadata = $1 WHERE token_lookup_index = $2",
+        dumped, lookup,
     )
     return meta
 
@@ -1298,13 +1372,16 @@ async def update_session_metadata(
 async def delete_session(token: str, conn=None) -> None:
     if not token:
         return
+    lookup = _token_lookup_hash(token)
     if conn is None:
         async with get_pool().acquire() as owned_conn:
             await owned_conn.execute(
-                "DELETE FROM sessions WHERE token = $1", token,
+                "DELETE FROM sessions WHERE token_lookup_index = $1", lookup,
             )
         return
-    await conn.execute("DELETE FROM sessions WHERE token = $1", token)
+    await conn.execute(
+        "DELETE FROM sessions WHERE token_lookup_index = $1", lookup,
+    )
 
 
 async def cleanup_expired_sessions(conn=None) -> int:
@@ -1351,10 +1428,14 @@ async def _rotate_session_impl(
             return existing, old_token
     new_sess = await _create_session_impl(conn, old.user_id, ip, user_agent)
     grace_expires = time.time() + ROTATION_GRACE_S
+    # FX.11.2: ``rotated_from`` keeps storing plaintext (it is fed
+    # straight into ``_get_session_impl`` on the grace-window read,
+    # which hashes its input) — only the WHERE clause migrates to
+    # the lookup index because the row itself is keyed by hash now.
     await conn.execute(
         "UPDATE sessions SET rotated_from = $1, expires_at = $2 "
-        "WHERE token = $3",
-        new_sess.token, grace_expires, old_token,
+        "WHERE token_lookup_index = $3",
+        new_sess.token, grace_expires, _token_lookup_hash(old_token),
     )
     logger.info(
         "[AUTH] Session rotated for user %s (grace %ds)",
@@ -1404,16 +1485,23 @@ async def _rotate_user_sessions_impl(
     # request lands in ``current_user`` with an empty session lookup,
     # and we need a side-channel to explain *why* it's 401-ing. That
     # side-channel is this log.
+    # FX.11.2: ``sessions.token`` is now KS-envelope-encrypted JSON;
+    # both the WHERE filter and the value we propagate into
+    # ``session_revocations`` switch to the sha256 lookup index so the
+    # Q.1 probe can resolve a peer cookie back to its revocation row
+    # without holding KMS material at lookup time.
+    exclude_hash = _token_lookup_hash(exclude_token) if exclude_token else None
     if reason:
-        if exclude_token:
+        if exclude_hash is not None:
             rows = await conn.fetch(
-                "SELECT token FROM sessions "
-                "WHERE user_id = $1 AND token != $2 AND expires_at > $3",
-                user_id, exclude_token, now,
+                "SELECT token_lookup_index FROM sessions "
+                "WHERE user_id = $1 AND token_lookup_index != $2 "
+                "AND expires_at > $3",
+                user_id, exclude_hash, now,
             )
         else:
             rows = await conn.fetch(
-                "SELECT token FROM sessions "
+                "SELECT token_lookup_index FROM sessions "
                 "WHERE user_id = $1 AND expires_at > $2",
                 user_id, now,
             )
@@ -1426,13 +1514,14 @@ async def _rotate_user_sessions_impl(
                 "reason = EXCLUDED.reason, "
                 "trigger = EXCLUDED.trigger, "
                 "revoked_at = EXCLUDED.revoked_at",
-                r["token"], user_id, reason, trigger or "", now,
+                r["token_lookup_index"], user_id, reason, trigger or "", now,
             )
-    if exclude_token:
+    if exclude_hash is not None:
         status = await conn.execute(
             "UPDATE sessions SET expires_at = $1 "
-            "WHERE user_id = $2 AND token != $3 AND expires_at > $4",
-            grace, user_id, exclude_token, now,
+            "WHERE user_id = $2 AND token_lookup_index != $3 "
+            "AND expires_at > $4",
+            grace, user_id, exclude_hash, now,
         )
     else:
         status = await conn.execute(
@@ -1489,10 +1578,16 @@ SESSION_REVOCATION_REPORT_WINDOW_S = 7 * 24 * 3600.0
 
 
 async def _get_session_revocation_impl(conn, token: str) -> Optional[dict]:
+    # FX.11.2: ``session_revocations.token`` now stores the sha256
+    # lookup hash (the writer in ``_rotate_user_sessions_impl``
+    # propagates ``sessions.token_lookup_index`` instead of plaintext).
+    # The probe receives a plaintext cookie token from the peer
+    # device's next-request 401 path and hashes it before lookup.
+    lookup = _token_lookup_hash(token)
     r = await conn.fetchrow(
         "SELECT token, user_id, reason, trigger, revoked_at "
         "FROM session_revocations WHERE token = $1",
-        token,
+        lookup,
     )
     if not r:
         return None
@@ -2102,6 +2197,18 @@ def _mask_token(token: str) -> str:
     return token[:4] + "***" + token[-4:]
 
 
+def session_token_hint(plaintext_token: str) -> str:
+    """Stable masked hint for *plaintext_token* — matches the
+    ``token_hint`` field returned by ``list_sessions`` and accepted
+    by the cascade / revoke endpoints. FX.11.2: derived from the
+    sha256 lookup hash so the hint is identical no matter whether
+    the caller already holds the hash (server-side list) or the
+    plaintext cookie (SSE new-device toast)."""
+    if not plaintext_token:
+        return "***"
+    return _mask_token(_token_lookup_hash(plaintext_token))
+
+
 def session_id_from_token(token: str) -> str:
     """Derive a stable, non-reversible session_id from the session token.
     Used to tag SSE events so the frontend can filter by originating session."""
@@ -2110,17 +2217,26 @@ def session_id_from_token(token: str) -> str:
 
 
 async def _list_sessions_impl(conn, user_id: str) -> list[dict]:
+    # FX.11.2: ``token`` is no longer exposed by the listing API — the
+    # raw plaintext is unavailable post-envelope-migration and the
+    # encrypted JSON would be useless to callers anyway. The
+    # ``token_lookup_index`` (sha256 hex of the cookie plaintext) is
+    # surfaced instead so consumers can (a) compare against
+    # ``_token_lookup_hash(current_cookie)`` to find the caller's own
+    # row, (b) take ``[:16]`` to derive the same value as
+    # ``session_id_from_token`` for SSE crosswalk, (c) call
+    # ``revoke_session_by_lookup(...)`` to delete a peer row.
     rows = await conn.fetch(
-        "SELECT token, user_id, created_at, expires_at, last_seen_at, "
-        "ip, user_agent, metadata, mfa_verified "
+        "SELECT token_lookup_index, user_id, created_at, expires_at, "
+        "last_seen_at, ip, user_agent, metadata, mfa_verified "
         "FROM sessions WHERE user_id = $1 AND expires_at > $2 "
         "ORDER BY last_seen_at DESC",
         user_id, time.time(),
     )
     return [
         {
-            "token_hint": _mask_token(r["token"]),
-            "token": r["token"],
+            "token_hint": _mask_token(r["token_lookup_index"] or ""),
+            "token_lookup_index": r["token_lookup_index"],
             "user_id": r["user_id"],
             "created_at": r["created_at"],
             "expires_at": r["expires_at"],
@@ -2142,12 +2258,25 @@ async def list_sessions(user_id: str, conn=None) -> list[dict]:
 
 
 async def revoke_session(token: str, conn=None) -> bool:
-    sql = "DELETE FROM sessions WHERE token = $1"
+    """Delete a session row by plaintext cookie token (hashes inside
+    via the FX.11.2 lookup index). Cookie-bearing callers — mfa,
+    test fixtures, the ``DELETE /auth/sessions`` self-logout path —
+    keep their plaintext-in API."""
+    lookup = _token_lookup_hash(token)
+    return await revoke_session_by_lookup(lookup, conn=conn)
+
+
+async def revoke_session_by_lookup(lookup_hash: str, conn=None) -> bool:
+    """Delete a session row by the FX.11.2 sha256 lookup index.
+    Internal helper for callers that already hold the hash (e.g.
+    the session-management UI which receives ``token_lookup_index``
+    from ``list_sessions`` and never sees plaintext)."""
+    sql = "DELETE FROM sessions WHERE token_lookup_index = $1"
     if conn is None:
         async with get_pool().acquire() as owned_conn:
-            status = await owned_conn.execute(sql, token)
+            status = await owned_conn.execute(sql, lookup_hash)
     else:
-        status = await conn.execute(sql, token)
+        status = await conn.execute(sql, lookup_hash)
     try:
         return int(status.rsplit(" ", 1)[-1]) > 0
     except (ValueError, AttributeError):
@@ -2157,12 +2286,16 @@ async def revoke_session(token: str, conn=None) -> bool:
 async def revoke_other_sessions(
     user_id: str, keep_token: str, conn=None,
 ) -> int:
-    sql = "DELETE FROM sessions WHERE user_id = $1 AND token != $2"
+    keep_hash = _token_lookup_hash(keep_token) if keep_token else ""
+    sql = (
+        "DELETE FROM sessions "
+        "WHERE user_id = $1 AND token_lookup_index != $2"
+    )
     if conn is None:
         async with get_pool().acquire() as owned_conn:
-            status = await owned_conn.execute(sql, user_id, keep_token)
+            status = await owned_conn.execute(sql, user_id, keep_hash)
     else:
-        status = await conn.execute(sql, user_id, keep_token)
+        status = await conn.execute(sql, user_id, keep_hash)
     try:
         return int(status.rsplit(" ", 1)[-1])
     except (ValueError, AttributeError):

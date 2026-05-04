@@ -110,7 +110,7 @@ async def test_not_me_cascade_rotates_all_sessions_and_flips_mcp(_auth_db):
     bad_device = await auth.create_session(
         u.id, ip="203.0.113.42", user_agent="Unknown-new-device",
     )
-    bad_hint = auth._mask_token(bad_device.token)
+    bad_hint = auth.session_token_hint(bad_device.token)
 
     from backend.routers.auth import revoke_session
     request = _make_request(session_token=laptop.token)
@@ -172,7 +172,7 @@ async def test_default_delete_does_not_trigger_cascade(_auth_db):
     )
     laptop = await auth.create_session(u.id, user_agent="Laptop")
     phone = await auth.create_session(u.id, user_agent="Phone")
-    phone_hint = auth._mask_token(phone.token)
+    phone_hint = auth.session_token_hint(phone.token)
 
     from backend.routers.auth import revoke_session
     request = _make_request(session_token=laptop.token)
@@ -252,7 +252,7 @@ async def test_not_me_cascade_refuses_other_users_session(_auth_db):
     )
     admin_sess = await auth.create_session(admin.id, user_agent="Admin-console")
     peer_sess = await auth.create_session(peer.id, user_agent="Peer-laptop")
-    peer_hint = auth._mask_token(peer_sess.token)
+    peer_hint = auth.session_token_hint(peer_sess.token)
 
     from backend.routers.auth import revoke_session
     request = _make_request(session_token=admin_sess.token)
@@ -289,7 +289,7 @@ async def test_not_me_cascade_with_only_target_session(_auth_db):
     only = await auth.create_session(
         u.id, ip="203.0.113.99", user_agent="OnlyDevice",
     )
-    only_hint = auth._mask_token(only.token)
+    only_hint = auth.session_token_hint(only.token)
 
     from backend.routers.auth import revoke_session
     request = _make_request(session_token=only.token)
@@ -323,7 +323,7 @@ async def test_not_me_cascade_unknown_value_falls_through_to_legacy(_auth_db):
     )
     laptop = await auth.create_session(u.id, user_agent="Laptop")
     phone = await auth.create_session(u.id, user_agent="Phone")
-    phone_hint = auth._mask_token(phone.token)
+    phone_hint = auth.session_token_hint(phone.token)
 
     from backend.routers.auth import revoke_session
     request = _make_request(session_token=laptop.token)

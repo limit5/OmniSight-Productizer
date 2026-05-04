@@ -123,8 +123,10 @@ async def test_first_device_login_emits_and_notifies(_q2_alert_env):
     assert emit_kwargs["user_id"] == u.id
     assert emit_kwargs["ip"] == "203.0.113.42"
     assert emit_kwargs["user_agent"] == "Mozilla/5.0 (Test-NewDevice)"
-    # token_hint is _mask_token(sess.token) = first4 + *** + last4
-    expected_hint = sess.token[:4] + "***" + sess.token[-4:]
+    # FX.11.2: token_hint now derives from the sha256 lookup hash
+    # (so it matches the value list_sessions exposes), not the raw
+    # plaintext cookie token.
+    expected_hint = auth.session_token_hint(sess.token)
     assert emit_kwargs["token_hint"] == expected_hint
     # session_id passes through so future per-session UI affordances
     # (e.g. "this card belongs to your current device") have a stable

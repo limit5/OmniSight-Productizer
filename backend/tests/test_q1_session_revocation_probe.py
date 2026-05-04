@@ -137,10 +137,14 @@ async def test_revocation_record_expires_after_report_window(_auth_db):
     from backend.db_pool import get_pool
     stale = time.time() - (auth.SESSION_REVOCATION_REPORT_WINDOW_S + 60)
     async with get_pool().acquire() as conn:
+        # FX.11.2: ``session_revocations.token`` now stores the
+        # sha256 lookup hash propagated from
+        # ``sessions.token_lookup_index`` — direct DB pokes must hash
+        # the plaintext cookie token before lookup.
         await conn.execute(
             "UPDATE session_revocations SET revoked_at = $1 "
             "WHERE token = $2",
-            stale, peer.token,
+            stale, auth._token_lookup_hash(peer.token),
         )
     assert await auth.get_session_revocation(peer.token) is None, (
         "probe must not report records older than the report window"
@@ -167,9 +171,11 @@ async def test_current_user_returns_structured_401_after_revocation(_auth_db):
     # evicts it and ``current_user`` lands on the revocation probe.
     from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
+        # FX.11.2: lookup-index keyed UPDATE.
         await conn.execute(
-            "UPDATE sessions SET expires_at = $1 WHERE token = $2",
-            time.time() - 1, phone.token,
+            "UPDATE sessions SET expires_at = $1 "
+            "WHERE token_lookup_index = $2",
+            time.time() - 1, auth._token_lookup_hash(phone.token),
         )
 
     # Ensure session/strict auth mode is active so ``current_user``
@@ -205,9 +211,11 @@ async def test_current_user_generic_401_when_no_revocation(_auth_db):
     # Age the session out without recording a revocation.
     from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:
+        # FX.11.2: lookup-index keyed UPDATE.
         await conn.execute(
-            "UPDATE sessions SET expires_at = $1 WHERE token = $2",
-            time.time() - 1, sess.token,
+            "UPDATE sessions SET expires_at = $1 "
+            "WHERE token_lookup_index = $2",
+            time.time() - 1, auth._token_lookup_hash(sess.token),
         )
     import os
     os.environ["OMNISIGHT_AUTH_MODE"] = "strict"

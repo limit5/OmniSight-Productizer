@@ -1320,6 +1320,10 @@ async def list_sessions(request: Request,
                         user: auth.User = Depends(auth.current_user)) -> dict:
     sessions = await auth.list_sessions(user.id)
     current_token = request.cookies.get(auth.SESSION_COOKIE) or ""
+    # FX.11.2: ``list_sessions`` no longer surfaces raw token plaintext
+    # (it's KS-envelope at rest). Compare cookie hash against the
+    # row's ``token_lookup_index`` to flag the caller's own session.
+    current_lookup = auth._token_lookup_hash(current_token) if current_token else ""
     items = []
     for s in sessions:
         items.append({
@@ -1329,7 +1333,10 @@ async def list_sessions(request: Request,
             "last_seen_at": s["last_seen_at"],
             "ip": s["ip"],
             "user_agent": s["user_agent"],
-            "is_current": s["token"] == current_token,
+            "is_current": (
+                bool(current_lookup)
+                and s.get("token_lookup_index") == current_lookup
+            ),
         })
     return {"items": items, "count": len(items)}
 
@@ -1414,8 +1421,12 @@ async def sessions_presence(
     # with minimal metadata so the count matches what the SSE stream
     # reported, but mark the device name as unknown.
     sessions = await auth.list_sessions(user.id)
+    # FX.11.2: ``token_lookup_index`` is sha256(plaintext) hex;
+    # ``session_id_from_token`` is sha256(plaintext)[:16], so the
+    # two-key crosswalk equals ``token_lookup_index[:16]`` without
+    # decrypting the envelope or hashing again.
     by_session: dict[str, dict] = {
-        auth.session_id_from_token(s["token"]): s for s in sessions
+        (s.get("token_lookup_index") or "")[:16]: s for s in sessions
     }
 
     current_token = request.cookies.get(auth.SESSION_COOKIE) or ""
@@ -1503,22 +1514,28 @@ async def revoke_session(token_hint: str, request: Request,
     target_user_id = user.id
     is_admin = auth.role_at_least(user.role, "admin")
     sessions = await auth.list_sessions(user.id)
-    target_token = None
+    # FX.11.2: post-envelope-migration the row identifier we hold on
+    # to is the sha256 lookup hash, not the plaintext cookie token.
+    # Renaming to ``target_lookup`` keeps the intent explicit at the
+    # delete-by-lookup call site below.
+    target_lookup = None
     for s in sessions:
         if s["token_hint"] == token_hint:
-            target_token = s["token"]
+            target_lookup = s["token_lookup_index"]
             target_user_id = s["user_id"]
             break
-    if not target_token and is_admin:
+    if not target_lookup and is_admin:
         from backend.db_pool import get_pool
         async with get_pool().acquire() as conn:
-            rows = await conn.fetch("SELECT token, user_id FROM sessions")
+            rows = await conn.fetch(
+                "SELECT token_lookup_index, user_id FROM sessions"
+            )
         for row in rows:
-            if auth._mask_token(row["token"]) == token_hint:
-                target_token = row["token"]
+            if auth._mask_token(row["token_lookup_index"] or "") == token_hint:
+                target_lookup = row["token_lookup_index"]
                 target_user_id = row["user_id"]
                 break
-    if not target_token:
+    if not target_lookup:
         raise HTTPException(status_code=404, detail="session not found")
     if target_user_id != user.id and not is_admin:
         raise HTTPException(status_code=403, detail="cannot revoke another user's session")
@@ -1534,7 +1551,7 @@ async def revoke_session(token_hint: str, request: Request,
                    "to disable another user's account",
         )
 
-    await auth.revoke_session(target_token)
+    await auth.revoke_session_by_lookup(target_lookup)
     try:
         await _audit.write_audit(
             request, action="session_revoke", entity_kind="session",
