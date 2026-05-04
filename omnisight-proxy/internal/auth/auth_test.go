@@ -23,7 +23,7 @@ import (
 
 var nonceKey = []byte("0123456789abcdef0123456789abcdef")
 
-func TestVerifyRejectsNonceReplay(t *testing.T) {
+func TestKS314VerifyRejectsNonceReplay(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	client := newCertificate(t, nil, "client", x509.ExtKeyUsageClientAuth, now.Add(-time.Hour), now.Add(time.Hour))
 	authenticator := NewForTest("tenant-a", CertificateFingerprint(client.leaf), nonceKey, 5*time.Minute)
@@ -56,7 +56,7 @@ func TestVerifyRejectsBadSignatureWithoutConsumingNonce(t *testing.T) {
 	}
 }
 
-func TestMTLSHandshakeAndAuthMatrix(t *testing.T) {
+func TestKS314MTLSHandshakeMatrixValidExpiredSelfSigned(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	ca := newCertificate(t, nil, "ca", x509.ExtKeyUsageAny, now.Add(-time.Hour), now.Add(time.Hour))
 	serverCert := newCertificate(t, &ca, "127.0.0.1", x509.ExtKeyUsageServerAuth, now.Add(-time.Hour), now.Add(time.Hour))

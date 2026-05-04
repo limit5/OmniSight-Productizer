@@ -252,7 +252,7 @@ func TestLLMForwarderRejectsNonLocalKeySource(t *testing.T) {
 	}
 }
 
-func TestLLMForwarderStreamsResponseWithoutBufferingPayload(t *testing.T) {
+func TestKS314LLMForwarderStreamsResponseWithoutBufferingPayload(t *testing.T) {
 	secondChunk := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -301,7 +301,7 @@ func TestLLMForwarderStreamsResponseWithoutBufferingPayload(t *testing.T) {
 
 }
 
-func TestLLMForwarderProxyHopP95UnderLatencyBudgetWithMTLSReuse(t *testing.T) {
+func TestKS314LLMForwarderProxyHopP95UnderLatencyBudgetWithMTLSReuse(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	ca := newProxyCertificate(t, nil, "ca", x509.ExtKeyUsageAny, now.Add(-time.Hour), now.Add(time.Hour))
 	serverCert := newProxyCertificate(t, &ca, "127.0.0.1", x509.ExtKeyUsageServerAuth, now.Add(-time.Hour), now.Add(time.Hour))

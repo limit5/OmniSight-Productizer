@@ -88,6 +88,43 @@ async def test_status_hides_tier3_when_byog_disabled(monkeypatch) -> None:
     assert body["available_security_tiers"] == ["tier-1", "tier-2"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["true", "false"])
+async def test_tier1_and_tier2_status_contract_unchanged_by_byog_knob(
+    monkeypatch,
+    raw: str,
+) -> None:
+    from backend.routers import cmek_wizard as router
+
+    monkeypatch.setenv(cmek_wizard.BYOG_ENABLED_ENV, raw)
+    detector.record_cmek_health_result(
+        detector.CMEKHealthResult(
+            tenant_id=TENANT,
+            provider="aws-kms",
+            key_id="arn:aws:kms:us-east-1:111122223333:key/example",
+            ok=True,
+            revoked=False,
+            reason="enabled",
+            checked_at=1.0,
+            elapsed_ms=1.0,
+            raw_state="Enabled",
+            detail={},
+        )
+    )
+
+    tier1 = json.loads((await router.get_cmek_settings_status("t-basic", None, _actor())).body)
+    tier2 = json.loads((await router.get_cmek_settings_status(TENANT, None, _actor())).body)
+
+    assert tier1["security_tier"] == "tier-1"
+    assert tier1["tier2_available"] is True
+    assert tier1["kms_health"] == "not_configured"
+    assert tier1["revoke_status"] == "clear"
+    assert tier2["security_tier"] == "tier-2"
+    assert tier2["tier2_available"] is True
+    assert tier2["kms_health"] == "healthy"
+    assert tier2["revoke_status"] == "clear"
+
+
 def test_source_fingerprint_clean():
     for path in [
         "backend/security/cmek_wizard.py",
