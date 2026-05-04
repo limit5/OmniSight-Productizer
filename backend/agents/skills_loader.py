@@ -48,6 +48,7 @@ ADR: TODO row WP.2 freezes this contract.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from hashlib import sha256
 from dataclasses import dataclass
@@ -62,6 +63,46 @@ logger = logging.getLogger(__name__)
 # returns a list of directories to scan. Lower index = higher priority.
 SCOPE_ORDER: tuple[str, ...] = ("project", "home", "bundled")
 _DEFAULT_PROVIDER_RANK = 0
+SKILLS_LOADER_ENABLED_ENV = "OMNISIGHT_WP_SKILLS_LOADER_ENABLED"
+
+# WP.2.7 rollback registry: mirrors the pre-WP.2.5 hard-coded
+# SKILL_HD_* table from backend.agents.tool_schemas.
+_HARD_CODED_SKILL_REGISTRY: tuple[tuple[str, str], ...] = (
+    ("SKILL_HD_PARSE", "[HD.1] Parse an EDA file into HDIR."),
+    ("SKILL_HD_DIFF_REFERENCE", "[HD.4] Reference vs customer design diff."),
+    ("SKILL_HD_SENSOR_SWAP_FEASIBILITY", "[HD.5] Sensor substitution feasibility."),
+    ("SKILL_HD_FW_SYNC_PATCH", "[HD.7] HW change -> FW patch list."),
+    ("SKILL_HD_PCB_SI_ANALYZE", "[HD.2] PCB signal integrity analysis."),
+    ("SKILL_HD_HIL_RUN", "[HD.8] Hardware-in-the-loop session execution."),
+    ("SKILL_HD_RAG_QUERY", "[HD.9] Datasheet RAG retrieval."),
+    ("SKILL_HD_CERT_RETEST_PLAN", "[HD.10] EMC / safety retest plan generator."),
+    ("SKILL_HD_PLATFORM_RESOLVE", "[HD.16] SoC mark -> platform spec lookup."),
+    ("SKILL_HD_VENDOR_SYNC", "[HD.16] Vendor SDK upstream sync pipeline."),
+    ("SKILL_HD_VENDOR_REBASE", "[HD.16] Patch rebase conflict auto-attempt."),
+    ("SKILL_HD_NDA_GATE", "[HD.16] NDA boundary enforcement check."),
+    ("SKILL_HD_CUSTOMER_OVERLAY", "[HD.17] Per-customer overlay manifest resolver."),
+    ("SKILL_HD_LIFECYCLE_AUDIT", "[HD.18] Annual reproducibility audit."),
+    ("SKILL_HD_CVE_IMPACT", "[HD.18] CVE feed -> SBOM impact analysis."),
+    (
+        "SKILL_HD_CVE_AUTO_BACKPORT",
+        "[HD.18] Vendor patch -> customer-overlay backport proposal.",
+    ),
+    ("SKILL_HD_BRINGUP_CHECKLIST", "[HD.19] SoC-specific bring-up checklist generator."),
+    ("SKILL_HD_BRINGUP_LIVE_PARSE", "[HD.19] Live boot console -> AI parse blockers."),
+    (
+        "SKILL_HD_PORT_ADVISOR",
+        "[HD.19] Cross-SoC port required-changes + effort estimate.",
+    ),
+    ("SKILL_HD_DEVKIT_FORK", "[HD.19] DevKit reference -> customer fork starting point."),
+    ("SKILL_HD_ISP_TUNING_DIFF", "[HD.20] ISP tuning binary before/after compare."),
+    ("SKILL_HD_BLOB_COMPAT", "[HD.20] (BSP-version, blob-version) compatibility matrix."),
+    ("SKILL_HD_PRODUCTION_BUNDLE", "[HD.21] EMS production access bundle generator."),
+    ("SKILL_HD_OTA_PACKAGE_GEN", "[HD.21] OTA bundle generation (SWUpdate / RAUC / A-B)."),
+    ("SKILL_HD_SBOM_GENERATE", "[HD.21] SBOM CycloneDX + SPDX generation."),
+    ("SKILL_HD_LICENSE_AUDIT", "[HD.21] Ship-time license conflict check."),
+    ("SKILL_HD_AUTHENTICITY_VERIFY", "[HD.21] Chip authenticity challenge / verification."),
+    ("SKILL_HD_AI_COMPANION", "[HD.21] Unified chat surface skill router."),
+)
 
 
 @dataclass(frozen=True)
@@ -468,6 +509,41 @@ def _bundled_scope_dirs(project_root: Path) -> list[tuple[Path, int]]:
     ]
 
 
+def _skills_loader_enabled() -> bool:
+    """Master switch for WP.2 filesystem skill loading.
+
+    Default ON; set ``OMNISIGHT_WP_SKILLS_LOADER_ENABLED=false`` to use
+    the pre-WP.2.5 hard-coded SKILL_HD registry. Module-global state audit:
+    this reads process env only and returns an immutable decision per call.
+    """
+    raw = (os.environ.get(SKILLS_LOADER_ENABLED_ENV) or "true").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _load_hard_coded_registry() -> SkillRegistry:
+    """Return the pre-WP.2.5 hard-coded SKILL_HD registry."""
+    registry = SkillRegistry()
+    for name, description in _HARD_CODED_SKILL_REGISTRY:
+        registry.add(
+            Skill(
+                name=name,
+                description=description,
+                body=(
+                    f"# {name}\n\n"
+                    "Hard-coded WP.2 rollback placeholder. Re-enable "
+                    f"filesystem skills by unsetting {SKILLS_LOADER_ENABLED_ENV}."
+                ),
+                scope="hardcoded",
+            )
+        )
+    logger.warning(
+        "skills_loader: %s=false; using hard-coded SKILL registry (%d skills)",
+        SKILLS_LOADER_ENABLED_ENV,
+        len(registry),
+    )
+    return registry
+
+
 def load_default_scopes(
     project_root: Path,
     *,
@@ -484,6 +560,9 @@ def load_default_scopes(
         order, treated as the **lowest** priority — useful for embedded
         skill bundles distributed alongside a customer install.
     """
+    if not _skills_loader_enabled():
+        return _load_hard_coded_registry()
+
     registry = SkillRegistry()
 
     def _add_all(dirs: list[tuple[Path, int]], scope: str) -> None:

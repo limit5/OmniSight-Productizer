@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from backend.agents.skills_loader import (
+    SKILLS_LOADER_ENABLED_ENV,
     Skill,
     SkillRegistry,
     load_default_scopes,
@@ -339,6 +340,30 @@ def test_load_default_scopes_skips_readme(tmp_path: Path) -> None:
     assert reg.has("real-skill")
     assert not reg.has("README")
     assert not reg.has("readme")
+
+
+def test_load_default_scopes_disabled_uses_hardcoded_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    project_skill = project / ".omnisight" / "skills" / "custom" / "SKILL.md"
+    project_skill.parent.mkdir(parents=True)
+    project_skill.write_text(
+        "---\nname: custom\ndescription: project custom\n---\nproject-body\n"
+    )
+    monkeypatch.setenv(SKILLS_LOADER_ENABLED_ENV, "false")
+
+    reg = load_default_scopes(project, home=home)
+
+    assert len(reg) == 28
+    assert not reg.has("custom")
+    sk = reg.get("SKILL_HD_PARSE")
+    assert sk is not None
+    assert sk.scope == "hardcoded"
+    assert sk.source_path is None
+    assert sk.description.startswith("[HD.1]")
 
 
 def test_watch_project_scopes_reloads_modified_project_skill(
