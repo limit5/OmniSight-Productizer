@@ -72,10 +72,24 @@ def test_validate_rejects_too_short():
         validate_api_key("sk-ant-short")
 
 
-def test_validate_accepts_trimmed_whitespace():
+@pytest.mark.asyncio
+async def test_validate_accepts_trimmed_whitespace():
     """User pasting from console may include surrounding whitespace."""
-    # The validate function strips before checking
-    validate_api_key("  sk-ant-" + "A" * 30 + "  ")
+    persisted: list[tuple[str, str]] = []
+
+    async def writer(workspace: str, key: str) -> None:
+        persisted.append((workspace, key))
+
+    key = "sk-ant-" + "A" * 30
+    pasted = f"  {key}  "
+
+    validate_api_key(pasted)
+    mgr = AnthropicModeManager(key_vault_writer=writer)
+    state = await mgr.submit_api_key(pasted)
+
+    assert state.current_step == WizardStep.KEY_OBTAINED
+    assert state.api_key_fingerprint == "…" + key[-8:]
+    assert persisted == [("production", key)]
 
 
 # ─── fingerprint_api_key ─────────────────────────────────────────
@@ -187,7 +201,6 @@ async def test_happy_path_5_steps():
 async def test_submit_api_key_idempotent():
     mgr = AnthropicModeManager()
     await mgr.submit_api_key("sk-ant-" + "B" * 30)
-    state_first = mgr.state
     # Calling with the SAME key should advance the step (already past)
     # but not regress.
     await mgr.submit_api_key("sk-ant-" + "B" * 30)

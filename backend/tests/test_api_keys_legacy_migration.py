@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 
 import pytest
 
@@ -95,18 +96,39 @@ async def test_migrate_legacy_bearer_idempotent_sequential(
     finally:
         await db.close()
 
+    expected_id = (
+        "ak-legacy-"
+        + hashlib.sha256(LEGACY_SECRET.encode("utf-8")).hexdigest()[:12]
+    )
+
     assert first is not None, "first call must actually migrate"
+    assert first.id == expected_id
+    assert first.name == "legacy-bearer"
+    assert first.key_prefix == LEGACY_SECRET[:8]
+    assert first.scopes == ["*"]
+    assert first.created_by == "system/migration"
+    assert first.enabled
     assert second is None, "second call must see existing row → return None"
     assert third is None, "third call must see existing row → return None"
 
     async with pg_test_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id FROM api_keys WHERE name = 'legacy-bearer'"
+            "SELECT id, key_hash, key_prefix, scopes, created_by, enabled "
+            "FROM api_keys WHERE name = 'legacy-bearer'"
         )
     assert len(rows) == 1, (
         f"expected exactly one legacy-bearer row after 3 migrate calls, "
         f"got {len(rows)}: {[dict(r) for r in rows]}"
     )
+    row = rows[0]
+    assert row["id"] == expected_id
+    assert row["key_hash"] == hashlib.sha256(
+        LEGACY_SECRET.encode("utf-8")
+    ).hexdigest()
+    assert row["key_prefix"] == LEGACY_SECRET[:8]
+    assert json.loads(row["scopes"]) == ["*"]
+    assert row["created_by"] == "system/migration"
+    assert bool(row["enabled"])
     # Cleanup — this test writes a real row (no tx rollback since
     # migrate commits).
     async with pg_test_pool.acquire() as conn:
