@@ -9,9 +9,10 @@ Design rules (enforced by tests):
 
   1. SEARCH block resolves through the WP.3.1 cascade: exact match,
      indent-agnostic match, prefix-tail rescue, then Jaro-Winkler
-     similarity >= 0.9. Each layer must produce exactly one match.
-     Multi-match or zero-match → raise. This is the whole point —
-     silent apply on the wrong occurrence corrupts code invisibly.
+     similarity >= 0.9. Each layer carries a confidence score and
+     must produce exactly one match. Multi-match or zero-match → raise.
+     This is the whole point — silent apply on the wrong occurrence
+     corrupts code invisibly.
 
   2. SEARCH block must carry ≥ 3 lines of context (the design
      document locks this threshold). 1-line SEARCH is too ambiguous;
@@ -44,6 +45,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,14 @@ logger = logging.getLogger(__name__)
 # Locked by design — SEARCH block needs ≥ this many non-blank lines so
 # the match is actually unique in typical code.
 MIN_SEARCH_CONTEXT_LINES = 3
+REPO_ROOT = Path(__file__).resolve().parents[2]
+N10_LEDGER_PATH = REPO_ROOT / "docs" / "ops" / "upgrade_rollback_ledger.md"
+
+_CASCADE_LAYER_CONFIDENCE = {
+    1: 1.0,
+    2: 0.98,
+    3: 0.94,
+}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -99,6 +109,17 @@ class CascadeMatch:
     layer: int
     start: int
     end: int
+    score: float
+
+
+@dataclass(frozen=True)
+class DiffValidationLedgerEvent:
+    path: str
+    patch_kind: str
+    layer: int
+    score: float
+    disposition: str = "applied"
+    notes: str = ""
 
 
 def parse_search_replace(raw: str) -> list[SearchReplaceBlock]:
@@ -165,6 +186,7 @@ def _window_matches(source: str, search: str) -> list[CascadeMatch]:
                 layer=0,
                 start=offsets[start_line],
                 end=offsets[end_line],
+                score=0.0,
             )
         )
     return matches
@@ -189,7 +211,12 @@ def _find_exact_match(source: str, search: str) -> CascadeMatch | None:
             f"SEARCH block matched {count} times — add more context"
         )
     start = source.index(search)
-    return CascadeMatch(layer=1, start=start, end=start + len(search))
+    return CascadeMatch(
+        layer=1,
+        start=start,
+        end=start + len(search),
+        score=_CASCADE_LAYER_CONFIDENCE[1],
+    )
 
 
 def _find_indent_agnostic_match(source: str, search: str) -> CascadeMatch | None:
@@ -199,7 +226,12 @@ def _find_indent_agnostic_match(source: str, search: str) -> CascadeMatch | None
         window_norm = _indent_agnostic_lines(source[match.start:match.end])
         if window_norm == search_norm:
             matches.append(
-                CascadeMatch(layer=2, start=match.start, end=match.end)
+                CascadeMatch(
+                    layer=2,
+                    start=match.start,
+                    end=match.end,
+                    score=_CASCADE_LAYER_CONFIDENCE[2],
+                )
             )
     return _unique_match(matches, layer=2)
 
@@ -223,7 +255,12 @@ def _find_prefix_tail_match(source: str, search: str) -> CascadeMatch | None:
             and window_norm[last_idx] == last_line
         ):
             matches.append(
-                CascadeMatch(layer=3, start=match.start, end=match.end)
+                CascadeMatch(
+                    layer=3,
+                    start=match.start,
+                    end=match.end,
+                    score=_CASCADE_LAYER_CONFIDENCE[3],
+                )
             )
     return _unique_match(matches, layer=3)
 
@@ -290,9 +327,15 @@ def _find_jaro_winkler_match(
         window_norm = "\n".join(
             _indent_agnostic_lines(source[match.start:match.end])
         )
-        if _jaro_winkler_similarity(window_norm, search_norm) >= threshold:
+        score = _jaro_winkler_similarity(window_norm, search_norm)
+        if score >= threshold:
             matches.append(
-                CascadeMatch(layer=4, start=match.start, end=match.end)
+                CascadeMatch(
+                    layer=4,
+                    start=match.start,
+                    end=match.end,
+                    score=score,
+                )
             )
     return _unique_match(matches, layer=4)
 
@@ -329,6 +372,19 @@ def apply_search_replace(
     return source[:match.start] + block.replace + source[match.end:]
 
 
+def _apply_search_replace_with_match(
+    source: str, block: SearchReplaceBlock,
+    *, min_context: int = MIN_SEARCH_CONTEXT_LINES,
+) -> tuple[str, CascadeMatch]:
+    if _count_content_lines(block.search) < min_context:
+        raise PatchMalformed(
+            f"SEARCH block has fewer than {min_context} non-blank lines "
+            f"of context; patches with too little context are ambiguous"
+        )
+    match = find_search_replace_match(source, block.search)
+    return source[:match.start] + block.replace + source[match.end:], match
+
+
 def apply_search_replace_payload(
     source: str, raw: str,
     *, min_context: int = MIN_SEARCH_CONTEXT_LINES,
@@ -340,10 +396,75 @@ def apply_search_replace_payload(
     out = source
     for i, blk in enumerate(blocks):
         try:
-            out = apply_search_replace(out, blk, min_context=min_context)
+            out, _match = _apply_search_replace_with_match(
+                out, blk, min_context=min_context,
+            )
         except PatchError as exc:
             raise type(exc)(f"block {i + 1}/{len(blocks)}: {exc}") from None
     return out
+
+
+def _apply_search_replace_payload_with_matches(
+    source: str, raw: str,
+    *, min_context: int = MIN_SEARCH_CONTEXT_LINES,
+) -> tuple[str, list[CascadeMatch]]:
+    blocks = parse_search_replace(raw)
+    out = source
+    matches: list[CascadeMatch] = []
+    for i, blk in enumerate(blocks):
+        try:
+            out, match = _apply_search_replace_with_match(
+                out, blk, min_context=min_context,
+            )
+        except PatchError as exc:
+            raise type(exc)(f"block {i + 1}/{len(blocks)}: {exc}") from None
+        matches.append(match)
+    return out, matches
+
+
+def _clean_ledger_cell(value: object) -> str:
+    return str(value).replace("|", r"\|").replace("\n", " ").strip()
+
+
+def append_diff_validation_confidence_ledger(
+    event: DiffValidationLedgerEvent,
+    *, ledger_path: Path = N10_LEDGER_PATH,
+    now: datetime | None = None,
+) -> None:
+    """Append one WP.3 confidence event to the N10 ledger.
+
+    The ledger write is file-backed shared state; workers coordinate via
+    the filesystem, not module-global memory.
+    """
+    path = Path(ledger_path)
+    text = path.read_text(encoding="utf-8")
+    section = "## Diff Validation Confidence\n"
+    if section not in text:
+        raise PatchMalformed("N10 ledger missing Diff Validation Confidence section")
+
+    ts = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    row = (
+        f"| {_clean_ledger_cell(ts)} | {_clean_ledger_cell(event.path)} | "
+        f"{_clean_ledger_cell(event.patch_kind)} | {event.layer} | "
+        f"{event.score:.3f} | {_clean_ledger_cell(event.disposition)} | "
+        f"{_clean_ledger_cell(event.notes)} |\n"
+    )
+
+    start = text.index(section) + len(section)
+    next_section = text.find("\n## ", start)
+    if next_section == -1:
+        next_section = len(text)
+    insert_at = text.rfind("\n\n", start, next_section)
+    if insert_at == -1:
+        insert_at = next_section
+    path.write_text(text[:insert_at] + "\n" + row + text[insert_at:], encoding="utf-8")
+
+
+def _repo_relative_path(path: Path) -> str | None:
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -475,7 +596,13 @@ def apply_unified_diff(source: str, diff: str) -> str:
 #  File convenience wrapper
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def apply_to_file(path: Path, patch_kind: str, payload: str) -> None:
+def apply_to_file(
+    path: Path,
+    patch_kind: str,
+    payload: str,
+    *,
+    ledger_path: Path = N10_LEDGER_PATH,
+) -> None:
     """Read file → apply → write atomically (temp file + rename).
     `patch_kind` is ``"search_replace"`` or ``"unified_diff"``.
     Never creates a new file — refuses with `PatchNotFound` if the
@@ -487,8 +614,9 @@ def apply_to_file(path: Path, patch_kind: str, payload: str) -> None:
             f"apply_to_file: {path} does not exist (use create_file for new files)"
         )
     body = p.read_text(encoding="utf-8")
+    matches: list[CascadeMatch] = []
     if patch_kind == "search_replace":
-        new = apply_search_replace_payload(body, payload)
+        new, matches = _apply_search_replace_payload_with_matches(body, payload)
     elif patch_kind == "unified_diff":
         new = apply_unified_diff(body, payload)
     else:
@@ -496,3 +624,16 @@ def apply_to_file(path: Path, patch_kind: str, payload: str) -> None:
     tmp = p.with_suffix(p.suffix + ".omnisight-patch-tmp")
     tmp.write_text(new, encoding="utf-8")
     tmp.replace(p)  # atomic on POSIX
+    ledger_rel = _repo_relative_path(p)
+    if matches and (ledger_rel is not None or ledger_path != N10_LEDGER_PATH):
+        for match in matches:
+            append_diff_validation_confidence_ledger(
+                DiffValidationLedgerEvent(
+                    path=ledger_rel or str(p),
+                    patch_kind=patch_kind,
+                    layer=match.layer,
+                    score=match.score,
+                    notes="WP.3 cascade match confidence",
+                ),
+                ledger_path=ledger_path,
+            )

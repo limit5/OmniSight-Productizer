@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import textwrap
+from datetime import datetime, timezone
 
 import pytest
 
 from backend.agents import tools_patch as tp
+
+REPO_ROOT = tp.REPO_ROOT
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -152,6 +155,7 @@ def test_cascade_layer_1_exact_match():
         ),
     )
     assert match.layer == 1
+    assert match.score == 1.0
 
 
 def test_cascade_layer_2_indent_agnostic_match():
@@ -168,6 +172,7 @@ def test_cascade_layer_2_indent_agnostic_match():
     out = tp.apply_search_replace(source, block)
 
     assert match.layer == 2
+    assert match.score == 0.98
     assert "verify()" in out
 
 
@@ -186,6 +191,7 @@ def test_cascade_layer_3_prefix_tail_rescue_match():
     out = tp.apply_search_replace(source, block)
 
     assert match.layer == 3
+    assert match.score == 0.94
     assert "new_middle()" in out
 
 
@@ -214,7 +220,23 @@ def test_cascade_layer_4_jaro_winkler_match():
     out = tp.apply_search_replace(source, block)
 
     assert match.layer == 4
+    assert match.score >= 0.9
+    assert match.score < 1.0
     assert "record_output()" in out
+
+
+def test_cascade_match_score_flows_into_search_replace_payload_chain():
+    src = "one\ntwo\nthree\nfour\nfive\n"
+    payload = (
+        _sr_block("one\ntwo\nthree\n", "one\nTWO\nthree\n")
+        + "\n"
+        + _sr_block("one\nTWO\nthree\n", "one\nTWO\nTHREE\n")
+    )
+    out, matches = tp._apply_search_replace_payload_with_matches(src, payload)
+
+    assert "THREE" in out
+    assert [m.layer for m in matches] == [1, 1]
+    assert [m.score for m in matches] == [1.0, 1.0]
 
 
 def test_cascade_ambiguous_fallback_raises():
@@ -427,6 +449,82 @@ def test_apply_to_file_sr_round_trip(tmp_path):
     )
     tp.apply_to_file(f, "search_replace", payload)
     assert "PULL_UP" in f.read_text(encoding="utf-8")
+
+
+def test_apply_to_file_appends_n10_confidence_ledger_row(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text(SOURCE_GOOD, encoding="utf-8")
+    ledger = tmp_path / "upgrade_rollback_ledger.md"
+    ledger.write_text(textwrap.dedent("""\
+        # Major Upgrade + Rollback Ledger (N10)
+
+        ## Diff Validation Confidence
+
+        | Applied (UTC) | Path | Patch kind | Layer | Confidence | Disposition | Notes |
+        |---|---|---|---:|---:|---|---|
+        | _(runtime rows appended by WP.3 patcher; no raw patch payloads stored)_ | | | | | | |
+
+        ## Trigger vocabulary (Rollbacks)
+    """), encoding="utf-8")
+    payload = _sr_block(
+        "def init_gpio(pin_number):\n"
+        "    # Initialize the hardware pin\n"
+        "    setup_pin(pin_number, MODE_IN)\n",
+        "def init_gpio(pin_number):\n"
+        "    # Initialize the hardware pin with Pull-Up resistor\n"
+        "    setup_pin(pin_number, MODE_IN, PULL_UP)\n",
+    )
+
+    tp.apply_to_file(f, "search_replace", payload, ledger_path=ledger)
+
+    ledger_text = ledger.read_text(encoding="utf-8")
+    assert "| search_replace | 1 | 1.000 | applied |" in ledger_text
+    assert "WP.3 cascade match confidence" in ledger_text
+    assert "setup_pin" not in ledger_text
+
+
+def test_append_diff_validation_confidence_ledger_escapes_cells(tmp_path):
+    ledger = tmp_path / "upgrade_rollback_ledger.md"
+    ledger.write_text(textwrap.dedent("""\
+        # Major Upgrade + Rollback Ledger (N10)
+
+        ## Diff Validation Confidence
+
+        | Applied (UTC) | Path | Patch kind | Layer | Confidence | Disposition | Notes |
+        |---|---|---|---:|---:|---|---|
+        | _(runtime rows appended by WP.3 patcher; no raw patch payloads stored)_ | | | | | | |
+
+        ## Trigger vocabulary (Rollbacks)
+    """), encoding="utf-8")
+
+    tp.append_diff_validation_confidence_ledger(
+        tp.DiffValidationLedgerEvent(
+            path="backend/agents/tools_patch.py",
+            patch_kind="search_replace",
+            layer=4,
+            score=0.91234,
+            notes="fuzzy | no raw payload\nstored",
+        ),
+        ledger_path=ledger,
+        now=datetime(2026, 5, 4, 12, 0, tzinfo=timezone.utc),
+    )
+
+    ledger_text = ledger.read_text(encoding="utf-8")
+    assert (
+        "| 2026-05-04T12:00:00Z | backend/agents/tools_patch.py | "
+        "search_replace | 4 | 0.912 | applied | fuzzy \\| no raw payload stored |"
+    ) in ledger_text
+
+
+def test_n10_ledger_has_diff_validation_confidence_table():
+    ledger = (
+        REPO_ROOT / "docs" / "ops" / "upgrade_rollback_ledger.md"
+    ).read_text(encoding="utf-8")
+
+    assert "## Diff Validation Confidence" in ledger
+    assert "| Applied (UTC) | Path | Patch kind | Layer | Confidence |" in ledger
+    assert "Do not store raw" in ledger
+    assert "SEARCH / REPLACE payloads" in ledger
 
 
 def test_apply_to_file_refuses_missing_file(tmp_path):
