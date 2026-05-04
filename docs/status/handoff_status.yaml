@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 333
+entry_count: 334
 status_counts:
-  dev-only: 324
+  dev-only: 325
   deployed-inactive: 4
   deployed-active: 3
   deployed-observed: 0
@@ -3139,3 +3139,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production image 重 build 後，在 staging 跑一次 BP.I hook smoke，並由 operator 確認 GitHub Secret Scanning
     / Dependabot alerts / Renovate App settings 皆已啟用。
+- id: 2026-05-04--BP.I.5
+  header_line: 45294
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: BP.I.5
+  title: BP.I.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image 重 build 後，在 staging 跑一次 BP.I hook smoke；本項是 test-only matrix，無獨立 runtime
+    enablement knob。
