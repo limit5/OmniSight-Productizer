@@ -60,6 +60,10 @@ SENSITIVE_COLUMN_MARKERS = (
     "webhook_secret",
 )
 
+REQUIRED_ENVELOPE_COLUMNS = {
+    ("sessions", "token"),
+}
+
 
 @dataclass
 class BackupDLPFinding:
@@ -109,6 +113,23 @@ def _is_skipped_column(name: str) -> bool:
 def _is_sensitive_plaintext_column(name: str) -> bool:
     key = name.strip().lower()
     return any(marker in key for marker in SENSITIVE_COLUMN_MARKERS)
+
+
+def _is_required_envelope_column(table: str, column: str) -> bool:
+    return (table.strip().lower(), column.strip().lower()) in REQUIRED_ENVELOPE_COLUMNS
+
+
+def _looks_like_ks_envelope(value: str) -> bool:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if {"ciphertext", "dek_ref"}.issubset(payload):
+        dek_ref = payload.get("dek_ref")
+        return isinstance(payload.get("ciphertext"), str) and isinstance(dek_ref, dict)
+    return {"dek", "tid", "nonce_b64", "ciphertext_b64"}.issubset(payload)
 
 
 def _iter_user_tables(conn: sqlite3.Connection) -> Iterable[str]:
@@ -165,7 +186,17 @@ def scan_backup_db(db_path: Path | str) -> BackupDLPReport:
                     if not isinstance(value, str) or not value:
                         continue
                     _, labels = redact(value)
-                    if labels:
+                    if _is_required_envelope_column(table, column):
+                        if not _looks_like_ks_envelope(value):
+                            findings.append(
+                                BackupDLPFinding(
+                                    table=table,
+                                    column=column,
+                                    rowid=rowid,
+                                    labels=["required_envelope_plaintext"],
+                                )
+                            )
+                    elif labels:
                         findings.append(
                             BackupDLPFinding(
                                 table=table,
