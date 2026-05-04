@@ -4,7 +4,8 @@ Locks:
   - All 6 handlers happy path
   - Path safety: every path-taking handler rejects BASE_DIR escapes
     (relative climb + absolute outside)
-  - Edit refuses non-unique old_string unless replace_all=True
+  - Edit routes unique replacements through WP.3 cascade while keeping
+    replace_all exact
   - Bash respects timeout + cwd
   - run_in_background is rejected (would orphan procs)
   - bind_to_dispatcher / make_runner_dispatcher wire all 6 names
@@ -114,7 +115,7 @@ def test_write_rejects_relative_climb(base_dir: Path) -> None:
 def test_edit_replaces_unique_match(base_dir: Path) -> None:
     f = base_dir / "code.py"
     f.write_text("def foo():\n    return 1\n")
-    edit_handler(
+    res = edit_handler(
         {
             "file_path": str(f),
             "old_string": "return 1",
@@ -122,6 +123,98 @@ def test_edit_replaces_unique_match(base_dir: Path) -> None:
         }
     )
     assert "return 2" in f.read_text()
+    assert "cascade layer 1" in res
+
+
+def test_edit_uses_cascade_for_multiline_stale_context(base_dir: Path) -> None:
+    f = base_dir / "code.py"
+    f.write_text(
+        "def build():\n"
+        "  prepare_config()\n"
+        "  apply_config()\n"
+        "  verify_output()\n"
+    )
+    res = edit_handler(
+        {
+            "file_path": str(f),
+            "old_string": (
+                "def build():\n"
+                "    prepare_config()\n"
+                "    apply_config()\n"
+                "    verify_output()\n"
+            ),
+            "new_string": (
+                "def build():\n"
+                "    prepare_config()\n"
+                "    apply_config()\n"
+                "    record_output()\n"
+            ),
+        }
+    )
+
+    assert "record_output()" in f.read_text()
+    assert "cascade layer 2" in res
+
+
+def test_edit_single_line_miss_does_not_fuzzy_replace(base_dir: Path) -> None:
+    f = base_dir / "code.py"
+    original = "def foo():\n    return 1\n"
+    f.write_text(original)
+
+    with pytest.raises(ValueError, match="not found"):
+        edit_handler(
+            {
+                "file_path": str(f),
+                "old_string": "return 2",
+                "new_string": "return 3",
+            }
+        )
+
+    assert f.read_text() == original
+
+
+def test_edit_hd_strict_path_rejects_09_layer4_match(base_dir: Path) -> None:
+    f = base_dir / "board.dts"
+    original = (
+        "&i2c1 {\n"
+        "    status = \"okay\";\n"
+        "    clock-frequency = <400000>;\n"
+        "    sensor@10 {\n"
+        "        compatible = \"vendor,old-sensor\";\n"
+        "        reg = <0x10>;\n"
+        "    };\n"
+        "};\n"
+    )
+    f.write_text(original)
+
+    with pytest.raises(ValueError, match="not found"):
+        edit_handler(
+            {
+                "file_path": str(f),
+                "old_string": (
+                    "&i2c2 {\n"
+                    "    status = \"okay\";\n"
+                    "    clock-frequency = <100000>;\n"
+                    "    sensor@10 {\n"
+                    "        compatible = \"vendor,new-sensor\";\n"
+                    "        reg = <0x10>;\n"
+                    "    };\n"
+                    "};\n"
+                ),
+                "new_string": (
+                    "&i2c1 {\n"
+                    "    status = \"okay\";\n"
+                    "    clock-frequency = <400000>;\n"
+                    "    sensor@10 {\n"
+                    "        compatible = \"vendor,new-sensor\";\n"
+                    "        reg = <0x10>;\n"
+                    "    };\n"
+                    "};\n"
+                ),
+            }
+        )
+
+    assert f.read_text() == original
 
 
 def test_edit_refuses_non_unique_without_replace_all(base_dir: Path) -> None:

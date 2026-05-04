@@ -131,6 +131,12 @@ class DiffValidationLedgerEvent:
     notes: str = ""
 
 
+@dataclass(frozen=True)
+class EditApplyResult:
+    replaced_count: int
+    match: CascadeMatch | None = None
+
+
 def parse_search_replace(raw: str) -> list[SearchReplaceBlock]:
     """Parse one or more SEARCH/REPLACE blocks out of `raw`. Raises
     `PatchMalformed` when the markers are unbalanced or absent."""
@@ -697,3 +703,74 @@ def apply_to_file(
                 ),
                 ledger_path=ledger_path,
             )
+
+
+def apply_edit_to_file(
+    path: Path,
+    old_string: str,
+    new_string: str,
+    *,
+    replace_all: bool = False,
+    ledger_path: Path = N10_LEDGER_PATH,
+) -> EditApplyResult:
+    """Apply the legacy Edit-tool replacement through WP.3 cascade.
+
+    Exact one-line edits remain supported for compatibility. Fuzzy
+    fallback requires the same 3-line context floor as SEARCH/REPLACE,
+    so workers derive a deterministic match policy from file content and
+    path without sharing module-global state.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise PatchNotFound(f"apply_edit_to_file: {path} does not exist")
+    body = p.read_text(encoding="utf-8")
+    count = body.count(old_string)
+    if replace_all:
+        if count == 0:
+            raise PatchNotFound("old_string not found in file")
+        new_body = body.replace(old_string, new_string)
+        match: CascadeMatch | None = None
+        replaced_count = count
+    else:
+        if count > 1:
+            raise PatchAmbiguous(
+                f"old_string is not unique (found {count} matches); "
+                "pass replace_all=true or extend old_string with more context"
+            )
+        if count == 1:
+            match = _find_exact_match(body, old_string)
+            if match is None:
+                raise PatchNotFound("old_string not found in file")
+        else:
+            if _count_content_lines(old_string) < MIN_SEARCH_CONTEXT_LINES:
+                raise PatchNotFound("old_string not found in file")
+            try:
+                match = find_search_replace_match(
+                    body,
+                    old_string,
+                    jaro_winkler_threshold=(
+                        diff_validation_jaro_winkler_threshold_for_path(p)
+                    ),
+                )
+            except PatchNotFound:
+                raise PatchNotFound("old_string not found in file") from None
+        new_body = body[:match.start] + new_string + body[match.end:]
+        replaced_count = 1
+
+    tmp = p.with_suffix(p.suffix + ".omnisight-patch-tmp")
+    tmp.write_text(new_body, encoding="utf-8")
+    tmp.replace(p)
+
+    ledger_rel = _repo_relative_path(p)
+    if match is not None and (ledger_rel is not None or ledger_path != N10_LEDGER_PATH):
+        append_diff_validation_confidence_ledger(
+            DiffValidationLedgerEvent(
+                path=ledger_rel or str(p),
+                patch_kind="edit",
+                layer=match.layer,
+                score=match.score,
+                notes="WP.3 cascade match confidence",
+            ),
+            ledger_path=ledger_path,
+        )
+    return EditApplyResult(replaced_count=replaced_count, match=match)
