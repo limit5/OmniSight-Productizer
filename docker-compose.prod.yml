@@ -1,6 +1,10 @@
-version: "3.9"
-
 # Production compose — image-first deployment.
+#
+# FX.9.6 (2026-05-04): the top-level `version:` key was removed.
+# Docker Compose v2 (the only supported runtime since v1 EOL in 2023)
+# ignores the field and emits a `WARN[0000] /…/docker-compose.prod.yml:
+# the attribute `version` is obsolete` line on every invocation.
+# Removing it silences the warning without changing behaviour.
 #
 # Pre-built images live on GHCR (published by .github/workflows/docker-publish.yml).
 # `docker compose -f docker-compose.prod.yml up -d` will:

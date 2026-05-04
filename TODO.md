@@ -6277,7 +6277,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.9.3 `backend/platform.py` rename → `backend/platform_profile.py`（永久解 stdlib 衝突）+ 全 codebase update import
 - [x] FX.9.4 `backend/alembic/versions/` 寫一條 merge migration 把 0059 / 0106 / 0183 / 0187 四 head 收成單 head（避免 `alembic upgrade head` 撞 MultipleHeads error）
 - [x] FX.9.5 deploy 流程加 `alembic upgrade heads` 步驟（在 Step 2.5 build 完之後、Step 3 rolling restart 之前，避免 readyz fail）
-- [ ] FX.9.6 `docker-compose.prod.yml` 拿掉 obsolete `version:` field + `--remove-orphans`（清 omnisight-productizer-backend-1 / omnisight-pg-test 殘骸）
+- [x] FX.9.6 `docker-compose.prod.yml` 拿掉 obsolete `version:` field + `--remove-orphans`（清 omnisight-productizer-backend-1 / omnisight-pg-test 殘骸）
 
 #### Operator setup（2 items）
 - [ ] FX.9.7 `OMNISIGHT_BACKUP_PASSPHRASE` export 從 `.bashrc` 移到 `~/.profile`（讓 cron / systemd / 非互動 shell 也讀得到；現在只 interactive bash 拿到）

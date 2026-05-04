@@ -42,7 +42,22 @@ TimeoutStopSec=60
 ; `--profile tunnel` includes cloudflared so the public URL comes back too.
 ; If you ever want to boot the stack *without* opening the tunnel, disable
 ; this unit and bring it up manually without --profile tunnel.
-ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml --profile tunnel up -d
+;
+; FX.9.6 (2026-05-04): `--remove-orphans` self-heals stale containers
+; from earlier compose-project layouts (e.g. `omnisight-productizer-
+; backend-1` from the pre-replica era before the backend-a / backend-b
+; split, or `omnisight-pg-test` from one-off test runs). Orphans are
+; containers that belong to this compose project but are no longer
+; declared in docker-compose.prod.yml — they keep volume / network
+; references alive and confuse `docker compose ps`. Without this flag
+; operators have to `docker rm -f` them manually after every layout
+; change. CAUTION: any service activated via a profile NOT listed
+; here will be classed as orphan on next boot — currently only
+; `tunnel` is on, so the `observability` profile (prometheus / grafana
+; / grafana-env-validator) is intentionally torn down at reboot. Bring
+; observability back via `docker compose -f docker-compose.prod.yml
+; --profile observability up -d` after boot if needed.
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml --profile tunnel up -d --remove-orphans
 ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml --profile tunnel down
 
 [Install]
