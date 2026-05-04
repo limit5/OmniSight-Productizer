@@ -3116,7 +3116,7 @@ ls backend/alembic/versions/ | tail -3
 > **目標**：中型 enterprise 客戶帶自己 KMS key、可隨時 revoke 讓我方瞬間失能。**4% 客戶覆蓋、onboarding +5-10 min wizard**。第一個中型 enterprise 簽約前 ship。
 
 - [x][G] KS.2.1 **CMEK Tenant Settings Wizard**（5 step）
-  - [~][G] Step 1 選 KMS provider（AWS / GCP / Vault）
+  - [x][G] Step 1 選 KMS provider（AWS / GCP / Vault）
   - [x][G] Step 2 IAM policy generator（精準輸出 JSON、客戶在自家 console 貼上）
   - [x][G] Step 3 KMS key ARN / resource id 貼回 wizard
   - [x][G] Step 4 verify connection（OmniSight 跑一次 test encrypt-decrypt）
@@ -6166,7 +6166,7 @@ BP.E GraphRAG / Neo4j
 
 #### Lazy cache cross-worker sync（7）
 - [x][G] FX.4.1 `backend/bootstrap.py:662` `_gate_cache` 加 mtime check 或 SharedKV
-- [~][G] FX.4.2 `backend/forecast.py:155` `_PRICING_CACHE` 同
+- [x][G] FX.4.2 `backend/forecast.py:155` `_PRICING_CACHE` 同
 - [x][G] FX.4.3 `backend/sensor_fusion.py:497` `_SF_CACHE` 同
 - [x][G] FX.4.4 `backend/telemetry_backend.py:536` `_TELEMETRY_CACHE` 同
 - [x][G] FX.4.5 `backend/codeowners.py:39` `_rules` 加 file mtime 失效
@@ -6178,13 +6178,13 @@ BP.E GraphRAG / Neo4j
 - [x][G] FX.4.9 `backend/enterprise_web_stack.py:988` `_export_xlsx_stub` 用 openpyxl 真出 XLSX OR 下架
 - [x][G] FX.4.10 `backend/enterprise_web_stack.py:1517` `_preview_xlsx_stub` 同
 - [x][G] FX.4.11 `backend/agents/sub_agent.py` run_in_background 真實作 OR docstring 明寫 unsupported 加 contract test
-- [~][G] FX.4.12 `backend/agents/runner_handlers.py` bash_handler run_in_background 同
+- [x][G] FX.4.12 `backend/agents/runner_handlers.py` bash_handler run_in_background 同
 
 #### ABC 強制（5）
 - [x][G] FX.4.13 `backend/build_adapters.py:448` BuildAdapter 改 `ABC` + `@abstractmethod`
 - [x][G] FX.4.14 `backend/app_store_connect.py` Transport 同
 - [x][G] FX.4.15 `backend/hmi_components.py` HALComponent 同（render_html / render_js / hal_endpoints）
-- [~][G] FX.4.16 `backend/web/framework_adapter.py:602` _AdapterBase 同；移除 pragma:no-cover
+- [x][G] FX.4.16 `backend/web/framework_adapter.py:602` _AdapterBase 同；移除 pragma:no-cover
 - [x][G] FX.4.17 `backend/queue_backend.py` _UnimplementedAdapter 拿掉、改 explicit factory raise
 
 #### API contract response_model（5）
@@ -6211,12 +6211,12 @@ BP.E GraphRAG / Neo4j
 - [x][G] FX.5.5 `backend/tests/test_cost_guard.py` 新增（成本控管）
 - [x][G] FX.5.6 `backend/tests/test_external_tool_registry.py` 新增
 - [x][G] FX.5.7 `backend/tests/test_mcp_integration.py` 新增
-- [~][G] FX.5.8 `backend/tests/test_postgres_stores.py` 新增
+- [x][G] FX.5.8 `backend/tests/test_postgres_stores.py` 新增
 - [x][G] FX.5.9 `backend/tests/test_rate_limiter.py` 新增（限流）
 - [x][G] FX.5.10 `backend/tests/test_tool_dispatcher.py` 新增（agent runtime 核心）
 - [x][G] FX.5.11 `backend/tests/test_tools_patch.py` 新增
 - [x][G] FX.5.12 `backend/tests/test_tool_schemas.py` 新增
-- [~][G] FX.5.13 修弱 assertion test 6 條（test_anthropic_mode_manager.py / test_api_keys_legacy_migration.py / test_auth_dashboard_shape_drift.py / test_auto_runner_codex.py / test_ssh_runner.py / test_require_super_admin.py 改用 real call + assertion）
+- [x][G] FX.5.13 修弱 assertion test 6 條（test_anthropic_mode_manager.py / test_api_keys_legacy_migration.py / test_auth_dashboard_shape_drift.py / test_auto_runner_codex.py / test_ssh_runner.py / test_require_super_admin.py 改用 real call + assertion）
 
 ### FX.6 — Dependency 衛生（8 items, ~2-3 day）
 
