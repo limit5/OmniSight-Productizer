@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import inspect
-import json
 import re
 
 import pytest
@@ -104,7 +102,16 @@ def test_aws_policy_is_precise_to_tenant_context():
     assert crypto_stmt["Action"] == ["kms:Encrypt", "kms:Decrypt"]
     assert crypto_stmt["Resource"] == "*"
     assert crypto_stmt["Condition"]["StringEquals"] == {
-        "kms:EncryptionContext:omnisight:tenant_id": "t-acme",
+        "kms:EncryptionContext:tenant_id": "t-acme",
+        "kms:EncryptionContext:schema": "ks.1.2",
+    }
+    assert crypto_stmt["Condition"]["ForAllValues:StringEquals"] == {
+        "kms:EncryptionContextKeys": [
+            "tenant_id",
+            "dek_id",
+            "purpose",
+            "schema",
+        ],
     }
 
 
@@ -144,20 +151,20 @@ def test_vault_policy_json_has_encrypt_and_decrypt_rules():
         "transit/decrypt/omnisight-tenant-tier2",
     ]
     assert all(rule["capabilities"] == ["update"] for rule in policy["policy"]["rules"])
-    expected_context = base64.b64encode(
-        json.dumps(
-            {
-                "omnisight:cmek_provider": "vault-transit",
-                "omnisight:tenant_id": "t-acme",
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).decode("ascii")
-    assert all(
-        rule["allowed_parameters"] == {"context": [expected_context]}
-        for rule in policy["policy"]["rules"]
-    )
+    assert all("allowed_parameters" not in rule for rule in policy["policy"]["rules"])
+    assert policy["policy"]["context_audit"] == {
+        "tenant_id": "t-acme",
+        "context_keys": [
+            "tenant_id",
+            "dek_id",
+            "purpose",
+            "schema",
+        ],
+        "note": (
+            "Vault Transit receives a per-DEK context value; path scoping is "
+            "the enforceable policy boundary."
+        ),
+    }
 
 
 @pytest.mark.parametrize(

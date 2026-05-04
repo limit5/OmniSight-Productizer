@@ -29,7 +29,6 @@ contract to preserve.
 
 from __future__ import annotations
 
-import base64
 import json
 import re
 import secrets
@@ -144,15 +143,6 @@ def validate_policy_principal(provider: CMEK_PROVIDER, principal: str) -> str:
     raise ValueError(f"invalid {provider} policy principal")
 
 
-def _tenant_context_b64(provider: CMEK_PROVIDER, tenant_id: str) -> str:
-    context = {
-        "omnisight:cmek_provider": provider,
-        "omnisight:tenant_id": tenant_id,
-    }
-    raw = json.dumps(context, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return base64.b64encode(raw).decode("ascii")
-
-
 def _vault_policy_paths(key_id: str | None) -> tuple[str, str]:
     ref = key_id.strip() if key_id else "transit/omnisight-tenant-tier2"
     if "/" in ref:
@@ -195,7 +185,16 @@ def generate_policy_json(
                     "Resource": "*",
                     "Condition": {
                         "StringEquals": {
-                            "kms:EncryptionContext:omnisight:tenant_id": tenant_id,
+                            "kms:EncryptionContext:tenant_id": tenant_id,
+                            "kms:EncryptionContext:schema": "ks.1.2",
+                        },
+                        "ForAllValues:StringEquals": {
+                            "kms:EncryptionContextKeys": [
+                                "tenant_id",
+                                "dek_id",
+                                "purpose",
+                                "schema",
+                            ],
                         },
                     },
                 },
@@ -219,7 +218,6 @@ def generate_policy_json(
         }
 
     encrypt_path, decrypt_path = _vault_policy_paths(key_id)
-    context_b64 = _tenant_context_b64(provider, tenant_id)
     return {
         "policy": {
             "name": f"omnisight-{tenant_id}-cmek",
@@ -227,18 +225,22 @@ def generate_policy_json(
                 {
                     "path": encrypt_path,
                     "capabilities": ["update"],
-                    "allowed_parameters": {
-                        "context": [context_b64],
-                    },
                 },
                 {
                     "path": decrypt_path,
                     "capabilities": ["update"],
-                    "allowed_parameters": {
-                        "context": [context_b64],
-                    },
                 },
             ],
+            "context_audit": {
+                "tenant_id": tenant_id,
+                "context_keys": [
+                    "tenant_id",
+                    "dek_id",
+                    "purpose",
+                    "schema",
+                ],
+                "note": "Vault Transit receives a per-DEK context value; path scoping is the enforceable policy boundary.",
+            },
             "attach_to": principal,
         },
     }
