@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from backend import auth
+from backend.security import cmek_graceful_degrade as _cmek_degrade
 from backend.security import cmek_wizard as _cw
 
 
@@ -99,6 +100,12 @@ async def _guard(tenant_id: str, actor: auth.User) -> JSONResponse | None:
         raise HTTPException(
             status_code=403,
             detail=f"requires tenant owner/admin or super_admin on {tenant_id!r}",
+        )
+    decision = _cmek_degrade.cmek_degrade_decision_for_tenant(tenant_id)
+    if not decision.allowed:
+        return JSONResponse(
+            status_code=403,
+            content=decision.to_error_payload(),
         )
     return None
 
