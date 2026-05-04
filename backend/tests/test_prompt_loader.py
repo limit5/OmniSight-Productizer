@@ -102,8 +102,8 @@ class TestBuildSystemPrompt:
 
         content = prompt_loader.load_core_rules()
         assert content.index("CLAUDE.md body") < content.index("AGENTS.md body")
-        assert content.index("AGENTS.md body") < content.index("OMNISIGHT.md body")
-        assert content.index("OMNISIGHT.md body") < content.index("WARP.md body")
+        assert content.index("AGENTS.md body") < content.index("WARP.md body")
+        assert content.index("WARP.md body") < content.index("OMNISIGHT.md body")
 
     def test_load_core_rules_walks_three_parent_dirs_with_weight(
         self,
@@ -124,12 +124,36 @@ class TestBuildSystemPrompt:
         monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
 
         content = prompt_loader.load_core_rules()
-        assert content.index("current rules") < content.index("parent one rules")
-        assert content.index("parent one rules") < content.index("parent two rules")
-        assert content.index("parent two rules") < content.index("parent three rules")
+        assert content.index("parent three rules") < content.index("parent two rules")
+        assert content.index("parent two rules") < content.index("parent one rules")
+        assert content.index("parent one rules") < content.index("current rules")
         assert "too far rules" not in content
         assert "distance=0, weight=4" in content
         assert "distance=3, weight=1" in content
+
+    def test_load_core_rules_project_specific_after_generic(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import backend.prompt_loader as prompt_loader
+
+        current = tmp_path / "repo" / "app"
+        current.mkdir(parents=True)
+        (current.parent / "OMNISIGHT.md").write_text("parent project specific\n")
+        (current / "CLAUDE.md").write_text("current generic\n")
+        (current / "OMNISIGHT.md").write_text("current project specific\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", current)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        content = prompt_loader.load_core_rules()
+        assert content.index("parent project specific") < content.index(
+            "current generic"
+        )
+        assert content.index("current generic") < content.index(
+            "current project specific"
+        )
 
     def test_load_core_rules_reloads_when_rule_file_changes(self, tmp_path, monkeypatch):
         import backend.prompt_loader as prompt_loader

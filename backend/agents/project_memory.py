@@ -38,13 +38,13 @@ logger = logging.getLogger(__name__)
 
 
 # Conventional rule-file names recognised at project root.
-# Order matters: when both files exist they appear in this order in the
-# rendered system prompt, so CLAUDE.md is read first.
+# Order matters: generic tool conventions appear before the OmniSight-
+# specific convention, so project-specific rules come later in the merge.
 PROJECT_RULE_FILENAMES: tuple[str, ...] = (
     "CLAUDE.md",
     "AGENTS.md",
-    "OMNISIGHT.md",
     "WARP.md",
+    "OMNISIGHT.md",
 )
 
 # User-home convention: ``~/.claude/<filename>``. CLAUDE.md is the
@@ -128,6 +128,23 @@ def project_rule_dirs(
     return out
 
 
+def project_rule_merge_dirs(
+    project_root: Path,
+    *,
+    max_parent_depth: int = PROJECT_RULE_PARENT_DEPTH,
+) -> list[tuple[Path, int, int]]:
+    """Return project rule directories in merge-precedence order.
+
+    Lower-precedence parent directories come first; the current directory
+    comes last so its rules are closest to the active instruction context.
+    """
+    return list(
+        reversed(
+            project_rule_dirs(project_root, max_parent_depth=max_parent_depth)
+        )
+    )
+
+
 def project_rule_signature(
     project_root: Path,
     *,
@@ -142,7 +159,7 @@ def project_rule_signature(
     removes a rule file on the shared filesystem.
     """
     entries: list[tuple[str, int, int, int]] = []
-    for base, distance, _weight in project_rule_dirs(
+    for base, distance, _weight in project_rule_merge_dirs(
         project_root,
         max_parent_depth=max_parent_depth,
     ):
@@ -164,9 +181,9 @@ def load_project_memory(
     filenames: tuple[str, ...] = PROJECT_RULE_FILENAMES,
     max_parent_depth: int = PROJECT_RULE_PARENT_DEPTH,
 ) -> list[MemoryFile]:
-    """Load recognised rule files from ``project_root`` and nearby parents."""
+    """Load recognised rule files in low-to-high merge precedence order."""
     out: list[MemoryFile] = []
-    for base, distance, weight in project_rule_dirs(
+    for base, distance, weight in project_rule_merge_dirs(
         project_root,
         max_parent_depth=max_parent_depth,
     ):

@@ -39,7 +39,7 @@ from pathlib import Path
 
 from backend.agents.project_memory import (
     PROJECT_RULE_FILENAMES,
-    project_rule_dirs,
+    project_rule_merge_dirs,
     project_rule_signature,
 )
 
@@ -113,7 +113,7 @@ def load_core_rules() -> str:
     if _core_rules_cache is not None and _core_rules_cache[0] == signature:
         return _core_rules_cache[1]
     parts: list[str] = []
-    for base, distance, weight in project_rule_dirs(_PROJECT_ROOT):
+    for base, distance, weight in project_rule_merge_dirs(_PROJECT_ROOT):
         for filename in PROJECT_RULE_FILENAMES:
             content = _read_md(base / filename, _MAX_CORE_RULES)
             if content:

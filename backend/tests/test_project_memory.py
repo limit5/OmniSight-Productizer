@@ -28,6 +28,7 @@ from backend.agents.project_memory import (
     load_project_memory,
     load_user_memory,
     project_rule_dirs,
+    project_rule_merge_dirs,
     project_rule_signature,
     render_for_prompt,
 )
@@ -63,12 +64,13 @@ def test_load_project_skips_empty(tmp_path: Path) -> None:
     assert "AGENTS.md" not in conventions
 
 
-def test_load_project_preserves_canonical_order(tmp_path: Path) -> None:
+def test_load_project_preserves_filename_precedence_order(tmp_path: Path) -> None:
     """Output order matches PROJECT_RULE_FILENAMES, regardless of write order."""
     for fn in ("WARP.md", "AGENTS.md", "CLAUDE.md", "OMNISIGHT.md"):
         (tmp_path / fn).write_text(f"{fn} body\n")
     out = load_project_memory(tmp_path)
     assert [m.convention for m in out] == list(PROJECT_RULE_FILENAMES)
+    assert out[-1].convention == "OMNISIGHT.md"
 
 
 def test_load_project_returns_empty_when_root_missing_files(tmp_path: Path) -> None:
@@ -94,7 +96,20 @@ def test_project_rule_dirs_current_plus_three_parents(tmp_path: Path) -> None:
     assert [weight for _, _, weight in out] == [4, 3, 2, 1]
 
 
-def test_load_project_walks_parents_by_distance_weight(tmp_path: Path) -> None:
+def test_project_rule_merge_dirs_parents_before_current(tmp_path: Path) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+
+    out = project_rule_merge_dirs(current)
+
+    assert [p.name for p, _, _ in out] == ["a", "b", "c", "d"]
+    assert [distance for _, distance, _ in out] == [3, 2, 1, 0]
+    assert [weight for _, _, weight in out] == [1, 2, 3, 4]
+
+
+def test_load_project_walks_parents_in_merge_precedence_order(
+    tmp_path: Path,
+) -> None:
     current = tmp_path / "a" / "b" / "c" / "d"
     current.mkdir(parents=True)
     (current / "CLAUDE.md").write_text("current\n")
@@ -106,13 +121,33 @@ def test_load_project_walks_parents_by_distance_weight(tmp_path: Path) -> None:
     out = load_project_memory(current, filenames=("CLAUDE.md",))
 
     assert [m.content.strip() for m in out] == [
-        "current",
-        "parent-1",
-        "parent-2",
         "parent-3",
+        "parent-2",
+        "parent-1",
+        "current",
     ]
-    assert [m.distance for m in out] == [0, 1, 2, 3]
-    assert [m.weight for m in out] == [4, 3, 2, 1]
+    assert [m.distance for m in out] == [3, 2, 1, 0]
+    assert [m.weight for m in out] == [1, 2, 3, 4]
+
+
+def test_load_project_project_specific_rules_come_after_generic(
+    tmp_path: Path,
+) -> None:
+    current = tmp_path / "a" / "b"
+    current.mkdir(parents=True)
+    (current.parent / "OMNISIGHT.md").write_text("parent project specific\n")
+    (current / "CLAUDE.md").write_text("current generic\n")
+    (current / "OMNISIGHT.md").write_text("current project specific\n")
+
+    out = load_project_memory(current)
+
+    assert [m.content.strip() for m in out] == [
+        "parent project specific",
+        "current generic",
+        "current project specific",
+    ]
+    assert out[-1].convention == "OMNISIGHT.md"
+    assert out[-1].distance == 0
 
 
 def test_project_rule_signature_tracks_content_changes(tmp_path: Path) -> None:
