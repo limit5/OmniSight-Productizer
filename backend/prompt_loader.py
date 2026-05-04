@@ -37,6 +37,12 @@ import re
 import time
 from pathlib import Path
 
+from backend.agents.project_memory import (
+    load_project_memory,
+    project_rule_signature,
+    render_for_prompt,
+)
+
 logger = logging.getLogger(__name__)
 
 # ZZ.C1 #305-1 checkbox 2 (2026-04-24): slug fence for auto-captured
@@ -67,10 +73,8 @@ _CONFIGS_ROOT = _PROJECT_ROOT / "configs"
 _MODELS_DIR = _CONFIGS_ROOT / "models"
 _ROLES_DIR = _CONFIGS_ROOT / "roles"
 _SKILLS_DIR = _CONFIGS_ROOT / "skills"
-_CLAUDE_MD = _PROJECT_ROOT / "CLAUDE.md"
 
 # Maximum prompt section lengths (rough char counts) to avoid blowing context
-_MAX_CORE_RULES = 2000
 _MAX_MODEL_RULES = 3000
 _MAX_ROLE_SKILL = 8000
 _MAX_TASK_SKILL = 4000
@@ -91,22 +95,32 @@ _MAX_CLONE_SPEC_CONTEXT = 4000
 # import the W15.3 module just to know the budget.
 _MAX_VITE_ERROR_BANNER_SECTION = 512
 
-# L1 Core Rules cache (loaded once)
-_core_rules_cache: str | None = None
+# L1 Core Rules cache (invalidated by watched rule-file signature)
+_core_rules_cache: tuple[tuple[tuple[str, int, int, int], ...], str] | None = None
 
 
 def load_core_rules() -> str:
-    """Load CLAUDE.md core rules (L1 Memory). Cached after first call."""
+    """Load project rule files (L1 Memory). Cached by file signature.
+
+    Module-global audit (SOP Step 1): the cache is PER-WORKER and is
+    derived from watched project files on disk. Cross-worker consistency
+    is guaranteed because each worker reads the same files and invalidates
+    when another worker/operator updates, adds, or removes a rule file.
+    """
     global _core_rules_cache
-    if _core_rules_cache is not None:
-        return _core_rules_cache
-    if _CLAUDE_MD.is_file():
-        content = _read_md(_CLAUDE_MD, _MAX_CORE_RULES)
-        _core_rules_cache = content
-        logger.info("Loaded L1 core rules from CLAUDE.md (%d chars)", len(content))
-        return content
-    _core_rules_cache = ""
-    return ""
+    signature = project_rule_signature(_PROJECT_ROOT)
+    if _core_rules_cache is not None and _core_rules_cache[0] == signature:
+        return _core_rules_cache[1]
+    memory_files = load_project_memory(_PROJECT_ROOT)
+    core_rules = render_for_prompt(memory_files, header="")
+    _core_rules_cache = (signature, core_rules)
+    if core_rules:
+        logger.info(
+            "Loaded L1 core rules from %d project rule file(s) (%d chars)",
+            len(memory_files),
+            len(core_rules),
+        )
+    return core_rules
 
 
 def _strip_frontmatter(text: str) -> str:

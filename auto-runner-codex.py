@@ -39,6 +39,18 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+# Make `from backend...` imports resolve when invoked from project root.
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from backend.agents.project_memory import (  # noqa: E402
+    load_all_memory,
+    parse_ignored_paths,
+    render_operator_summary as render_memory_operator_summary,
+)
 
 # ── 優雅停機 ──
 _shutdown_requested = False
@@ -71,6 +83,13 @@ HANDOFF_FILE = os.path.join(BASE_DIR, "HANDOFF.md")
 SOP_FILE = os.path.join(BASE_DIR, "docs", "sop", "implement_phase_step.md")
 AGENTS_FILE = os.path.join(BASE_DIR, "AGENTS.md")
 COORDINATION_FILE = os.path.join(BASE_DIR, "coordination.md")
+# Operator UI for WP.5.7: omit specific rule files without editing repo
+# files. Relative paths resolve against BASE_DIR; ~/ resolves to home.
+RULE_IGNORE_ENV = "OMNISIGHT_RULE_IGNORE"
+RULE_IGNORE_PATHS = parse_ignored_paths(
+    os.environ.get(RULE_IGNORE_ENV),
+    project_root=Path(BASE_DIR),
+)
 
 # Worktree path for Tier B work (created via `git worktree add`).
 WORKTREE_DIR = os.environ.get(
@@ -497,6 +516,14 @@ def main() -> None:
         print("🏷️ Track filter：無（處理所有 [G]-eligible 項目）")
     if TARGET_ITEM_SUBSTR:
         print(f"🎯 Target item lock: substring={TARGET_ITEM_SUBSTR!r}")
+    memory_files = load_all_memory(Path(BASE_DIR), ignored_paths=RULE_IGNORE_PATHS)
+    print(
+        render_memory_operator_summary(
+            memory_files,
+            project_root=Path(BASE_DIR),
+            ignore_env_var=RULE_IGNORE_ENV,
+        )
+    )
     print(
         "⚠️ 警告：codex 將以 --yolo 模式執行 shell + 檔案編輯，按 Ctrl+C 可隨時中斷。\n"
     )
@@ -536,6 +563,14 @@ def main() -> None:
             )
             time.sleep(SECTION_COOLDOWN_S)
         last_section = section_title
+        memory_files = load_all_memory(Path(BASE_DIR), ignored_paths=RULE_IGNORE_PATHS)
+        print(
+            render_memory_operator_summary(
+                memory_files,
+                project_root=Path(BASE_DIR),
+                ignore_env_var=RULE_IGNORE_ENV,
+            )
+        )
 
         # Tier B fix (2026-05-03): runner OWNS master/TODO.md marker.
         # Reserve the item with [~][G] BEFORE dispatching codex so:

@@ -53,6 +53,8 @@ from backend.agents.mcp_integration import (  # noqa: E402
 )
 from backend.agents.project_memory import (  # noqa: E402
     load_all_memory,
+    parse_ignored_paths,
+    render_operator_summary as render_memory_operator_summary,
     render_for_prompt as render_memory_for_prompt,
 )
 from backend.agents.runner_handlers import make_runner_dispatcher  # noqa: E402
@@ -161,6 +163,14 @@ SKILLS_DISABLED = os.environ.get("OMNISIGHT_SDK_DISABLE_SKILLS", "").strip().low
 SUBAGENTS_DISABLED = os.environ.get(
     "OMNISIGHT_SDK_DISABLE_SUBAGENTS", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
+
+# Operator UI for WP.5.7: omit specific rule files without editing repo
+# files. Relative paths resolve against BASE_DIR; ~/ resolves to home.
+RULE_IGNORE_ENV = "OMNISIGHT_RULE_IGNORE"
+RULE_IGNORE_PATHS = parse_ignored_paths(
+    os.environ.get(RULE_IGNORE_ENV),
+    project_root=BASE_DIR,
+)
 
 
 # ─── Track filter (parallel-worker support) ──────────────────────
@@ -712,17 +722,23 @@ async def main() -> None:
 
     # Memory layer banner (just the count + scope split — actual content
     # is loaded fresh per item to honour operator mid-pipeline edits).
-    _initial_memory = load_all_memory(BASE_DIR)
+    _initial_memory = load_all_memory(BASE_DIR, ignored_paths=RULE_IGNORE_PATHS)
     if _initial_memory:
-        proj = sum(1 for m in _initial_memory if m.scope == "project")
-        usr = sum(1 for m in _initial_memory if m.scope == "user")
-        names = ", ".join(m.convention for m in _initial_memory)
         print(
-            f"📜 Memory: {len(_initial_memory)} rule file(s) — "
-            f"project={proj} user={usr} | {names}"
+            render_memory_operator_summary(
+                _initial_memory,
+                project_root=BASE_DIR,
+                ignore_env_var=RULE_IGNORE_ENV,
+            )
         )
     else:
-        print("📜 Memory: no rule files found (CLAUDE.md / AGENTS.md / etc.)")
+        print(
+            render_memory_operator_summary(
+                _initial_memory,
+                project_root=BASE_DIR,
+                ignore_env_var=RULE_IGNORE_ENV,
+            )
+        )
 
     dispatcher = make_runner_dispatcher()
 
@@ -836,11 +852,18 @@ async def main() -> None:
                 if HANDOFF_FILE.exists()
                 else "(HANDOFF.md not yet created)"
             )
-            memory_files = load_all_memory(BASE_DIR)
+            memory_files = load_all_memory(BASE_DIR, ignored_paths=RULE_IGNORE_PATHS)
             memory_block = render_memory_for_prompt(memory_files)
         except OSError as e:
             print(f"❌ 讀取 SOP/TODO/HANDOFF/memory 失敗: {e}")
             sys.exit(1)
+        print(
+            render_memory_operator_summary(
+                memory_files,
+                project_root=BASE_DIR,
+                ignore_env_var=RULE_IGNORE_ENV,
+            )
+        )
 
         success = False
         run_result: RunResult | None = None

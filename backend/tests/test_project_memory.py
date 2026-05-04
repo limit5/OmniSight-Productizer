@@ -3,6 +3,10 @@
 Locks:
   * load_project_memory finds every recognised filename and skips
     missing / empty
+  * load_project_memory walks current dir + up to three parents with
+    distance-derived weights
+  * project_rule_signature changes when watched rule files change
+  * WP.5.8 integrated matrix: parent walk + multi-file + caps + ignore
   * load_user_memory reads from ~/.claude/ with home override
   * load_all_memory yields user-level first, then project-level
   * render_for_prompt: empty list → empty string; populated list emits
@@ -19,11 +23,19 @@ from pathlib import Path
 
 from backend.agents.project_memory import (
     PROJECT_RULE_FILENAMES,
+    PROJECT_RULE_FILE_MAX_BYTES,
+    PROJECT_RULE_TOTAL_MAX_BYTES,
     USER_RULE_FILENAMES,
     MemoryFile,
+    format_memory_size,
     load_all_memory,
     load_project_memory,
+    parse_ignored_paths,
     load_user_memory,
+    project_rule_dirs,
+    project_rule_merge_dirs,
+    project_rule_signature,
+    render_operator_summary,
     render_for_prompt,
 )
 
@@ -58,12 +70,13 @@ def test_load_project_skips_empty(tmp_path: Path) -> None:
     assert "AGENTS.md" not in conventions
 
 
-def test_load_project_preserves_canonical_order(tmp_path: Path) -> None:
+def test_load_project_preserves_filename_precedence_order(tmp_path: Path) -> None:
     """Output order matches PROJECT_RULE_FILENAMES, regardless of write order."""
     for fn in ("WARP.md", "AGENTS.md", "CLAUDE.md", "OMNISIGHT.md"):
         (tmp_path / fn).write_text(f"{fn} body\n")
     out = load_project_memory(tmp_path)
     assert [m.convention for m in out] == list(PROJECT_RULE_FILENAMES)
+    assert out[-1].convention == "OMNISIGHT.md"
 
 
 def test_load_project_returns_empty_when_root_missing_files(tmp_path: Path) -> None:
@@ -76,6 +89,192 @@ def test_load_project_custom_filenames(tmp_path: Path) -> None:
     out = load_project_memory(tmp_path, filenames=("MY_RULES.md",))
     assert len(out) == 1
     assert out[0].convention == "MY_RULES.md"
+
+
+def test_project_rule_dirs_current_plus_three_parents(tmp_path: Path) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+
+    out = project_rule_dirs(current)
+
+    assert [p.name for p, _, _ in out] == ["d", "c", "b", "a"]
+    assert [distance for _, distance, _ in out] == [0, 1, 2, 3]
+    assert [weight for _, _, weight in out] == [4, 3, 2, 1]
+
+
+def test_project_rule_merge_dirs_parents_before_current(tmp_path: Path) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+
+    out = project_rule_merge_dirs(current)
+
+    assert [p.name for p, _, _ in out] == ["a", "b", "c", "d"]
+    assert [distance for _, distance, _ in out] == [3, 2, 1, 0]
+    assert [weight for _, _, weight in out] == [1, 2, 3, 4]
+
+
+def test_load_project_walks_parents_in_merge_precedence_order(
+    tmp_path: Path,
+) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+    (current / "CLAUDE.md").write_text("current\n")
+    (current.parent / "CLAUDE.md").write_text("parent-1\n")
+    (current.parent.parent / "CLAUDE.md").write_text("parent-2\n")
+    (current.parent.parent.parent / "CLAUDE.md").write_text("parent-3\n")
+    (tmp_path / "CLAUDE.md").write_text("too-far\n")
+
+    out = load_project_memory(current, filenames=("CLAUDE.md",))
+
+    assert [m.content.strip() for m in out] == [
+        "parent-3",
+        "parent-2",
+        "parent-1",
+        "current",
+    ]
+    assert [m.distance for m in out] == [3, 2, 1, 0]
+    assert [m.weight for m in out] == [1, 2, 3, 4]
+
+
+def test_load_project_project_specific_rules_come_after_generic(
+    tmp_path: Path,
+) -> None:
+    current = tmp_path / "a" / "b"
+    current.mkdir(parents=True)
+    (current.parent / "OMNISIGHT.md").write_text("parent project specific\n")
+    (current / "CLAUDE.md").write_text("current generic\n")
+    (current / "OMNISIGHT.md").write_text("current project specific\n")
+
+    out = load_project_memory(current)
+
+    assert [m.content.strip() for m in out] == [
+        "parent project specific",
+        "current generic",
+        "current project specific",
+    ]
+    assert out[-1].convention == "OMNISIGHT.md"
+    assert out[-1].distance == 0
+
+
+def test_project_rule_signature_tracks_content_changes(tmp_path: Path) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("first\n")
+    first = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    rule_file.write_text("second rules\n")
+    second = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    assert first != second
+
+
+def test_project_rule_signature_tracks_add_and_remove(tmp_path: Path) -> None:
+    first = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("rules\n")
+    second = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    rule_file.unlink()
+    third = project_rule_signature(tmp_path, filenames=("CLAUDE.md",))
+
+    assert first == ()
+    assert second != first
+    assert third == first
+
+
+def test_load_project_truncates_each_rule_file_at_five_kib(
+    tmp_path: Path,
+) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("a" * (PROJECT_RULE_FILE_MAX_BYTES + 20))
+
+    out = load_project_memory(tmp_path, filenames=("CLAUDE.md",))
+
+    assert len(out) == 1
+    assert out[0].size_bytes == PROJECT_RULE_FILE_MAX_BYTES + 20
+    assert out[0].included_bytes == PROJECT_RULE_FILE_MAX_BYTES
+    assert out[0].truncated is True
+    assert out[0].truncated_reason == "file"
+    assert len(out[0].content.encode("utf-8")) == PROJECT_RULE_FILE_MAX_BYTES
+
+
+def test_load_project_truncates_merged_rules_at_fifty_kib(
+    tmp_path: Path,
+) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+    for base in (current, current.parent, current.parent.parent):
+        for fn in PROJECT_RULE_FILENAMES:
+            (base / fn).write_text("x" * PROJECT_RULE_FILE_MAX_BYTES)
+
+    out = load_project_memory(current)
+
+    assert sum(m.included_bytes for m in out) == PROJECT_RULE_TOTAL_MAX_BYTES
+    assert out[-1].truncated is True
+    assert out[-1].truncated_reason == "total"
+    assert out[-1].included_bytes == 0
+
+
+def test_load_project_marks_operator_ignored_rule_file(
+    tmp_path: Path,
+) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("ignore me\n")
+
+    out = load_project_memory(tmp_path, ignored_paths=[rule_file])
+
+    assert len(out) == 1
+    assert out[0].ignored is True
+    assert out[0].content == ""
+    assert out[0].size_bytes == len("ignore me\n")
+    assert out[0].included_bytes == 0
+
+
+def test_wp5_full_matrix_parent_multi_file_caps_ignore_and_summary(
+    tmp_path: Path,
+) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+    parent_three = current.parent.parent.parent
+    parent_two = current.parent.parent
+    parent_one = current.parent
+
+    (parent_three / "CLAUDE.md").write_text("p3-rule\n")
+    ignored_file = parent_two / "AGENTS.md"
+    ignored_file.write_text("ignored\n")
+    (parent_one / "WARP.md").write_text("w" * 12)
+    (current / "OMNISIGHT.md").write_text("current-omni\n")
+    (tmp_path / "CLAUDE.md").write_text("too-far\n")
+
+    out = load_project_memory(
+        current,
+        max_file_bytes=8,
+        max_total_bytes=19,
+        ignored_paths=[ignored_file],
+    )
+
+    assert [m.convention for m in out] == [
+        "CLAUDE.md",
+        "AGENTS.md",
+        "WARP.md",
+        "OMNISIGHT.md",
+    ]
+    assert [m.distance for m in out] == [3, 2, 1, 0]
+    assert [m.weight for m in out] == [1, 2, 3, 4]
+    assert [m.content for m in out] == ["p3-rule", "", "w" * 8, "curr"]
+    assert [m.included_bytes for m in out] == [7, 0, 8, 4]
+    assert [m.ignored for m in out] == [False, True, False, False]
+    assert [m.truncated_reason for m in out] == [None, None, "file", "total"]
+    assert "too-far" not in render_for_prompt(out)
+
+    summary = render_operator_summary(out, project_root=current)
+
+    assert "Memory: 4 rule file(s)" in summary
+    assert "CLAUDE.md (project d=3 w=1) size=8 B included=7 B [loaded]" in summary
+    assert "AGENTS.md (project d=2 w=2) size=8 B included=0 B [ignored]" in summary
+    assert "WARP.md (project d=1 w=3) size=12 B included=8 B [truncated:file]" in summary
+    assert "OMNISIGHT.md (project d=0 w=4) size=13 B included=4 B [truncated:total]" in summary
+    assert "OMNISIGHT_RULE_IGNORE='<path>[,<path>...]'" in summary
 
 
 # ─── load_user_memory ────────────────────────────────────────────
@@ -158,6 +357,8 @@ def test_render_includes_header_and_subheadings(tmp_path: Path) -> None:
             convention="CLAUDE.md",
             scope="project",
             content="rule A\nrule B",
+            distance=0,
+            weight=4,
         ),
         MemoryFile(
             path=tmp_path / "AGENTS.md",
@@ -168,10 +369,93 @@ def test_render_includes_header_and_subheadings(tmp_path: Path) -> None:
     ]
     out = render_for_prompt(files)
     assert "L1 不可違反" in out  # default header
-    assert "## CLAUDE.md（scope=project）" in out
+    assert "## CLAUDE.md（scope=project, distance=0, weight=4）" in out
     assert "## AGENTS.md（scope=user）" in out
     assert "rule A" in out
     assert "rule X" in out
+
+
+def test_render_surfaces_truncated_and_ignore_options(tmp_path: Path) -> None:
+    files = [
+        MemoryFile(
+            path=tmp_path / "CLAUDE.md",
+            convention="CLAUDE.md",
+            scope="project",
+            content="a" * PROJECT_RULE_FILE_MAX_BYTES,
+            size_bytes=PROJECT_RULE_FILE_MAX_BYTES + 1,
+            included_bytes=PROJECT_RULE_FILE_MAX_BYTES,
+            truncated=True,
+            truncated_reason="file",
+        ),
+        MemoryFile(
+            path=tmp_path / "AGENTS.md",
+            convention="AGENTS.md",
+            scope="project",
+            content="",
+            size_bytes=9,
+            ignored=True,
+        ),
+    ]
+
+    out = render_for_prompt(files)
+
+    assert "truncated=true, reason=file" in out
+    assert "[truncated; operator may ignore this file]" in out
+    assert "ignored=true" in out
+    assert "[ignored by operator]" in out
+
+
+def test_render_operator_summary_lists_files_sizes_and_ignore_hint(
+    tmp_path: Path,
+) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("rules\n")
+    ignored_file = tmp_path / "AGENTS.md"
+    ignored_file.write_text("ignore me\n")
+
+    files = load_project_memory(tmp_path, ignored_paths=[ignored_file])
+
+    out = render_operator_summary(files, project_root=tmp_path)
+
+    assert "Memory: 2 rule file(s)" in out
+    assert "CLAUDE.md (project d=0 w=4) size=6 B included=5 B [loaded]" in out
+    assert "AGENTS.md (project d=0 w=4) size=10 B included=0 B [ignored]" in out
+    assert "OMNISIGHT_RULE_IGNORE='<path>[,<path>...]'" in out
+
+
+def test_render_operator_summary_marks_truncated_files(tmp_path: Path) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("a" * (PROJECT_RULE_FILE_MAX_BYTES + 1))
+
+    files = load_project_memory(tmp_path, filenames=("CLAUDE.md",))
+
+    out = render_operator_summary(files, project_root=tmp_path)
+
+    assert "size=5.0 KiB included=5.0 KiB [truncated:file]" in out
+
+
+def test_parse_ignored_paths_resolves_operator_env_values(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+
+    out = parse_ignored_paths(
+        "CLAUDE.md,~/AGENTS.md\n/subtree/WARP.md",
+        project_root=project,
+        home=home,
+    )
+
+    assert out == [
+        project / "CLAUDE.md",
+        home / "AGENTS.md",
+        Path("/subtree/WARP.md"),
+    ]
+
+
+def test_format_memory_size_uses_bytes_then_kib() -> None:
+    assert format_memory_size(999) == "999 B"
+    assert format_memory_size(1536) == "1.5 KiB"
 
 
 def test_render_custom_header() -> None:

@@ -16,9 +16,11 @@ from pathlib import Path
 import pytest
 
 from backend.rag.corpus import (
+    HD_RAG_RELATIVE_GLOBS,
     VALID_AUDIENCES,
     _classify_default,  # type: ignore[attr-defined]
     _parse_doc,  # type: ignore[attr-defined]
+    load_corpus,
     visible_audiences_for,
 )
 from backend.rag import retrieval as _retrieval
@@ -164,3 +166,82 @@ def test_valid_audiences_constant_matches_classification():
             assert aud in visible_union, (
                 f"audience {aud!r} declared but not reachable by any role"
             )
+
+
+def test_load_corpus_auto_ingests_hd_rag_markdown_with_parent_walker(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "org" / "repo"
+    app = repo / "apps" / "firmware"
+    docs = app / "docs"
+    parent_hd = repo / "hd" / "datasheets"
+    current_specs = app / "sensor_specs"
+    current_errata = app / "errata"
+    docs.mkdir(parents=True)
+    parent_hd.mkdir(parents=True)
+    current_specs.mkdir(parents=True)
+    current_errata.mkdir(parents=True)
+
+    (docs / "operator-guide.md").write_text(
+        "---\naudience: operator\n---\n# Operator Guide\nnormal docs\n"
+    )
+    (parent_hd / "imx415.md").write_text(
+        "# IMX415 Datasheet\nMIPI lane timing and register map\n"
+    )
+    (current_specs / "os08a20.md").write_text(
+        "# OS08A20 Sensor Spec\nHDR mode and pixel array\n"
+    )
+    (current_errata / "imx415-rev-b.md").write_text(
+        "# IMX415 Rev B Errata\n60Hz flicker rejection caveat\n"
+    )
+    (tmp_path / "hd" / "datasheets").mkdir(parents=True)
+    (tmp_path / "hd" / "datasheets" / "too-far.md").write_text(
+        "# Too Far\noutside three-parent walk\n"
+    )
+
+    out = load_corpus(docs)
+    paths = [doc.path for doc in out]
+
+    assert "docs/operator-guide.md" in paths
+    assert "hd/datasheets/imx415.md" in paths
+    assert "sensor_specs/os08a20.md" in paths
+    assert "errata/imx415-rev-b.md" in paths
+    assert "hd/datasheets/too-far.md" not in paths
+    assert all(
+        doc.audience == "operator"
+        for doc in out
+        if doc.path
+        in {
+            "hd/datasheets/imx415.md",
+            "sensor_specs/os08a20.md",
+            "errata/imx415-rev-b.md",
+        }
+    )
+
+
+def test_retrieve_returns_auto_ingested_hd_rag_doc(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from backend.rag import corpus as _c
+
+    docs = tmp_path / "repo" / "docs"
+    hd = tmp_path / "repo" / "hd" / "errata"
+    docs.mkdir(parents=True)
+    hd.mkdir(parents=True)
+    (hd / "imx415.md").write_text(
+        "# IMX415 Errata\nblack level calibration fails after hot reset\n"
+    )
+
+    monkeypatch.setattr(_c, "DOC_ROOT", docs)
+    _retrieval.reset_corpus_cache()
+
+    hits = _retrieval.retrieve("black level hot reset", role="operator")
+
+    assert any(hit.doc_path == "hd/errata/imx415.md" for hit in hits)
+
+
+def test_hd_rag_globs_cover_expected_document_families() -> None:
+    assert "hd/datasheets/**/*.md" in HD_RAG_RELATIVE_GLOBS
+    assert "hd/sensor_specs/**/*.md" in HD_RAG_RELATIVE_GLOBS
+    assert "hd/errata/**/*.md" in HD_RAG_RELATIVE_GLOBS

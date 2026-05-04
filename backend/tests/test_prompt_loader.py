@@ -91,6 +91,149 @@ class TestLoadRoleSkill:
 
 class TestBuildSystemPrompt:
 
+    def test_load_core_rules_scans_all_project_rule_files(self, tmp_path, monkeypatch):
+        import backend.prompt_loader as prompt_loader
+
+        for filename in ("CLAUDE.md", "AGENTS.md", "OMNISIGHT.md", "WARP.md"):
+            (tmp_path / filename).write_text(f"{filename} body\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        content = prompt_loader.load_core_rules()
+        assert content.index("CLAUDE.md body") < content.index("AGENTS.md body")
+        assert content.index("AGENTS.md body") < content.index("WARP.md body")
+        assert content.index("WARP.md body") < content.index("OMNISIGHT.md body")
+
+    def test_load_core_rules_walks_three_parent_dirs_with_weight(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import backend.prompt_loader as prompt_loader
+
+        current = tmp_path / "a" / "b" / "c" / "d"
+        current.mkdir(parents=True)
+        (current / "CLAUDE.md").write_text("current rules\n")
+        (current.parent / "CLAUDE.md").write_text("parent one rules\n")
+        (current.parent.parent / "CLAUDE.md").write_text("parent two rules\n")
+        (current.parent.parent.parent / "CLAUDE.md").write_text("parent three rules\n")
+        (tmp_path / "CLAUDE.md").write_text("too far rules\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", current)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        content = prompt_loader.load_core_rules()
+        assert content.index("parent three rules") < content.index("parent two rules")
+        assert content.index("parent two rules") < content.index("parent one rules")
+        assert content.index("parent one rules") < content.index("current rules")
+        assert "too far rules" not in content
+        assert "distance=0, weight=4" in content
+        assert "distance=3, weight=1" in content
+
+    def test_load_core_rules_project_specific_after_generic(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import backend.prompt_loader as prompt_loader
+
+        current = tmp_path / "repo" / "app"
+        current.mkdir(parents=True)
+        (current.parent / "OMNISIGHT.md").write_text("parent project specific\n")
+        (current / "CLAUDE.md").write_text("current generic\n")
+        (current / "OMNISIGHT.md").write_text("current project specific\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", current)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        content = prompt_loader.load_core_rules()
+        assert content.index("parent project specific") < content.index(
+            "current generic"
+        )
+        assert content.index("current generic") < content.index(
+            "current project specific"
+        )
+
+    def test_load_core_rules_reloads_when_rule_file_changes(self, tmp_path, monkeypatch):
+        import backend.prompt_loader as prompt_loader
+
+        rule_file = tmp_path / "CLAUDE.md"
+        rule_file.write_text("first rules\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        first = prompt_loader.load_core_rules()
+        rule_file.write_text("second rules are longer\n")
+        second = prompt_loader.load_core_rules()
+
+        assert "first rules" in first
+        assert "second rules are longer" in second
+        assert "first rules" not in second
+
+    def test_load_core_rules_reloads_when_rule_file_is_added(self, tmp_path, monkeypatch):
+        import backend.prompt_loader as prompt_loader
+
+        (tmp_path / "CLAUDE.md").write_text("claude rules\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        first = prompt_loader.load_core_rules()
+        (tmp_path / "AGENTS.md").write_text("agents rules\n")
+        second = prompt_loader.load_core_rules()
+
+        assert "claude rules" in first
+        assert "agents rules" not in first
+        assert "agents rules" in second
+
+    def test_load_core_rules_reloads_parent_multi_file_merge(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import backend.prompt_loader as prompt_loader
+
+        current = tmp_path / "repo" / "service"
+        current.mkdir(parents=True)
+        parent_rule = current.parent / "CLAUDE.md"
+        parent_rule.write_text("parent first\n")
+        (current / "AGENTS.md").write_text("current agents\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", current)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        first = prompt_loader.load_core_rules()
+        parent_rule.write_text("parent second rules\n")
+        second = prompt_loader.load_core_rules()
+
+        assert "parent first" in first
+        assert "parent second rules" in second
+        assert "parent first" not in second
+        assert second.index("parent second rules") < second.index("current agents")
+        assert "distance=1, weight=3" in second
+        assert "distance=0, weight=4" in second
+
+    def test_load_core_rules_marks_oversized_file_truncated(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import backend.prompt_loader as prompt_loader
+        from backend.agents.project_memory import PROJECT_RULE_FILE_MAX_BYTES
+
+        (tmp_path / "CLAUDE.md").write_text(
+            "x" * (PROJECT_RULE_FILE_MAX_BYTES + 1)
+        )
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        content = prompt_loader.load_core_rules()
+        assert "truncated=true, reason=file" in content
+        assert "[truncated; operator may ignore this file]" in content
+
     def test_with_model_and_role(self):
         prompt = build_system_prompt(
             model_name="claude-sonnet-4",

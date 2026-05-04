@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 346
+entry_count: 354
 status_counts:
-  dev-only: 337
+  dev-only: 345
   deployed-inactive: 4
   deployed-active: 3
   deployed-observed: 0
@@ -3256,3 +3256,75 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.3 cascade 已有 unit/regression coverage；staging 需以 BP generic edit、HD `.dts` strict reject、W14
     sandbox edit、env knob disabled 各跑一次 smoke 後再 flip。
+- id: 2026-05-04--WP.5.1
+  header_line: 45505
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: WP.5.1
+  title: WP.5.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.5.2/WP.5.3/WP.5.6 需補 parent walk、檔案 watcher 與 size cap 後，再用 runner/backend prompt smoke
+    驗證 rule merge 來源清單。
+- id: 2026-05-04--WP.5.2
+  header_line: 45521
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: WP.5.2
+  title: WP.5.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.5.3/WP.5.4/WP.5.6 需補 watcher、merge precedence 與 size cap 後，再用 runner/backend prompt smoke
+    驗證 parent rule stack。
+- id: 2026-05-04--WP.5.3
+  header_line: 45537
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: WP.5.3
+  title: WP.5.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.5.4/WP.5.6/WP.5.7 需補 precedence、size cap 與 UI visibility 後，再以 runner/backend prompt smoke
+    驗證 operator rule file edits 會出現在新 prompt。
+- id: 2026-05-04--WP.5.4
+  header_line: 45553
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: WP.5.4
+  title: WP.5.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.5.5/WP.5.6/WP.5.7 需補 RAG ingest、size cap 與 UI visibility 後，再以 runner/backend prompt smoke
+    驗證完整 rule loading surface。
+- id: 2026-05-04--WP.5.5
+  header_line: 45570
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: WP.5.5
+  title: WP.5.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.5.6/WP.5.7 需補 size cap、ignore UI 與載入來源顯示後，再以 HD datasheet/spec/errata fixture 跑 backend
+    RAG smoke。
+- id: 2026-05-04--WP.5.6
+  header_line: 45586
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: WP.5.6
+  title: WP.5.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.5.7 需把 `MemoryFile` size/truncated/ignored metadata 接到 operator UI，提供 loaded-file 清單與
+    per-file ignore 操作。
+- id: 2026-05-04--WP.5.7
+  header_line: 45603
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: WP.5.7
+  title: WP.5.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.5.8 需補 parent walk + multi-file merge + size cap + ignore + reload 的 full regression matrix，並用
+    runner smoke 驗證 operator UI output。
+- id: 2026-05-04--WP.5.8
+  header_line: 45619
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: WP.5.8
+  title: WP.5.8 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 需在 runner/backend prompt smoke 中驗證 operator 實際設定 `OMNISIGHT_RULE_IGNORE` 與 rule file edits
+    後，console UI 與下一次 prompt assembly 都符合 WP.5.8 regression。

@@ -1,7 +1,9 @@
 """R20 Phase 0 — Doc corpus loader with audience classification.
 
-Walks ``docs/**/*.md``, parses optional ``audience:`` frontmatter, and
-exposes a queryable list of ``Doc`` records.
+Walks ``docs/**/*.md`` plus HD RAG markdown discovered by the same
+current-dir + parent-dir walker as project memory, parses optional
+``audience:`` frontmatter, and exposes a queryable list of ``Doc``
+records.
 
 Audience classification (the entire point of this module):
 
@@ -37,6 +39,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.agents.project_memory import project_rule_merge_dirs
+
 # Locating the docs root. Defaults to ``docs`` relative to repo root
 # but can be overridden in tests / containerised deployments where the
 # repo isn't laid out at $PWD.
@@ -60,8 +64,33 @@ _DIR_DEFAULTS: list[tuple[str, str]] = [
     ("docs/phase-", "internal"),
     ("docs/priority-y/", "internal"),
     ("docs/security/", "internal"),
+    ("hd/datasheets/", "operator"),
+    ("hd/sensor_specs/", "operator"),
+    ("hd/errata/", "operator"),
+    ("hardware/datasheets/", "operator"),
+    ("hardware/sensor_specs/", "operator"),
+    ("hardware/errata/", "operator"),
+    ("datasheets/", "operator"),
+    ("sensor_specs/", "operator"),
+    ("errata/", "operator"),
     ("README.md", "public"),
 ]
+
+# WP.5.5: HD datasheets / sensor specs / errata are project-context
+# corpus inputs, not generic docs. The directory set is intentionally
+# conventional and markdown-only so vision-parse output can be ingested
+# automatically without pulling binary PDFs into the Phase 0 keyword RAG.
+HD_RAG_RELATIVE_GLOBS: tuple[str, ...] = (
+    "hd/datasheets/**/*.md",
+    "hd/sensor_specs/**/*.md",
+    "hd/errata/**/*.md",
+    "hardware/datasheets/**/*.md",
+    "hardware/sensor_specs/**/*.md",
+    "hardware/errata/**/*.md",
+    "datasheets/**/*.md",
+    "sensor_specs/**/*.md",
+    "errata/**/*.md",
+)
 
 
 @dataclass(frozen=True)
@@ -93,14 +122,15 @@ def _classify_default(rel_path: str) -> str:
     return "internal"
 
 
-def _parse_doc(path: Path, root: Path) -> Doc:
+def _parse_doc(path: Path, root: Path, *, rel_base: Path | None = None) -> Doc:
     """Read one .md file, parse frontmatter + title, return a Doc."""
     raw = path.read_text(encoding="utf-8", errors="replace")
     # Compute path relative to the repo root (not docs root) so the
     # citation path matches what an operator would type to open the
     # file: ``docs/operator/foo.md`` rather than ``operator/foo.md``.
+    base = rel_base or root.parent
     try:
-        rel = str(path.relative_to(root.parent))
+        rel = str(path.relative_to(base))
     except ValueError:
         rel = str(path)
 
@@ -121,16 +151,37 @@ def _parse_doc(path: Path, root: Path) -> Doc:
     return Doc(path=rel, title=title, audience=audience, body=body)
 
 
+def _load_hd_corpus(repo_root: Path) -> list[Doc]:
+    """Load HD RAG markdown using the project-memory parent walker."""
+    docs: dict[str, Doc] = {}
+    for base, _distance, _weight in project_rule_merge_dirs(repo_root):
+        for pattern in HD_RAG_RELATIVE_GLOBS:
+            for path in sorted(base.glob(pattern)):
+                if not path.is_file():
+                    continue
+                key = str(path.resolve())
+                if key in docs:
+                    continue
+                docs[key] = _parse_doc(path, base, rel_base=base)
+    return [docs[key] for key in sorted(docs)]
+
+
 def load_corpus(root: Path | None = None) -> list[Doc]:
     """Load every .md doc under ``root`` (default ``DOC_ROOT``).
 
-    Returns docs sorted by path so retrieval is deterministic — useful
-    for unit tests that snapshot retrieval results.
+    Also auto-ingests HD datasheets / sensor specs / errata markdown
+    discovered by the same current-dir + parent-dir walker used for
+    project memory. Returns docs sorted by path so retrieval is
+    deterministic — useful for unit tests that snapshot retrieval
+    results.
     """
     root = root or DOC_ROOT
-    if not root.exists():
-        return []
-    return [_parse_doc(p, root) for p in sorted(root.rglob("*.md"))]
+    repo_root = root.parent
+    docs: list[Doc] = []
+    if root.exists():
+        docs.extend(_parse_doc(p, root) for p in sorted(root.rglob("*.md")))
+    docs.extend(_load_hd_corpus(repo_root))
+    return sorted(docs, key=lambda d: d.path)
 
 
 def visible_audiences_for(role: str) -> frozenset[str]:
