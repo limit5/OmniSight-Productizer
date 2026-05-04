@@ -13,6 +13,7 @@ assignment, no eval.
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,19 +25,22 @@ COMPONENT_LIBRARY_VERSION = "1.0.0"
 
 
 @dataclass
-class Component:
+class Component(ABC):
     id: str
     title: str
     description: str
     required_endpoints: list[str] = field(default_factory=list)
     used_by_skills: list[str] = field(default_factory=list)
 
+    @abstractmethod
     def render_html(self) -> str:
         raise NotImplementedError
 
+    @abstractmethod
     def render_js(self) -> str:
         raise NotImplementedError
 
+    @abstractmethod
     def hal_endpoints(self) -> list[_hb.HALEndpoint]:
         raise NotImplementedError
 

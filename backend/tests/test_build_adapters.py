@@ -284,6 +284,17 @@ class TestBuildSource:
         ba.BuildSource(path=tmp_source).validate()
 
 
+class TestBuildAdapterBase:
+
+    def test_base_adapter_requires_build_implementation(self):
+        class MissingBuildAdapter(ba.BuildAdapter):
+            target = "docker"
+            binaries = ("docker",)
+
+        with pytest.raises(TypeError, match="_build"):
+            MissingBuildAdapter(name="foo", version="1.0.0")
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  DockerImageAdapter
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

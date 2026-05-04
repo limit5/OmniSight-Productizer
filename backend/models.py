@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------- Agent ----------
@@ -75,6 +75,8 @@ class AgentWorkspace(BaseModel):
 
 
 class Agent(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str
     name: str
     type: AgentType
@@ -86,9 +88,6 @@ class Agent(BaseModel):
     sub_tasks: list[SubTask] = Field(default_factory=list)
     workspace: AgentWorkspace = Field(default_factory=AgentWorkspace)
     file_scope: list[str] = Field(default_factory=list)  # Glob patterns from CODEOWNERS
-
-    class Config:
-        populate_by_name = True
 
 
 class AgentCreate(BaseModel):

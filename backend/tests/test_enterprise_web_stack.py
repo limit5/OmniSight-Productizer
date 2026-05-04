@@ -6,10 +6,13 @@ Import/Export, Workflow engine, Test recipes, Artifacts, Gate validation.
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import time
 
 import pytest
+from openpyxl import load_workbook
 
 from backend import enterprise_web_stack as ews
 
@@ -420,12 +423,18 @@ class TestReports:
         assert "data" in parsed
         assert len(parsed["data"]) == 1
 
-    def test_export_xlsx_stub(self):
+    def test_export_xlsx(self):
         data = [{"name": "A", "value": 10}]
         report = ews.generate_report("tabular", data)
         export = ews.export_report(report, "xlsx")
         assert export.format == "xlsx"
         assert export.row_count == 1
+        workbook = load_workbook(io.BytesIO(export.content))
+        worksheet = workbook.active
+        assert worksheet.title == "Report"
+        assert [cell.value for cell in worksheet[1]] == ["name", "value"]
+        assert [cell.value for cell in worksheet[2]] == ["A", "10"]
+        assert export.content.startswith(b"PK")
 
     def test_export_pdf_stub(self):
         data = [{"name": "A"}]
@@ -676,11 +685,24 @@ class TestImportExport:
         assert preview.total_rows == 2
         assert preview.detected_types["score"] == "number"
 
-    def test_preview_xlsx_stub(self):
-        data = "name\tage\nAlice\t30\nBob\t25"
-        preview = ews.preview_import(data, "xlsx", 5)
+    def test_preview_xlsx(self):
+        report = ews.generate_report("tabular", [
+            {"name": "Alice", "age": 30},
+            {"name": "Bob", "age": 25},
+            {"name": "Charlie", "age": 35},
+        ])
+        export = ews.export_report(report, "xlsx")
+        data = base64.b64encode(export.content).decode("ascii")
+
+        preview = ews.preview_import(data, "xlsx", 2)
         assert preview.format == "xlsx"
-        assert preview.total_rows == 2
+        assert preview.total_rows == 3
+        assert preview.columns == ["name", "age"]
+        assert preview.sample_rows == [
+            {"name": "Alice", "age": "30"},
+            {"name": "Bob", "age": "25"},
+        ]
+        assert preview.detected_types["age"] == "string"
 
     def test_preview_unknown_format(self):
         with pytest.raises(ValueError, match="Unknown import format"):

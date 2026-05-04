@@ -421,6 +421,29 @@
         "title": "AltitudeRequest",
         "type": "object"
       },
+      "AltitudeResponse": {
+        "properties": {
+          "altitude_m": {
+            "title": "Altitude M",
+            "type": "number"
+          },
+          "pressure_pa": {
+            "title": "Pressure Pa",
+            "type": "number"
+          },
+          "sea_level_pressure_pa": {
+            "title": "Sea Level Pressure Pa",
+            "type": "number"
+          }
+        },
+        "required": [
+          "altitude_m",
+          "pressure_pa",
+          "sea_level_pressure_pa"
+        ],
+        "title": "AltitudeResponse",
+        "type": "object"
+      },
       "ApproveRejectRequest": {
         "properties": {
           "approver": {
@@ -438,6 +461,60 @@
           "approver"
         ],
         "title": "ApproveRejectRequest",
+        "type": "object"
+      },
+      "ArtifactDefinitionResponse": {
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "file_pattern": {
+            "title": "File Pattern",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "name",
+          "description",
+          "file_pattern"
+        ],
+        "title": "ArtifactDefinitionResponse",
+        "type": "object"
+      },
+      "ArtifactGenerationResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/CertArtifactResponse"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "sensor_type": {
+            "title": "Sensor Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor_type",
+          "count",
+          "artifacts"
+        ],
+        "title": "ArtifactGenerationResponse",
         "type": "object"
       },
       "AssembleRequest": {
@@ -673,6 +750,165 @@
         "title": "AuthenticateRequest",
         "type": "object"
       },
+      "AxisResponse": {
+        "properties": {
+          "axis_id": {
+            "title": "Axis Id",
+            "type": "string"
+          },
+          "homing_feedrate_mm_s": {
+            "title": "Homing Feedrate Mm S",
+            "type": "number"
+          },
+          "max_accel_mm_s2": {
+            "title": "Max Accel Mm S2",
+            "type": "number"
+          },
+          "max_feedrate_mm_s": {
+            "title": "Max Feedrate Mm S",
+            "type": "number"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "steps_per_mm": {
+            "title": "Steps Per Mm",
+            "type": "number"
+          },
+          "travel_mm": {
+            "title": "Travel Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis_id",
+          "name",
+          "steps_per_mm",
+          "max_feedrate_mm_s",
+          "max_accel_mm_s2",
+          "homing_feedrate_mm_s",
+          "travel_mm"
+        ],
+        "title": "AxisResponse",
+        "type": "object"
+      },
+      "BarometerDriverResponse": {
+        "properties": {
+          "bus": {
+            "title": "Bus",
+            "type": "string"
+          },
+          "compatible_socs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Compatible Socs",
+            "type": "array"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "i2c_addr_default": {
+            "title": "I2C Addr Default",
+            "type": "string"
+          },
+          "modes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Modes",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pressure_range_hpa": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Pressure Range Hpa",
+            "type": "array"
+          },
+          "pressure_resolution_pa": {
+            "title": "Pressure Resolution Pa",
+            "type": "number"
+          },
+          "sample_rate_hz": {
+            "title": "Sample Rate Hz",
+            "type": "integer"
+          },
+          "temperature_range_c": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Temperature Range C",
+            "type": "array"
+          },
+          "vendor": {
+            "title": "Vendor",
+            "type": "string"
+          }
+        },
+        "required": [
+          "driver_id",
+          "name",
+          "vendor",
+          "bus",
+          "i2c_addr_default",
+          "pressure_range_hpa",
+          "pressure_resolution_pa",
+          "temperature_range_c",
+          "sample_rate_hz",
+          "modes",
+          "compatible_socs"
+        ],
+        "title": "BarometerDriverResponse",
+        "type": "object"
+      },
+      "BarometerDriversResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "drivers": {
+            "items": {
+              "$ref": "#/components/schemas/BarometerDriverResponse"
+            },
+            "title": "Drivers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "drivers"
+        ],
+        "title": "BarometerDriversResponse",
+        "type": "object"
+      },
+      "BillingPortalSessionRequest": {
+        "properties": {
+          "customer_id": {
+            "description": "Stripe customer ID",
+            "title": "Customer Id",
+            "type": "string"
+          },
+          "return_url": {
+            "default": "",
+            "description": "Portal return URL override",
+            "title": "Return Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "title": "BillingPortalSessionRequest",
+        "type": "object"
+      },
       "BindUdcRequest": {
         "properties": {
           "udc_name": {
@@ -883,6 +1119,149 @@
         "title": "BulkUninstallBody",
         "type": "object"
       },
+      "CalibrationProfileResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parameters": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Parameters",
+            "type": "object"
+          },
+          "procedure": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Procedure",
+            "type": "array"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "name",
+          "description",
+          "parameters",
+          "procedure"
+        ],
+        "title": "CalibrationProfileResponse",
+        "type": "object"
+      },
+      "CalibrationProfilesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/CalibrationProfileResponse"
+            },
+            "title": "Profiles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "profiles"
+        ],
+        "title": "CalibrationProfilesResponse",
+        "type": "object"
+      },
+      "CalibrationRunResponse": {
+        "properties": {
+          "accel_bias": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Accel Bias",
+            "type": "array"
+          },
+          "accel_scale": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Accel Scale",
+            "type": "array"
+          },
+          "gyro_bias": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Gyro Bias",
+            "type": "array"
+          },
+          "gyro_scale": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Gyro Scale",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "misalignment_matrix": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "title": "Misalignment Matrix",
+            "type": "array"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "residual_g": {
+            "title": "Residual G",
+            "type": "number"
+          },
+          "samples_used": {
+            "title": "Samples Used",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "profile_id",
+          "status",
+          "accel_bias",
+          "accel_scale",
+          "gyro_bias",
+          "gyro_scale",
+          "misalignment_matrix",
+          "residual_g",
+          "samples_used",
+          "timestamp",
+          "message"
+        ],
+        "title": "CalibrationRunResponse",
+        "type": "object"
+      },
       "CameraConnectRequest": {
         "properties": {
           "camera_model": {
@@ -933,6 +1312,78 @@
         "title": "CameraConnectRequest",
         "type": "object"
       },
+      "CertArtifactBundleResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/CertArtifactItemResponse"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "gap_analysis": {
+            "items": {
+              "$ref": "#/components/schemas/CertGapAnalysisResponse"
+            },
+            "title": "Gap Analysis",
+            "type": "array"
+          },
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "standard",
+          "level",
+          "status",
+          "timestamp",
+          "artifacts",
+          "gap_analysis"
+        ],
+        "title": "CertArtifactBundleResponse",
+        "type": "object"
+      },
+      "CertArtifactItemResponse": {
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "file_pattern": {
+            "title": "File Pattern",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "name",
+          "status",
+          "file_pattern"
+        ],
+        "title": "CertArtifactItemResponse",
+        "type": "object"
+      },
       "CertArtifactRequest": {
         "properties": {
           "existing_artifacts": {
@@ -959,6 +1410,72 @@
           "standard"
         ],
         "title": "CertArtifactRequest",
+        "type": "object"
+      },
+      "CertArtifactResponse": {
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "file_path": {
+            "title": "File Path",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sensor_type": {
+            "title": "Sensor Type",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "name",
+          "sensor_type",
+          "status",
+          "file_path",
+          "description"
+        ],
+        "title": "CertArtifactResponse",
+        "type": "object"
+      },
+      "CertGapAnalysisResponse": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "priority": {
+            "title": "Priority",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "name",
+          "action",
+          "priority"
+        ],
+        "title": "CertGapAnalysisResponse",
         "type": "object"
       },
       "CfTunnelSkipRequest": {
@@ -1110,6 +1627,36 @@
         "title": "CheckResult",
         "type": "object"
       },
+      "CheckoutSessionRequest": {
+        "properties": {
+          "cancel_url": {
+            "default": "",
+            "description": "Checkout cancel URL override",
+            "title": "Cancel Url",
+            "type": "string"
+          },
+          "customer_id": {
+            "default": "",
+            "description": "Existing Stripe customer ID",
+            "title": "Customer Id",
+            "type": "string"
+          },
+          "price_id": {
+            "default": "",
+            "description": "Stripe Price ID override",
+            "title": "Price Id",
+            "type": "string"
+          },
+          "success_url": {
+            "default": "",
+            "description": "Checkout success URL override",
+            "title": "Success Url",
+            "type": "string"
+          }
+        },
+        "title": "CheckoutSessionRequest",
+        "type": "object"
+      },
       "CircuitResetRequest": {
         "properties": {
           "fingerprint": {
@@ -1168,6 +1715,58 @@
           "option_id"
         ],
         "title": "ClarifyRequest",
+        "type": "object"
+      },
+      "CompatibleSocResponse": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "notes": {
+            "title": "Notes",
+            "type": "string"
+          },
+          "payment_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Payment Capabilities",
+            "type": "array"
+          },
+          "soc_id": {
+            "title": "Soc Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "soc_id",
+          "name",
+          "payment_capabilities",
+          "notes"
+        ],
+        "title": "CompatibleSocResponse",
+        "type": "object"
+      },
+      "CompatibleSocsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CompatibleSocResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "CompatibleSocsResponse",
         "type": "object"
       },
       "ComplianceCheckRequest": {
@@ -1794,6 +2393,24 @@
         "title": "DashboardQueryRequest",
         "type": "object"
       },
+      "DeleteMachineResponse": {
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "machine_id",
+          "deleted"
+        ],
+        "title": "DeleteMachineResponse",
+        "type": "object"
+      },
       "DeltaApplyRequest": {
         "properties": {
           "engine_id": {
@@ -1983,6 +2600,194 @@
         "title": "DraftBody",
         "type": "object"
       },
+      "DriverStatusResponse": {
+        "properties": {
+          "axis_id": {
+            "title": "Axis Id",
+            "type": "string"
+          },
+          "current_ma": {
+            "title": "Current Ma",
+            "type": "integer"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "fault": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fault"
+          },
+          "microsteps": {
+            "title": "Microsteps",
+            "type": "integer"
+          },
+          "position_mm": {
+            "title": "Position Mm",
+            "type": "number"
+          },
+          "position_steps": {
+            "title": "Position Steps",
+            "type": "integer"
+          },
+          "sleep": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sleep"
+          },
+          "stall_threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stall Threshold"
+          },
+          "stealthchop": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stealthchop"
+          },
+          "step_count": {
+            "title": "Step Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "driver_id",
+          "axis_id",
+          "enabled",
+          "position_steps",
+          "position_mm",
+          "microsteps",
+          "current_ma",
+          "step_count"
+        ],
+        "title": "DriverStatusResponse",
+        "type": "object"
+      },
+      "EKFProfileResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "initial_covariance": {
+            "title": "Initial Covariance",
+            "type": "number"
+          },
+          "measurement_dim": {
+            "title": "Measurement Dim",
+            "type": "integer"
+          },
+          "measurement_noise": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Measurement Noise",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "prediction_model": {
+            "title": "Prediction Model",
+            "type": "string"
+          },
+          "process_noise": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Process Noise",
+            "type": "object"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "state_dim": {
+            "title": "State Dim",
+            "type": "integer"
+          },
+          "state_vector": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "State Vector",
+            "type": "array"
+          },
+          "update_model": {
+            "title": "Update Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "name",
+          "description",
+          "state_dim",
+          "measurement_dim",
+          "state_vector",
+          "process_noise",
+          "measurement_noise",
+          "initial_covariance",
+          "prediction_model",
+          "update_model"
+        ],
+        "title": "EKFProfileResponse",
+        "type": "object"
+      },
+      "EKFProfilesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/EKFProfileResponse"
+            },
+            "title": "Profiles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "profiles"
+        ],
+        "title": "EKFProfilesResponse",
+        "type": "object"
+      },
       "EKFRunRequest": {
         "properties": {
           "initial_orientation": {
@@ -2024,6 +2829,73 @@
         "title": "EKFRunRequest",
         "type": "object"
       },
+      "EKFRunResponse": {
+        "properties": {
+          "covariance_trace": {
+            "title": "Covariance Trace",
+            "type": "number"
+          },
+          "euler_deg": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Euler Deg",
+            "type": "object"
+          },
+          "gyro_bias": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Gyro Bias",
+            "type": "array"
+          },
+          "iterations": {
+            "title": "Iterations",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "quaternion": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Quaternion",
+            "type": "array"
+          },
+          "rms_error_deg": {
+            "title": "Rms Error Deg",
+            "type": "number"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "profile_id",
+          "state",
+          "quaternion",
+          "euler_deg",
+          "gyro_bias",
+          "covariance_trace",
+          "iterations",
+          "rms_error_deg",
+          "timestamp",
+          "message"
+        ],
+        "title": "EKFRunResponse",
+        "type": "object"
+      },
       "EMVGateRequest": {
         "properties": {
           "artifacts": {
@@ -2044,6 +2916,74 @@
           "level"
         ],
         "title": "EMVGateRequest",
+        "type": "object"
+      },
+      "EMVLevelResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "level_id": {
+            "title": "Level Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required_artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Artifacts",
+            "type": "array"
+          },
+          "required_dag_tasks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Dag Tasks",
+            "type": "array"
+          },
+          "test_categories": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Test Categories",
+            "type": "array"
+          }
+        },
+        "required": [
+          "level_id",
+          "name",
+          "description",
+          "test_categories",
+          "required_artifacts",
+          "required_dag_tasks"
+        ],
+        "title": "EMVLevelResponse",
+        "type": "object"
+      },
+      "EMVLevelsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EMVLevelResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "EMVLevelsResponse",
         "type": "object"
       },
       "EMVTestRequest": {
@@ -2070,6 +3010,69 @@
           "level"
         ],
         "title": "EMVTestRequest",
+        "type": "object"
+      },
+      "EMVTestResultResponse": {
+        "properties": {
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "test_cases": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Test Cases",
+            "type": "array"
+          },
+          "test_category": {
+            "title": "Test Category",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "level",
+          "test_category",
+          "status",
+          "timestamp",
+          "test_cases",
+          "summary"
+        ],
+        "title": "EMVTestResultResponse",
+        "type": "object"
+      },
+      "EMVTestResultsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/EMVTestResultResponse"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "results",
+          "count"
+        ],
+        "title": "EMVTestResultsResponse",
         "type": "object"
       },
       "EmissionsTestRequest": {
@@ -2128,6 +3131,67 @@
           }
         },
         "title": "EncoderCreateRequest",
+        "type": "object"
+      },
+      "EndstopStatusResponse": {
+        "properties": {
+          "axis_id": {
+            "title": "Axis Id",
+            "type": "string"
+          },
+          "endstop_type": {
+            "title": "Endstop Type",
+            "type": "string"
+          },
+          "trigger_position_mm": {
+            "title": "Trigger Position Mm",
+            "type": "number"
+          },
+          "triggered": {
+            "title": "Triggered",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "axis_id",
+          "endstop_type",
+          "triggered",
+          "trigger_position_mm"
+        ],
+        "title": "EndstopStatusResponse",
+        "type": "object"
+      },
+      "EndstopTypeResponse": {
+        "properties": {
+          "active_low": {
+            "title": "Active Low",
+            "type": "boolean"
+          },
+          "debounce_ms": {
+            "title": "Debounce Ms",
+            "type": "integer"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "endstop_type": {
+            "title": "Endstop Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "endstop_type",
+          "name",
+          "description",
+          "debounce_ms",
+          "active_low"
+        ],
+        "title": "EndstopTypeResponse",
         "type": "object"
       },
       "EnqueueRequest": {
@@ -2476,6 +3540,23 @@
         "title": "EntryPatch",
         "type": "object"
       },
+      "ExecuteGCodeResponse": {
+        "properties": {
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          },
+          "trace": {
+            "$ref": "#/components/schemas/MotionTraceResponse"
+          }
+        },
+        "required": [
+          "machine_id",
+          "trace"
+        ],
+        "title": "ExecuteGCodeResponse",
+        "type": "object"
+      },
       "ExportExecuteRequest": {
         "properties": {
           "data": {
@@ -2753,6 +3834,166 @@
           }
         },
         "title": "ForceTurboRequest",
+        "type": "object"
+      },
+      "GCodeCommandResponse": {
+        "properties": {
+          "axes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Axes",
+            "type": "array"
+          },
+          "command_id": {
+            "title": "Command Id",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parameters": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Parameters",
+            "type": "array"
+          }
+        },
+        "required": [
+          "command_id",
+          "name",
+          "description",
+          "axes",
+          "parameters"
+        ],
+        "title": "GCodeCommandResponse",
+        "type": "object"
+      },
+      "GPSProtocolResponse": {
+        "properties": {
+          "baud_default": {
+            "title": "Baud Default",
+            "type": "integer"
+          },
+          "checksum": {
+            "title": "Checksum",
+            "type": "string"
+          },
+          "key_messages": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Key Messages",
+            "type": "array"
+          },
+          "message_classes": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Message Classes",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "protocol_id": {
+            "title": "Protocol Id",
+            "type": "string"
+          },
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "supported_sentences": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Supported Sentences",
+            "type": "array"
+          },
+          "talker_ids": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Talker Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "protocol_id",
+          "name",
+          "standard",
+          "baud_default",
+          "supported_sentences",
+          "message_classes",
+          "key_messages",
+          "talker_ids",
+          "checksum"
+        ],
+        "title": "GPSProtocolResponse",
+        "type": "object"
+      },
+      "GPSProtocolsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "protocols": {
+            "items": {
+              "$ref": "#/components/schemas/GPSProtocolResponse"
+            },
+            "title": "Protocols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "protocols"
+        ],
+        "title": "GPSProtocolsResponse",
+        "type": "object"
+      },
+      "GateFindingResponse": {
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "item": {
+            "title": "Item",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "item",
+          "message"
+        ],
+        "title": "GateFindingResponse",
         "type": "object"
       },
       "GenerateReportRequest": {
@@ -3233,6 +4474,24 @@
         "title": "HALFieldReq",
         "type": "object"
       },
+      "HSMCloseResponse": {
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "session_id"
+        ],
+        "title": "HSMCloseResponse",
+        "type": "object"
+      },
       "HSMDecryptRequest": {
         "properties": {
           "ciphertext": {
@@ -3257,6 +4516,34 @@
           "key_id"
         ],
         "title": "HSMDecryptRequest",
+        "type": "object"
+      },
+      "HSMDecryptResponse": {
+        "properties": {
+          "command_used": {
+            "title": "Command Used",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "plaintext": {
+            "title": "Plaintext",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "plaintext",
+          "key_id",
+          "command_used"
+        ],
+        "title": "HSMDecryptResponse",
         "type": "object"
       },
       "HSMEncryptRequest": {
@@ -3285,6 +4572,34 @@
         "title": "HSMEncryptRequest",
         "type": "object"
       },
+      "HSMEncryptResponse": {
+        "properties": {
+          "ciphertext": {
+            "title": "Ciphertext",
+            "type": "string"
+          },
+          "command_used": {
+            "title": "Command Used",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "ciphertext",
+          "key_id",
+          "command_used"
+        ],
+        "title": "HSMEncryptResponse",
+        "type": "object"
+      },
       "HSMKeyGenRequest": {
         "properties": {
           "algorithm": {
@@ -3311,6 +4626,49 @@
         "title": "HSMKeyGenRequest",
         "type": "object"
       },
+      "HSMKeyGenResponse": {
+        "properties": {
+          "algorithm": {
+            "title": "Algorithm",
+            "type": "string"
+          },
+          "check_value": {
+            "title": "Check Value",
+            "type": "string"
+          },
+          "command_used": {
+            "title": "Command Used",
+            "type": "string"
+          },
+          "hsm_vendor": {
+            "title": "Hsm Vendor",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "key_type": {
+            "title": "Key Type",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "key_id",
+          "key_type",
+          "algorithm",
+          "check_value",
+          "hsm_vendor",
+          "command_used"
+        ],
+        "title": "HSMKeyGenResponse",
+        "type": "object"
+      },
       "HSMSessionRequest": {
         "properties": {
           "vendor": {
@@ -3323,6 +4681,212 @@
           "vendor"
         ],
         "title": "HSMSessionRequest",
+        "type": "object"
+      },
+      "HSMSessionResponse": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "number"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "vendor": {
+            "title": "Vendor",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "vendor",
+          "status",
+          "created_at",
+          "capabilities",
+          "metadata"
+        ],
+        "title": "HSMSessionResponse",
+        "type": "object"
+      },
+      "HSMSessionsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/HSMSessionResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "HSMSessionsResponse",
+        "type": "object"
+      },
+      "HSMVendorResponse": {
+        "properties": {
+          "commands": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Commands",
+            "type": "object"
+          },
+          "fips_level": {
+            "title": "Fips Level",
+            "type": "string"
+          },
+          "key_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Key Types",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pci_pts_certified": {
+            "title": "Pci Pts Certified",
+            "type": "boolean"
+          },
+          "protocols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Protocols",
+            "type": "array"
+          },
+          "supported_algorithms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supported Algorithms",
+            "type": "array"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "vendor_id": {
+            "title": "Vendor Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vendor_id",
+          "name",
+          "type",
+          "fips_level",
+          "pci_pts_certified",
+          "protocols",
+          "key_types",
+          "supported_algorithms",
+          "commands"
+        ],
+        "title": "HSMVendorResponse",
+        "type": "object"
+      },
+      "HSMVendorSummaryResponse": {
+        "properties": {
+          "fips_level": {
+            "title": "Fips Level",
+            "type": "string"
+          },
+          "key_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Key Types",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pci_pts_certified": {
+            "title": "Pci Pts Certified",
+            "type": "boolean"
+          },
+          "protocols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Protocols",
+            "type": "array"
+          },
+          "supported_algorithms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supported Algorithms",
+            "type": "array"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "vendor_id": {
+            "title": "Vendor Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vendor_id",
+          "name",
+          "type",
+          "fips_level",
+          "pci_pts_certified",
+          "protocols",
+          "key_types",
+          "supported_algorithms"
+        ],
+        "title": "HSMVendorSummaryResponse",
+        "type": "object"
+      },
+      "HSMVendorsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/HSMVendorSummaryResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "HSMVendorsResponse",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -3364,6 +4928,107 @@
           "version"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "HeaterResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "heater_id": {
+            "title": "Heater Id",
+            "type": "string"
+          },
+          "max_temp_c": {
+            "title": "Max Temp C",
+            "type": "number"
+          },
+          "min_temp_c": {
+            "title": "Min Temp C",
+            "type": "number"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pid_kd": {
+            "title": "Pid Kd",
+            "type": "number"
+          },
+          "pid_ki": {
+            "title": "Pid Ki",
+            "type": "number"
+          },
+          "pid_kp": {
+            "title": "Pid Kp",
+            "type": "number"
+          },
+          "thermal_runaway_grace_period_s": {
+            "title": "Thermal Runaway Grace Period S",
+            "type": "number"
+          },
+          "thermal_runaway_hysteresis_c": {
+            "title": "Thermal Runaway Hysteresis C",
+            "type": "number"
+          },
+          "thermal_runaway_max_deviation_c": {
+            "title": "Thermal Runaway Max Deviation C",
+            "type": "number"
+          },
+          "thermal_runaway_period_s": {
+            "title": "Thermal Runaway Period S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "heater_id",
+          "name",
+          "description",
+          "max_temp_c",
+          "min_temp_c",
+          "pid_kp",
+          "pid_ki",
+          "pid_kd",
+          "thermal_runaway_period_s",
+          "thermal_runaway_hysteresis_c",
+          "thermal_runaway_max_deviation_c",
+          "thermal_runaway_grace_period_s"
+        ],
+        "title": "HeaterResponse",
+        "type": "object"
+      },
+      "HeaterStatusResponse": {
+        "properties": {
+          "current": {
+            "title": "Current",
+            "type": "number"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "heater_id": {
+            "title": "Heater Id",
+            "type": "string"
+          },
+          "output": {
+            "title": "Output",
+            "type": "number"
+          },
+          "target": {
+            "title": "Target",
+            "type": "number"
+          }
+        },
+        "required": [
+          "heater_id",
+          "target",
+          "current",
+          "output",
+          "enabled"
+        ],
+        "title": "HeaterStatusResponse",
         "type": "object"
       },
       "HumanVotePayload": {
@@ -3448,6 +5113,119 @@
           "profile_id"
         ],
         "title": "ICCEmbedRequest",
+        "type": "object"
+      },
+      "IMUDriverResponse": {
+        "properties": {
+          "accel_range_g": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Accel Range G",
+            "type": "array"
+          },
+          "axes": {
+            "title": "Axes",
+            "type": "integer"
+          },
+          "bus": {
+            "title": "Bus",
+            "type": "string"
+          },
+          "compatible_socs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Compatible Socs",
+            "type": "array"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "fifo_depth": {
+            "title": "Fifo Depth",
+            "type": "integer"
+          },
+          "gyro_range_dps": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Gyro Range Dps",
+            "type": "array"
+          },
+          "i2c_addr_alt": {
+            "title": "I2C Addr Alt",
+            "type": "string"
+          },
+          "i2c_addr_default": {
+            "title": "I2C Addr Default",
+            "type": "string"
+          },
+          "interrupt_pin": {
+            "title": "Interrupt Pin",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sample_rate_hz": {
+            "title": "Sample Rate Hz",
+            "type": "integer"
+          },
+          "temperature": {
+            "title": "Temperature",
+            "type": "boolean"
+          },
+          "vendor": {
+            "title": "Vendor",
+            "type": "string"
+          },
+          "wake_on_motion": {
+            "title": "Wake On Motion",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "driver_id",
+          "name",
+          "vendor",
+          "bus",
+          "i2c_addr_default",
+          "i2c_addr_alt",
+          "accel_range_g",
+          "gyro_range_dps",
+          "sample_rate_hz",
+          "fifo_depth",
+          "axes",
+          "temperature",
+          "interrupt_pin",
+          "wake_on_motion",
+          "compatible_socs"
+        ],
+        "title": "IMUDriverResponse",
+        "type": "object"
+      },
+      "IMUDriversResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "drivers": {
+            "items": {
+              "$ref": "#/components/schemas/IMUDriverResponse"
+            },
+            "title": "Drivers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "drivers"
+        ],
+        "title": "IMUDriversResponse",
         "type": "object"
       },
       "IPPJobRequest": {
@@ -3923,6 +5701,57 @@
         "title": "InvokeHaltResponse",
         "type": "object"
       },
+      "KeyInjectionResponse": {
+        "properties": {
+          "device_id": {
+            "title": "Device Id",
+            "type": "string"
+          },
+          "error_message": {
+            "title": "Error Message",
+            "type": "string"
+          },
+          "hsm_vendor": {
+            "title": "Hsm Vendor",
+            "type": "string"
+          },
+          "ipek_check_value": {
+            "title": "Ipek Check Value",
+            "type": "string"
+          },
+          "key_serial_number": {
+            "title": "Key Serial Number",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "steps_completed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Steps Completed",
+            "type": "array"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "device_id",
+          "hsm_vendor",
+          "status",
+          "timestamp",
+          "key_serial_number",
+          "ipek_check_value",
+          "steps_completed",
+          "error_message"
+        ],
+        "title": "KeyInjectionResponse",
+        "type": "object"
+      },
       "LLMCredentialCreate": {
         "properties": {
           "auth_type": {
@@ -4259,6 +6088,196 @@
         "title": "LineScanComposeRequest",
         "type": "object"
       },
+      "LiveTestStatusResponse": {
+        "properties": {
+          "consecutive_failures": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Z.7.8: number of consecutive nightly failures; 0 after a pass.",
+            "title": "Consecutive Failures"
+          },
+          "estimated_cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Cost Usd"
+          },
+          "providers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProviderResult"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providers"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "status": {
+            "description": "pass | fail | unknown | never_run",
+            "title": "Status",
+            "type": "string"
+          },
+          "tests_passed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Passed"
+          },
+          "tests_run": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Run"
+          },
+          "tests_skipped": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Skipped"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "LiveTestStatusResponse",
+        "type": "object"
+      },
+      "LiveTestStatusWriteRequest": {
+        "properties": {
+          "estimated_cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Cost Usd"
+          },
+          "providers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providers"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "status": {
+            "description": "pass | fail",
+            "title": "Status",
+            "type": "string"
+          },
+          "tests_passed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Passed"
+          },
+          "tests_run": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Run"
+          },
+          "tests_skipped": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tests Skipped"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "LiveTestStatusWriteRequest",
+        "type": "object"
+      },
       "LlmProvisionRequest": {
         "description": "Request body for the wizard's L3 Step 2 provider provisioning.\n\n``api_key`` is required for every hosted provider (anthropic / openai\n/ azure); ``ollama`` is local and authenticates by reachability only.\n``base_url`` is mandatory for Azure (the resource endpoint) and\noptional for Ollama (defaults to ``http://localhost:11434``). A\ncaller-supplied ``model`` is echoed back into\n:attr:`settings.llm_model` so the agent factory picks it up.",
         "properties": {
@@ -4353,13 +6372,36 @@
         "title": "LoadGCodeRequest",
         "type": "object"
       },
+      "LoadGCodeResponse": {
+        "properties": {
+          "lines_parsed": {
+            "title": "Lines Parsed",
+            "type": "integer"
+          },
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "machine_id",
+          "lines_parsed"
+        ],
+        "title": "LoadGCodeResponse",
+        "type": "object"
+      },
       "LoginRequest": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "email": {
             "minLength": 3,
             "title": "Email",
             "type": "string"
+          },
+          "honeypot_fields": {
+            "additionalProperties": true,
+            "title": "Honeypot Fields",
+            "type": "object"
           },
           "password": {
             "minLength": 1,
@@ -4383,6 +6425,144 @@
           "password"
         ],
         "title": "LoginRequest",
+        "type": "object"
+      },
+      "LoginResponse": {
+        "properties": {
+          "csrf_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Csrf Token"
+          },
+          "mfa_methods": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mfa Methods"
+          },
+          "mfa_required": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mfa Required"
+          },
+          "mfa_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mfa Token"
+          },
+          "user": {
+            "$ref": "#/components/schemas/LoginUserResponse"
+          }
+        },
+        "required": [
+          "user"
+        ],
+        "title": "LoginResponse",
+        "type": "object"
+      },
+      "LoginUserResponse": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "must_change_password": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Must Change Password"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "LoginUserResponse",
         "type": "object"
       },
       "MFAChallengeRequest": {
@@ -4421,6 +6601,81 @@
           }
         },
         "title": "MachineConfigRequest",
+        "type": "object"
+      },
+      "MachineResponse": {
+        "properties": {
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MachineStatusResponse"
+          }
+        },
+        "required": [
+          "machine_id",
+          "status"
+        ],
+        "title": "MachineResponse",
+        "type": "object"
+      },
+      "MachineStatusResponse": {
+        "properties": {
+          "bed": {
+            "$ref": "#/components/schemas/HeaterStatusResponse"
+          },
+          "drivers": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DriverStatusResponse"
+            },
+            "title": "Drivers",
+            "type": "object"
+          },
+          "endstops": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/EndstopStatusResponse"
+            },
+            "title": "Endstops",
+            "type": "object"
+          },
+          "feedrate": {
+            "title": "Feedrate",
+            "type": "number"
+          },
+          "hotend": {
+            "$ref": "#/components/schemas/HeaterStatusResponse"
+          },
+          "position": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Position",
+            "type": "object"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "thermal_monitors": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ThermalMonitorStatusResponse"
+            },
+            "title": "Thermal Monitors",
+            "type": "object"
+          }
+        },
+        "required": [
+          "state",
+          "position",
+          "feedrate",
+          "hotend",
+          "bed",
+          "drivers",
+          "endstops",
+          "thermal_monitors"
+        ],
+        "title": "MachineStatusResponse",
         "type": "object"
       },
       "ManifestCreateRequest": {
@@ -4515,6 +6770,271 @@
         "title": "ModeRequest",
         "type": "object"
       },
+      "MotionArtifactResponse": {
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "kind",
+          "description"
+        ],
+        "title": "MotionArtifactResponse",
+        "type": "object"
+      },
+      "MotionGateResponse": {
+        "properties": {
+          "recipes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Recipes",
+            "type": "array"
+          },
+          "total_failed": {
+            "title": "Total Failed",
+            "type": "integer"
+          },
+          "total_passed": {
+            "title": "Total Passed",
+            "type": "integer"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict",
+          "total_passed",
+          "total_failed",
+          "recipes"
+        ],
+        "title": "MotionGateResponse",
+        "type": "object"
+      },
+      "MotionStepResponse": {
+        "properties": {
+          "bed_target": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Target"
+          },
+          "bed_temp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Temp"
+          },
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "feedrate": {
+            "title": "Feedrate",
+            "type": "number"
+          },
+          "hotend_target": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hotend Target"
+          },
+          "hotend_temp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hotend Temp"
+          },
+          "line_number": {
+            "title": "Line Number",
+            "type": "integer"
+          },
+          "position": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Position",
+            "type": "object"
+          },
+          "timestamp_ms": {
+            "title": "Timestamp Ms",
+            "type": "number"
+          }
+        },
+        "required": [
+          "line_number",
+          "command",
+          "position",
+          "feedrate",
+          "event",
+          "timestamp_ms"
+        ],
+        "title": "MotionStepResponse",
+        "type": "object"
+      },
+      "MotionTestRecipeResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Domains",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "name",
+          "description",
+          "domains"
+        ],
+        "title": "MotionTestRecipeResponse",
+        "type": "object"
+      },
+      "MotionTestRecipeRunResponse": {
+        "properties": {
+          "details": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Details",
+            "type": "array"
+          },
+          "duration_ms": {
+            "title": "Duration Ms",
+            "type": "number"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "integer"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "status",
+          "total",
+          "passed",
+          "failed",
+          "skipped",
+          "duration_ms",
+          "details"
+        ],
+        "title": "MotionTestRecipeRunResponse",
+        "type": "object"
+      },
+      "MotionTraceResponse": {
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "final_position": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Final Position",
+            "type": "object"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/MotionStepResponse"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "total_distance_mm": {
+            "title": "Total Distance Mm",
+            "type": "number"
+          },
+          "total_time_ms": {
+            "title": "Total Time Ms",
+            "type": "number"
+          }
+        },
+        "required": [
+          "steps",
+          "total_distance_mm",
+          "total_time_ms",
+          "final_position",
+          "errors"
+        ],
+        "title": "MotionTraceResponse",
+        "type": "object"
+      },
       "MultiCheckRequest": {
         "properties": {
           "artifacts": {
@@ -4554,6 +7074,50 @@
           "sentence"
         ],
         "title": "NMEAParseRequest",
+        "type": "object"
+      },
+      "NMEAParseResponse": {
+        "properties": {
+          "checksum_ok": {
+            "title": "Checksum Ok",
+            "type": "boolean"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "fields": {
+            "additionalProperties": true,
+            "title": "Fields",
+            "type": "object"
+          },
+          "raw": {
+            "title": "Raw",
+            "type": "string"
+          },
+          "sentence_type": {
+            "title": "Sentence Type",
+            "type": "string"
+          },
+          "talker_id": {
+            "title": "Talker Id",
+            "type": "string"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sentence_type",
+          "talker_id",
+          "valid",
+          "fields",
+          "raw",
+          "checksum_ok",
+          "error"
+        ],
+        "title": "NMEAParseResponse",
         "type": "object"
       },
       "OCRRequest": {
@@ -4697,6 +7261,59 @@
         "title": "OrchestratorMessage",
         "type": "object"
       },
+      "P2PEDomainResponse": {
+        "properties": {
+          "controls": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Controls",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "domain_id": {
+            "title": "Domain Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain_id",
+          "name",
+          "description",
+          "controls"
+        ],
+        "title": "P2PEDomainResponse",
+        "type": "object"
+      },
+      "P2PEDomainsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/P2PEDomainResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "P2PEDomainsResponse",
+        "type": "object"
+      },
       "P2PEKeyInjectionRequest": {
         "properties": {
           "device_id": {
@@ -4751,6 +7368,131 @@
         "title": "PCIDSSGateRequest",
         "type": "object"
       },
+      "PCIDSSLevelResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "level_id": {
+            "title": "Level Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required_artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Artifacts",
+            "type": "array"
+          },
+          "required_dag_tasks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Dag Tasks",
+            "type": "array"
+          },
+          "validation_type": {
+            "title": "Validation Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "level_id",
+          "name",
+          "description",
+          "validation_type",
+          "required_artifacts",
+          "required_dag_tasks"
+        ],
+        "title": "PCIDSSLevelResponse",
+        "type": "object"
+      },
+      "PCIDSSLevelsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PCIDSSLevelResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PCIDSSLevelsResponse",
+        "type": "object"
+      },
+      "PCIDSSRequirementResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "req_id": {
+            "title": "Req Id",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "req_id",
+          "title",
+          "description",
+          "artifacts",
+          "tasks"
+        ],
+        "title": "PCIDSSRequirementResponse",
+        "type": "object"
+      },
+      "PCIDSSRequirementsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PCIDSSRequirementResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PCIDSSRequirementsResponse",
+        "type": "object"
+      },
       "PCIPTSGateRequest": {
         "properties": {
           "artifacts": {
@@ -4763,6 +7505,94 @@
           }
         },
         "title": "PCIPTSGateRequest",
+        "type": "object"
+      },
+      "PCIPTSModuleResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "module_id": {
+            "title": "Module Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/PCIPTSRuleResponse"
+            },
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "module_id",
+          "name",
+          "description",
+          "rules"
+        ],
+        "title": "PCIPTSModuleResponse",
+        "type": "object"
+      },
+      "PCIPTSModulesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PCIPTSModuleResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PCIPTSModulesResponse",
+        "type": "object"
+      },
+      "PCIPTSRuleResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "required_artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Artifacts",
+            "type": "array"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_id",
+          "title",
+          "description",
+          "severity",
+          "required_artifacts"
+        ],
+        "title": "PCIPTSRuleResponse",
         "type": "object"
       },
       "PCLGenerateRequest": {
@@ -5224,6 +8054,233 @@
         "title": "PatchUserRequest",
         "type": "object"
       },
+      "PaymentCertResponse": {
+        "properties": {
+          "cert_id": {
+            "title": "Cert Id",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "standard",
+          "status",
+          "cert_id",
+          "details"
+        ],
+        "title": "PaymentCertResponse",
+        "type": "object"
+      },
+      "PaymentCertsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PaymentCertResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PaymentCertsResponse",
+        "type": "object"
+      },
+      "PaymentGateResponse": {
+        "properties": {
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/GateFindingResponse"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "missing_artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Artifacts",
+            "type": "array"
+          },
+          "missing_tasks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Tasks",
+            "type": "array"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          },
+          "total_issues": {
+            "title": "Total Issues",
+            "type": "integer"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "standard",
+          "level",
+          "verdict",
+          "timestamp",
+          "passed",
+          "total_issues",
+          "missing_artifacts",
+          "missing_tasks",
+          "findings",
+          "metadata"
+        ],
+        "title": "PaymentGateResponse",
+        "type": "object"
+      },
+      "PaymentTestRecipeResponse": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "name",
+          "description",
+          "domain",
+          "steps"
+        ],
+        "title": "PaymentTestRecipeResponse",
+        "type": "object"
+      },
+      "PaymentTestRecipeRunResponse": {
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "passed_steps": {
+            "title": "Passed Steps",
+            "type": "integer"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "recipe_name": {
+            "title": "Recipe Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "step_results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Step Results",
+            "type": "array"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          },
+          "total_steps": {
+            "title": "Total Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "recipe_id",
+          "recipe_name",
+          "domain",
+          "total_steps",
+          "passed_steps",
+          "step_results",
+          "timestamp"
+        ],
+        "title": "PaymentTestRecipeRunResponse",
+        "type": "object"
+      },
+      "PaymentTestRecipesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PaymentTestRecipeResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "PaymentTestRecipesResponse",
+        "type": "object"
+      },
       "PepDecisionRequest": {
         "properties": {
           "decision": {
@@ -5646,6 +8703,20 @@
             "default": true,
             "title": "Requires Key",
             "type": "boolean"
+          },
+          "tool_calling_compat": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProviderToolCallingCompat"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Calling Compat"
           }
         },
         "required": [
@@ -5653,6 +8724,59 @@
           "name"
         ],
         "title": "ProviderInfo",
+        "type": "object"
+      },
+      "ProviderResult": {
+        "properties": {
+          "status": {
+            "description": "pass | fail | skip",
+            "title": "Status",
+            "type": "string"
+          },
+          "tests_passed": {
+            "default": 0,
+            "title": "Tests Passed",
+            "type": "integer"
+          },
+          "tests_run": {
+            "default": 0,
+            "title": "Tests Run",
+            "type": "integer"
+          },
+          "tests_skipped": {
+            "default": 0,
+            "title": "Tests Skipped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ProviderResult",
+        "type": "object"
+      },
+      "ProviderToolCallingCompat": {
+        "description": "Per-model tool-calling support entry from config/ollama_tool_calling.yaml.",
+        "properties": {
+          "min_ollama_version": {
+            "title": "Min Ollama Version",
+            "type": "string"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "support": {
+            "title": "Support",
+            "type": "string"
+          }
+        },
+        "required": [
+          "support",
+          "min_ollama_version"
+        ],
+        "title": "ProviderToolCallingCompat",
         "type": "object"
       },
       "ProvidersListResponse": {
@@ -5808,6 +8932,24 @@
           "standard"
         ],
         "title": "RegisterCertRequest",
+        "type": "object"
+      },
+      "RegisterCertResponse": {
+        "properties": {
+          "standard": {
+            "title": "Standard",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "standard"
+        ],
+        "title": "RegisterCertResponse",
         "type": "object"
       },
       "ReleaseRequest": {
@@ -6371,6 +9513,73 @@
         "title": "SendRequest",
         "type": "object"
       },
+      "SensorTestRecipeResponse": {
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "sensor_type": {
+            "title": "Sensor Type",
+            "type": "string"
+          },
+          "timeout_s": {
+            "title": "Timeout S",
+            "type": "integer"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "name",
+          "category",
+          "description",
+          "sensor_type",
+          "tools",
+          "timeout_s"
+        ],
+        "title": "SensorTestRecipeResponse",
+        "type": "object"
+      },
+      "SensorTestRecipesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "recipes": {
+            "items": {
+              "$ref": "#/components/schemas/SensorTestRecipeResponse"
+            },
+            "title": "Recipes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "recipes"
+        ],
+        "title": "SensorTestRecipesResponse",
+        "type": "object"
+      },
       "SensorTestRequest": {
         "properties": {
           "recipe_id": {
@@ -6395,6 +9604,55 @@
           "target_device"
         ],
         "title": "SensorTestRequest",
+        "type": "object"
+      },
+      "SensorTestRunResponse": {
+        "properties": {
+          "measurements": {
+            "additionalProperties": true,
+            "title": "Measurements",
+            "type": "object"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "raw_log_path": {
+            "title": "Raw Log Path",
+            "type": "string"
+          },
+          "recipe_id": {
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "sensor_type": {
+            "title": "Sensor Type",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_device": {
+            "title": "Target Device",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "recipe_id",
+          "sensor_type",
+          "status",
+          "target_device",
+          "timestamp",
+          "measurements",
+          "raw_log_path",
+          "message"
+        ],
+        "title": "SensorTestRunResponse",
         "type": "object"
       },
       "SessionTitleBody": {
@@ -6762,6 +10020,27 @@
         "title": "SmokeSubsetResponse",
         "type": "object"
       },
+      "SocCompatResponse": {
+        "properties": {
+          "compatibility": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Compatibility",
+            "type": "object"
+          },
+          "soc_id": {
+            "title": "Soc Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "soc_id",
+          "compatibility"
+        ],
+        "title": "SocCompatResponse",
+        "type": "object"
+      },
       "SocSecurityRequest": {
         "properties": {
           "features": {
@@ -6945,6 +10224,85 @@
           }
         },
         "title": "StatusResponse",
+        "type": "object"
+      },
+      "StepperDriverResponse": {
+        "properties": {
+          "default_microsteps": {
+            "title": "Default Microsteps",
+            "type": "integer"
+          },
+          "default_stall_threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Stall Threshold"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "features": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Features",
+            "type": "array"
+          },
+          "interface": {
+            "title": "Interface",
+            "type": "string"
+          },
+          "max_current_ma": {
+            "title": "Max Current Ma",
+            "type": "integer"
+          },
+          "microstep_options": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Microstep Options",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "stall_threshold_range": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stall Threshold Range"
+          }
+        },
+        "required": [
+          "driver_id",
+          "name",
+          "description",
+          "interface",
+          "microstep_options",
+          "default_microsteps",
+          "max_current_ma",
+          "features"
+        ],
+        "title": "StepperDriverResponse",
         "type": "object"
       },
       "StereoCalibrationRequest": {
@@ -7184,7 +10542,7 @@
         "type": "object"
       },
       "SystemInfoResponse": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "arch": {
             "default": "",
@@ -7924,6 +11282,29 @@
         "title": "TelemetryTestRequest",
         "type": "object"
       },
+      "ThermalMonitorStatusResponse": {
+        "properties": {
+          "fault_reason": {
+            "title": "Fault Reason",
+            "type": "string"
+          },
+          "heater_id": {
+            "title": "Heater Id",
+            "type": "string"
+          },
+          "tripped": {
+            "title": "Tripped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "heater_id",
+          "tripped",
+          "fault_reason"
+        ],
+        "title": "ThermalMonitorStatusResponse",
+        "type": "object"
+      },
       "ThreatCoverageRequest": {
         "properties": {
           "class_id": {
@@ -8347,6 +11728,225 @@
         "title": "TrajectoryEvalRequest",
         "type": "object"
       },
+      "TrajectoryEvaluationResponse": {
+        "properties": {
+          "actual": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "expected": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected"
+          },
+          "fixture_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixture Id"
+          },
+          "max_error_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Error Deg"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "per_axis_error": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Per Axis Error"
+          },
+          "rms_error_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rms Error Deg"
+          },
+          "tolerance_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tolerance Deg"
+          }
+        },
+        "required": [
+          "passed"
+        ],
+        "title": "TrajectoryEvaluationResponse",
+        "type": "object"
+      },
+      "TrajectoryFixtureResponse": {
+        "properties": {
+          "angular_rate_dps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Angular Rate Dps"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "duration_s": {
+            "title": "Duration S",
+            "type": "number"
+          },
+          "expected_final_orientation": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Final Orientation"
+          },
+          "expected_orientation": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Orientation"
+          },
+          "fixture_id": {
+            "title": "Fixture Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "return_to_origin": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return To Origin"
+          },
+          "sample_rate_hz": {
+            "title": "Sample Rate Hz",
+            "type": "integer"
+          },
+          "tolerance_deg": {
+            "title": "Tolerance Deg",
+            "type": "number"
+          }
+        },
+        "required": [
+          "fixture_id",
+          "name",
+          "duration_s",
+          "sample_rate_hz",
+          "tolerance_deg",
+          "description"
+        ],
+        "title": "TrajectoryFixtureResponse",
+        "type": "object"
+      },
+      "TrajectoryFixturesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "fixtures": {
+            "items": {
+              "$ref": "#/components/schemas/TrajectoryFixtureResponse"
+            },
+            "title": "Fixtures",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "fixtures"
+        ],
+        "title": "TrajectoryFixturesResponse",
+        "type": "object"
+      },
       "TransitionDetectRequest": {
         "properties": {
           "trace": {
@@ -8454,6 +12054,55 @@
           "data_hex"
         ],
         "title": "UBXParseRequest",
+        "type": "object"
+      },
+      "UBXParseResponse": {
+        "properties": {
+          "class_name": {
+            "title": "Class Name",
+            "type": "string"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "msg_class": {
+            "title": "Msg Class",
+            "type": "string"
+          },
+          "msg_id": {
+            "title": "Msg Id",
+            "type": "string"
+          },
+          "msg_name": {
+            "title": "Msg Name",
+            "type": "string"
+          },
+          "parsed_fields": {
+            "additionalProperties": true,
+            "title": "Parsed Fields",
+            "type": "object"
+          },
+          "payload_length": {
+            "title": "Payload Length",
+            "type": "integer"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "msg_class",
+          "msg_id",
+          "payload_length",
+          "valid",
+          "class_name",
+          "msg_name",
+          "parsed_fields",
+          "error"
+        ],
+        "title": "UBXParseResponse",
         "type": "object"
       },
       "UpdateScopesRequest": {
@@ -9109,6 +12758,292 @@
         "title": "WebAuthnRegisterCompleteRequest",
         "type": "object"
       },
+      "WorkflowInFlightRunResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Step Id"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "started_at",
+          "metadata"
+        ],
+        "title": "WorkflowInFlightRunResponse",
+        "type": "object"
+      },
+      "WorkflowInFlightRunsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowInFlightRunResponse"
+            },
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs",
+          "count"
+        ],
+        "title": "WorkflowInFlightRunsResponse",
+        "type": "object"
+      },
+      "WorkflowReplayResponse": {
+        "properties": {
+          "in_flight": {
+            "title": "In Flight",
+            "type": "boolean"
+          },
+          "run": {
+            "$ref": "#/components/schemas/WorkflowRunResponse"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowStepResponse"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "run",
+          "steps",
+          "in_flight"
+        ],
+        "title": "WorkflowReplayResponse",
+        "type": "object"
+      },
+      "WorkflowRunResponse": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Step Id"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "number"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "started_at",
+          "metadata",
+          "version"
+        ],
+        "title": "WorkflowRunResponse",
+        "type": "object"
+      },
+      "WorkflowRunsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunResponse"
+            },
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs",
+          "count"
+        ],
+        "title": "WorkflowRunsResponse",
+        "type": "object"
+      },
+      "WorkflowStatusResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "WorkflowStatusResponse",
+        "type": "object"
+      },
+      "WorkflowStepResponse": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "is_done": {
+            "title": "Is Done",
+            "type": "boolean"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "output": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "started_at",
+          "is_done"
+        ],
+        "title": "WorkflowStepResponse",
+        "type": "object"
+      },
+      "WorkflowVersionResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "title": "WorkflowVersionResponse",
+        "type": "object"
+      },
+      "WorkflowVersionedStatusResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "version"
+        ],
+        "title": "WorkflowVersionedStatusResponse",
+        "type": "object"
+      },
       "XUSetRequest": {
         "properties": {
           "selector": {
@@ -9552,6 +13487,27 @@
         "title": "CalibrationRequest",
         "type": "object"
       },
+      "backend__routers__payment__ArtifactDefinitionsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactDefinitionResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "ArtifactDefinitionsResponse",
+        "type": "object"
+      },
       "backend__routers__print_pipeline__CertGenerateRequest": {
         "properties": {
           "domain": {
@@ -9714,6 +13670,27 @@
           "security_domain"
         ],
         "title": "ArtifactGenRequest",
+        "type": "object"
+      },
+      "backend__routers__sensor_fusion__ArtifactDefinitionsResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactDefinitionResponse"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "artifacts"
+        ],
+        "title": "ArtifactDefinitionsResponse",
         "type": "object"
       },
       "backend__routers__sensor_fusion__ArtifactGenRequest": {
@@ -11435,9 +15412,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Login Api V1 Auth Login Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/LoginResponse"
                 }
               }
             },
@@ -12813,6 +16788,96 @@
         "summary": "Get Vendor Capabilities",
         "tags": [
           "barcode"
+        ]
+      }
+    },
+    "/api/v1/billing/stripe/checkout-session": {
+      "post": {
+        "operationId": "create_stripe_checkout_session_api_v1_billing_stripe_checkout_session_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckoutSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Create Stripe Checkout Session Api V1 Billing Stripe Checkout Session Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Stripe Checkout Session",
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/v1/billing/stripe/portal-session": {
+      "post": {
+        "operationId": "create_stripe_billing_portal_session_api_v1_billing_stripe_portal_session_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingPortalSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Create Stripe Billing Portal Session Api V1 Billing Stripe Portal Session Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Stripe Billing Portal Session",
+        "tags": [
+          "billing"
         ]
       }
     },
@@ -21415,7 +25480,7 @@
     },
     "/api/v1/invoke/stream": {
       "post": {
-        "description": "SSE streaming invoke — analyses state, plans, executes, reports.\n\nQuery param `command` is optional; if provided, it takes priority\nand is routed through the LangGraph pipeline.\n\nR20-B: ``suppress_coach`` is a comma-separated list of coaching\ntrigger keys the frontend has already shown the operator this\nsession (tracked in sessionStorage). Planner skips coaching for\nthose triggers so the operator isn't re-coached on every INVOKE\npress. Recognised keys: ``empty_workspace`` / ``stale_pep``.",
+        "description": "SSE streaming invoke — analyses state, plans, executes, reports.\n\nQuery param `command` is optional; if provided, it takes priority\nand is routed through the LangGraph pipeline.\n\nR20-B: ``suppress_coach`` is a comma-separated list of coaching\ntrigger keys the frontend has already shown the operator this\nsession (tracked in sessionStorage). Planner skips coaching for\nthose triggers so the operator isn't re-coached on every INVOKE\npress. Recognised keys: ``empty_workspace`` / ``stale_pep`` /\n``missing_toolchain:<slug>`` (BS.10.1) / ``url_in_message:<url>``\n(W16.1, per-URL dismissal so re-pasting a fresh URL still coaches)\n/ ``image_in_message:<hash16>`` (W16.2, per-attachment dismissal so\nre-pasting a fresh image still coaches; the hash is the 16-hex-\nchar SHA-256 prefix of the data URL payload or the upload marker\nfilename).",
         "operationId": "invoke_stream_api_v1_invoke_stream_post",
         "parameters": [
           {
@@ -21960,8 +26025,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/MotionArtifactResponse"
                   },
                   "title": "Response Get Artifacts Api V1 Motion Artifacts Get",
                   "type": "array"
@@ -21986,8 +26050,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/AxisResponse"
                   },
                   "title": "Response Get Axes Api V1 Motion Axes Get",
                   "type": "array"
@@ -22012,8 +26075,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/StepperDriverResponse"
                   },
                   "title": "Response Get Stepper Drivers Api V1 Motion Drivers Get",
                   "type": "array"
@@ -22038,8 +26100,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/EndstopTypeResponse"
                   },
                   "title": "Response Get Endstop Types Api V1 Motion Endstop Types Get",
                   "type": "array"
@@ -22064,8 +26125,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/GCodeCommandResponse"
                   },
                   "title": "Response Get Gcode Commands Api V1 Motion Gcode Commands Get",
                   "type": "array"
@@ -22090,8 +26150,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/HeaterResponse"
                   },
                   "title": "Response Get Heaters Api V1 Motion Heaters Get",
                   "type": "array"
@@ -22132,9 +26191,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Machine Api V1 Motion Machines Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MachineResponse"
                 }
               }
             },
@@ -22176,9 +26233,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Delete Machine Api V1 Motion Machines  Machine Id  Delete",
-                  "type": "object"
+                  "$ref": "#/components/schemas/DeleteMachineResponse"
                 }
               }
             },
@@ -22218,9 +26273,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Machine Status Api V1 Motion Machines  Machine Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MachineResponse"
                 }
               }
             },
@@ -22262,9 +26315,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Emergency Stop Api V1 Motion Machines  Machine Id  Estop Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MachineResponse"
                 }
               }
             },
@@ -22306,9 +26357,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Execute Gcode Api V1 Motion Machines  Machine Id  Execute Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ExecuteGCodeResponse"
                 }
               }
             },
@@ -22360,9 +26409,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Load Gcode Api V1 Motion Machines  Machine Id  Load Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/LoadGCodeResponse"
                 }
               }
             },
@@ -22394,8 +26441,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/MotionTestRecipeResponse"
                   },
                   "title": "Response Get Test Recipes Api V1 Motion Recipes Get",
                   "type": "array"
@@ -22430,9 +26476,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Test Recipe Api V1 Motion Recipes  Recipe Id  Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MotionTestRecipeRunResponse"
                 }
               }
             },
@@ -22463,9 +26507,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Gate Api V1 Motion Validate Gate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/MotionGateResponse"
                 }
               }
             },
@@ -23801,9 +27843,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Artifact Definitions Api V1 Payment Artifacts Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/backend__routers__payment__ArtifactDefinitionsResponse"
                 }
               }
             },
@@ -23835,9 +27875,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Artifact Definition Api V1 Payment Artifacts  Artifact Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ArtifactDefinitionResponse"
                 }
               }
             },
@@ -23868,9 +27906,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Payment Certs Api V1 Payment Certs Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentCertsResponse"
                 }
               }
             },
@@ -23901,9 +27937,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Generate Cert Artifacts Api V1 Payment Certs Generate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CertArtifactBundleResponse"
                 }
               }
             },
@@ -23944,9 +27978,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Register Payment Cert Api V1 Payment Certs Register Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RegisterCertResponse"
                 }
               }
             },
@@ -23977,9 +28009,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Emv Levels Api V1 Payment Emv Levels Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EMVLevelsResponse"
                 }
               }
             },
@@ -24011,9 +28041,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Emv Level Api V1 Payment Emv Levels  Level Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EMVLevelResponse"
                 }
               }
             },
@@ -24054,9 +28082,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Emv Test Api V1 Payment Emv Test Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EMVTestResultsResponse"
                 }
               }
             },
@@ -24097,9 +28123,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Emv Api V1 Payment Emv Validate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentGateResponse"
                 }
               }
             },
@@ -24140,9 +28164,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Hsm Decrypt Api V1 Payment Hsm Decrypt Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMDecryptResponse"
                 }
               }
             },
@@ -24183,9 +28205,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Hsm Encrypt Api V1 Payment Hsm Encrypt Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMEncryptResponse"
                 }
               }
             },
@@ -24226,9 +28246,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Hsm Generate Key Api V1 Payment Hsm Generate Key Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMKeyGenResponse"
                 }
               }
             },
@@ -24259,9 +28277,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Hsm Sessions Api V1 Payment Hsm Sessions Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMSessionsResponse"
                 }
               }
             },
@@ -24290,9 +28306,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Hsm Session Api V1 Payment Hsm Sessions Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMSessionResponse"
                 }
               }
             },
@@ -24334,9 +28348,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Close Hsm Session Api V1 Payment Hsm Sessions  Session Id  Delete",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMCloseResponse"
                 }
               }
             },
@@ -24367,9 +28379,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Hsm Vendors Api V1 Payment Hsm Vendors Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMVendorsResponse"
                 }
               }
             },
@@ -24401,9 +28411,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Hsm Vendor Api V1 Payment Hsm Vendors  Vendor Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HSMVendorResponse"
                 }
               }
             },
@@ -24434,9 +28442,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List P2Pe Domains Api V1 Payment P2Pe Domains Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/P2PEDomainsResponse"
                 }
               }
             },
@@ -24467,9 +28473,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Key Injection Api V1 Payment P2Pe Key Injection Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/KeyInjectionResponse"
                 }
               }
             },
@@ -24500,9 +28504,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Pci Dss Levels Api V1 Payment Pci Dss Levels Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIDSSLevelsResponse"
                 }
               }
             },
@@ -24534,9 +28536,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Pci Dss Level Api V1 Payment Pci Dss Levels  Level Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIDSSLevelResponse"
                 }
               }
             },
@@ -24567,9 +28567,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Pci Dss Requirements Api V1 Payment Pci Dss Requirements Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIDSSRequirementsResponse"
                 }
               }
             },
@@ -24601,9 +28599,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Pci Dss Requirement Api V1 Payment Pci Dss Requirements  Req Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIDSSRequirementResponse"
                 }
               }
             },
@@ -24644,9 +28640,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Pci Dss Api V1 Payment Pci Dss Validate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentGateResponse"
                 }
               }
             },
@@ -24677,9 +28671,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Pci Pts Modules Api V1 Payment Pci Pts Modules Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIPTSModulesResponse"
                 }
               }
             },
@@ -24711,9 +28703,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Pci Pts Module Api V1 Payment Pci Pts Modules  Module Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PCIPTSModuleResponse"
                 }
               }
             },
@@ -24754,9 +28744,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Pci Pts Api V1 Payment Pci Pts Validate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentGateResponse"
                 }
               }
             },
@@ -24787,9 +28775,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Compatible Socs Api V1 Payment Socs Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CompatibleSocsResponse"
                 }
               }
             },
@@ -24821,9 +28807,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Compatible Soc Api V1 Payment Socs  Soc Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CompatibleSocResponse"
                 }
               }
             },
@@ -24854,9 +28838,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Test Recipes Api V1 Payment Test Recipes Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentTestRecipesResponse"
                 }
               }
             },
@@ -24888,9 +28870,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Test Recipe Api V1 Payment Test Recipes  Recipe Id  Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PaymentTestRecipeRunResponse"
                 }
               }
             },
@@ -27314,6 +31294,75 @@
         "summary": "Validate Gate",
         "tags": [
           "printing"
+        ]
+      }
+    },
+    "/api/v1/privacy/access": {
+      "post": {
+        "operationId": "create_access_request_api_v1_privacy_access_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Access Request Api V1 Privacy Access Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Access Request",
+        "tags": [
+          "privacy"
+        ]
+      }
+    },
+    "/api/v1/privacy/erasure": {
+      "post": {
+        "operationId": "create_erasure_request_api_v1_privacy_erasure_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Erasure Request Api V1 Privacy Erasure Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Erasure Request",
+        "tags": [
+          "privacy"
+        ]
+      }
+    },
+    "/api/v1/privacy/portability": {
+      "post": {
+        "operationId": "create_portability_request_api_v1_privacy_portability_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Portability Request Api V1 Privacy Portability Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Portability Request",
+        "tags": [
+          "privacy"
         ]
       }
     },
@@ -29750,6 +33799,79 @@
         ]
       }
     },
+    "/api/v1/runtime/live-test-status": {
+      "get": {
+        "description": "Return the most recent nightly live-test result from SharedKV.\n\nReturns ``status: never_run`` when the CI workflow has not yet written\nany result (fresh deploy / first run not completed).",
+        "operationId": "get_live_test_status_api_v1_runtime_live_test_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveTestStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read last LLM live integration test result",
+        "tags": [
+          "runtime"
+        ]
+      },
+      "post": {
+        "description": "Write nightly live-test results from the GitHub Actions runner.\n\nAuth: ``Authorization: Bearer <OMNISIGHT_REPORTER_TOKEN>`` — a static\npre-shared secret stored in GitHub Actions repo secrets. The standard\nuser-session auth is intentionally skipped so CI does not need an\noperator account.\n\nIf ``OMNISIGHT_REPORTER_TOKEN`` is unset/empty, the endpoint is\ndisabled (returns 503) to prevent accidental open writes.",
+        "operationId": "post_live_test_status_api_v1_runtime_live_test_status_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiveTestStatusWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Write LLM live integration test result (CI reporter)",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
     "/api/v1/runtime/logs": {
       "get": {
         "description": "Return recent system logs.",
@@ -30172,6 +34294,26 @@
           }
         },
         "summary": "Update Npi Phase",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/ollama/tool-failures": {
+      "get": {
+        "description": "Return Ollama tool-call failure counters from SharedKV.\n\nZ.6.5: when the ollama adapter degrades to pure-chat (model does not\nsupport tool calling, daemon is unreachable, or the tool_calls block\ncannot be parsed), it increments SharedKV(\"ollama_tool_failures\")\ncounters.  This endpoint exposes those counts for the dashboard.\n\n``has_warning`` is True whenever total > 0, signalling that at least\none Ollama tool-call silently degraded since the last counter reset.\n\nModule-global state: SharedKV reads from Redis (cross-worker) or\nin-memory fallback (per-process in degraded mode — 故意每 worker 獨立\nwhen Redis is absent, acceptable for observability counters).",
+        "operationId": "get_ollama_tool_failures_api_v1_runtime_ollama_tool_failures_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Ollama Tool Failures",
         "tags": [
           "runtime"
         ]
@@ -33134,9 +37276,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Artifact Definitions Api V1 Sensor Fusion Artifacts Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/backend__routers__sensor_fusion__ArtifactDefinitionsResponse"
                 }
               }
             },
@@ -33167,9 +37307,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Generate Artifacts Api V1 Sensor Fusion Artifacts Generate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ArtifactGenerationResponse"
                 }
               }
             },
@@ -33210,9 +37348,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Calculate Altitude Api V1 Sensor Fusion Barometer Altitude Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/AltitudeResponse"
                 }
               }
             },
@@ -33243,9 +37379,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Barometer Drivers Api V1 Sensor Fusion Barometer Drivers Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/BarometerDriversResponse"
                 }
               }
             },
@@ -33277,9 +37411,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Barometer Driver Api V1 Sensor Fusion Barometer Drivers  Driver Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/BarometerDriverResponse"
                 }
               }
             },
@@ -33310,9 +37442,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Calibration Profiles Api V1 Sensor Fusion Calibration Profiles Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CalibrationProfilesResponse"
                 }
               }
             },
@@ -33344,9 +37474,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Calibration Profile Api V1 Sensor Fusion Calibration Profiles  Profile Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CalibrationProfileResponse"
                 }
               }
             },
@@ -33387,9 +37515,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Calibration Api V1 Sensor Fusion Calibration Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CalibrationRunResponse"
                 }
               }
             },
@@ -33420,9 +37546,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Ekf Profiles Api V1 Sensor Fusion Ekf Profiles Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EKFProfilesResponse"
                 }
               }
             },
@@ -33454,9 +37578,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Ekf Profile Api V1 Sensor Fusion Ekf Profiles  Profile Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EKFProfileResponse"
                 }
               }
             },
@@ -33497,9 +37619,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Ekf Api V1 Sensor Fusion Ekf Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EKFRunResponse"
                 }
               }
             },
@@ -33540,9 +37660,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Parse Nmea Api V1 Sensor Fusion Gps Nmea Parse Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/NMEAParseResponse"
                 }
               }
             },
@@ -33573,9 +37691,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Gps Protocols Api V1 Sensor Fusion Gps Protocols Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/GPSProtocolsResponse"
                 }
               }
             },
@@ -33607,9 +37723,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Gps Protocol Api V1 Sensor Fusion Gps Protocols  Protocol Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/GPSProtocolResponse"
                 }
               }
             },
@@ -33650,9 +37764,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Parse Ubx Api V1 Sensor Fusion Gps Ubx Parse Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/UBXParseResponse"
                 }
               }
             },
@@ -33683,9 +37795,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Imu Drivers Api V1 Sensor Fusion Imu Drivers Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IMUDriversResponse"
                 }
               }
             },
@@ -33717,9 +37827,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Imu Driver Api V1 Sensor Fusion Imu Drivers  Driver Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/IMUDriverResponse"
                 }
               }
             },
@@ -33760,9 +37868,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Check Soc Compat Api V1 Sensor Fusion Soc Compat Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SocCompatResponse"
                 }
               }
             },
@@ -33827,9 +37933,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Test Recipes Api V1 Sensor Fusion Test Recipes Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SensorTestRecipesResponse"
                 }
               }
             },
@@ -33871,9 +37975,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Test Recipe Api V1 Sensor Fusion Test Recipes  Recipe Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SensorTestRecipeResponse"
                 }
               }
             },
@@ -33914,9 +38016,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Sensor Test Api V1 Sensor Fusion Test Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SensorTestRunResponse"
                 }
               }
             },
@@ -33957,9 +38057,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Evaluate Trajectory Api V1 Sensor Fusion Trajectory Evaluate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/TrajectoryEvaluationResponse"
                 }
               }
             },
@@ -33990,9 +38088,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Trajectory Fixtures Api V1 Sensor Fusion Trajectory Fixtures Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/TrajectoryFixturesResponse"
                 }
               }
             },
@@ -34024,9 +38120,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Trajectory Fixture Api V1 Sensor Fusion Trajectory Fixtures  Fixture Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/TrajectoryFixtureResponse"
                 }
               }
             },
@@ -39423,7 +43517,7 @@
     },
     "/api/v1/web-sandbox/preview/{workspace_id}/ready": {
       "post": {
-        "description": "Caller signals that the dev server has reported ready.",
+        "description": "Caller signals that the dev server has reported ready.\n\nW16.4 — emits a ``preview.ready`` SSE event carrying the sandbox\nURL so the orchestrator-chat surface can append an inline-iframe\nmessage without polling docker logs from the browser.  The emit is\nbest-effort; a transport failure does not break the existing\noperator-tier ready signal contract.",
         "operationId": "mark_preview_ready_api_v1_web_sandbox_preview__workspace_id__ready_post",
         "parameters": [
           {
@@ -39511,6 +43605,47 @@
         ]
       }
     },
+    "/api/v1/webhooks/email/{provider}": {
+      "post": {
+        "description": "Receive provider bounce / complaint webhooks for FS.4 email.\n\nThe endpoint accepts a shared bearer token or HMAC-SHA256 signature.\n``settings.email_webhook_secret`` is env/runtime configuration, so\nevery worker independently verifies against the same source value\nwithout writing module-global state.",
+        "operationId": "email_feedback_webhook_api_v1_webhooks_email__provider__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Email Feedback Webhook",
+        "tags": [
+          "webhooks"
+        ]
+      }
+    },
     "/api/v1/webhooks/gerrit": {
       "post": {
         "description": "Receive Gerrit events and trigger appropriate actions.\n\nGerrit sends JSON events via its webhook plugin or stream-events.\nSupports optional HMAC-SHA256 signature via X-Gerrit-Signature header.\n\nPhase-3-Runtime-v2 SP-3.1: handler takes a pool-backed\n``asyncpg.Connection`` so the agent-spawn code path inside\n``_on_patchset_created`` can persist the spawned reviewer via\nthe ported ``db.upsert_agent`` API. Background tasks started from\nhere (``_run_review``) acquire their OWN conn since the request\nscope ends before they run.",
@@ -39591,6 +43726,26 @@
         ]
       }
     },
+    "/api/v1/webhooks/stripe": {
+      "post": {
+        "description": "Receive Stripe billing webhooks for FS.8.\n\n``settings.stripe_webhook_secret`` is env/runtime configuration, so\nevery worker independently verifies against the same source value\nwithout writing module-global state. FS.8.4 subscription lifecycle\nevents are then persisted through PG ``provisioned_billing``.",
+        "operationId": "stripe_webhook_api_v1_webhooks_stripe_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stripe Webhook",
+        "tags": [
+          "webhooks"
+        ]
+      }
+    },
     "/api/v1/workflow/in-flight": {
       "get": {
         "description": "Convenience for the dashboard 'Resume in-flight runs?' banner.",
@@ -39600,9 +43755,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List In Flight Api V1 Workflow In Flight Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowInFlightRunsResponse"
                 }
               }
             },
@@ -39655,9 +43808,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Runs Api V1 Workflow Runs Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowRunsResponse"
                 }
               }
             },
@@ -39699,9 +43850,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Replay Run Api V1 Workflow Runs  Run Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowReplayResponse"
                 }
               }
             },
@@ -39767,9 +43916,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Update Run Api V1 Workflow Runs  Run Id  Patch",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowVersionResponse"
                 }
               }
             },
@@ -39827,9 +43974,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Cancel Run Api V1 Workflow Runs  Run Id  Cancel Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowVersionedStatusResponse"
                 }
               }
             },
@@ -39897,9 +44042,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Finish Run Api V1 Workflow Runs  Run Id  Finish Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowStatusResponse"
                 }
               }
             },
@@ -39957,9 +44100,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Retry Run Api V1 Workflow Runs  Run Id  Retry Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowVersionedStatusResponse"
                 }
               }
             },

@@ -277,6 +277,14 @@ def _write_marker(data: dict) -> None:
     path.write_text(json.dumps(data, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def _marker_mtime() -> float | None:
+    """Return the marker mtime used to invalidate per-worker gate cache."""
+    try:
+        return _BOOTSTRAP_MARKER.stat().st_mtime
+    except OSError:
+        return None
+
+
 def mark_smoke_passed(passed: bool = True) -> None:
     """Persist the smoke test outcome into the bootstrap marker.
 
@@ -659,12 +667,13 @@ async def get_bootstrap_status() -> BootstrapStatus:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _GATE_CACHE_TTL = 2.0  # seconds — keep low so wizard progress is visible
-_gate_cache: dict = {"finalized": None, "ts": 0.0}
+_gate_cache: dict = {"finalized": None, "ts": 0.0, "marker_mtime": None}
 
 
 def _gate_cache_reset() -> None:
     _gate_cache["finalized"] = None
     _gate_cache["ts"] = 0.0
+    _gate_cache["marker_mtime"] = None
 
 
 async def is_bootstrap_finalized() -> bool:
@@ -679,9 +688,21 @@ async def is_bootstrap_finalized() -> bool:
         so wizard progress reflects into the middleware promptly.
       * Probe errors fail-open (``True``) so a broken DB never locks
         operators out of the app.
+
+    Module-global state audit: ``_gate_cache`` is per-worker process
+    state, but it is keyed by ``data/.bootstrap_state.json`` mtime; every
+    worker derives the same finalized flag from the same marker file and
+    invalidates sticky-green when another worker updates or deletes it.
     """
     now = time.monotonic()
     cache = _gate_cache
+    marker_mtime = _marker_mtime()
+    if (
+        cache["finalized"] is not None
+        and cache.get("marker_mtime") != marker_mtime
+    ):
+        cache["finalized"] = None
+        cache["ts"] = 0.0
     if cache["finalized"] is True:
         return True
     # Persisted finalize flag short-circuits the live probe — this is
@@ -690,6 +711,7 @@ async def is_bootstrap_finalized() -> bool:
     if is_bootstrap_finalized_flag():
         cache["finalized"] = True
         cache["ts"] = now
+        cache["marker_mtime"] = marker_mtime
         return True
     if cache["finalized"] is not None and (now - cache["ts"]) < _GATE_CACHE_TTL:
         return cache["finalized"]
@@ -701,4 +723,5 @@ async def is_bootstrap_finalized() -> bool:
         finalized = True
     cache["finalized"] = finalized
     cache["ts"] = now
+    cache["marker_mtime"] = marker_mtime
     return finalized

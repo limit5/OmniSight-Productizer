@@ -1,5 +1,6 @@
 """Tests for CODEOWNERS enforcement and conflict detection (Phase 24)."""
 
+import os
 from pathlib import Path
 
 
@@ -33,6 +34,25 @@ class TestCodeownersParser:
         from backend.codeowners import get_file_owners
         owners = get_file_owners("random_file_not_in_codeowners.txt")
         assert len(owners) == 0
+
+    def test_config_cache_invalidates_on_codeowners_mtime(
+        self, monkeypatch, tmp_path
+    ):
+        from backend import codeowners
+
+        config = tmp_path / "CODEOWNERS"
+        config.write_text("src/hal/** firmware/hal\n", encoding="utf-8")
+        monkeypatch.setattr(codeowners, "_CODEOWNERS_PATH", config)
+        codeowners.reload_codeowners_for_tests()
+
+        first = codeowners.get_file_owners("src/hal/gpio.h")
+        config.write_text("src/hal/** software/algorithm\n", encoding="utf-8")
+        stat = config.stat()
+        os.utime(config, (stat.st_atime + 2.0, stat.st_mtime + 2.0))
+        later = codeowners.get_file_owners("src/hal/gpio.h")
+
+        assert [(t, s) for t, s, _ in first] == [("firmware", "hal")]
+        assert [(t, s) for t, s, _ in later] == [("software", "algorithm")]
 
 
 class TestFilePermission:

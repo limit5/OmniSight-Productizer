@@ -21,6 +21,17 @@ def _reload():
 
 
 class TestRegistry:
+    def test_base_component_requires_render_contract(self):
+        class MissingComponent(hc.Component):
+            pass
+
+        with pytest.raises(TypeError, match="hal_endpoints|render_html|render_js"):
+            MissingComponent(
+                id="missing",
+                title="missing",
+                description="missing",
+            )
+
     def test_three_base_components(self):
         ids = {c.id for c in hc.list_components()}
         assert ids == {"network", "ota", "logs"}

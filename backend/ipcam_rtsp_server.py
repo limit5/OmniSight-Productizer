@@ -588,7 +588,11 @@ def build_sdp(
 
 
 def _md5(s: str) -> str:
-    return hashlib.md5(s.encode("utf-8")).hexdigest()
+    """RTSP Digest auth's spec-required MD5 hex component."""
+    return hashlib.md5(
+        s.encode("utf-8"),
+        usedforsecurity=False,
+    ).hexdigest()
 
 
 def build_digest_challenge(

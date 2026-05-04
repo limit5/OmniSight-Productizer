@@ -16,6 +16,8 @@ operators visibility + a way to flag a run as needing attention.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
@@ -41,8 +43,69 @@ def _parse_if_match(if_match: str | None) -> int:
         raise HTTPException(status_code=400, detail="If-Match must be an integer version")
 
 
-@router.get("/runs")
-async def list_runs(status: str | None = None, limit: int = _pg.Limit(default=50, max_cap=200)) -> dict:
+class WorkflowRunResponse(BaseModel):
+    id: str
+    kind: str
+    status: str
+    started_at: float
+    completed_at: float | None = None
+    last_step_id: str | None = None
+    metadata: dict[str, Any]
+    version: int
+
+
+class WorkflowRunsResponse(BaseModel):
+    runs: list[WorkflowRunResponse]
+    count: int
+
+
+class WorkflowInFlightRunResponse(BaseModel):
+    id: str
+    kind: str
+    started_at: float
+    last_step_id: str | None = None
+    metadata: dict[str, Any]
+
+
+class WorkflowInFlightRunsResponse(BaseModel):
+    runs: list[WorkflowInFlightRunResponse]
+    count: int
+
+
+class WorkflowStepResponse(BaseModel):
+    id: str
+    key: str
+    started_at: float
+    completed_at: float | None = None
+    is_done: bool
+    error: str | None = None
+    output: Any | None = None
+
+
+class WorkflowReplayResponse(BaseModel):
+    run: WorkflowRunResponse
+    steps: list[WorkflowStepResponse]
+    in_flight: bool
+
+
+class WorkflowStatusResponse(BaseModel):
+    id: str
+    status: str
+
+
+class WorkflowVersionedStatusResponse(BaseModel):
+    id: str
+    status: str
+    version: int
+
+
+class WorkflowVersionResponse(BaseModel):
+    id: str
+    version: int
+
+
+@router.get("/runs", response_model=WorkflowRunsResponse)
+async def list_runs(status: str | None = None, limit: int = _pg.Limit(default=50, max_cap=200)) -> dict[str, Any]:
     runs = await wf.list_runs(status=status, limit=limit)
     return {
         "runs": [
@@ -58,8 +121,8 @@ async def list_runs(status: str | None = None, limit: int = _pg.Limit(default=50
     }
 
 
-@router.get("/in-flight")
-async def list_in_flight() -> dict:
+@router.get("/in-flight", response_model=WorkflowInFlightRunsResponse)
+async def list_in_flight() -> dict[str, Any]:
     """Convenience for the dashboard 'Resume in-flight runs?' banner."""
     runs = await wf.list_in_flight_on_startup()
     return {"runs": [
@@ -69,17 +132,17 @@ async def list_in_flight() -> dict:
     ], "count": len(runs)}
 
 
-@router.get("/runs/{run_id}")
-async def replay_run(run_id: str) -> dict:
+@router.get("/runs/{run_id}", response_model=WorkflowReplayResponse)
+async def replay_run(run_id: str) -> dict[str, Any]:
     payload = await wf.replay(run_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"workflow run {run_id} not found")
     return payload
 
 
-@router.post("/runs/{run_id}/finish")
+@router.post("/runs/{run_id}/finish", response_model=WorkflowStatusResponse)
 async def finish_run(run_id: str, status: str = "completed",
-                     if_match: str | None = Header(None, alias="If-Match")) -> dict:
+                     if_match: str | None = Header(None, alias="If-Match")) -> dict[str, str]:
     if status not in {"completed", "failed", "halted"}:
         raise HTTPException(status_code=422, detail="status must be completed|failed|halted")
     run = await wf.get_run(run_id)
@@ -93,9 +156,9 @@ async def finish_run(run_id: str, status: str = "completed",
     return {"id": run_id, "status": status}
 
 
-@router.post("/runs/{run_id}/retry")
+@router.post("/runs/{run_id}/retry", response_model=WorkflowVersionedStatusResponse)
 async def retry_run(run_id: str,
-                    if_match: str | None = Header(None, alias="If-Match")) -> dict:
+                    if_match: str | None = Header(None, alias="If-Match")) -> dict[str, Any]:
     expected = _parse_if_match(if_match)
     run = await wf.get_run(run_id)
     if not run:
@@ -109,9 +172,9 @@ async def retry_run(run_id: str,
     return {"id": updated.id, "status": updated.status, "version": updated.version}
 
 
-@router.post("/runs/{run_id}/cancel")
+@router.post("/runs/{run_id}/cancel", response_model=WorkflowVersionedStatusResponse)
 async def cancel_run(run_id: str,
-                     if_match: str | None = Header(None, alias="If-Match")) -> dict:
+                     if_match: str | None = Header(None, alias="If-Match")) -> dict[str, Any]:
     expected = _parse_if_match(if_match)
     run = await wf.get_run(run_id)
     if not run:
@@ -129,9 +192,9 @@ class _MetadataUpdate(BaseModel):
     metadata: dict
 
 
-@router.patch("/runs/{run_id}")
+@router.patch("/runs/{run_id}", response_model=WorkflowVersionResponse)
 async def update_run(run_id: str, body: _MetadataUpdate,
-                     if_match: str | None = Header(None, alias="If-Match")) -> dict:
+                     if_match: str | None = Header(None, alias="If-Match")) -> dict[str, Any]:
     expected = _parse_if_match(if_match)
     run = await wf.get_run(run_id)
     if not run:

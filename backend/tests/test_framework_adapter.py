@@ -42,6 +42,7 @@ from typing import Any
 import pytest
 
 import backend.web as web_pkg
+from backend.web import framework_adapter as fa
 from backend.web.clone_manifest import (
     CloneManifest,
     build_clone_manifest,
@@ -156,6 +157,14 @@ def _make_manifest(transformed: TransformedSpec) -> CloneManifest:
 
 
 class TestPublicSurface:
+
+    def test_base_adapter_requires_render_files_implementation(self):
+        class MissingAdapter(fa._AdapterBase):
+            framework = "missing"
+            name = "MissingAdapter"
+
+        with pytest.raises(TypeError, match="_render_files"):
+            MissingAdapter()
 
     def test_supported_frameworks_pin(self):
         assert SUPPORTED_FRAMEWORKS == frozenset({"next", "nuxt", "astro"})

@@ -215,6 +215,27 @@ class TestInvokeChat:
         assert out == "via get_llm"
         p.assert_called_once_with(provider="openai", model="gpt-4o", bind_tools=None)
 
+    def test_passes_bind_tools_to_resolved_llm(self):
+        fake_llm = MagicMock()
+        bound_llm = MagicMock()
+        bound_llm.invoke.return_value = AIMessage(content="tool-ready")
+        fake_llm.bind_tools.return_value = bound_llm
+        tools = [object()]
+        out = invoke_chat([("user", "q")], llm=fake_llm, bind_tools=tools)
+        assert out == "tool-ready"
+        fake_llm.bind_tools.assert_called_once_with(tools)
+        bound_llm.invoke.assert_called_once()
+
+    def test_applies_max_tokens_before_invoke(self):
+        fake_llm = MagicMock()
+        limited_llm = MagicMock()
+        limited_llm.invoke.return_value = AIMessage(content="short")
+        fake_llm.bind.return_value = limited_llm
+        out = invoke_chat([("user", "q")], llm=fake_llm, max_tokens=32)
+        assert out == "short"
+        fake_llm.bind.assert_called_once_with(max_tokens=32)
+        limited_llm.invoke.assert_called_once()
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  stream_chat
@@ -570,6 +591,39 @@ class TestBuildChatModel:
         assert kwargs["default_headers"] == {
             "HTTP-Referer": "https://foo", "X-Title": "Bar",
         }
+
+    def test_openai_family_forwards_max_tokens(self, monkeypatch):
+        fake_cls = MagicMock(return_value=MagicMock(spec=BaseChatModel))
+        import langchain_openai
+        monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_cls, raising=True)
+        build_chat_model("openai", api_key="k", max_tokens=123)
+        assert fake_cls.call_args.kwargs["max_tokens"] == 123
+
+    def test_google_maps_max_tokens_to_max_output_tokens(self, monkeypatch):
+        fake_cls = MagicMock(return_value=MagicMock(spec=BaseChatModel))
+        import langchain_google_genai
+        monkeypatch.setattr(
+            langchain_google_genai, "ChatGoogleGenerativeAI", fake_cls, raising=True,
+        )
+        build_chat_model("google", api_key="k", max_tokens=123)
+        assert fake_cls.call_args.kwargs["max_output_tokens"] == 123
+
+    @pytest.mark.parametrize(
+        ("provider", "module_name", "class_name", "expected_kw"),
+        [
+            ("groq", "langchain_groq", "ChatGroq", "max_tokens"),
+            ("together", "langchain_together", "ChatTogether", "max_tokens"),
+            ("ollama", "langchain_ollama", "ChatOllama", "num_predict"),
+        ],
+    )
+    def test_provider_specific_max_tokens_contract(
+        self, monkeypatch, provider, module_name, class_name, expected_kw,
+    ):
+        fake_cls = MagicMock(return_value=MagicMock(spec=BaseChatModel))
+        module = __import__(module_name)
+        monkeypatch.setattr(module, class_name, fake_cls, raising=True)
+        build_chat_model(provider, api_key="k", max_tokens=123)
+        assert fake_cls.call_args.kwargs[expected_kw] == 123
 
     # ── Z.6.2: ollama bind_tools path ──────────────────────────────
 

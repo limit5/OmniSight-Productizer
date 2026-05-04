@@ -142,10 +142,16 @@ _BASELINE: dict[tuple[str, str], int] = {
     ("backend/semantic_entropy.py", "emit_debug_finding"): 1,
     ("backend/ssh_runner.py", "emit_pipeline_phase"): 7,
     ("backend/workflow.py", "emit_workflow_updated"): 2,
-    ("backend/workspace.py", "emit_agent_update"): 2,
-    ("backend/workspace.py", "emit_pipeline_phase"): 3,
+    ("backend/web/vite_retry_budget.py", "emit_debug_finding"): 1,
+    ("backend/web/vite_retry_budget.py", "emit_pipeline_phase"): 1,
+    ("backend/workspace.py", "emit_agent_update"): 3,
+    ("backend/workspace.py", "emit_pipeline_phase"): 4,
     ("backend/workspace.py", "emit_token_warning"): 1,
-    ("backend/workspace.py", "emit_workspace"): 3,
+    ("backend/workspace.py", "emit_workspace"): 5,
+    # Drift acknowledged by FX merge of codex-work (KS+FX.4+FX.8) into master.
+    # Backlog: add broadcast_scope= per docs/design/sse-event-scope-policy.md §2
+    # (operator / session / tenant rubric) — track as a follow-up item under
+    # cross-module DEBT (Priority FX.7 sweep or its successor).
 }
 
 

@@ -152,24 +152,37 @@ class ProjectForecast:
 #  Pricing loader
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-_PRICING_CACHE: dict[str, dict[str, float]] | None = None
+_PRICING_CACHE: tuple[float | None, dict[str, dict[str, float]]] | None = None
 _PRICING_PATH = _PROJECT_ROOT / "configs" / "provider_pricing.yaml"
 
 
 def _load_pricing() -> dict[str, dict[str, float]]:
+    """Load provider pricing with file-mtime cache invalidation.
+
+    Module-global state audit: ``_PRICING_CACHE`` is per-worker process
+    state, keyed by ``configs/provider_pricing.yaml`` mtime. Every worker
+    derives the same pricing table from the same shared YAML and reloads
+    when another worker/operator updates the file.
+    """
     global _PRICING_CACHE
-    if _PRICING_CACHE is not None:
-        return _PRICING_CACHE
     try:
-        if _PRICING_PATH.exists():
+        pricing_mtime = _PRICING_PATH.stat().st_mtime
+    except OSError:
+        pricing_mtime = None
+    if _PRICING_CACHE is not None and _PRICING_CACHE[0] == pricing_mtime:
+        return _PRICING_CACHE[1]
+    try:
+        if pricing_mtime is not None:
             data = yaml.safe_load(_PRICING_PATH.read_text(encoding="utf-8")) or {}
-            _PRICING_CACHE = {p: {t: float(v) for t, v in tiers.items()} for p, tiers in data.items()}
-            return _PRICING_CACHE
+            parsed = {p: {t: float(v) for t, v in tiers.items()} for p, tiers in data.items()}
+            _PRICING_CACHE = (pricing_mtime, parsed)
+            return parsed
     except Exception as exc:
         logger.warning("provider_pricing.yaml load failed: %s", exc)
     # Fallback: zero-cost (ollama-like)
-    _PRICING_CACHE = {_DEFAULT_PROVIDER: {"premium": 0.0, "default": 0.0, "budget": 0.0}}
-    return _PRICING_CACHE
+    fallback = {_DEFAULT_PROVIDER: {"premium": 0.0, "default": 0.0, "budget": 0.0}}
+    _PRICING_CACHE = (pricing_mtime, fallback)
+    return fallback
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from backend import llm_adapter
 from backend.component_consistency_linter import (
     LINTER_SCHEMA_VERSION,
     LintReport,
@@ -752,11 +753,10 @@ def _default_invoker(
     llm: Any | None,
 ) -> ChatInvoker:
     """Return a chat invoker bound to the requested provider/model."""
-    from backend.llm_adapter import invoke_chat
 
     def _invoke(messages: list) -> str:
         try:
-            return invoke_chat(
+            return llm_adapter.invoke_chat(
                 messages,
                 provider=provider,
                 model=model,

@@ -3,6 +3,7 @@ overlay confidence ladder."""
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -99,7 +100,10 @@ def test_v1_history_full_at_20_samples(monkeypatch, tmp_path, _full_stack_manife
         INSERT INTO token_usage VALUES ('claude', 200000, 30);
     """)
     for i in range(25):
-        con.execute("INSERT INTO simulations (duration_ms) VALUES (?)", (300000 + i * 10000,))
+        con.execute(
+            "INSERT INTO simulations (duration_ms) VALUES (:duration_ms)",
+            {"duration_ms": 300000 + i * 10000},
+        )
     con.commit(); con.close()
 
     from backend import forecast
@@ -126,3 +130,26 @@ def test_cost_uses_pricing(_full_stack_manifest):
     # ollama free → cost should be zero
     f2 = forecast.from_manifest(_full_stack_manifest, provider="ollama")
     assert f2.cost.total_usd == 0.0
+
+
+def test_pricing_cache_invalidates_on_yaml_mtime(monkeypatch, tmp_path, _full_stack_manifest):
+    from backend import forecast
+
+    pricing = tmp_path / "provider_pricing.yaml"
+    pricing.write_text(
+        "anthropic:\n  premium: 1.0\n  default: 1.0\n  budget: 1.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(forecast, "_PRICING_PATH", pricing)
+    monkeypatch.setattr(forecast, "_PRICING_CACHE", None)
+
+    first = forecast.from_manifest(_full_stack_manifest, provider="anthropic")
+    pricing.write_text(
+        "anthropic:\n  premium: 10.0\n  default: 10.0\n  budget: 10.0\n",
+        encoding="utf-8",
+    )
+    stat = pricing.stat()
+    os.utime(pricing, (stat.st_atime + 2.0, stat.st_mtime + 2.0))
+    later = forecast.from_manifest(_full_stack_manifest, provider="anthropic")
+
+    assert later.cost.total_usd > first.cost.total_usd

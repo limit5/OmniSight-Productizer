@@ -21,8 +21,6 @@ from backend.queue_backend import (
     MessageNotFound,
     PriorityLevel,
     QueueMessage,
-    RabbitMQQueueBackend,
-    SQSQueueBackend,
     TaskState,
     ack,
     depth,
@@ -500,27 +498,31 @@ class TestIntegration:
 
 
 # ──────────────────────────────────────────────────────────────
-#  10. Adapter stubs (RabbitMQ / SQS)
+#  10. Reserved backend names (RabbitMQ / SQS)
 # ──────────────────────────────────────────────────────────────
 
 
-class TestAdapterStubs:
-    def test_rabbitmq_adapter_raises_not_implemented(self):
-        with pytest.raises(NotImplementedError) as exc:
-            RabbitMQQueueBackend()
-        assert "rabbitmq" in str(exc.value).lower()
-
-    def test_sqs_adapter_raises_not_implemented(self):
-        with pytest.raises(NotImplementedError) as exc:
-            SQSQueueBackend()
-        assert "sqs" in str(exc.value).lower()
-
-    def test_force_backend_via_env(self, monkeypatch):
-        # Force the selector to attempt the rabbit adapter.
+class TestReservedBackends:
+    def test_rabbitmq_backend_selection_raises_not_implemented(self, monkeypatch):
         set_backend_for_tests(None)
         monkeypatch.setenv("OMNISIGHT_QUEUE_BACKEND", "rabbitmq")
-        with pytest.raises(NotImplementedError):
-            push(_make_card())  # _select_backend → RabbitMQQueueBackend()
+        with pytest.raises(NotImplementedError) as exc:
+            push(_make_card())
+        assert "rabbitmq" in str(exc.value).lower()
+
+    def test_sqs_backend_selection_raises_not_implemented(self, monkeypatch):
+        set_backend_for_tests(None)
+        monkeypatch.setenv("OMNISIGHT_QUEUE_BACKEND", "sqs")
+        with pytest.raises(NotImplementedError) as exc:
+            push(_make_card())
+        assert "sqs" in str(exc.value).lower()
+
+    def test_rabbit_alias_backend_selection_raises_not_implemented(self, monkeypatch):
+        set_backend_for_tests(None)
+        monkeypatch.setenv("OMNISIGHT_QUEUE_BACKEND", "rabbit")
+        with pytest.raises(NotImplementedError) as exc:
+            push(_make_card())
+        assert "rabbitmq" in str(exc.value).lower()
 
 
 # ──────────────────────────────────────────────────────────────

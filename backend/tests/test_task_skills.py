@@ -1,5 +1,6 @@
 """Tests for Anthropic-format task skill loading (Phase 18)."""
 
+import os
 from pathlib import Path
 
 
@@ -15,6 +16,43 @@ class TestTaskSkillLoading:
         assert "pdf-generation" in names
         assert "xlsx-generation" in names
         assert "mcp-builder" in names
+
+    def test_list_available_task_skills_invalidates_on_skill_mtime(
+        self, monkeypatch, tmp_path
+    ):
+        from backend import prompt_loader
+
+        skill_dir = tmp_path / "first"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            "---\n"
+            "name: first\n"
+            "description: First skill\n"
+            "keywords: [first]\n"
+            "---\n"
+            "# First\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(prompt_loader, "_SKILLS_DIR", tmp_path)
+        prompt_loader.reload_task_skills_for_tests()
+
+        first = prompt_loader.list_available_task_skills()
+        skill_file.write_text(
+            "---\n"
+            "name: second\n"
+            "description: Second skill\n"
+            "keywords: [second]\n"
+            "---\n"
+            "# Second\n",
+            encoding="utf-8",
+        )
+        stat = skill_file.stat()
+        os.utime(skill_file, (stat.st_atime + 2.0, stat.st_mtime + 2.0))
+        later = prompt_loader.list_available_task_skills()
+
+        assert [skill["name"] for skill in first] == ["first"]
+        assert [skill["name"] for skill in later] == ["second"]
 
     def test_load_task_skill_exists(self):
         from backend.prompt_loader import load_task_skill

@@ -168,6 +168,15 @@ class TestJWT:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+class TestTransportBase:
+    def test_base_transport_requires_request_implementation(self):
+        class MissingTransport(asc.Transport):
+            pass
+
+        with pytest.raises(TypeError, match="request"):
+            MissingTransport()
+
+
 class TestFakeTransport:
     def test_scrubs_authorization_header(self):
         ft = asc.FakeTransport()

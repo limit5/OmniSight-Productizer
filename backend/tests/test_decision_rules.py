@@ -34,21 +34,25 @@ def test_replace_rules_normalises_and_generates_ids():
 
 
 def test_replace_rules_rejects_bad_severity():
-    with pytest.raises(ValueError, match="severity"):
+    with pytest.raises(dr.DecisionRuleValidationError, match="severity"):
         dr.replace_rules([{"kind_pattern": "x", "severity": "ultra"}])
 
 
 def test_replace_rules_rejects_unknown_mode():
-    with pytest.raises(ValueError, match="mode"):
+    with pytest.raises(dr.DecisionRuleValidationError, match="mode"):
         dr.replace_rules([{"kind_pattern": "x", "auto_in_modes": ["bogus"]}])
 
 
 def test_replace_rules_rejects_duplicate_id():
-    with pytest.raises(ValueError, match="duplicate"):
+    with pytest.raises(dr.DecisionRuleValidationError, match="duplicate"):
         dr.replace_rules([
             {"id": "r1", "kind_pattern": "a"},
             {"id": "r1", "kind_pattern": "b"},
         ])
+
+
+def test_decision_rule_validation_error_preserves_value_error_contract():
+    assert issubclass(dr.DecisionRuleValidationError, ValueError)
 
 
 def test_match_first_priority_hit_wins():

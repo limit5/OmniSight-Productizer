@@ -64,6 +64,7 @@ import os
 import re
 import shutil
 import subprocess
+from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Mapping, Optional, Sequence
@@ -370,7 +371,7 @@ def _tail(text: str, *, lines: int = 20) -> str:
 #  Base class
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-class BuildAdapter:
+class BuildAdapter(ABC):
     """Abstract base for every build/package target adapter.
 
     Subclasses MUST set the ``target`` and ``binaries`` classvars and
@@ -460,8 +461,9 @@ class BuildAdapter:
     def _validate_source(self, source: BuildSource) -> None:
         """Override to check for the target-specific manifest file."""
 
+    @abstractmethod
     def _build(self, source: BuildSource, runner: str) -> BuildResult:
-        raise NotImplementedError
+        """Run the target-specific build with an already-resolved runner."""
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

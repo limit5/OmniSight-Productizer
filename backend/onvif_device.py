@@ -692,11 +692,11 @@ def _parse_iso_utc(value: str) -> float:
 def compute_password_digest(
     password: str, nonce_bytes: bytes, created_iso: str
 ) -> str:
-    """WS-UsernameToken PasswordDigest per OASIS WSS §4.1.1.2.
+    """WS-UsernameToken PasswordDigest's spec-required SHA1 component.
 
     ``base64(SHA1(nonce + created_utf8 + password_utf8))``.
     """
-    sha1 = hashlib.sha1()
+    sha1 = hashlib.sha1(usedforsecurity=False)
     sha1.update(nonce_bytes)
     sha1.update(created_iso.encode("utf-8"))
     sha1.update(password.encode("utf-8"))
