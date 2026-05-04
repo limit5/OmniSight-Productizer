@@ -141,11 +141,11 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.I — SecOps Threat Intel Agent（~1-2 週）
 > 零前置；可插入 A/B 之間
-- [ ] BP.I.1 `backend/secops_intel.py` — search_latest_cve / query_zero_day_feeds / fetch_latest_best_practices skills
-- [ ] BP.I.2 `configs/guilds/intel/` — skill pack scaffolding
-- [ ] BP.I.3 整合：Integration Engineer pre-install hook + Architect pre-blueprint hook
-- [ ] BP.I.4 與 Priority N2 Renovate / S2-8 GitHub Secret Scanning 合併重疊功能
-- [ ] BP.I.5 `backend/tests/test_secops_intel.py` — ~30 test
+- [x][G] BP.I.1 `backend/secops_intel.py` — search_latest_cve / query_zero_day_feeds / fetch_latest_best_practices skills
+- [x][G] BP.I.2 `configs/guilds/intel/` — skill pack scaffolding
+- [x][G] BP.I.3 整合：Integration Engineer pre-install hook + Architect pre-blueprint hook
+- [x][G] BP.I.4 與 Priority N2 Renovate / S2-8 GitHub Secret Scanning 合併重疊功能
+- [x][G] BP.I.5 `backend/tests/test_secops_intel.py` — ~30 test
 
 ### BP.B — Guild 重組 + AGENT_TOOLS 拆分（~2-3 週）
 > Blueprint 主結構變更；前置 BP.A；雙寫 3-6 個月
