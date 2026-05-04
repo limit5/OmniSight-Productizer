@@ -6314,3 +6314,13 @@ BP.E GraphRAG / Neo4j
 - [x][G] FX.10.9 4 條弱 assertion test 改用真實 call + assertion（test_anthropic_mode_manager / test_api_keys_legacy_migration / test_auth_dashboard_shape_drift / test_auto_runner_codex；FX.5.13 涵蓋部分）
 
 **Priority FX.9 + FX.10 合計範圍**：~7-10 day；雙 runner 並行 4-5 day 完工。Day-count 加進 Total。
+
+### FX.11 — KS Envelope sessions.token Migration（3 items, ~1-2 day）
+
+> **背景**：FX.10.7 把 DLP 加上 `REQUIRED_ENVELOPE_COLUMNS` infrastructure 但沒寫 data migration——live `sessions.token` 是 plaintext，啟用 gate 會立刻 fail 每次 prod backup。在 FX.10 merge commit (`4b26a2bd`) 把 REQUIRED 設空集合 + sessions.token 暫留 EXPECTED allowlist 作 transition；FX.11 把這條解到底。
+
+- [ ] FX.11.1 寫 alembic migration 0189：scan `sessions` 全 row、用 `backend.security.envelope.encrypt_for_tenant` 把 plaintext token 包成 KS envelope JSON、UPDATE 寫回；冪等（已是 envelope JSON 的 row 跳過）
+- [ ] FX.11.2 改 `backend/auth.py:851` `INSERT INTO sessions` 路徑用 envelope helper 寫 token；改 `backend/auth.py:1178` SELECT + `:1187` DELETE 路徑用 envelope-aware token lookup（`token_lookup_index` 走 hash 索引、不直接 LIKE plaintext）
+- [ ] FX.11.3 `scripts/backup_dlp_scan.py`：把 `sessions.token` 從 EXPECTED_HIGH_ENTROPY_COLUMNS 移除、加進 REQUIRED_ENVELOPE_COLUMNS；移除 `test_scan_backup_db_blocks_plaintext_session_token` 上的 `@pytest.mark.skip`；跑一次 prod backup DLP 確認 0 finding
+
+**Priority FX.11 範圍**：~1-2 day；FX.10.7 收尾。Day-count 加進 Total。
