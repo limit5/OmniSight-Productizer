@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import logging
 
-import pytest
 
 from backend.agents.llm import TokenTrackingCallback
 from backend.llm_adapter import AIMessage, ChatGeneration, LLMResult

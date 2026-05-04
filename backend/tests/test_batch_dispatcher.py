@@ -22,25 +22,18 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §4
 from __future__ import annotations
 
 import asyncio
-import json
-from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
 from backend.agents.batch_client import (
     BatchClient,
-    BatchRequest,
     BatchResult,
-    BatchRun,
     InMemoryBatchPersistence,
-    MAX_BATCH_SIZE_BYTES,
-    MAX_REQUESTS_PER_BATCH,
 )
 from backend.agents.batch_dispatcher import (
     BatchableTask,
     BatchDispatcher,
-    BatchGroup,
     BatchTaskQueue,
     chunk_by_model_tools,
     submit_in_lane,

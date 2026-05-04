@@ -14,7 +14,6 @@ gate as every other Y1 row test).
 """
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import re
 from pathlib import Path

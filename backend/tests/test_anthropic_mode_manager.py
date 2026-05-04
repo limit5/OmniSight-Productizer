@@ -25,7 +25,6 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §7
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 
 import pytest
 
@@ -37,7 +36,6 @@ from backend.agents.anthropic_mode_manager import (
     WizardAlreadyConfirmedError,
     WizardError,
     WizardOutOfOrderError,
-    WizardState,
     WizardStep,
     fingerprint_api_key,
     validate_api_key,

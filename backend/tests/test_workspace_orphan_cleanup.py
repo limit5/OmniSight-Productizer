@@ -28,7 +28,6 @@ The function must:
 from __future__ import annotations
 
 import asyncio
-import shutil
 import subprocess
 from pathlib import Path
 

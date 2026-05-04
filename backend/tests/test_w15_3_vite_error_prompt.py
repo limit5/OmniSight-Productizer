@@ -44,7 +44,6 @@ from typing import Any
 import pytest
 
 from backend.web.vite_error_relay import (
-    VITE_ERROR_HISTORY_KEY_PREFIX,
     VITE_ERROR_HISTORY_NO_FILE_TOKEN,
     VITE_ERROR_HISTORY_UNKNOWN_TOKEN,
     format_vite_error_for_history,

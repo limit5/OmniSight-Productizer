@@ -33,11 +33,8 @@ import pytest
 
 from backend.agents.rate_limiter import (
     DLQEntry,
-    DeadLetterQueue,
     InMemoryDeadLetterQueue,
-    ModelRateLimit,
     RateLimitTracker,
-    RetryDecision,
     RetryPolicy,
     RetryableExecutor,
     TIER_4_LIMITS,

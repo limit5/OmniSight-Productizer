@@ -425,7 +425,6 @@ class TestEmitViteEscalation:
         """One escalation publishes one pipeline_phase event AND one
         debug_finding event — not just one or the other."""
 
-        from backend.web import vite_retry_budget as mod
         from backend import events as events_mod
 
         captured_phases: list[tuple[str, str]] = []

@@ -52,7 +52,7 @@ import asyncio
 import importlib
 import warnings
 from types import MappingProxyType
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 

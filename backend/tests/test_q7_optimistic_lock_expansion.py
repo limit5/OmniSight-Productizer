@@ -24,7 +24,6 @@ shape, ``bump_version_pg`` SQL semantics (with a live PG row).
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 
 import pytest

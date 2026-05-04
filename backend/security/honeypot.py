@@ -127,7 +127,6 @@ required HTML attribute keys (cross-twin parity).
 
 from __future__ import annotations
 
-import enum
 import hashlib
 import logging
 import time

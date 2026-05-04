@@ -46,10 +46,7 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §4
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
 import logging
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -59,7 +56,6 @@ from backend.agents.batch_client import (
     BatchRequest,
     BatchResult,
     BatchRun,
-    InMemoryBatchPersistence,
     MAX_REQUESTS_PER_BATCH,
     MAX_BATCH_SIZE_BYTES,
     estimate_request_size,

@@ -21,7 +21,6 @@ OMNI_TEST_PG_URL).
 
 from __future__ import annotations
 
-import json
 
 import pytest
 

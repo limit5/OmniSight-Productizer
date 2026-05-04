@@ -22,7 +22,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 # sys.path shim — the script lives under `scripts/`, not an installed
 # package. Import by file path.

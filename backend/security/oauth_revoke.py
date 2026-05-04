@@ -125,7 +125,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from backend.security import oauth_audit, oauth_client, token_vault
 from backend.security.oauth_refresh_hook import TokenVaultRecord

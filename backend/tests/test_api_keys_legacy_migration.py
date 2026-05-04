@@ -127,7 +127,6 @@ def test_migrate_legacy_bearer_multi_worker_single_winner(
     the conflict and return None).
     """
     import os
-    import asyncio
 
     # Seed env so the children inherit it (they also set it themselves
     # at worker entry, but setting here makes the pipeline explicit).

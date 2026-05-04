@@ -80,7 +80,6 @@ from backend.web.reference_attachment import (
     build_chat_message_for_reference_attached,
     emit_reference_attached,
     list_reference_attachments,
-    load_reference_attachment,
     load_reference_index,
     mint_reference_id,
     read_reference_payload,

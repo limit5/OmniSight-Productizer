@@ -46,7 +46,6 @@ from backend.brand_extractor import (
 from backend.brand_spec import (
     BrandSpec,
     BrandSpecError,
-    HeadingScale,
     spec_from_json,
     spec_to_json,
 )

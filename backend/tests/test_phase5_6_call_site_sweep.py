@@ -316,7 +316,6 @@ class TestSyncGetTokenNoLongerLeaksAcrossHosts:
     leaking the github.com default token."""
 
     def test_get_token_for_unrelated_host_returns_empty(self):
-        import json
         from unittest.mock import patch
         from backend.git_credentials import (
             clear_credential_cache, get_token_for_url,
@@ -357,7 +356,6 @@ class TestSyncGetTokenNoLongerLeaksAcrossHosts:
         """Backward-compat guarantee: the legitimate github.com ↔
         settings.github_token path still works via the registry's
         scalar-fallback synthesis."""
-        import json
         from unittest.mock import patch
         from backend.git_credentials import (
             clear_credential_cache, get_token_for_url,

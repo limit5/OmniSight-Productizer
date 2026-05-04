@@ -30,15 +30,13 @@ exercises the same code path the production asyncpg conn does.
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
 from backend.account_linking import (
     AccountLinkingError,
-    METHOD_PASSWORD,
     OAUTH_METHOD_PREFIX,
-    OAuthOnlyAccountError,
     PasswordRequiredForLinkError,
     add_auth_method,
     encode_methods_for_insert,

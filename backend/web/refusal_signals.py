@@ -81,7 +81,6 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import (
-    Any,
     Iterable,
     Mapping,
     Optional,
@@ -95,7 +94,6 @@ from urllib.robotparser import RobotFileParser
 from backend.web.site_cloner import (
     RawCapture,
     SiteClonerError,
-    extract_hostname,
     normalize_url,
 )
 

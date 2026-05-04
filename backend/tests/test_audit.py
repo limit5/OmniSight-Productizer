@@ -169,7 +169,6 @@ async def test_per_tenant_independent_chains(_audit_db):
 async def test_per_tenant_genesis_starts_empty(_audit_db):
     """First row of each tenant's chain should have empty prev_hash."""
     audit = _audit_db
-    from backend import db
     from backend.db_context import set_tenant_id
     await _create_test_tenants("t-one", "t-two")
 
@@ -193,7 +192,6 @@ async def test_per_tenant_genesis_starts_empty(_audit_db):
 async def test_tampering_one_tenant_does_not_affect_other(_audit_db):
     """Tampering in tenant A should not break tenant B's chain."""
     audit = _audit_db
-    from backend import db
     from backend.db_context import set_tenant_id
     await _create_test_tenants("t-alpha", "t-beta")
 
@@ -253,7 +251,6 @@ async def test_verify_all_chains(_audit_db):
 async def test_verify_all_chains_detects_partial_tampering(_audit_db):
     """verify_all_chains should detect tampering in one tenant while others pass."""
     audit = _audit_db
-    from backend import db
     from backend.db_context import set_tenant_id
     await _create_test_tenants("t-good", "t-bad")
 

@@ -131,7 +131,6 @@ from typing import Any
 import pytest
 
 from backend.security import (
-    auth_audit_bridge,
     auth_event,
     bot_challenge,
     credential_vault,

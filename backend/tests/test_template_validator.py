@@ -21,10 +21,6 @@ from pydantic import ValidationError
 
 from backend.template_validator import (
     CognitivePenaltyPrompt,
-    ImplValidationResult,
-    ReviewValidationResult,
-    SpecValidationResult,
-    TaskValidationResult,
     ValidationErrorDetail,
     _FIX_HINTS,
     _hint_for_loc,

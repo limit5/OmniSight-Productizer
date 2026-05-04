@@ -223,7 +223,8 @@ def _probe_provider_deep(provider: str, key: str) -> tuple[bool, str]:
     not ready to serve requests that depend on it.
     """
     import time as _time
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
 
     # key_tail = last 6 chars, opaque to logs but unique across rotations
     key_tail = key[-6:] if key else ""
@@ -370,7 +371,7 @@ def _check_provider_chain() -> tuple[bool, str]:
         if rejected:
             return False, f"deep_check_all_failed: {','.join(rejected)}"
         return False, f"no_configured_provider_in_chain: {','.join(chain)}"
-    suffix = f" (deep)" if deep else ""
+    suffix = " (deep)" if deep else ""
     return True, f"ready={','.join(ready)}{suffix}"
 
 

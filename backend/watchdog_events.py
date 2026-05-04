@@ -87,7 +87,6 @@ from backend.severity import (
     L3_JIRA,
     L4_PAGERDUTY,
     L4_SMS,
-    SEVERITY_TIER_MAPPING,
     Severity,
 )
 

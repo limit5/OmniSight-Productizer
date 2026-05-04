@@ -105,9 +105,7 @@ from backend.web_sandbox_pep import (
 )
 from backend.web_sandbox_vite_errors import (
     WEB_SANDBOX_VITE_ERROR_SCHEMA_VERSION,
-    VITE_ERROR_ALLOWED_KINDS,
     VITE_ERROR_ALLOWED_PHASES,
-    ViteBuildError,
     ViteBuildErrorValidationError,
     ViteErrorBuffer,
     get_default_buffer,

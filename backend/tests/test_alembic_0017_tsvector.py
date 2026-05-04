@@ -196,7 +196,7 @@ class TestTsvectorGeneratedValue:
                 params.append("")
 
         insert_sql = (
-            f"INSERT INTO episodic_memory ("
+            "INSERT INTO episodic_memory ("
             + ", ".join(col_list)
             + ") VALUES ("
             + ", ".join(val_list)

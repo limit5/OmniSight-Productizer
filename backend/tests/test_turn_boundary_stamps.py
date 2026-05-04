@@ -30,7 +30,7 @@ the canonical shape so this file doesn't re-prove that:
    caller contract other fields on the entry already respect.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 

@@ -167,10 +167,10 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional
 
 from backend.web.content_classifier import RiskClassification
 from backend.web.output_transformer import TransformedSpec

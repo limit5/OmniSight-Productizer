@@ -824,7 +824,6 @@ def test_no_module_level_mutable_state():
     Acceptable: ``__loader__`` / ``__spec__`` etc. (Python machinery),
     typing aliases, frozensets, tuples, frozen dataclasses.
     """
-    import types
 
     forbidden_types = (list, dict, set, bytearray)
     # The Python module itself has __dict__ etc., so we ignore dunders.

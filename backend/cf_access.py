@@ -128,8 +128,7 @@ import json
 import logging
 import re
 import threading
-from dataclasses import dataclass, field
-from types import MappingProxyType
+from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
 import httpx

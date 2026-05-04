@@ -54,7 +54,6 @@ import asyncio
 import importlib
 import json
 import time
-from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -67,7 +66,6 @@ from backend.security.oauth_client import (
     StateExpiredError,
     StateMismatchError,
     TokenResponseError,
-    TokenSet,
 )
 
 

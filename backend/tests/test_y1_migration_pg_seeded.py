@@ -478,7 +478,7 @@ async def test_pg_seeded_backfill_fk_blocks_invalid_project_id(pg_test_pool):
                 "(id, kind, started_at, status, tenant_id) "
                 "VALUES ($1, 'test', 0, 'running', $2) "
                 "ON CONFLICT (id) DO NOTHING",
-                f"wf-y1r8-fkguard", tid,
+                "wf-y1r8-fkguard", tid,
             )
             with pytest.raises(asyncpg.exceptions.ForeignKeyViolationError):
                 await conn.execute(

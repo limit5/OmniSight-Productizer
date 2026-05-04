@@ -606,7 +606,6 @@ async def test_no_touch_when_resolve_returns_none(_pool_with):
     pool = _pool_with([])  # empty registry
 
     from backend.git_credentials import pick_account_for_url
-    from backend import db_pool, git_credentials as gc
 
     # Force the shim fallback to also be empty so we get a True None.
     from unittest.mock import patch

@@ -59,9 +59,7 @@ finish coroutine (not via ``loop.create_task``), so a SELECT after
 
 from __future__ import annotations
 
-import asyncio
 import inspect
-import json
 import os
 import re
 import time

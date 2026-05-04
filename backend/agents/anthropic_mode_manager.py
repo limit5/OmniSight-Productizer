@@ -47,13 +47,12 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Literal
 
 from backend.agents.cost_guard import CostGuard, ScopeKey
-from backend.agents.rate_limiter import WorkspaceConfig, WorkspaceKind
+from backend.agents.rate_limiter import WorkspaceKind
 
 logger = logging.getLogger(__name__)
 

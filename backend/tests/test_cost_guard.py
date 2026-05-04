@@ -27,9 +27,7 @@ import pytest
 
 from backend.agents.cost_guard import (
     BudgetAlert,
-    BudgetCap,
     CostActual,
-    CostEstimate,
     CostGuard,
     InMemoryCostStore,
     PRICING_TABLE,

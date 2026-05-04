@@ -25,12 +25,9 @@ Pins the idle-reaper module's structural + behavioural promises:
 
 from __future__ import annotations
 
-import threading
 import time
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -40,7 +37,6 @@ from backend.web_sandbox import (
     WebSandboxError,
     WebSandboxInstance,
     WebSandboxManager,
-    WebSandboxNotFound,
     WebSandboxStatus,
 )
 from backend.web_sandbox_idle_reaper import (

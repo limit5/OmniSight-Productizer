@@ -16,7 +16,7 @@ var (skipped in the unit suite).
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -597,7 +597,6 @@ async def test_pg_dlq_remove_handles_unexpected_response():
 
 def test_pg_batch_persistence_satisfies_protocol():
     """PostgresBatchPersistence has every method on the BatchPersistence Protocol."""
-    from backend.agents.batch_client import BatchPersistence as Proto
     pg = PostgresBatchPersistence(conn_factory=lambda: None)
     for name in (
         "save_batch_run", "get_batch_run", "list_batch_runs",

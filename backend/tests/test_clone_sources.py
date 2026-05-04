@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from typing import Any, Mapping, Optional
 
 import pytest
@@ -52,7 +51,6 @@ from backend.web.site_cloner import (
     CloneSource,
     CloneSourceError,
     RawCapture,
-    SiteClonerError,
 )
 
 

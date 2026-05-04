@@ -16,7 +16,6 @@ from pathlib import Path
 import pytest
 
 from backend.rag.corpus import (
-    Doc,
     VALID_AUDIENCES,
     _classify_default,  # type: ignore[attr-defined]
     _parse_doc,  # type: ignore[attr-defined]

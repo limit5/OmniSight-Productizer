@@ -27,7 +27,6 @@ import pytest
 from backend.config import settings
 from backend import llm_credential_resolver as lcr
 from backend.llm_credential_resolver import (
-    LLMCredential,
     LLMCredentialMissingError,
     get_llm_credential,
     get_llm_credential_sync,

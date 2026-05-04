@@ -28,9 +28,7 @@ from alembic.ddl.base import AddColumn as _AlembicAddColumn
 from sqlalchemy.dialects import sqlite as _sqlite_dialect_mod
 
 from backend.db_context import (
-    current_tenant_id,
     tenant_insert_value,
-    tenant_where,
     tenant_where_pg,
 )
 

@@ -48,7 +48,6 @@ import asyncio
 import hashlib
 import importlib
 import pathlib
-import re
 from typing import Any
 from unittest.mock import patch
 

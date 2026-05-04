@@ -40,7 +40,6 @@ from typing import Optional
 
 import backend.web as web_pkg
 from backend.web.content_classifier import (
-    RISK_CATEGORIES,
     RISK_LEVELS,
     ContentRiskError,
     RiskClassification,

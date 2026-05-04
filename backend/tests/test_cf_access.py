@@ -29,7 +29,6 @@ from backend.cf_access import (
     PREVIEW_APP_NAME_PREFIX,
     CFAccessAPIError,
     CFAccessApplicationRecord,
-    CFAccessClient,
     CFAccessConfig,
     CFAccessError,
     CFAccessManager,

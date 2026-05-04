@@ -25,7 +25,6 @@ Unblocks the removal of ``auth._conn`` stub (Step C / Epic 7).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 

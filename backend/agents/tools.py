@@ -2191,7 +2191,6 @@ async def image_generate(
     import base64 as _base64
     import hashlib as _hashlib
     import uuid as _uuid
-    import json as _json
     from datetime import datetime as _dt
 
     provider = (provider or "openai").strip().lower()
@@ -2253,7 +2252,6 @@ async def image_generate(
     try:
         from backend.llm_credential_resolver import (
             get_llm_credential,
-            LLMCredentialMissingError,
         )
         cred = await get_llm_credential("openai")
     except Exception as exc:  # LLMCredentialMissingError or import/resolve issue

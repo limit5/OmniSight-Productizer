@@ -20,7 +20,6 @@ import sys
 import tempfile
 from unittest.mock import patch
 
-import pytest
 
 # Add repo root to path so we can import scripts/ci_budget_guard.py
 _REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
