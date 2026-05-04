@@ -26,12 +26,15 @@ from backend.agents.project_memory import (
     PROJECT_RULE_TOTAL_MAX_BYTES,
     USER_RULE_FILENAMES,
     MemoryFile,
+    format_memory_size,
     load_all_memory,
     load_project_memory,
+    parse_ignored_paths,
     load_user_memory,
     project_rule_dirs,
     project_rule_merge_dirs,
     project_rule_signature,
+    render_operator_summary,
     render_for_prompt,
 )
 
@@ -352,6 +355,59 @@ def test_render_surfaces_truncated_and_ignore_options(tmp_path: Path) -> None:
     assert "[truncated; operator may ignore this file]" in out
     assert "ignored=true" in out
     assert "[ignored by operator]" in out
+
+
+def test_render_operator_summary_lists_files_sizes_and_ignore_hint(
+    tmp_path: Path,
+) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("rules\n")
+    ignored_file = tmp_path / "AGENTS.md"
+    ignored_file.write_text("ignore me\n")
+
+    files = load_project_memory(tmp_path, ignored_paths=[ignored_file])
+
+    out = render_operator_summary(files, project_root=tmp_path)
+
+    assert "Memory: 2 rule file(s)" in out
+    assert "CLAUDE.md (project d=0 w=4) size=6 B included=5 B [loaded]" in out
+    assert "AGENTS.md (project d=0 w=4) size=10 B included=0 B [ignored]" in out
+    assert "OMNISIGHT_RULE_IGNORE='<path>[,<path>...]'" in out
+
+
+def test_render_operator_summary_marks_truncated_files(tmp_path: Path) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("a" * (PROJECT_RULE_FILE_MAX_BYTES + 1))
+
+    files = load_project_memory(tmp_path, filenames=("CLAUDE.md",))
+
+    out = render_operator_summary(files, project_root=tmp_path)
+
+    assert "size=5.0 KiB included=5.0 KiB [truncated:file]" in out
+
+
+def test_parse_ignored_paths_resolves_operator_env_values(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+
+    out = parse_ignored_paths(
+        "CLAUDE.md,~/AGENTS.md\n/subtree/WARP.md",
+        project_root=project,
+        home=home,
+    )
+
+    assert out == [
+        project / "CLAUDE.md",
+        home / "AGENTS.md",
+        Path("/subtree/WARP.md"),
+    ]
+
+
+def test_format_memory_size_uses_bytes_then_kib() -> None:
+    assert format_memory_size(999) == "999 B"
+    assert format_memory_size(1536) == "1.5 KiB"
 
 
 def test_render_custom_header() -> None:

@@ -102,6 +102,44 @@ class MemoryFile:
     """True when caller requested this file be ignored."""
 
 
+def format_memory_size(size_bytes: int) -> str:
+    """Return an operator-facing byte/KiB size label."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    return f"{size_bytes / 1024:.1f} KiB"
+
+
+def parse_ignored_paths(
+    raw: str | None,
+    *,
+    project_root: Path,
+    home: Path | None = None,
+) -> list[Path]:
+    """Parse the operator ignore list used by runner UI env knobs.
+
+    ``raw`` accepts comma, newline, or colon-separated paths.
+    Relative paths resolve against ``project_root``; ``~/`` resolves
+    against ``home`` / ``Path.home()``. Every worker derives the same
+    ignore set from env + paths, with no shared module-global state.
+    """
+    if not raw:
+        return []
+    base_home = home or Path.home()
+    out: list[Path] = []
+    for item in re.split(r"[,:\n]", raw):
+        value = item.strip()
+        if not value:
+            continue
+        if value == "~" or value.startswith("~/"):
+            path = base_home / value[2:]
+        else:
+            path = Path(value)
+            if not path.is_absolute():
+                path = project_root / path
+        out.append(path)
+    return out
+
+
 def _load_one(
     path: Path,
     convention: str,
@@ -369,3 +407,51 @@ def render_for_prompt(
                 parts.append("[truncated; operator may ignore this file]")
         parts.append("")
     return "\n".join(parts)
+
+
+def render_operator_summary(
+    memory_files: list[MemoryFile],
+    *,
+    project_root: Path,
+    ignore_env_var: str = "OMNISIGHT_RULE_IGNORE",
+) -> str:
+    """Render loaded rule files for runner/operator console UI."""
+    if not memory_files:
+        return "📜 Memory: no rule files found (CLAUDE.md / AGENTS.md / etc.)"
+
+    project = sum(1 for m in memory_files if m.scope == "project")
+    user = sum(1 for m in memory_files if m.scope == "user")
+    included = sum(m.included_bytes for m in memory_files)
+    total = sum(m.size_bytes for m in memory_files)
+    lines = [
+        (
+            f"📜 Memory: {len(memory_files)} rule file(s) — "
+            f"project={project} user={user} | "
+            f"included={format_memory_size(included)} / "
+            f"disk={format_memory_size(total)}"
+        )
+    ]
+    for mf in memory_files:
+        try:
+            label = str(mf.path.resolve().relative_to(project_root.resolve()))
+        except (OSError, ValueError):
+            label = str(mf.path)
+        status = "ignored" if mf.ignored else "loaded"
+        if mf.truncated:
+            status = f"truncated:{mf.truncated_reason}"
+        scope_label = mf.scope
+        if mf.distance is not None:
+            scope_label += f" d={mf.distance} w={mf.weight}"
+        lines.append(
+            "   - "
+            f"{label} ({scope_label}) "
+            f"size={format_memory_size(mf.size_bytes)} "
+            f"included={format_memory_size(mf.included_bytes)} "
+            f"[{status}]"
+        )
+    lines.append(
+        "   ignore: "
+        f"{ignore_env_var}='<path>[,<path>...]' "
+        "to omit specific files on the next reload"
+    )
+    return "\n".join(lines)
