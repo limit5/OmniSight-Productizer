@@ -13,6 +13,7 @@
 
 **Key invariants**:
 - SEARCH resolution walks the WP.3 cascade: exact match (`1.000`) → indent-agnostic (`0.980`) → prefix-tail rescue (`0.940`) → Jaro-Winkler actual score when ≥ `0.900`. Each layer must produce exactly one match; zero or multiple matches raise rather than guess — silent wrong-occurrence application is the failure mode being prevented.
+- `OMNISIGHT_WP_DIFF_VALIDATION_ENABLED=false` disables the fuzzy cascade and keeps Layer 1 exact-match only; the knob is read lazily per call so workers derive the same policy from their process environment.
 - Successful file-level SEARCH/REPLACE patches append one N10 `Diff Validation Confidence` row per block, with path, patch kind, selected layer, score, and non-sensitive notes. Raw patch payloads and file contents are never written to the ledger.
 - SEARCH blocks need ≥ `MIN_SEARCH_CONTEXT_LINES` (3) non-blank lines; this threshold is "locked by design".
 - Line endings are preserved: `apply_unified_diff` sniffs CRLF in the first 4 KB and rejoins with the original terminator, and trailing-newline state is tracked across `splitlines()`.

@@ -43,6 +43,7 @@ Exceptions:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -62,6 +63,7 @@ _CASCADE_LAYER_CONFIDENCE = {
     3: 0.94,
 }
 DEFAULT_JARO_WINKLER_THRESHOLD = 0.9
+DIFF_VALIDATION_ENABLED_ENV = "OMNISIGHT_WP_DIFF_VALIDATION_ENABLED"
 HD_BRINGUP_STRICT_JARO_WINKLER_THRESHOLD = 0.95
 HD_BRINGUP_STRICT_SUFFIXES = (
     ".dts",
@@ -234,6 +236,18 @@ def _find_exact_match(source: str, search: str) -> CascadeMatch | None:
     )
 
 
+def diff_validation_enabled() -> bool:
+    """Return whether the WP.3 fuzzy cascade is enabled.
+
+    The rollback knob is read lazily per call, so every worker derives
+    the same value from its process environment without relying on
+    shared module-global state.
+    """
+
+    raw = (os.environ.get(DIFF_VALIDATION_ENABLED_ENV) or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _find_indent_agnostic_match(source: str, search: str) -> CascadeMatch | None:
     search_norm = _indent_agnostic_lines(search)
     matches: list[CascadeMatch] = []
@@ -367,13 +381,15 @@ def find_search_replace_match(
     """Resolve a SEARCH block through the WP.3.1 cascade.
 
     Pure function: no module-global mutable state; every worker derives
-    the same result from the supplied source/search strings.
+    the same result from the supplied source/search strings and process
+    environment.
     """
-    for finder in (
-        _find_exact_match,
-        _find_indent_agnostic_match,
-        _find_prefix_tail_match,
-    ):
+    match = _find_exact_match(source, search)
+    if match is not None:
+        return match
+    if not diff_validation_enabled():
+        raise PatchNotFound("SEARCH block did not match exactly in the source file")
+    for finder in (_find_indent_agnostic_match, _find_prefix_tail_match):
         match = finder(source, search)
         if match is not None:
             return match

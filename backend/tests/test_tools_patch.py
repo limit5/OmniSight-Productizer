@@ -225,6 +225,49 @@ def test_cascade_layer_4_jaro_winkler_match():
     assert "record_output()" in out
 
 
+def test_diff_validation_disabled_keeps_exact_match_only(monkeypatch):
+    monkeypatch.setenv(tp.DIFF_VALIDATION_ENABLED_ENV, "false")
+    source = textwrap.dedent("""\
+        if ready:
+          start()
+          finish()
+    """)
+
+    exact = tp.find_search_replace_match(source, source)
+    assert exact.layer == 1
+
+    with pytest.raises(tp.PatchNotFound, match="exactly"):
+        tp.find_search_replace_match(
+            source,
+            "if ready:\n    start()\n    finish()\n",
+        )
+
+
+def test_diff_validation_disabled_reverts_edit_to_exact_only(tmp_path, monkeypatch):
+    monkeypatch.setenv(tp.DIFF_VALIDATION_ENABLED_ENV, "false")
+    f = tmp_path / "edit.py"
+    original = textwrap.dedent("""\
+        def render():
+            before()
+            live_middle()
+            after()
+    """)
+    f.write_text(original, encoding="utf-8")
+
+    with pytest.raises(tp.PatchNotFound, match="old_string not found"):
+        tp.apply_edit_to_file(
+            f,
+            "def render():\n    before()\n    stale_middle()\n    after()\n",
+            "def render():\n    before()\n    new_middle()\n    after()\n",
+        )
+
+    assert f.read_text(encoding="utf-8") == original
+    result = tp.apply_edit_to_file(f, "live_middle()", "exact_middle()")
+    assert result.match is not None
+    assert result.match.layer == 1
+    assert "exact_middle()" in f.read_text(encoding="utf-8")
+
+
 def test_hd_bringup_strict_path_uses_095_fuzzy_threshold(tmp_path):
     f = tmp_path / "board.dts"
     f.write_text(textwrap.dedent("""\
