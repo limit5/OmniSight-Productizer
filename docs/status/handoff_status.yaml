@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 364
+entry_count: 365
 status_counts:
-  dev-only: 354
+  dev-only: 355
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3419,3 +3419,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.2.4 需把 watched registry 接到 command palette / chat mention 的 registry surface；production
     若要使用 project overrides，需在實際 project checkout 放置 `.claude/skills/` 或 `.omnisight/skills/` skill files 並完成 live smoke。
+- id: 2026-05-05--WP.2.4
+  header_line: 45837
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.4
+  title: WP.2.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image / frontend bundle 需重建後 live smoke：開 command palette 搜尋 skill、選取後確認 Orchestrator
+    chat 收到 `@skill-name`。

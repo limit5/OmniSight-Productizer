@@ -990,6 +990,25 @@ export async function getReadyz() {
   return request<ReadyzResponse>("/readyz")
 }
 
+// ─── Skills ───
+
+export interface EffectiveSkill {
+  name: string
+  description: string
+  keywords: string[]
+  scope: "project" | "home" | "bundled" | string
+  source_path: string | null
+}
+
+export interface EffectiveSkillsResponse {
+  items: EffectiveSkill[]
+  count: number
+}
+
+export async function listEffectiveSkills(): Promise<EffectiveSkillsResponse> {
+  return request<EffectiveSkillsResponse>("/skills/effective")
+}
+
 // ─── Agents ───
 
 export interface ApiAgent {

@@ -29,8 +29,10 @@ import {
   ScrollText,
   ExternalLink,
   Command,
+  Wand2,
 } from "lucide-react"
 import { useI18n as _useI18n, type Locale } from "@/lib/i18n/context"
+import { listEffectiveSkills, type EffectiveSkill } from "@/lib/api"
 
 function useLocale(): Locale {
   try { return _useI18n().locale } catch { return "en" }
@@ -64,6 +66,7 @@ export function CommandPalette({ onNavigatePanel }: Props) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState("")
   const [cursor, setCursor] = useState(0)
+  const [skills, setSkills] = useState<EffectiveSkill[]>([])
   const inputRef = useRef<HTMLInputElement | null>(null)
   const listRef = useRef<HTMLUListElement | null>(null)
 
@@ -83,6 +86,52 @@ export function CommandPalette({ onNavigatePanel }: Props) {
     if (external) window.open(href, "_blank", "noopener,noreferrer")
     else window.location.href = href
   }, [])
+
+  const invokeSkillMention = useCallback((name: string) => {
+    if (typeof window === "undefined") return
+    navigatePanel("orchestrator")
+    setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("omnisight:chat-insert-text", {
+          detail: { text: `@${name} ` },
+        }),
+      )
+    }, 0)
+  }, [navigatePanel])
+
+  useEffect(() => {
+    let cancelled = false
+    listEffectiveSkills()
+      .then((res) => {
+        if (!cancelled) setSkills(res.items)
+      })
+      .catch(() => {
+        if (!cancelled) setSkills([])
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  const skillCommands = useMemo<CommandItem[]>(
+    () => skills.map((skill) => ({
+      id: `skill-${skill.name}`,
+      icon: Wand2,
+      label: {
+        en: `Invoke skill: @${skill.name}`,
+        "zh-TW": `叫用 skill：@${skill.name}`,
+        "zh-CN": `调用 skill：@${skill.name}`,
+        ja: `skill を呼び出す: @${skill.name}`,
+      },
+      hint: {
+        en: skill.description,
+        "zh-TW": skill.description,
+        "zh-CN": skill.description,
+        ja: skill.description,
+      },
+      run: () => invokeSkillMention(skill.name),
+      tags: ["skill", "skills", skill.name, skill.description, skill.scope, ...skill.keywords],
+    })),
+    [skills, invokeSkillMention],
+  )
 
   const commands = useMemo<CommandItem[]>(() => [
     // Panels — navigate via ?panel=…
@@ -105,7 +154,8 @@ export function CommandPalette({ onNavigatePanel }: Props) {
     { id: "doc-tutorial-2",  icon: PlayCircle, label: { en: "Tutorial: Handling a decision", "zh-TW": "教學：處理一個決策", "zh-CN": "教程：处理一个决策", ja: "チュートリアル: 決定の扱い方" }, run: () => go(`/docs/operator/${locale}/tutorial/handling-a-decision`) },
     { id: "doc-search",      icon: Compass,  label: { en: "Search all docs", "zh-TW": "搜尋所有文件", "zh-CN": "搜索所有文档", ja: "全ドキュメント検索" }, run: () => go(`/docs/operator/${locale}`) },
     { id: "swagger",         icon: ExternalLink, label: { en: "API reference (Swagger)", "zh-TW": "API 參考 (Swagger)", "zh-CN": "API 参考 (Swagger)", ja: "API リファレンス (Swagger)" }, run: () => go("/docs", true) },
-  ], [locale, navigatePanel, go])
+    ...skillCommands,
+  ], [locale, navigatePanel, go, skillCommands])
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase()
@@ -113,7 +163,7 @@ export function CommandPalette({ onNavigatePanel }: Props) {
     const terms = needle.split(/\s+/).filter(Boolean)
     return commands
       .map((c) => {
-        const haystack = [c.label[locale], ...(c.tags ?? [])].join(" ").toLowerCase()
+        const haystack = [c.label[locale], c.hint?.[locale] ?? "", ...(c.tags ?? [])].join(" ").toLowerCase()
         let score = 0
         for (const t of terms) {
           const i = haystack.indexOf(t)
