@@ -45,6 +45,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
+import { useTranslations } from "next-intl"
 import {
   AlertCircle,
   ArrowLeft,
@@ -104,6 +105,7 @@ function MethodPanel({
   busy,
   webauthnInFlight,
 }: MethodPanelProps) {
+  const tMfa = useTranslations("mfa")
   if (kind === MFA_METHOD_KIND.totp) {
     return (
       <div
@@ -120,7 +122,7 @@ function MethodPanel({
         />
         <input
           data-testid="as7-mfa-totp-input"
-          aria-label="6-digit authenticator code"
+          aria-label={tMfa("totpAriaLabel")}
           inputMode="numeric"
           autoComplete="one-time-code"
           autoFocus
@@ -149,7 +151,7 @@ function MethodPanel({
         <KeyRound size={20} className="text-[var(--artifact-purple)]" />
         <input
           data-testid="as7-mfa-backup-input"
-          aria-label="One-time backup code"
+          aria-label={tMfa("backupAriaLabel")}
           autoComplete="one-time-code"
           autoFocus
           maxLength={BACKUP_CODE_LENGTH}
@@ -181,7 +183,7 @@ function MethodPanel({
         className="text-[var(--artifact-purple)]"
       />
       <p className="font-mono text-[11px] text-[var(--muted-foreground)] text-center leading-relaxed">
-        Tap your security key or use platform biometric to continue.
+        {tMfa("tapKey")}
       </p>
       <button
         type="button"
@@ -195,7 +197,7 @@ function MethodPanel({
         ) : (
           <ShieldCheck size={14} />
         )}
-        Use security key
+        {tMfa("useSecurityKey")}
       </button>
     </div>
   )
@@ -211,6 +213,8 @@ function MfaChallengeForm() {
   const search = useSearchParams()
   const next = search.get("next") || "/"
   const level = useEffectiveMotionLevel()
+  const tMfa = useTranslations("mfa")
+  const tAuth = useTranslations("auth")
 
   const [value, setValue] = useState("")
   const [pulseKey, setPulseKey] = useState(0)
@@ -354,7 +358,7 @@ function MfaChallengeForm() {
       >
         <ShieldAlert size={28} className="text-[var(--muted-foreground)]" />
         <p className="font-mono text-[11px] text-[var(--muted-foreground)]">
-          No challenge in flight. Redirecting to sign-in…
+          {tMfa("noChallenge")}
         </p>
       </div>
     )
@@ -372,14 +376,23 @@ function MfaChallengeForm() {
           <AuthBrandWordmark level={level} bloomKey={bloomKey} />
           <Shield size={22} className="text-[var(--artifact-purple)]" />
           <h1 className="font-mono text-base font-semibold text-[var(--foreground)]">
-            Two-Factor Verification
+            {tMfa("verifyTitle")}
           </h1>
           <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
-            We&apos;re sending you in,{" "}
-            <span className="text-[var(--foreground)]">
-              {auth.mfaPending.email}
-            </span>
-            . Confirm it&apos;s you with one of the methods below.
+            {(() => {
+              const SENTINEL = "__OMNISIGHT_EMAIL_PLACEHOLDER__"
+              const body = tMfa("welcome", { email: SENTINEL })
+              const [before, after] = body.split(SENTINEL)
+              return (
+                <>
+                  {before}
+                  <span className="text-[var(--foreground)]">
+                    {auth.mfaPending.email}
+                  </span>
+                  {after}
+                </>
+              )
+            })()}
           </p>
         </div>
 
@@ -429,7 +442,7 @@ function MfaChallengeForm() {
             className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-sm font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {busy ? <Loader2 size={14} className="animate-spin" /> : null}
-            Verify
+            {tMfa("verify")}
           </button>
         ) : null}
 
@@ -440,13 +453,11 @@ function MfaChallengeForm() {
           className="flex items-center justify-center gap-1 font-mono text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
         >
           <ArrowLeft size={12} />
-          Back to sign in
+          {tAuth("backToSignIn")}
         </button>
 
         <p className="font-mono text-[10px] text-[var(--muted-foreground)] text-center leading-relaxed">
-          Lost access to every method? Contact your administrator —
-          they can disable MFA on your account so you can sign in with
-          your password.
+          {tMfa("lostAccess")}
         </p>
       </form>
 

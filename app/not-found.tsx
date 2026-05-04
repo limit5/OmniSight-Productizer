@@ -14,10 +14,13 @@
 import { useEffect, useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
+import { useTranslations } from "next-intl"
 import { AlertTriangle, ChevronDown, ChevronRight, Home } from "lucide-react"
 import { NeuralGrid } from "@/components/omnisight/neural-grid"
 
 export default function NotFound() {
+  const tNotFound = useTranslations("notFound")
+  const tCommon = useTranslations("common")
   const pathname = usePathname()
   const [expanded, setExpanded] = useState(false)
   // ``window`` is undefined during SSR — hydrate the full URL on mount so
@@ -56,7 +59,7 @@ export default function NotFound() {
               className="text-[10px] uppercase tracking-[0.3em] text-[var(--critical-red)]"
               style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
             >
-              SYS.ROUTE · NO MATCH
+              {tNotFound("badge")}
             </span>
           </div>
 
@@ -75,12 +78,12 @@ export default function NotFound() {
             className="text-2xl md:text-3xl font-semibold tracking-fui text-[var(--foreground)] text-center"
             style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
           >
-            找不到此頁面
+            {tNotFound("title")}
           </h1>
           <p className="mt-3 font-mono text-sm text-[var(--muted-foreground)] text-center leading-relaxed">
-            您所尋找的頁面不存在或已移除，
+            {tNotFound("introLine1")}
             <br />
-            請確認網址是否正確。
+            {tNotFound("introLine2")}
           </p>
 
           <div className="mt-8 flex flex-col items-center gap-3">
@@ -89,7 +92,7 @@ export default function NotFound() {
               className="group inline-flex items-center gap-2 rounded-md border border-[var(--neural-blue)] bg-[var(--neural-blue-dim)] px-6 py-3 font-mono text-sm font-semibold tracking-widest text-[var(--foreground)] transition-all hover:bg-[var(--neural-blue)] hover:text-black hover:shadow-[0_0_20px_var(--neural-blue-glow)]"
             >
               <Home size={14} aria-hidden="true" />
-              <span>回首頁</span>
+              <span>{tNotFound("home")}</span>
               <ChevronRight
                 size={14}
                 className="opacity-60 transition-transform group-hover:translate-x-0.5"
@@ -106,7 +109,7 @@ export default function NotFound() {
             >
               <span className="flex items-center gap-2">
                 <AlertTriangle size={12} />
-                <span>技術詳情 (for engineers)</span>
+                <span>{tNotFound("techDetails")}</span>
               </span>
               <ChevronDown
                 size={14}
@@ -160,7 +163,7 @@ export default function NotFound() {
         </div>
 
         <p className="mt-6 text-center font-mono text-[10px] uppercase tracking-widest text-[var(--muted-foreground)]">
-          OmniSight Productizer · neural command center
+          {tCommon("footer")}
         </p>
       </main>
     </div>

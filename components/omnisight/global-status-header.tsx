@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useTranslations } from "next-intl"
 import { EmergencyStop } from "./emergency-stop"
 import { LanguageToggle } from "./language-toggle"
 import { ModeSelector } from "./mode-selector"
@@ -36,6 +37,8 @@ export function GlobalStatusHeader({
   hasRunningAgents = false,
   settingsButton,
 }: StatusHeaderProps & { settingsButton?: React.ReactNode }) {
+  const tHeader = useTranslations("header")
+  const tStatus = useTranslations("globalStatus")
   const [time, setTime] = useState("")
   
   useEffect(() => {
@@ -110,10 +113,10 @@ export function GlobalStatusHeader({
           </div>
           <div>
             <h1 className="font-sans text-base lg:text-lg font-bold tracking-fui text-[var(--neural-blue)] text-glow-blue">
-              OMNISIGHT PRODUCTIZER
+              {tHeader("title")}
             </h1>
             <p className="font-mono text-xs text-[var(--muted-foreground)]">
-              NEURAL COMMAND CENTER v2.0
+              {tHeader("subtitle")}
             </p>
           </div>
         </div>
@@ -121,9 +124,9 @@ export function GlobalStatusHeader({
         {/* Project Pipeline Progress - hidden on tablet, shown on desktop */}
         <div className="hidden lg:block flex-1 max-w-md mx-8">
           <div className="flex items-center justify-between mb-1">
-            <span className="font-mono text-xs text-[var(--muted-foreground)]">PROJECT PIPELINE</span>
+            <span className="font-mono text-xs text-[var(--muted-foreground)]">{tHeader("pipeline")}</span>
             <span className="font-mono text-xs text-[var(--validation-emerald)]">
-              {finished}/{total} COMPLETE
+              {finished}/{total} {tHeader("complete")}
             </span>
           </div>
           <div className="h-2 bg-[var(--secondary)] rounded-full overflow-hidden">
@@ -180,10 +183,10 @@ export function GlobalStatusHeader({
                 }`}
                 title={
                   wslStatus === "OK"
-                    ? "WSL2 environment detected"
+                    ? tStatus("wsl2Ok")
                     : wslStatus === "N/A"
-                    ? "Host is not WSL2 (Linux/macOS native) — not an error"
-                    : "WSL2 status unavailable — backend may be unreachable"
+                    ? tStatus("wsl2Na")
+                    : tStatus("wsl2Off")
                 }
               />
               <span className="font-mono text-xs text-[var(--foreground)] whitespace-nowrap">
@@ -249,7 +252,7 @@ export function GlobalStatusHeader({
             <button
               onClick={onToggleNotifications}
               className="relative z-20 p-1.5 rounded transition-colors bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] cursor-pointer"
-              title="Notifications"
+              title={tStatus("notifications")}
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
               {unreadNotifications > 0 && (

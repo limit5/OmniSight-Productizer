@@ -29,6 +29,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
+import { useTranslations } from "next-intl"
 import {
   AlertCircle,
   ArrowLeft,
@@ -61,6 +62,14 @@ const TURNSTILE_SITE_KEY: string | null =
 // ─────────────────────────────────────────────────────────────────
 
 function LinkSentCard({ email }: { email: string }) {
+  const tAuth = useTranslations("auth")
+  const tForgot = useTranslations("forgotPassword")
+  // Split the localized body around an internal sentinel so the
+  // `{email}` slot can render with the foreground colour for emphasis.
+  // Drift-guard ensures every locale carries the `{email}` token.
+  const SENTINEL = "__OMNISIGHT_EMAIL_PLACEHOLDER__"
+  const body = tForgot("linkSentBody", { email: SENTINEL })
+  const [before, after] = body.split(SENTINEL)
   return (
     <div
       data-testid="as7-forgot-link-sent"
@@ -68,24 +77,22 @@ function LinkSentCard({ email }: { email: string }) {
     >
       <Mail size={32} className="text-[var(--artifact-purple)]" />
       <h1 className="font-mono text-base font-semibold text-[var(--foreground)]">
-        Check your inbox
+        {tAuth("checkInbox")}
       </h1>
       <p className="font-mono text-[12px] text-[var(--muted-foreground)] leading-relaxed">
-        If an account exists for{" "}
-        <span className="text-[var(--foreground)]">{email}</span>, we
-        sent a password reset link. The link expires in 30 minutes —
-        click it from the same browser to set a new password.
+        {before}
+        <span className="text-[var(--foreground)]">{email}</span>
+        {after}
       </p>
       <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
-        Didn&apos;t get it? Check your spam folder or wait a minute and
-        request a fresh link.
+        {tForgot("didntGet")}
       </p>
       <a
         href="/login"
         data-testid="as7-forgot-back-to-login"
         className="flex items-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90"
       >
-        <ArrowLeft size={12} /> Back to sign in
+        <ArrowLeft size={12} /> {tAuth("backToSignIn")}
       </a>
     </div>
   )
@@ -100,6 +107,8 @@ function ForgotPasswordForm() {
   const search = useSearchParams()
   const auth = useAuth()
   const level = useEffectiveMotionLevel()
+  const tAuth = useTranslations("auth")
+  const tForgot = useTranslations("forgotPassword")
 
   // Pre-fill from `?email=` if the user came from the login page
   // with their email already typed (we forward it so they don't have
@@ -192,17 +201,16 @@ function ForgotPasswordForm() {
         <AuthBrandWordmark level={level} bloomKey={bloomKey} />
         <KeyRound size={22} className="text-[var(--artifact-purple)]" />
         <h1 className="font-mono text-base font-semibold text-[var(--foreground)]">
-          Forgot your password?
+          {tForgot("title")}
         </h1>
         <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
-          Enter the email associated with your account. We&apos;ll send
-          you a link to set a new password.
+          {tForgot("intro")}
         </p>
       </div>
 
       <AuthFieldElectric
         level={level}
-        label="EMAIL"
+        label={tAuth("emailLabel")}
         leadingIcon={<Mail size={14} />}
         hasError={hasError}
         errorKey={errorKey}
@@ -212,7 +220,7 @@ function ForgotPasswordForm() {
           autoComplete: "email",
           autoFocus: true,
           required: true,
-          placeholder: "you@example.com",
+          placeholder: tAuth("emailPlaceholder"),
           value: email,
           onChange: (e) => setEmail(e.target.value),
           onFocus: onFieldFocus,
@@ -258,17 +266,17 @@ function ForgotPasswordForm() {
         className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-sm font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
       >
         {busy ? <Loader2 size={14} className="animate-spin" /> : null}
-        Send reset link
+        {tForgot("send")}
       </button>
 
       <p className="font-mono text-[10px] text-[var(--muted-foreground)] text-center leading-relaxed">
-        Remembered it?{" "}
+        {tAuth("rememberedIt")}{" "}
         <a
           href="/login"
           data-testid="as7-forgot-back-link"
           className="underline hover:text-[var(--foreground)] inline-flex items-center gap-1"
         >
-          <ArrowLeft size={10} /> Back to sign in
+          <ArrowLeft size={10} /> {tAuth("backToSignIn")}
         </a>
       </p>
     </form>

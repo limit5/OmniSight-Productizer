@@ -44,6 +44,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
+import { useTranslations } from "next-intl"
 import {
   AlertCircle,
   ArrowLeft,
@@ -79,39 +80,34 @@ import { bumpShakeKey } from "@/lib/auth/login-form-helpers"
 
 // AS.7.1 — Q.1 banner copy carried across from the previous page
 // rewrite. Kept inline so an operator landing on /login?reason=...
-// after a peer-session revocation still sees the explanation.
-const SESSION_REVOCATION_TRIGGER_COPY: Record<string, string> = {
-  password_change:
-    "Your password was changed on another device. Please sign in again.",
-  totp_enrolled:
-    "Two-factor authentication was enabled on another device. Please sign in again.",
-  totp_disabled:
-    "Two-factor authentication was disabled on another device. Please sign in again.",
-  backup_codes_regenerated:
-    "Your MFA backup codes were regenerated on another device. Please sign in again.",
-  webauthn_registered:
-    "A new security key was registered on your account. Please sign in again.",
-  webauthn_removed:
-    "A security key was removed from your account. Please sign in again.",
-  role_change:
-    "Your account role was changed by an administrator. Please sign in again.",
-  account_disabled:
-    "Your account was disabled by an administrator. Contact your administrator for access.",
-  not_me_cascade:
-    "You flagged a new-device login as suspicious. Every session was signed out and you will be required to change your password after signing in again.",
+// after a peer-session revocation still sees the explanation. The
+// trigger string maps to a stable i18n key under the `auth.session*`
+// namespace; the `t()` lookup happens at render so locale switches
+// re-render the copy.
+const SESSION_REVOCATION_TRIGGER_KEY: Record<string, string> = {
+  password_change: "sessionPasswordChange",
+  totp_enrolled: "sessionTotpEnrolled",
+  totp_disabled: "sessionTotpDisabled",
+  backup_codes_regenerated: "sessionBackupCodesRegenerated",
+  webauthn_registered: "sessionWebauthnRegistered",
+  webauthn_removed: "sessionWebauthnRemoved",
+  role_change: "sessionRoleChange",
+  account_disabled: "sessionAccountDisabled",
+  not_me_cascade: "sessionNotMeCascade",
 }
 
 function getSessionRevocationCopy(
+  tAuth: (key: string) => string,
   reason: string | null,
   trigger: string | null,
   message: string | null,
 ): string | null {
   if (reason !== "user_security_event") return null
   if (message && message.length > 0) return message
-  if (trigger && SESSION_REVOCATION_TRIGGER_COPY[trigger]) {
-    return SESSION_REVOCATION_TRIGGER_COPY[trigger]
+  if (trigger && SESSION_REVOCATION_TRIGGER_KEY[trigger]) {
+    return tAuth(SESSION_REVOCATION_TRIGGER_KEY[trigger])
   }
-  return "Your session was ended for security reasons. Please sign in again."
+  return tAuth("sessionDefault")
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -120,6 +116,8 @@ function getSessionRevocationCopy(
 
 function MfaChallengeForm({ onCompleted }: { onCompleted: () => void }) {
   const auth = useAuth()
+  const tMfa = useTranslations("mfa")
+  const tAuth = useTranslations("auth")
   const [code, setCode] = useState("")
   const [busy, setBusy] = useState(false)
   const [errorKey, setErrorKey] = useState(0)
@@ -144,10 +142,10 @@ function MfaChallengeForm({ onCompleted }: { onCompleted: () => void }) {
   const hasTotp = methods.includes("totp")
   const hasWebauthn = methods.includes("webauthn")
   const hint = hasTotp
-    ? "Enter your authenticator code or a backup code"
+    ? tMfa("hintTotp")
     : hasWebauthn
-    ? "Use your security key to continue"
-    : "Enter your verification code"
+    ? tMfa("hintWebauthn")
+    : tMfa("hintGeneric")
 
   return (
     <form
@@ -158,7 +156,7 @@ function MfaChallengeForm({ onCompleted }: { onCompleted: () => void }) {
       <div className="flex flex-col items-center text-center gap-1.5">
         <Shield size={26} className="text-[var(--artifact-purple)]" />
         <h1 className="font-mono text-base font-semibold text-[var(--foreground)]">
-          Two-Factor Authentication
+          {tMfa("title")}
         </h1>
         <p className="font-mono text-[11px] text-[var(--muted-foreground)]">
           {hint}
@@ -167,7 +165,7 @@ function MfaChallengeForm({ onCompleted }: { onCompleted: () => void }) {
 
       <AuthFieldElectric
         level="dramatic"
-        label="CODE"
+        label={tMfa("codeLabel")}
         leadingIcon={<Shield size={14} />}
         hasError={Boolean(auth.error)}
         errorKey={errorKey}
@@ -201,7 +199,7 @@ function MfaChallengeForm({ onCompleted }: { onCompleted: () => void }) {
         className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-sm font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
       >
         {busy ? <Loader2 size={14} className="animate-spin" /> : null}
-        Verify
+        {tMfa("verify")}
       </button>
 
       <button
@@ -210,11 +208,11 @@ function MfaChallengeForm({ onCompleted }: { onCompleted: () => void }) {
         className="flex items-center justify-center gap-1 font-mono text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
       >
         <ArrowLeft size={12} />
-        Back to login
+        {tAuth("backToLogin")}
       </button>
 
       <p className="font-mono text-[10px] text-[var(--muted-foreground)] text-center leading-relaxed">
-        You can use a 6-digit authenticator code or a backup code (xxxx-xxxx).
+        {tMfa("altCodeOrBackup")}
       </p>
     </form>
   )
@@ -233,6 +231,7 @@ function LoginForm() {
   const next = search.get("next") || "/"
   const auth = useAuth()
   const level = useEffectiveMotionLevel()
+  const tAuth = useTranslations("auth")
 
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
@@ -249,6 +248,7 @@ function LoginForm() {
   const revokedTrigger = search.get("trigger")
   const revokedMessage = search.get("message")
   const revocationCopy = getSessionRevocationCopy(
+    tAuth,
     revokedReason,
     revokedTrigger,
     revokedMessage,
@@ -377,7 +377,7 @@ function LoginForm() {
         <div className="flex flex-col items-center gap-1.5 text-center">
           <AuthBrandWordmark level={level} bloomKey={bloomKey} />
           <p className="font-mono text-[11px] text-[var(--muted-foreground)]">
-            Sign in to continue
+            {tAuth("signInToContinue")}
           </p>
         </div>
 
@@ -394,7 +394,7 @@ function LoginForm() {
             />
             <div className="flex flex-col gap-1">
               <span className="font-semibold tracking-wider text-[10px] text-[var(--artifact-purple)]">
-                SESSION ENDED
+                {tAuth("sessionEndedBadge")}
               </span>
               <span>{revocationCopy}</span>
             </div>
@@ -403,7 +403,7 @@ function LoginForm() {
 
         <AuthFieldElectric
           level={level}
-          label="EMAIL"
+          label={tAuth("emailLabel")}
           leadingIcon={<Mail size={14} />}
           hasError={hasError}
           errorKey={errorKey}
@@ -413,7 +413,7 @@ function LoginForm() {
             autoComplete: "email",
             autoFocus: true,
             required: true,
-            placeholder: "you@example.com",
+            placeholder: tAuth("emailPlaceholder"),
             value: email,
             onChange: (e) => setEmail(e.target.value),
             onFocus: onFieldFocus,
@@ -422,7 +422,7 @@ function LoginForm() {
 
         <AuthFieldElectric
           level={level}
-          label="PASSWORD"
+          label={tAuth("passwordLabel")}
           leadingIcon={<Lock size={14} />}
           hasError={hasError}
           errorKey={errorKey}
@@ -449,7 +449,7 @@ function LoginForm() {
           data-testid="as7-login-forgot-link"
           className="self-end font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] underline"
         >
-          Forgot your password?
+          {tAuth("forgotPasswordLink")}
         </a>
 
         {/* AS.6.4 honeypot — rotating field name. Renders empty
@@ -492,7 +492,7 @@ function LoginForm() {
           className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-sm font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {busy ? <Loader2 size={14} className="animate-spin" /> : null}
-          Sign in
+          {tAuth("signIn")}
         </button>
 
         {/* OAuth row — 5 primary providers always visible + a More
@@ -500,7 +500,7 @@ function LoginForm() {
         <div className="flex flex-col gap-3 mt-1">
           <div className="flex items-center gap-2 text-[var(--muted-foreground)] font-mono text-[10px] tracking-wider">
             <span className="flex-1 h-px bg-[var(--border)]" />
-            OR CONTINUE WITH
+            {tAuth("orContinueWith")}
             <span className="flex-1 h-px bg-[var(--border)]" />
           </div>
           <div
@@ -532,7 +532,7 @@ function LoginForm() {
                 transition: "transform 180ms ease",
               }}
             />
-            {showSecondary ? "Hide more" : "More providers"}
+            {showSecondary ? tAuth("hideMore") : tAuth("moreProviders")}
           </button>
           {showSecondary && (
             <div
@@ -555,9 +555,10 @@ function LoginForm() {
         </div>
 
         <p className="font-mono text-[10px] text-[var(--muted-foreground)] text-center leading-relaxed">
-          First boot? Bootstrap admin email is whatever you set in
+          {tAuth("firstBootHintBefore")}
           <code className="mx-1">OMNISIGHT_ADMIN_EMAIL</code>
-          (default: <code>admin@omnisight.local</code>).
+          {tAuth("firstBootHintAfter")} <code>admin@omnisight.local</code>
+          {tAuth("firstBootHintEnd")}
         </p>
 
         {/* 423 / lockout overlay — only renders when the backend

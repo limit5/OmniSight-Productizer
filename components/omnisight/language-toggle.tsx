@@ -1,21 +1,27 @@
 "use client"
 
 import { useState, useRef, useEffect } from "react"
+import { useTranslations } from "next-intl"
 import { Globe, ChevronDown, Check } from "lucide-react"
 import { useI18n, type Locale } from "@/lib/i18n/context"
 
 interface LanguageOption {
   code: Locale
-  label: string
+  // FX.9.9: `labelKey` resolves to a localized description of the
+  // language in the *user's currently active* locale (e.g. "簡體中文"
+  // when the user's UI is zh-TW). `nativeLabel` is always the language
+  // name in its own script and never gets translated. `flag` is the
+  // single-character glyph shown in the compact pill.
+  labelKey: string
   nativeLabel: string
   flag: string
 }
 
 const languages: LanguageOption[] = [
-  { code: "en", label: "English", nativeLabel: "English", flag: "EN" },
-  { code: "zh-CN", label: "Chinese (Simplified)", nativeLabel: "简体中文", flag: "简" },
-  { code: "zh-TW", label: "Chinese (Traditional)", nativeLabel: "繁體中文", flag: "繁" },
-  { code: "ja", label: "Japanese", nativeLabel: "日本語", flag: "日" },
+  { code: "en", labelKey: "english", nativeLabel: "English", flag: "EN" },
+  { code: "zh-CN", labelKey: "chineseSimplified", nativeLabel: "简体中文", flag: "简" },
+  { code: "zh-TW", labelKey: "chineseTraditional", nativeLabel: "繁體中文", flag: "繁" },
+  { code: "ja", labelKey: "japanese", nativeLabel: "日本語", flag: "日" },
 ]
 
 interface LanguageToggleProps {
@@ -24,9 +30,10 @@ interface LanguageToggleProps {
 
 export function LanguageToggle({ compact = false }: LanguageToggleProps) {
   const { locale, setLocale } = useI18n()
+  const tLang = useTranslations("language")
   const [isOpen, setIsOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
-  
+
   const currentLang = languages.find(l => l.code === locale) || languages[0]
   
   // Close dropdown when clicking outside
@@ -53,7 +60,7 @@ export function LanguageToggle({ compact = false }: LanguageToggleProps) {
         <button
           onClick={() => setIsOpen(!isOpen)}
           className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--secondary)] text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors"
-          aria-label="Select language"
+          aria-label={tLang("selectLanguage")}
         >
           <span className="font-mono text-[10px] font-bold">{currentLang.flag}</span>
         </button>
@@ -87,7 +94,7 @@ export function LanguageToggle({ compact = false }: LanguageToggleProps) {
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="flex items-center gap-2 px-3 py-1.5 rounded bg-[var(--secondary)] hover:bg-[var(--neural-blue)]/20 transition-colors group"
-        aria-label="Select language"
+        aria-label={tLang("selectLanguage")}
       >
         <Globe size={14} className="text-[var(--muted-foreground)] group-hover:text-[var(--neural-blue)]" />
         <span className="font-mono text-xs text-[var(--foreground)]">{currentLang.flag}</span>
@@ -109,7 +116,7 @@ export function LanguageToggle({ compact = false }: LanguageToggleProps) {
               <span className="font-mono text-xs font-bold w-6">{lang.flag}</span>
               <div className="flex-1">
                 <div className="font-mono text-sm">{lang.nativeLabel}</div>
-                <div className="font-mono text-xs text-[var(--muted-foreground)]">{lang.label}</div>
+                <div className="font-mono text-xs text-[var(--muted-foreground)]">{tLang(lang.labelKey)}</div>
               </div>
               {lang.code === locale && <Check size={14} className="text-[var(--neural-blue)]" />}
             </button>

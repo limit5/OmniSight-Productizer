@@ -17,6 +17,7 @@
 
 import { useEffect, useState } from "react"
 import Link from "next/link"
+import { useTranslations } from "next-intl"
 import {
   AlertTriangle,
   ChevronDown,
@@ -32,6 +33,8 @@ interface ErrorPageProps {
 }
 
 export default function Error({ error, reset }: ErrorPageProps) {
+  const tErr = useTranslations("errorPage")
+  const tCommon = useTranslations("common")
   const [expanded, setExpanded] = useState(false)
   const [pathname, setPathname] = useState<string | null>(null)
 
@@ -69,7 +72,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
               className="text-[10px] uppercase tracking-[0.3em] text-[var(--critical-red)]"
               style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
             >
-              SYS.EXCEPTION · UNHANDLED
+              {tErr("badge")}
             </span>
           </div>
 
@@ -88,12 +91,12 @@ export default function Error({ error, reset }: ErrorPageProps) {
             className="text-2xl md:text-3xl font-semibold tracking-fui text-[var(--foreground)] text-center"
             style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
           >
-            發生錯誤
+            {tErr("title")}
           </h1>
           <p className="mt-3 font-mono text-sm text-[var(--muted-foreground)] text-center leading-relaxed">
-            系統執行時發生未預期的錯誤，
+            {tErr("introLine1")}
             <br />
-            您可以點擊下方按鈕重試，或回首頁繼續操作。
+            {tErr("introLine2")}
           </p>
 
           <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
@@ -103,14 +106,14 @@ export default function Error({ error, reset }: ErrorPageProps) {
               className="group inline-flex items-center gap-2 rounded-md border border-[var(--neural-blue)] bg-[var(--neural-blue-dim)] px-6 py-3 font-mono text-sm font-semibold tracking-widest text-[var(--foreground)] transition-all hover:bg-[var(--neural-blue)] hover:text-black hover:shadow-[0_0_20px_var(--neural-blue-glow)]"
             >
               <RefreshCw size={14} aria-hidden="true" />
-              <span>重試</span>
+              <span>{tErr("retry")}</span>
             </button>
             <Link
               href="/"
               className="group inline-flex items-center gap-2 rounded-md border border-[var(--holo-glass-border)] px-6 py-3 font-mono text-sm font-semibold tracking-widest text-[var(--muted-foreground)] transition-all hover:border-[var(--neural-blue)] hover:text-[var(--neural-blue)]"
             >
               <Home size={14} aria-hidden="true" />
-              <span>回首頁</span>
+              <span>{tErr("home")}</span>
               <ChevronRight
                 size={14}
                 className="opacity-60 transition-transform group-hover:translate-x-0.5"
@@ -127,7 +130,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
             >
               <span className="flex items-center gap-2">
                 <AlertTriangle size={12} />
-                <span>技術詳情 (for engineers)</span>
+                <span>{tErr("techDetails")}</span>
               </span>
               <ChevronDown
                 size={14}
@@ -193,7 +196,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
         </div>
 
         <p className="mt-6 text-center font-mono text-[10px] uppercase tracking-widest text-[var(--muted-foreground)]">
-          OmniSight Productizer · neural command center
+          {tCommon("footer")}
         </p>
       </main>
     </div>

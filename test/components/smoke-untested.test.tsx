@@ -61,6 +61,13 @@ vi.mock("@/lib/i18n/context", () => ({
   }),
 }))
 
+// FX.9.9: LanguageToggle now also calls next-intl's `useTranslations`.
+// Smoke test stubs the namespaced hook so it returns the bare key,
+// matching the legacy `useI18n().t` mock above.
+vi.mock("next-intl", () => ({
+  useTranslations: () => (k: string) => k,
+}))
+
 import { LanguageToggle } from "@/components/omnisight/language-toggle"
 
 describe("LanguageToggle — smoke", () => {

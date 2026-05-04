@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
+import { useTranslations } from "next-intl"
 import {
   AlertTriangle,
   Check,
@@ -895,6 +896,8 @@ function CinemaModeToggle({
 // ─── Page ─────────────────────────────────────────────────────────────
 
 export default function SetupRequiredPage() {
+  const tSetup = useTranslations("setup")
+  const tCommon = useTranslations("common")
   const [status, setStatus] = useState<BootstrapStatusResponse | null>(null)
   const [backendVersion, setBackendVersion] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1018,7 +1021,7 @@ export default function SetupRequiredPage() {
               className="text-[10px] uppercase tracking-[0.3em] text-[var(--neural-blue)]"
               style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
             >
-              SYS.BOOTSTRAP · AWAITING OPERATOR
+              {tSetup("bootstrapBadge")}
             </span>
           </div>
 
@@ -1030,7 +1033,7 @@ export default function SetupRequiredPage() {
             className="mb-2 text-center text-2xl sm:text-3xl md:text-4xl font-bold uppercase tracking-[0.1em] sm:tracking-[0.2em] text-[var(--neural-blue)] text-glow-blue break-words"
             style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
           >
-            BOOTSTRAP REQUIRED
+            {tSetup("bootstrapTitle")}
           </div>
 
           {/* Friendly headline */}
@@ -1038,12 +1041,12 @@ export default function SetupRequiredPage() {
             className="text-2xl md:text-3xl font-semibold tracking-fui text-[var(--foreground)] text-center"
             style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
           >
-            系統需要完成初始設定
+            {tSetup("title")}
           </h1>
           <p className="mt-3 font-mono text-sm text-[var(--muted-foreground)] text-center leading-relaxed">
-            歡迎！這是您第一次使用 OmniSight，
+            {tSetup("introLine1")}
             <br />
-            只需幾分鐘即可完成基礎配置。
+            {tSetup("introLine2")}
           </p>
 
           {/* CTA */}
@@ -1053,7 +1056,7 @@ export default function SetupRequiredPage() {
               className="group inline-flex items-center gap-2 rounded-md border border-[var(--neural-blue)] bg-[var(--neural-blue-dim)] px-6 py-3 font-mono text-sm font-semibold tracking-widest text-[var(--foreground)] transition-all hover:bg-[var(--neural-blue)] hover:text-black hover:shadow-[0_0_20px_var(--neural-blue-glow)]"
             >
               <span aria-hidden="true">▶</span>
-              <span>開始設定</span>
+              <span>{tSetup("startSetup")}</span>
               <ChevronRight
                 size={14}
                 className="opacity-60 transition-transform group-hover:translate-x-0.5"
@@ -1070,7 +1073,7 @@ export default function SetupRequiredPage() {
               ) : (
                 <RefreshCw size={12} />
               )}
-              <span>重新檢測</span>
+              <span>{tSetup("redetect")}</span>
             </button>
           </div>
 
@@ -1168,7 +1171,7 @@ export default function SetupRequiredPage() {
             >
               <span className="flex items-center gap-2">
                 <AlertTriangle size={12} />
-                <span>技術詳情 (for engineers)</span>
+                <span>{tSetup("techDetails")}</span>
               </span>
               <ChevronDown
                 size={14}
@@ -1230,7 +1233,7 @@ export default function SetupRequiredPage() {
         </div>
 
         <p className="mt-6 text-center font-mono text-[10px] uppercase tracking-widest text-[var(--muted-foreground)]">
-          OmniSight Productizer · neural command center
+          {tCommon("footer")}
         </p>
       </main>
 

@@ -10,6 +10,61 @@
 import "@testing-library/jest-dom/vitest"
 import { afterEach, vi } from "vitest"
 import { cleanup } from "@testing-library/react"
+import enMessages from "../messages/en.json"
+
+// FX.9.9 — global next-intl shim for vitest.
+//
+// Most component tests render auth pages / dashboards directly without
+// wrapping in `<I18nProvider>` (which is the source of the
+// `<NextIntlClientProvider>`). Calling `useTranslations()` outside that
+// provider throws. Rather than touch every existing test to add a
+// provider wrapper, we install a deterministic mock that resolves
+// dot-keys against `messages/en.json` — the canonical baseline the
+// drift-guard test pins everyone else to. This keeps test text
+// assertions identical to what would render under the real provider in
+// the default English locale.
+//
+// `t.rich`, `t.markup`, `t.has`, `t.raw` are not used by the migrated
+// components and intentionally not stubbed; tests that need them can
+// still re-mock `next-intl` per-file to override.
+function resolveDotKey(bundle: Record<string, unknown>, dotted: string): string | undefined {
+  let cursor: unknown = bundle
+  for (const seg of dotted.split(".")) {
+    if (cursor && typeof cursor === "object" && seg in (cursor as Record<string, unknown>)) {
+      cursor = (cursor as Record<string, unknown>)[seg]
+    } else {
+      return undefined
+    }
+  }
+  return typeof cursor === "string" ? cursor : undefined
+}
+function interpolate(text: string, params?: Record<string, string | number>): string {
+  if (!params) return text
+  return Object.entries(params).reduce(
+    (acc, [k, v]) => acc.replace(new RegExp(`\\{${k}\\}`, "g"), String(v)),
+    text,
+  )
+}
+vi.mock("next-intl", async () => {
+  const actual = await vi.importActual<typeof import("next-intl")>("next-intl")
+  return {
+    ...actual,
+    useTranslations: (namespace?: string) => {
+      const t = (key: string, params?: Record<string, string | number>) => {
+        const dotted = namespace ? `${namespace}.${key}` : key
+        const text = resolveDotKey(enMessages as Record<string, unknown>, dotted)
+        return text === undefined ? dotted : interpolate(text, params)
+      }
+      // next-intl exposes `.rich` / `.has`; our migrated components
+      // don't call them, but stub them for forward compat so any future
+      // call site doesn't blow up.
+      ;(t as unknown as { rich: typeof t }).rich = t
+      ;(t as unknown as { has: (k: string) => boolean }).has = (k: string) =>
+        resolveDotKey(enMessages as Record<string, unknown>, namespace ? `${namespace}.${k}` : k) !== undefined
+      return t
+    },
+  }
+})
 
 // ─── Polyfills ───
 

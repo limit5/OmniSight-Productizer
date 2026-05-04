@@ -6284,7 +6284,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.9.8 GPG release-signer setup：operator GPG key 生成 + fingerprint 加進 `deploy/prod-deploy-signers.txt` + 簽 master tip + deploy 走真 verify（不再用 `--insecure-skip-verify`）
 
 #### Frontend i18n（1 item）
-- [ ] FX.9.9 真把前 10 個 user-facing 元件做 i18n 翻譯（FX.7.11 只搭 next-intl scaffolding 但沒翻任何字串）
+- [x] FX.9.9 真把前 10 個 user-facing 元件做 i18n 翻譯（FX.7.11 只搭 next-intl scaffolding 但沒翻任何字串）
 
 #### Tech debt 規劃（2 items）
 - [ ] FX.9.10 9 大檔（>2000 行）寫 ADR + module-split 規劃（不立刻 refactor，先決定怎麼拆）

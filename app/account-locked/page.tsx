@@ -45,6 +45,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
+import { useTranslations } from "next-intl"
 import {
   AlertTriangle,
   ArrowLeft,
@@ -97,6 +98,7 @@ function LockoutHero({
   remainingSeconds: number | null
   level: ReturnType<typeof useEffectiveMotionLevel>
 }) {
+  const tLockout = useTranslations("lockout")
   return (
     <div
       data-testid="as7-locked-hero"
@@ -138,13 +140,13 @@ function LockoutHero({
           >
             {remainingSeconds > 0 ? (
               <>
-                Retry available in{" "}
+                {tLockout("retryAvailableInBefore")}{" "}
                 <span className="as7-locked-hero-countdown-value">
                   {formatRemainingTime(remainingSeconds)}
                 </span>
               </>
             ) : (
-              <>You can try signing in again now.</>
+              <>{tLockout("tryAgainNow")}</>
             )}
           </p>
         ) : null}
@@ -171,6 +173,8 @@ function RecoveryRow({
   next,
   onSignOut,
 }: RecoveryRowProps) {
+  const tLockout = useTranslations("lockout")
+  const tAuth = useTranslations("auth")
   const retryBlocked = retrySignInBlockedReason({
     state,
     remainingSeconds,
@@ -218,7 +222,7 @@ function RecoveryRow({
           }
         >
           <KeyRound size={14} />
-          {retryDisabled ? "Try signing in again" : "Try signing in again"}
+          {tLockout("tryAgainCta")}
           {!retryDisabled ? <ArrowRight size={14} /> : null}
         </a>
       ) : null}
@@ -230,7 +234,7 @@ function RecoveryRow({
           className="flex items-center justify-center gap-2 px-3 py-2 rounded border border-[var(--border)] text-[var(--foreground)] font-mono text-xs hover:border-[var(--artifact-purple)] hover:text-[var(--artifact-purple)]"
         >
           <Lock size={12} />
-          Reset password
+          {tLockout("resetPassword")}
         </a>
       ) : null}
 
@@ -242,7 +246,7 @@ function RecoveryRow({
           className="flex items-center justify-center gap-2 px-3 py-2 rounded border border-[var(--border)] text-[var(--foreground)] font-mono text-xs hover:border-[var(--artifact-purple)] hover:text-[var(--artifact-purple)]"
         >
           <Mail size={12} />
-          Contact administrator
+          {tLockout("contactAdmin")}
         </a>
       ) : null}
 
@@ -261,7 +265,7 @@ function RecoveryRow({
           className="flex items-center justify-center gap-1 font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
         >
           <LogOut size={10} />
-          Sign out of OmniSight
+          {tLockout("signOut")}
         </button>
       ) : null}
 
@@ -271,7 +275,7 @@ function RecoveryRow({
         className="flex items-center justify-center gap-1 font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
       >
         <ArrowLeft size={10} />
-        Back to sign in
+        {tAuth("backToSignIn")}
       </a>
     </div>
   )
@@ -286,6 +290,7 @@ function AccountLockedBody() {
   const router = useRouter()
   const search = useSearchParams()
   const level = useEffectiveMotionLevel()
+  const tLockout = useTranslations("lockout")
 
   const reasonHint = search.get("reason")
   const retryAfterRaw = search.get("retry_after")
@@ -380,10 +385,7 @@ function AccountLockedBody() {
             size={14}
             className="shrink-0 mt-0.5 text-[var(--artifact-purple)]"
           />
-          <span>
-            A security event triggered this hold. Resetting your password
-            removes the hold.
-          </span>
+          <span>{tLockout("securityHoldBanner")}</span>
         </div>
       ) : null}
 
