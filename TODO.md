@@ -6273,7 +6273,7 @@ BP.E GraphRAG / Neo4j
 
 #### 部署穩定性（6 items）
 - [x] FX.9.1 `backend/alembic/versions/0052_catalog_seed.py` upgrade() 改 `op.execute()` 取代 `conn.exec_driver_sql()`，繞 SQLAlchemy 2.x + sqlite3 cython 對 immutabledict params 不相容
-- [ ] FX.9.2 `backend/alembic/env.py:90` 改 `from backend.alembic_pg_compat import` (絕對 import)，避免 alembic 啟動時把 `/app/backend` 推進 sys.path 導致 platform.py shadow stdlib
+- [x] FX.9.2 `backend/alembic/env.py:90` 改 `from backend.alembic_pg_compat import` (絕對 import)，避免 alembic 啟動時把 `/app/backend` 推進 sys.path 導致 platform.py shadow stdlib
 - [ ] FX.9.3 `backend/platform.py` rename → `backend/platform_profile.py`（永久解 stdlib 衝突）+ 全 codebase update import
 - [ ] FX.9.4 `backend/alembic/versions/` 寫一條 merge migration 把 0059 / 0106 / 0183 / 0187 四 head 收成單 head（避免 `alembic upgrade head` 撞 MultipleHeads error）
 - [ ] FX.9.5 deploy 流程加 `alembic upgrade heads` 步驟（在 Step 2.5 build 完之後、Step 3 rolling restart 之前，避免 readyz fail）
@@ -6297,9 +6297,9 @@ BP.E GraphRAG / Neo4j
 > **runner**：Codex（Tier B codex-work worktree）
 
 #### CVE 修復（3 items）
-- [~][G] FX.10.1 升 `starlette` 0.46.2 → 0.49.1（CVE-2025-54121 + CVE-2025-62727）；驗 FastAPI compat
-- [ ] FX.10.2 升 `langchain-openai` 1.1.12 → 1.1.14（GHSA-r7w7-9xr2-qq2r）
-- [ ] FX.10.3 升 `python-dotenv` 1.1.0 → 1.2.2（CVE-2026-28684）
+- [x][G] FX.10.1 升 `starlette` 0.46.2 → 0.49.1（CVE-2025-54121 + CVE-2025-62727）；驗 FastAPI compat
+- [x][G] FX.10.2 升 `langchain-openai` 1.1.12 → 1.1.14（GHSA-r7w7-9xr2-qq2r）
+- [~][G] FX.10.3 升 `python-dotenv` 1.1.0 → 1.2.2（CVE-2026-28684）
 
 #### Code quality（4 items）
 - [ ] FX.10.4 `ruff check backend/ --fix` 跑一輪解 209 個 auto-fixable（202 unused-import + 7 其他）；未動到 production logic
