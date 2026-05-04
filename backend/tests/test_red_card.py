@@ -207,6 +207,48 @@ def test_parse_review_history_accepts_mapping_aliases() -> None:
     )
 
 
+def test_parse_review_history_preserves_model_instances() -> None:
+    event = RedCardReviewEvent(
+        agent_id="agent-alpha",
+        jira_ticket="PROJ-42",
+        verified_label="Verified -1",
+    )
+    assert parse_review_history([event]) == (event,)
+
+
+def test_parse_review_history_normalises_verified_label_aliases() -> None:
+    events = parse_review_history([
+        {"agent": "agent-alpha", "ticket": "PROJ-42", "score": "-1"},
+        {"agent": "agent-alpha", "ticket": "PROJ-42", "score": "verified-1"},
+        {"agent": "agent-alpha", "ticket": "PROJ-42", "score": "Verified:-1"},
+    ])
+    assert [event.verified_label for event in events] == [
+        VERIFIED_MINUS_ONE,
+        VERIFIED_MINUS_ONE,
+        VERIFIED_MINUS_ONE,
+    ]
+
+
+def test_parse_review_history_normalises_non_failure_aliases() -> None:
+    events = parse_review_history([
+        {"agent": "agent-alpha", "ticket": "PROJ-42", "score": "+1"},
+        {"agent": "agent-alpha", "ticket": "PROJ-42", "score": "verified+0"},
+    ])
+    assert [event.verified_label for event in events] == [
+        "Verified +1",
+        "Verified 0",
+    ]
+
+
+def test_parse_review_history_skips_malformed_rows() -> None:
+    events = parse_review_history([
+        {},
+        {"agent": "agent-alpha", "score": "-1"},
+        {"ticket": "PROJ-42", "score": "-1"},
+    ])
+    assert events == ()
+
+
 def test_two_failures_warn_but_do_not_red_card() -> None:
     decision = evaluate_red_card([_event(), _event(patchset="2")])
     assert decision.status == "warn"
@@ -230,11 +272,30 @@ def test_three_consecutive_failures_red_card() -> None:
     assert decision.should_block_jira is True
 
 
+def test_verified_minus_one_label_property_uses_normalised_value() -> None:
+    event = RedCardReviewEvent(
+        agent_id="agent-alpha",
+        jira_ticket="PROJ-42",
+        verified_label="verified-1",
+    )
+    assert event.is_verified_minus_one is True
+
+
 def test_non_failure_resets_consecutive_streak() -> None:
     decision = evaluate_red_card([
         _event(patchset="1"),
         _event(patchset="2"),
         _event("Verified +1", patchset="3"),
+    ])
+    assert decision.status == "clear"
+    assert decision.consecutive_failures == 0
+
+
+def test_verified_zero_resets_consecutive_streak() -> None:
+    decision = evaluate_red_card([
+        _event(patchset="1"),
+        _event(patchset="2"),
+        _event("0", patchset="3"),
     ])
     assert decision.status == "clear"
     assert decision.consecutive_failures == 0
@@ -254,6 +315,18 @@ def test_streak_is_scoped_to_same_agent_and_ticket() -> None:
     assert decision.consecutive_failures == 3
 
 
+def test_explicit_scope_with_no_matching_events_is_clear() -> None:
+    decision = evaluate_red_card(
+        [_event(agent_id="agent-beta", jira_ticket="PROJ-99")],
+        agent_id="agent-alpha",
+        jira_ticket="PROJ-42",
+    )
+    assert decision.agent_id == "agent-alpha"
+    assert decision.jira_ticket == "PROJ-42"
+    assert decision.status == "clear"
+    assert decision.consecutive_failures == 0
+
+
 def test_explicit_scope_can_evaluate_non_latest_pair() -> None:
     decision = evaluate_red_card(
         [
@@ -269,16 +342,73 @@ def test_explicit_scope_can_evaluate_non_latest_pair() -> None:
     assert decision.consecutive_failures == 3
 
 
+def test_latest_valid_event_supplies_default_scope_after_bad_rows() -> None:
+    decision = evaluate_red_card([
+        {"bad": "row"},
+        _event(agent_id="agent-alpha", jira_ticket="PROJ-42"),
+    ])
+    assert decision.agent_id == "agent-alpha"
+    assert decision.jira_ticket == "PROJ-42"
+    assert decision.status == "warn"
+
+
 def test_empty_history_is_clear() -> None:
     decision = evaluate_red_card([], agent_id="agent-alpha", jira_ticket="PROJ-42")
     assert decision.status == "clear"
     assert decision.consecutive_failures == 0
 
 
+def test_empty_history_without_scope_keeps_empty_identifiers() -> None:
+    decision = evaluate_red_card([])
+    assert decision.agent_id == ""
+    assert decision.jira_ticket == ""
+    assert decision.status == "clear"
+
+
 def test_custom_threshold_is_supported_for_staging() -> None:
     decision = evaluate_red_card([_event(), _event(patchset="2")], threshold=2)
     assert decision.status == "red_card"
     assert decision.threshold == 2
+
+
+def test_negative_threshold_clamps_to_one() -> None:
+    decision = evaluate_red_card([_event()], threshold=-10)
+    assert decision.status == "red_card"
+    assert decision.threshold == 1
+
+
+def test_zero_threshold_uses_default_threshold() -> None:
+    decision = evaluate_red_card([_event()], threshold=0)
+    assert decision.status == "warn"
+    assert decision.threshold == RED_CARD_THRESHOLD
+
+
+def test_warn_decision_carries_latest_failure_metadata() -> None:
+    decision = evaluate_red_card([
+        {
+            "agent_id": "agent-alpha",
+            "jira_ticket": "PROJ-42",
+            "verified_label": "Verified -1",
+            "api_key_id": "ak-alpha",
+            "change_id": "Iabc",
+            "patchset": "7",
+        },
+    ])
+    assert decision.status == "warn"
+    assert decision.reason == "verified_minus_one_streak"
+    assert decision.api_key_id == "ak-alpha"
+    assert decision.change_id == "Iabc"
+    assert decision.patchset == "7"
+
+
+def test_clear_decision_carries_latest_scoped_event_metadata() -> None:
+    decision = evaluate_red_card([
+        _event(patchset="1"),
+        _event("Verified +1", api_key_id="ak-new", patchset="2"),
+    ])
+    assert decision.status == "clear"
+    assert decision.api_key_id == "ak-new"
+    assert decision.patchset == "2"
 
 
 def test_execute_red_card_noops_before_threshold() -> None:
@@ -293,6 +423,30 @@ def test_execute_red_card_noops_before_threshold() -> None:
     assert result.jira_block is None
     assert api.calls == []
     assert jira.calls == []
+
+
+def test_execute_red_card_uses_explicit_scope() -> None:
+    api = _StubApiDisabler()
+    jira = _StubJiraBlocker()
+    result = _run(execute_red_card(
+        [
+            _event(agent_id="agent-alpha", jira_ticket="PROJ-42"),
+            _event(agent_id="agent-alpha", jira_ticket="PROJ-42"),
+            _event(agent_id="agent-alpha", jira_ticket="PROJ-42"),
+            _event("Verified +1", agent_id="agent-beta", jira_ticket="PROJ-99"),
+        ],
+        agent_id="agent-alpha",
+        jira_ticket="PROJ-42",
+        deps=RedCardDeps(api_disabler=api, jira_blocker=jira),
+    ))
+    assert result.performed is True
+    assert result.decision.agent_id == "agent-alpha"
+    assert result.decision.jira_ticket == "PROJ-42"
+    assert api.calls == [{
+        "agent_id": "agent-alpha",
+        "api_key_id": "ak-alpha",
+        "reason": RED_CARD_REASON,
+    }]
 
 
 def test_execute_red_card_cuts_api_and_blocks_jira() -> None:
