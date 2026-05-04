@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 357
+entry_count: 358
 status_counts:
-  dev-only: 347
+  dev-only: 348
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3356,3 +3356,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — BP.C.3 需把 `backend.agents.graph` 改為使用 `backend.graph_topology` builder，BP.C.4 再由 orchestrator
     sizing pre-stage 與 `OMNISIGHT_TOPOLOGY_MODE=legacy|smxl` 控制 live traffic。
+- id: 2026-05-05--BP.C.3
+  header_line: 45726
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.C.3
+  title: BP.C.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.C.4 需接 orchestrator sizing pre-stage，把 BP.C.1 sizer 結果傳入 `run_graph(size=...)`，並在 production
+    env 顯式翻 `OMNISIGHT_TOPOLOGY_MODE=smxl` 後才會有 live S/XL traffic。
