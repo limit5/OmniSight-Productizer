@@ -11,9 +11,11 @@ persistence remains blocked on KS.2.11's CMEK tables.
 
 Module-global state audit (SOP Step 1)
 --------------------------------------
-Only immutable route constants and Pydantic classes are module globals.
-Provider metadata lives in ``backend.security.cmek_wizard`` as immutable
-dataclasses. No in-memory cache or singleton is introduced.
+Only immutable route constants, Pydantic classes, and pure helper
+functions are module globals. The settings status endpoint reads
+``cmek_revoke_detector``'s per-worker observability snapshot; every
+worker derives it from the same external KMS/Vault source, so no shared
+Python memory is required.
 
 Read-after-write timing audit (SOP Step 1)
 ------------------------------------------
@@ -32,6 +34,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from backend import auth
 from backend.security import cmek_graceful_degrade as _cmek_degrade
+from backend.security import cmek_revoke_detector as _cmek_detector
 from backend.security import cmek_siem as _cmek_siem
 from backend.security import cmek_upgrade as _cmek_upgrade
 from backend.security import cmek_wizard as _cw
@@ -110,6 +113,40 @@ class TierDowngradeRequest(BaseModel):
     dek_refs: list[dict] = Field(default_factory=list)
 
 
+def _cmek_settings_status_payload(tenant_id: str) -> dict:
+    latest_for_tenant = [
+        result
+        for result in _cmek_detector.latest_cmek_health_results()
+        if result.get("tenant_id") == tenant_id
+    ]
+    latest = (
+        max(latest_for_tenant, key=lambda result: float(result.get("checked_at") or 0.0))
+        if latest_for_tenant
+        else None
+    )
+    decision = _cmek_degrade.cmek_degrade_decision_for_tenant(
+        tenant_id,
+        latest_results=latest_for_tenant,
+    )
+    if latest is None:
+        kms_health = "not_configured"
+    elif decision.allowed:
+        kms_health = "healthy"
+    else:
+        kms_health = "revoked"
+    return {
+        "tenant_id": tenant_id,
+        "security_tier": "tier-2" if latest is not None else "tier-1",
+        "kms_health": kms_health,
+        "revoke_status": "clear" if decision.allowed else "revoked",
+        "provider": str(latest.get("provider") or "") if latest else "",
+        "key_id": str(latest.get("key_id") or "") if latest else "",
+        "reason": str(latest.get("reason") or "") if latest else "",
+        "raw_state": str(latest.get("raw_state") or "") if latest else "",
+        "checked_at": float(latest["checked_at"]) if latest and latest.get("checked_at") else None,
+    }
+
+
 async def _guard(tenant_id: str, actor: auth.User) -> JSONResponse | None:
     if not _is_valid_tenant_id(tenant_id):
         return JSONResponse(
@@ -150,6 +187,30 @@ async def list_cmek_wizard_providers(
             "providers": _cw.list_provider_specs(),
         }
     )
+
+
+@router.get("/tenants/{tenant_id}/cmek/status")
+async def get_cmek_settings_status(
+    tenant_id: str,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; "
+                    f"must match {TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not await _user_can_manage_cmek(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"requires tenant owner/admin or super_admin on {tenant_id!r}",
+        )
+    return JSONResponse(_cmek_settings_status_payload(tenant_id))
 
 
 @router.post("/tenants/{tenant_id}/cmek/wizard/policy")

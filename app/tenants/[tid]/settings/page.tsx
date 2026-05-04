@@ -60,6 +60,7 @@ import {
   createTenantProject,
   deleteTenantMember,
   generateCmekWizardPolicy,
+  getCmekSettingsStatus,
   getStorageUsage,
   listAllTenantProjects,
   listCmekWizardProviders,
@@ -72,6 +73,7 @@ import {
   type CreatedTenantInvite,
   type CmekProvider,
   type CmekProviderSpec,
+  type CmekSettingsStatus,
   type CompleteCmekResponse,
   type ProductLine,
   type TenantInviteRow,
@@ -1264,6 +1266,7 @@ const CMEK_STEPS = [
 
 function SecurityTab({ tid }: { tid: string }) {
   const [providers, setProviders] = useState<CmekProviderSpec[]>([])
+  const [cmekStatus, setCmekStatus] = useState<CmekSettingsStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [step, setStep] = useState(0)
@@ -1277,21 +1280,26 @@ function SecurityTab({ tid }: { tid: string }) {
   const [policyCopied, setPolicyCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [selectedSecurityTier, setSelectedSecurityTier] = useState<"tier-1" | "tier-2">("tier-1")
 
   const selected = useMemo(
     () => providers.find((p) => p.provider === provider) ?? providers[0],
     [providers, provider],
   )
 
-  const securityTier = completeResult?.security_tier ?? "tier-1"
+  const securityTier = completeResult?.security_tier ?? selectedSecurityTier
+  const effectiveKmsHealth = completeResult ? "healthy" : cmekStatus?.kms_health ?? "not_configured"
+  const effectiveRevokeStatus = cmekStatus?.revoke_status ?? "clear"
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setLoadError(null)
-    listCmekWizardProviders(tid)
-      .then((res) => {
+    Promise.all([listCmekWizardProviders(tid), getCmekSettingsStatus(tid)])
+      .then(([res, status]) => {
         if (cancelled) return
+        setCmekStatus(status)
+        setSelectedSecurityTier(status.security_tier)
         setProviders(res.providers)
         if (res.providers[0]) {
           setProvider(res.providers[0].provider)
@@ -1397,6 +1405,7 @@ function SecurityTab({ tid }: { tid: string }) {
         verification_id: verifyResult.verification_id,
       })
       setCompleteResult(res)
+      setSelectedSecurityTier("tier-2")
       setStep(4)
     } catch (exc) {
       setError(describeError(exc))
@@ -1437,19 +1446,100 @@ function SecurityTab({ tid }: { tid: string }) {
             Configure a customer-managed key draft for tenant {tid}.
           </p>
         </div>
-        <div
-          className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-mono ${
-            securityTier === "tier-2"
-              ? "border-[var(--neural-green)]/50 bg-[var(--neural-green)]/10"
-              : "border-[var(--border)] bg-[var(--card)]"
-          }`}
-          data-testid="cmek-security-tier"
-        >
-          <ShieldAlert size={13} />
-          {securityTier === "tier-2" ? "Tier 2 · Customer-managed KEK" : "Tier 1 · OmniSight-managed KEK"}
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="inline-flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-xs font-mono">
+            <span className="text-[var(--muted-foreground)]">Security Tier</span>
+            <select
+              value={selectedSecurityTier}
+              onChange={(e) => {
+                const next = e.target.value as "tier-1" | "tier-2"
+                setSelectedSecurityTier(next)
+                if (next === "tier-1") {
+                  setCompleteResult(null)
+                }
+              }}
+              className="rounded border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs"
+              data-testid="cmek-security-tier-selector"
+            >
+              <option value="tier-1">Tier 1</option>
+              <option value="tier-2">Tier 2</option>
+            </select>
+          </label>
+          <div
+            className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-mono ${
+              securityTier === "tier-2"
+                ? "border-[var(--neural-green)]/50 bg-[var(--neural-green)]/10"
+                : "border-[var(--border)] bg-[var(--card)]"
+            }`}
+            data-testid="cmek-security-tier"
+          >
+            <ShieldAlert size={13} />
+            {securityTier === "tier-2" ? "Tier 2 · Customer-managed KEK" : "Tier 1 · OmniSight-managed KEK"}
+          </div>
         </div>
       </div>
 
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-4 font-mono">
+        <div
+          className={`rounded border px-3 py-2 text-xs ${
+            effectiveRevokeStatus === "revoked"
+              ? "border-[var(--destructive)]/50 bg-[var(--destructive)]/10"
+              : "border-[var(--border)] bg-[var(--card)]"
+          }`}
+          data-testid="cmek-revoke-status"
+          data-status={effectiveRevokeStatus}
+        >
+          <div className="flex items-center gap-2">
+            {effectiveRevokeStatus === "revoked" ? (
+              <CircleAlert size={13} className="text-[var(--destructive)]" />
+            ) : (
+              <CheckCircle2 size={13} className="text-[var(--neural-green)]" />
+            )}
+            <span>{effectiveRevokeStatus === "revoked" ? "Revoked · new requests paused" : "Revoke clear"}</span>
+          </div>
+          <p className="mt-1 text-[10px] text-[var(--muted-foreground)]">
+            {cmekStatus?.reason || "No revoke snapshot for this tenant."}
+          </p>
+        </div>
+        <div
+          className={`rounded border px-3 py-2 text-xs ${
+            effectiveKmsHealth === "healthy"
+              ? "border-[var(--neural-green)]/50 bg-[var(--neural-green)]/10"
+              : effectiveKmsHealth === "revoked"
+                ? "border-[var(--destructive)]/50 bg-[var(--destructive)]/10"
+                : "border-[var(--border)] bg-[var(--card)]"
+          }`}
+          data-testid="cmek-kms-health-badge"
+          data-status={effectiveKmsHealth}
+        >
+          <div className="flex items-center gap-2">
+            {effectiveKmsHealth === "healthy" ? (
+              <CheckCircle2 size={13} className="text-[var(--neural-green)]" />
+            ) : effectiveKmsHealth === "revoked" ? (
+              <CircleAlert size={13} className="text-[var(--destructive)]" />
+            ) : (
+              <ShieldAlert size={13} className="text-[var(--muted-foreground)]" />
+            )}
+            <span>
+              KMS {effectiveKmsHealth === "not_configured" ? "not configured" : effectiveKmsHealth}
+            </span>
+          </div>
+          <p className="mt-1 text-[10px] text-[var(--muted-foreground)] truncate">
+            {cmekStatus?.provider ? `${cmekStatus.provider} · ${cmekStatus.raw_state || cmekStatus.key_id}` : "Tier 1 uses the OmniSight-managed KEK."}
+          </p>
+        </div>
+      </div>
+
+      {selectedSecurityTier === "tier-1" && (
+        <div
+          className="rounded border border-[var(--border)] bg-[var(--card)] p-4 font-mono text-xs text-[var(--muted-foreground)]"
+          data-testid="cmek-tier1-selected"
+        >
+          Tier 1 selected. Choose Tier 2 to configure a customer-managed key.
+        </div>
+      )}
+
+      {selectedSecurityTier === "tier-2" && (
       <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-4">
         <ol className="rounded border border-[var(--border)] bg-[var(--card)] p-3 font-mono text-xs space-y-1">
           {CMEK_STEPS.map((label, idx) => {
@@ -1659,6 +1749,7 @@ function SecurityTab({ tid }: { tid: string }) {
           )}
         </div>
       </div>
+      )}
     </div>
   )
 }

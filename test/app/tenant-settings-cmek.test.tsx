@@ -22,6 +22,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return {
     ...actual,
     listTenantMembers: vi.fn(),
+    getCmekSettingsStatus: vi.fn(),
     listCmekWizardProviders: vi.fn(),
     generateCmekWizardPolicy: vi.fn(),
     saveCmekWizardKeyId: vi.fn(),
@@ -35,6 +36,7 @@ import { useAuth } from "@/lib/auth-context"
 import {
   completeCmekWizard,
   generateCmekWizardPolicy,
+  getCmekSettingsStatus,
   listCmekWizardProviders,
   listTenantMembers,
   saveCmekWizardKeyId,
@@ -43,6 +45,7 @@ import {
 
 const mockedUseAuth = useAuth as unknown as ReturnType<typeof vi.fn>
 const mockedListMembers = listTenantMembers as unknown as ReturnType<typeof vi.fn>
+const mockedGetStatus = getCmekSettingsStatus as unknown as ReturnType<typeof vi.fn>
 const mockedListProviders = listCmekWizardProviders as unknown as ReturnType<typeof vi.fn>
 const mockedGeneratePolicy = generateCmekWizardPolicy as unknown as ReturnType<typeof vi.fn>
 const mockedSaveKeyId = saveCmekWizardKeyId as unknown as ReturnType<typeof vi.fn>
@@ -85,6 +88,17 @@ beforeEach(() => {
     status_filter: "active",
     count: 0,
     members: [],
+  })
+  mockedGetStatus.mockResolvedValue({
+    tenant_id: "t-acme",
+    security_tier: "tier-2",
+    kms_health: "healthy",
+    revoke_status: "clear",
+    provider: "aws-kms",
+    key_id: "arn:aws:kms:us-east-1:111122223333:key/00000000-0000-0000-0000-000000000000",
+    reason: "describe_ok",
+    raw_state: "Enabled",
+    checked_at: 1760000000,
   })
   mockedListProviders.mockResolvedValue({
     tenant_id: "t-acme",
@@ -164,6 +178,56 @@ beforeEach(() => {
 })
 
 describe("/tenants/{tid}/settings — CMEK wizard", () => {
+  it("renders the Security Tier selector, revoke status, and KMS health badge", async () => {
+    await renderPage()
+
+    fireEvent.click(screen.getByTestId("settings-tab-security"))
+
+    expect(await screen.findByTestId("cmek-security-tier-selector")).toHaveValue("tier-2")
+    expect(screen.getByTestId("cmek-revoke-status")).toHaveAttribute("data-status", "clear")
+    expect(screen.getByTestId("cmek-kms-health-badge")).toHaveAttribute("data-status", "healthy")
+
+    fireEvent.change(screen.getByTestId("cmek-security-tier-selector"), {
+      target: { value: "tier-1" },
+    })
+
+    expect(screen.getByTestId("cmek-security-tier")).toHaveTextContent(
+      "Tier 1 · OmniSight-managed KEK",
+    )
+    expect(screen.getByTestId("cmek-tier1-selected")).toHaveTextContent(
+      "Tier 1 selected",
+    )
+  })
+
+  it("shows revoked KMS status when the health endpoint reports revoked access", async () => {
+    mockedGetStatus.mockResolvedValueOnce({
+      tenant_id: "t-acme",
+      security_tier: "tier-2",
+      kms_health: "revoked",
+      revoke_status: "revoked",
+      provider: "gcp-kms",
+      key_id: "projects/acme-prod/locations/us/keyRings/r/cryptoKeys/k",
+      reason: "key_disabled",
+      raw_state: "DISABLED",
+      checked_at: 1760000001,
+    })
+
+    await renderPage()
+
+    fireEvent.click(screen.getByTestId("settings-tab-security"))
+    expect(await screen.findByTestId("cmek-revoke-status")).toHaveAttribute(
+      "data-status",
+      "revoked",
+    )
+    expect(screen.getByTestId("cmek-kms-health-badge")).toHaveAttribute(
+      "data-status",
+      "revoked",
+    )
+    expect(screen.getByTestId("cmek-revoke-status")).toHaveTextContent(
+      "Revoked",
+    )
+  })
+
   it("runs policy generation, verify, and done steps", async () => {
     await renderPage()
 

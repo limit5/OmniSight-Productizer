@@ -3355,6 +3355,26 @@ export async function completeCmekWizard(
   )
 }
 
+export interface CmekSettingsStatus {
+  tenant_id: string
+  security_tier: "tier-1" | "tier-2"
+  kms_health: "not_configured" | "healthy" | "revoked"
+  revoke_status: "clear" | "revoked"
+  provider: string
+  key_id: string
+  reason: string
+  raw_state: string
+  checked_at: number | null
+}
+
+export async function getCmekSettingsStatus(
+  tenantId: string,
+): Promise<CmekSettingsStatus> {
+  return request<CmekSettingsStatus>(
+    `/tenants/${encodeURIComponent(tenantId)}/cmek/status`,
+  )
+}
+
 // ─── Project settings page (Y8 row 5) ──────────────────────────
 //
 // REST surface for ``/projects/{pid}/settings`` (project-owner /

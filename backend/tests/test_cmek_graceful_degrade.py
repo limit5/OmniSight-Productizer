@@ -117,6 +117,49 @@ async def test_cmek_wizard_new_request_returns_403_without_retry_after():
     assert body["recovery_runbook"] == "docs/ops/cmek_revoke_recovery.md"
 
 
+@pytest.mark.asyncio
+async def test_cmek_settings_status_reports_revoke_and_health_badges():
+    from backend.routers import cmek_wizard
+
+    detector.record_cmek_health_result(_revoked_result(checked_at=3.0))
+    actor = auth.User(
+        id="u-admin",
+        email="admin@example.com",
+        name="Admin",
+        role="super_admin",
+    )
+
+    response = await cmek_wizard.get_cmek_settings_status("t-acme", None, actor)
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert body["security_tier"] == "tier-2"
+    assert body["kms_health"] == "revoked"
+    assert body["revoke_status"] == "revoked"
+    assert body["provider"] == "aws-kms"
+    assert body["reason"] == "describe_failed"
+
+
+@pytest.mark.asyncio
+async def test_cmek_settings_status_defaults_to_tier1_without_health_snapshot():
+    from backend.routers import cmek_wizard
+
+    actor = auth.User(
+        id="u-admin",
+        email="admin@example.com",
+        name="Admin",
+        role="super_admin",
+    )
+
+    response = await cmek_wizard.get_cmek_settings_status("t-acme", None, actor)
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert body["security_tier"] == "tier-1"
+    assert body["kms_health"] == "not_configured"
+    assert body["revoke_status"] == "clear"
+
+
 def test_recovery_runbook_documents_no_retry_and_restore_flow():
     text = RUNBOOK.read_text(encoding="utf-8")
 
