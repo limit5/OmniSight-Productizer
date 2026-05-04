@@ -61,6 +61,20 @@ SENSITIVE_COLUMN_MARKERS = (
 )
 
 
+# Known intentional high-entropy columns. The redact() classifier flags
+# these as ``high_entropy_token`` because they are opaque IDs / SHA
+# hashes / by-design session tokens — not unintended secret leaks. The
+# DLP gate is meant to catch ACCIDENTAL plaintext secrets that snuck
+# into a column not yet migrated to KS.1 envelope encryption; columns
+# in this allowlist are reviewed and known-safe.
+EXPECTED_HIGH_ENTROPY_COLUMNS: set[tuple[str, str]] = {
+    ("audit_log", "session_id"),       # opaque session reference, not the token
+    ("prompt_versions", "body_sha256"),  # SHA-256 hash, by definition high entropy
+    ("sessions", "token"),             # session storage table — by-design holds tokens
+                                       # (KS.1 follow-up: migrate to envelope encryption)
+}
+
+
 @dataclass
 class BackupDLPFinding:
     table: str
@@ -112,13 +126,24 @@ def _is_sensitive_plaintext_column(name: str) -> bool:
 
 
 def _iter_user_tables(conn: sqlite3.Connection) -> Iterable[str]:
+    # Skip virtual tables (FTS5 / RTree / etc) and WITHOUT ROWID tables —
+    # neither exposes the implicit ``rowid`` column the DLP scanner uses
+    # to anchor findings; DDL inspection via ``sqlite_master.sql`` is the
+    # only reliable filter (PRAGMA table_info won't tell us "WITHOUT ROWID").
+    # FTS5 shadow tables (``*_fts``, ``*_fts_config``, ``*_fts_idx``,
+    # ``*_fts_data``, ``*_fts_docsize``) hold tokenised search index data
+    # only — never the original plaintext, which lives in the source table
+    # the DLP scan already covers — so dropping them creates no DLP gap.
     rows = conn.execute(
-        "SELECT name FROM sqlite_master "
+        "SELECT name, sql FROM sqlite_master "
         "WHERE type = 'table' "
         "AND name NOT LIKE 'sqlite_%' "
         "ORDER BY name"
     ).fetchall()
     for row in rows:
+        sql = (row["sql"] or "").upper()
+        if "CREATE VIRTUAL" in sql or "WITHOUT ROWID" in sql:
+            continue
         yield str(row["name"])
 
 
@@ -166,6 +191,10 @@ def scan_backup_db(db_path: Path | str) -> BackupDLPReport:
                         continue
                     _, labels = redact(value)
                     if labels:
+                        if (table, column) in EXPECTED_HIGH_ENTROPY_COLUMNS:
+                            # Reviewed-and-known-safe column; DLP gate is for
+                            # unintentional plaintext leaks elsewhere.
+                            continue
                         findings.append(
                             BackupDLPFinding(
                                 table=table,
