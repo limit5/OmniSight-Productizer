@@ -45,7 +45,7 @@ These are project-wide, no exceptions:
 
 ### Safety
 - NEVER modify files in `test_assets/` — they are read-only ground truth.
-- NEVER force-push to main/master branches.
+- NEVER force-push to main branch.
 - NEVER bypass Gerrit Code Review. AI reviewer max score is +1; human +2
   required for merge.
 - NEVER store API keys, tokens, or secrets in source code or commits.
@@ -119,7 +119,7 @@ fixing wrong-direction work.
 Every task you do is either Tier A or Tier B (defined in
 `coordination.md`):
 
-  * **Tier A**: directly commit to current branch (`master` or whichever).
+  * **Tier A**: directly commit to current branch (`main` or whichever).
     Used for pattern-replication tasks where output is structurally
     constrained.
   * **Tier B**: commit only to the `codex-work` branch (you should
@@ -151,18 +151,18 @@ a glance.
 
 **Tier B (default — you are running from `codex-work` worktree)**:
 
-  * **DO NOT modify `TODO.md` at all.** The runner owns master/TODO.md
+  * **DO NOT modify `TODO.md` at all.** The runner owns main/TODO.md
     marker writes. Before it dispatches you, it has already flipped
     the line to `- [~][G]` (reserved). After you finish, the runner
     flips it to `- [x][G]` (success) or `- [!][G]` (failure) based on
     your exit code.
   * **DO NOT include `TODO.md` in your `git add` / commit**.
   * Why: your worktree has its OWN copy of TODO.md (a snapshot of the
-    `codex-work` branch). If you edit it there, master never sees the
+    `codex-work` branch). If you edit it there, main never sees the
     change → runner re-dispatches the same item → infinite loop. This
     burned hours on FS.1.1 before this rule was clarified (2026-05-03).
 
-**Tier A (rare — you are running from the master checkout)**:
+**Tier A (rare — you are running from the main checkout)**:
 
   * Use `- [x][G]` (not `- [x]`) where `[G]` = "GPT/Codex completed".
   * For failed: `- [!][G]`. For operator-blocked: `- [O][G]`.
@@ -208,7 +208,7 @@ Run shell / etc.). Treat:
   * **Tests**: Run them yourself before claiming done. `pytest <relevant
     file>` is the minimum bar. **Run pytest using the project's venv**
     at `backend/.venv/bin/pytest`, NOT codex's bundled python — the
-    project venv is what CI / master / Claude all use, and it is the
+    project venv is what CI / main / Claude all use, and it is the
     only environment that proves your tests pass for everyone, not
     just you. If a `ModuleNotFoundError` appears, that's a missing
     declared dep — see Rule 11.
@@ -230,7 +230,7 @@ If your work requires a Python package that isn't already in
   3. Commit the dep change in the SAME logical commit that introduces
      the import — do NOT split "use the dep" from "declare the dep"
 
-If you skip these steps, `master` (Claude / CI / other operators)
+If you skip these steps, `main` (Claude / CI / other operators)
 cannot run your tests and will fail at import time. Discovered
 2026-05-03 when codex's FS-series tests imported `respx` without
 declaring it; 47 alembic + provider tests failed at collection until

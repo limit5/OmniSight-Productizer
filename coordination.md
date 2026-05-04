@@ -114,22 +114,22 @@ branch — costlier to clean up.
 ## Worktree layout (local-only, no remote push)
 
 The repo has 1 main checkout at `/home/user/work/sora/OmniSight-Productizer`
-(branch: `master`) plus 1 codex-dedicated worktree.
+(branch: `main`) plus 1 codex-dedicated worktree.
 
 Setup (one-time, done by Claude on 2026-05-02):
 ```bash
-git -C /home/user/work/sora/OmniSight-Productizer branch codex-work master
+git -C /home/user/work/sora/OmniSight-Productizer branch codex-work main
 git -C /home/user/work/sora/OmniSight-Productizer worktree add \
     /home/user/work/sora/OmniSight-codex-worktree codex-work
 ```
 
 After setup, two physical directories share the same `.git`:
-  * `/home/user/work/sora/OmniSight-Productizer/`        → branch `master`
+  * `/home/user/work/sora/OmniSight-Productizer/`        → branch `main`
   * `/home/user/work/sora/OmniSight-codex-worktree/`     → branch `codex-work`
 
 **Routing convention**:
-  * Claude runners: always work from the main checkout on `master`.
-  * Codex Tier A tasks: from main checkout on `master` (rare — only for
+  * Claude runners: always work from the main checkout on `main`.
+  * Codex Tier A tasks: from main checkout on `main` (rare — only for
     pattern-replication tasks the human pre-approved as Tier A).
   * Codex Tier B tasks (default): from worktree on `codex-work`.
 
@@ -161,9 +161,9 @@ otherwise concurrent commits / TODO writes corrupt state:
    Reading another's marker is fine; modifying is not.
 
    **Tier B special**: in Tier B (codex worktree), the **codex runner
-   itself** writes the `[G]` marker on master TODO, NOT codex inside
+   itself** writes the `[G]` marker on main TODO, NOT codex inside
    the worktree. This is because the worktree has its own TODO.md
-   snapshot — codex modifying it never reaches master and causes
+   snapshot — codex modifying it never reaches main and causes
    infinite-loop dispatch. The runner pre-reserves with `- [~][G]`
    before dispatch and flips to `[x]` / `[!]` after. Codex's prompt
    (AGENTS.md Rule 6) tells it not to touch TODO.md in Tier B.
@@ -191,11 +191,11 @@ Concrete scenarios + resolutions:
 
 | Scenario | Resolution |
 |---|---|
-| Codex's Tier A commit lands in master with a style that Claude finds inconsistent | Human (or Claude) opens a discussion in HANDOFF; if needed, Claude can adjust style in a follow-up commit |
+| Codex's Tier A commit lands in main with a style that Claude finds inconsistent | Human (or Claude) opens a discussion in HANDOFF; if needed, Claude can adjust style in a follow-up commit |
 | Codex marks `[x][G]` but Claude's later session finds the work incomplete | Claude flips it to `[!][G]` (NOT `[!][C]` — preserves authorship) and writes a HANDOFF entry explaining the gap |
 | Both agents independently start on the same task | The one running it second sees the section already has a marker change → stops, writes HANDOFF `[blocked]: race detected with <other agent>` |
 | Codex needs to modify a Claude-owned file (e.g., `backend/agents/anthropic_native_client.py`) | Codex stops, writes `[codex-blocked]: this task seems to need changes to Claude-owned area; suggesting <X>`. Human / Claude takes over. |
-| Claude wants to refactor a Codex-authored module | Claude does it on `master`. The refactor commit references the original Codex commit hash so audit trail is clear. No special protocol — Claude has architectural authority. |
+| Claude wants to refactor a Codex-authored module | Claude does it on `main`. The refactor commit references the original Codex commit hash so audit trail is clear. No special protocol — Claude has architectural authority. |
 
 The human operator is the final arbiter for any disagreement that
 isn't resolvable via the rules above.
@@ -224,7 +224,7 @@ If you're an agent and not sure what to do RIGHT NOW:
 
 ```
 Q1: What's my model?
-    Claude → CLAUDE.md is your rules; you can work directly on master.
+    Claude → CLAUDE.md is your rules; you can work directly on main.
     Codex  → AGENTS.md is your rules; default to codex-work branch.
 
 Q2: Is the task on the section ownership table?
@@ -233,7 +233,7 @@ Q2: Is the task on the section ownership table?
 
 Q3: Is this Tier A (pattern-mirroring, 1-2 files) or Tier B (anything else)?
     Tier A → commit to current branch.
-    Tier B → switch to codex-work (Codex) or stay on master (Claude).
+    Tier B → switch to codex-work (Codex) or stay on main (Claude).
 
 Q4: How do I mark TODO when done?
     Claude → - [x][C]  (or [!][C] / [~][C] / [O][C])
