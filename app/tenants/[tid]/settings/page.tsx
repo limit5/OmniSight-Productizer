@@ -1336,6 +1336,12 @@ function SecurityTab({ tid }: { tid: string }) {
     }
   }
 
+  function onContinueProvider() {
+    if (!selected) return
+    setStep(1)
+    setError(null)
+  }
+
   async function onVerify() {
     setBusy(true)
     setError(null)
@@ -1449,6 +1455,8 @@ function SecurityTab({ tid }: { tid: string }) {
               <button
                 key={p.provider}
                 type="button"
+                role="radio"
+                aria-checked={provider === p.provider}
                 onClick={() => setProvider(p.provider)}
                 className={`rounded border px-3 py-3 text-left text-xs transition-colors ${
                   provider === p.provider
@@ -1465,103 +1473,119 @@ function SecurityTab({ tid }: { tid: string }) {
             ))}
           </div>
 
-          <div className="space-y-4">
-            <label className="block">
-              <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
-                {selected?.policy_target_label ?? "OmniSight principal"}
-              </span>
-              <input
-                value={principal}
-                onChange={(e) => setPrincipal(e.target.value)}
-                className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
-                placeholder={selected?.policy_target_example}
-                data-testid="cmek-principal-input"
-              />
-            </label>
+          {step === 0 && (
+            <div className="flex items-center justify-end">
+              <button
+                type="button"
+                onClick={onContinueProvider}
+                disabled={!selected}
+                className="inline-flex items-center gap-1 rounded bg-[var(--neural-blue)] px-3 py-2 text-xs text-[var(--background)] disabled:opacity-50"
+                data-testid="cmek-provider-continue"
+              >
+                Use {selected?.label ?? "provider"}
+              </button>
+            </div>
+          )}
 
-            <div>
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <span className="text-[10px] text-[var(--muted-foreground)]">Generated IAM policy JSON</span>
+          {step > 0 && (
+            <div className="space-y-4">
+              <label className="block">
+                <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+                  {selected?.policy_target_label ?? "OmniSight principal"}
+                </span>
+                <input
+                  value={principal}
+                  onChange={(e) => setPrincipal(e.target.value)}
+                  className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+                  placeholder={selected?.policy_target_example}
+                  data-testid="cmek-principal-input"
+                />
+              </label>
+
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="text-[10px] text-[var(--muted-foreground)]">Generated IAM policy JSON</span>
+                  <button
+                    type="button"
+                    onClick={() => void onGeneratePolicy()}
+                    disabled={busy || !principal.trim()}
+                    className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-[10px] disabled:opacity-50"
+                    data-testid="cmek-generate-policy"
+                  >
+                    {busy ? <Loader2 size={10} className="animate-spin" /> : <Copy size={10} />}
+                    Generate
+                  </button>
+                </div>
+                <pre
+                  className="min-h-40 max-h-64 overflow-auto rounded border border-[var(--border)] bg-[var(--background)] p-3 text-[10px] leading-relaxed whitespace-pre-wrap"
+                  data-testid="cmek-policy-json"
+                >
+                  {policyJson || "Generate the policy, then paste the JSON into your cloud console."}
+                </pre>
+              </div>
+
+              <label className="block">
+                <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+                  {selected?.key_id_label ?? "KMS key id"}
+                </span>
+                <input
+                  value={keyId}
+                  onChange={(e) => {
+                    setKeyId(e.target.value)
+                    setVerifyResult(null)
+                    setCompleteResult(null)
+                  }}
+                  className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+                  placeholder={selected?.key_id_example}
+                  data-testid="cmek-key-id-input"
+                />
+              </label>
+
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => void onGeneratePolicy()}
-                  disabled={busy || !principal.trim()}
-                  className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-[10px] disabled:opacity-50"
-                  data-testid="cmek-generate-policy"
+                  onClick={() => {
+                    setStep(2)
+                    void onVerify()
+                  }}
+                  disabled={busy || !policyJson || !keyId.trim()}
+                  className="inline-flex items-center gap-1 rounded bg-[var(--neural-blue)] px-3 py-2 text-xs text-[var(--background)] disabled:opacity-50"
+                  data-testid="cmek-verify"
                 >
-                  {busy ? <Loader2 size={10} className="animate-spin" /> : <Copy size={10} />}
-                  Generate
+                  {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                  Verify connection
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onComplete()}
+                  disabled={busy || !verifyResult?.ok}
+                  className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-3 py-2 text-xs disabled:opacity-50"
+                  data-testid="cmek-complete"
+                >
+                  <CheckCircle2 size={12} />
+                  Done
                 </button>
               </div>
-              <pre
-                className="min-h-40 max-h-64 overflow-auto rounded border border-[var(--border)] bg-[var(--background)] p-3 text-[10px] leading-relaxed whitespace-pre-wrap"
-                data-testid="cmek-policy-json"
-              >
-                {policyJson || "Generate the policy, then paste the JSON into your cloud console."}
-              </pre>
+
+              {verifyResult && (
+                <div
+                  className="rounded border border-[var(--neural-green)]/40 bg-[var(--neural-green)]/10 p-3 text-xs"
+                  data-testid="cmek-verify-result"
+                >
+                  encrypt-decrypt ok · {verifyResult.algorithm} · {verifyResult.elapsed_ms} ms · {verifyResult.verification_id}
+                </div>
+              )}
+
+              {completeResult && (
+                <div
+                  className="rounded border border-[var(--neural-green)]/40 bg-[var(--neural-green)]/10 p-3 text-xs"
+                  data-testid="cmek-complete-result"
+                >
+                  Tier 2 draft ready for {completeResult.provider}; durable activation follows KS.2.11 storage.
+                </div>
+              )}
             </div>
-
-            <label className="block">
-              <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
-                {selected?.key_id_label ?? "KMS key id"}
-              </span>
-              <input
-                value={keyId}
-                onChange={(e) => {
-                  setKeyId(e.target.value)
-                  setVerifyResult(null)
-                  setCompleteResult(null)
-                }}
-                className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
-                placeholder={selected?.key_id_example}
-                data-testid="cmek-key-id-input"
-              />
-            </label>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setStep(2)
-                  void onVerify()
-                }}
-                disabled={busy || !policyJson || !keyId.trim()}
-                className="inline-flex items-center gap-1 rounded bg-[var(--neural-blue)] px-3 py-2 text-xs text-[var(--background)] disabled:opacity-50"
-                data-testid="cmek-verify"
-              >
-                {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                Verify connection
-              </button>
-              <button
-                type="button"
-                onClick={() => void onComplete()}
-                disabled={busy || !verifyResult?.ok}
-                className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-3 py-2 text-xs disabled:opacity-50"
-                data-testid="cmek-complete"
-              >
-                <CheckCircle2 size={12} />
-                Done
-              </button>
-            </div>
-
-            {verifyResult && (
-              <div
-                className="rounded border border-[var(--neural-green)]/40 bg-[var(--neural-green)]/10 p-3 text-xs"
-                data-testid="cmek-verify-result"
-              >
-                encrypt-decrypt ok · {verifyResult.algorithm} · {verifyResult.elapsed_ms} ms · {verifyResult.verification_id}
-              </div>
-            )}
-
-            {completeResult && (
-              <div
-                className="rounded border border-[var(--neural-green)]/40 bg-[var(--neural-green)]/10 p-3 text-xs"
-                data-testid="cmek-complete-result"
-              >
-                Tier 2 draft ready for {completeResult.provider}; durable activation follows KS.2.11 storage.
-              </div>
-            )}
-          </div>
+          )}
         </div>
       </div>
     </div>

@@ -144,6 +144,7 @@ describe("/tenants/{tid}/settings — CMEK wizard", () => {
     fireEvent.click(screen.getByTestId("settings-tab-security"))
     expect(await screen.findByTestId("cmek-security-tab")).toBeInTheDocument()
     expect(await screen.findByTestId("cmek-provider-aws-kms")).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId("cmek-provider-continue"))
 
     fireEvent.click(screen.getByTestId("cmek-generate-policy"))
     await waitFor(() => {
@@ -168,5 +169,38 @@ describe("/tenants/{tid}/settings — CMEK wizard", () => {
     })
     expect(await screen.findByTestId("cmek-security-tier")).toHaveTextContent("Tier 2")
     expect(screen.getByTestId("cmek-complete-result")).toHaveTextContent("Tier 2 draft")
+  })
+
+  it("keeps Step 1 scoped to AWS, GCP, and Vault provider selection", async () => {
+    await renderPage()
+
+    fireEvent.click(screen.getByTestId("settings-tab-security"))
+    expect(await screen.findByTestId("cmek-security-tab")).toBeInTheDocument()
+
+    const aws = await screen.findByTestId("cmek-provider-aws-kms")
+    const gcp = screen.getByTestId("cmek-provider-gcp-kms")
+    const vault = screen.getByTestId("cmek-provider-vault-transit")
+
+    expect(aws).toHaveAttribute("role", "radio")
+    expect(gcp).toHaveAttribute("role", "radio")
+    expect(vault).toHaveAttribute("role", "radio")
+    expect(aws).toHaveAttribute("aria-checked", "true")
+    expect(screen.getByTestId("cmek-provider-continue")).toHaveTextContent("Use AWS KMS")
+    expect(screen.queryByTestId("cmek-generate-policy")).not.toBeInTheDocument()
+
+    fireEvent.click(gcp)
+    expect(gcp).toHaveAttribute("aria-checked", "true")
+    expect(aws).toHaveAttribute("aria-checked", "false")
+    expect(screen.getByTestId("cmek-provider-continue")).toHaveTextContent("Use Google Cloud KMS")
+
+    fireEvent.click(vault)
+    expect(vault).toHaveAttribute("aria-checked", "true")
+    expect(gcp).toHaveAttribute("aria-checked", "false")
+    expect(screen.getByTestId("cmek-provider-continue")).toHaveTextContent("Use HashiCorp Vault Transit")
+
+    fireEvent.click(screen.getByTestId("cmek-provider-continue"))
+    expect(screen.getByTestId("cmek-principal-input")).toHaveValue("omnisight-cmek")
+    expect(screen.getByTestId("cmek-key-id-input")).toHaveValue("transit/omnisight-tenant-tier2")
+    expect(screen.getByTestId("cmek-step-1")).toHaveTextContent("Provider")
   })
 })
