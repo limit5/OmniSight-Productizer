@@ -16,8 +16,8 @@ Generated: {{ generation_date | default("N/A") }}
 
 {% if report.error %}
 Error: {{ report.error }}
-{% elif report.items %}
-{% for item in report.items %}
+{% elif report["items"] %}
+{% for item in report["items"] %}
 - {{ item.id }} / {{ item.severity }} / {{ item.title }}{% if item.url %} / {{ item.url }}{% endif %}
 {% endfor %}
 {% else %}
