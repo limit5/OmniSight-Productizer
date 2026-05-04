@@ -225,6 +225,72 @@ def test_cascade_layer_4_jaro_winkler_match():
     assert "record_output()" in out
 
 
+def test_hd_bringup_strict_path_uses_095_fuzzy_threshold(tmp_path):
+    f = tmp_path / "board.dts"
+    f.write_text(textwrap.dedent("""\
+        &i2c1 {
+            status = "okay";
+            clock-frequency = <400000>;
+            sensor@10 {
+                compatible = "vendor,old-sensor";
+                reg = <0x10>;
+            };
+        };
+    """), encoding="utf-8")
+    payload = _sr_block(
+        textwrap.dedent("""\
+            &i2c2 {
+                status = "okay";
+                clock-frequency = <100000>;
+                sensor@10 {
+                    compatible = "vendor,new-sensor";
+                    reg = <0x10>;
+                };
+            };
+        """),
+        textwrap.dedent("""\
+            &i2c1 {
+                status = "okay";
+                clock-frequency = <400000>;
+                sensor@10 {
+                    compatible = "vendor,new-sensor";
+                    reg = <0x10>;
+                };
+            };
+        """),
+    )
+
+    with pytest.raises(tp.PatchNotFound):
+        tp.apply_to_file(f, "search_replace", payload)
+
+
+def test_non_hd_path_keeps_09_fuzzy_threshold():
+    source = textwrap.dedent("""\
+        def provision():
+            prepare_config()
+            apply_config()
+            verify_output()
+    """)
+    block = tp.SearchReplaceBlock(
+        search=(
+            "def provision_config():\n"
+            "    prepare_config()\n"
+            "    apply_configs()\n"
+            "    verify_output()\n"
+        ),
+        replace=(
+            "def provision():\n"
+            "    prepare_config()\n"
+            "    apply_config()\n"
+            "    record_output()\n"
+        ),
+    )
+
+    out = tp.apply_search_replace(source, block)
+
+    assert "record_output()" in out
+
+
 def test_cascade_match_score_flows_into_search_replace_payload_chain():
     src = "one\ntwo\nthree\nfour\nfive\n"
     payload = (

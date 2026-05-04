@@ -61,6 +61,15 @@ _CASCADE_LAYER_CONFIDENCE = {
     2: 0.98,
     3: 0.94,
 }
+DEFAULT_JARO_WINKLER_THRESHOLD = 0.9
+HD_BRINGUP_STRICT_JARO_WINKLER_THRESHOLD = 0.95
+HD_BRINGUP_STRICT_SUFFIXES = (
+    ".dts",
+    ".dtsi",
+    ".dtso",
+    ".bb",
+    ".bbappend",
+)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -319,7 +328,10 @@ def _jaro_winkler_similarity(a: str, b: str) -> float:
 
 
 def _find_jaro_winkler_match(
-    source: str, search: str, *, threshold: float = 0.9,
+    source: str,
+    search: str,
+    *,
+    threshold: float = DEFAULT_JARO_WINKLER_THRESHOLD,
 ) -> CascadeMatch | None:
     search_norm = "\n".join(_indent_agnostic_lines(search))
     matches: list[CascadeMatch] = []
@@ -340,7 +352,12 @@ def _find_jaro_winkler_match(
     return _unique_match(matches, layer=4)
 
 
-def find_search_replace_match(source: str, search: str) -> CascadeMatch:
+def find_search_replace_match(
+    source: str,
+    search: str,
+    *,
+    jaro_winkler_threshold: float = DEFAULT_JARO_WINKLER_THRESHOLD,
+) -> CascadeMatch:
     """Resolve a SEARCH block through the WP.3.1 cascade.
 
     Pure function: no module-global mutable state; every worker derives
@@ -350,17 +367,24 @@ def find_search_replace_match(source: str, search: str) -> CascadeMatch:
         _find_exact_match,
         _find_indent_agnostic_match,
         _find_prefix_tail_match,
-        _find_jaro_winkler_match,
     ):
         match = finder(source, search)
         if match is not None:
             return match
+    match = _find_jaro_winkler_match(
+        source,
+        search,
+        threshold=jaro_winkler_threshold,
+    )
+    if match is not None:
+        return match
     raise PatchNotFound("SEARCH block did not match any run in the source file")
 
 
 def apply_search_replace(
     source: str, block: SearchReplaceBlock,
     *, min_context: int = MIN_SEARCH_CONTEXT_LINES,
+    jaro_winkler_threshold: float = DEFAULT_JARO_WINKLER_THRESHOLD,
 ) -> str:
     """Apply one SEARCH/REPLACE to `source`. Pure function."""
     if _count_content_lines(block.search) < min_context:
@@ -368,26 +392,36 @@ def apply_search_replace(
             f"SEARCH block has fewer than {min_context} non-blank lines "
             f"of context; patches with too little context are ambiguous"
         )
-    match = find_search_replace_match(source, block.search)
+    match = find_search_replace_match(
+        source,
+        block.search,
+        jaro_winkler_threshold=jaro_winkler_threshold,
+    )
     return source[:match.start] + block.replace + source[match.end:]
 
 
 def _apply_search_replace_with_match(
     source: str, block: SearchReplaceBlock,
     *, min_context: int = MIN_SEARCH_CONTEXT_LINES,
+    jaro_winkler_threshold: float = DEFAULT_JARO_WINKLER_THRESHOLD,
 ) -> tuple[str, CascadeMatch]:
     if _count_content_lines(block.search) < min_context:
         raise PatchMalformed(
             f"SEARCH block has fewer than {min_context} non-blank lines "
             f"of context; patches with too little context are ambiguous"
         )
-    match = find_search_replace_match(source, block.search)
+    match = find_search_replace_match(
+        source,
+        block.search,
+        jaro_winkler_threshold=jaro_winkler_threshold,
+    )
     return source[:match.start] + block.replace + source[match.end:], match
 
 
 def apply_search_replace_payload(
     source: str, raw: str,
     *, min_context: int = MIN_SEARCH_CONTEXT_LINES,
+    jaro_winkler_threshold: float = DEFAULT_JARO_WINKLER_THRESHOLD,
 ) -> str:
     """Apply EVERY SEARCH/REPLACE block in `raw` against `source`, in
     order. Each block must be uniquely matchable AGAINST THE RESULT
@@ -397,7 +431,10 @@ def apply_search_replace_payload(
     for i, blk in enumerate(blocks):
         try:
             out, _match = _apply_search_replace_with_match(
-                out, blk, min_context=min_context,
+                out,
+                blk,
+                min_context=min_context,
+                jaro_winkler_threshold=jaro_winkler_threshold,
             )
         except PatchError as exc:
             raise type(exc)(f"block {i + 1}/{len(blocks)}: {exc}") from None
@@ -407,6 +444,7 @@ def apply_search_replace_payload(
 def _apply_search_replace_payload_with_matches(
     source: str, raw: str,
     *, min_context: int = MIN_SEARCH_CONTEXT_LINES,
+    jaro_winkler_threshold: float = DEFAULT_JARO_WINKLER_THRESHOLD,
 ) -> tuple[str, list[CascadeMatch]]:
     blocks = parse_search_replace(raw)
     out = source
@@ -414,7 +452,10 @@ def _apply_search_replace_payload_with_matches(
     for i, blk in enumerate(blocks):
         try:
             out, match = _apply_search_replace_with_match(
-                out, blk, min_context=min_context,
+                out,
+                blk,
+                min_context=min_context,
+                jaro_winkler_threshold=jaro_winkler_threshold,
             )
         except PatchError as exc:
             raise type(exc)(f"block {i + 1}/{len(blocks)}: {exc}") from None
@@ -465,6 +506,21 @@ def _repo_relative_path(path: Path) -> str | None:
         return str(path.resolve().relative_to(REPO_ROOT))
     except ValueError:
         return None
+
+
+def diff_validation_jaro_winkler_threshold_for_path(path: Path) -> float:
+    """Return the Layer-4 threshold for a patch target path.
+
+    DTS / Yocto recipe edits are the HD bring-up strict profile from
+    WP.3.3: no 0.9 fuzzy fallback; Layer 4 must clear 0.95. This is a
+    pure path-derived value, so uvicorn workers independently derive the
+    same policy without module-global coordination.
+    """
+    name = Path(path).name.lower()
+    suffix = Path(path).suffix.lower()
+    if suffix in HD_BRINGUP_STRICT_SUFFIXES or name.endswith(".inc"):
+        return HD_BRINGUP_STRICT_JARO_WINKLER_THRESHOLD
+    return DEFAULT_JARO_WINKLER_THRESHOLD
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -616,7 +672,11 @@ def apply_to_file(
     body = p.read_text(encoding="utf-8")
     matches: list[CascadeMatch] = []
     if patch_kind == "search_replace":
-        new, matches = _apply_search_replace_payload_with_matches(body, payload)
+        new, matches = _apply_search_replace_payload_with_matches(
+            body,
+            payload,
+            jaro_winkler_threshold=diff_validation_jaro_winkler_threshold_for_path(p),
+        )
     elif patch_kind == "unified_diff":
         new = apply_unified_diff(body, payload)
     else:
