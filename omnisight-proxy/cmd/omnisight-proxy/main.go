@@ -1,9 +1,8 @@
 // KS.3.1 — omnisight-proxy entry point.
 //
-// This first slice deliberately keeps the proxy as a small Go stdlib
-// binary. Later KS.3 rows own mTLS, nonce signatures, provider config,
-// and request forwarding; this process only proves the container image
-// can start, serve, and drain cleanly.
+// This process stays a small Go stdlib binary. KS.3.2 adds the customer
+// proxy auth envelope; later KS.3 rows own provider config and request
+// forwarding.
 
 package main
 
@@ -17,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/omnisight/productizer/omnisight-proxy/internal/auth"
 	"github.com/omnisight/productizer/omnisight-proxy/internal/config"
 	"github.com/omnisight/productizer/omnisight-proxy/internal/server"
 )
@@ -33,6 +33,13 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
+	if cfg.AuthEnabled {
+		if _, err := auth.New(cfg); err != nil {
+			logger.Error("proxy auth config failed", "err", err)
+			os.Exit(2)
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -44,10 +51,18 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	if cfg.AuthEnabled {
+		tlsConfig, err := auth.ServerTLSConfig(cfg)
+		if err != nil {
+			logger.Error("mTLS config failed", "err", err)
+			os.Exit(2)
+		}
+		srv.TLSConfig = tlsConfig
+	}
 
 	go func() {
 		logger.Info("omnisight-proxy starting", "addr", cfg.Addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := listenAndServe(srv, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("listen failed", "err", err)
 			stop()
 		}
@@ -63,4 +78,11 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("omnisight-proxy stopped")
+}
+
+func listenAndServe(srv *http.Server, cfg *config.Settings) error {
+	if cfg.AuthEnabled {
+		return srv.ListenAndServeTLS(cfg.ServerCertFile, cfg.ServerKeyFile)
+	}
+	return srv.ListenAndServe()
 }

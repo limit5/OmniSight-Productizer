@@ -3,9 +3,11 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -13,15 +15,39 @@ import (
 // rows add auth and provider configuration here instead of scattering
 // env reads through request-handling code.
 type Settings struct {
-	Addr     string
-	LogLevel string
+	Addr                   string
+	LogLevel               string
+	AuthEnabled            bool
+	TenantID               string
+	ServerCertFile         string
+	ServerKeyFile          string
+	ClientCAFile           string
+	PinnedClientCertSHA256 string
+	NonceHMACKeyFile       string
+	NonceTTLSeconds        int
 }
 
 // Load parses environment-backed settings and validates their shape.
 func Load() (*Settings, error) {
+	authEnabled, err := envBoolDefault("OMNISIGHT_PROXY_AUTH_ENABLED", false)
+	if err != nil {
+		return nil, err
+	}
+	nonceTTLSeconds, err := envIntDefault("OMNISIGHT_PROXY_NONCE_TTL_SECONDS", 300)
+	if err != nil {
+		return nil, err
+	}
 	s := &Settings{
-		Addr:     envDefault("OMNISIGHT_PROXY_ADDR", ":8080"),
-		LogLevel: strings.ToLower(envDefault("OMNISIGHT_PROXY_LOG_LEVEL", "info")),
+		Addr:                   envDefault("OMNISIGHT_PROXY_ADDR", ":8080"),
+		LogLevel:               strings.ToLower(envDefault("OMNISIGHT_PROXY_LOG_LEVEL", "info")),
+		AuthEnabled:            authEnabled,
+		TenantID:               envDefault("OMNISIGHT_PROXY_TENANT_ID", ""),
+		ServerCertFile:         envDefault("OMNISIGHT_PROXY_TLS_CERT_FILE", ""),
+		ServerKeyFile:          envDefault("OMNISIGHT_PROXY_TLS_KEY_FILE", ""),
+		ClientCAFile:           envDefault("OMNISIGHT_PROXY_CLIENT_CA_FILE", ""),
+		PinnedClientCertSHA256: envDefault("OMNISIGHT_PROXY_PINNED_CLIENT_CERT_SHA256", ""),
+		NonceHMACKeyFile:       envDefault("OMNISIGHT_PROXY_NONCE_HMAC_KEY_FILE", ""),
+		NonceTTLSeconds:        nonceTTLSeconds,
 	}
 	if err := s.Validate(); err != nil {
 		return nil, err
@@ -32,8 +58,9 @@ func Load() (*Settings, error) {
 // ForTest returns deterministic settings without reading process env.
 func ForTest() *Settings {
 	return &Settings{
-		Addr:     "127.0.0.1:0",
-		LogLevel: "error",
+		Addr:            "127.0.0.1:0",
+		LogLevel:        "error",
+		NonceTTLSeconds: 300,
 	}
 }
 
@@ -45,6 +72,27 @@ func (s *Settings) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("OMNISIGHT_PROXY_LOG_LEVEL must be one of debug|info|warn|error, got %q", s.LogLevel)
+	}
+	if s.NonceTTLSeconds <= 0 {
+		return fmt.Errorf("OMNISIGHT_PROXY_NONCE_TTL_SECONDS must be positive")
+	}
+	if s.AuthEnabled {
+		required := map[string]string{
+			"OMNISIGHT_PROXY_TENANT_ID":                 s.TenantID,
+			"OMNISIGHT_PROXY_TLS_CERT_FILE":             s.ServerCertFile,
+			"OMNISIGHT_PROXY_TLS_KEY_FILE":              s.ServerKeyFile,
+			"OMNISIGHT_PROXY_CLIENT_CA_FILE":            s.ClientCAFile,
+			"OMNISIGHT_PROXY_PINNED_CLIENT_CERT_SHA256": s.PinnedClientCertSHA256,
+			"OMNISIGHT_PROXY_NONCE_HMAC_KEY_FILE":       s.NonceHMACKeyFile,
+		}
+		for key, value := range required {
+			if value == "" {
+				return fmt.Errorf("%s must be non-empty when OMNISIGHT_PROXY_AUTH_ENABLED=true", key)
+			}
+		}
+		if !validSHA256Fingerprint(s.PinnedClientCertSHA256) {
+			return fmt.Errorf("OMNISIGHT_PROXY_PINNED_CLIENT_CERT_SHA256 must be sha256:<64 hex chars>")
+		}
 	}
 	return nil
 }
@@ -67,4 +115,40 @@ func envDefault(key string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envBoolDefault(key string, fallback bool) (bool, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback, nil
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+}
+
+func envIntDefault(key string, fallback int) (int, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	return parsed, nil
+}
+
+func validSHA256Fingerprint(value string) bool {
+	normalized := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(value)), "sha256:")
+	if len(normalized) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(normalized)
+	return err == nil
 }

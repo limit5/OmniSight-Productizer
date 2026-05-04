@@ -43,3 +43,28 @@ func TestHealthzRejectsNonGet(t *testing.T) {
 		t.Fatalf("Allow = %q, want GET", rec.Header().Get("Allow"))
 	}
 }
+
+func TestAuthVerifyIsAvailableWhenAuthDisabled(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	rec := httptest.NewRecorder()
+
+	NewHandler(config.ForTest()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestAuthVerifyRejectsNonGet(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify", nil)
+	rec := httptest.NewRecorder()
+
+	NewHandler(config.ForTest()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+	if rec.Header().Get("Allow") != http.MethodGet {
+		t.Fatalf("Allow = %q, want GET", rec.Header().Get("Allow"))
+	}
+}
