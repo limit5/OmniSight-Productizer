@@ -1,0 +1,46 @@
+# SecOps Threat Intel Guild Integration Guide
+
+> Product: {{ product_name | default("Unnamed Product") }}
+> Date: {{ generation_date | default("N/A") }}
+
+## 1. CVE Search
+
+{% if cve_report %}
+| CVE | Severity | Source | Summary |
+|-----|----------|--------|---------|
+{% for item in cve_report.items %}
+| {{ item.id }} | {{ item.severity }} | {{ item.source }} | {{ item.summary }} |
+{% endfor %}
+{% else %}
+No CVE report provided.
+{% endif %}
+
+## 2. Exploited-In-The-Wild Watch
+
+{% if zero_day_report %}
+| ID | Severity | Source | Summary |
+|----|----------|--------|---------|
+{% for item in zero_day_report.items %}
+| {{ item.id }} | {{ item.severity }} | {{ item.source }} | {{ item.summary }} |
+{% endfor %}
+{% else %}
+No exploited-in-the-wild report provided.
+{% endif %}
+
+## 3. Best Practices
+
+{% if best_practice_report %}
+{% for item in best_practice_report.items %}
+- **{{ item.title }}** ({{ item.source }}): {{ item.summary }}
+{% endfor %}
+{% else %}
+No best-practice report provided.
+{% endif %}
+
+## 4. Preflight Decision Notes
+
+{% if decision_notes %}
+{{ decision_notes }}
+{% else %}
+No preflight decision notes provided.
+{% endif %}

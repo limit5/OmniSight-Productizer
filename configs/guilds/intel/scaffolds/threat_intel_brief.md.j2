@@ -1,0 +1,31 @@
+# Threat Intel Preflight Brief
+
+Product: {{ product_name | default("Unnamed Product") }}
+Generated: {{ generation_date | default("N/A") }}
+
+## Inputs
+
+- CVE query: {{ cve_query | default("N/A") }}
+- Zero-day query: {{ zero_day_query | default("N/A") }}
+- Best-practice topic: {{ best_practice_topic | default("N/A") }}
+
+## Findings
+
+{% for report in reports | default([]) %}
+### {{ report.kind | replace("_", " ") | title }} ({{ report.source }})
+
+{% if report.error %}
+Error: {{ report.error }}
+{% elif report["items"] %}
+{% for item in report["items"] %}
+- {{ item.id }} / {{ item.severity }} / {{ item.title }}{% if item.url %} / {{ item.url }}{% endif %}
+{% endfor %}
+{% else %}
+No items returned.
+{% endif %}
+
+{% endfor %}
+
+## Recommended Hook Action
+
+{{ recommended_action | default("Record the brief for BP.I.3 hook consumers; do not block automatically in BP.I.2.") }}

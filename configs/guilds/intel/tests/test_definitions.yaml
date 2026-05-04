@@ -1,0 +1,34 @@
+schema_version: 1
+skill: intel
+test_suites:
+  - suite_id: intel_manifest_tests
+    name: "Intel guild scaffold manifest tests"
+    tests:
+      - test_id: intel_manifest_loads
+        name: "skill.yaml loads with all required artifact kinds"
+        type: unit
+        description: "Validate the Intel guild manifest follows the formal skill pack schema."
+      - test_id: intel_tasks_load
+        name: "tasks.yaml loads with four preflight tasks"
+        type: unit
+        description: "Verify CVE, zero-day, best-practice, and brief-render tasks are declared."
+      - test_id: intel_artifacts_exist
+        name: "Declared artifact paths exist"
+        type: unit
+        description: "Verify tasks, scaffolds, tests, hil, and docs artifacts exist on disk."
+
+  - suite_id: intel_helper_contract_tests
+    name: "BP.I.1 helper contract tests"
+    tests:
+      - test_id: intel_cve_helper_contract
+        name: "CVE helper returns IntelReport envelope"
+        type: unit
+        description: "Covered by backend/tests/test_secops_intel_bp_i_1.py until BP.I.5 expands the matrix."
+      - test_id: intel_zero_day_helper_contract
+        name: "Zero-day feed helper returns IntelReport envelope"
+        type: unit
+        description: "Covered by backend/tests/test_secops_intel_bp_i_1.py until BP.I.5 expands the matrix."
+      - test_id: intel_best_practice_helper_contract
+        name: "Best-practice helper returns IntelReport envelope"
+        type: unit
+        description: "Covered by backend/tests/test_secops_intel_bp_i_1.py until BP.I.5 expands the matrix."

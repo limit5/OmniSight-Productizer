@@ -1,0 +1,53 @@
+# BP.I.2 -- SecOps Threat Intel guild skill pack scaffold.
+#
+# Mirrors the formal skill-pack manifest shape used under configs/skills/.
+# This row only ships the Intel guild artifact scaffold; runtime hook
+# wiring is intentionally left to BP.I.3.
+
+schema_version: 1
+name: intel
+description: >
+  SecOps Threat Intel guild skill pack. Packages the BP.I.1
+  source-backed threat-intel helpers for CVE search, exploited-in-the-wild
+  feed checks, and best-practice retrieval so later guild hooks can
+  preflight product plans before install or blueprint generation.
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Proprietary"
+
+compatible_socs: []
+
+depends_on_skills:
+  - security
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - secops
+  - threat-intel
+  - cve
+  - nvd
+  - cisa-kev
+  - zero-day
+  - exploited-in-the-wild
+  - best-practices
+  - hardening
+  - bp-i

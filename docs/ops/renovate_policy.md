@@ -134,6 +134,11 @@ priority of the day — do not let it linger past the next business day.
   *what* the upcoming weekend's Renovate batch will try to merge;
   this policy tells you *how* it will be merged. Use the preview to
   pre-empt breakage on major-bump candidates before Saturday.
+* **BP.I SecOps Intel**: pre-install and pre-blueprint Intel briefs may
+  flag recent CVEs or exploited-in-the-wild signals before a dependency
+  enters the repo. Once a tracked dependency needs remediation, this N2
+  policy remains the owner of the fix PR and lockfile regeneration; see
+  [`secops_intel_overlap.md`](secops_intel_overlap.md).
 * **CODEOWNERS**: `reviewersFromCodeOwners: true` requires a populated
   `.github/CODEOWNERS`. If a path has no owner, Renovate falls back to
   whoever the repo's default reviewers are (currently the maintainer).
@@ -197,6 +202,9 @@ to interpret a broken config in production.
   *opens* the PRs; the policy doc describes how they *land*.
 * **Runbook**: [`dependency_upgrade_runbook.md`](dependency_upgrade_runbook.md)
   — the four-phase upgrade + rollback SOP.
+* **SecOps Intel overlap**:
+  [`secops_intel_overlap.md`](secops_intel_overlap.md) — how BP.I,
+  N2, and S2-8 avoid duplicate CVE/secret-scanning ownership.
 * **Ledger**: [`upgrade_rollback_ledger.md`](upgrade_rollback_ledger.md)
   — append-only ledger read by the quarterly policy review.
 

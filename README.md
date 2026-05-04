@@ -340,6 +340,12 @@ Group rules keep peer-coupled families together so the lockfile stays internally
 
 CI validates `renovate.json` against the Renovate JSON schema in the `renovate-config` job before any other gate runs — typos cannot silently disable the bot.
 
+BP.I SecOps Intel deliberately does not duplicate Renovate: CVE briefs
+may flag risky dependency choices before install or blueprint decisions,
+but dependency fix PRs and lockfile regeneration stay with Renovate.
+The overlap contract with S2-8 GitHub Secret Scanning is documented in
+[`docs/ops/secops_intel_overlap.md`](docs/ops/secops_intel_overlap.md).
+
 ### LangChain / LangGraph adapter firewall (N4)
 
 All `langchain*` and `langgraph*` imports are funneled through a single module, [`backend/llm_adapter.py`](backend/llm_adapter.py). Every other backend module imports message classes, graph primitives, and provider factories from the adapter — never from LangChain directly.

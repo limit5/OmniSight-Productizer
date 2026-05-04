@@ -1,0 +1,17 @@
+schema_version: 1
+skill: intel
+recipes:
+  - recipe_id: intel-feed-connectivity-smoke
+    name: "Threat-intel feed connectivity smoke"
+    description: >
+      Optional network smoke for deployments that allow outbound threat
+      feed access. BP.I.2 only declares the recipe; BP.I.3 decides where
+      it is invoked.
+    required_plugins: []
+    steps:
+      - id: cve_feed_reachable
+        description: "Call search_latest_cve with a bounded query and record source/error."
+      - id: kev_feed_reachable
+        description: "Call query_zero_day_feeds with a bounded query and record source/error."
+      - id: best_practice_available
+        description: "Call fetch_latest_best_practices for a hardening topic."
