@@ -5,8 +5,9 @@ will add durable ``cmek_configs`` / ``tier_assignments`` storage; until
 then ``complete`` returns a Tier 2 draft summary for the settings UI.
 KS.2.7 extends the same stateless surface with customer SIEM ingest
 spec generation for native CloudTrail / Cloud Audit Logs.
-KS.2.8 adds the Tier 1 -> Tier 2 stateless rewrap plan endpoint; durable
-progress persistence remains blocked on KS.2.11's CMEK tables.
+KS.2.8 adds the Tier 1 -> Tier 2 stateless rewrap plan endpoint; KS.2.9
+adds the mirrored Tier 2 -> Tier 1 downgrade plan. Durable progress
+persistence remains blocked on KS.2.11's CMEK tables.
 
 Module-global state audit (SOP Step 1)
 --------------------------------------
@@ -98,6 +99,12 @@ class SIEMIngestSpecRequest(BaseModel):
 
 
 class TierUpgradeRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
+    key_id: str = Field(min_length=1, max_length=512)
+    dek_refs: list[dict] = Field(default_factory=list)
+
+
+class TierDowngradeRequest(BaseModel):
     provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
     key_id: str = Field(min_length=1, max_length=512)
     dek_refs: list[dict] = Field(default_factory=list)
@@ -285,6 +292,28 @@ async def start_tier1_to_tier2_upgrade(
         return guarded
     try:
         result = _cmek_upgrade.plan_tier1_to_tier2_upgrade(
+            tenant_id=tenant_id,
+            provider=_cw.normalise_provider(req.provider),
+            key_id=req.key_id,
+            dek_refs=req.dek_refs,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    return JSONResponse(result.to_dict())
+
+
+@router.post("/tenants/{tenant_id}/cmek/tier-downgrade")
+async def start_tier2_to_tier1_downgrade(
+    tenant_id: str,
+    req: TierDowngradeRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        result = _cmek_upgrade.plan_tier2_to_tier1_downgrade(
             tenant_id=tenant_id,
             provider=_cw.normalise_provider(req.provider),
             key_id=req.key_id,
