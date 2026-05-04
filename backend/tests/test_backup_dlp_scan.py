@@ -9,8 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "backup_dlp_scan.py"
@@ -138,13 +136,6 @@ def test_scan_backup_db_blocks_plaintext_sensitive_column(tmp_path: Path) -> Non
     assert finding.labels == ["sensitive_column_plaintext"]
 
 
-@pytest.mark.skip(
-    reason="FX.10.7 deferred — REQUIRED_ENVELOPE_COLUMNS is empty until FX.11 "
-    "data migration lands. sessions.token currently sits in "
-    "EXPECTED_HIGH_ENTROPY_COLUMNS allowlist; once migration writes envelope JSON "
-    "for all rows + auth.py:851 writer is updated, move sessions.token from "
-    "EXPECTED back into REQUIRED and unskip this test."
-)
 def test_scan_backup_db_blocks_plaintext_session_token(tmp_path: Path) -> None:
     db_path = tmp_path / "plaintext-session.db"
     conn = sqlite3.connect(str(db_path))

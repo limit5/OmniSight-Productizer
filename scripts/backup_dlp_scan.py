@@ -61,15 +61,10 @@ SENSITIVE_COLUMN_MARKERS = (
 )
 
 REQUIRED_ENVELOPE_COLUMNS: set[tuple[str, str]] = {
-    # FX.10.7 added the gate infrastructure (helpers + test + this set)
-    # but live sessions.token rows are still plaintext and the runtime
-    # writer in backend/auth.py:851 doesn't produce envelope JSON yet.
-    # Activating the gate now would fail every prod backup DLP scan.
-    #
-    # DEFERRED until the data migration + runtime envelope writer land
-    # (tracked as FX.11 follow-up). When ready, uncomment:
-    #     ("sessions", "token"),
-    # and remove the matching entry from EXPECTED_HIGH_ENTROPY_COLUMNS.
+    # FX.11.3 — sessions.token MUST be KS envelope JSON post-FX.11.1
+    # backfill (alembic 0189) + FX.11.2 envelope-aware writer
+    # (backend/auth.py:851). Plaintext rows here fail the gate.
+    ("sessions", "token"),
 }
 
 
@@ -80,11 +75,9 @@ REQUIRED_ENVELOPE_COLUMNS: set[tuple[str, str]] = {
 # into a column not yet migrated to KS.1 envelope encryption; columns
 # in this allowlist are reviewed and known-safe.
 EXPECTED_HIGH_ENTROPY_COLUMNS: set[tuple[str, str]] = {
-    ("audit_log", "session_id"),         # opaque session reference, not the token
-    ("prompt_versions", "body_sha256"),  # SHA-256 hash, by definition high entropy
-    ("sessions", "token"),               # session storage table — by-design holds tokens.
-                                         # FX.10.7 deferred: REQUIRED_ENVELOPE_COLUMNS will
-                                         # take this over after FX.11 data migration lands.
+    ("audit_log", "session_id"),                  # opaque session reference, not the token
+    ("prompt_versions", "body_sha256"),           # SHA-256 hash, by definition high entropy
+    ("sessions", "token_lookup_index"),           # FX.11.1 added column: sha256(plaintext_token) hex
 }
 
 

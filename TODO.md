@@ -3117,10 +3117,10 @@ ls backend/alembic/versions/ | tail -3
 
 - [x][G] KS.2.1 **CMEK Tenant Settings Wizard**（5 step）
   - [~][G] Step 1 選 KMS provider（AWS / GCP / Vault）
-  - [~][G] Step 2 IAM policy generator（精準輸出 JSON、客戶在自家 console 貼上）
-  - [ ] Step 3 KMS key ARN / resource id 貼回 wizard
-  - [ ] Step 4 verify connection（OmniSight 跑一次 test encrypt-decrypt）
-  - [ ] Step 5 done + UI 切到 Tier 2
+  - [x][G] Step 2 IAM policy generator（精準輸出 JSON、客戶在自家 console 貼上）
+  - [x][G] Step 3 KMS key ARN / resource id 貼回 wizard
+  - [x][G] Step 4 verify connection（OmniSight 跑一次 test encrypt-decrypt）
+  - [~][G] Step 5 done + UI 切到 Tier 2
 - [ ] KS.2.2 **AWS KMS live integration**（CI sandbox account + production IAM assume-role）
 - [ ] KS.2.3 **GCP KMS live integration**
 - [ ] KS.2.4 **HashiCorp Vault Transit live integration**（multi-cloud / cloud-neutral 客戶必選）
@@ -6321,6 +6321,6 @@ BP.E GraphRAG / Neo4j
 
 - [x] FX.11.1 寫 alembic migration 0189：scan `sessions` 全 row、用 `backend.security.envelope.encrypt_for_tenant` 把 plaintext token 包成 KS envelope JSON、UPDATE 寫回；冪等（已是 envelope JSON 的 row 跳過）
 - [x] FX.11.2 改 `backend/auth.py:851` `INSERT INTO sessions` 路徑用 envelope helper 寫 token；改 `backend/auth.py:1178` SELECT + `:1187` DELETE 路徑用 envelope-aware token lookup（`token_lookup_index` 走 hash 索引、不直接 LIKE plaintext）
-- [ ] FX.11.3 `scripts/backup_dlp_scan.py`：把 `sessions.token` 從 EXPECTED_HIGH_ENTROPY_COLUMNS 移除、加進 REQUIRED_ENVELOPE_COLUMNS；移除 `test_scan_backup_db_blocks_plaintext_session_token` 上的 `@pytest.mark.skip`；跑一次 prod backup DLP 確認 0 finding
+- [x] FX.11.3 `scripts/backup_dlp_scan.py`：把 `sessions.token` 從 EXPECTED_HIGH_ENTROPY_COLUMNS 移除、加進 REQUIRED_ENVELOPE_COLUMNS；移除 `test_scan_backup_db_blocks_plaintext_session_token` 上的 `@pytest.mark.skip`；跑一次 prod backup DLP 確認 0 finding
 
 **Priority FX.11 範圍**：~1-2 day；FX.10.7 收尾。Day-count 加進 Total。
