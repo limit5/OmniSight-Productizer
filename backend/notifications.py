@@ -14,6 +14,7 @@ import logging
 import os
 import uuid
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime
 
 from backend.config import settings
@@ -82,6 +83,7 @@ async def notify(
     interactive_buttons: list[dict] | None = None,
     interactive_channel: str = "*",
     severity: Severity | str | None = None,
+    is_red_card: bool = False,
     conn=None,
 ) -> Notification:
     """Create and route a notification through the tiered system.
@@ -125,6 +127,7 @@ async def notify(
         action_url=action_url,
         action_label=action_label,
         severity=severity_str,
+        is_red_card=is_red_card,
     )
 
     # 1. Always persist to DB (best-effort — a failed DB write still
@@ -156,6 +159,7 @@ async def notify(
         # frontend can render per-card P1/P2/P3 badges without an
         # extra round-trip. None for legacy callers.
         "severity": severity_str,
+        "is_red_card": is_red_card,
     })
 
     # 3. Route to external channels based on level OR severity tag.
@@ -166,7 +170,7 @@ async def notify(
     #    reached the dispatcher via their natural ``critical``/``action``
     #    levels, but P3 is informational and would otherwise be dropped
     #    by the legacy level-only gate.
-    if level_str in ("warning", "action", "critical") or severity_str:
+    if level_str in ("warning", "action", "critical") or severity_str or is_red_card:
         asyncio.create_task(_dispatch_external(notif))
 
     # R1 (#307): interactive mirror to ChatOps bridge. Non-fatal if
@@ -197,6 +201,7 @@ async def send_notification(
     severity: "Severity | str | None" = None,
     payload: "dict | Notification | None" = None,
     interactive: bool = False,
+    is_red_card: bool = False,
     conn=None,
 ) -> Notification:
     """Tier-explicit notification dispatcher (R9 row 2941, #315).
@@ -273,6 +278,11 @@ async def send_notification(
         L1_LOG_EMAIL, L2_IM_WEBHOOK, L2_CHATOPS_INTERACTIVE,
         L3_JIRA, L4_PAGERDUTY, L4_SMS,
     })
+    payload_is_red_card = bool(is_red_card)
+    if isinstance(payload, Notification):
+        payload_is_red_card = payload_is_red_card or payload.is_red_card
+    elif isinstance(payload, Mapping):
+        payload_is_red_card = payload_is_red_card or bool(payload.get("is_red_card"))
 
     # ── Normalise tier set ───────────────────────────────────────
     if tier is None:
@@ -293,6 +303,8 @@ async def send_notification(
     # gets a sensible default fan-out (mirrors notify() semantics).
     if not tier_set and severity is not None:
         tier_set = set(tiers_for(severity))
+    if not tier_set and payload_is_red_card:
+        tier_set = {L3_JIRA, L4_PAGERDUTY}
 
     unknown = tier_set - known_tiers
     if unknown:
@@ -313,6 +325,7 @@ async def send_notification(
 
     if isinstance(payload, Notification):
         notif = payload
+        update: dict[str, object] = {}
         if severity_str is not None:
             # Coerce back to Severity enum so model_copy preserves the
             # field's declared type (Pydantic skips validation on
@@ -322,7 +335,11 @@ async def send_notification(
                 sev_enum = Severity(severity_str)
             except ValueError:
                 sev_enum = severity_str  # unknown — let model fail at use
-            notif = notif.model_copy(update={"severity": sev_enum})
+            update["severity"] = sev_enum
+        if is_red_card:
+            update["is_red_card"] = True
+        if update:
+            notif = notif.model_copy(update=update)
     else:
         if payload is None:
             payload = {}
@@ -343,6 +360,7 @@ async def send_notification(
             action_url=payload.get("action_url"),
             action_label=payload.get("action_label"),
             severity=severity_str,
+            is_red_card=bool(payload.get("is_red_card") or is_red_card),
         )
         interactive_buttons = list(payload.get("interactive_buttons") or [])
         interactive_channel = str(payload.get("interactive_channel") or "*")
@@ -373,6 +391,7 @@ async def send_notification(
         "action_url": notif.action_url,
         "action_label": notif.action_label,
         "severity": severity_str,
+        "is_red_card": notif.is_red_card,
     })
 
     # ── Tier-explicit dispatch ──────────────────────────────────
@@ -528,6 +547,7 @@ async def _dispatch_external(notif: Notification) -> None:
     level = notif.level
     severity = notif.severity.value if notif.severity is not None else None
     severity_tiers = tiers_for(severity) if severity else frozenset()
+    is_red_card = bool(getattr(notif, "is_red_card", False))
     errors: list[str] = []
     any_required = False
 
@@ -543,10 +563,12 @@ async def _dispatch_external(notif: Notification) -> None:
     fire_jira = (
         L3_JIRA in severity_tiers
         or level in ("action", "critical")
+        or is_red_card
     )
     fire_pagerduty = (
         L4_PAGERDUTY in severity_tiers
         or level == "critical"
+        or is_red_card
     )
     fire_sms = L4_SMS in severity_tiers
     # R9 row 2939: ChatOps interactive is *severity-only* — there is no
@@ -1031,7 +1053,7 @@ async def retry_failed_notifications(
             try:
                 notif = Notification(**{k: row.get(k) for k in (
                     "id", "level", "title", "message", "source", "timestamp",
-                    "action_url", "action_label",
+                    "action_url", "action_label", "severity", "is_red_card",
                 ) if row.get(k) is not None})
             except Exception as exc:
                 logger.warning("DLQ: cannot rehydrate %s: %s", row.get("id"), exc)
@@ -1172,7 +1194,11 @@ async def _send_jira(notif: Notification) -> None:
     fields: dict = {
         "project": {"key": project},
         "summary": f"[{notif.level.upper()}] {notif.title}",
-        "description": (f"[severity:{sev}] " if sev else "") + (notif.message or ""),
+        "description": (
+            ("[red-card] " if notif.is_red_card else "")
+            + (f"[severity:{sev}] " if sev else "")
+            + (notif.message or "")
+        ),
         "issuetype": {
             "name": "Bug" if (notif.level == "critical" or sev == "P1") else "Task",
         },
@@ -1188,6 +1214,10 @@ async def _send_jira(notif: Notification) -> None:
             # swimlanes pick up the ticket without an extra severity
             # query.
             labels.append("blocked")
+        fields["labels"] = labels
+    if notif.is_red_card:
+        labels = list(fields.get("labels") or [])
+        labels.append("red-card")
         fields["labels"] = labels
     payload = json.dumps({"fields": fields})
     api_url = f"{url}/rest/api/2/issue"
@@ -1220,7 +1250,7 @@ async def _send_pagerduty(notif: Notification) -> None:
 
     import json
     sev = notif.severity.value if notif.severity is not None else None
-    summary_prefix = f"[{sev}]" if sev else "[CRITICAL]"
+    summary_prefix = "[RED CARD]" if notif.is_red_card else (f"[{sev}]" if sev else "[CRITICAL]")
     pd_payload: dict = {
         "summary": f"{summary_prefix} {notif.title}: {notif.message}",
         "severity": "critical",
@@ -1228,6 +1258,8 @@ async def _send_pagerduty(notif: Notification) -> None:
     }
     if sev:
         pd_payload["custom_details"] = {"omnisight_severity": sev}
+    if notif.is_red_card:
+        pd_payload.setdefault("custom_details", {})["is_red_card"] = True
     payload = json.dumps({
         "routing_key": key,
         "event_action": "trigger",

@@ -203,11 +203,11 @@ rows from 2026-04-20 onwards should use the layered convention:
 ### BP.H — 3-tier Penalty + Red Card（~1 週）
 > 前置 R0 / R2 / Watchdog（已完）；BP.B 完後加 guild_id label
 > 注意：此「Phase H」是 Blueprint Phase H，與 TODO `Priority H — Host-aware Coordinator`（line 2525+）是**不同**東西，命名碰撞（見 ADR Appendix C §C.5）
-- [ ] BP.H.1 `backend/cognitive_penalty.py` — CI report → 警告 prompt 回注
-- [ ] BP.H.2 `backend/red_card.py` — 3 連 `Verified -1` → 斷 API + Jira `[BLOCKED]`
-- [ ] **BP.H.2.b** `recursive_subcall_budget`（**2026-04-25 from RLM Option B**）：單一 root task 累積 sub-LM call > 3 → yellow card（warn + slow down）；> 5 → red card（熔斷整條 agent + 升級人類）；直接 mitigate reproduction paper 警告的 `depth>1 = 96x slowdown`；可配置 per-Guild override；source-of-truth = ADR R10 + Appendix C
-- [ ] BP.H.3 Notification 加 `is_red_card` bool；映射到 L3 Jira + L4 PagerDuty
-- [ ] BP.H.4 `backend/tests/test_red_card.py` — ~35 test（原 25 + sub-call budget 10）
+- [x][G] BP.H.1 `backend/cognitive_penalty.py` — CI report → 警告 prompt 回注
+- [x][G] BP.H.2 `backend/red_card.py` — 3 連 `Verified -1` → 斷 API + Jira `[BLOCKED]`
+- [x][G] **BP.H.2.b** `recursive_subcall_budget`（**2026-04-25 from RLM Option B**）：單一 root task 累積 sub-LM call > 3 → yellow card（warn + slow down）；> 5 → red card（熔斷整條 agent + 升級人類）；直接 mitigate reproduction paper 警告的 `depth>1 = 96x slowdown`；可配置 per-Guild override；source-of-truth = ADR R10 + Appendix C
+- [x][G] BP.H.3 Notification 加 `is_red_card` bool；映射到 L3 Jira + L4 PagerDuty
+- [x][G] BP.H.4 `backend/tests/test_red_card.py` — ~35 test（原 25 + sub-call budget 10）
 
 ### BP.C — T-shirt Gateway + S/M/XL Topology（~2-3 週）
 > 前置 BP.B；feature flag `OMNISIGHT_TOPOLOGY_MODE=legacy|smxl`
@@ -352,7 +352,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] C2 Multi-tenancy tenant_guild_config（獨立 alembic 0021）
 - [ ] C3 Test 分級（implements: BP.L.1-2）
 - [ ] C4 ProjectClass 三維正交（implements: BP.C.6）
-- [ ] C5 Notification Red Card 映射（implements: BP.H.3）
+- [x] C5 Notification Red Card 映射（implements: BP.H.3）
 - [ ] C6 37 role skill 物理位置遷移（implements: BP.B.6）
 
 ### BP 風險登記簿 v2（2026-04-25 D' path 擴充）
