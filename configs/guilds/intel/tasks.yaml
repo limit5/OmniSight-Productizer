@@ -1,0 +1,62 @@
+# BP.I.2 -- SecOps Threat Intel guild DAG tasks.
+#
+# Task IDs mirror the three BP.I.1 helper skills and stop before BP.I.3
+# hook integration. The Intel guild consumes these as preflight steps
+# once the pre-install / pre-blueprint hooks are wired.
+
+tasks:
+  - id: intel-cve-search
+    name: "Search latest CVEs"
+    description: >
+      Query recent NVD CVE API 2.0 entries for product, dependency,
+      platform, or SoC keywords and normalize them into the BP.I.1
+      IntelReport envelope.
+    tier: t2
+    toolchain: backend.secops_intel.search_latest_cve
+    when: "secops_intel_enabled: true"
+    depends_on: []
+    artifacts:
+      - cve_intel_report
+
+  - id: intel-zero-day-feed
+    name: "Query exploited-in-the-wild feeds"
+    description: >
+      Query CISA Known Exploited Vulnerabilities as the minimal
+      source-backed zero-day / active exploitation signal and filter
+      entries by product or dependency keywords.
+    tier: t2
+    toolchain: backend.secops_intel.query_zero_day_feeds
+    when: "secops_intel_enabled: true"
+    depends_on:
+      - intel-cve-search
+    artifacts:
+      - zero_day_intel_report
+
+  - id: intel-best-practices
+    name: "Fetch latest best practices"
+    description: >
+      Fetch curated CISA, NIST, and OWASP hardening guidance for the
+      current product topic and return source-backed recommendations
+      in the BP.I.1 IntelReport envelope.
+    tier: t2
+    toolchain: backend.secops_intel.fetch_latest_best_practices
+    when: "secops_intel_enabled: true"
+    depends_on: []
+    artifacts:
+      - best_practice_report
+
+  - id: intel-preflight-brief
+    name: "Render threat-intel preflight brief"
+    description: >
+      Render a concise preflight brief from CVE, exploited-in-the-wild,
+      and best-practice reports. This artifact is passive in BP.I.2 and
+      becomes hook input in BP.I.3.
+    tier: t0
+    toolchain: jinja2
+    when: "secops_intel_enabled: true"
+    depends_on:
+      - intel-cve-search
+      - intel-zero-day-feed
+      - intel-best-practices
+    artifacts:
+      - threat_intel_brief
