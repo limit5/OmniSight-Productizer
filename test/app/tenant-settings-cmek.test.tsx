@@ -211,8 +211,13 @@ describe("/tenants/{tid}/settings — CMEK wizard", () => {
         verification_id: "cmekv_abc123",
       })
     })
-    expect(await screen.findByTestId("cmek-security-tier")).toHaveTextContent("Tier 2")
-    expect(screen.getByTestId("cmek-complete-result")).toHaveTextContent("Tier 2 draft")
+    expect(await screen.findByTestId("cmek-security-tier")).toHaveTextContent(
+      "Tier 2 · Customer-managed KEK",
+    )
+    expect(screen.getByTestId("cmek-step-5")).toHaveTextContent("Done")
+    expect(screen.getByTestId("cmek-complete-result")).toHaveTextContent(
+      "Step 5 done · UI switched to Tier 2",
+    )
   })
 
   it("keeps Step 1 scoped to AWS, GCP, and Vault provider selection", async () => {

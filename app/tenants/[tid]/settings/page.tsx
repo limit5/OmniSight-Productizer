@@ -1446,7 +1446,7 @@ function SecurityTab({ tid }: { tid: string }) {
           data-testid="cmek-security-tier"
         >
           <ShieldAlert size={13} />
-          {securityTier === "tier-2" ? "Tier 2 · CMEK draft" : "Tier 1 · OmniSight-managed KEK"}
+          {securityTier === "tier-2" ? "Tier 2 · Customer-managed KEK" : "Tier 1 · OmniSight-managed KEK"}
         </div>
       </div>
 
@@ -1652,7 +1652,7 @@ function SecurityTab({ tid }: { tid: string }) {
                   className="rounded border border-[var(--neural-green)]/40 bg-[var(--neural-green)]/10 p-3 text-xs"
                   data-testid="cmek-complete-result"
                 >
-                  Tier 2 draft ready for {completeResult.provider}; durable activation follows KS.2.11 storage.
+                  Step 5 done · UI switched to Tier 2 for {completeResult.provider}; durable activation follows KS.2.11 storage.
                 </div>
               )}
             </div>
