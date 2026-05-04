@@ -12,7 +12,6 @@ import logging
 from pathlib import Path
 from urllib.parse import quote_plus
 
-from backend.config import settings
 from backend.git_auth import detect_platform, parse_repo_path, get_gitlab_api_url
 from backend.git_credentials import pick_account_for_url, pick_default
 

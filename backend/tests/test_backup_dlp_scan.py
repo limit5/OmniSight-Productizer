@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "backup_dlp_scan.py"
@@ -134,6 +136,86 @@ def test_scan_backup_db_blocks_plaintext_sensitive_column(tmp_path: Path) -> Non
     assert finding.table == "webhook_deliveries"
     assert finding.column == "access_token"
     assert finding.labels == ["sensitive_column_plaintext"]
+
+
+@pytest.mark.skip(
+    reason="FX.10.7 deferred — REQUIRED_ENVELOPE_COLUMNS is empty until FX.11 "
+    "data migration lands. sessions.token currently sits in "
+    "EXPECTED_HIGH_ENTROPY_COLUMNS allowlist; once migration writes envelope JSON "
+    "for all rows + auth.py:851 writer is updated, move sessions.token from "
+    "EXPECTED back into REQUIRED and unskip this test."
+)
+def test_scan_backup_db_blocks_plaintext_session_token(tmp_path: Path) -> None:
+    db_path = tmp_path / "plaintext-session.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE sessions ("
+            "token TEXT PRIMARY KEY, "
+            "user_id TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions (token, user_id) VALUES (:token, :user_id)",
+            {
+                "token": "sess_" + ("A" * 48),
+                "user_id": "u-session",
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = backup_dlp_scan.scan_backup_db(db_path)
+
+    assert report.passed is False
+    assert report.total_findings == 1
+    finding = report.findings[0]
+    assert finding.table == "sessions"
+    assert finding.column == "token"
+    assert finding.labels == ["required_envelope_plaintext"]
+    assert "sess_AAAA" not in json.dumps(report.to_dict())
+
+
+def test_scan_backup_db_allows_enveloped_session_token(tmp_path: Path) -> None:
+    db_path = tmp_path / "enveloped-session.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE sessions ("
+            "token TEXT PRIMARY KEY, "
+            "user_id TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions (token, user_id) VALUES (:token, :user_id)",
+            {
+                "token": json.dumps(
+                    {
+                        "fmt": 1,
+                        "ciphertext": (
+                            '{"fmt":1,"dek":"dek-session","tid":"t-default",'
+                            '"nonce_b64":"bm9uY2U=","ciphertext_b64":"Y2lwaGVy"}'
+                        ),
+                        "dek_ref": {
+                            "dek_id": "dek-session",
+                            "tenant_id": "t-default",
+                            "key_id": "local",
+                            "provider": "local-fernet",
+                            "wrapped_dek_b64": "d3JhcHBlZA==",
+                        },
+                    },
+                    sort_keys=True,
+                ),
+                "user_id": "u-session",
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = backup_dlp_scan.scan_backup_db(db_path)
+
+    assert report.passed is True
+    assert report.total_findings == 0
 
 
 def test_cli_json_returns_nonzero_without_raw_secret(tmp_path: Path) -> None:

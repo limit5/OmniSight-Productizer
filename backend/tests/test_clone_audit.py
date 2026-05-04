@@ -28,7 +28,7 @@ audit subsystem.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import pytest
 

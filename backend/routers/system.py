@@ -28,8 +28,8 @@ from backend.routers import _pagination as _pg
 
 from backend.models import (
     SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse, TokenUsageEntry,
-    TokenBurnRatePoint, TokenBurnRateResponse,
-    TokenHeatmapCell, TokenHeatmapResponse,
+    TokenBurnRateResponse,
+    TokenHeatmapResponse,
     PromptVersionEntry, PromptVersionsListResponse, PromptDiffResponse,
     DeployRequest,
 )

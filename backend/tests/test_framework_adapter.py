@@ -36,7 +36,6 @@ needed; the adapter is a pure text emitter.
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from pathlib import Path
 from typing import Any
 
 import pytest

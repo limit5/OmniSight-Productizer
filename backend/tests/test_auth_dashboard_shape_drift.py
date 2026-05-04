@@ -163,8 +163,33 @@ def _ts_set_members(src: str, name: str) -> list[str]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def test_ts_twin_present() -> None:
-    assert _TS_TWIN_PATH.exists(), f"missing TS twin: {_TS_TWIN_PATH}"
+def test_ts_twin_present_and_python_empty_shape_real_call() -> None:
+    src = _ts_source()
+    assert "export function summarise" in src
+
+    summary = ad.summarise(
+        [],
+        tenant_id="t-empty-real-call",
+        since=10.0,
+        until=20.0,
+    )
+    empty = ad.empty_summary(
+        "t-empty-real-call",
+        since=10.0,
+        until=20.0,
+    )
+    alerts = ad.detect_suspicious_patterns(
+        [],
+        tenant_id="t-empty-real-call",
+    )
+
+    assert _normalise_summary_python(summary) == _normalise_summary_python(empty)
+    assert summary.since == 10.0
+    assert summary.until == 20.0
+    assert summary.total_events == 0
+    assert summary.login_success_rate is None
+    assert dict(summary.auth_method_distribution) == {}
+    assert alerts == ()
 
 
 def test_rule_strings_byte_equal() -> None:

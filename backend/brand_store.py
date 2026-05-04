@@ -120,7 +120,6 @@ from backend.brand_spec import (
     BRAND_SPEC_SCHEMA_VERSION,
     BrandSpec,
     BrandSpecError,
-    spec_from_json,
     spec_to_json,
 )
 

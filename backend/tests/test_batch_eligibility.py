@@ -29,7 +29,6 @@ from backend.agents.batch_eligibility import (
     AutoBatchAccumulator,
     EligibilityRegistry,
     EligibilityRule,
-    RoutingDecision,
 )
 
 

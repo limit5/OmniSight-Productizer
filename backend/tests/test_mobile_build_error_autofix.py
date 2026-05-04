@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -43,7 +43,6 @@ from backend.mobile_agent_visual_context import (
     MOBILE_AGENT_VISUAL_CONTEXT_EVENT_TYPES,
     MOBILE_AGENT_VISUAL_CONTEXT_SCHEMA_VERSION,
     MobileAgentVisualContextBuilder,
-    MobileAgentVisualContextPayload,
     MobileBuildErrorSummary,
     MobileDeviceTarget,
 )
@@ -83,11 +82,9 @@ from backend.mobile_sandbox import (
     BuildError,
     BuildReport,
     InstallReport,
-    MobileSandboxAlreadyExists,
     MobileSandboxConfig,
     MobileSandboxError,
     MobileSandboxManager,
-    MobileSandboxStatus,
     ScreenshotReport,
 )
 from backend.mobile_screenshot import (
@@ -2317,9 +2314,6 @@ def test_schema_versions_independent():
     # Neighbouring rows should have their own schemas — we only check
     # they are present and parseable.
     from backend.mobile_sandbox import MOBILE_SANDBOX_SCHEMA_VERSION
-    from backend.mobile_agent_visual_context import (
-        MOBILE_AGENT_VISUAL_CONTEXT_SCHEMA_VERSION,
-    )
 
     assert MOBILE_SANDBOX_SCHEMA_VERSION
     assert MOBILE_AGENT_VISUAL_CONTEXT_SCHEMA_VERSION

@@ -21,8 +21,6 @@ The CATC field is Optional during the 30-day migration window per
 from __future__ import annotations
 
 import asyncio
-import os
-import shutil
 import subprocess
 from pathlib import Path
 

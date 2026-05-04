@@ -21,11 +21,9 @@ re-import them in each child.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import uuid
 
-import pytest
 
 from backend.tests.multi_worker import run_workers
 

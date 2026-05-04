@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import inspect
 import os
-import re
 from datetime import datetime, timezone
 
 import pytest

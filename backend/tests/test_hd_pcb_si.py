@@ -12,14 +12,11 @@ ADR: docs/design/hd-hardware-design-verification.md §3 + §11.1
 
 from __future__ import annotations
 
-import pytest
 
 from backend.agents.hdir import (
     HDIR,
-    Component,
     Layer,
     Net,
-    Pin,
     Plane,
     Trace,
     Via,

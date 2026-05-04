@@ -60,6 +60,18 @@ SENSITIVE_COLUMN_MARKERS = (
     "webhook_secret",
 )
 
+REQUIRED_ENVELOPE_COLUMNS: set[tuple[str, str]] = {
+    # FX.10.7 added the gate infrastructure (helpers + test + this set)
+    # but live sessions.token rows are still plaintext and the runtime
+    # writer in backend/auth.py:851 doesn't produce envelope JSON yet.
+    # Activating the gate now would fail every prod backup DLP scan.
+    #
+    # DEFERRED until the data migration + runtime envelope writer land
+    # (tracked as FX.11 follow-up). When ready, uncomment:
+    #     ("sessions", "token"),
+    # and remove the matching entry from EXPECTED_HIGH_ENTROPY_COLUMNS.
+}
+
 
 # Known intentional high-entropy columns. The redact() classifier flags
 # these as ``high_entropy_token`` because they are opaque IDs / SHA
@@ -68,10 +80,11 @@ SENSITIVE_COLUMN_MARKERS = (
 # into a column not yet migrated to KS.1 envelope encryption; columns
 # in this allowlist are reviewed and known-safe.
 EXPECTED_HIGH_ENTROPY_COLUMNS: set[tuple[str, str]] = {
-    ("audit_log", "session_id"),       # opaque session reference, not the token
+    ("audit_log", "session_id"),         # opaque session reference, not the token
     ("prompt_versions", "body_sha256"),  # SHA-256 hash, by definition high entropy
-    ("sessions", "token"),             # session storage table — by-design holds tokens
-                                       # (KS.1 follow-up: migrate to envelope encryption)
+    ("sessions", "token"),               # session storage table — by-design holds tokens.
+                                         # FX.10.7 deferred: REQUIRED_ENVELOPE_COLUMNS will
+                                         # take this over after FX.11 data migration lands.
 }
 
 
@@ -123,6 +136,23 @@ def _is_skipped_column(name: str) -> bool:
 def _is_sensitive_plaintext_column(name: str) -> bool:
     key = name.strip().lower()
     return any(marker in key for marker in SENSITIVE_COLUMN_MARKERS)
+
+
+def _is_required_envelope_column(table: str, column: str) -> bool:
+    return (table.strip().lower(), column.strip().lower()) in REQUIRED_ENVELOPE_COLUMNS
+
+
+def _looks_like_ks_envelope(value: str) -> bool:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if {"ciphertext", "dek_ref"}.issubset(payload):
+        dek_ref = payload.get("dek_ref")
+        return isinstance(payload.get("ciphertext"), str) and isinstance(dek_ref, dict)
+    return {"dek", "tid", "nonce_b64", "ciphertext_b64"}.issubset(payload)
 
 
 def _iter_user_tables(conn: sqlite3.Connection) -> Iterable[str]:
@@ -190,7 +220,19 @@ def scan_backup_db(db_path: Path | str) -> BackupDLPReport:
                     if not isinstance(value, str) or not value:
                         continue
                     _, labels = redact(value)
-                    if labels:
+                    if _is_required_envelope_column(table, column):
+                        # FX.10.7 — sessions.token MUST be KS envelope JSON.
+                        # Plaintext (or unrecognised JSON) fails the gate.
+                        if not _looks_like_ks_envelope(value):
+                            findings.append(
+                                BackupDLPFinding(
+                                    table=table,
+                                    column=column,
+                                    rowid=rowid,
+                                    labels=["required_envelope_plaintext"],
+                                )
+                            )
+                    elif labels:
                         if (table, column) in EXPECTED_HIGH_ENTROPY_COLUMNS:
                             # Reviewed-and-known-safe column; DLP gate is for
                             # unintentional plaintext leaks elsewhere.

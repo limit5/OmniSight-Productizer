@@ -554,7 +554,7 @@ def build_sdp(
         f"a=rtpmap:{mount.rtp_payload_type} {mount.rtp_encoding_name}/90000",
     ]
     if mount.codec == VideoCodec.H264:
-        fmtp_parts = [f"packetization-mode=1"]
+        fmtp_parts = ["packetization-mode=1"]
         if mount.profile_level_id:
             fmtp_parts.append(f"profile-level-id={mount.profile_level_id}")
         if mount.sprop_parameter_sets:
@@ -580,7 +580,7 @@ def build_sdp(
     lines.append(
         f"a=x-dimensions:{mount.width},{mount.height}"
     )
-    lines.append(f"a=control:track1")
+    lines.append("a=control:track1")
     return "\r\n".join(lines) + "\r\n"
 
 

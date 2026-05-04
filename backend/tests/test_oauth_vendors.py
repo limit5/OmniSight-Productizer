@@ -32,11 +32,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import json
 import pathlib
 import re
 import types
-from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest

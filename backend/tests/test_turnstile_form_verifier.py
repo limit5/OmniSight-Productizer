@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -655,7 +654,6 @@ def test_no_module_level_mutable_container():
     """SOP §1 invariant: every module-level mapping / collection must
     be frozen (frozenset / tuple / MappingProxyType). Mutable list /
     dict / set at module level breaks cross-worker consistency."""
-    import types as _types
     for name in dir(tv):
         if name.startswith("_"):
             continue

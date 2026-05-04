@@ -148,7 +148,6 @@ from backend.security.oauth_client import (
     DEFAULT_STATE_TTL_SECONDS,
     FlowSession,
     StateExpiredError,
-    StateMismatchError,
     TokenResponseError,
     TokenSet,
 )

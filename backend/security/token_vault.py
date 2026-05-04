@@ -128,7 +128,7 @@ import logging
 import secrets
 import uuid
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from backend import secret_store
 from backend.security import decryption_audit

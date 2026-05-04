@@ -32,7 +32,6 @@ dialect).
 from __future__ import annotations
 
 import sqlite3
-import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock

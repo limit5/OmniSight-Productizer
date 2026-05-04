@@ -28,15 +28,13 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §6.2
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
 from backend.agents.batch_client import (
-    BatchPersistence,
     BatchResult,
-    BatchResultStatus,
     BatchRun,
     BatchRunStatus,
 )
@@ -45,7 +43,6 @@ from backend.agents.cost_guard import (
     BudgetCap,
     CostActual,
     CostEstimate,
-    CostStore,
     PeriodKind,
     ScopeKey,
     _period_start,
@@ -54,13 +51,10 @@ from backend.agents.external_tool_registry import (
     DEFAULT_TOOL_DEFINITIONS,
     ExternalToolBinding,
     ExternalToolDefinition,
-    ExternalToolRegistryStore,
     HealthStatus,
 )
 from backend.agents.rate_limiter import (
     DLQEntry,
-    DeadLetterQueue,
-    RetryClassification,
 )
 
 

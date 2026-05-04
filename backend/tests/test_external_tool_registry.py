@@ -25,7 +25,6 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §5
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import types
 from datetime import datetime, timezone

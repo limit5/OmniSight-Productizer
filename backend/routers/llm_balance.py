@@ -71,7 +71,6 @@ import logging
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import Field
 
 from backend import auth as _auth
 from backend.llm_balance import (

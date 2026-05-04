@@ -37,7 +37,6 @@ headroom only improves).
 
 from __future__ import annotations
 
-import pytest
 
 from backend.quota import PLAN_QUOTAS
 from backend.rate_limit import InMemoryLimiter

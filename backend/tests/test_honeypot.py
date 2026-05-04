@@ -28,7 +28,6 @@ Module-global state audit (per implement_phase_step.md SOP §1)
 from __future__ import annotations
 
 import sys
-from typing import Any
 from unittest import mock
 
 import pytest

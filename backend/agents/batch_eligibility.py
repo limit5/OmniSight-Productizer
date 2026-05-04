@@ -32,12 +32,10 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §7
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal
 
 from backend.agents.batch_dispatcher import BatchableTask, LaneType, PriorityLevel
 

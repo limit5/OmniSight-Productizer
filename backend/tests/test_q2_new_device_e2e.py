@@ -252,7 +252,6 @@ async def test_second_device_login_triggers_alert(_q2_e2e_client):
     # block it. We exercised the gate in test_q2_new_device_rate_limit;
     # here we relax it to isolate the "second device alerts" behaviour.
     from backend import auth as _auth_mod
-    import importlib
 
     # Use a small but non-zero per-user window so the rate-limit gate
     # refills before the second login (1ms = 1000 tokens/sec, refilled

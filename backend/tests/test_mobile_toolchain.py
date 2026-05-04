@@ -488,7 +488,6 @@ def test_host_install_android_cli_script_exists_and_is_executable():
         "scripts/install_android_cli.sh missing — P11 #351 requires a "
         "host install path mirroring the Docker image install"
     )
-    import os
     mode = _INSTALL_ANDROID_CLI.stat().st_mode
     assert mode & 0o111, (
         "scripts/install_android_cli.sh must be chmod +x so operators "

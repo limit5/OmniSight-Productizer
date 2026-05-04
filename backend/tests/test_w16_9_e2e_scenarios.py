@@ -140,7 +140,6 @@ from backend.web import (
     preview_vite_error_payload_from_history_entry,
     register_reference_from_clone_manifest,
     register_reference_from_layout_spec,
-    render_reference_attachment_context,
     resolve_reference_index_path,
 )
 

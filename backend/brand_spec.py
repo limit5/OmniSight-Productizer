@@ -52,7 +52,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field, replace
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping
 
 logger = logging.getLogger(__name__)
 

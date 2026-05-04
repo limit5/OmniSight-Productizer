@@ -55,7 +55,6 @@ import inspect
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import pytest

@@ -24,7 +24,6 @@ import asyncio
 
 import asyncpg
 import pytest
-import pytest_asyncio
 
 from backend import db_pool
 

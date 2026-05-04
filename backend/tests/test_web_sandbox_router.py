@@ -47,7 +47,6 @@ from backend.tests.test_web_sandbox import (
     RecordingEventCallback,
 )
 from backend.web_sandbox import (
-    WebSandboxConfig,
     WebSandboxManager,
     WebSandboxStatus,
 )

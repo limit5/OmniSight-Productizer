@@ -32,7 +32,6 @@ from typing import Any
 
 import pytest
 
-from backend.agents.anthropic_native_client import AnthropicClient
 from backend.agents.batch_client import BatchClient, BatchResult, InMemoryBatchPersistence
 from backend.agents.batch_dispatcher import BatchDispatcher, BatchableTask
 from backend.agents.batch_eligibility import (

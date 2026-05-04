@@ -1,9 +1,10 @@
 name: Nightly lint + type-check + supply-chain audit
 
 # FX.6.8 (TODO row 6234) — nightly informational gate that runs the
-# three FX.6.5 dev-tools (`pip-audit`, `ruff check`, `mypy`) against
-# their respective scopes and posts the results to the run summary +
-# an uploaded markdown report. The tools themselves are pinned in
+# four FX.6.5/FX.10 dev-tools (`pip-audit`, `ruff check`, `mypy`,
+# `tsc --noEmit`) against their respective scopes and posts the results
+# to the run summary + an uploaded markdown report. The Python tools
+# themselves are pinned in
 # ``backend/requirements-dev.txt`` (peeled out of the prod lockfile by
 # FX.6.7) so the nightly job and a developer's ``backend/.venv`` see
 # byte-for-byte the same wheel hashes — no version drift between local
@@ -33,6 +34,10 @@ name: Nightly lint + type-check + supply-chain audit
 #     surfaces a Python-only CVE 12-48h before the GHSA mirror picks
 #     it up; OSV-Scanner is broader (npm + Python). Both are
 #     informational here — Renovate (``N2``) is the auto-PR vehicle.
+#   * ``tsc --noEmit`` is already a PR hard gate in ``ci.yml::lint``.
+#     This nightly mirror catches frontend type drift on the same
+#     daily cadence as mypy, with a retained report artefact for
+#     operators who only inspect the nightly audit bundle.
 #
 # Cron slot: 04:00 UTC = 12:00 Asia/Taipei. Lunchtime in Taipei so
 # operators see the result while at desk; intentionally NOT colliding
@@ -77,6 +82,8 @@ name: Nightly lint + type-check + supply-chain audit
 #                    "Item 'None' of 'Optional[X]' has no attribute"
 #                    pseudo-errors. A future row can tighten this
 #                    once the existing 126 errors are triaged.
+#   tsc        → repo-wide TypeScript ``--noEmit`` check using the same
+#                pnpm install + Node setup as ``ci.yml::lint``.
 #
 # Scope discipline (what this row does NOT do):
 #   * Does not flip ``ci.yml::lint`` from ``ruff==0.7.4`` to the
@@ -375,6 +382,71 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mypy-check-${{ github.run_id }}
+          path: audit-reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────
+  # tsc --noEmit — repo-wide frontend TypeScript drift check. Mirrors
+  # ci.yml::lint's Node/pnpm setup, but keeps the nightly informational
+  # report style used by ruff-check and mypy-check above.
+  # ─────────────────────────────────────────────────────────────────
+  tsc-check:
+    name: tsc --noEmit (frontend type check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: pnpm
+
+      - name: install js deps
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: tsc --noEmit (informational)
+        id: tsc
+        continue-on-error: true
+        run: |
+          set -eu
+          mkdir -p audit-reports
+          set +e
+          pnpm exec tsc --noEmit > audit-reports/tsc-check.txt 2>&1
+          tsc_exit=$?
+          set -e
+          echo "tsc_exit=$tsc_exit" >> "$GITHUB_OUTPUT"
+          tail -1 audit-reports/tsc-check.txt > audit-reports/tsc-summary.txt || true
+          echo "tsc exit code: $tsc_exit"
+
+      - name: write step summary
+        if: always()
+        run: |
+          set -eu
+          {
+            echo "## tsc --noEmit — frontend type check (informational)"
+            echo ""
+            echo "Node version: \`$(node --version 2>&1 | tr -d '\n')\`"
+            echo "pnpm version: \`$(pnpm --version 2>&1 | tr -d '\n')\`"
+            echo "Exit code: \`${{ steps.tsc.outputs.tsc_exit }}\`"
+            echo ""
+            echo "### Summary (last 60 lines)"
+            echo ""
+            echo '```'
+            tail -60 audit-reports/tsc-check.txt 2>/dev/null || echo "(no report)"
+            echo '```'
+            echo ""
+            echo "_Full report in the uploaded artefact (\`tsc-check-${{ github.run_id }}\`)._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload tsc report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsc-check-${{ github.run_id }}
           path: audit-reports/
           retention-days: 30
           if-no-files-found: warn

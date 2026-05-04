@@ -20,7 +20,6 @@ minimal async mock so the contract runs unconditionally in CI.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 
 import pytest
 

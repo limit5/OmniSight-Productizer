@@ -31,7 +31,6 @@ Drift guard families:
 
 from __future__ import annotations
 
-import inspect
 import os
 import re
 from pathlib import Path

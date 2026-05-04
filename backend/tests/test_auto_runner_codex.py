@@ -337,9 +337,19 @@ def test_replace_marker_returns_none_when_line_missing(
 # ─── Filename + co-existence with auto-runner.py ────────────────
 
 
-def test_runner_path_exists() -> None:
-    assert _RUNNER_PATH.exists()
-    assert _RUNNER_PATH.name == "auto-runner-codex.py"
+def test_runner_path_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_CODEX_TIER", "A")
+    monkeypatch.setenv("OMNISIGHT_CODEX_WORKTREE", str(tmp_path))
+    mod = _load_codex_runner()
+
+    assert Path(mod.__file__).name == "auto-runner-codex.py"
+    hit = mod._find_first_pending([
+        "- [x][C] already done by claude\n",
+        "- [ ] FX.10.9 strengthen weak assertions\n",
+    ])
+    assert hit == "- [ ] FX.10.9 strengthen weak assertions"
 
 
 def test_sibling_runners_co_exist() -> None:

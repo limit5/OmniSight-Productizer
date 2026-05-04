@@ -16,7 +16,6 @@ These tests pin down the fixture contract itself.
 
 from __future__ import annotations
 
-import os
 
 import pytest
 
