@@ -7,9 +7,11 @@ module IS that patcher.
 
 Design rules (enforced by tests):
 
-  1. SEARCH block must match the file exactly ONCE. Multi-match or
-     zero-match → raise. This is the whole point — silent apply on
-     the wrong occurrence corrupts code invisibly.
+  1. SEARCH block resolves through the WP.3.1 cascade: exact match,
+     indent-agnostic match, prefix-tail rescue, then Jaro-Winkler
+     similarity >= 0.9. Each layer must produce exactly one match.
+     Multi-match or zero-match → raise. This is the whole point —
+     silent apply on the wrong occurrence corrupts code invisibly.
 
   2. SEARCH block must carry ≥ 3 lines of context (the design
      document locks this threshold). 1-line SEARCH is too ambiguous;
@@ -92,6 +94,13 @@ class SearchReplaceBlock:
     replace: str
 
 
+@dataclass(frozen=True)
+class CascadeMatch:
+    layer: int
+    start: int
+    end: int
+
+
 def parse_search_replace(raw: str) -> list[SearchReplaceBlock]:
     """Parse one or more SEARCH/REPLACE blocks out of `raw`. Raises
     `PatchMalformed` when the markers are unbalanced or absent."""
@@ -123,6 +132,189 @@ def _count_content_lines(text: str) -> int:
     return sum(1 for line in text.splitlines() if line.strip())
 
 
+def _line_without_newline(line: str) -> str:
+    return line.rstrip("\r\n")
+
+
+def _indent_agnostic_lines(text: str) -> list[str]:
+    return [_line_without_newline(line).lstrip(" \t") for line in text.splitlines()]
+
+
+def _line_offsets(lines: list[str]) -> list[int]:
+    offsets = [0]
+    total = 0
+    for line in lines:
+        total += len(line)
+        offsets.append(total)
+    return offsets
+
+
+def _window_matches(source: str, search: str) -> list[CascadeMatch]:
+    source_lines = source.splitlines(keepends=True)
+    search_lines = search.splitlines()
+    if not search_lines or len(search_lines) > len(source_lines):
+        return []
+
+    offsets = _line_offsets(source_lines)
+    window_size = len(search_lines)
+    matches: list[CascadeMatch] = []
+    for start_line in range(0, len(source_lines) - window_size + 1):
+        end_line = start_line + window_size
+        matches.append(
+            CascadeMatch(
+                layer=0,
+                start=offsets[start_line],
+                end=offsets[end_line],
+            )
+        )
+    return matches
+
+
+def _unique_match(matches: list[CascadeMatch], *, layer: int) -> CascadeMatch | None:
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise PatchAmbiguous(
+            f"SEARCH block matched {len(matches)} times at cascade layer {layer}"
+        )
+    return matches[0]
+
+
+def _find_exact_match(source: str, search: str) -> CascadeMatch | None:
+    count = source.count(search)
+    if count == 0:
+        return None
+    if count > 1:
+        raise PatchAmbiguous(
+            f"SEARCH block matched {count} times — add more context"
+        )
+    start = source.index(search)
+    return CascadeMatch(layer=1, start=start, end=start + len(search))
+
+
+def _find_indent_agnostic_match(source: str, search: str) -> CascadeMatch | None:
+    search_norm = _indent_agnostic_lines(search)
+    matches: list[CascadeMatch] = []
+    for match in _window_matches(source, search):
+        window_norm = _indent_agnostic_lines(source[match.start:match.end])
+        if window_norm == search_norm:
+            matches.append(
+                CascadeMatch(layer=2, start=match.start, end=match.end)
+            )
+    return _unique_match(matches, layer=2)
+
+
+def _find_prefix_tail_match(source: str, search: str) -> CascadeMatch | None:
+    search_norm = _indent_agnostic_lines(search)
+    content_indexes = [i for i, line in enumerate(search_norm) if line.strip()]
+    if len(content_indexes) < 2:
+        return None
+    first_idx = content_indexes[0]
+    last_idx = content_indexes[-1]
+    first_line = search_norm[first_idx]
+    last_line = search_norm[last_idx]
+
+    matches: list[CascadeMatch] = []
+    for match in _window_matches(source, search):
+        window_norm = _indent_agnostic_lines(source[match.start:match.end])
+        if (
+            len(window_norm) == len(search_norm)
+            and window_norm[first_idx] == first_line
+            and window_norm[last_idx] == last_line
+        ):
+            matches.append(
+                CascadeMatch(layer=3, start=match.start, end=match.end)
+            )
+    return _unique_match(matches, layer=3)
+
+
+def _jaro_similarity(a: str, b: str) -> float:
+    if a == b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+
+    match_distance = max(len(a), len(b)) // 2 - 1
+    a_matches = [False] * len(a)
+    b_matches = [False] * len(b)
+    matches = 0
+
+    for i, char in enumerate(a):
+        start = max(0, i - match_distance)
+        end = min(i + match_distance + 1, len(b))
+        for j in range(start, end):
+            if b_matches[j] or char != b[j]:
+                continue
+            a_matches[i] = True
+            b_matches[j] = True
+            matches += 1
+            break
+
+    if matches == 0:
+        return 0.0
+
+    transpositions = 0
+    j = 0
+    for i, char in enumerate(a):
+        if not a_matches[i]:
+            continue
+        while not b_matches[j]:
+            j += 1
+        if char != b[j]:
+            transpositions += 1
+        j += 1
+
+    return (
+        matches / len(a)
+        + matches / len(b)
+        + (matches - transpositions / 2) / matches
+    ) / 3
+
+
+def _jaro_winkler_similarity(a: str, b: str) -> float:
+    jaro = _jaro_similarity(a, b)
+    prefix = 0
+    for left, right in zip(a[:4], b[:4]):
+        if left != right:
+            break
+        prefix += 1
+    return jaro + prefix * 0.1 * (1 - jaro)
+
+
+def _find_jaro_winkler_match(
+    source: str, search: str, *, threshold: float = 0.9,
+) -> CascadeMatch | None:
+    search_norm = "\n".join(_indent_agnostic_lines(search))
+    matches: list[CascadeMatch] = []
+    for match in _window_matches(source, search):
+        window_norm = "\n".join(
+            _indent_agnostic_lines(source[match.start:match.end])
+        )
+        if _jaro_winkler_similarity(window_norm, search_norm) >= threshold:
+            matches.append(
+                CascadeMatch(layer=4, start=match.start, end=match.end)
+            )
+    return _unique_match(matches, layer=4)
+
+
+def find_search_replace_match(source: str, search: str) -> CascadeMatch:
+    """Resolve a SEARCH block through the WP.3.1 cascade.
+
+    Pure function: no module-global mutable state; every worker derives
+    the same result from the supplied source/search strings.
+    """
+    for finder in (
+        _find_exact_match,
+        _find_indent_agnostic_match,
+        _find_prefix_tail_match,
+        _find_jaro_winkler_match,
+    ):
+        match = finder(source, search)
+        if match is not None:
+            return match
+    raise PatchNotFound("SEARCH block did not match any run in the source file")
+
+
 def apply_search_replace(
     source: str, block: SearchReplaceBlock,
     *, min_context: int = MIN_SEARCH_CONTEXT_LINES,
@@ -133,16 +325,8 @@ def apply_search_replace(
             f"SEARCH block has fewer than {min_context} non-blank lines "
             f"of context; patches with too little context are ambiguous"
         )
-    count = source.count(block.search)
-    if count == 0:
-        raise PatchNotFound(
-            "SEARCH block did not match any run in the source file"
-        )
-    if count > 1:
-        raise PatchAmbiguous(
-            f"SEARCH block matched {count} times — add more context"
-        )
-    return source.replace(block.search, block.replace, 1)
+    match = find_search_replace_match(source, block.search)
+    return source[:match.start] + block.replace + source[match.end:]
 
 
 def apply_search_replace_payload(

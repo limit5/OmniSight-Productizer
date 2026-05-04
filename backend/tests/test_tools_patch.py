@@ -142,6 +142,102 @@ def test_preserves_tail_exactly():
     assert out.endswith("    # unrelated comment\n    return True\n")
 
 
+def test_cascade_layer_1_exact_match():
+    match = tp.find_search_replace_match(
+        SOURCE_GOOD,
+        (
+            "def init_gpio(pin_number):\n"
+            "    # Initialize the hardware pin\n"
+            "    setup_pin(pin_number, MODE_IN)\n"
+        ),
+    )
+    assert match.layer == 1
+
+
+def test_cascade_layer_2_indent_agnostic_match():
+    source = textwrap.dedent("""\
+        if ready:
+          start()
+          finish()
+    """)
+    block = tp.SearchReplaceBlock(
+        search="if ready:\n    start()\n    finish()\n",
+        replace="if ready:\n    start()\n    verify()\n",
+    )
+    match = tp.find_search_replace_match(source, block.search)
+    out = tp.apply_search_replace(source, block)
+
+    assert match.layer == 2
+    assert "verify()" in out
+
+
+def test_cascade_layer_3_prefix_tail_rescue_match():
+    source = textwrap.dedent("""\
+        def render():
+            before()
+            live_middle()
+            after()
+    """)
+    block = tp.SearchReplaceBlock(
+        search="def render():\n    before()\n    stale_middle()\n    after()\n",
+        replace="def render():\n    before()\n    new_middle()\n    after()\n",
+    )
+    match = tp.find_search_replace_match(source, block.search)
+    out = tp.apply_search_replace(source, block)
+
+    assert match.layer == 3
+    assert "new_middle()" in out
+
+
+def test_cascade_layer_4_jaro_winkler_match():
+    source = textwrap.dedent("""\
+        def provision():
+            prepare_config()
+            apply_config()
+            verify_output()
+    """)
+    block = tp.SearchReplaceBlock(
+        search=(
+            "def provision_config():\n"
+            "    prepare_config()\n"
+            "    apply_configs()\n"
+            "    verify_output()\n"
+        ),
+        replace=(
+            "def provision():\n"
+            "    prepare_config()\n"
+            "    apply_config()\n"
+            "    record_output()\n"
+        ),
+    )
+    match = tp.find_search_replace_match(source, block.search)
+    out = tp.apply_search_replace(source, block)
+
+    assert match.layer == 4
+    assert "record_output()" in out
+
+
+def test_cascade_ambiguous_fallback_raises():
+    source = textwrap.dedent("""\
+        patch target:
+            keep()
+            live_a()
+            done()
+
+        patch target:
+            keep()
+            live_b()
+            done()
+    """)
+    block = tp.SearchReplaceBlock(
+        search="patch target:\n    keep()\n    stale()\n    done()\n",
+        replace="patch target:\n    keep()\n    patched()\n    done()\n",
+    )
+
+    with pytest.raises(tp.PatchAmbiguous, match="cascade layer 3"):
+        tp.apply_search_replace(source, block)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  apply_search_replace_payload — multi-block chain
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
