@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 334
+entry_count: 335
 status_counts:
-  dev-only: 325
+  dev-only: 326
   deployed-inactive: 4
   deployed-active: 3
   deployed-observed: 0
@@ -3148,3 +3148,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production image 重 build 後，在 staging 跑一次 BP.I hook smoke；本項是 test-only matrix，無獨立 runtime
     enablement knob。
+- id: 2026-05-04--BP.H.1
+  header_line: 45310
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: BP.H.1
+  title: BP.H.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.H.2/BP.H.3 落地後，在 staging 將 cognitive-penalty block 接入 agent retry prompt，並用一份 failed CI
+    report smoke 驗證下一輪 agent prompt 會包含 `# Cognitive Penalty (CI)`。
