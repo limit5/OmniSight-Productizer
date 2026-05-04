@@ -3357,7 +3357,7 @@ export async function completeCmekWizard(
 
 export interface CmekSettingsStatus {
   tenant_id: string
-  security_tier: "tier-1" | "tier-2"
+  security_tier: "tier-1" | "tier-2" | "tier-3"
   kms_health: "not_configured" | "healthy" | "revoked"
   revoke_status: "clear" | "revoked"
   provider: string

@@ -316,4 +316,43 @@ describe("/tenants/{tid}/settings — CMEK wizard", () => {
     expect(screen.getByTestId("cmek-key-id-input")).toHaveValue("transit/omnisight-tenant-tier2")
     expect(screen.getByTestId("cmek-step-1")).toHaveTextContent("Provider")
   })
+
+  it("replaces the Tier 3 provider-key flow with Proxy Configuration fields", async () => {
+    mockedGetStatus.mockResolvedValueOnce({
+      tenant_id: "t-acme",
+      security_tier: "tier-3",
+      kms_health: "not_configured",
+      revoke_status: "clear",
+      provider: "",
+      key_id: "",
+      reason: "byog_proxy",
+      raw_state: "proxy_registered",
+      checked_at: 1760000002,
+    })
+
+    await renderPage()
+
+    fireEvent.click(screen.getByTestId("settings-tab-security"))
+
+    expect(await screen.findByTestId("cmek-security-tier-selector")).toHaveValue("tier-3")
+    expect(screen.getByTestId("cmek-security-tier")).toHaveTextContent(
+      "Tier 3 · BYOG proxy",
+    )
+    expect(screen.getByTestId("byog-proxy-configuration-panel")).toHaveTextContent(
+      "Proxy Configuration",
+    )
+    expect(screen.getByTestId("byog-proxy-url-input")).toHaveValue(
+      "https://proxy.customer.example.com",
+    )
+    expect(screen.getByTestId("byog-client-cert-input")).toBeInTheDocument()
+    expect(screen.getByTestId("byog-cert-fingerprint-input")).toBeInTheDocument()
+    expect(screen.getByTestId("byog-accepted-materials")).toHaveTextContent(
+      "proxy URL, client cert, pinned cert fingerprint",
+    )
+    expect(screen.getByTestId("byog-rejected-materials")).toHaveTextContent(
+      "provider API keys",
+    )
+    expect(screen.queryByTestId("cmek-provider-aws-kms")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("cmek-key-id-input")).not.toBeInTheDocument()
+  })
 })

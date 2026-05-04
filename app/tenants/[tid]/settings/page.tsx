@@ -48,7 +48,9 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Server,
   ShieldAlert,
+  ShieldCheck,
   Users,
   X,
 } from "lucide-react"
@@ -1254,7 +1256,7 @@ function QuotasTab({ tid }: { tid: string }) {
   )
 }
 
-// ─── Security tab / KS.2.1 CMEK wizard ─────────────────────────
+// ─── Security tab / KS.2.1 CMEK wizard + KS.3.10 BYOG proxy UI ───
 
 const CMEK_STEPS = [
   "Provider",
@@ -1280,7 +1282,10 @@ function SecurityTab({ tid }: { tid: string }) {
   const [policyCopied, setPolicyCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [selectedSecurityTier, setSelectedSecurityTier] = useState<"tier-1" | "tier-2">("tier-1")
+  const [selectedSecurityTier, setSelectedSecurityTier] = useState<SecurityTier>("tier-1")
+  const [proxyUrl, setProxyUrl] = useState("https://proxy.customer.example.com")
+  const [proxyClientCert, setProxyClientCert] = useState("")
+  const [proxyCertFingerprint, setProxyCertFingerprint] = useState("")
 
   const selected = useMemo(
     () => providers.find((p) => p.provider === provider) ?? providers[0],
@@ -1414,6 +1419,17 @@ function SecurityTab({ tid }: { tid: string }) {
     }
   }
 
+  function onTierChange(next: SecurityTier) {
+    setSelectedSecurityTier(next)
+    if (next === "tier-1" || next === "tier-3") {
+      setCompleteResult(null)
+    }
+    if (next === "tier-3") {
+      setError(null)
+      setStep(0)
+    }
+  }
+
   if (loading) {
     return (
       <div className="rounded border border-[var(--border)] bg-[var(--card)] p-6 font-mono text-xs text-[var(--muted-foreground)]">
@@ -1452,29 +1468,32 @@ function SecurityTab({ tid }: { tid: string }) {
             <select
               value={selectedSecurityTier}
               onChange={(e) => {
-                const next = e.target.value as "tier-1" | "tier-2"
-                setSelectedSecurityTier(next)
-                if (next === "tier-1") {
-                  setCompleteResult(null)
-                }
+                onTierChange(e.target.value as SecurityTier)
               }}
               className="rounded border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs"
               data-testid="cmek-security-tier-selector"
             >
               <option value="tier-1">Tier 1</option>
               <option value="tier-2">Tier 2</option>
+              <option value="tier-3">Tier 3</option>
             </select>
           </label>
           <div
             className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-mono ${
-              securityTier === "tier-2"
+              securityTier === "tier-3"
+                ? "border-[var(--neural-blue)]/50 bg-[var(--neural-blue)]/10"
+                : securityTier === "tier-2"
                 ? "border-[var(--neural-green)]/50 bg-[var(--neural-green)]/10"
                 : "border-[var(--border)] bg-[var(--card)]"
             }`}
             data-testid="cmek-security-tier"
           >
-            <ShieldAlert size={13} />
-            {securityTier === "tier-2" ? "Tier 2 · Customer-managed KEK" : "Tier 1 · OmniSight-managed KEK"}
+            {securityTier === "tier-3" ? <Server size={13} /> : <ShieldAlert size={13} />}
+            {securityTier === "tier-3"
+              ? "Tier 3 · BYOG proxy"
+              : securityTier === "tier-2"
+                ? "Tier 2 · Customer-managed KEK"
+                : "Tier 1 · OmniSight-managed KEK"}
           </div>
         </div>
       </div>
@@ -1750,6 +1769,130 @@ function SecurityTab({ tid }: { tid: string }) {
         </div>
       </div>
       )}
+
+      {selectedSecurityTier === "tier-3" && (
+        <ProxyConfigurationPanel
+          tid={tid}
+          proxyUrl={proxyUrl}
+          proxyClientCert={proxyClientCert}
+          proxyCertFingerprint={proxyCertFingerprint}
+          onProxyUrlChange={setProxyUrl}
+          onProxyClientCertChange={setProxyClientCert}
+          onProxyCertFingerprintChange={setProxyCertFingerprint}
+        />
+      )}
+    </div>
+  )
+}
+
+type SecurityTier = "tier-1" | "tier-2" | "tier-3"
+
+function ProxyConfigurationPanel({
+  tid,
+  proxyUrl,
+  proxyClientCert,
+  proxyCertFingerprint,
+  onProxyUrlChange,
+  onProxyClientCertChange,
+  onProxyCertFingerprintChange,
+}: {
+  tid: string
+  proxyUrl: string
+  proxyClientCert: string
+  proxyCertFingerprint: string
+  onProxyUrlChange: (value: string) => void
+  onProxyClientCertChange: (value: string) => void
+  onProxyCertFingerprintChange: (value: string) => void
+}) {
+  return (
+    <div
+      className="rounded border border-[var(--border)] bg-[var(--card)] p-4 font-mono"
+      data-testid="byog-proxy-configuration-panel"
+    >
+      <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 mb-4">
+        <div>
+          <h3 className="text-sm font-semibold inline-flex items-center gap-2">
+            <Server size={14} />
+            Proxy Configuration
+          </h3>
+          <p className="text-[10px] text-[var(--muted-foreground)] mt-1">
+            Tier 3 tenants route LLM traffic through omnisight-proxy. Provider keys stay inside the customer VPC.
+          </p>
+        </div>
+        <div className="inline-flex items-center gap-2 rounded border border-[var(--neural-blue)]/50 bg-[var(--neural-blue)]/10 px-3 py-2 text-xs">
+          <ShieldCheck size={13} />
+          mTLS required
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-4">
+        <div className="space-y-4">
+          <label className="block">
+            <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+              Proxy URL
+            </span>
+            <input
+              value={proxyUrl}
+              onChange={(e) => onProxyUrlChange(e.target.value)}
+              className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+              placeholder="https://proxy.customer.example.com"
+              data-testid="byog-proxy-url-input"
+            />
+          </label>
+
+          <label className="block">
+            <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+              Client certificate PEM
+            </span>
+            <textarea
+              value={proxyClientCert}
+              onChange={(e) => onProxyClientCertChange(e.target.value)}
+              className="min-h-40 w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs leading-relaxed"
+              placeholder="-----BEGIN CERTIFICATE-----"
+              data-testid="byog-client-cert-input"
+            />
+          </label>
+
+          <label className="block">
+            <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+              Pinned certificate fingerprint
+            </span>
+            <input
+              value={proxyCertFingerprint}
+              onChange={(e) => onProxyCertFingerprintChange(e.target.value)}
+              className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+              placeholder="sha256:..."
+              data-testid="byog-cert-fingerprint-input"
+            />
+          </label>
+        </div>
+
+        <aside className="rounded border border-[var(--border)] bg-[var(--background)] p-3 text-xs text-[var(--muted-foreground)]">
+          <div className="flex items-center gap-2 text-[var(--foreground)] mb-2">
+            <KeyRound size={13} />
+            <span>Provider keys disabled</span>
+          </div>
+          <p className="leading-relaxed">
+            Do not paste OpenAI, Anthropic, Google, or other LLM provider keys
+            into OmniSight for tenant {tid}. Load them into the customer-side
+            proxy key source instead.
+          </p>
+          <dl className="mt-3 space-y-2">
+            <div>
+              <dt className="text-[10px] uppercase text-[var(--muted-foreground)]">
+                Accepted here
+              </dt>
+              <dd data-testid="byog-accepted-materials">proxy URL, client cert, pinned cert fingerprint</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] uppercase text-[var(--muted-foreground)]">
+                Rejected here
+              </dt>
+              <dd data-testid="byog-rejected-materials">provider API keys</dd>
+            </div>
+          </dl>
+        </aside>
+      </div>
     </div>
   )
 }
