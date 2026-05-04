@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import inspect
 import json
+import os
 import sys
 from types import ModuleType
 from types import SimpleNamespace
@@ -147,6 +148,7 @@ class FakeAWSKMSClient:
     def __init__(self):
         self.encrypt_calls = []
         self.decrypt_calls = []
+        self.describe_key_calls = []
 
     def encrypt(self, **kwargs):
         self.encrypt_calls.append(kwargs)
@@ -160,6 +162,16 @@ class FakeAWSKMSClient:
     def decrypt(self, **kwargs):
         self.decrypt_calls.append(kwargs)
         return {"Plaintext": kwargs["CiphertextBlob"].removeprefix(b"aws-wrapped-")}
+
+    def describe_key(self, **kwargs):
+        self.describe_key_calls.append(kwargs)
+        return {
+            "KeyMetadata": {
+                "Arn": kwargs["KeyId"],
+                "KeyState": "Enabled",
+                "KeyManager": "CUSTOMER",
+            }
+        }
 
 
 class FakeAWSSTSClient:
@@ -245,6 +257,73 @@ class TestAWSKMSAdapter:
             ),
         ]
         assert fake_boto3.kms.encrypt_calls[0]["KeyId"] == adapter.key_id
+
+    def test_describe_key_delegates_to_boto3_client_shape(self):
+        fake = FakeAWSKMSClient()
+        adapter = kms.AWSKMSAdapter(
+            key_id="arn:aws:kms:us-east-1:111122223333:key/demo",
+            region_name="us-east-1",
+        )
+        adapter._client = fake
+
+        metadata = adapter.describe_key()
+
+        assert metadata["KeyMetadata"]["KeyState"] == "Enabled"
+        assert fake.describe_key_calls == [{"KeyId": adapter.key_id}]
+
+    def test_from_environment_supports_production_assume_role(self, monkeypatch):
+        monkeypatch.setenv(
+            "OMNISIGHT_AWS_KMS_KEY_ID",
+            "arn:aws:kms:us-east-1:111122223333:key/demo",
+        )
+        monkeypatch.setenv("OMNISIGHT_AWS_KMS_REGION", "us-east-1")
+        monkeypatch.setenv(
+            "OMNISIGHT_AWS_KMS_ROLE_ARN",
+            "arn:aws:iam::111122223333:role/OmniSightKMS",
+        )
+        monkeypatch.setenv("OMNISIGHT_AWS_KMS_EXTERNAL_ID", "tenant-a")
+        monkeypatch.setenv("OMNISIGHT_AWS_KMS_SESSION_NAME", "omnisight-prod-tenant-a")
+
+        adapter = kms.AWSKMSAdapter.from_environment()
+
+        assert adapter.key_id == "arn:aws:kms:us-east-1:111122223333:key/demo"
+        assert adapter.region_name == "us-east-1"
+        assert adapter.role_arn == "arn:aws:iam::111122223333:role/OmniSightKMS"
+        assert adapter.external_id == "tenant-a"
+        assert adapter.session_name == "omnisight-prod-tenant-a"
+
+    def test_from_environment_requires_key_id(self, monkeypatch):
+        monkeypatch.delenv("OMNISIGHT_AWS_KMS_KEY_ID", raising=False)
+
+        with pytest.raises(kms.KMSConfigurationError, match="OMNISIGHT_AWS_KMS_KEY_ID"):
+            kms.AWSKMSAdapter.from_environment()
+
+
+AWS_LIVE_PREFIX = "OMNISIGHT_TEST_AWS_KMS"
+AWS_LIVE_KEY_ID = os.environ.get(f"{AWS_LIVE_PREFIX}_KEY_ID", "").strip()
+
+
+class TestAWSKMSLiveIntegration:
+    pytestmark = pytest.mark.skipif(
+        not AWS_LIVE_KEY_ID,
+        reason=f"{AWS_LIVE_PREFIX}_KEY_ID not set — skip AWS KMS sandbox live test",
+    )
+
+    def test_ci_sandbox_describe_encrypt_decrypt_round_trip(self):
+        adapter = kms.AWSKMSAdapter.from_environment(prefix=AWS_LIVE_PREFIX)
+        metadata = adapter.describe_key()["KeyMetadata"]
+        assert metadata["KeyState"] == "Enabled"
+
+        context = {
+            "tenant_id": "ci-sandbox",
+            "dek_id": "ks-2-2-live",
+            "purpose": "cmek-verify:aws-kms",
+            "schema": "ks.1.2",
+        }
+        wrapped = adapter.wrap_dek(b"ks-2-2-live-dek", encryption_context=context)
+        assert wrapped.provider == "aws-kms"
+        assert wrapped.ciphertext != b"ks-2-2-live-dek"
+        assert adapter.unwrap_dek(wrapped, encryption_context=context) == b"ks-2-2-live-dek"
 
 
 class FakeGCPKMSClient:

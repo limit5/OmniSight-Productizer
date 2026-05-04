@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Mapping, Optional, Protocol, runtime_checkable
 
@@ -206,6 +207,24 @@ class AWSKMSAdapter(BaseKMSAdapter):
         super().__post_init__()
         self._client: Any = None
 
+    @classmethod
+    def from_environment(cls, *, prefix: str = "OMNISIGHT_AWS_KMS") -> "AWSKMSAdapter":
+        """Build the AWS adapter from CI/prod environment configuration.
+
+        ``OMNISIGHT_AWS_KMS_*`` is the production assume-role prefix.
+        Tests pass ``prefix="OMNISIGHT_TEST_AWS_KMS"`` for the CI
+        sandbox account without changing the runtime knob names.
+        """
+
+        key_id = _env_required(f"{prefix}_KEY_ID", provider=cls.provider)
+        return cls(
+            key_id=key_id,
+            region_name=_env_optional(f"{prefix}_REGION"),
+            role_arn=_env_optional(f"{prefix}_ROLE_ARN"),
+            external_id=_env_optional(f"{prefix}_EXTERNAL_ID"),
+            session_name=_env_optional(f"{prefix}_SESSION_NAME") or cls.session_name,
+        )
+
     def _kms_client(self) -> Any:
         if self._client is not None:
             return self._client
@@ -236,6 +255,15 @@ class AWSKMSAdapter(BaseKMSAdapter):
             return self._client
         self._client = boto3.client("kms", region_name=self.region_name)
         return self._client
+
+    def describe_key(self) -> dict[str, Any]:
+        """Return AWS KMS key metadata for live connectivity checks."""
+
+        try:
+            result = self._kms_client().describe_key(KeyId=self.key_id)
+        except Exception as exc:  # pragma: no cover - SDK-specific subclasses.
+            raise KMSOperationError(str(exc), provider=self.provider, key_id=self.key_id) from exc
+        return dict(result)
 
     def wrap_dek(
         self,
@@ -444,6 +472,18 @@ def _vault_key_version(ciphertext: str) -> Optional[str]:
     if len(parts) >= 3 and parts[0] == "vault":
         return parts[1]
     return None
+
+
+def _env_optional(name: str) -> Optional[str]:
+    value = (os.environ.get(name) or "").strip()
+    return value or None
+
+
+def _env_required(name: str, *, provider: str) -> str:
+    value = _env_optional(name)
+    if not value:
+        raise KMSConfigurationError(f"{name} is required", provider=provider)
+    return value
 
 
 def list_providers() -> list[str]:

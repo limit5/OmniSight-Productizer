@@ -1,0 +1,61 @@
+name: AWS KMS Live Integration Tests
+
+on:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - ".github/workflows/aws-kms-live-tests.yml"
+      - "backend/security/kms_adapters.py"
+      - "backend/tests/test_security_kms_adapters.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-kms-live-tests
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  live-tests:
+    name: AWS KMS sandbox live test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OMNISIGHT_TEST_AWS_KMS_KEY_ID: ${{ secrets.OMNISIGHT_TEST_AWS_KMS_KEY_ID }}
+      OMNISIGHT_TEST_AWS_KMS_REGION: ${{ secrets.OMNISIGHT_TEST_AWS_KMS_REGION }}
+      OMNISIGHT_TEST_AWS_KMS_ROLE_ARN: ${{ secrets.OMNISIGHT_TEST_AWS_KMS_ROLE_ARN }}
+      OMNISIGHT_TEST_AWS_KMS_EXTERNAL_ID: ${{ secrets.OMNISIGHT_TEST_AWS_KMS_EXTERNAL_ID }}
+      OMNISIGHT_TEST_AWS_KMS_SESSION_NAME: ${{ secrets.OMNISIGHT_TEST_AWS_KMS_SESSION_NAME }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.OMNISIGHT_TEST_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.OMNISIGHT_TEST_AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.OMNISIGHT_TEST_AWS_SESSION_TOKEN }}
+      AWS_REGION: ${{ secrets.OMNISIGHT_TEST_AWS_KMS_REGION }}
+      AWS_DEFAULT_REGION: ${{ secrets.OMNISIGHT_TEST_AWS_KMS_REGION }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install backend dependencies
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install --require-hashes -r backend/requirements-dev.txt
+
+      - name: Run AWS KMS live tests
+        run: |
+          python -m pytest \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -q \
+            backend/tests/test_security_kms_adapters.py::TestAWSKMSLiveIntegration
