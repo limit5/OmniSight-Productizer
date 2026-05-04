@@ -27,6 +27,7 @@ from backend.agents.skills_loader import (
     make_skill_handler,
     parse_skill_file,
     render_catalog_for_prompt,
+    watch_project_scopes,
 )
 
 
@@ -338,6 +339,96 @@ def test_load_default_scopes_skips_readme(tmp_path: Path) -> None:
     assert reg.has("real-skill")
     assert not reg.has("README")
     assert not reg.has("readme")
+
+
+def test_watch_project_scopes_reloads_modified_project_skill(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    skill_file = project / ".claude" / "skills" / "watched" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(
+        "---\nname: watched\ndescription: v1\n---\nbody-v1\n"
+    )
+
+    reg = watch_project_scopes(project, home=home)
+    assert reg.get("watched").body == "body-v1\n"
+
+    skill_file.write_text(
+        "---\nname: watched\ndescription: v2\n---\nbody-v2\n"
+    )
+    assert reg.get("watched").body == "body-v2\n"
+
+
+def test_watch_project_scopes_reloads_added_project_override(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    bundled = project / "configs" / "skills" / "shared" / "SKILL.md"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text(
+        "---\nname: shared\ndescription: bundled\n---\nbundled-body\n"
+    )
+
+    reg = watch_project_scopes(project, home=home)
+    assert reg.get("shared").scope == "bundled"
+
+    project_skill = project / ".omnisight" / "skills" / "shared" / "SKILL.md"
+    project_skill.parent.mkdir(parents=True)
+    project_skill.write_text(
+        "---\nname: shared\ndescription: project\n---\nproject-body\n"
+    )
+    sk = reg.get("shared")
+    assert sk is not None
+    assert sk.scope == "project"
+    assert sk.body == "project-body\n"
+
+
+def test_watch_project_scopes_reloads_deleted_project_override(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    bundled = project / "configs" / "skills" / "shared" / "SKILL.md"
+    project_skill = project / ".claude" / "skills" / "shared" / "SKILL.md"
+    bundled.parent.mkdir(parents=True)
+    project_skill.parent.mkdir(parents=True)
+    bundled.write_text(
+        "---\nname: shared\ndescription: bundled\n---\nbundled-body\n"
+    )
+    project_skill.write_text(
+        "---\nname: shared\ndescription: project\n---\nproject-body\n"
+    )
+
+    reg = watch_project_scopes(project, home=home)
+    assert reg.get("shared").scope == "project"
+
+    project_skill.unlink()
+    sk = reg.get("shared")
+    assert sk is not None
+    assert sk.scope == "bundled"
+    assert sk.body == "bundled-body\n"
+
+
+def test_skill_handler_with_watched_registry_reloads_body(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    skill_file = project / ".claude" / "skills" / "watched" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(
+        "---\nname: watched\ndescription: v1\n---\nbody-v1\n"
+    )
+    reg = watch_project_scopes(project, home=tmp_path / "h")
+    handler = make_skill_handler(reg)
+    assert handler({"skill": "watched"}) == "body-v1\n"
+
+    skill_file.write_text(
+        "---\nname: watched\ndescription: v2\n---\nbody-v2\n"
+    )
+    assert handler({"skill": "watched"}) == "body-v2\n"
 
 
 # ─── Tool handler ───────────────────────────────────────────────

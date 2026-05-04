@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import re
+from hashlib import sha256
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -306,6 +307,72 @@ class SkillRegistry:
         return len(self._skills)
 
 
+class ProjectWatchedSkillRegistry:
+    """Long-lived registry proxy that reloads when project skills change.
+
+    Module-global state audit: each instance keeps a per-worker cache
+    derived from the project skill files on disk. Cross-worker consistency
+    is guaranteed because workers independently rebuild from the same
+    shared filesystem when the project-scope signature changes.
+    """
+
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        home: Path | None = None,
+        extra_dirs: Iterable[tuple[Path, str]] = (),
+    ) -> None:
+        self._project_root = project_root
+        self._home = home
+        self._extra_dirs = tuple(extra_dirs)
+        self._signature: tuple[tuple[str, int, int, int], ...] | None = None
+        self._registry = SkillRegistry()
+
+    def reload(self) -> None:
+        self._signature = _project_scope_signature(self._project_root)
+        self._registry = load_default_scopes(
+            self._project_root,
+            home=self._home,
+            extra_dirs=self._extra_dirs,
+        )
+
+    def _refresh_if_needed(self) -> None:
+        signature = _project_scope_signature(self._project_root)
+        if self._signature == signature:
+            return
+        self._signature = signature
+        self._registry = load_default_scopes(
+            self._project_root,
+            home=self._home,
+            extra_dirs=self._extra_dirs,
+        )
+
+    def provider_rank(self, name: str) -> int | None:
+        self._refresh_if_needed()
+        return self._registry.provider_rank(name)
+
+    def get(self, name: str) -> Skill | None:
+        self._refresh_if_needed()
+        return self._registry.get(name)
+
+    def has(self, name: str) -> bool:
+        self._refresh_if_needed()
+        return self._registry.has(name)
+
+    def names(self) -> list[str]:
+        self._refresh_if_needed()
+        return self._registry.names()
+
+    def list_all(self) -> list[Skill]:
+        self._refresh_if_needed()
+        return self._registry.list_all()
+
+    def __len__(self) -> int:
+        self._refresh_if_needed()
+        return len(self._registry)
+
+
 # ─── Scope walking ───────────────────────────────────────────────
 
 
@@ -343,6 +410,40 @@ def _scan_dir_for_skills(
             out.append(sk)
         seen_paths.add(md)
     return out
+
+
+def _project_scope_signature(
+    project_root: Path,
+) -> tuple[tuple[str, int, int, int], ...]:
+    """Return a deterministic signature for project-scope skill files."""
+    entries: list[tuple[str, int, int, int]] = []
+    for root, _provider_rank in _project_scope_dirs(project_root):
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*")):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if path.is_dir() or path.name == "SKILL.md" or path.suffix == ".md":
+                content_sig = st.st_mtime_ns
+                if path.is_file():
+                    try:
+                        content_sig = int.from_bytes(
+                            sha256(path.read_bytes()).digest()[:8],
+                            "big",
+                        )
+                    except OSError:
+                        continue
+                entries.append(
+                    (
+                        str(path.relative_to(project_root)),
+                        int(path.is_dir()),
+                        st.st_size,
+                        content_sig,
+                    )
+                )
+    return tuple(entries)
 
 
 def _project_scope_dirs(project_root: Path) -> list[tuple[Path, int]]:
@@ -407,6 +508,20 @@ def load_default_scopes(
             ", ".join(f"{k}={v}" for k, v in sorted(scope_counts.items())),
         )
     return registry
+
+
+def watch_project_scopes(
+    project_root: Path,
+    *,
+    home: Path | None = None,
+    extra_dirs: Iterable[tuple[Path, str]] = (),
+) -> ProjectWatchedSkillRegistry:
+    """Return a registry proxy that reloads on project skill file changes."""
+    return ProjectWatchedSkillRegistry(
+        project_root,
+        home=home,
+        extra_dirs=extra_dirs,
+    )
 
 
 # ─── Tool handler ────────────────────────────────────────────────
