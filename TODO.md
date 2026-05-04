@@ -3115,8 +3115,8 @@ ls backend/alembic/versions/ | tail -3
 
 > **目標**：中型 enterprise 客戶帶自己 KMS key、可隨時 revoke 讓我方瞬間失能。**4% 客戶覆蓋、onboarding +5-10 min wizard**。第一個中型 enterprise 簽約前 ship。
 
-- [ ] KS.2.1 **CMEK Tenant Settings Wizard**（5 step）
-  - [ ] Step 1 選 KMS provider（AWS / GCP / Vault）
+- [x][G] KS.2.1 **CMEK Tenant Settings Wizard**（5 step）
+  - [~][G] Step 1 選 KMS provider（AWS / GCP / Vault）
   - [ ] Step 2 IAM policy generator（精準輸出 JSON、客戶在自家 console 貼上）
   - [ ] Step 3 KMS key ARN / resource id 貼回 wizard
   - [ ] Step 4 verify connection（OmniSight 跑一次 test encrypt-decrypt）
@@ -6319,7 +6319,7 @@ BP.E GraphRAG / Neo4j
 
 > **背景**：FX.10.7 把 DLP 加上 `REQUIRED_ENVELOPE_COLUMNS` infrastructure 但沒寫 data migration——live `sessions.token` 是 plaintext，啟用 gate 會立刻 fail 每次 prod backup。在 FX.10 merge commit (`4b26a2bd`) 把 REQUIRED 設空集合 + sessions.token 暫留 EXPECTED allowlist 作 transition；FX.11 把這條解到底。
 
-- [ ] FX.11.1 寫 alembic migration 0189：scan `sessions` 全 row、用 `backend.security.envelope.encrypt_for_tenant` 把 plaintext token 包成 KS envelope JSON、UPDATE 寫回；冪等（已是 envelope JSON 的 row 跳過）
+- [x] FX.11.1 寫 alembic migration 0189：scan `sessions` 全 row、用 `backend.security.envelope.encrypt_for_tenant` 把 plaintext token 包成 KS envelope JSON、UPDATE 寫回；冪等（已是 envelope JSON 的 row 跳過）
 - [ ] FX.11.2 改 `backend/auth.py:851` `INSERT INTO sessions` 路徑用 envelope helper 寫 token；改 `backend/auth.py:1178` SELECT + `:1187` DELETE 路徑用 envelope-aware token lookup（`token_lookup_index` 走 hash 索引、不直接 LIKE plaintext）
 - [ ] FX.11.3 `scripts/backup_dlp_scan.py`：把 `sessions.token` 從 EXPECTED_HIGH_ENTROPY_COLUMNS 移除、加進 REQUIRED_ENVELOPE_COLUMNS；移除 `test_scan_backup_db_blocks_plaintext_session_token` 上的 `@pytest.mark.skip`；跑一次 prod backup DLP 確認 0 finding
 
