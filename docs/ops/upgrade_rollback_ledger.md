@@ -95,6 +95,14 @@ On **every GDPR / DSAR request lifecycle change** (KS.4.8):
    purge, audit metadata retention, raw payload deletion, and DSAR export
    workflow.
 
+On **every WP.3 diff-validation cascade match**:
+
+1. Append one row to the "Diff Validation Confidence" table with the
+   UTC timestamp, repository path, patch kind, selected cascade layer,
+   confidence score, disposition, and non-sensitive notes.
+2. Do not store SEARCH / REPLACE payload bytes, file contents, secrets,
+   customer data, or model prompts in this ledger.
+
 ## Upgrades
 
 | Cut-over (UTC) | Package | From → To | PR | Operator | Disposition | Notes |
@@ -165,6 +173,17 @@ data, raw audit payloads, secrets, plaintext tokens, plaintext DEKs, or
 wrapped DEK material in this ledger. Use
 `correction -> <request-id/evidence-sha256>` in Notes to correct a prior
 row.
+
+## Diff Validation Confidence
+
+| Applied (UTC) | Path | Patch kind | Layer | Confidence | Disposition | Notes |
+|---|---|---|---:|---:|---|---|
+| _(runtime rows appended by WP.3 patcher; no raw patch payloads stored)_ | | | | | | |
+
+Diff-validation confidence rows are append-only. Do not store raw
+SEARCH / REPLACE payloads, file contents, model prompts, secrets, or
+customer data in this ledger. Use
+`correction -> <applied-utc/path/layer>` in Notes to correct a prior row.
 
 ## Trigger vocabulary (Rollbacks)
 

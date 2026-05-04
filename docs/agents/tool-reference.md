@@ -75,7 +75,7 @@ Ask the user a question via UI.
 
 ### `Edit`
 
-Exact string replacement in a file. `old_string` must match exactly once unless `replace_all=true`. Preserves indentation. Must Read the file first.
+String replacement in a file using the WP.3 diff-validation cascade for unique edits. `old_string` must match exactly once unless `replace_all=true`; fuzzy fallback requires at least three context lines. Must Read the file first.
 
 **Input schema**:
 

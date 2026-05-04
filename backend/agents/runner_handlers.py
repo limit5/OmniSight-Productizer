@@ -5,7 +5,9 @@ Implements Read / Write / Edit / Bash / Grep / Glob with safety guards:
   * Path operations (Read / Write / Edit / Glob) reject paths outside
     `BASE_DIR` (resolved with realpath, so symlink escapes are blocked).
   * Bash forces ``cwd=BASE_DIR`` and honours the schema's ``timeout`` (ms).
-  * Edit refuses non-unique ``old_string`` unless ``replace_all=True``.
+  * Edit routes unique replacements through the WP.3 diff-validation
+    cascade and refuses non-unique ``old_string`` unless
+    ``replace_all=True``.
 
 Register on a dispatcher via :func:`bind_to_dispatcher`. Tests build a
 fresh ``ToolDispatcher`` so registration does not leak across tests.
@@ -92,21 +94,31 @@ def edit_handler(payload: dict[str, Any]) -> str:
     new = payload["new_string"]
     if old == new:
         raise ValueError("old_string and new_string are identical")
-    text = p.read_text(encoding="utf-8")
-    count = text.count(old)
-    if count == 0:
-        raise ValueError("old_string not found in file")
-    if payload.get("replace_all"):
-        new_text = text.replace(old, new)
-    else:
-        if count > 1:
-            raise ValueError(
-                f"old_string is not unique (found {count} matches); "
-                "pass replace_all=true or extend old_string with more context"
-            )
-        new_text = text.replace(old, new, 1)
-    p.write_text(new_text, encoding="utf-8")
-    return f"Replaced {count} occurrence(s) in {p}"
+    from backend.agents.tools_patch import (
+        PatchAmbiguous,
+        PatchNotFound,
+        apply_edit_to_file,
+    )
+
+    try:
+        result = apply_edit_to_file(
+            p,
+            old,
+            new,
+            replace_all=bool(payload.get("replace_all")),
+        )
+    except PatchNotFound as exc:
+        raise ValueError(str(exc)) from exc
+    except PatchAmbiguous as exc:
+        raise ValueError(str(exc)) from exc
+
+    suffix = ""
+    if result.match is not None:
+        suffix = (
+            f" via cascade layer {result.match.layer} "
+            f"(confidence {result.match.score:.3f})"
+        )
+    return f"Replaced {result.replaced_count} occurrence(s) in {p}{suffix}"
 
 
 # ─── Bash ────────────────────────────────────────────────────────

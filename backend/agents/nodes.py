@@ -35,6 +35,14 @@ from backend.web.vite_retry_budget import (
 
 logger = logging.getLogger(__name__)
 
+_TOOL_ERROR_PREFIXES = (
+    "[ERROR]",
+    "[BLOCKED]",
+    "[TIMEOUT]",
+    "[PATCH-FAILED]",
+    "[REJECTED]",
+)
+
 
 def _parse_model_spec(model_name: str) -> tuple[str | None, str | None]:
     """Parse a model spec into (provider, model).
@@ -822,8 +830,7 @@ async def tool_executor_node(state: GraphState) -> dict:
                         output, _ = await compress_output(output, tc.tool_name)
                     except Exception:
                         pass  # Compression failure — use original output
-                _ERROR_PREFIXES = ("[ERROR]", "[BLOCKED]", "[TIMEOUT]")
-                success = not any(output.startswith(p) for p in _ERROR_PREFIXES)
+                success = not any(output.startswith(p) for p in _TOOL_ERROR_PREFIXES)
                 status_label = "done" if success else "error"
                 emit_tool_progress(tc.tool_name, status_label, output, index=i, success=success)
                 results.append(ToolResult(tool_name=tc.tool_name, output=output, success=success))
