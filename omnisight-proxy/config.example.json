@@ -1,0 +1,36 @@
+{
+  "providers": [
+    {
+      "name": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "models": ["claude-3-5-sonnet-latest"],
+      "key_source": {
+        "type": "local_file",
+        "path": "/run/secrets/anthropic_api_key"
+      }
+    },
+    {
+      "name": "openai",
+      "base_url": "https://api.openai.com",
+      "models": ["gpt-4.1"],
+      "key_source": {
+        "type": "kms",
+        "kms_provider": "aws",
+        "kms_key_id": "arn:aws:kms:us-east-1:111122223333:key/example",
+        "kms_ciphertext_file": "/run/secrets/openai_api_key.kms"
+      }
+    },
+    {
+      "name": "gemini",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "key_source": {
+        "type": "vault",
+        "vault_address": "https://vault.internal:8200",
+        "vault_token_file": "/run/secrets/vault_token",
+        "vault_mount": "secret",
+        "vault_path": "llm/gemini",
+        "vault_field": "api_key"
+      }
+    }
+  ]
+}

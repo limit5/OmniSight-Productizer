@@ -11,9 +11,9 @@ import (
 	"strings"
 )
 
-// Settings aggregates every runtime knob owned by KS.3.1. Later KS.3
-// rows add auth and provider configuration here instead of scattering
-// env reads through request-handling code.
+// Settings aggregates every runtime knob owned by the BYOG proxy. Later
+// KS.3 rows keep extending this struct instead of scattering env reads
+// through request-handling code.
 type Settings struct {
 	Addr                   string
 	LogLevel               string
@@ -25,6 +25,8 @@ type Settings struct {
 	PinnedClientCertSHA256 string
 	NonceHMACKeyFile       string
 	NonceTTLSeconds        int
+	ProviderConfigFile     string
+	ProviderCatalog        *ProviderCatalog
 }
 
 // Load parses environment-backed settings and validates their shape.
@@ -48,6 +50,14 @@ func Load() (*Settings, error) {
 		PinnedClientCertSHA256: envDefault("OMNISIGHT_PROXY_PINNED_CLIENT_CERT_SHA256", ""),
 		NonceHMACKeyFile:       envDefault("OMNISIGHT_PROXY_NONCE_HMAC_KEY_FILE", ""),
 		NonceTTLSeconds:        nonceTTLSeconds,
+		ProviderConfigFile:     envDefault("OMNISIGHT_PROXY_PROVIDER_CONFIG_FILE", ""),
+	}
+	if s.ProviderConfigFile != "" {
+		catalog, err := LoadProviderCatalogFile(s.ProviderConfigFile)
+		if err != nil {
+			return nil, err
+		}
+		s.ProviderCatalog = catalog
 	}
 	if err := s.Validate(); err != nil {
 		return nil, err
@@ -92,6 +102,11 @@ func (s *Settings) Validate() error {
 		}
 		if !validSHA256Fingerprint(s.PinnedClientCertSHA256) {
 			return fmt.Errorf("OMNISIGHT_PROXY_PINNED_CLIENT_CERT_SHA256 must be sha256:<64 hex chars>")
+		}
+	}
+	if s.ProviderCatalog != nil {
+		if err := s.ProviderCatalog.Validate(); err != nil {
+			return err
 		}
 	}
 	return nil

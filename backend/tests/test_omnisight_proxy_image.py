@@ -3,7 +3,8 @@
 Pins the narrow scope of the first BYOG proxy row: a distroless,
 non-root, <100 MB, single Go binary image. Later KS.3 rows own mTLS,
 nonce replay protection, provider config, forwarding, streaming, and
-heartbeat semantics; this file only verifies the image skeleton.
+heartbeat semantics; this file only verifies the image skeleton and
+stdlib/config boundaries.
 """
 
 from __future__ import annotations
