@@ -2,9 +2,11 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -219,6 +221,83 @@ func TestLLMForwarderStreamsResponseWithoutBufferingPayload(t *testing.T) {
 
 }
 
+func TestHeartbeatClientPostsHealthPayload(t *testing.T) {
+	got := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q, want POST", r.Method)
+		}
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode heartbeat body: %v", err)
+		}
+		got <- body
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	cfg := forwardingConfig(t, "https://api.openai.test")
+	cfg.ProxyID = "proxy-a"
+	cfg.TenantID = "tenant-a"
+	cfg.SaaSHeartbeatURL = upstream.URL
+	cfg.HeartbeatIntervalSeconds = 30
+
+	if err := newHeartbeatClient(cfg).post(context.Background()); err != nil {
+		t.Fatalf("post heartbeat: %v", err)
+	}
+
+	select {
+	case body := <-got:
+		if body["proxy_id"] != "proxy-a" {
+			t.Fatalf("proxy_id = %v, want proxy-a", body["proxy_id"])
+		}
+		if body["tenant_id"] != "tenant-a" {
+			t.Fatalf("tenant_id = %v, want tenant-a", body["tenant_id"])
+		}
+		if body["status"] != "ok" {
+			t.Fatalf("status = %v, want ok", body["status"])
+		}
+		if body["service"] != "omnisight-proxy" {
+			t.Fatalf("service = %v, want omnisight-proxy", body["service"])
+		}
+		if body["provider_count"] != float64(1) {
+			t.Fatalf("provider_count = %v, want 1", body["provider_count"])
+		}
+		if body["heartbeat_interval_seconds"] != float64(30) {
+			t.Fatalf("heartbeat_interval_seconds = %v, want 30", body["heartbeat_interval_seconds"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for heartbeat post")
+	}
+}
+
+func TestStartHeartbeatLoopPostsImmediately(t *testing.T) {
+	got := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	cfg := config.ForTest()
+	cfg.ProxyID = "proxy-a"
+	cfg.SaaSHeartbeatURL = upstream.URL
+	cfg.HeartbeatIntervalSeconds = 30
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	StartHeartbeatLoop(ctx, cfg, nilLogger())
+
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat loop did not post immediately")
+	}
+}
+
 func forwardingConfig(t *testing.T, baseURL string) *config.Settings {
 	t.Helper()
 	dir := t.TempDir()
@@ -240,4 +319,8 @@ func forwardingConfig(t *testing.T, baseURL string) *config.Settings {
 		},
 	}
 	return cfg
+}
+
+func nilLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

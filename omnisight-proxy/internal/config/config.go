@@ -15,18 +15,21 @@ import (
 // KS.3 rows keep extending this struct instead of scattering env reads
 // through request-handling code.
 type Settings struct {
-	Addr                   string
-	LogLevel               string
-	AuthEnabled            bool
-	TenantID               string
-	ServerCertFile         string
-	ServerKeyFile          string
-	ClientCAFile           string
-	PinnedClientCertSHA256 string
-	NonceHMACKeyFile       string
-	NonceTTLSeconds        int
-	ProviderConfigFile     string
-	ProviderCatalog        *ProviderCatalog
+	Addr                     string
+	LogLevel                 string
+	AuthEnabled              bool
+	ProxyID                  string
+	TenantID                 string
+	ServerCertFile           string
+	ServerKeyFile            string
+	ClientCAFile             string
+	PinnedClientCertSHA256   string
+	NonceHMACKeyFile         string
+	NonceTTLSeconds          int
+	ProviderConfigFile       string
+	ProviderCatalog          *ProviderCatalog
+	SaaSHeartbeatURL         string
+	HeartbeatIntervalSeconds int
 }
 
 // Load parses environment-backed settings and validates their shape.
@@ -39,18 +42,25 @@ func Load() (*Settings, error) {
 	if err != nil {
 		return nil, err
 	}
+	heartbeatIntervalSeconds, err := envIntDefault("OMNISIGHT_PROXY_HEARTBEAT_INTERVAL_SECONDS", 30)
+	if err != nil {
+		return nil, err
+	}
 	s := &Settings{
-		Addr:                   envDefault("OMNISIGHT_PROXY_ADDR", ":8080"),
-		LogLevel:               strings.ToLower(envDefault("OMNISIGHT_PROXY_LOG_LEVEL", "info")),
-		AuthEnabled:            authEnabled,
-		TenantID:               envDefault("OMNISIGHT_PROXY_TENANT_ID", ""),
-		ServerCertFile:         envDefault("OMNISIGHT_PROXY_TLS_CERT_FILE", ""),
-		ServerKeyFile:          envDefault("OMNISIGHT_PROXY_TLS_KEY_FILE", ""),
-		ClientCAFile:           envDefault("OMNISIGHT_PROXY_CLIENT_CA_FILE", ""),
-		PinnedClientCertSHA256: envDefault("OMNISIGHT_PROXY_PINNED_CLIENT_CERT_SHA256", ""),
-		NonceHMACKeyFile:       envDefault("OMNISIGHT_PROXY_NONCE_HMAC_KEY_FILE", ""),
-		NonceTTLSeconds:        nonceTTLSeconds,
-		ProviderConfigFile:     envDefault("OMNISIGHT_PROXY_PROVIDER_CONFIG_FILE", ""),
+		Addr:                     envDefault("OMNISIGHT_PROXY_ADDR", ":8080"),
+		LogLevel:                 strings.ToLower(envDefault("OMNISIGHT_PROXY_LOG_LEVEL", "info")),
+		AuthEnabled:              authEnabled,
+		ProxyID:                  envDefault("OMNISIGHT_PROXY_ID", ""),
+		TenantID:                 envDefault("OMNISIGHT_PROXY_TENANT_ID", ""),
+		ServerCertFile:           envDefault("OMNISIGHT_PROXY_TLS_CERT_FILE", ""),
+		ServerKeyFile:            envDefault("OMNISIGHT_PROXY_TLS_KEY_FILE", ""),
+		ClientCAFile:             envDefault("OMNISIGHT_PROXY_CLIENT_CA_FILE", ""),
+		PinnedClientCertSHA256:   envDefault("OMNISIGHT_PROXY_PINNED_CLIENT_CERT_SHA256", ""),
+		NonceHMACKeyFile:         envDefault("OMNISIGHT_PROXY_NONCE_HMAC_KEY_FILE", ""),
+		NonceTTLSeconds:          nonceTTLSeconds,
+		ProviderConfigFile:       envDefault("OMNISIGHT_PROXY_PROVIDER_CONFIG_FILE", ""),
+		SaaSHeartbeatURL:         envDefault("OMNISIGHT_PROXY_SAAS_HEARTBEAT_URL", ""),
+		HeartbeatIntervalSeconds: heartbeatIntervalSeconds,
 	}
 	if s.ProviderConfigFile != "" {
 		catalog, err := LoadProviderCatalogFile(s.ProviderConfigFile)
@@ -68,9 +78,10 @@ func Load() (*Settings, error) {
 // ForTest returns deterministic settings without reading process env.
 func ForTest() *Settings {
 	return &Settings{
-		Addr:            "127.0.0.1:0",
-		LogLevel:        "error",
-		NonceTTLSeconds: 300,
+		Addr:                     "127.0.0.1:0",
+		LogLevel:                 "error",
+		NonceTTLSeconds:          300,
+		HeartbeatIntervalSeconds: 30,
 	}
 }
 
@@ -85,6 +96,12 @@ func (s *Settings) Validate() error {
 	}
 	if s.NonceTTLSeconds <= 0 {
 		return fmt.Errorf("OMNISIGHT_PROXY_NONCE_TTL_SECONDS must be positive")
+	}
+	if s.HeartbeatIntervalSeconds <= 0 {
+		return fmt.Errorf("OMNISIGHT_PROXY_HEARTBEAT_INTERVAL_SECONDS must be positive")
+	}
+	if s.SaaSHeartbeatURL != "" && s.ProxyID == "" {
+		return fmt.Errorf("OMNISIGHT_PROXY_ID must be non-empty when OMNISIGHT_PROXY_SAAS_HEARTBEAT_URL is set")
 	}
 	if s.AuthEnabled {
 		required := map[string]string{

@@ -38,6 +38,27 @@ func TestValidateRejectsInvalidNonceTTL(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidHeartbeatInterval(t *testing.T) {
+	cfg := ForTest()
+	cfg.HeartbeatIntervalSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected non-positive HeartbeatIntervalSeconds to be rejected")
+	}
+}
+
+func TestValidateRequiresProxyIDWhenHeartbeatConfigured(t *testing.T) {
+	cfg := ForTest()
+	cfg.SaaSHeartbeatURL = "https://app.example.test/api/v1/byog/proxies/proxy-a/heartbeat"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected missing ProxyID to be rejected")
+	}
+
+	cfg.ProxyID = "proxy-a"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected heartbeat config with proxy id to validate: %v", err)
+	}
+}
+
 func TestValidateRequiresAuthFieldsWhenEnabled(t *testing.T) {
 	cfg := ForTest()
 	cfg.AuthEnabled = true
@@ -68,6 +89,23 @@ func TestLoadRejectsInvalidNonceTTL(t *testing.T) {
 	t.Setenv("OMNISIGHT_PROXY_NONCE_TTL_SECONDS", "five")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected invalid nonce TTL to be rejected")
+	}
+}
+
+func TestLoadDefaultsHeartbeatIntervalToThirtySeconds(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.HeartbeatIntervalSeconds != 30 {
+		t.Fatalf("HeartbeatIntervalSeconds = %d, want 30", cfg.HeartbeatIntervalSeconds)
+	}
+}
+
+func TestLoadRejectsInvalidHeartbeatInterval(t *testing.T) {
+	t.Setenv("OMNISIGHT_PROXY_HEARTBEAT_INTERVAL_SECONDS", "soon")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid heartbeat interval to be rejected")
 	}
 }
 

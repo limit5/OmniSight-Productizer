@@ -59,6 +59,7 @@ func main() {
 		}
 		srv.TLSConfig = tlsConfig
 	}
+	server.StartHeartbeatLoop(ctx, cfg, logger)
 
 	go func() {
 		logger.Info("omnisight-proxy starting", "addr", cfg.Addr)

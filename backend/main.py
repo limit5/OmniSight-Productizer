@@ -1329,6 +1329,8 @@ from backend.routers import tenant_projects as _tenant_projects_router  # Y4 (#2
 app.include_router(_tenant_projects_router.router, prefix=settings.api_prefix)
 from backend.routers import cmek_wizard as _cmek_wizard_router  # KS.2.1 CMEK tenant settings wizard
 app.include_router(_cmek_wizard_router.router, prefix=settings.api_prefix)
+from backend.routers import proxy_health as _proxy_health_router  # KS.3.5 BYOG proxy heartbeat
+app.include_router(_proxy_health_router.router, prefix=settings.api_prefix)
 from backend.routers import catalog as _catalog_router  # BS.2.1 — catalog entries + sources CRUD
 app.include_router(_catalog_router.router, prefix=settings.api_prefix)
 from backend.routers import installer as _installer_router  # BS.2.2 — install jobs CRUD + sidecar long-poll
