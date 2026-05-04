@@ -47,9 +47,9 @@ func main() {
 		Addr:              cfg.Addr,
 		Handler:           server.NewHandler(cfg),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// LLM requests and responses are streamed; per-request deadlines belong
+		// to the SaaS caller so this proxy does not truncate long completions.
+		IdleTimeout: 60 * time.Second,
 	}
 	if cfg.AuthEnabled {
 		tlsConfig, err := auth.ServerTLSConfig(cfg)

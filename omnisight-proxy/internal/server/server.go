@@ -1,4 +1,5 @@
-// Package server owns the HTTP surface for the BYOG proxy smoke and auth paths.
+// Package server owns the HTTP surface for the BYOG proxy smoke, auth, and
+// streaming LLM forwarding paths.
 
 package server
 
@@ -15,21 +16,24 @@ type healthResponse struct {
 	Service string `json:"service"`
 }
 
-// NewHandler returns the proxy HTTP handler. KS.3.2 keeps /healthz as the
-// local smoke endpoint and pins the protected auth envelope on /auth/verify;
-// forwarding and streaming belong to later KS.3 rows.
+// NewHandler returns the proxy HTTP handler. Protected paths keep per-handler
+// state only; LLM payloads stream through request/response bodies and are never
+// cached in module-global memory.
 func NewHandler(cfg *config.Settings) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)
 	var protected http.Handler = http.HandlerFunc(authVerify)
+	var llmForward http.Handler = newLLMForwarder(cfg)
 	if cfg.AuthEnabled {
 		authenticator, err := auth.New(cfg)
 		if err != nil {
 			return configErrorHandler(err)
 		}
 		protected = authenticator.Middleware(protected)
+		llmForward = authenticator.Middleware(llmForward)
 	}
 	mux.Handle("/auth/verify", protected)
+	mux.Handle(llmForwardPrefix, llmForward)
 	return mux
 }
 

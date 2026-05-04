@@ -91,6 +91,19 @@ func (c *ProviderCatalog) Validate() error {
 	return nil
 }
 
+func (c *ProviderCatalog) FindProvider(name string) (*ProviderConfig, bool) {
+	if c == nil {
+		return nil, false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	for i := range c.Providers {
+		if strings.ToLower(strings.TrimSpace(c.Providers[i].Name)) == normalized {
+			return &c.Providers[i], true
+		}
+	}
+	return nil, false
+}
+
 func (p *ProviderConfig) Validate() error {
 	p.Name = strings.TrimSpace(p.Name)
 	if p.Name == "" {
