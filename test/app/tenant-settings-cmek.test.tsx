@@ -24,6 +24,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     listTenantMembers: vi.fn(),
     listCmekWizardProviders: vi.fn(),
     generateCmekWizardPolicy: vi.fn(),
+    saveCmekWizardKeyId: vi.fn(),
     verifyCmekWizardConnection: vi.fn(),
     completeCmekWizard: vi.fn(),
   }
@@ -36,6 +37,7 @@ import {
   generateCmekWizardPolicy,
   listCmekWizardProviders,
   listTenantMembers,
+  saveCmekWizardKeyId,
   verifyCmekWizardConnection,
 } from "@/lib/api"
 
@@ -43,6 +45,7 @@ const mockedUseAuth = useAuth as unknown as ReturnType<typeof vi.fn>
 const mockedListMembers = listTenantMembers as unknown as ReturnType<typeof vi.fn>
 const mockedListProviders = listCmekWizardProviders as unknown as ReturnType<typeof vi.fn>
 const mockedGeneratePolicy = generateCmekWizardPolicy as unknown as ReturnType<typeof vi.fn>
+const mockedSaveKeyId = saveCmekWizardKeyId as unknown as ReturnType<typeof vi.fn>
 const mockedVerify = verifyCmekWizardConnection as unknown as ReturnType<typeof vi.fn>
 const mockedComplete = completeCmekWizard as unknown as ReturnType<typeof vi.fn>
 const clipboardWriteText = vi.fn()
@@ -131,6 +134,12 @@ beforeEach(() => {
     policy_json:
       "{\n  \"Statement\": [\n    {\n      \"Action\": \"kms:DescribeKey\"\n    },\n    {\n      \"Action\": [\n        \"kms:Encrypt\",\n        \"kms:Decrypt\"\n      ]\n    }\n  ],\n  \"Version\": \"2012-10-17\"\n}",
   })
+  mockedSaveKeyId.mockResolvedValue({
+    tenant_id: "t-acme",
+    provider: "aws-kms",
+    key_id: "arn:aws:kms:us-east-1:111122223333:key/00000000-0000-0000-0000-000000000000",
+    accepted: true,
+  })
   mockedVerify.mockResolvedValue({
     tenant_id: "t-acme",
     ok: true,
@@ -177,6 +186,17 @@ describe("/tenants/{tid}/settings — CMEK wizard", () => {
       )
     })
     expect(screen.getByTestId("cmek-copy-policy-json")).toHaveTextContent("Copied")
+
+    fireEvent.click(screen.getByTestId("cmek-save-key-id"))
+    await waitFor(() => {
+      expect(mockedSaveKeyId).toHaveBeenCalledWith("t-acme", {
+        provider: "aws-kms",
+        key_id: "arn:aws:kms:us-east-1:111122223333:key/00000000-0000-0000-0000-000000000000",
+      })
+    })
+    expect(await screen.findByTestId("cmek-key-id-accepted")).toHaveTextContent(
+      "Accepted",
+    )
 
     fireEvent.click(screen.getByTestId("cmek-verify"))
     expect(await screen.findByTestId("cmek-verify-result")).toHaveTextContent("cmekv_abc123")

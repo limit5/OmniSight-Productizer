@@ -67,6 +67,11 @@ class VerifyCMEKRequest(BaseModel):
     key_id: str = Field(min_length=1, max_length=512)
 
 
+class KeyIdCMEKRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
+    key_id: str = Field(min_length=1, max_length=512)
+
+
 class CompleteCMEKRequest(BaseModel):
     provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
     key_id: str = Field(min_length=1, max_length=512)
@@ -141,6 +146,31 @@ async def generate_cmek_wizard_policy(
             "provider": provider,
             "policy": policy,
             "policy_json": _cw.stable_policy_json(policy),
+        }
+    )
+
+
+@router.post("/tenants/{tenant_id}/cmek/wizard/key-id")
+async def save_cmek_wizard_key_id(
+    tenant_id: str,
+    req: KeyIdCMEKRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        provider = _cw.normalise_provider(req.provider)
+        key_id = _cw.validate_key_id(provider, req.key_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "provider": provider,
+            "key_id": key_id,
+            "accepted": True,
         }
     )
 

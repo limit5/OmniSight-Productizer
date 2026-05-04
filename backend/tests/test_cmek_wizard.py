@@ -199,6 +199,20 @@ def test_verify_connection_probe_round_trips_without_live_provider(monkeypatch):
     assert str(result["verification_id"]).startswith("cmekv_")
 
 
+def test_key_id_request_trims_and_validates_provider_shape():
+    from backend.routers.cmek_wizard import KeyIdCMEKRequest
+    from backend.security import cmek_wizard as cmek
+
+    req = KeyIdCMEKRequest(
+        provider="gcp-kms",
+        key_id=" projects/acme-prod/locations/us/keyRings/omnisight/cryptoKeys/tenant-tier2 ",
+    )
+
+    assert cmek.validate_key_id(req.provider, req.key_id) == (
+        "projects/acme-prod/locations/us/keyRings/omnisight/cryptoKeys/tenant-tier2"
+    )
+
+
 def test_router_exposes_five_step_endpoints():
     from backend.routers.cmek_wizard import router
 
@@ -206,6 +220,7 @@ def test_router_exposes_five_step_endpoints():
 
     assert (("GET",), "/tenants/{tenant_id}/cmek/wizard/providers") in paths
     assert (("POST",), "/tenants/{tenant_id}/cmek/wizard/policy") in paths
+    assert (("POST",), "/tenants/{tenant_id}/cmek/wizard/key-id") in paths
     assert (("POST",), "/tenants/{tenant_id}/cmek/wizard/verify") in paths
     assert (("POST",), "/tenants/{tenant_id}/cmek/wizard/complete") in paths
 

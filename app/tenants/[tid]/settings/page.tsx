@@ -68,6 +68,7 @@ import {
   patchTenantMember,
   restoreTenantProject,
   revokeTenantInvite,
+  saveCmekWizardKeyId,
   type CreatedTenantInvite,
   type CmekProvider,
   type CmekProviderSpec,
@@ -1269,6 +1270,7 @@ function SecurityTab({ tid }: { tid: string }) {
   const [provider, setProvider] = useState<CmekProvider>("aws-kms")
   const [principal, setPrincipal] = useState("")
   const [keyId, setKeyId] = useState("")
+  const [acceptedKeyId, setAcceptedKeyId] = useState("")
   const [policyJson, setPolicyJson] = useState("")
   const [verifyResult, setVerifyResult] = useState<VerifyCmekResponse | null>(null)
   const [completeResult, setCompleteResult] = useState<CompleteCmekResponse | null>(null)
@@ -1312,6 +1314,7 @@ function SecurityTab({ tid }: { tid: string }) {
     if (!selected) return
     setPrincipal(selected.policy_target_example)
     setKeyId(selected.key_id_example)
+    setAcceptedKeyId("")
     setPolicyJson("")
     setPolicyCopied(false)
     setVerifyResult(null)
@@ -1331,6 +1334,7 @@ function SecurityTab({ tid }: { tid: string }) {
       })
       setPolicyJson(res.policy_json)
       setPolicyCopied(false)
+      setAcceptedKeyId("")
       setStep(1)
     } catch (exc) {
       setError(describeError(exc))
@@ -1351,11 +1355,28 @@ function SecurityTab({ tid }: { tid: string }) {
     setPolicyCopied(true)
   }
 
+  async function onSaveKeyId() {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await saveCmekWizardKeyId(tid, { provider, key_id: keyId })
+      setKeyId(res.key_id)
+      setAcceptedKeyId(res.key_id)
+      setVerifyResult(null)
+      setCompleteResult(null)
+      setStep(2)
+    } catch (exc) {
+      setError(describeError(exc))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function onVerify() {
     setBusy(true)
     setError(null)
     try {
-      const res = await verifyCmekWizardConnection(tid, { provider, key_id: keyId })
+      const res = await verifyCmekWizardConnection(tid, { provider, key_id: acceptedKeyId })
       setVerifyResult(res)
       setStep(3)
     } catch (exc) {
@@ -1372,7 +1393,7 @@ function SecurityTab({ tid }: { tid: string }) {
     try {
       const res = await completeCmekWizard(tid, {
         provider,
-        key_id: keyId,
+        key_id: acceptedKeyId,
         verification_id: verifyResult.verification_id,
       })
       setCompleteResult(res)
@@ -1557,6 +1578,7 @@ function SecurityTab({ tid }: { tid: string }) {
                   value={keyId}
                   onChange={(e) => {
                     setKeyId(e.target.value)
+                    setAcceptedKeyId("")
                     setPolicyJson("")
                     setPolicyCopied(false)
                     setVerifyResult(null)
@@ -1568,14 +1590,36 @@ function SecurityTab({ tid }: { tid: string }) {
                 />
               </label>
 
+              <div className="flex items-center justify-between gap-2 rounded border border-[var(--border)] bg-[var(--background)] p-3">
+                <div>
+                  <p className="text-[10px] text-[var(--muted-foreground)]">
+                    Paste the customer key ARN / resource id after the cloud-side policy is attached.
+                  </p>
+                  {acceptedKeyId && (
+                    <p className="mt-1 text-[10px] text-[var(--neural-green)]" data-testid="cmek-key-id-accepted">
+                      Accepted · {acceptedKeyId}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void onSaveKeyId()}
+                  disabled={busy || !keyId.trim()}
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-[10px] disabled:opacity-50"
+                  data-testid="cmek-save-key-id"
+                >
+                  {busy ? <Loader2 size={10} className="animate-spin" /> : <CheckCircle2 size={10} />}
+                  Use key id
+                </button>
+              </div>
+
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => {
-                    setStep(2)
                     void onVerify()
                   }}
-                  disabled={busy || !policyJson || !keyId.trim()}
+                  disabled={busy || !acceptedKeyId}
                   className="inline-flex items-center gap-1 rounded bg-[var(--neural-blue)] px-3 py-2 text-xs text-[var(--background)] disabled:opacity-50"
                   data-testid="cmek-verify"
                 >

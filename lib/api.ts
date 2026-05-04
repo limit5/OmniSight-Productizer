@@ -3279,6 +3279,28 @@ export async function generateCmekWizardPolicy(
   )
 }
 
+export interface SaveCmekKeyIdRequest {
+  provider: CmekProvider
+  key_id: string
+}
+
+export interface SaveCmekKeyIdResponse {
+  tenant_id: string
+  provider: CmekProvider
+  key_id: string
+  accepted: boolean
+}
+
+export async function saveCmekWizardKeyId(
+  tenantId: string,
+  body: SaveCmekKeyIdRequest,
+): Promise<SaveCmekKeyIdResponse> {
+  return request<SaveCmekKeyIdResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/cmek/wizard/key-id`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
 export interface VerifyCmekRequest {
   provider: CmekProvider
   key_id: string
