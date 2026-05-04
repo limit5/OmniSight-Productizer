@@ -3,6 +3,8 @@
 Routes are tenant-admin scoped and intentionally stateless. KS.2.11
 will add durable ``cmek_configs`` / ``tier_assignments`` storage; until
 then ``complete`` returns a Tier 2 draft summary for the settings UI.
+KS.2.7 extends the same stateless surface with customer SIEM ingest
+spec generation for native CloudTrail / Cloud Audit Logs.
 
 Module-global state audit (SOP Step 1)
 --------------------------------------
@@ -27,6 +29,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from backend import auth
 from backend.security import cmek_graceful_degrade as _cmek_degrade
+from backend.security import cmek_siem as _cmek_siem
 from backend.security import cmek_wizard as _cw
 
 
@@ -83,6 +86,12 @@ class CompleteCMEKRequest(BaseModel):
         if not self.verification_id.startswith("cmekv_"):
             raise ValueError("verification_id must come from the verify step")
         return self
+
+
+class SIEMIngestSpecRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms"]
+    key_id: str = Field(min_length=1, max_length=512)
+    principal: str | None = Field(default=None, max_length=512)
 
 
 async def _guard(tenant_id: str, actor: auth.User) -> JSONResponse | None:
@@ -229,3 +238,27 @@ async def complete_cmek_wizard(
             "persisted": False,
         }
     )
+
+
+@router.post("/tenants/{tenant_id}/cmek/siem/ingest-spec")
+async def generate_cmek_siem_ingest_spec(
+    tenant_id: str,
+    req: SIEMIngestSpecRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        spec = _cmek_siem.build_cmek_siem_ingest_spec(
+            _cmek_siem.normalise_siem_provider(req.provider),
+            tenant_id=tenant_id,
+            key_id=req.key_id,
+            principal=req.principal,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    body = spec.to_dict()
+    body["ingest_spec_json"] = _cmek_siem.stable_ingest_json(spec)
+    return JSONResponse(body)
