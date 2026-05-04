@@ -22,14 +22,14 @@
 # without importing the public key fails closed (correct outcome).
 #
 # === RELEASE SIGNERS ===
-# Until the first real release-signing key is provisioned, this file
-# has zero entries. The verifier will reject every deploy unless an
-# operator passes `--insecure-skip-verify` (or sets
-# OMNISIGHT_DEPLOY_INSECURE_SKIP_VERIFY=1) — a loud, audit-trailed
-# escape hatch documented in .env.example § FX.7.9.
+# One fingerprint per line. Matching public keys are bundled in
+# `deploy/release-signers.asc` and must be imported into the prod
+# host's gpg keyring before the verifier can accept a signature:
 #
-# Replace this comment block with one fingerprint per line via PR
-# once the release signing key exists. Example shape (do NOT copy —
-# replace before any prod deploy):
+#     gpg --import deploy/release-signers.asc
 #
-# 0123456789ABCDEF0123456789ABCDEF01234567
+# Operator setup runbook: docs/runbook/gpg-release-signer-setup.md
+#
+# nanakusa sora <rt3628@hotmail.com> — primary operator
+# Generated 2026-05-04 (FX.9.8); ed25519 sign-only; expires 2028-05-03.
+50245609D5BF1E14CA7AD5AF18BC2AB5FDDD932A

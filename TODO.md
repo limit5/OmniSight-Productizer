@@ -6281,7 +6281,7 @@ BP.E GraphRAG / Neo4j
 
 #### Operator setup（2 items）
 - [x] FX.9.7 `OMNISIGHT_BACKUP_PASSPHRASE` export 從 `.bashrc` 移到 `~/.profile`（讓 cron / systemd / 非互動 shell 也讀得到；現在只 interactive bash 拿到）
-- [ ] FX.9.8 GPG release-signer setup：operator GPG key 生成 + fingerprint 加進 `deploy/prod-deploy-signers.txt` + 簽 master tip + deploy 走真 verify（不再用 `--insecure-skip-verify`）
+- [x] FX.9.8 GPG release-signer setup：operator GPG key 生成 + fingerprint 加進 `deploy/prod-deploy-signers.txt` + 簽 master tip + deploy 走真 verify（不再用 `--insecure-skip-verify`）
 
 #### Frontend i18n（1 item）
 - [ ] FX.9.9 真把前 10 個 user-facing 元件做 i18n 翻譯（FX.7.11 只搭 next-intl scaffolding 但沒翻任何字串）
