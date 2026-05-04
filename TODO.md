@@ -6263,15 +6263,15 @@ BP.E GraphRAG / Neo4j
 
 **Priority FX 範圍**：~50-80 day 全部完工；BLOCKER wave（FX.1+FX.2+FX.3+FX.4+FX.6）約 1-2 週並行。day-count 加進 Total。
 
-### FX.9 — Post-Deploy Follow-ups（~20 items, ~7-10 day）
+### FX.9 — Post-Deploy Follow-ups [Claude]（11 items, ~5-7 day）
 
-> **背景**：2026-05-04 首次 prod deploy 把 FX.1-8 落地時撞了多個 production-readiness gap：alembic migration 跑不起來（platform.py shadow + 0052 SQLAlchemy 2.x compat + 4 heads）、deploy script gate（GPG signer / backup passphrase 都沒 setup）、frontend type drift（React 19 + .ts extension）。加上 re-audit 發現的 4 CVE。本 sub-epic 把這些 follow-up 一次清掉。
+> **背景**：2026-05-04 首次 prod deploy 把 FX.1-8 落地時撞了多個 production-readiness gap：alembic migration 跑不起來（platform.py shadow + 0052 SQLAlchemy 2.x compat + 4 heads）、deploy script gate（GPG signer / backup passphrase 都沒 setup）、frontend type drift（React 19 + .ts extension）。本 H3 收 Claude 該做的部分（深度 reasoning / cross-module / UX）。
 >
 > **觸發**：剛跑完 prod deploy（2026-05-04），對應 commit `9676d17e`。
 >
-> **runner 分工**：FX.9 內 items 跨 backend / infra / frontend / 測試，雙 runner 並行。
+> **runner**：Claude 訂閱（Tier A 直接 master）
 
-#### 部署穩定性（6 items, Claude）
+#### 部署穩定性（6 items）
 - [ ] FX.9.1 `backend/alembic/versions/0052_catalog_seed.py` upgrade() 改 `op.execute()` 取代 `conn.exec_driver_sql()`，繞 SQLAlchemy 2.x + sqlite3 cython 對 immutabledict params 不相容
 - [ ] FX.9.2 `backend/alembic/env.py:90` 改 `from backend.alembic_pg_compat import` (絕對 import)，避免 alembic 啟動時把 `/app/backend` 推進 sys.path 導致 platform.py shadow stdlib
 - [ ] FX.9.3 `backend/platform.py` rename → `backend/platform_profile.py`（永久解 stdlib 衝突）+ 全 codebase update import
@@ -6279,32 +6279,38 @@ BP.E GraphRAG / Neo4j
 - [ ] FX.9.5 deploy 流程加 `alembic upgrade heads` 步驟（在 Step 2.5 build 完之後、Step 3 rolling restart 之前，避免 readyz fail）
 - [ ] FX.9.6 `docker-compose.prod.yml` 拿掉 obsolete `version:` field + `--remove-orphans`（清 omnisight-productizer-backend-1 / omnisight-pg-test 殘骸）
 
-#### Operator setup（2 items, Claude）
+#### Operator setup（2 items）
 - [ ] FX.9.7 `OMNISIGHT_BACKUP_PASSPHRASE` export 從 `.bashrc` 移到 `~/.profile`（讓 cron / systemd / 非互動 shell 也讀得到；現在只 interactive bash 拿到）
 - [ ] FX.9.8 GPG release-signer setup：operator GPG key 生成 + fingerprint 加進 `deploy/prod-deploy-signers.txt` + 簽 master tip + deploy 走真 verify（不再用 `--insecure-skip-verify`）
 
-#### CVE 修復（3 items, Codex）
-- [ ] FX.9.9 升 `starlette` 0.46.2 → 0.49.1（CVE-2025-54121 + CVE-2025-62727）；驗 FastAPI compat
-- [ ] FX.9.10 升 `langchain-openai` 1.1.12 → 1.1.14（GHSA-r7w7-9xr2-qq2r）
-- [ ] FX.9.11 升 `python-dotenv` 1.1.0 → 1.2.2（CVE-2026-28684）
+#### Frontend i18n（1 item）
+- [ ] FX.9.9 真把前 10 個 user-facing 元件做 i18n 翻譯（FX.7.11 只搭 next-intl scaffolding 但沒翻任何字串）
 
-#### Code quality（4 items, Codex）
-- [ ] FX.9.12 `ruff check backend/ --fix` 跑一輪解 209 個 auto-fixable（202 unused-import + 7 其他）；未動到 production logic
-- [ ] FX.9.13 `mypy` 加 `explicit-package-bases = true` 進 `backend/mypy.ini` 或 `pyproject.toml`，解「Source file found twice under different module names」
-- [ ] FX.9.14 `.github/workflows/lint-audit-nightly.yml` 加 `pnpm exec tsc --noEmit` job（FX.6.8 只跑 mypy 沒 tsc，frontend type drift 沒被抓）
-- [ ] FX.9.15 KS.1 envelope 擴張到 `sessions.token`，把 `EXPECTED_HIGH_ENTROPY_COLUMNS` allowlist 那條移除（DLP 對 sessions 不再放水）
+#### Tech debt 規劃（2 items）
+- [ ] FX.9.10 9 大檔（>2000 行）寫 ADR + module-split 規劃（不立刻 refactor，先決定怎麼拆）
+- [ ] FX.9.11 寫 `docs/runbook/post-deploy-recovery.md`：把這次 deploy 撞的 5 道閘門 + 解法 + 預防整理成 runbook（GPG signer / passphrase / DLP / migration / TS）
 
-#### API contract 收尾（1 item, Codex）
-- [ ] FX.9.16 `backend/routers/sensor_fusion.py:73-325` 25 個 endpoint 補 response_model（FX.4.18 涵蓋部分但未全清）
+### FX.10 — Post-Deploy Follow-ups [Codex]（9 items, ~3-5 day）
 
-#### Frontend i18n（1 item, Claude）
-- [ ] FX.9.17 真把前 10 個 user-facing 元件做 i18n 翻譯（FX.7.11 只搭 next-intl scaffolding 但沒翻任何字串）
+> **背景**：FX.9 姊妹，收 Codex 該做的部分（CVE bumps / lint auto-fix / 補 response_model / test 強化）。**檔案範圍與 FX.9 不重疊**（CVE 動 requirements、ruff 動 .py 全套、sensor_fusion 動 routers — 無 overlap）。
+>
+> **runner**：Codex（Tier B codex-work worktree）
 
-#### Test 強化（1 item, Codex）
-- [ ] FX.9.18 4 條弱 assertion test 改用真實 call + assertion（test_anthropic_mode_manager / test_api_keys_legacy_migration / test_auth_dashboard_shape_drift / test_auto_runner_codex；FX.5.13 涵蓋部分）
+#### CVE 修復（3 items）
+- [ ] FX.10.1 升 `starlette` 0.46.2 → 0.49.1（CVE-2025-54121 + CVE-2025-62727）；驗 FastAPI compat
+- [ ] FX.10.2 升 `langchain-openai` 1.1.12 → 1.1.14（GHSA-r7w7-9xr2-qq2r）
+- [ ] FX.10.3 升 `python-dotenv` 1.1.0 → 1.2.2（CVE-2026-28684）
 
-#### Tech debt 規劃（2 items, Claude）
-- [ ] FX.9.19 9 大檔（>2000 行）寫 ADR + module-split 規劃（不立刻 refactor，先決定怎麼拆）
-- [ ] FX.9.20 寫 `docs/runbook/post-deploy-recovery.md`：把這次 deploy 撞的 5 道閘門 + 解法 + 預防整理成 runbook（GPG signer / passphrase / DLP / migration / TS）
+#### Code quality（4 items）
+- [ ] FX.10.4 `ruff check backend/ --fix` 跑一輪解 209 個 auto-fixable（202 unused-import + 7 其他）；未動到 production logic
+- [ ] FX.10.5 `mypy` 加 `explicit-package-bases = true` 進 `backend/mypy.ini` 或 `pyproject.toml`，解「Source file found twice under different module names」
+- [ ] FX.10.6 `.github/workflows/lint-audit-nightly.yml` 加 `pnpm exec tsc --noEmit` job（FX.6.8 只跑 mypy 沒 tsc，frontend type drift 沒被抓）
+- [ ] FX.10.7 KS.1 envelope 擴張到 `sessions.token`，把 `EXPECTED_HIGH_ENTROPY_COLUMNS` allowlist 那條移除（DLP 對 sessions 不再放水）
 
-**Priority FX.9 範圍**：~7-10 day；含部署穩定性 + CVE + 收尾 follow-up。Day-count 加進 Total。
+#### API contract 收尾（1 item）
+- [ ] FX.10.8 `backend/routers/sensor_fusion.py:73-325` 25 個 endpoint 補 response_model（FX.4.18 涵蓋部分但未全清）
+
+#### Test 強化（1 item）
+- [ ] FX.10.9 4 條弱 assertion test 改用真實 call + assertion（test_anthropic_mode_manager / test_api_keys_legacy_migration / test_auth_dashboard_shape_drift / test_auto_runner_codex；FX.5.13 涵蓋部分）
+
+**Priority FX.9 + FX.10 合計範圍**：~7-10 day；雙 runner 並行 4-5 day 完工。Day-count 加進 Total。
