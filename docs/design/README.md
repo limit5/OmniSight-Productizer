@@ -20,6 +20,7 @@ This directory contains all design specifications and architecture documents for
 | [r8-idempotent-retry-worktree.md](r8-idempotent-retry-worktree.md) | Retry 以 `git worktree` discard + recreate from anchor commit（覆寫白皮書 §三.2 的 `git clean` 指引） | R8 (#314) |
 | [bs-bootstrap-vertical-aware.md](bs-bootstrap-vertical-aware.md) | Bootstrap Vertical-Aware Setup & Platform Catalog（4 設計核心 + 8 層動畫 spec + sidecar protocol v1 + catalog 三層 source 模型 + reduce-motion 合規） | Priority BS (BS.0.1) |
 | [fx-7-3-large-file-module-split.md](fx-7-3-large-file-module-split.md) | ADR — module-split plan + 9-wave schedule for the 9 backend files > 2000 LOC（onvif_device, depth_sensing, db, tenant_projects, bootstrap, system, tools, invoke, auth）；planning only, execution under future Priority MS | Priority FX (FX.7.3) |
+| [fx-9-10-large-file-module-split.md](fx-9-10-large-file-module-split.md) | ADR — post-deploy refresh of the >2000-LOC list (top-9 cross-stack); net-new design for the 3 frontend giants (`lib/api.ts` 7 223, `integration-settings.tsx` 4 680, `app/bootstrap/page.tsx` 4 215) + interleaved FW1-FW3 schedule alongside FX.7.3 W1-W9; planning only | Priority FX (FX.9.10) |
 
 ## Adding New Documents
 

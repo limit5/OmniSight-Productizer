@@ -6287,7 +6287,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.9.9 真把前 10 個 user-facing 元件做 i18n 翻譯（FX.7.11 只搭 next-intl scaffolding 但沒翻任何字串）
 
 #### Tech debt 規劃（2 items）
-- [ ] FX.9.10 9 大檔（>2000 行）寫 ADR + module-split 規劃（不立刻 refactor，先決定怎麼拆）
+- [x] FX.9.10 9 大檔（>2000 行）寫 ADR + module-split 規劃（不立刻 refactor，先決定怎麼拆） *(done 2026-05-04: `docs/design/fx-9-10-large-file-module-split.md` 落地——10 章 ADR，post-deploy refresh 改 frame top-9 cross-stack（3 frontend net-new + 6 backend cross-ref FX.7.3）；net-new 設計集中在 G1 `lib/api.ts` 7 223 LOC / 33-submodule、G2 `integration-settings.tsx` 4 680 LOC / 13-submodule、G3 `app/bootstrap/page.tsx` 4 215 LOC / 12-submodule；frontend 專屬 splitting rules（無 `export *`、tree-shaking 守則、Next.js default export 保留、testid drift guard、TS fingerprint grep）；FW0/FW1/FW2/FW3 排程 interleave 進 FX.7.3 W1-W9 pause window；drift guards §6.1-6.5 規格化；planning only，execution 走未來 Priority MS sub-epic 的新 row（MS-FW1/FW2/FW3）。設計不重做 FX.7.3 已決定的 6 檔，只 cross-ref；deferred watch list 收 enterprise_web_stack / routers/integration / routers/admin_tenants 三檔 >2000 LOC 但未在 top-9 內。)*
 - [ ] FX.9.11 寫 `docs/runbook/post-deploy-recovery.md`：把這次 deploy 撞的 5 道閘門 + 解法 + 預防整理成 runbook（GPG signer / passphrase / DLP / migration / TS）
 
 ### FX.10 — Post-Deploy Follow-ups [Codex]（9 items, ~3-5 day）
