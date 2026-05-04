@@ -18,8 +18,7 @@
 # Adding a new entry is a deliberate change reviewed in a PR — that
 # is the audit trail for "who said this branch is allowed to ship".
 
-# Long-lived production lines.
-branch master
+# Long-lived production line (master→main rename 2026-05-05, ADR 0001).
 branch main
 
 # Hotfix and release branches keyed off a semver-shaped name.

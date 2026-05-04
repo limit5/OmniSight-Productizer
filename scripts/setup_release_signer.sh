@@ -106,11 +106,11 @@ echo "  3. Wire git signing:" >&2
 echo "       git config --global user.signingkey $FPR" >&2
 echo "       git config --global commit.gpgsign true" >&2
 echo "       git config --global tag.gpgsign true" >&2
-echo "  4. Sign master tip and push:" >&2
-echo "       git commit --allow-empty -S -m 'chore(release): sign master tip'" >&2
-echo "       git push origin master" >&2
+echo "  4. Sign main tip and push:" >&2
+echo "       git commit --allow-empty -S -m 'chore(release): sign main tip'" >&2
+echo "       git push origin main" >&2
 echo "  5. Verify gate accepts without --insecure-skip-verify:" >&2
-echo "       ./scripts/check_deploy_ref.sh --kind branch --ref master" >&2
+echo "       ./scripts/check_deploy_ref.sh --kind branch --ref main" >&2
 
 # Print fingerprint on stdout (no prefix) for piping to other scripts.
 printf '%s\n' "$FPR"

@@ -6,8 +6,8 @@
 # 實現 G2 rolling restart：一次只重啟一個 backend replica
 #
 # 使用方式：
-#   ./scripts/deploy-prod.sh                    # 從 master branch 部署
-#   ./scripts/deploy-prod.sh --branch=main      # 部署指定 branch
+#   ./scripts/deploy-prod.sh                    # 從 main branch 部署 (Phase 1, 2026-05-05)
+#   ./scripts/deploy-prod.sh --branch=develop   # 部署指定 branch (僅供 staging-style 驗證)
 #   ./scripts/deploy-prod.sh --tag v1.2.0       # 部署特定 tag
 #   ./scripts/deploy-prod.sh --skip-build       # 跳過 build（已有 GHCR image）
 #   ./scripts/deploy-prod.sh --dry-run          # 只印步驟不執行
@@ -20,7 +20,7 @@
 set -euo pipefail
 
 COMPOSE_FILE="docker-compose.prod.yml"
-BRANCH="${OMNISIGHT_DEPLOY_BRANCH:-master}"
+BRANCH="${OMNISIGHT_DEPLOY_BRANCH:-main}"
 TAG=""
 SKIP_BUILD=false
 DRY_RUN=false
@@ -44,7 +44,7 @@ for arg in "$@"; do
         --dry-run) DRY_RUN=true ;;
         --insecure-skip-verify) INSECURE_SKIP_VERIFY=true ;;
         --help|-h)
-            echo "Usage: $0 [--branch=master] [--tag=v1.2.0] [--skip-build] [--dry-run] [--insecure-skip-verify]"
+            echo "Usage: $0 [--branch=main] [--tag=v1.2.0] [--skip-build] [--dry-run] [--insecure-skip-verify]"
             exit 0 ;;
     esac
 done

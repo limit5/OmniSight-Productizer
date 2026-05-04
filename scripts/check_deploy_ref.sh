@@ -12,7 +12,7 @@
 #
 # Usage:
 #   scripts/check_deploy_ref.sh --kind tag    --ref v1.2.3
-#   scripts/check_deploy_ref.sh --kind branch --ref master
+#   scripts/check_deploy_ref.sh --kind branch --ref main
 #
 # Flags:
 #   --kind {branch,tag}       (required)
