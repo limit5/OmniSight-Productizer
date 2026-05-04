@@ -1272,6 +1272,7 @@ function SecurityTab({ tid }: { tid: string }) {
   const [policyJson, setPolicyJson] = useState("")
   const [verifyResult, setVerifyResult] = useState<VerifyCmekResponse | null>(null)
   const [completeResult, setCompleteResult] = useState<CompleteCmekResponse | null>(null)
+  const [policyCopied, setPolicyCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -1312,6 +1313,7 @@ function SecurityTab({ tid }: { tid: string }) {
     setPrincipal(selected.policy_target_example)
     setKeyId(selected.key_id_example)
     setPolicyJson("")
+    setPolicyCopied(false)
     setVerifyResult(null)
     setCompleteResult(null)
     setError(null)
@@ -1328,6 +1330,7 @@ function SecurityTab({ tid }: { tid: string }) {
         key_id: keyId.trim() || null,
       })
       setPolicyJson(res.policy_json)
+      setPolicyCopied(false)
       setStep(1)
     } catch (exc) {
       setError(describeError(exc))
@@ -1340,6 +1343,12 @@ function SecurityTab({ tid }: { tid: string }) {
     if (!selected) return
     setStep(1)
     setError(null)
+  }
+
+  async function onCopyPolicy() {
+    if (!policyJson) return
+    await navigator.clipboard?.writeText(policyJson)
+    setPolicyCopied(true)
   }
 
   async function onVerify() {
@@ -1495,7 +1504,13 @@ function SecurityTab({ tid }: { tid: string }) {
                 </span>
                 <input
                   value={principal}
-                  onChange={(e) => setPrincipal(e.target.value)}
+                  onChange={(e) => {
+                    setPrincipal(e.target.value)
+                    setPolicyJson("")
+                    setPolicyCopied(false)
+                    setVerifyResult(null)
+                    setCompleteResult(null)
+                  }}
                   className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
                   placeholder={selected?.policy_target_example}
                   data-testid="cmek-principal-input"
@@ -1515,6 +1530,16 @@ function SecurityTab({ tid }: { tid: string }) {
                     {busy ? <Loader2 size={10} className="animate-spin" /> : <Copy size={10} />}
                     Generate
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void onCopyPolicy()}
+                    disabled={!policyJson}
+                    className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-[10px] disabled:opacity-50"
+                    data-testid="cmek-copy-policy-json"
+                  >
+                    <Copy size={10} />
+                    {policyCopied ? "Copied" : "Copy JSON"}
+                  </button>
                 </div>
                 <pre
                   className="min-h-40 max-h-64 overflow-auto rounded border border-[var(--border)] bg-[var(--background)] p-3 text-[10px] leading-relaxed whitespace-pre-wrap"
@@ -1532,6 +1557,8 @@ function SecurityTab({ tid }: { tid: string }) {
                   value={keyId}
                   onChange={(e) => {
                     setKeyId(e.target.value)
+                    setPolicyJson("")
+                    setPolicyCopied(false)
                     setVerifyResult(null)
                     setCompleteResult(null)
                   }}

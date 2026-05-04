@@ -45,6 +45,7 @@ const mockedListProviders = listCmekWizardProviders as unknown as ReturnType<typ
 const mockedGeneratePolicy = generateCmekWizardPolicy as unknown as ReturnType<typeof vi.fn>
 const mockedVerify = verifyCmekWizardConnection as unknown as ReturnType<typeof vi.fn>
 const mockedComplete = completeCmekWizard as unknown as ReturnType<typeof vi.fn>
+const clipboardWriteText = vi.fn()
 
 function makeParams(tid = "t-acme") {
   return Promise.resolve({ tid })
@@ -63,6 +64,7 @@ async function renderPage() {
 beforeEach(() => {
   cleanup()
   vi.clearAllMocks()
+  Object.assign(navigator, { clipboard: { writeText: clipboardWriteText } })
   mockedUseAuth.mockReturnValue({
     user: {
       id: "u-admin0001",
@@ -113,8 +115,21 @@ beforeEach(() => {
   mockedGeneratePolicy.mockResolvedValue({
     tenant_id: "t-acme",
     provider: "aws-kms",
-    policy: { Version: "2012-10-17" },
-    policy_json: "{\n  \"Version\": \"2012-10-17\"\n}",
+    policy: {
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Sid: "AllowOmniSightDescribeTenantKey",
+          Action: "kms:DescribeKey",
+        },
+        {
+          Sid: "AllowOmniSightTenantEnvelopeEncryption",
+          Action: ["kms:Encrypt", "kms:Decrypt"],
+        },
+      ],
+    },
+    policy_json:
+      "{\n  \"Statement\": [\n    {\n      \"Action\": \"kms:DescribeKey\"\n    },\n    {\n      \"Action\": [\n        \"kms:Encrypt\",\n        \"kms:Decrypt\"\n      ]\n    }\n  ],\n  \"Version\": \"2012-10-17\"\n}",
   })
   mockedVerify.mockResolvedValue({
     tenant_id: "t-acme",
@@ -155,6 +170,13 @@ describe("/tenants/{tid}/settings — CMEK wizard", () => {
       })
     })
     expect(await screen.findByText(/2012-10-17/)).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId("cmek-copy-policy-json"))
+    await waitFor(() => {
+      expect(clipboardWriteText).toHaveBeenCalledWith(
+        expect.stringContaining('"kms:DescribeKey"'),
+      )
+    })
+    expect(screen.getByTestId("cmek-copy-policy-json")).toHaveTextContent("Copied")
 
     fireEvent.click(screen.getByTestId("cmek-verify"))
     expect(await screen.findByTestId("cmek-verify-result")).toHaveTextContent("cmekv_abc123")

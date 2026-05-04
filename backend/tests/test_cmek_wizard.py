@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import inspect
+import json
 import re
 
 import pytest
@@ -90,10 +92,18 @@ def test_aws_policy_is_precise_to_tenant_context():
         key_id="arn:aws:kms:us-east-1:111122223333:key/00000000-0000-0000-0000-000000000000",
     )
 
-    stmt = policy["Statement"][0]
-    assert stmt["Effect"] == "Allow"
-    assert stmt["Action"] == ["kms:DescribeKey", "kms:Encrypt", "kms:Decrypt"]
-    assert stmt["Condition"]["StringEquals"] == {
+    describe_stmt, crypto_stmt = policy["Statement"]
+    assert describe_stmt == {
+        "Sid": "AllowOmniSightDescribeTenantKey",
+        "Effect": "Allow",
+        "Principal": {"AWS": "arn:aws:iam::444455556666:role/OmniSightCMEKAccess"},
+        "Action": "kms:DescribeKey",
+        "Resource": "*",
+    }
+    assert crypto_stmt["Effect"] == "Allow"
+    assert crypto_stmt["Action"] == ["kms:Encrypt", "kms:Decrypt"]
+    assert crypto_stmt["Resource"] == "*"
+    assert crypto_stmt["Condition"]["StringEquals"] == {
         "kms:EncryptionContext:omnisight:tenant_id": "t-acme",
     }
 
@@ -112,6 +122,10 @@ def test_gcp_policy_uses_crypto_key_role():
     assert policy["bindings"][0]["members"] == [
         "serviceAccount:omnisight-cmek@example.iam.gserviceaccount.com",
     ]
+    assert policy["bindings"][0]["condition"]["expression"] == (
+        'resource.name == "projects/acme-prod/locations/us/keyRings/omnisight/'
+        'cryptoKeys/tenant-tier2"'
+    )
 
 
 def test_vault_policy_json_has_encrypt_and_decrypt_rules():
@@ -125,8 +139,45 @@ def test_vault_policy_json_has_encrypt_and_decrypt_rules():
     )
 
     paths = [rule["path"] for rule in policy["policy"]["rules"]]
-    assert paths == ["transit/encrypt/{{key_name}}", "transit/decrypt/{{key_name}}"]
+    assert paths == [
+        "transit/encrypt/omnisight-tenant-tier2",
+        "transit/decrypt/omnisight-tenant-tier2",
+    ]
     assert all(rule["capabilities"] == ["update"] for rule in policy["policy"]["rules"])
+    expected_context = base64.b64encode(
+        json.dumps(
+            {
+                "omnisight:cmek_provider": "vault-transit",
+                "omnisight:tenant_id": "t-acme",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).decode("ascii")
+    assert all(
+        rule["allowed_parameters"] == {"context": [expected_context]}
+        for rule in policy["policy"]["rules"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "principal"),
+    [
+        ("aws-kms", "arn:aws:iam::444455556666:root"),
+        ("gcp-kms", "omnisight@example.iam.gserviceaccount.com"),
+        ("vault-transit", "../omnisight"),
+    ],
+)
+def test_policy_generation_rejects_non_pasteable_principals(provider, principal):
+    from backend.security import cmek_wizard as cmek
+
+    with pytest.raises(ValueError, match="policy principal"):
+        cmek.generate_policy_json(
+            provider,
+            tenant_id="t-acme",
+            principal=principal,
+            key_id=None,
+        )
 
 
 def test_verify_connection_probe_round_trips_without_live_provider(monkeypatch):

@@ -29,6 +29,7 @@ contract to preserve.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import secrets
@@ -44,10 +45,14 @@ CMEK_PROVIDER = Literal["aws-kms", "gcp-kms", "vault-transit"]
 _AWS_KEY_RE = re.compile(
     r"^arn:aws:kms:[a-z0-9-]+:\d{12}:key/[0-9a-fA-F-]{36}$"
 )
+_AWS_PRINCIPAL_RE = re.compile(
+    r"^arn:aws(?:-[a-z]+)?:iam::\d{12}:(?:role|user)/[A-Za-z0-9+=,.@_/-]{1,128}$"
+)
 _GCP_KEY_RE = re.compile(
     r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/[a-z0-9-]+/"
     r"keyRings/[A-Za-z0-9_-]{1,63}/cryptoKeys/[A-Za-z0-9_-]{1,63}$"
 )
+_GCP_MEMBER_RE = re.compile(r"^(?:serviceAccount|user|group|domain):[^\s@]+(?:@[^\s@]+\.[^\s@]+)?$")
 _VAULT_KEY_RE = re.compile(
     r"^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,63}/)?[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
 )
@@ -127,6 +132,38 @@ def validate_key_id(provider: CMEK_PROVIDER, key_id: str) -> str:
     raise ValueError(f"invalid {provider} key id")
 
 
+def validate_policy_principal(provider: CMEK_PROVIDER, principal: str) -> str:
+    principal = principal.strip()
+    if provider == "aws-kms" and _AWS_PRINCIPAL_RE.match(principal):
+        return principal
+    if provider == "gcp-kms" and _GCP_MEMBER_RE.match(principal):
+        return principal
+    if provider == "vault-transit" and _VAULT_KEY_RE.match(principal):
+        return principal
+    raise ValueError(f"invalid {provider} policy principal")
+
+
+def _tenant_context_b64(provider: CMEK_PROVIDER, tenant_id: str) -> str:
+    context = {
+        "omnisight:cmek_provider": provider,
+        "omnisight:tenant_id": tenant_id,
+    }
+    raw = json.dumps(context, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _vault_policy_paths(key_id: str | None) -> tuple[str, str]:
+    ref = key_id.strip() if key_id else "transit/omnisight-tenant-tier2"
+    if "/" in ref:
+        mount_point, key_name = ref.split("/", 1)
+    else:
+        mount_point, key_name = "transit", ref
+    return (
+        f"{mount_point}/encrypt/{key_name}",
+        f"{mount_point}/decrypt/{key_name}",
+    )
+
+
 def generate_policy_json(
     provider: CMEK_PROVIDER,
     *,
@@ -134,25 +171,27 @@ def generate_policy_json(
     principal: str,
     key_id: str | None = None,
 ) -> dict:
-    principal = principal.strip()
-    if not principal:
-        raise ValueError("principal is required")
+    principal = validate_policy_principal(provider, principal)
+    if key_id:
+        key_id = validate_key_id(provider, key_id)
 
     if provider == "aws-kms":
-        resource = key_id.strip() if key_id else "*"
         return {
             "Version": "2012-10-17",
             "Statement": [
                 {
-                    "Sid": "AllowOmniSightTenantCMEK",
+                    "Sid": "AllowOmniSightDescribeTenantKey",
                     "Effect": "Allow",
                     "Principal": {"AWS": principal},
-                    "Action": [
-                        "kms:DescribeKey",
-                        "kms:Encrypt",
-                        "kms:Decrypt",
-                    ],
-                    "Resource": resource,
+                    "Action": "kms:DescribeKey",
+                    "Resource": "*",
+                },
+                {
+                    "Sid": "AllowOmniSightTenantEnvelopeEncryption",
+                    "Effect": "Allow",
+                    "Principal": {"AWS": principal},
+                    "Action": ["kms:Encrypt", "kms:Decrypt"],
+                    "Resource": "*",
                     "Condition": {
                         "StringEquals": {
                             "kms:EncryptionContext:omnisight:tenant_id": tenant_id,
@@ -163,6 +202,7 @@ def generate_policy_json(
         }
 
     if provider == "gcp-kms":
+        resource_name = key_id or "projects/PROJECT/locations/LOCATION/keyRings/RING/cryptoKeys/KEY"
         return {
             "bindings": [
                 {
@@ -171,33 +211,30 @@ def generate_policy_json(
                     "condition": {
                         "title": "omnisight_tenant_cmek",
                         "description": f"Limit OmniSight CMEK use to tenant {tenant_id}",
-                        "expression": (
-                            "resource.name.startsWith("
-                            f"\"{key_id or 'projects/PROJECT/locations/LOCATION/keyRings/RING/cryptoKeys/KEY'}\""
-                            ")"
-                        ),
+                        "expression": f'resource.name == "{resource_name}"',
                     },
                 }
             ]
         }
 
+    encrypt_path, decrypt_path = _vault_policy_paths(key_id)
+    context_b64 = _tenant_context_b64(provider, tenant_id)
     return {
-        "path": (key_id.strip() if key_id else "transit/encrypt/omnisight-tenant-tier2"),
         "policy": {
             "name": f"omnisight-{tenant_id}-cmek",
             "rules": [
                 {
-                    "path": "transit/encrypt/{{key_name}}",
+                    "path": encrypt_path,
                     "capabilities": ["update"],
                     "allowed_parameters": {
-                        "context": [tenant_id],
+                        "context": [context_b64],
                     },
                 },
                 {
-                    "path": "transit/decrypt/{{key_name}}",
+                    "path": decrypt_path,
                     "capabilities": ["update"],
                     "allowed_parameters": {
-                        "context": [tenant_id],
+                        "context": [context_b64],
                     },
                 },
             ],
