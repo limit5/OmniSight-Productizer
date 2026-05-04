@@ -15,6 +15,8 @@
  * `backend/agents/cost_guard.py`, mirrored in `./types.ts`.
  */
 
+import type { JSX } from "react"
+
 import {
   AlertCircle,
   AlertTriangle,

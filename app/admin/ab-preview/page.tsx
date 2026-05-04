@@ -9,7 +9,7 @@
  * empty / partial / busy states on one page.
  */
 
-import { useState } from "react"
+import { type JSX, useState } from "react"
 
 import { BatchProgressPanel } from "@/components/omnisight/ab/batch-progress-panel"
 import { CostDashboardPanel } from "@/components/omnisight/ab/cost-dashboard-panel"

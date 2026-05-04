@@ -18,7 +18,7 @@
  * mirrored in `./types.ts`.
  */
 
-import { useState } from "react"
+import { type JSX, useState } from "react"
 import { ChevronDown, ChevronRight } from "lucide-react"
 import {
   type BatchRun,

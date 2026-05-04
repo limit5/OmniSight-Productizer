@@ -25,7 +25,7 @@
  * mirrored in `./types.ts`.
  */
 
-import { useState } from "react"
+import { type JSX, useState } from "react"
 import {
   Check,
   Circle,

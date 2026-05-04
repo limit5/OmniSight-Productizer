@@ -22,7 +22,7 @@
  * `backend/agents/batch_eligibility.py`, mirrored in `./types.ts`.
  */
 
-import { useState } from "react"
+import { type JSX, useState } from "react"
 import { Lock, Zap, Database, Layers, Plus, Trash } from "lucide-react"
 import {
   type EligibilityRule,
