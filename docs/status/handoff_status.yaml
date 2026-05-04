@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 332
+entry_count: 333
 status_counts:
-  dev-only: 323
+  dev-only: 324
   deployed-inactive: 4
   deployed-active: 3
   deployed-observed: 0
@@ -3130,3 +3130,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production image 重 build 後，在 staging 以 mocked NVD/CISA feed 分別呼叫 Integration Engineer pre-install
     與 Architect pre-blueprint hook，確認 brief 進入下游 prompt/artifact 且不自動阻擋。
+- id: 2026-05-04--BP.I.4
+  header_line: 45278
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: BP.I.4
+  title: BP.I.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image 重 build 後，在 staging 跑一次 BP.I hook smoke，並由 operator 確認 GitHub Secret Scanning
+    / Dependabot alerts / Renovate App settings 皆已啟用。

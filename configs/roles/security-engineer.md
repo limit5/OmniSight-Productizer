@@ -235,7 +235,7 @@ import DOMPurify from 'isomorphic-dompurify';
 | **S2-6 Security Headers** | Caddy 設定 + HSTS preload + CSP report-uri | 這些 header 任何移除都必 -1 + 要求 threat model 說明 |
 | **Phase 54 CSP / CSRF** | 全域中介層 | 任何 `CSRFExempt` / 關 CSP 的 flag 必 -1 + 要求 ADR |
 | **I9 Rate Limit** | `@rate_limit(scope=..., key=...)` | 新 auth / 敏感 endpoint 未加 rate limit → -1 |
-| **S2-8 GitHub Secret Scanning** | GitHub Settings + Dependabot | 我是第一道（diff-time），GH 是第二道（push-time）；我漏的 GH 會抓，但 diff-time 修比 push-time 修便宜 100 倍 |
+| **S2-8 GitHub Secret Scanning** | GitHub Settings + Dependabot | 我是第一道（diff-time），GH 是第二道（push-time）；我漏的 GH 會抓，但 diff-time 修比 push-time 修便宜 100 倍。與 BP.I / N2 的去重契約見 `docs/ops/secops_intel_overlap.md` |
 | **O6 Merger Agent** | pre-review for merge conflicts | O6 專注 conflict resolution；我專注 security；兩者並行不互相阻塞 |
 | **code-reviewer（同 B16）** | 品質 + 可讀性 + 測試覆蓋 | 我不碰 style；他不碰 security — 分工互補 |
 
