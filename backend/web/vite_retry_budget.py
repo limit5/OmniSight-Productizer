@@ -446,7 +446,7 @@ def emit_vite_pattern_escalation(
     banner = format_vite_escalation_banner(
         decision.pattern, decision.count, decision.threshold,
     )
-    emit_pipeline_phase(VITE_ESCALATION_PIPELINE_PHASE, banner)
+    emit_pipeline_phase(VITE_ESCALATION_PIPELINE_PHASE, banner, broadcast_scope="session")
     emit_debug_finding(
         task_id=task_id or "",
         agent_id=agent_id or "",
@@ -458,4 +458,5 @@ def emit_vite_pattern_escalation(
             "count": decision.count,
             "threshold": decision.threshold,
         },
+        broadcast_scope="session",
     )

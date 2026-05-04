@@ -450,7 +450,7 @@ async def provision(
     if agent_id in _workspaces:
         await cleanup(agent_id)
 
-    emit_pipeline_phase("workspace_provision", f"Creating workspace for {agent_id}")
+    emit_pipeline_phase("workspace_provision", f"Creating workspace for {agent_id}", broadcast_scope="session")
 
     from backend.config import settings as _settings
 
@@ -463,6 +463,7 @@ async def provision(
             emit_pipeline_phase(
                 "env_check",
                 f"[{issue['status'].upper()}] {issue['check']}: {issue['detail']}",
+                broadcast_scope="session",
             )
             if issue["status"] in ("error", "critical"):
                 try:
@@ -698,8 +699,9 @@ async def provision(
         # full path. Pre-clone log line above carries the same value.
         f"branch={branch}, path={ws_path}, url_hash={_resolved_url_hash}, "
         f"anchor={anchor_sha or 'none'}",
+        broadcast_scope="session",
     )
-    emit_agent_update(agent_id, "running", f"Workspace ready: branch={branch}")
+    emit_agent_update(agent_id, "running", f"Workspace ready: branch={branch}", broadcast_scope="session")
     return info
 
 
@@ -713,7 +715,7 @@ async def finalize(agent_id: str) -> dict:
         return {"error": f"No workspace for {agent_id}"}
 
     ws = info.path
-    emit_pipeline_phase("workspace_finalize", f"Finalizing workspace for {agent_id}")
+    emit_pipeline_phase("workspace_finalize", f"Finalizing workspace for {agent_id}", broadcast_scope="session")
 
     # Stage all changes
     await _run("git add -A", cwd=ws)
@@ -799,8 +801,8 @@ async def finalize(agent_id: str) -> dict:
 
     info.status = "finalized"
     files_changed = [f.strip() for f in files_out.splitlines() if f.strip()]
-    emit_workspace(agent_id, "finalized", f"{info.commit_count} commit(s), {len(files_changed)} file(s)")
-    emit_agent_update(agent_id, "success", f"Work finalized on branch {info.branch}")
+    emit_workspace(agent_id, "finalized", f"{info.commit_count} commit(s), {len(files_changed)} file(s)", broadcast_scope="session")
+    emit_agent_update(agent_id, "success", f"Work finalized on branch {info.branch}", broadcast_scope="session")
 
     result = {
         "branch": info.branch,
@@ -939,6 +941,7 @@ async def discard_and_recreate(
     emit_pipeline_phase(
         "workspace_recreate",
         f"Discarding {agent_id} workspace, recreating from anchor {anchor_sha[:12]} ({reason})",
+        broadcast_scope="session",
     )
 
     # Step 1: ``git worktree remove --force`` is preferred — it not
@@ -1056,10 +1059,12 @@ async def discard_and_recreate(
         "retried",
         f"branch={branch}, anchor={anchor_sha[:12]}, "
         f"old_tip={old_branch_tip[:12] or 'none'}, reason={reason}",
+        broadcast_scope="session",
     )
     emit_agent_update(
         agent_id, "running",
         f"Workspace recreated from anchor {anchor_sha[:12]}",
+        broadcast_scope="session",
     )
 
     # R8 #314 row 2874: audit trail. ``audit.log`` is best-effort
@@ -1307,6 +1312,7 @@ async def cleanup_orphan_worktrees() -> list[dict[str, str]]:
                 safe_name, "orphan_cleanup",
                 f"path={wt_path}, source={source}, method={method or 'noop'}, "
                 f"status={status}",
+                broadcast_scope="session",
             )
         except Exception as exc:  # pragma: no cover — bus is best-effort
             logger.debug("emit_workspace orphan_cleanup failed: %s", exc)
@@ -1411,7 +1417,7 @@ async def cleanup(agent_id: str) -> bool:
     await _run("git worktree prune", cwd=_MAIN_REPO)
 
     info.status = "cleaned"
-    emit_workspace(agent_id, "cleaned", "worktree removed")
+    emit_workspace(agent_id, "cleaned", "worktree removed", broadcast_scope="session")
     logger.info("Workspace cleaned: %s", agent_id)
     return True
 
