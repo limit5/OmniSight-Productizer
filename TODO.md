@@ -6280,7 +6280,7 @@ BP.E GraphRAG / Neo4j
 - [x] FX.9.6 `docker-compose.prod.yml` 拿掉 obsolete `version:` field + `--remove-orphans`（清 omnisight-productizer-backend-1 / omnisight-pg-test 殘骸）
 
 #### Operator setup（2 items）
-- [ ] FX.9.7 `OMNISIGHT_BACKUP_PASSPHRASE` export 從 `.bashrc` 移到 `~/.profile`（讓 cron / systemd / 非互動 shell 也讀得到；現在只 interactive bash 拿到）
+- [x] FX.9.7 `OMNISIGHT_BACKUP_PASSPHRASE` export 從 `.bashrc` 移到 `~/.profile`（讓 cron / systemd / 非互動 shell 也讀得到；現在只 interactive bash 拿到）
 - [ ] FX.9.8 GPG release-signer setup：operator GPG key 生成 + fingerprint 加進 `deploy/prod-deploy-signers.txt` + 簽 master tip + deploy 走真 verify（不再用 `--insecure-skip-verify`）
 
 #### Frontend i18n（1 item）
@@ -6299,18 +6299,18 @@ BP.E GraphRAG / Neo4j
 #### CVE 修復（3 items）
 - [x][G] FX.10.1 升 `starlette` 0.46.2 → 0.49.1（CVE-2025-54121 + CVE-2025-62727）；驗 FastAPI compat
 - [x][G] FX.10.2 升 `langchain-openai` 1.1.12 → 1.1.14（GHSA-r7w7-9xr2-qq2r）
-- [~][G] FX.10.3 升 `python-dotenv` 1.1.0 → 1.2.2（CVE-2026-28684）
+- [x][G] FX.10.3 升 `python-dotenv` 1.1.0 → 1.2.2（CVE-2026-28684）
 
 #### Code quality（4 items）
-- [ ] FX.10.4 `ruff check backend/ --fix` 跑一輪解 209 個 auto-fixable（202 unused-import + 7 其他）；未動到 production logic
-- [ ] FX.10.5 `mypy` 加 `explicit-package-bases = true` 進 `backend/mypy.ini` 或 `pyproject.toml`，解「Source file found twice under different module names」
-- [ ] FX.10.6 `.github/workflows/lint-audit-nightly.yml` 加 `pnpm exec tsc --noEmit` job（FX.6.8 只跑 mypy 沒 tsc，frontend type drift 沒被抓）
-- [ ] FX.10.7 KS.1 envelope 擴張到 `sessions.token`，把 `EXPECTED_HIGH_ENTROPY_COLUMNS` allowlist 那條移除（DLP 對 sessions 不再放水）
+- [x][G] FX.10.4 `ruff check backend/ --fix` 跑一輪解 209 個 auto-fixable（202 unused-import + 7 其他）；未動到 production logic
+- [x][G] FX.10.5 `mypy` 加 `explicit-package-bases = true` 進 `backend/mypy.ini` 或 `pyproject.toml`，解「Source file found twice under different module names」
+- [x][G] FX.10.6 `.github/workflows/lint-audit-nightly.yml` 加 `pnpm exec tsc --noEmit` job（FX.6.8 只跑 mypy 沒 tsc，frontend type drift 沒被抓）
+- [x][G] FX.10.7 KS.1 envelope 擴張到 `sessions.token`，把 `EXPECTED_HIGH_ENTROPY_COLUMNS` allowlist 那條移除（DLP 對 sessions 不再放水）
 
 #### API contract 收尾（1 item）
-- [ ] FX.10.8 `backend/routers/sensor_fusion.py:73-325` 25 個 endpoint 補 response_model（FX.4.18 涵蓋部分但未全清）
+- [x][G] FX.10.8 `backend/routers/sensor_fusion.py:73-325` 25 個 endpoint 補 response_model（FX.4.18 涵蓋部分但未全清）
 
 #### Test 強化（1 item）
-- [ ] FX.10.9 4 條弱 assertion test 改用真實 call + assertion（test_anthropic_mode_manager / test_api_keys_legacy_migration / test_auth_dashboard_shape_drift / test_auto_runner_codex；FX.5.13 涵蓋部分）
+- [x][G] FX.10.9 4 條弱 assertion test 改用真實 call + assertion（test_anthropic_mode_manager / test_api_keys_legacy_migration / test_auth_dashboard_shape_drift / test_auto_runner_codex；FX.5.13 涵蓋部分）
 
 **Priority FX.9 + FX.10 合計範圍**：~7-10 day；雙 runner 並行 4-5 day 完工。Day-count 加進 Total。
