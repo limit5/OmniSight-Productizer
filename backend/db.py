@@ -244,6 +244,12 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         # NULLable so legacy callers without severity awareness keep
         # working unchanged; dispatcher consumes this in row 2939.
         ("notifications", sa.Column("severity", _t())),
+        # BP.H.3 — persistent red-card marker. DB-backed, not worker
+        # global state; every worker reads the same notification row.
+        ("notifications", sa.Column(
+            "is_red_card", sa.Boolean(), nullable=False,
+            server_default=sa.false(),
+        )),
         # Artifact version/checksum (Phase 39)
         ("artifacts", sa.Column("version", _t(), nullable=False, server_default="")),
         ("artifacts", sa.Column("checksum", _t(), nullable=False, server_default="")),
@@ -643,7 +649,9 @@ CREATE TABLE IF NOT EXISTS notifications (
     send_attempts   INTEGER NOT NULL DEFAULT 0,
     last_error      TEXT,
     -- R9 row 2935 (#315): P1/P2/P3 severity tag (orthogonal to level).
-    severity        TEXT
+    severity        TEXT,
+    -- BP.H.3: red-card notifications route to L3 Jira + L4 PagerDuty.
+    is_red_card     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -2589,8 +2597,9 @@ async def insert_notification(conn, data: dict) -> None:
     # treated (also stored as TEXT, also not re-validated here).
     await conn.execute(
         """INSERT INTO notifications (id, level, title, message, source, timestamp,
-             read, action_url, action_label, auto_resolved, severity)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             read, action_url, action_label, auto_resolved, severity,
+             is_red_card)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         """,
         data["id"],
         data["level"],
@@ -2603,6 +2612,7 @@ async def insert_notification(conn, data: dict) -> None:
         data.get("action_label"),
         1 if data.get("auto_resolved") else 0,
         data.get("severity"),
+        1 if data.get("is_red_card") else 0,
     )
 
 
@@ -2610,6 +2620,7 @@ def _notification_row_to_dict(row) -> dict:
     d = dict(row)
     d["read"] = bool(d.get("read", 0))
     d["auto_resolved"] = bool(d.get("auto_resolved", 0))
+    d["is_red_card"] = bool(d.get("is_red_card", 0))
     return d
 
 

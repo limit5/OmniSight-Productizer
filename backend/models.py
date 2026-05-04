@@ -348,6 +348,10 @@ class Notification(BaseModel):
     # caller without severity awareness; the dispatcher falls back to
     # plain level routing in that case.
     severity: Optional[Severity] = None
+    # BP.H.3: red-card escalation marker. False keeps legacy callers on
+    # the existing level/severity ladders; True additionally maps the
+    # notification to L3 Jira + L4 PagerDuty.
+    is_red_card: bool = False
 
 
 # ---------- Simulations ----------

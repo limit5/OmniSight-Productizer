@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 337
+entry_count: 338
 status_counts:
-  dev-only: 328
+  dev-only: 329
   deployed-inactive: 4
   deployed-active: 3
   deployed-observed: 0
@@ -3175,3 +3175,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — staging 需把 root-task sub-LM call history 接到 `execute_recursive_subcall_budget()`，並以 4-call
     yellow / 6-call red smoke 確認 yellow path 延遲、red path revoke API key 且升級 human review。
+- id: 2026-05-04--BP.H.3
+  header_line: 45359
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: BP.H.3
+  title: BP.H.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — staging 需把 BP.H.2 / BP.H.2.b red-card action path 改成發送 `is_red_card=True` notification，並配置
+    Jira / PagerDuty env 後用一個 red-card smoke 確認兩個外部 leg 都送達。
