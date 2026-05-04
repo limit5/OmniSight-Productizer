@@ -10,7 +10,7 @@ captured in coordination.md and AGENTS.md:
   * Commit messages add a ``[Tier-A]`` or ``[Tier-B]`` line before the
     Co-Authored-By trailers.
   * Tier B tasks run from the ``codex-work`` worktree to keep them off
-    master until human review.
+    main until human review.
 
 Usage (interactive sub):
 
@@ -119,8 +119,8 @@ CODEX_EXTRA_FLAGS = os.environ.get("OMNISIGHT_CODEX_EXTRA_FLAGS", "").strip()
 # ── Tier 與 worktree 路徑解析 ──
 
 # Tier:
-#   B (default) → cwd = worktree (codex-work branch), keeps changes off master.
-#   A           → cwd = main checkout (master). Caller must have pre-vetted
+#   B (default) → cwd = worktree (codex-work branch), keeps changes off main.
+#   A           → cwd = main checkout (main). Caller must have pre-vetted
 #                 the task as Tier A per coordination.md.
 TIER = os.environ.get("OMNISIGHT_CODEX_TIER", "B").strip().upper()
 if TIER not in {"A", "B"}:
@@ -135,7 +135,7 @@ def _resolve_cwd_for_tier(tier: str) -> str:
         print(
             f"❌ Tier B 需要 worktree 但找不到 {WORKTREE_DIR}\n"
             "   先用以下指令建立：\n"
-            f"   git -C {BASE_DIR} branch codex-work master\n"
+            f"   git -C {BASE_DIR} branch codex-work main\n"
             f"   git -C {BASE_DIR} worktree add {WORKTREE_DIR} codex-work"
         )
         sys.exit(1)
@@ -252,13 +252,13 @@ def _find_first_pending(lines: list[str]) -> str | None:
 #
 # Tier B runs codex in a separate worktree on `codex-work` branch. That
 # worktree has its OWN TODO.md (a snapshot at the branch HEAD), distinct
-# from the master checkout's TODO.md. If codex updates the worktree's
+# from the main checkout's TODO.md. If codex updates the worktree's
 # TODO.md and commits, those changes land on `codex-work`, NOT on
-# master. The runner reads master/TODO.md every iteration → never sees
+# main. The runner reads main/TODO.md every iteration → never sees
 # the [G] marker codex wrote in the worktree → infinite loop dispatching
 # the same already-completed item.
 #
-# Fix: runner takes full ownership of master/TODO.md marker writes.
+# Fix: runner takes full ownership of main/TODO.md marker writes.
 #   * BEFORE dispatching, runner reserves the item with `- [~][G]` so
 #     parallel runners (Claude or other codex instances) see it claimed
 #     and skip it.
@@ -267,7 +267,7 @@ def _find_first_pending(lines: list[str]) -> str | None:
 #
 # Codex's prompt is updated to TELL it not to touch TODO.md at all in
 # Tier B mode. Code commits on `codex-work` are the work product;
-# master/TODO.md is the coordination state.
+# main/TODO.md is the coordination state.
 
 
 def _replace_marker_in_master_todo(
@@ -276,7 +276,7 @@ def _replace_marker_in_master_todo(
     *,
     label: str,
 ) -> str | None:
-    """Replace the leading ``- [X]...`` of a single line in master TODO.
+    """Replace the leading ``- [X]...`` of a single line in main TODO.
 
     Returns the new line on success, None on failure / no match. Caller
     typically uses the returned string as the canonical reference for
@@ -286,14 +286,14 @@ def _replace_marker_in_master_todo(
         with open(TODO_FILE, "r", encoding="utf-8") as f:
             content = f.read()
     except OSError as e:
-        print(f"⚠️ 讀 master TODO 失敗：{e}")
+        print(f"⚠️ 讀 main TODO 失敗：{e}")
         return None
 
     if item_line not in content:
         # Could happen if a parallel runner already mutated this line.
         # Don't try to recover — just log and bail.
         print(
-            f"⚠️ 在 master TODO 找不到原始 marker（可能已被其他 runner 改動）：\n"
+            f"⚠️ 在 main TODO 找不到原始 marker（可能已被其他 runner 改動）：\n"
             f"   {item_line[:80]}"
         )
         return None
@@ -315,7 +315,7 @@ def _replace_marker_in_master_todo(
         with open(TODO_FILE, "w", encoding="utf-8") as f:
             f.write(new_content)
     except OSError as e:
-        print(f"⚠️ 寫 master TODO 失敗：{e}")
+        print(f"⚠️ 寫 main TODO 失敗：{e}")
         return None
     print(f"📝 [{label}] {new_prefix} ← {item_line[:60]}")
     return new_line
@@ -397,18 +397,18 @@ Claude (Opus)。協作規則在 {COORDINATION_FILE}，你的特定規則在 {AGE
 6. 這是真實執行階段，請直接讀寫檔案、修改程式碼、建立資料夾或執行必要指令。
 7. 如果遇到缺少的檔案，請參考專案上下文自行推導並建立。
 8. **【TODO.md 寫入鐵律 — Tier B 重要】**：在 Tier B (worktree) 模式下，你
-   **完全不要改動 TODO.md**。原因：你的 worktree 跟 master 是不同 working
-   tree，TODO.md 的 master 副本由 runner 統一管理。runner 已經在你開工前
+   **完全不要改動 TODO.md**。原因：你的 worktree 跟 main 是不同 working
+   tree，TODO.md 的 main 副本由 runner 統一管理。runner 已經在你開工前
    把那行從 `- [ ]` 標成 `- [~][G]`（reserved），完工後 runner 會根據你
    的 exit code 自動翻成 `- [x][G]`（成功）或 `- [!][G]`（失敗）。
    - **不要在 worktree 內 edit TODO.md**（你改的是 codex-work 那份的副本，
      完全沒被 runner 看見，會造成過去版本的「無限 loop bug」復發）
    - **不要把 TODO.md 加進你的 commit**
-   - 唯一例外：Tier A 模式時 (cwd 為 master)，你才照舊 `- [ ]` → `- [x][G]`
+   - 唯一例外：Tier A 模式時 (cwd 為 main)，你才照舊 `- [ ]` → `- [x][G]`
      自己標。
 9. **HANDOFF.md 寫入規範**：HANDOFF.md 你**可以**寫，因為它在 worktree
    內你寫進去的內容會跟你的 code 一起 commit 到 codex-work，後續 merge 時
-   一併進入 master。你寫的條目 heading 必須以 **`## [Codex/GPT-5.5]`** 開頭，
+   一併進入 main。你寫的條目 heading 必須以 **`## [Codex/GPT-5.5]`** 開頭，
    後面跟日期跟 item ID。例：`## [Codex/GPT-5.5] 2026-05-02 FS.4.1 完工`。
    **不要改動 Claude 寫的條目** (heading 是 `## [Claude/Opus]`)。
 10. 更新完後，請務必將更動後的內容 commit 到 Git。**commit message 末尾必須
@@ -572,15 +572,15 @@ def main() -> None:
             )
         )
 
-        # Tier B fix (2026-05-03): runner OWNS master/TODO.md marker.
+        # Tier B fix (2026-05-03): runner OWNS main/TODO.md marker.
         # Reserve the item with [~][G] BEFORE dispatching codex so:
         #   (a) the next iteration of THIS runner won't re-pick it (the
         #       infinite-loop bug that wasted hours on FS.1.1 before)
-        #   (b) parallel Claude runners reading the same master/TODO see
+        #   (b) parallel Claude runners reading the same main/TODO see
         #       it claimed and skip
         # Codex's prompt (Rule 8) tells it NOT to touch TODO.md in
         # Tier B mode — so changes made in worktree's TODO.md are
-        # invisible-but-harmless; the master copy is the truth.
+        # invisible-but-harmless; the main copy is the truth.
         if TIER == "B":
             reserved_line = _reserve_item_for_codex(item_line)
             if reserved_line is None:
@@ -591,7 +591,7 @@ def main() -> None:
                 time.sleep(COOLDOWN_S)
                 continue
         else:
-            # Tier A: codex runs in master; old contract — codex owns
+            # Tier A: codex runs in main; old contract — codex owns
             # TODO marker itself.
             reserved_line = item_line
 
