@@ -27,8 +27,8 @@
  * Read-after-write timing audit
  * ─────────────────────────────
  * All tab actions are sequential ``await`` (one inflight per tab,
- * disabled UI while busy) followed by a tab-scoped refetch — no
- * shared state to race.
+ * disabled UI while busy) followed by a tab-scoped refetch / response
+ * projection — no shared state to race.
  */
 
 import { use, useCallback, useEffect, useMemo, useState } from "react"
@@ -38,9 +38,11 @@ import {
   Archive,
   Building2,
   ChevronRight,
+  CheckCircle2,
   CircleAlert,
   Copy,
   Folder,
+  KeyRound,
   Loader2,
   Mail,
   Plus,
@@ -53,24 +55,31 @@ import {
 import {
   ApiError,
   archiveTenantProject,
+  completeCmekWizard,
   createTenantInvite,
   createTenantProject,
   deleteTenantMember,
+  generateCmekWizardPolicy,
   getStorageUsage,
   listAllTenantProjects,
+  listCmekWizardProviders,
   listTenantInvites,
   listTenantMembers,
   patchTenantMember,
   restoreTenantProject,
   revokeTenantInvite,
   type CreatedTenantInvite,
+  type CmekProvider,
+  type CmekProviderSpec,
+  type CompleteCmekResponse,
   type ProductLine,
   type TenantInviteRow,
   type TenantMemberRole,
   type TenantMemberRow,
-  type TenantPlan,
   type TenantProjectInfo,
   type TenantStorageUsage,
+  type VerifyCmekResponse,
+  verifyCmekWizardConnection,
 } from "@/lib/api"
 import { useAuth } from "@/lib/auth-context"
 
@@ -86,13 +95,14 @@ const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 const TENANT_ID_PATTERN = /^t-[a-z0-9][a-z0-9-]{2,62}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-type TabId = "members" | "invites" | "projects" | "quotas"
+type TabId = "members" | "invites" | "projects" | "quotas" | "security"
 
 const TABS: { id: TabId; label: string; icon: typeof Users }[] = [
   { id: "members", label: "Members", icon: Users },
   { id: "invites", label: "Invites", icon: Mail },
   { id: "projects", label: "Projects", icon: Folder },
   { id: "quotas", label: "Quotas", icon: Archive },
+  { id: "security", label: "Security", icon: KeyRound },
 ]
 
 function formatBytes(n: number | null | undefined): string {
@@ -271,6 +281,7 @@ export default function TenantSettingsPage({
           {tab === "invites" && <InvitesTab tid={tid} />}
           {tab === "projects" && <ProjectsTab tid={tid} />}
           {tab === "quotas" && <QuotasTab tid={tid} />}
+          {tab === "security" && <SecurityTab tid={tid} />}
         </section>
       </div>
     </main>
@@ -1236,6 +1247,323 @@ function QuotasTab({ tid }: { tid: string }) {
       <p className="mt-3 text-[10px] text-[var(--muted-foreground)] font-mono">
         Plan changes ship via the super-admin /admin/tenants surface (Y8 row 3). This panel is read-only for tenant admins.
       </p>
+    </div>
+  )
+}
+
+// ─── Security tab / KS.2.1 CMEK wizard ─────────────────────────
+
+const CMEK_STEPS = [
+  "Provider",
+  "IAM policy",
+  "Key id",
+  "Verify",
+  "Done",
+] as const
+
+function SecurityTab({ tid }: { tid: string }) {
+  const [providers, setProviders] = useState<CmekProviderSpec[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [step, setStep] = useState(0)
+  const [provider, setProvider] = useState<CmekProvider>("aws-kms")
+  const [principal, setPrincipal] = useState("")
+  const [keyId, setKeyId] = useState("")
+  const [policyJson, setPolicyJson] = useState("")
+  const [verifyResult, setVerifyResult] = useState<VerifyCmekResponse | null>(null)
+  const [completeResult, setCompleteResult] = useState<CompleteCmekResponse | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const selected = useMemo(
+    () => providers.find((p) => p.provider === provider) ?? providers[0],
+    [providers, provider],
+  )
+
+  const securityTier = completeResult?.security_tier ?? "tier-1"
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setLoadError(null)
+    listCmekWizardProviders(tid)
+      .then((res) => {
+        if (cancelled) return
+        setProviders(res.providers)
+        if (res.providers[0]) {
+          setProvider(res.providers[0].provider)
+          setPrincipal(res.providers[0].policy_target_example)
+          setKeyId(res.providers[0].key_id_example)
+        }
+      })
+      .catch((exc) => {
+        if (!cancelled) setLoadError(describeError(exc))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [tid])
+
+  useEffect(() => {
+    if (!selected) return
+    setPrincipal(selected.policy_target_example)
+    setKeyId(selected.key_id_example)
+    setPolicyJson("")
+    setVerifyResult(null)
+    setCompleteResult(null)
+    setError(null)
+    setStep(0)
+  }, [selected])
+
+  async function onGeneratePolicy() {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await generateCmekWizardPolicy(tid, {
+        provider,
+        principal,
+        key_id: keyId.trim() || null,
+      })
+      setPolicyJson(res.policy_json)
+      setStep(1)
+    } catch (exc) {
+      setError(describeError(exc))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function onVerify() {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await verifyCmekWizardConnection(tid, { provider, key_id: keyId })
+      setVerifyResult(res)
+      setStep(3)
+    } catch (exc) {
+      setError(describeError(exc))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function onComplete() {
+    if (!verifyResult) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await completeCmekWizard(tid, {
+        provider,
+        key_id: keyId,
+        verification_id: verifyResult.verification_id,
+      })
+      setCompleteResult(res)
+      setStep(4)
+    } catch (exc) {
+      setError(describeError(exc))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="rounded border border-[var(--border)] bg-[var(--card)] p-6 font-mono text-xs text-[var(--muted-foreground)]">
+        <Loader2 size={14} className="animate-spin inline-block mr-2" />
+        Loading CMEK wizard…
+      </div>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <div
+        className="rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 p-3 text-xs font-mono text-[var(--destructive)]"
+        data-testid="cmek-load-error"
+      >
+        {loadError}
+      </div>
+    )
+  }
+
+  return (
+    <div data-testid="cmek-security-tab">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-sm font-semibold inline-flex items-center gap-2">
+            <KeyRound size={14} />
+            CMEK security tier
+          </h2>
+          <p className="text-[10px] text-[var(--muted-foreground)] font-mono mt-1">
+            Configure a customer-managed key draft for tenant {tid}.
+          </p>
+        </div>
+        <div
+          className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-mono ${
+            securityTier === "tier-2"
+              ? "border-[var(--neural-green)]/50 bg-[var(--neural-green)]/10"
+              : "border-[var(--border)] bg-[var(--card)]"
+          }`}
+          data-testid="cmek-security-tier"
+        >
+          <ShieldAlert size={13} />
+          {securityTier === "tier-2" ? "Tier 2 · CMEK draft" : "Tier 1 · OmniSight-managed KEK"}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-4">
+        <ol className="rounded border border-[var(--border)] bg-[var(--card)] p-3 font-mono text-xs space-y-1">
+          {CMEK_STEPS.map((label, idx) => {
+            const done = step > idx
+            const active = step === idx
+            return (
+              <li
+                key={label}
+                className={`flex items-center gap-2 rounded px-2 py-2 ${
+                  active ? "bg-[var(--secondary)]/40 text-[var(--foreground)]" : "text-[var(--muted-foreground)]"
+                }`}
+                data-testid={`cmek-step-${idx + 1}`}
+              >
+                {done ? <CheckCircle2 size={13} className="text-[var(--neural-green)]" /> : <span className="w-[13px] text-center">{idx + 1}</span>}
+                {label}
+              </li>
+            )
+          })}
+        </ol>
+
+        <div className="rounded border border-[var(--border)] bg-[var(--card)] p-4 font-mono">
+          {error && (
+            <div
+              className="mb-3 rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 p-2 text-xs text-[var(--destructive)]"
+              data-testid="cmek-error"
+            >
+              {error}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-4" role="radiogroup" aria-label="KMS provider">
+            {providers.map((p) => (
+              <button
+                key={p.provider}
+                type="button"
+                onClick={() => setProvider(p.provider)}
+                className={`rounded border px-3 py-3 text-left text-xs transition-colors ${
+                  provider === p.provider
+                    ? "border-[var(--neural-blue)] bg-[var(--neural-blue)]/10"
+                    : "border-[var(--border)] hover:bg-[var(--secondary)]/30"
+                }`}
+                data-testid={`cmek-provider-${p.provider}`}
+              >
+                <span className="block font-semibold">{p.label}</span>
+                <span className="block text-[10px] text-[var(--muted-foreground)] mt-1">
+                  {p.key_id_label}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <div className="space-y-4">
+            <label className="block">
+              <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+                {selected?.policy_target_label ?? "OmniSight principal"}
+              </span>
+              <input
+                value={principal}
+                onChange={(e) => setPrincipal(e.target.value)}
+                className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+                placeholder={selected?.policy_target_example}
+                data-testid="cmek-principal-input"
+              />
+            </label>
+
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span className="text-[10px] text-[var(--muted-foreground)]">Generated IAM policy JSON</span>
+                <button
+                  type="button"
+                  onClick={() => void onGeneratePolicy()}
+                  disabled={busy || !principal.trim()}
+                  className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-[10px] disabled:opacity-50"
+                  data-testid="cmek-generate-policy"
+                >
+                  {busy ? <Loader2 size={10} className="animate-spin" /> : <Copy size={10} />}
+                  Generate
+                </button>
+              </div>
+              <pre
+                className="min-h-40 max-h-64 overflow-auto rounded border border-[var(--border)] bg-[var(--background)] p-3 text-[10px] leading-relaxed whitespace-pre-wrap"
+                data-testid="cmek-policy-json"
+              >
+                {policyJson || "Generate the policy, then paste the JSON into your cloud console."}
+              </pre>
+            </div>
+
+            <label className="block">
+              <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+                {selected?.key_id_label ?? "KMS key id"}
+              </span>
+              <input
+                value={keyId}
+                onChange={(e) => {
+                  setKeyId(e.target.value)
+                  setVerifyResult(null)
+                  setCompleteResult(null)
+                }}
+                className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+                placeholder={selected?.key_id_example}
+                data-testid="cmek-key-id-input"
+              />
+            </label>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setStep(2)
+                  void onVerify()
+                }}
+                disabled={busy || !policyJson || !keyId.trim()}
+                className="inline-flex items-center gap-1 rounded bg-[var(--neural-blue)] px-3 py-2 text-xs text-[var(--background)] disabled:opacity-50"
+                data-testid="cmek-verify"
+              >
+                {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                Verify connection
+              </button>
+              <button
+                type="button"
+                onClick={() => void onComplete()}
+                disabled={busy || !verifyResult?.ok}
+                className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-3 py-2 text-xs disabled:opacity-50"
+                data-testid="cmek-complete"
+              >
+                <CheckCircle2 size={12} />
+                Done
+              </button>
+            </div>
+
+            {verifyResult && (
+              <div
+                className="rounded border border-[var(--neural-green)]/40 bg-[var(--neural-green)]/10 p-3 text-xs"
+                data-testid="cmek-verify-result"
+              >
+                encrypt-decrypt ok · {verifyResult.algorithm} · {verifyResult.elapsed_ms} ms · {verifyResult.verification_id}
+              </div>
+            )}
+
+            {completeResult && (
+              <div
+                className="rounded border border-[var(--neural-green)]/40 bg-[var(--neural-green)]/10 p-3 text-xs"
+                data-testid="cmek-complete-result"
+              >
+                Tier 2 draft ready for {completeResult.provider}; durable activation follows KS.2.11 storage.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
