@@ -38,6 +38,7 @@
   "exclude": [
     "node_modules",
     "configs/skills/*/scaffolds",
+    "templates",
     "backend",
     "scripts",
     "deploy",
