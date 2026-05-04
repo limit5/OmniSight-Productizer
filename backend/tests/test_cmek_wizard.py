@@ -211,6 +211,44 @@ def test_verify_connection_probe_runs_omnisight_encrypt_decrypt(monkeypatch):
     assert "ciphertext" not in result
 
 
+@pytest.mark.asyncio
+async def test_verify_endpoint_returns_encrypt_decrypt_result(monkeypatch):
+    from backend import secret_store
+    from backend.routers import cmek_wizard
+
+    async def allow_guard(_tenant_id, _actor):
+        return None
+
+    monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-2-1-cmek-wizard-endpoint-test")
+    secret_store._reset_for_tests()
+    monkeypatch.setattr(cmek_wizard, "_guard", allow_guard)
+
+    response = await cmek_wizard.verify_cmek_wizard_connection(
+        "t-acme",
+        cmek_wizard.VerifyCMEKRequest(
+            provider="aws-kms",
+            key_id=(
+                "arn:aws:kms:us-east-1:111122223333:key/"
+                "00000000-0000-0000-0000-000000000000"
+            ),
+        ),
+        None,
+        None,
+    )
+    body = json.loads(response.body)
+
+    assert body["tenant_id"] == "t-acme"
+    assert body["ok"] is True
+    assert body["provider"] == "aws-kms"
+    assert body["operation"] == "encrypt-decrypt"
+    assert body["algorithm"] == "AES-256-GCM"
+    assert body["wrap_algorithm"] == "fernet"
+    assert body["live_provider_checked"] is False
+    assert body["verification_id"].startswith("cmekv_")
+    assert "plaintext" not in body
+    assert "ciphertext" not in body
+
+
 def test_key_id_request_trims_and_validates_provider_shape():
     from backend.routers.cmek_wizard import KeyIdCMEKRequest
     from backend.security import cmek_wizard as cmek
