@@ -12,10 +12,15 @@ import pytest
 from backend.proxy_health import (
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     DEFAULT_STALE_THRESHOLD_SECONDS,
+    InMemoryProxyAuditMetadataStore,
     InMemoryProxyHeartbeatStore,
+    ProxyAuditMetadata,
     ProxyHeartbeat,
     get_proxy_health,
+    list_audit_metadata,
+    record_audit_metadata,
     record_heartbeat,
+    set_proxy_audit_metadata_store_for_tests,
     set_proxy_heartbeat_store_for_tests,
 )
 
@@ -51,6 +56,36 @@ def test_missing_heartbeat_for_more_than_sixty_seconds_is_disconnected() -> None
     assert health.connected is False
     assert health.stale is True
     assert health.last_heartbeat_age_seconds == 61.0
+
+
+def test_record_audit_metadata_stores_only_metadata() -> None:
+    store = InMemoryProxyAuditMetadataStore()
+
+    record_audit_metadata(
+        ProxyAuditMetadata(
+            proxy_id="proxy-a",
+            tenant_id="tenant-a",
+            provider="openai",
+            method="POST",
+            path="/v1/chat/completions",
+            status_code=200,
+            model="gpt-4.1",
+            token_count=12,
+            prompt_tokens=7,
+            completion_tokens=5,
+            total_tokens=12,
+            recorded_at="2026-05-04T00:00:00Z",
+        ),
+        store=store,
+        now=1_000.0,
+    )
+
+    entries = list_audit_metadata("proxy-a", store=store)
+    assert len(entries) == 1
+    assert entries[0].model == "gpt-4.1"
+    assert entries[0].token_count == 12
+    assert not hasattr(entries[0], "prompt")
+    assert not hasattr(entries[0], "response")
 
 
 @pytest.mark.asyncio
@@ -93,3 +128,52 @@ async def test_proxy_heartbeat_endpoint_rejects_proxy_id_mismatch(client) -> Non
 
     assert response.status_code == 400
     assert response.json()["detail"] == "body proxy_id must match path proxy_id"
+
+
+@pytest.mark.asyncio
+async def test_proxy_audit_endpoint_records_metadata_only(client) -> None:
+    store = InMemoryProxyAuditMetadataStore()
+    set_proxy_audit_metadata_store_for_tests(store)
+    try:
+        response = await client.post(
+            "/api/v1/byog/proxies/proxy-a/audit",
+            json={
+                "proxy_id": "proxy-a",
+                "tenant_id": "tenant-a",
+                "provider": "openai",
+                "method": "POST",
+                "path": "/v1/chat/completions",
+                "status_code": 200,
+                "model": "gpt-4.1",
+                "token_count": 12,
+                "prompt_tokens": 7,
+                "completion_tokens": 5,
+                "total_tokens": 12,
+                "recorded_at": "2026-05-04T00:00:00Z",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["token_count"] == 12
+
+        entries = list_audit_metadata("proxy-a", store=store)
+        assert len(entries) == 1
+        assert entries[0].provider == "openai"
+        assert entries[0].model == "gpt-4.1"
+        assert entries[0].token_count == 12
+    finally:
+        set_proxy_audit_metadata_store_for_tests(None)
+
+
+@pytest.mark.asyncio
+async def test_proxy_audit_endpoint_rejects_prompt_payload(client) -> None:
+    response = await client.post(
+        "/api/v1/byog/proxies/proxy-a/audit",
+        json={
+            "proxy_id": "proxy-a",
+            "model": "gpt-4.1",
+            "token_count": 12,
+            "prompt": "must stay customer-side",
+        },
+    )
+
+    assert response.status_code == 422

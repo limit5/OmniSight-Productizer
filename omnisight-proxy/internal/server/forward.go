@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/omnisight/productizer/omnisight-proxy/internal/auth"
 	"github.com/omnisight/productizer/omnisight-proxy/internal/config"
@@ -14,14 +16,22 @@ import (
 const llmForwardPrefix = "/v1/llm/"
 
 type llmForwarder struct {
-	catalog *config.ProviderCatalog
-	client  *http.Client
+	catalog  *config.ProviderCatalog
+	client   *http.Client
+	audit    *proxyAuditSink
+	saas     *saasAuditClient
+	proxyID  string
+	tenantID string
 }
 
 func newLLMForwarder(cfg *config.Settings) http.Handler {
 	return &llmForwarder{
-		catalog: cfg.ProviderCatalog,
-		client:  &http.Client{},
+		catalog:  cfg.ProviderCatalog,
+		client:   &http.Client{},
+		audit:    newProxyAuditSink(cfg.CustomerAuditLogFile),
+		saas:     newSaaSAuditClient(cfg.SaaSAuditURL),
+		proxyID:  cfg.ProxyID,
+		tenantID: cfg.TenantID,
 	}
 }
 
@@ -51,7 +61,19 @@ func (f *llmForwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outbound, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	var requestBody []byte
+	requestReader := r.Body
+	auditEnabled := f.audit != nil || f.saas != nil
+	if auditEnabled {
+		requestBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read request body failed", http.StatusInternalServerError)
+			return
+		}
+		requestReader = io.NopCloser(bytes.NewReader(requestBody))
+	}
+
+	outbound, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, requestReader)
 	if err != nil {
 		http.Error(w, "build upstream request failed", http.StatusInternalServerError)
 		return
@@ -71,15 +93,54 @@ func (f *llmForwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	copyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
+	var responseBody bytes.Buffer
+	responseReader := response.Body
+	if auditEnabled {
+		responseReader = io.NopCloser(io.TeeReader(response.Body, &responseBody))
+	}
 	if flusher, ok := w.(http.Flusher); ok {
-		if _, err := io.Copy(flushWriter{writer: w, flusher: flusher}, response.Body); err != nil {
+		if _, err := io.Copy(flushWriter{writer: w, flusher: flusher}, responseReader); err != nil {
 			return
 		}
+	} else if _, err := io.Copy(w, responseReader); err != nil {
 		return
 	}
-	if _, err := io.Copy(w, response.Body); err != nil {
-		return
+	if auditEnabled {
+		f.recordAudit(r, providerName, upstreamPath, response.StatusCode, requestBody, responseBody.Bytes())
 	}
+}
+
+func (f *llmForwarder) recordAudit(r *http.Request, providerName string, upstreamPath string, statusCode int, requestBody []byte, responseBody []byte) {
+	recordedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	usage := extractUsageMetadata(requestBody, responseBody)
+	metadata := proxyAuditMetadata{
+		RecordedAt:       recordedAt,
+		ProxyID:          f.proxyID,
+		TenantID:         f.tenantID,
+		Provider:         providerName,
+		Method:           r.Method,
+		Path:             "/" + strings.TrimLeft(upstreamPath, "/"),
+		StatusCode:       statusCode,
+		Model:            usage.model,
+		TokenCount:       usage.totalTokens,
+		PromptTokens:     usage.promptTokens,
+		CompletionTokens: usage.completionTokens,
+		TotalTokens:      usage.totalTokens,
+	}
+	_ = f.audit.write(proxyAuditRecord{
+		RecordedAt: recordedAt,
+		ProxyID:    f.proxyID,
+		TenantID:   f.tenantID,
+		Provider:   providerName,
+		Method:     r.Method,
+		Path:       "/" + strings.TrimLeft(upstreamPath, "/"),
+		StatusCode: statusCode,
+		Model:      usage.model,
+		TokenCount: usage.totalTokens,
+		Prompt:     string(requestBody),
+		Response:   string(responseBody),
+	})
+	_ = f.saas.post(r.Context(), metadata)
 }
 
 type flushWriter struct {

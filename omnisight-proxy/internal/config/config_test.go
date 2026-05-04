@@ -59,6 +59,19 @@ func TestValidateRequiresProxyIDWhenHeartbeatConfigured(t *testing.T) {
 	}
 }
 
+func TestValidateRequiresProxyIDWhenSaaSAuditConfigured(t *testing.T) {
+	cfg := ForTest()
+	cfg.SaaSAuditURL = "https://app.example.test/api/v1/byog/proxies/proxy-a/audit"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected missing ProxyID to be rejected")
+	}
+
+	cfg.ProxyID = "proxy-a"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected SaaS audit config with proxy id to validate: %v", err)
+	}
+}
+
 func TestValidateRequiresAuthFieldsWhenEnabled(t *testing.T) {
 	cfg := ForTest()
 	cfg.AuthEnabled = true

@@ -29,6 +29,8 @@ type Settings struct {
 	ProviderConfigFile       string
 	ProviderCatalog          *ProviderCatalog
 	SaaSHeartbeatURL         string
+	SaaSAuditURL             string
+	CustomerAuditLogFile     string
 	HeartbeatIntervalSeconds int
 }
 
@@ -60,6 +62,8 @@ func Load() (*Settings, error) {
 		NonceTTLSeconds:          nonceTTLSeconds,
 		ProviderConfigFile:       envDefault("OMNISIGHT_PROXY_PROVIDER_CONFIG_FILE", ""),
 		SaaSHeartbeatURL:         envDefault("OMNISIGHT_PROXY_SAAS_HEARTBEAT_URL", ""),
+		SaaSAuditURL:             envDefault("OMNISIGHT_PROXY_SAAS_AUDIT_URL", ""),
+		CustomerAuditLogFile:     envDefault("OMNISIGHT_PROXY_CUSTOMER_AUDIT_LOG_FILE", ""),
 		HeartbeatIntervalSeconds: heartbeatIntervalSeconds,
 	}
 	if s.ProviderConfigFile != "" {
@@ -102,6 +106,9 @@ func (s *Settings) Validate() error {
 	}
 	if s.SaaSHeartbeatURL != "" && s.ProxyID == "" {
 		return fmt.Errorf("OMNISIGHT_PROXY_ID must be non-empty when OMNISIGHT_PROXY_SAAS_HEARTBEAT_URL is set")
+	}
+	if s.SaaSAuditURL != "" && s.ProxyID == "" {
+		return fmt.Errorf("OMNISIGHT_PROXY_ID must be non-empty when OMNISIGHT_PROXY_SAAS_AUDIT_URL is set")
 	}
 	if s.AuthEnabled {
 		required := map[string]string{

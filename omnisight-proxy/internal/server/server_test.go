@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -146,6 +147,71 @@ func TestLLMForwarderStreamsRequestToConfiguredProvider(t *testing.T) {
 	}
 	if rec.Header().Get("Content-Type") != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", rec.Header().Get("Content-Type"))
+	}
+}
+
+func TestLLMForwarderWritesCustomerAuditAndPostsSaaSMetadataOnly(t *testing.T) {
+	var saasMetadata map[string]any
+	saas := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&saasMetadata); err != nil {
+			t.Fatalf("decode SaaS metadata: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer saas.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":5,"total_tokens":12}}`))
+	}))
+	defer upstream.Close()
+
+	auditPath := filepath.Join(t.TempDir(), "proxy-audit.jsonl")
+	cfg := forwardingConfig(t, upstream.URL)
+	cfg.ProxyID = "proxy-a"
+	cfg.TenantID = "tenant-a"
+	cfg.CustomerAuditLogFile = auditPath
+	cfg.SaaSAuditURL = saas.URL
+	req := httptest.NewRequest(http.MethodPost, "/v1/llm/openai/v1/chat/completions", strings.NewReader(`{"model":"gpt-4.1","messages":[{"role":"user","content":"customer secret prompt"}]}`))
+	rec := httptest.NewRecorder()
+
+	NewHandler(cfg).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	rawAudit, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	var auditRecord map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(rawAudit), &auditRecord); err != nil {
+		t.Fatalf("decode audit log: %v", err)
+	}
+	if !strings.Contains(auditRecord["prompt"].(string), "customer secret prompt") {
+		t.Fatalf("customer audit prompt missing full request: %v", auditRecord["prompt"])
+	}
+	if !strings.Contains(auditRecord["response"].(string), `"total_tokens":12`) {
+		t.Fatalf("customer audit response missing full response: %v", auditRecord["response"])
+	}
+	if auditRecord["token_count"] != float64(12) {
+		t.Fatalf("customer audit token_count = %v, want 12", auditRecord["token_count"])
+	}
+	if saasMetadata["proxy_id"] != "proxy-a" {
+		t.Fatalf("SaaS proxy_id = %v, want proxy-a", saasMetadata["proxy_id"])
+	}
+	if saasMetadata["model"] != "gpt-4.1" {
+		t.Fatalf("SaaS model = %v, want gpt-4.1", saasMetadata["model"])
+	}
+	if saasMetadata["token_count"] != float64(12) {
+		t.Fatalf("SaaS token_count = %v, want 12", saasMetadata["token_count"])
+	}
+	if _, ok := saasMetadata["prompt"]; ok {
+		t.Fatal("SaaS metadata leaked prompt")
+	}
+	if _, ok := saasMetadata["response"]; ok {
+		t.Fatal("SaaS metadata leaked response")
 	}
 }
 
