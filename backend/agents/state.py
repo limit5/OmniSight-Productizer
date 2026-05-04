@@ -64,10 +64,16 @@ class GraphState(BaseModel):
     # hasn't set it explicitly. Unknown values collapse to t1.
     sandbox_tier: str = "t1"
 
-    # BP.C.5 (Blueprint v2 Phase C — T-shirt Gateway + S/M/XL Topology):
+    # BP.C.5/BP.C.6 (Blueprint v2 Phase C — T-shirt Gateway + S/M/XL
+    # Topology):
     # T-shirt size assigned by the upstream sizer (`backend/t_shirt_sizer.py`,
     # BP.C.1) and consumed by the topology builder (`backend/graph_topology.py`,
     # BP.C.2) to pick S (single-track) / M (standard DAG) / XL (fractal matrix).
+    #
+    # This axis is intentionally orthogonal to C0 ``ProjectClass`` and
+    # Blueprint ``target_triple``: ProjectClass describes business/domain,
+    # target_triple describes compilation target, and size describes graph
+    # scale/topology. None of those dimensions should encode another.
     #
     # Default = "M" because:
     #   1. M maps to the *current* legacy LangGraph topology (standard DAG),
@@ -155,27 +161,3 @@ class GraphState(BaseModel):
     # specialist.
     soc_vendor: str = ""
     sdk_version: str = ""
-
-    # BP.C.5 (2026-04-25) — T-shirt sizing dimension for the S/M/XL
-    # topology gateway (Blueprint v2 Phase C). Written by
-    # ``backend.t_shirt_sizer`` (BP.C.1) before graph execution and
-    # read by ``backend.graph_topology`` (BP.C.2) / ``backend.agents.graph``
-    # (BP.C.3) to choose the correct topology builder:
-    #
-    #   - "S"  → single-track (lightweight sequential pipeline)
-    #   - "M"  → standard DAG (current default LangGraph topology)
-    #   - "XL" → fractal matrix (heavy multi-agent recursion)
-    #
-    # Default is ``"M"`` so existing call sites and tests that don't
-    # populate this field keep their pre-BP.C behaviour (standard DAG).
-    # The dimension is independent of ``ProjectClass`` (BP.C.6 — three-
-    # way orthogonal axis: ProjectClass × Target_Triple × T-shirt size)
-    # and of ``OMNISIGHT_TOPOLOGY_MODE`` (the legacy/smxl feature flag
-    # is read at gateway level, not here).
-    #
-    # Module-global audit (SOP Step 1): this field lives on the per-
-    # request ``GraphState`` instance — no shared singleton, no cross-
-    # worker visibility concern; each uvicorn worker constructs its own
-    # state object per invocation (answer type 1: not shared because
-    # each worker derives identical defaults independently).
-    size: Literal["S", "M", "XL"] = "M"

@@ -1,6 +1,12 @@
-"""LangGraph topology for the OmniSight multi-agent system.
+"""LangGraph entry point for the OmniSight multi-agent system.
 
-Graph structure (with tool calling and self-healing loop):
+Runtime topology is gated by ``OMNISIGHT_TOPOLOGY_MODE``:
+
+* ``legacy`` (default): always use the M standard DAG for backward
+  compatibility.
+* ``smxl``: select S / M / XL from the run-scoped ``GraphState.size``.
+
+M graph structure (with tool calling and self-healing loop):
 
     ┌──────────┐
     │  START   │
@@ -45,22 +51,17 @@ Graph structure (with tool calling and self-healing loop):
 
 from __future__ import annotations
 
-from backend.llm_adapter import END, HumanMessage, StateGraph
+import os
+from types import MappingProxyType
+
+from backend.llm_adapter import HumanMessage
 from backend.agents.state import GraphState
-from backend.agents.nodes import (
-    orchestrator_node,
-    conversation_node,
-    firmware_node,
-    software_node,
-    validator_node,
-    reporter_node,
-    reviewer_node,
-    general_node,
-    tool_executor_node,
-    error_check_node,
-    _should_retry,
-    context_compression_gate,
-    summarizer_node,
+from backend.graph_topology import (
+    TopologySize,
+    VALID_TOPOLOGY_SIZES,
+    build_topology,
+    _check_tool_calls,
+    _route_after_orchestrator,
 )
 from backend.security.llm_firewall import (
     BLOCKED_REFUSAL_MESSAGE,
@@ -69,102 +70,45 @@ from backend.security.llm_firewall import (
 )
 
 
-_VALID_SPECIALISTS = {"firmware", "software", "validator", "reporter", "reviewer", "general"}
+TOPOLOGY_MODE_ENV = "OMNISIGHT_TOPOLOGY_MODE"
+VALID_TOPOLOGY_MODES: tuple[str, ...] = ("legacy", "smxl")
 
 
-def _route_after_orchestrator(state: GraphState) -> str:
-    """Conditional edge: conversation mode or specialist routing."""
-    if state.is_conversational:
-        return "conversation"
-    return state.routed_to if state.routed_to in _VALID_SPECIALISTS else "general"
+def get_topology_mode() -> str:
+    """Return the graph topology feature-flag mode.
+
+    Unknown values fail closed to ``legacy`` so a typo does not activate
+    the BP.C S/M/XL runtime path before operators intend it.
+    """
+    mode = (os.getenv(TOPOLOGY_MODE_ENV) or "legacy").strip().lower()
+    if mode in VALID_TOPOLOGY_MODES:
+        return mode
+    return "legacy"
 
 
-def _check_tool_calls(state: GraphState) -> str:
-    """After a specialist runs, check if it requested tool calls."""
-    if state.tool_calls:
-        return "tool_executor"
-    return "context_gate"
+def build_graph(size: TopologySize = "M"):
+    """Construct and compile the requested S/M/XL topology graph."""
+    return build_topology(size)
 
 
-def build_graph() -> StateGraph:
-    """Construct and compile the agent topology graph."""
-    builder = StateGraph(GraphState)
+# Singleton compiled graphs.
+#
+# Module-global / cross-worker audit: the mapping is read-only after import and
+# each uvicorn worker compiles the same three graphs from code. No mutable
+# cache, singleton mutation, or cross-worker coordination is required.
+_TOPOLOGY_GRAPHS = MappingProxyType({
+    size: build_graph(size) for size in VALID_TOPOLOGY_SIZES
+})
 
-    # ── Nodes ──
-    builder.add_node("orchestrator", orchestrator_node)
-    builder.add_node("firmware", firmware_node)
-    builder.add_node("software", software_node)
-    builder.add_node("validator", validator_node)
-    builder.add_node("reporter", reporter_node)
-    builder.add_node("reviewer", reviewer_node)
-    builder.add_node("general", general_node)
-    builder.add_node("tool_executor", tool_executor_node)
-    builder.add_node("error_check", error_check_node)
-    builder.add_node("conversation", conversation_node)
-    builder.add_node("context_gate", context_compression_gate)
-    builder.add_node("summarizer", summarizer_node)
-
-    # ── Edges ──
-
-    # Entry
-    builder.set_entry_point("orchestrator")
-
-    # Orchestrator → conversation or specialist (conditional)
-    builder.add_conditional_edges(
-        "orchestrator",
-        _route_after_orchestrator,
-        {
-            "conversation": "conversation",
-            "firmware": "firmware",
-            "software": "software",
-            "validator": "validator",
-            "reporter": "reporter",
-            "reviewer": "reviewer",
-            "general": "general",
-        },
-    )
-
-    # Conversation → context_gate → summarizer (direct, no tools)
-    builder.add_edge("conversation", "context_gate")
-
-    # All specialists → check if tools are needed (conditional)
-    for specialist in ("firmware", "software", "validator", "reporter", "reviewer", "general"):
-        builder.add_conditional_edges(
-            specialist,
-            _check_tool_calls,
-            {
-                "tool_executor": "tool_executor",
-                "context_gate": "context_gate",
-            },
-        )
-
-    # Tool executor → error_check (self-healing gate)
-    builder.add_edge("tool_executor", "error_check")
-
-    # Error check → retry specialist or proceed to context_gate → summarizer
-    builder.add_conditional_edges(
-        "error_check",
-        _should_retry,
-        {
-            "firmware": "firmware",
-            "software": "software",
-            "validator": "validator",
-            "reporter": "reporter",
-            "reviewer": "reviewer",
-            "general": "general",
-            "summarizer": "context_gate",
-        },
-    )
-
-    # Context compression gate → summarizer → END
-    builder.add_edge("context_gate", "summarizer")
-    builder.add_edge("summarizer", END)
-
-    return builder.compile()
+# Backward-compatible alias used by existing imports/tests: legacy == M.
+agent_graph = _TOPOLOGY_GRAPHS["M"]
 
 
-# Singleton compiled graph
-agent_graph = build_graph()
+def _select_graph_for_state(state: GraphState):
+    """Pick the compiled graph for a run-scoped ``GraphState``."""
+    if get_topology_mode() != "smxl":
+        return agent_graph
+    return _TOPOLOGY_GRAPHS[state.size]
 
 
 GRAPH_TIMEOUT = 300  # 5 minutes max per graph execution
@@ -213,6 +157,7 @@ async def run_graph(
     task_id: str | None = None,
     soc_vendor: str = "",
     sdk_version: str = "",
+    size: TopologySize = "M",
     firewall_result: FirewallResult | None = None,
     firewall_trust: str = "external",
 ) -> GraphState:
@@ -230,6 +175,9 @@ async def run_graph(
             so prefetch_for_sandbox_error can enforce the SDK
             hard-lock. Empty strings keep the gate permissive (the
             non-platform-aware default).
+        size: BP.C S/M/XL topology size. Defaults to ``"M"`` so existing
+            callers keep the legacy standard DAG until BP.C.4 wires the
+            upstream sizer.
         firewall_trust: ``external`` runs the KS.4.12 firewall before
             routing. ``internal`` is reserved for specialist-to-specialist
             traffic that has already passed the user-facing entry guard.
@@ -255,6 +203,7 @@ async def run_graph(
                 task_skill_context=task_skill_context,
                 soc_vendor=soc_vendor,
                 sdk_version=sdk_version,
+                size=size,
                 answer=firewall.refusal_message or BLOCKED_REFUSAL_MESSAGE,
                 last_error="llm_firewall_blocked",
             )
@@ -275,10 +224,11 @@ async def run_graph(
         task_skill_context=task_skill_context,
         soc_vendor=soc_vendor,
         sdk_version=sdk_version,
+        size=size,
     )
     try:
         result = await asyncio.wait_for(
-            agent_graph.ainvoke(initial_state),
+            _select_graph_for_state(initial_state).ainvoke(initial_state),
             timeout=GRAPH_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -293,6 +243,7 @@ async def run_graph(
             task_skill_context=task_skill_context,
             soc_vendor=soc_vendor,
             sdk_version=sdk_version,
+            size=size,
             answer=f"[TIMEOUT] Graph execution exceeded {GRAPH_TIMEOUT}s",
             last_error="Graph execution timeout",
         )

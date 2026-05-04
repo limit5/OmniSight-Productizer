@@ -16,6 +16,10 @@ Webhook signature check: we re-use the same HMAC shared secret as
 automation rule can hit either path.  When the secret is unset, the
 path is still available for operator-driven testing behind the normal
 ``require_operator`` auth — Jira itself is locked out.
+
+BP.C.4 sizing: ``orchestrator_gateway.intake`` runs the T-shirt sizer
+after the input firewall and before the O4 DAG/CATC split, then this
+HTTP surface returns the resulting ``size`` / ``sizing`` metadata.
 """
 
 from __future__ import annotations
@@ -146,7 +150,8 @@ async def intake_endpoint(
     works, then drives the ``orchestrator_gateway.intake`` pipeline.
 
     On success: 200 JSON with the intake outcome (``state`` tells the
-    caller whether CATCs were queued or held for PM review).
+    caller whether CATCs were queued or held for PM review; ``size`` /
+    ``sizing`` expose the BP.C.4 pre-stage decision).
     On failure: 4xx/5xx JSON with ``{reason, detail, context}``.
     """
     raw = await request.body()

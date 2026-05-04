@@ -211,13 +211,13 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.C — T-shirt Gateway + S/M/XL Topology（~2-3 週）
 > 前置 BP.B；feature flag `OMNISIGHT_TOPOLOGY_MODE=legacy|smxl`
-- [ ] BP.C.1 `backend/t_shirt_sizer.py` — Haiku/Gemma 評估 S/M/XL
-- [ ] BP.C.2 `backend/graph_topology.py` — S（單軌）/ M（標準 DAG）/ XL（碎形矩陣）三種 builder
-- [ ] BP.C.3 `backend/agents/graph.py` 重寫支持 3 種 topology
-- [ ] BP.C.4 `backend/routers/orchestrator.py` 加 sizing 前置層（在 O4 CATC split 之前）
+- [x][G] BP.C.1 `backend/t_shirt_sizer.py` — Haiku/Gemma 評估 S/M/XL
+- [x][G] BP.C.2 `backend/graph_topology.py` — S（單軌）/ M（標準 DAG）/ XL（碎形矩陣）三種 builder
+- [x][G] BP.C.3 `backend/agents/graph.py` 重寫支持 3 種 topology
+- [x][G] BP.C.4 `backend/routers/orchestrator.py` 加 sizing 前置層（在 O4 CATC split 之前）
 - [x] BP.C.5 `GraphState` 加 `size: Literal["S","M","XL"]` <!-- 2026-04-27: `backend/agents/state.py` 加 `size: Literal["S","M","XL"] = "M"` schema 欄位（M = 標準 DAG，匹配 legacy topology，向後相容直到 BP.C.4 sizer pre-stage 上線）。配 13 顆 schema-shape test in `backend/tests/test_graph_state.py`：default-is-M / 三 literal accept / 7 invalid reject (含 `"L"` typo / 大小寫敏感 / whitespace / None / int) / orthogonality / pre-BP.C 既有 caller 不受影響。114/114 GraphState 消費者鄰居測試 (test_nodes + test_verification_loop + test_clone_spec_context + test_graph_state) 0 regression。test_debug_blackboard 1 失敗是 pre-existing 401（已 stash 驗證、與此無關）。Module-global audit: 純 per-instance Pydantic field、無 module-level state、不需 cross-worker coord（LangGraph state 是 run-scoped）。**Production status: dev-only** — schema-only addition; downstream sizer (BP.C.1) / topology builder (BP.C.2) / orchestrator pre-stage (BP.C.4) 尚未實作；feature flag `OMNISIGHT_TOPOLOGY_MODE=legacy|smxl` 仍掛 legacy。-->
-- [ ] BP.C.6 與 C0 ProjectClass enum 三維正交（ProjectClass / Target_Triple / T-shirt size）
-- [ ] BP.C.7 `backend/tests/test_topology_smxl.py` — ~90 test
+- [x][G] BP.C.6 與 C0 ProjectClass enum 三維正交（ProjectClass / Target_Triple / T-shirt size）
+- [x][G] BP.C.7 `backend/tests/test_topology_smxl.py` — ~90 test
 
 ### BP.D — 4 Compliance Matrices（Auxiliary）+ 第三方 Legal Review（~2-3 週）
 > 前置 BP.B；**第三方公正單位 legal review 與開發並行進行**
@@ -342,7 +342,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] A2 agent_type backward-compat 雙寫 3-6 個月（implements: BP.B.1 + BP.B.7）
 - [ ] A3 合規宣稱 Auxiliary 字眼 + 第三方 legal review（implements: BP.D.5 + BP.D.6 + BP.D.10）
 - [ ] B1 PEP Gateway per-Guild policy（implements: BP.D.8）
-- [ ] B2 O4 Gateway vs T-shirt 重疊（implements: BP.C.4）
+- [x] B2 O4 Gateway vs T-shirt 重疊（implements: BP.C.4）
 - [ ] B3 Token Budget per-Guild bucket（implements: BP.F + 獨立 ticket）
 - [ ] B4 Skill Packs（X5-X9 + D1 + W6-W8）歸 Guild（implements: BP.B + W3.1）
 - [ ] B5 C26 HMI 併入 Frontend Guild sub-skill（implements: BP.B.2 frontend）
@@ -351,7 +351,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] C1 Bootstrap Wizard Guild Step 6（implements: BP.K.6）
 - [ ] C2 Multi-tenancy tenant_guild_config（獨立 alembic 0021）
 - [ ] C3 Test 分級（implements: BP.L.1-2）
-- [ ] C4 ProjectClass 三維正交（implements: BP.C.6）
+- [x] C4 ProjectClass 三維正交（implements: BP.C.6）
 - [x] C5 Notification Red Card 映射（implements: BP.H.3）
 - [ ] C6 37 role skill 物理位置遷移（implements: BP.B.6）
 

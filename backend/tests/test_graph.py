@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from backend.agents.graph import build_graph, run_graph, agent_graph
+from backend.agents.graph import (
+    build_graph,
+    run_graph,
+    agent_graph,
+    get_topology_mode,
+    _select_graph_for_state,
+)
+from backend.agents.state import GraphState
 from backend.security.llm_firewall import (
     BLOCKED_REFUSAL_MESSAGE,
     FirewallResult,
@@ -33,6 +40,50 @@ class TestGraphStructure:
     def test_build_graph_returns_compiled(self):
         graph = build_graph()
         assert hasattr(graph, "ainvoke")
+
+    @pytest.mark.parametrize(
+        ("size", "expected_node"),
+        [
+            ("S", "single_track"),
+            ("M", "firmware"),
+            ("XL", "portfolio_architect"),
+        ],
+    )
+    def test_build_graph_dispatches_to_smxl_topologies(self, size, expected_node):
+        graph = build_graph(size)
+        assert expected_node in graph.nodes
+
+    def test_topology_mode_defaults_to_legacy(self, monkeypatch):
+        monkeypatch.delenv("OMNISIGHT_TOPOLOGY_MODE", raising=False)
+        assert get_topology_mode() == "legacy"
+
+    def test_topology_mode_accepts_smxl(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_TOPOLOGY_MODE", "smxl")
+        assert get_topology_mode() == "smxl"
+
+    def test_topology_mode_unknown_fails_closed_to_legacy(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_TOPOLOGY_MODE", "experimental")
+        assert get_topology_mode() == "legacy"
+
+    def test_legacy_mode_ignores_state_size(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_TOPOLOGY_MODE", "legacy")
+        graph = _select_graph_for_state(GraphState(size="XL"))
+        assert graph is agent_graph
+        assert "firmware" in graph.nodes
+        assert "portfolio_architect" not in graph.nodes
+
+    @pytest.mark.parametrize(
+        ("size", "expected_node"),
+        [
+            ("S", "single_track"),
+            ("M", "firmware"),
+            ("XL", "portfolio_architect"),
+        ],
+    )
+    def test_smxl_mode_selects_graphstate_size(self, monkeypatch, size, expected_node):
+        monkeypatch.setenv("OMNISIGHT_TOPOLOGY_MODE", "smxl")
+        graph = _select_graph_for_state(GraphState(size=size))
+        assert expected_node in graph.nodes
 
 
 class TestRunGraph:
