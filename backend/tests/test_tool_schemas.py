@@ -21,6 +21,7 @@ import pytest
 from backend.agents.tool_schemas import (
     ToolSchema,
     _REGISTRY,
+    _load_hd_skill_schemas,
     generate_markdown_reference,
     get_schema,
     list_schemas,
@@ -81,6 +82,19 @@ def test_hd_skills_all_registered():
     for s in hd_skills:
         assert s.name.startswith("SKILL_HD_"), f"HD skill {s.name} missing prefix"
         assert s.deferred, f"HD skill {s.name} should be deferred"
+
+
+def test_hd_skills_are_loaded_from_wp2_bundled_skills():
+    """BP.B Guild SKILL_HD_* schemas come from WP.2 markdown skills."""
+    project_root = Path(__file__).resolve().parents[2]
+    loaded = _load_hd_skill_schemas(project_root)
+    assert len(loaded) == EXPECTED_HD_SKILL_COUNT
+    loaded_names = {s.name for s in loaded}
+    registered_names = {
+        s.name for s in _REGISTRY.values() if s.category == "skill_hd"
+    }
+    assert loaded_names == registered_names
+    assert get_schema("SKILL_HD_PARSE").description.startswith("[HD.1]")
 
 
 # ─── Anthropic API serialization ─────────────────────────────────

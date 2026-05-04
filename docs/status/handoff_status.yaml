@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 365
+entry_count: 366
 status_counts:
-  dev-only: 355
+  dev-only: 356
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3428,3 +3428,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production image / frontend bundle 需重建後 live smoke：開 command palette 搜尋 skill、選取後確認 Orchestrator
     chat 收到 `@skill-name`。
+- id: 2026-05-05--WP.2.5
+  header_line: 45855
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.5
+  title: WP.2.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image 重建後，以 BP.B/HD task smoke 確認 `to_anthropic_tools(["SKILL_HD_PARSE"])` 仍可取
+    schema，且 bundled skill source path 出現在 `/skills/effective`。

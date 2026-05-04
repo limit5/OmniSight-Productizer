@@ -29,9 +29,12 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §2
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from backend.agents import skills_loader
 
 ToolCategory = Literal[
     "filesystem",
@@ -496,51 +499,36 @@ for _name, _desc, _cat in [
         )
     )
 
-# ─────────────────────────────────────────────────────────────────
-#  OmniSight SKILL_HD_* — placeholder schemas for HD priority skills
-#  Full input_schema will be filled in as each HD phase ships.
-# ─────────────────────────────────────────────────────────────────
+def _load_hd_skill_schemas(project_root: Path) -> list[ToolSchema]:
+    """Load BP.B Guild HD skill schemas from the WP.2 skill loader.
 
-_SKILL_HD_REGISTRY = [
-    ("SKILL_HD_PARSE", "Parse an EDA file (KiCad / Altium / OrCAD / etc) into HDIR.", "HD.1"),
-    ("SKILL_HD_DIFF_REFERENCE", "Reference vs customer design diff.", "HD.4"),
-    ("SKILL_HD_SENSOR_SWAP_FEASIBILITY", "Sensor substitution feasibility.", "HD.5"),
-    ("SKILL_HD_FW_SYNC_PATCH", "HW change → FW patch list.", "HD.7"),
-    ("SKILL_HD_PCB_SI_ANALYZE", "PCB signal integrity analysis.", "HD.2"),
-    ("SKILL_HD_HIL_RUN", "Hardware-in-the-loop session execution.", "HD.8"),
-    ("SKILL_HD_RAG_QUERY", "Datasheet RAG retrieval.", "HD.9"),
-    ("SKILL_HD_CERT_RETEST_PLAN", "EMC / safety retest plan generator.", "HD.10"),
-    ("SKILL_HD_PLATFORM_RESOLVE", "SoC mark → platform spec lookup.", "HD.16"),
-    ("SKILL_HD_VENDOR_SYNC", "Vendor SDK upstream sync pipeline.", "HD.16"),
-    ("SKILL_HD_VENDOR_REBASE", "Patch rebase conflict auto-attempt.", "HD.16"),
-    ("SKILL_HD_NDA_GATE", "NDA boundary enforcement check.", "HD.16"),
-    ("SKILL_HD_CUSTOMER_OVERLAY", "Per-customer overlay manifest resolver.", "HD.17"),
-    ("SKILL_HD_LIFECYCLE_AUDIT", "Annual reproducibility audit.", "HD.18"),
-    ("SKILL_HD_CVE_IMPACT", "CVE feed → SBOM impact analysis.", "HD.18"),
-    ("SKILL_HD_CVE_AUTO_BACKPORT", "Vendor patch → customer-overlay backport proposal.", "HD.18"),
-    ("SKILL_HD_BRINGUP_CHECKLIST", "SoC-specific bring-up checklist generator.", "HD.19"),
-    ("SKILL_HD_BRINGUP_LIVE_PARSE", "Live boot console → AI parse blockers.", "HD.19"),
-    ("SKILL_HD_PORT_ADVISOR", "Cross-SoC port required-changes + effort estimate.", "HD.19"),
-    ("SKILL_HD_DEVKIT_FORK", "DevKit reference → customer fork starting point.", "HD.19"),
-    ("SKILL_HD_ISP_TUNING_DIFF", "ISP tuning binary before/after compare.", "HD.20"),
-    ("SKILL_HD_BLOB_COMPAT", "(BSP-version, blob-version) compatibility matrix.", "HD.20"),
-    ("SKILL_HD_PRODUCTION_BUNDLE", "EMS production access bundle generator.", "HD.21"),
-    ("SKILL_HD_OTA_PACKAGE_GEN", "OTA bundle generation (SWUpdate / RAUC / A-B).", "HD.21"),
-    ("SKILL_HD_SBOM_GENERATE", "SBOM CycloneDX + SPDX generation.", "HD.21"),
-    ("SKILL_HD_LICENSE_AUDIT", "Ship-time license conflict check.", "HD.21"),
-    ("SKILL_HD_AUTHENTICITY_VERIFY", "Chip authenticity challenge / verification.", "HD.21"),
-    ("SKILL_HD_AI_COMPANION", "Unified chat surface skill router.", "HD.21"),
-]
-
-for _name, _desc, _phase in _SKILL_HD_REGISTRY:
-    register_tool(
+    Module-global state audit: import-time schemas are derived from bundled
+    repo files, so every worker computes the same registry from the same
+    checkout without sharing mutable process state.
+    """
+    registry = skills_loader.load_default_scopes(
+        project_root,
+        home=Path("/__omnisight_no_home_skills_for_tool_schemas__"),
+    )
+    return [
         ToolSchema(
-            name=_name,
-            description=f"[{_phase}] {_desc} (placeholder; input_schema fills as phase ships)",
+            name=skill.name,
+            description=(
+                f"{skill.description} "
+                "(placeholder; input_schema fills as phase ships)"
+            ),
             category="skill_hd",
             deferred=True,
             input_schema={"type": "object"},
         )
+        for skill in registry.list_all()
+        if skill.name.startswith("SKILL_HD_")
+    ]
+
+
+for _schema in _load_hd_skill_schemas(Path(__file__).resolve().parents[2]):
+    register_tool(
+        _schema
     )
 
 
