@@ -26,10 +26,10 @@ pyyaml==6.0.3
 
 # --- Agent graph / LLM -------------------------------------------------
 langgraph==1.1.6
-langchain-core==1.2.28
+langchain-core==1.2.31
 langchain-anthropic==1.4.0
 langchain-google-genai==4.2.1
-langchain-openai==1.1.12
+langchain-openai==1.1.14
 langchain-groq==1.1.2
 langchain-together==0.4.0
 langchain-ollama==1.1.0
