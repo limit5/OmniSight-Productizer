@@ -62,6 +62,7 @@ from backend.dag_validator import ValidationError as DagValError
 from backend.dag_validator import validate as dag_validate
 from backend.queue_backend import PriorityLevel
 from backend.security.llm_firewall import FirewallResult, enforce_input
+from backend.t_shirt_sizer import TShirtSizingReport, heuristic_size_project
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,9 @@ class IntakeError(RuntimeError):
 # ``dag_planner.parse_response`` to get a ``DAG`` object.
 DagSplitter = Callable[[str, str], Awaitable[tuple[str, int]]]
 
+# A T-shirt sizer runs after input firewalling and before the O4 DAG split.
+TShirtSizer = Callable[[str], Awaitable[TShirtSizingReport]]
+
 
 async def _default_splitter(jira_ticket: str, story_text: str
                             ) -> tuple[str, int]:
@@ -154,6 +158,22 @@ async def _default_splitter(jira_ticket: str, story_text: str
     except Exception as exc:
         logger.warning("orchestrator_gateway: live_ask_fn failed: %s", exc)
         return ("", 0)
+
+
+async def _default_sizer(story_text: str) -> TShirtSizingReport:
+    """Run BP.C.1 sizing before the O4 CATC split.
+
+    The lazy import mirrors ``_default_splitter`` so importing this module
+    stays network-free. Module-global / cross-worker audit: this helper
+    stores no mutable state; each worker derives the sizing decision from
+    request text plus identical env-configured model order.
+    """
+    try:
+        from backend.t_shirt_sizer import size_project
+        return await size_project(story_text)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.warning("orchestrator_gateway: T-shirt sizer failed: %s", exc)
+        return heuristic_size_project(story_text)
 
 
 def _build_split_prompt(jira_ticket: str, story_text: str) -> str:
@@ -214,6 +234,8 @@ class IntakeSession:
     reject_reason: str | None = None
     replan_count: int = 0
     last_updated_at: float = 0.0
+    size: str = "M"
+    sizing_report: TShirtSizingReport | None = None
 
     def status_snapshot(self) -> dict[str, Any]:
         """Build the GET /status response payload.
@@ -251,6 +273,11 @@ class IntakeSession:
             "complexity_score": self.complexity_score,
             "tokens_used": self.tokens_used,
             "token_budget": self.token_budget,
+            "size": self.size,
+            "sizing": (
+                self.sizing_report.model_dump()
+                if self.sizing_report is not None else None
+            ),
             "dag": (self.dag.model_dump() if self.dag else None),
             "cards": cards_payload,
         }
@@ -312,6 +339,7 @@ def _subtask_key(jira_ticket: str, index: int) -> str:
 def build_catcs_from_dag(jira_ticket: str, dag: DAG,
                          *, acceptance_criteria: str = "",
                          domain_context: str = "",
+                         size: str = "M",
                          forbidden_globs: list[str] | None = None,
                          ) -> list[TaskCard]:
     """Produce one TaskCard per DAG node.
@@ -336,8 +364,11 @@ def build_catcs_from_dag(jira_ticket: str, dag: DAG,
                     "forbidden": forbidden,
                 },
             },
-            "domain_context": domain_context or f"task={task.task_id}",
+            "domain_context": (
+                domain_context or f"topology_size={size} task={task.task_id}"
+            ),
             "handoff_protocol": [
+                f"topology_size:{size}",
                 f"Run toolchain: {task.toolchain}",
                 "Commit changes and push to Gerrit refs/for/main",
             ],
@@ -598,6 +629,8 @@ class IntakeOutcome:
     complexity_score: int
     require_human_review: bool
     state: str
+    size: str
+    sizing: TShirtSizingReport | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -610,6 +643,11 @@ class IntakeOutcome:
             "complexity_score": self.complexity_score,
             "require_human_review": self.require_human_review,
             "state": self.state,
+            "size": self.size,
+            "sizing": (
+                self.sizing.model_dump()
+                if self.sizing is not None else None
+            ),
             "cards": [
                 {
                     "task_id": c.task_id,
@@ -630,6 +668,7 @@ async def intake(
     forbidden_globs: list[str] | None = None,
     tenant_id: str | None = None,
     firewall_result: FirewallResult | None = None,
+    sizer: TShirtSizer | None = None,
 ) -> IntakeOutcome:
     """Main entry point — accepts a parsed Jira webhook and drives the
     full pipeline.  Raises ``IntakeError`` on any rejection.
@@ -691,6 +730,27 @@ async def intake(
         session.replan_count = existing.replan_count + 1
     _sessions[jira_ticket] = session
 
+    size_project = sizer or _default_sizer
+    try:
+        sizing = await size_project(story)
+    except Exception as exc:
+        logger.warning("orchestrator_gateway: injected T-shirt sizer failed: %s", exc)
+        sizing = heuristic_size_project(story)
+    session.size = sizing.size
+    session.sizing_report = sizing
+    session.tokens_used = int(sizing.tokens_used or 0)
+    if session.tokens_used > budget:
+        session.state = "rejected"
+        session.reject_reason = IntakeRejectReason.token_budget_exceeded.value
+        session.last_updated_at = time.time()
+        _emit_token_alert("token_budget_exceeded",
+                          session.tokens_used, budget, jira_ticket)
+        raise IntakeError(
+            IntakeRejectReason.token_budget_exceeded,
+            f"intake consumed {session.tokens_used} tokens > budget {budget}",
+            {"tokens_used": session.tokens_used, "token_budget": budget},
+        )
+
     split = splitter or _default_splitter
     try:
         raw, tokens = await split(jira_ticket, story)
@@ -703,7 +763,7 @@ async def intake(
             f"DAG splitter raised: {exc}",
         ) from exc
 
-    session.tokens_used = int(tokens or 0)
+    session.tokens_used += int(tokens or 0)
     session.last_updated_at = time.time()
     if session.tokens_used > budget:
         session.state = "rejected"
@@ -760,6 +820,7 @@ async def intake(
     cards = build_catcs_from_dag(
         jira_ticket, dag,
         acceptance_criteria=story,
+        size=session.size,
         forbidden_globs=forbidden_globs,
     )
 
@@ -798,6 +859,8 @@ async def intake(
             complexity_score=score,
             require_human_review=True,
             state="pending",
+            size=session.size,
+            sizing=session.sizing_report,
         )
 
     # Push to queue.
@@ -821,6 +884,8 @@ async def intake(
         complexity_score=score,
         require_human_review=False,
         state="queued",
+        size=session.size,
+        sizing=session.sizing_report,
     )
 
 
@@ -830,6 +895,7 @@ async def replan(
     approver: str,
     new_story: str | None = None,
     splitter: DagSplitter | None = None,
+    sizer: TShirtSizer | None = None,
     token_budget: int | None = None,
     priority: PriorityLevel = PriorityLevel.P2,
     forbidden_globs: list[str] | None = None,
@@ -869,6 +935,7 @@ async def replan(
         cards = build_catcs_from_dag(
             jira_ticket, session.dag,
             acceptance_criteria=session.story_text,
+            size=session.size,
             forbidden_globs=forbidden_globs,
         )
         conflicts = check_impact_scope_intersect(cards, dag=session.dag)
@@ -898,6 +965,8 @@ async def replan(
             complexity_score=session.complexity_score,
             require_human_review=False,
             state="queued",
+            size=session.size,
+            sizing=session.sizing_report,
         )
 
     # Otherwise, re-drive the LLM split (with new story if supplied).
@@ -909,6 +978,7 @@ async def replan(
     return await intake(
         webhook_body,
         splitter=splitter,
+        sizer=sizer,
         token_budget=(token_budget or session.token_budget),
         priority=priority,
         forbidden_globs=forbidden_globs,
@@ -1086,6 +1156,7 @@ def _publish_intake_event(session: IntakeSession, *, event: str) -> None:
             complexity_score=session.complexity_score,
             require_human_review=session.require_human_review,
             n_cards=len(session.cards),
+            size=session.size,
         )
     except Exception as exc:  # pragma: no cover
         logger.debug("intake SSE emit failed: %s", exc)

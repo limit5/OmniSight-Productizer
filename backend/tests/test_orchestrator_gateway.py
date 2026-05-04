@@ -34,6 +34,7 @@ from backend.orchestrator_gateway import (
 )
 from backend.queue_backend import PriorityLevel
 from backend.security.llm_firewall import FirewallResult
+from backend.t_shirt_sizer import TShirtSizingReport
 
 
 # ──────────────────────────────────────────────────────────────
@@ -42,9 +43,14 @@ from backend.security.llm_firewall import FirewallResult
 
 
 @pytest.fixture(autouse=True)
-def _fresh_gateway():
+def _fresh_gateway(monkeypatch):
     og.reset_registry_for_tests()
     qb.set_backend_for_tests(qb.InMemoryQueueBackend())
+    monkeypatch.setattr(
+        "backend.orchestrator_gateway._default_sizer",
+        _deterministic_sizer("M", tokens=0),
+        raising=True,
+    )
     yield
     og.reset_registry_for_tests()
     qb.set_backend_for_tests(None)
@@ -95,6 +101,19 @@ def _deterministic_split(dag: DAG, tokens: int = 100):
     async def _fn(ticket: str, story: str) -> tuple[str, int]:
         d = dag.model_copy(update={"dag_id": ticket})
         return (d.model_dump_json(), tokens)
+    return _fn
+
+
+def _deterministic_sizer(size: str = "M", tokens: int = 0):
+    async def _fn(story: str) -> TShirtSizingReport:
+        return TShirtSizingReport(
+            size=size,  # type: ignore[arg-type]
+            confidence=0.9,
+            rationale="test sizing",
+            model="test/sizer",
+            tokens_used=tokens,
+            source="llm",
+        )
     return _fn
 
 
@@ -320,6 +339,63 @@ class TestIntake:
         # Both are in the in-memory queue.
         for c in outcome.cards:
             assert qb.get(c.message_id) is not None
+
+    async def test_tshirt_sizer_runs_before_dag_splitter(self):
+        dag = _dag_two_independent()
+        calls: list[str] = []
+
+        async def _sizer(story: str) -> TShirtSizingReport:
+            calls.append("sizer")
+            assert "Build firmware" in story
+            return TShirtSizingReport(
+                size="XL",
+                confidence=0.91,
+                rationale="broad integration",
+                model="test/sizer",
+                tokens_used=7,
+                source="llm",
+            )
+
+        async def _split(ticket: str, story: str) -> tuple[str, int]:
+            calls.append("splitter")
+            assert calls == ["sizer", "splitter"]
+            d = dag.model_copy(update={"dag_id": ticket})
+            return d.model_dump_json(), 100
+
+        outcome = await og.intake(
+            {"issue": {"key": "PROJ-10",
+                       "fields": {"summary": "Build firmware pipeline"}}},
+            splitter=_split,
+            sizer=_sizer,
+            token_budget=10_000,
+        )
+
+        assert calls == ["sizer", "splitter"]
+        assert outcome.size == "XL"
+        assert outcome.sizing is not None
+        assert outcome.tokens_used == 107
+        snap = og.get_status("PROJ-10")
+        assert snap["size"] == "XL"
+        assert snap["sizing"]["model"] == "test/sizer"
+        queued = qb.get(outcome.cards[0].message_id)
+        assert queued is not None
+        assert queued.payload["domain_context"].startswith("topology_size=XL ")
+        assert "topology_size:XL" in queued.payload["handoff_protocol"]
+
+    async def test_sizer_tokens_count_against_budget_before_splitter(self):
+        async def _split(_t, _s):
+            raise AssertionError("splitter must not run after sizing budget cap")
+
+        with pytest.raises(IntakeError) as ex:
+            await og.intake(
+                {"issue": {"key": "PROJ-11",
+                           "fields": {"summary": "Build firmware pipeline"}}},
+                splitter=_split,
+                sizer=_deterministic_sizer("XL", tokens=20),
+                token_budget=10,
+            )
+
+        assert ex.value.reason is IntakeRejectReason.token_budget_exceeded
 
     async def test_cycle_rejected(self):
         # Splitter returns a DAG with a self-reference by constructing
@@ -576,11 +652,14 @@ class TestHttpSurface:
         assert body["ok"] is True
         assert body["state"] == "queued"
         assert body["n_cards_queued"] == 2
+        assert body["size"] == "M"
+        assert body["sizing"]["source"] == "llm"
 
         s = await client.get("/api/v1/orchestrator/status/PROJ-31")
         assert s.status_code == 200
         snap = s.json()
         assert snap["state"] == "queued"
+        assert snap["size"] == "M"
         assert len(snap["cards"]) == 2
         assert snap["cards"][0]["queue_state"] == "Queued"
 
