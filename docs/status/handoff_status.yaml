@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 293
+entry_count: 330
 status_counts:
-  dev-only: 284
+  dev-only: 321
   deployed-inactive: 4
   deployed-active: 3
   deployed-observed: 0
@@ -2777,3 +2777,338 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — merge 後由 runner/CI 重跑這 4 個 contract test 檔；PG fixture unavailable 時 legacy migration 仍會依既有條件
     skip。
+- id: 2026-05-04--KS.2.1
+  header_line: 44656
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — KS.2.11 落 durable `cmek_configs` / `tier_assignments` 後，將 complete endpoint 改為持久化 Tier 2；KS.2.2-KS.2.4
+    再替 verify 接上 live AWS/GCP/Vault adapters。
+- id: 2026-05-04--KS.2.1-2
+  header_line: 44672
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 Step 1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 tenant settings CMEK Vitest；後續 Step 2 才擴充 IAM policy
+    generator UX。
+- id: 2026-05-04--KS.2.1-3
+  header_line: 44688
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 Step 2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；KS.2.2-KS.2.4 才能把
+    Step 4 verify 接上 live KMS/Vault。
+- id: 2026-05-04--KS.2.1-4
+  header_line: 44705
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 Step 3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；Step 4 verify connection
+    仍由 KS.2.2-KS.2.4 live adapters 接上實際 AWS/GCP/Vault。
+- id: 2026-05-04--KS.2.1-5
+  header_line: 44721
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 Step 4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；KS.2.2-KS.2.4 再把同一
+    encrypt-decrypt contract 接上 live AWS/GCP/Vault。
+- id: 2026-05-04--KS.2.1-6
+  header_line: 44737
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 Step 5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；KS.2.11 才能把 Tier
+    2 complete endpoint 改成 durable activation。
+- id: 2026-05-04--KS.2.1-7
+  header_line: 44752
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 Step 2 policy precision 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard tests；KS.2.2-KS.2.4 live adapters 接上後需用同一
+    context contract 做 live smoke。
+- id: 2026-05-04--KS.2.1-8
+  header_line: 44768
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 Step 3 contract test 補強
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard tests；durable Step 3 storage 仍等 KS.2.11
+    schema。
+- id: 2026-05-04--KS.2.1-9
+  header_line: 44783
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 Step 4 endpoint contract 補強
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 runner/CI 重跑 CMEK wizard backend tests；KS.2.2-KS.2.4 再把同一 encrypt-decrypt contract 接上
+    live AWS/GCP/Vault。
+- id: 2026-05-04--KS.2.1-10
+  header_line: 44799
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.1
+  title: KS.2.1 Step 5 endpoint contract 補強
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；KS.2.11 才能把 Step
+    5 從 non-durable draft 改成 durable Tier 2 activation。
+- id: 2026-05-04--KS.2.2
+  header_line: 44814
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.2
+  title: KS.2.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後在 GitHub Secrets 設定 `OMNISIGHT_TEST_AWS_KMS_*` / sandbox AWS credentials，讓 `aws-kms-live-tests`
+    nightly 從 skipped 變成 live green；production 啟用前由 operator 設定 `OMNISIGHT_AWS_KMS_ROLE_ARN` / `EXTERNAL_ID`。
+- id: 2026-05-04--KS.2.3
+  header_line: 44829
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.3
+  title: KS.2.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後在 GitHub Secrets 設定 `OMNISIGHT_TEST_GCP_KMS_KEY_ID` / `OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON`，讓
+    `gcp-kms-live-tests` nightly 從 skipped 變成 live green；production 啟用前由 operator 設定 `OMNISIGHT_GCP_KMS_KEY_ID` 並提供 ADC。
+- id: 2026-05-04--KS.2.4
+  header_line: 44844
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.4
+  title: KS.2.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後在 GitHub Secrets 設定 `OMNISIGHT_TEST_VAULT_TRANSIT_*`，讓 `vault-transit-live-tests` nightly
+    從 skipped 變成 live green；production 啟用前由 operator 設定 `OMNISIGHT_VAULT_TRANSIT_KEY_ID` / `URL` / `TOKEN` / optional namespace。
+- id: 2026-05-04--KS.2.5
+  header_line: 44860
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.5
+  title: KS.2.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — KS.2.11 durable `cmek_configs` 落地後，將 `load_env_cmek_key_checks()` 換成 DB-backed tenant config
+    loader；KS.2.6 再把 `revoked=true` 接到新請求 403 與復原 runbook。
+- id: 2026-05-04--KS.2.6
+  header_line: 44878
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.6
+  title: KS.2.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — KS.2.11 durable `cmek_configs` / `cmek_revoke_events` 落地後，把 request guard 從 env/snapshot
+    source 擴到 DB-backed tenant configs；production 啟用前需 operator 走 runbook smoke 一次 revoked→restored。
+- id: 2026-05-04--KS.2.7
+  header_line: 44893
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.7
+  title: KS.2.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後由 operator/客戶在實際 AWS KMS key 或 GCP CryptoKey 套用回傳 tags/labels，建立 CloudTrail Lake/S3 或
+    Log Router/PubSub sink，並用 CMEK verify step 產生一次 Encrypt/Decrypt/GetKey audit smoke。
+- id: 2026-05-04--KS.2.8
+  header_line: 44908
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.8
+  title: KS.2.8 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — KS.2.11 durable `cmek_configs` / `tier_assignments` / `cmek_revoke_events` 落地後，把 `persisted=false`
+    的 stateless rewrap payload 接到 DB transaction，並由 operator 用 sandbox AWS/GCP/Vault CMK smoke 一次 full upgrade path。
+- id: 2026-05-04--KS.2.9
+  header_line: 44924
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.9
+  title: KS.2.9 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — KS.2.11 durable CMEK tables 落地後，把 downgrade replacement refs 與 Tier 1 assignment 放入同一 DB
+    transaction；transaction 成功後 operator/客戶即可從 AWS/GCP/Vault key policy 移除 OmniSight IAM principal。
+- id: 2026-05-04--KS.2.10
+  header_line: 44939
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.10
+  title: KS.2.10 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — KS.2.11 durable `cmek_configs` / `tier_assignments` / `cmek_revoke_events` 落地後，將 status endpoint
+    從 health snapshot 推導改為 DB-backed tenant assignment + latest revoke event，並重生 OpenAPI generated types。
+- id: 2026-05-04--KS.2.11
+  header_line: 44956
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.11
+  title: KS.2.11 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 將 alembic 0107 跑到 prod PG；KS.2.12/KS.2.13 再把 wizard completion、tier 升降級與 revoke detector
+    事件寫入 `cmek_configs` / `tier_assignments` / `cmek_revoke_events`。
+- id: 2026-05-04--KS.2.12
+  header_line: 44973
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.12
+  title: KS.2.12 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 部署新 build 後由 operator 設 `OMNISIGHT_KS_CMEK_ENABLED=false` 做 staging smoke：確認 settings status
+    只顯示 Tier 1、wizard/upgrade 404、downgrade endpoint 可對既有 Tier 2 DEK refs 產生 Tier 1 plan；`deployed-active` 需首次實際 Tier 2 tenant
+    fallback/downgrade smoke 通過。
+- id: 2026-05-04--KS.2.13
+  header_line: 44988
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.2.13
+  title: KS.2.13 完工
+  production_status: dev-only
+  next_gate: deployed-active — 在 CI/staging 注入三組 sandbox KMS env 後重跑 KS.2.13 live test，確認 AWS/GCP/Vault 三 adapter 不再 skip；production
+    cutover 前再以一個 Tier 2 sandbox tenant 做 revoke + downgrade smoke。
+- id: 2026-05-04--KS.3.1
+  header_line: 45004
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.1
+  title: KS.3.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 下一個 release tag push 後由 docker-publish workflow 發佈 `ghcr.io/<owner>/omnisight-proxy:<tag>`；customer/VPC
+    部署與 mTLS/provider config 等 runtime gates 由 KS.3.2-KS.3.5 承接。
+- id: 2026-05-04--KS.3.2
+  header_line: 45020
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.2
+  title: KS.3.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 發佈新 `omnisight-proxy` image 後，在 staging tenant 注入 `OMNISIGHT_PROXY_AUTH_ENABLED=true`、server
+    cert/key、client CA、tenant client cert pin、nonce HMAC key file，並以 SaaS-side client cert 做一次 `/auth/verify` smoke。
+- id: 2026-05-04--KS.3.3
+  header_line: 45035
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.3
+  title: KS.3.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 發佈新 proxy image 後，staging 掛載 `config.example.json` 同形狀的 customer config + local/KMS/Vault
+    secret files，確認 `OMNISIGHT_PROXY_PROVIDER_CONFIG_FILE` 啟動 fail-fast；KS.3.4 再接上實際 LLM forwarding 與 provider key materialization。
+- id: 2026-05-04--KS.3.4
+  header_line: 45051
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.4
+  title: KS.3.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 發佈新 proxy image 後，在 staging tenant 掛載 local provider key + provider config，使用 SaaS-side mTLS
+    client 打 `/v1/llm/openai/v1/chat/completions?stream=true`，確認 nonce auth、provider forwarding、SSE chunk streaming 與 OmniSight
+    端 payload non-retention metadata policy 一起通過；KMS/Vault key materialization 仍需後續 KS.3 provider-key runtime gate。
+- id: 2026-05-04--KS.3.5
+  header_line: 45067
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.5
+  title: KS.3.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 發佈新 proxy image 後，在 staging 設定 `OMNISIGHT_PROXY_ID`、`OMNISIGHT_PROXY_SAAS_HEARTBEAT_URL`
+    與 Redis，確認 proxy 連續兩次 30 秒 heartbeat 後 SaaS health 維持 connected；停止 proxy 逾 60 秒後 health 轉 stale。
+- id: 2026-05-04--KS.3.6
+  header_line: 45084
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.6
+  title: KS.3.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 發佈新 proxy image 後，在 staging 以 SaaS-side mTLS client 對 customer-side proxy 重複打 `/v1/llm/...`，確認
+    CI p95 budget 與 staging network/CPU profile 沒有顯著落差。
+- id: 2026-05-04--KS.3.7
+  header_line: 45101
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.7
+  title: KS.3.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 發佈新 proxy image 後，在 staging 設定 customer audit file mount + `OMNISIGHT_PROXY_SAAS_AUDIT_URL`，打一筆
+    LLM request，確認 customer-side JSONL 含完整 payload、SaaS Redis metadata 不含 prompt/response。
+- id: 2026-05-04--KS.3.8
+  header_line: 45117
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.8
+  title: KS.3.8 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — KS.3.10/KS.3.12/KS.3.13 補齊 proxy registration UI/schema/feature knob 後，在 staging tenant 依本
+    runbook 跑一次 dry-run：sealed export bundle、customer proxy import、proxied request、SaaS key purge evidence 全部留 ticket。
+- id: 2026-05-04--KS.3.9
+  header_line: 45132
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.9
+  title: KS.3.9 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — HD.21.5.2 真正 self-hosted compose bundle 開工時，引用本 SOP 的同一 proxy image digest，做一次 customer-registry
+    mirror + local backend heartbeat smoke。
+- id: 2026-05-04--KS.3.10
+  header_line: 45147
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.10
+  title: KS.3.10 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — KS.3.12 `proxy_registrations` / `proxy_mtls_certs` schema 與 API 落地後，把此 UI 的 proxy URL / cert
+    / fingerprint 接到 durable save/load，並在 staging Tier 3 tenant 做一次 mTLS health smoke。
+- id: 2026-05-04--KS.3.11
+  header_line: 45164
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.11
+  title: KS.3.11 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — KS.3.12 schema/API 落地後，將 Tier 3 tenant registration 接到 `BYOGProxyTarget`，在 staging 以 unreachable
+    proxy 與 bad client cert 各打一筆 LLM request，確認 SaaS 回錯且沒有 direct provider egress。
+- id: 2026-05-04--KS.3.12
+  header_line: 45181
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.12
+  title: KS.3.12 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — staging / prod 執行 alembic `0107 -> 0108` 後，KS.3.13 feature knob 與 KS.3.14 mTLS/nonce/latency/streaming
+    matrix 才能開始寫入並驗證這些 durable BYOG rows。
+- id: 2026-05-04--KS.3.13
+  header_line: 45197
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.13
+  title: KS.3.13 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image 部署後由 operator 設 `OMNISIGHT_KS_BYOG_ENABLED=false` 做 staging smoke：確認 tenant
+    Settings 不顯示 Tier 3 option / Proxy Configuration，且後續 KS.3.14 proxy registration API 不接受 proxy mode。
+- id: 2026-05-04--KS.3.14
+  header_line: 45213
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: KS.3.14
+  title: KS.3.14 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image 重 build 後，在 staging 以 valid / expired / self-signed client cert、replayed
+    nonce、unreachable proxy、streaming request 各跑一次 live smoke，確認沒有 direct-provider fallback。
+- id: 2026-05-04--BP.I.1
+  header_line: 45230
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: BP.I.1
+  title: BP.I.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.I.2/BP.I.3 落地後，在 staging 將 Intel guild hook 接到 Integration Engineer pre-install 與 Architect
+    pre-blueprint，並以 mocked NVD/CISA feed 做一次 live hook smoke。
