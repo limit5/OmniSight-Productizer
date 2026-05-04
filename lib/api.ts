@@ -3225,6 +3225,163 @@ export async function listAllTenantProjects(
   return res.projects
 }
 
+// ─────────────────────────────────────────────────────────────────
+// KS.2.1 — CMEK Tenant Settings Wizard
+// Stateless onboarding surface for ``/tenants/{tid}/settings``. The
+// backend returns a non-durable Tier 2 draft until KS.2.11 lands the
+// cmek_configs / tier_assignments tables.
+// ─────────────────────────────────────────────────────────────────
+
+export type CmekProvider = "aws-kms" | "gcp-kms" | "vault-transit"
+
+export interface CmekProviderSpec {
+  provider: CmekProvider
+  label: string
+  key_id_label: string
+  key_id_example: string
+  policy_target_label: string
+  policy_target_example: string
+}
+
+export interface ListCmekProvidersResponse {
+  tenant_id: string
+  providers: CmekProviderSpec[]
+}
+
+export async function listCmekWizardProviders(
+  tenantId: string,
+): Promise<ListCmekProvidersResponse> {
+  return request<ListCmekProvidersResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/cmek/wizard/providers`,
+  )
+}
+
+export interface GenerateCmekPolicyRequest {
+  provider: CmekProvider
+  principal: string
+  key_id?: string | null
+}
+
+export interface GenerateCmekPolicyResponse {
+  tenant_id: string
+  provider: CmekProvider
+  policy: Record<string, unknown>
+  policy_json: string
+}
+
+export async function generateCmekWizardPolicy(
+  tenantId: string,
+  body: GenerateCmekPolicyRequest,
+): Promise<GenerateCmekPolicyResponse> {
+  return request<GenerateCmekPolicyResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/cmek/wizard/policy`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
+export interface SaveCmekKeyIdRequest {
+  provider: CmekProvider
+  key_id: string
+}
+
+export interface SaveCmekKeyIdResponse {
+  tenant_id: string
+  provider: CmekProvider
+  key_id: string
+  accepted: boolean
+}
+
+export async function saveCmekWizardKeyId(
+  tenantId: string,
+  body: SaveCmekKeyIdRequest,
+): Promise<SaveCmekKeyIdResponse> {
+  return request<SaveCmekKeyIdResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/cmek/wizard/key-id`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
+export interface VerifyCmekRequest {
+  provider: CmekProvider
+  key_id: string
+}
+
+export interface VerifyCmekResponse {
+  tenant_id: string
+  ok: boolean
+  provider: CmekProvider
+  key_id: string
+  verification_id: string
+  operation: "encrypt-decrypt"
+  algorithm: string
+  wrap_algorithm: string
+  elapsed_ms: number
+  live_provider_checked: boolean
+}
+
+export async function verifyCmekWizardConnection(
+  tenantId: string,
+  body: VerifyCmekRequest,
+): Promise<VerifyCmekResponse> {
+  return request<VerifyCmekResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/cmek/wizard/verify`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
+export interface CompleteCmekRequest {
+  provider: CmekProvider
+  key_id: string
+  verification_id: string
+}
+
+export interface CompleteCmekResponse {
+  tenant_id: string
+  security_tier: "tier-2"
+  provider: CmekProvider
+  key_id: string
+  verification_id: string
+  config_status: "draft"
+  persisted: boolean
+}
+
+export async function completeCmekWizard(
+  tenantId: string,
+  body: CompleteCmekRequest,
+): Promise<CompleteCmekResponse> {
+  return request<CompleteCmekResponse>(
+    `/tenants/${encodeURIComponent(tenantId)}/cmek/wizard/complete`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
+export interface CmekSettingsStatus {
+  tenant_id: string
+  security_tier: "tier-1" | "tier-2" | "tier-3"
+  kms_health: "not_configured" | "healthy" | "revoked"
+  revoke_status: "clear" | "revoked"
+  provider: string
+  key_id: string
+  reason: string
+  raw_state: string
+  checked_at: number | null
+  cmek_enabled?: boolean
+  tier2_available?: boolean
+  wizard_visible?: boolean
+  available_security_tiers?: Array<"tier-1" | "tier-2" | "tier-3">
+  byog_enabled?: boolean
+  tier3_available?: boolean
+  proxy_mode_available?: boolean
+}
+
+export async function getCmekSettingsStatus(
+  tenantId: string,
+): Promise<CmekSettingsStatus> {
+  return request<CmekSettingsStatus>(
+    `/tenants/${encodeURIComponent(tenantId)}/cmek/status`,
+  )
+}
+
 // ─── Project settings page (Y8 row 5) ──────────────────────────
 //
 // REST surface for ``/projects/{pid}/settings`` (project-owner /

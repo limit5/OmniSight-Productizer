@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import inspect
 import json
+import os
 import sys
 from types import ModuleType
 from types import SimpleNamespace
@@ -147,6 +148,7 @@ class FakeAWSKMSClient:
     def __init__(self):
         self.encrypt_calls = []
         self.decrypt_calls = []
+        self.describe_key_calls = []
 
     def encrypt(self, **kwargs):
         self.encrypt_calls.append(kwargs)
@@ -160,6 +162,16 @@ class FakeAWSKMSClient:
     def decrypt(self, **kwargs):
         self.decrypt_calls.append(kwargs)
         return {"Plaintext": kwargs["CiphertextBlob"].removeprefix(b"aws-wrapped-")}
+
+    def describe_key(self, **kwargs):
+        self.describe_key_calls.append(kwargs)
+        return {
+            "KeyMetadata": {
+                "Arn": kwargs["KeyId"],
+                "KeyState": "Enabled",
+                "KeyManager": "CUSTOMER",
+            }
+        }
 
 
 class FakeAWSSTSClient:
@@ -246,11 +258,79 @@ class TestAWSKMSAdapter:
         ]
         assert fake_boto3.kms.encrypt_calls[0]["KeyId"] == adapter.key_id
 
+    def test_describe_key_delegates_to_boto3_client_shape(self):
+        fake = FakeAWSKMSClient()
+        adapter = kms.AWSKMSAdapter(
+            key_id="arn:aws:kms:us-east-1:111122223333:key/demo",
+            region_name="us-east-1",
+        )
+        adapter._client = fake
+
+        metadata = adapter.describe_key()
+
+        assert metadata["KeyMetadata"]["KeyState"] == "Enabled"
+        assert fake.describe_key_calls == [{"KeyId": adapter.key_id}]
+
+    def test_from_environment_supports_production_assume_role(self, monkeypatch):
+        monkeypatch.setenv(
+            "OMNISIGHT_AWS_KMS_KEY_ID",
+            "arn:aws:kms:us-east-1:111122223333:key/demo",
+        )
+        monkeypatch.setenv("OMNISIGHT_AWS_KMS_REGION", "us-east-1")
+        monkeypatch.setenv(
+            "OMNISIGHT_AWS_KMS_ROLE_ARN",
+            "arn:aws:iam::111122223333:role/OmniSightKMS",
+        )
+        monkeypatch.setenv("OMNISIGHT_AWS_KMS_EXTERNAL_ID", "tenant-a")
+        monkeypatch.setenv("OMNISIGHT_AWS_KMS_SESSION_NAME", "omnisight-prod-tenant-a")
+
+        adapter = kms.AWSKMSAdapter.from_environment()
+
+        assert adapter.key_id == "arn:aws:kms:us-east-1:111122223333:key/demo"
+        assert adapter.region_name == "us-east-1"
+        assert adapter.role_arn == "arn:aws:iam::111122223333:role/OmniSightKMS"
+        assert adapter.external_id == "tenant-a"
+        assert adapter.session_name == "omnisight-prod-tenant-a"
+
+    def test_from_environment_requires_key_id(self, monkeypatch):
+        monkeypatch.delenv("OMNISIGHT_AWS_KMS_KEY_ID", raising=False)
+
+        with pytest.raises(kms.KMSConfigurationError, match="OMNISIGHT_AWS_KMS_KEY_ID"):
+            kms.AWSKMSAdapter.from_environment()
+
+
+AWS_LIVE_PREFIX = "OMNISIGHT_TEST_AWS_KMS"
+AWS_LIVE_KEY_ID = os.environ.get(f"{AWS_LIVE_PREFIX}_KEY_ID", "").strip()
+
+
+class TestAWSKMSLiveIntegration:
+    pytestmark = pytest.mark.skipif(
+        not AWS_LIVE_KEY_ID,
+        reason=f"{AWS_LIVE_PREFIX}_KEY_ID not set — skip AWS KMS sandbox live test",
+    )
+
+    def test_ci_sandbox_describe_encrypt_decrypt_round_trip(self):
+        adapter = kms.AWSKMSAdapter.from_environment(prefix=AWS_LIVE_PREFIX)
+        metadata = adapter.describe_key()["KeyMetadata"]
+        assert metadata["KeyState"] == "Enabled"
+
+        context = {
+            "tenant_id": "ci-sandbox",
+            "dek_id": "ks-2-2-live",
+            "purpose": "cmek-verify:aws-kms",
+            "schema": "ks.1.2",
+        }
+        wrapped = adapter.wrap_dek(b"ks-2-2-live-dek", encryption_context=context)
+        assert wrapped.provider == "aws-kms"
+        assert wrapped.ciphertext != b"ks-2-2-live-dek"
+        assert adapter.unwrap_dek(wrapped, encryption_context=context) == b"ks-2-2-live-dek"
+
 
 class FakeGCPKMSClient:
     def __init__(self):
         self.encrypt_requests = []
         self.decrypt_requests = []
+        self.get_crypto_key_requests = []
 
     def encrypt(self, *, request):
         self.encrypt_requests.append(request)
@@ -262,6 +342,13 @@ class FakeGCPKMSClient:
     def decrypt(self, *, request):
         self.decrypt_requests.append(request)
         return SimpleNamespace(plaintext=request["ciphertext"].removeprefix(b"gcp-wrapped-"))
+
+    def get_crypto_key(self, *, request):
+        self.get_crypto_key_requests.append(request)
+        return SimpleNamespace(
+            name=request["name"],
+            primary=SimpleNamespace(name=request["name"] + "/cryptoKeyVersions/1"),
+        )
 
 
 class FakeGoogleCloudKMSModule:
@@ -319,11 +406,68 @@ class TestGCPKMSAdapter:
             b'{"tenant_id":"t1"}'
         )
 
+    def test_describe_key_delegates_to_google_client_shape(self):
+        fake = FakeGCPKMSClient()
+        adapter = kms.GCPKMSAdapter(
+            key_id="projects/p/locations/global/keyRings/r/cryptoKeys/k"
+        )
+        adapter._client = fake
+
+        metadata = adapter.describe_key()
+
+        assert metadata.name == adapter.key_id
+        assert metadata.primary.name.endswith("/cryptoKeyVersions/1")
+        assert fake.get_crypto_key_requests == [{"name": adapter.key_id}]
+
+    def test_from_environment_reads_gcp_key_id(self, monkeypatch):
+        monkeypatch.setenv(
+            "OMNISIGHT_GCP_KMS_KEY_ID",
+            "projects/p/locations/global/keyRings/r/cryptoKeys/k",
+        )
+
+        adapter = kms.GCPKMSAdapter.from_environment()
+
+        assert adapter.key_id == "projects/p/locations/global/keyRings/r/cryptoKeys/k"
+
+    def test_from_environment_requires_gcp_key_id(self, monkeypatch):
+        monkeypatch.delenv("OMNISIGHT_GCP_KMS_KEY_ID", raising=False)
+
+        with pytest.raises(kms.KMSConfigurationError, match="OMNISIGHT_GCP_KMS_KEY_ID"):
+            kms.GCPKMSAdapter.from_environment()
+
+
+GCP_LIVE_PREFIX = "OMNISIGHT_TEST_GCP_KMS"
+GCP_LIVE_KEY_ID = os.environ.get(f"{GCP_LIVE_PREFIX}_KEY_ID", "").strip()
+
+
+class TestGCPKMSLiveIntegration:
+    pytestmark = pytest.mark.skipif(
+        not GCP_LIVE_KEY_ID,
+        reason=f"{GCP_LIVE_PREFIX}_KEY_ID not set — skip GCP KMS sandbox live test",
+    )
+
+    def test_ci_sandbox_describe_encrypt_decrypt_round_trip(self):
+        adapter = kms.GCPKMSAdapter.from_environment(prefix=GCP_LIVE_PREFIX)
+        metadata = adapter.describe_key()
+        assert getattr(metadata, "name", "") == adapter.key_id
+
+        context = {
+            "tenant_id": "ci-sandbox",
+            "dek_id": "ks-2-3-live",
+            "purpose": "cmek-verify:gcp-kms",
+            "schema": "ks.1.2",
+        }
+        wrapped = adapter.wrap_dek(b"ks-2-3-live-dek", encryption_context=context)
+        assert wrapped.provider == "gcp-kms"
+        assert wrapped.ciphertext != b"ks-2-3-live-dek"
+        assert adapter.unwrap_dek(wrapped, encryption_context=context) == b"ks-2-3-live-dek"
+
 
 class FakeVaultTransit:
     def __init__(self):
         self.encrypt_calls = []
         self.decrypt_calls = []
+        self.read_key_calls = []
 
     def encrypt_data(self, **kwargs):
         self.encrypt_calls.append(kwargs)
@@ -332,6 +476,17 @@ class FakeVaultTransit:
     def decrypt_data(self, **kwargs):
         self.decrypt_calls.append(kwargs)
         return {"data": {"plaintext": kwargs["ciphertext"].split(":", 2)[2]}}
+
+    def read_key(self, **kwargs):
+        self.read_key_calls.append(kwargs)
+        return {
+            "data": {
+                "name": kwargs["name"],
+                "latest_version": 7,
+                "supports_encryption": True,
+                "supports_decryption": True,
+            }
+        }
 
 
 class FakeHVACModule:
@@ -395,6 +550,80 @@ class TestVaultTransitKMSAdapter:
         assert fake_hvac.transit.encrypt_calls[0]["context"] == (
             base64.b64encode(b'{"tenant_id":"t1"}').decode("ascii")
         )
+
+    def test_describe_key_delegates_to_hvac_transit_shape(self):
+        transit = FakeVaultTransit()
+        adapter = kms.VaultTransitKMSAdapter(
+            key_id="tenant-dek",
+            url="https://vault.example.com",
+            token="vault-token",
+            mount_point="transit-prod",
+        )
+        adapter._client = SimpleNamespace(secrets=SimpleNamespace(transit=transit))
+
+        metadata = adapter.describe_key()
+
+        assert metadata["data"]["latest_version"] == 7
+        assert metadata["data"]["supports_encryption"] is True
+        assert transit.read_key_calls == [
+            {"name": "tenant-dek", "mount_point": "transit-prod"}
+        ]
+
+    def test_from_environment_reads_vault_transit_config(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_KEY_ID", "tenant-dek")
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_URL", "https://vault.example.com")
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_TOKEN", "vault-token")
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_NAMESPACE", "admin")
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_MOUNT_POINT", "transit-prod")
+
+        adapter = kms.VaultTransitKMSAdapter.from_environment()
+
+        assert adapter.key_id == "tenant-dek"
+        assert adapter.url == "https://vault.example.com"
+        assert adapter.token == "vault-token"
+        assert adapter.namespace == "admin"
+        assert adapter.mount_point == "transit-prod"
+
+    def test_from_environment_requires_vault_transit_url(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_KEY_ID", "tenant-dek")
+        monkeypatch.delenv("OMNISIGHT_VAULT_TRANSIT_URL", raising=False)
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_TOKEN", "vault-token")
+
+        with pytest.raises(kms.KMSConfigurationError, match="OMNISIGHT_VAULT_TRANSIT_URL"):
+            kms.VaultTransitKMSAdapter.from_environment()
+
+
+VAULT_LIVE_PREFIX = "OMNISIGHT_TEST_VAULT_TRANSIT"
+VAULT_LIVE_REQUIRED = all(
+    os.environ.get(f"{VAULT_LIVE_PREFIX}_{name}", "").strip()
+    for name in ("KEY_ID", "URL", "TOKEN")
+)
+
+
+class TestVaultTransitKMSLiveIntegration:
+    pytestmark = pytest.mark.skipif(
+        not VAULT_LIVE_REQUIRED,
+        reason=(
+            f"{VAULT_LIVE_PREFIX}_KEY_ID, _URL, and _TOKEN not set — "
+            "skip Vault Transit sandbox live test"
+        ),
+    )
+
+    def test_ci_sandbox_read_key_encrypt_decrypt_round_trip(self):
+        adapter = kms.VaultTransitKMSAdapter.from_environment(prefix=VAULT_LIVE_PREFIX)
+        metadata = adapter.describe_key()
+        assert metadata.get("data", {}).get("name") in (None, adapter.key_id)
+
+        context = {
+            "tenant_id": "ci-sandbox",
+            "dek_id": "ks-2-4-live",
+            "purpose": "cmek-verify:vault-transit",
+            "schema": "ks.1.2",
+        }
+        wrapped = adapter.wrap_dek(b"ks-2-4-live-dek", encryption_context=context)
+        assert wrapped.provider == "vault-transit"
+        assert wrapped.ciphertext != b"ks-2-4-live-dek"
+        assert adapter.unwrap_dek(wrapped, encryption_context=context) == b"ks-2-4-live-dek"
 
 
 class TestConfigAndDriftGuards:

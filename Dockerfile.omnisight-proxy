@@ -1,0 +1,37 @@
+# KS.3.1 — omnisight-proxy single-binary image.
+#
+# Mirrors configs/skills/skill-go-service/scaffolds/Dockerfile.j2:
+#   * Stage 1 (builder) — golang:1.22-alpine, CGO disabled for a
+#     fully-static binary.
+#   * Stage 2 (runtime) — gcr.io/distroless/static-debian12:nonroot.
+#     No shell, no package manager, no runtime files outside the binary
+#     and the distroless trust store. Target compressed image: < 100 MB.
+
+ARG GO_VERSION=1.22
+
+# -- Stage 1: builder -------------------------------------------------------
+FROM golang:${GO_VERSION}-alpine AS builder
+
+ENV CGO_ENABLED=0 \
+    GOFLAGS=-mod=readonly
+
+WORKDIR /build
+
+COPY omnisight-proxy/go.mod ./omnisight-proxy/go.mod
+COPY omnisight-proxy/ ./omnisight-proxy/
+
+RUN cd omnisight-proxy && go test ./...
+RUN cd omnisight-proxy && go build -trimpath -ldflags "-s -w -buildid=" \
+    -o /out/omnisight-proxy ./cmd/omnisight-proxy
+
+# -- Stage 2: runtime -------------------------------------------------------
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+WORKDIR /app
+
+COPY --from=builder /out/omnisight-proxy /app/omnisight-proxy
+
+USER nonroot:nonroot
+EXPOSE 8080
+
+ENTRYPOINT ["/app/omnisight-proxy"]

@@ -264,6 +264,71 @@ def decrypt(
         _zeroize_bytearray(plaintext)
 
 
+def rewrap_tenant_dek_ref(
+    dek_ref: TenantDEKRef,
+    *,
+    source_kms_adapter: Optional[kms_adapters.KMSAdapter] = None,
+    target_kms_adapter: kms_adapters.KMSAdapter,
+) -> TenantDEKRef:
+    """Rewrap ``dek_ref`` under a new KEK without changing the tenant DEK.
+
+    KS.2.8 uses this for Tier 1 -> Tier 2 CMEK upgrades: the raw
+    per-tenant DEK is unwrapped once from the existing master KEK,
+    immediately wrapped by the customer CMK adapter, and zeroized in
+    this worker before returning the replacement ``TenantDEKRef``.
+    No module-global state is read or written; each worker derives the
+    source adapter from the persisted ``dek_ref`` or the explicit
+    argument.
+    """
+
+    if not isinstance(dek_ref, TenantDEKRef):
+        raise EnvelopeEncryptionError(
+            f"dek_ref must be a TenantDEKRef, got {type(dek_ref).__name__}"
+        )
+    if dek_ref.schema_version != KEY_VERSION_CURRENT:
+        raise UnknownEnvelopeVersionError(
+            f"unknown TenantDEKRef schema_version={dek_ref.schema_version!r}"
+        )
+    if target_kms_adapter is None:
+        raise EnvelopeEncryptionError("target_kms_adapter is required")
+
+    source_adapter = _adapter_for_ref(dek_ref, source_kms_adapter)
+    wrapped = kms_adapters.WrappedDEK(
+        provider=dek_ref.provider,
+        key_id=dek_ref.key_id,
+        ciphertext=base64.b64decode(dek_ref.wrapped_dek_b64.encode("ascii")),
+        key_version=dek_ref.key_version,
+        algorithm=dek_ref.wrap_algorithm,
+        encryption_context=dict(dek_ref.encryption_context),
+    )
+    plaintext_dek = bytearray()
+    try:
+        plaintext_dek = bytearray(
+            source_adapter.unwrap_dek(
+                wrapped,
+                encryption_context=dek_ref.encryption_context,
+            )
+        )
+        rewrapped = target_kms_adapter.wrap_dek(
+            bytes(plaintext_dek),
+            encryption_context=dek_ref.encryption_context,
+        )
+    finally:
+        _zeroize_bytearray(plaintext_dek)
+
+    return TenantDEKRef(
+        dek_id=dek_ref.dek_id,
+        tenant_id=dek_ref.tenant_id,
+        provider=rewrapped.provider,
+        key_id=rewrapped.key_id,
+        wrapped_dek_b64=base64.b64encode(rewrapped.ciphertext).decode("ascii"),
+        key_version=rewrapped.key_version,
+        wrap_algorithm=rewrapped.algorithm,
+        encryption_context=dict(rewrapped.encryption_context),
+        schema_version=dek_ref.schema_version,
+    )
+
+
 def _require_plaintext(value: str) -> str:
     if not isinstance(value, str):
         raise EnvelopeEncryptionError(
@@ -395,4 +460,5 @@ __all__ = [
     "decrypt",
     "encrypt",
     "is_enabled",
+    "rewrap_tenant_dek_ref",
 ]

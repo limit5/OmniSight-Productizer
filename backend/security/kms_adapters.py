@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Mapping, Optional, Protocol, runtime_checkable
 
@@ -206,6 +207,24 @@ class AWSKMSAdapter(BaseKMSAdapter):
         super().__post_init__()
         self._client: Any = None
 
+    @classmethod
+    def from_environment(cls, *, prefix: str = "OMNISIGHT_AWS_KMS") -> "AWSKMSAdapter":
+        """Build the AWS adapter from CI/prod environment configuration.
+
+        ``OMNISIGHT_AWS_KMS_*`` is the production assume-role prefix.
+        Tests pass ``prefix="OMNISIGHT_TEST_AWS_KMS"`` for the CI
+        sandbox account without changing the runtime knob names.
+        """
+
+        key_id = _env_required(f"{prefix}_KEY_ID", provider=cls.provider)
+        return cls(
+            key_id=key_id,
+            region_name=_env_optional(f"{prefix}_REGION"),
+            role_arn=_env_optional(f"{prefix}_ROLE_ARN"),
+            external_id=_env_optional(f"{prefix}_EXTERNAL_ID"),
+            session_name=_env_optional(f"{prefix}_SESSION_NAME") or cls.session_name,
+        )
+
     def _kms_client(self) -> Any:
         if self._client is not None:
             return self._client
@@ -236,6 +255,15 @@ class AWSKMSAdapter(BaseKMSAdapter):
             return self._client
         self._client = boto3.client("kms", region_name=self.region_name)
         return self._client
+
+    def describe_key(self) -> dict[str, Any]:
+        """Return AWS KMS key metadata for live connectivity checks."""
+
+        try:
+            result = self._kms_client().describe_key(KeyId=self.key_id)
+        except Exception as exc:  # pragma: no cover - SDK-specific subclasses.
+            raise KMSOperationError(str(exc), provider=self.provider, key_id=self.key_id) from exc
+        return dict(result)
 
     def wrap_dek(
         self,
@@ -292,6 +320,17 @@ class GCPKMSAdapter(BaseKMSAdapter):
         super().__post_init__()
         self._client: Any = None
 
+    @classmethod
+    def from_environment(cls, *, prefix: str = "OMNISIGHT_GCP_KMS") -> "GCPKMSAdapter":
+        """Build the GCP adapter from ADC-backed environment configuration.
+
+        ``OMNISIGHT_GCP_KMS_*`` is the production prefix. Tests pass
+        ``prefix="OMNISIGHT_TEST_GCP_KMS"`` for the CI sandbox key;
+        credentials stay in Google ADC / ``GOOGLE_APPLICATION_CREDENTIALS``.
+        """
+
+        return cls(key_id=_env_required(f"{prefix}_KEY_ID", provider=cls.provider))
+
     def _kms_client(self) -> Any:
         if self._client is not None:
             return self._client
@@ -305,6 +344,14 @@ class GCPKMSAdapter(BaseKMSAdapter):
             ) from exc
         self._client = kms.KeyManagementServiceClient()
         return self._client
+
+    def describe_key(self) -> Any:
+        """Return Google Cloud KMS CryptoKey metadata for live checks."""
+
+        try:
+            return self._kms_client().get_crypto_key(request={"name": self.key_id})
+        except Exception as exc:  # pragma: no cover - SDK-specific subclasses.
+            raise KMSOperationError(str(exc), provider=self.provider, key_id=self.key_id) from exc
 
     def wrap_dek(
         self,
@@ -373,6 +420,24 @@ class VaultTransitKMSAdapter(BaseKMSAdapter):
             raise KMSConfigurationError("token is required", provider=self.provider)
         self._client: Any = None
 
+    @classmethod
+    def from_environment(
+        cls, *, prefix: str = "OMNISIGHT_VAULT_TRANSIT"
+    ) -> "VaultTransitKMSAdapter":
+        """Build the Vault Transit adapter from CI/prod env configuration.
+
+        ``OMNISIGHT_VAULT_TRANSIT_*`` is the production prefix. Tests pass
+        ``prefix="OMNISIGHT_TEST_VAULT_TRANSIT"`` for the CI sandbox Vault.
+        """
+
+        return cls(
+            key_id=_env_required(f"{prefix}_KEY_ID", provider=cls.provider),
+            url=_env_required(f"{prefix}_URL", provider=cls.provider),
+            token=_env_required(f"{prefix}_TOKEN", provider=cls.provider),
+            namespace=_env_optional(f"{prefix}_NAMESPACE"),
+            mount_point=_env_optional(f"{prefix}_MOUNT_POINT") or cls.mount_point,
+        )
+
     def _vault_client(self) -> Any:
         if self._client is not None:
             return self._client
@@ -386,6 +451,18 @@ class VaultTransitKMSAdapter(BaseKMSAdapter):
             ) from exc
         self._client = hvac.Client(url=self.url, token=self.token, namespace=self.namespace)
         return self._client
+
+    def describe_key(self) -> dict[str, Any]:
+        """Return Vault Transit key metadata for live connectivity checks."""
+
+        try:
+            result = self._vault_client().secrets.transit.read_key(
+                name=self.key_id,
+                mount_point=self.mount_point,
+            )
+        except Exception as exc:  # pragma: no cover - SDK-specific subclasses.
+            raise KMSOperationError(str(exc), provider=self.provider, key_id=self.key_id) from exc
+        return dict(result)
 
     def wrap_dek(
         self,
@@ -444,6 +521,18 @@ def _vault_key_version(ciphertext: str) -> Optional[str]:
     if len(parts) >= 3 and parts[0] == "vault":
         return parts[1]
     return None
+
+
+def _env_optional(name: str) -> Optional[str]:
+    value = (os.environ.get(name) or "").strip()
+    return value or None
+
+
+def _env_required(name: str, *, provider: str) -> str:
+    value = _env_optional(name)
+    if not value:
+        raise KMSConfigurationError(f"{name} is required", provider=provider)
+    return value
 
 
 def list_providers() -> list[str]:

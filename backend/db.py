@@ -1860,6 +1860,164 @@ CREATE INDEX IF NOT EXISTS idx_kek_rotations_status_schedule
 CREATE INDEX IF NOT EXISTS idx_kek_rotations_key
     ON kek_rotations(key_id, started_at DESC);
 
+-- KS.2.11 (alembic 0107): Tier 2 CMEK persistence tables.
+-- Runtime rows KS.2.1-KS.2.10 stay stateless until these tables are
+-- wired by follow-up rows; this schema only makes wizard completions,
+-- tier assignments, and revoke events durable.
+CREATE TABLE IF NOT EXISTS cmek_configs (
+    config_id       TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL
+                         REFERENCES tenants(id) ON DELETE CASCADE,
+    provider        TEXT NOT NULL
+                         CHECK (provider IN ('aws-kms','gcp-kms',
+                                             'vault-transit')),
+    key_id          TEXT NOT NULL,
+    policy_principal TEXT NOT NULL DEFAULT '',
+    verification_id TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'draft'
+                         CHECK (status IN ('active','disabled','draft',
+                                           'revoked','verifying')),
+    verified_at     REAL,
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL,
+    disabled_at     REAL,
+    metadata_json   TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_cmek_configs_tenant_status
+    ON cmek_configs(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_cmek_configs_provider_key
+    ON cmek_configs(provider, key_id);
+
+CREATE TABLE IF NOT EXISTS tier_assignments (
+    tenant_id       TEXT PRIMARY KEY
+                         REFERENCES tenants(id) ON DELETE CASCADE,
+    security_tier   TEXT NOT NULL DEFAULT 'tier-1'
+                         CHECK (security_tier IN ('tier-1','tier-2')),
+    cmek_config_id  TEXT
+                         REFERENCES cmek_configs(config_id) ON DELETE SET NULL,
+    status          TEXT NOT NULL DEFAULT 'active'
+                         CHECK (status IN ('active','downgrading',
+                                           'fallback_to_tier1','revoked',
+                                           'upgrading')),
+    assigned_by     TEXT NOT NULL DEFAULT '',
+    assigned_at     REAL NOT NULL,
+    updated_at      REAL NOT NULL,
+    metadata_json   TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_tier_assignments_security_tier
+    ON tier_assignments(security_tier, status);
+CREATE INDEX IF NOT EXISTS idx_tier_assignments_cmek_config
+    ON tier_assignments(cmek_config_id);
+
+CREATE TABLE IF NOT EXISTS cmek_revoke_events (
+    event_id       TEXT PRIMARY KEY,
+    tenant_id      TEXT NOT NULL
+                         REFERENCES tenants(id) ON DELETE CASCADE,
+    cmek_config_id TEXT
+                         REFERENCES cmek_configs(config_id) ON DELETE SET NULL,
+    provider       TEXT NOT NULL
+                         CHECK (provider IN ('aws-kms','gcp-kms',
+                                             'vault-transit')),
+    key_id         TEXT NOT NULL,
+    reason         TEXT NOT NULL
+                         CHECK (reason IN ('describe_failed','key_disabled',
+                                           'permission_revoked','restored',
+                                           'unknown')),
+    raw_state      TEXT NOT NULL DEFAULT '',
+    source         TEXT NOT NULL DEFAULT 'cmek_revoke_detector',
+    detected_at    REAL NOT NULL,
+    restored_at    REAL,
+    detail_json    TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_cmek_revoke_events_tenant_time
+    ON cmek_revoke_events(tenant_id, detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cmek_revoke_events_config_time
+    ON cmek_revoke_events(cmek_config_id, detected_at DESC);
+
+-- KS.3.12 (alembic 0108): Tier 3 BYOG proxy persistence tables.
+-- These mirror proxy registration, heartbeat, and mTLS certificate
+-- metadata only. Prompt / response bodies stay customer-owned inside
+-- omnisight-proxy and private key material is never stored here.
+CREATE TABLE IF NOT EXISTS proxy_registrations (
+    proxy_id         TEXT PRIMARY KEY,
+    tenant_id        TEXT NOT NULL
+                           REFERENCES tenants(id) ON DELETE CASCADE,
+    display_name     TEXT NOT NULL DEFAULT '',
+    proxy_url        TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending'
+                           CHECK (status IN ('active','disabled','pending',
+                                             'revoked')),
+    service          TEXT NOT NULL DEFAULT 'omnisight-proxy',
+    provider_count   INTEGER NOT NULL DEFAULT 0 CHECK (provider_count >= 0),
+    heartbeat_interval_seconds INTEGER NOT NULL DEFAULT 30
+                           CHECK (heartbeat_interval_seconds > 0),
+    stale_threshold_seconds INTEGER NOT NULL DEFAULT 60
+                           CHECK (stale_threshold_seconds > 0),
+    nonce_key_ref    TEXT NOT NULL DEFAULT '',
+    client_cert_fingerprint_sha256 TEXT NOT NULL DEFAULT '',
+    created_at       REAL NOT NULL,
+    updated_at       REAL NOT NULL,
+    disabled_at      REAL,
+    metadata_json    TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_proxy_registrations_tenant_status
+    ON proxy_registrations(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_proxy_registrations_url
+    ON proxy_registrations(proxy_url);
+
+CREATE TABLE IF NOT EXISTS proxy_health_checks (
+    check_id        TEXT PRIMARY KEY,
+    proxy_id        TEXT NOT NULL
+                          REFERENCES proxy_registrations(proxy_id)
+                          ON DELETE CASCADE,
+    tenant_id       TEXT NOT NULL
+                          REFERENCES tenants(id) ON DELETE CASCADE,
+    status          TEXT NOT NULL
+                          CHECK (status IN ('mtls_failed','ok','stale',
+                                            'unreachable')),
+    service         TEXT NOT NULL DEFAULT 'omnisight-proxy',
+    provider_count  INTEGER NOT NULL DEFAULT 0 CHECK (provider_count >= 0),
+    heartbeat_interval_seconds INTEGER NOT NULL DEFAULT 30
+                          CHECK (heartbeat_interval_seconds > 0),
+    latency_ms      REAL,
+    error           TEXT NOT NULL DEFAULT '',
+    checked_at      REAL NOT NULL,
+    detail_json     TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_proxy_health_checks_proxy_time
+    ON proxy_health_checks(proxy_id, checked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_proxy_health_checks_tenant_status
+    ON proxy_health_checks(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS proxy_mtls_certs (
+    cert_id        TEXT PRIMARY KEY,
+    proxy_id       TEXT NOT NULL
+                         REFERENCES proxy_registrations(proxy_id)
+                         ON DELETE CASCADE,
+    tenant_id      TEXT NOT NULL
+                         REFERENCES tenants(id) ON DELETE CASCADE,
+    cert_role      TEXT NOT NULL CHECK (cert_role IN ('ca','client','server')),
+    fingerprint_sha256 TEXT NOT NULL,
+    subject        TEXT NOT NULL DEFAULT '',
+    issuer         TEXT NOT NULL DEFAULT '',
+    serial_number  TEXT NOT NULL DEFAULT '',
+    not_before     REAL,
+    not_after      REAL,
+    status         TEXT NOT NULL DEFAULT 'active'
+                         CHECK (status IN ('active','expired','revoked',
+                                           'rotating')),
+    pinned         INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+    material_ref   TEXT NOT NULL DEFAULT '',
+    created_at     REAL NOT NULL,
+    rotated_at     REAL,
+    revoked_at     REAL,
+    metadata_json  TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_proxy_mtls_certs_proxy_status
+    ON proxy_mtls_certs(proxy_id, status);
+CREATE INDEX IF NOT EXISTS idx_proxy_mtls_certs_fingerprint
+    ON proxy_mtls_certs(fingerprint_sha256);
+
 -- KS.4.13 (alembic 0187): durable LLM firewall review events.
 -- Stores only suspicious / blocked decisions and input hashes; raw
 -- input text is intentionally absent so persistence does not expand

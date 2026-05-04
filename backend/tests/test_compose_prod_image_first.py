@@ -194,9 +194,18 @@ def test_compose_image_names_match_publishing_workflow() -> None:
         # the bare image name.
         bare = image.rsplit("/", 1)[-1].split(":", 1)[0]
         consumed.add(bare)
-    assert consumed == published, (
-        f"compose consumes {consumed} but workflow publishes {published} "
+    deployable_app_images = {"omnisight-backend", "omnisight-frontend"}
+    assert consumed == deployable_app_images, (
+        f"compose consumes {consumed}, expected {deployable_app_images} "
+        "for the SaaS app deployment path"
+    )
+    assert deployable_app_images <= published, (
+        f"workflow publishes {published}, missing a compose-consumed app image "
         "— image-first deployment requires both files to agree"
+    )
+    assert "omnisight-proxy" in published, (
+        "KS.3.1 proxy is a customer-side image and is intentionally not "
+        "started by docker-compose.prod.yml"
     )
     # Both must use ghcr.io as the registry.
     assert workflow["env"]["REGISTRY"] == "ghcr.io"

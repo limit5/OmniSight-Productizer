@@ -1,0 +1,56 @@
+name: Vault Transit Live Integration Tests
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - ".github/workflows/vault-transit-live-tests.yml"
+      - "backend/security/kms_adapters.py"
+      - "backend/tests/test_security_kms_adapters.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vault-transit-live-tests
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  live-tests:
+    name: Vault Transit sandbox live test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OMNISIGHT_TEST_VAULT_TRANSIT_KEY_ID: ${{ secrets.OMNISIGHT_TEST_VAULT_TRANSIT_KEY_ID }}
+      OMNISIGHT_TEST_VAULT_TRANSIT_URL: ${{ secrets.OMNISIGHT_TEST_VAULT_TRANSIT_URL }}
+      OMNISIGHT_TEST_VAULT_TRANSIT_TOKEN: ${{ secrets.OMNISIGHT_TEST_VAULT_TRANSIT_TOKEN }}
+      OMNISIGHT_TEST_VAULT_TRANSIT_NAMESPACE: ${{ secrets.OMNISIGHT_TEST_VAULT_TRANSIT_NAMESPACE }}
+      OMNISIGHT_TEST_VAULT_TRANSIT_MOUNT_POINT: ${{ secrets.OMNISIGHT_TEST_VAULT_TRANSIT_MOUNT_POINT }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install backend dependencies
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install --require-hashes -r backend/requirements-dev.txt
+
+      - name: Run Vault Transit live tests
+        run: |
+          python -m pytest \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -q \
+            backend/tests/test_security_kms_adapters.py::TestVaultTransitKMSLiveIntegration

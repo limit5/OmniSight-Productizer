@@ -27,8 +27,8 @@
  * Read-after-write timing audit
  * ─────────────────────────────
  * All tab actions are sequential ``await`` (one inflight per tab,
- * disabled UI while busy) followed by a tab-scoped refetch — no
- * shared state to race.
+ * disabled UI while busy) followed by a tab-scoped refetch / response
+ * projection — no shared state to race.
  */
 
 import { use, useCallback, useEffect, useMemo, useState } from "react"
@@ -38,39 +38,53 @@ import {
   Archive,
   Building2,
   ChevronRight,
+  CheckCircle2,
   CircleAlert,
   Copy,
   Folder,
+  KeyRound,
   Loader2,
   Mail,
   Plus,
   RefreshCw,
   RotateCcw,
+  Server,
   ShieldAlert,
+  ShieldCheck,
   Users,
   X,
 } from "lucide-react"
 import {
   ApiError,
   archiveTenantProject,
+  completeCmekWizard,
   createTenantInvite,
   createTenantProject,
   deleteTenantMember,
+  generateCmekWizardPolicy,
+  getCmekSettingsStatus,
   getStorageUsage,
   listAllTenantProjects,
+  listCmekWizardProviders,
   listTenantInvites,
   listTenantMembers,
   patchTenantMember,
   restoreTenantProject,
   revokeTenantInvite,
+  saveCmekWizardKeyId,
   type CreatedTenantInvite,
+  type CmekProvider,
+  type CmekProviderSpec,
+  type CmekSettingsStatus,
+  type CompleteCmekResponse,
   type ProductLine,
   type TenantInviteRow,
   type TenantMemberRole,
   type TenantMemberRow,
-  type TenantPlan,
   type TenantProjectInfo,
   type TenantStorageUsage,
+  type VerifyCmekResponse,
+  verifyCmekWizardConnection,
 } from "@/lib/api"
 import { useAuth } from "@/lib/auth-context"
 
@@ -86,13 +100,14 @@ const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 const TENANT_ID_PATTERN = /^t-[a-z0-9][a-z0-9-]{2,62}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-type TabId = "members" | "invites" | "projects" | "quotas"
+type TabId = "members" | "invites" | "projects" | "quotas" | "security"
 
 const TABS: { id: TabId; label: string; icon: typeof Users }[] = [
   { id: "members", label: "Members", icon: Users },
   { id: "invites", label: "Invites", icon: Mail },
   { id: "projects", label: "Projects", icon: Folder },
   { id: "quotas", label: "Quotas", icon: Archive },
+  { id: "security", label: "Security", icon: KeyRound },
 ]
 
 function formatBytes(n: number | null | undefined): string {
@@ -271,6 +286,7 @@ export default function TenantSettingsPage({
           {tab === "invites" && <InvitesTab tid={tid} />}
           {tab === "projects" && <ProjectsTab tid={tid} />}
           {tab === "quotas" && <QuotasTab tid={tid} />}
+          {tab === "security" && <SecurityTab tid={tid} />}
         </section>
       </div>
     </main>
@@ -1236,6 +1252,661 @@ function QuotasTab({ tid }: { tid: string }) {
       <p className="mt-3 text-[10px] text-[var(--muted-foreground)] font-mono">
         Plan changes ship via the super-admin /admin/tenants surface (Y8 row 3). This panel is read-only for tenant admins.
       </p>
+    </div>
+  )
+}
+
+// ─── Security tab / KS.2.1 CMEK wizard + KS.3.10 BYOG proxy UI ───
+
+const CMEK_STEPS = [
+  "Provider",
+  "IAM policy",
+  "Key id",
+  "Verify",
+  "Done",
+] as const
+
+function SecurityTab({ tid }: { tid: string }) {
+  const [providers, setProviders] = useState<CmekProviderSpec[]>([])
+  const [cmekStatus, setCmekStatus] = useState<CmekSettingsStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [step, setStep] = useState(0)
+  const [provider, setProvider] = useState<CmekProvider>("aws-kms")
+  const [principal, setPrincipal] = useState("")
+  const [keyId, setKeyId] = useState("")
+  const [acceptedKeyId, setAcceptedKeyId] = useState("")
+  const [policyJson, setPolicyJson] = useState("")
+  const [verifyResult, setVerifyResult] = useState<VerifyCmekResponse | null>(null)
+  const [completeResult, setCompleteResult] = useState<CompleteCmekResponse | null>(null)
+  const [policyCopied, setPolicyCopied] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [selectedSecurityTier, setSelectedSecurityTier] = useState<SecurityTier>("tier-1")
+  const [proxyUrl, setProxyUrl] = useState("https://proxy.customer.example.com")
+  const [proxyClientCert, setProxyClientCert] = useState("")
+  const [proxyCertFingerprint, setProxyCertFingerprint] = useState("")
+
+  const selected = useMemo(
+    () => providers.find((p) => p.provider === provider) ?? providers[0],
+    [providers, provider],
+  )
+  const availableSecurityTiers = useMemo<SecurityTier[]>(
+    () => cmekStatus?.available_security_tiers ?? ["tier-1", "tier-2", "tier-3"],
+    [cmekStatus?.available_security_tiers],
+  )
+  const tier3Available =
+    availableSecurityTiers.includes("tier-3") &&
+    cmekStatus?.byog_enabled !== false &&
+    cmekStatus?.tier3_available !== false &&
+    cmekStatus?.proxy_mode_available !== false
+
+  const securityTier = completeResult?.security_tier ?? selectedSecurityTier
+  const effectiveKmsHealth = completeResult ? "healthy" : cmekStatus?.kms_health ?? "not_configured"
+  const effectiveRevokeStatus = cmekStatus?.revoke_status ?? "clear"
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setLoadError(null)
+    Promise.all([listCmekWizardProviders(tid), getCmekSettingsStatus(tid)])
+      .then(([res, status]) => {
+        if (cancelled) return
+        const statusTiers = status.available_security_tiers ?? ["tier-1", "tier-2", "tier-3"]
+        const nextTier = statusTiers.includes(status.security_tier)
+          ? status.security_tier
+          : "tier-1"
+        setCmekStatus(status)
+        setSelectedSecurityTier(nextTier)
+        setProviders(res.providers)
+        if (res.providers[0]) {
+          setProvider(res.providers[0].provider)
+          setPrincipal(res.providers[0].policy_target_example)
+          setKeyId(res.providers[0].key_id_example)
+        }
+      })
+      .catch((exc) => {
+        if (!cancelled) setLoadError(describeError(exc))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [tid])
+
+  useEffect(() => {
+    if (!selected) return
+    setPrincipal(selected.policy_target_example)
+    setKeyId(selected.key_id_example)
+    setAcceptedKeyId("")
+    setPolicyJson("")
+    setPolicyCopied(false)
+    setVerifyResult(null)
+    setCompleteResult(null)
+    setError(null)
+    setStep(0)
+  }, [selected])
+
+  async function onGeneratePolicy() {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await generateCmekWizardPolicy(tid, {
+        provider,
+        principal,
+        key_id: keyId.trim() || null,
+      })
+      setPolicyJson(res.policy_json)
+      setPolicyCopied(false)
+      setAcceptedKeyId("")
+      setStep(1)
+    } catch (exc) {
+      setError(describeError(exc))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function onContinueProvider() {
+    if (!selected) return
+    setStep(1)
+    setError(null)
+  }
+
+  async function onCopyPolicy() {
+    if (!policyJson) return
+    await navigator.clipboard?.writeText(policyJson)
+    setPolicyCopied(true)
+  }
+
+  async function onSaveKeyId() {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await saveCmekWizardKeyId(tid, { provider, key_id: keyId })
+      setKeyId(res.key_id)
+      setAcceptedKeyId(res.key_id)
+      setVerifyResult(null)
+      setCompleteResult(null)
+      setStep(2)
+    } catch (exc) {
+      setError(describeError(exc))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function onVerify() {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await verifyCmekWizardConnection(tid, { provider, key_id: acceptedKeyId })
+      setVerifyResult(res)
+      setStep(3)
+    } catch (exc) {
+      setError(describeError(exc))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function onComplete() {
+    if (!verifyResult) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await completeCmekWizard(tid, {
+        provider,
+        key_id: acceptedKeyId,
+        verification_id: verifyResult.verification_id,
+      })
+      setCompleteResult(res)
+      setSelectedSecurityTier("tier-2")
+      setStep(4)
+    } catch (exc) {
+      setError(describeError(exc))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function onTierChange(next: SecurityTier) {
+    if (next === "tier-3" && !tier3Available) return
+    setSelectedSecurityTier(next)
+    if (next === "tier-1" || next === "tier-3") {
+      setCompleteResult(null)
+    }
+    if (next === "tier-3") {
+      setError(null)
+      setStep(0)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="rounded border border-[var(--border)] bg-[var(--card)] p-6 font-mono text-xs text-[var(--muted-foreground)]">
+        <Loader2 size={14} className="animate-spin inline-block mr-2" />
+        Loading CMEK wizard…
+      </div>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <div
+        className="rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 p-3 text-xs font-mono text-[var(--destructive)]"
+        data-testid="cmek-load-error"
+      >
+        {loadError}
+      </div>
+    )
+  }
+
+  return (
+    <div data-testid="cmek-security-tab">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-sm font-semibold inline-flex items-center gap-2">
+            <KeyRound size={14} />
+            CMEK security tier
+          </h2>
+          <p className="text-[10px] text-[var(--muted-foreground)] font-mono mt-1">
+            Configure a customer-managed key draft for tenant {tid}.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="inline-flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-xs font-mono">
+            <span className="text-[var(--muted-foreground)]">Security Tier</span>
+            <select
+              value={selectedSecurityTier}
+              onChange={(e) => {
+                onTierChange(e.target.value as SecurityTier)
+              }}
+              className="rounded border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs"
+              data-testid="cmek-security-tier-selector"
+            >
+              <option value="tier-1">Tier 1</option>
+              <option value="tier-2">Tier 2</option>
+              {tier3Available && <option value="tier-3">Tier 3</option>}
+            </select>
+          </label>
+          <div
+            className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-mono ${
+              securityTier === "tier-3"
+                ? "border-[var(--neural-blue)]/50 bg-[var(--neural-blue)]/10"
+                : securityTier === "tier-2"
+                ? "border-[var(--neural-green)]/50 bg-[var(--neural-green)]/10"
+                : "border-[var(--border)] bg-[var(--card)]"
+            }`}
+            data-testid="cmek-security-tier"
+          >
+            {securityTier === "tier-3" ? <Server size={13} /> : <ShieldAlert size={13} />}
+            {securityTier === "tier-3"
+              ? "Tier 3 · BYOG proxy"
+              : securityTier === "tier-2"
+                ? "Tier 2 · Customer-managed KEK"
+                : "Tier 1 · OmniSight-managed KEK"}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-4 font-mono">
+        <div
+          className={`rounded border px-3 py-2 text-xs ${
+            effectiveRevokeStatus === "revoked"
+              ? "border-[var(--destructive)]/50 bg-[var(--destructive)]/10"
+              : "border-[var(--border)] bg-[var(--card)]"
+          }`}
+          data-testid="cmek-revoke-status"
+          data-status={effectiveRevokeStatus}
+        >
+          <div className="flex items-center gap-2">
+            {effectiveRevokeStatus === "revoked" ? (
+              <CircleAlert size={13} className="text-[var(--destructive)]" />
+            ) : (
+              <CheckCircle2 size={13} className="text-[var(--neural-green)]" />
+            )}
+            <span>{effectiveRevokeStatus === "revoked" ? "Revoked · new requests paused" : "Revoke clear"}</span>
+          </div>
+          <p className="mt-1 text-[10px] text-[var(--muted-foreground)]">
+            {cmekStatus?.reason || "No revoke snapshot for this tenant."}
+          </p>
+        </div>
+        <div
+          className={`rounded border px-3 py-2 text-xs ${
+            effectiveKmsHealth === "healthy"
+              ? "border-[var(--neural-green)]/50 bg-[var(--neural-green)]/10"
+              : effectiveKmsHealth === "revoked"
+                ? "border-[var(--destructive)]/50 bg-[var(--destructive)]/10"
+                : "border-[var(--border)] bg-[var(--card)]"
+          }`}
+          data-testid="cmek-kms-health-badge"
+          data-status={effectiveKmsHealth}
+        >
+          <div className="flex items-center gap-2">
+            {effectiveKmsHealth === "healthy" ? (
+              <CheckCircle2 size={13} className="text-[var(--neural-green)]" />
+            ) : effectiveKmsHealth === "revoked" ? (
+              <CircleAlert size={13} className="text-[var(--destructive)]" />
+            ) : (
+              <ShieldAlert size={13} className="text-[var(--muted-foreground)]" />
+            )}
+            <span>
+              KMS {effectiveKmsHealth === "not_configured" ? "not configured" : effectiveKmsHealth}
+            </span>
+          </div>
+          <p className="mt-1 text-[10px] text-[var(--muted-foreground)] truncate">
+            {cmekStatus?.provider ? `${cmekStatus.provider} · ${cmekStatus.raw_state || cmekStatus.key_id}` : "Tier 1 uses the OmniSight-managed KEK."}
+          </p>
+        </div>
+      </div>
+
+      {selectedSecurityTier === "tier-1" && (
+        <div
+          className="rounded border border-[var(--border)] bg-[var(--card)] p-4 font-mono text-xs text-[var(--muted-foreground)]"
+          data-testid="cmek-tier1-selected"
+        >
+          Tier 1 selected. Choose Tier 2 to configure a customer-managed key.
+        </div>
+      )}
+
+      {selectedSecurityTier === "tier-2" && (
+      <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-4">
+        <ol className="rounded border border-[var(--border)] bg-[var(--card)] p-3 font-mono text-xs space-y-1">
+          {CMEK_STEPS.map((label, idx) => {
+            const done = step > idx
+            const active = step === idx
+            return (
+              <li
+                key={label}
+                className={`flex items-center gap-2 rounded px-2 py-2 ${
+                  active ? "bg-[var(--secondary)]/40 text-[var(--foreground)]" : "text-[var(--muted-foreground)]"
+                }`}
+                data-testid={`cmek-step-${idx + 1}`}
+              >
+                {done ? <CheckCircle2 size={13} className="text-[var(--neural-green)]" /> : <span className="w-[13px] text-center">{idx + 1}</span>}
+                {label}
+              </li>
+            )
+          })}
+        </ol>
+
+        <div className="rounded border border-[var(--border)] bg-[var(--card)] p-4 font-mono">
+          {error && (
+            <div
+              className="mb-3 rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 p-2 text-xs text-[var(--destructive)]"
+              data-testid="cmek-error"
+            >
+              {error}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-4" role="radiogroup" aria-label="KMS provider">
+            {providers.map((p) => (
+              <button
+                key={p.provider}
+                type="button"
+                role="radio"
+                aria-checked={provider === p.provider}
+                onClick={() => setProvider(p.provider)}
+                className={`rounded border px-3 py-3 text-left text-xs transition-colors ${
+                  provider === p.provider
+                    ? "border-[var(--neural-blue)] bg-[var(--neural-blue)]/10"
+                    : "border-[var(--border)] hover:bg-[var(--secondary)]/30"
+                }`}
+                data-testid={`cmek-provider-${p.provider}`}
+              >
+                <span className="block font-semibold">{p.label}</span>
+                <span className="block text-[10px] text-[var(--muted-foreground)] mt-1">
+                  {p.key_id_label}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {step === 0 && (
+            <div className="flex items-center justify-end">
+              <button
+                type="button"
+                onClick={onContinueProvider}
+                disabled={!selected}
+                className="inline-flex items-center gap-1 rounded bg-[var(--neural-blue)] px-3 py-2 text-xs text-[var(--background)] disabled:opacity-50"
+                data-testid="cmek-provider-continue"
+              >
+                Use {selected?.label ?? "provider"}
+              </button>
+            </div>
+          )}
+
+          {step > 0 && (
+            <div className="space-y-4">
+              <label className="block">
+                <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+                  {selected?.policy_target_label ?? "OmniSight principal"}
+                </span>
+                <input
+                  value={principal}
+                  onChange={(e) => {
+                    setPrincipal(e.target.value)
+                    setPolicyJson("")
+                    setPolicyCopied(false)
+                    setVerifyResult(null)
+                    setCompleteResult(null)
+                  }}
+                  className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+                  placeholder={selected?.policy_target_example}
+                  data-testid="cmek-principal-input"
+                />
+              </label>
+
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="text-[10px] text-[var(--muted-foreground)]">Generated IAM policy JSON</span>
+                  <button
+                    type="button"
+                    onClick={() => void onGeneratePolicy()}
+                    disabled={busy || !principal.trim()}
+                    className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-[10px] disabled:opacity-50"
+                    data-testid="cmek-generate-policy"
+                  >
+                    {busy ? <Loader2 size={10} className="animate-spin" /> : <Copy size={10} />}
+                    Generate
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void onCopyPolicy()}
+                    disabled={!policyJson}
+                    className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-[10px] disabled:opacity-50"
+                    data-testid="cmek-copy-policy-json"
+                  >
+                    <Copy size={10} />
+                    {policyCopied ? "Copied" : "Copy JSON"}
+                  </button>
+                </div>
+                <pre
+                  className="min-h-40 max-h-64 overflow-auto rounded border border-[var(--border)] bg-[var(--background)] p-3 text-[10px] leading-relaxed whitespace-pre-wrap"
+                  data-testid="cmek-policy-json"
+                >
+                  {policyJson || "Generate the policy, then paste the JSON into your cloud console."}
+                </pre>
+              </div>
+
+              <label className="block">
+                <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+                  {selected?.key_id_label ?? "KMS key id"}
+                </span>
+                <input
+                  value={keyId}
+                  onChange={(e) => {
+                    setKeyId(e.target.value)
+                    setAcceptedKeyId("")
+                    setPolicyJson("")
+                    setPolicyCopied(false)
+                    setVerifyResult(null)
+                    setCompleteResult(null)
+                  }}
+                  className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+                  placeholder={selected?.key_id_example}
+                  data-testid="cmek-key-id-input"
+                />
+              </label>
+
+              <div className="flex items-center justify-between gap-2 rounded border border-[var(--border)] bg-[var(--background)] p-3">
+                <div>
+                  <p className="text-[10px] text-[var(--muted-foreground)]">
+                    Paste the customer key ARN / resource id after the cloud-side policy is attached.
+                  </p>
+                  {acceptedKeyId && (
+                    <p className="mt-1 text-[10px] text-[var(--neural-green)]" data-testid="cmek-key-id-accepted">
+                      Accepted · {acceptedKeyId}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void onSaveKeyId()}
+                  disabled={busy || !keyId.trim()}
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-[10px] disabled:opacity-50"
+                  data-testid="cmek-save-key-id"
+                >
+                  {busy ? <Loader2 size={10} className="animate-spin" /> : <CheckCircle2 size={10} />}
+                  Use key id
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void onVerify()
+                  }}
+                  disabled={busy || !acceptedKeyId}
+                  className="inline-flex items-center gap-1 rounded bg-[var(--neural-blue)] px-3 py-2 text-xs text-[var(--background)] disabled:opacity-50"
+                  data-testid="cmek-verify"
+                >
+                  {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                  Verify connection
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onComplete()}
+                  disabled={busy || !verifyResult?.ok}
+                  className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-3 py-2 text-xs disabled:opacity-50"
+                  data-testid="cmek-complete"
+                >
+                  <CheckCircle2 size={12} />
+                  Done
+                </button>
+              </div>
+
+              {verifyResult && (
+                <div
+                  className="rounded border border-[var(--neural-green)]/40 bg-[var(--neural-green)]/10 p-3 text-xs"
+                  data-testid="cmek-verify-result"
+                >
+                  encrypt-decrypt ok · {verifyResult.algorithm} · {verifyResult.elapsed_ms} ms · {verifyResult.verification_id}
+                </div>
+              )}
+
+              {completeResult && (
+                <div
+                  className="rounded border border-[var(--neural-green)]/40 bg-[var(--neural-green)]/10 p-3 text-xs"
+                  data-testid="cmek-complete-result"
+                >
+                  Step 5 done · UI switched to Tier 2 for {completeResult.provider}; durable activation follows KS.2.11 storage.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      )}
+
+      {selectedSecurityTier === "tier-3" && tier3Available && (
+        <ProxyConfigurationPanel
+          tid={tid}
+          proxyUrl={proxyUrl}
+          proxyClientCert={proxyClientCert}
+          proxyCertFingerprint={proxyCertFingerprint}
+          onProxyUrlChange={setProxyUrl}
+          onProxyClientCertChange={setProxyClientCert}
+          onProxyCertFingerprintChange={setProxyCertFingerprint}
+        />
+      )}
+    </div>
+  )
+}
+
+type SecurityTier = "tier-1" | "tier-2" | "tier-3"
+
+function ProxyConfigurationPanel({
+  tid,
+  proxyUrl,
+  proxyClientCert,
+  proxyCertFingerprint,
+  onProxyUrlChange,
+  onProxyClientCertChange,
+  onProxyCertFingerprintChange,
+}: {
+  tid: string
+  proxyUrl: string
+  proxyClientCert: string
+  proxyCertFingerprint: string
+  onProxyUrlChange: (value: string) => void
+  onProxyClientCertChange: (value: string) => void
+  onProxyCertFingerprintChange: (value: string) => void
+}) {
+  return (
+    <div
+      className="rounded border border-[var(--border)] bg-[var(--card)] p-4 font-mono"
+      data-testid="byog-proxy-configuration-panel"
+    >
+      <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 mb-4">
+        <div>
+          <h3 className="text-sm font-semibold inline-flex items-center gap-2">
+            <Server size={14} />
+            Proxy Configuration
+          </h3>
+          <p className="text-[10px] text-[var(--muted-foreground)] mt-1">
+            Tier 3 tenants route LLM traffic through omnisight-proxy. Provider keys stay inside the customer VPC.
+          </p>
+        </div>
+        <div className="inline-flex items-center gap-2 rounded border border-[var(--neural-blue)]/50 bg-[var(--neural-blue)]/10 px-3 py-2 text-xs">
+          <ShieldCheck size={13} />
+          mTLS required
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-4">
+        <div className="space-y-4">
+          <label className="block">
+            <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+              Proxy URL
+            </span>
+            <input
+              value={proxyUrl}
+              onChange={(e) => onProxyUrlChange(e.target.value)}
+              className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+              placeholder="https://proxy.customer.example.com"
+              data-testid="byog-proxy-url-input"
+            />
+          </label>
+
+          <label className="block">
+            <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+              Client certificate PEM
+            </span>
+            <textarea
+              value={proxyClientCert}
+              onChange={(e) => onProxyClientCertChange(e.target.value)}
+              className="min-h-40 w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs leading-relaxed"
+              placeholder="-----BEGIN CERTIFICATE-----"
+              data-testid="byog-client-cert-input"
+            />
+          </label>
+
+          <label className="block">
+            <span className="block text-[10px] text-[var(--muted-foreground)] mb-1">
+              Pinned certificate fingerprint
+            </span>
+            <input
+              value={proxyCertFingerprint}
+              onChange={(e) => onProxyCertFingerprintChange(e.target.value)}
+              className="w-full rounded border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-xs"
+              placeholder="sha256:..."
+              data-testid="byog-cert-fingerprint-input"
+            />
+          </label>
+        </div>
+
+        <aside className="rounded border border-[var(--border)] bg-[var(--background)] p-3 text-xs text-[var(--muted-foreground)]">
+          <div className="flex items-center gap-2 text-[var(--foreground)] mb-2">
+            <KeyRound size={13} />
+            <span>Provider keys disabled</span>
+          </div>
+          <p className="leading-relaxed">
+            Do not paste OpenAI, Anthropic, Google, or other LLM provider keys
+            into OmniSight for tenant {tid}. Load them into the customer-side
+            proxy key source instead.
+          </p>
+          <dl className="mt-3 space-y-2">
+            <div>
+              <dt className="text-[10px] uppercase text-[var(--muted-foreground)]">
+                Accepted here
+              </dt>
+              <dd data-testid="byog-accepted-materials">proxy URL, client cert, pinned cert fingerprint</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] uppercase text-[var(--muted-foreground)]">
+                Rejected here
+              </dt>
+              <dd data-testid="byog-rejected-materials">provider API keys</dd>
+            </div>
+          </dl>
+        </aside>
+      </div>
     </div>
   )
 }

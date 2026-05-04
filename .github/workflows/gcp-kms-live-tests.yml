@@ -1,0 +1,61 @@
+name: GCP KMS Live Integration Tests
+
+on:
+  schedule:
+    - cron: "45 6 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - ".github/workflows/gcp-kms-live-tests.yml"
+      - "backend/security/kms_adapters.py"
+      - "backend/tests/test_security_kms_adapters.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gcp-kms-live-tests
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  live-tests:
+    name: GCP KMS sandbox live test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OMNISIGHT_TEST_GCP_KMS_KEY_ID: ${{ secrets.OMNISIGHT_TEST_GCP_KMS_KEY_ID }}
+      OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON: ${{ secrets.OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON }}
+      GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/gcp-kms-credentials.json
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Write GCP KMS sandbox credentials
+        if: env.OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON != ''
+        run: |
+          set -eu
+          umask 077
+          printf '%s' "$OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON" > "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      - name: Install backend dependencies
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install --require-hashes -r backend/requirements-dev.txt
+
+      - name: Run GCP KMS live tests
+        run: |
+          python -m pytest \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -q \
+            backend/tests/test_security_kms_adapters.py::TestGCPKMSLiveIntegration

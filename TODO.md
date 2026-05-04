@@ -3120,19 +3120,19 @@ ls backend/alembic/versions/ | tail -3
   - [x][G] Step 2 IAM policy generator（精準輸出 JSON、客戶在自家 console 貼上）
   - [x][G] Step 3 KMS key ARN / resource id 貼回 wizard
   - [x][G] Step 4 verify connection（OmniSight 跑一次 test encrypt-decrypt）
-  - [~][G] Step 5 done + UI 切到 Tier 2
-- [ ] KS.2.2 **AWS KMS live integration**（CI sandbox account + production IAM assume-role）
-- [ ] KS.2.3 **GCP KMS live integration**
-- [ ] KS.2.4 **HashiCorp Vault Transit live integration**（multi-cloud / cloud-neutral 客戶必選）
-- [ ] KS.2.5 **CMEK revoke 偵測**：定期 `DescribeKey` 健康檢查 → key disabled / 權限拔除 → 60 sec 內偵測
-- [ ] KS.2.6 **Graceful degrade**：客戶 revoke 後 (a) in-flight 完成 / (b) 新請求 403 + 友善錯誤 + 復原 runbook、不 retry
-- [ ] KS.2.7 **客戶 SIEM audit log 整合**：CloudTrail / Cloud Audit Logs 加 OmniSight tag、客戶可 ingest
-- [ ] KS.2.8 **Tier 1 → Tier 2 升級 flow**：re-encrypt 所有 tenant 資料（per-tenant DEK 不變、上層 wrap 從 master KEK 換成客戶 CMK）+ progress UI
-- [ ] KS.2.9 **Tier 2 → Tier 1 降級 flow**：撤回我方 IAM 對客戶 CMK 的依賴 + re-encrypt 回 master KEK
-- [ ] KS.2.10 **Settings UI**：「Security Tier」selector + revoke status indicator + KMS health badge
-- [ ] KS.2.11 **alembic 0107** — `cmek_configs` / `tier_assignments` / `cmek_revoke_events`
-- [ ] KS.2.12 **Single knob**：`OMNISIGHT_KS_CMEK_ENABLED=false` → 隱藏 Tier 2 wizard、所有 tenant 退回 Tier 1、既有 Tier 2 客戶 graceful 降級
-- [ ] KS.2.13 **Test**：3 KMS adapter live test + CMEK revoke E2E + Tier upgrade / downgrade re-encrypt 路徑 + Compat regression（Tier 1 客戶 0 變化）
+  - [x][G] Step 5 done + UI 切到 Tier 2
+- [x][G] KS.2.2 **AWS KMS live integration**（CI sandbox account + production IAM assume-role）
+- [x][G] KS.2.3 **GCP KMS live integration**
+- [x][G] KS.2.4 **HashiCorp Vault Transit live integration**（multi-cloud / cloud-neutral 客戶必選）
+- [x][G] KS.2.5 **CMEK revoke 偵測**：定期 `DescribeKey` 健康檢查 → key disabled / 權限拔除 → 60 sec 內偵測
+- [x][G] KS.2.6 **Graceful degrade**：客戶 revoke 後 (a) in-flight 完成 / (b) 新請求 403 + 友善錯誤 + 復原 runbook、不 retry
+- [x][G] KS.2.7 **客戶 SIEM audit log 整合**：CloudTrail / Cloud Audit Logs 加 OmniSight tag、客戶可 ingest
+- [x][G] KS.2.8 **Tier 1 → Tier 2 升級 flow**：re-encrypt 所有 tenant 資料（per-tenant DEK 不變、上層 wrap 從 master KEK 換成客戶 CMK）+ progress UI
+- [x][G] KS.2.9 **Tier 2 → Tier 1 降級 flow**：撤回我方 IAM 對客戶 CMK 的依賴 + re-encrypt 回 master KEK
+- [x][G] KS.2.10 **Settings UI**：「Security Tier」selector + revoke status indicator + KMS health badge
+- [x][G] KS.2.11 **alembic 0107** — `cmek_configs` / `tier_assignments` / `cmek_revoke_events`
+- [x][G] KS.2.12 **Single knob**：`OMNISIGHT_KS_CMEK_ENABLED=false` → 隱藏 Tier 2 wizard、所有 tenant 退回 Tier 1、既有 Tier 2 客戶 graceful 降級
+- [x][G] KS.2.13 **Test**：3 KMS adapter live test + CMEK revoke E2E + Tier upgrade / downgrade re-encrypt 路徑 + Compat regression（Tier 1 客戶 0 變化）
 
 預估：**3 週**（Day 1-5 三 KMS live integration / Day 6-10 wizard + revoke 偵測 / Day 11-15 Tier 升降級 + UI + test）
 
@@ -3140,20 +3140,20 @@ ls backend/alembic/versions/ | tail -3
 
 > **目標**：銀行 / 政府 / 醫療 / 軍工 / air-gapped 客戶在自家 VPC 跑 omnisight-proxy、key 永不離客戶基建。**1% 客戶但合約金額最大**。第一個此類客戶詢盤時 ship。
 
-- [ ] KS.3.1 **`omnisight-proxy` container image**：distroless base、< 100 MB、單 binary（Go or Rust）
-- [ ] KS.3.2 **Proxy auth**：mTLS + 簽名 nonce（防 replay） + per-tenant client cert + cert pinning
-- [ ] KS.3.3 **Proxy config schema**：provider keys 從 local file / KMS / Vault 讀（客戶選）+ multi-provider 同 proxy 支援
-- [ ] KS.3.4 **Proxy ↔ SaaS 通訊協定**：forward LLM request、stream response back、**不 cache payload**（嚴格 zero-trust）
-- [ ] KS.3.5 **Health check + heartbeat**：proxy 每 30 sec 上報健康、SaaS 端 60 sec 沒收 heartbeat 視為失聯
-- [ ] KS.3.6 **Latency budget**：proxy hop p95 < 50 ms（含 mTLS handshake reuse） — CI 持續驗
-- [ ] KS.3.7 **客戶側 proxy audit log**：完整 prompt + response（客戶資產）；OmniSight 端只 metadata（時間 / model / token count、不含 prompt 內文）
-- [ ] KS.3.8 **Tier 2 → Tier 3 升級 runbook**：proxy 部署 + key migration（OmniSight export → 客戶導入 proxy → OmniSight 清除）
-- [ ] KS.3.9 **HD.21.5 self-hosted edition 對齊**：omnisight-proxy 與 self-hosted edition 共享 container image + 部署 SOP
-- [ ] KS.3.10 **Settings UI**：「Proxy Configuration」面板取代 Tier 3 tenant 的 Provider Keys panel（不貼 key、貼 proxy URL + cert）
-- [ ] KS.3.11 **Fail-fast 嚴格 zero-trust**：proxy unreachable / mTLS handshake failed → 直接 close、**不 fallback 到我方直連**（這是 Tier 3 客戶選擇 BYOG 的根本原因）
-- [ ] KS.3.12 **alembic 0108** — `proxy_registrations` / `proxy_health_checks` / `proxy_mtls_certs`
-- [ ] KS.3.13 **Single knob**：`OMNISIGHT_KS_BYOG_ENABLED=false` → 隱藏 Tier 3 註冊、proxy 模式不可選
-- [ ] KS.3.14 **Test**：mTLS handshake 矩陣（valid / expired / self-signed） + 簽名 nonce replay 防護 + proxy unreachable graceful 失敗 + p95 latency budget + streaming LLM response 不破 + Compat regression（Tier 1/2 客戶 0 變化）
+- [x][G] KS.3.1 **`omnisight-proxy` container image**：distroless base、< 100 MB、單 binary（Go or Rust）
+- [x][G] KS.3.2 **Proxy auth**：mTLS + 簽名 nonce（防 replay） + per-tenant client cert + cert pinning
+- [x][G] KS.3.3 **Proxy config schema**：provider keys 從 local file / KMS / Vault 讀（客戶選）+ multi-provider 同 proxy 支援
+- [x][G] KS.3.4 **Proxy ↔ SaaS 通訊協定**：forward LLM request、stream response back、**不 cache payload**（嚴格 zero-trust）
+- [x][G] KS.3.5 **Health check + heartbeat**：proxy 每 30 sec 上報健康、SaaS 端 60 sec 沒收 heartbeat 視為失聯
+- [x][G] KS.3.6 **Latency budget**：proxy hop p95 < 50 ms（含 mTLS handshake reuse） — CI 持續驗
+- [x][G] KS.3.7 **客戶側 proxy audit log**：完整 prompt + response（客戶資產）；OmniSight 端只 metadata（時間 / model / token count、不含 prompt 內文）
+- [x][G] KS.3.8 **Tier 2 → Tier 3 升級 runbook**：proxy 部署 + key migration（OmniSight export → 客戶導入 proxy → OmniSight 清除）
+- [x][G] KS.3.9 **HD.21.5 self-hosted edition 對齊**：omnisight-proxy 與 self-hosted edition 共享 container image + 部署 SOP
+- [x][G] KS.3.10 **Settings UI**：「Proxy Configuration」面板取代 Tier 3 tenant 的 Provider Keys panel（不貼 key、貼 proxy URL + cert）
+- [x][G] KS.3.11 **Fail-fast 嚴格 zero-trust**：proxy unreachable / mTLS handshake failed → 直接 close、**不 fallback 到我方直連**（這是 Tier 3 客戶選擇 BYOG 的根本原因）
+- [x][G] KS.3.12 **alembic 0108** — `proxy_registrations` / `proxy_health_checks` / `proxy_mtls_certs`
+- [x][G] KS.3.13 **Single knob**：`OMNISIGHT_KS_BYOG_ENABLED=false` → 隱藏 Tier 3 註冊、proxy 模式不可選
+- [x][G] KS.3.14 **Test**：mTLS handshake 矩陣（valid / expired / self-signed） + 簽名 nonce replay 防護 + proxy unreachable graceful 失敗 + p95 latency budget + streaming LLM response 不破 + Compat regression（Tier 1/2 客戶 0 變化）
 
 預估：**2 週**（Day 1-5 container + mTLS + 通訊協定 / Day 6-10 audit + UI + HD.21.5 對齊 + test）
 

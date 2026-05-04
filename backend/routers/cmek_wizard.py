@@ -1,0 +1,456 @@
+"""KS.2.1 -- CMEK tenant-settings wizard REST surface.
+
+Routes are tenant-admin scoped and intentionally stateless. KS.2.11
+will add durable ``cmek_configs`` / ``tier_assignments`` storage; until
+then ``complete`` returns a Tier 2 draft summary for the settings UI.
+KS.2.7 extends the same stateless surface with customer SIEM ingest
+spec generation for native CloudTrail / Cloud Audit Logs.
+KS.2.8 adds the Tier 1 -> Tier 2 stateless rewrap plan endpoint; KS.2.9
+adds the mirrored Tier 2 -> Tier 1 downgrade plan. Durable progress
+persistence remains blocked on KS.2.11's CMEK tables.
+KS.2.12 adds the single rollback knob: when
+``OMNISIGHT_KS_CMEK_ENABLED=false``, Tier 2 wizard/upgrade routes are
+hidden, status reports Tier 1 fallback for every tenant, and the Tier
+2 -> Tier 1 downgrade route remains available for existing CMEK tenants.
+KS.3.13 adds the BYOG single knob: when
+``OMNISIGHT_KS_BYOG_ENABLED=false``, status hides Tier 3 from available
+security tiers so the settings UI cannot select proxy mode.
+
+Module-global state audit (SOP Step 1)
+--------------------------------------
+Only immutable route constants, Pydantic classes, and pure helper
+functions are module globals. The settings status endpoint reads
+``cmek_revoke_detector``'s per-worker observability snapshot; every
+worker derives it from the same external KMS/Vault source, so no shared
+Python memory is required. The KS.2.12 knob is read lazily through
+``cmek_wizard.is_enabled()``, so each worker derives the same value from
+env without shared module-global state.
+The KS.3.13 BYOG knob is read lazily through
+``cmek_wizard.is_byog_enabled()`` with the same per-worker env
+derivation.
+
+Read-after-write timing audit (SOP Step 1)
+------------------------------------------
+No shared writes happen in this router. Every request computes its
+response from request input, so there is no read-after-write race.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, model_validator
+
+from backend import auth
+from backend.security import cmek_graceful_degrade as _cmek_degrade
+from backend.security import cmek_revoke_detector as _cmek_detector
+from backend.security import cmek_siem as _cmek_siem
+from backend.security import cmek_upgrade as _cmek_upgrade
+from backend.security import cmek_wizard as _cw
+
+
+router = APIRouter(tags=["cmek-wizard"])
+
+TENANT_ID_PATTERN = r"^t-[a-z0-9][a-z0-9-]{2,62}$"
+_TENANT_ID_RE = re.compile(TENANT_ID_PATTERN)
+_ALLOWED_MEMBERSHIP_ROLES = frozenset({"owner", "admin"})
+CMEK_DISABLED_ERROR_CODE = "cmek_disabled"
+CMEK_DISABLED_DETAIL = (
+    "Tier 2 CMEK is disabled by OMNISIGHT_KS_CMEK_ENABLED=false. "
+    "Tier 2 onboarding and upgrades are hidden; tenants are presented "
+    "as Tier 1 until CMEK is re-enabled."
+)
+
+
+def _is_valid_tenant_id(tid: str) -> bool:
+    return bool(tid) and bool(_TENANT_ID_RE.match(tid))
+
+
+async def _user_can_manage_cmek(user: auth.User, tenant_id: str) -> bool:
+    if auth.role_at_least(user.role, "super_admin"):
+        return True
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT role, status FROM user_tenant_memberships "
+            "WHERE user_id = $1 AND tenant_id = $2",
+            user.id, tenant_id,
+        )
+    if row is None or row["status"] != "active":
+        return False
+    return row["role"] in _ALLOWED_MEMBERSHIP_ROLES
+
+
+class GeneratePolicyRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
+    principal: str = Field(min_length=1, max_length=512)
+    key_id: str | None = Field(default=None, max_length=512)
+
+
+class VerifyCMEKRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
+    key_id: str = Field(min_length=1, max_length=512)
+
+
+class KeyIdCMEKRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
+    key_id: str = Field(min_length=1, max_length=512)
+
+
+class CompleteCMEKRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
+    key_id: str = Field(min_length=1, max_length=512)
+    verification_id: str = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _verification_id_shape(self) -> "CompleteCMEKRequest":
+        if not self.verification_id.startswith("cmekv_"):
+            raise ValueError("verification_id must come from the verify step")
+        return self
+
+
+class SIEMIngestSpecRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms"]
+    key_id: str = Field(min_length=1, max_length=512)
+    principal: str | None = Field(default=None, max_length=512)
+
+
+class TierUpgradeRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
+    key_id: str = Field(min_length=1, max_length=512)
+    dek_refs: list[dict] = Field(default_factory=list)
+
+
+class TierDowngradeRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
+    key_id: str = Field(min_length=1, max_length=512)
+    dek_refs: list[dict] = Field(default_factory=list)
+
+
+def _cmek_settings_status_payload(tenant_id: str) -> dict:
+    latest_for_tenant = [
+        result
+        for result in _cmek_detector.latest_cmek_health_results()
+        if result.get("tenant_id") == tenant_id
+    ]
+    latest = (
+        max(latest_for_tenant, key=lambda result: float(result.get("checked_at") or 0.0))
+        if latest_for_tenant
+        else None
+    )
+    decision = _cmek_degrade.cmek_degrade_decision_for_tenant(
+        tenant_id,
+        latest_results=latest_for_tenant,
+    )
+    if latest is None:
+        kms_health = "not_configured"
+    elif decision.allowed:
+        kms_health = "healthy"
+    else:
+        kms_health = "revoked"
+    if not _cw.is_enabled():
+        previous_security_tier = "tier-2" if latest is not None else "tier-1"
+        return {
+            "tenant_id": tenant_id,
+            "security_tier": "tier-1",
+            "previous_security_tier": previous_security_tier,
+            "kms_health": "cmek_disabled",
+            "revoke_status": "fallback_to_tier1",
+            "provider": "",
+            "key_id": "",
+            "reason": f"{_cw.CMEK_ENABLED_ENV}=false",
+            "raw_state": "cmek_disabled",
+            "checked_at": None,
+            "cmek_enabled": False,
+            "tier2_available": False,
+            "wizard_visible": False,
+            "available_security_tiers": ["tier-1"],
+            "byog_enabled": _cw.is_byog_enabled(),
+            "tier3_available": False,
+            "proxy_mode_available": False,
+        }
+    byog_enabled = _cw.is_byog_enabled()
+    available_security_tiers = ["tier-1", "tier-2"]
+    if byog_enabled:
+        available_security_tiers.append("tier-3")
+    return {
+        "tenant_id": tenant_id,
+        "security_tier": "tier-2" if latest is not None else "tier-1",
+        "kms_health": kms_health,
+        "revoke_status": "clear" if decision.allowed else "revoked",
+        "provider": str(latest.get("provider") or "") if latest else "",
+        "key_id": str(latest.get("key_id") or "") if latest else "",
+        "reason": str(latest.get("reason") or "") if latest else "",
+        "raw_state": str(latest.get("raw_state") or "") if latest else "",
+        "checked_at": float(latest["checked_at"]) if latest and latest.get("checked_at") else None,
+        "cmek_enabled": True,
+        "tier2_available": True,
+        "wizard_visible": True,
+        "available_security_tiers": available_security_tiers,
+        "byog_enabled": byog_enabled,
+        "tier3_available": byog_enabled,
+        "proxy_mode_available": byog_enabled,
+    }
+
+
+def _cmek_disabled_response(tenant_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content={
+            "detail": CMEK_DISABLED_DETAIL,
+            "error_code": CMEK_DISABLED_ERROR_CODE,
+            "tenant_id": tenant_id,
+            "cmek_enabled": False,
+            "security_tier": "tier-1",
+            "retryable": False,
+        },
+    )
+
+
+async def _guard(
+    tenant_id: str,
+    actor: auth.User,
+    *,
+    require_cmek_enabled: bool = True,
+) -> JSONResponse | None:
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; "
+                    f"must match {TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not await _user_can_manage_cmek(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"requires tenant owner/admin or super_admin on {tenant_id!r}",
+        )
+    if require_cmek_enabled and not _cw.is_enabled():
+        return _cmek_disabled_response(tenant_id)
+    decision = _cmek_degrade.cmek_degrade_decision_for_tenant(tenant_id)
+    if not decision.allowed:
+        return JSONResponse(
+            status_code=403,
+            content=decision.to_error_payload(),
+        )
+    return None
+
+
+@router.get("/tenants/{tenant_id}/cmek/wizard/providers")
+async def list_cmek_wizard_providers(
+    tenant_id: str,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "providers": _cw.list_provider_specs(),
+        }
+    )
+
+
+@router.get("/tenants/{tenant_id}/cmek/status")
+async def get_cmek_settings_status(
+    tenant_id: str,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    if not _is_valid_tenant_id(tenant_id):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"invalid tenant id: {tenant_id!r}; "
+                    f"must match {TENANT_ID_PATTERN}"
+                ),
+            },
+        )
+    if not await _user_can_manage_cmek(actor, tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"requires tenant owner/admin or super_admin on {tenant_id!r}",
+        )
+    return JSONResponse(_cmek_settings_status_payload(tenant_id))
+
+
+@router.post("/tenants/{tenant_id}/cmek/wizard/policy")
+async def generate_cmek_wizard_policy(
+    tenant_id: str,
+    req: GeneratePolicyRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        provider = _cw.normalise_provider(req.provider)
+        policy = _cw.generate_policy_json(
+            provider,
+            tenant_id=tenant_id,
+            principal=req.principal,
+            key_id=req.key_id,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "provider": provider,
+            "policy": policy,
+            "policy_json": _cw.stable_policy_json(policy),
+        }
+    )
+
+
+@router.post("/tenants/{tenant_id}/cmek/wizard/key-id")
+async def save_cmek_wizard_key_id(
+    tenant_id: str,
+    req: KeyIdCMEKRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        provider = _cw.normalise_provider(req.provider)
+        key_id = _cw.validate_key_id(provider, req.key_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "provider": provider,
+            "key_id": key_id,
+            "accepted": True,
+        }
+    )
+
+
+@router.post("/tenants/{tenant_id}/cmek/wizard/verify")
+async def verify_cmek_wizard_connection(
+    tenant_id: str,
+    req: VerifyCMEKRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        result = _cw.verify_connection_probe(
+            _cw.normalise_provider(req.provider),
+            tenant_id=tenant_id,
+            key_id=req.key_id,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    return JSONResponse({"tenant_id": tenant_id, **result})
+
+
+@router.post("/tenants/{tenant_id}/cmek/wizard/complete")
+async def complete_cmek_wizard(
+    tenant_id: str,
+    req: CompleteCMEKRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        provider = _cw.normalise_provider(req.provider)
+        key_id = _cw.validate_key_id(provider, req.key_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "security_tier": "tier-2",
+            "provider": provider,
+            "key_id": key_id,
+            "verification_id": req.verification_id,
+            "config_status": "draft",
+            "persisted": False,
+        }
+    )
+
+
+@router.post("/tenants/{tenant_id}/cmek/siem/ingest-spec")
+async def generate_cmek_siem_ingest_spec(
+    tenant_id: str,
+    req: SIEMIngestSpecRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        spec = _cmek_siem.build_cmek_siem_ingest_spec(
+            _cmek_siem.normalise_siem_provider(req.provider),
+            tenant_id=tenant_id,
+            key_id=req.key_id,
+            principal=req.principal,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    body = spec.to_dict()
+    body["ingest_spec_json"] = _cmek_siem.stable_ingest_json(spec)
+    return JSONResponse(body)
+
+
+@router.post("/tenants/{tenant_id}/cmek/tier-upgrade")
+async def start_tier1_to_tier2_upgrade(
+    tenant_id: str,
+    req: TierUpgradeRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        result = _cmek_upgrade.plan_tier1_to_tier2_upgrade(
+            tenant_id=tenant_id,
+            provider=_cw.normalise_provider(req.provider),
+            key_id=req.key_id,
+            dek_refs=req.dek_refs,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    return JSONResponse(result.to_dict())
+
+
+@router.post("/tenants/{tenant_id}/cmek/tier-downgrade")
+async def start_tier2_to_tier1_downgrade(
+    tenant_id: str,
+    req: TierDowngradeRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor, require_cmek_enabled=False)
+    if guarded is not None:
+        return guarded
+    try:
+        result = _cmek_upgrade.plan_tier2_to_tier1_downgrade(
+            tenant_id=tenant_id,
+            provider=_cw.normalise_provider(req.provider),
+            key_id=req.key_id,
+            dek_refs=req.dek_refs,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    return JSONResponse(result.to_dict())
