@@ -91,6 +91,20 @@ class TestLoadRoleSkill:
 
 class TestBuildSystemPrompt:
 
+    def test_load_core_rules_scans_all_project_rule_files(self, tmp_path, monkeypatch):
+        import backend.prompt_loader as prompt_loader
+
+        for filename in ("CLAUDE.md", "AGENTS.md", "OMNISIGHT.md", "WARP.md"):
+            (tmp_path / filename).write_text(f"{filename} body\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        content = prompt_loader.load_core_rules()
+        assert content.index("CLAUDE.md body") < content.index("AGENTS.md body")
+        assert content.index("AGENTS.md body") < content.index("OMNISIGHT.md body")
+        assert content.index("OMNISIGHT.md body") < content.index("WARP.md body")
+
     def test_with_model_and_role(self):
         prompt = build_system_prompt(
             model_name="claude-sonnet-4",

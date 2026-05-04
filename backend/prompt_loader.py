@@ -37,6 +37,8 @@ import re
 import time
 from pathlib import Path
 
+from backend.agents.project_memory import PROJECT_RULE_FILENAMES
+
 logger = logging.getLogger(__name__)
 
 # ZZ.C1 #305-1 checkbox 2 (2026-04-24): slug fence for auto-captured
@@ -67,7 +69,6 @@ _CONFIGS_ROOT = _PROJECT_ROOT / "configs"
 _MODELS_DIR = _CONFIGS_ROOT / "models"
 _ROLES_DIR = _CONFIGS_ROOT / "roles"
 _SKILLS_DIR = _CONFIGS_ROOT / "skills"
-_CLAUDE_MD = _PROJECT_ROOT / "CLAUDE.md"
 
 # Maximum prompt section lengths (rough char counts) to avoid blowing context
 _MAX_CORE_RULES = 2000
@@ -96,17 +97,28 @@ _core_rules_cache: str | None = None
 
 
 def load_core_rules() -> str:
-    """Load CLAUDE.md core rules (L1 Memory). Cached after first call."""
+    """Load project rule files (L1 Memory). Cached after first call.
+
+    Module-global audit (SOP Step 1): the cache is PER-WORKER and is
+    derived from immutable project files on disk at startup. Cross-worker
+    consistency is guaranteed because each worker reads the same files.
+    """
     global _core_rules_cache
     if _core_rules_cache is not None:
         return _core_rules_cache
-    if _CLAUDE_MD.is_file():
-        content = _read_md(_CLAUDE_MD, _MAX_CORE_RULES)
-        _core_rules_cache = content
-        logger.info("Loaded L1 core rules from CLAUDE.md (%d chars)", len(content))
-        return content
-    _core_rules_cache = ""
-    return ""
+    parts: list[str] = []
+    for filename in PROJECT_RULE_FILENAMES:
+        content = _read_md(_PROJECT_ROOT / filename, _MAX_CORE_RULES)
+        if content:
+            parts.append(f"## {filename}\n\n{content}")
+    _core_rules_cache = "\n\n".join(parts)
+    if _core_rules_cache:
+        logger.info(
+            "Loaded L1 core rules from %d project rule file(s) (%d chars)",
+            len(parts),
+            len(_core_rules_cache),
+        )
+    return _core_rules_cache
 
 
 def _strip_frontmatter(text: str) -> str:
