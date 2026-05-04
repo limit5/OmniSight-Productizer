@@ -3285,26 +3285,26 @@ ls backend/alembic/versions/ | tail -3
 
 > Agent 改檔（patch / replace / insert）走 4 層 fallback、防 silent corrupt。BP / HD / W14 sandbox 共用。
 
-- [ ] WP.3.1 **Cascade 實作**：Layer 1 exact match → Layer 2 indent-agnostic → Layer 3 prefix-tail rescue → Layer 4 Jaro-Winkler ≥ 0.9
-- [ ] WP.3.2 **Confidence score**：每 layer 帶 score、進 N10 ledger
-- [ ] WP.3.3 **Strict mode**：HD bring-up agent 改 DTS / Yocto recipe 預設 strict（不走 0.9 fallback、改 0.95），防 R60 false-positive
-- [ ] WP.3.4 **既有 Edit tool wrapper 升級**：BP agent / HD bring-up agent / W14 sandbox 統一走 cascade
-- [ ] WP.3.5 **失敗 explicit error**：不 silent fail、走 agent self-correction loop
-- [ ] WP.3.6 **Single knob**：`OMNISIGHT_WP_DIFF_VALIDATION_ENABLED=false` 退回 exact-match only
-- [ ] WP.3.7 **Test**：4 層 ladder 各自 unit + 50+ scenario regression（正改 / 誤改 / 邊界 / strict mode triggers）
+- [x][G] WP.3.1 **Cascade 實作**：Layer 1 exact match → Layer 2 indent-agnostic → Layer 3 prefix-tail rescue → Layer 4 Jaro-Winkler ≥ 0.9
+- [x][G] WP.3.2 **Confidence score**：每 layer 帶 score、進 N10 ledger
+- [x][G] WP.3.3 **Strict mode**：HD bring-up agent 改 DTS / Yocto recipe 預設 strict（不走 0.9 fallback、改 0.95），防 R60 false-positive
+- [x][G] WP.3.4 **既有 Edit tool wrapper 升級**：BP agent / HD bring-up agent / W14 sandbox 統一走 cascade
+- [x][G] WP.3.5 **失敗 explicit error**：不 silent fail、走 agent self-correction loop
+- [x][G] WP.3.6 **Single knob**：`OMNISIGHT_WP_DIFF_VALIDATION_ENABLED=false` 退回 exact-match only
+- [x][G] WP.3.7 **Test**：4 層 ladder 各自 unit + 50+ scenario regression（正改 / 誤改 / 邊界 / strict mode triggers）
 
 ### WP.5 Project-Context Multi-Rule Walker
 
 > 升級 OmniSight 既有 CLAUDE.md 處理：multi-file + parent-walk + FS-watched。HD RAG corpus 多 datasheet / spec 自動 ingest。
 
-- [ ] WP.5.1 **Multi-file**：`CLAUDE.md` + `AGENTS.md` + `OMNISIGHT.md` + `WARP.md` 全掃
-- [ ] WP.5.2 **Parent walk**：current dir + 最多 3 層父目錄、依距離 weight
-- [ ] WP.5.3 **FS-watched**：檔變動即時重 merge
-- [ ] WP.5.4 **Merge precedence**：current dir > 父目錄、project-specific > generic
-- [ ] WP.5.5 **R20 Phase 0 RAG 整合**：HD datasheet / sensor spec / errata 走相同 walker 自動 ingest
-- [ ] WP.5.6 **Size cap**：每檔 max 5 KB、總和 max 50 KB（防 R61 prompt 污染）；超過則 UI 顯示 truncated + ignore option
-- [ ] WP.5.7 **UI 顯示**：載入哪些檔 + 各檔大小 + operator 可 ignore 特定檔
-- [ ] WP.5.8 **Test**：parent walk + multi-file merge + size cap + ignore + reload
+- [x][G] WP.5.1 **Multi-file**：`CLAUDE.md` + `AGENTS.md` + `OMNISIGHT.md` + `WARP.md` 全掃
+- [x][G] WP.5.2 **Parent walk**：current dir + 最多 3 層父目錄、依距離 weight
+- [x][G] WP.5.3 **FS-watched**：檔變動即時重 merge
+- [x][G] WP.5.4 **Merge precedence**：current dir > 父目錄、project-specific > generic
+- [x][G] WP.5.5 **R20 Phase 0 RAG 整合**：HD datasheet / sensor spec / errata 走相同 walker 自動 ingest
+- [x][G] WP.5.6 **Size cap**：每檔 max 5 KB、總和 max 50 KB（防 R61 prompt 污染）；超過則 UI 顯示 truncated + ignore option
+- [x][G] WP.5.7 **UI 顯示**：載入哪些檔 + 各檔大小 + operator 可 ignore 特定檔
+- [x][G] WP.5.8 **Test**：parent walk + multi-file merge + size cap + ignore + reload
 
 ### WP.7 Feature Flag Tiered Registry
 
