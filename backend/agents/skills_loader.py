@@ -7,7 +7,9 @@ from three precedence layers:
   1. **Project** — ``<project>/.claude/skills/`` and
      ``<project>/.omnisight/skills/`` (highest)
   2. **Home** — ``~/.claude/skills/`` and ``~/.omnisight/skills/``
-  3. **Bundled** — ``<project>/configs/skills/`` (lowest, ships with repo)
+  3. **Bundled** — ``<project>/omnisight/agents/skills/`` (lowest,
+     ships with repo). ``<project>/configs/skills/`` remains a legacy
+     bundled fallback while existing packs are migrated.
 
 Same skill name in a higher scope shadows lower scopes — operators can
 override a bundled skill by dropping a same-named ``SKILL.md`` into
@@ -319,7 +321,10 @@ def _home_scope_dirs(home: Path | None = None) -> list[Path]:
 
 
 def _bundled_scope_dirs(project_root: Path) -> list[Path]:
-    return [project_root / "configs" / "skills"]
+    return [
+        project_root / "omnisight" / "agents" / "skills",
+        project_root / "configs" / "skills",
+    ]
 
 
 def load_default_scopes(
@@ -331,8 +336,8 @@ def load_default_scopes(
     """Load skills with 3-scope precedence.
 
     Args:
-      project_root: Repository root. ``.claude/skills/`` and
-        ``configs/skills/`` are scanned relative to it.
+      project_root: Repository root. Project and bundled skill roots are
+        scanned relative to it.
       home: Override ``~`` for tests. Defaults to :func:`Path.home`.
       extra_dirs: Optional ``(path, scope_label)`` pairs. Iterated in
         order, treated as the **lowest** priority — useful for embedded

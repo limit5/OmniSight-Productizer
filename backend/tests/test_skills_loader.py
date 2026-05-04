@@ -9,8 +9,8 @@ Locks:
   * Skill tool handler returns body; unknown name raises; empty name raises;
     args prepended to body
   * render_catalog_for_prompt: empty registry → empty string; truncation
-  * Real-world smoke: load this repo's bundled configs/skills/ and verify
-    at least one frontmatter skill + one legacy skill round-trip
+  * Real-world smoke: load this repo's bundled skills and verify at least
+    one frontmatter skill + one legacy skill round-trip
 """
 
 from __future__ import annotations
@@ -165,6 +165,35 @@ def test_load_default_scopes_project_shadows_bundled(tmp_path: Path) -> None:
     assert "from-project" in sk.description
 
 
+def test_load_default_scopes_project_omnisight_shadows_bundled(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "proj"
+    home = tmp_path / "fakehome"
+    (project / ".omnisight" / "skills" / "shared").mkdir(parents=True)
+    (project / ".omnisight" / "skills" / "shared" / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: from-project-omnisight\n---\nbody-proj\n"
+    )
+    (project / "omnisight" / "agents" / "skills" / "shared").mkdir(parents=True)
+    (
+        project
+        / "omnisight"
+        / "agents"
+        / "skills"
+        / "shared"
+        / "SKILL.md"
+    ).write_text(
+        "---\nname: shared\ndescription: from-bundled\n---\nbody-bundle\n"
+    )
+    home.mkdir()
+    reg = load_default_scopes(project, home=home)
+    sk = reg.get("shared")
+    assert sk is not None
+    assert sk.scope == "project"
+    assert sk.body == "body-proj\n"
+    assert "from-project-omnisight" in sk.description
+
+
 def test_load_default_scopes_home_between_project_and_bundled(
     tmp_path: Path,
 ) -> None:
@@ -182,9 +211,54 @@ def test_load_default_scopes_home_between_project_and_bundled(
     assert reg.get("homed").scope == "home"
 
 
+def test_load_default_scopes_home_omnisight_between_project_and_bundled(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    (home / ".omnisight" / "skills" / "homed").mkdir(parents=True)
+    (home / ".omnisight" / "skills" / "homed" / "SKILL.md").write_text(
+        "---\nname: homed\ndescription: home-omnisight\n---\nb\n"
+    )
+    (project / "omnisight" / "agents" / "skills" / "homed").mkdir(
+        parents=True
+    )
+    (
+        project
+        / "omnisight"
+        / "agents"
+        / "skills"
+        / "homed"
+        / "SKILL.md"
+    ).write_text(
+        "---\nname: homed\ndescription: bundled-only\n---\nb\n"
+    )
+    reg = load_default_scopes(project, home=home)
+    sk = reg.get("homed")
+    assert sk is not None
+    assert sk.scope == "home"
+    assert sk.description == "home-omnisight"
+
+
+def test_load_default_scopes_bundled_uses_omnisight_agents_skills(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    bundled = project / "omnisight" / "agents" / "skills" / "bundled"
+    bundled.mkdir(parents=True)
+    (bundled / "SKILL.md").write_text(
+        "---\nname: bundled\ndescription: canonical bundled\n---\nb\n"
+    )
+    reg = load_default_scopes(project, home=tmp_path / "nohome")
+    sk = reg.get("bundled")
+    assert sk is not None
+    assert sk.scope == "bundled"
+    assert sk.source_path == bundled / "SKILL.md"
+
+
 def test_load_default_scopes_skips_readme(tmp_path: Path) -> None:
     project = tmp_path / "p"
-    bundled = project / "configs" / "skills"
+    bundled = project / "omnisight" / "agents" / "skills"
     bundled.mkdir(parents=True)
     (bundled / "README.md").write_text(
         "# Skills directory\nthis is just a readme\n"
@@ -268,7 +342,7 @@ def test_render_catalog_truncates_over_max() -> None:
 
 
 def test_real_repo_loads_bundled_skills() -> None:
-    """Load the live ``configs/skills/`` and assert sanity."""
+    """Load the live bundled skills and assert sanity."""
     project_root = Path(__file__).resolve().parents[2]
     reg = load_default_scopes(
         project_root, home=Path("/__nonexistent_for_test__")

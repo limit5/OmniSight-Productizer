@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 361
+entry_count: 362
 status_counts:
-  dev-only: 351
+  dev-only: 352
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3392,3 +3392,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — BP.C Phase C test gate 已補齊；production 仍需 operator 顯式設定 `OMNISIGHT_TOPOLOGY_MODE=smxl`、重啟服務並完成
     live smoke 後才啟用 S/XL runtime traffic。
+- id: 2026-05-05--WP.2.1
+  header_line: 45790
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.1
+  title: WP.2.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.2.2 需在同名 shadow/衝突時補 WARN log；production 若要啟用新 bundled source，需把內建 skills 實際放入 `omnisight/agents/skills/`
+    或完成從 legacy `configs/skills/` 的遷移。
