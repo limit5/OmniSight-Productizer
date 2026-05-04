@@ -254,6 +254,16 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "cmek_configs",
     "tier_assignments",
     "cmek_revoke_events",
+    # KS.3.12 (alembic 0108): Tier 3 BYOG proxy persistence.
+    # ``proxy_health_checks`` and ``proxy_mtls_certs`` FK to
+    # ``proxy_registrations`` so registrations replay first; all three
+    # also FK to tenants. PKs are app-generated TEXT ids, so none
+    # belong in TABLES_WITH_IDENTITY_ID. SaaS-side rows store health /
+    # cert metadata only; prompt and response bodies remain customer
+    # assets inside omnisight-proxy.
+    "proxy_registrations",
+    "proxy_health_checks",
+    "proxy_mtls_certs",
     # KS.4.13 (alembic 0187): LLM firewall review events. FK
     # ``tenant_id -> tenants.id`` (CASCADE) so it MUST replay after
     # tenants. PK is app-generated TEXT ``event_id``; raw input is not
