@@ -12,6 +12,9 @@ KS.2.12 adds the single rollback knob: when
 ``OMNISIGHT_KS_CMEK_ENABLED=false``, Tier 2 wizard/upgrade routes are
 hidden, status reports Tier 1 fallback for every tenant, and the Tier
 2 -> Tier 1 downgrade route remains available for existing CMEK tenants.
+KS.3.13 adds the BYOG single knob: when
+``OMNISIGHT_KS_BYOG_ENABLED=false``, status hides Tier 3 from available
+security tiers so the settings UI cannot select proxy mode.
 
 Module-global state audit (SOP Step 1)
 --------------------------------------
@@ -22,6 +25,9 @@ worker derives it from the same external KMS/Vault source, so no shared
 Python memory is required. The KS.2.12 knob is read lazily through
 ``cmek_wizard.is_enabled()``, so each worker derives the same value from
 env without shared module-global state.
+The KS.3.13 BYOG knob is read lazily through
+``cmek_wizard.is_byog_enabled()`` with the same per-worker env
+derivation.
 
 Read-after-write timing audit (SOP Step 1)
 ------------------------------------------
@@ -163,7 +169,14 @@ def _cmek_settings_status_payload(tenant_id: str) -> dict:
             "tier2_available": False,
             "wizard_visible": False,
             "available_security_tiers": ["tier-1"],
+            "byog_enabled": _cw.is_byog_enabled(),
+            "tier3_available": False,
+            "proxy_mode_available": False,
         }
+    byog_enabled = _cw.is_byog_enabled()
+    available_security_tiers = ["tier-1", "tier-2"]
+    if byog_enabled:
+        available_security_tiers.append("tier-3")
     return {
         "tenant_id": tenant_id,
         "security_tier": "tier-2" if latest is not None else "tier-1",
@@ -177,7 +190,10 @@ def _cmek_settings_status_payload(tenant_id: str) -> dict:
         "cmek_enabled": True,
         "tier2_available": True,
         "wizard_visible": True,
-        "available_security_tiers": ["tier-1", "tier-2"],
+        "available_security_tiers": available_security_tiers,
+        "byog_enabled": byog_enabled,
+        "tier3_available": byog_enabled,
+        "proxy_mode_available": byog_enabled,
     }
 
 

@@ -3365,6 +3365,13 @@ export interface CmekSettingsStatus {
   reason: string
   raw_state: string
   checked_at: number | null
+  cmek_enabled?: boolean
+  tier2_available?: boolean
+  wizard_visible?: boolean
+  available_security_tiers?: Array<"tier-1" | "tier-2" | "tier-3">
+  byog_enabled?: boolean
+  tier3_available?: boolean
+  proxy_mode_available?: boolean
 }
 
 export async function getCmekSettingsStatus(

@@ -99,6 +99,10 @@ beforeEach(() => {
     reason: "describe_ok",
     raw_state: "Enabled",
     checked_at: 1760000000,
+    available_security_tiers: ["tier-1", "tier-2", "tier-3"],
+    byog_enabled: true,
+    tier3_available: true,
+    proxy_mode_available: true,
   })
   mockedListProviders.mockResolvedValue({
     tenant_id: "t-acme",
@@ -328,6 +332,10 @@ describe("/tenants/{tid}/settings — CMEK wizard", () => {
       reason: "byog_proxy",
       raw_state: "proxy_registered",
       checked_at: 1760000002,
+      available_security_tiers: ["tier-1", "tier-2", "tier-3"],
+      byog_enabled: true,
+      tier3_available: true,
+      proxy_mode_available: true,
     })
 
     await renderPage()
@@ -354,5 +362,35 @@ describe("/tenants/{tid}/settings — CMEK wizard", () => {
     )
     expect(screen.queryByTestId("cmek-provider-aws-kms")).not.toBeInTheDocument()
     expect(screen.queryByTestId("cmek-key-id-input")).not.toBeInTheDocument()
+  })
+
+  it("hides Tier 3 and keeps proxy mode unavailable when BYOG is disabled", async () => {
+    mockedGetStatus.mockResolvedValueOnce({
+      tenant_id: "t-acme",
+      security_tier: "tier-3",
+      kms_health: "not_configured",
+      revoke_status: "clear",
+      provider: "",
+      key_id: "",
+      reason: "OMNISIGHT_KS_BYOG_ENABLED=false",
+      raw_state: "byog_disabled",
+      checked_at: null,
+      available_security_tiers: ["tier-1", "tier-2"],
+      byog_enabled: false,
+      tier3_available: false,
+      proxy_mode_available: false,
+    })
+
+    await renderPage()
+
+    fireEvent.click(screen.getByTestId("settings-tab-security"))
+
+    const selector = await screen.findByTestId("cmek-security-tier-selector")
+    expect(selector).toHaveValue("tier-1")
+    expect(screen.queryByRole("option", { name: "Tier 3" })).not.toBeInTheDocument()
+    expect(screen.queryByTestId("byog-proxy-configuration-panel")).not.toBeInTheDocument()
+    fireEvent.change(selector, { target: { value: "tier-3" } })
+    expect(selector).toHaveValue("tier-1")
+    expect(screen.queryByTestId("byog-proxy-configuration-panel")).not.toBeInTheDocument()
   })
 })

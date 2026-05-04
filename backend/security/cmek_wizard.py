@@ -9,6 +9,8 @@ This module owns only the onboarding wizard surface:
   durable KS.2.11 tables and KS.2.2-KS.2.4 live adapters land.
 * the KS.2.12 single knob: ``OMNISIGHT_KS_CMEK_ENABLED=false`` hides
   Tier 2 onboarding while keeping Tier 1 available.
+* the KS.3.13 single knob: ``OMNISIGHT_KS_BYOG_ENABLED=false`` hides
+  Tier 3 BYOG proxy registration and proxy mode selection.
 
 No customer credential, KMS token, or wizard draft is persisted here.
 The tenant settings page keeps the step state in React state and the
@@ -46,6 +48,7 @@ from backend.security.kms_adapters import LocalFernetKMSAdapter
 
 
 CMEK_ENABLED_ENV: str = "OMNISIGHT_KS_CMEK_ENABLED"
+BYOG_ENABLED_ENV: str = "OMNISIGHT_KS_BYOG_ENABLED"
 CMEK_PROVIDER = Literal["aws-kms", "gcp-kms", "vault-transit"]
 
 _AWS_KEY_RE = re.compile(
@@ -125,6 +128,18 @@ def is_enabled() -> bool:
     """
 
     raw = (os.environ.get(CMEK_ENABLED_ENV) or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def is_byog_enabled() -> bool:
+    """Whether KS.3 Tier 3 BYOG proxy registration is enabled.
+
+    The KS.3.13 rollback knob is read lazily per call so multi-worker
+    deployments derive the same value from env without relying on shared
+    module-global state.
+    """
+
+    raw = (os.environ.get(BYOG_ENABLED_ENV) or "true").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 

@@ -1291,6 +1291,15 @@ function SecurityTab({ tid }: { tid: string }) {
     () => providers.find((p) => p.provider === provider) ?? providers[0],
     [providers, provider],
   )
+  const availableSecurityTiers = useMemo<SecurityTier[]>(
+    () => cmekStatus?.available_security_tiers ?? ["tier-1", "tier-2", "tier-3"],
+    [cmekStatus?.available_security_tiers],
+  )
+  const tier3Available =
+    availableSecurityTiers.includes("tier-3") &&
+    cmekStatus?.byog_enabled !== false &&
+    cmekStatus?.tier3_available !== false &&
+    cmekStatus?.proxy_mode_available !== false
 
   const securityTier = completeResult?.security_tier ?? selectedSecurityTier
   const effectiveKmsHealth = completeResult ? "healthy" : cmekStatus?.kms_health ?? "not_configured"
@@ -1303,8 +1312,12 @@ function SecurityTab({ tid }: { tid: string }) {
     Promise.all([listCmekWizardProviders(tid), getCmekSettingsStatus(tid)])
       .then(([res, status]) => {
         if (cancelled) return
+        const statusTiers = status.available_security_tiers ?? ["tier-1", "tier-2", "tier-3"]
+        const nextTier = statusTiers.includes(status.security_tier)
+          ? status.security_tier
+          : "tier-1"
         setCmekStatus(status)
-        setSelectedSecurityTier(status.security_tier)
+        setSelectedSecurityTier(nextTier)
         setProviders(res.providers)
         if (res.providers[0]) {
           setProvider(res.providers[0].provider)
@@ -1420,6 +1433,7 @@ function SecurityTab({ tid }: { tid: string }) {
   }
 
   function onTierChange(next: SecurityTier) {
+    if (next === "tier-3" && !tier3Available) return
     setSelectedSecurityTier(next)
     if (next === "tier-1" || next === "tier-3") {
       setCompleteResult(null)
@@ -1475,7 +1489,7 @@ function SecurityTab({ tid }: { tid: string }) {
             >
               <option value="tier-1">Tier 1</option>
               <option value="tier-2">Tier 2</option>
-              <option value="tier-3">Tier 3</option>
+              {tier3Available && <option value="tier-3">Tier 3</option>}
             </select>
           </label>
           <div
@@ -1770,7 +1784,7 @@ function SecurityTab({ tid }: { tid: string }) {
       </div>
       )}
 
-      {selectedSecurityTier === "tier-3" && (
+      {selectedSecurityTier === "tier-3" && tier3Available && (
         <ProxyConfigurationPanel
           tid={tid}
           proxyUrl={proxyUrl}
