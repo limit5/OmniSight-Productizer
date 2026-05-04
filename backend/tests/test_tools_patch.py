@@ -369,6 +369,325 @@ def test_cascade_ambiguous_fallback_raises():
         tp.apply_search_replace(source, block)
 
 
+_WP37_POSITIVE_SCENARIOS = [
+    (
+        f"exact-{idx}",
+        1,
+        (
+            f"def exact_case_{idx}():\n"
+            f"    prepare_{idx}()\n"
+            f"    apply_{idx}()\n"
+            f"    finish_{idx}()\n"
+        ),
+        (
+            f"def exact_case_{idx}():\n"
+            f"    prepare_{idx}()\n"
+            f"    apply_{idx}()\n"
+            f"    finish_{idx}()\n"
+        ),
+        (
+            f"def exact_case_{idx}():\n"
+            f"    prepare_{idx}()\n"
+            f"    apply_{idx}_patched()\n"
+            f"    finish_{idx}()\n"
+        ),
+        f"apply_{idx}_patched()",
+    )
+    for idx in range(1, 9)
+] + [
+    (
+        f"indent-{idx}",
+        2,
+        (
+            f"if indent_case_{idx}:\n"
+            f"  prepare_{idx}()\n"
+            f"  apply_{idx}()\n"
+            f"  finish_{idx}()\n"
+        ),
+        (
+            f"if indent_case_{idx}:\n"
+            f"    prepare_{idx}()\n"
+            f"    apply_{idx}()\n"
+            f"    finish_{idx}()\n"
+        ),
+        (
+            f"if indent_case_{idx}:\n"
+            f"    prepare_{idx}()\n"
+            f"    apply_{idx}_patched()\n"
+            f"    finish_{idx}()\n"
+        ),
+        f"apply_{idx}_patched()",
+    )
+    for idx in range(1, 9)
+] + [
+    (
+        f"prefix-tail-{idx}",
+        3,
+        (
+            f"def prefix_tail_case_{idx}():\n"
+            f"    before_{idx}()\n"
+            f"    live_middle_{idx}()\n"
+            f"    after_{idx}()\n"
+        ),
+        (
+            f"def prefix_tail_case_{idx}():\n"
+            f"    before_{idx}()\n"
+            f"    stale_middle_{idx}()\n"
+            f"    after_{idx}()\n"
+        ),
+        (
+            f"def prefix_tail_case_{idx}():\n"
+            f"    before_{idx}()\n"
+            f"    patched_middle_{idx}()\n"
+            f"    after_{idx}()\n"
+        ),
+        f"patched_middle_{idx}()",
+    )
+    for idx in range(1, 9)
+] + [
+    (
+        f"jaro-{idx}",
+        4,
+        (
+            f"def provision_case_{idx}():\n"
+            f"    prepare_config_{idx}()\n"
+            f"    apply_config_{idx}()\n"
+            f"    verify_output_{idx}()\n"
+        ),
+        (
+            f"def provision_config_case_{idx}():\n"
+            f"    prepare_config_{idx}()\n"
+            f"    apply_configs_{idx}()\n"
+            f"    verify_output_{idx}()\n"
+        ),
+        (
+            f"def provision_case_{idx}():\n"
+            f"    prepare_config_{idx}()\n"
+            f"    apply_config_{idx}()\n"
+            f"    record_output_{idx}()\n"
+        ),
+        f"record_output_{idx}()",
+    )
+    for idx in range(1, 9)
+]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "expected_layer", "source", "search", "replace", "needle"),
+    _WP37_POSITIVE_SCENARIOS,
+    ids=[case[0] for case in _WP37_POSITIVE_SCENARIOS],
+)
+def test_wp37_positive_scenario_regression_matrix(
+    case_id, expected_layer, source, search, replace, needle
+):
+    """WP.3.7: positive scenario regression across all 4 cascade layers."""
+    block = tp.SearchReplaceBlock(search=search, replace=replace)
+
+    match = tp.find_search_replace_match(source, search)
+    out = tp.apply_search_replace(source, block)
+
+    assert case_id
+    assert match.layer == expected_layer
+    assert needle in out
+
+
+_WP37_FAILURE_SCENARIOS = [
+    (
+        "not-found-unrelated-function",
+        tp.PatchNotFound,
+        "did not match any run",
+        "def target():\n    one()\n    two()\n    three()\n",
+        "def missing():\n    one()\n    two()\n    three()\n",
+        "def missing():\n    patched()\n    two()\n    three()\n",
+    ),
+    (
+        "not-found-wrong-tail",
+        tp.PatchNotFound,
+        "did not match any run",
+        "def target():\n    one()\n    two()\n    three()\n",
+        "def target():\n    one()\n    stale()\n    different_tail()\n",
+        "def target():\n    one()\n    patched()\n    different_tail()\n",
+    ),
+    (
+        "not-found-unrelated-three-line-window",
+        tp.PatchNotFound,
+        "did not match any run",
+        "alpha\nbeta\ngamma\n",
+        "one\ntwo\nthree\n",
+        "one\npatched\nthree\n",
+    ),
+    (
+        "too-little-context-one-line",
+        tp.PatchMalformed,
+        "fewer than",
+        "alpha\nbeta\ngamma\n",
+        "beta\n",
+        "BETA\n",
+    ),
+    (
+        "too-little-context-blank-lines",
+        tp.PatchMalformed,
+        "fewer than",
+        "alpha\n\nbeta\n\ngamma\n",
+        "alpha\n\nbeta\n",
+        "alpha\n\nBETA\n",
+    ),
+    (
+        "ambiguous-exact",
+        tp.PatchAmbiguous,
+        "matched 2",
+        "same\nsame\nsame\nsame\nsame\nsame\n",
+        "same\nsame\nsame\n",
+        "diff\ndiff\ndiff\n",
+    ),
+    (
+        "ambiguous-indent",
+        tp.PatchAmbiguous,
+        "cascade layer 2",
+        (
+            "if ready:\n"
+            "  start()\n"
+            "  finish()\n"
+            "\n"
+            "if ready:\n"
+            "  start()\n"
+            "  finish()\n"
+        ),
+        "if ready:\n    start()\n    finish()\n",
+        "if ready:\n    start()\n    verify()\n",
+    ),
+    (
+        "ambiguous-prefix-tail",
+        tp.PatchAmbiguous,
+        "cascade layer 3",
+        (
+            "target:\n"
+            "    keep()\n"
+            "    live_a()\n"
+            "    done()\n"
+            "\n"
+            "target:\n"
+            "    keep()\n"
+            "    live_b()\n"
+            "    done()\n"
+        ),
+        "target:\n    keep()\n    stale()\n    done()\n",
+        "target:\n    keep()\n    patched()\n    done()\n",
+    ),
+    (
+        "ambiguous-jaro",
+        tp.PatchAmbiguous,
+        "cascade layer 4",
+        (
+            "def provision_case_alpha():\n"
+            "    prepare_config()\n"
+            "    apply_config()\n"
+            "    verify_output()\n"
+            "\n"
+            "def provision_case_bravo():\n"
+            "    prepare_config()\n"
+            "    apply_config()\n"
+            "    verify_output()\n"
+        ),
+        (
+            "def provision_case_probe():\n"
+            "    prepare_config()\n"
+            "    apply_configs()\n"
+            "    verify_output()\n"
+        ),
+        (
+            "def provision_case():\n"
+            "    prepare_config()\n"
+            "    apply_config()\n"
+            "    record_output()\n"
+        ),
+    ),
+    (
+        "boundary-search-longer-than-source",
+        tp.PatchNotFound,
+        "did not match any run",
+        "one\ntwo\nthree\n",
+        "one\ntwo\nthree\nfour\n",
+        "one\ntwo\nTHREE\nfour\n",
+    ),
+    (
+        "boundary-empty-search-lines",
+        tp.PatchMalformed,
+        "fewer than",
+        "one\ntwo\nthree\n",
+        "\n\n\n",
+        "patched\n",
+    ),
+    (
+        "boundary-case-sensitive",
+        tp.PatchNotFound,
+        "did not match any run",
+        "Alpha\nBeta\nGamma\n",
+        "alpha\nbeta\ngamma\n",
+        "alpha\nBETA\ngamma\n",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "exc_type", "message", "source", "search", "replace"),
+    _WP37_FAILURE_SCENARIOS,
+    ids=[case[0] for case in _WP37_FAILURE_SCENARIOS],
+)
+def test_wp37_negative_and_boundary_scenario_regression_matrix(
+    case_id, exc_type, message, source, search, replace
+):
+    """WP.3.7: wrong-edit and boundary regressions fail explicitly."""
+    block = tp.SearchReplaceBlock(search=search, replace=replace)
+
+    with pytest.raises(exc_type, match=message):
+        tp.apply_search_replace(source, block)
+
+    assert case_id
+
+
+_WP37_STRICT_SCENARIOS = [
+    (".dts", tp.HD_BRINGUP_STRICT_JARO_WINKLER_THRESHOLD),
+    (".dtsi", tp.HD_BRINGUP_STRICT_JARO_WINKLER_THRESHOLD),
+    (".dtso", tp.HD_BRINGUP_STRICT_JARO_WINKLER_THRESHOLD),
+    (".bb", tp.HD_BRINGUP_STRICT_JARO_WINKLER_THRESHOLD),
+    (".bbappend", tp.HD_BRINGUP_STRICT_JARO_WINKLER_THRESHOLD),
+    (".inc", tp.HD_BRINGUP_STRICT_JARO_WINKLER_THRESHOLD),
+    (".py", tp.DEFAULT_JARO_WINKLER_THRESHOLD),
+    (".ts", tp.DEFAULT_JARO_WINKLER_THRESHOLD),
+]
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected_threshold"),
+    _WP37_STRICT_SCENARIOS,
+    ids=[case[0] for case in _WP37_STRICT_SCENARIOS],
+)
+def test_wp37_strict_mode_trigger_matrix(suffix, expected_threshold):
+    """WP.3.7: HD bring-up strict suffixes use the 0.95 Layer-4 gate."""
+    path = REPO_ROOT / f"board{suffix}"
+
+    assert tp.diff_validation_jaro_winkler_threshold_for_path(path) == (
+        expected_threshold
+    )
+
+
+@pytest.mark.parametrize(
+    "disabled_value",
+    ["false", "0", "no", "off"],
+)
+def test_wp37_disabled_knob_rejects_fuzzy_scenarios(monkeypatch, disabled_value):
+    """WP.3.7: rollback knob keeps the ladder at exact-only."""
+    monkeypatch.setenv(tp.DIFF_VALIDATION_ENABLED_ENV, disabled_value)
+    source = "if ready:\n  start()\n  finish()\n"
+
+    with pytest.raises(tp.PatchNotFound, match="exactly"):
+        tp.find_search_replace_match(
+            source,
+            "if ready:\n    start()\n    finish()\n",
+        )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  apply_search_replace_payload — multi-block chain
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
