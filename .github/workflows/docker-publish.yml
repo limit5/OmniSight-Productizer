@@ -1,8 +1,8 @@
 name: Docker Publish
 
-# L10 #337 — on every `v*` tag push, build the backend + frontend
-# container images and push them to GHCR under the repo owner's
-# namespace. Two tags per image:
+# L10 #337 + KS.3.1 — on every `v*` tag push, build the backend,
+# frontend, and customer-side omnisight-proxy container images and push
+# them to GHCR under the repo owner's namespace. Two tags per image:
 #   - :latest            — floating tag, moves with each release
 #   - :<git-tag>          — immutable snapshot (e.g. v0.3.1)
 #
@@ -35,6 +35,7 @@ env:
   REGISTRY: ghcr.io
   BACKEND_IMAGE: omnisight-backend
   FRONTEND_IMAGE: omnisight-frontend
+  PROXY_IMAGE: omnisight-proxy
 
 jobs:
   publish:
@@ -53,6 +54,9 @@ jobs:
           - name: frontend
             image: omnisight-frontend
             dockerfile: Dockerfile.frontend
+          - name: proxy
+            image: omnisight-proxy
+            dockerfile: Dockerfile.omnisight-proxy
     steps:
       - uses: actions/checkout@v4
 

@@ -70,7 +70,7 @@ def test_contents_permission_is_read_only(workflow: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Matrix — both backend and frontend must ship
+# Matrix — backend, frontend, and BYOG proxy must ship
 # ---------------------------------------------------------------------------
 
 def _publish_job(workflow: dict) -> dict:
@@ -79,13 +79,14 @@ def _publish_job(workflow: dict) -> dict:
     return jobs["publish"]
 
 
-def test_matrix_covers_backend_and_frontend(workflow: dict) -> None:
+def test_matrix_covers_backend_frontend_and_proxy(workflow: dict) -> None:
     matrix = _publish_job(workflow).get("strategy", {}).get("matrix", {})
     includes = matrix.get("include") or []
     names = {entry["name"] for entry in includes}
-    assert {"backend", "frontend"} <= names, (
-        "matrix must build both images — L10 #337 requires parity "
-        f"between backend and frontend (found: {names})"
+    assert {"backend", "frontend", "proxy"} <= names, (
+        "matrix must build all published images — L10 #337 requires "
+        "backend/frontend and KS.3.1 requires the BYOG proxy "
+        f"(found: {names})"
     )
 
 
@@ -93,7 +94,11 @@ def test_matrix_uses_repo_dockerfiles(workflow: dict) -> None:
     matrix = _publish_job(workflow).get("strategy", {}).get("matrix", {})
     includes = matrix.get("include") or []
     dockerfiles = {entry["dockerfile"] for entry in includes}
-    assert dockerfiles == {"Dockerfile.backend", "Dockerfile.frontend"}
+    assert dockerfiles == {
+        "Dockerfile.backend",
+        "Dockerfile.frontend",
+        "Dockerfile.omnisight-proxy",
+    }
     for df in dockerfiles:
         assert (REPO_ROOT / df).exists(), f"matrix references missing {df}"
 
@@ -152,25 +157,25 @@ def test_tags_include_latest_and_version(workflow: dict) -> None:
     assert "${{ steps.tag.outputs.value }}" in tags
 
 
-def test_image_names_are_omnisight_backend_and_frontend(workflow: dict) -> None:
+def test_image_names_are_omnisight_backend_frontend_and_proxy(workflow: dict) -> None:
     steps = _steps(workflow)
     build_push = next(
         s for s in steps if isinstance(s.get("uses"), str)
         and s["uses"].startswith("docker/build-push-action@")
     )
     tags = str(build_push["with"]["tags"])
-    # Both image names must appear in the template — L10 #337 pins
-    # these as the public contract.
+    # Image names must appear in the template — L10 #337 pins
+    # backend/frontend; KS.3.1 adds the customer-side proxy.
     assert "omnisight-backend" in tags or "${{ matrix.image }}" in tags
     matrix = _publish_job(workflow).get("strategy", {}).get("matrix", {})
     images = {entry["image"] for entry in matrix.get("include", [])}
-    assert images == {"omnisight-backend", "omnisight-frontend"}
+    assert images == {"omnisight-backend", "omnisight-frontend", "omnisight-proxy"}
 
 
 def test_uses_ghcr_registry(workflow: dict) -> None:
     env = workflow.get("env") or {}
     assert env.get("REGISTRY") == "ghcr.io", (
-        "public contract is ghcr.io/<owner>/omnisight-{backend,frontend}"
+        "public contract is ghcr.io/<owner>/omnisight-{backend,frontend,proxy}"
     )
 
 
