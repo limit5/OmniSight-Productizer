@@ -176,9 +176,9 @@ DISK_G="$(df -BG --output=avail . | tail -1 | tr -dc '0-9')"
 ok "disk: ${DISK_G}G free"
 
 # Git state — warn only (operator may be deploying a local tag)
-git fetch origin master --quiet 2>/dev/null || warn "git fetch failed (offline?)"
-BEHIND="$(git rev-list --count HEAD..origin/master 2>/dev/null || echo 0)"
-[[ "$BEHIND" == "0" ]] || warn "local is $BEHIND commit(s) behind origin/master"
+git fetch origin main --quiet 2>/dev/null || warn "git fetch failed (offline?)"
+BEHIND="$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)"
+[[ "$BEHIND" == "0" ]] || warn "local is $BEHIND commit(s) behind origin/main"
 ok "HEAD: $(git rev-parse --short HEAD) — $(git log -1 --format=%s | head -c 60)"
 
 # .env exists + has all required strict-mode keys

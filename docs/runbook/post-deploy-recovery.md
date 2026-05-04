@@ -60,8 +60,8 @@ that runs all five gate sanity checks in <30 seconds.
 Operator runs `scripts/deploy-prod.sh` (no flags). Step 1 prints:
 
 ```
-✅ Layer 1: ref 'branch:master' matched allowlist
-❌ Layer 2: 'branch:origin/master' is signed by <FPR-X>, but no
+✅ Layer 1: ref 'branch:main' matched allowlist
+❌ Layer 2: 'branch:origin/main' is signed by <FPR-X>, but no
    trusted signer fingerprint matches.
    Trusted signers from deploy/prod-deploy-signers.txt:
      (none — file contains only comments)
@@ -76,7 +76,7 @@ data risk.
 FX.7.9 (2026-05-04 morning) shipped the two-layer
 `check_deploy_ref.sh` gate (allowlist + GPG signer) but landed
 `deploy/prod-deploy-signers.txt` with **only the comment block** — no
-real fingerprints. Layer 1 passed (`master` was on the allowlist),
+real fingerprints. Layer 1 passed (`main` was on the allowlist),
 but Layer 2 had nothing to compare against, so every signed commit
 failed the check. The escape hatch `--insecure-skip-verify` worked
 but is supposed to be loud-and-rare, not the default.
@@ -92,13 +92,13 @@ Two paths, depending on whether you have an operator GPG key already:
 FPR=$(gpg --list-secret-keys --with-colons you@example.com \
        | awk -F: '/^fpr:/ {print $10; exit}')
 
-# 2. Append to signers list (commit + push to master so the gate
+# 2. Append to signers list (commit + push to main so the gate
 #    sees it)
 echo "$FPR" >> deploy/prod-deploy-signers.txt
 gpg --armor --export "$FPR" >> deploy/release-signers.asc
 git add deploy/prod-deploy-signers.txt deploy/release-signers.asc
 git commit -S -m "chore(deploy): add operator GPG fingerprint $FPR"
-git push origin master
+git push origin main
 
 # 3. Re-run the deploy
 ./scripts/deploy-prod.sh
@@ -132,15 +132,15 @@ e.g. lost GPG key, host rebuild without keyring restore):
   full runbook `docs/runbook/gpg-release-signer-setup.md`, drift guard
   `backend/tests/test_release_signer_setup_drift_guard.py`.
 - The very commit that lands `prod-deploy-signers.txt` non-empty must
-  itself be GPG-signed by the same key (so master tip becomes signed
+  itself be GPG-signed by the same key (so main tip becomes signed
   and Layer 2 starts passing immediately).
 
 ### 1.5 Prevention
 
 ```bash
 # 30-second preflight: confirms signers list is non-empty AND
-# master tip is signed by a trusted signer.
-./scripts/check_deploy_ref.sh --kind branch --ref master
+# main tip is signed by a trusted signer.
+./scripts/check_deploy_ref.sh --kind branch --ref main
 # expect both ✅ Layer 1 and ✅ Layer 2 lines.
 ```
 
@@ -345,7 +345,7 @@ that regression.
 **Mode 3.1.1 (FTS5 / WITHOUT ROWID crash):**
 
 The fix is already merged (`e9908bfc`). If you're hitting this on
-`master` head, the most likely causes are (a) you're on an old
+`main` head, the most likely causes are (a) you're on an old
 checkout that pre-dates `e9908bfc`, or (b) a *new* virtual / WITHOUT
 ROWID table was added without updating the scanner allow-skip logic.
 
@@ -353,10 +353,10 @@ ROWID table was added without updating the scanner allow-skip logic.
 # Check the version
 git log --oneline -1 scripts/backup_dlp_scan.py
 
-# If older than e9908bfc, just pull master:
-git fetch origin master && git merge origin/master --ff-only
+# If older than e9908bfc, just pull main:
+git fetch origin main && git merge origin/main --ff-only
 
-# If on master head and a NEW virtual table caused the regression,
+# If on main head and a NEW virtual table caused the regression,
 # the scanner already auto-skips by reading sqlite_master.sql for
 # `CREATE VIRTUAL` / `WITHOUT ROWID` substrings — verify the new
 # table's DDL contains one of those tokens. If it doesn't (e.g.
@@ -384,7 +384,7 @@ OMNISIGHT_BACKUP_SKIP_DLP=1 ./scripts/deploy-prod.sh   # check the
 # in a comment ("salt is base64-random by design, not a credential").
 git add scripts/backup_dlp_scan.py
 git commit -S -m "fix(dlp): allowlist <table>.<column> as by-design opaque"
-git push origin master
+git push origin main
 ./scripts/deploy-prod.sh
 ```
 
@@ -536,7 +536,7 @@ docker compose -f docker-compose.prod.yml run --rm --no-deps \
 # Confirm the FX.9.3 rename has landed
 ls backend/platform_profile.py 2>/dev/null \
     && echo "FX.9.3 in place" \
-    || echo "FX.9.3 NOT in place — pull master"
+    || echo "FX.9.3 NOT in place — pull main"
 
 # If pre-FX.9.3, the temp-fix is to ensure PYTHONSAFEPATH=1 is set
 # (already wired into Step 2.5 by FX.9.5 since 68fc49ad). If your
@@ -549,7 +549,7 @@ docker compose -f docker-compose.prod.yml run --rm --no-deps \
 **4.3.3 — `TypeError ... immutabledict`:**
 
 ```bash
-# This error means the FX.9.1 fix isn't on master yet (or a new
+# This error means the FX.9.1 fix isn't on main yet (or a new
 # migration introduced a fresh exec_driver_sql call).
 # Quick triage: grep for the bad pattern across all migrations.
 grep -rn "exec_driver_sql" backend/alembic/versions/
@@ -604,7 +604,7 @@ ls -lh ~/.local/share/omnisight/backups/ | head -5
 Before pressing deploy:
 
 ```bash
-# 1. Confirm single-head invariant on master
+# 1. Confirm single-head invariant on main
 docker compose -f docker-compose.prod.yml run --rm --no-deps \
     -e PYTHONSAFEPATH=1 -w /app/backend \
     backend-a python -m alembic heads
@@ -746,7 +746,7 @@ pnpm run build
 # If green, push + redeploy.
 git add app/ components/ tsconfig.json   # whichever files changed
 git commit -S -m "fix(frontend): <describe the fix>"
-git push origin master
+git push origin main
 ./scripts/deploy-prod.sh
 ```
 
@@ -822,7 +822,7 @@ on the prod WSL host: ~30 seconds when all gates pass.
 set -e
 
 echo "=== Gate 1: GPG signer ==="
-./scripts/check_deploy_ref.sh --kind branch --ref master
+./scripts/check_deploy_ref.sh --kind branch --ref main
 # expect both ✅ Layer 1 and ✅ Layer 2
 
 echo "=== Gate 2: Backup passphrase in non-interactive shell ==="

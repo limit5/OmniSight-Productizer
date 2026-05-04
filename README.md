@@ -95,7 +95,7 @@ auto-generated Swagger) once the backend is up.
 
 Point a cloud provider at this repo and get a public URL in ~3 minutes:
 
-[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/master)
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/main)
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2Flimit5%2FOmniSight-Productizer)
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/limit5/OmniSight-Productizer)
 
@@ -374,7 +374,7 @@ A CI gate (`llm-adapter-firewall` job, runs in parallel with `lint`) enforces th
 
 ### Framework fallback branches (N9)
 
-Two long-running branches stand permanent guard over the framework rollback path: `compat/nextjs-15` (held one major behind master's Next 16) and `compat/pydantic-v2` (pre-emptive — declared today even though Pydantic v3 has not shipped yet). The branches are declared in [`.fallback/manifests/*.toml`](./.fallback/) — a single TOML per branch carries the pin, the `freshness_days` window, and the `skip_globs` that the rebase tool uses to filter master commits when keeping the fallback evergreen.
+Two long-running branches stand permanent guard over the framework rollback path: `compat/nextjs-15` (held one major behind main's Next 16) and `compat/pydantic-v2` (pre-emptive — declared today even though Pydantic v3 has not shipped yet). The branches are declared in [`.fallback/manifests/*.toml`](./.fallback/) — a single TOML per branch carries the pin, the `freshness_days` window, and the `skip_globs` that the rebase tool uses to filter main commits when keeping the fallback evergreen.
 
 Three CI surfaces enforce the policy: ([`fallback-branches.yml`](.github/workflows/fallback-branches.yml)) re-builds + runs core tests on every `compat/**` push and on a Sunday-night cron, certifying the fallback as deployable; ([`major-upgrade-gate.yml`](.github/workflows/major-upgrade-gate.yml)) blocks any `tier/major` PR that bumps `next` or `pydantic` until the corresponding fallback branch shows a green CI run within its freshness window (defaults to 14 days); and the carve-outs in [`renovate.json`](renovate.json) prevent Renovate from bumping the pinned framework on its own fallback (which would defeat the entire point), while still flowing security patches and unrelated minor bumps so the branch doesn't rot.
 

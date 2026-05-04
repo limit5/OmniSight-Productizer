@@ -1,6 +1,6 @@
 # OmniSight Productizer — DigitalOcean App Platform spec (L11 #338 #1)
 #
-# One-click deploy: https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/master
+# One-click deploy: https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/main
 # The DO wizard picks this file up automatically on first deploy; on subsequent
 # deploys the App's live spec is the SSOT and this file becomes a seed template.
 #
@@ -42,7 +42,7 @@ services:
     source_dir: /
     github:
       repo: limit5/OmniSight-Productizer
-      branch: master
+      branch: main
       deploy_on_push: true
     instance_count: 1
     instance_size_slug: basic-xxs
@@ -114,7 +114,7 @@ services:
     source_dir: /
     github:
       repo: limit5/OmniSight-Productizer
-      branch: master
+      branch: main
       deploy_on_push: true
     instance_count: 1
     instance_size_slug: basic-xxs

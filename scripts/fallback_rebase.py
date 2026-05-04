@@ -2,7 +2,7 @@
 """
 N9 — fallback-branch rebase planner.
 
-Reads `.fallback/manifests/<branch>.toml`, walks `master..origin/master`
+Reads `.fallback/manifests/<branch>.toml`, walks `main..origin/main`
 (or any user-supplied range), and classifies every commit into one of:
 
     * pickable      — touches NO path matched by [rebase].skip_globs
@@ -26,7 +26,7 @@ Usage::
     python3 scripts/fallback_rebase.py --branch compat/nextjs-15 --plan
     python3 scripts/fallback_rebase.py --branch compat/nextjs-15 --apply
     python3 scripts/fallback_rebase.py --branch compat/nextjs-15 \\
-        --range main..origin/master --plan
+        --range main..origin/main --plan
 """
 
 from __future__ import annotations
@@ -263,7 +263,7 @@ def apply(manifest: Manifest, rev_range: str, *, allow_partial: bool) -> int:
     """Cherry-pick the pickable bucket onto the current branch.
 
     Refuses to run if HEAD is not the fallback branch — guards against
-    accidentally applying to master. Stops on first conflict and prints
+    accidentally applying to main. Stops on first conflict and prints
     the recovery command.
     """
     head = _git("symbolic-ref", "--short", "HEAD").strip()
@@ -317,8 +317,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--branch", required=True,
                         help="Fallback branch name (e.g. compat/nextjs-15)")
     parser.add_argument(
-        "--range", default="HEAD..origin/master",
-        help="Git revision range to consider (default: HEAD..origin/master)",
+        "--range", default="HEAD..origin/main",
+        help="Git revision range to consider (default: HEAD..origin/main)",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true",

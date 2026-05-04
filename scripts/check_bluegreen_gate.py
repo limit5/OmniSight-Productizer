@@ -222,7 +222,7 @@ def main(argv: list[str]) -> int:
     if labels is None:
         sys.stderr.write(
             f"[bluegreen-gate] WARN: no merged PR found for ref {ref[:12]}. "
-            "Gate green by default (hotfix / direct-to-master case). "
+            "Gate green by default (hotfix / direct-to-main case). "
             "If this is a major framework cut-over, abort and re-deploy "
             "from the PR's merge commit.\n"
         )

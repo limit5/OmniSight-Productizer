@@ -149,7 +149,7 @@ the client bundle picks up the new `NEXT_PUBLIC_API_URL`.
 apply, the live Blueprint in Render's control plane becomes the SSOT.
 To push local edits:
 
-- Commit + push to `master` — Render auto-detects the change and prompts
+- Commit + push to `main` — Render auto-detects the change and prompts
   to re-apply the Blueprint on next visit to the dashboard (or
 - enable **Settings → Blueprint → Auto-sync** on the workspace to apply
   updates automatically on every push).

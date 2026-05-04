@@ -336,7 +336,7 @@ RED-flags it.
 The G6 bucket is **closed** with this row. That means:
 
 1. All five G6 TODO rows (1379–1383) are flipped `[x]`.
-2. All five contract tests are green on the `master` branch at the
+2. All five contract tests are green on the `main` branch at the
    commit that lands this doc.
 3. The explicit-migration pattern (remove a sibling guard in the
    commit that lands the row it guards against) is carried

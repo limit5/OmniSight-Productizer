@@ -2,7 +2,7 @@
 
 One-click deploy to [DigitalOcean App Platform](https://www.digitalocean.com/products/app-platform):
 
-[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/master)
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/main)
 
 The button points the DO wizard at this repo; on first deploy the wizard
 auto-detects `deploy/digitalocean/app.yaml` and provisions two services:

@@ -7,7 +7,7 @@ production WSL host.
 gate, but `deploy/prod-deploy-signers.txt` shipped with zero entries —
 so every deploy required `--insecure-skip-verify` (a deliberately loud
 escape hatch). FX.9.8 provisions the first real release-signing key,
-adds its fingerprint to the signers file, and signs `master` so future
+adds its fingerprint to the signers file, and signs `main` so future
 deploys go through real verification.
 
 This runbook covers (a) first-time setup, (b) re-key / rotation, and
@@ -95,20 +95,20 @@ repo is signed. That's intentional: the gate is "is this signer
 trusted", and every commit by this operator should be signed even
 outside this repo.
 
-### 1.5 Sign `master` tip
+### 1.5 Sign `main` tip
 
-The deploy gate verifies the signature on `origin/master`'s tip
+The deploy gate verifies the signature on `origin/main`'s tip
 commit. The tip becomes signed automatically the next time you commit
-on master with `commit.gpgsign=true` set. To force-sign immediately
+on main with `commit.gpgsign=true` set. To force-sign immediately
 without a content change, use an empty commit:
 
 ```bash
-git commit --allow-empty -S -m "chore(release): sign master tip (FX.9.8)"
-git push origin master
+git commit --allow-empty -S -m "chore(release): sign main tip (FX.9.8)"
+git push origin main
 ```
 
 In the FX.9.8 change itself the very commit that adds the fingerprint
-to `prod-deploy-signers.txt` is signed and becomes the new master tip,
+to `prod-deploy-signers.txt` is signed and becomes the new main tip,
 so this step is implicit on first setup.
 
 ### 1.6 Verify the deploy gate accepts without `--insecure-skip-verify`
@@ -116,17 +116,17 @@ so this step is implicit on first setup.
 Pre-push self-test (local):
 
 ```bash
-git verify-commit master
+git verify-commit main
 # expect: "Good signature from <your name+email>"
 ```
 
 After pushing, full end-to-end verify against origin:
 
 ```bash
-./scripts/check_deploy_ref.sh --kind branch --ref master
+./scripts/check_deploy_ref.sh --kind branch --ref main
 # expect:
-#   ✅ Layer 1: ref 'branch:master' matched allowlist
-#   ✅ Layer 2: 'branch:origin/master' signed by trusted fingerprint <FPR>
+#   ✅ Layer 1: ref 'branch:main' matched allowlist
+#   ✅ Layer 2: 'branch:origin/main' signed by trusted fingerprint <FPR>
 ```
 
 Then run a full dry-run deploy:
@@ -183,7 +183,7 @@ If the operator key is suspected compromised:
 3. Push the revoked public key to any keyserver where it was uploaded
    (skip if you never uploaded — the FX.9.8 setup does not upload).
 4. Generate a fresh release-signer key per §1, deploy a signed empty
-   commit to master, verify deploys gate correctly with new key.
+   commit to main, verify deploys gate correctly with new key.
 
 ## 4. Cold-spare prod host bring-up
 
@@ -194,7 +194,7 @@ WSL:
 git clone <repo>
 cd OmniSight-Productizer
 gpg --import deploy/release-signers.asc
-./scripts/check_deploy_ref.sh --kind branch --ref master
+./scripts/check_deploy_ref.sh --kind branch --ref main
 # Layer 2 should pass: the spare host now trusts the same operator key
 # without holding the private half.
 ```
