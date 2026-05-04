@@ -7,6 +7,8 @@ This module owns only the onboarding wizard surface:
 * key-id shape validation; and
 * a local test encrypt-decrypt probe used by the wizard before the
   durable KS.2.11 tables and KS.2.2-KS.2.4 live adapters land.
+* the KS.2.12 single knob: ``OMNISIGHT_KS_CMEK_ENABLED=false`` hides
+  Tier 2 onboarding while keeping Tier 1 available.
 
 No customer credential, KMS token, or wizard draft is persisted here.
 The tenant settings page keeps the step state in React state and the
@@ -14,11 +16,13 @@ The tenant settings page keeps the step state in React state and the
 
 Module-global state audit (SOP Step 1)
 --------------------------------------
-Only immutable provider metadata and regex constants are kept at module
-scope. Every worker derives the same policy JSON from request input and
-the verify probe delegates key material to ``LocalFernetKMSAdapter`` /
-``secret_store`` disk coordination; no mutable process-local cache is
-introduced.
+Only immutable provider metadata, regex constants, and the env-var name
+are kept at module scope. ``is_enabled()`` reads the process env lazily
+per call, so every worker derives the same value from its deployment
+environment without shared Python memory. Every worker derives the same
+policy JSON from request input and the verify probe delegates key
+material to ``LocalFernetKMSAdapter`` / ``secret_store`` disk
+coordination; no mutable process-local cache is introduced.
 
 Read-after-write timing audit (SOP Step 1)
 ------------------------------------------
@@ -30,6 +34,7 @@ contract to preserve.
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import time
@@ -40,6 +45,7 @@ from backend.security import envelope
 from backend.security.kms_adapters import LocalFernetKMSAdapter
 
 
+CMEK_ENABLED_ENV: str = "OMNISIGHT_KS_CMEK_ENABLED"
 CMEK_PROVIDER = Literal["aws-kms", "gcp-kms", "vault-transit"]
 
 _AWS_KEY_RE = re.compile(
@@ -108,6 +114,18 @@ CMEK_PROVIDERS: tuple[CMEKProviderSpec, ...] = (
 
 def list_provider_specs() -> list[dict[str, str]]:
     return [spec.to_dict() for spec in CMEK_PROVIDERS]
+
+
+def is_enabled() -> bool:
+    """Whether KS.2 Tier 2 CMEK onboarding and upgrades are enabled.
+
+    The KS.2.12 rollback knob is read lazily per call so multi-worker
+    deployments derive the same value from env without relying on shared
+    module-global state.
+    """
+
+    raw = (os.environ.get(CMEK_ENABLED_ENV) or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def normalise_provider(raw: str) -> CMEK_PROVIDER:
@@ -290,9 +308,11 @@ def stable_policy_json(policy: dict) -> str:
 
 
 __all__ = [
+    "CMEK_ENABLED_ENV",
     "CMEK_PROVIDER",
     "CMEK_PROVIDERS",
     "generate_policy_json",
+    "is_enabled",
     "list_provider_specs",
     "normalise_provider",
     "stable_policy_json",

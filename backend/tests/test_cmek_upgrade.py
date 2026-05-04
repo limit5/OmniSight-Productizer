@@ -214,7 +214,7 @@ async def test_upgrade_endpoint_returns_progress_payload(monkeypatch) -> None:
                 "ui": {"current_step": "complete"},
             }
 
-    async def allow_guard(_tenant_id, _actor):
+    async def allow_guard(_tenant_id, _actor, **_kwargs):
         return None
 
     def fake_plan(**kwargs):
@@ -265,7 +265,7 @@ async def test_downgrade_endpoint_returns_progress_payload(monkeypatch) -> None:
                 "ui": {"current_step": "complete"},
             }
 
-    async def allow_guard(_tenant_id, _actor):
+    async def allow_guard(_tenant_id, _actor, **_kwargs):
         return None
 
     def fake_plan(**kwargs):

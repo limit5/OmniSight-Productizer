@@ -13,7 +13,10 @@ DescribeKey/read permission is surfaced in-process within 60 s. KS.2.6
 owns turning that status into graceful 403 behaviour, and KS.2.11 owns
 durable ``cmek_configs`` / ``cmek_revoke_events`` storage. Until that
 schema lands, the production loop discovers environment-configured
-adapters from the existing KS.2.2-KS.2.4 prefixes.
+adapters from the existing KS.2.2-KS.2.4 prefixes. KS.2.12's
+``OMNISIGHT_KS_CMEK_ENABLED=false`` single knob makes the env loader
+return no checks, so workers keep the background task idle instead of
+touching customer KMS when Tier 2 is globally hidden.
 
 Module-global state audit (SOP Step 1)
 --------------------------------------
@@ -21,7 +24,9 @@ Module-global state audit (SOP Step 1)
 Each uvicorn worker polls the same external KMS/Vault source on the
 same cadence, so revoke detection does not depend on shared Python
 memory. The latest-result cache is observability-only; no request path
-uses it for authorization in KS.2.5.
+uses it for authorization in KS.2.5. The KS.2.12 knob is read lazily
+through ``cmek_wizard.is_enabled()`` so every worker derives the same
+fallback from env without shared module-global state.
 
 Read-after-write timing audit (SOP Step 1)
 ------------------------------------------
@@ -39,6 +44,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Protocol
 
+from backend.security import cmek_wizard
 from backend.security import kms_adapters as kms
 
 
@@ -235,6 +241,9 @@ def latest_cmek_health_results() -> list[dict[str, Any]]:
 
 def load_env_cmek_key_checks() -> list[CMEKKeyCheck]:
     """Build checks from existing KS.2.2-KS.2.4 production env prefixes."""
+
+    if not cmek_wizard.is_enabled():
+        return []
 
     tenant_id = os.environ.get("OMNISIGHT_CMEK_HEALTH_TENANT_ID", "").strip()
     if not tenant_id:

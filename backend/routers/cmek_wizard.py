@@ -8,6 +8,10 @@ spec generation for native CloudTrail / Cloud Audit Logs.
 KS.2.8 adds the Tier 1 -> Tier 2 stateless rewrap plan endpoint; KS.2.9
 adds the mirrored Tier 2 -> Tier 1 downgrade plan. Durable progress
 persistence remains blocked on KS.2.11's CMEK tables.
+KS.2.12 adds the single rollback knob: when
+``OMNISIGHT_KS_CMEK_ENABLED=false``, Tier 2 wizard/upgrade routes are
+hidden, status reports Tier 1 fallback for every tenant, and the Tier
+2 -> Tier 1 downgrade route remains available for existing CMEK tenants.
 
 Module-global state audit (SOP Step 1)
 --------------------------------------
@@ -15,7 +19,9 @@ Only immutable route constants, Pydantic classes, and pure helper
 functions are module globals. The settings status endpoint reads
 ``cmek_revoke_detector``'s per-worker observability snapshot; every
 worker derives it from the same external KMS/Vault source, so no shared
-Python memory is required.
+Python memory is required. The KS.2.12 knob is read lazily through
+``cmek_wizard.is_enabled()``, so each worker derives the same value from
+env without shared module-global state.
 
 Read-after-write timing audit (SOP Step 1)
 ------------------------------------------
@@ -45,6 +51,12 @@ router = APIRouter(tags=["cmek-wizard"])
 TENANT_ID_PATTERN = r"^t-[a-z0-9][a-z0-9-]{2,62}$"
 _TENANT_ID_RE = re.compile(TENANT_ID_PATTERN)
 _ALLOWED_MEMBERSHIP_ROLES = frozenset({"owner", "admin"})
+CMEK_DISABLED_ERROR_CODE = "cmek_disabled"
+CMEK_DISABLED_DETAIL = (
+    "Tier 2 CMEK is disabled by OMNISIGHT_KS_CMEK_ENABLED=false. "
+    "Tier 2 onboarding and upgrades are hidden; tenants are presented "
+    "as Tier 1 until CMEK is re-enabled."
+)
 
 
 def _is_valid_tenant_id(tid: str) -> bool:
@@ -134,6 +146,24 @@ def _cmek_settings_status_payload(tenant_id: str) -> dict:
         kms_health = "healthy"
     else:
         kms_health = "revoked"
+    if not _cw.is_enabled():
+        previous_security_tier = "tier-2" if latest is not None else "tier-1"
+        return {
+            "tenant_id": tenant_id,
+            "security_tier": "tier-1",
+            "previous_security_tier": previous_security_tier,
+            "kms_health": "cmek_disabled",
+            "revoke_status": "fallback_to_tier1",
+            "provider": "",
+            "key_id": "",
+            "reason": f"{_cw.CMEK_ENABLED_ENV}=false",
+            "raw_state": "cmek_disabled",
+            "checked_at": None,
+            "cmek_enabled": False,
+            "tier2_available": False,
+            "wizard_visible": False,
+            "available_security_tiers": ["tier-1"],
+        }
     return {
         "tenant_id": tenant_id,
         "security_tier": "tier-2" if latest is not None else "tier-1",
@@ -144,10 +174,33 @@ def _cmek_settings_status_payload(tenant_id: str) -> dict:
         "reason": str(latest.get("reason") or "") if latest else "",
         "raw_state": str(latest.get("raw_state") or "") if latest else "",
         "checked_at": float(latest["checked_at"]) if latest and latest.get("checked_at") else None,
+        "cmek_enabled": True,
+        "tier2_available": True,
+        "wizard_visible": True,
+        "available_security_tiers": ["tier-1", "tier-2"],
     }
 
 
-async def _guard(tenant_id: str, actor: auth.User) -> JSONResponse | None:
+def _cmek_disabled_response(tenant_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content={
+            "detail": CMEK_DISABLED_DETAIL,
+            "error_code": CMEK_DISABLED_ERROR_CODE,
+            "tenant_id": tenant_id,
+            "cmek_enabled": False,
+            "security_tier": "tier-1",
+            "retryable": False,
+        },
+    )
+
+
+async def _guard(
+    tenant_id: str,
+    actor: auth.User,
+    *,
+    require_cmek_enabled: bool = True,
+) -> JSONResponse | None:
     if not _is_valid_tenant_id(tenant_id):
         return JSONResponse(
             status_code=422,
@@ -163,6 +216,8 @@ async def _guard(tenant_id: str, actor: auth.User) -> JSONResponse | None:
             status_code=403,
             detail=f"requires tenant owner/admin or super_admin on {tenant_id!r}",
         )
+    if require_cmek_enabled and not _cw.is_enabled():
+        return _cmek_disabled_response(tenant_id)
     decision = _cmek_degrade.cmek_degrade_decision_for_tenant(tenant_id)
     if not decision.allowed:
         return JSONResponse(
@@ -370,7 +425,7 @@ async def start_tier2_to_tier1_downgrade(
     _request: Request,
     actor: auth.User = Depends(auth.current_user),
 ) -> JSONResponse:
-    guarded = await _guard(tenant_id, actor)
+    guarded = await _guard(tenant_id, actor, require_cmek_enabled=False)
     if guarded is not None:
         return guarded
     try:
