@@ -717,10 +717,21 @@ def _seed_ids() -> tuple[str, ...]:
 
 
 def upgrade() -> None:
-    conn = op.get_bind()
-    dialect = conn.dialect.name
+    # FX.9.1: route through ``op.execute()`` instead of
+    # ``conn.exec_driver_sql()``. SQLAlchemy 2.x wraps the empty params
+    # arg passed to ``exec_driver_sql`` in an ``immutabledict`` before
+    # forwarding to the DBAPI cursor; CPython's C-accelerated sqlite3
+    # ``execute()`` rejects ``immutabledict`` (only ``dict`` / ``tuple``
+    # / ``list`` pass its argument-type check), which broke the prod
+    # ``alembic upgrade head`` on the cutover (2026-05-04). ``op.execute``
+    # routes through alembic's MigrationContext, which uses a SA
+    # ``TextClause`` and passes params via SA's adapter layer — so the
+    # ``before_cursor_execute`` hook in ``alembic_pg_compat`` still
+    # fires (translating ``INSERT OR IGNORE`` → PG ``ON CONFLICT DO
+    # NOTHING`` on Postgres) without poking the cython sqlite3 API.
+    dialect = op.get_bind().dialect.name
     for entry in _SEED_ENTRIES:
-        conn.exec_driver_sql(_build_insert(entry, dialect))
+        op.execute(_build_insert(entry, dialect))
 
 
 def downgrade() -> None:
@@ -729,9 +740,10 @@ def downgrade() -> None:
     # true) is preserved by the ``hidden = false`` filter; an
     # admin-overridden row at source='operator' / 'override' is
     # preserved because of the ``source = 'shipped'`` filter.
+    # FX.9.1: same ``op.execute()`` swap as upgrade() — see the upgrade
+    # docstring above for the SQLAlchemy 2.x + cython sqlite3 reasoning.
     ids = ", ".join(f"'{_sql_escape(i)}'" for i in _seed_ids())
-    conn = op.get_bind()
-    conn.exec_driver_sql(
+    op.execute(
         f"DELETE FROM catalog_entries "
         f"WHERE source = 'shipped' "
         f"AND id IN ({ids})"

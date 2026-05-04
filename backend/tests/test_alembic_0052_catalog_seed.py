@@ -393,6 +393,12 @@ class TestPgBranchExecutes:
         We don't try to reproduce a PG semantic check via mock — only that
         the dialect branch is taken and the JSON literal is emitted with
         the cast suffix the PG side needs.
+
+        FX.9.1: capture happens on ``op.execute`` (not ``bind.exec_driver_sql``)
+        because 0052's upgrade() now routes through ``op.execute`` to dodge
+        the SQLAlchemy 2.x + cython sqlite3 immutabledict incompatibility.
+        ``bind.dialect.name`` is still consulted to pick the JSONB branch,
+        so the bind stub is kept as a dialect carrier only.
         """
         from alembic import op as alembic_op
 
@@ -404,10 +410,8 @@ class TestPgBranchExecutes:
 
             dialect = _Dialect()
 
-            def exec_driver_sql(self, sql, *a, **k):
-                captured.append(sql)
-
         monkeypatch.setattr(alembic_op, "get_bind", lambda: _PgBind())
+        monkeypatch.setattr(alembic_op, "execute", lambda sql: captured.append(sql))
         m0052.upgrade()
         assert len(captured) == 30
         joined = "\n".join(captured)
