@@ -334,6 +334,44 @@ def test_complete_request_requires_verify_token():
         )
 
 
+@pytest.mark.asyncio
+async def test_complete_endpoint_returns_tier_2_draft(monkeypatch):
+    from backend.routers import cmek_wizard
+
+    async def allow_guard(_tenant_id, _actor):
+        return None
+
+    monkeypatch.setattr(cmek_wizard, "_guard", allow_guard)
+
+    response = await cmek_wizard.complete_cmek_wizard(
+        "t-acme",
+        cmek_wizard.CompleteCMEKRequest(
+            provider="aws-kms",
+            key_id=(
+                "arn:aws:kms:us-east-1:111122223333:key/"
+                "00000000-0000-0000-0000-000000000000"
+            ),
+            verification_id="cmekv_abc123",
+        ),
+        None,
+        None,
+    )
+    body = json.loads(response.body)
+
+    assert body == {
+        "tenant_id": "t-acme",
+        "security_tier": "tier-2",
+        "provider": "aws-kms",
+        "key_id": (
+            "arn:aws:kms:us-east-1:111122223333:key/"
+            "00000000-0000-0000-0000-000000000000"
+        ),
+        "verification_id": "cmekv_abc123",
+        "config_status": "draft",
+        "persisted": False,
+    }
+
+
 def test_router_uses_current_user_dependency():
     from fastapi.params import Depends as _DependsParam
     from backend import auth
