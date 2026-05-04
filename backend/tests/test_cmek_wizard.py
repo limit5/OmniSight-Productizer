@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 
 import pytest
@@ -222,6 +223,40 @@ def test_key_id_request_trims_and_validates_provider_shape():
     assert cmek.validate_key_id(req.provider, req.key_id) == (
         "projects/acme-prod/locations/us/keyRings/omnisight/cryptoKeys/tenant-tier2"
     )
+
+
+@pytest.mark.asyncio
+async def test_key_id_endpoint_returns_accepted_canonical_key(monkeypatch):
+    from backend.routers import cmek_wizard
+
+    async def allow_guard(_tenant_id, _actor):
+        return None
+
+    monkeypatch.setattr(cmek_wizard, "_guard", allow_guard)
+
+    response = await cmek_wizard.save_cmek_wizard_key_id(
+        "t-acme",
+        cmek_wizard.KeyIdCMEKRequest(
+            provider="aws-kms",
+            key_id=(
+                " arn:aws:kms:us-east-1:111122223333:key/"
+                "00000000-0000-0000-0000-000000000000 "
+            ),
+        ),
+        None,
+        None,
+    )
+    body = json.loads(response.body)
+
+    assert body == {
+        "tenant_id": "t-acme",
+        "provider": "aws-kms",
+        "key_id": (
+            "arn:aws:kms:us-east-1:111122223333:key/"
+            "00000000-0000-0000-0000-000000000000"
+        ),
+        "accepted": True,
+    }
 
 
 def test_router_exposes_five_step_endpoints():
