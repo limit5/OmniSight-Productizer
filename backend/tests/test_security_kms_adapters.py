@@ -467,6 +467,7 @@ class FakeVaultTransit:
     def __init__(self):
         self.encrypt_calls = []
         self.decrypt_calls = []
+        self.read_key_calls = []
 
     def encrypt_data(self, **kwargs):
         self.encrypt_calls.append(kwargs)
@@ -475,6 +476,17 @@ class FakeVaultTransit:
     def decrypt_data(self, **kwargs):
         self.decrypt_calls.append(kwargs)
         return {"data": {"plaintext": kwargs["ciphertext"].split(":", 2)[2]}}
+
+    def read_key(self, **kwargs):
+        self.read_key_calls.append(kwargs)
+        return {
+            "data": {
+                "name": kwargs["name"],
+                "latest_version": 7,
+                "supports_encryption": True,
+                "supports_decryption": True,
+            }
+        }
 
 
 class FakeHVACModule:
@@ -538,6 +550,80 @@ class TestVaultTransitKMSAdapter:
         assert fake_hvac.transit.encrypt_calls[0]["context"] == (
             base64.b64encode(b'{"tenant_id":"t1"}').decode("ascii")
         )
+
+    def test_describe_key_delegates_to_hvac_transit_shape(self):
+        transit = FakeVaultTransit()
+        adapter = kms.VaultTransitKMSAdapter(
+            key_id="tenant-dek",
+            url="https://vault.example.com",
+            token="vault-token",
+            mount_point="transit-prod",
+        )
+        adapter._client = SimpleNamespace(secrets=SimpleNamespace(transit=transit))
+
+        metadata = adapter.describe_key()
+
+        assert metadata["data"]["latest_version"] == 7
+        assert metadata["data"]["supports_encryption"] is True
+        assert transit.read_key_calls == [
+            {"name": "tenant-dek", "mount_point": "transit-prod"}
+        ]
+
+    def test_from_environment_reads_vault_transit_config(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_KEY_ID", "tenant-dek")
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_URL", "https://vault.example.com")
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_TOKEN", "vault-token")
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_NAMESPACE", "admin")
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_MOUNT_POINT", "transit-prod")
+
+        adapter = kms.VaultTransitKMSAdapter.from_environment()
+
+        assert adapter.key_id == "tenant-dek"
+        assert adapter.url == "https://vault.example.com"
+        assert adapter.token == "vault-token"
+        assert adapter.namespace == "admin"
+        assert adapter.mount_point == "transit-prod"
+
+    def test_from_environment_requires_vault_transit_url(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_KEY_ID", "tenant-dek")
+        monkeypatch.delenv("OMNISIGHT_VAULT_TRANSIT_URL", raising=False)
+        monkeypatch.setenv("OMNISIGHT_VAULT_TRANSIT_TOKEN", "vault-token")
+
+        with pytest.raises(kms.KMSConfigurationError, match="OMNISIGHT_VAULT_TRANSIT_URL"):
+            kms.VaultTransitKMSAdapter.from_environment()
+
+
+VAULT_LIVE_PREFIX = "OMNISIGHT_TEST_VAULT_TRANSIT"
+VAULT_LIVE_REQUIRED = all(
+    os.environ.get(f"{VAULT_LIVE_PREFIX}_{name}", "").strip()
+    for name in ("KEY_ID", "URL", "TOKEN")
+)
+
+
+class TestVaultTransitKMSLiveIntegration:
+    pytestmark = pytest.mark.skipif(
+        not VAULT_LIVE_REQUIRED,
+        reason=(
+            f"{VAULT_LIVE_PREFIX}_KEY_ID, _URL, and _TOKEN not set — "
+            "skip Vault Transit sandbox live test"
+        ),
+    )
+
+    def test_ci_sandbox_read_key_encrypt_decrypt_round_trip(self):
+        adapter = kms.VaultTransitKMSAdapter.from_environment(prefix=VAULT_LIVE_PREFIX)
+        metadata = adapter.describe_key()
+        assert metadata.get("data", {}).get("name") in (None, adapter.key_id)
+
+        context = {
+            "tenant_id": "ci-sandbox",
+            "dek_id": "ks-2-4-live",
+            "purpose": "cmek-verify:vault-transit",
+            "schema": "ks.1.2",
+        }
+        wrapped = adapter.wrap_dek(b"ks-2-4-live-dek", encryption_context=context)
+        assert wrapped.provider == "vault-transit"
+        assert wrapped.ciphertext != b"ks-2-4-live-dek"
+        assert adapter.unwrap_dek(wrapped, encryption_context=context) == b"ks-2-4-live-dek"
 
 
 class TestConfigAndDriftGuards:

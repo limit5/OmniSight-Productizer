@@ -420,6 +420,24 @@ class VaultTransitKMSAdapter(BaseKMSAdapter):
             raise KMSConfigurationError("token is required", provider=self.provider)
         self._client: Any = None
 
+    @classmethod
+    def from_environment(
+        cls, *, prefix: str = "OMNISIGHT_VAULT_TRANSIT"
+    ) -> "VaultTransitKMSAdapter":
+        """Build the Vault Transit adapter from CI/prod env configuration.
+
+        ``OMNISIGHT_VAULT_TRANSIT_*`` is the production prefix. Tests pass
+        ``prefix="OMNISIGHT_TEST_VAULT_TRANSIT"`` for the CI sandbox Vault.
+        """
+
+        return cls(
+            key_id=_env_required(f"{prefix}_KEY_ID", provider=cls.provider),
+            url=_env_required(f"{prefix}_URL", provider=cls.provider),
+            token=_env_required(f"{prefix}_TOKEN", provider=cls.provider),
+            namespace=_env_optional(f"{prefix}_NAMESPACE"),
+            mount_point=_env_optional(f"{prefix}_MOUNT_POINT") or cls.mount_point,
+        )
+
     def _vault_client(self) -> Any:
         if self._client is not None:
             return self._client
@@ -433,6 +451,18 @@ class VaultTransitKMSAdapter(BaseKMSAdapter):
             ) from exc
         self._client = hvac.Client(url=self.url, token=self.token, namespace=self.namespace)
         return self._client
+
+    def describe_key(self) -> dict[str, Any]:
+        """Return Vault Transit key metadata for live connectivity checks."""
+
+        try:
+            result = self._vault_client().secrets.transit.read_key(
+                name=self.key_id,
+                mount_point=self.mount_point,
+            )
+        except Exception as exc:  # pragma: no cover - SDK-specific subclasses.
+            raise KMSOperationError(str(exc), provider=self.provider, key_id=self.key_id) from exc
+        return dict(result)
 
     def wrap_dek(
         self,
