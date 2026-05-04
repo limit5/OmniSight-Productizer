@@ -123,6 +123,24 @@ def _skill(name: str, scope: str, body: str = "x") -> Skill:
     return Skill(name=name, description=f"{name} desc", body=body, scope=scope)
 
 
+def _write_skill_file(
+    path: Path,
+    *,
+    name: str,
+    description: str,
+    body: str = "body\n",
+) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        "---\n"
+        f"{body}",
+        encoding="utf-8",
+    )
+
+
 def test_registry_add_first_wins() -> None:
     reg = SkillRegistry()
     assert reg.add(_skill("a", "project", body="proj-body"))
@@ -179,6 +197,60 @@ def test_load_default_scopes_project_shadows_bundled(tmp_path: Path) -> None:
     assert sk.scope == "project"
     assert sk.body == "body-proj\n"
     assert "from-project" in sk.description
+
+
+def test_load_default_scopes_three_scope_precedence_matrix(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "proj"
+    home = tmp_path / "fakehome"
+    _write_skill_file(
+        project / "omnisight" / "agents" / "skills" / "shared" / "SKILL.md",
+        name="shared",
+        description="bundled shared",
+        body="bundled-body\n",
+    )
+    _write_skill_file(
+        home / ".claude" / "skills" / "shared" / "SKILL.md",
+        name="shared",
+        description="home shared",
+        body="home-body\n",
+    )
+    _write_skill_file(
+        project / ".claude" / "skills" / "shared" / "SKILL.md",
+        name="shared",
+        description="project shared",
+        body="project-body\n",
+    )
+    _write_skill_file(
+        project / "configs" / "skills" / "bundled-only" / "SKILL.md",
+        name="bundled-only",
+        description="bundled only",
+    )
+    _write_skill_file(
+        home / ".omnisight" / "skills" / "home-only" / "SKILL.md",
+        name="home-only",
+        description="home only",
+    )
+    _write_skill_file(
+        project / ".omnisight" / "skills" / "project-only" / "SKILL.md",
+        name="project-only",
+        description="project only",
+    )
+
+    reg = load_default_scopes(project, home=home)
+
+    shared = reg.get("shared")
+    assert shared is not None
+    assert shared.scope == "project"
+    assert shared.body == "project-body\n"
+    assert reg.provider_rank("shared") == 310
+    assert reg.get("home-only").scope == "home"
+    assert reg.provider_rank("home-only") == 220
+    assert reg.get("bundled-only").scope == "bundled"
+    assert reg.provider_rank("bundled-only") == 110
+    assert reg.get("project-only").scope == "project"
+    assert reg.provider_rank("project-only") == 320
 
 
 def test_load_default_scopes_project_omnisight_shadows_bundled(
@@ -278,6 +350,62 @@ def test_load_default_scopes_project_shadows_home_with_warn(
     assert "shadowed by" in caplog.text
     assert "rank=220" in caplog.text
     assert "rank=310" in caplog.text
+
+
+def test_load_default_scopes_same_name_across_all_providers_warns(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="backend.agents.skills_loader")
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    for skill_file, description in (
+        (
+            project / ".claude" / "skills" / "shared" / "SKILL.md",
+            "project claude",
+        ),
+        (
+            project / ".omnisight" / "skills" / "shared" / "SKILL.md",
+            "project omnisight",
+        ),
+        (
+            home / ".claude" / "skills" / "shared" / "SKILL.md",
+            "home claude",
+        ),
+        (
+            home / ".omnisight" / "skills" / "shared" / "SKILL.md",
+            "home omnisight",
+        ),
+        (
+            project / "configs" / "skills" / "shared" / "SKILL.md",
+            "legacy bundled",
+        ),
+        (
+            project / "omnisight" / "agents" / "skills" / "shared" / "SKILL.md",
+            "canonical bundled",
+        ),
+    ):
+        _write_skill_file(
+            skill_file,
+            name="shared",
+            description=description,
+            body=f"{description}\n",
+        )
+
+    reg = load_default_scopes(project, home=home)
+
+    sk = reg.get("shared")
+    assert sk is not None
+    assert sk.description == "project omnisight"
+    assert sk.body == "project omnisight\n"
+    assert sk.scope == "project"
+    assert reg.provider_rank("shared") == 320
+    assert "overrides" in caplog.text
+    assert "shadowed by" in caplog.text
+    assert "rank=320" in caplog.text
+    assert "rank=210" in caplog.text
+    assert "rank=120" in caplog.text
+    assert "rank=110" in caplog.text
 
 
 def test_load_default_scopes_home_omnisight_between_project_and_bundled(
@@ -437,6 +565,27 @@ def test_watch_project_scopes_reloads_deleted_project_override(
     assert sk.body == "bundled-body\n"
 
 
+def test_watch_project_scopes_manual_reload_updates_registry(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    reg = watch_project_scopes(project, home=tmp_path / "h")
+    assert not reg.has("manual")
+
+    _write_skill_file(
+        project / ".omnisight" / "skills" / "manual" / "SKILL.md",
+        name="manual",
+        description="manual v1",
+        body="body-v1\n",
+    )
+    reg.reload()
+
+    sk = reg.get("manual")
+    assert sk is not None
+    assert sk.description == "manual v1"
+    assert sk.body == "body-v1\n"
+
+
 def test_skill_handler_with_watched_registry_reloads_body(
     tmp_path: Path,
 ) -> None:
@@ -454,6 +603,43 @@ def test_skill_handler_with_watched_registry_reloads_body(
         "---\nname: watched\ndescription: v2\n---\nbody-v2\n"
     )
     assert handler({"skill": "watched"}) == "body-v2\n"
+
+
+def test_watched_registry_integration_updates_handler_and_catalog(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    _write_skill_file(
+        project / "omnisight" / "agents" / "skills" / "shared" / "SKILL.md",
+        name="shared",
+        description="bundled shared",
+        body="bundled-body\n",
+    )
+    reg = watch_project_scopes(project, home=home)
+    handler = make_skill_handler(reg)
+
+    assert reg.get("shared").scope == "bundled"
+    assert handler({"skill": "shared"}) == "bundled-body\n"
+
+    _write_skill_file(
+        project / ".omnisight" / "skills" / "shared" / "SKILL.md",
+        name="shared",
+        description="project shared",
+        body="project-body\n",
+    )
+
+    sk = reg.get("shared")
+    assert sk is not None
+    assert sk.scope == "project"
+    assert reg.provider_rank("shared") == 320
+    assert handler({"skill": "shared", "args": "--dry-run"}).endswith(
+        "project-body\n"
+    )
+    catalog = render_catalog_for_prompt(reg)
+    assert "**shared**" in catalog
+    assert "project shared" in catalog
+    assert "bundled shared" not in catalog
 
 
 # ─── Tool handler ───────────────────────────────────────────────
