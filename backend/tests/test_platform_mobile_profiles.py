@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.platform import (
+from backend.platform_profile import (
     get_platform_config,
     list_profile_ids,
     load_raw_profile,

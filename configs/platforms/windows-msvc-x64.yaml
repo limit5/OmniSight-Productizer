@@ -32,7 +32,7 @@
 #   encodes the shape, not the project-specific signing identity.
 #
 # Consumed by:
-#   * backend/platform.py::resolve_build_toolchain → kind=software
+#   * backend/platform_profile.py::resolve_build_toolchain → kind=software
 #   * scripts/simulate.sh software track              [X1 #297]
 #   * X3 build & package adapters (.msi / NSIS)       [X3 #299]
 #   * X4 license scan / CVE / SBOM                    [X4 #300]

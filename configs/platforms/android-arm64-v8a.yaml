@@ -39,7 +39,7 @@
 #   via `gradle assembleRelease`.
 #
 # Consumed by:
-#   * backend/platform.py::resolve_build_toolchain → kind=mobile
+#   * backend/platform_profile.py::resolve_build_toolchain → kind=mobile
 #   * scripts/simulate.sh mobile track (Android Emulator + Espresso) [P2 #287]
 #   * backend/deploy/play_store.py (Play Developer API adapter)      [P5 #290]
 #   * configs/skills/skill-android/ scaffold generator               [P8 #293]

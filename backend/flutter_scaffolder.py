@@ -13,7 +13,7 @@ Design
 ------
 * **Dual-profile binding** — ``_render_context`` resolves BOTH
   ``ios-arm64`` and ``android-arm64-v8a`` profiles from
-  ``backend.platform.load_raw_profile`` so ``min_os_version`` /
+  ``backend.platform_profile.load_raw_profile`` so ``min_os_version`` /
   ``sdk_version`` come from the P0 YAMLs for each rail.
 * **Template resolution** — ``.j2`` files are Jinja-rendered;
   everything else is copied byte-for-byte.
@@ -44,7 +44,7 @@ from typing import Any, Iterable
 
 import jinja2
 
-from backend import platform as _platform
+from backend import platform_profile as _platform
 from backend.skill_registry import get_skill, validate_skill
 
 logger = logging.getLogger(__name__)

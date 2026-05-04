@@ -33,8 +33,9 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 def _run_alembic(dsn: str, *argv: str) -> subprocess.CompletedProcess:
     """Run `python -m alembic` wait no — use the binary, see SP-1.2
-    rationale (shebang-launcher avoids the backend/platform.py shadow
-    that bites `python -m alembic` in cwd=backend/)."""
+    rationale. (Pre-FX.9.3 this avoided the backend/platform.py shadow
+    that bit `python -m alembic` in cwd=backend/; post-rename it's
+    defence-in-depth — keeping the entry point identical to prod.)"""
     import os as _os
     sqlalchemy_url = dsn.replace(
         "postgresql://", "postgresql+psycopg2://", 1,

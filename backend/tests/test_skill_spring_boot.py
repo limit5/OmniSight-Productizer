@@ -36,7 +36,7 @@ from backend.build_adapters import (
     MavenAdapter,
     default_targets_for_role,
 )
-from backend.platform import get_platform_config
+from backend.platform_profile import get_platform_config
 from backend.skill_registry import get_skill, list_skills, validate_skill
 from backend.software_compliance.licenses import detect_ecosystem
 from backend.software_simulator import COVERAGE_THRESHOLDS

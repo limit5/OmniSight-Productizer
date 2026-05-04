@@ -6,7 +6,7 @@ framework invariants the same way D1 SKILL-UVC locked C5, D29
 SKILL-HMI-WEBUI locked C26, and W6 SKILL-NEXTJS locked the web vertical:
 
 * **P0** — ``ios-arm64`` profile loads cleanly via
-  ``backend.platform.load_raw_profile``; rendered scaffold's
+  ``backend.platform_profile.load_raw_profile``; rendered scaffold's
   ``IPHONEOS_DEPLOYMENT_TARGET`` matches the profile's
   ``min_os_version``.
 * **P2** — rendered project autodetects as ``xcuitest`` via
@@ -45,7 +45,7 @@ from backend.ios_scaffolder import (
     render_project,
     validate_pack,
 )
-from backend.platform import load_raw_profile
+from backend.platform_profile import load_raw_profile
 from backend.skill_registry import get_skill, list_skills, validate_skill
 
 

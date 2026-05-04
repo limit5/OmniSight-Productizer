@@ -1055,7 +1055,7 @@ def simulate_mobile(
     profile_cfg: dict[str, Any] = {}
     emu_spec: dict[str, Any] = {}
     try:
-        from backend.platform import get_platform_config
+        from backend.platform_profile import get_platform_config
         profile_cfg = get_platform_config(profile)
     except Exception as exc:  # noqa: BLE001
         result.errors.append(f"profile resolve failed: {exc}")

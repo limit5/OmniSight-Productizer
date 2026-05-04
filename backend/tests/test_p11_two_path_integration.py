@@ -47,7 +47,7 @@ import pytest
 
 from backend import mobile_simulator as ms
 from backend import mobile_toolchain as mt
-from backend.platform import get_platform_config
+from backend.platform_profile import get_platform_config
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

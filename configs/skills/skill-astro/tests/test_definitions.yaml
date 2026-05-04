@@ -55,7 +55,7 @@ test_suites:
     name: "W0-W5 framework binding tests"
     tests:
       - id: w0-platform-profile-exists
-        name: "Resolved profile loads via backend.platform"
+        name: "Resolved profile loads via backend.platform_profile"
         type: integration
         target: backend.astro_scaffolder.render_project
       - id: w1-profile-budget-propagation

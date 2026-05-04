@@ -473,7 +473,7 @@ def simulate_web(
     ----------
     profile:
         Platform profile id (e.g. ``web-static``). Used to resolve the
-        bundle budget via `backend.platform.get_platform_config`.
+        bundle budget via `backend.platform_profile.get_platform_config`.
     app_path:
         Repo path of the web app being evaluated. For the simulator
         fixture this points at a prebuilt bundle; for real projects it
@@ -495,7 +495,7 @@ def simulate_web(
     budget_bytes = budget_override or 0
     if not budget_bytes:
         try:
-            from backend.platform import get_platform_config  # local import: lazy + testable
+            from backend.platform_profile import get_platform_config  # local import: lazy + testable
             cfg = get_platform_config(profile)
             budget_bytes = parse_budget(
                 (cfg.get("build_toolchain") or {}).get("bundle_size_budget"),

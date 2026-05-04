@@ -60,7 +60,7 @@ from typing import Any, Iterable, Optional
 
 import jinja2
 
-from backend import platform as _platform
+from backend import platform_profile as _platform
 from backend.build_adapters import BuildSource, CargoDistAdapter
 from backend.skill_registry import get_skill, validate_skill
 from backend.software_compliance import run_all as run_compliance_all

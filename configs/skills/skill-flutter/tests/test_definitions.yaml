@@ -45,11 +45,11 @@ test_suites:
     name: "P0-P6 framework binding tests"
     tests:
       - id: p0-ios-profile-resolves
-        name: "ios-arm64 profile loads via backend.platform"
+        name: "ios-arm64 profile loads via backend.platform_profile"
         type: integration
         target: backend.flutter_scaffolder._render_context
       - id: p0-android-profile-resolves
-        name: "android-arm64-v8a profile loads via backend.platform"
+        name: "android-arm64-v8a profile loads via backend.platform_profile"
         type: integration
         target: backend.flutter_scaffolder._render_context
       - id: p2-simulate-autodetect

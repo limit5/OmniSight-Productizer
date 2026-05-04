@@ -37,7 +37,7 @@
 #   would break `scripts/simulate.sh mobile` track dispatch (P2 #287).
 #
 # Consumed by:
-#   * backend/platform.py::resolve_build_toolchain → kind=mobile
+#   * backend/platform_profile.py::resolve_build_toolchain → kind=mobile
 #   * scripts/simulate.sh mobile track                        [P2 #287]
 #   * backend/deploy/app_store.py (App Store Connect adapter) [P5 #290]
 #   * configs/skills/skill-ios/ scaffold generator            [P7 #292]

@@ -18,7 +18,7 @@ Design
   outside the scaffold surface (e.g. ``App/Sources/Features/Login.swift``)
   are never touched.
 * **Framework binding** — each render resolves ``ios-arm64`` from
-  ``backend.platform.load_raw_profile`` so ``IPHONEOS_DEPLOYMENT_TARGET``
+  ``backend.platform_profile.load_raw_profile`` so ``IPHONEOS_DEPLOYMENT_TARGET``
   reads straight from the P0 profile, not a copy.
 * **Pilot report** — ``pilot_report()`` runs the P6 mobile_compliance
   bundle against the rendered project + checks the P5 ASC metadata
@@ -43,7 +43,7 @@ from typing import Any, Iterable
 
 import jinja2
 
-from backend import platform as _platform
+from backend import platform_profile as _platform
 from backend.skill_registry import get_skill, validate_skill
 
 logger = logging.getLogger(__name__)

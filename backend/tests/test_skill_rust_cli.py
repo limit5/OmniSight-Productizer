@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 from backend.build_adapters import BuildSource, CargoDistAdapter
-from backend.platform import get_platform_config
+from backend.platform_profile import get_platform_config
 from backend.rust_cli_scaffolder import (
     ScaffoldOptions,
     _SCAFFOLDS_DIR,

@@ -33,7 +33,7 @@ from backend.rn_scaffolder import (
     render_project,
     validate_pack,
 )
-from backend.platform import load_raw_profile
+from backend.platform_profile import load_raw_profile
 from backend.skill_registry import get_skill, list_skills, validate_skill
 
 

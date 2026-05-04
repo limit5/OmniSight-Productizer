@@ -79,7 +79,7 @@ fix; do **not** delete the block without re-reproducing the panic first.
 
 | Framework gate         | How SKILL-NEXTJS uses it                                   |
 |------------------------|-------------------------------------------------------------|
-| W0 `target_kind: web`  | Scaffolder reads the profile YAML via `backend.platform`    |
+| W0 `target_kind: web`  | Scaffolder reads the profile YAML via `backend.platform_profile` |
 | W1 `web-vercel`        | `vercel.json` memory limit = profile's `memory_limit_mb`    |
 | W1 `web-edge-cloudflare` | `wrangler.toml` compat flags + 1 MiB edge ceiling          |
 | W2 Lighthouse / Bundle | Rendered app passes default thresholds when deployed        |

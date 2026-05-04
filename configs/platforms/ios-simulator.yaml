@@ -31,7 +31,7 @@
 #   `OMNISIGHT_IOS_SIM_DEVICE` / `OMNISIGHT_IOS_SIM_RUNTIME` env.
 #
 # Consumed by:
-#   * backend/platform.py::resolve_build_toolchain → kind=mobile
+#   * backend/platform_profile.py::resolve_build_toolchain → kind=mobile
 #   * scripts/simulate.sh mobile track (XCUITest launch) [P2 #287]
 #   * configs/skills/skill-ios/ scaffold generator       [P7 #292]
 

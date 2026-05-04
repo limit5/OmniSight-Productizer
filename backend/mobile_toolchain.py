@@ -73,7 +73,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-from backend import platform as _platform
+from backend import platform_profile as _platform
 
 logger = logging.getLogger(__name__)
 

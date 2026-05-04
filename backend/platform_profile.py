@@ -6,6 +6,14 @@ embedded SoC, a web runtime, a mobile OS, or plain host software. It
 replaces the historical contract where every consumer assumed the
 `configs/platforms/*.yaml` shape meant cross-compile.
 
+Renamed from ``backend.platform`` → ``backend.platform_profile`` in
+FX.9.3 (2026-05-04) to permanently end the stdlib shadow trap: the old
+name shadowed CPython's stdlib ``platform`` whenever ``backend/`` landed
+on ``sys.path[0]`` (alembic CLI, pytest cwd=backend/, multiprocessing
+spawn). Several earlier defensive workarounds in CI / bootstrap /
+multi-worker fixtures targeted that shadow; with the rename they remain
+as belt-and-suspenders but are no longer load-bearing.
+
 Why this exists
 ---------------
 Pre-W0 the project only supported embedded cross-compile profiles

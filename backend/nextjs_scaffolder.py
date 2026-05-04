@@ -17,7 +17,7 @@ Design
   operator is expected to edit OUTSIDE the scaffold surface (e.g.
   ``app/dashboard/`` is NOT in the scaffold, so it survives).
 * **Framework binding** — each render resolves the target web
-  profile from ``backend.platform.get_platform_config`` so the
+  profile from ``backend.platform_profile.get_platform_config`` so the
   ``bundle_size_budget`` / ``memory_limit_mb`` read straight from
   the W1 profile, not a copy.
 * **Dry-run deploy** — ``dry_run_deploy()`` calls the W4 adapter's
@@ -45,7 +45,7 @@ from typing import Any, Iterable, Optional
 
 import jinja2
 
-from backend import platform as _platform
+from backend import platform_profile as _platform
 from backend.deploy.base import BuildArtifact
 from backend.skill_registry import get_skill, validate_skill
 from backend.web.vite_config_injection import (

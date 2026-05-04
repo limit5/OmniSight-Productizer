@@ -304,11 +304,14 @@ jobs:
           # the path below.
           COVERAGE_FILE: .coverage.${{ matrix.shard.name }}
         # Run from repo root (not `cd backend`) so sys.path[0] is the
-        # project root rather than `backend/`. The previous `cd backend`
-        # put `backend/` on sys.path[0] and backend/platform.py (W0 #274
-        # + P0 #285) shadowed stdlib `platform` during pytest startup —
-        # uuid.py's `import platform` → `backend/platform.py` without a
-        # `system()` attr → AttributeError → exit 2 on every shard.
+        # project root rather than `backend/`. (Pre-FX.9.3 the previous
+        # `cd backend` put `backend/` on sys.path[0] and the project
+        # module `backend/platform.py` (W0 #274 + P0 #285) shadowed
+        # stdlib `platform` during pytest startup — uuid.py's
+        # `import platform` → `backend/platform.py` without a `system()`
+        # attr → AttributeError → exit 2 on every shard. FX.9.3
+        # renamed it to `backend/platform_profile.py`, so the shadow
+        # is gone; we keep the repo-root cwd as defence-in-depth.)
         #
         # `python3 -m pytest` (NOT the bare `pytest` CLI) is required so
         # python adds the repo root to sys.path[0] — otherwise

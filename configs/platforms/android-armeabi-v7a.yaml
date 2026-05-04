@@ -38,7 +38,7 @@
 #     effect: no < armv7a+neon device still takes updates).
 #
 # Consumed by:
-#   * backend/platform.py::resolve_build_toolchain → kind=mobile
+#   * backend/platform_profile.py::resolve_build_toolchain → kind=mobile
 #   * scripts/simulate.sh mobile track (ABI-pair smoke)          [P2 #287]
 #   * backend/deploy/play_store.py (Play Developer API adapter)  [P5 #290]
 #   * configs/skills/skill-android/ scaffold generator           [P8 #293]

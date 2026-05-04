@@ -41,7 +41,7 @@ from backend.fastapi_scaffolder import (
     render_project,
     validate_pack,
 )
-from backend.platform import get_platform_config
+from backend.platform_profile import get_platform_config
 from backend.skill_registry import get_skill, list_skills, validate_skill
 
 

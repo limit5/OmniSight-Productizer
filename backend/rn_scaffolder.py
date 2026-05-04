@@ -24,7 +24,7 @@ from typing import Any, Iterable
 
 import jinja2
 
-from backend import platform as _platform
+from backend import platform_profile as _platform
 from backend.skill_registry import get_skill, validate_skill
 
 logger = logging.getLogger(__name__)

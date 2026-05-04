@@ -37,7 +37,7 @@ test_suites:
     name: "X0-X4 framework binding tests"
     tests:
       - id: x0-platform-profile-exists
-        name: "Default + 4 sibling profiles all load via backend.platform"
+        name: "Default + 4 sibling profiles all load via backend.platform_profile"
         type: integration
         target: backend.tauri_scaffolder.render_project
       - id: x1-coverage-thresholds-honoured

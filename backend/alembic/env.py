@@ -88,11 +88,13 @@ def run_migrations_online() -> None:
         # existing migrations (written against SQLite) run cleanly on
         # Postgres. No-op for SQLite binds.
         # FX.9.2: absolute `backend.` import — keeps `/app` on sys.path
-        # rather than `/app/backend`, so `backend/platform.py` cannot
-        # shadow stdlib `platform` (which SQLAlchemy imports at top
-        # level). The bare `from alembic_pg_compat import …` form
-        # required `/app/backend` to be sys.path[0] and triggered the
-        # shadow.
+        # rather than `/app/backend`. (Pre-FX.9.3 this also defended
+        # against `backend/platform.py` shadowing stdlib `platform`;
+        # FX.9.3 renamed the module to `backend/platform_profile.py`
+        # so the shadow is gone, but the absolute-import discipline
+        # is kept as defence-in-depth — bare `from alembic_pg_compat
+        # import …` would still require `/app/backend` on sys.path[0]
+        # which we no longer want at all.)
         import sys
         root = Path(__file__).resolve().parents[2]
         if str(root) not in sys.path:

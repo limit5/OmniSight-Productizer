@@ -42,7 +42,7 @@
 #   reproducibility).
 #
 # Consumed by:
-#   * backend/platform.py::resolve_build_toolchain → kind=software
+#   * backend/platform_profile.py::resolve_build_toolchain → kind=software
 #   * scripts/simulate.sh software track              [X1 #297]
 #   * X3 build & package adapters                     [X3 #299]
 #   * X4 SPDX license scan / CVE / SBOM               [X4 #300]

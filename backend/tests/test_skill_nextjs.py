@@ -45,7 +45,7 @@ from backend.nextjs_scaffolder import (
     render_project,
     validate_pack,
 )
-from backend.platform import load_raw_profile
+from backend.platform_profile import load_raw_profile
 from backend.skill_registry import get_skill, list_skills, validate_skill
 
 
@@ -368,7 +368,7 @@ class TestW0W1Bindings:
 
     def test_profile_loads_via_platform_module(self):
         """W0 dispatch test — the profile the scaffold binds to must
-        be loadable through the central backend.platform loader."""
+        be loadable through the central backend.platform_profile loader."""
         for profile_id in ("web-vercel", "web-edge-cloudflare"):
             data = load_raw_profile(profile_id)
             assert data.get("target_kind") == "web"

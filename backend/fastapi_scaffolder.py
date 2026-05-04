@@ -22,7 +22,7 @@ Design
   Operator edits OUTSIDE the scaffold surface (e.g. ``src/<pkg>/domain/``)
   are never touched.
 * **Framework binding** — ``render_project`` resolves the target
-  software platform profile via ``backend.platform.load_raw_profile``
+  software platform profile via ``backend.platform_profile.load_raw_profile``
   so the rendered Dockerfile & values.yaml read from the X0 profile,
   not a duplicated constant.
 * **Dry-run build** — ``dry_run_build()`` constructs the X3
@@ -51,7 +51,7 @@ from typing import Any, Iterable, Optional
 
 import jinja2
 
-from backend import platform as _platform
+from backend import platform_profile as _platform
 from backend.build_adapters import (
     BuildSource,
     DockerImageAdapter,

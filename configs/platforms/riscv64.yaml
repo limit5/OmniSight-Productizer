@@ -1,7 +1,7 @@
 # OmniSight Platform Profile: RISC-V 64-bit
 platform: riscv64
 label: "RISC-V 64-bit"
-target_kind: embedded    # W0 #274 — dispatch signal for backend/platform.py
+target_kind: embedded    # W0 #274 — dispatch signal for backend/platform_profile.py
 
 toolchain: riscv64-linux-gnu-gcc
 cross_prefix: riscv64-linux-gnu-

@@ -274,12 +274,15 @@ done
 # INVOCATION CWD (not the ini's own directory — alembic quirk). So we
 # set CWD to /app/backend via `-w`.
 #
-# BUT: cd-ing to /app/backend puts it at sys.path[0] (Python auto-adds
-# CWD), and backend/platform.py then SHADOWS stdlib `platform`,
-# breaking SQLAlchemy's `import platform` at top-level. Python 3.11+
-# has PYTHONSAFEPATH=1 which disables the auto-inject — we set that
-# for the alembic invocation only. The uvicorn runtime runs from /app
-# (no backend/ on sys.path[0]) and is unaffected.
+# Note: pre-FX.9.3, cd-ing to /app/backend put it at sys.path[0]
+# (Python auto-adds CWD) and `backend/platform.py` then SHADOWED
+# stdlib `platform`, breaking SQLAlchemy's `import platform` at
+# top-level. FX.9.3 renamed the module to `backend/platform_profile.py`
+# so the shadow is gone. We keep PYTHONSAFEPATH=1 here as
+# defence-in-depth — it prevents any future top-level project
+# module name from accidentally shadowing a stdlib module under the
+# alembic CLI's import order. (Belt-and-suspenders; can be removed
+# safely once we're confident no future module name will collide.)
 step "§4 Alembic migrations"
 LAST_SVC="backend-a"
 retry 2 run "${COMPOSE[@]}" exec -T \

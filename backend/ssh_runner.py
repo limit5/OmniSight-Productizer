@@ -139,7 +139,7 @@ def find_target_for_arch(target_arch: str, target_os: str = "linux") -> SSHTarge
     # Fallback: check platform profile deploy fields
     try:
         import yaml
-        from backend.platform import _NON_PROFILE_FILES  # W0 #274
+        from backend.platform_profile import _NON_PROFILE_FILES  # W0 #274 (renamed in FX.9.3)
         platforms_dir = _PROJECT_ROOT / "configs" / "platforms"
         for yf in platforms_dir.glob("*.yaml"):
             if yf.name in _NON_PROFILE_FILES:

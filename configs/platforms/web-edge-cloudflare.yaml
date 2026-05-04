@@ -21,7 +21,7 @@
 #     worth recording in docs.
 #
 # This profile is consumed by:
-#   * backend/platform.py::resolve_build_toolchain → kind=web
+#   * backend/platform_profile.py::resolve_build_toolchain → kind=web
 #   * scripts/simulate.sh web track (1 MiB worker gate)        [W2]
 #   * backend/deploy/cloudflare.py (wrangler deploy adapter)   [W4]
 

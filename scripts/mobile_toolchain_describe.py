@@ -25,7 +25,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from backend import mobile_toolchain  # noqa: E402
-from backend.platform import PlatformProfileError  # noqa: E402
+from backend.platform_profile import PlatformProfileError  # noqa: E402
 
 
 def main(argv: list[str]) -> int:

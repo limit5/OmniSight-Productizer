@@ -33,7 +33,7 @@ test_suites:
     name: "X0-X4 framework binding tests"
     tests:
       - id: x0-platform-profile-exists
-        name: "Resolved profile loads via backend.platform"
+        name: "Resolved profile loads via backend.platform_profile"
         type: integration
         target: backend.fastapi_scaffolder.render_project
       - id: x1-coverage-threshold-in-pyproject

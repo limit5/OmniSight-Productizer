@@ -116,7 +116,7 @@ NITRO_PRESET=bun npm run build
 
 | Framework gate             | How SKILL-NUXT uses it                                        |
 |----------------------------|----------------------------------------------------------------|
-| W0 `target_kind: web`      | Scaffolder reads profile YAML via `backend.platform`           |
+| W0 `target_kind: web`      | Scaffolder reads profile YAML via `backend.platform_profile`   |
 | W1 `web-ssr-node`          | 5 MiB server-bundle ceiling enforced for node/bun presets      |
 | W1 `web-vercel`            | `vercel.json` memory limit = profile's `memory_limit_mb`       |
 | W1 `web-edge-cloudflare`   | `wrangler.toml` compat flags + 1 MiB edge ceiling              |

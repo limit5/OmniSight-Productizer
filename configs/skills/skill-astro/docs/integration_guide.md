@@ -106,7 +106,7 @@ ASTRO_TARGET=cloudflare npm run build
 
 | Framework gate             | How SKILL-ASTRO uses it                                      |
 |----------------------------|---------------------------------------------------------------|
-| W0 `target_kind: web`      | Scaffolder reads profile YAML via `backend.platform`          |
+| W0 `target_kind: web`      | Scaffolder reads profile YAML via `backend.platform_profile`  |
 | W1 `web-static`            | 500 KiB critical-path budget enforced for static target       |
 | W1 `web-ssr-node`          | 5 MiB server bundle for node adapter                          |
 | W1 `web-vercel`            | `vercel.json` memory limit = profile's `memory_limit_mb`      |

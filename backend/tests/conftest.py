@@ -460,25 +460,20 @@ def pg_test_alembic_upgraded(pg_test_dsn: str) -> str:
     env["SQLALCHEMY_URL"] = sqlalchemy_url
     env["OMNISIGHT_SKIP_FS_MIGRATIONS"] = "1"
 
-    # Two overlapping stdlib-shadow hazards we defend against here:
+    # Pre-FX.9.3 there were two overlapping stdlib-shadow hazards here.
+    # FX.9.3 renamed `backend/platform.py` → `backend/platform_profile.py`
+    # so the shadow trap is gone, but we still scrub PYTHONPATH because:
     #
     # (1) `PYTHONPATH=.` in the pytest parent inherits into the child,
-    #     which puts the repo root on sys.path. The repo has a W0
-    #     `./platform.py` module that shadows stdlib `platform`; any
-    #     transitive `import platform` (uuid, sqlalchemy util, etc.)
-    #     then raises AttributeError on `.system()` / `.python_
-    #     implementation()`. Dropping PYTHONPATH breaks this chain.
+    #     putting the repo root on sys.path. Even without the rename
+    #     this remains undesirable for migration subprocesses — we want
+    #     them to run with a clean import surface so the production
+    #     alembic CLI invocation matches the test invocation byte-for-byte.
     #
-    # (2) `python -m alembic` sets sys.path[0] = '' (cwd), which with
-    #     cwd=backend/ surfaces ANOTHER copy of `platform.py` — the real
-    #     project module at backend/platform.py that legitimately lives
-    #     there as `from backend import platform`. Running via the
-    #     `alembic` console-script binary instead uses its shebang's
-    #     sys.path (no cwd injection), side-stepping the shadow.
-    #
-    # These are pre-existing project hazards — migration-v2 just happens
-    # to be the first test that invokes alembic from a pytest subprocess
-    # and thus the first to surface them.
+    # (2) `python -m alembic` would set sys.path[0] = '' (cwd) regardless
+    #     of cwd; running via the `alembic` console-script binary uses
+    #     its shebang's sys.path (no cwd injection), which is the entry
+    #     point we exercise in production anyway.
     env.pop("PYTHONPATH", None)
 
     backend_dir = Path(__file__).resolve().parents[1]

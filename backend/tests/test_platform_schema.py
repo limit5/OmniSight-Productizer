@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from backend.platform import (
+from backend.platform_profile import (
     DEFAULT_TARGET_KIND,
     TARGET_KINDS,
     PlatformProfileError,

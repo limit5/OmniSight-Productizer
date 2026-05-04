@@ -34,7 +34,7 @@ class TestPlatformProfiles:
         # mobile / software profiles legitimately omit it. Gate the
         # toolchain assertion on the dispatched target_kind so adding a
         # non-embedded profile doesn't trip this contract test.
-        from backend.platform import _NON_PROFILE_FILES, DEFAULT_TARGET_KIND
+        from backend.platform_profile import _NON_PROFILE_FILES, DEFAULT_TARGET_KIND
         for f in platforms_dir.glob("*.yaml"):
             if f.name in _NON_PROFILE_FILES:
                 continue

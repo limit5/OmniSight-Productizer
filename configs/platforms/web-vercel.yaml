@@ -22,7 +22,7 @@
 #   * Execution time: 10 s (Hobby) / 60 s (Pro) / 900 s (Enterprise).
 #
 # This profile is consumed by:
-#   * backend/platform.py::resolve_build_toolchain → kind=web
+#   * backend/platform_profile.py::resolve_build_toolchain → kind=web
 #   * scripts/simulate.sh web track                            [W2]
 #   * backend/deploy/vercel.py (Vercel REST API adapter)       [W4]
 

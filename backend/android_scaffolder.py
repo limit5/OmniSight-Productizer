@@ -18,7 +18,7 @@ Design
 * **Idempotent** — on re-render we overwrite scaffold files. Files
   outside the scaffold surface are never touched.
 * **Framework binding** — each render resolves ``android-arm64-v8a``
-  from ``backend.platform.load_raw_profile`` so ``minSdk`` / ``targetSdk``
+  from ``backend.platform_profile.load_raw_profile`` so ``minSdk`` / ``targetSdk``
   read straight from the P0 profile, not a copy.
 * **Pilot report** — ``pilot_report()`` runs the P6 mobile_compliance
   bundle against the rendered project + checks the P5 Play metadata
@@ -45,7 +45,7 @@ from typing import Any, Iterable
 
 import jinja2
 
-from backend import platform as _platform
+from backend import platform_profile as _platform
 from backend.skill_registry import get_skill, validate_skill
 
 logger = logging.getLogger(__name__)

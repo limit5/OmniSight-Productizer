@@ -41,7 +41,7 @@ test_suites:
     name: "P0-P6 framework binding tests"
     tests:
       - id: p0-platform-profile-resolves
-        name: "Resolved platform profile loads via backend.platform"
+        name: "Resolved platform profile loads via backend.platform_profile"
         type: integration
         target: backend.ios_scaffolder._render_context
       - id: p2-simulate-autodetect

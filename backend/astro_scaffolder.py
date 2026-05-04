@@ -50,7 +50,7 @@ from typing import Any, Iterable, Optional
 
 import jinja2
 
-from backend import platform as _platform
+from backend import platform_profile as _platform
 from backend.deploy.base import BuildArtifact
 from backend.skill_registry import get_skill, validate_skill
 from backend.web.vite_config_injection import (

@@ -72,7 +72,7 @@ _TIER_RULES_PATH = _PROJECT_ROOT / "configs" / "tier_capabilities.yaml"
 def _collect_toolchains() -> dict:
     """Scan platform YAMLs + tier_capabilities to build the toolchain enum."""
     # W0 #274: skip schema.yaml — it's a schema declaration, not a profile.
-    from backend.platform import _NON_PROFILE_FILES
+    from backend.platform_profile import _NON_PROFILE_FILES
     by_platform: dict[str, str] = {}
     for p in sorted(_PLATFORMS_DIR.glob("*.yaml")):
         if p.name in _NON_PROFILE_FILES:
@@ -290,7 +290,7 @@ async def get_evk_status():
         return results
 
     # W0 #274: skip schema.yaml — it's a schema declaration, not a profile.
-    from backend.platform import _NON_PROFILE_FILES
+    from backend.platform_profile import _NON_PROFILE_FILES
     for yf in sorted(platforms_dir.glob("*.yaml")):
         if yf.name in _NON_PROFILE_FILES:
             continue
@@ -894,7 +894,7 @@ async def list_vendor_sdks():
     # UI lists them with empty vendor fields and a misleading "ready"
     # status. We dispatch on target_kind (defaulting to embedded for
     # pre-W0 profiles per the W0 backward-compat rule).
-    from backend.platform import _NON_PROFILE_FILES, DEFAULT_TARGET_KIND
+    from backend.platform_profile import _NON_PROFILE_FILES, DEFAULT_TARGET_KIND
     results = []
     for f in sorted(platforms_dir.glob("*.yaml")):
         if f.name in _NON_PROFILE_FILES:

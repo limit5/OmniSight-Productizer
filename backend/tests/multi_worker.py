@@ -71,17 +71,16 @@ def _subprocess_entry(
     The subprocess brings up its OWN asyncio loop and its OWN asyncpg
     pool — no state from the parent carries in.
     """
-    # Defuse the ``backend/platform.py`` stdlib-shadow trap: pytest
-    # runs with cwd=backend/ and multiprocessing.spawn inherits that,
-    # so sys.path[0] = '' resolves to backend/, and transitive
-    # ``import platform`` (asyncio internals, uuid) hits
-    # backend/platform.py instead of stdlib — AttributeError on
-    # platform.system() breaks the bootstrap.
-    #
-    # Fix: drop the offending entries specifically. The empty-string
-    # entry (cwd) and any literal path ending in ``/backend`` are
-    # the only ones that matter — stdlib paths must stay intact or
-    # even ``dataclasses`` stops resolving.
+    # FX.9.3 renamed ``backend/platform.py`` → ``backend/platform_profile.py``
+    # so the original stdlib-shadow trap (transitive ``import platform``
+    # in asyncio / uuid hitting our project module instead of stdlib)
+    # is gone. We still scrub the cwd / backend/ entries from sys.path
+    # in the spawned child because the multiprocessing.spawn child
+    # inherits cwd from pytest (cwd=backend/) and we want a clean
+    # import surface that matches production layout (sys.path rooted
+    # at /app, not /app/backend). Dropping only the specific offenders
+    # — empty string (cwd) and any literal path ending in /backend —
+    # leaves stdlib paths intact or even ``dataclasses`` stops resolving.
     _repo_backend = os.environ.get("OMNI_MULTI_WORKER_BACKEND_DIR", "")
     sys.path[:] = [
         p for p in sys.path

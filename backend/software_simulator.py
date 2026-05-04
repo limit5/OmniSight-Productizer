@@ -922,7 +922,7 @@ def simulate_software(
 
     # ─── Profile validation ───
     try:
-        from backend.platform import get_platform_config  # lazy for testability
+        from backend.platform_profile import get_platform_config  # lazy for testability
         profile_cfg = get_platform_config(profile)
     except Exception as exc:  # noqa: BLE001
         result.errors.append(f"profile resolve failed: {exc}")

@@ -1,7 +1,7 @@
 # OmniSight Platform Profile Schema (W0 #274)
 #
 # Declares the contract every `configs/platforms/<id>.yaml` must satisfy.
-# Used by `backend/platform.py::validate_profile()` to reject malformed
+# Used by `backend/platform_profile.py::validate_profile()` to reject malformed
 # profiles before they hit the toolchain resolver, and by the W/P/X
 # vertical tracks (web / mobile / software) to dispatch on `target_kind`.
 #
@@ -15,7 +15,7 @@
 #
 # Migration rule:
 #   profiles that omit `target_kind` are treated as `embedded` for
-#   backward compatibility (see backend/platform.py::get_platform_config).
+#   backward compatibility (see backend/platform_profile.py::get_platform_config).
 #   We still prefer every profile to declare it explicitly — the existing
 #   aarch64 / armv7 / riscv64 / vendor-example / host_native profiles
 #   were updated in this Phase.
