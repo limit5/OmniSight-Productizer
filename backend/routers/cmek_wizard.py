@@ -5,6 +5,8 @@ will add durable ``cmek_configs`` / ``tier_assignments`` storage; until
 then ``complete`` returns a Tier 2 draft summary for the settings UI.
 KS.2.7 extends the same stateless surface with customer SIEM ingest
 spec generation for native CloudTrail / Cloud Audit Logs.
+KS.2.8 adds the Tier 1 -> Tier 2 stateless rewrap plan endpoint; durable
+progress persistence remains blocked on KS.2.11's CMEK tables.
 
 Module-global state audit (SOP Step 1)
 --------------------------------------
@@ -30,6 +32,7 @@ from pydantic import BaseModel, Field, model_validator
 from backend import auth
 from backend.security import cmek_graceful_degrade as _cmek_degrade
 from backend.security import cmek_siem as _cmek_siem
+from backend.security import cmek_upgrade as _cmek_upgrade
 from backend.security import cmek_wizard as _cw
 
 
@@ -92,6 +95,12 @@ class SIEMIngestSpecRequest(BaseModel):
     provider: Literal["aws-kms", "gcp-kms"]
     key_id: str = Field(min_length=1, max_length=512)
     principal: str | None = Field(default=None, max_length=512)
+
+
+class TierUpgradeRequest(BaseModel):
+    provider: Literal["aws-kms", "gcp-kms", "vault-transit"]
+    key_id: str = Field(min_length=1, max_length=512)
+    dek_refs: list[dict] = Field(default_factory=list)
 
 
 async def _guard(tenant_id: str, actor: auth.User) -> JSONResponse | None:
@@ -262,3 +271,25 @@ async def generate_cmek_siem_ingest_spec(
     body = spec.to_dict()
     body["ingest_spec_json"] = _cmek_siem.stable_ingest_json(spec)
     return JSONResponse(body)
+
+
+@router.post("/tenants/{tenant_id}/cmek/tier-upgrade")
+async def start_tier1_to_tier2_upgrade(
+    tenant_id: str,
+    req: TierUpgradeRequest,
+    _request: Request,
+    actor: auth.User = Depends(auth.current_user),
+) -> JSONResponse:
+    guarded = await _guard(tenant_id, actor)
+    if guarded is not None:
+        return guarded
+    try:
+        result = _cmek_upgrade.plan_tier1_to_tier2_upgrade(
+            tenant_id=tenant_id,
+            provider=_cw.normalise_provider(req.provider),
+            key_id=req.key_id,
+            dek_refs=req.dek_refs,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    return JSONResponse(result.to_dict())

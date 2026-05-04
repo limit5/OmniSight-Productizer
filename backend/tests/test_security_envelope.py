@@ -230,6 +230,49 @@ def test_non_local_decrypt_requires_adapter() -> None:
         envelope.decrypt(ciphertext, dek_ref)
 
 
+class FakeCMEKAdapter:
+    provider = "aws-kms"
+
+    def __init__(self) -> None:
+        self.wrap_calls = []
+        self.unwrap_calls = []
+
+    def wrap_dek(self, plaintext_dek, *, encryption_context=None):
+        self.wrap_calls.append((plaintext_dek, encryption_context))
+        return kms.WrappedDEK(
+            provider=self.provider,
+            key_id="arn:aws:kms:us-east-1:111122223333:key/00000000-0000-0000-0000-000000000000",
+            ciphertext=b"cmk:" + plaintext_dek,
+            key_version="cmk-v1",
+            algorithm="aws-kms",
+            encryption_context=dict(encryption_context or {}),
+        )
+
+    def unwrap_dek(self, wrapped_dek, *, encryption_context=None):
+        self.unwrap_calls.append((wrapped_dek, encryption_context))
+        return wrapped_dek.ciphertext.removeprefix(b"cmk:")
+
+
+def test_rewrap_tenant_dek_ref_keeps_dek_and_ciphertext_binding(monkeypatch) -> None:
+    monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-2-8-rewrap")
+    secret_store._reset_for_tests()
+    target = FakeCMEKAdapter()
+    ciphertext, dek_ref = envelope.encrypt("payload", TENANT_A)
+
+    rewrapped = envelope.rewrap_tenant_dek_ref(
+        dek_ref,
+        target_kms_adapter=target,
+    )
+
+    assert rewrapped.dek_id == dek_ref.dek_id
+    assert rewrapped.tenant_id == dek_ref.tenant_id
+    assert rewrapped.encryption_context == dek_ref.encryption_context
+    assert rewrapped.provider == "aws-kms"
+    assert rewrapped.key_id.startswith("arn:aws:kms:")
+    assert rewrapped.wrapped_dek_b64 != dek_ref.wrapped_dek_b64
+    assert envelope.decrypt(ciphertext, rewrapped, kms_adapter=target) == "payload"
+
+
 def test_input_validation() -> None:
     with pytest.raises(envelope.EnvelopeEncryptionError, match="plaintext"):
         envelope.encrypt("", TENANT_A)
