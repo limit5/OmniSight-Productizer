@@ -397,8 +397,8 @@ def test_services_repo_matches_button(services: dict):
             f"{name}.repo must reference limit5/OmniSight-Productizer, "
             f"got {repo!r}"
         )
-        assert svc.get("branch") == "master", (
-            f"{name}.branch must be `master`"
+        assert svc.get("branch") == "main", (
+            f"{name}.branch must be `main`"
         )
 
 

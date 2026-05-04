@@ -41,10 +41,10 @@ README = REPO_ROOT / "README.md"
 # The canonical repo slug + branch must be the SAME in all three deploy
 # button URLs. Per-platform specs (app.yaml / railway.json / render.yaml)
 # independently reference github.com/limit5/OmniSight-Productizer on
-# branch master — the buttons must route users to the same place or
+# branch main — the buttons must route users to the same place or
 # clicking lands them in a repo that doesn't match the spec.
 CANONICAL_REPO_SLUG = "limit5/OmniSight-Productizer"
-CANONICAL_BRANCH = "master"
+CANONICAL_BRANCH = "main"
 
 
 @pytest.fixture(scope="module")
@@ -191,7 +191,7 @@ def test_digitalocean_deploy_url_points_at_canonical_repo(
 ):
     """DO's one-click URL shape is
     `cloud.digitalocean.com/apps/new?repo=<URL>/tree/<branch>`.
-    The `?repo=...` must point at limit5/OmniSight-Productizer on master
+    The `?repo=...` must point at limit5/OmniSight-Productizer on main
     so it matches `deploy/digitalocean/app.yaml`'s `github.repo`."""
     href = badges["digitalocean"]["href"]
     assert href.startswith("https://cloud.digitalocean.com/apps/new"), (

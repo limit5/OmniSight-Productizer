@@ -273,15 +273,15 @@ def test_dockerfile_paths_exist(services: dict):
 
 def test_services_source_github_repo_matches_button(services: dict):
     """The Deploy button URL hard-codes `limit5/OmniSight-Productizer` +
-    branch `master`. The app.yaml `github:` block must point at the
+    branch `main`. The app.yaml `github:` block must point at the
     same place — otherwise the wizard fork UX gets confusing."""
     for name, svc in services.items():
         gh = svc.get("github") or {}
         assert gh.get("repo") == "limit5/OmniSight-Productizer", (
             f"{name}.github.repo must match the README Deploy-button URL"
         )
-        assert gh.get("branch") == "master", (
-            f"{name}.github.branch must be `master`"
+        assert gh.get("branch") == "main", (
+            f"{name}.github.branch must be `main`"
         )
 
 
