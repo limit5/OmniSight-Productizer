@@ -116,6 +116,53 @@ else
     log "使用現有 image"
 fi
 
+# ── Step 2.5: Alembic migrations against live DB ──
+# FX.9.5 (2026-05-04): apply pending Alembic migrations BEFORE the
+# rolling restart so the new backend replica's /readyz doesn't fail on
+# schema drift. Spawns an ephemeral container from the freshly-built
+# backend image via `docker compose run --rm --no-deps` — backend-a /
+# backend-b stay on the OLD image until Step 3 / Step 4 restart them,
+# so the live request path is unaffected during migration.
+#
+# Knobs mirror bootstrap_prod.sh §4:
+#   PYTHONSAFEPATH=1 — defence-in-depth against any future top-level
+#                     project module shadowing a stdlib module under
+#                     the alembic CLI's import order.
+#   -w /app/backend  — alembic.ini's `script_location = alembic` is
+#                     relative to invocation CWD (alembic quirk), not
+#                     to the ini's own directory.
+#   `upgrade heads` (plural) — defensive: works whether the tree is
+#                     single-head (post-FX.9.4 merge) or transiently
+#                     multi-head (e.g. mid-merge concurrent feature
+#                     branches). `head` (singular) would bail with
+#                     `Multiple head revisions are present`.
+#
+# `--no-deps` skips backend-a's `depends_on: docker-socket-proxy` —
+# the migration container only needs PG (reachable via the
+# `db_ha` external network attached to backend-a's service def);
+# the docker-socket-proxy gate is a runtime concern for the long-
+# lived replica, not for a one-shot alembic invocation.
+#
+# Failure semantics: if alembic exits non-zero we abort the deploy
+# BEFORE touching either replica. The DB is left in whatever partial
+# state alembic reached (Alembic wraps each migration in a tx so a
+# single migration is atomic; a multi-migration batch may stop part-
+# way and resume on the next run). Operator re-runs `deploy-prod.sh`
+# after fixing the bad migration.
+step "Step 2.5: Alembic upgrade heads"
+echo "在 rolling restart 之前用新 image 套 schema（FX.9.5 — 避免 readyz fail）..."
+
+if [ "$DRY_RUN" = false ]; then
+    if ! docker compose -f $COMPOSE_FILE run --rm --no-deps \
+            -e PYTHONSAFEPATH=1 -w /app/backend \
+            backend-a python -m alembic upgrade heads; then
+        err "Alembic upgrade heads 失敗 — 中止部署。修正 migration 後重跑 deploy-prod.sh。"
+    fi
+    log "Alembic upgrade heads 完成"
+else
+    echo "  [dry-run] docker compose -f $COMPOSE_FILE run --rm --no-deps backend-a python -m alembic upgrade heads"
+fi
+
 # ── Step 3: Rolling restart backend-a ──
 step "Step 3: Rolling restart — backend-a"
 echo "Caddy 會自動將流量切到 backend-b..."
