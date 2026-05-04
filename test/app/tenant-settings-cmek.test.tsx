@@ -146,7 +146,9 @@ beforeEach(() => {
     provider: "aws-kms",
     key_id: "arn:aws:kms:us-east-1:111122223333:key/00000000-0000-0000-0000-000000000000",
     verification_id: "cmekv_abc123",
-    algorithm: "fernet",
+    operation: "encrypt-decrypt",
+    algorithm: "AES-256-GCM",
+    wrap_algorithm: "fernet",
     elapsed_ms: 1.2,
     live_provider_checked: false,
   })

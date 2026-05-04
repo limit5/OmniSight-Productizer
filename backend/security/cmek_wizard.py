@@ -37,6 +37,7 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
+from backend.security import envelope
 from backend.security.kms_adapters import LocalFernetKMSAdapter
 
 
@@ -258,22 +259,25 @@ def verify_connection_probe(
 
     key_id = validate_key_id(provider, key_id)
     started = time.perf_counter()
-    plaintext = b"ks-2-1-cmek-wizard-probe:" + secrets.token_bytes(32)
-    context = {
-        "omnisight:tenant_id": tenant_id,
-        "omnisight:cmek_provider": provider,
-    }
     adapter = LocalFernetKMSAdapter(key_id="ks-2-1-wizard-probe")
-    wrapped = adapter.wrap_dek(plaintext, encryption_context=context)
-    decrypted = adapter.unwrap_dek(wrapped, encryption_context=context)
+    plaintext = f"ks-2-1-cmek-wizard-probe:{secrets.token_hex(16)}"
+    ciphertext, dek_ref = envelope.encrypt(
+        plaintext,
+        tenant_id,
+        kms_adapter=adapter,
+        purpose=f"cmek-verify:{provider}",
+    )
+    decrypted = envelope.decrypt(ciphertext, dek_ref, kms_adapter=adapter)
     if decrypted != plaintext:
-        raise RuntimeError("CMEK wizard probe decrypt mismatch")
+        raise RuntimeError("CMEK wizard probe encrypt-decrypt mismatch")
     return {
         "ok": True,
         "provider": provider,
         "key_id": key_id,
         "verification_id": f"cmekv_{secrets.token_hex(8)}",
-        "algorithm": wrapped.algorithm,
+        "operation": "encrypt-decrypt",
+        "algorithm": envelope.AES_GCM_ALGORITHM,
+        "wrap_algorithm": dek_ref.wrap_algorithm,
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
         "live_provider_checked": False,
     }

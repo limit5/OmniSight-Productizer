@@ -3312,7 +3312,9 @@ export interface VerifyCmekResponse {
   provider: CmekProvider
   key_id: string
   verification_id: string
+  operation: "encrypt-decrypt"
   algorithm: string
+  wrap_algorithm: string
   elapsed_ms: number
   live_provider_checked: boolean
 }

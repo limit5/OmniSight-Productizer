@@ -180,7 +180,7 @@ def test_policy_generation_rejects_non_pasteable_principals(provider, principal)
         )
 
 
-def test_verify_connection_probe_round_trips_without_live_provider(monkeypatch):
+def test_verify_connection_probe_runs_omnisight_encrypt_decrypt(monkeypatch):
     from backend import secret_store
     from backend.security import cmek_wizard as cmek
 
@@ -194,9 +194,13 @@ def test_verify_connection_probe_round_trips_without_live_provider(monkeypatch):
 
     assert result["ok"] is True
     assert result["provider"] == "aws-kms"
-    assert result["algorithm"] == "fernet"
+    assert result["operation"] == "encrypt-decrypt"
+    assert result["algorithm"] == "AES-256-GCM"
+    assert result["wrap_algorithm"] == "fernet"
     assert result["live_provider_checked"] is False
     assert str(result["verification_id"]).startswith("cmekv_")
+    assert "plaintext" not in result
+    assert "ciphertext" not in result
 
 
 def test_key_id_request_trims_and_validates_provider_shape():
