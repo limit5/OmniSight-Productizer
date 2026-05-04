@@ -3,6 +3,8 @@
 Locks:
   * load_project_memory finds every recognised filename and skips
     missing / empty
+  * load_project_memory walks current dir + up to three parents with
+    distance-derived weights
   * load_user_memory reads from ~/.claude/ with home override
   * load_all_memory yields user-level first, then project-level
   * render_for_prompt: empty list → empty string; populated list emits
@@ -24,6 +26,7 @@ from backend.agents.project_memory import (
     load_all_memory,
     load_project_memory,
     load_user_memory,
+    project_rule_dirs,
     render_for_prompt,
 )
 
@@ -76,6 +79,38 @@ def test_load_project_custom_filenames(tmp_path: Path) -> None:
     out = load_project_memory(tmp_path, filenames=("MY_RULES.md",))
     assert len(out) == 1
     assert out[0].convention == "MY_RULES.md"
+
+
+def test_project_rule_dirs_current_plus_three_parents(tmp_path: Path) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+
+    out = project_rule_dirs(current)
+
+    assert [p.name for p, _, _ in out] == ["d", "c", "b", "a"]
+    assert [distance for _, distance, _ in out] == [0, 1, 2, 3]
+    assert [weight for _, _, weight in out] == [4, 3, 2, 1]
+
+
+def test_load_project_walks_parents_by_distance_weight(tmp_path: Path) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+    (current / "CLAUDE.md").write_text("current\n")
+    (current.parent / "CLAUDE.md").write_text("parent-1\n")
+    (current.parent.parent / "CLAUDE.md").write_text("parent-2\n")
+    (current.parent.parent.parent / "CLAUDE.md").write_text("parent-3\n")
+    (tmp_path / "CLAUDE.md").write_text("too-far\n")
+
+    out = load_project_memory(current, filenames=("CLAUDE.md",))
+
+    assert [m.content.strip() for m in out] == [
+        "current",
+        "parent-1",
+        "parent-2",
+        "parent-3",
+    ]
+    assert [m.distance for m in out] == [0, 1, 2, 3]
+    assert [m.weight for m in out] == [4, 3, 2, 1]
 
 
 # ─── load_user_memory ────────────────────────────────────────────
@@ -158,6 +193,8 @@ def test_render_includes_header_and_subheadings(tmp_path: Path) -> None:
             convention="CLAUDE.md",
             scope="project",
             content="rule A\nrule B",
+            distance=0,
+            weight=4,
         ),
         MemoryFile(
             path=tmp_path / "AGENTS.md",
@@ -168,7 +205,7 @@ def test_render_includes_header_and_subheadings(tmp_path: Path) -> None:
     ]
     out = render_for_prompt(files)
     assert "L1 不可違反" in out  # default header
-    assert "## CLAUDE.md（scope=project）" in out
+    assert "## CLAUDE.md（scope=project, distance=0, weight=4）" in out
     assert "## AGENTS.md（scope=user）" in out
     assert "rule A" in out
     assert "rule X" in out

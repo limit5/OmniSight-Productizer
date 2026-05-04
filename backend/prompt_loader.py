@@ -37,7 +37,7 @@ import re
 import time
 from pathlib import Path
 
-from backend.agents.project_memory import PROJECT_RULE_FILENAMES
+from backend.agents.project_memory import PROJECT_RULE_FILENAMES, project_rule_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -107,10 +107,14 @@ def load_core_rules() -> str:
     if _core_rules_cache is not None:
         return _core_rules_cache
     parts: list[str] = []
-    for filename in PROJECT_RULE_FILENAMES:
-        content = _read_md(_PROJECT_ROOT / filename, _MAX_CORE_RULES)
-        if content:
-            parts.append(f"## {filename}\n\n{content}")
+    for base, distance, weight in project_rule_dirs(_PROJECT_ROOT):
+        for filename in PROJECT_RULE_FILENAMES:
+            content = _read_md(base / filename, _MAX_CORE_RULES)
+            if content:
+                parts.append(
+                    f"## {filename} (distance={distance}, weight={weight})"
+                    f"\n\n{content}"
+                )
     _core_rules_cache = "\n\n".join(parts)
     if _core_rules_cache:
         logger.info(

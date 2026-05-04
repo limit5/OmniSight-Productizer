@@ -105,6 +105,32 @@ class TestBuildSystemPrompt:
         assert content.index("AGENTS.md body") < content.index("OMNISIGHT.md body")
         assert content.index("OMNISIGHT.md body") < content.index("WARP.md body")
 
+    def test_load_core_rules_walks_three_parent_dirs_with_weight(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import backend.prompt_loader as prompt_loader
+
+        current = tmp_path / "a" / "b" / "c" / "d"
+        current.mkdir(parents=True)
+        (current / "CLAUDE.md").write_text("current rules\n")
+        (current.parent / "CLAUDE.md").write_text("parent one rules\n")
+        (current.parent.parent / "CLAUDE.md").write_text("parent two rules\n")
+        (current.parent.parent.parent / "CLAUDE.md").write_text("parent three rules\n")
+        (tmp_path / "CLAUDE.md").write_text("too far rules\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", current)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        content = prompt_loader.load_core_rules()
+        assert content.index("current rules") < content.index("parent one rules")
+        assert content.index("parent one rules") < content.index("parent two rules")
+        assert content.index("parent two rules") < content.index("parent three rules")
+        assert "too far rules" not in content
+        assert "distance=0, weight=4" in content
+        assert "distance=3, weight=1" in content
+
     def test_with_model_and_role(self):
         prompt = build_system_prompt(
             model_name="claude-sonnet-4",

@@ -8,9 +8,10 @@ conventions agentic CLIs share:
   * ``OMNISIGHT.md``   — OmniSight-specific rules
   * ``WARP.md``        — Warp.dev terminal AI
 
-Both project root (``<repo>/<filename>``) and user home
-(``~/.claude/<filename>``) are scanned. Missing files are silently
-skipped. Concatenated content goes into the LLM's system prompt as
+Both project root (``<repo>/<filename>``), up to three parent
+directories, and user home (``~/.claude/<filename>``) are scanned.
+Missing files are silently skipped. Concatenated content goes into the
+LLM's system prompt as
 the L1-immutable rule layer; the runner already places these BEFORE
 SOP so their constraints win on conflict.
 
@@ -55,6 +56,10 @@ USER_RULE_FILENAMES: tuple[str, ...] = (
     "AGENTS.md",
 )
 
+# WP.5.2 parent walk: current directory plus at most three parents.
+# Higher weight means closer to the current project directory.
+PROJECT_RULE_PARENT_DEPTH = 3
+
 
 @dataclass(frozen=True)
 class MemoryFile:
@@ -66,9 +71,20 @@ class MemoryFile:
     scope: str
     """Where it was found — ``"project"`` or ``"user"``."""
     content: str
+    distance: int | None = None
+    """Directory distance from the project root for project files."""
+    weight: int = 1
+    """Distance-derived priority; closer project files receive higher weight."""
 
 
-def _load_one(path: Path, convention: str, scope: str) -> MemoryFile | None:
+def _load_one(
+    path: Path,
+    convention: str,
+    scope: str,
+    *,
+    distance: int | None = None,
+    weight: int = 1,
+) -> MemoryFile | None:
     """Read one rule file. Returns None on missing / empty / unreadable."""
     if not path.is_file():
         return None
@@ -79,20 +95,61 @@ def _load_one(path: Path, convention: str, scope: str) -> MemoryFile | None:
         return None
     if not text.strip():
         return None
-    return MemoryFile(path=path, convention=convention, scope=scope, content=text)
+    return MemoryFile(
+        path=path,
+        convention=convention,
+        scope=scope,
+        content=text,
+        distance=distance,
+        weight=weight,
+    )
+
+
+def project_rule_dirs(
+    project_root: Path,
+    *,
+    max_parent_depth: int = PROJECT_RULE_PARENT_DEPTH,
+) -> list[tuple[Path, int, int]]:
+    """Return current project directory and up to ``max_parent_depth`` parents.
+
+    The tuple is ``(directory, distance, weight)``. Weight is derived only
+    from distance, so every worker reading the same path computes the same
+    ordered rule stack without shared state.
+    """
+    out: list[tuple[Path, int, int]] = []
+    current = project_root
+    for distance in range(max_parent_depth + 1):
+        weight = max_parent_depth + 1 - distance
+        out.append((current, distance, weight))
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return out
 
 
 def load_project_memory(
     project_root: Path,
     *,
     filenames: tuple[str, ...] = PROJECT_RULE_FILENAMES,
+    max_parent_depth: int = PROJECT_RULE_PARENT_DEPTH,
 ) -> list[MemoryFile]:
-    """Load every recognised rule file under ``project_root``."""
+    """Load recognised rule files from ``project_root`` and nearby parents."""
     out: list[MemoryFile] = []
-    for fn in filenames:
-        mf = _load_one(project_root / fn, fn, scope="project")
-        if mf is not None:
-            out.append(mf)
+    for base, distance, weight in project_rule_dirs(
+        project_root,
+        max_parent_depth=max_parent_depth,
+    ):
+        for fn in filenames:
+            mf = _load_one(
+                base / fn,
+                fn,
+                scope="project",
+                distance=distance,
+                weight=weight,
+            )
+            if mf is not None:
+                out.append(mf)
     return out
 
 
@@ -140,7 +197,10 @@ def render_for_prompt(
         return ""
     parts: list[str] = [header, ""]
     for mf in memory_files:
-        parts.append(f"## {mf.convention}（scope={mf.scope}）")
+        scope_label = f"scope={mf.scope}"
+        if mf.distance is not None:
+            scope_label += f", distance={mf.distance}, weight={mf.weight}"
+        parts.append(f"## {mf.convention}（{scope_label}）")
         parts.append(mf.content.strip())
         parts.append("")
     return "\n".join(parts)
