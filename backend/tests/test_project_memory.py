@@ -6,6 +6,7 @@ Locks:
   * load_project_memory walks current dir + up to three parents with
     distance-derived weights
   * project_rule_signature changes when watched rule files change
+  * WP.5.8 integrated matrix: parent walk + multi-file + caps + ignore
   * load_user_memory reads from ~/.claude/ with home override
   * load_all_memory yields user-level first, then project-level
   * render_for_prompt: empty list → empty string; populated list emits
@@ -227,6 +228,53 @@ def test_load_project_marks_operator_ignored_rule_file(
     assert out[0].content == ""
     assert out[0].size_bytes == len("ignore me\n")
     assert out[0].included_bytes == 0
+
+
+def test_wp5_full_matrix_parent_multi_file_caps_ignore_and_summary(
+    tmp_path: Path,
+) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+    parent_three = current.parent.parent.parent
+    parent_two = current.parent.parent
+    parent_one = current.parent
+
+    (parent_three / "CLAUDE.md").write_text("p3-rule\n")
+    ignored_file = parent_two / "AGENTS.md"
+    ignored_file.write_text("ignored\n")
+    (parent_one / "WARP.md").write_text("w" * 12)
+    (current / "OMNISIGHT.md").write_text("current-omni\n")
+    (tmp_path / "CLAUDE.md").write_text("too-far\n")
+
+    out = load_project_memory(
+        current,
+        max_file_bytes=8,
+        max_total_bytes=19,
+        ignored_paths=[ignored_file],
+    )
+
+    assert [m.convention for m in out] == [
+        "CLAUDE.md",
+        "AGENTS.md",
+        "WARP.md",
+        "OMNISIGHT.md",
+    ]
+    assert [m.distance for m in out] == [3, 2, 1, 0]
+    assert [m.weight for m in out] == [1, 2, 3, 4]
+    assert [m.content for m in out] == ["p3-rule", "", "w" * 8, "curr"]
+    assert [m.included_bytes for m in out] == [7, 0, 8, 4]
+    assert [m.ignored for m in out] == [False, True, False, False]
+    assert [m.truncated_reason for m in out] == [None, None, "file", "total"]
+    assert "too-far" not in render_for_prompt(out)
+
+    summary = render_operator_summary(out, project_root=current)
+
+    assert "Memory: 4 rule file(s)" in summary
+    assert "CLAUDE.md (project d=3 w=1) size=8 B included=7 B [loaded]" in summary
+    assert "AGENTS.md (project d=2 w=2) size=8 B included=0 B [ignored]" in summary
+    assert "WARP.md (project d=1 w=3) size=12 B included=8 B [truncated:file]" in summary
+    assert "OMNISIGHT.md (project d=0 w=4) size=13 B included=4 B [truncated:total]" in summary
+    assert "OMNISIGHT_RULE_IGNORE='<path>[,<path>...]'" in summary
 
 
 # ─── load_user_memory ────────────────────────────────────────────

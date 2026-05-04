@@ -188,6 +188,33 @@ class TestBuildSystemPrompt:
         assert "agents rules" not in first
         assert "agents rules" in second
 
+    def test_load_core_rules_reloads_parent_multi_file_merge(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import backend.prompt_loader as prompt_loader
+
+        current = tmp_path / "repo" / "service"
+        current.mkdir(parents=True)
+        parent_rule = current.parent / "CLAUDE.md"
+        parent_rule.write_text("parent first\n")
+        (current / "AGENTS.md").write_text("current agents\n")
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", current)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        first = prompt_loader.load_core_rules()
+        parent_rule.write_text("parent second rules\n")
+        second = prompt_loader.load_core_rules()
+
+        assert "parent first" in first
+        assert "parent second rules" in second
+        assert "parent first" not in second
+        assert second.index("parent second rules") < second.index("current agents")
+        assert "distance=1, weight=3" in second
+        assert "distance=0, weight=4" in second
+
     def test_load_core_rules_marks_oversized_file_truncated(
         self,
         tmp_path,
