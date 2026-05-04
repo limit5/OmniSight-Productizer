@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 351
+entry_count: 352
 status_counts:
-  dev-only: 342
+  dev-only: 343
   deployed-inactive: 4
   deployed-active: 3
   deployed-observed: 0
@@ -3301,3 +3301,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.5.6/WP.5.7 需補 size cap、ignore UI 與載入來源顯示後，再以 HD datasheet/spec/errata fixture 跑 backend
     RAG smoke。
+- id: 2026-05-04--WP.5.6
+  header_line: 45586
+  date: '2026-05-04'
+  author: Codex/GPT-5.5
+  task_id: WP.5.6
+  title: WP.5.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.5.7 需把 `MemoryFile` size/truncated/ignored metadata 接到 operator UI，提供 loaded-file 清單與
+    per-file ignore 操作。

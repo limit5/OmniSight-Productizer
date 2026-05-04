@@ -38,9 +38,9 @@ import time
 from pathlib import Path
 
 from backend.agents.project_memory import (
-    PROJECT_RULE_FILENAMES,
-    project_rule_merge_dirs,
+    load_project_memory,
     project_rule_signature,
+    render_for_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,6 @@ _ROLES_DIR = _CONFIGS_ROOT / "roles"
 _SKILLS_DIR = _CONFIGS_ROOT / "skills"
 
 # Maximum prompt section lengths (rough char counts) to avoid blowing context
-_MAX_CORE_RULES = 2000
 _MAX_MODEL_RULES = 3000
 _MAX_ROLE_SKILL = 8000
 _MAX_TASK_SKILL = 4000
@@ -112,21 +111,13 @@ def load_core_rules() -> str:
     signature = project_rule_signature(_PROJECT_ROOT)
     if _core_rules_cache is not None and _core_rules_cache[0] == signature:
         return _core_rules_cache[1]
-    parts: list[str] = []
-    for base, distance, weight in project_rule_merge_dirs(_PROJECT_ROOT):
-        for filename in PROJECT_RULE_FILENAMES:
-            content = _read_md(base / filename, _MAX_CORE_RULES)
-            if content:
-                parts.append(
-                    f"## {filename} (distance={distance}, weight={weight})"
-                    f"\n\n{content}"
-                )
-    core_rules = "\n\n".join(parts)
+    memory_files = load_project_memory(_PROJECT_ROOT)
+    core_rules = render_for_prompt(memory_files, header="")
     _core_rules_cache = (signature, core_rules)
     if core_rules:
         logger.info(
             "Loaded L1 core rules from %d project rule file(s) (%d chars)",
-            len(parts),
+            len(memory_files),
             len(core_rules),
         )
     return core_rules

@@ -22,6 +22,8 @@ from pathlib import Path
 
 from backend.agents.project_memory import (
     PROJECT_RULE_FILENAMES,
+    PROJECT_RULE_FILE_MAX_BYTES,
+    PROJECT_RULE_TOTAL_MAX_BYTES,
     USER_RULE_FILENAMES,
     MemoryFile,
     load_all_memory,
@@ -176,6 +178,54 @@ def test_project_rule_signature_tracks_add_and_remove(tmp_path: Path) -> None:
     assert third == first
 
 
+def test_load_project_truncates_each_rule_file_at_five_kib(
+    tmp_path: Path,
+) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("a" * (PROJECT_RULE_FILE_MAX_BYTES + 20))
+
+    out = load_project_memory(tmp_path, filenames=("CLAUDE.md",))
+
+    assert len(out) == 1
+    assert out[0].size_bytes == PROJECT_RULE_FILE_MAX_BYTES + 20
+    assert out[0].included_bytes == PROJECT_RULE_FILE_MAX_BYTES
+    assert out[0].truncated is True
+    assert out[0].truncated_reason == "file"
+    assert len(out[0].content.encode("utf-8")) == PROJECT_RULE_FILE_MAX_BYTES
+
+
+def test_load_project_truncates_merged_rules_at_fifty_kib(
+    tmp_path: Path,
+) -> None:
+    current = tmp_path / "a" / "b" / "c" / "d"
+    current.mkdir(parents=True)
+    for base in (current, current.parent, current.parent.parent):
+        for fn in PROJECT_RULE_FILENAMES:
+            (base / fn).write_text("x" * PROJECT_RULE_FILE_MAX_BYTES)
+
+    out = load_project_memory(current)
+
+    assert sum(m.included_bytes for m in out) == PROJECT_RULE_TOTAL_MAX_BYTES
+    assert out[-1].truncated is True
+    assert out[-1].truncated_reason == "total"
+    assert out[-1].included_bytes == 0
+
+
+def test_load_project_marks_operator_ignored_rule_file(
+    tmp_path: Path,
+) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("ignore me\n")
+
+    out = load_project_memory(tmp_path, ignored_paths=[rule_file])
+
+    assert len(out) == 1
+    assert out[0].ignored is True
+    assert out[0].content == ""
+    assert out[0].size_bytes == len("ignore me\n")
+    assert out[0].included_bytes == 0
+
+
 # ─── load_user_memory ────────────────────────────────────────────
 
 
@@ -272,6 +322,36 @@ def test_render_includes_header_and_subheadings(tmp_path: Path) -> None:
     assert "## AGENTS.md（scope=user）" in out
     assert "rule A" in out
     assert "rule X" in out
+
+
+def test_render_surfaces_truncated_and_ignore_options(tmp_path: Path) -> None:
+    files = [
+        MemoryFile(
+            path=tmp_path / "CLAUDE.md",
+            convention="CLAUDE.md",
+            scope="project",
+            content="a" * PROJECT_RULE_FILE_MAX_BYTES,
+            size_bytes=PROJECT_RULE_FILE_MAX_BYTES + 1,
+            included_bytes=PROJECT_RULE_FILE_MAX_BYTES,
+            truncated=True,
+            truncated_reason="file",
+        ),
+        MemoryFile(
+            path=tmp_path / "AGENTS.md",
+            convention="AGENTS.md",
+            scope="project",
+            content="",
+            size_bytes=9,
+            ignored=True,
+        ),
+    ]
+
+    out = render_for_prompt(files)
+
+    assert "truncated=true, reason=file" in out
+    assert "[truncated; operator may ignore this file]" in out
+    assert "ignored=true" in out
+    assert "[ignored by operator]" in out
 
 
 def test_render_custom_header() -> None:

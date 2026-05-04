@@ -188,6 +188,25 @@ class TestBuildSystemPrompt:
         assert "agents rules" not in first
         assert "agents rules" in second
 
+    def test_load_core_rules_marks_oversized_file_truncated(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import backend.prompt_loader as prompt_loader
+        from backend.agents.project_memory import PROJECT_RULE_FILE_MAX_BYTES
+
+        (tmp_path / "CLAUDE.md").write_text(
+            "x" * (PROJECT_RULE_FILE_MAX_BYTES + 1)
+        )
+
+        monkeypatch.setattr(prompt_loader, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(prompt_loader, "_core_rules_cache", None)
+
+        content = prompt_loader.load_core_rules()
+        assert "truncated=true, reason=file" in content
+        assert "[truncated; operator may ignore this file]" in content
+
     def test_with_model_and_role(self):
         prompt = build_system_prompt(
             model_name="claude-sonnet-4",
