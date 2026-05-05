@@ -375,6 +375,10 @@ jobs:
           - { name: decision, paths: "backend/tests/test_decision_engine.py backend/tests/test_decision_rules.py backend/tests/test_decision_rules_persistence.py backend/tests/test_decision_api.py backend/tests/test_decision_sse.py backend/tests/test_ambiguity_budget.py backend/tests/test_stuck_detector.py", min: 0 }
           - { name: pipeline, paths: "backend/tests/test_pipeline.py backend/tests/test_release.py backend/tests/test_handoff.py", min: 0 }
           - { name: schema,   paths: "backend/tests/test_schema.py backend/tests/test_event_system.py backend/tests/test_artifact_pipeline.py backend/tests/test_artifacts.py", min: 0 }
+          - { name: auth-security, paths: "backend/tests/test_account*.py backend/tests/test_auth*.py backend/tests/test_oauth*.py backend/tests/test_security*.py", min: 0 }
+          - { name: runtime, paths: "backend/tests/test_background*.py backend/tests/test_bootstrap*.py backend/tests/test_tool*.py backend/tests/test_turn*.py backend/tests/test_workflow*.py", min: 0 }
+          - { name: product, paths: "backend/tests/test_catalog*.py backend/tests/test_mobile*.py backend/tests/test_skill*.py backend/tests/test_software*.py backend/tests/test_web*.py", min: 0 }
+          - { name: infra, paths: "backend/tests/test_alembic*.py backend/tests/test_db*.py backend/tests/test_deploy*.py backend/tests/test_feature_flag*.py backend/tests/test_git*.py", min: 0 }
           - { name: rest,     paths: "backend/tests/", min: 60 }
     steps:
       - uses: actions/checkout@v4
@@ -389,7 +393,7 @@ jobs:
           OMNISIGHT_DATABASE_PATH: /tmp/ci-omnisight-${{ matrix.shard.name }}.db
           # H6 audit (2026-04-19): per-shard COVERAGE_FILE so the .coverage
           # binary data files don't overwrite each other when the
-          # combine job downloads all four artifacts into one directory.
+          # combine job downloads all eight artifacts into one directory.
           # pytest-cov honours this env; the XML report still lands at
           # the path below.
           COVERAGE_FILE: .coverage.${{ matrix.shard.name }}
@@ -438,11 +442,11 @@ jobs:
 
   backend-coverage-combine:
     # H6 audit (2026-04-19): enforces the *aggregate* coverage floor
-    # across all four shards. Per-shard thresholds are meaningless —
+    # across all eight shards. Per-shard thresholds are meaningless —
     # decision's 7 tests can't exercise 85% of ~5,700 backend files.
     # The rest shard runs everything, but its own --cov-fail-under=60
-    # doesn't count work the other three shards did.
-    # Combining the four .coverage data files gives the real full-suite
+    # doesn't count work the other seven shards did.
+    # Combining the eight .coverage data files gives the real full-suite
     # percentage, which is what we actually want to gate on.
     needs: backend-tests
     runs-on: ubuntu-latest

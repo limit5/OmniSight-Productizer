@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 401
+entry_count: 402
 status_counts:
-  dev-only: 391
+  dev-only: 392
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3752,3 +3752,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認三個新 backend tier jobs 分別在 5 / 30 / 60 min budget 內完成，然後 BP.L.3
     再處理 full-suite shard 4-way → 8-way。
+- id: 2026-05-05--BP.L.3
+  header_line: 46400
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.L.3
+  title: BP.L.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 8 個 `backend-tests` matrix shard 都有產出 coverage artifact，且 `backend-coverage-combine`
+    aggregate floor 仍通過；BP.L.5 再評估 full suite wall-clock 目標。

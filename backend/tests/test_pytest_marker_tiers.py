@@ -68,3 +68,32 @@ def test_bp_l_ci_workflow_runs_three_ordered_marker_tiers() -> None:
         assert "--rootdir=backend" in run_blocks[0]
         assert "-c backend/pytest.ini" in run_blocks[0]
         assert marker_arg in run_blocks[0]
+
+
+def test_bp_l_ci_backend_tests_uses_eight_coverage_shards() -> None:
+    workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+
+    shards = jobs["backend-tests"]["strategy"]["matrix"]["shard"]
+    assert [shard["name"] for shard in shards] == [
+        "decision",
+        "pipeline",
+        "schema",
+        "auth-security",
+        "runtime",
+        "product",
+        "infra",
+        "rest",
+    ]
+
+    assert jobs["backend-coverage-combine"]["needs"] == "backend-tests"
+    for shard in shards:
+        assert shard["paths"]
+        assert isinstance(shard["min"], int)
+        for path_token in shard["paths"].split():
+            if "*" in path_token:
+                assert list(_REPO_ROOT.glob(path_token)), path_token
+            elif path_token.endswith("/"):
+                assert (_REPO_ROOT / path_token).is_dir(), path_token
+            else:
+                assert (_REPO_ROOT / path_token).is_file(), path_token
