@@ -111,4 +111,49 @@ describe("<Block />", () => {
     fireEvent.contextMenu(screen.getByTestId("plain-block"))
     expect(screen.queryByText("Share")).not.toBeInTheDocument()
   })
+
+  it("passes the Block redaction mask through the WP.9 share request", async () => {
+    const createShare = vi.fn(
+      async (_body: CreateShareableObjectRequest) => ({
+        share_id: "share-2",
+        object_kind: "block",
+        object_id: "block-2",
+        visibility: "private" as const,
+        permalink_url: "https://omnisight.local/share/share-2",
+        expires_at: null,
+      }),
+    )
+
+    render(
+      <Block
+        blockId="block-2"
+        redactionMask={{
+          "payload.command": "secret",
+          "metadata.customer_ip": "customer_ip",
+          "payload.stdout": ["secret", "pii"],
+        }}
+        createShare={createShare}
+        data-testid="masked-block"
+      >
+        masked output
+      </Block>,
+    )
+
+    fireEvent.contextMenu(screen.getByTestId("masked-block"))
+    fireEvent.click(await screen.findByText("Share"))
+    fireEvent.click(screen.getByTestId("block-share-create"))
+
+    await waitFor(() => expect(createShare).toHaveBeenCalledTimes(1))
+    expect(createShare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        object_kind: "block",
+        object_id: "block-2",
+        redaction_mask: {
+          "payload.command": "secret",
+          "metadata.customer_ip": "customer_ip",
+          "payload.stdout": ["secret", "pii"],
+        },
+      }),
+    )
+  })
 })

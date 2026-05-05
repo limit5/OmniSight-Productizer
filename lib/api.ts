@@ -5444,6 +5444,7 @@ export interface CreateShareableObjectRequest {
   tenant_id?: string | null
   visibility?: ShareableObjectVisibility
   regions?: string[]
+  redaction_mask?: Record<string, unknown>
   base_url?: string
   expires_at?: string | null
 }

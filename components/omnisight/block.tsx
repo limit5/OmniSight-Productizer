@@ -30,6 +30,11 @@ import { cn } from "@/lib/utils"
 type BlockElement = "div" | "section" | "article" | "aside" | "li" | "button" | "figure"
 type BlockTone = "neutral" | "info" | "success" | "warning" | "danger"
 export type BlockShareRegion = "command" | "output" | "metadata" | "screenshots"
+export type BlockRedactionReason = "secret" | "pii" | "customer_ip" | "ks_envelope"
+export type BlockRedactionMask = Record<
+  string,
+  BlockRedactionReason | BlockRedactionReason[]
+>
 
 const SHARE_REGIONS: Array<{ id: BlockShareRegion; label: string }> = [
   { id: "command", label: "Command" },
@@ -60,6 +65,7 @@ export interface BlockProps extends Omit<HTMLAttributes<HTMLElement>, "title"> {
   blockId?: string
   tenantId?: string
   shareRegions?: BlockShareRegion[]
+  redactionMask?: BlockRedactionMask
   createShare?: (
     body: CreateShareableObjectRequest,
   ) => Promise<CreateShareableObjectResponse>
@@ -79,6 +85,7 @@ export function Block({
   blockId,
   tenantId,
   shareRegions,
+  redactionMask,
   createShare = createShareableObject,
   children,
   ...props
@@ -117,21 +124,23 @@ export function Block({
     setShareUrl(null)
     try {
       const base = typeof window !== "undefined" ? window.location.origin : ""
-      const resp = await createShare({
+      const body: CreateShareableObjectRequest = {
         object_kind: "block",
         object_id: blockId,
         tenant_id: tenantId ?? null,
         visibility: "private",
         regions: Array.from(selectedRegions),
         base_url: base,
-      })
+      }
+      if (redactionMask) body.redaction_mask = redactionMask
+      const resp = await createShare(body)
       setShareUrl(resp.permalink_url || resp.url || "")
     } catch (exc) {
       setShareError(exc instanceof Error ? exc.message : String(exc))
     } finally {
       setSharing(false)
     }
-  }, [blockId, createShare, selectedRegions, tenantId])
+  }, [blockId, createShare, redactionMask, selectedRegions, tenantId])
 
   const handleCopyShareUrl = useCallback(async () => {
     if (!shareUrl) return
