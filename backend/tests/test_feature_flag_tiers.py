@@ -71,11 +71,19 @@ def test_is_feature_flag_tier_is_permissive_probe() -> None:
 
 def test_public_exports_are_pinned() -> None:
     assert ff.__all__ == [
+        "FEATURE_FLAG_RESOLUTION_SOURCE_ORDER",
+        "FEATURE_FLAG_STATE_VALUES",
+        "FEATURE_FLAG_STATE_VALUE_SET",
         "FEATURE_FLAG_TIER_DEFINITIONS",
         "FEATURE_FLAG_TIER_ORDER",
         "FEATURE_FLAG_TIER_VALUES",
         "FEATURE_FLAG_TIER_VALUE_SET",
+        "FeatureFlagResolution",
+        "FeatureFlagResolutionSource",
+        "FeatureFlagState",
         "FeatureFlagTier",
         "FeatureFlagTierDefinition",
+        "is_feature_flag_state",
         "is_feature_flag_tier",
+        "resolve_feature_flag_state",
     ]
