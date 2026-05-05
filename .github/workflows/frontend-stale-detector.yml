@@ -1,0 +1,35 @@
+name: Frontend Stale Bundle Detector
+
+# BP.W3.14 — fail CI when master/main has accumulated too many frontend
+# commits since the last recorded production frontend deploy.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-stale-detector-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-stale-detector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: compare frontend deploy record with HEAD
+        env:
+          FRONTEND_DEPLOY_COMMIT: ${{ vars.OMNISIGHT_FRONTEND_DEPLOY_COMMIT }}
+          SLACK_WEBHOOK_URL: ${{ secrets.OMNISIGHT_SLACK_WEBHOOK_URL }}
+        run: |
+          python3 scripts/check_frontend_stale.py \
+            --head-ref HEAD \
+            --threshold 5

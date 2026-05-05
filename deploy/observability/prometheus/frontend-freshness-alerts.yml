@@ -1,0 +1,24 @@
+# BP.W3.14 — frontend stale-bundle Prometheus alert rules.
+#
+# Kept separate from G7's HA-07 alerts.yml because that file has a
+# contract test pinning exactly the HA alert set. Load this file alongside
+# deploy/observability/prometheus/alerts.yml in Prometheus rule_files.
+
+groups:
+  - name: omnisight_frontend_freshness
+    interval: 30s
+    rules:
+      - alert: OmniSightFrontendBuildLagHigh
+        expr: omnisight_frontend_build_lag_commits >= 10
+        for: 5m
+        labels:
+          severity: critical
+          subsystem: frontend_deploy
+        annotations:
+          summary: "Production frontend build is >= 10 commits behind"
+          description: |
+            The backend reports production's frontend build is
+            {{ $value }} commits behind master HEAD. Rebuild and recreate
+            the frontend service, then update the deploy commit record used
+            by the frontend-stale-detector CI job.
+          runbook_url: "https://internal.docs/omnisight/frontend-build-lag"

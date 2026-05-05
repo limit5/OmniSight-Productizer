@@ -5606,11 +5606,20 @@ export interface BootstrapGates {
   smoke_passed: boolean
 }
 
+export interface BootstrapFrontendFreshness {
+  prod_build_commit: string
+  master_head_commit: string
+  lag_commits: number
+  status: "fresh" | "stale" | "unknown"
+  detail: string
+}
+
 export interface BootstrapStatusResponse {
   status: BootstrapGates
   all_green: boolean
   finalized: boolean
   missing_steps: string[]
+  frontend_freshness: BootstrapFrontendFreshness
 }
 
 export interface BootstrapFinalizeResponse {

@@ -419,6 +419,11 @@ if _AVAILABLE:
         "1 when the RTK binary is installed and runnable, 0 otherwise",
         registry=REGISTRY,
     )
+    frontend_build_lag_commits = Gauge(
+        "omnisight_frontend_build_lag_commits",
+        "Commits between the production frontend build and master HEAD",
+        registry=REGISTRY,
+    )
 
     # Phase 63-D D3: daily IQ benchmark score per model ─────────
     intelligence_iq_score = Gauge(
@@ -815,6 +820,7 @@ else:
     rtk_compression_ratio = _NoOp()  # type: ignore
     rtk_fallback_total = _NoOp()  # type: ignore
     rtk_install_status = _NoOp()  # type: ignore
+    frontend_build_lag_commits = _NoOp()  # type: ignore
     intelligence_iq_score = _NoOp()  # type: ignore
     intelligence_iq_regression_total = _NoOp()  # type: ignore
     rag_prefetch_total = _NoOp()  # type: ignore
@@ -897,6 +903,7 @@ def reset_for_tests() -> None:
     global finetune_eval_score
     global prompt_cache_hit_total, prompt_cache_miss_total
     global rtk_compression_ratio, rtk_fallback_total, rtk_install_status
+    global frontend_build_lag_commits
     global intelligence_iq_score, intelligence_iq_regression_total
     global rag_prefetch_total
     global memory_decay_total
@@ -1144,6 +1151,11 @@ def reset_for_tests() -> None:
     rtk_install_status = Gauge(
         "omnisight_rtk_install_status",
         "1 when the RTK binary is installed and runnable, 0 otherwise",
+        registry=REGISTRY,
+    )
+    frontend_build_lag_commits = Gauge(
+        "omnisight_frontend_build_lag_commits",
+        "Commits between the production frontend build and master HEAD",
         registry=REGISTRY,
     )
     intelligence_iq_score = Gauge(

@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 456
+entry_count: 457
 status_counts:
-  dev-only: 446
+  dev-only: 447
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4246,3 +4246,13 @@ entries:
   next_gate: deployed-active — 合併後在 production sandbox host 安裝 / 驗證 `runsc`，設定 `ENV=production`，rolling restart backend，跑第一個
     Tier 1 sandbox smoke 並確認 audit row `after.runtime=runsc`、metric `omnisight_sandbox_launch_total{runtime="runsc",result="success"}`，再執行
     `scripts/benchmark_gvisor_runtime.sh` 保存 runc/runsc CSV；24h 無 runtime fallback / mismatch 後翻 `deployed-observed`。
+- id: 2026-05-06--W3.14
+  header_line: 47232
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: W3.14
+  title: BP.W3.14 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production deploy 需設定 GitHub variable `OMNISIGHT_FRONTEND_DEPLOY_COMMIT` 為實際前端 build commit，載入
+    `deploy/observability/prometheus/frontend-freshness-alerts.yml`，並以 `scripts/deploy-prod.sh` 重新 build/redeploy frontend
+    後觀察 lag metric。

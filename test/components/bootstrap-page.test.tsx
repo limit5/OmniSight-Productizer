@@ -85,6 +85,13 @@ const redStatus = {
     "cf_tunnel_configured",
     "smoke_passed",
   ],
+  frontend_freshness: {
+    prod_build_commit: "abc123456789",
+    master_head_commit: "abc123456789",
+    lag_commits: 0,
+    status: "fresh",
+    detail: "prod frontend build matches master HEAD",
+  },
 }
 
 const greenStatus = {
@@ -97,6 +104,13 @@ const greenStatus = {
   all_green: true,
   finalized: false,
   missing_steps: [],
+  frontend_freshness: {
+    prod_build_commit: "abc123456789",
+    master_head_commit: "abc123456789",
+    lag_commits: 0,
+    status: "fresh",
+    detail: "prod frontend build matches master HEAD",
+  },
 }
 
 describe("BootstrapPage", () => {
@@ -143,7 +157,7 @@ describe("BootstrapPage", () => {
     })
   })
 
-  it("renders all seven wizard steps with the first red step auto-focused", async () => {
+  it("renders all wizard steps with the first red step auto-focused", async () => {
     mockedGetStatus.mockResolvedValue(redStatus)
     render(<BootstrapPage />)
 
@@ -153,12 +167,48 @@ describe("BootstrapPage", () => {
     expect(screen.getByTestId("bootstrap-step-llm_provider")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-cf_tunnel")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-git_forge")).toBeInTheDocument()
+    expect(screen.getByTestId("bootstrap-step-init_tenant")).toBeInTheDocument()
+    expect(screen.getByTestId("bootstrap-step-vertical_setup")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-services_ready")).toBeInTheDocument()
+    expect(screen.getByTestId("bootstrap-step-frontend_freshness")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-smoke")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-finalize")).toBeInTheDocument()
 
-    // First red step is auto-focused → STEP 1 / 7 header reflects admin_password.
-    expect(screen.getByText("STEP 1 / 7")).toBeInTheDocument()
+    // First red step is auto-focused → STEP 1 / N header reflects admin_password.
+    expect(screen.getByText("STEP 1 / 10")).toBeInTheDocument()
+  })
+
+  it("surfaces frontend bundle freshness in the wizard", async () => {
+    mockedGetStatus.mockResolvedValue({
+      ...greenStatus,
+      frontend_freshness: {
+        prod_build_commit: "1111111222222223333333",
+        master_head_commit: "9999999aaaaaaaabbbbbbb",
+        lag_commits: 12,
+        status: "stale",
+        detail: "prod frontend build is 12 commit(s) behind master HEAD",
+      },
+    })
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-frontend_freshness")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-frontend_freshness"))
+
+    expect(screen.getByTestId("bootstrap-frontend-freshness")).toHaveAttribute(
+      "data-status",
+      "stale",
+    )
+    expect(screen.getByTestId("bootstrap-frontend-prod-commit")).toHaveTextContent(
+      "111111122222",
+    )
+    expect(screen.getByTestId("bootstrap-frontend-master-commit")).toHaveTextContent(
+      "9999999aaaaa",
+    )
+    expect(screen.getByTestId("bootstrap-frontend-lag")).toHaveTextContent(
+      "12 commits",
+    )
   })
 
   it("disables the Finalize button while gates are red + shows missing_steps", async () => {
@@ -195,8 +245,9 @@ describe("BootstrapPage", () => {
     render(<BootstrapPage />)
 
     await waitFor(() => {
-      expect(screen.getByText("STEP 7 / 7")).toBeInTheDocument()
+      expect(screen.getByTestId("bootstrap-step-finalize")).toBeInTheDocument()
     })
+    fireEvent.click(screen.getByTestId("bootstrap-step-finalize"))
 
     const btn = screen.getByTestId("bootstrap-finalize-button")
     expect(btn).not.toBeDisabled()
@@ -1038,7 +1089,7 @@ describe("BootstrapPage", () => {
       screen.getByTestId("bootstrap-smoke-jump-back-llm_provider"),
     )
     await waitFor(() => {
-      expect(screen.getByText("STEP 2 / 7")).toBeInTheDocument()
+      expect(screen.getByText("STEP 3 / 10")).toBeInTheDocument()
     })
   })
 
@@ -1085,7 +1136,7 @@ describe("BootstrapPage", () => {
       screen.getByTestId("bootstrap-smoke-jump-back-services_ready"),
     )
     await waitFor(() => {
-      expect(screen.getByText("STEP 5 / 7")).toBeInTheDocument()
+      expect(screen.getByText("STEP 7 / 10")).toBeInTheDocument()
     })
   })
 
