@@ -5,10 +5,13 @@ from __future__ import annotations
 from configparser import ConfigParser
 from pathlib import Path
 
+import yaml
+
 from tests.conftest import _BP_L_MARKER_TIERS, _bp_l_marker_for_path
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def test_bp_l_marker_tier_file_sets_are_disjoint() -> None:
@@ -37,3 +40,31 @@ def test_bp_l_markers_registered_in_pytest_ini() -> None:
     registered = {line.split(":", 1)[0].strip() for line in marker_lines if ":" in line}
 
     assert {"critical", "guild_loadout", "compliance"} <= registered
+
+
+def test_bp_l_ci_workflow_runs_three_ordered_marker_tiers() -> None:
+    workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+
+    assert jobs["backend-critical"]["timeout-minutes"] == 5
+    assert jobs["backend-loadout"]["timeout-minutes"] == 30
+    assert jobs["backend-compliance"]["timeout-minutes"] == 60
+    assert jobs["backend-loadout"]["needs"] == "backend-critical"
+    assert jobs["backend-compliance"]["needs"] == "backend-loadout"
+
+    expected_markers = {
+        "backend-critical": "-m critical",
+        "backend-loadout": "-m guild_loadout",
+        "backend-compliance": "-m compliance",
+    }
+    for job_name, marker_arg in expected_markers.items():
+        run_blocks = [
+            step.get("run", "")
+            for step in jobs[job_name]["steps"]
+            if step.get("name", "").startswith("pytest ")
+        ]
+        assert len(run_blocks) == 1
+        assert "python3 -m pytest backend/tests/" in run_blocks[0]
+        assert "--rootdir=backend" in run_blocks[0]
+        assert "-c backend/pytest.ini" in run_blocks[0]
+        assert marker_arg in run_blocks[0]
