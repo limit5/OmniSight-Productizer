@@ -239,19 +239,19 @@ _CLAIMS_BY_GUILD = MappingProxyType(
 )
 
 
-def _coerce_guild(guild: Guild | str) -> Guild:
+def _auxiliary_coerce_guild(guild: Guild | str) -> Guild:
     if isinstance(guild, Guild):
         return guild
     return Guild(guild)
 
 
-def _coerce_tier(tier: SandboxTier | str) -> SandboxTier:
+def _auxiliary_coerce_tier(tier: SandboxTier | str) -> SandboxTier:
     if isinstance(tier, SandboxTier):
         return tier
     return SandboxTier(tier)
 
 
-def _filter_claims(
+def _auxiliary_filter_claims(
     claims: Iterable[MedicalAuxiliaryClaim],
     tier: SandboxTier | None,
 ) -> tuple[MedicalAuxiliaryClaim, ...]:
@@ -266,14 +266,14 @@ def _auxiliary_medical_claims(
 ) -> tuple[MedicalAuxiliaryClaim, ...]:
     """Return advisory medical claims, optionally scoped by Guild/Tier."""
 
-    scoped_guild = _coerce_guild(guild) if guild is not None else None
-    scoped_tier = _coerce_tier(tier) if tier is not None else None
+    scoped_guild = _auxiliary_coerce_guild(guild) if guild is not None else None
+    scoped_tier = _auxiliary_coerce_tier(tier) if tier is not None else None
     claims = (
         _CLAIMS_BY_GUILD[scoped_guild]
         if scoped_guild is not None
         else _MEDICAL_AUXILIARY_CLAIMS
     )
-    return _filter_claims(claims, scoped_tier)
+    return _auxiliary_filter_claims(claims, scoped_tier)
 
 
 def _auxiliary_check_medical(
@@ -287,8 +287,8 @@ def _auxiliary_check_medical(
     medical-domain claims applicable to that cell.
     """
 
-    scoped_guild = _coerce_guild(guild) if guild is not None else None
-    scoped_tier = _coerce_tier(tier) if tier is not None else None
+    scoped_guild = _auxiliary_coerce_guild(guild) if guild is not None else None
+    scoped_tier = _auxiliary_coerce_tier(tier) if tier is not None else None
     gaps: list[str] = []
 
     if scoped_guild is not None and scoped_tier is not None:
