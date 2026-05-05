@@ -221,16 +221,16 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.D — 4 Compliance Matrices（Auxiliary）+ 第三方 Legal Review（~2-3 週）
 > 前置 BP.B；**第三方公正單位 legal review 與開發並行進行**
-- [ ] BP.D.1 `backend/compliance_matrix/medical.py` — IEC 62304 / ISO 13485 / HIPAA auxiliary check
-- [ ] BP.D.2 `backend/compliance_matrix/automotive.py` — ISO 26262 / MISRA C / AUTOSAR auxiliary check
-- [ ] BP.D.3 `backend/compliance_matrix/industrial.py` — IEC 61508 / SIL auxiliary check
-- [ ] BP.D.4 `backend/compliance_matrix/military.py` — DO-178C / MIL-STD-882E auxiliary check
-- [ ] BP.D.5 所有 module header 強制 disclaimer + 函數名 `_auxiliary_` 前綴
-- [ ] BP.D.6 API response schema 強制包 `{"audit_type":"advisory","requires_human_signoff":true}`
-- [ ] BP.D.7 新審計技能 10+ 個（audit_iec62304_traceability_auxiliary / scan_misra_c_strict_auxiliary / verify_mcdc_100_percent_auxiliary 等）
-- [ ] BP.D.8 PEP Gateway policy matrix 加 `guild_id` 維度（B1 衝突決議）
-- [ ] BP.D.9 `backend/tests/test_compliance_matrix.py` — ~80 test
-- [ ] BP.D.10 第三方公正單位 legal review 報告與 code 同步歸檔到 `docs/compliance/legal-review/`
+- [x][G] BP.D.1 `backend/compliance_matrix/medical.py` — IEC 62304 / ISO 13485 / HIPAA auxiliary check
+- [x][G] BP.D.2 `backend/compliance_matrix/automotive.py` — ISO 26262 / MISRA C / AUTOSAR auxiliary check
+- [x][G] BP.D.3 `backend/compliance_matrix/industrial.py` — IEC 61508 / SIL auxiliary check
+- [x][G] BP.D.4 `backend/compliance_matrix/military.py` — DO-178C / MIL-STD-882E auxiliary check
+- [x][G] BP.D.5 所有 module header 強制 disclaimer + 函數名 `_auxiliary_` 前綴
+- [x][G] BP.D.6 API response schema 強制包 `{"audit_type":"advisory","requires_human_signoff":true}`
+- [x][G] BP.D.7 新審計技能 10+ 個（audit_iec62304_traceability_auxiliary / scan_misra_c_strict_auxiliary / verify_mcdc_100_percent_auxiliary 等）
+- [x][G] BP.D.8 PEP Gateway policy matrix 加 `guild_id` 維度（B1 衝突決議）
+- [x][G] BP.D.9 `backend/tests/test_compliance_matrix.py` — ~80 test
+- [x][G] BP.D.10 第三方公正單位 legal review 報告與 code 同步歸檔到 `docs/compliance/legal-review/`
 
 ### BP.G — TDD Dual-Patchset 自動化（Gerrit Hook）（~1-2 週）
 > 前置 BP.B + Y-prep（Window 0 已完）+ O7 Submit-Rule（已完）
@@ -340,8 +340,8 @@ rows from 2026-04-20 onwards should use the layered convention:
 ### BP 衝突決議追蹤（見 ADR §4，共 16 項）
 - [x] A1 Phase-3-Runtime-v2 觀察窗 → 已解 2026-04-24
 - [ ] A2 agent_type backward-compat 雙寫 3-6 個月（implements: BP.B.1 + BP.B.7）
-- [ ] A3 合規宣稱 Auxiliary 字眼 + 第三方 legal review（implements: BP.D.5 + BP.D.6 + BP.D.10）
-- [ ] B1 PEP Gateway per-Guild policy（implements: BP.D.8）
+- [x] A3 合規宣稱 Auxiliary 字眼 + 第三方 legal review（implements: BP.D.5 + BP.D.6 + BP.D.10）
+- [x] B1 PEP Gateway per-Guild policy（implements: BP.D.8）
 - [x] B2 O4 Gateway vs T-shirt 重疊（implements: BP.C.4）
 - [ ] B3 Token Budget per-Guild bucket（implements: BP.F + 獨立 ticket）
 - [ ] B4 Skill Packs（X5-X9 + D1 + W6-W8）歸 Guild（implements: BP.B + W3.1）

@@ -181,6 +181,38 @@ class TestClassify:
         assert "read_file" in pep.tier_whitelist("t2")
         assert "git_push" in pep.tier_whitelist("t2")
 
+    def test_guild_tier_whitelist_inherits_admitted_tier_policy(self):
+        assert "git_push" in pep.guild_tier_whitelist("backend", "t2")
+        assert "run_bash" not in pep.guild_tier_whitelist("backend", "t2")
+
+    def test_guild_tier_whitelist_empty_for_inadmissible_pair(self):
+        assert pep.guild_tier_whitelist("backend", "t1") == frozenset()
+        assert pep.guild_tier_whitelist("not_a_guild", "t2") == frozenset()
+
+    def test_guild_admission_denies_before_tier_whitelist(self):
+        action, rule, reason, scope = pep.classify(
+            "read_file",
+            {"path": "src/main.c"},
+            "t1",
+            guild_id="backend",
+        )
+        assert action is pep.PepAction.deny
+        assert rule == "guild_tier_inadmissible"
+        assert "backend" in reason
+        assert scope == "local"
+
+    def test_unknown_guild_id_denies(self):
+        action, rule, reason, scope = pep.classify(
+            "read_file",
+            {"path": "src/main.c"},
+            "t2",
+            guild_id="not_a_guild",
+        )
+        assert action is pep.PepAction.deny
+        assert rule == "guild_unknown"
+        assert "not_a_guild" in reason
+        assert scope == "local"
+
     def test_sast_high_severity_tool_is_explicit_hold(self):
         action, rule, reason, scope = pep.classify(
             "sast_high_severity_finding",
@@ -373,6 +405,22 @@ class TestEvaluateHold:
         # Under t1, run_bash isn't whitelisted — it should hold + propose.
         assert len(calls) == 1
         assert out.action is pep.PepAction.auto_allow  # approved by operator
+
+    @pytest.mark.asyncio
+    async def test_hold_proposal_carries_guild_id(self):
+        outcomes: dict[str, str] = {"fake-dec-1": "approved"}
+        propose_fn, calls = _make_propose_fn(outcomes)
+        out = await pep.evaluate(
+            tool="run_bash", arguments={"command": "ls -la"},
+            agent_id="a1", tier="t2", guild_id="backend",
+            propose_fn=propose_fn,
+            wait_for_decision=_waiter(outcomes),
+            hold_timeout_s=1.0,
+        )
+        assert len(calls) == 1
+        assert calls[0].source["guild_id"] == "backend"
+        assert out.guild_id == "backend"
+        assert out.action is pep.PepAction.auto_allow
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

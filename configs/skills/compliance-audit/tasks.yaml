@@ -1,0 +1,134 @@
+schema_version: 1
+skill: compliance-audit
+tasks:
+  - task_id: audit_iec62304_traceability_auxiliary
+    name: "IEC 62304 traceability audit"
+    description: "Advisory check for requirement-to-test-to-release traceability evidence."
+    phase: advisory_audit
+    matrix: medical
+    standard: IEC 62304
+    depends_on: []
+    inputs: [requirements, bdd_specs, code_diff, test_report, release_evidence]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: scan_phi_data_leakage_auxiliary
+    name: "PHI data leakage scan"
+    description: "Advisory check for PHI leakage in logs, exports, screenshots, fixtures, and reports."
+    phase: advisory_audit
+    matrix: medical
+    standard: HIPAA
+    depends_on: []
+    inputs: [logs, exports, screenshots, fixtures, reports]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: audit_iso13485_design_controls_auxiliary
+    name: "ISO 13485 design controls audit"
+    description: "Advisory check for design-control evidence and change-control traceability."
+    phase: advisory_audit
+    matrix: medical
+    standard: ISO 13485
+    depends_on: []
+    inputs: [design_inputs, design_outputs, verification_report, validation_report, change_log]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: scan_misra_c_strict_auxiliary
+    name: "MISRA C strict scan"
+    description: "Advisory MISRA C/C++ rule-risk scan requiring tool-backed findings."
+    phase: advisory_audit
+    matrix: automotive
+    standard: MISRA C/C++ 2012
+    depends_on: []
+    inputs: [source_diff, static_analysis_report, deviation_record]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: verify_asil_d_redundancy_auxiliary
+    name: "ASIL-D redundancy verification"
+    description: "Advisory check for redundancy, independence, diagnostics, and fault reaction evidence."
+    phase: advisory_audit
+    matrix: automotive
+    standard: ISO 26262
+    depends_on: []
+    inputs: [safety_goal, architecture_diagram, diagnostic_report, fault_injection_report]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: audit_autosar_interface_contract_auxiliary
+    name: "AUTOSAR interface contract audit"
+    description: "Advisory check for RTE boundaries, signal contracts, and generated artefact drift."
+    phase: advisory_audit
+    matrix: automotive
+    standard: AUTOSAR
+    depends_on: []
+    inputs: [arxml, interface_control_document, generated_artifact_diff]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: analyze_state_machine_deadlocks_auxiliary
+    name: "State-machine deadlock analysis"
+    description: "Advisory IEC 61508 check for terminal traps, unsafe defaults, and missing recovery paths."
+    phase: advisory_audit
+    matrix: industrial
+    standard: IEC 61508
+    depends_on: []
+    inputs: [state_diagram, transition_table, fault_injection_report]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: verify_watchdog_pet_timing_auxiliary
+    name: "Watchdog pet timing verification"
+    description: "Advisory check for watchdog servicing windows, reset escalation, and timing evidence."
+    phase: advisory_audit
+    matrix: industrial
+    standard: IEC 61508
+    depends_on: []
+    inputs: [watchdog_config, timing_trace, fault_injection_report]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: audit_sil_claim_evidence_auxiliary
+    name: "SIL claim evidence audit"
+    description: "Advisory check that SIL claims cite hazards, target SIL, diagnostics, validation, and reviewer status."
+    phase: advisory_audit
+    matrix: industrial
+    standard: IEC 61508 SIL
+    depends_on: []
+    inputs: [hazard_analysis, sil_assignment, diagnostic_coverage, validation_report]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: verify_mcdc_100_percent_auxiliary
+    name: "MC/DC 100 percent verification"
+    description: "Advisory DO-178C check for complete decision and condition coverage evidence."
+    phase: advisory_audit
+    matrix: military
+    standard: DO-178C
+    depends_on: []
+    inputs: [coverage_report, test_vectors, source_diff]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: run_formal_verification_proof_auxiliary
+    name: "Formal verification proof review"
+    description: "Advisory check for proof artefacts, assumptions, solver logs, and requirement mapping."
+    phase: advisory_audit
+    matrix: military
+    standard: DO-178C
+    depends_on: []
+    inputs: [proof_artifacts, solver_log, assumptions, requirement_mapping]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true
+
+  - task_id: audit_mil_std_882e_hazard_log_auxiliary
+    name: "MIL-STD-882E hazard log audit"
+    description: "Advisory check for hazard severity, probability, mitigation, residual risk, and acceptance traceability."
+    phase: advisory_audit
+    matrix: military
+    standard: MIL-STD-882E
+    depends_on: []
+    inputs: [hazard_log, mitigation_plan, residual_risk_acceptance]
+    outputs: [advisory_audit_report]
+    requires_human_signoff: true

@@ -8,8 +8,8 @@
 > actually understands today, (b) how `classify()` orders its rules, (c)
 > how the runtime `tier=...` parameter relates to the BP.S.1 `SandboxTier`
 > enum and the BP.S.2 operator narrowing layer, and (d) the explicit list of
-> things this layer does **not** yet do (Guild-aware admission, yaml
-> loader, etc.) so future readers do not assume coverage that is not there.
+> things this layer does **not** yet do (yaml loader, case normalisation,
+> etc.) so future readers do not assume coverage that is not there.
 >
 > This row is scoped to **pure documentation, zero runtime change**, in
 > line with the BP.S epic header. The companion drift-guard tests are
@@ -47,6 +47,7 @@ async def evaluate(
     arguments: dict[str, Any],
     agent_id: str = "",
     tier: str = "t1",
+    guild_id: str | None = None,
     propose_fn: Callable[..., Any] | None = None,
     wait_for_decision: Callable[[str, float], Awaitable[Any]] | None = None,
     hold_timeout_s: float = 1800.0,
@@ -80,6 +81,7 @@ Every `evaluate()` call returns a `PepDecision`:
 | `tool`          | `str`                 | Tool name as registered in `TOOL_MAP`.                                                               |
 | `command`       | `str`                 | Flattened command string used by the regex match (see §4).                                           |
 | `tier`          | `str`                 | The `tier=` kwarg that the caller passed in. Recorded verbatim.                                      |
+| `guild_id`      | `str`                 | Optional Guild slug. Empty string preserves the legacy tier-only path; non-empty values gate inheritance through `sandbox_tier`. |
 | `action`        | `PepAction`           | `auto_allow` / `hold` / `deny`.                                                                      |
 | `rule`          | `str`                 | Which rule fired: e.g. `tier_whitelist`, `tier_unlisted`, `rm_rf_root`, `deploy_prod`.               |
 | `reason`        | `str`                 | Human-readable explanation; surfaced in the toast + audit.                                           |
@@ -267,28 +269,31 @@ adjacent layers* of the same control:
   specific tool call they just made auto-allowed, held, or denied?"*
 
 A request that is structurally inadmissible (e.g. `auditor` Guild
-trying to dispatch into Tier 1) should be refused **before** it reaches
-`pep_gateway.evaluate()` — that is the role of `assert_admitted`, not
-of the PEP rule tables. The PEP only sees calls that already passed
-admission.
+trying to dispatch into Tier 1) should ideally be refused **before** it
+reaches `pep_gateway.evaluate()` by `assert_admitted`. BP.D.8/B1 also
+adds a PEP-side fail-closed check for callers that pass `guild_id`, so
+legacy dispatch paths can not accidentally inherit a tier whitelist for
+an inadmissible Guild × Tier pair.
 
-### 6.1 Today: no Guild parameter on the PEP
+### 6.1 Guild-aware PEP policy matrix
 
-`pep_gateway.evaluate()` does **not** take a `guild=` kwarg today. The
-admission-matrix lookup is the caller's responsibility. In practice
-this means:
+BP.D.8/B1 adds `guild_id=` as a non-breaking policy dimension on
+`pep_gateway.evaluate()` and `classify()`. The inheritance rule is:
 
-* The agent runtime decides which tier a Guild belongs in (using
-  `sandbox_tier.admitted_tiers(guild)` or the future yaml override).
-* The runtime then calls `pep_gateway.evaluate(tier="t1", …)` (or t2 /
-  t3) for the specific tool invocation.
-* The PEP applies its rule tables (§3, §4) without ever seeing the
-  Guild label. From the PEP's point of view, two callers in the same
-  tier are indistinguishable.
+* Omitted or empty `guild_id` keeps the R0 tier-only behaviour.
+* Known `guild_id` + admitted PEP tier inherits the existing tier
+  whitelist unchanged.
+* Known `guild_id` + inadmissible PEP tier denies with
+  `rule="guild_tier_inadmissible"` before the tool whitelist is applied.
+* Unknown `guild_id` denies with `rule="guild_unknown"` rather than
+  silently falling back to a tier whitelist.
 
-This is **deliberate separation of concerns** today, not a forgotten
-integration. Guild-aware enforcement at the PEP boundary is a future
-row (see §7).
+The PEP-to-sandbox tier mapping is `t0 → SandboxTier.T0`, `t1 → T1`,
+`t2` / `networked → T2`, and `t3 → T3`. The exported
+`guild_tier_whitelist(guild_id, tier)` helper materialises the inherited
+matrix for callers/tests, and `GET /pep/policy` exposes
+`guild_policy_matrix` for operator visibility. The yaml narrowing layer
+is still not loaded at runtime (§6.2).
 
 ### 6.2 Today: no yaml loader
 
@@ -325,14 +330,15 @@ decision = await pep_gateway.evaluate(            # enforcement (R0)
     tool="run_bash",
     arguments={"command": "make -j4"},
     agent_id="bsp:agent-42",
+    guild_id=Guild.bsp.value,
     tier="t1",                                    # NB: lower-case
 )
 ```
 
-Until §7 lands, **do not** call `pep_gateway.evaluate(tier=tier.value)`
-with an `SandboxTier` enum — its `.value` is `"T1"`, which is
-unrecognised by `tier_whitelist()` and silently falls back to the most
-restrictive set (§3.4). Always pass the explicit lower-case literal.
+Until §7 lands, keep the PEP wire convention lower-case at caller
+boundaries. `tier_whitelist()` lower-cases defensively, but audit / SSE /
+metric labels are clearer when callers pass the explicit lower-case
+literal rather than `SandboxTier.T1.value`.
 
 ---
 
@@ -347,18 +353,12 @@ row. Each item has its own future row.
   Must reject any operator list that *widens* past the structural
   matrix. Tracked outside BP.S.4; mentioned in BP.S.6 ("policy
   parsing").
-* **Guild-aware PEP signature.** Adding `guild=...` to
-  `pep_gateway.evaluate()` so audit rows record "Guild × tier × tool"
-  and SSE feeds can filter by Guild. Likely lands with BP.B (Guild
-  dispatcher) so the runtime caller actually has a Guild handle.
 * **`assert_admitted(guild, tier)` enforcement at the runtime
-  boundary.** Today the matrix is declarative; nothing calls
-  `assert_admitted` in the dispatch path. The integration target is
-  "the agent runtime calls `assert_admitted` before it routes a tool
-  call to the PEP; a `GuildTierViolation` becomes a
-  `pep.guild_inadmissible` audit row". Out of scope for BP.S.4 because
-  it requires the agent runtime to carry a Guild handle, which
-  arrives with BP.B.
+  boundary.** BP.D.8/B1 makes the PEP deny inadmissible Guild × Tier
+  pairs when `guild_id` is supplied. A separate dispatcher row still
+  needs to call `assert_admitted` before the tool reaches the PEP so the
+  audit row can distinguish "rejected at routing" from "rejected at
+  policy enforcement".
 * **Case normalisation.** Picking one casing — most likely lower-case
   to match the existing PEP wire format — and updating
   `SandboxTier.value`, `sandbox-tier-audit.md`, the yaml schema, and
@@ -383,9 +383,9 @@ row. Each item has its own future row.
 
 * **Code source-of-truth (this layer)**:
   [`backend/pep_gateway.py`](../../backend/pep_gateway.py) —
-  `classify`, `tier_whitelist`, `evaluate`, `PepDecision`,
-  `_DESTRUCTIVE_RULES`, `_PROD_HOLD_RULES`, `TIER_T{1,2,3}*` whitelist
-  tables.
+  `classify`, `tier_whitelist`, `guild_tier_whitelist`,
+  `guild_policy_matrix`, `evaluate`, `PepDecision`, `_DESTRUCTIVE_RULES`,
+  `_PROD_HOLD_RULES`, `TIER_T{1,2,3}*` whitelist tables.
 * **Code source-of-truth (admission layer)**:
   [`backend/sandbox_tier.py`](../../backend/sandbox_tier.py) — `Guild`,
   `SandboxTier`, `GUILD_TIER_ADMISSION_MATRIX`, `is_admitted`,
@@ -420,6 +420,8 @@ row. Each item has its own future row.
 |            | in the PEP path (Guild kwarg, yaml loader, T0 entry, case            |                       |
 |            | normalisation) under §7. Zero runtime changes. Companion drift       |                       |
 |            | guard remains BP.S.6's responsibility.                               |                       |
+| 2026-05-05 | BP.D.8/B1: documents landed `guild_id` policy dimension, inherited   | Codex/GPT-5.5         |
+|            | `guild_tier_whitelist()`, and `/pep/policy.guild_policy_matrix`.     |                       |
 
 > Future updates to this doc MUST be paired with a corresponding update
 > to `backend/pep_gateway.py` whitelist tables / `classify()` rule

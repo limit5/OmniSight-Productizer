@@ -1,0 +1,50 @@
+schema_version: 1
+name: compliance-audit
+description: >
+  Phase D auxiliary audit skill pack. Provides advisory-only medical,
+  automotive, industrial, military, and aerospace audit prompts that
+  require certified human signoff and emit advisory evidence reports.
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Proprietary"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - compliance
+  - audit
+  - auxiliary
+  - advisory
+  - human-signoff
+  - iec-62304
+  - iso-13485
+  - hipaa
+  - misra-c
+  - iso-26262
+  - autosar
+  - iec-61508
+  - sil
+  - do-178c
+  - mil-std-882e

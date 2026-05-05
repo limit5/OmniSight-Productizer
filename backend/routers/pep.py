@@ -66,6 +66,7 @@ async def pep_policy() -> dict[str, Any]:
         "prod_hold_rule_count": len(_pep._PROD_HOLD_RULES),
         "destructive_rules": [name for name, _ in _pep._DESTRUCTIVE_RULES],
         "prod_hold_rules": [name for name, _ in _pep._PROD_HOLD_RULES],
+        "guild_policy_matrix": _pep.guild_policy_matrix(),
     }
 
 

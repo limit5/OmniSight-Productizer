@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 404
+entry_count: 414
 status_counts:
-  dev-only: 394
+  dev-only: 404
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3779,3 +3779,93 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 `backend-tests` 最慢 shard 加 `backend-coverage-combine` 在 240
     min wall-clock budget 內完成。
+- id: 2026-05-05--BP.D.1
+  header_line: 46445
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.D.1
+  title: BP.D.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.D.9 補上 `backend/tests/test_compliance_matrix.py` 後，在 CI 中對 medical auxiliary schema、Guild/Tier
+    filtering、denied-cell gaps 做 drift guard；BP.D.6 再接 API response wrapper。
+- id: 2026-05-05--BP.D.2
+  header_line: 46461
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.D.2
+  title: BP.D.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.D.9 補上 `backend/tests/test_compliance_matrix.py` 後，在 CI 中對 automotive auxiliary schema、Guild/Tier
+    filtering、denied-cell gaps 做 drift guard；BP.D.6 再接 API response wrapper。
+- id: 2026-05-05--BP.D.3
+  header_line: 46477
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.D.3
+  title: BP.D.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.D.9 補上 `backend/tests/test_compliance_matrix.py` 後，在 CI 中對 industrial auxiliary schema、Guild/Tier
+    filtering、denied-cell gaps 做 drift guard；BP.D.6 再接 API response wrapper。
+- id: 2026-05-05--BP.D.4
+  header_line: 46493
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.D.4
+  title: BP.D.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.D.9 補上 `backend/tests/test_compliance_matrix.py` 後，在 CI 中對 military auxiliary schema、Guild/Tier
+    filtering、denied-cell gaps 做 drift guard；BP.D.6 再接 API response wrapper。
+- id: 2026-05-05--BP.D.5
+  header_line: 46510
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.D.5
+  title: BP.D.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.D.9 可擴充同一 contract test 到完整 `backend/tests/test_compliance_matrix.py` 約 80 cases；BP.D.6
+    再將 API response wrapper 加上 `audit_type` / `requires_human_signoff` envelope。
+- id: 2026-05-05--BP.D.6
+  header_line: 46525
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.D.6
+  title: BP.D.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.D.9 補完整 `backend/tests/test_compliance_matrix.py` 後，CI 可擴充到所有 matrix/Guild/Tier cells；production
+    image rebuild + live smoke 後再提升狀態。
+- id: 2026-05-05--BP.D.7
+  header_line: 46541
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.D.7
+  title: BP.D.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.D.9 可把 `compliance-audit` task matrix 納入完整 `backend/tests/test_compliance_matrix.py` 約
+    80 cases；production image rebuild + live smoke 後再提升狀態。
+- id: 2026-05-05--BP.D.8
+  header_line: 46557
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.D.8
+  title: BP.D.8 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.D.9 可把 Guild × Tier × PEP classification 納入完整 compliance matrix tests；production image
+    rebuild + `/pep/policy` live smoke 後再提升狀態。
+- id: 2026-05-06--BP.D.9
+  header_line: 46573
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: BP.D.9
+  title: BP.D.9 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.D.10 第三方 legal review 歸檔完成後，production image rebuild + `/compliance-matrix/matrices` live
+    smoke 再提升狀態。
+- id: 2026-05-06--BP.D.10
+  header_line: 46587
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: BP.D.10
+  title: BP.D.10 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 將第三方簽署 legal report 存入 private evidence vault，重建 production image，並對 `/compliance-matrix/matrices`
+    做 live smoke 後再提升狀態。
