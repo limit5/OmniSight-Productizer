@@ -3054,6 +3054,46 @@ export async function adminPatchTenant(
   )
 }
 
+// ─── Feature flag registry (WP.7.8 operator UI) ───────────────
+
+export type FeatureFlagTier = "debug" | "dogfood" | "preview" | "release" | "runtime"
+export type FeatureFlagState = "disabled" | "enabled"
+
+export interface FeatureFlagRow {
+  flag_name: string
+  tier: FeatureFlagTier
+  state: FeatureFlagState
+  expires_at: string | null
+  owner: string
+  created_at: string
+}
+
+export interface FeatureFlagListResponse {
+  feature_flags: FeatureFlagRow[]
+  can_toggle: boolean
+}
+
+export async function listFeatureFlags(): Promise<FeatureFlagListResponse> {
+  return request<FeatureFlagListResponse>("/feature-flags")
+}
+
+export interface PatchFeatureFlagResponse {
+  feature_flag: FeatureFlagRow
+}
+
+export async function patchFeatureFlag(
+  flagName: string,
+  state: FeatureFlagState,
+): Promise<PatchFeatureFlagResponse> {
+  return request<PatchFeatureFlagResponse>(
+    `/feature-flags/${encodeURIComponent(flagName)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ state }),
+    },
+  )
+}
+
 // ─── Tenant settings page (Y8 row 4) ───────────────────────────
 //
 // REST surface used by ``/tenants/{tid}/settings`` (tenant-admin
