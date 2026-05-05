@@ -232,6 +232,26 @@ class ChatResponse(BaseModel):
     tasks: list[Task] = Field(default_factory=list)
 
 
+# ---------- Blocks ----------
+
+class Block(BaseModel):
+    block_id: str
+    parent_id: Optional[str] = None
+    tenant_id: str
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+    session_id: Optional[str] = None
+    kind: str
+    status: str
+    title: str = ""
+    payload: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict)
+    redaction_mask: dict = Field(default_factory=dict)
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
 # ---------- Notifications ----------
 
 # ---------- Artifacts ----------

@@ -19,6 +19,7 @@ from backend.models import (
     AgentStatus,
     AgentType,
     AgentWorkspace,
+    Block,
     ChatRequest,
     MessageRole,
     Notification,
@@ -63,6 +64,13 @@ def test_simulation_requires_track_and_module():
         Simulation(id="s1")  # type: ignore[call-arg]
     missing = {e["loc"][0] for e in exc.value.errors()}
     assert {"track", "module"}.issubset(missing)
+
+
+def test_block_requires_identity_scope_and_shape_fields():
+    with pytest.raises(ValidationError) as exc:
+        Block()  # type: ignore[call-arg]
+    missing = {e["loc"][0] for e in exc.value.errors()}
+    assert {"block_id", "tenant_id", "kind", "status"}.issubset(missing)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -136,6 +144,18 @@ def test_notification_defaults():
     assert n.action_url is None
 
 
+def test_block_json_defaults_are_independent_instances():
+    b1 = Block(block_id="b1", tenant_id="t1", kind="agent_turn", status="running")
+    b2 = Block(block_id="b2", tenant_id="t1", kind="command", status="completed")
+    b1.payload["command"] = "pytest"
+    b1.metadata["surface"] = "orchestrator"
+    b1.redaction_mask["payload.command"] = "secret"
+    assert b2.payload == {}
+    assert b2.metadata == {}
+    assert b2.redaction_mask == {}
+    assert "T" in b1.created_at
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Round-trip (model_dump → Model(**dump))
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -174,6 +194,30 @@ def test_orchestrator_message_with_suggestion_round_trip():
     restored = OrchestratorMessage(**msg.model_dump())
     assert restored.suggestion is not None
     assert restored.suggestion.type == "spawn"
+
+
+def test_block_round_trip_preserves_tree_and_jsonb_fields():
+    original = Block(
+        block_id="b-child",
+        parent_id="b-parent",
+        tenant_id="t1",
+        user_id="u1",
+        project_id="p1",
+        session_id="s1",
+        kind="output",
+        status="completed",
+        title="pytest output",
+        payload={"stdout": "ok"},
+        metadata={"surface": "TokenUsageStats"},
+        redaction_mask={"payload.stdout": "none"},
+        started_at="2026-05-06T10:00:00",
+        completed_at="2026-05-06T10:00:01",
+    )
+    restored = Block(**original.model_dump())
+    assert restored == original
+    assert restored.parent_id == "b-parent"
+    assert restored.payload["stdout"] == "ok"
+    assert restored.redaction_mask["payload.stdout"] == "none"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
