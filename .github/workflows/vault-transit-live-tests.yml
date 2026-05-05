@@ -41,6 +41,13 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
+      - name: Validate Vault Transit sandbox configuration
+        run: |
+          set -eu
+          : "${OMNISIGHT_TEST_VAULT_TRANSIT_KEY_ID:?missing OMNISIGHT_TEST_VAULT_TRANSIT_KEY_ID secret}"
+          : "${OMNISIGHT_TEST_VAULT_TRANSIT_URL:?missing OMNISIGHT_TEST_VAULT_TRANSIT_URL secret}"
+          : "${OMNISIGHT_TEST_VAULT_TRANSIT_TOKEN:?missing OMNISIGHT_TEST_VAULT_TRANSIT_TOKEN secret}"
+
       - name: Install backend dependencies
         run: |
           set -eu
