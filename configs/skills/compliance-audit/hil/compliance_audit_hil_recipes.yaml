@@ -1,0 +1,20 @@
+schema_version: 1
+skill: compliance-audit
+recipes:
+  - id: advisory-report-schema-smoke
+    name: "Advisory report schema smoke"
+    description: >
+      Operator supplies one representative evidence bundle and confirms the
+      generated report contains audit_type=advisory and
+      requires_human_signoff=true before any reviewer-facing handoff.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: manual_review
+      expected_fields:
+        - skill_name
+        - audit_type
+        - requires_human_signoff
+        - evidence_inputs
+        - claims
+        - gaps
+        - human_review_note

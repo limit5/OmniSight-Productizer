@@ -1,0 +1,24 @@
+# Compliance Audit Skill Integration Guide
+
+Use `compliance-audit` only for Phase D auxiliary evidence checks.
+Generated reports are advisory and must be reviewed by a certified human
+engineer before they are cited in customer, regulatory, or legal material.
+
+## Invocation Inputs
+
+- `skill_name`: one of the `_auxiliary` task IDs in `tasks.yaml`
+- `matrix`: `medical`, `automotive`, `industrial`, or `military`
+- `evidence_inputs`: requirement IDs, reports, diffs, logs, and tool outputs
+- `review_context`: product, release, target platform, and reviewer queue
+
+## Required Output Envelope
+
+```json
+{
+  "audit_type": "advisory",
+  "requires_human_signoff": true
+}
+```
+
+Do not treat the output as certification. Attach the generated report to
+the human review packet with the source evidence bundle.

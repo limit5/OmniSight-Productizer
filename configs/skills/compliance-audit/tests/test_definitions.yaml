@@ -1,0 +1,31 @@
+schema_version: 1
+skill: compliance-audit
+test_suites:
+  - suite_id: registry_contract
+    name: "Compliance audit skill registry contract"
+    tests:
+      - test_id: pack_discoverable
+        name: "compliance-audit appears in list_skills()"
+        type: unit
+      - test_id: pack_validates_clean
+        name: "validate_skill('compliance-audit') returns ok=True"
+        type: unit
+      - test_id: all_artifact_kinds
+        name: "Manifest declares all required artifact kinds"
+        type: unit
+
+  - suite_id: auxiliary_skill_contract
+    name: "Auxiliary audit skill naming and signoff contract"
+    tests:
+      - test_id: ten_or_more_auxiliary_skills
+        name: "tasks.yaml declares at least ten auxiliary audit skills"
+        type: unit
+      - test_id: all_tasks_auxiliary
+        name: "Every audit task id ends with _auxiliary"
+        type: unit
+      - test_id: all_tasks_require_human_signoff
+        name: "Every audit task requires human signoff"
+        type: unit
+      - test_id: skill_md_disclaimer
+        name: "SKILL.md repeats advisory and human certified engineer disclaimer"
+        type: unit
