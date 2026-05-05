@@ -8,8 +8,8 @@ Key format: ``omni_<40-char-urlsafe-random>`` (total ~46 chars).
 Stored as ``sha256(<full_key>)``; only the 8-char prefix is kept in
 cleartext for log display.
 
-Phase-3-Runtime-v2 SP-5.7a (2026-04-21): ported from compat
-``db._conn()`` to native asyncpg pool. 9 public functions move to
+Phase-3-Runtime-v2 SP-5.7a (2026-04-21): ported from the legacy
+compat DB wrapper to native asyncpg pool. 9 public functions move to
 ``get_pool().acquire() + $N placeholders``. Rowcount-based returns
 (``revoke_key`` / ``enable_key`` / ``delete_key`` / ``update_scopes``)
 swap to ``UPDATE ... RETURNING id`` so we can tell match vs miss
@@ -65,10 +65,39 @@ class ApiKey:
     def scope_allows(self, endpoint: str) -> bool:
         if "*" in self.scopes:
             return True
+        endpoint_scope = _endpoint_to_oauth_scope(endpoint)
         for scope in self.scopes:
             if endpoint.startswith(scope):
                 return True
+            if endpoint_scope and _oauth_scope_allows(scope, endpoint_scope):
+                return True
         return False
+
+
+def _endpoint_to_oauth_scope(endpoint: str) -> str:
+    """Map project-local paths to OAuth-style API key scopes.
+
+    Module-global audit: this helper is pure and derives the same scope
+    string in every worker; no cache or mutable process state is used.
+    """
+    path = endpoint or ""
+    if path == "/.well-known/agent.json":
+        return "a2a:discover:agent-card"
+    if path.startswith("/a2a/invoke/"):
+        agent_name = path.removeprefix("/a2a/invoke/").split("/", 1)[0].split("?", 1)[0]
+        if agent_name:
+            return f"a2a:invoke:{agent_name}"
+    return ""
+
+
+def _oauth_scope_allows(grant: str, required: str) -> bool:
+    if not grant or not required:
+        return False
+    if grant == required:
+        return True
+    if grant.endswith(":*"):
+        return required.startswith(grant[:-1])
+    return False
 
 
 def _hash_key(raw: str) -> str:

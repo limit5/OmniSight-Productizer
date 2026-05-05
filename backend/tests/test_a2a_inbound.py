@@ -8,6 +8,7 @@ import pytest
 
 from backend import auth as _auth
 from backend import pep_gateway as _pep
+from backend.api_keys import ApiKey
 from backend.agents.state import GraphState, ToolResult
 from backend.routers import a2a_inbound
 
@@ -26,6 +27,10 @@ def _operator() -> _auth.User:
         role="operator",
         tenant_id="tenant-a2a",
     )
+
+
+async def _noop_audit(**kwargs):
+    return None
 
 
 async def _allow_pep(**kwargs):
@@ -64,6 +69,20 @@ async def test_agent_card_discovery_uses_well_known_root_and_forwarded_host() ->
     assert any(cap["agent_name"] == "hal" for cap in body["capabilities"])
 
 
+def test_api_key_scope_allows_a2a_oauth_style_discover_and_invoke() -> None:
+    key = ApiKey(
+        id="ak-a2a",
+        name="a2a",
+        key_prefix="omni_a2a",
+        scopes=["a2a:discover:*", "a2a:invoke:*"],
+    )
+
+    assert key.scope_allows("/.well-known/agent.json") is True
+    assert key.scope_allows("/a2a/invoke/hal") is True
+    assert key.scope_allows("/a2a/invoke/bsp") is True
+    assert key.scope_allows("/api-keys") is False
+
+
 @pytest.mark.asyncio
 async def test_sync_invoke_runs_graph_after_operator_auth_and_pep(monkeypatch) -> None:
     app = _app()
@@ -86,6 +105,7 @@ async def test_sync_invoke_runs_graph_after_operator_auth_and_pep(monkeypatch) -
 
     monkeypatch.setattr(a2a_inbound._pep, "evaluate", _fake_pep)
     monkeypatch.setattr(a2a_inbound, "run_graph", _fake_run_graph)
+    monkeypatch.setattr(a2a_inbound, "_audit_a2a_event", _noop_audit)
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -120,6 +140,7 @@ async def test_streaming_invoke_emits_a2a_sse_event_order(monkeypatch) -> None:
 
     monkeypatch.setattr(a2a_inbound._pep, "evaluate", _allow_pep)
     monkeypatch.setattr(a2a_inbound, "run_graph", _fake_run_graph)
+    monkeypatch.setattr(a2a_inbound, "_audit_a2a_event", _noop_audit)
     transport = ASGITransport(app=app)
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -192,3 +213,74 @@ async def test_pep_deny_blocks_invoke(monkeypatch) -> None:
 
     assert res.status_code == 403
     assert res.json()["detail"]["reason"] == "pep_denied"
+
+
+@pytest.mark.asyncio
+async def test_invoke_rate_limit_is_per_tenant_agent_card(monkeypatch) -> None:
+    app = _app()
+    app.dependency_overrides[_auth.require_operator] = _operator
+    keys: list[str] = []
+
+    class _DenyLimiter:
+        def allow(self, key: str, capacity: int, window_seconds: float):
+            keys.append(key)
+            return False, 2.0
+
+    async def _fail_run_graph(*args, **kwargs) -> GraphState:
+        raise AssertionError("rate limit should block before graph runs")
+
+    monkeypatch.setattr(a2a_inbound._pep, "evaluate", _allow_pep)
+    monkeypatch.setattr(a2a_inbound, "run_graph", _fail_run_graph)
+
+    from backend import rate_limit as _rate_limit
+    monkeypatch.setattr(_rate_limit, "get_limiter", lambda: _DenyLimiter())
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.post(
+            "/a2a/invoke/hal",
+            json={"message": "inspect HAL driver"},
+        )
+
+    assert res.status_code == 429
+    assert res.headers["retry-after"] == "3"
+    assert keys == ["a2a:agent:tenant-a2a:hal"]
+
+
+@pytest.mark.asyncio
+async def test_sync_invoke_audit_writes_hashes_not_plaintext(monkeypatch) -> None:
+    app = _app()
+    app.dependency_overrides[_auth.require_operator] = _operator
+    audit_calls: list[dict] = []
+
+    async def _fake_audit(**kwargs):
+        audit_calls.append(kwargs)
+
+    async def _fake_run_graph(command: str, **kwargs) -> GraphState:
+        return GraphState(
+            user_command=command,
+            routed_to="hal",
+            answer="sensitive answer should not enter audit",
+        )
+
+    monkeypatch.setattr(a2a_inbound._pep, "evaluate", _allow_pep)
+    monkeypatch.setattr(a2a_inbound, "run_graph", _fake_run_graph)
+    monkeypatch.setattr(a2a_inbound, "_audit_a2a_event", _fake_audit)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.post(
+            "/a2a/invoke/hal",
+            json={"message": "secret command should not enter audit"},
+        )
+
+    assert res.status_code == 200
+    audit = audit_calls[0]
+    assert audit["action"] == "a2a_agent_invoked"
+    assert audit["tenant_id"] == "tenant-a2a"
+    assert audit["before"]["agent_name"] == "hal"
+    assert len(audit["before"]["request_hash"]) == 64
+    assert len(audit["after"]["response_hash"]) == 64
+    assert audit["after"]["status"] == "completed"
+    assert "secret command" not in str(audit)
+    assert "sensitive answer" not in str(audit)
