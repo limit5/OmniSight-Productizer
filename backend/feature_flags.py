@@ -22,12 +22,18 @@ local-only and intentionally a single-worker/dev fallback.
 WP.7.5 expiry enforcement is data-only: every worker derives the same
 expired-flag verdict from the same registry snapshot plus caller-supplied
 CI clock. It does not mutate cache state.
+
+WP.7.7 keeps env-backed rollback knobs as registry-first / env-fallback
+reads. Cross-worker consistency follows the registry cache contract when
+a row exists; otherwise every worker derives the fallback from the same
+process environment.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import os
 import threading
 import time
 from enum import Enum
@@ -110,6 +116,16 @@ class FeatureFlagRecord(NamedTuple):
     created_at: str = ""
 
 
+class FeatureFlagEnvKnob(NamedTuple):
+    """One existing env rollback knob progressively folded into WP.7."""
+
+    env_name: str
+    flag_name: str
+    tier: FeatureFlagTier
+    default_state: FeatureFlagState
+    owner: str
+
+
 class FeatureFlagExpiryViolation(NamedTuple):
     """One expired feature flag that must be cleaned before CI passes."""
 
@@ -188,6 +204,59 @@ FEATURE_FLAG_TIER_DEFINITIONS: Mapping[
     ),
 })
 
+FEATURE_FLAG_ENV_PREFIXES: tuple[str, ...] = (
+    "OMNISIGHT_BP_",
+    "OMNISIGHT_HD_",
+    "OMNISIGHT_KS_",
+    "OMNISIGHT_WP_",
+)
+
+FEATURE_FLAG_ENV_TRUE_VALUES: frozenset[str] = frozenset(
+    {"1", "true", "yes", "on"}
+)
+
+FEATURE_FLAG_ENV_FALSE_VALUES: frozenset[str] = frozenset(
+    {"0", "false", "no", "off"}
+)
+
+FEATURE_FLAG_ENV_KNOBS: Mapping[str, FeatureFlagEnvKnob] = MappingProxyType({
+    "OMNISIGHT_KS_ENVELOPE_ENABLED": FeatureFlagEnvKnob(
+        env_name="OMNISIGHT_KS_ENVELOPE_ENABLED",
+        flag_name="ks.envelope.enabled",
+        tier=FeatureFlagTier.RELEASE,
+        default_state=FeatureFlagState.ENABLED,
+        owner="ks",
+    ),
+    "OMNISIGHT_KS_CMEK_ENABLED": FeatureFlagEnvKnob(
+        env_name="OMNISIGHT_KS_CMEK_ENABLED",
+        flag_name="ks.cmek.enabled",
+        tier=FeatureFlagTier.PREVIEW,
+        default_state=FeatureFlagState.ENABLED,
+        owner="ks",
+    ),
+    "OMNISIGHT_KS_BYOG_ENABLED": FeatureFlagEnvKnob(
+        env_name="OMNISIGHT_KS_BYOG_ENABLED",
+        flag_name="ks.byog.enabled",
+        tier=FeatureFlagTier.PREVIEW,
+        default_state=FeatureFlagState.ENABLED,
+        owner="ks",
+    ),
+    "OMNISIGHT_WP_DIFF_VALIDATION_ENABLED": FeatureFlagEnvKnob(
+        env_name="OMNISIGHT_WP_DIFF_VALIDATION_ENABLED",
+        flag_name="wp.diff_validation.enabled",
+        tier=FeatureFlagTier.RELEASE,
+        default_state=FeatureFlagState.ENABLED,
+        owner="wp",
+    ),
+    "OMNISIGHT_WP_SKILLS_LOADER_ENABLED": FeatureFlagEnvKnob(
+        env_name="OMNISIGHT_WP_SKILLS_LOADER_ENABLED",
+        flag_name="wp.skills_loader.enabled",
+        tier=FeatureFlagTier.RELEASE,
+        default_state=FeatureFlagState.ENABLED,
+        owner="wp",
+    ),
+})
+
 
 def is_feature_flag_tier(value: str | FeatureFlagTier) -> bool:
     """Return True when ``value`` is one of the five canonical tiers."""
@@ -201,6 +270,27 @@ def is_feature_flag_state(value: str | FeatureFlagState) -> bool:
     if isinstance(value, FeatureFlagState):
         return True
     return str(value).strip().lower() in FEATURE_FLAG_STATE_VALUE_SET
+
+
+def is_feature_flag_env_knob(env_name: str) -> bool:
+    """Return True for BP / HD / KS / WP env knobs managed by WP.7."""
+    return str(env_name).strip().startswith(FEATURE_FLAG_ENV_PREFIXES)
+
+
+def feature_flag_name_for_env_knob(env_name: str) -> str:
+    """Return the canonical registry flag name for one env knob.
+
+    Known knobs use the pinned WP.7.7 manifest. New BP / HD / KS / WP
+    knobs can be folded in progressively with the same mechanical name:
+    ``OMNISIGHT_KS_CMEK_ENABLED`` -> ``ks.cmek.enabled``.
+    """
+    key = str(env_name).strip()
+    if key in FEATURE_FLAG_ENV_KNOBS:
+        return FEATURE_FLAG_ENV_KNOBS[key].flag_name
+    for prefix in FEATURE_FLAG_ENV_PREFIXES:
+        if key.startswith(prefix):
+            return key[len("OMNISIGHT_"):].lower().replace("_", ".")
+    raise ValueError(f"env knob is outside WP.7 registry prefixes: {env_name!r}")
 
 
 def resolve_feature_flag_state(
@@ -233,6 +323,37 @@ def resolve_feature_flag_state(
                 source=source,
             )
     raise AssertionError("default feature flag state must not be None")
+
+
+def resolve_env_backed_feature_flag(
+    env_name: str,
+    *,
+    default_enabled: bool = True,
+    registry: FeatureFlagRegistry | None = None,
+    env_mode: str = "disabled_values",
+) -> bool:
+    """Resolve a WP.7 env-backed flag as registry row, then env fallback.
+
+    The registry global state is authoritative when present; env remains
+    only the migration fallback so existing deployments keep their
+    rollback knobs until rows are seeded in ``feature_flags``.
+    """
+    global_state = get_feature_flag_global_state(
+        feature_flag_name_for_env_knob(env_name),
+        registry=registry,
+    )
+    if global_state is not None:
+        return global_state is FeatureFlagState.ENABLED
+
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default_enabled
+    value = raw.strip().lower()
+    if env_mode == "true_values":
+        return value in FEATURE_FLAG_ENV_TRUE_VALUES
+    if env_mode != "disabled_values":
+        raise ValueError(f"unknown env_mode={env_mode!r}")
+    return value not in FEATURE_FLAG_ENV_FALSE_VALUES
 
 
 def _parse_expires_at(raw: str) -> datetime:
@@ -476,6 +597,10 @@ except Exception:  # pragma: no cover - defensive, like pricing.py
 
 __all__ = [
     "FEATURE_FLAGS_INVALIDATE_EVENT",
+    "FEATURE_FLAG_ENV_FALSE_VALUES",
+    "FEATURE_FLAG_ENV_KNOBS",
+    "FEATURE_FLAG_ENV_PREFIXES",
+    "FEATURE_FLAG_ENV_TRUE_VALUES",
     "FEATURE_FLAG_RESOLUTION_SOURCE_ORDER",
     "FEATURE_FLAG_STATE_VALUES",
     "FEATURE_FLAG_STATE_VALUE_SET",
@@ -486,6 +611,7 @@ __all__ = [
     "FeatureFlagResolution",
     "FeatureFlagResolutionSource",
     "FeatureFlagExpiryViolation",
+    "FeatureFlagEnvKnob",
     "FeatureFlagRegistry",
     "FeatureFlagRegistrySnapshot",
     "FeatureFlagRecord",
@@ -494,11 +620,14 @@ __all__ = [
     "FeatureFlagTierDefinition",
     "assert_no_expired_feature_flags",
     "default_feature_flag_registry",
+    "feature_flag_name_for_env_knob",
     "find_expired_feature_flags",
     "get_feature_flag_global_state",
     "invalidate_feature_flags_cache",
+    "is_feature_flag_env_knob",
     "is_feature_flag_state",
     "is_feature_flag_tier",
     "publish_feature_flags_invalidate",
+    "resolve_env_backed_feature_flag",
     "resolve_feature_flag_state",
 ]

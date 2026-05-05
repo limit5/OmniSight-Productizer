@@ -48,12 +48,13 @@ ADR: TODO row WP.2 freezes this contract.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from hashlib import sha256
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+
+from backend import feature_flags
 
 logger = logging.getLogger(__name__)
 
@@ -514,10 +515,13 @@ def _skills_loader_enabled() -> bool:
 
     Default ON; set ``OMNISIGHT_WP_SKILLS_LOADER_ENABLED=false`` to use
     the pre-WP.2.5 hard-coded SKILL_HD registry. Module-global state audit:
-    this reads process env only and returns an immutable decision per call.
+    WP.7.7 resolves registry first, then env fallback, so workers share
+    registry invalidation or derive the same process-env decision.
     """
-    raw = (os.environ.get(SKILLS_LOADER_ENABLED_ENV) or "true").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return feature_flags.resolve_env_backed_feature_flag(
+        SKILLS_LOADER_ENABLED_ENV,
+        env_mode="true_values",
+    )
 
 
 def _load_hard_coded_registry() -> SkillRegistry:

@@ -72,6 +72,10 @@ def test_is_feature_flag_tier_is_permissive_probe() -> None:
 def test_public_exports_are_pinned() -> None:
     assert ff.__all__ == [
         "FEATURE_FLAGS_INVALIDATE_EVENT",
+        "FEATURE_FLAG_ENV_FALSE_VALUES",
+        "FEATURE_FLAG_ENV_KNOBS",
+        "FEATURE_FLAG_ENV_PREFIXES",
+        "FEATURE_FLAG_ENV_TRUE_VALUES",
         "FEATURE_FLAG_RESOLUTION_SOURCE_ORDER",
         "FEATURE_FLAG_STATE_VALUES",
         "FEATURE_FLAG_STATE_VALUE_SET",
@@ -82,6 +86,7 @@ def test_public_exports_are_pinned() -> None:
         "FeatureFlagResolution",
         "FeatureFlagResolutionSource",
         "FeatureFlagExpiryViolation",
+        "FeatureFlagEnvKnob",
         "FeatureFlagRegistry",
         "FeatureFlagRegistrySnapshot",
         "FeatureFlagRecord",
@@ -90,11 +95,14 @@ def test_public_exports_are_pinned() -> None:
         "FeatureFlagTierDefinition",
         "assert_no_expired_feature_flags",
         "default_feature_flag_registry",
+        "feature_flag_name_for_env_knob",
         "find_expired_feature_flags",
         "get_feature_flag_global_state",
         "invalidate_feature_flags_cache",
+        "is_feature_flag_env_knob",
         "is_feature_flag_state",
         "is_feature_flag_tier",
         "publish_feature_flags_invalidate",
+        "resolve_env_backed_feature_flag",
         "resolve_feature_flag_state",
     ]

@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 396
+entry_count: 397
 status_counts:
-  dev-only: 386
+  dev-only: 387
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3707,3 +3707,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.7.8 operator UI / toggle writer 接上真實 registry 與 N10 audit 後，在 staging 產生一次 feature flag
     review dry run，確認 review row 與 stale alert row 可依 SOP append。
+- id: 2026-05-05--WP.7.7
+  header_line: 46324
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.7.7
+  title: WP.7.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.7.8 接上實際 `feature_flags` row loader / operator toggle 後，在 staging seed `ks.cmek.enabled=false`
+    與 `wp.diff_validation.enabled=false`，確認 registry row 可覆蓋 env fallback 並透過 invalidate 推送到多 worker。

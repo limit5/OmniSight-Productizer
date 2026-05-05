@@ -58,7 +58,6 @@ from __future__ import annotations
 import base64
 import hmac
 import json
-import os
 import secrets
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
@@ -66,6 +65,7 @@ from typing import Any, Mapping, Optional
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from nacl.bindings import sodium_core
 
+from backend import feature_flags
 from backend.security import kms_adapters
 
 
@@ -200,13 +200,12 @@ def encrypt(
 def is_enabled() -> bool:
     """Whether KS.1 envelope writes are enabled.
 
-    The migration rollback knob is read lazily per call, so every
-    worker derives the same value from its process environment without
-    relying on shared module-global state.
+    WP.7.7 resolves registry first, then the migration rollback env
+    fallback; every worker reads the same registry row or derives the
+    same value from its process environment.
     """
 
-    raw = (os.environ.get(ENVELOPE_ENABLED_ENV) or "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    return feature_flags.resolve_env_backed_feature_flag(ENVELOPE_ENABLED_ENV)
 
 
 def decrypt(
