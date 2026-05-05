@@ -52,15 +52,26 @@ def test_cross_cutting_evidence_doc_exists_and_defines_scope() -> None:
 
 def test_r46_r50_evidence_matrix_links_to_mitigation_artifacts() -> None:
     body = _read(EVIDENCE)
+    ledger = _read(LEDGER)
 
     for risk_id in ["R46", "R47", "R48", "R49", "R50"]:
         assert risk_id in body
 
     for phrase in [
+        "KEK quarterly rotation",
+        "IAM least-privilege",
+        "KMS admin dual-control",
+        "KMS audit log to N10",
+        "backend/security/token_vault.py",
         "backend/security/envelope.py",
-        "backend/security/kms_adapters.py",
-        "backend/security/decryption_audit.py",
+        "backend/security/cmek_wizard.py",
+        "docs/ops/cmek_siem_ingest.md",
+        "KS KMS Control Reviews",
         "docs/ops/priority_i_multi_tenancy_readiness.md",
+        "Multi-adapter abstraction",
+        "Vault fallback",
+        "backend/tests/test_security_kms_adapters.py",
+        "backend/tests/test_cmek_upgrade.py",
         "backend/security/cmek_revoke_detector.py",
         "backend/security/cmek_graceful_degrade.py",
         "docs/ops/cmek_revoke_recovery.md",
@@ -68,8 +79,22 @@ def test_r46_r50_evidence_matrix_links_to_mitigation_artifacts() -> None:
         "backend/tests/test_byog_proxy_fail_fast.py",
         "backend/audit.py",
         "pg_advisory_xact_lock",
+        "S3 Object Lock / Glacier",
+        "scripts/backup_prod_db.sh",
+        "backend/tests/test_backup_dlp_scan.py",
     ]:
         assert phrase in body
+
+    for phrase in [
+        "## KS KMS Control Reviews",
+        "KEK rotation SHA-256",
+        "Policy snapshot SHA-256",
+        "Dual-control approval SHA-256",
+        "KMS audit export SHA-256",
+        "Disposition =\n   accepted",
+        "Do not store raw CloudTrail",
+    ]:
+        assert phrase in ledger
 
     adr = _read(ADR)
     assert "## 10. Risk Register（R46-R50）" in adr

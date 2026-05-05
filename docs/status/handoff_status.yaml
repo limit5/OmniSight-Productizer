@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 475
+entry_count: 476
 status_counts:
-  dev-only: 465
+  dev-only: 466
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4413,8 +4413,17 @@ entries:
   production_status: dev-only
   next_gate: deployed-active — 第一個 Tier 3 staging/customer cutover 時實際關閉或阻斷 customer proxy，確認 SaaS 回 BYOGProxyUnavailable/等價
     BYOG error、provider egress logs 無 direct call，再把 smoke evidence 附到 customer ticket。
-- id: 2026-05-06--ks-dod-cross-cutting
+- id: 2026-05-06--R46
   header_line: 47448
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: R46
+  title: KS.DOD.R46-R50 mitigation 完工
+  production_status: dev-only
+  next_gate: deployed-active — security owner 在 private evidence vault 補第一筆 KMS control-review packet，將 policy / dual-control
+    approval / KMS audit export fingerprints 寫入 N10 `KS KMS Control Reviews`；外部 pentest 與 SOC 2 readiness 仍由各自 DoD row 驗收。
+- id: 2026-05-06--ks-dod-cross-cutting
+  header_line: 47460
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null

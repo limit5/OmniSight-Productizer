@@ -111,6 +111,22 @@ On **every Priority I multi-tenancy readiness sign-off** (KS.DOD):
    production image/env proof, multi-tenant isolation smoke, legacy
    Fernet deprecation proof, and 24h observation requirements.
 
+On **every KS KMS control review** (R46):
+
+1. Store the KEK rotation transcript, least-privilege IAM / Vault policy
+   snapshot, two-person KMS admin approval, and KMS audit export in the
+   private security evidence vault; do not commit raw CloudTrail, Cloud
+   Audit Logs, Vault audit payloads, principals, customer data, secrets,
+   plaintext DEKs, or wrapped DEK material.
+2. Compute SHA-256 fingerprints for the policy snapshot, admin approval,
+   and KMS audit export.
+3. Append one row to the "KS KMS Control Reviews" table before
+   Priority I starts and then once per quarter. Use `Disposition =
+   accepted` only when rotation cadence, least-privilege policy,
+   dual-control approval, and KMS audit evidence are all present.
+4. Follow `ks_cross_cutting_evidence.md` and `cmek_siem_ingest.md` for
+   the R46 mitigation evidence boundary.
+
 On **every WP.3 diff-validation cascade match**:
 
 1. Append one row to the "Diff Validation Confidence" table with the
@@ -218,6 +234,18 @@ Priority I readiness rows are append-only. Do not store raw logs,
 customer data, secrets, plaintext tokens, plaintext DEKs, or wrapped DEK
 material in this ledger. Use
 `correction -> <commit/evidence-sha256>` in Notes to correct a prior row.
+
+## KS KMS Control Reviews
+
+| Reviewed (UTC) | Quarter | Provider scope | KEK rotation SHA-256 | Policy snapshot SHA-256 | Dual-control approval SHA-256 | KMS audit export SHA-256 | Disposition | Notes |
+|---|---|---|---|---|---|---|---|---|
+| _Q2 2026 initial_ | _pending_ | _AWS/GCP/Vault/LocalFernet_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _R46 mitigation ledger effective 2026-05-06; first accepted row required before Priority I start_ |
+
+KS KMS control review rows are append-only. Do not store raw CloudTrail,
+Cloud Audit Logs, Vault audit payloads, principals, customer data,
+secrets, plaintext DEKs, or wrapped DEK material in this ledger. Use
+`correction -> <quarter/provider-scope/evidence-sha256>` in Notes to
+correct a prior row.
 
 ## Diff Validation Confidence
 
