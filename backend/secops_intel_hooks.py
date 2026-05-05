@@ -6,6 +6,10 @@ passive hook entry points:
 * ``integration_engineer_pre_install_hook`` -- run before dependency or
   catalog-entry install decisions.
 * ``architect_pre_blueprint_hook`` -- run before blueprint generation.
+* ``integration_engineer_pre_install_a2a_hook`` and
+  ``architect_pre_blueprint_a2a_hook`` -- same BP.I brief contract, but
+  source reports from an operator-registered third-party A2A threat
+  intel agent instead of direct feed SDK/API calls.
 
 The hooks deliberately return a structured brief instead of mutating
 installer or Architect state. The caller can persist the brief or feed it
@@ -13,10 +17,11 @@ into the next prompt/template without this module owning orchestration.
 
 Module-global state audit (SOP Step 1, 2026-04-21 rule)
 -------------------------------------------------------
-Only immutable constants and template paths live at module scope. Each
-hook call invokes BP.I.1 helpers with caller-injected clients when tests
-need them. Cross-worker consistency is moot because no mutable
-module-level cache, singleton, or in-memory registry is read or written.
+Only immutable constants and template paths live at module scope. Local
+hook calls invoke BP.I.1 helpers with caller-injected clients when tests
+need them; A2A hook calls use caller-injected registries/clients.
+Cross-worker consistency is moot because no mutable module-level cache,
+singleton, or in-memory registry is read or written here.
 
 Read-after-write audit (SOP Step 1, 2026-04-21 rule)
 ---------------------------------------------------
@@ -143,6 +148,127 @@ def _result(
     ).to_dict()
 
 
+def _a2a_payload(
+    *,
+    hook: HookName,
+    product_name: str,
+    query: str,
+    best_practice_topic: str,
+    limit: int,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "hook": hook,
+        "guild": "intel",
+        "product_name": product_name,
+        "query": query,
+        "best_practice_topic": best_practice_topic,
+        "requested_reports": ["cve", "zero_day", "best_practice"],
+        "limit": max(1, min(int(limit), 100)),
+        "context": context,
+    }
+
+
+def _a2a_error_report(
+    *,
+    external_agent_id: str,
+    query: str,
+    error: str,
+    now: datetime | None,
+) -> dict[str, Any]:
+    return {
+        "kind": "a2a",
+        "query": query,
+        "source": f"a2a:{external_agent_id}",
+        "fetched_at": _utc_stamp(now),
+        "total_items": 0,
+        "items": [],
+        "error": error,
+    }
+
+
+def _a2a_reports_from_payload(
+    payload: dict[str, Any],
+    *,
+    external_agent_id: str,
+    query: str,
+    now: datetime | None,
+) -> list[dict[str, Any]]:
+    status = str(payload.get("status") or "").lower()
+    if status in {"failed", "error", "cancelled", "canceled"} or payload.get("last_error"):
+        return [
+            _a2a_error_report(
+                external_agent_id=external_agent_id,
+                query=query,
+                error=str(payload.get("last_error") or "remote A2A threat intel agent failed"),
+                now=now,
+            )
+        ]
+
+    reports = payload.get("reports")
+    if reports is None and isinstance(payload.get("result"), dict):
+        reports = payload["result"].get("reports")
+    if isinstance(reports, list):
+        return [report for report in reports if isinstance(report, dict)]
+    return [
+        _a2a_error_report(
+            external_agent_id=external_agent_id,
+            query=query,
+            error="remote A2A threat intel payload omitted reports",
+            now=now,
+        )
+    ]
+
+
+async def _a2a_reports(
+    *,
+    registry: Any,
+    external_agent_id: str,
+    tenant_id: str,
+    bearer_token: str,
+    hook: HookName,
+    product_name: str,
+    query: str,
+    best_practice_topic: str,
+    limit: int,
+    context: dict[str, Any],
+    now: datetime | None,
+) -> list[dict[str, Any]]:
+    try:
+        endpoint = await registry.get_endpoint(external_agent_id, require_enabled=True)
+        client = await registry.build_client(
+            external_agent_id,
+            tenant_id=tenant_id,
+            bearer_token=bearer_token,
+        )
+        result = await client.invoke(
+            endpoint.agent_name,
+            _a2a_payload(
+                hook=hook,
+                product_name=product_name,
+                query=query,
+                best_practice_topic=best_practice_topic,
+                limit=limit,
+                context=context,
+            ),
+        )
+        return _a2a_reports_from_payload(
+            result.payload,
+            external_agent_id=external_agent_id,
+            query=query,
+            now=now,
+        )
+    except Exception as exc:
+        return [
+            _a2a_error_report(
+                external_agent_id=external_agent_id,
+                query=query,
+                error=f"{type(exc).__name__}: {exc}",
+                now=now,
+            )
+        ]
+
+
 def integration_engineer_pre_install_hook(
     *,
     product_name: str = "",
@@ -189,6 +315,49 @@ def integration_engineer_pre_install_hook(
     )
 
 
+async def integration_engineer_pre_install_a2a_hook(
+    *,
+    registry: Any,
+    tenant_id: str,
+    product_name: str = "",
+    install_targets: list[str] | tuple[str, ...] = (),
+    external_agent_id: str = "threat-intel",
+    bearer_token: str = "",
+    limit: int = 5,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Run BP.I pre-install intel through an external A2A threat agent.
+
+    The local BP.I helpers remain available for direct feed smoke tests,
+    but this entry point is the real outbound integration path: the hook
+    builds the same brief contract after invoking an operator-registered
+    third-party agent through ``ExternalAgentRegistry`` / ``A2AClient``.
+    """
+    query = _join_terms([product_name, *list(install_targets)])
+    best_practice_topic = _join_terms(["dependency install", product_name])
+    reports = await _a2a_reports(
+        registry=registry,
+        external_agent_id=external_agent_id,
+        tenant_id=tenant_id,
+        bearer_token=bearer_token,
+        hook="integration_engineer_pre_install",
+        product_name=product_name,
+        query=query,
+        best_practice_topic=best_practice_topic,
+        limit=limit,
+        context={"install_targets": list(install_targets)},
+        now=now,
+    )
+    return _result(
+        hook="integration_engineer_pre_install",
+        product_name=product_name,
+        query=query,
+        best_practice_topic=best_practice_topic,
+        reports=reports,
+        now=now,
+    )
+
+
 def architect_pre_blueprint_hook(
     *,
     product_name: str = "",
@@ -204,7 +373,9 @@ def architect_pre_blueprint_hook(
     source-backed inputs for the blueprint prompt/template.
     """
     query = _join_terms([product_name, *list(blueprint_keywords)])
-    best_practice_topic = _join_terms(["secure architecture", product_name, *list(blueprint_keywords)])
+    best_practice_topic = _join_terms(
+        ["secure architecture", product_name, *list(blueprint_keywords)]
+    )
     reports = [
         intel.search_latest_cve(
             query,
@@ -234,10 +405,51 @@ def architect_pre_blueprint_hook(
     )
 
 
+async def architect_pre_blueprint_a2a_hook(
+    *,
+    registry: Any,
+    tenant_id: str,
+    product_name: str = "",
+    blueprint_keywords: list[str] | tuple[str, ...] = (),
+    external_agent_id: str = "threat-intel",
+    bearer_token: str = "",
+    limit: int = 5,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Run BP.I blueprint intel through an external A2A threat agent."""
+    query = _join_terms([product_name, *list(blueprint_keywords)])
+    best_practice_topic = _join_terms(
+        ["secure architecture", product_name, *list(blueprint_keywords)]
+    )
+    reports = await _a2a_reports(
+        registry=registry,
+        external_agent_id=external_agent_id,
+        tenant_id=tenant_id,
+        bearer_token=bearer_token,
+        hook="architect_pre_blueprint",
+        product_name=product_name,
+        query=query,
+        best_practice_topic=best_practice_topic,
+        limit=limit,
+        context={"blueprint_keywords": list(blueprint_keywords)},
+        now=now,
+    )
+    return _result(
+        hook="architect_pre_blueprint",
+        product_name=product_name,
+        query=query,
+        best_practice_topic=best_practice_topic,
+        reports=reports,
+        now=now,
+    )
+
+
 __all__ = [
     "HOOK_STATUS_CLEAN",
     "HOOK_STATUS_FINDINGS",
     "IntelHookResult",
+    "architect_pre_blueprint_a2a_hook",
     "architect_pre_blueprint_hook",
+    "integration_engineer_pre_install_a2a_hook",
     "integration_engineer_pre_install_hook",
 ]
