@@ -13,6 +13,7 @@ Format: Michael Nygard style (Status / Context / Decision / Consequences) with l
 | [0003](0003-gerrit-code-review.md) | Gerrit code review (primary review tool) | Accepted | 2026-05-04 |
 | [0004](0004-per-agent-jira-identity.md) | Per-agent JIRA identity (rejected shared bot) | Accepted | 2026-05-04 |
 | [0005](0005-tier-authority-levels.md) | Tier S/M/L/X AI authority with 4-layer protection | Accepted | 2026-05-04 |
+| [0006](0006-tls-termination-synology-reverse-proxy.md) | TLS termination at Synology DSM Reverse Proxy + Sectigo wildcard cert | Accepted | 2026-05-05 |
 
 ## How to add a new ADR
 
