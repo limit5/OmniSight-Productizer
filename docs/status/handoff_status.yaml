@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 376
+entry_count: 377
 status_counts:
-  dev-only: 366
+  dev-only: 367
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3527,3 +3527,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production PG 執行 alembic 0191→0192；BP.M.2-BP.M.5 接 summarizer、review/promote endpoints、UI
     與 audit_log 後再做 runtime smoke。
+- id: 2026-05-05--BP.M.2
+  header_line: 46022
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.2
+  title: BP.M.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.M.3 review/promote endpoints 與 BP.M.5 audit_log 落地後，production image 重建並以 `OMNISIGHT_SELF_IMPROVE_LEVEL=l1`
+    staging workflow smoke 驗證 draft row 產生。

@@ -401,6 +401,8 @@ async def finish(run_id: str, status: RunStatus = "completed",
     # skill candidate and file a Decision Engine proposal. Failures here
     # must NEVER break the workflow.finish contract — wrap everything.
     if status == "completed":
+        run = None
+        steps = None
         try:
             from backend import skills_extractor as _ex
             if _ex.is_enabled():
@@ -413,6 +415,19 @@ async def finish(run_id: str, status: RunStatus = "completed",
         except Exception as exc:
             logger.warning(
                 "skills extractor hook failed for run=%s: %s", run_id, exc,
+            )
+        try:
+            from backend import skill_distiller as _distiller
+            if _distiller.is_enabled():
+                if run is None:
+                    run = await get_run(run_id)
+                if steps is None:
+                    steps = await list_steps(run_id)
+                if run is not None:
+                    await _distiller.architect_guild_hook(run, steps)
+        except Exception as exc:
+            logger.warning(
+                "skill distiller hook failed for run=%s: %s", run_id, exc,
             )
 
 
