@@ -568,7 +568,7 @@ CREATE TABLE IF NOT EXISTS tenants (
     auth_features   TEXT NOT NULL DEFAULT '{}'
 );
 
--- WP.7.1 (alembic 0118): tiered feature flag registry.
+-- WP.7.1 (alembic 0194): tiered feature flag registry.
 -- Runtime writers must audit changes through audit_log with
 -- entity_kind='feature_flag'; this table is the durable source of truth.
 CREATE TABLE IF NOT EXISTS feature_flags (

@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-MIGRATION_0186 = BACKEND_ROOT / "alembic" / "versions" / "0186_embedding_chunks.py"
+MIGRATION_0193 = BACKEND_ROOT / "alembic" / "versions" / "0193_embedding_chunks.py"
 
 
 def _load_module(path: Path, name: str):
@@ -31,13 +31,13 @@ def _bootstrap_parent_schema(conn: sqlite3.Connection) -> None:
 
 
 def test_revision_id_and_parent_are_declared() -> None:
-    source = MIGRATION_0186.read_text()
-    assert 'revision = "0186"' in source
+    source = MIGRATION_0193.read_text()
+    assert 'revision = "0193"' in source
     assert 'down_revision = "0192"' in source
 
 
 def test_pg_branch_uses_pgvector_jsonb_and_hnsw_index() -> None:
-    m0186 = _load_module(MIGRATION_0186, "_alembic_test_0186_pg")
+    m0186 = _load_module(MIGRATION_0193, "_alembic_test_0186_pg")
 
     assert "embedding   vector NOT NULL" in m0186._PG_CREATE_TABLE
     assert "metadata    JSONB NOT NULL DEFAULT '{}'::jsonb" in (
@@ -51,7 +51,7 @@ def test_pg_branch_uses_pgvector_jsonb_and_hnsw_index() -> None:
 
 
 def test_pg_branch_enforces_tenant_rls_policy() -> None:
-    m0186 = _load_module(MIGRATION_0186, "_alembic_test_0186_rls")
+    m0186 = _load_module(MIGRATION_0193, "_alembic_test_0186_rls")
 
     assert m0186._PG_ENABLE_RLS == (
         "ALTER TABLE embedding_chunks ENABLE ROW LEVEL SECURITY"
@@ -68,7 +68,7 @@ def test_pg_branch_enforces_tenant_rls_policy() -> None:
 
 
 def test_ks_review_note_keeps_embeddings_out_of_envelope_scope() -> None:
-    source = MIGRATION_0186.read_text()
+    source = MIGRATION_0193.read_text()
 
     assert "KS.1 review note" in source
     assert "does not envelope-encrypt raw embeddings" in source
@@ -76,7 +76,7 @@ def test_ks_review_note_keeps_embeddings_out_of_envelope_scope() -> None:
 
 
 def test_sqlite_upgrade_creates_dev_parity_table_and_index() -> None:
-    m0186 = _load_module(MIGRATION_0186, "_alembic_test_0186_sqlite")
+    m0186 = _load_module(MIGRATION_0193, "_alembic_test_0186_sqlite")
     conn = sqlite3.connect(":memory:")
     _bootstrap_parent_schema(conn)
     conn.executescript(m0186._SQLITE_CREATE_TABLE)
@@ -103,7 +103,7 @@ def test_sqlite_upgrade_creates_dev_parity_table_and_index() -> None:
 
 
 def test_sqlite_tenant_delete_cascades_chunks() -> None:
-    m0186 = _load_module(MIGRATION_0186, "_alembic_test_0186_cascade")
+    m0186 = _load_module(MIGRATION_0193, "_alembic_test_0186_cascade")
     conn = sqlite3.connect(":memory:")
     _bootstrap_parent_schema(conn)
     conn.executescript(m0186._SQLITE_CREATE_TABLE)

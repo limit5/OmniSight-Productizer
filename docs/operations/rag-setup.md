@@ -199,5 +199,5 @@ Expected:
 - `backend/agents/rag_indexer.py` - bulk and incremental indexer
 - `backend/hooks/post_merge_rag_index.py` - git post-merge hook
 - `backend/agents/runner_handlers.py` - `KnowledgeRetrieval` handler
-- `backend/alembic/versions/0186_embedding_chunks.py` - pgvector table, indexes, and RLS
+- `backend/alembic/versions/0193_embedding_chunks.py` - pgvector table, indexes, and RLS
 - `backend/tests/test_rag.py` - adapter, handler, tenant isolation, and optional live pgvector tests

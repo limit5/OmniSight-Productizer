@@ -108,7 +108,7 @@ logger = logging.getLogger("migrate_sqlite_to_pg")
 TABLES_IN_ORDER: tuple[str, ...] = (
     # Tenant root — MUST be first for FK parents below.
     "tenants",
-    # WP.7.1 (alembic 0118): tiered feature flag registry. No FK, but
+    # WP.7.1 (alembic 0194): tiered feature flag registry. No FK, but
     # placed near the tenant/global roots because later runtime
     # resolution reads it as global control-plane state. PK is TEXT
     # ``flag_name``; audit rows use generic ``audit_log`` with

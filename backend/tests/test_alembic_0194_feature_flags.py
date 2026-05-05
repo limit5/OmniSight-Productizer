@@ -10,7 +10,7 @@ import pytest
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-MIGRATION_0118 = BACKEND_ROOT / "alembic" / "versions" / "0118_feature_flags.py"
+MIGRATION_0194 = BACKEND_ROOT / "alembic" / "versions" / "0194_feature_flags.py"
 
 
 def _load_module(path: Path, name: str):
@@ -23,19 +23,19 @@ def _load_module(path: Path, name: str):
 
 @pytest.fixture(scope="module")
 def m0118():
-    return _load_module(MIGRATION_0118, "_alembic_test_0118")
+    return _load_module(MIGRATION_0194, "_alembic_test_0194")
 
 
 class TestMigrationFileStructure:
     @pytest.fixture(scope="class")
     def source(self) -> str:
-        return MIGRATION_0118.read_text()
+        return MIGRATION_0194.read_text()
 
     def test_revision_id_is_0118(self, source: str) -> None:
-        assert 'revision = "0118"' in source
+        assert 'revision = "0194"' in source
 
     def test_down_revision_is_current_head(self, source: str) -> None:
-        assert 'down_revision = "0186"' in source
+        assert 'down_revision = "0193"' in source
 
     def test_required_columns_present(self, m0118) -> None:
         required = (
