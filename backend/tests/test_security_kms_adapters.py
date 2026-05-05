@@ -144,6 +144,29 @@ class TestLocalFernetKMSAdapter:
         assert "OMNISIGHT_LOCAL_FERNET" not in source
 
 
+class TestLocalFernetKMSLiveIntegration:
+
+    def test_ci_sandbox_encrypt_decrypt_round_trip(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-local-fernet-live")
+        secret_store._reset_for_tests()
+        adapter = kms.LocalFernetKMSAdapter()
+        context = {
+            "tenant_id": "ci-sandbox",
+            "dek_id": "ks-local-fernet-live",
+            "purpose": "cmek-verify:local-fernet",
+            "schema": "ks.1.2",
+        }
+
+        wrapped = adapter.wrap_dek(b"ks-local-fernet-live-dek", encryption_context=context)
+
+        assert wrapped.provider == "local-fernet"
+        assert wrapped.ciphertext != b"ks-local-fernet-live-dek"
+        assert (
+            adapter.unwrap_dek(wrapped, encryption_context=context)
+            == b"ks-local-fernet-live-dek"
+        )
+
+
 class FakeAWSKMSClient:
     def __init__(self):
         self.encrypt_calls = []
