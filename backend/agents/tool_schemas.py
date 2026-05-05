@@ -287,6 +287,50 @@ register_tool(
     )
 )
 
+register_tool(
+    ToolSchema(
+        name="KnowledgeRetrieval",
+        description=(
+            "Semantic retrieval over the internal workspace RAG index. Returns "
+            "top-K relevant chunks with citations containing source path, line "
+            "range, and similarity score."
+        ),
+        category="search",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language or code search query.",
+                },
+                "tenant_id": {
+                    "type": "string",
+                    "description": (
+                        "Tenant scope. Defaults to OMNISIGHT_RAG_TENANT_ID "
+                        "when omitted."
+                    ),
+                },
+                "top_k": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 5,
+                    "description": "Maximum number of chunks to return.",
+                },
+                "source_path": {
+                    "type": "string",
+                    "description": "Optional repo-relative path filter.",
+                },
+                "metadata_filter": {
+                    "type": "object",
+                    "description": "Optional exact metadata filter.",
+                },
+            },
+            "required": ["query"],
+        },
+    )
+)
+
 # === Agent ===
 
 register_tool(
