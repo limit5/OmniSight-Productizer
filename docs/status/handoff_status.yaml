@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 453
+entry_count: 454
 status_counts:
-  dev-only: 443
+  dev-only: 444
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4218,3 +4218,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 後續 Phase O runtime 實作需新增 evaluator job / review queue / audit rows，並在 staging 以 `OMNISIGHT_SELF_IMPROVE_LEVEL=l3`
     smoke：同一 prompt path 的 repeated failure trajectory 只產生候選 diff，不直接 promote。
+- id: 2026-05-06--W3.11
+  header_line: 47182
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: W3.11
+  title: BP.W3.11 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 後續 Phase P runtime 實作需新增 candidate staging store / smoke runner / review queue / promotion
+    command / PEP registration glue / audit rows，並在 staging 以 T1 smoke 驗證未審核 candidate 不能被一般 agent 呼叫、通過三段 gate 後才可 execute。

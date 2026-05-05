@@ -40,9 +40,43 @@ BP.M 的 L1 skill distiller 與 R3 Scratchpad 都會把長任務壓縮成 markdo
 
 * **實作機制 (Mechanism)：**
   AI 目前常受限於基礎命令列工具的低效（例如直接讀取幾萬行的 Valgrind 原始日誌會導致 Token 溢出）。系統允許 Agent 識別出這些工作流的「瓶頸」，並主動撰寫客製化的輔助腳本（如一個專門用來過濾無用記憶體位址的 `parse_valgrind.py` 或 `analyze_gpio_timing.sh`）。
-  寫好後，Agent 將此腳本 Commit 至 Git 儲存庫，並註冊為系統的全域指令。
+
+  Phase P delta 的落地邊界是 **Agent 只能把自寫工具提交為 staging candidate，不能直接 commit 到全域工具目錄、不能直接註冊為 production tool**。候選腳本一律寫入 `data/skill_tools/staging/`，並附上 manifest：作者 agent、來源 workflow / task、欲解決的瓶頸、預期輸入輸出、需要的 sandbox tier、測試命令、依賴清單、rollback 條件。Architect reviewer 先評估工具是否真的泛化、是否和既有 script / tool schema 重複；Auditor reviewer 再做安全審查（secret scan、危險 syscall / shell pattern、network / filesystem boundary、dependency provenance）。兩者通過後，仍必須由 human reviewer 明確 approve，才可 promote 到 `scripts/agent_authored/` 並註冊為全域工具。
+
+  所有 agent-authored executable 在 PEP Gateway 內預設套用最嚴格的 Tier 1 sandbox policy：無網路、ephemeral workspace、只允許讀寫明確掛載的 task artefact / build log / report output，未知 tier 或未註冊工具一律 fail-closed。若工具未來需要 T2 / T3，必須另開 human-reviewed policy narrowing / expansion；Phase P delta 不給 agent 自己升級執行權限。Audit chain 必須記錄 candidate 建立、Architect approve / reject、Auditor approve / reject、human approve / reject、promotion、global registration、每次 execution 的 author / reviewer lineage，讓 post-mortem 能追到「哪個 agent 寫的工具、誰審過、哪次呼叫造成副作用」。
 * **進化結果 (Evolutionary Result)：**
-  AI 實質上擴充了整個自動化系統的基礎設施。下一次遇到同樣的分析任務時，Agent 可以直接呼叫自己發明的新工具（如 `rtk python parse_valgrind.py`），大幅節省 Token 消耗並提高數據判讀的準確率。
+  AI 實質上擴充了整個自動化系統的基礎設施，但 promotion discipline 與 release audit 不變：Agent 負責發現工具缺口、產生最小 executable candidate；Architect / Auditor / human 負責判斷是否值得進入 production tool surface；PEP Gateway 負責以 T1 fail-closed policy 執行與記錄。下一次遇到同樣的分析任務時，Agent 可以直接呼叫已審核的新工具（如 `rtk python scripts/agent_authored/parse_valgrind.py`），大幅節省 Token 消耗並提高數據判讀的準確率，同時避免「自寫可執行碼、自動上線」造成 supply-chain 或 sandbox bypass 風險。
+
+### Phase P delta 與既有 Tool / PEP Gateway 的邊界
+
+Phase P delta 不新增一條繞過 PEP Gateway 的 execution path，也不讓 agent-authored scripts 直接出現在 eager tool payload。它只補上「從 repeated workflow bottleneck 產生 executable tool candidate」這一段：
+
+| 面向 | 既有 Tool / PEP Gateway | Phase P delta Toolmaking |
+|---|---|---|
+| 目的 | 管理既有 tool schema、tier whitelist、Guild admission、hold / deny / audit decision | 從 agent trajectory 中的重複工具瓶頸產生可審核的 executable candidate |
+| 輸入 | 已註冊 tool schema、caller `tier` / `guild_id`、PEP command arguments | workflow trajectory、build / Valgrind / hardware log excerpt、agent-authored script body、candidate manifest |
+| 輸出 | `PepDecision`、audit / SSE / hold decision、已允許工具的 execution | human-review proposal：script、manifest、test evidence、Architect verdict、Auditor verdict |
+| Promotion 權限 | 已註冊工具依既有 policy 被呼叫；PEP 不負責新增 production script | 無 promotion 權限；candidate 只能停在 `data/skill_tools/staging/` |
+| Registration 權限 | 全域工具由 repository / registry owner 維護 | human approve 後才 move 到 `scripts/agent_authored/` 並 register；拒絕則 candidate 歸檔 |
+| 預設 sandbox | 呼叫端提供 tier；未知 tier fail-closed 到 T1 whitelist | agent-authored executable 一律先套 T1；T2 / T3 需要另一次 human-reviewed policy change |
+
+因此 L2 的資料流固定為：
+
+1. Agent 在任務中偵測 repeated bottleneck，例如 log 太大、人工 grep pattern 反覆失敗、既有 compressor 無法保留必要訊號。
+2. Agent 產生最小候選 script 與 manifest，寫入 `data/skill_tools/staging/<candidate_id>/`；不得直接修改 `scripts/agent_authored/` 或 tool registry。
+3. Sandbox smoke 在 T1 執行候選測試，輸出 stdout / stderr / exit code / artefact diff；失敗則 candidate 標記為 `needs_revision`，不進 review。
+4. Architect reviewer 評估泛化價值、命名、與既有工具重複度；Auditor reviewer 評估安全與依賴風險。任一拒絕都不得 promote。
+5. Human reviewer 看 script diff、manifest、兩個 reviewer verdict、T1 smoke evidence 後，才可 promote 到 `scripts/agent_authored/` 並 register 全域。
+6. 每次 promotion / registration / execution 都寫 audit row，包含 original author agent、Architect reviewer、Auditor reviewer、human reviewer、script digest、sandbox tier、PEP decision id。
+
+設計上的硬限制：
+
+1. **Staging 不是 production**：`data/skill_tools/staging/` 內的 candidate 不能被一般 agent task 自動 discovery；只有 review / smoke runner 可讀取。
+2. **一個 candidate 只解一個 bottleneck**：避免把 log parser、deploy helper、hardware probe 混成一支大腳本，讓 review、rollback 與 attribution 仍可讀。
+3. **Executable 比 markdown skill 高一階風險**：L1 skill pack 只影響指引；L2 script 會執行 code，因此必經 Architect + Auditor + human 三段 gate。
+4. **PEP Gateway 是唯一 execution gate**：promote 後也不能繞過 PEP；所有呼叫都要帶 tier / guild context，未知工具、未知 tier、缺 reviewer lineage 都 fail-closed。
+5. **Audit chain 是 source of truth**：script digest、author、reviewer、promotion、registration、execution result 都必須可從 audit chain 重建；repo history 只是輔助證據。
+6. **L2 不取代 L1 / L3 / L4**：工具只改善可執行資料處理；可泛化 SOP 仍走 L1 skill distillation，prompt 行為修正仍走 L3 Evaluator，模型權重更新仍走 L4 fine-tune gate。
 
 ---
 
