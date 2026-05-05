@@ -175,6 +175,12 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "iq_runs",
     # Phase 55 users/sessions/GitHub app.
     "users",
+    # WP.9.1 (alembic 0197): generic tenant-scoped share registry.
+    # FKs ``tenant_id -> tenants.id`` and ``owner_user_id -> users.id``
+    # (both CASCADE) so it MUST replay after both parents. PK is the
+    # app-generated TEXT ``share_id`` and ``redaction_applied`` is TEXT
+    # in SQLite / JSONB in PG, so NOT in TABLES_WITH_IDENTITY_ID.
+    "shareable_objects",
     # Y1 row 1 (#277, alembic 0032): N-to-M users <-> tenants. FKs
     # ``user_id → users.id`` and ``tenant_id → tenants.id`` (both
     # ON DELETE CASCADE) so it MUST replay after both parents. PK is

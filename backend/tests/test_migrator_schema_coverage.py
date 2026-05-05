@@ -186,6 +186,7 @@ def test_identity_subset_only_contains_integer_pk_tables():
         "firewall_events",
         "kek_rotations",
         "kms_keys",
+        "shareable_objects",
         "spend_thresholds",
         "tier_assignments",
         "tenant_deks",

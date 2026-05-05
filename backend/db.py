@@ -980,6 +980,32 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_provider, oidc_subject);
 
+-- WP.9.1 (alembic 0197): generic share registry.
+-- Runtime permalink generation, ACL resolution, expiry cleanup, and
+-- redaction enforcement land in WP.9.2-WP.9.6; this table stores the
+-- durable share pointer and redaction audit payload.
+CREATE TABLE IF NOT EXISTS shareable_objects (
+    share_id          TEXT PRIMARY KEY,
+    object_kind       TEXT NOT NULL,
+    object_id         TEXT NOT NULL,
+    tenant_id         TEXT NOT NULL
+                            REFERENCES tenants(id) ON DELETE CASCADE,
+    owner_user_id     TEXT NOT NULL
+                            REFERENCES users(id) ON DELETE CASCADE,
+    visibility        TEXT NOT NULL DEFAULT 'private'
+                            CHECK (visibility IN ('private','team','tenant','public')),
+    expires_at        TEXT,
+    redaction_applied TEXT NOT NULL DEFAULT '{}',
+    created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_shareable_objects_tenant_object
+    ON shareable_objects(tenant_id, object_kind, object_id);
+CREATE INDEX IF NOT EXISTS idx_shareable_objects_owner_created
+    ON shareable_objects(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shareable_objects_expires_at
+    ON shareable_objects(expires_at)
+    WHERE expires_at IS NOT NULL;
+
 -- Y1 row 1 (#277): N-to-M users <-> tenants. ``users.tenant_id`` is
 -- demoted to a "primary / most-recent tenant" cache; this table is
 -- the authoritative source of "which tenants can this user act in".
