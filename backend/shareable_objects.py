@@ -8,7 +8,8 @@ without reimplementing permalink entropy.
 Module-global state audit (SOP Step 1): constants, regex objects, and SQL
 strings are immutable policy data.  No singleton, in-memory cache, or
 cross-worker mutable state is introduced; every worker mints request-local
-random slugs and PG arbitrates collisions via the primary key.
+random slugs and PG arbitrates collisions / expiry cleanup races via the
+primary key plus ``FOR UPDATE SKIP LOCKED`` row locks.
 
 Read-after-write timing audit (SOP Step 1): row creation is one atomic
 ``INSERT ... ON CONFLICT DO NOTHING RETURNING``.  A collision retries with
@@ -22,7 +23,10 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Mapping
+
+from backend.db_context import current_tenant_id, set_tenant_id
 
 
 SHARE_SLUG_PREFIX = "sh-"
@@ -63,6 +67,25 @@ _FETCH_USER_TENANT_MEMBERSHIP_SQL = (
     "WHERE user_id = $1 AND tenant_id = $2"
 )
 
+_SELECT_EXPIRED_SHAREABLE_OBJECTS_SQL = """
+SELECT share_id, object_kind, object_id, tenant_id, owner_user_id,
+       visibility, expires_at, redaction_applied, created_at
+FROM shareable_objects
+WHERE expires_at IS NOT NULL
+  AND expires_at <= $1
+ORDER BY expires_at ASC, share_id ASC
+LIMIT $2
+FOR UPDATE SKIP LOCKED
+"""
+
+_DELETE_EXPIRED_SHAREABLE_OBJECT_SQL = """
+DELETE FROM shareable_objects
+WHERE share_id = $1
+  AND expires_at IS NOT NULL
+  AND expires_at <= $2
+RETURNING share_id
+"""
+
 
 class ShareSlugCollisionError(RuntimeError):
     """Raised when random slug minting exhausts the retry budget."""
@@ -93,6 +116,24 @@ class ShareableObject:
             "expires_at": self.expires_at,
             "redaction_applied": self.redaction_applied,
             "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class ExpiredShareCleanupSummary:
+    """Result from one WP.9.4 expired-share cleanup pass."""
+
+    scanned: int
+    audited: int
+    deleted: int
+    skipped_audit: int
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "scanned": self.scanned,
+            "audited": self.audited,
+            "deleted": self.deleted,
+            "skipped_audit": self.skipped_audit,
         }
 
 
@@ -145,6 +186,117 @@ def _row_to_shareable_object(row) -> ShareableObject:
         redaction_applied=row["redaction_applied"],
         created_at=row["created_at"],
     )
+
+
+async def _audit_expired_share_delete(
+    share: ShareableObject,
+    *,
+    audit_log,
+    conn,
+) -> Any:
+    saved = current_tenant_id()
+    try:
+        set_tenant_id(share.tenant_id)
+        return await audit_log(
+            action="shareable_object.expired_deleted",
+            entity_kind="shareable_object",
+            entity_id=share.share_id,
+            before=share.to_dict(),
+            after={
+                "share_id": share.share_id,
+                "deleted": True,
+                "delete_reason": "expires_at",
+            },
+            actor="system:share-expiry-cleanup",
+            conn=conn,
+        )
+    finally:
+        set_tenant_id(saved)
+
+
+async def _cleanup_expired_shareable_objects_with_conn(
+    conn,
+    *,
+    now: datetime,
+    limit: int,
+    audit_log,
+) -> ExpiredShareCleanupSummary:
+    rows = await conn.fetch(
+        _SELECT_EXPIRED_SHAREABLE_OBJECTS_SQL,
+        now,
+        limit,
+    )
+
+    audited = 0
+    deleted = 0
+    skipped_audit = 0
+    for row in rows:
+        share = _row_to_shareable_object(row)
+        audit_id = await _audit_expired_share_delete(
+            share,
+            audit_log=audit_log,
+            conn=conn,
+        )
+        if audit_id is None:
+            skipped_audit += 1
+            continue
+        audited += 1
+        deleted_row = await conn.fetchrow(
+            _DELETE_EXPIRED_SHAREABLE_OBJECT_SQL,
+            share.share_id,
+            now,
+        )
+        if deleted_row is not None:
+            deleted += 1
+
+    return ExpiredShareCleanupSummary(
+        scanned=len(rows),
+        audited=audited,
+        deleted=deleted,
+        skipped_audit=skipped_audit,
+    )
+
+
+async def cleanup_expired_shareable_objects(
+    conn=None,
+    *,
+    now: datetime | None = None,
+    limit: int = 100,
+    audit_log=None,
+) -> ExpiredShareCleanupSummary:
+    """Audit then delete expired ``shareable_objects`` rows.
+
+    The cron job may run in multiple workers/providers. PG coordinates
+    that cross-worker race with ``FOR UPDATE SKIP LOCKED``; if audit
+    emission returns ``None`` the row is left in place for a later sweep
+    rather than being deleted without a receipt.
+    """
+
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    cutoff = now or datetime.now(UTC)
+    if audit_log is None:
+        from backend import audit as _audit
+        audit_log = _audit.log
+
+    if conn is not None:
+        async with conn.transaction():
+            return await _cleanup_expired_shareable_objects_with_conn(
+                conn,
+                now=cutoff,
+                limit=limit,
+                audit_log=audit_log,
+            )
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as owned_conn:
+        async with owned_conn.transaction():
+            return await _cleanup_expired_shareable_objects_with_conn(
+                owned_conn,
+                now=cutoff,
+                limit=limit,
+                audit_log=audit_log,
+            )
 
 
 async def create_shareable_object(
