@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 452
+entry_count: 453
 status_counts:
-  dev-only: 442
+  dev-only: 443
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4209,3 +4209,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 合併後 CI 跑 `backend/tests/test_sandbox_tier_policy.py` 作為 BP.S matrix / yaml spec / PEP integration
     drift guard；無 production deploy action，因本 row 為 test-only。
+- id: 2026-05-06--W3.10
+  header_line: 47167
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: W3.10
+  title: BP.W3.10 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 後續 Phase O runtime 實作需新增 evaluator job / review queue / audit rows，並在 staging 以 `OMNISIGHT_SELF_IMPROVE_LEVEL=l3`
+    smoke：同一 prompt path 的 repeated failure trajectory 只產生候選 diff，不直接 promote。

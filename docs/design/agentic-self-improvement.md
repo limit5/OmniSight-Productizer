@@ -50,10 +50,41 @@ BP.M 的 L1 skill distiller 與 R3 Scratchpad 都會把長任務壓縮成 markdo
 **核心概念：AI 自己修改自己的「潛意識規則」與系統提示詞。**
 
 * **實作機制 (Mechanism)：**
-  導入自動化的提示詞優化框架（如 DSPy）。系統在背景持續收集 Agent「做對的任務」與「做錯的任務」。
-  定時啟動一個高智商的**評估 Agent (Evaluator Agent)** 來進行覆盤分析：「*為什麼編譯 Agent 剛才失敗了？因為 `CLAUDE.md` 裡面對指標對齊的描述太模糊。*」隨後，評估 Agent 會自動改寫並發布新版本的 `CLAUDE.md` 或 System Prompt。
+  導入自動化的提示詞優化框架（如 DSPy）。系統在背景持續收集 Agent「做對的任務」與「做錯的任務」，並把實際 serving 過的 system prompt snapshot、canary outcome、workflow failure、audit trail 連回 `prompt_versions`。
+
+  Phase O gamma 的落地邊界是 **Evaluator Agent 只能提出候選 prompt 版本，不能直接改 L1 規則檔、不能直接 promotion**。定時 job 掃描 `audit_log` 與 workflow failure trajectory，挑出同一 prompt path 下重複出現的失敗型態（例如 tool policy 誤用、patch protocol 違規、錯誤 fallback 決策）。Evaluator Agent 使用 Opus 4.7 產出最小 diff，寫成 `prompt_registry.register_canary(path, body)` 可接受的 candidate body，目標只限 `backend/agents/prompts/**.md`；`CLAUDE.md` / `AGENTS.md` / `coordination.md` 仍屬 L1 immutable，不在 L3 自動優化範圍。
+
+  Candidate 必須進入 human review queue，reviewer 看 diff、失敗 trajectory 摘要、預期改善指標與 rollback 條件後，才可把候選註冊為 canary。上線後沿用 Phase 63-C prompt registry canary：5% deterministic agent bucket、`record_outcome()` 累積 success / failure、`evaluate_canary()` 自動 rollback regression；即使 `evaluate_canary()` 回傳 `promote_canary`，最終 `promote_canary()` 仍必須由 human reviewer 明確批准。
 * **進化結果 (Evolutionary Result)：**
-  解決了人類難以手動調優龐大提示詞的痛點。AI 能夠針對失敗案例，動態調整自身的行為準則與思考框架，讓任務成功率在無人介入的情況下穩步爬升。
+  解決了人類難以手動調優龐大提示詞的痛點，但保留 release discipline：AI 負責發現重複失敗、提出可 review 的 prompt diff；人類負責 approve canary / promote；prompt registry 負責版本、canary、rollback 與 outcome counters。系統能針對失敗案例持續收斂 agent 行為，同時避免「自動改規則、自動升級」造成 specification gaming 或 governance bypass。
+
+### Phase O gamma 與既有 Phase 63-C 的邊界
+
+Phase O gamma 不新增第二套 prompt storage，也不繞過 Phase 63-C canary。它只補上「從 fail trajectory 產生候選 prompt diff」這一段：
+
+| 面向 | Phase 63-C Prompt Registry | Phase O gamma Evaluator Agent |
+|---|---|---|
+| 目的 | 管理 prompt version、active / canary / archive role、5% canary routing 與 rollback | 從 repeated failure trajectory 產生候選 prompt diff |
+| 輸入 | on-disk `backend/agents/prompts/*.md`、operator-provided body、runtime outcome counters | `audit_log` fail rows、workflow failure metadata、`prompt_versions` snapshot / outcome history |
+| 輸出 | `prompt_versions` row 與 canary evaluation decision | human-review proposal：path、diff、evidence、expected metric、rollback condition |
+| Promotion 權限 | `register_canary()` / `promote_canary()` 只在 review 後被 operator 或 reviewer action 觸發 | 無 promotion 權限；不能直接寫 active row |
+| Rollback | `evaluate_canary()` regression path 可自動 archive canary | 只能標記候選 rejected / stale，不能覆寫 active |
+| 不可碰範圍 | `CLAUDE.md`、`AGENTS.md`、`coordination.md`、任意非 prompt tree 檔案 | 同左；Evaluator 的 output 必須通過 `prompt_registry._normalise_path()` whitelist |
+
+因此 L3 的資料流固定為：
+
+1. `prompt_registry.capture_prompt_snapshot()` / `record_outcome()` 累積 prompt version 與 outcome shadow。
+2. 定時 evaluator job 讀 `audit_log` 中可歸因到 prompt path 的 failure trajectory，聚合同類失敗。
+3. Evaluator Agent（Opus 4.7）對單一 prompt path 產生最小候選 diff，附上 evidence bundle 與 expected pass-rate improvement。
+4. Human reviewer approve 後才呼叫 `register_canary(path, body)`；拒絕則候選歸檔並寫 audit。
+5. Canary 期間繼續收集 outcome；regression 由 `evaluate_canary()` 自動 rollback，promotion 則仍需 human reviewer 明確呼叫 `promote_canary(path)`。
+
+設計上的硬限制：
+
+1. **前置資料不足時不產生候選**：同一 prompt path 需要已累積 enough trajectory（至少多筆同類 failure + 對應 prompt snapshot），否則 evaluator 只能輸出 `insufficient_evidence`。
+2. **一個候選只改一個 prompt path**：避免把多個 agent 行為變更塞進同一 canary，讓 rollback 與 attribution 仍可讀。
+3. **Audit chain 是 source of truth**：候選建立、review approve / reject、canary register、rollback、promotion 都必須有 audit row；post-mortem 不需要重讀 repo 就能看見哪個 prompt 改動造成行為變化。
+4. **L3 不取代 L1 / L2 / L4**：prompt diff 只能改善指令與決策框架；可泛化知識仍走 L1 skill distillation，工具缺口仍走 L2 toolmaking，模型權重更新仍走 L4 fine-tune gate。
 
 ---
 
