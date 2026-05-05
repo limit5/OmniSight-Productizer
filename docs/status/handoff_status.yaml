@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 451
+entry_count: 452
 status_counts:
-  dev-only: 441
+  dev-only: 442
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -50,8 +50,17 @@ canonical_statuses:
 - planning-only
 - n/a
 entries:
-- id: 2026-05-06--W3.8
+- id: 2026-05-06--W3.9
   header_line: 13
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: W3.9
+  title: BP.W3.9 完工
+  production_status: dev-only
+  next_gate: trigger 等待中 — 只有當 Appendix C 的 RLM trigger 被滿足（≥3 qualifying independent reproduction papers + ≥1 qualifying
+    big-company production deployment report）或 Phase B 完成後重新 dispatch 時，才重跑 §C.1 七步驟；在此之前維持 Option B。
+- id: 2026-05-06--W3.8
+  header_line: 28
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: W3.8
@@ -60,7 +69,7 @@ entries:
   next_gate: blocked until Blueprint completion / Window 3 start; then audit the landed ZZ.A/ZZ.B/ZZ.C observability surface
     and split any remaining gaps into concrete ZZ follow-up rows.
 - id: 2026-05-06--W3.7
-  header_line: 26
+  header_line: 41
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: W3.7
@@ -69,7 +78,7 @@ entries:
   next_gate: blocked until Blueprint completion / Window 3 start; then re-dispatch BP.W3.7 as subsystem-scoped S/R/H/P leftover
     rows.
 - id: 2026-05-06--W3.6
-  header_line: 39
+  header_line: 54
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: W3.6
@@ -77,7 +86,7 @@ entries:
   production_status: dev-only
   next_gate: blocked until Blueprint Phase B + Phase D completion; then re-dispatch BP.W3.6 or split F1-F3 by META bundle.
 - id: 2026-05-06--W3.5
-  header_line: 52
+  header_line: 67
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: W3.5
@@ -86,7 +95,7 @@ entries:
   next_gate: blocked until Blueprint BP.B completion / Window 3 start; then re-dispatch BP.W3.5 or split the V leftovers by
     V0-V9 workspace slice.
 - id: 2026-05-06--W3.4
-  header_line: 65
+  header_line: 80
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: W3.4
@@ -95,7 +104,7 @@ entries:
   next_gate: blocked until Blueprint Window 3 starts; then re-dispatch BP.W3.4 or split the 85 Billing items by the existing
     T0-T9 delivery order.
 - id: 2026-05-06--W3.3
-  header_line: 78
+  header_line: 93
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: W3.3
@@ -104,7 +113,7 @@ entries:
   next_gate: blocked until Blueprint Phase B completion plus C2 `tenant_guild_config` design readiness; then re-dispatch BP.W3.3
     or split the Y 76 items by Tenant Ops subsystem.
 - id: 2026-05-06--W3.2
-  header_line: 93
+  header_line: 108
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: W3.2
@@ -113,7 +122,7 @@ entries:
   next_gate: blocked until Blueprint Phase B + Phase D completion; then re-dispatch BP.W3.2 or split E1-E15 by the existing
     software-track ordering.
 - id: 2026-05-06--W3.1
-  header_line: 106
+  header_line: 121
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: W3.1
@@ -121,7 +130,7 @@ entries:
   production_status: dev-only
   next_gate: blocked until Phase B completion or ADR R9 amendment explicitly authorises D3-D29 rework before Phase B.
 - id: 2026-05-05--phase-1-complete-master-main-rename-git-flow-branch-cut
-  header_line: 119
+  header_line: 134
   date: '2026-05-05'
   author: Operator + Claude/Opus
   task_id: null
@@ -131,7 +140,7 @@ entries:
     missed callsites, or runner contract drift. If 7 days pass without regression, Phase 2 entry gate (`external_url` BLOCKER
     + HTTPS) becomes the next blocker.'
 - id: 2026-05-04--FX.11.3
-  header_line: 178
+  header_line: 193
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.11.3
@@ -140,7 +149,7 @@ entries:
   next_gate: deployed-active — 與 FX.11.1 + FX.11.2 同 deploy window land；operator 跑 alembic 0189 backfill 後跑 prod backup pipeline
     觀察 DLP gate 0 finding。預估 5 min（DLP scan 本身 sub-second，需求是 backup workflow 整體跑通）。
 - id: 2026-05-04--FX.11.2
-  header_line: 247
+  header_line: 262
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.11.2
@@ -149,7 +158,7 @@ entries:
   next_gate: deployed-inactive — 同 FX.11.1 一起 deploy（FX.11.1 alone 會 logout 全用戶；本 row + FX.11.1 配對 land 後新 cookie 用 envelope+lookup、active
     session 重 login 一次即恢復）。預估 30 min 含 service drain、rolling restart 兩 backend replica。
 - id: 2026-05-04--FX.11.1
-  header_line: 349
+  header_line: 364
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.11.1
@@ -158,7 +167,7 @@ entries:
   next_gate: deployed-inactive — 等 FX.11.2 (`backend/auth.py` envelope helper + lookup-by-hash) 完成後 operator 在同 window run
     `alembic upgrade head` + restart uvicorn workers。預估 30 min 含 service drain；session 失效對使用者 = 重新 login。
 - id: 2026-05-04--FX.9.11
-  header_line: 404
+  header_line: 419
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.11
@@ -167,7 +176,7 @@ entries:
   next_gate: N/A — FX.9.11 是 closed planning row，FX.9 epic 完整收斂（11/11 [x]）。下一個與 deploy 流程相關的 row 預計是 FX.10 / 未來 Priority MS
     sub-epic（MS-FW0/W0 prep），與本 runbook 無 hard dependency；operator 下一次跑 deploy-prod.sh 時可參考本 runbook 但不必先 ship 任何東西。
 - id: 2026-05-04--FX.9.10
-  header_line: 480
+  header_line: 495
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.10
@@ -176,7 +185,7 @@ entries:
   next_gate: N/A — FX.9.10 是 closed planning row。執行壓力轉到未來 Priority MS sub-epic 的新 row（`MS-FW0` prep + `MS-FW1`-`MS-FW3` execution
     + FX.7.3 的 `MS-W0`-`MS-W9`），各自走自己的 deployed-active / deployed-observed 狀態流。
 - id: 2026-05-04--FX.9.9
-  header_line: 604
+  header_line: 619
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.9
@@ -186,7 +195,7 @@ entries:
     `/login` 頁切換語言下拉到 zh-TW / zh-CN / ja 各驗一次 layout、(3) 觀察 4 locale 都正確渲染（不出現 raw `auth.signIn` 之類未解析 key）。預估首次驗證在下次 prod
     deploy 視窗（FX.9.9 落地後最近的一次）。
 - id: 2026-05-04--FX.9.8
-  header_line: 673
+  header_line: 688
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.8
@@ -196,7 +205,7 @@ entries:
     deploy 視窗跑 `./scripts/deploy-prod.sh` *不* 帶 `--insecure-skip-verify`、(3) 觀察 Step 1 verifier 印 `✅ Layer 2: ''branch:origin/master''
     signed by trusted fingerprint 50245609...`。預估首次驗證在下次 prod deploy 視窗（FX.9.8 落地後最近的一次）。'
 - id: 2026-05-04--FX.9.7
-  header_line: 724
+  header_line: 739
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.7
@@ -205,7 +214,7 @@ entries:
   next_gate: deployed-observed — 下次跑 `scripts/deploy-prod.sh prod <tag>`（或 nightly backup cron 若之後有設）時觀察 Step 1b 是否一次過，不再撞
     `OMNISIGHT_BACKUP_PASSPHRASE is required` fail-close。預估首次驗證在下次 prod deploy 視窗。
 - id: 2026-05-04--FX.9.6
-  header_line: 786
+  header_line: 801
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.6
@@ -215,7 +224,7 @@ entries:
   next_gate: deployed-observed — 等下次 host reboot 後跑 `docker ps -a --filter name=omnisight` 確認沒新 orphan 累積、`journalctl -u omnisight-compose-prod`
     確認 ExecStart 帶 `--remove-orphans` 順走。預估 7 天觀察窗（通常每週至少一次 reboot）。
 - id: 2026-05-04--FX.9.5
-  header_line: 840
+  header_line: 855
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.5
@@ -224,7 +233,7 @@ entries:
   next_gate: deployed-active — 下次跑 `scripts/deploy-prod.sh` 時新 Step 2.5 自動執行；觀察 log 確認 alembic 順走、backend-a/b `/readyz` 不再因
     schema drift fail，即視為 active。本次修改純 bash script，不需重 build image。
 - id: 2026-05-04--FX.9.4
-  header_line: 890
+  header_line: 905
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.4
@@ -233,7 +242,7 @@ entries:
   next_gate: deployed-active — 下次 prod 跑 `alembic upgrade head` 把 `alembic_version` 推到 `0188` 即視為 active。本次修改不需重 build image（純
     .py 檔，alembic CLI runtime import 會吃到）。FX.9.5 deploy 流程加 `alembic upgrade heads` 那 row 完成後可改回 `upgrade head`（單數），閘門收緊。
 - id: 2026-05-04--FX.9.3
-  header_line: 948
+  header_line: 963
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.3
@@ -243,7 +252,7 @@ entries:
     maintenance window，rolling restart 即可。FX.9.5 上線後可一併把 `bootstrap_prod.sh` 的 `PYTHONSAFEPATH=1` 拿掉、deploy script CWD 平移到
     `/app`。
 - id: 2026-05-04--FX.9.2
-  header_line: 1003
+  header_line: 1018
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.2
@@ -253,7 +262,7 @@ entries:
     .py 檔，alembic CLI runtime import 會吃到）；commit 進 master + 下次 prod alembic 啟動就生效。FX.9.3 / FX.9.5 上線後可一併把 `bootstrap_prod.sh`
     的 `PYTHONSAFEPATH=1` 拿掉。
 - id: 2026-05-04--FX.9.1
-  header_line: 1049
+  header_line: 1064
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.9.1
@@ -262,7 +271,7 @@ entries:
   next_gate: deployed-active — 下次 cold-start prod PG（new region / DR rehydrate）跑 `alembic upgrade head` 時 0052 會走新的 op.execute()
     路徑；該事件即視為 active。本次修改不需重 build image（純 .py 檔，runtime import 會吃到）；只要 commit 進 master + 下次 prod alembic 啟動就會生效。
 - id: 2026-05-04--FX.7.12
-  header_line: 1096
+  header_line: 1111
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.12
@@ -271,7 +280,7 @@ entries:
   next_gate: 不適用（lint-only milestone，無 runtime artefact）。`[D]` 在 FX.7.12 的脈絡裡 collapse 等於 `[x]`。後續 wave row（清 109 條 behavioural
     warning）才會推進這個面向的 a11y 成熟度。
 - id: 2026-05-04--FX.7.11
-  header_line: 1204
+  header_line: 1219
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.11
@@ -282,7 +291,7 @@ entries:
     maintenance window（rolling restart 即可，i18n machinery 是純 client bundle 變化 + 一個 server-side request hook，0 schema change、0
     migration）。預估 ops 操作 < 10 min。
 - id: 2026-05-04--FX.7.10
-  header_line: 1317
+  header_line: 1332
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.10
@@ -293,7 +302,7 @@ entries:
     scripts/backup_prod_db.sh --label fx-7-10-smoke; mv /tmp/backup_dlp_scan.py scripts/`，預期看到含「deploy artefact incomplete」的
     die 訊息。預估 ops 操作 5 min，含 negative smoke。
 - id: 2026-05-04--FX.7.8
-  header_line: 1426
+  header_line: 1441
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.8
@@ -304,7 +313,7 @@ entries:
     passes startup validation.`、(4) `curl -u $USER:$PW http://localhost:3001/api/admin/settings` 200，舊 `admin / admin` curl
     401。預估 5 min ops 操作。'
 - id: 2026-05-04--FX.7.7
-  header_line: 1511
+  header_line: 1526
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.7
@@ -314,7 +323,7 @@ entries:
     `docker inspect <container> | jq .HostConfig.Memory` 確認非 0、(3) 24h 觀察窗無 OOM-kill regression（`dmesg | grep "Killed process"`
     應該不漲）。預估 5 min ops 操作 + 24h 觀察。
 - id: 2026-05-04--FX.7.6
-  header_line: 1573
+  header_line: 1588
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.6
@@ -323,7 +332,7 @@ entries:
   next_gate: deployed-inactive — 需要 (1) CI workflow 確認 pytest 收 `backend/tests/test_alembic_downgrade_drift_guard.py`（既有 `backend/pytest.ini`
     應自動收），(2) `pre-commit install` 步驟存在於 dev onboarding doc。預估 30 min。
 - id: 2026-05-04--FX.7.5
-  header_line: 1663
+  header_line: 1678
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.5
@@ -332,7 +341,7 @@ entries:
   next_gate: deployed-inactive — 本 row 純 prose + manifest YAML，下次 manifest 跑 `--check` 綠 + drift guard test 持續綠 = effectively-active；無
     image rebuild、無 env knob、無 maintenance window。FX.7.6 把 `--check` 接進 pre-commit hook 後，本 row 的「校正不再被遺忘」防護就在 author 端落地。
 - id: 2026-05-04--FX.7.4
-  header_line: 1819
+  header_line: 1834
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.4
@@ -342,7 +351,7 @@ entries:
     commit，而非到 CI 才紅；(2) optional：把 `pytest backend/tests/ test_handoff_status_manifest_drift_guard.py` 加進 nightly workflow
     （FX.6.8 那條），確保 manifest 漂走時隔夜內被抓。預估 FX.7.6 一起做 ~10 min、無 maintenance window、無 image rebuild。
 - id: 2026-05-04--FX.7.3
-  header_line: 2017
+  header_line: 2032
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.3
@@ -351,7 +360,7 @@ entries:
   next_gate: MS.0 — 把 ADR §6 的 4 個 drift guard 落地（含 baseline JSON snapshot），預估 0.5 day Codex (mechanical)。然後 MS.1 (W1 onvif_device
     split) 排 2026-05-07。
 - id: 2026-05-04--FX.7.2
-  header_line: 2170
+  header_line: 2185
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.2
@@ -363,7 +372,7 @@ entries:
     / `mfa` 任一路徑 5xx rate 不應上升；(3) drift guard CI test 不應 spuriously fail（已在 master 跑綠）。FX.7.3 (module split for files > 2000
     lines) 或 FX.7.2-followup wave (需要 import-graph 分析才能再批量 hoist) 為獨立 follow-up。
 - id: 2026-05-04--FX.7.1
-  header_line: 2308
+  header_line: 2323
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.1
@@ -374,7 +383,7 @@ entries:
     故 0 條），(2) drift guard CI test 持續綠。Milestone closing 條件：rebuild 後第一條 PCI-DSS gate audit row 入 chain → flip 到 `deployed-active`。drift
     guard 會在未來任何 `from backend import 拼錯名` 的 PR 上替 reviewer 擋下。
 - id: 2026-05-04--FX.3.4
-  header_line: 2429
+  header_line: 2444
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.3.4
@@ -385,7 +394,7 @@ entries:
     → flip 到 `deployed-active`。drift guard 在 PR CI 上替 future reviewer 擋下任何 SDK / model ID silent skew 的能力 CI 端已 active；prod
     端 `deployed-active` 之後 milestone closing。
 - id: 2026-05-04--FX.3.3
-  header_line: 2512
+  header_line: 2527
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.3.3
@@ -396,7 +405,7 @@ entries:
     預期看到 `Strict-Transport-Security: max-age=31536000; includeSubDomains`，(4) `curl -sI https://127.0.0.1/ -k | grep -i strict-transport`
     預期空（loopback 安全閥）。預估 5 min、不需 maintenance window。'
 - id: 2026-05-04--FX.3.2
-  header_line: 2622
+  header_line: 2637
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.3.2
@@ -406,7 +415,7 @@ entries:
     `docker inspect omnisight-productizer-frontend-1 --format '{{.HostConfig.Memory}} {{.HostConfig.MemoryReservation}}'`
     預期 `2147483648 536870912`，(3) `curl -fs http://localhost:3010/` 預期 200/3xx（healthcheck）。預估 3 min、不需 maintenance window。
 - id: 2026-05-04--FX.3.1
-  header_line: 2693
+  header_line: 2708
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.3.1
@@ -416,7 +425,7 @@ entries:
     `docker exec staging-backend-a curl -s docker-socket-proxy:2375/_ping` 預期 `OK`，(3) `docker exec staging-backend-a python3
     -c "import docker; docker.from_env().ping()"` 預期 `True`。預估 5 min、不需 maintenance window（staging 本來就允許短暫 downtime）。
 - id: 2026-05-04--FX.2.4
-  header_line: 2763
+  header_line: 2778
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.2.4
@@ -425,7 +434,7 @@ entries:
   next_gate: deployed-active — 隨下一次 frontend image rebuild 自動上線。純 client-side React 變更、無新增 runtime 依賴、無 env knob、無 schema
     migration、無 docker 變動。下次 frontend deploy 即生效。
 - id: 2026-05-04--FX.2.3
-  header_line: 2849
+  header_line: 2864
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.2.3
@@ -434,7 +443,7 @@ entries:
   next_gate: deployed-active — 隨下一次前端 image rebuild 自動上線。本變更純 client-side React，無新增 runtime 依賴、無 env knob、無 schema migration、無
     docker 變動。下次 frontend deploy 即生效。
 - id: 2026-05-04--FX.2.2
-  header_line: 2908
+  header_line: 2923
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.2.2
@@ -443,7 +452,7 @@ entries:
   next_gate: deployed-active — 隨下一次前端 image rebuild 自動上線。本變更純 client-side React，無新增 runtime 依賴、無 env knob、無 schema migration、無
     docker 變動。下次 frontend deploy 即生效。
 - id: 2026-05-04--FX.2.1
-  header_line: 2968
+  header_line: 2983
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.2.1
@@ -452,7 +461,7 @@ entries:
   next_gate: deployed-active — `pnpm install` 在 production image build pipeline（`Dockerfile` 對應的 frontend stage）會自動 lock-resolve
     `isomorphic-dompurify`；下次 frontend image rebuild 後即進 prod。不需 maintenance window，影響 0。
 - id: 2026-05-04--FX.6.8
-  header_line: 3054
+  header_line: 3069
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.6.8
@@ -460,7 +469,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-active — 等下一個 04:00 UTC 排程觸發、第一份 nightly 報告 land 即達 active。預計 < 24h。
 - id: 2026-05-04--FX.6.7
-  header_line: 3160
+  header_line: 3175
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.6.7
@@ -469,7 +478,7 @@ entries:
   next_gate: deployed-inactive — 等下次 backend image rebuild 自然套用（Renovate 月度 lock-maintenance / 任一 backend prod PR 都會觸發）。不需專門
     maintenance window。
 - id: 2026-05-04--FX.6.6
-  header_line: 3275
+  header_line: 3290
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.6.6
@@ -479,7 +488,7 @@ entries:
     不在 runtime path 上）。本 row 正確意義上的 `next gate` 是「下次 frontend feature PR 通過 CI 時、新 lock 隨之 effectively-deployed」——預期 FX.6.7
     / FX.6.8 PR 內就會自然觸達。FX.6.7 不動 `package.json`、不會再讓 frontend lock 漂；只會專注於拆 `requirements-dev.txt`。'
 - id: 2026-05-04--FX.6.5
-  header_line: 3351
+  header_line: 3366
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.6.5
@@ -490,7 +499,7 @@ entries:
     import）。FX.6.7 拆 `requirements-dev.txt` 之後 prod image 不再裝它們，FX.6.5 的 baseline 自動 stay 在 dev-only 永久（這是預期的——dev 工具沒有 production
     status 軸）。'
 - id: 2026-05-04--FX.6.4
-  header_line: 3481
+  header_line: 3496
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.6.4
@@ -502,7 +511,7 @@ entries:
     才會 fail；如果該部署的 health-check 沒涵蓋 SSH runner，可能會在生產環境第一次跑 cross-arch task 時才發現缺 dep。建議在 docs/operations/ 加一頁「啟用 SSH runner
     的部署指引」（follow-up，非 blocker），但本次不在 scope。'
 - id: 2026-05-04--FX.6.3
-  header_line: 3571
+  header_line: 3586
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.6.3
@@ -511,7 +520,7 @@ entries:
   next_gate: deployed-inactive — 重 build backend production image 後（hash gate 會抓新的 anthropic 0.97.0 sha256），下次 deploy 自動套用；不需要
     maintenance window。
 - id: 2026-05-04--FX.6.2
-  header_line: 3668
+  header_line: 3683
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.6.2
@@ -519,7 +528,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 本變更不影響 production image build；下次重 build backend image 時自動套用（`.txt` 內容一致、hashes 不變）。
 - id: 2026-05-04--FX.6.1
-  header_line: 3710
+  header_line: 3725
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.6.1
@@ -527,7 +536,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 本變更不影響 production image build；下次重 build backend image 時會自動套用（`.txt` 內容一致、hashes 不變）。
 - id: 2026-05-04--FX.1.16
-  header_line: 3758
+  header_line: 3773
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.16
@@ -537,7 +546,7 @@ entries:
     logged-in 連線 user_id 注入正常（看 `omnisight_sse_subscribers` gauge 不掉）；(2) frontend chat / notification / preferences 在 user
     切換 / multi-tab 場景沒有少 frame；(3) cross-tenant operator 的 admin dashboard 仍正常（未傳 user_id 的 listener 行為不變）。
 - id: 2026-05-04--FX.1.15
-  header_line: 3837
+  header_line: 3852
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.15
@@ -546,7 +555,7 @@ entries:
   next_gate: deployed-active — code merged 到 master 即生效（無 env knob、無 image rebuild 需求；下次部署自動上）。後續觀察：login route 的 422 rate
     不應顯著上升（既有客戶端不該送額外欄位，若上升表示有未文件化的欄位或 honeypot rotate bug）。
 - id: 2026-05-04--FX.1.14
-  header_line: 3900
+  header_line: 3915
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.14
@@ -555,7 +564,7 @@ entries:
   next_gate: deployed-active — 本 row 純驗證 + 文檔，無 image / env / migration 變動。merge 後直接歸 `deployed-active`（每次 backend image rebuild
     都已 import 過這兩個符號；W4 / W10 features 在 prod 已 active 跑著）。
 - id: 2026-05-04--FX.1.13
-  header_line: 4008
+  header_line: 4023
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.13
@@ -565,7 +574,7 @@ entries:
     API、無新 wheel、無 image rebuild。下次 staging cutover 時若需 rollback 演練（0009 因故 abort）才會 exercise 此 path；演練前需確認 in-flight optimistic-lock
     writers 已 drain。
 - id: 2026-05-04--FX.1.12
-  header_line: 4064
+  header_line: 4079
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.12
@@ -574,7 +583,7 @@ entries:
   next_gate: deployed-active — 此 row 改的 downgrade 在 production 從未被觸發（forward-only deployment）。`op.drop_column` 是 alembic public
     API、無新 wheel、無 image rebuild。下次 staging cutover 時若需 rollback 演練（0008 因故 abort）才會 exercise 此 path。
 - id: 2026-05-04--FX.1.11
-  header_line: 4120
+  header_line: 4135
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.11
@@ -583,7 +592,7 @@ entries:
   next_gate: deployed-active — 此 row 改的 downgrade 在 production 從未被觸發（forward-only deployment）。`op.drop_index` / `op.drop_column`
     是 alembic public API、無新 wheel、無 image rebuild。下次 staging cutover 時若需 rollback 演練（0007 因故 abort）才會 exercise 此 path。
 - id: 2026-05-04--FX.1.10
-  header_line: 4172
+  header_line: 4187
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.10
@@ -593,7 +602,7 @@ entries:
     / `op.drop_table` 是 alembic public API、無新 wheel、無 image rebuild。下次 staging cutover 時若需 rollback 演練（KS Phase 1 因故 abort）才會
     exercise 此 path。
 - id: 2026-05-04--FX.1.9
-  header_line: 4230
+  header_line: 4245
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.9
@@ -603,7 +612,7 @@ entries:
     + `sqlalchemy.dialects.sqlite`，皆已在 `requirements.txt`（alembic 1.14.0、sqlalchemy 2.0.49 — via alembic）— 無新 wheel、無 image
     rebuild。
 - id: 2026-05-04--FX.1.8
-  header_line: 4290
+  header_line: 4305
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.8
@@ -612,7 +621,7 @@ entries:
   next_gate: deployed-active — `backend.enterprise_web_stack.apply_rls` 是 pure function，下次 backend 重啟（rolling deploy）即生效；無新依賴；無
     env knob 變動；無 DB schema 變動。RLS API endpoint 的 SQL injection 面封閉。
 - id: 2026-05-04--FX.1.7
-  header_line: 4349
+  header_line: 4364
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.7
@@ -621,7 +630,7 @@ entries:
   next_gate: deployed-active — `backend.skill_registry` 是 import-time 載入，下次 backend 重啟（rolling deploy）即生效；無新依賴；無 env knob
     變動；無 DB schema 變動。skill_registry 三個 hook（validate / install / enumerate）的 RCE 面到此全部封閉。
 - id: 2026-05-04--FX.1.6
-  header_line: 4416
+  header_line: 4431
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.6
@@ -630,7 +639,7 @@ entries:
   next_gate: deployed-active — `backend.skill_registry` 是 import-time 載入，下次 backend 重啟（rolling deploy）即生效；無新依賴；無 env knob
     變動；無 DB schema 變動。FX.1.7 `enumerate hook` 接著做（同一 helper 套用，預計 ~15 行 diff + lock test 含 yaml stdout 處理）。
 - id: 2026-05-04--FX.1.5
-  header_line: 4477
+  header_line: 4492
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.5
@@ -640,7 +649,7 @@ entries:
     stdlib），不需 image rebuild；無 env knob 變動；無 DB schema 變動。FX.1.6 `install hook` shell injection 接著做（同一 helper 套用，預計 ~10 行
     diff + 3-5 個 lock test）。
 - id: 2026-05-04--FX.1.4
-  header_line: 4540
+  header_line: 4555
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.4
@@ -650,7 +659,7 @@ entries:
     import 沒新增依賴（只多 stdlib `shlex`），rebuild 不需要。下次 runner 啟動即自動套用。FX.1.5 `skill_registry.py` 的 validate_cmd shell injection
     接著做。
 - id: 2026-05-04--FX.1.3
-  header_line: 4596
+  header_line: 4611
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.3
@@ -659,7 +668,7 @@ entries:
   next_gate: deployed-active —— `redis-py` 已 ship 在 production image (FX.1.1 同 dependency)；`OMNISIGHT_REDIS_URL` 已是現役 env
     knob；`/api/v1/telemetry/certs*` route 無 auth scope 變動。下次部署滾動即生效。FX.1.4 `runner_handlers.py` shell injection 接著做。
 - id: 2026-05-04--FX.1.2
-  header_line: 4653
+  header_line: 4668
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.2
@@ -668,7 +677,7 @@ entries:
   next_gate: deployed-active —— `redis-py` 已 ship 在 production image (FX.1.1 同 dependency)；`OMNISIGHT_REDIS_URL` 已是現役 env
     knob；`require_tenant` dependency 已存在於既有 routes，FX.1.2 直接消費。下次部署滾動即生效。FX.1.3 `_TELEMETRY_CERTS` 接著做。
 - id: 2026-05-04--FX.1.1
-  header_line: 4704
+  header_line: 4719
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.1.1
@@ -677,7 +686,7 @@ entries:
   next_gate: deployed-active —— production image 已 ship `redis-py`（既有），`OMNISIGHT_REDIS_URL` 已是現役 env knob；下次部署滾動即生效，無需額外動作。FX.1.2
     `_queue_jobs` 接著做。
 - id: 2026-05-03--deep-audit-8-dim-150-findings-health-5-2-10-priority-fx-fix-
-  header_line: 4753
+  header_line: 4768
   date: '2026-05-03'
   author: Claude/Opus
   task_id: null
@@ -686,7 +695,7 @@ entries:
   raw_status: planning + audit doc landed
   next_gate: kick off Claude + Codex parallel runners on FX.1 / FX.5（pre-merge cleanup 跟 SC/KS merge 同 pattern）
 - id: 2026-05-03--strategic-decision-add-priority-he-hardware-engineering-expa
-  header_line: 4800
+  header_line: 4815
   date: '2026-05-03'
   author: Claude/Opus
   task_id: null
@@ -694,7 +703,7 @@ entries:
   production_status: planning-only
   next_gate: trigger 等待中（兩條 hard gate 都未滿足、預估 2027+）
 - id: 2026-05-03--Z.7.10
-  header_line: 4838
+  header_line: 4853
   date: '2026-05-03'
   author: Agent-row7-self-agent
   task_id: Z.7.10
@@ -702,7 +711,7 @@ entries:
   production_status: dev-only
   next_gate: n/a（純文件，無 deployment gate）
 - id: 2026-05-03--Z.7.9
-  header_line: 4874
+  header_line: 4889
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.7.9
@@ -710,7 +719,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 此 task 為 CI/test infra；workflow 在 operator 設定 GitHub Secrets (Z.7.1) 後即可 active。
 - id: 2026-05-03--Z.7.6
-  header_line: 4944
+  header_line: 4959
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.7.6
@@ -718,7 +727,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 此 task 為 test-only；CI 路徑由 Z.7.7 補 GitHub Actions workflow。
 - id: 2026-05-03--Z.7.5
-  header_line: 5010
+  header_line: 5025
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.7.5
@@ -726,7 +735,7 @@ entries:
   production_status: dev-only
   next_gate: CI 端需 operator 設立三家 `*_API_KEY_CI` secrets（Z.7.1 operator step），Z.7.7 workflow 才能 nightly 實跑 streaming + tool_calls。
 - id: 2026-05-03--Z.7.4
-  header_line: 5091
+  header_line: 5106
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.7.4
@@ -734,7 +743,7 @@ entries:
   production_status: dev-only
   next_gate: CI 端需 operator 設立三家 `*_API_KEY_CI` secrets（Z.7.1 operator step），Z.7.7 workflow 才能 nightly 實跑 multi-turn loop。
 - id: 2026-05-03--Z.7.2
-  header_line: 5150
+  header_line: 5165
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.7.2
@@ -743,7 +752,7 @@ entries:
   next_gate: CI 端需 operator 設立 `ANTHROPIC_API_KEY_CI` / `OPENAI_API_KEY_CI` / `GOOGLE_API_KEY_CI` secrets（Z.7.1 operator step），Z.7.7
     workflow 才能 nightly 實跑。
 - id: 2026-05-03--Z.6.8
-  header_line: 5192
+  header_line: 5207
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.6.8
@@ -751,7 +760,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-observed — 文件隨下一次 image rebuild 一起部署；無額外 runtime 依賴。
 - id: 2026-05-03--Z.6.5
-  header_line: 5227
+  header_line: 5242
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.6.5
@@ -760,7 +769,7 @@ entries:
   next_gate: deployed-inactive — 需要 (1) 確認 Redis 環境有 OMNISIGHT_REDIS_URL，counter 才能跨 worker 累積；(2) rebuild image；(3) 確認 dashboard
     有顯示 `ollamaToolFailures` panel。
 - id: 2026-05-03--Z.6.4
-  header_line: 5284
+  header_line: 5299
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.6.4
@@ -768,7 +777,7 @@ entries:
   production_status: dev-only
   next_gate: 無額外 gate。下一步為 Z.6.5（graceful fallback + SharedKV 計數 + dashboard 警示）。
 - id: 2026-05-03--Z.6.3
-  header_line: 5348
+  header_line: 5363
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.6.3
@@ -776,7 +785,7 @@ entries:
   production_status: dev-only
   next_gate: 無額外 gate。下一步為 Z.6.4（ollama model 兼容矩陣 YAML + UI badge）。
 - id: 2026-05-03--Z.6.1
-  header_line: 5394
+  header_line: 5409
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: Z.6.1
@@ -784,7 +793,7 @@ entries:
   production_status: dev-only
   next_gate: 無額外 gate — 版本已滿足需求。下一步為 Z.6.2（`llm_adapter.py` ollama 分支接 `bind_tools`）。
 - id: 2026-05-03--BP.A.7
-  header_line: 5436
+  header_line: 5451
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: BP.A.7
@@ -792,7 +801,7 @@ entries:
   production_status: dev-only
   next_gate: 無 — test 檔案不需要 deploy gate；下一個真正的 gate 是 BP.A.6 router mount to `backend/main.py`（見 BP.A.6 entry 的 Next gate）。
 - id: 2026-05-03--BP.A.6
-  header_line: 5475
+  header_line: 5490
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: BP.A.6
@@ -802,7 +811,7 @@ entries:
     + `fastapi` 已在 production image（兩者已在 requirements.txt）。預估 30 min，不需 maintenance window。待 BP.A.7 (~1d) 統一測試套件完成後可整批進 deployed-inactive
     gate。
 - id: 2026-05-03--BP.A.5
-  header_line: 5538
+  header_line: 5553
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: BP.A.5
@@ -811,7 +820,7 @@ entries:
   next_gate: 維持 dev-only，待 BP.A.6 `template_validator.py` FastAPI 中介層消費 `exceeds_ceiling` 回傳值後一起翻 deployed-inactive；`cognitive_load.py`
     單獨 ship 沒有 HTTP call site，無 live smoke 可跑。預估 BP.A.6 (~1-1.5d) + A.7 (~1d) 後可整批進 deployed-inactive gate。
 - id: 2026-05-03--BP.A.4
-  header_line: 5589
+  header_line: 5604
   date: '2026-05-03'
   author: Claude/Sonnet
   task_id: BP.A.4
@@ -820,7 +829,7 @@ entries:
   next_gate: 維持 dev-only，待 BP.A.5 / A.5b / A.6 / A.7 全部落地後整批進 deployed-inactive gate。ReviewTemplate 單獨 ship 沒有 runtime call
     site，無 live smoke 可跑。預估 BP.A.5 (~1d) + BP.A.5b (~0.5d) + BP.A.6 (~1.5d) + BP.A.7 (~1d) 後可整批進 deployed-inactive。
 - id: 2026-05-03--BP.A.3
-  header_line: 5632
+  header_line: 5647
   date: '2026-05-03'
   author: Claude/Opus
   task_id: BP.A.3
@@ -830,7 +839,7 @@ entries:
     deployed-inactive；ImplTemplate 單獨 ship 沒有 runtime call site，無 live smoke 可跑。預估 BP.A.4 (~0.5d) + BP.A.5 / A.5b / A.6 (~3-4d)
     + A.7 (~1d) 後可整批進 deployed-inactive gate。
 - id: 2026-05-03--BP.A.2
-  header_line: 5669
+  header_line: 5684
   date: '2026-05-03'
   author: Claude/Opus
   task_id: BP.A.2
@@ -840,7 +849,7 @@ entries:
     單獨 ship 沒有 runtime call site，無 live smoke 可跑。預估 BP.A.3 (~0.5d) + A.4 (~0.5d) 後 + BP.A.5 / A.5b / A.6 (~3-4d) 即可整批進 deployed-inactive
     gate。
 - id: 2026-05-03--BP.A.1
-  header_line: 5705
+  header_line: 5720
   date: '2026-05-03'
   author: Claude/Opus
   task_id: BP.A.1
@@ -849,7 +858,7 @@ entries:
   next_gate: 維持 dev-only，待 BP.A.2 / A.3 / A.4 三個姊妹 template 補完 + BP.A.6 中介層上線後一起翻 deployed-inactive；SpecTemplate 單獨 ship 沒有
     runtime call site，無 live smoke 可跑。預估 BP.A.2 (~0.5d) + A.3 (~0.5d) + A.4 (~0.5d) 後即可整批進 deployed-inactive gate。
 - id: 2026-05-03--SC.1.1
-  header_line: 5737
+  header_line: 5752
   date: '2026-05-03'
   author: Claude/Opus
   task_id: SC.1.1
@@ -861,7 +870,7 @@ entries:
     Presidio 引擎 download，並對 generated app workspace 做一輪 smoke 全套 scan。`deployed-active` 待 W14 sandbox lifecycle 起 live preview
     後 SC.2.2 ZAP first-ready scan trigger 觀察過幾輪 baseline；`deployed-observed` 待 24h 無 regression metric。
 - id: 2026-05-03--W16.9
-  header_line: 5768
+  header_line: 5783
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W16.9
@@ -871,7 +880,7 @@ entries:
   next_gate: deployed-active** — operator does not need any new env knob; running `pytest backend/tests/test_w16_9_e2e_scenarios.py`
     against any future PR will catch silent breaks in the W16 wire shape across the 5 row-spec scenarios.
 - id: 2026-05-03--W16.8
-  header_line: 5910
+  header_line: 5925
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W16.8
@@ -886,7 +895,7 @@ entries:
     ''…''` → flip to deployed-active。Producer-side wiring (W11.x / W12 / W13.3 各 call register_*) 是 W16.8 的 consumer-side
     closer， filed under W16.9 (e2e tests cover the full pipeline)。'
 - id: 2026-05-03--W16.7
-  header_line: 6114
+  header_line: 6129
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W16.7
@@ -904,7 +913,7 @@ entries:
     router 真正去 invoke Vercel API / a11y scanner / git workflow 是 W16.7 的 consumer-side closer，filed under W16.9 (e2e tests
     cover the full pipeline)。'
 - id: 2026-05-03--W16.6
-  header_line: 6307
+  header_line: 6322
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W16.6
@@ -915,7 +924,7 @@ entries:
   next_gate: deployed-inactive** — code 在 main、無新 env 旋鈕、 直接 ride 既有 backend image。需要 (1) 找一個有 W14 sidecar 跑 著的 workspace
     做 lifecycle smoke、(2) 確認 SSE consumer 在 operator chat 把 `previewViteError`-bearing 訊息 append 進 chat log 後 trace card 渲染正常。
 - id: 2026-05-03--W16.5
-  header_line: 6519
+  header_line: 6534
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W16.5
@@ -929,7 +938,7 @@ entries:
     card 出現雙語三選一 apply menu 含 `/edit-preview <workspace_id> "header 大一點"` slash command + `--dry` variant → flip 為 deployed-active。完整啟用
     W16 epic 仍待 W16.6 + W16.7 + W16.8 + W16.9。
 - id: 2026-05-03--W16.4
-  header_line: 6754
+  header_line: 6769
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W16.4
@@ -942,7 +951,7 @@ entries:
     install）→ 觀察 SSE stream 含 `event: preview.ready` payload 帶 `workspace_id` + `preview_url` → 確認 chat 會 mount `<iframe src="...">`
     並可以 Fullscreen toggle → flip 為 deployed-active。'
 - id: 2026-05-03--W16.3
-  header_line: 6885
+  header_line: 6900
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W16.3
@@ -954,7 +963,7 @@ entries:
     smoke：在 chat 打「幫我蓋一個 landing page」→ 確認下一張 coach card surface bilingual 四選一菜單 + `/scaffold landing --auto-preview` ★ 推薦
     + 三個 alternatives → 確認 dismiss 一個建議再貼別的 intent 會 re-coach → flip 到 deployed-active。
 - id: 2026-05-03--W16.2
-  header_line: 7128
+  header_line: 7143
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W16.2
@@ -968,7 +977,7 @@ entries:
     / `--as=page` / `/brand-image <hash16>` slash commands → confirm dismissing one image and pasting a fresh one re-coaches
     → flip to deployed-active.'
 - id: 2026-05-03--W16.1
-  header_line: 7376
+  header_line: 7391
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W16.1
@@ -980,7 +989,7 @@ entries:
     把 chat / INVOKE command 路徑也接上 coach 分流（或最早 W16.4 inline preview iframe 串通整個 W14→W15→W16 流）。 本 row 提供的 trigger 偵測 + 四選一渲染
     + LLM context block 是後續 所有 W16.* 行共用的 building block，沒裝錯方向。
 - id: 2026-05-03--W15.6
-  header_line: 7503
+  header_line: 7518
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W15.6
@@ -995,7 +1004,7 @@ entries:
     1, undefined_symbol: 1, import_path_typo: 1})` → confirm a 3-strike trail of any single class fires `should_escalate_vite_pattern`
     → flip to deployed-active. 整 W15 epic (W15.1 → W15.6) 已完成 — Vite/Build Error Self-healing Loop 全套已 land。'
 - id: 2026-05-03--BP.S.5
-  header_line: 7669
+  header_line: 7684
   date: '2026-05-03'
   author: Claude/Opus
   task_id: BP.S.5
@@ -1008,7 +1017,7 @@ entries:
     從未來語言改成現況描述 + 三 callout flip 成 closed-out + 本文件 status 翻 closed。BP.W3.13 是 Phase U window 範圍、跨 host operator manual work
     至少數天到 1 週、需要 maintenance window 滾動部署 gVisor。
 - id: 2026-05-04--FX.5.8
-  header_line: 7802
+  header_line: 7817
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.8
@@ -1017,7 +1026,7 @@ entries:
   next_gate: deployed-inactive — 此 row 為 test-only coverage，無 production image/env/schema 變更；下一 gate 是 CI 在標準 project venv
     內跑同一測試檔。
 - id: 2026-05-03--KS.1.3
-  header_line: 7813
+  header_line: 7828
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.3
@@ -1026,7 +1035,7 @@ entries:
   next_gate: deployed-inactive — 需要 operator 在 prod image/環境中跑同一 token-vault smoke，並在 2026-06-02 前完成既有 `oauth_tokens` Fernet
     row backfill；KS.1.4 另負責 master KEK rotation。
 - id: 2026-05-03--W15.5
-  header_line: 7823
+  header_line: 7838
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W15.5
@@ -1038,7 +1047,7 @@ entries:
     確認 rendered config import `makeOmnisightVitePlugin`；(4) 在 W14.1 sidecar 設 `OMNISIGHT_WORKSPACE_ID` + `OMNISIGHT_BACKEND_URL`
     跑該專案、觸發 syntax error；(5) 確認 W15.1 endpoint 收到 error；(6) flip to deployed-active。
 - id: 2026-05-03--W15.4
-  header_line: 7917
+  header_line: 7932
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W15.4
@@ -1049,7 +1058,7 @@ entries:
     連續 3 retry → 確認 operator UI 的 debug feed 看到 `finding_type="vite_retry_budget_exhausted"` + `severity="error"` + context
     含 pattern；(2) 確認 4th retry 同錯誤不會 re-emit（`vite_escalated_signatures` gate 運作）；(3) 確認不同錯誤可重新 escalate；(4) flip to deployed-active。
 - id: 2026-05-03--W15.3
-  header_line: 8002
+  header_line: 8017
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W15.3
@@ -1061,7 +1070,7 @@ entries:
     [<message>]` banner → confirm agent 第一句 acknowledge 該 error 才 retry → flip to deployed-active。**Production 整 epic 啟用**
     仍待 W15.4 + W15.5 + W15.6。'
 - id: 2026-05-03--W15.2
-  header_line: 8081
+  header_line: 8096
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W15.2
@@ -1071,7 +1080,7 @@ entries:
     W15.3 落地把 helper 嵌進 system prompt 模板，operator 開 sandbox → vite project 故意打 syntax error → W15.1 buffer 收 → W15.2 fold
     → agent 系統 prompt 看到「上次 build 有 error: src/App.tsx:10 SyntaxError」→ 升 `[x] → [D]`。'
 - id: 2026-05-03--W15.1
-  header_line: 8139
+  header_line: 8154
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W15.1
@@ -1081,7 +1090,7 @@ entries:
     落地把 plugin wire 進 W6/W7/W8 vite.config 模板，operator 開 sandbox 後在 vite project 故意打一個 syntax error → plugin 自動 POST → `GET
     /api/v1/web-sandbox/preview/{ws}/errors` 看到 1 entry → 升 `[x] → [D]`。
 - id: 2026-05-03--W14.12
-  header_line: 8210
+  header_line: 8225
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W14.12
@@ -1092,7 +1101,7 @@ entries:
     都 populated → 等 30-90s install + `pnpm dev` 起來 → curl `https://preview-ws-{12hex}.ai.sora-dev.app/`（CF Access 登入流） → 操作者
     IdP 登入後 sidecar 200 → flip `[x] → [D]`。
 - id: 2026-05-03--W14.11
-  header_line: 8274
+  header_line: 8289
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W14.11
@@ -1102,7 +1111,7 @@ entries:
     row landed 後跑 `pytest backend/tests/test_w14_11_threat_model_drift_guard.py backend/tests/test_w14_12_*.py -v` → 30 +
     W14.12 全綠 → 跟 ADR §8 R28-R30 row 一致 → flip to deployed-active。**Production 整 epic 啟用** 仍待 W14.12（最後一個 row）+ 上述 7 條控制 wiring。
 - id: 2026-05-03--W14.10
-  header_line: 8337
+  header_line: 8352
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W14.10
@@ -1113,7 +1122,7 @@ entries:
     整 epic 啟用** 仍待 W14.11（R28-R30 risk register）+ W14.12（lifecycle/bypass tests）+ the WebSandboxManager swap from in-memory
     cache to PG-backed reads（separate row that consumes this schema — not owned by W14.10）。
 - id: 2026-05-03--W14.9
-  header_line: 8423
+  header_line: 8438
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W14.9
@@ -1126,7 +1135,7 @@ entries:
     after next stop call → flip deployed-active。**整 epic 啟用** 仍待 W14.10（alembic 0059 讓 instance state survive uvicorn worker
     restart + cross-worker idle reaping）+ W14.11 + W14.12。
 - id: 2026-05-03--W14.8
-  header_line: 8502
+  header_line: 8517
   date: '2026-05-03'
   author: Claude/Opus
   task_id: W14.8
@@ -1137,7 +1146,7 @@ entries:
     toast → 點 APPROVE → 確認 sidecar 走 pending→installing→running → flip deployed-active。**整 epic 啟用** 仍待 W14.9 (cgroup 防 RAM
     吃光) + W14.10 (alembic 0059 讓 instance state survive uvicorn worker restart + cross-worker idle reaping)。
 - id: 2026-05-02--BP.S.4
-  header_line: 8564
+  header_line: 8579
   date: '2026-05-02'
   author: Claude/Opus
   task_id: BP.S.4
@@ -1145,7 +1154,7 @@ entries:
   production_status: dev-only
   next_gate: N/A — 純 docs 隨 git push 即生效，無 prod artefact 需 deploy；未來 BP.S.6 落地後本 doc 會被 drift-guard test 引用。
 - id: 2026-05-02--FS.1.1
-  header_line: 41071
+  header_line: 41086
   date: '2026-05-02'
   author: Codex/GPT-5.5
   task_id: FS.1.1
@@ -1154,7 +1163,7 @@ entries:
   next_gate: deployed-inactive — FS.1.2/FS.1.3 落地後，把 provision result 寫入 durable table 並以 feature/env knob 關閉；deployed-active
     需 FS.1.7 三 provider live smoke 綠。
 - id: 2026-05-03--FS.1.2
-  header_line: 41253
+  header_line: 41268
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.1.2
@@ -1163,7 +1172,7 @@ entries:
   next_gate: deployed-inactive — FS.1.3 落地持久化 provisioned DB metadata 後，將此 runner 接到 provision → migrate orchestration path，並在
     staging tenant DB 跑一次 native migration smoke。
 - id: 2026-05-03--FS.1.3
-  header_line: 41273
+  header_line: 41288
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.1.3
@@ -1172,7 +1181,7 @@ entries:
   next_gate: deployed-inactive — 在 prod PG 執行 alembic chain 到 `0061`，並由後續 FS orchestration row 實際寫入 encrypted connection URL
     metadata。
 - id: 2026-05-03--FS.1.4
-  header_line: 41295
+  header_line: 41310
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.1.4
@@ -1181,7 +1190,7 @@ entries:
   next_gate: deployed-inactive — 將 provision orchestration 接上 FS.1.3 durable table，並在 staging provider token 下跑三 provider
     provision → policy metadata → migrate smoke。
 - id: 2026-05-03--FS.1.5
-  header_line: 41314
+  header_line: 41329
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.1.5
@@ -1190,7 +1199,7 @@ entries:
   next_gate: deployed-inactive — 將 provision orchestration 接上 FS.1.3 durable table，並在 staging provider token 下跑三 provider
     provision → backup policy metadata → migrate smoke。
 - id: 2026-05-03--FS.1.6
-  header_line: 41333
+  header_line: 41348
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.1.6
@@ -1199,7 +1208,7 @@ entries:
   next_gate: deployed-inactive — 將 provision orchestration 接上 PEP gateway HOLD flow，並在 staging token 下跑一次 approve → provider
     provision → migrate smoke。
 - id: 2026-05-03--FS.1.7
-  header_line: 41353
+  header_line: 41368
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.1.7
@@ -1208,7 +1217,7 @@ entries:
   next_gate: deployed-inactive — 後續 orchestration row 接上 provider token / PEP approval / `provisioned_databases` persistence
     後，在 staging provider 帳號跑一次 live provision → migrate → smoke。
 - id: 2026-05-03--FS.2.1
-  header_line: 41372
+  header_line: 41387
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.2.1
@@ -1217,7 +1226,7 @@ entries:
   next_gate: deployed-inactive — 後續 FS.2 orchestration row 接上 provider token storage / generated app scaffold 後，在 staging
     provider 帳號跑一次 live setup smoke。
 - id: 2026-05-03--FS.2.2
-  header_line: 41392
+  header_line: 41407
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.2.2
@@ -1226,7 +1235,7 @@ entries:
   next_gate: deployed-inactive — FS.2 orchestration 接上 generated-app writer 後，使用 staging Auth0/WorkOS/Clerk setup result 渲染
     NextAuth/Lucia scaffold 並跑一次 callback smoke。
 - id: 2026-05-03--FS.2.3
-  header_line: 41411
+  header_line: 41426
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.2.3
@@ -1235,7 +1244,7 @@ entries:
   next_gate: deployed-inactive — FS.2 orchestration 接上 wizard UI / workspace env writer 後，使用 staging GitHub manifest flow
     與 Google manual plan 各跑一次 setup smoke。
 - id: 2026-05-03--FS.2.4
-  header_line: 41432
+  header_line: 41447
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.2.4
@@ -1244,7 +1253,7 @@ entries:
   next_gate: deployed-inactive — FS.2 orchestration 接上 workspace writer 後，使用 staging Google + GitHub OAuth plans 渲染 multi-provider
     stack，並跑一次 link existing password account → OAuth provider 的 smoke。
 - id: 2026-05-03--FS.2.5
-  header_line: 41452
+  header_line: 41467
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.2.5
@@ -1253,7 +1262,7 @@ entries:
   next_gate: deployed-inactive — FS.2 orchestration 接上 workspace writer 與 email sender provider 後，跑一次 magic-link login + TOTP
     challenge + WebAuthn challenge staging smoke。
 - id: 2026-05-03--FS.2.6
-  header_line: 41471
+  header_line: 41486
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.2.6
@@ -1262,7 +1271,7 @@ entries:
   next_gate: deployed-inactive — FS.2 orchestration 接上 workspace writer + staging credentials 後，五 provider 各跑一次 live setup
     / generated-app login smoke。
 - id: 2026-05-03--fs-2b-1
-  header_line: 41490
+  header_line: 41505
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: null
@@ -1271,7 +1280,7 @@ entries:
   next_gate: deployed-inactive — FS.2b.2 接上 generated-app token vault 後，使用 staging GitHub + Slack/Notion OAuth app 跑 authorize
     → callback → token exchange → vault write smoke。
 - id: 2026-05-03--fs-2b-2
-  header_line: 41512
+  header_line: 41527
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: null
@@ -1280,7 +1289,7 @@ entries:
   next_gate: deployed-inactive — FS.2b orchestration 接上 generated-app storage writer 與 staging vault master key 後，跑一次 GitHub
     authorize → callback → token exchange → vault record write smoke。
 - id: 2026-05-03--fs-2b-3
-  header_line: 41533
+  header_line: 41548
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: null
@@ -1289,7 +1298,7 @@ entries:
   next_gate: deployed-inactive — FS.2b orchestration 接上 generated-app token store 後，用 staging GitHub/Google provider 跑 connect
     → forced-expiry use → refresh → rotated vault record save smoke。
 - id: 2026-05-03--fs-2b-4
-  header_line: 41553
+  header_line: 41568
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: null
@@ -1298,7 +1307,7 @@ entries:
   next_gate: deployed-inactive — FS.2b orchestration 接上 generated-app token store 後，用 staging GitHub/Google provider 跑 connect
     → request extra scope → callback merge → provider API smoke。
 - id: 2026-05-03--fs-2b-5
-  header_line: 41573
+  header_line: 41588
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: null
@@ -1307,7 +1316,7 @@ entries:
   next_gate: deployed-inactive — FS.2b orchestration 接上 generated-app token store 後，用 staging Google/GitHub provider 跑 connect
     → disconnect → revoke attempt → local vault delete smoke。
 - id: 2026-05-03--fs-2b-6
-  header_line: 41592
+  header_line: 41607
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: null
@@ -1316,7 +1325,7 @@ entries:
   next_gate: deployed-inactive — FS.2b.7 用 3 個 vendor 跑 connect → use → refresh → revoke 模擬後，再接 staging provider credentials
     做 live smoke。
 - id: 2026-05-03--fs-2b-7
-  header_line: 41612
+  header_line: 41627
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: null
@@ -1325,7 +1334,7 @@ entries:
   next_gate: deployed-inactive — 接上 generated-app token store 與 staging GitHub/Google/Microsoft credentials 後，跑一次真實 connect
     → API use → forced refresh → disconnect smoke。
 - id: 2026-05-03--FS.3.1
-  header_line: 41632
+  header_line: 41647
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.3.1
@@ -1334,7 +1343,7 @@ entries:
   next_gate: deployed-inactive — FS.3.2/FS.3.3 接上 `provisioned_storage` persistence 與 signed URL 後，用 staging S3/R2/Supabase
     credentials 跑 bucket create/reuse smoke。
 - id: 2026-05-03--FS.3.2
-  header_line: 41652
+  header_line: 41667
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.3.2
@@ -1343,7 +1352,7 @@ entries:
   next_gate: deployed-inactive — 將 alembic chain `... → 0061 → 0062` 套到 prod PG；FS.3.3 接上 signed URL 後再用 staging S3/R2/Supabase
     credentials 做 bucket registry smoke。
 - id: 2026-05-03--FS.3.3
-  header_line: 41672
+  header_line: 41687
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.3.3
@@ -1352,7 +1361,7 @@ entries:
   next_gate: deployed-inactive — 用 staging S3/R2/Supabase credentials 對已 provisioned bucket 跑 GET/PUT signed URL smoke；Supabase
     upload signed URL 若要支援 PUT/POST 留給後續明確 row。
 - id: 2026-05-03--FS.3.4
-  header_line: 41692
+  header_line: 41707
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.3.4
@@ -1361,7 +1370,7 @@ entries:
   next_gate: deployed-inactive — 用 staging S3/R2/Supabase credentials 跑 bucket create/reuse + CORS preflight/upload smoke，確認
     provider 端 CORS rule 真實生效。
 - id: 2026-05-03--FS.3.5
-  header_line: 41712
+  header_line: 41727
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.3.5
@@ -1370,7 +1379,7 @@ entries:
   next_gate: deployed-inactive — 用 staging S3/R2/Supabase credentials 跑 bucket create/reuse + CORS + signed URL smoke，確認 provider
     端行為與 mock contract 一致。
 - id: 2026-05-03--FS.4.1
-  header_line: 41731
+  header_line: 41746
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.4.1
@@ -1379,7 +1388,7 @@ entries:
   next_gate: deployed-inactive — FS.4.2 接上 template registry 後，用 staging Resend/Postmark/SES credentials 各跑一封 transaction
     email smoke，確認 sender domain 與 provider API key scope。
 - id: 2026-05-03--FS.4.2
-  header_line: 41751
+  header_line: 41766
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.4.2
@@ -1388,7 +1397,7 @@ entries:
   next_gate: deployed-inactive — 用 staging Resend/Postmark/SES credentials 分別寄送一封 registry-rendered transaction email smoke，確認
     sender domain、unsubscribe/headers policy 與 provider API key scope。
 - id: 2026-05-03--FS.4.3
-  header_line: 41770
+  header_line: 41785
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.4.3
@@ -1397,7 +1406,7 @@ entries:
   next_gate: deployed-inactive — 設定 `OMNISIGHT_EMAIL_WEBHOOK_SECRET`，在 staging Resend/Postmark/SES webhook console 指到 `/api/v1/webhooks/email/{provider}`，各送一個
     bounce / complaint test payload 並確認 operator notification。
 - id: 2026-05-03--FS.4.4
-  header_line: 41790
+  header_line: 41805
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.4.4
@@ -1406,7 +1415,7 @@ entries:
   next_gate: deployed-inactive — 在 staging sender domain 依 runbook 發佈 provider DNS records，等待 provider 驗證通過，寄一封外部 mailbox
     smoke 並確認 `dkim=pass` / `dmarc=pass`。
 - id: 2026-05-03--FS.4.5
-  header_line: 41808
+  header_line: 41823
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.4.5
@@ -1415,7 +1424,7 @@ entries:
   next_gate: deployed-inactive — FS.4 進 staging 後，用真實 sender domain + provider credentials 跑 Resend/Postmark/SES send smoke、webhook
     feedback smoke 與 DNS header verification。
 - id: 2026-05-03--FS.5.1
-  header_line: 41826
+  header_line: 41841
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.5.1
@@ -1424,7 +1433,7 @@ entries:
   next_gate: deployed-inactive — FS.5.2/FS.5.3 接上實際 job definition 與 cron route 後，用 staging Inngest / Trigger.dev token 及
     Vercel Cron secret 各跑一次 dispatch smoke。
 - id: 2026-05-03--FS.5.2
-  header_line: 41846
+  header_line: 41861
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.5.2
@@ -1433,7 +1442,7 @@ entries:
   next_gate: deployed-inactive — FS.5.3 接上 cron schedule wiring 後，用 staging provider token 對 catalog 中每個 cron-backed definition
     產出 provider descriptor 並跑一次 dry-run/smoke。
 - id: 2026-05-03--FS.5.3
-  header_line: 41866
+  header_line: 41881
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.5.3
@@ -1442,7 +1451,7 @@ entries:
   next_gate: deployed-inactive — FS.5.4 補 retry / DLQ 後，用 staging Inngest / Trigger.dev / Vercel Cron secret 對 `build_cron_schedule_manifest()`
     產出的每個 schedule 跑 provider dry-run/smoke。
 - id: 2026-05-03--FS.5.4
-  header_line: 41886
+  header_line: 41901
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.5.4
@@ -1451,7 +1460,7 @@ entries:
   next_gate: deployed-inactive — FS.5.5 補整體 Background Jobs 測試後，用 staging provider token/secret 對失敗重試與 DLQ deposit 跑 provider
     dry-run/smoke；若需要跨重啟 replay，再新增 PG/Redis-backed DLQ。
 - id: 2026-05-03--FS.5.5
-  header_line: 41906
+  header_line: 41921
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.5.5
@@ -1460,7 +1469,7 @@ entries:
   next_gate: deployed-inactive — 用 staging Inngest / Trigger.dev / Vercel Cron token/secret 對 FS.5 manifest 中每個 schedule 跑
     provider dry-run/smoke；若 production 需要跨 worker / 重啟 replay，再補 PG/Redis-backed DLQ。
 - id: 2026-05-03--FS.6.1
-  header_line: 41926
+  header_line: 41941
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.6.1
@@ -1469,7 +1478,7 @@ entries:
   next_gate: deployed-inactive — FS.6.2 接上 indexing pipeline 後，用 staging Algolia / Typesense / Meilisearch credentials 各跑一次
     index/delete/search provider smoke；若 production image 缺 optional provider SDK，本項不受影響，因 FS.6.1 只使用既有 `httpx`。
 - id: 2026-05-03--FS.6.2
-  header_line: 41946
+  header_line: 41961
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.6.2
@@ -1478,7 +1487,7 @@ entries:
   next_gate: deployed-inactive — 需要用 staging Algolia / Typesense / Meilisearch credentials 對 FS.6.2 pipeline 各跑一次 index/delete
     provider smoke；FS.6.3 faceted UI 仍未接入。
 - id: 2026-05-03--FS.6.3
-  header_line: 41966
+  header_line: 41981
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.6.3
@@ -1487,7 +1496,7 @@ entries:
   next_gate: deployed-inactive — FS.6.4 補 component/helper tests 後，將 generated-app search page 接到 staging search provider，驗證
     facet state 到 provider filter dialect 的 mapper。
 - id: 2026-05-03--FS.6.4
-  header_line: 41985
+  header_line: 42000
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.6.4
@@ -1496,7 +1505,7 @@ entries:
   next_gate: deployed-inactive — 將 generated-app search page 接 staging Algolia / Typesense / Meilisearch，驗證 `FacetedSearchState.selectedFacets`
     到 provider filter dialect mapper。
 - id: 2026-05-03--FS.7.1
-  header_line: 42003
+  header_line: 42018
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.7.1
@@ -1505,7 +1514,7 @@ entries:
   next_gate: deployed-inactive — 用一個暫存 Next.js app render FS.7.1 bundle 後，接 staging Postgres + Resend API key 跑 `npm install`,
     `prisma generate`, `next build`, 以及 `/api/contact` smoke。
 - id: 2026-05-03--FS.7.2
-  header_line: 42021
+  header_line: 42036
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.7.2
@@ -1514,7 +1523,7 @@ entries:
   next_gate: deployed-inactive — 用一個暫存 Nuxt app render FS.7.2 bundle 後，接 staging Postgres + Postmark server token 跑 `npm install`,
     `drizzle-kit generate`, `nuxt build`, 以及 `/api/contact` smoke。
 - id: 2026-05-03--FS.7.3
-  header_line: 42040
+  header_line: 42055
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.7.3
@@ -1523,7 +1532,7 @@ entries:
   next_gate: deployed-inactive — 用暫存 Astro app render FS.7.3 bundle 後，接 staging Sanity project/token 跑 `npm install`, `astro
     build`, Sanity webhook signature smoke，並驗證 `ASTRO_TARGET` 四種 target build。
 - id: 2026-05-03--FS.7.4
-  header_line: 42057
+  header_line: 42072
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.7.4
@@ -1532,7 +1541,7 @@ entries:
   next_gate: deployed-inactive — 用暫存 Next.js app render `example_app="todo"` + FS.7.1 knobs 後，安裝依賴並跑 `pnpm test`, `pnpm build`,
     `/todos` Playwright smoke。
 - id: 2026-05-03--FS.8.1
-  header_line: 42077
+  header_line: 42092
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.8.1
@@ -1541,7 +1550,7 @@ entries:
   next_gate: deployed-inactive — 設定 Stripe test secret / price / success-cancel-return URLs 後，在 staging 建立 checkout 與 portal
     session smoke；webhook 與 subscription state 等待 FS.8.2-FS.8.4。
 - id: 2026-05-03--FS.8.2
-  header_line: 42097
+  header_line: 42112
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.8.2
@@ -1550,7 +1559,7 @@ entries:
   next_gate: deployed-inactive — 在 Stripe test mode 設定 endpoint secret 到 `OMNISIGHT_STRIPE_WEBHOOK_SECRET`，用 Stripe CLI 或
     dashboard 發送 `checkout.session.completed` / `customer.subscription.updated` smoke；local subscription sync 等 FS.8.4。
 - id: 2026-05-03--FS.8.3
-  header_line: 42116
+  header_line: 42131
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.8.3
@@ -1559,7 +1568,7 @@ entries:
   next_gate: deployed-inactive — 對 production PG 跑 alembic 0062 → 0063，並在 staging 設定 Stripe test env 後交由 FS.8.4 寫入 webhook
     subscription state。
 - id: 2026-05-03--FS.8.4
-  header_line: 42137
+  header_line: 42152
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.8.4
@@ -1568,7 +1577,7 @@ entries:
   next_gate: deployed-inactive — 在 staging/prod PG 套用 alembic 0063 後，設定 Stripe test webhook secret + checkout price，發送 `customer.subscription.updated`
     smoke 並確認 `provisioned_billing` row 更新。
 - id: 2026-05-03--FS.8.5
-  header_line: 42156
+  header_line: 42171
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.8.5
@@ -1577,7 +1586,7 @@ entries:
   next_gate: deployed-inactive — 在 staging/prod PG 套用 alembic 0063 並設定 Stripe test env 後，執行 checkout + webhook smoke，確認 `provisioned_billing`
     row 由 Stripe lifecycle event 更新。
 - id: 2026-05-03--FS.9.1
-  header_line: 42175
+  header_line: 42190
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.9.1
@@ -1586,7 +1595,7 @@ entries:
   next_gate: deployed-inactive — 用暫存 Next.js todo SaaS render 後，接 staging Auth0/Supabase/Resend credentials 跑 `pnpm install`,
     `prisma migrate deploy`, `pnpm build`, `/todos` + welcome-email live smoke。
 - id: 2026-05-03--FS.9.2
-  header_line: 42193
+  header_line: 42208
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.9.2
@@ -1595,7 +1604,7 @@ entries:
   next_gate: deployed-inactive — 用暫存 Astro blog render 後，接 staging Sanity/R2/Meilisearch credentials 跑 `npm install`, `npm
     run build:static`, CMS webhook publish、asset upload presign、search query live smoke。
 - id: 2026-05-03--FS.9.3
-  header_line: 42212
+  header_line: 42227
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: FS.9.3
@@ -1604,7 +1613,7 @@ entries:
   next_gate: deployed-inactive — 用暫存 Next.js landing render 後，接 staging Stripe/Resend credentials 跑 `pnpm install`, `pnpm
     build`, checkout session、billing portal、welcome-email live smoke。
 - id: 2026-05-03--SC.1.1-2
-  header_line: 42230
+  header_line: 42245
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.1.1
@@ -1613,7 +1622,7 @@ entries:
   next_gate: deployed-inactive — SC.1.2 將 adapter 接到 generated workspace commit trigger 後，在 staging runner image 確認至少一個 SAST
     CLI 可用並跑一次 generated app smoke scan。
 - id: 2026-05-03--SC.1.2
-  header_line: 42249
+  header_line: 42264
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.1.2
@@ -1622,7 +1631,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 需確認 `python3 -m backend.security_scanning.sast --workspace <generated>`
     可用，並至少安裝/啟用一個 SAST CLI（CodeQL/Semgrep/Snyk Code）跑 generated app smoke scan。
 - id: 2026-05-03--SC.1.3
-  header_line: 42268
+  header_line: 42283
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.1.3
@@ -1631,7 +1640,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 安裝至少一個 SAST CLI 後，對 generated workspace 製造 HIGH finding，確認 finalize
     raises PEP HOLD 並由 operator approve/reject smoke 通過。
 - id: 2026-05-03--SC.2.1
-  header_line: 42287
+  header_line: 42302
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.2.1
@@ -1640,7 +1649,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 需安裝或允許 ZAP runner（`zap-baseline.py` 或 Docker image pull），SC.2.2 再把 adapter
     接到 W14 sandbox lifecycle 並跑一次 live preview smoke scan。
 - id: 2026-05-03--SC.1.4
-  header_line: 42306
+  header_line: 42321
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.1.4
@@ -1649,7 +1658,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 安裝至少一個 SAST CLI 後，跑 generated workspace smoke：clean/MEDIUM finding 不
     HOLD、HIGH/CRITICAL finding 進 PEP HOLD。
 - id: 2026-05-03--SC.1.3-2
-  header_line: 42326
+  header_line: 42341
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.1.3
@@ -1658,7 +1667,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 安裝至少一個 SAST CLI 後，對 generated workspace 製造 HIGH finding，確認 finalize
     raises PEP HOLD 並由 operator approve/reject smoke 通過。
 - id: 2026-05-03--SC.2.2
-  header_line: 42339
+  header_line: 42354
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.2.2
@@ -1667,7 +1676,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 需安裝或允許 ZAP runner（`zap-baseline.py` 或 Docker image pull），再對一個 W14 live
     preview 跑 ready-trigger smoke scan。
 - id: 2026-05-03--SC.2.3
-  header_line: 42358
+  header_line: 42373
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.2.3
@@ -1676,7 +1685,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 需安裝或允許 ZAP runner（`zap-baseline.py` 或 Docker image pull），再對 W14 live
     preview 跑一次 ready-trigger DAST smoke scan。
 - id: 2026-05-03--SC.3.1
-  header_line: 42377
+  header_line: 42392
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.3.1
@@ -1685,7 +1694,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 需安裝至少一個 SCA CLI（npm / osv-scanner / snyk），SC.3.2 再接自動 fix-PR pattern
     前先跑 generated Node app smoke scan。
 - id: 2026-05-03--SC.3.2
-  header_line: 42397
+  header_line: 42412
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.3.2
@@ -1694,7 +1703,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 安裝 SCA CLI 後，對含 fixable CVE 的 generated Node app 跑 scan + `--fix-pr-out`
     smoke，確認 artifact 可由後續 GitHub PR opener 消費。
 - id: 2026-05-03--SC.4.2
-  header_line: 42416
+  header_line: 42431
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.4.2
@@ -1703,7 +1712,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 安裝 Trivy 或 Grype 後，對 W4 deploy artifact 製造 HIGH CVE smoke，確認四個 provider
     deploy path 都在實際 upload/copy 前 block。
 - id: 2026-05-03--SC.4.1
-  header_line: 42435
+  header_line: 42450
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.4.1
@@ -1712,7 +1721,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 需安裝 Trivy 或 Grype，SC.4.2 再把 HIGH/CRITICAL container findings 接入 W4 deploy
     adapter blocking。
 - id: 2026-05-03--SC.3.3
-  header_line: 42454
+  header_line: 42469
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.3.3
@@ -1721,7 +1730,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 安裝 SCA CLI 後，對含 fixable CVE 的 generated Node app 跑 scan + `--fix-pr-out`
     smoke，確認 artifact 可由後續 GitHub PR opener 消費。
 - id: 2026-05-03--SC.5.1
-  header_line: 42473
+  header_line: 42488
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.5.1
@@ -1730,7 +1739,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 安裝 Gitleaks 或 TruffleHog 後，對含假測試 token 的 generated workspace 跑 smoke，確認
     scanner artifact 可由 SC.5.2 hook 消費且 raw secret 不落盤。
 - id: 2026-05-03--SC.5.2
-  header_line: 42492
+  header_line: 42507
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.5.2
@@ -1739,7 +1748,7 @@ entries:
   next_gate: deployed-inactive — staging runner image 安裝 Gitleaks 或 TruffleHog 後，建立 generated workspace，commit 含假 token 的檔案，確認
     pre-commit hook 在 commit object 產生前阻擋且不輸出 raw secret。
 - id: 2026-05-03--SC.6.1
-  header_line: 42513
+  header_line: 42528
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.6.1
@@ -1748,7 +1757,7 @@ entries:
   next_gate: deployed-inactive — staging backend image 套用後，對實際 HTML route 做 smoke，確認瀏覽器收到含 nonce/hash 的 CSP 且無 inline script
     CSP violation。
 - id: 2026-05-03--SC.6.2
-  header_line: 42534
+  header_line: 42549
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.6.2
@@ -1757,7 +1766,7 @@ entries:
   next_gate: deployed-inactive — staging backend/frontend image 套用後，對實際 HTML route 與 `/api/v1/health` 做 header smoke，確認 HSTS
     preload、COOP/COEP/CORP 與既有 CSP 不造成 asset load regression。
 - id: 2026-05-03--SC.6.3
-  header_line: 42555
+  header_line: 42570
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.6.3
@@ -1766,7 +1775,7 @@ entries:
   next_gate: deployed-inactive — 用 W6/W7/W8 各產生一個 staging workspace，跑 `pnpm build` + 瀏覽器 header smoke，確認 middleware header
     生效且 CSP 沒有阻擋 framework runtime asset。
 - id: 2026-05-03--SC.7.1
-  header_line: 42574
+  header_line: 42589
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.7.1
@@ -1775,7 +1784,7 @@ entries:
   next_gate: deployed-inactive — generated-app template 開始引用本 helper 後，在 staging workspace 對 representative HTTP form/API
     inputs 做 400/422 smoke，確認錯誤 code 映射符合產品 UX。
 - id: 2026-05-03--SC.7.2
-  header_line: 42595
+  header_line: 42610
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.7.2
@@ -1784,7 +1793,7 @@ entries:
   next_gate: deployed-inactive — generated-app template 開始引用本 helper 後，在 staging workspace 對 representative rendered HTML
     / inline script / URL component sink 做 browser smoke，確認編碼後內容可用且無 XSS regression。
 - id: 2026-05-03--SC.7.3
-  header_line: 42616
+  header_line: 42631
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.7.3
@@ -1794,7 +1803,7 @@ entries:
     做 DB smoke，確認 asyncpg `fetch/fetchrow/execute` 使用 `QueryTemplate.sql` + `*QueryTemplate.params` 且 value injection 不進 SQL
     text。
 - id: 2026-05-03--SC.7.4
-  header_line: 42636
+  header_line: 42651
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.7.4
@@ -1803,7 +1812,7 @@ entries:
   next_gate: deployed-inactive — generated-app template 開始引用本 helper 後，在 staging workspace 對 representative unsafe form/API
     request 做 browser + API smoke，確認 cookie/session token 能被 header/form echo 並拒絕 missing/mismatch token。
 - id: 2026-05-03--SC.7.5
-  header_line: 42656
+  header_line: 42671
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.7.5
@@ -1812,7 +1821,7 @@ entries:
   next_gate: deployed-inactive — generated-app template 開始引用本 helper 後，在 staging workspace 對 representative file export/import
     path 與 server-side URL fetch 做 smoke，確認 traversal / blocked-destination errors 被映射成預期 400/422。
 - id: 2026-05-03--SC.8.1
-  header_line: 42676
+  header_line: 42691
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.8.1
@@ -1821,7 +1830,7 @@ entries:
   next_gate: deployed-inactive — 使用 staging Clerk/Auth0 credentials 跑一次 managed-provider setup smoke，確認 provider dashboard
     / Management API 讀回 `require_mfa` metadata 後，再由 generated app enforcement layer 消費此 toggle。
 - id: 2026-05-03--SC.8.2
-  header_line: 42696
+  header_line: 42711
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.8.2
@@ -1830,7 +1839,7 @@ entries:
   next_gate: deployed-inactive — 在 staging generated NextAuth app 寫入 `AUTH_MFA_REQUIRED=true`，跑 OAuth login → `/mfa-challenge`
     step-up smoke，確認 session update 後 `mfaVerified=true` 被 callbacks 帶回。
 - id: 2026-05-03--SC.9.1
-  header_line: 42716
+  header_line: 42731
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.9.1
@@ -1839,7 +1848,7 @@ entries:
   next_gate: deployed-inactive — SC.9.2-SC.9.5 其他 jurisdiction template 落地後，generated-app template registry 才能把 GDPR notice
     暴露給 scaffold UI/API；SC.10 另行接 DSAR request workflow。
 - id: 2026-05-03--SC.9.2
-  header_line: 42737
+  header_line: 42752
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.9.2
@@ -1848,7 +1857,7 @@ entries:
   next_gate: deployed-inactive — SC.9.3-SC.9.5 其他 jurisdiction template 與 SC.9.6 SDK inference 落地後，generated-app template
     registry 才能把 per-jurisdiction notice 選項暴露給 scaffold UI/API；SC.10 另行接 consumer request workflow。
 - id: 2026-05-03--SC.9.3
-  header_line: 42756
+  header_line: 42771
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.9.3
@@ -1857,7 +1866,7 @@ entries:
   next_gate: deployed-inactive — SC.9.4-SC.9.5 其他 jurisdiction template 與 SC.9.6 SDK inference 落地後，generated-app template
     registry 才能把 per-jurisdiction notice 選項暴露給 scaffold UI/API；SC.10 另行接 individual request workflow。
 - id: 2026-05-03--SC.9.4
-  header_line: 42775
+  header_line: 42790
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.9.4
@@ -1866,7 +1875,7 @@ entries:
   next_gate: deployed-inactive — SC.9.5 PIPEDA template 與 SC.9.6 SDK inference 落地後，generated-app template registry 才能把 per-jurisdiction
     notice 選項暴露給 scaffold UI/API；SC.10 另行接 data-subject request workflow。
 - id: 2026-05-03--SC.9.5
-  header_line: 42795
+  header_line: 42810
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.9.5
@@ -1875,7 +1884,7 @@ entries:
   next_gate: deployed-inactive — SC.9.6 SDK inference 落地後，generated-app template registry 才能把 all five jurisdiction notice
     options 暴露給 scaffold UI/API；SC.10 另行接 privacy request workflow。
 - id: 2026-05-03--SC.9.6
-  header_line: 42815
+  header_line: 42830
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.9.6
@@ -1884,7 +1893,7 @@ entries:
   next_gate: deployed-inactive — generated-app template registry / scaffold UI/API 尚未接入 SC.9 privacy notice builders；SC.10
     另行接 privacy request workflow。
 - id: 2026-05-03--SC.10.1
-  header_line: 42835
+  header_line: 42850
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.10.1
@@ -1893,7 +1902,7 @@ entries:
   next_gate: deployed-inactive — prod PG 跑 `alembic upgrade head` 到 0064；deployed-active 需 SC.10.2-SC.10.5 endpoints / email
     SLA worker 實際開始寫入 `dsar_requests`。
 - id: 2026-05-03--SC.10.2
-  header_line: 42856
+  header_line: 42871
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.10.2
@@ -1902,7 +1911,7 @@ entries:
   next_gate: deployed-inactive — prod PG 需先完成 0064 migration；deployed-active 需 SC.10.3-SC.10.5 補齊 erasure / portability /
     email SLA 後再跑 live DSAR smoke。
 - id: 2026-05-03--SC.10.3
-  header_line: 42877
+  header_line: 42892
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.10.3
@@ -1911,7 +1920,7 @@ entries:
   next_gate: deployed-inactive — prod PG 需先完成 0064 migration；deployed-active 需 SC.10.4-SC.10.5 補齊 portability / email SLA，並在
     production-like PG 跑 erasure smoke。
 - id: 2026-05-03--SC.10.4
-  header_line: 42899
+  header_line: 42914
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.10.4
@@ -1920,7 +1929,7 @@ entries:
   next_gate: deployed-inactive — prod PG 需先完成 0064 migration；deployed-active 需 SC.10.5 email SLA timer 後，在 production-like
     PG 跑 access/erasure/portability DSAR smoke。
 - id: 2026-05-03--SC.10.5
-  header_line: 42920
+  header_line: 42935
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.10.5
@@ -1928,7 +1937,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — prod PG 需先完成 0064 migration；deployed-active 需實際接上 email provider dispatch / live DSAR smoke。
 - id: 2026-05-03--SC.11.1
-  header_line: 42939
+  header_line: 42954
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.11.1
@@ -1937,7 +1946,7 @@ entries:
   next_gate: deployed-inactive — prod PG 跑 alembic chain 0064 -> 0065；deployed-active 需 SC.11.2-SC.11.4 寫入 bundle rows 並在
     production-like PG 跑 evidence bundle smoke。
 - id: 2026-05-03--SC.11.2
-  header_line: 42960
+  header_line: 42975
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.11.2
@@ -1946,7 +1955,7 @@ entries:
   next_gate: deployed-inactive — prod PG 需先完成 0065 migration；deployed-active 需由 SC.11.4 worker/export path 實際呼叫 SOC 2 collection
     並產出 zip/signature smoke。
 - id: 2026-05-03--SC.11.3
-  header_line: 42980
+  header_line: 42995
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.11.3
@@ -1955,7 +1964,7 @@ entries:
   next_gate: deployed-inactive — prod PG 需先完成 0065 migration；deployed-active 需由 SC.11.4 worker/export path 實際呼叫 ISO 27001
     collection 並產出 zip/signature smoke。
 - id: 2026-05-03--SC.11.4
-  header_line: 42999
+  header_line: 43014
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.11.4
@@ -1964,7 +1973,7 @@ entries:
   next_gate: deployed-inactive — prod PG 需先完成 0065 migration 並配置 `OMNISIGHT_COMPLIANCE_EVIDENCE_HMAC_KEY`；deployed-active
     需在 production-like PG 對 SOC 2 / ISO 27001 bundle 跑一次 collect→export→verify smoke。
 - id: 2026-05-03--SC.12.1
-  header_line: 43018
+  header_line: 43033
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.12.1
@@ -1973,7 +1982,7 @@ entries:
   next_gate: deployed-inactive — 將本次 backend image rebuild/publish 到 production image registry；deployed-active 需由 SC.12.2
     將 helper 接到 log / response mask path 後做 live smoke。
 - id: 2026-05-03--SC.12.2
-  header_line: 43039
+  header_line: 43054
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.12.2
@@ -1982,7 +1991,7 @@ entries:
   next_gate: deployed-inactive — 需由後續 wiring row 將 helper 接到實際 log/response call-site，並在 production image 中做一次 masked log
     / masked response smoke。
 - id: 2026-05-03--SC.12.3
-  header_line: 43058
+  header_line: 43073
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.12.3
@@ -1991,7 +2000,7 @@ entries:
   next_gate: deployed-inactive — 需由後續 wiring row 將 helper 接到實際 log/response call-site，並在 production image 中做一次 masked log
     / masked response smoke。
 - id: 2026-05-03--SC.13.1
-  header_line: 43077
+  header_line: 43092
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.13.1
@@ -2000,7 +2009,7 @@ entries:
   next_gate: deployed-inactive — SC.13.2 將此 bridge 接到 login / signup / password-reset / contact / comment form scaffold 後，在
     generated-app build 中跑一次 bot-challenge env + route smoke。
 - id: 2026-05-03--SC.13.2
-  header_line: 43096
+  header_line: 43111
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.13.2
@@ -2009,7 +2018,7 @@ entries:
   next_gate: deployed-inactive — SC.13.3 將 AS.4 honeypot field 接入同一批 generated form defaults 後，在 generated-app build 中跑 bot-challenge
     + honeypot form route smoke。
 - id: 2026-05-03--SC.13.3
-  header_line: 43115
+  header_line: 43130
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.13.3
@@ -2018,7 +2027,7 @@ entries:
   next_gate: deployed-inactive — SC.13.4 觀測 dashboard 或後續 generated-app build smoke 需實際 render `botDefenseHoneypotFieldForForm()`
     並送一次 honeypot-empty form submit。
 - id: 2026-05-03--SC.13.4
-  header_line: 43134
+  header_line: 43149
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.13.4
@@ -2027,7 +2036,7 @@ entries:
   next_gate: deployed-inactive — 後續 generated-app build smoke 需渲染 `botDefenseChallengeDashboard()`，並以 pass / fail / fallback
     三類結果各送一次確認 ratio 顯示。
 - id: 2026-05-03--SC.13.5
-  header_line: 43153
+  header_line: 43168
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: SC.13.5
@@ -2036,7 +2045,7 @@ entries:
   next_gate: deployed-inactive — 後續 generated-app build smoke 需實際編譯 `auth/bot-challenge.ts` / `auth/honeypot.ts` / `auth/bot-defense-forms.ts`
     / `auth/bot-defense-dashboard.ts` 並以 pass / fail / fallback fixture 驗證 dashboard ratio。
 - id: 2026-05-03--BP.A.5b
-  header_line: 43173
+  header_line: 43188
   date: '2026-05-03'
   author: Agent-row7-self-agent
   task_id: BP.A.5b
@@ -2045,7 +2054,7 @@ entries:
   next_gate: deployed-inactive — BP.A.6 `backend/template_validator.py` FastAPI middleware 實作後，`plan_dispatch` 才會有 live code
     path；目前純 additive，不影響任何 runtime。
 - id: 2026-05-03--Z.6.2
-  header_line: 43201
+  header_line: 43216
   date: '2026-05-03'
   author: Agent-row7-self-agent
   task_id: Z.6.2
@@ -2054,7 +2063,7 @@ entries:
   next_gate: deployed-inactive — Z.6.3 確認 AGENT_TOOLS mapping ollama provider 不被短路後，air-gapped 客戶端才能完整使用 agent skills via
     ollama。
 - id: 2026-05-03--Z.6.6
-  header_line: 43229
+  header_line: 43244
   date: '2026-05-03'
   author: Agent-row7-self-agent
   task_id: Z.6.6
@@ -2062,7 +2071,7 @@ entries:
   production_status: dev-only
   next_gate: Z.6.7 `test_ollama_tool_fallback.py`（unsupported model / daemon error / parse error fallback tests）。
 - id: 2026-05-03--Z.6.7
-  header_line: 43255
+  header_line: 43270
   date: '2026-05-03'
   author: Agent-row7-self-agent
   task_id: Z.6.7
@@ -2070,7 +2079,7 @@ entries:
   production_status: dev-only
   next_gate: Z.6.8 `docs/integrations/llm-observability.md` 加 Tool Calling 欄位。
 - id: 2026-05-03--Z.7.1
-  header_line: 43282
+  header_line: 43297
   date: '2026-05-03'
   author: Agent-row7-self-agent
   task_id: Z.7.1
@@ -2079,7 +2088,7 @@ entries:
   next_gate: Operator 需在 GitHub Actions 建立三個 CI sandbox secrets（上方 Operator 待辦），然後 Z.7.2 可接著實作 `test_llm_adapter_live.py`
     test file。
 - id: 2026-05-03--Z.7.3
-  header_line: 43313
+  header_line: 43328
   date: '2026-05-03'
   author: Agent-row7-self-agent
   task_id: Z.7.3
@@ -2087,7 +2096,7 @@ entries:
   production_status: dev-only
   next_gate: Z.7.1 Operator 建立 CI secrets 後，`pytest -m live` 即可驗三家 tool_call 真實回應。Z.7.4 multi-turn loop test 為下一實作項目。
 - id: 2026-05-03--Z.7.7
-  header_line: 43338
+  header_line: 43353
   date: '2026-05-03'
   author: Agent-row7-self-agent
   task_id: Z.7.7
@@ -2096,7 +2105,7 @@ entries:
   next_gate: deployed-inactive — 需要 Operator 設定 3+2 個 GitHub secrets + backend `OMNISIGHT_REPORTER_TOKEN` env var。設完後下次 06:00
     UTC nightly run 即開始更新 dashboard chip。
 - id: 2026-05-03--Z.7.8
-  header_line: 43386
+  header_line: 43401
   date: '2026-05-03'
   author: Agent-row7-self-agent
   task_id: Z.7.8
@@ -2105,7 +2114,7 @@ entries:
   next_gate: 'deployed-inactive — 需要 Operator 確認 GitHub Actions repo permissions 允許 `issues: write`（Settings → Actions → General
     → Workflow permissions）。下次 06:00 UTC nightly run 若失敗兩次即自動觸發。'
 - id: 2026-05-03--KS.1.1
-  header_line: 43439
+  header_line: 43454
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.1
@@ -2114,7 +2123,7 @@ entries:
   next_gate: deployed-inactive — 重 build backend production image，執行 `docker run --rm <image> python3 -c "import boto3, hvac;
     from google.cloud import kms"`，再接 KS.1.2 的 tenant DEK schema / envelope helper。
 - id: 2026-05-03--KS.1.1-2
-  header_line: 43459
+  header_line: 43474
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.1
@@ -2123,7 +2132,7 @@ entries:
   next_gate: deployed-inactive — 重 build backend production image 後執行 `docker run --rm <image> python3 -c "import boto3"`，並在
     AWS sandbox 以 assume-role role ARN 做一次 live KMS encrypt/decrypt smoke。
 - id: 2026-05-03--KS.1.1-3
-  header_line: 43476
+  header_line: 43491
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.1
@@ -2132,7 +2141,7 @@ entries:
   next_gate: deployed-inactive — 重 build backend production image 後執行 `docker run --rm <image> python3 -c "from google.cloud
     import kms"`，並在 GCP sandbox 以 Cloud KMS key resource 做一次 live encrypt/decrypt smoke。
 - id: 2026-05-03--KS.1.1-4
-  header_line: 43493
+  header_line: 43508
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.1
@@ -2141,7 +2150,7 @@ entries:
   next_gate: deployed-inactive — 重 build backend production image 後執行 `docker run --rm <image> python3 -c "import hvac"`，並以
     self-hosted Vault Transit mount 做一次 live encrypt/decrypt smoke。
 - id: 2026-05-03--KS.1.1-5
-  header_line: 43510
+  header_line: 43525
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.1
@@ -2150,7 +2159,7 @@ entries:
   next_gate: deployed-inactive — 重 build backend production image 後執行 `docker run --rm <image> python3 -c "from backend.security.kms_adapters
     import LocalFernetKMSAdapter"`，再接 KS.1.2 tenant DEK schema / envelope helper。
 - id: 2026-05-03--KS.1.2
-  header_line: 43530
+  header_line: 43545
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.2
@@ -2159,7 +2168,7 @@ entries:
   next_gate: deployed-inactive — KS.1.10 落地 `tenant_deks` / `kms_keys` 後，重 build backend production image，跑 `docker run --rm
     <image> python3 -c "from backend.security import envelope"`，再由 KS.1.3 接 AS Token Vault 雙讀雙寫。
 - id: 2026-05-03--KS.1.4
-  header_line: 43545
+  header_line: 43560
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.4
@@ -2168,7 +2177,7 @@ entries:
   next_gate: deployed-inactive — production image 重 build 後執行 `docker run --rm <image> python3 -c "from backend.security import
     token_vault; assert token_vault.current_key_version() >= 1"`，並在 KS.1.10 schema 落地後接實際 background scanner SQL。
 - id: 2026-05-03--KS.1.5
-  header_line: 43561
+  header_line: 43576
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.5
@@ -2177,7 +2186,7 @@ entries:
   next_gate: deployed-inactive — 重 build backend production image 後執行 `docker run --rm <image> python3 -c "from backend.security
     import decryption_audit"`，並在 KS.1.10 `decryption_audits` schema 落地後補 schema-level 對齊測試。
 - id: 2026-05-03--KS.1.6
-  header_line: 43576
+  header_line: 43591
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.6
@@ -2187,7 +2196,7 @@ entries:
     run --rm <image> python3 -c "from backend.security import spend_anomaly"`，並以 Redis-backed store 做一次 60 秒內 anomaly trigger
     smoke。
 - id: 2026-05-03--KS.1.7
-  header_line: 43593
+  header_line: 43608
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.7
@@ -2196,7 +2205,7 @@ entries:
   next_gate: deployed-inactive — CI 首次跑 `secret-pre-commit` 後確認 repo fixtures 未造成 scanner false positive；重 build backend production
     image 後跑 `docker run --rm <image> python3 -c "from backend.security.secret_filter import SecretScrubbingFilter"`。
 - id: 2026-05-03--KS.1.8
-  header_line: 43609
+  header_line: 43624
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.8
@@ -2205,7 +2214,7 @@ entries:
   next_gate: deployed-inactive — production host 需設定 `OMNISIGHT_BACKUP_PASSPHRASE`，重 build / deploy 後在 staging 或 prod-equivalent
     host 跑一次 `scripts/backup_prod_db.sh --label ks-1-8-smoke --prune 1`，確認輸出只留下 `.db.gpg` 且 restore command 可解密。
 - id: 2026-05-03--KS.1.9
-  header_line: 43625
+  header_line: 43640
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.9
@@ -2215,7 +2224,7 @@ entries:
     import envelope; b=bytearray(b'ks19'); envelope._zeroize_bytearray(b); assert b == b'\\x00' * 4"`，並在 staging 以 token vault
     round-trip smoke 確認 envelope decrypt 正常。
 - id: 2026-05-03--KS.1.10
-  header_line: 43642
+  header_line: 43657
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.10
@@ -2224,7 +2233,7 @@ entries:
   next_gate: deployed-inactive — production PG 執行 alembic chain `0065 -> 0106` 後，確認五張表存在且 runtime KS.1.11-KS.1.13 開始把 token
     vault / customer secrets / provider keys 寫入新 envelope schema。
 - id: 2026-05-03--KS.1.11
-  header_line: 43660
+  header_line: 43675
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.11
@@ -2233,7 +2242,7 @@ entries:
   next_gate: deployed-inactive — 補齊 KS.1.12 single knob 後，重 build backend production image，跑 token vault / tenant_secrets
     / llm_secrets 三條 envelope round-trip smoke，再進入 staging hard-restart 驗證。
 - id: 2026-05-03--KS.1.12
-  header_line: 43677
+  header_line: 43692
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.12
@@ -2242,7 +2251,7 @@ entries:
   next_gate: deployed-inactive — production image 重 build 後，以 `OMNISIGHT_KS_ENVELOPE_ENABLED=false` 跑 token vault / tenant_secrets
     / llm_secrets rollback smoke；migration window 結束後將此 env 永久設為 ON / 移除 false override。
 - id: 2026-05-03--KS.1.13
-  header_line: 43694
+  header_line: 43709
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.1.13
@@ -2251,7 +2260,7 @@ entries:
   next_gate: deployed-inactive — production image 重 build 後，於 staging 執行 KS.1.13 對應 smoke：token vault hard-restart decrypt、audit
     ledger chain verify、anomaly alert sink、log sink redaction、backup DLP fail-closed。
 - id: 2026-05-03--KS.4.1
-  header_line: 43710
+  header_line: 43725
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.1
@@ -2260,7 +2269,7 @@ entries:
   next_gate: deployed-inactive — production image 重 build 後，於 staging 跑一筆 logging smoke，確認 API key / OAuth token / JWT / cookie
     / database URL 進 stdlib logging sink 皆輸出 `[REDACTED]`。
 - id: 2026-05-03--KS.4.2
-  header_line: 43727
+  header_line: 43742
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.2
@@ -2269,7 +2278,7 @@ entries:
   next_gate: deployed-inactive — 需讓 GitHub PR required checks 包含 `secret-pre-commit`，並在下一個 PR 觀察該 check 綠燈；若 branch protection
     尚未套用，由 repo admin 在 GitHub 設定。
 - id: 2026-05-03--KS.4.3
-  header_line: 43743
+  header_line: 43758
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.3
@@ -2279,7 +2288,7 @@ entries:
     `OMNISIGHT_BACKUP_S3_KMS_KEY_ID`），重 build/deploy 後跑 `scripts/backup_prod_db.sh --label ks-4-3-smoke --prune 1` 並確認 S3
     object 帶 COMPLIANCE retention、SSE、`GLACIER_IR`。
 - id: 2026-05-03--KS.4.4
-  header_line: 43760
+  header_line: 43775
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.4
@@ -2288,7 +2297,7 @@ entries:
   next_gate: deployed-inactive — security owner 需完成 vendor MSA/SOW 與 Q2 2026 測試排程；收到報告後存入 private evidence vault，計算 SHA-256，並在
     N10 `Pentest Reports` 表補實際 vendor/report row。
 - id: 2026-05-03--KS.4.5
-  header_line: 43776
+  header_line: 43791
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.5
@@ -2298,7 +2307,7 @@ entries:
     pool approval、managed triage enablement、private researcher invite list 與平台 emergency pause smoke，然後在 N10 `Bug Bounty Programs`
     表補實際 launch row。
 - id: 2026-05-03--KS.4.6
-  header_line: 43792
+  header_line: 43807
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.6
@@ -2307,7 +2316,7 @@ entries:
   next_gate: deployed-inactive — on-call rotation 需確認 incident commander / security / engineering / communications 角色已排班，private
     security evidence vault 可用，並於下一次 tabletop drill 使用此 runbook 演練一次 24h SOP。
 - id: 2026-05-03--KS.4.7
-  header_line: 43807
+  header_line: 43822
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.7
@@ -2317,7 +2326,7 @@ entries:
     決策、至少兩家 CPA auditor shortlist / independence review，並在觀察窗開始前於 N10 `SOC 2 Readiness` 表補實際 platform / auditor / evidence-index
     row。
 - id: 2026-05-03--KS.4.8
-  header_line: 43823
+  header_line: 43838
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.8
@@ -2327,7 +2336,7 @@ entries:
     成功後 purge wrapped DEK rows 或 KMS tenant key material、sample decrypt failure、redact audit raw payload while retaining hash
     metadata，並在首次真實 DSAR/export/erasure 完成時補 N10 `DSAR Evidence` row。
 - id: 2026-05-03--KS.4.9
-  header_line: 43839
+  header_line: 43854
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.9
@@ -2337,7 +2346,7 @@ entries:
     import envelope; b=bytearray(b'ks49'); envelope._zeroize_bytearray(b); assert b == b'\\x00' * 4"`，並跑 token/envelope round-trip
     smoke 確認 PyNaCl/libsodium 在 production image 可載入。
 - id: 2026-05-03--KS.4.10
-  header_line: 43855
+  header_line: 43870
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.10
@@ -2346,7 +2355,7 @@ entries:
   next_gate: deployed-inactive — KS.4.11+ 需把 `safe / suspicious / blocked` 接到 enforcement/audit/persistence；production image
     rebuild 後用實際 `ANTHROPIC_API_KEY` 跑一次 safe + blocked classifier smoke，確認 Anthropic SDK 與 PyNaCl dependency 都能載入。
 - id: 2026-05-03--KS.4.11
-  header_line: 43872
+  header_line: 43887
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.11
@@ -2355,7 +2364,7 @@ entries:
   next_gate: deployed-inactive — KS.4.12 需把 `enforce_input()` 掛到 user-facing orchestrator/chat/API/webhook entry；KS.4.13 再將
     suspicious/blocked 持久化到 `firewall_events`，production image rebuild 後跑一次 safe / suspicious / blocked smoke。
 - id: 2026-05-03--KS.4.12
-  header_line: 43888
+  header_line: 43903
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.12
@@ -2364,7 +2373,7 @@ entries:
   next_gate: deployed-inactive — 補齊 project venv / production image dependency 後重跑相關 pytest；KS.4.13 持久化 `firewall_events`，BP.A2A
     inbound endpoint landed 後需在其外部 caller entry 直接套用同一 `enforce_input()`。
 - id: 2026-05-03--KS.4.13
-  header_line: 43904
+  header_line: 43919
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.13
@@ -2373,7 +2382,7 @@ entries:
   next_gate: deployed-inactive — production PG 執行 alembic 0185 → 0187 後，KS.4.11/KS.4.12 的 suspicious / blocked firewall decisions
     需接上 `firewall_events` writer；首次 live smoke 要確認 blocked/suspicious 只寫 `input_hash` 與 reason，不寫 raw input。
 - id: 2026-05-03--KS.4.14
-  header_line: 43921
+  header_line: 43936
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.14
@@ -2382,7 +2391,7 @@ entries:
   next_gate: deployed-inactive — KS.4.15 將 firewall 作為 PEP layer 接入後，補 live smoke：blocked/suspicious 在 tenant-scoped `firewall_events`
     持久化時只寫 tenant_id + input_hash + reason，不寫 raw input。
 - id: 2026-05-03--KS.4.15
-  header_line: 43937
+  header_line: 43952
   date: '2026-05-03'
   author: Codex/GPT-5.5
   task_id: KS.4.15
@@ -2391,7 +2400,7 @@ entries:
   next_gate: deployed-inactive — production image / env 已有 classifier credential 時跑一次 PEP safe、suspicious、blocked live smoke；確認
     blocked 只產生 firewall audit hash、不產生 PEP HOLD/PEP audit，suspicious 仍進 PEP policy。
 - id: 2026-05-04--FX.5.1
-  header_line: 43953
+  header_line: 43968
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.1
@@ -2400,7 +2409,7 @@ entries:
   next_gate: deployed-inactive — FX.5 系列其餘補測完成後，由 runner/CI 在 production-equivalent test image 重跑 auth/OAuth/security subset；本項無獨立
     deploy 動作。
 - id: 2026-05-04--FX.5.2
-  header_line: 43968
+  header_line: 43983
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.2
@@ -2409,7 +2418,7 @@ entries:
   next_gate: deployed-inactive — FX.5 security補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 agent-runtime/security
     subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.3
-  header_line: 43984
+  header_line: 43999
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.3
@@ -2418,7 +2427,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime 補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 batch dispatcher
     / eligibility / tool dispatcher subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.6
-  header_line: 43999
+  header_line: 44014
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.6
@@ -2427,7 +2436,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime 補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 external tool
     registry / MCP / tool dispatcher subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.9
-  header_line: 44014
+  header_line: 44029
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.9
@@ -2436,7 +2445,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime 補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 rate limiter
     / retry executor / tool dispatcher subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.5
-  header_line: 44029
+  header_line: 44044
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.5
@@ -2445,7 +2454,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime / cost-control 補測全部完成後，由 runner/CI 在 production-equivalent test image
     重跑 cost guard / batch / tool runtime subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.4
-  header_line: 44044
+  header_line: 44059
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.4
@@ -2454,7 +2463,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime 補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 batch dispatcher
     / eligibility / tool dispatcher subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.7
-  header_line: 44059
+  header_line: 44074
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.7
@@ -2463,7 +2472,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime 補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 MCP / external
     tool registry / tool dispatcher subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.6-2
-  header_line: 44074
+  header_line: 44089
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.6
@@ -2472,7 +2481,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime 補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 external tool
     registry / MCP / tool dispatcher subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.10
-  header_line: 44089
+  header_line: 44104
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.10
@@ -2481,7 +2490,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime 補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 tool dispatcher
     / runner handlers / Anthropic client subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.11
-  header_line: 44106
+  header_line: 44121
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.11
@@ -2490,7 +2499,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime 補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 tools patch
     / wrapper / tool dispatcher subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.12
-  header_line: 44121
+  header_line: 44136
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.12
@@ -2499,7 +2508,7 @@ entries:
   next_gate: deployed-inactive — FX.5 agent-runtime 補測全部完成後，由 runner/CI 在 production-equivalent test image 重跑 tool schema
     / dispatcher / Anthropic client subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.5.13
-  header_line: 44135
+  header_line: 44150
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.5.13
@@ -2508,7 +2517,7 @@ entries:
   next_gate: deployed-inactive — FX.5 coverage 補測全部合併後，由 runner/CI 在 production-equivalent test image 重跑 FX.5 subset；本項無獨立
     deploy 動作。
 - id: 2026-05-04--FX.7.9
-  header_line: 44151
+  header_line: 44166
   date: '2026-05-04'
   author: Claude/Opus
   task_id: FX.7.9
@@ -2518,7 +2527,7 @@ entries:
     對應公鑰 import 進 prod host gpg keyring，才能去掉 `--insecure-skip-verify` flag 跑第一次嚴格 deploy。在那之前每次 prod deploy 都會印 6 行 stderr
     loud warning（且應在 post-deploy review 提）。
 - id: 2026-05-04--FX.4.1
-  header_line: 44195
+  header_line: 44210
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.1
@@ -2527,7 +2536,7 @@ entries:
   next_gate: deployed-inactive — FX.4 lazy-cache defects 全部合併後，由 runner/CI 在 production-equivalent multi-worker topology 重跑
     bootstrap gate subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.2
-  header_line: 44212
+  header_line: 44227
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.2
@@ -2536,7 +2545,7 @@ entries:
   next_gate: deployed-inactive — FX.4 lazy-cache defects 全部合併後，由 runner/CI 在 production-equivalent multi-worker topology 重跑
     forecast/pricing subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.3
-  header_line: 44229
+  header_line: 44244
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.3
@@ -2545,7 +2554,7 @@ entries:
   next_gate: deployed-inactive — FX.4 lazy-cache defects 全部合併後，由 runner/CI 在 production-equivalent multi-worker topology 重跑
     sensor fusion subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.4
-  header_line: 44246
+  header_line: 44261
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.4
@@ -2554,7 +2563,7 @@ entries:
   next_gate: deployed-inactive — FX.4 lazy-cache defects 全部合併後，由 runner/CI 在 production-equivalent multi-worker topology 重跑
     telemetry backend subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.5
-  header_line: 44263
+  header_line: 44278
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.5
@@ -2563,7 +2572,7 @@ entries:
   next_gate: deployed-inactive — FX.4 lazy-cache defects 全部合併後，由 runner/CI 在 production-equivalent multi-worker topology 重跑
     CODEOWNERS enforcement subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.6
-  header_line: 44279
+  header_line: 44294
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.6
@@ -2572,7 +2581,7 @@ entries:
   next_gate: deployed-inactive — FX.4 lazy-cache defects 全部合併後，由 runner/CI 在 production-equivalent multi-worker topology 重跑
     prompt loader task-skill subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.7
-  header_line: 44295
+  header_line: 44310
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.7
@@ -2581,7 +2590,7 @@ entries:
   next_gate: deployed-inactive — FX.4 lazy-cache defects 全部合併後，由 runner/CI 在 production-equivalent multi-worker topology 重跑
     LLM provider metadata subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.8
-  header_line: 44312
+  header_line: 44327
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.8
@@ -2590,7 +2599,7 @@ entries:
   next_gate: deployed-inactive — FX.4 stub-removal 批次合併後，在 production-equivalent worker / Gerrit webhook flow 跑一次 intake →
     worker push → merger +2 → human +2 smoke；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.9
-  header_line: 44329
+  header_line: 44344
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.9
@@ -2599,7 +2608,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 以正式 production image tag 重 build 並跑 enterprise web stack XLSX export smoke；本項本地
     production-image import smoke 已通過。
 - id: 2026-05-04--FX.4.10
-  header_line: 44346
+  header_line: 44361
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.10
@@ -2608,7 +2617,7 @@ entries:
   next_gate: deployed-inactive — FX.4 stub-removal 批次合併後，由 runner/CI 以 production-equivalent image 跑 enterprise web stack
     XLSX import preview smoke；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.11
-  header_line: 44361
+  header_line: 44376
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.11
@@ -2616,7 +2625,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — FX.4 stub-removal 批次合併後，由 runner/CI 重跑 agent tool contract subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.12
-  header_line: 44377
+  header_line: 44392
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.12
@@ -2624,7 +2633,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — FX.4 stub-removal 批次合併後，由 runner/CI 重跑 runner handler tool contract subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.13
-  header_line: 44393
+  header_line: 44408
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.13
@@ -2632,7 +2641,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — FX.4 ABC-enforcement 批次合併後，由 runner/CI 重跑 build adapter contract subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.14
-  header_line: 44409
+  header_line: 44424
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.14
@@ -2641,7 +2650,7 @@ entries:
   next_gate: deployed-inactive — FX.4 ABC-enforcement 批次合併後，由 runner/CI 重跑 App Store Connect transport contract subset；本項無獨立
     deploy 動作。
 - id: 2026-05-04--FX.4.15
-  header_line: 44424
+  header_line: 44439
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.15
@@ -2649,7 +2658,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — FX.4 ABC-enforcement 批次合併後，由 runner/CI 重跑 HMI components contract subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.16
-  header_line: 44439
+  header_line: 44454
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.16
@@ -2658,7 +2667,7 @@ entries:
   next_gate: deployed-inactive — FX.4 ABC-enforcement 批次合併後，由 runner/CI 重跑 framework adapter contract subset；本項無獨立 deploy
     動作。
 - id: 2026-05-04--FX.4.17
-  header_line: 44456
+  header_line: 44471
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.17
@@ -2666,7 +2675,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — FX.4 stub-removal 批次合併後，由 runner/CI 重跑 queue backend contract subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.4.18
-  header_line: 44472
+  header_line: 44487
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.18
@@ -2675,7 +2684,7 @@ entries:
   next_gate: deployed-inactive — FX.4 API-contract 批次合併後，由 runner/CI 重跑 OpenAPI contract 與 sensor-fusion router subset；本項無獨立
     deploy 動作。
 - id: 2026-05-04--FX.4.19
-  header_line: 44489
+  header_line: 44504
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.19
@@ -2684,7 +2693,7 @@ entries:
   next_gate: deployed-inactive — FX.4 API-contract 批次合併後，由 runner/CI 重跑 OpenAPI contract 與 workflow router/HTTP subset；本項無獨立
     deploy 動作。
 - id: 2026-05-04--FX.4.20
-  header_line: 44506
+  header_line: 44521
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.20
@@ -2693,7 +2702,7 @@ entries:
   next_gate: deployed-inactive — FX.4 API-contract 批次合併後，由 runner/CI 重跑 OpenAPI contract 與 payment/motion router subsets；本項無獨立
     deploy 動作。
 - id: 2026-05-04--FX.4.21
-  header_line: 44523
+  header_line: 44538
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.21
@@ -2702,7 +2711,7 @@ entries:
   next_gate: deployed-inactive — FX.4 API-contract 批次合併後，由 runner/CI 重跑 OpenAPI contract 與 auth router subset；本項無獨立 deploy
     動作。
 - id: 2026-05-04--FX.4.22
-  header_line: 44540
+  header_line: 44555
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.22
@@ -2711,7 +2720,7 @@ entries:
   next_gate: deployed-inactive — FX.4 model-config 批次合併後，由 runner/CI 重跑 backend schema/OpenAPI 與 agent model subsets；本項無獨立
     deploy 動作。
 - id: 2026-05-04--FX.4.23
-  header_line: 44554
+  header_line: 44569
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.23
@@ -2720,7 +2729,7 @@ entries:
   next_gate: deployed-inactive — FX.4 imports/circular-workaround 批次合併後，由 runner/CI 重跑 vision-to-ui 與 LLM adapter subsets；本項無獨立
     deploy 動作。
 - id: 2026-05-04--FX.4.24
-  header_line: 44568
+  header_line: 44583
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.24
@@ -2729,7 +2738,7 @@ entries:
   next_gate: deployed-inactive — FX.4 LLM adapter contract 批次合併後，由 runner/CI 重跑 LLM adapter/firewall subsets；本項無獨立 deploy
     動作。
 - id: 2026-05-04--FX.4.25
-  header_line: 44584
+  header_line: 44599
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.4.25
@@ -2738,7 +2747,7 @@ entries:
   next_gate: deployed-inactive — FX.4 typed-exception 批次合併後，由 runner/CI 重跑 decision rules 與 decisions router subsets；本項無獨立
     deploy 動作。
 - id: 2026-05-04--FX.8.1
-  header_line: 44599
+  header_line: 44614
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.8.1
@@ -2747,7 +2756,7 @@ entries:
   next_gate: deployed-inactive — operator 用真實 repo/token 先跑 `batch-create --dry-run --limit <N>` 審 payload，再分批移除 `--dry-run`
     建 issue；本項不需要 production image rebuild。
 - id: 2026-05-04--FX.8.2
-  header_line: 44617
+  header_line: 44632
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.8.2
@@ -2755,7 +2764,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — operator 先審 `/tmp` 產物或重跑到 `out/`，再把 `stub` findings 批次轉 issue；本項不需要 production image rebuild。
 - id: 2026-05-04--FX.8.3
-  header_line: 44633
+  header_line: 44648
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.8.3
@@ -2763,7 +2772,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — FX.8 cosmetic cleanup 批次合併後由 runner/CI 重跑 imaging pipeline subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.8.4
-  header_line: 44647
+  header_line: 44662
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.8.4
@@ -2771,7 +2780,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — FX.8 cosmetic cleanup 批次合併後由 runner/CI 重跑 RTSP auth subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.8.5
-  header_line: 44662
+  header_line: 44677
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.8.5
@@ -2779,7 +2788,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — FX.8 cosmetic cleanup 批次合併後由 runner/CI 重跑 ONVIF auth subset；本項無獨立 deploy 動作。
 - id: 2026-05-04--FX.10.1
-  header_line: 44676
+  header_line: 44691
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.10.1
@@ -2788,7 +2797,7 @@ entries:
   next_gate: deployed-inactive — merge 後由 runner/CI 以新 lockfile rebuild backend production image，並在 staging 跑 dependency-upgrade
     runbook smoke（尤其 `/events` SSE 與 `/openapi.json`）。
 - id: 2026-05-04--FX.10.2
-  header_line: 44693
+  header_line: 44708
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.10.2
@@ -2797,7 +2806,7 @@ entries:
   next_gate: deployed-inactive — merge 後由 runner/CI 以新 lockfile rebuild backend production image，並在 staging 跑 LLM adapter
     smoke；FX.10.3 另行處理剩餘 `python-dotenv` CVE。
 - id: 2026-05-04--FX.10.3
-  header_line: 44710
+  header_line: 44725
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.10.3
@@ -2806,7 +2815,7 @@ entries:
   next_gate: deployed-inactive — merge 後由 runner/CI 以新 lockfile rebuild backend production image，並在 staging 跑 dotenv/settings
     load smoke。
 - id: 2026-05-04--FX.10.4
-  header_line: 44728
+  header_line: 44743
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.10.4
@@ -2814,7 +2823,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — merge 後由 runner/CI 重跑 lint nightly；剩餘 32 個 non-auto-fix findings 需另開 FX follow-up 或人工 review。
 - id: 2026-05-04--FX.10.5
-  header_line: 44744
+  header_line: 44759
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.10.5
@@ -2822,7 +2831,7 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — merge 後由 runner/CI 使用 root `pyproject.toml` 重跑 mypy nightly；既有型別錯誤 baseline 由後續 FX row 收斂。
 - id: 2026-05-04--FX.10.6
-  header_line: 44759
+  header_line: 44774
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.10.6
@@ -2831,7 +2840,7 @@ entries:
   next_gate: deployed-inactive — merge 後由 GitHub Actions nightly 或 manual dispatch 跑 `tsc-check`，以 artifact/summary 追蹤 frontend
     type drift baseline。
 - id: 2026-05-04--FX.10.7
-  header_line: 44775
+  header_line: 44790
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.10.7
@@ -2840,7 +2849,7 @@ entries:
   next_gate: deployed-inactive — merge 後在 staging/prod backup smoke 中確認 `sessions.token` 已由 KS envelope 寫入；若仍有 legacy plaintext
     session row，backup DLP 會 fail-closed，需先清 session 或完成 runtime envelope rollout。
 - id: 2026-05-04--FX.10.8
-  header_line: 44791
+  header_line: 44806
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.10.8
@@ -2849,7 +2858,7 @@ entries:
   next_gate: deployed-inactive — merge 後由 runner/CI 重跑 OpenAPI generation/check 與 sensor-fusion router contract tests，確認 API
     schema artifact 同步。
 - id: 2026-05-04--FX.10.9
-  header_line: 44807
+  header_line: 44822
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: FX.10.9
@@ -2858,7 +2867,7 @@ entries:
   next_gate: deployed-inactive — merge 後由 runner/CI 重跑這 4 個 contract test 檔；PG fixture unavailable 時 legacy migration 仍會依既有條件
     skip。
 - id: 2026-05-04--KS.2.1
-  header_line: 44821
+  header_line: 44836
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2867,7 +2876,7 @@ entries:
   next_gate: deployed-inactive — KS.2.11 落 durable `cmek_configs` / `tier_assignments` 後，將 complete endpoint 改為持久化 Tier 2；KS.2.2-KS.2.4
     再替 verify 接上 live AWS/GCP/Vault adapters。
 - id: 2026-05-04--KS.2.1-2
-  header_line: 44837
+  header_line: 44852
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2876,7 +2885,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 tenant settings CMEK Vitest；後續 Step 2 才擴充 IAM policy
     generator UX。
 - id: 2026-05-04--KS.2.1-3
-  header_line: 44853
+  header_line: 44868
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2885,7 +2894,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；KS.2.2-KS.2.4 才能把
     Step 4 verify 接上 live KMS/Vault。
 - id: 2026-05-04--KS.2.1-4
-  header_line: 44870
+  header_line: 44885
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2894,7 +2903,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；Step 4 verify connection
     仍由 KS.2.2-KS.2.4 live adapters 接上實際 AWS/GCP/Vault。
 - id: 2026-05-04--KS.2.1-5
-  header_line: 44886
+  header_line: 44901
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2903,7 +2912,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；KS.2.2-KS.2.4 再把同一
     encrypt-decrypt contract 接上 live AWS/GCP/Vault。
 - id: 2026-05-04--KS.2.1-6
-  header_line: 44902
+  header_line: 44917
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2912,7 +2921,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；KS.2.11 才能把 Tier
     2 complete endpoint 改成 durable activation。
 - id: 2026-05-04--KS.2.1-7
-  header_line: 44917
+  header_line: 44932
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2921,7 +2930,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard tests；KS.2.2-KS.2.4 live adapters 接上後需用同一
     context contract 做 live smoke。
 - id: 2026-05-04--KS.2.1-8
-  header_line: 44933
+  header_line: 44948
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2930,7 +2939,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard tests；durable Step 3 storage 仍等 KS.2.11
     schema。
 - id: 2026-05-04--KS.2.1-9
-  header_line: 44948
+  header_line: 44963
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2939,7 +2948,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 重跑 CMEK wizard backend tests；KS.2.2-KS.2.4 再把同一 encrypt-decrypt contract 接上
     live AWS/GCP/Vault。
 - id: 2026-05-04--KS.2.1-10
-  header_line: 44964
+  header_line: 44979
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.1
@@ -2948,7 +2957,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 runner/CI 在 Node 20 frontend 環境重跑 CMEK wizard backend/frontend tests；KS.2.11 才能把 Step
     5 從 non-durable draft 改成 durable Tier 2 activation。
 - id: 2026-05-04--KS.2.2
-  header_line: 44979
+  header_line: 44994
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.2
@@ -2957,7 +2966,7 @@ entries:
   next_gate: deployed-inactive — 合併後在 GitHub Secrets 設定 `OMNISIGHT_TEST_AWS_KMS_*` / sandbox AWS credentials，讓 `aws-kms-live-tests`
     nightly 從 skipped 變成 live green；production 啟用前由 operator 設定 `OMNISIGHT_AWS_KMS_ROLE_ARN` / `EXTERNAL_ID`。
 - id: 2026-05-04--KS.2.3
-  header_line: 44994
+  header_line: 45009
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.3
@@ -2966,7 +2975,7 @@ entries:
   next_gate: deployed-inactive — 合併後在 GitHub Secrets 設定 `OMNISIGHT_TEST_GCP_KMS_KEY_ID` / `OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON`，讓
     `gcp-kms-live-tests` nightly 從 skipped 變成 live green；production 啟用前由 operator 設定 `OMNISIGHT_GCP_KMS_KEY_ID` 並提供 ADC。
 - id: 2026-05-04--KS.2.4
-  header_line: 45009
+  header_line: 45024
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.4
@@ -2975,7 +2984,7 @@ entries:
   next_gate: deployed-inactive — 合併後在 GitHub Secrets 設定 `OMNISIGHT_TEST_VAULT_TRANSIT_*`，讓 `vault-transit-live-tests` nightly
     從 skipped 變成 live green；production 啟用前由 operator 設定 `OMNISIGHT_VAULT_TRANSIT_KEY_ID` / `URL` / `TOKEN` / optional namespace。
 - id: 2026-05-04--KS.2.5
-  header_line: 45025
+  header_line: 45040
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.5
@@ -2984,7 +2993,7 @@ entries:
   next_gate: deployed-inactive — KS.2.11 durable `cmek_configs` 落地後，將 `load_env_cmek_key_checks()` 換成 DB-backed tenant config
     loader；KS.2.6 再把 `revoked=true` 接到新請求 403 與復原 runbook。
 - id: 2026-05-04--KS.2.6
-  header_line: 45043
+  header_line: 45058
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.6
@@ -2993,7 +3002,7 @@ entries:
   next_gate: deployed-inactive — KS.2.11 durable `cmek_configs` / `cmek_revoke_events` 落地後，把 request guard 從 env/snapshot
     source 擴到 DB-backed tenant configs；production 啟用前需 operator 走 runbook smoke 一次 revoked→restored。
 - id: 2026-05-04--KS.2.7
-  header_line: 45058
+  header_line: 45073
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.7
@@ -3002,7 +3011,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 operator/客戶在實際 AWS KMS key 或 GCP CryptoKey 套用回傳 tags/labels，建立 CloudTrail Lake/S3 或
     Log Router/PubSub sink，並用 CMEK verify step 產生一次 Encrypt/Decrypt/GetKey audit smoke。
 - id: 2026-05-04--KS.2.8
-  header_line: 45073
+  header_line: 45088
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.8
@@ -3011,7 +3020,7 @@ entries:
   next_gate: deployed-inactive — KS.2.11 durable `cmek_configs` / `tier_assignments` / `cmek_revoke_events` 落地後，把 `persisted=false`
     的 stateless rewrap payload 接到 DB transaction，並由 operator 用 sandbox AWS/GCP/Vault CMK smoke 一次 full upgrade path。
 - id: 2026-05-04--KS.2.9
-  header_line: 45089
+  header_line: 45104
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.9
@@ -3020,7 +3029,7 @@ entries:
   next_gate: deployed-inactive — KS.2.11 durable CMEK tables 落地後，把 downgrade replacement refs 與 Tier 1 assignment 放入同一 DB
     transaction；transaction 成功後 operator/客戶即可從 AWS/GCP/Vault key policy 移除 OmniSight IAM principal。
 - id: 2026-05-04--KS.2.10
-  header_line: 45104
+  header_line: 45119
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.10
@@ -3029,7 +3038,7 @@ entries:
   next_gate: deployed-inactive — KS.2.11 durable `cmek_configs` / `tier_assignments` / `cmek_revoke_events` 落地後，將 status endpoint
     從 health snapshot 推導改為 DB-backed tenant assignment + latest revoke event，並重生 OpenAPI generated types。
 - id: 2026-05-04--KS.2.11
-  header_line: 45121
+  header_line: 45136
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.11
@@ -3038,7 +3047,7 @@ entries:
   next_gate: deployed-inactive — 將 alembic 0107 跑到 prod PG；KS.2.12/KS.2.13 再把 wizard completion、tier 升降級與 revoke detector
     事件寫入 `cmek_configs` / `tier_assignments` / `cmek_revoke_events`。
 - id: 2026-05-04--KS.2.12
-  header_line: 45138
+  header_line: 45153
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.12
@@ -3048,7 +3057,7 @@ entries:
     只顯示 Tier 1、wizard/upgrade 404、downgrade endpoint 可對既有 Tier 2 DEK refs 產生 Tier 1 plan；`deployed-active` 需首次實際 Tier 2 tenant
     fallback/downgrade smoke 通過。
 - id: 2026-05-04--KS.2.13
-  header_line: 45153
+  header_line: 45168
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.2.13
@@ -3057,7 +3066,7 @@ entries:
   next_gate: deployed-active — 在 CI/staging 注入三組 sandbox KMS env 後重跑 KS.2.13 live test，確認 AWS/GCP/Vault 三 adapter 不再 skip；production
     cutover 前再以一個 Tier 2 sandbox tenant 做 revoke + downgrade smoke。
 - id: 2026-05-04--KS.3.1
-  header_line: 45169
+  header_line: 45184
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.1
@@ -3066,7 +3075,7 @@ entries:
   next_gate: deployed-inactive — 下一個 release tag push 後由 docker-publish workflow 發佈 `ghcr.io/<owner>/omnisight-proxy:<tag>`；customer/VPC
     部署與 mTLS/provider config 等 runtime gates 由 KS.3.2-KS.3.5 承接。
 - id: 2026-05-04--KS.3.2
-  header_line: 45185
+  header_line: 45200
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.2
@@ -3075,7 +3084,7 @@ entries:
   next_gate: deployed-inactive — 發佈新 `omnisight-proxy` image 後，在 staging tenant 注入 `OMNISIGHT_PROXY_AUTH_ENABLED=true`、server
     cert/key、client CA、tenant client cert pin、nonce HMAC key file，並以 SaaS-side client cert 做一次 `/auth/verify` smoke。
 - id: 2026-05-04--KS.3.3
-  header_line: 45200
+  header_line: 45215
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.3
@@ -3084,7 +3093,7 @@ entries:
   next_gate: deployed-inactive — 發佈新 proxy image 後，staging 掛載 `config.example.json` 同形狀的 customer config + local/KMS/Vault
     secret files，確認 `OMNISIGHT_PROXY_PROVIDER_CONFIG_FILE` 啟動 fail-fast；KS.3.4 再接上實際 LLM forwarding 與 provider key materialization。
 - id: 2026-05-04--KS.3.4
-  header_line: 45216
+  header_line: 45231
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.4
@@ -3094,7 +3103,7 @@ entries:
     client 打 `/v1/llm/openai/v1/chat/completions?stream=true`，確認 nonce auth、provider forwarding、SSE chunk streaming 與 OmniSight
     端 payload non-retention metadata policy 一起通過；KMS/Vault key materialization 仍需後續 KS.3 provider-key runtime gate。
 - id: 2026-05-04--KS.3.5
-  header_line: 45232
+  header_line: 45247
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.5
@@ -3103,7 +3112,7 @@ entries:
   next_gate: deployed-inactive — 發佈新 proxy image 後，在 staging 設定 `OMNISIGHT_PROXY_ID`、`OMNISIGHT_PROXY_SAAS_HEARTBEAT_URL`
     與 Redis，確認 proxy 連續兩次 30 秒 heartbeat 後 SaaS health 維持 connected；停止 proxy 逾 60 秒後 health 轉 stale。
 - id: 2026-05-04--KS.3.6
-  header_line: 45249
+  header_line: 45264
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.6
@@ -3112,7 +3121,7 @@ entries:
   next_gate: deployed-inactive — 發佈新 proxy image 後，在 staging 以 SaaS-side mTLS client 對 customer-side proxy 重複打 `/v1/llm/...`，確認
     CI p95 budget 與 staging network/CPU profile 沒有顯著落差。
 - id: 2026-05-04--KS.3.7
-  header_line: 45266
+  header_line: 45281
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.7
@@ -3121,7 +3130,7 @@ entries:
   next_gate: deployed-inactive — 發佈新 proxy image 後，在 staging 設定 customer audit file mount + `OMNISIGHT_PROXY_SAAS_AUDIT_URL`，打一筆
     LLM request，確認 customer-side JSONL 含完整 payload、SaaS Redis metadata 不含 prompt/response。
 - id: 2026-05-04--KS.3.8
-  header_line: 45282
+  header_line: 45297
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.8
@@ -3130,7 +3139,7 @@ entries:
   next_gate: deployed-inactive — KS.3.10/KS.3.12/KS.3.13 補齊 proxy registration UI/schema/feature knob 後，在 staging tenant 依本
     runbook 跑一次 dry-run：sealed export bundle、customer proxy import、proxied request、SaaS key purge evidence 全部留 ticket。
 - id: 2026-05-04--KS.3.9
-  header_line: 45297
+  header_line: 45312
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.9
@@ -3139,7 +3148,7 @@ entries:
   next_gate: deployed-inactive — HD.21.5.2 真正 self-hosted compose bundle 開工時，引用本 SOP 的同一 proxy image digest，做一次 customer-registry
     mirror + local backend heartbeat smoke。
 - id: 2026-05-04--KS.3.10
-  header_line: 45312
+  header_line: 45327
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.10
@@ -3148,7 +3157,7 @@ entries:
   next_gate: deployed-inactive — KS.3.12 `proxy_registrations` / `proxy_mtls_certs` schema 與 API 落地後，把此 UI 的 proxy URL / cert
     / fingerprint 接到 durable save/load，並在 staging Tier 3 tenant 做一次 mTLS health smoke。
 - id: 2026-05-04--KS.3.11
-  header_line: 45329
+  header_line: 45344
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.11
@@ -3157,7 +3166,7 @@ entries:
   next_gate: deployed-inactive — KS.3.12 schema/API 落地後，將 Tier 3 tenant registration 接到 `BYOGProxyTarget`，在 staging 以 unreachable
     proxy 與 bad client cert 各打一筆 LLM request，確認 SaaS 回錯且沒有 direct provider egress。
 - id: 2026-05-04--KS.3.12
-  header_line: 45346
+  header_line: 45361
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.12
@@ -3166,7 +3175,7 @@ entries:
   next_gate: deployed-inactive — staging / prod 執行 alembic `0107 -> 0108` 後，KS.3.13 feature knob 與 KS.3.14 mTLS/nonce/latency/streaming
     matrix 才能開始寫入並驗證這些 durable BYOG rows。
 - id: 2026-05-04--KS.3.13
-  header_line: 45362
+  header_line: 45377
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.13
@@ -3175,7 +3184,7 @@ entries:
   next_gate: deployed-inactive — production image 部署後由 operator 設 `OMNISIGHT_KS_BYOG_ENABLED=false` 做 staging smoke：確認 tenant
     Settings 不顯示 Tier 3 option / Proxy Configuration，且後續 KS.3.14 proxy registration API 不接受 proxy mode。
 - id: 2026-05-04--KS.3.14
-  header_line: 45378
+  header_line: 45393
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: KS.3.14
@@ -3184,7 +3193,7 @@ entries:
   next_gate: deployed-inactive — production image 重 build 後，在 staging 以 valid / expired / self-signed client cert、replayed
     nonce、unreachable proxy、streaming request 各跑一次 live smoke，確認沒有 direct-provider fallback。
 - id: 2026-05-04--BP.I.1
-  header_line: 45395
+  header_line: 45410
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.I.1
@@ -3193,7 +3202,7 @@ entries:
   next_gate: deployed-inactive — BP.I.2/BP.I.3 落地後，在 staging 將 Intel guild hook 接到 Integration Engineer pre-install 與 Architect
     pre-blueprint，並以 mocked NVD/CISA feed 做一次 live hook smoke。
 - id: 2026-05-04--BP.I.2
-  header_line: 45411
+  header_line: 45426
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.I.2
@@ -3202,7 +3211,7 @@ entries:
   next_gate: deployed-inactive — BP.I.3 將此 scaffold 接到 Integration Engineer pre-install hook 與 Architect pre-blueprint hook
     後，在 staging 以 mocked NVD/CISA feed 跑一次 hook smoke，確認 brief 被產生但不自動阻擋。
 - id: 2026-05-04--BP.I.3
-  header_line: 45427
+  header_line: 45442
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.I.3
@@ -3211,7 +3220,7 @@ entries:
   next_gate: deployed-inactive — production image 重 build 後，在 staging 以 mocked NVD/CISA feed 分別呼叫 Integration Engineer pre-install
     與 Architect pre-blueprint hook，確認 brief 進入下游 prompt/artifact 且不自動阻擋。
 - id: 2026-05-04--BP.I.4
-  header_line: 45443
+  header_line: 45458
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.I.4
@@ -3220,7 +3229,7 @@ entries:
   next_gate: deployed-inactive — production image 重 build 後，在 staging 跑一次 BP.I hook smoke，並由 operator 確認 GitHub Secret Scanning
     / Dependabot alerts / Renovate App settings 皆已啟用。
 - id: 2026-05-04--BP.I.5
-  header_line: 45459
+  header_line: 45474
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.I.5
@@ -3229,7 +3238,7 @@ entries:
   next_gate: deployed-inactive — production image 重 build 後，在 staging 跑一次 BP.I hook smoke；本項是 test-only matrix，無獨立 runtime
     enablement knob。
 - id: 2026-05-04--BP.H.1
-  header_line: 45475
+  header_line: 45490
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.H.1
@@ -3238,7 +3247,7 @@ entries:
   next_gate: deployed-inactive — BP.H.2/BP.H.3 落地後，在 staging 將 cognitive-penalty block 接入 agent retry prompt，並用一份 failed CI
     report smoke 驗證下一輪 agent prompt 會包含 `# Cognitive Penalty (CI)`。
 - id: 2026-05-04--BP.H.2
-  header_line: 45491
+  header_line: 45506
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.H.2
@@ -3247,7 +3256,7 @@ entries:
   next_gate: deployed-inactive — staging 需把 Gerrit `Verified` label stream 接到 `execute_red_card()`，並提供 agent `api_key_id`；用同一
     agent/ticket 三次 `Verified -1` smoke 確認 API key disabled 且 JIRA 轉 blocked / 留 `[BLOCKED]` comment。
 - id: 2026-05-04--BP.H.2.b
-  header_line: 45507
+  header_line: 45522
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.H.2.b
@@ -3256,7 +3265,7 @@ entries:
   next_gate: deployed-inactive — staging 需把 root-task sub-LM call history 接到 `execute_recursive_subcall_budget()`，並以 4-call
     yellow / 6-call red smoke 確認 yellow path 延遲、red path revoke API key 且升級 human review。
 - id: 2026-05-04--BP.H.3
-  header_line: 45524
+  header_line: 45539
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.H.3
@@ -3265,7 +3274,7 @@ entries:
   next_gate: deployed-inactive — staging 需把 BP.H.2 / BP.H.2.b red-card action path 改成發送 `is_red_card=True` notification，並配置
     Jira / PagerDuty env 後用一個 red-card smoke 確認兩個外部 leg 都送達。
 - id: 2026-05-04--BP.H.4
-  header_line: 45542
+  header_line: 45557
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: BP.H.4
@@ -3274,7 +3283,7 @@ entries:
   next_gate: deployed-inactive — staging 需把 BP.H.2/BP.H.2.b/BP.H.3 串成端到端 red-card smoke；本項是 test-only matrix，無獨立 runtime enablement
     knob。
 - id: 2026-05-04--WP.3.1
-  header_line: 45557
+  header_line: 45572
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.3.1
@@ -3283,7 +3292,7 @@ entries:
   next_gate: deployed-inactive — WP.3.2/WP.3.4/WP.3.6 需接上 confidence ledger、wrapper 統一入口與 single knob 後，於 staging 以一個 search/replace
     fuzzy rescue smoke 驗證 agent patch path。
 - id: 2026-05-04--WP.3.2
-  header_line: 45574
+  header_line: 45589
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.3.2
@@ -3292,7 +3301,7 @@ entries:
   next_gate: deployed-inactive — WP.3.4/WP.3.6 需把 BP/HD/W14 wrappers 與 feature knob 接到同一入口；staging 用一個 fuzzy rescue patch
     smoke 確認 ledger row 包含 layer + confidence。
 - id: 2026-05-04--WP.3.3
-  header_line: 45590
+  header_line: 45605
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.3.3
@@ -3301,7 +3310,7 @@ entries:
   next_gate: deployed-inactive — WP.3.4 需把 BP / HD bring-up / W14 sandbox wrappers 統一接到 cascade 入口；staging 用一個 `.dts` 或 Yocto
     recipe fuzzy patch smoke 確認 `0.90-0.95` match 會 explicit fail。
 - id: 2026-05-04--WP.3.4
-  header_line: 45607
+  header_line: 45622
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.3.4
@@ -3310,7 +3319,7 @@ entries:
   next_gate: deployed-inactive — WP.3.5/WP.3.6 需補 explicit self-correction error path 與 single env knob；staging 用 BP generic
     edit、HD `.dts` strict reject、W14 sandbox edit 各一個 smoke 確認 wrapper 都走 cascade。
 - id: 2026-05-04--WP.3.5
-  header_line: 45623
+  header_line: 45638
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.3.5
@@ -3319,7 +3328,7 @@ entries:
   next_gate: deployed-inactive — WP.3.6 single knob 合入後，staging 用一次 failing patch smoke 確認 UI / agent loop 看到 explicit error
     並 retry。
 - id: 2026-05-04--WP.3.6
-  header_line: 45638
+  header_line: 45653
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.3.6
@@ -3328,7 +3337,7 @@ entries:
   next_gate: deployed-inactive — staging 以 `OMNISIGHT_WP_DIFF_VALIDATION_ENABLED=false` 跑一次 stale multiline patch smoke，確認
     fuzzy rescue 被拒絕且 exact edit 仍可 apply。
 - id: 2026-05-04--WP.3.7
-  header_line: 45654
+  header_line: 45669
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.3.7
@@ -3337,7 +3346,7 @@ entries:
   next_gate: deployed-inactive — WP.3 cascade 已有 unit/regression coverage；staging 需以 BP generic edit、HD `.dts` strict reject、W14
     sandbox edit、env knob disabled 各跑一次 smoke 後再 flip。
 - id: 2026-05-04--WP.5.1
-  header_line: 45670
+  header_line: 45685
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.5.1
@@ -3346,7 +3355,7 @@ entries:
   next_gate: deployed-inactive — WP.5.2/WP.5.3/WP.5.6 需補 parent walk、檔案 watcher 與 size cap 後，再用 runner/backend prompt smoke
     驗證 rule merge 來源清單。
 - id: 2026-05-04--WP.5.2
-  header_line: 45686
+  header_line: 45701
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.5.2
@@ -3355,7 +3364,7 @@ entries:
   next_gate: deployed-inactive — WP.5.3/WP.5.4/WP.5.6 需補 watcher、merge precedence 與 size cap 後，再用 runner/backend prompt smoke
     驗證 parent rule stack。
 - id: 2026-05-04--WP.5.3
-  header_line: 45702
+  header_line: 45717
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.5.3
@@ -3364,7 +3373,7 @@ entries:
   next_gate: deployed-inactive — WP.5.4/WP.5.6/WP.5.7 需補 precedence、size cap 與 UI visibility 後，再以 runner/backend prompt smoke
     驗證 operator rule file edits 會出現在新 prompt。
 - id: 2026-05-04--WP.5.4
-  header_line: 45718
+  header_line: 45733
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.5.4
@@ -3373,7 +3382,7 @@ entries:
   next_gate: deployed-inactive — WP.5.5/WP.5.6/WP.5.7 需補 RAG ingest、size cap 與 UI visibility 後，再以 runner/backend prompt smoke
     驗證完整 rule loading surface。
 - id: 2026-05-04--WP.5.5
-  header_line: 45735
+  header_line: 45750
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.5.5
@@ -3382,7 +3391,7 @@ entries:
   next_gate: deployed-inactive — WP.5.6/WP.5.7 需補 size cap、ignore UI 與載入來源顯示後，再以 HD datasheet/spec/errata fixture 跑 backend
     RAG smoke。
 - id: 2026-05-04--WP.5.6
-  header_line: 45751
+  header_line: 45766
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.5.6
@@ -3391,7 +3400,7 @@ entries:
   next_gate: deployed-inactive — WP.5.7 需把 `MemoryFile` size/truncated/ignored metadata 接到 operator UI，提供 loaded-file 清單與
     per-file ignore 操作。
 - id: 2026-05-04--WP.5.7
-  header_line: 45768
+  header_line: 45783
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.5.7
@@ -3400,7 +3409,7 @@ entries:
   next_gate: deployed-inactive — WP.5.8 需補 parent walk + multi-file merge + size cap + ignore + reload 的 full regression matrix，並用
     runner smoke 驗證 operator UI output。
 - id: 2026-05-04--WP.5.8
-  header_line: 45784
+  header_line: 45799
   date: '2026-05-04'
   author: Codex/GPT-5.5
   task_id: WP.5.8
@@ -3409,7 +3418,7 @@ entries:
   next_gate: deployed-inactive — 需在 runner/backend prompt smoke 中驗證 operator 實際設定 `OMNISIGHT_RULE_IGNORE` 與 rule file edits
     後，console UI 與下一次 prompt assembly 都符合 WP.5.8 regression。
 - id: 2026-05-05--BP.C.1
-  header_line: 45799
+  header_line: 45814
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.C.1
@@ -3418,7 +3427,7 @@ entries:
   next_gate: deployed-inactive — BP.C.2-BP.C.4 需接 topology builder、graph wiring 與 orchestrator sizing pre-stage，並由 `OMNISIGHT_TOPOLOGY_MODE=legacy|smxl`
     gate rollout。
 - id: 2026-05-05--BP.C.2
-  header_line: 45815
+  header_line: 45830
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.C.2
@@ -3427,7 +3436,7 @@ entries:
   next_gate: deployed-inactive — BP.C.3 需把 `backend.agents.graph` 改為使用 `backend.graph_topology` builder，BP.C.4 再由 orchestrator
     sizing pre-stage 與 `OMNISIGHT_TOPOLOGY_MODE=legacy|smxl` 控制 live traffic。
 - id: 2026-05-05--BP.C.3
-  header_line: 45832
+  header_line: 45847
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.C.3
@@ -3436,7 +3445,7 @@ entries:
   next_gate: deployed-inactive — BP.C.4 需接 orchestrator sizing pre-stage，把 BP.C.1 sizer 結果傳入 `run_graph(size=...)`，並在 production
     env 顯式翻 `OMNISIGHT_TOPOLOGY_MODE=smxl` 後才會有 live S/XL traffic。
 - id: 2026-05-05--BP.C.4
-  header_line: 45849
+  header_line: 45864
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.C.4
@@ -3445,7 +3454,7 @@ entries:
   next_gate: deployed-inactive — production env 顯式設 `OMNISIGHT_TOPOLOGY_MODE=smxl` 並完成 BP.C.7 topology suite 後，才能讓 real S
     / XL graph traffic active；目前 code path 已可標註 sizing，但 production 未翻 flag。
 - id: 2026-05-05--BP.C.6
-  header_line: 45865
+  header_line: 45880
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.C.6
@@ -3454,7 +3463,7 @@ entries:
   next_gate: deployed-inactive — BP.C.7 需補完整 `test_topology_smxl.py` suite；production 仍需 operator 顯式翻 `OMNISIGHT_TOPOLOGY_MODE=smxl`
     後才會啟用 S/XL runtime traffic。
 - id: 2026-05-05--BP.C.7
-  header_line: 45880
+  header_line: 45895
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.C.7
@@ -3463,7 +3472,7 @@ entries:
   next_gate: deployed-inactive — BP.C Phase C test gate 已補齊；production 仍需 operator 顯式設定 `OMNISIGHT_TOPOLOGY_MODE=smxl`、重啟服務並完成
     live smoke 後才啟用 S/XL runtime traffic。
 - id: 2026-05-05--WP.2.1
-  header_line: 45896
+  header_line: 45911
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.2.1
@@ -3472,7 +3481,7 @@ entries:
   next_gate: deployed-inactive — WP.2.2 需在同名 shadow/衝突時補 WARN log；production 若要啟用新 bundled source，需把內建 skills 實際放入 `omnisight/agents/skills/`
     或完成從 legacy `configs/skills/` 的遷移。
 - id: 2026-05-05--WP.2.2
-  header_line: 45911
+  header_line: 45926
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.2.2
@@ -3481,7 +3490,7 @@ entries:
   next_gate: deployed-inactive — WP.2.3 需補 project scope FS-watch reload；production 若要啟用新 bundled source，仍需把內建 skills 實際放入
     `omnisight/agents/skills/` 或完成從 legacy `configs/skills/` 的遷移。
 - id: 2026-05-05--WP.2.3
-  header_line: 45927
+  header_line: 45942
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.2.3
@@ -3490,7 +3499,7 @@ entries:
   next_gate: deployed-inactive — WP.2.4 需把 watched registry 接到 command palette / chat mention 的 registry surface；production
     若要使用 project overrides，需在實際 project checkout 放置 `.claude/skills/` 或 `.omnisight/skills/` skill files 並完成 live smoke。
 - id: 2026-05-05--WP.2.4
-  header_line: 45943
+  header_line: 45958
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.2.4
@@ -3499,7 +3508,7 @@ entries:
   next_gate: deployed-inactive — production image / frontend bundle 需重建後 live smoke：開 command palette 搜尋 skill、選取後確認 Orchestrator
     chat 收到 `@skill-name`。
 - id: 2026-05-05--WP.2.5
-  header_line: 45961
+  header_line: 45976
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.2.5
@@ -3508,7 +3517,7 @@ entries:
   next_gate: deployed-inactive — production image 重建後，以 BP.B/HD task smoke 確認 `to_anthropic_tools(["SKILL_HD_PARSE"])` 仍可取
     schema，且 bundled skill source path 出現在 `/skills/effective`。
 - id: 2026-05-05--WP.2.6
-  header_line: 45976
+  header_line: 45991
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.2.6
@@ -3517,7 +3526,7 @@ entries:
   next_gate: deployed-inactive — production image / CLI package 重建後，於實際 repo checkout 執行 `omnisight skills list` 與 `omnisight
     skills resolve SKILL_HD_PARSE` smoke，確認 source path 顯示 canonical bundled skill。
 - id: 2026-05-05--WP.2.7
-  header_line: 45991
+  header_line: 46006
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.2.7
@@ -3526,7 +3535,7 @@ entries:
   next_gate: deployed-inactive — production image / CLI package 重建後，以 `OMNISIGHT_WP_SKILLS_LOADER_ENABLED=false omnisight
     skills resolve SKILL_HD_PARSE` smoke 確認 rollback path 可用；正式啟用仍維持 env unset/default。
 - id: 2026-05-05--WP.2.8
-  header_line: 46007
+  header_line: 46022
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.2.8
@@ -3535,7 +3544,7 @@ entries:
   next_gate: deployed-inactive — production image / CLI package 重建後，對實際 checkout 跑 `omnisight skills list`、`omnisight skills
     resolve SKILL_HD_PARSE`，並手動覆寫一個 project skill smoke watched reload。
 - id: 2026-05-05--BP.N.1
-  header_line: 46022
+  header_line: 46037
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.N.1
@@ -3544,7 +3553,7 @@ entries:
   next_gate: deployed-inactive — BP.N.3 需補正式 env knobs / production config，BP.N.4-BP.N.5 接 tool loadout + audit_log；production
     image 重建後用 fake/mock provider 或 staging Tavily key 做 smoke。
 - id: 2026-05-05--BP.N.2
-  header_line: 46038
+  header_line: 46053
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.N.2
@@ -3553,7 +3562,7 @@ entries:
   next_gate: deployed-inactive — BP.N.3-BP.N.5 接 provider/env/tool/audit 後，production image 重建並以 mock/staging web-search result
     smoke 確認 sanitized marker 進入 Intel + Architect Guild 的 LLM prompt。
 - id: 2026-05-05--BP.N.3
-  header_line: 46053
+  header_line: 46068
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.N.3
@@ -3562,7 +3571,7 @@ entries:
   next_gate: deployed-inactive — BP.N.4/BP.N.5 接 Intel + Architect Guild tool loadout 與 audit_log 後，production image 重建並以
     `OMNISIGHT_WEB_SEARCH_PROVIDER=none` default-off smoke，再用 staging Tavily key 驗證 daily budget cap。
 - id: 2026-05-05--BP.N.4
-  header_line: 46069
+  header_line: 46084
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.N.4
@@ -3571,7 +3580,7 @@ entries:
   next_gate: deployed-inactive — BP.N.5 接 audit_log traceability 後，production image 重建並 smoke：`OMNISIGHT_WEB_SEARCH_PROVIDER=none`
     default-off、staging Tavily key 下 Intel/Architect 可用且其他 Guild 不帶 `WebSearch`。
 - id: 2026-05-05--BP.N.5
-  header_line: 46084
+  header_line: 46099
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.N.5
@@ -3580,7 +3589,7 @@ entries:
   next_gate: deployed-inactive — BP.N.6 補 full rate-limit / sanitization / fallback / cost-cap test matrix 後，production image
     重建並以 provider none + staging Tavily key smoke audit row 寫入。
 - id: 2026-05-05--BP.N.6
-  header_line: 46099
+  header_line: 46114
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.N.6
@@ -3589,7 +3598,7 @@ entries:
   next_gate: deployed-inactive — production image 重建後，以 `OMNISIGHT_WEB_SEARCH_PROVIDER=none` default-off smoke；再用 staging
     Tavily key 驗證 Intel/Architect WebSearch、audit row、budget cap 與 sanitizer marker。
 - id: 2026-05-05--BP.M.1
-  header_line: 46113
+  header_line: 46128
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.M.1
@@ -3598,7 +3607,7 @@ entries:
   next_gate: deployed-inactive — production PG 執行 alembic 0191→0192；BP.M.2-BP.M.5 接 summarizer、review/promote endpoints、UI
     與 audit_log 後再做 runtime smoke。
 - id: 2026-05-05--BP.M.2
-  header_line: 46128
+  header_line: 46143
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.M.2
@@ -3607,7 +3616,7 @@ entries:
   next_gate: deployed-inactive — BP.M.3 review/promote endpoints 與 BP.M.5 audit_log 落地後，production image 重建並以 `OMNISIGHT_SELF_IMPROVE_LEVEL=l1`
     staging workflow smoke 驗證 draft row 產生。
 - id: 2026-05-05--BP.M.3
-  header_line: 46143
+  header_line: 46158
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.M.3
@@ -3616,7 +3625,7 @@ entries:
   next_gate: deployed-inactive — BP.M.5 audit_log traceability 與 BP.M.4 review UI 落地後，production image 重建並以 `OMNISIGHT_SELF_IMPROVE_LEVEL=l1`
     staging smoke：產生 draft、review、promote、確認 skill pack 可被 loader 讀到。
 - id: 2026-05-05--BP.M.4
-  header_line: 46158
+  header_line: 46173
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.M.4
@@ -3625,7 +3634,7 @@ entries:
   next_gate: deployed-inactive — BP.M.5 audit_log traceability 落地後，production image 重建並 staging smoke：產生 draft、UI review、UI
     promote、確認 `configs/skills/<skill_name>/SKILL.md` 被 effective skill registry 讀到。
 - id: 2026-05-05--BP.M.5
-  header_line: 46173
+  header_line: 46188
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.M.5
@@ -3634,7 +3643,7 @@ entries:
   next_gate: deployed-inactive — BP.M.6 文件化 scratchpad/distiller 邊界、BP.M.7 補完整 distiller test matrix 後，production image 重建並
     staging smoke：產生 draft、確認 `skill_distilled` audit row、promote、確認 `skill_promoted` audit row 與 skill registry 可讀。
 - id: 2026-05-05--BP.M.6
-  header_line: 46188
+  header_line: 46203
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.M.6
@@ -3643,7 +3652,7 @@ entries:
   next_gate: deployed-inactive — BP.M.7 補完整 distiller test matrix 後，production image 重建並 staging smoke：產生 draft、確認 `skill_distilled`
     audit row、promote、確認 `skill_promoted` audit row 與 skill registry 可讀。
 - id: 2026-05-05--BP.M.7
-  header_line: 46202
+  header_line: 46217
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.M.7
@@ -3652,7 +3661,7 @@ entries:
   next_gate: deployed-inactive — production image 重建並 staging smoke：`OMNISIGHT_SELF_IMPROVE_LEVEL=l1` 產生 draft、確認 `skill_distilled`
     audit row、review/promote、確認 `skill_promoted` audit row 與 skill registry 可讀。
 - id: 2026-05-05--BP.Q.1
-  header_line: 46216
+  header_line: 46231
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.Q.1
@@ -3661,7 +3670,7 @@ entries:
   next_gate: deployed-inactive — BP.Q.4 `embedding_chunks` migration/RLS 與 BP.Q.3 `KnowledgeRetrieval` handler 落地後，production
     image 重建並 staging smoke：建立 tenant A/B chunks、query top-K、確認 tenant filter 不跨租戶。
 - id: 2026-05-05--BP.Q.2
-  header_line: 46231
+  header_line: 46246
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.Q.2
@@ -3670,7 +3679,7 @@ entries:
   next_gate: deployed-inactive — BP.Q.4 `embedding_chunks` migration/RLS 與 production embedding/vector-store env 完成後，設定 `OMNISIGHT_RAG_INDEX_ON_MERGE=1`，production
     image 重建並在 staging 跑 initial bulk + post-merge incremental smoke。
 - id: 2026-05-05--BP.Q.3
-  header_line: 46246
+  header_line: 46261
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.Q.3
@@ -3679,7 +3688,7 @@ entries:
   next_gate: deployed-inactive — BP.Q.4 `embedding_chunks` migration/RLS 與 production vector-store env 完成後，production image
     重建並 staging smoke：index tenant chunks、呼叫 `KnowledgeRetrieval`、確認 citation line range 與 tenant filter。
 - id: 2026-05-05--BP.Q.4
-  header_line: 46261
+  header_line: 46276
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.Q.4
@@ -3688,7 +3697,7 @@ entries:
   next_gate: deployed-inactive — production PG 套用 alembic chain `0192 -> 0186` 並確認 pgvector extension 可建立 HNSW index；後續 BP.Q.5/BP.Q.6
     staging smoke 應覆蓋 tenant A/B chunks 與 top-K retrieval。
 - id: 2026-05-05--BP.Q.5
-  header_line: 46278
+  header_line: 46293
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.Q.5
@@ -3697,7 +3706,7 @@ entries:
   next_gate: deployed-inactive — BP.Q.6 tenant isolation review 完成後，production image/staging env 啟用 RAG store，smoke：Explore
     先呼叫 `KnowledgeRetrieval` 命中 cited chunks，並在無 index 或 literal symbol query 時走 Grep fallback。
 - id: 2026-05-05--BP.Q.6
-  header_line: 46293
+  header_line: 46308
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.Q.6
@@ -3706,7 +3715,7 @@ entries:
   next_gate: deployed-inactive — production PG 套用含 RLS 的 `0186` migration 後，staging smoke 建立 tenant A/B chunks，確認 tenant A
     `KnowledgeRetrieval` 看不到 tenant B chunk，並確認 pooled connection 後續 borrow 不殘留 `omnisight.tenant_id`。
 - id: 2026-05-05--BP.Q.7
-  header_line: 46308
+  header_line: 46323
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.Q.7
@@ -3715,7 +3724,7 @@ entries:
   next_gate: deployed-inactive — BP.Q.8 operator setup doc 完成後，在 staging 設定 pgvector DSN/embedding env，跑 live pgvector smoke
     與 tenant A/B `KnowledgeRetrieval` isolation smoke。
 - id: 2026-05-05--BP.Q.8
-  header_line: 46324
+  header_line: 46339
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.Q.8
@@ -3724,7 +3733,7 @@ entries:
   next_gate: deployed-inactive — 在 staging/prod 設定 pgvector DSN 與 embedding env，跑 Alembic 0186、bulk index、cron dry run、`KnowledgeRetrieval`
     tenant A/B isolation smoke，然後重建 production image（若使用 local embedding runtime 需確認 optional dependency 已進 image）。
 - id: 2026-05-05--WP.7.1
-  header_line: 46338
+  header_line: 46353
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.7.1
@@ -3733,7 +3742,7 @@ entries:
   next_gate: deployed-inactive — production PG 套用 alembic chain `0186 -> 0118`；後續 WP.7.2-WP.7.8 runtime rows 實作 tier definition、resolution、cache
     invalidation、expiry enforcement 與 operator toggle audit 後，再做 staging smoke。
 - id: 2026-05-05--WP.7.2
-  header_line: 46355
+  header_line: 46370
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.7.2
@@ -3742,7 +3751,7 @@ entries:
   next_gate: deployed-inactive — staging/prod 套用含 tier CHECK 的 0118 migration；WP.7.3 後才開始接 resolution priority，WP.7.4 後才做
     hot-path cache / invalidation smoke。
 - id: 2026-05-05--WP.7.3
-  header_line: 46371
+  header_line: 46386
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.7.3
@@ -3751,7 +3760,7 @@ entries:
   next_gate: deployed-inactive — WP.7.4 接上 in-memory cache + Redis pub/sub invalidate 後，在 staging 以 test override / user preference
     / global state / default 四層資料源跑 hot-path smoke，確認 resolution priority 與 invalidate 後讀值一致。
 - id: 2026-05-05--WP.7.4
-  header_line: 46386
+  header_line: 46401
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.7.4
@@ -3760,7 +3769,7 @@ entries:
   next_gate: deployed-inactive — WP.7.8 operator toggle 寫入路徑接上 `publish_feature_flags_invalidate()` 並在 staging/Redis 環境跑雙
     worker smoke：worker A 更新 flag 後，worker B 收到 invalidate 並重新讀到新 global state。
 - id: 2026-05-05--WP.7.5
-  header_line: 46401
+  header_line: 46416
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.7.5
@@ -3769,7 +3778,7 @@ entries:
   next_gate: deployed-inactive — WP.7.8 operator toggle / registry loader 接上實際 `feature_flags` rows 後，在 CI/staging 以真實 registry
     snapshot 呼叫 `assert_no_expired_feature_flags()`，確認過期未清理 flag 會阻擋 merge。
 - id: 2026-05-05--WP.7.6
-  header_line: 46415
+  header_line: 46430
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.7.6
@@ -3778,7 +3787,7 @@ entries:
   next_gate: deployed-inactive — WP.7.8 operator UI / toggle writer 接上真實 registry 與 N10 audit 後，在 staging 產生一次 feature flag
     review dry run，確認 review row 與 stale alert row 可依 SOP append。
 - id: 2026-05-05--WP.7.7
-  header_line: 46430
+  header_line: 46445
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.7.7
@@ -3787,7 +3796,7 @@ entries:
   next_gate: deployed-inactive — WP.7.8 接上實際 `feature_flags` row loader / operator toggle 後，在 staging seed `ks.cmek.enabled=false`
     與 `wp.diff_validation.enabled=false`，確認 registry row 可覆蓋 env fallback 並透過 invalidate 推送到多 worker。
 - id: 2026-05-05--WP.7.8
-  header_line: 46445
+  header_line: 46460
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.7.8
@@ -3796,7 +3805,7 @@ entries:
   next_gate: deployed-inactive — staging seed 至少一個 `feature_flags` row，以 admin session 切換一次，確認 audit_log `entity_kind="feature_flag"`
     row、Redis invalidate fan-out 與 UI reload 都觀察到新 state。
 - id: 2026-05-05--WP.7.9
-  header_line: 46461
+  header_line: 46476
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: WP.7.9
@@ -3805,7 +3814,7 @@ entries:
   next_gate: deployed-inactive — staging 以真實 Redis/pubsub + DB registry seed 跑一次 operator toggle smoke，確認 backend test 鎖住的
     reload / expire guard 契約可在多 worker topology 觀察到。
 - id: 2026-05-05--BP.L.1
-  header_line: 46476
+  header_line: 46491
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.L.1
@@ -3814,7 +3823,7 @@ entries:
   next_gate: deployed-inactive — BP.L.2 在 CI workflow 中接上三階段 marker job（critical / guild_loadout / compliance），並以 CI collect-only
     或 dry-run artifact 確認 marker count drift 在可接受區間。
 - id: 2026-05-05--BP.L.2
-  header_line: 46491
+  header_line: 46506
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.L.2
@@ -3823,7 +3832,7 @@ entries:
   next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認三個新 backend tier jobs 分別在 5 / 30 / 60 min budget 內完成，然後 BP.L.3
     再處理 full-suite shard 4-way → 8-way。
 - id: 2026-05-05--BP.L.3
-  header_line: 46506
+  header_line: 46521
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.L.3
@@ -3832,7 +3841,7 @@ entries:
   next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 8 個 `backend-tests` matrix shard 都有產出 coverage artifact，且 `backend-coverage-combine`
     aggregate floor 仍通過；BP.L.5 再評估 full suite wall-clock 目標。
 - id: 2026-05-05--BP.L.4
-  header_line: 46521
+  header_line: 46536
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.L.4
@@ -3841,7 +3850,7 @@ entries:
   next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 `backend-coverage-combine` 下載 8 shard 的 `.coverage.*` 後仍以 aggregate
     floor gate backend 新 module；BP.L.5 再評估 full suite wall-clock 目標。
 - id: 2026-05-05--BP.L.5
-  header_line: 46536
+  header_line: 46551
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.L.5
@@ -3850,7 +3859,7 @@ entries:
   next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 `backend-tests` 最慢 shard 加 `backend-coverage-combine` 在 240
     min wall-clock budget 內完成。
 - id: 2026-05-05--BP.D.1
-  header_line: 46551
+  header_line: 46566
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.D.1
@@ -3859,7 +3868,7 @@ entries:
   next_gate: deployed-inactive — BP.D.9 補上 `backend/tests/test_compliance_matrix.py` 後，在 CI 中對 medical auxiliary schema、Guild/Tier
     filtering、denied-cell gaps 做 drift guard；BP.D.6 再接 API response wrapper。
 - id: 2026-05-05--BP.D.2
-  header_line: 46567
+  header_line: 46582
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.D.2
@@ -3868,7 +3877,7 @@ entries:
   next_gate: deployed-inactive — BP.D.9 補上 `backend/tests/test_compliance_matrix.py` 後，在 CI 中對 automotive auxiliary schema、Guild/Tier
     filtering、denied-cell gaps 做 drift guard；BP.D.6 再接 API response wrapper。
 - id: 2026-05-05--BP.D.3
-  header_line: 46583
+  header_line: 46598
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.D.3
@@ -3877,7 +3886,7 @@ entries:
   next_gate: deployed-inactive — BP.D.9 補上 `backend/tests/test_compliance_matrix.py` 後，在 CI 中對 industrial auxiliary schema、Guild/Tier
     filtering、denied-cell gaps 做 drift guard；BP.D.6 再接 API response wrapper。
 - id: 2026-05-05--BP.D.4
-  header_line: 46599
+  header_line: 46614
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.D.4
@@ -3886,7 +3895,7 @@ entries:
   next_gate: deployed-inactive — BP.D.9 補上 `backend/tests/test_compliance_matrix.py` 後，在 CI 中對 military auxiliary schema、Guild/Tier
     filtering、denied-cell gaps 做 drift guard；BP.D.6 再接 API response wrapper。
 - id: 2026-05-05--BP.D.5
-  header_line: 46616
+  header_line: 46631
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.D.5
@@ -3895,7 +3904,7 @@ entries:
   next_gate: deployed-inactive — BP.D.9 可擴充同一 contract test 到完整 `backend/tests/test_compliance_matrix.py` 約 80 cases；BP.D.6
     再將 API response wrapper 加上 `audit_type` / `requires_human_signoff` envelope。
 - id: 2026-05-05--BP.D.6
-  header_line: 46631
+  header_line: 46646
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.D.6
@@ -3904,7 +3913,7 @@ entries:
   next_gate: deployed-inactive — BP.D.9 補完整 `backend/tests/test_compliance_matrix.py` 後，CI 可擴充到所有 matrix/Guild/Tier cells；production
     image rebuild + live smoke 後再提升狀態。
 - id: 2026-05-05--BP.D.7
-  header_line: 46647
+  header_line: 46662
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.D.7
@@ -3913,7 +3922,7 @@ entries:
   next_gate: deployed-inactive — BP.D.9 可把 `compliance-audit` task matrix 納入完整 `backend/tests/test_compliance_matrix.py` 約
     80 cases；production image rebuild + live smoke 後再提升狀態。
 - id: 2026-05-05--BP.D.8
-  header_line: 46663
+  header_line: 46678
   date: '2026-05-05'
   author: Codex/GPT-5.5
   task_id: BP.D.8
@@ -3922,7 +3931,7 @@ entries:
   next_gate: deployed-inactive — BP.D.9 可把 Guild × Tier × PEP classification 納入完整 compliance matrix tests；production image
     rebuild + `/pep/policy` live smoke 後再提升狀態。
 - id: 2026-05-06--BP.D.9
-  header_line: 46679
+  header_line: 46694
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.D.9
@@ -3931,7 +3940,7 @@ entries:
   next_gate: deployed-inactive — BP.D.10 第三方 legal review 歸檔完成後，production image rebuild + `/compliance-matrix/matrices` live
     smoke 再提升狀態。
 - id: 2026-05-06--BP.D.10
-  header_line: 46693
+  header_line: 46708
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.D.10
@@ -3940,7 +3949,7 @@ entries:
   next_gate: deployed-inactive — operator 將第三方簽署 legal report 存入 private evidence vault，重建 production image，並對 `/compliance-matrix/matrices`
     做 live smoke 後再提升狀態。
 - id: 2026-05-06--WP.1.1
-  header_line: 46707
+  header_line: 46722
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: WP.1.1
@@ -3949,7 +3958,7 @@ entries:
   next_gate: deployed-inactive — WP.1.2 以 live head 0194 後的下一個 migration 建立 `blocks` table + indexes，並同步 migrator/static schema
     drift guards 後再進下一 gate。
 - id: 2026-05-06--WP.1.2
-  header_line: 46722
+  header_line: 46737
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: WP.1.2
@@ -3958,7 +3967,7 @@ entries:
   next_gate: deployed-inactive — operator/Claude 跑 production alembic chain 0194→0195，並在 production image 對 `blocks` table
     做 live schema smoke 後再提升狀態。
 - id: 2026-05-06--WP.1.3
-  header_line: 46737
+  header_line: 46752
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: WP.1.3
@@ -3967,7 +3976,7 @@ entries:
   next_gate: deployed-inactive — WP.1.4/WP.1.5 接 share/redaction 行為後，production image rebuild + dashboard smoke 檢查各 migrated
     surface 的 block wrappers 再提升狀態。
 - id: 2026-05-06--WP.1.4
-  header_line: 46752
+  header_line: 46767
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: WP.1.4
@@ -3976,7 +3985,7 @@ entries:
   next_gate: deployed-inactive — WP.9.1-WP.9.5 建立 `shareable_objects` table/router/ACL/redaction enforcement 後，production
     image rebuild + 右鍵 Block share live smoke 再提升狀態。
 - id: 2026-05-06--WP.1.5
-  header_line: 46767
+  header_line: 46782
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: WP.1.5
@@ -3985,7 +3994,7 @@ entries:
   next_gate: deployed-inactive — WP.9 router/table 落地後接上 `redact_block_for_share()`，將 mask 寫入 `shareable_objects.redaction_applied`，並做
     production share permalink live smoke。
 - id: 2026-05-06--WP.1.6
-  header_line: 46782
+  header_line: 46797
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: WP.1.6
@@ -3994,7 +4003,7 @@ entries:
   next_gate: deployed-inactive — WP.1.7 接上 `OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false` 全域 kill switch；之後各 surface 依 WP.1.6 wave
     gate 在 staging 逐步開 flag 並做 snapshot / share / redaction smoke。
 - id: 2026-05-06--WP.1.7
-  header_line: 46797
+  header_line: 46812
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: WP.1.7
@@ -4003,7 +4012,7 @@ entries:
   next_gate: deployed-inactive — operator/Claude 在 staging/prod image 設 `OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false` 做 dashboard
     smoke，確認 ORCHESTRATOR / TokenUsageStats / BP / HD migrated card 皆無 `data-block-*` 與 share menu 後再提升狀態。
 - id: 2026-05-06--WP.1.8
-  header_line: 46812
+  header_line: 46827
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: WP.1.8
@@ -4012,7 +4021,7 @@ entries:
   next_gate: deployed-inactive — WP.9 `shareable_objects` router/table 落地後，把此 round-trip test 接到真 endpoint，並在 staging/prod
     image 做 Block CRUD + permalink + redaction live smoke。
 - id: 2026-05-06--bp-a2a-1
-  header_line: 46828
+  header_line: 46843
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4021,7 +4030,7 @@ entries:
   next_gate: deployed-inactive — BP.A2A.2 掛上 `/.well-known/agent.json` 與 `/a2a/invoke/{agent_name}` 後，production image rebuild
     並做 discovery + sync invoke + SSE live smoke。
 - id: 2026-05-06--bp-a2a-2
-  header_line: 46843
+  header_line: 46858
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4030,7 +4039,7 @@ entries:
   next_gate: deployed-inactive — production image rebuild 後，以 operator bearer/session 做 discovery、sync invoke、SSE invoke smoke；BP.A2A.3
     再補 OAuth scopes / per-tenant rate limit / audit chain。
 - id: 2026-05-06--bp-a2a-3
-  header_line: 46860
+  header_line: 46875
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4039,7 +4048,7 @@ entries:
   next_gate: deployed-inactive — production image rebuild 後，以 API key scopes `a2a:discover:*` / `a2a:invoke:*` 做 discovery
     + sync invoke + SSE invoke smoke，並查 `audit_log` 只有 hash metadata、無 payload 明文。
 - id: 2026-05-06--bp-a2a-4
-  header_line: 46875
+  header_line: 46890
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4048,7 +4057,7 @@ entries:
   next_gate: deployed-inactive — production 跑 alembic 0195→0196 後，BP.A2A runtime writer 接入此 table，並以 sync/SSE invoke smoke
     確認只寫 hash metadata、無 payload 明文。
 - id: 2026-05-06--bp-a2a-5
-  header_line: 46890
+  header_line: 46905
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4057,7 +4066,7 @@ entries:
   next_gate: deployed-inactive — BP.A2A.6 註冊外部 agent endpoint 後，在 staging/prod image 以 operator 註冊的 A2A endpoint 做 discovery
     + sync invoke + SSE invoke smoke，並觀察 circuit_state event。
 - id: 2026-05-06--bp-a2a-6
-  header_line: 46905
+  header_line: 46920
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4066,7 +4075,7 @@ entries:
   next_gate: deployed-inactive — 後續 durable store / migration 注入後，production image rebuild，operator 在 `/admin/external-agents`
     註冊真實 A2A endpoint，完成 AgentCard discovery + sync invoke + SSE invoke smoke。
 - id: 2026-05-06--bp-a2a-7
-  header_line: 46920
+  header_line: 46935
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4075,7 +4084,7 @@ entries:
   next_gate: deployed-inactive — BP.A2A.8 將真實第三方 threat-intel workflow step 接到此 factory 後，production image rebuild 並以註冊 endpoint
     做 graph-run smoke，確認 `tool_progress` SSE 與 `tool_results` summary 同步出現。
 - id: 2026-05-06--bp-a2a-8
-  header_line: 46935
+  header_line: 46950
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4084,7 +4093,7 @@ entries:
   next_gate: deployed-inactive — production image rebuild 後，operator 註冊真實第三方 threat-intel A2A endpoint，對 pre-install 與 pre-blueprint
     hook 各跑一次 smoke，確認 partner `reports` 進入 Intel brief。
 - id: 2026-05-06--bp-a2a-9
-  header_line: 46950
+  header_line: 46965
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4093,7 +4102,7 @@ entries:
   next_gate: deployed-inactive — production image rebuild 後，對 9 個 provider AgentCard 各跑 discovery smoke，並對至少一個 key-based provider
     + Ollama 各跑 sync/SSE provider invoke smoke，確認 orchestrator 只保存/轉交 A2A endpoint + `model_spec` metadata。
 - id: 2026-05-06--bp-a2a-10
-  header_line: 46965
+  header_line: 46980
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4102,7 +4111,7 @@ entries:
   next_gate: deployed-inactive — production image rebuild 後，operator 調整 `configs/model_mapping.yaml` 任一 Guild model，對 `/.well-known/agent.json`
     與 provider AgentCard 各跑 discovery smoke，確認 mapping reload 與 provider boundary 如預期。
 - id: 2026-05-06--bp-a2a-11
-  header_line: 46980
+  header_line: 46995
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4111,7 +4120,7 @@ entries:
   next_gate: deployed-inactive — BP.A2A.12 outbound 測試與 BP.A2A.13 operator docs 完成後，production image rebuild，對 discovery、sync
     invoke、SSE invoke、tenant isolation 各跑一次 staging smoke。
 - id: 2026-05-06--bp-a2a-12
-  header_line: 46995
+  header_line: 47010
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4120,7 +4129,7 @@ entries:
   next_gate: deployed-inactive — BP.A2A.13 operator docs 完成後，production image rebuild，operator 註冊真實 external A2A endpoint，對
     AgentCard fetch/cache、sync invoke、SSE invoke、breaker recovery 與 tenant-isolated registry view 各跑 staging smoke。
 - id: 2026-05-06--bp-a2a-13
-  header_line: 47009
+  header_line: 47024
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: null
@@ -4129,7 +4138,7 @@ entries:
   next_gate: deployed-inactive — production image rebuild 後，operator 以真實 partner A2A endpoint 跑 external-agent registration、AgentCard
     fetch/cache、sync invoke、SSE invoke 與 kill-switch toggle smoke；另開 follow-up 補 provider-scoped A2A API-key scope mapping。
 - id: 2026-05-06--BP.R.1
-  header_line: 47024
+  header_line: 47039
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.R.1
@@ -4138,7 +4147,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 official agent image pipeline 重 build/publish，並在 staging agent container smoke `rtk
     --version`、`test -s /var/log/omnisight/rtk-install.log`；BP.R.6 再接 `omnisight_rtk_install_status` metric。
 - id: 2026-05-06--BP.R.2
-  header_line: 47039
+  header_line: 47054
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.R.2
@@ -4147,7 +4156,7 @@ entries:
   next_gate: deployed-inactive — 合併後由 official agent image pipeline 將 `configs/.rtkignore` 納入 agent workspace/config bundle，並在
     staging agent container smoke `rtk cat build/*.o` 或等價二進位路徑確認 ignore 規則不把 binary payload 丟進 agent context。
 - id: 2026-05-06--BP.R.3
-  header_line: 47055
+  header_line: 47070
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.R.3
@@ -4156,7 +4165,7 @@ entries:
   next_gate: deployed-inactive — 合併後 production agent image / prompt-serving backend 重 build，對任一 runtime prompt endpoint 或
     agent sandbox smoke 確認 system prompt 含 `RTK Output Compression Rules` 與 `rtk` high-noise command examples。
 - id: 2026-05-06--BP.R.4
-  header_line: 47070
+  header_line: 47085
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.R.4
@@ -4165,7 +4174,7 @@ entries:
   next_gate: deployed-inactive — 合併後 production backend / agent runtime image 重 build，跑 staging compile-failure smoke：同 task
     連續兩次 `make` 失敗後確認下一輪 prompt 含 `rtk --no-rtk ...` 且 raw output path 不走 compression。
 - id: 2026-05-06--BP.R.5
-  header_line: 47087
+  header_line: 47102
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.R.5
@@ -4174,7 +4183,7 @@ entries:
   next_gate: deployed-inactive — 合併後 production backend / agent runtime image 重 build，在 staging agent smoke 嘗試 `Read(build/compile.log)`
     應被 PEP deny，再以 `Bash(rtk cat build/compile.log)` 或等價 tail/sed path 讀取壓縮輸出。
 - id: 2026-05-06--BP.R.6
-  header_line: 47103
+  header_line: 47118
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.R.6
@@ -4183,7 +4192,7 @@ entries:
   next_gate: deployed-inactive — 合併後 production backend / agent runtime image 重 build，staging scrape `/metrics` 確認三條 RTK series
     存在，並用 compile-failure smoke 觸發 `omnisight_rtk_fallback_total`。
 - id: 2026-05-06--BP.R.7
-  header_line: 47119
+  header_line: 47134
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.R.7
@@ -4192,7 +4201,7 @@ entries:
   next_gate: deployed-inactive — 合併後在 production backend / agent runtime image 重 build 後跑 staging RTK smoke：確認 prompt 含 RTK
     規範、native build/log read 被 PEP deny、同 task 連續兩次 compile failure 觸發 `rtk --no-rtk` fallback，並 scrape RTK metrics。
 - id: 2026-05-06--BP.S.6
-  header_line: 47134
+  header_line: 47149
   date: '2026-05-06'
   author: Codex/GPT-5.5
   task_id: BP.S.6
