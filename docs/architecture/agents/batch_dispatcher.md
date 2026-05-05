@@ -8,6 +8,7 @@
 - `BatchDispatcher` — the worker; `start()`, `stop(drain_in_flight=...)`, `enqueue()`, `stats()`.
 - `chunk_by_model_tools()` — pure function that groups tasks into `BatchGroup`s respecting Anthropic count/byte limits.
 - `submit_in_lane()` — caller-side router; `lane="realtime"` runs immediately, `lane="batch"` enqueues and returns `None`.
+- `submit_guild_task_in_lane()` — thin BP.B Guild client adapter; validates the Guild slug, stamps `dispatch_source="guild"` / `guild_id` / `task_kind` metadata, then delegates to `submit_in_lane()`.
 
 **Key invariants**:
 - Grouping by `(model, tools_signature)` is for prompt-cache hit rate, not Anthropic correctness — batches don't need to be homogeneous, but breaking the grouping silently kills the ~90% cache discount.
@@ -18,4 +19,4 @@
 **Cross-module touchpoints**:
 - Imports from `backend.agents.batch_client` (`BatchClient`, `BatchRequest/Result/Run`, size limits, `estimate_request_size`).
 - Priority semantics are documented as mirroring `queue_backend.py`, though no direct import.
-- Intended downstream callers (per docstring): BP.B Guild (AB.4.6) and any code building params via `AnthropicClient.simple_params` / `run_with_tools`. Not yet wired in this module.
+- Intended downstream callers: BP.B Guild calls `submit_guild_task_in_lane()` after it builds params via `AnthropicClient.simple_params`; non-Guild callers can keep using `submit_in_lane()` directly.

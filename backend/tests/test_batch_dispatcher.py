@@ -36,6 +36,7 @@ from backend.agents.batch_dispatcher import (
     BatchDispatcher,
     BatchTaskQueue,
     chunk_by_model_tools,
+    submit_guild_task_in_lane,
     submit_in_lane,
 )
 
@@ -547,6 +548,94 @@ async def test_submit_in_lane_realtime_without_runner_raises():
 async def test_submit_in_lane_batch_without_dispatcher_raises():
     with pytest.raises(ValueError, match="dispatcher"):
         await submit_in_lane(lane="batch", task=_task("t1"))
+
+
+# ─── Guild dispatch client ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_submit_guild_task_batch_uses_submit_in_lane_and_stamps_metadata():
+    sdk_msgs = _StubMessages()
+    bc = BatchClient(sdk_msgs, persistence=InMemoryBatchPersistence())
+    dispatcher = BatchDispatcher(bc)
+
+    params = {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "parse board"}],
+    }
+    result = await submit_guild_task_in_lane(
+        guild_id="bsp",
+        lane="batch",
+        task_id="guild-task-1",
+        params=params,
+        task_kind="hd_parse_kicad",
+        priority="P1",
+        metadata={"tenant_id": "tenant-a", "guild_id": "spoof"},
+        dispatcher=dispatcher,
+    )
+
+    assert result is None
+    queued = await dispatcher.queue.drain()
+    assert len(queued) == 1
+    assert queued[0].task_id == "guild-task-1"
+    assert queued[0].priority == "P1"
+    assert queued[0].metadata == {
+        "tenant_id": "tenant-a",
+        "dispatch_source": "guild",
+        "guild_id": "bsp",
+        "task_kind": "hd_parse_kicad",
+    }
+
+
+@pytest.mark.asyncio
+async def test_submit_guild_task_realtime_invokes_runner_with_guild_metadata():
+    received: list[BatchableTask] = []
+
+    async def runner(t: BatchableTask) -> BatchResult:
+        received.append(t)
+        return BatchResult(
+            batch_run_id="rt",
+            custom_id=t.task_id,
+            task_id=t.task_id,
+            status="succeeded",
+            final_text="done",
+        )
+
+    result = await submit_guild_task_in_lane(
+        guild_id="frontend",
+        lane="realtime",
+        task_id="guild-task-rt",
+        params={
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "fix ui"}],
+        },
+        task_kind="planning",
+        realtime_runner=runner,
+    )
+
+    assert result is not None
+    assert result.final_text == "done"
+    assert received[0].metadata["dispatch_source"] == "guild"
+    assert received[0].metadata["guild_id"] == "frontend"
+    assert received[0].metadata["task_kind"] == "planning"
+
+
+@pytest.mark.asyncio
+async def test_submit_guild_task_unknown_guild_raises_before_dispatch():
+    sdk_msgs = _StubMessages()
+    bc = BatchClient(sdk_msgs, persistence=InMemoryBatchPersistence())
+    dispatcher = BatchDispatcher(bc)
+
+    with pytest.raises(ValueError, match="not_a_guild"):
+        await submit_guild_task_in_lane(
+            guild_id="not_a_guild",
+            lane="batch",
+            task_id="bad",
+            params={"model": "claude-sonnet-4-6", "messages": []},
+            dispatcher=dispatcher,
+        )
+    assert len(dispatcher.queue) == 0
 
 
 # ─── BatchableTask metadata ──────────────────────────────────────

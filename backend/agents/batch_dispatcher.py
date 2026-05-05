@@ -60,6 +60,7 @@ from backend.agents.batch_client import (
     MAX_BATCH_SIZE_BYTES,
     estimate_request_size,
 )
+from backend.sandbox_tier import Guild
 
 logger = logging.getLogger(__name__)
 
@@ -499,3 +500,46 @@ async def submit_in_lane(
         raise ValueError("lane='batch' requires dispatcher")
     await dispatcher.enqueue(task)
     return None
+
+
+async def submit_guild_task_in_lane(
+    *,
+    guild_id: str | Guild,
+    lane: LaneType,
+    task_id: str,
+    params: dict[str, Any],
+    task_kind: str = "generic_dev",
+    callback: Callable[[BatchResult], Awaitable[None]] | None = None,
+    priority: PriorityLevel = "P2",
+    metadata: dict[str, Any] | None = None,
+    realtime_runner: Callable[[BatchableTask], Awaitable[BatchResult]] | None = None,
+    dispatcher: BatchDispatcher | None = None,
+) -> BatchResult | None:
+    """Guild-side client adapter for AB.4.6.
+
+    BP.B Guild dispatch remains the caller: it builds Anthropic params
+    (typically via ``AnthropicClient.simple_params()``), chooses a lane,
+    and hands the task here. This helper only stamps the Guild audit
+    metadata and routes through ``submit_in_lane()`` so the batch
+    dispatcher stays an independent worker mode.
+    """
+    guild = guild_id if isinstance(guild_id, Guild) else Guild(guild_id)
+    task_metadata = dict(metadata or {})
+    task_metadata.update({
+        "dispatch_source": "guild",
+        "guild_id": guild.value,
+        "task_kind": task_kind,
+    })
+    task = BatchableTask(
+        task_id=task_id,
+        params=params,
+        callback=callback,
+        priority=priority,
+        metadata=task_metadata,
+    )
+    return await submit_in_lane(
+        lane=lane,
+        task=task,
+        realtime_runner=realtime_runner,
+        dispatcher=dispatcher,
+    )
