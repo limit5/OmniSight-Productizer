@@ -133,6 +133,48 @@ async def test_distill_inserts_draft_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_distill_emits_audit_log(monkeypatch) -> None:
+    from backend import audit as _audit
+    from backend.db_context import current_tenant_id, set_tenant_id
+
+    captured: list[dict[str, Any]] = []
+
+    async def fake_log(**kwargs: Any) -> None:
+        captured.append({**kwargs, "tenant_context": current_tenant_id()})
+
+    monkeypatch.setattr(_audit, "log", fake_log, raising=True)
+    set_tenant_id("t-prior")
+    try:
+        conn = _FakeConn()
+        run = _FakeRun(
+            metadata={
+                "tenant_id": "t-acme",
+                "task_id": "task-audit",
+                "tool_calls": 6,
+                "iterations": 1,
+            }
+        )
+        result = await sd.distill(run, _steps(2), conn=conn)
+    finally:
+        assert current_tenant_id() == "t-prior"
+        set_tenant_id(None)
+
+    assert result.written is True
+    assert result.draft is not None
+    assert len(captured) == 1
+    row = captured[0]
+    assert row["tenant_context"] == "t-acme"
+    assert row["action"] == "skill_distilled"
+    assert row["entity_kind"] == "auto_distilled_skill"
+    assert row["entity_id"] == result.draft.id
+    assert row["actor"] == "system:skill-distiller"
+    assert row["after"]["skill_name"] == "auto-architect-blueprint"
+    assert row["after"]["source_task_id"] == "task-audit"
+    assert row["after"]["tool_calls"] == 6
+    assert len(row["after"]["markdown_sha256"]) == 64
+
+
+@pytest.mark.asyncio
 async def test_distill_skips_below_threshold() -> None:
     conn = _FakeConn()
     run = _FakeRun(metadata={"tool_calls": 5, "iterations": 3})

@@ -19,6 +19,8 @@ observes the same source of truth.
 from __future__ import annotations
 
 import re
+import hashlib
+import logging
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -27,8 +29,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend import auth as _au
+from backend.db_context import current_tenant_id, set_tenant_id
 
 router = APIRouter(prefix="/auto-skills", tags=["auto-skills"])
+logger = logging.getLogger(__name__)
 
 _SKILLS_LIVE = Path(__file__).resolve().parent.parent.parent / "configs" / "skills"
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
@@ -79,6 +83,10 @@ def _actor_tenant(user: _au.User) -> str:
     return user.tenant_id or "t-default"
 
 
+def _markdown_sha256(markdown: str) -> str:
+    return hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+
+
 async def _fetch_owned(conn: Any, skill_id: str, tenant_id: str) -> dict | None:
     row = await conn.fetchrow(
         "SELECT id, tenant_id, skill_name, source_task_id, markdown_content, "
@@ -88,6 +96,52 @@ async def _fetch_owned(conn: Any, skill_id: str, tenant_id: str) -> dict | None:
         tenant_id,
     )
     return _row(row) if row else None
+
+
+async def _emit_promotion_audit(
+    skill: dict,
+    *,
+    path: Path,
+    actor: str,
+) -> None:
+    """Best-effort Phase D traceability row for reviewed skill promotion.
+
+    The durable auto_distilled_skills row supplies the tenant context, so
+    the audit chain is coordinated through PG rather than process state.
+    """
+
+    saved = current_tenant_id()
+    try:
+        set_tenant_id(skill["tenant_id"])
+        try:
+            from backend import audit as _audit
+            await _audit.log(
+                action="skill_promoted",
+                entity_kind="skill",
+                entity_id=skill["skill_name"],
+                before={
+                    "auto_distilled_skill_id": skill["id"],
+                    "status": "reviewed",
+                    "version": skill["version"] - 1,
+                },
+                after={
+                    "auto_distilled_skill_id": skill["id"],
+                    "tenant_id": skill["tenant_id"],
+                    "skill_name": skill["skill_name"],
+                    "source_task_id": skill["source_task_id"],
+                    "status": skill["status"],
+                    "version": skill["version"],
+                    "path": str(path),
+                    "markdown_sha256": _markdown_sha256(
+                        skill["markdown_content"],
+                    ),
+                },
+                actor=actor,
+            )
+        except Exception as exc:  # pragma: no cover — audit.log swallows
+            logger.debug("audit log for skill_promoted failed: %s", exc)
+    finally:
+        set_tenant_id(saved)
 
 
 @router.get("")
@@ -347,4 +401,10 @@ async def promote_auto_skill(
                 except OSError:
                     pass
                 raise
-    return {"skill": _row(row), "path": str(dest_file)}
+    skill = _row(row)
+    await _emit_promotion_audit(
+        skill,
+        path=dest_file,
+        actor=getattr(user, "email", "operator"),
+    )
+    return {"skill": skill, "path": str(dest_file)}

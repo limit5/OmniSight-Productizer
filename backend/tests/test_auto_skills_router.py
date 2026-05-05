@@ -102,9 +102,17 @@ async def test_direct_review_promote_uses_db_row_and_writes_pack(
     monkeypatch, tmp_path,
 ):
     conn = _FakeConn()
+    from backend import audit as _audit
     import backend.db_pool as _db_pool
+    from backend.db_context import current_tenant_id, set_tenant_id
     from backend.routers import auto_skills as _router
 
+    captured: list[dict[str, Any]] = []
+
+    async def fake_log(**kwargs: Any) -> None:
+        captured.append({**kwargs, "tenant_context": current_tenant_id()})
+
+    monkeypatch.setattr(_audit, "log", fake_log, raising=True)
     monkeypatch.setattr(_db_pool, "get_pool", lambda: _FakePool(conn))
     monkeypatch.setattr(_router, "_SKILLS_LIVE", tmp_path / "skills")
 
@@ -127,11 +135,31 @@ async def test_direct_review_promote_uses_db_row_and_writes_pack(
     )
     assert reviewed["status"] == "reviewed"
 
-    promoted = await _router.promote_auto_skill(created["id"], user=_admin_user())
+    set_tenant_id("t-prior")
+    try:
+        promoted = await _router.promote_auto_skill(
+            created["id"], user=_admin_user(),
+        )
+    finally:
+        assert current_tenant_id() == "t-prior"
+        set_tenant_id(None)
     assert promoted["skill"]["status"] == "promoted"
     skill_file = tmp_path / "skills" / "auto-direct" / "SKILL.md"
     assert Path(promoted["path"]) == skill_file
     assert skill_file.read_text(encoding="utf-8").endswith("# Reviewed\n")
+
+    assert len(captured) == 1
+    row = captured[0]
+    assert row["tenant_context"] == "t-default"
+    assert row["action"] == "skill_promoted"
+    assert row["entity_kind"] == "skill"
+    assert row["entity_id"] == "auto-direct"
+    assert row["actor"] == "admin@example.test"
+    assert row["before"]["auto_distilled_skill_id"] == created["id"]
+    assert row["after"]["auto_distilled_skill_id"] == created["id"]
+    assert row["after"]["source_task_id"] is None
+    assert row["after"]["path"] == str(skill_file)
+    assert len(row["after"]["markdown_sha256"]) == 64
 
 
 @pytest.fixture

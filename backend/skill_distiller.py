@@ -29,13 +29,14 @@ import json
 import logging
 import os
 import re
+import hashlib
 import time
 import uuid
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from backend.db_context import tenant_insert_value
+from backend.db_context import current_tenant_id, set_tenant_id, tenant_insert_value
 from backend.skills_scrubber import is_safe_to_promote, scrub
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,10 @@ class SkillDistillationResult:
     stats: TrajectoryStats
     hits: Counter[str]
     skipped_reason: str = ""
+
+
+def _markdown_sha256(markdown: str) -> str:
+    return hashlib.sha256(markdown.encode("utf-8")).hexdigest()
 
 
 def is_enabled() -> bool:
@@ -363,6 +368,47 @@ async def _insert_draft(
     return _row_to_draft(row, fallback=draft)
 
 
+async def _emit_distillation_audit(
+    draft: DistilledSkillDraft,
+    *,
+    stats: TrajectoryStats,
+) -> None:
+    """Best-effort Phase D traceability row for a distilled draft.
+
+    Tenant context is temporarily set from the durable draft row so
+    audit.log writes the same tenant chain in every worker/process.
+    """
+
+    saved = current_tenant_id()
+    try:
+        set_tenant_id(draft.tenant_id)
+        try:
+            from backend import audit as _audit
+            await _audit.log(
+                action="skill_distilled",
+                entity_kind="auto_distilled_skill",
+                entity_id=draft.id,
+                before=None,
+                after={
+                    "id": draft.id,
+                    "tenant_id": draft.tenant_id,
+                    "skill_name": draft.skill_name,
+                    "source_task_id": draft.source_task_id,
+                    "version": draft.version,
+                    "status": draft.status,
+                    "markdown_sha256": _markdown_sha256(draft.markdown_content),
+                    "tool_calls": stats.tool_calls,
+                    "iterations": stats.iterations,
+                    "success": stats.success,
+                },
+                actor="system:skill-distiller",
+            )
+        except Exception as exc:  # pragma: no cover — audit.log swallows
+            logger.debug("audit log for skill_distilled failed: %s", exc)
+    finally:
+        set_tenant_id(saved)
+
+
 async def distill(
     run: Any,
     steps: list[Any],
@@ -416,6 +462,7 @@ async def distill(
         markdown_content=markdown,
     )
     inserted = await _insert_draft(draft, conn=conn)
+    await _emit_distillation_audit(inserted, stats=stats)
     return SkillDistillationResult(
         written=True,
         draft=inserted,
