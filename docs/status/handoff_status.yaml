@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 471
+entry_count: 472
 status_counts:
-  dev-only: 461
+  dev-only: 462
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4385,3 +4385,12 @@ entries:
   next_gate: deployed-active — 發佈 immutable `omnisight-proxy` release image，為第一個 Tier 3 staging/customer tenant 部署並記錄 GHCR/customer
     digest、mTLS/replay/proxied-provider smoke、SaaS metadata-only audit、provider key purge 與 proxy-unreachable no-fallback
     evidence。
+- id: 2026-05-06--KS.3.14
+  header_line: 47413
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: KS.3.14
+  title: KS.3.14 mTLS-replay 完工
+  production_status: dev-only
+  next_gate: deployed-active — staging/customer Tier 3 cutover 時記錄實際 mTLS CA、pinned client cert fingerprint、cert expiry、replayed
+    nonce rejected smoke、proxied provider success 與 proxy-unreachable no-fallback evidence。
