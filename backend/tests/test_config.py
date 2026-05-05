@@ -14,6 +14,15 @@ def test_default_settings_have_sane_defaults():
     assert s.notification_max_retries == 3
 
 
+def test_web_search_settings_have_sane_defaults(monkeypatch):
+    monkeypatch.delenv("OMNISIGHT_WEB_SEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD", raising=False)
+    from backend.config import Settings
+    s = Settings()
+    assert s.web_search_provider == "none"
+    assert s.web_search_daily_budget_usd == 5.00
+
+
 @pytest.mark.parametrize("env,expected_provider", [
     ({"OMNISIGHT_LLM_PROVIDER": "xai"}, "xai"),
     ({"OMNISIGHT_LLM_PROVIDER": "groq"}, "groq"),
@@ -30,10 +39,12 @@ def test_env_override_llm_provider(monkeypatch, env, expected_provider):
 def test_env_override_numeric_coerces(monkeypatch):
     monkeypatch.setenv("OMNISIGHT_LLM_TEMPERATURE", "0.9")
     monkeypatch.setenv("OMNISIGHT_NOTIFICATION_MAX_RETRIES", "7")
+    monkeypatch.setenv("OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD", "12.50")
     from backend.config import Settings
     s = Settings()
     assert s.llm_temperature == 0.9
     assert s.notification_max_retries == 7
+    assert s.web_search_daily_budget_usd == 12.50
 
 
 def test_env_override_bool_coerces(monkeypatch):
@@ -43,6 +54,28 @@ def test_env_override_bool_coerces(monkeypatch):
     s = Settings()
     assert s.debug is True
     assert s.rtk_enabled is False
+
+
+@pytest.mark.parametrize("provider", ["none", "tavily", "exa", "perplexity"])
+def test_env_override_web_search_provider(monkeypatch, provider):
+    monkeypatch.setenv("OMNISIGHT_WEB_SEARCH_PROVIDER", provider)
+    from backend.config import Settings
+    s = Settings()
+    assert s.web_search_provider == provider
+
+
+def test_validate_startup_config_warns_on_bad_web_search_provider(monkeypatch):
+    from backend import config as cfg
+    monkeypatch.setattr(cfg.settings, "web_search_provider", "bing")
+    warnings = cfg.validate_startup_config(strict=False)
+    assert any("WEB_SEARCH_PROVIDER" in w for w in warnings)
+
+
+def test_validate_startup_config_warns_on_bad_web_search_budget(monkeypatch):
+    from backend import config as cfg
+    monkeypatch.setattr(cfg.settings, "web_search_daily_budget_usd", -1)
+    warnings = cfg.validate_startup_config(strict=False)
+    assert any("WEB_SEARCH_DAILY_BUDGET_USD" in w for w in warnings)
 
 
 @pytest.mark.parametrize("provider,default_model", [
