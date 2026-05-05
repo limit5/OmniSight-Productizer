@@ -65,6 +65,12 @@ def _ensure_inside_base(path: str | Path) -> Path:
 
 
 def read_handler(payload: dict[str, Any]) -> str:
+    from backend import pep_gateway as _pep
+
+    dec = _pep.classify_native_read_path("Read", payload)
+    if dec is not None:
+        _action, rule, reason, _scope = dec
+        raise PermissionError(f"PEP denied Read ({rule}): {reason}")
     p = _ensure_inside_base(payload["file_path"])
     if not p.exists():
         raise FileNotFoundError(f"{p} does not exist")

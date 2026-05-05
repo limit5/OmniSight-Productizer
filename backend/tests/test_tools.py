@@ -70,6 +70,17 @@ class TestReadFile:
         assert result.startswith("[ERROR]")
         assert "too large" in result.lower()
 
+    @pytest.mark.asyncio
+    async def test_read_build_log_path_rejected_by_pep(self, workspace: Path):
+        log = workspace / "build" / "compile.log"
+        log.parent.mkdir()
+        log.write_text("compiler noise")
+        result = await read_file.ainvoke({"path": "build/compile.log"})
+        assert result.startswith("[BLOCKED] PEP denied read_file")
+        assert "native_read_high_noise_path" in result
+        assert "Bash" in result
+        assert "RTK" in result
+
 
 class TestWriteFile:
 

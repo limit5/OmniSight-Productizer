@@ -104,6 +104,19 @@ class TestClassify:
         assert rule == "tier_whitelist"
         assert scope == "local"
 
+    @pytest.mark.parametrize("tool,args", [
+        ("read_file", {"path": "build/compile.log"}),
+        ("Read", {"file_path": "logs/agent.out"}),
+        ("Read", {"file_path": "src/.logs/session.err.1"}),
+    ])
+    def test_native_read_file_denies_build_log_paths(self, tool, args):
+        action, rule, reason, scope = pep.classify(tool, args, "t3")
+        assert action is pep.PepAction.deny
+        assert rule == "native_read_high_noise_path"
+        assert "Bash" in reason
+        assert "RTK" in reason
+        assert scope == "local"
+
     def test_t1_run_bash_is_held_not_in_whitelist(self):
         # run_bash is a t3-only tool.
         action, rule, _reason, scope = pep.classify(
@@ -243,6 +256,19 @@ class TestEvaluateAutoAllow:
         # Appears in recent ring
         assert any(r["id"] == out.id for r in pep.recent_decisions())
         # Not in HELD queue
+        assert pep.held_snapshot() == []
+
+    @pytest.mark.asyncio
+    async def test_native_read_file_build_log_deny_returns_immediately(self):
+        out = await pep.evaluate(
+            tool="read_file",
+            arguments={"path": "build/test.log"},
+            agent_id="a1",
+            tier="t3",
+        )
+        assert out.action is pep.PepAction.deny
+        assert out.rule == "native_read_high_noise_path"
+        assert out.decision_id is None
         assert pep.held_snapshot() == []
 
 

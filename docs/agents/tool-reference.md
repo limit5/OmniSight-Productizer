@@ -108,7 +108,7 @@ String replacement in a file using the WP.3 diff-validation cascade for unique e
 
 ### `Read`
 
-Read a file from the local filesystem. Supports text, image, PDF, and Jupyter notebook formats. Use absolute paths. Use `pages` for PDFs > 10 pages, `offset`+`limit` for large text files.
+Read a file from the local filesystem. Supports text, image, PDF, and Jupyter notebook formats. Use absolute paths. Use `pages` for PDFs > 10 pages, `offset`+`limit` for large source files. Build and log paths are blocked by PEP; inspect them via Bash with an RTK-prefixed cat/head/tail/sed command.
 
 **Input schema**:
 
@@ -399,7 +399,7 @@ Semantic retrieval over the internal workspace RAG index. Returns top-K relevant
 
 ### `Bash`
 
-Execute a shell command. Default 30s timeout (max 600s). Quote paths with spaces. Avoid using cat/head/tail/sed/awk/echo — use Read/Edit/Write tools instead. Use `run_in_background` for long tasks; check via Monitor.
+Execute a shell command. Default 30s timeout (max 600s). Quote paths with spaces. Use RTK-prefixed cat/head/tail/sed/awk for build or log paths; use Read/Edit/Write for normal source files. Use `run_in_background` for long tasks; check via Monitor.
 
 **Input schema**:
 
