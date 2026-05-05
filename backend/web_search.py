@@ -61,9 +61,46 @@ DEFAULT_TENANT_RATE_CAPACITY = 30
 DEFAULT_TENANT_RATE_WINDOW_SECONDS = 60.0
 DEFAULT_DAILY_BUDGET_USD = 5.00
 DEFAULT_TAVILY_CREDIT_USD = 0.008
+KNOWN_WEB_SEARCH_PROVIDERS = frozenset({"none", "tavily", "exa", "perplexity"})
 
 SearchDepth = Literal["basic", "advanced"]
 SearchTopic = Literal["general", "news", "finance"]
+WebSearchProvider = Literal["none", "tavily", "exa", "perplexity"]
+
+
+class WebSearchConfigError(ValueError):
+    """Raised when BP.N.3 web-search env knobs are malformed."""
+
+
+class UnsupportedWebSearchProviderError(WebSearchConfigError):
+    """Raised when a configured provider has no concrete client yet."""
+
+
+@dataclass(frozen=True)
+class WebSearchRuntimeConfig:
+    """BP.N.3 runtime knobs for web-search provider and tenant budget.
+
+    Module-global state audit: instances are immutable values derived
+    from Settings/env per worker; cross-worker spend consistency stays
+    in the Redis-backed ``WebSearchCostTracker`` path, with the existing
+    in-memory fallback intentionally per-worker for tests and dev.
+    """
+
+    provider: WebSearchProvider = "none"
+    daily_budget_usd: float = DEFAULT_DAILY_BUDGET_USD
+
+    @classmethod
+    def from_settings(cls, settings: Any | None = None) -> "WebSearchRuntimeConfig":
+        if settings is None:
+            provider_raw = os.environ.get("OMNISIGHT_WEB_SEARCH_PROVIDER", "")
+            budget_raw: Any = os.environ.get("OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD", "")
+        else:
+            provider_raw = getattr(settings, "web_search_provider", "")
+            budget_raw = getattr(settings, "web_search_daily_budget_usd", "")
+        return cls(
+            provider=_parse_web_search_provider(provider_raw),
+            daily_budget_usd=_parse_daily_budget_usd(budget_raw),
+        )
 
 
 @dataclass(frozen=True)
@@ -209,6 +246,32 @@ def _day_key(now: datetime | None = None) -> str:
 
 def _credits_for_depth(search_depth: SearchDepth) -> int:
     return 2 if search_depth == "advanced" else 1
+
+
+def _parse_web_search_provider(value: Any) -> WebSearchProvider:
+    provider = str(value or "none").strip().lower() or "none"
+    if provider not in KNOWN_WEB_SEARCH_PROVIDERS:
+        raise WebSearchConfigError(
+            f"unknown web-search provider {provider!r}; expected one of "
+            f"{sorted(KNOWN_WEB_SEARCH_PROVIDERS)}"
+        )
+    return provider  # type: ignore[return-value]
+
+
+def _parse_daily_budget_usd(value: Any) -> float:
+    if value in (None, ""):
+        return DEFAULT_DAILY_BUDGET_USD
+    try:
+        budget = float(value)
+    except (TypeError, ValueError) as exc:
+        raise WebSearchConfigError(
+            "web-search daily budget must be a non-negative number"
+        ) from exc
+    if budget < 0:
+        raise WebSearchConfigError(
+            "web-search daily budget must be a non-negative number"
+        )
+    return budget
 
 
 def estimate_tavily_cost_usd(
@@ -597,6 +660,48 @@ class TavilyWebSearchClient:
         )
 
 
+def make_web_search_client(
+    provider: str | None = None,
+    *,
+    settings: Any | None = None,
+    cost_store: WebSearchCostStore | None = None,
+    **client_kwargs: Any,
+) -> TavilyWebSearchClient | None:
+    """Construct the configured BP.N web-search client.
+
+    Resolution mirrors the existing clone-source factory pattern:
+    explicit ``provider`` argument wins, otherwise the passed Settings
+    object / environment provides ``OMNISIGHT_WEB_SEARCH_PROVIDER``.
+    ``none`` returns ``None`` so BP.N.4 can leave guilds disabled by
+    default. ``exa`` and ``perplexity`` are accepted BP.N.3 knob values
+    but raise until their adapters land in a later row.
+    """
+
+    config = WebSearchRuntimeConfig.from_settings(settings)
+    if provider is not None:
+        config = WebSearchRuntimeConfig(
+            provider=_parse_web_search_provider(provider),
+            daily_budget_usd=config.daily_budget_usd,
+        )
+
+    if config.provider == "none":
+        return None
+    if config.provider != "tavily":
+        raise UnsupportedWebSearchProviderError(
+            f"web-search provider {config.provider!r} is configured but "
+            "no client adapter has shipped yet"
+        )
+
+    client_kwargs.setdefault(
+        "cost_tracker",
+        WebSearchCostTracker(
+            store=cost_store,
+            daily_budget_usd=config.daily_budget_usd,
+        ),
+    )
+    return TavilyWebSearchClient(**client_kwargs)
+
+
 def _tavily_results(payload: dict[str, Any]) -> list[WebSearchResult]:
     results: list[WebSearchResult] = []
     for item in payload.get("results") or []:
@@ -631,19 +736,25 @@ __all__ = [
     "DEFAULT_TENANT_RATE_CAPACITY",
     "DEFAULT_TENANT_RATE_WINDOW_SECONDS",
     "InMemoryWebSearchCostStore",
+    "KNOWN_WEB_SEARCH_PROVIDERS",
     "RedisWebSearchCostStore",
     "TAVILY_SEARCH_URL",
     "TavilyWebSearchClient",
     "WebSearchBudgetCheck",
     "WebSearchBudgetExceeded",
+    "WebSearchConfigError",
     "WebSearchCostReservation",
     "WebSearchCostStore",
     "WebSearchCostTracker",
     "WebSearchCredentialMissing",
+    "WebSearchProvider",
     "WebSearchRateGate",
     "WebSearchRateLimitConfig",
     "WebSearchRateLimited",
     "WebSearchResponse",
     "WebSearchResult",
+    "WebSearchRuntimeConfig",
+    "UnsupportedWebSearchProviderError",
     "estimate_tavily_cost_usd",
+    "make_web_search_client",
 ]

@@ -103,6 +103,25 @@ class Settings(BaseSettings):
     token_fallback_model: str = "llama3.1"  # Model to downgrade to at 90%
     llm_fallback_chain: str = "anthropic,openai,google,groq,deepseek,openrouter,ollama"  # Failover priority
 
+    # ── BP.N.3 Web Search Tool knobs ──
+    # Provider selection is intentionally default-off. BP.N.1 shipped the
+    # Tavily client and per-tenant spend tracker; BP.N.3 only declares the
+    # operator knobs so later BP.N rows can wire the tool into selected
+    # guild loadouts without surprising existing deployments.
+    #
+    # ``web_search_provider``: none | tavily | exa | perplexity. Only
+    # Tavily has a concrete client in BP.N.1; Exa/Perplexity are accepted
+    # config values so operators can stage env before their adapters land.
+    # ``web_search_daily_budget_usd`` is a per-tenant daily cap passed to
+    # ``backend.web_search.WebSearchCostTracker``.
+    #
+    # Module-global state audit (Step 1, type-1): Settings values are
+    # immutable literals derived by each worker from the same env/.env
+    # source; mutable per-tenant spend state remains in Redis or the
+    # documented per-worker dev fallback inside ``backend.web_search``.
+    web_search_provider: str = "none"
+    web_search_daily_budget_usd: float = 5.00
+
     # ── W11.2 Website Cloning Backend ──
     # Which CloneSource backend the W11 cloning pipeline picks up at
     # runtime. Empty = auto-select (Firecrawl when an API key is in env,
@@ -990,6 +1009,30 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
             "not tenant-bucketed. Only safe on single-tenant or fully-"
             "trusted deployments. Use 'per_tenant' for SaaS."
         )
+
+    # ── BP.N.3: web-search provider / budget knobs ──
+    web_search_provider = (settings.web_search_provider or "").strip().lower()
+    if web_search_provider not in {"none", "tavily", "exa", "perplexity"}:
+        msg = (
+            f"OMNISIGHT_WEB_SEARCH_PROVIDER={settings.web_search_provider!r} "
+            "is invalid. Valid: none / tavily / exa / perplexity."
+        )
+        (hard_errors if strict else warnings).append(msg)
+    try:
+        web_search_budget = float(settings.web_search_daily_budget_usd)
+    except (TypeError, ValueError):
+        msg = (
+            "OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD must be a non-negative "
+            f"number, got {settings.web_search_daily_budget_usd!r}."
+        )
+        (hard_errors if strict else warnings).append(msg)
+    else:
+        if web_search_budget < 0:
+            msg = (
+                "OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD must be non-negative, "
+                f"got {settings.web_search_daily_budget_usd!r}."
+            )
+            (hard_errors if strict else warnings).append(msg)
 
     # ── Internet-exposure auth (Phase 54 + L1) ──
     # The single most common foot-gun on first deploy: auth_mode=open

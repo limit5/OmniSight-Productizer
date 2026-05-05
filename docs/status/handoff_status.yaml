@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 371
+entry_count: 372
 status_counts:
-  dev-only: 361
+  dev-only: 362
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3482,3 +3482,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — BP.N.3-BP.N.5 接 provider/env/tool/audit 後，production image 重建並以 mock/staging web-search result
     smoke 確認 sanitized marker 進入 Intel + Architect Guild 的 LLM prompt。
+- id: 2026-05-05--BP.N.3
+  header_line: 45947
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.N.3
+  title: BP.N.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.N.4/BP.N.5 接 Intel + Architect Guild tool loadout 與 audit_log 後，production image 重建並以
+    `OMNISIGHT_WEB_SEARCH_PROVIDER=none` default-off smoke，再用 staging Tavily key 驗證 daily budget cap。
