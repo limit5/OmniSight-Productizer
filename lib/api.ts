@@ -1009,6 +1009,66 @@ export async function listEffectiveSkills(): Promise<EffectiveSkillsResponse> {
   return request<EffectiveSkillsResponse>("/skills/effective")
 }
 
+export type AutoSkillStatus = "draft" | "reviewed" | "promoted"
+
+export interface AutoSkillItem {
+  id: string
+  tenant_id: string
+  skill_name: string
+  source_task_id: string | null
+  markdown_content: string
+  version: number
+  status: AutoSkillStatus
+  created_at: string
+}
+
+export interface AutoSkillsListResponse {
+  items: AutoSkillItem[]
+  count: number
+}
+
+export interface AutoSkillReviewUpdate {
+  skill_name?: string
+  source_task_id?: string | null
+  markdown_content?: string
+  expected_version?: number
+}
+
+export interface AutoSkillPromoteResponse {
+  skill: AutoSkillItem
+  path: string
+}
+
+export async function listAutoSkills(opts?: {
+  status?: AutoSkillStatus
+  limit?: number
+}): Promise<AutoSkillsListResponse> {
+  const params = new URLSearchParams()
+  if (opts?.status) params.set("status", opts.status)
+  if (opts?.limit) params.set("limit", String(opts.limit))
+  const qs = params.toString()
+  return request<AutoSkillsListResponse>(`/auto-skills${qs ? `?${qs}` : ""}`)
+}
+
+export async function reviewAutoSkill(
+  skillId: string,
+  body?: AutoSkillReviewUpdate,
+): Promise<AutoSkillItem> {
+  return request<AutoSkillItem>(`/auto-skills/${encodeURIComponent(skillId)}/review`, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  })
+}
+
+export async function promoteAutoSkill(
+  skillId: string,
+): Promise<AutoSkillPromoteResponse> {
+  return request<AutoSkillPromoteResponse>(
+    `/auto-skills/${encodeURIComponent(skillId)}/promote`,
+    { method: "POST" },
+  )
+}
+
 // ─── Agents ───
 
 export interface ApiAgent {
