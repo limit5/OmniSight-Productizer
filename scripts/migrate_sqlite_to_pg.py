@@ -114,6 +114,12 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # ``flag_name``; audit rows use generic ``audit_log`` with
     # entity_kind='feature_flag'. NOT in TABLES_WITH_IDENTITY_ID.
     "feature_flags",
+    # WP.1.2 (alembic 0195): addressable Block primitive. Optional
+    # self-FK on ``parent_id``; callers must insert parent blocks before
+    # children when preserving trees. PK is app-generated TEXT
+    # ``block_id`` and JSON payload columns are TEXT in SQLite / JSONB in
+    # PG, so NOT in TABLES_WITH_IDENTITY_ID.
+    "blocks",
     # BP.Q.4 (alembic 0186): tenant-scoped RAG embedding chunks. FK
     # ``tenant_id -> tenants.id`` (CASCADE) so it MUST replay after
     # tenants. PK is app-generated TEXT ``chunk_id``; embedding and

@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 415
+entry_count: 416
 status_counts:
-  dev-only: 405
+  dev-only: 406
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3878,3 +3878,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.1.2 以 live head 0194 後的下一個 migration 建立 `blocks` table + indexes，並同步 migrator/static schema
     drift guards 後再進下一 gate。
+- id: 2026-05-06--WP.1.2
+  header_line: 46616
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.2
+  title: WP.1.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator/Claude 跑 production alembic chain 0194→0195，並在 production image 對 `blocks` table
+    做 live schema smoke 後再提升狀態。

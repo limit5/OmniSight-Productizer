@@ -586,6 +586,31 @@ CREATE INDEX IF NOT EXISTS idx_feature_flags_tier_state
 CREATE INDEX IF NOT EXISTS idx_feature_flags_expires_at
     ON feature_flags(expires_at);
 
+-- WP.1.2 (alembic 0195): addressable Block primitive.
+-- Runtime writers, share/permalink flows, and redaction enforcement land
+-- in WP.1.3-WP.1.8; this is the durable table + lookup shape.
+CREATE TABLE IF NOT EXISTS blocks (
+    block_id       TEXT PRIMARY KEY,
+    parent_id      TEXT REFERENCES blocks(block_id),
+    tenant_id      TEXT NOT NULL,
+    user_id        TEXT,
+    project_id     TEXT,
+    session_id     TEXT,
+    kind           TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    title          TEXT NOT NULL DEFAULT '',
+    payload        TEXT NOT NULL DEFAULT '{}',
+    metadata       TEXT NOT NULL DEFAULT '{}',
+    redaction_mask TEXT NOT NULL DEFAULT '{}',
+    started_at     TEXT,
+    completed_at   TEXT,
+    created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_blocks_tenant_session
+    ON blocks(tenant_id, session_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_blocks_parent
+    ON blocks(parent_id);
+
 CREATE TABLE IF NOT EXISTS agents (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,

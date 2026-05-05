@@ -176,6 +176,7 @@ def test_identity_subset_only_contains_integer_pk_tables():
     non_integer_pks = {
         "adaptive_budget_state",
         "auto_distilled_skills",
+        "blocks",
         "cmek_configs",
         "cmek_revoke_events",
         "bootstrap_state",
