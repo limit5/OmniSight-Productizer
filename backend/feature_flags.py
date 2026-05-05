@@ -255,6 +255,13 @@ FEATURE_FLAG_ENV_KNOBS: Mapping[str, FeatureFlagEnvKnob] = MappingProxyType({
         default_state=FeatureFlagState.ENABLED,
         owner="wp",
     ),
+    "OMNISIGHT_WP_BLOCK_MODEL_ENABLED": FeatureFlagEnvKnob(
+        env_name="OMNISIGHT_WP_BLOCK_MODEL_ENABLED",
+        flag_name="wp.block_model.enabled",
+        tier=FeatureFlagTier.RELEASE,
+        default_state=FeatureFlagState.ENABLED,
+        owner="wp",
+    ),
 })
 
 

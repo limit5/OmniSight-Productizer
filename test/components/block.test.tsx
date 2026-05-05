@@ -6,12 +6,16 @@
  * while callers keep their existing inner layout and test ids.
  */
 
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 import { Activity } from "lucide-react"
 
-import { Block } from "@/components/omnisight/block"
+import { Block, isBlockModelEnabled } from "@/components/omnisight/block"
 import type { CreateShareableObjectRequest } from "@/lib/api"
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
 
 describe("<Block />", () => {
   it("renders the addressable block attributes and header", () => {
@@ -109,6 +113,30 @@ describe("<Block />", () => {
     )
 
     fireEvent.contextMenu(screen.getByTestId("plain-block"))
+    expect(screen.queryByText("Share")).not.toBeInTheDocument()
+  })
+
+  it("honours OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false as the ad-hoc card rollback", () => {
+    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "false")
+
+    render(
+      <Block
+        blockId="block-disabled"
+        kind="turn.message"
+        status="completed"
+        data-testid="rollback-card"
+      >
+        ad-hoc body
+      </Block>,
+    )
+
+    expect(isBlockModelEnabled()).toBe(false)
+    const card = screen.getByTestId("rollback-card")
+    expect(card).toHaveTextContent("ad-hoc body")
+    expect(card).not.toHaveAttribute("data-block-id")
+    expect(card).not.toHaveAttribute("data-block-kind")
+    expect(card).not.toHaveAttribute("data-block-status")
+    fireEvent.contextMenu(card)
     expect(screen.queryByText("Share")).not.toBeInTheDocument()
   })
 

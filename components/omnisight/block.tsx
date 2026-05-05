@@ -43,6 +43,9 @@ const SHARE_REGIONS: Array<{ id: BlockShareRegion; label: string }> = [
   { id: "screenshots", label: "Screenshots" },
 ]
 
+const BLOCK_MODEL_ENABLED_ENV = "OMNISIGHT_WP_BLOCK_MODEL_ENABLED"
+const BLOCK_MODEL_ENV_FALSE_VALUES = new Set(["0", "false", "no", "off"])
+
 const TONE_CLASS: Record<BlockTone, string> = {
   neutral: "border-[var(--neural-border,rgba(148,163,184,0.25))] bg-white/[0.02]",
   info: "border-[var(--neural-blue,#3b82f6)]/35 bg-[var(--neural-blue,#3b82f6)]/[0.05]",
@@ -71,6 +74,12 @@ export interface BlockProps extends Omit<HTMLAttributes<HTMLElement>, "title"> {
   ) => Promise<CreateShareableObjectResponse>
 }
 
+export function isBlockModelEnabled(): boolean {
+  const raw = process.env[BLOCK_MODEL_ENABLED_ENV]
+  if (raw === undefined) return true
+  return !BLOCK_MODEL_ENV_FALSE_VALUES.has(raw.trim().toLowerCase())
+}
+
 export function Block({
   as = "div",
   title,
@@ -90,6 +99,7 @@ export function Block({
   children,
   ...props
 }: BlockProps) {
+  const blockModelEnabled = isBlockModelEnabled()
   const hasHeader = Boolean(title || titleRight || Icon)
   const Element = as
   const enabledRegions = useMemo(
@@ -151,9 +161,9 @@ export function Block({
 
   const block = (
     <Element
-      data-block-id={blockId}
-      data-block-kind={kind}
-      data-block-status={status}
+      data-block-id={blockModelEnabled ? blockId : undefined}
+      data-block-kind={blockModelEnabled ? kind : undefined}
+      data-block-status={blockModelEnabled ? status : undefined}
       className={cn(
         "flex min-w-0 flex-col gap-1.5 rounded-sm border p-2",
         TONE_CLASS[tone],
@@ -179,7 +189,7 @@ export function Block({
     </Element>
   )
 
-  if (!blockId) return block
+  if (!blockModelEnabled || !blockId) return block
 
   return (
     <>
