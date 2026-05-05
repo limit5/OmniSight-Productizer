@@ -44,6 +44,35 @@
   * 禁止危險系統指令 (如 `rm`, `dd` 覆寫系統磁區)。
 * **主要職責：** 燒錄韌體至 EVK、讀取 UART 串口日誌、擷取真實 I2C/SPI 訊號。
 
+#### Phase T 落地狀態 (BP.W3.12, 2026-05-06)
+
+Tier 3 的實作入口是 `tools/hardware_daemon/app.py`，作為部署在
+EVK 連接機上的獨立 FastAPI daemon。它不是 OmniSight backend 的一般
+router，也不給 Agent shell / SSH / arbitrary command surface；所有可執行
+能力都被固定在三個 JSON-only endpoint：
+
+| Endpoint | Action | 參數邊界 | 執行方式 |
+| :--- | :--- | :--- | :--- |
+| `POST /flash_board` | `flash_board` | `board_id`、`firmware_url` 或 artifact-root 內的 `artifact_path` | `OMNISIGHT_HW_BRIDGE_FLASH_CMD` argv |
+| `POST /read_uart` | `read_uart` | `/dev/tty*` 或 `/dev/serial/by-id/*`、baud、duration、max bytes | `OMNISIGHT_HW_BRIDGE_UART_CMD` argv |
+| `POST /capture_signal` | `capture_signal` | `bus ∈ {i2c, spi, gpio}`、channel、duration、sample rate | `OMNISIGHT_HW_BRIDGE_SIGNAL_CMD` argv |
+
+共同約束：
+
+* POST 必須是 `Content-Type: application/json`；非 JSON request 在 body
+  parsing 前回 `415`。
+* Pydantic model 使用 `extra="forbid"`，未知欄位不會被悄悄傳進硬體層。
+* 子程序一律走 `asyncio.create_subprocess_exec(*argv)`，不走 shell
+  interpolation；daemon 只把高階參數轉成白名單命令 argv。
+* `OMNISIGHT_HW_BRIDGE_TOKEN` 若有設定，caller 必須帶
+  `X-Omnisight-Bridge-Token`；mTLS / LAN ACL 仍由部署層負責。
+* systemd 範本在 `deploy/systemd/omnisight-hardware-bridge.service`，預設
+  綁定 `127.0.0.1:8765`，由反向 proxy / VPN / mTLS sidecar 決定是否暴露
+  給 Tier 0 控制面。
+
+這補上 Risk R13 的最小 runtime surface：自動化燒錄 / UART / 訊號擷取可走
+Tier 3 RPC，不再需要把 Agent 放進 EVK host。
+
 ---
 
 ## 二、 標準任務流轉與沙盒生命週期 (Lifecycle)

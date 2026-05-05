@@ -1,0 +1,31 @@
+; OmniSight Tier 3 Hardware Bridge Daemon.
+;
+; Install on the EVK-connected host, then:
+;   sudo cp deploy/systemd/omnisight-hardware-bridge.service /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now omnisight-hardware-bridge.service
+
+[Unit]
+Description=OmniSight Tier 3 Hardware Bridge Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/omnisight
+Environment=PYTHONPATH=/opt/omnisight
+Environment=OMNISIGHT_HW_BRIDGE_ARTIFACT_ROOT=/var/lib/omnisight/hardware-bridge/artifacts
+Environment=OMNISIGHT_HW_BRIDGE_FLASH_CMD=/usr/local/bin/omni-flash-board
+Environment=OMNISIGHT_HW_BRIDGE_UART_CMD=/usr/local/bin/omni-read-uart
+Environment=OMNISIGHT_HW_BRIDGE_SIGNAL_CMD=/usr/local/bin/omni-capture-signal
+ExecStart=/opt/omnisight/backend/.venv/bin/uvicorn tools.hardware_daemon.app:app --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/omnisight/hardware-bridge /dev
+
+[Install]
+WantedBy=multi-user.target
+

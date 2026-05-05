@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 454
+entry_count: 455
 status_counts:
-  dev-only: 444
+  dev-only: 445
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4227,3 +4227,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 後續 Phase P runtime 實作需新增 candidate staging store / smoke runner / review queue / promotion
     command / PEP registration glue / audit rows，並在 staging 以 T1 smoke 驗證未審核 candidate 不能被一般 agent 呼叫、通過三段 gate 後才可 execute。
+- id: 2026-05-06--W3.12
+  header_line: 47199
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: W3.12
+  title: BP.W3.12 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後在 EVK 連接機安裝 systemd unit，配置三個 `OMNISIGHT_HW_BRIDGE_*_CMD` wrapper 與 mTLS / LAN ACL，跑 staging
+    smoke：flash test firmware、讀 UART boot log、擷取一段 I2C/SPI/GPIO signal。
