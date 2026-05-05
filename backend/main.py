@@ -1194,6 +1194,8 @@ app.include_router(health.router, prefix=settings.api_prefix)
 # at the server root so systemd / docker-compose / k8s / CF health
 # checks don't need to know about the API prefix.
 app.include_router(health.probe_router)
+from backend.routers import a2a_inbound as _a2a_inbound_router  # BP.A2A.2
+app.include_router(_a2a_inbound_router.router)
 app.include_router(agents.router, prefix=settings.api_prefix)
 app.include_router(tasks.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)
