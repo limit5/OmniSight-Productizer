@@ -4,7 +4,7 @@
 >
 > Run `python -m backend.agents.tool_schemas --regen-doc` to refresh.
 
-**Totals**: 60 tools  ·  10 eager  ·  50 deferred (lazy-load via ToolSearch)  ·  28 HD skills (placeholder).
+**Totals**: 61 tools  ·  11 eager  ·  50 deferred (lazy-load via ToolSearch)  ·  28 HD skills (placeholder).
 
 **Conventions**:
 
@@ -351,6 +351,46 @@ Ripgrep-based content search. Supports regex patterns, paths, globs, type filter
   },
   "required": [
     "pattern"
+  ]
+}
+```
+
+### `KnowledgeRetrieval`
+
+Semantic retrieval over the internal workspace RAG index. Returns top-K relevant chunks with citations containing source path, line range, and similarity score.
+
+**Input schema**:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Natural-language or code search query."
+    },
+    "tenant_id": {
+      "type": "string",
+      "description": "Tenant scope. Defaults to OMNISIGHT_RAG_TENANT_ID when omitted."
+    },
+    "top_k": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 5,
+      "description": "Maximum number of chunks to return."
+    },
+    "source_path": {
+      "type": "string",
+      "description": "Optional repo-relative path filter."
+    },
+    "metadata_filter": {
+      "type": "object",
+      "description": "Optional exact metadata filter."
+    }
+  },
+  "required": [
+    "query"
   ]
 }
 ```

@@ -13,7 +13,8 @@ Why not just have the parent loop do everything directly?
   * **Transcript isolation** — long exploration burns parent's cache and
     fills its working memory. Sub-agent's full transcript is summarized
     into one text result.
-  * **Tool scoping** — an ``Explore`` sub-agent should be read-only;
+  * **Tool scoping** — an ``Explore`` sub-agent should be read-only and
+    RAG-first;
     a ``Plan`` sub-agent shouldn't write code. Forcing the parent to
     drop tools mid-loop is awkward; isolating in a sub-call is clean.
   * **Cost containment** — independent ``max_iterations`` per
@@ -108,10 +109,14 @@ _GENERAL_PROMPT = (
 )
 
 _EXPLORE_PROMPT = (
-    "You are an Explore sub-agent. Read-only — Read / Grep / Glob only. "
-    "Do NOT modify files. Your output is a structured findings summary "
-    "for the parent: which files, which symbols, which patterns matter. "
-    "Concise bullet form. End with '== END FINDINGS =='."
+    "You are an Explore sub-agent. Read-only — KnowledgeRetrieval / Read / "
+    "Grep / Glob only. Do NOT modify files. Default to KnowledgeRetrieval "
+    "for semantic codebase exploration, then Read cited files to verify "
+    "details. Use Grep as fallback when the RAG index is unavailable, when "
+    "KnowledgeRetrieval returns no useful hits, or when the task is a syntax, "
+    "regex, exact symbol, or other literal query. Your output is a structured "
+    "findings summary for the parent: which files, which symbols, which "
+    "patterns matter. Concise bullet form. End with '== END FINDINGS =='."
 )
 
 _PLAN_PROMPT = (
@@ -133,7 +138,7 @@ DEFAULT_SUBAGENT_TYPES: dict[str, SubAgentTypeSpec] = {
     ),
     "Explore": SubAgentTypeSpec(
         name="Explore",
-        tools=("Read", "Grep", "Glob"),
+        tools=("KnowledgeRetrieval", "Read", "Grep", "Glob"),
         system_prefix=_EXPLORE_PROMPT,
         max_iterations=30,
     ),

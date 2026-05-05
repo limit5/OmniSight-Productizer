@@ -39,6 +39,7 @@ EAGER_TOOL_NAMES = {
     "Bash",
     "Grep",
     "Glob",
+    "KnowledgeRetrieval",
     "Agent",
     "WebFetch",
     "ToolSearch",

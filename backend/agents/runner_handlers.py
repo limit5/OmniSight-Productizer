@@ -1,6 +1,7 @@
 """Tool handlers for `auto-runner-sdk.py` agentic loop.
 
-Implements Read / Write / Edit / Bash / Grep / Glob with safety guards:
+Implements Read / Write / Edit / Bash / Grep / Glob / KnowledgeRetrieval
+with safety guards:
 
   * Path operations (Read / Write / Edit / Glob) reject paths outside
     `BASE_DIR` (resolved with realpath, so symlink escapes are blocked).
@@ -24,6 +25,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from backend.agents.rag import VectorHit, VectorQuery
+from backend.agents.rag_indexer import (
+    DEFAULT_TENANT_ID,
+    _build_embedder_from_env,
+    _build_store_from_env,
+)
 from backend.agents.tool_dispatcher import ToolDispatcher
 
 
@@ -298,6 +305,95 @@ def glob_handler(payload: dict[str, Any]) -> str:
     return "\n".join(matches)
 
 
+# ─── KnowledgeRetrieval ──────────────────────────────────────────
+
+
+def _normalise_knowledge_source_path(raw_path: str | None) -> str | None:
+    if not raw_path:
+        return None
+    path = _ensure_inside_base(raw_path)
+    return path.relative_to(BASE_DIR).as_posix()
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _hit_to_knowledge_result(hit: VectorHit) -> dict[str, Any]:
+    line_start = _optional_int(hit.metadata.get("line_start"))
+    line_end = _optional_int(hit.metadata.get("line_end"))
+    citation = {
+        "path": hit.source_path,
+        "line_start": line_start,
+        "line_end": line_end,
+        "line_range": (
+            f"L{line_start}-L{line_end}"
+            if line_start is not None and line_end is not None
+            else "unknown"
+        ),
+        "similarity_score": hit.score,
+    }
+    return {
+        "chunk_id": hit.chunk_id,
+        "chunk_text": hit.chunk_text,
+        "citation": citation,
+        "metadata": dict(hit.metadata),
+    }
+
+
+async def knowledge_retrieval_handler(payload: dict[str, Any]) -> dict[str, Any]:
+    """Query the configured BP.Q vector index without process-local caches.
+
+    Module-global state audit: this handler reads immutable module constants
+    only. Store/embedder instances are constructed per call from env/config,
+    and vector state lives in PG/Qdrant/Chroma, so uvicorn workers coordinate
+    through the configured backing service rather than shared memory.
+    """
+
+    query_text = str(payload.get("query", "")).strip()
+    if not query_text:
+        raise ValueError("query is required")
+    tenant_id = str(
+        payload.get("tenant_id") or os.environ.get("OMNISIGHT_RAG_TENANT_ID")
+        or DEFAULT_TENANT_ID
+    ).strip()
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
+    top_k = int(payload.get("top_k") or 5)
+    if top_k < 1 or top_k > 20:
+        raise ValueError("top_k must be between 1 and 20")
+    metadata_filter = payload.get("metadata_filter") or {}
+    if not isinstance(metadata_filter, dict):
+        raise ValueError("metadata_filter must be an object")
+
+    source_path = _normalise_knowledge_source_path(payload.get("source_path"))
+    embedder = _build_embedder_from_env()
+    store, closeable = await _build_store_from_env()
+    try:
+        embedding = await embedder.embed_query(query_text)
+        hits = await store.query(
+            VectorQuery(
+                tenant_id=tenant_id,
+                embedding=embedding,
+                limit=top_k,
+                source_path=source_path,
+                metadata_filter=metadata_filter,
+            )
+        )
+    finally:
+        if closeable is not None:
+            await closeable.close()
+
+    return {
+        "query": query_text,
+        "tenant_id": tenant_id,
+        "top_k": top_k,
+        "results": [_hit_to_knowledge_result(hit) for hit in hits],
+    }
+
+
 # ─── Registration ────────────────────────────────────────────────
 
 
@@ -308,16 +404,17 @@ _HANDLERS: dict[str, Any] = {
     "Bash": bash_handler,
     "Grep": grep_handler,
     "Glob": glob_handler,
+    "KnowledgeRetrieval": knowledge_retrieval_handler,
 }
 
 
 def bind_to_dispatcher(dispatcher: ToolDispatcher) -> ToolDispatcher:
-    """Register all 6 handlers on ``dispatcher``. Returns the same dispatcher."""
+    """Register all runner handlers on ``dispatcher``. Returns the dispatcher."""
     for name, fn in _HANDLERS.items():
         dispatcher.register(name, fn)
     return dispatcher
 
 
 def make_runner_dispatcher() -> ToolDispatcher:
-    """Build a fresh dispatcher with all 6 handlers wired up."""
+    """Build a fresh dispatcher with all runner handlers wired up."""
     return bind_to_dispatcher(ToolDispatcher())

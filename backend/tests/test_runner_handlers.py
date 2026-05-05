@@ -1,7 +1,7 @@
 """Tests for runner_handlers — auto-runner-sdk's tool layer.
 
 Locks:
-  - All 6 handlers happy path
+  - All runner handlers happy path
   - Path safety: every path-taking handler rejects BASE_DIR escapes
     (relative climb + absolute outside)
   - Edit routes unique replacements through WP.3 cascade while keeping
@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.agents import rag
 from backend.agents import runner_handlers
 from backend.agents.runner_handlers import (
     bash_handler,
@@ -25,6 +26,7 @@ from backend.agents.runner_handlers import (
     edit_handler,
     glob_handler,
     grep_handler,
+    knowledge_retrieval_handler,
     make_runner_dispatcher,
     read_handler,
     write_handler,
@@ -420,10 +422,113 @@ def test_glob_rejects_path_outside_base(
         glob_handler({"pattern": "*", "path": str(outside)})
 
 
+# ─── KnowledgeRetrieval ──────────────────────────────────────────
+
+
+class _FakeKnowledgeEmbedder:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    async def embed_query(self, text: str) -> list[float]:
+        self.queries.append(text)
+        return [0.25, 0.75]
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [[float(len(text))] for text in texts]
+
+
+class _FakeKnowledgeStore:
+    def __init__(self) -> None:
+        self.queries: list[rag.VectorQuery] = []
+
+    async def query(self, query: rag.VectorQuery) -> list[rag.VectorHit]:
+        self.queries.append(query)
+        return [
+            rag.VectorHit(
+                chunk_id="chunk-1",
+                tenant_id=query.tenant_id,
+                source_path="docs/rag.md",
+                chunk_text="RAG retrieves relevant chunks.",
+                score=0.91,
+                metadata={"line_start": 12, "line_end": 18, "kind": "doc"},
+            )
+        ]
+
+
+class _FakeCloseable:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_knowledge_retrieval_returns_cited_chunks(
+    base_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    embedder = _FakeKnowledgeEmbedder()
+    store = _FakeKnowledgeStore()
+    closeable = _FakeCloseable()
+
+    monkeypatch.setattr(
+        runner_handlers, "_build_embedder_from_env", lambda: embedder
+    )
+
+    async def fake_build_store():
+        return store, closeable
+
+    monkeypatch.setattr(runner_handlers, "_build_store_from_env", fake_build_store)
+
+    result = await knowledge_retrieval_handler(
+        {
+            "query": "How does RAG cite chunks?",
+            "tenant_id": "t-acme",
+            "top_k": 3,
+            "source_path": "docs/rag.md",
+            "metadata_filter": {"kind": "doc"},
+        }
+    )
+
+    assert embedder.queries == ["How does RAG cite chunks?"]
+    assert store.queries[0].tenant_id == "t-acme"
+    assert store.queries[0].limit == 3
+    assert store.queries[0].source_path == "docs/rag.md"
+    assert store.queries[0].metadata_filter == {"kind": "doc"}
+    assert closeable.closed is True
+    assert result["results"] == [
+        {
+            "chunk_id": "chunk-1",
+            "chunk_text": "RAG retrieves relevant chunks.",
+            "citation": {
+                "path": "docs/rag.md",
+                "line_start": 12,
+                "line_end": 18,
+                "line_range": "L12-L18",
+                "similarity_score": 0.91,
+            },
+            "metadata": {"line_start": 12, "line_end": 18, "kind": "doc"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_retrieval_rejects_source_path_escape(
+    base_dir: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    outside = tmp_path_factory.mktemp("outside") / "secret.md"
+    outside.write_text("secret", encoding="utf-8")
+
+    with pytest.raises(PermissionError):
+        await knowledge_retrieval_handler(
+            {"query": "secret", "source_path": str(outside)}
+        )
+
+
 # ─── Registration ────────────────────────────────────────────────
 
 
-def test_bind_to_dispatcher_registers_all_six() -> None:
+def test_bind_to_dispatcher_registers_all_handlers() -> None:
     disp = ToolDispatcher()
     bind_to_dispatcher(disp)
     assert set(disp.registered_tools()) == {
@@ -433,6 +538,7 @@ def test_bind_to_dispatcher_registers_all_six() -> None:
         "Bash",
         "Grep",
         "Glob",
+        "KnowledgeRetrieval",
     }
 
 

@@ -180,6 +180,7 @@ def test_identity_subset_only_contains_integer_pk_tables():
         "cmek_revoke_events",
         "bootstrap_state",
         "decryption_audits",
+        "embedding_chunks",
         "firewall_events",
         "kek_rotations",
         "kms_keys",

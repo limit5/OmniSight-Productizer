@@ -4,6 +4,7 @@ Locks:
   * make_agent_tool_handler invokes client.run_with_tools with the
     spec's tools / system / model / max_iterations
   * subagent_type "Explore" / "Plan" use restricted (read-only) tools
+  * Explore defaults to KnowledgeRetrieval with Grep retained as fallback
   * Unknown subagent_type falls back to general-purpose, logs once
   * Friendly model alias ("opus" / "sonnet" / "haiku") maps to canonical
     model id; absent alias uses spec.default_model
@@ -84,7 +85,17 @@ def test_explore_is_read_only() -> None:
     assert "Write" not in spec.tools
     assert "Edit" not in spec.tools
     assert "Bash" not in spec.tools
-    assert {"Read", "Grep", "Glob"}.issubset(set(spec.tools))
+    assert {"KnowledgeRetrieval", "Read", "Grep", "Glob"}.issubset(
+        set(spec.tools)
+    )
+
+
+def test_explore_prompt_is_rag_first_with_grep_fallback() -> None:
+    prompt = DEFAULT_SUBAGENT_TYPES["Explore"].system_prefix
+    assert "Default to KnowledgeRetrieval" in prompt
+    assert "Use Grep as fallback" in prompt
+    assert "RAG index is unavailable" in prompt
+    assert "syntax, regex, exact symbol" in prompt
 
 
 def test_plan_is_read_only() -> None:
@@ -142,8 +153,9 @@ def test_handler_uses_explore_tools_when_subagent_type_explore() -> None:
         )
     )
     kw = client.captured.kwargs
-    assert set(kw["tools"]) == {"Read", "Grep", "Glob"}
+    assert set(kw["tools"]) == {"KnowledgeRetrieval", "Read", "Grep", "Glob"}
     assert "Explore sub-agent" in kw["system"]
+    assert "Default to KnowledgeRetrieval" in kw["system"]
 
 
 def test_handler_unknown_subagent_type_falls_back_to_general_purpose() -> None:
