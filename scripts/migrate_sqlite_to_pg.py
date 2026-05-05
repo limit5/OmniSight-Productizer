@@ -108,6 +108,12 @@ logger = logging.getLogger("migrate_sqlite_to_pg")
 TABLES_IN_ORDER: tuple[str, ...] = (
     # Tenant root — MUST be first for FK parents below.
     "tenants",
+    # WP.7.1 (alembic 0118): tiered feature flag registry. No FK, but
+    # placed near the tenant/global roots because later runtime
+    # resolution reads it as global control-plane state. PK is TEXT
+    # ``flag_name``; audit rows use generic ``audit_log`` with
+    # entity_kind='feature_flag'. NOT in TABLES_WITH_IDENTITY_ID.
+    "feature_flags",
     # BP.Q.4 (alembic 0186): tenant-scoped RAG embedding chunks. FK
     # ``tenant_id -> tenants.id`` (CASCADE) so it MUST replay after
     # tenants. PK is app-generated TEXT ``chunk_id``; embedding and
