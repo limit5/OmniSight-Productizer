@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 427
+entry_count: 428
 status_counts:
-  dev-only: 417
+  dev-only: 418
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3986,3 +3986,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — BP.A2A.6 註冊外部 agent endpoint 後，在 staging/prod image 以 operator 註冊的 A2A endpoint 做 discovery
     + sync invoke + SSE invoke smoke，並觀察 circuit_state event。
+- id: 2026-05-06--bp-a2a-6
+  header_line: 46799
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: BP.A2A.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 後續 durable store / migration 注入後，production image rebuild，operator 在 `/admin/external-agents`
+    註冊真實 A2A endpoint，完成 AgentCard discovery + sync invoke + SSE invoke smoke。
