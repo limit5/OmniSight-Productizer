@@ -111,7 +111,34 @@ Final KS rollout ledger row should include:
 - Customer onboarding packet SHA-256 for each active tier.
 - Disposition: `deployed-active`, `risk-accepted`, or `blocked`.
 
-## 6. Production status
+## 6. Per-tier operator packet
+
+Create one packet per tenant tier before declaring the tenant ready. The
+packet filename should be
+`ks-operator-<tenant-id>-tier-<1|2|3>-<YYYYMMDD>.md` in the private
+security evidence vault; commit only its SHA-256 and storage path alias
+to N10.
+
+| Field | Tier 1 envelope | Tier 2 CMEK | Tier 3 BYOG proxy |
+|---|---|---|---|
+| Tenant metadata | tenant id, plan, operator, backend image digest | tenant id, plan, operator, backend image digest | tenant id, plan, operator, backend image digest |
+| Enabled knobs | envelope state and Redis/shared-store state | envelope + CMEK state, BYOG state if disabled | envelope + CMEK + BYOG state |
+| Required smoke | provider key write/read, OAuth refresh/revoke, `ks.decryption` audit row | Tier 1 -> Tier 2 rewrap, CMEK verify, customer key disable -> graceful 403 -> same-key restore | proxy health, one proxied provider request, streaming smoke where supported, proxy-unreachable no-fallback smoke |
+| Evidence attachments | audit export, spend anomaly recipient snapshot, N10 ledger row | policy snapshot, verify transcript, customer KMS audit excerpt, SIEM ingest sample | image digest, mTLS fingerprint, signed-nonce key ref, customer proxy audit excerpt |
+| Exit / rollback record | provider key rotation path tested | downgrade path and revoke recovery owner recorded | fail-closed owner and Tier 3 exit plan recorded |
+
+Minimum packet checklist:
+
+1. Record the backend image digest and the exact three-knob env snapshot.
+2. Run the tier-specific smoke commands and attach transcripts.
+3. Attach customer-visible completion evidence from
+   [`ks_customer_onboarding.md`](ks_customer_onboarding.md).
+4. Store sensitive attachments only in the private security evidence
+   vault.
+5. Append an N10 row with packet SHA-256, tenant smoke SHA-256, operator,
+   and disposition.
+
+## 7. Production status
 
 This runbook does not deploy runtime code.
 

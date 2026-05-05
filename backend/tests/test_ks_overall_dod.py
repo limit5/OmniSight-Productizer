@@ -168,6 +168,12 @@ def test_operator_runbook_covers_rollout_rollback_and_evidence() -> None:
         "tier2_to_tier3_byog_proxy_upgrade.md",
         "self_hosted_byog_proxy_alignment.md",
         "Final KS rollout ledger row",
+        "Per-tier operator packet",
+        "ks-operator-<tenant-id>-tier-<1|2|3>-<YYYYMMDD>.md",
+        "provider key write/read, OAuth refresh/revoke",
+        "Tier 1 -> Tier 2 rewrap, CMEK verify",
+        "proxy health, one proxied provider request",
+        "tenant smoke SHA-256, operator",
         "**Production status:** dev-only",
     ]:
         assert phrase in body
@@ -187,6 +193,11 @@ def test_customer_onboarding_is_complete_per_tier() -> None:
         "Tier 3 BYOG Proxy Onboarding",
         "Completion criteria",
         "Escalation",
+        "Per-tier customer handoff packet",
+        "customer-facing counterpart to the operator packet",
+        "Customer-owned assets",
+        "launch checklist result and the exit / recovery behavior",
+        "customer approval, approval timestamp",
         "Proxy unreachable or removed means OmniSight fails closed",
         "**Production status:** dev-only",
     ]:

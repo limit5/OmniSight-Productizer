@@ -131,7 +131,32 @@ Completion criteria:
 | Tier 2 customer wants BYOG | Approve proxy deployment plan and key export | Follow `tier2_to_tier3_byog_proxy_upgrade.md` |
 | Tier 3 proxy unavailable | Restore proxy, mTLS, signed nonce, or network route | Keep fail-closed; do not route direct provider fallback |
 
-## 6. Production status
+## 6. Per-tier customer handoff packet
+
+Create one customer handoff packet per tenant tier. The packet is the
+customer-facing counterpart to the operator packet and should avoid raw
+secrets, private keys, prompt/response payloads, exploit details, and
+internal-only evidence-vault paths.
+
+| Packet section | Tier 1 envelope | Tier 2 CMEK | Tier 3 BYOG proxy |
+|---|---|---|---|
+| Customer summary | OmniSight stores provider keys using tenant-bound envelope encryption | Customer KMS / Vault key wraps the tenant DEK | Customer proxy owns provider keys and prompt/response audit payloads |
+| Customer-owned assets | provider account keys and rotation owner | KMS key, policy, principal, SIEM destination, revoke owner | proxy runtime, provider-key source, mTLS CA, signed-nonce key, audit sink |
+| Launch checklist | first invocation, key rotation, audit export | wizard verify, SIEM event match, disable/restore drill | proxy health, proxied request, unreachable fail-closed drill |
+| Exit checklist | rotate/delete keys in OmniSight | restore same key for recovery or downgrade to Tier 1 | keep proxy reachable until fresh onboarding completes |
+| Evidence returned to customer | launch timestamp, audit export, key-rotation confirmation | verify transcript, KMS audit event ids, revoke drill result | proxy image digest, mTLS fingerprint, no-fallback drill result |
+
+Minimum customer-facing packet checklist:
+
+1. State the selected tier and the customer's ownership boundary.
+2. List the customer-owned assets and named owners.
+3. Include the launch checklist result and the exit / recovery behavior.
+4. Include sanitized evidence ids or hashes; never include raw secrets or
+   internal evidence-vault paths.
+5. Record customer approval, approval timestamp, and the OmniSight
+   operator who closed onboarding.
+
+## 7. Production status
 
 This onboarding guide does not deploy runtime code.
 
