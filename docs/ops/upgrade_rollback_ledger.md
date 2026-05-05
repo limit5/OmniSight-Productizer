@@ -103,6 +103,24 @@ On **every WP.3 diff-validation cascade match**:
 2. Do not store SEARCH / REPLACE payload bytes, file contents, secrets,
    customer data, or model prompts in this ledger.
 
+On **every quarterly feature flag review** (WP.7.6):
+
+1. Export the `feature_flags` registry snapshot, compute its SHA-256
+   fingerprint, and collect owner dispositions for every active flag.
+2. Query `audit_log` for the latest `entity_kind="feature_flag"`
+   mutation per flag, using `feature_flags.created_at` as the fallback
+   when no mutation exists.
+3. Append one row to the "Feature Flag Quarterly Reviews" table with
+   the quarter, review timestamp, registry snapshot fingerprint, review
+   packet fingerprint, reviewed count, stale-alert count, disposition,
+   and cleanup tracker notes.
+4. Append one row to the "Stale Feature Flag Alerts" table for every
+   active flag with no mutation for 90 calendar days or more at review
+   close. Escalate flags at 180 calendar days to the platform owner.
+5. Follow `feature_flag_review_sop.md` for owner acknowledgement,
+   disposition vocabulary, long-untouched flag alert thresholds, and
+   private evidence handling.
+
 ## Upgrades
 
 | Cut-over (UTC) | Package | From → To | PR | Operator | Disposition | Notes |
@@ -185,6 +203,28 @@ SEARCH / REPLACE payloads, file contents, model prompts, secrets, or
 customer data in this ledger. Use
 `correction -> <applied-utc/path/layer>` in Notes to correct a prior row.
 
+## Feature Flag Quarterly Reviews
+
+| Quarter | Reviewed (UTC) | Registry snapshot SHA-256 | Review SHA-256 | Flags reviewed | Stale alerts | Disposition | Notes |
+|---|---|---|---|---:|---:|---|---|
+| _Q2 2026 (Apr-Jun)_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _planned_ | _WP.7.6 policy effective 2026-05-05; first review due first working week of Q3 2026_ |
+
+Feature flag review rows are append-only. Store no customer data,
+secrets, raw audit payloads, runtime user preferences, or owner-private
+comments in this ledger. Use
+`correction -> <quarter/review-sha256>` in Notes to correct a prior row.
+
+## Stale Feature Flag Alerts
+
+| Alerted (UTC) | Flag name | Tier | Owner | Last mutation (UTC) | Age days | Alert SHA-256 | Disposition | Notes |
+|---|---|---|---|---|---:|---|---|---|
+| _(no stale flag alert rows yet - WP.7.6 policy effective 2026-05-05)_ | | | | | | | | |
+
+Stale flag alert rows are append-only. Store no customer data,
+secrets, raw audit payloads, runtime user preferences, or alert payload
+exports in this ledger. Use
+`correction -> <flag-name/alert-sha256>` in Notes to correct a prior row.
+
 ## Trigger vocabulary (Rollbacks)
 
 Use one of these standard strings in the Rollbacks "Trigger" column so
@@ -210,6 +250,7 @@ the quarterly review can tally by cause:
 * Bug bounty SOP: [`bug_bounty_program_sop.md`](bug_bounty_program_sop.md)
 * SOC 2 Type II readiness checklist: [`soc2_type2_readiness_checklist.md`](soc2_type2_readiness_checklist.md)
 * GDPR / DSAR alignment SOP: [`gdpr_dsar_alignment_sop.md`](gdpr_dsar_alignment_sop.md)
+* Quarterly feature flag review SOP: [`feature_flag_review_sop.md`](feature_flag_review_sop.md)
 * Deploy-time gate: [`../../scripts/check_bluegreen_gate.py`](../../scripts/check_bluegreen_gate.py)
 * Auto-label workflow: [`../../.github/workflows/blue-green-gate.yml`](../../.github/workflows/blue-green-gate.yml)
 * Fallback SOP (Path C hard rollback): [`fallback_branches.md`](fallback_branches.md)

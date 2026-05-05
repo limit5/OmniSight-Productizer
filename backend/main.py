@@ -1341,6 +1341,8 @@ from backend.routers import live_test_status as _live_test_status_router  # Z.7.
 app.include_router(_live_test_status_router.router, prefix=settings.api_prefix)
 from backend.routers import auto_skills as _auto_skills_router  # BP.M.3 L1 skill auto-distillation CRUD
 app.include_router(_auto_skills_router.router, prefix=settings.api_prefix)
+from backend.routers import feature_flags as _feature_flags_router  # WP.7.8 operator feature flag registry UI
+app.include_router(_feature_flags_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import

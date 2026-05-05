@@ -36,13 +36,13 @@ contract to preserve.
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 import time
 from dataclasses import dataclass
 from typing import Literal
 
+from backend import feature_flags
 from backend.security import envelope
 from backend.security.kms_adapters import LocalFernetKMSAdapter
 
@@ -122,25 +122,23 @@ def list_provider_specs() -> list[dict[str, str]]:
 def is_enabled() -> bool:
     """Whether KS.2 Tier 2 CMEK onboarding and upgrades are enabled.
 
-    The KS.2.12 rollback knob is read lazily per call so multi-worker
-    deployments derive the same value from env without relying on shared
-    module-global state.
+    WP.7.7 resolves registry first, then the KS.2.12 rollback env
+    fallback; multi-worker deployments share registry invalidation or
+    derive the same value from env without shared Python memory.
     """
 
-    raw = (os.environ.get(CMEK_ENABLED_ENV) or "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    return feature_flags.resolve_env_backed_feature_flag(CMEK_ENABLED_ENV)
 
 
 def is_byog_enabled() -> bool:
     """Whether KS.3 Tier 3 BYOG proxy registration is enabled.
 
-    The KS.3.13 rollback knob is read lazily per call so multi-worker
-    deployments derive the same value from env without relying on shared
-    module-global state.
+    WP.7.7 resolves registry first, then the KS.3.13 rollback env
+    fallback; multi-worker deployments share registry invalidation or
+    derive the same value from env without shared Python memory.
     """
 
-    raw = (os.environ.get(BYOG_ENABLED_ENV) or "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    return feature_flags.resolve_env_backed_feature_flag(BYOG_ENABLED_ENV)
 
 
 def normalise_provider(raw: str) -> CMEK_PROVIDER:

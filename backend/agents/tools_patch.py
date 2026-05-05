@@ -43,11 +43,12 @@ Exceptions:
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+from backend import feature_flags
 
 logger = logging.getLogger(__name__)
 
@@ -239,13 +240,14 @@ def _find_exact_match(source: str, search: str) -> CascadeMatch | None:
 def diff_validation_enabled() -> bool:
     """Return whether the WP.3 fuzzy cascade is enabled.
 
-    The rollback knob is read lazily per call, so every worker derives
-    the same value from its process environment without relying on
-    shared module-global state.
+    WP.7.7 resolves registry first, then the WP.3 rollback env fallback;
+    every worker reads the same registry row or derives the same value
+    from its process environment.
     """
 
-    raw = (os.environ.get(DIFF_VALIDATION_ENABLED_ENV) or "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    return feature_flags.resolve_env_backed_feature_flag(
+        DIFF_VALIDATION_ENABLED_ENV,
+    )
 
 
 def _find_indent_agnostic_match(source: str, search: str) -> CascadeMatch | None:

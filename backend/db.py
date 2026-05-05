@@ -568,6 +568,24 @@ CREATE TABLE IF NOT EXISTS tenants (
     auth_features   TEXT NOT NULL DEFAULT '{}'
 );
 
+-- WP.7.1 (alembic 0118): tiered feature flag registry.
+-- Runtime writers must audit changes through audit_log with
+-- entity_kind='feature_flag'; this table is the durable source of truth.
+CREATE TABLE IF NOT EXISTS feature_flags (
+    flag_name  TEXT PRIMARY KEY,
+    tier       TEXT NOT NULL
+               CHECK (tier IN ('debug','dogfood','preview','release','runtime')),
+    state      TEXT NOT NULL DEFAULT 'disabled'
+               CHECK (state IN ('disabled','enabled')),
+    expires_at TEXT,
+    owner      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_feature_flags_tier_state
+    ON feature_flags(tier, state);
+CREATE INDEX IF NOT EXISTS idx_feature_flags_expires_at
+    ON feature_flags(expires_at);
+
 CREATE TABLE IF NOT EXISTS agents (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
