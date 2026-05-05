@@ -385,6 +385,33 @@ packet。
 - Per-tier customer onboarding:
   [`docs/ops/ks_customer_onboarding.md`](../ops/ks_customer_onboarding.md)
 
+### 9.6 ADR Completion Closure（KS.DOD.ADR）
+
+本 ADR 以「architectural source of truth + evidence index links」為完成
+標準；它不複製 private evidence vault 內容，也不取代 operator runbook。
+完整狀態由下表釘住：
+
+| DoD area | Completion evidence | Drift guard |
+|----------|---------------------|-------------|
+| **Phase 1（Tier 1 envelope）** | `priority_i_multi_tenancy_readiness.md` covers KMS adapter live evidence, envelope migration, `ks.decryption` audit coverage, spend anomaly detector, log scrubber, backup DLP, and legacy Fernet deprecation. | `backend/tests/test_ks_priority_i_readiness.py`, `backend/tests/test_security_envelope.py`, `backend/tests/test_ks113_envelope_security_integration.py` |
+| **Phase 2（Tier 2 CMEK）** | CMEK wizard, AWS / GCP / Vault live adapters, revoke 60 sec graceful 403, SIEM ingest, and Tier upgrade / downgrade re-encrypt paths are linked through the CMEK runbooks and single-knob guards. | `backend/tests/test_cmek_phase2_regression.py`, `backend/tests/test_cmek_single_knob.py`, `backend/tests/test_ks32_cmek_revoke_recovery.py` |
+| **Phase 3（Tier 3 BYOG proxy）** | BYOG proxy GA, mTLS / signed nonce / replay defense, HD.21.5 self-hosted image alignment, Tier 2 -> Tier 3 cutover, p95 latency budget, and strict no-fallback behavior are linked through the BYOG evidence pages. | `backend/tests/test_ks_phase3_byog_proxy_ga.py`, `backend/tests/test_byog_single_knob.py`, `backend/tests/test_byog_proxy_fail_fast.py`, `backend/tests/test_ks38_byog_upgrade_runbook.py` |
+| **Cross-cutting** | R46-R50 mitigation, incident response runbook, external pentest operational gate, SOC 2 Type II readiness, DSAR / GDPR, bug bounty, and N10 ledger tables are consolidated in the cross-cutting index. | `backend/tests/test_ks_cross_cutting_evidence.py`, `backend/tests/test_ks46_incident_response_runbook.py`, `backend/tests/test_ks47_soc2_type2_readiness_checklist.py` |
+| **Overall rollout** | Three independent runtime knobs, no-regression packet, operator runbook, per-tier customer onboarding, and final production evidence gate are consolidated in the overall rollout index. | `backend/tests/test_ks_overall_dod.py` |
+
+Completion boundary:
+
+- Repository completion is `dev-only`: the design, evidence indexes,
+  runbooks, customer onboarding material, and drift guards are present.
+- Production completion is separate: operators must rebuild the
+  production backend image, capture the three-knob env snapshot, run the
+  regression evidence packet, attach customer onboarding packets, and
+  append the final N10 KS rollout row before marking the KS rollout
+  `deployed-active`.
+- The ADR remains the source of truth for architecture and risk
+  acceptance; `docs/ops/ks_overall_rollout_evidence.md` is the source of
+  truth for final DoD evidence and production gate status.
+
 ---
 
 ## 10. Risk Register（R46-R50）
@@ -492,6 +519,6 @@ proof、24h observation clean，並在 N10 `Priority I Readiness` table 記
 ## 15. Sign-off
 
 - **Owner**: Agent-software-beta + nanakusa sora
-- **Date**: 2026-04-29
-- **Status**: Accepted（Phase 1 已進入 Priority I readiness gate；Phase 2 / 3 商務驅動）
-- **Next review**: Phase 1 完工後、Priority I 啟動前，以 `priority_i_multi_tenancy_readiness.md` 的 `ready-to-start` N10 row 為準
+- **Date**: 2026-04-29; completion closure updated 2026-05-06
+- **Status**: Accepted + complete for repository DoD（dev-only；production activation remains an operator gate）
+- **Next review**: Final production promotion，以 `docs/ops/ks_overall_rollout_evidence.md` 的 regression evidence packet、per-tier customer onboarding packets、three-knob env snapshot、production backend image digest、與 final N10 KS rollout row 為準

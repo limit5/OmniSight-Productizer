@@ -211,3 +211,27 @@ def test_adr_and_readme_link_overall_material() -> None:
         "per-tier customer onboarding",
     ]:
         assert phrase in adr
+
+
+def test_adr_completion_closure_pins_final_ks_dod() -> None:
+    adr = _read(ADR)
+
+    for phrase in [
+        "ADR Completion Closure",
+        "architectural source of truth + evidence index links",
+        "Phase 1（Tier 1 envelope）",
+        "priority_i_multi_tenancy_readiness.md",
+        "backend/tests/test_ks_priority_i_readiness.py",
+        "Phase 2（Tier 2 CMEK）",
+        "backend/tests/test_cmek_single_knob.py",
+        "Phase 3（Tier 3 BYOG proxy）",
+        "backend/tests/test_byog_proxy_fail_fast.py",
+        "Cross-cutting",
+        "backend/tests/test_ks_cross_cutting_evidence.py",
+        "Overall rollout",
+        "backend/tests/test_ks_overall_dod.py",
+        "Repository completion is `dev-only`",
+        "Production completion is separate",
+        "Accepted + complete for repository DoD",
+    ]:
+        assert phrase in adr
