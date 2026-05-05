@@ -28,6 +28,7 @@ from backend.prompt_loader import (
     extract_load_skill_requests,
     _resolve_skill_loading_mode,
 )
+from backend.rtk_fallback import update_rtk_fallback_history
 from backend.web.vite_error_prompt import build_last_vite_error_banner
 from backend.web.vite_retry_budget import (
     emit_vite_pattern_escalation,
@@ -1065,6 +1066,17 @@ async def error_check_node(state: GraphState) -> dict:
     error_summary = "; ".join(
         f"{r.tool_name}: {r.output[:200]}" for r in failed
     )
+    fallback_command = state.user_command if failed and failed[0].tool_name in {"run_bash", "Bash"} else ""
+    rtk_history, rtk_decision = update_rtk_fallback_history(
+        task_id=state.task_id,
+        failed_tool_name=failed[0].tool_name if failed else "",
+        failed_output=failed[0].output if failed else error_summary,
+        prior_history=state.rtk_fallback_history,
+        command=fallback_command,
+    )
+    if rtk_decision:
+        emit_pipeline_phase("rtk_fallback", rtk_decision.message[:200])
+        error_summary = f"{error_summary}; {rtk_decision.message}"
 
     # Permission/environment auto-fix — attempt before counting as retry.
     # Loop guard (H8): if we've already auto-fixed the same category twice in
@@ -1201,7 +1213,8 @@ async def error_check_node(state: GraphState) -> dict:
         "loop_breaker_triggered": loop_triggered,
         "tool_calls": [],
         "tool_results": [],
-        "rtk_bypass": new_retry >= 2,
+        "rtk_bypass": rtk_decision is not None,
+        "rtk_fallback_history": rtk_history,
         **({"messages": l3_hint_messages} if l3_hint_messages else {}),
     }
 

@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 438
+entry_count: 439
 status_counts:
-  dev-only: 428
+  dev-only: 429
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4085,3 +4085,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 合併後 production agent image / prompt-serving backend 重 build，對任一 runtime prompt endpoint 或
     agent sandbox smoke 確認 system prompt 含 `RTK Output Compression Rules` 與 `rtk` high-noise command examples。
+- id: 2026-05-06--BP.R.4
+  header_line: 46964
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: BP.R.4
+  title: BP.R.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後 production backend / agent runtime image 重 build，跑 staging compile-failure smoke：同 task
+    連續兩次 `make` 失敗後確認下一輪 prompt 含 `rtk --no-rtk ...` 且 raw output path 不走 compression。
