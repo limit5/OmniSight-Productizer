@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 375
+entry_count: 376
 status_counts:
-  dev-only: 365
+  dev-only: 366
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3518,3 +3518,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production image 重建後，以 `OMNISIGHT_WEB_SEARCH_PROVIDER=none` default-off smoke；再用 staging
     Tavily key 驗證 Intel/Architect WebSearch、audit row、budget cap 與 sanitizer marker。
+- id: 2026-05-05--BP.M.1
+  header_line: 46007
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.1
+  title: BP.M.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production PG 執行 alembic 0191→0192；BP.M.2-BP.M.5 接 summarizer、review/promote endpoints、UI
+    與 audit_log 後再做 runtime smoke。

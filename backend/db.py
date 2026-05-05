@@ -610,6 +610,28 @@ CREATE TABLE IF NOT EXISTS task_comments (
     timestamp   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- BP.M.1 (alembic 0192): L1 skill auto-distillation review queue.
+-- Runtime summarisation, review/promote endpoints, and audit events
+-- land in BP.M.2-BP.M.5.  TEXT PK avoids sequence-reset work during
+-- SQLite -> PG cutover.
+CREATE TABLE IF NOT EXISTS auto_distilled_skills (
+    id               TEXT PRIMARY KEY,
+    tenant_id        TEXT NOT NULL
+                          REFERENCES tenants(id) ON DELETE CASCADE,
+    skill_name       TEXT NOT NULL,
+    source_task_id   TEXT
+                          REFERENCES tasks(id) ON DELETE SET NULL,
+    markdown_content TEXT NOT NULL,
+    version          INTEGER NOT NULL DEFAULT 1,
+    status           TEXT NOT NULL DEFAULT 'draft'
+                          CHECK (status IN ('draft','promoted','reviewed')),
+    created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_auto_distilled_skills_tenant_status
+    ON auto_distilled_skills(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_auto_distilled_skills_source_task
+    ON auto_distilled_skills(source_task_id);
+
 CREATE TABLE IF NOT EXISTS npi_state (
     id          TEXT PRIMARY KEY DEFAULT 'current',
     data        TEXT NOT NULL DEFAULT '{}'
