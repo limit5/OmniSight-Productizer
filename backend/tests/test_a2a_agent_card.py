@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from pydantic import ValidationError
 
+import backend.a2a.agent_card as agent_card_module
 from backend.a2a.agent_card import (
     A2A_PROVIDER_IDS,
     DEFAULT_A2A_SCOPES,
@@ -21,6 +24,7 @@ from backend.a2a.agent_card import (
     build_provider_agent_card,
     build_provider_agent_cards,
     build_provider_capability_descriptors,
+    reload_model_mapping_for_tests,
     resolve_specialist_a2a_endpoint,
 )
 from backend.sandbox_tier import Guild, admitted_tiers
@@ -200,3 +204,62 @@ class TestProviderScopedAgentCards:
     def test_unknown_provider_is_rejected(self, provider_id: str) -> None:
         with pytest.raises(ValueError):
             build_provider_agent_card(BASE_URL, provider_id)
+
+
+class TestModelMappingAgentCards:
+    def test_public_card_uses_per_guild_model_mapping(self) -> None:
+        card = build_agent_card(BASE_URL)
+        by_name = _capabilities_by_name(card)
+
+        assert by_name["architect"].model_spec == "anthropic:claude-opus-4-20250514"
+        assert by_name["intel"].model_spec == "google:gemini-1.5-pro"
+        assert by_name["reporter"].model_spec == "anthropic:claude-haiku-4-20250506"
+
+    def test_provider_card_keeps_model_spec_inside_provider_boundary(self) -> None:
+        card = build_provider_agent_card(BASE_URL, "openai")
+        by_name = _capabilities_by_name(card)
+
+        assert by_name["architect"].model_spec == "openai:gpt-4o"
+        assert by_name["validator"].model_spec == "openai:gpt-4o"
+
+    def test_model_mapping_reloads_when_yaml_mtime_changes(self, tmp_path, monkeypatch) -> None:
+        mapping_path = tmp_path / "model_mapping.yaml"
+        mapping_path.write_text(
+            """
+version: 1
+providers:
+  openai:
+    default_model: gpt-4o-mini
+guilds:
+  hal:
+    model_spec: openai:gpt-4o-mini
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(agent_card_module, "_MODEL_MAPPING_PATH", mapping_path)
+        reload_model_mapping_for_tests()
+
+        first = build_agent_card(BASE_URL)
+        assert _capabilities_by_name(first)["hal"].model_spec == "openai:gpt-4o-mini"
+
+        mapping_path.write_text(
+            """
+version: 1
+providers:
+  openai:
+    default_model: gpt-4o
+guilds:
+  hal:
+    model_spec: anthropic:claude-sonnet-4-20250514
+""",
+            encoding="utf-8",
+        )
+        stat = mapping_path.stat()
+        os.utime(mapping_path, (stat.st_atime + 2, stat.st_mtime + 2))
+
+        second = build_agent_card(BASE_URL)
+        provider_card = build_provider_agent_card(BASE_URL, "openai")
+        assert _capabilities_by_name(second)["hal"].model_spec == (
+            "anthropic:claude-sonnet-4-20250514"
+        )
+        assert _capabilities_by_name(provider_card)["hal"].model_spec == "openai:gpt-4o"

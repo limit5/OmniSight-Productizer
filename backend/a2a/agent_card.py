@@ -13,22 +13,28 @@ specialist capability list is generated from the existing
 specialists such as ``orchestrator`` and ``hd`` appended as explicit
 domain descriptors.
 
-Module-global state audit (SOP Step 1): all module-level values are
-immutable tuples, frozensets, or ``MappingProxyType`` views. No cache,
-singleton, env read, DB read, or request state lives here; every uvicorn
-worker derives the same AgentCard from the same code plus the request's
-public base URL.
+Module-global state audit (SOP Step 1): static descriptor seeds are
+immutable tuples, frozensets, or ``MappingProxyType`` views. The only
+mutable module-global is the BP.A2A.10 model-mapping mtime cache; every
+uvicorn worker derives the same AgentCard from the same shared
+``configs/model_mapping.yaml`` file and reloads when that file's mtime
+changes.
 """
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+import yaml
 
 from backend.sandbox_tier import Guild, SandboxTier, admitted_tiers
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA_VERSION: Literal["1.0.0"] = "1.0.0"
@@ -64,6 +70,9 @@ A2A_PROVIDER_IDS: tuple[str, ...] = (
     "openrouter",
     "ollama",
 )
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_MODEL_MAPPING_PATH = _PROJECT_ROOT / "configs" / "model_mapping.yaml"
+_MODEL_MAPPING_CACHE: tuple[float | None, dict[str, str], dict[str, str]] | None = None
 
 
 _GUILD_DISPLAY_NAMES = MappingProxyType({
@@ -183,7 +192,7 @@ _PROVIDER_DISPLAY_NAMES = MappingProxyType({
     "ollama": "Ollama",
 })
 
-_PROVIDER_DEFAULT_MODELS = MappingProxyType({
+_FALLBACK_PROVIDER_DEFAULT_MODELS = MappingProxyType({
     "anthropic": "claude-sonnet-4-20250514",
     "openai": "gpt-4o",
     "google": "gemini-1.5-pro",
@@ -193,6 +202,37 @@ _PROVIDER_DEFAULT_MODELS = MappingProxyType({
     "together": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
     "openrouter": "anthropic/claude-sonnet-4",
     "ollama": "llama3.1",
+})
+
+_FALLBACK_SPECIALIST_MODEL_SPECS = MappingProxyType({
+    Guild.architect.value: "anthropic:claude-opus-4-20250514",
+    Guild.sa_sd.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.ux.value: "google:gemini-1.5-pro",
+    Guild.pm.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.gateway.value: "anthropic:claude-haiku-4-20250506",
+    Guild.bsp.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.hal.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.algo_cv.value: "anthropic:claude-opus-4-20250514",
+    Guild.optical.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.isp.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.audio.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.frontend.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.backend.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.sre.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.qa.value: "anthropic:claude-sonnet-4-20250514",
+    Guild.auditor.value: "anthropic:claude-opus-4-20250514",
+    Guild.red_team.value: "xai:grok-3-mini",
+    Guild.forensics.value: "google:gemini-1.5-pro",
+    Guild.intel.value: "google:gemini-1.5-pro",
+    Guild.reporter.value: "anthropic:claude-haiku-4-20250506",
+    Guild.custom.value: "anthropic:claude-sonnet-4-20250514",
+    "orchestrator": "anthropic:claude-sonnet-4-20250514",
+    "hd": "anthropic:claude-sonnet-4-20250514",
+    "firmware": "anthropic:claude-sonnet-4-20250514",
+    "software": "anthropic:claude-sonnet-4-20250514",
+    "validator": "openai:gpt-4o",
+    "reviewer": "anthropic:claude-sonnet-4-20250514",
+    "general": "anthropic:claude-sonnet-4-20250514",
 })
 
 
@@ -366,6 +406,103 @@ def _require_provider_id(provider_id: str) -> str:
     return provider
 
 
+def _coerce_model_spec(raw: Any) -> str | None:
+    if isinstance(raw, str):
+        spec = raw.strip()
+    elif isinstance(raw, dict):
+        if isinstance(raw.get("model_spec"), str):
+            spec = raw["model_spec"].strip()
+        elif isinstance(raw.get("provider"), str) and isinstance(raw.get("model"), str):
+            spec = f"{raw['provider'].strip()}:{raw['model'].strip()}"
+        else:
+            return None
+    else:
+        return None
+    if ":" not in spec:
+        return None
+    provider, model = spec.split(":", 1)
+    if provider.strip().lower() not in A2A_PROVIDER_IDS or not model.strip():
+        return None
+    return f"{provider.strip().lower()}:{model.strip()}"
+
+
+def _parse_model_mapping(raw: Any) -> tuple[dict[str, str], dict[str, str]]:
+    provider_defaults = dict(_FALLBACK_PROVIDER_DEFAULT_MODELS)
+    specialist_specs = dict(_FALLBACK_SPECIALIST_MODEL_SPECS)
+    if not isinstance(raw, dict):
+        return provider_defaults, specialist_specs
+
+    providers = raw.get("providers")
+    if isinstance(providers, dict):
+        for provider_id, provider_cfg in providers.items():
+            provider = str(provider_id).strip().lower()
+            if provider not in A2A_PROVIDER_IDS or not isinstance(provider_cfg, dict):
+                continue
+            model = provider_cfg.get("default_model")
+            if isinstance(model, str) and model.strip():
+                provider_defaults[provider] = model.strip()
+
+    for section in ("guilds", "runtime_specialists", "graph_specialists"):
+        entries = raw.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for agent_name, cfg in entries.items():
+            agent = str(agent_name).strip().lower()
+            if not agent:
+                continue
+            spec = _coerce_model_spec(cfg)
+            if spec:
+                specialist_specs[agent] = spec
+    return provider_defaults, specialist_specs
+
+
+def _load_model_mapping() -> tuple[dict[str, str], dict[str, str]]:
+    """Load BP.F sample model mapping with file-mtime cache invalidation."""
+
+    global _MODEL_MAPPING_CACHE
+    try:
+        mtime = _MODEL_MAPPING_PATH.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _MODEL_MAPPING_CACHE is not None and _MODEL_MAPPING_CACHE[0] == mtime:
+        return _MODEL_MAPPING_CACHE[1], _MODEL_MAPPING_CACHE[2]
+    try:
+        if mtime is not None:
+            parsed = yaml.safe_load(_MODEL_MAPPING_PATH.read_text(encoding="utf-8")) or {}
+            provider_defaults, specialist_specs = _parse_model_mapping(parsed)
+            _MODEL_MAPPING_CACHE = (mtime, provider_defaults, specialist_specs)
+            return provider_defaults, specialist_specs
+    except Exception as exc:  # noqa: BLE001 - AgentCard generation must stay available.
+        logger.warning("model_mapping.yaml load failed: %s; using built-in A2A sample", exc)
+    provider_defaults = dict(_FALLBACK_PROVIDER_DEFAULT_MODELS)
+    specialist_specs = dict(_FALLBACK_SPECIALIST_MODEL_SPECS)
+    _MODEL_MAPPING_CACHE = (mtime, provider_defaults, specialist_specs)
+    return provider_defaults, specialist_specs
+
+
+def reload_model_mapping_for_tests() -> None:
+    """Clear this worker's AgentCard model-mapping cache."""
+
+    global _MODEL_MAPPING_CACHE
+    _MODEL_MAPPING_CACHE = None
+
+
+def _specialist_model_spec(agent_name: str) -> str:
+    _, specialist_specs = _load_model_mapping()
+    agent = (agent_name or "").strip().lower()
+    return specialist_specs.get(agent, specialist_specs["general"])
+
+
+def _provider_model_spec(provider_id: str, agent_name: str) -> str:
+    provider_defaults, specialist_specs = _load_model_mapping()
+    provider = _require_provider_id(provider_id)
+    configured = specialist_specs.get((agent_name or "").strip().lower(), "")
+    prefix = f"{provider}:"
+    if configured.startswith(prefix):
+        return configured
+    return f"{provider}:{provider_defaults[provider]}"
+
+
 def _guild_capability(public_base_url: str, guild: Guild) -> CapabilityDescriptor:
     tiers = tuple(sorted(t.value for t in admitted_tiers(guild)))
     name = guild.value
@@ -378,6 +515,7 @@ def _guild_capability(public_base_url: str, guild: Guild) -> CapabilityDescripto
         stream_endpoint_url=_endpoint_url(public_base_url, DEFAULT_STREAM_PATH_TEMPLATE, name),
         admitted_tiers=tiers,
         tags=("guild", *tiers),
+        model_spec=_specialist_model_spec(name),
     )
 
 
@@ -404,6 +542,7 @@ def build_capability_descriptors(public_base_url: str) -> tuple[CapabilityDescri
             ),
             admitted_tiers=tuple(seed["admitted_tiers"]),
             tags=tuple(seed["tags"]),
+            model_spec=_specialist_model_spec(str(seed["agent_name"])),
         )
         for seed in _EXTRA_SPECIALIST_DESCRIPTORS
     )
@@ -418,7 +557,6 @@ def build_provider_capability_descriptors(
 
     base = _normalise_public_base_url(public_base_url)
     provider = _require_provider_id(provider_id)
-    model_spec = f"{provider}:{_PROVIDER_DEFAULT_MODELS[provider]}"
     base_descriptors = list(build_capability_descriptors(base))
     known = {descriptor.agent_name for descriptor in base_descriptors}
     base_descriptors.extend(
@@ -439,6 +577,7 @@ def build_provider_capability_descriptors(
             ),
             admitted_tiers=tuple(seed["admitted_tiers"]),
             tags=tuple(seed["tags"]),
+            model_spec=_specialist_model_spec(str(seed["agent_name"])),
         )
         for seed in _GRAPH_SPECIALIST_DESCRIPTORS
         if seed["agent_name"] not in known
@@ -469,7 +608,7 @@ def build_provider_capability_descriptors(
             output_modes=descriptor.output_modes,
             tags=("provider", provider, *descriptor.tags),
             provider_id=provider,
-            model_spec=model_spec,
+            model_spec=_provider_model_spec(provider, descriptor.agent_name),
         )
         for descriptor in base_descriptors
     )
@@ -564,7 +703,7 @@ def resolve_specialist_a2a_endpoint(
             provider,
             agent,
         ),
-        model_spec=f"{provider}:{_PROVIDER_DEFAULT_MODELS[provider]}",
+        model_spec=_provider_model_spec(provider, agent),
     )
 
 
@@ -591,5 +730,6 @@ __all__ = [
     "build_provider_agent_card",
     "build_provider_agent_cards",
     "build_provider_capability_descriptors",
+    "reload_model_mapping_for_tests",
     "resolve_specialist_a2a_endpoint",
 ]
