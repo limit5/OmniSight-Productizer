@@ -13,6 +13,26 @@
 * **進化結果 (Evolutionary Result)：**
   系統的 SOP 技能庫會像滾雪球般自動擴充。未來的 Agent 接收到類似任務時，會自動掛載這個由「前輩」寫好的新技能，避免同一個坑踩兩次，達成團隊級的經驗傳承。
 
+### BP.M 與 R3 Scratchpad 的邊界
+
+BP.M 的 L1 skill distiller 與 R3 Scratchpad 都會把長任務壓縮成 markdown，但兩者的生命週期不同，不能互相替代：
+
+| 面向 | R3 Scratchpad | BP.M Skill Distiller |
+|---|---|---|
+| 目的 | 單一任務內的 working memory offload 與 crash / max-token recovery | 成功任務後的 cross-task knowledge distillation |
+| 內容 | `Current Task` / `Progress` / `Blockers` / `Next Steps` / `Context Summary` 等當下操作狀態 | 可泛化的解題程序、觸發條件、失敗徵兆、檢查步驟與後續任務可重用的 SOP |
+| 儲存位置 | `data/agents/<agent_id>/scratchpad.md` 與 archive，at-rest encrypted，per-agent mutable | `auto_distilled_skills` draft row，review 後才 promote 到 `configs/skills/<skill_name>/SKILL.md` |
+| 啟用時機 | 任務執行中；tool_done、turn interval、continuation、crash recovery 等事件觸發 | 任務成功後；`(tool_calls > 5 OR iterations > 3) AND success == true` 觸發 |
+| 審核語義 | 無 promotion；操作員只拿它判斷 hot-resume / post-mortem | draft 必經 operator review / promote，才成為 production skill pack |
+| 失敗語義 | best-effort；scratchpad IO 失敗不得阻斷 agent step | best-effort；distillation / audit 失敗不得改變 workflow completion |
+
+因此：
+
+1. Scratchpad 是 **in-task working memory**。它可以保留尚未完成、尚未驗證、甚至錯誤的推理線索，目標是讓同一個 agent 在同一個任務中續跑。
+2. Skill distiller 是 **cross-task knowledge**。它只在任務成功後產生 draft，必須 scrub secrets、移除 task-specific 狀態，並經 human review gate 才能影響未來任務。
+3. Distiller 不直接把 scratchpad archive 當成 skill pack，也不因 scratchpad 存在就自動 promotion。若 trajectory 裡已包含 scratchpad summary，distiller 只能把它當作輸入脈絡，輸出仍必須是可泛化的技能文件。
+4. R3 與 BP.M 的共同 contract 是「壓縮狀態不可破壞主流程」：scratchpad 不能阻斷 tool execution；distiller 不能阻斷 workflow success；跨 worker 的真相分別由 disk snapshot 與 PG draft row 承載。
+
 ---
 
 ## 🔵 Level 2: 工具製造 (Toolmaking)

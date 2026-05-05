@@ -112,6 +112,12 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "agents",
     "tasks",
     "task_comments",
+    # BP.M.1 (alembic 0192): human-reviewed L1 skill auto-distillation
+    # drafts. FKs ``tenant_id -> tenants.id`` (CASCADE) and
+    # ``source_task_id -> tasks.id`` (SET NULL) so it MUST replay after
+    # both parents. PK is app-generated TEXT, so NOT in
+    # TABLES_WITH_IDENTITY_ID.
+    "auto_distilled_skills",
     "npi_state",
     "artifacts",
     "notifications",

@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 375
+entry_count: 382
 status_counts:
-  dev-only: 365
+  dev-only: 372
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3518,3 +3518,66 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production image 重建後，以 `OMNISIGHT_WEB_SEARCH_PROVIDER=none` default-off smoke；再用 staging
     Tavily key 驗證 Intel/Architect WebSearch、audit row、budget cap 與 sanitizer marker。
+- id: 2026-05-05--BP.M.1
+  header_line: 46007
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.1
+  title: BP.M.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production PG 執行 alembic 0191→0192；BP.M.2-BP.M.5 接 summarizer、review/promote endpoints、UI
+    與 audit_log 後再做 runtime smoke。
+- id: 2026-05-05--BP.M.2
+  header_line: 46022
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.2
+  title: BP.M.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.M.3 review/promote endpoints 與 BP.M.5 audit_log 落地後，production image 重建並以 `OMNISIGHT_SELF_IMPROVE_LEVEL=l1`
+    staging workflow smoke 驗證 draft row 產生。
+- id: 2026-05-05--BP.M.3
+  header_line: 46037
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.3
+  title: BP.M.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.M.5 audit_log traceability 與 BP.M.4 review UI 落地後，production image 重建並以 `OMNISIGHT_SELF_IMPROVE_LEVEL=l1`
+    staging smoke：產生 draft、review、promote、確認 skill pack 可被 loader 讀到。
+- id: 2026-05-05--BP.M.4
+  header_line: 46052
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.4
+  title: BP.M.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.M.5 audit_log traceability 落地後，production image 重建並 staging smoke：產生 draft、UI review、UI
+    promote、確認 `configs/skills/<skill_name>/SKILL.md` 被 effective skill registry 讀到。
+- id: 2026-05-05--BP.M.5
+  header_line: 46067
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.5
+  title: BP.M.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.M.6 文件化 scratchpad/distiller 邊界、BP.M.7 補完整 distiller test matrix 後，production image 重建並
+    staging smoke：產生 draft、確認 `skill_distilled` audit row、promote、確認 `skill_promoted` audit row 與 skill registry 可讀。
+- id: 2026-05-05--BP.M.6
+  header_line: 46082
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.6
+  title: BP.M.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.M.7 補完整 distiller test matrix 後，production image 重建並 staging smoke：產生 draft、確認 `skill_distilled`
+    audit row、promote、確認 `skill_promoted` audit row 與 skill registry 可讀。
+- id: 2026-05-05--BP.M.7
+  header_line: 46096
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.7
+  title: BP.M.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image 重建並 staging smoke：`OMNISIGHT_SELF_IMPROVE_LEVEL=l1` 產生 draft、確認 `skill_distilled`
+    audit row、review/promote、確認 `skill_promoted` audit row 與 skill registry 可讀。
