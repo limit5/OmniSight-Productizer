@@ -90,6 +90,7 @@ class BatchableTask:
     callback: Callable[[BatchResult], Awaitable[None]] | None = None
     priority: PriorityLevel = "P2"
     metadata: dict[str, Any] = field(default_factory=dict)
+    tenant_id: str | None = None
 
     @property
     def model(self) -> str:
@@ -180,6 +181,7 @@ class BatchGroup:
 
     model: str
     tools_signature: str
+    tenant_id: str | None
     tasks: tuple[BatchableTask, ...]
 
 
@@ -189,18 +191,20 @@ def chunk_by_model_tools(
     max_per_chunk: int = MAX_REQUESTS_PER_BATCH,
     max_size_per_chunk: int = MAX_BATCH_SIZE_BYTES,
 ) -> list[BatchGroup]:
-    """Group tasks by (model, tools_signature), then chunk to limits.
+    """Group tasks by (tenant_id, model, tools_signature), then chunk to limits.
 
     Anthropic doesn't require homogeneous batches, but grouping by
     (model, tools) keeps prompt-cache hit rate high (system + tools
     repeat exactly across same-group tasks → 90% off cached input).
+    The tenant dimension is R80's app-layer isolation guard: a shared
+    dispatcher never creates a mixed-tenant batch.
     """
-    by_key: dict[tuple[str, str], list[BatchableTask]] = {}
+    by_key: dict[tuple[str | None, str, str], list[BatchableTask]] = {}
     for task in tasks:
-        by_key.setdefault((task.model, task.tools_signature), []).append(task)
+        by_key.setdefault((task.tenant_id, task.model, task.tools_signature), []).append(task)
 
     groups: list[BatchGroup] = []
-    for (model, sig), bucket in by_key.items():
+    for (tenant_id, model, sig), bucket in by_key.items():
         chunk: list[BatchableTask] = []
         chunk_size = 0
         for task in bucket:
@@ -208,13 +212,13 @@ def chunk_by_model_tools(
             would_overflow_count = len(chunk) >= max_per_chunk
             would_overflow_size = chunk_size + t_size > max_size_per_chunk
             if chunk and (would_overflow_count or would_overflow_size):
-                groups.append(BatchGroup(model, sig, tuple(chunk)))
+                groups.append(BatchGroup(model, sig, tenant_id, tuple(chunk)))
                 chunk = []
                 chunk_size = 0
             chunk.append(task)
             chunk_size += t_size
         if chunk:
-            groups.append(BatchGroup(model, sig, tuple(chunk)))
+            groups.append(BatchGroup(model, sig, tenant_id, tuple(chunk)))
 
     return groups
 
@@ -227,7 +231,7 @@ class _ActiveBatch:
     """Tracks one submitted batch + the callbacks owed to its tasks."""
 
     batch_run_id: str
-    callbacks: dict[str, Callable[[BatchResult], Awaitable[None]] | None]
+    callbacks: dict[tuple[str | None, str], Callable[[BatchResult], Awaitable[None]] | None]
     submitted_at_loop_iter: int = 0
 
 
@@ -364,7 +368,9 @@ class BatchDispatcher:
                 run = await self._submit_group(group)
                 self._active[run.batch_run_id] = _ActiveBatch(
                     batch_run_id=run.batch_run_id,
-                    callbacks={t.task_id: t.callback for t in group.tasks},
+                    callbacks={
+                        (t.tenant_id, t.task_id): t.callback for t in group.tasks
+                    },
                     submitted_at_loop_iter=self._loop_iter,
                 )
                 submitted += 1
@@ -383,6 +389,7 @@ class BatchDispatcher:
                                 batch_run_id="",
                                 custom_id=task.task_id,
                                 task_id=task.task_id,
+                                tenant_id=task.tenant_id,
                                 status="errored",
                                 error={"type": "dispatcher_submit_failed",
                                        "message": str(e)[:500]},
@@ -402,6 +409,7 @@ class BatchDispatcher:
             BatchRequest(
                 custom_id=task.task_id,
                 task_id=task.task_id,
+                tenant_id=task.tenant_id,
                 params=task.params,
             )
             for task in group.tasks
@@ -411,6 +419,8 @@ class BatchDispatcher:
             "tools_signature": group.tools_signature,
             "task_count": len(group.tasks),
         }
+        if group.tenant_id:
+            metadata["tenant_id"] = group.tenant_id
         return await self.batch_client.submit_batch(
             requests, metadata=metadata, created_by="batch-dispatcher"
         )
@@ -436,14 +446,16 @@ class BatchDispatcher:
         try:
             async for result in self.batch_client.stream_results(batch_run_id):
                 self.results_processed += 1
-                cb = active.callbacks.get(result.task_id or result.custom_id)
+                cb = active.callbacks.get(
+                    (result.tenant_id, result.task_id or result.custom_id)
+                )
                 if cb:
                     await self._safe_callback(cb, result)
         except Exception:  # noqa: BLE001
             logger.exception("stream_results failed for %s", batch_run_id)
             self.errors_encountered += 1
             # Notify any pending callbacks so callers aren't stranded.
-            for task_id, cb in active.callbacks.items():
+            for (tenant_id, task_id), cb in active.callbacks.items():
                 if cb:
                     await self._safe_callback(
                         cb,
@@ -451,6 +463,7 @@ class BatchDispatcher:
                             batch_run_id=batch_run_id,
                             custom_id=task_id,
                             task_id=task_id,
+                            tenant_id=tenant_id,
                             status="errored",
                             error={"type": "stream_results_failed"},
                         ),
@@ -536,6 +549,7 @@ async def submit_guild_task_in_lane(
         callback=callback,
         priority=priority,
         metadata=task_metadata,
+        tenant_id=task_metadata.get("tenant_id"),
     )
     return await submit_in_lane(
         lane=lane,

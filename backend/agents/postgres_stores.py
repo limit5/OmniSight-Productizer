@@ -18,9 +18,10 @@ against the production pool unchanged. asyncpg's ``Connection.execute``
 / ``fetch`` / ``fetchrow`` / ``fetchval`` are the only methods used,
 which the mock can imitate trivially.
 
-Tenant scoping intentionally NOT added at this layer — multi-tenant
-arrives with KS.1 envelope + Priority I; at that point a follow-up
-patches each query to AND ``tenant_id = $N``.
+Tenant scoping at this layer is limited to app-level metadata until the
+production persistence migration adds batch table columns. The in-memory
+contract and dispatcher are tenant-aware for R80; SQL filtering remains
+the follow-up once the schema row lands.
 
 ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §6.2
 """
@@ -239,8 +240,12 @@ class PostgresBatchPersistence:
         return [_row_to_batch_result(r) for r in rows]
 
     async def find_result_by_task_id(
-        self, task_id: str
+        self, task_id: str, tenant_id: str | None = None
     ) -> BatchResult | None:
+        if tenant_id is not None:
+            raise NotImplementedError(
+                "tenant-scoped batch result lookup requires the R80 SQL migration"
+            )
         async with _acquire(self._factory) as conn:
             row = await conn.fetchrow(
                 """
@@ -271,6 +276,7 @@ def _row_to_batch_run(row: Any) -> BatchRun:
         expired_count=row["expired_count"] or 0,
         metadata=_parse_jsonb(row["metadata"]) or {},
         created_by=row["created_by"],
+        tenant_id=(_parse_jsonb(row["metadata"]) or {}).get("tenant_id"),
         created_at=row["created_at"],
     )
 

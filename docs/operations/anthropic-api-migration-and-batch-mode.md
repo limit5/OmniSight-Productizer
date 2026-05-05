@@ -477,7 +477,10 @@ Settings → Provider Keys → Anthropic
 - **R77 Batch 結果 24h 才回 → 排程錯亂**：dispatcher 預期分鐘級、batch 可能小時級。**Mitigation**：dispatcher 明確分 real-time vs batch lane；batch 任務帶 `expected_completion_within: 24h` SLA；UI 顯示 batch 進度條。
 - **R78 Rate limit 撞牆 → 任務丟失**：429 / 529 處理不周。**Mitigation**：AB.7 exponential backoff + retry（max 5）+ dead-letter queue + alert；Tier 4 申請避免 default tier 限制。
 - **R79 Tool schema drift**：Claude Code 升版、tool schema 改、OmniSight 自家 tool registry 跟不上。**Mitigation**：每月 schema diff vs Claude Code release notes；CI lock；deferred tool 走 ToolSearch 動態載入避免 hard-code。
-- **R80 Batch 任務跨 tenant 隔離**：multi-tenant 後、batch 共享 dispatcher 但結果不該滲漏。**Mitigation**：每 task 帶 `tenant_id`、result 寫回時嚴格 tenant scope；KS.1 envelope 邊界繼承；tenant 退出時所有 in-flight batch task cancel + 加密 deletion。
+- **R80 Batch 任務跨 tenant 隔離**：multi-tenant 後、batch 共享 dispatcher 但結果不該滲漏。**Mitigation**：每 task 帶 `tenant_id`、dispatcher 以 `(tenant_id, model, tools_signature)` 分 batch、callback 以 `(tenant_id, task_id)` 路由；KS.1 envelope 邊界繼承；tenant 退出時所有 in-flight batch task cancel + 加密 deletion。
+
+Mitigation evidence is consolidated in
+[`docs/ops/ab_r76_r80_mitigation_evidence.md`](../ops/ab_r76_r80_mitigation_evidence.md).
 
 ---
 

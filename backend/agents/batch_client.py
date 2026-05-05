@@ -28,10 +28,9 @@ Scope of THIS module:
 
 Out of scope (deferred):
 
-  - Postgres-backed `BatchPersistence` impl — alembic 0181 schema
-    landed; SQL plumbing arrives with AB.4 dispatcher (which needs it)
-  - `tenant_id` scoping — waits for KS.1 envelope + Priority I tenant
-    infra; tracked by R80
+  - Postgres column-level `tenant_id` scoping — app-layer request/result
+    identity is tenant-aware for R80; SQL columns land with the production
+    persistence migration.
 
 ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §4
 """
@@ -93,6 +92,7 @@ class BatchRequest:
     custom_id: str
     params: dict[str, Any]
     task_id: str | None = None
+    tenant_id: str | None = None
 
 
 @dataclass
@@ -113,6 +113,7 @@ class BatchRun:
     expired_count: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
     created_by: str | None = None
+    tenant_id: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -124,6 +125,7 @@ class BatchResult:
     custom_id: str
     status: BatchResultStatus
     task_id: str | None = None
+    tenant_id: str | None = None
     response: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     final_text: str = ""
@@ -147,7 +149,9 @@ class BatchPersistence(Protocol):
     ) -> list[BatchRun]: ...
     async def save_batch_result(self, result: BatchResult) -> None: ...
     async def list_batch_results(self, batch_run_id: str) -> list[BatchResult]: ...
-    async def find_result_by_task_id(self, task_id: str) -> BatchResult | None: ...
+    async def find_result_by_task_id(
+        self, task_id: str, tenant_id: str | None = None
+    ) -> BatchResult | None: ...
 
 
 class InMemoryBatchPersistence:
@@ -181,9 +185,11 @@ class InMemoryBatchPersistence:
     async def list_batch_results(self, batch_run_id: str) -> list[BatchResult]:
         return [r for (b, _), r in self._results.items() if b == batch_run_id]
 
-    async def find_result_by_task_id(self, task_id: str) -> BatchResult | None:
+    async def find_result_by_task_id(
+        self, task_id: str, tenant_id: str | None = None
+    ) -> BatchResult | None:
         for r in self._results.values():
-            if r.task_id == task_id:
+            if r.task_id == task_id and (tenant_id is None or r.tenant_id == tenant_id):
                 return r
         return None
 
@@ -201,7 +207,7 @@ def estimate_request_size(params: dict[str, Any]) -> int:
 
 
 def validate_batch_limits(requests: list[BatchRequest]) -> int:
-    """Validate request_count + total_size + custom_id constraints.
+    """Validate request_count + total_size + custom_id + tenant constraints.
 
     Returns total estimated size in bytes.
     """
@@ -230,6 +236,8 @@ def validate_batch_limits(requests: list[BatchRequest]) -> int:
         seen_ids.add(r.custom_id)
         total_size += estimate_request_size(r.params)
 
+    _single_tenant_id(requests, require_single=True)
+
     if total_size > MAX_BATCH_SIZE_BYTES:
         raise BatchLimitError(
             f"Batch payload {total_size:,} bytes exceeds {MAX_BATCH_SIZE_BYTES:,} "
@@ -237,6 +245,23 @@ def validate_batch_limits(requests: list[BatchRequest]) -> int:
         )
 
     return total_size
+
+
+def _single_tenant_id(
+    requests: list[BatchRequest], *, require_single: bool = False
+) -> str | None:
+    """Return tenant_id when a batch is single-tenant, else None.
+
+    R80 mitigation is enforced by AB.4 grouping before submission; this
+    helper mirrors the invariant on BatchRun for audit/debug metadata.
+    """
+    tenant_ids = {r.tenant_id for r in requests}
+    if require_single and len(tenant_ids) > 1:
+        raise BatchLimitError("Batch cannot mix tenant_id values; split by tenant.")
+    tenant_ids.discard(None)
+    if len(tenant_ids) == 1:
+        return next(iter(tenant_ids))
+    return None
 
 
 # ─── Status mapping helpers ──────────────────────────────────────
@@ -361,6 +386,7 @@ class BatchClient:
             total_size_bytes=total_size,
             metadata=dict(metadata or {}),
             created_by=created_by,
+            tenant_id=_single_tenant_id(requests),
         )
         await self.persistence.save_batch_run(run)
 
@@ -372,6 +398,7 @@ class BatchClient:
                     batch_run_id=run.batch_run_id,
                     custom_id=req.custom_id,
                     task_id=req.task_id,
+                    tenant_id=req.tenant_id,
                     status="pending",
                 )
             )
@@ -508,6 +535,7 @@ class BatchClient:
                 batch_run_id=batch_run_id,
                 custom_id=custom_id or "",
                 task_id=previous.task_id if previous else None,
+                tenant_id=previous.tenant_id if previous else None,
                 status=status,
                 response=_to_dict(message) if message is not None else None,
                 error=_to_dict(error) if error is not None else None,
@@ -543,9 +571,11 @@ class BatchClient:
         await self.persistence.save_batch_run(run)
         return run
 
-    async def find_result_for_task(self, task_id: str) -> BatchResult | None:
+    async def find_result_for_task(
+        self, task_id: str, tenant_id: str | None = None
+    ) -> BatchResult | None:
         """Look up the result row for a given OmniSight task_id (AB.3.2 mapping)."""
-        return await self.persistence.find_result_by_task_id(task_id)
+        return await self.persistence.find_result_by_task_id(task_id, tenant_id)
 
 
 async def _async_iter(maybe_async_iterable: Any) -> AsyncIterator[Any]:
