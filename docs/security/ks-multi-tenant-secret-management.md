@@ -375,6 +375,9 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 ## 10. Risk Register（R46-R50）
 
+R46-R50 mitigation evidence is consolidated in
+[`docs/ops/ks_cross_cutting_evidence.md`](../ops/ks_cross_cutting_evidence.md).
+
 | ID | 風險 | Mitigation |
 |----|------|-----------|
 | **R46** | Master KEK compromise（Phase 1）— KMS misconfig / IAM credential leak → 全租戶全洩 | KEK 季度 rotation；IAM least-privilege；KMS admin dual-control（Anthropic 內部 break-glass workflow 模式）；KMS audit log 進 N10 |
