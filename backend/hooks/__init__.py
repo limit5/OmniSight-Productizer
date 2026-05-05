@@ -12,4 +12,7 @@ Currently ships:
   that calls :mod:`backend.self_healing_docs` after a merge so a
   developer who pulls in new routes locally automatically refreshes
   their working-copy ``openapi.json`` + ``docs/architecture.md``.
+* :mod:`backend.hooks.post_merge_rag_index` — git ``post-merge`` hook
+  that calls :mod:`backend.agents.rag_indexer` when a merge touches
+  docs / code / ``SKILL.md`` / ``TODO.md`` RAG corpus inputs.
 """
