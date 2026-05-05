@@ -8,10 +8,110 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
+import type { ReactNode } from "react"
 import { Activity } from "lucide-react"
 
 import { Block, isBlockModelEnabled } from "@/components/omnisight/block"
 import type { CreateShareableObjectRequest } from "@/lib/api"
+
+type SurfaceFixture = {
+  surface: string
+  kind: string
+  status: string
+  className: string
+  legacyTestId: string
+  migratedTestId: string
+  children: ReactNode
+}
+
+const SURFACE_FIXTURES: SurfaceFixture[] = [
+  {
+    surface: "ORCHESTRATOR",
+    kind: "orchestration.queue",
+    status: "active",
+    className: "rounded-sm border p-2",
+    legacyTestId: "legacy-orchestrator",
+    migratedTestId: "migrated-orchestrator",
+    children: (
+      <>
+        <span data-testid="queue-p0">P0 1</span>
+        <span data-testid="queue-total">TOTAL 7</span>
+      </>
+    ),
+  },
+  {
+    surface: "TokenUsageStats",
+    kind: "token_usage.model",
+    status: "selected",
+    className: "w-full rounded-lg p-3",
+    legacyTestId: "legacy-token-usage",
+    migratedTestId: "migrated-token-usage",
+    children: (
+      <>
+        <span data-testid="model-label">Claude Opus</span>
+        <span data-testid="model-cost">$0.42</span>
+        <span data-testid="context-usage-pct">42%</span>
+      </>
+    ),
+  },
+  {
+    surface: "BP dispatch board",
+    kind: "bp.batch.run",
+    status: "running",
+    className: "rounded-sm border px-3 py-2",
+    legacyTestId: "legacy-bp",
+    migratedTestId: "migrated-bp",
+    children: (
+      <>
+        <span data-testid="batch-priority">Priority HD</span>
+        <span data-testid="batch-progress">3 / 8</span>
+      </>
+    ),
+  },
+  {
+    surface: "HD bring-up workbench",
+    kind: "hd.finding",
+    status: "warning",
+    className: "rounded-sm border px-3 py-2",
+    legacyTestId: "legacy-hd",
+    migratedTestId: "migrated-hd",
+    children: (
+      <>
+        <span data-testid="finding-title">Impedance mismatch</span>
+        <span data-testid="finding-severity">warn</span>
+      </>
+    ),
+  },
+]
+
+function renderLegacySurface(fixture: SurfaceFixture) {
+  return (
+    <div className={fixture.className} data-testid={fixture.legacyTestId}>
+      {fixture.children}
+    </div>
+  )
+}
+
+function renderMigratedSurface(fixture: SurfaceFixture) {
+  return (
+    <Block
+      kind={fixture.kind}
+      status={fixture.status}
+      className={fixture.className}
+      data-testid={fixture.migratedTestId}
+    >
+      {fixture.children}
+    </Block>
+  )
+}
+
+function semanticSurfaceSnapshot(root: HTMLElement) {
+  return Array.from(root.querySelectorAll<HTMLElement>("[data-testid]")).map((node) => ({
+    testId: node.dataset.testid,
+    tag: node.tagName,
+    text: (node.textContent ?? "").replace(/\s+/g, " ").trim(),
+  }))
+}
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -184,4 +284,42 @@ describe("<Block />", () => {
       }),
     )
   })
+
+  it.each(SURFACE_FIXTURES.map((fixture) => [fixture.surface, fixture] as const))(
+    "keeps the %s migrated UI semantic snapshot equal to the legacy card",
+    (_surface, fixture) => {
+      const legacy = render(renderLegacySurface(fixture))
+      const legacySnapshot = semanticSurfaceSnapshot(
+        screen.getByTestId(fixture.legacyTestId),
+      )
+      legacy.unmount()
+
+      render(renderMigratedSurface(fixture))
+      const migrated = screen.getByTestId(fixture.migratedTestId)
+
+      expect(semanticSurfaceSnapshot(migrated)).toEqual(legacySnapshot)
+      expect(migrated).toHaveAttribute("data-block-kind", fixture.kind)
+      expect(migrated).toHaveAttribute("data-block-status", fixture.status)
+    },
+  )
+
+  it.each(SURFACE_FIXTURES.map((fixture) => [fixture.surface, fixture] as const))(
+    "keeps the %s rollback UI snapshot equal to the legacy card",
+    (_surface, fixture) => {
+      vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "false")
+
+      const legacy = render(renderLegacySurface(fixture))
+      const legacySnapshot = semanticSurfaceSnapshot(
+        screen.getByTestId(fixture.legacyTestId),
+      )
+      legacy.unmount()
+
+      render(renderMigratedSurface(fixture))
+      const migrated = screen.getByTestId(fixture.migratedTestId)
+
+      expect(semanticSurfaceSnapshot(migrated)).toEqual(legacySnapshot)
+      expect(migrated).not.toHaveAttribute("data-block-kind")
+      expect(migrated).not.toHaveAttribute("data-block-status")
+    },
+  )
 })
