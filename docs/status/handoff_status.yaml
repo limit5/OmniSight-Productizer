@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 430
+entry_count: 431
 status_counts:
-  dev-only: 420
+  dev-only: 421
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4013,3 +4013,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production image rebuild 後，operator 註冊真實第三方 threat-intel A2A endpoint，對 pre-install 與 pre-blueprint
     hook 各跑一次 smoke，確認 partner `reports` 進入 Intel brief。
+- id: 2026-05-06--bp-a2a-9
+  header_line: 46844
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: BP.A2A.9 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image rebuild 後，對 9 個 provider AgentCard 各跑 discovery smoke，並對至少一個 key-based provider
+    + Ollama 各跑 sync/SSE provider invoke smoke，確認 orchestrator 只保存/轉交 A2A endpoint + `model_spec` metadata。

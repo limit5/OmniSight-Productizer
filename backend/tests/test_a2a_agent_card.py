@@ -6,15 +6,22 @@ import pytest
 from pydantic import ValidationError
 
 from backend.a2a.agent_card import (
+    A2A_PROVIDER_IDS,
     DEFAULT_A2A_SCOPES,
     DEFAULT_DISCOVERY_PATH,
     DEFAULT_INVOKE_PATH_TEMPLATE,
     DEFAULT_STREAM_PATH_TEMPLATE,
+    PROVIDER_DISCOVERY_PATH_TEMPLATE,
+    PROVIDER_INVOKE_PATH_TEMPLATE,
     SCHEMA_VERSION,
     AgentCard,
     CapabilityDescriptor,
     build_agent_card,
     build_capability_descriptors,
+    build_provider_agent_card,
+    build_provider_agent_cards,
+    build_provider_capability_descriptors,
+    resolve_specialist_a2a_endpoint,
 )
 from backend.sandbox_tier import Guild, admitted_tiers
 
@@ -117,3 +124,79 @@ class TestCapabilityDescriptors:
                 endpoint_url=f"{BASE_URL}/a2a/invoke/bad",
                 stream_endpoint_url=f"{BASE_URL}/a2a/invoke/bad?stream=true",
             )
+
+
+class TestProviderScopedAgentCards:
+    def test_generates_one_card_for_each_supported_provider(self) -> None:
+        cards = build_provider_agent_cards(BASE_URL)
+
+        assert len(cards) == 9
+        assert {card.provider.lower().split()[0] for card in cards} >= {
+            "anthropic",
+            "openai",
+            "google",
+            "xai",
+            "groq",
+            "deepseek",
+            "together",
+            "openrouter",
+            "ollama",
+        }
+
+    @pytest.mark.parametrize("provider_id", A2A_PROVIDER_IDS)
+    def test_provider_card_exposes_specialists_as_a2a_endpoints(self, provider_id: str) -> None:
+        card = build_provider_agent_card(BASE_URL, provider_id)
+        by_name = _capabilities_by_name(card)
+
+        assert card.protocol == "a2a"
+        assert card.url == (
+            BASE_URL + PROVIDER_DISCOVERY_PATH_TEMPLATE.format(provider_id=provider_id)
+        )
+        assert card.endpoints.invoke_url_template == (
+            BASE_URL + PROVIDER_INVOKE_PATH_TEMPLATE.format(
+                provider_id=provider_id,
+                agent_name="{agent_name}",
+            )
+        )
+        assert by_name["hal"].source == "provider_specialist"
+        assert by_name["hal"].provider_id == provider_id
+        assert by_name["hal"].model_spec is not None
+        assert by_name["hal"].endpoint_url == (
+            f"{BASE_URL}/a2a/providers/{provider_id}/invoke/hal"
+        )
+        assert "provider" in by_name["hal"].tags
+        assert provider_id in by_name["hal"].tags
+
+    def test_provider_capabilities_cover_public_and_graph_specialists(self) -> None:
+        public_names = {cap.agent_name for cap in build_capability_descriptors(BASE_URL)}
+        provider_names = {
+            cap.agent_name
+            for cap in build_provider_capability_descriptors(BASE_URL, "openai")
+        }
+
+        assert public_names.issubset(provider_names)
+        assert {"firmware", "software", "validator", "reviewer", "general"}.issubset(
+            provider_names
+        )
+
+    def test_orchestrator_resolves_provider_specialist_to_endpoint_only(self) -> None:
+        endpoint = resolve_specialist_a2a_endpoint(
+            BASE_URL,
+            provider_id="openrouter",
+            agent_name="reviewer",
+        )
+
+        assert endpoint.protocol == "a2a"
+        assert endpoint.endpoint_url == (
+            f"{BASE_URL}/a2a/providers/openrouter/invoke/reviewer"
+        )
+        assert endpoint.stream_endpoint_url == (
+            f"{BASE_URL}/a2a/providers/openrouter/invoke/reviewer?stream=true"
+        )
+        assert endpoint.model_spec.startswith("openrouter:")
+        assert "ChatOpenAI" not in endpoint.model_dump_json()
+
+    @pytest.mark.parametrize("provider_id", ["", "not-real"])
+    def test_unknown_provider_is_rejected(self, provider_id: str) -> None:
+        with pytest.raises(ValueError):
+            build_provider_agent_card(BASE_URL, provider_id)

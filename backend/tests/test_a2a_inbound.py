@@ -69,6 +69,37 @@ async def test_agent_card_discovery_uses_well_known_root_and_forwarded_host() ->
     assert any(cap["agent_name"] == "hal" for cap in body["capabilities"])
 
 
+@pytest.mark.asyncio
+async def test_provider_agent_card_discovery_exposes_provider_endpoint_templates() -> None:
+    app = _app()
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://internal") as client:
+        res = await client.get(
+            "/.well-known/a2a/providers/openai/agent.json",
+            headers={
+                "x-forwarded-proto": "https",
+                "x-forwarded-host": "omnisight.example.com",
+            },
+        )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["protocol"] == "a2a"
+    assert body["provider"] == "OpenAI"
+    assert body["url"] == (
+        "https://omnisight.example.com/.well-known/a2a/providers/openai/agent.json"
+    )
+    assert body["endpoints"]["invoke_url_template"] == (
+        "https://omnisight.example.com/a2a/providers/openai/invoke/{agent_name}"
+    )
+    hal = next(cap for cap in body["capabilities"] if cap["agent_name"] == "hal")
+    assert hal["source"] == "provider_specialist"
+    assert hal["provider_id"] == "openai"
+    assert hal["model_spec"].startswith("openai:")
+    assert "ChatOpenAI" not in str(body)
+
+
 def test_api_key_scope_allows_a2a_oauth_style_discover_and_invoke() -> None:
     key = ApiKey(
         id="ak-a2a",
@@ -124,6 +155,67 @@ async def test_sync_invoke_runs_graph_after_operator_auth_and_pep(monkeypatch) -
     assert pep_calls[0]["tool"] == a2a_inbound.A2A_INVOKE_PEP_TOOL
     assert pep_calls[0]["guild_id"] == "hal"
     assert pep_calls[0]["arguments"]["tenant_id"] == "tenant-a2a"
+
+
+@pytest.mark.asyncio
+async def test_provider_invoke_routes_to_graph_with_provider_model_spec(monkeypatch) -> None:
+    app = _app()
+    app.dependency_overrides[_auth.require_operator] = _operator
+    graph_calls: list[dict] = []
+
+    async def _fake_run_graph(command: str, **kwargs) -> GraphState:
+        graph_calls.append({"command": command, **kwargs})
+        return GraphState(
+            user_command=command,
+            routed_to="reviewer",
+            answer="reviewer answer",
+            model_name=kwargs.get("model_name", ""),
+        )
+
+    monkeypatch.setattr(a2a_inbound._pep, "evaluate", _allow_pep)
+    monkeypatch.setattr(a2a_inbound, "run_graph", _fake_run_graph)
+    monkeypatch.setattr(a2a_inbound, "_audit_a2a_event", _noop_audit)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.post(
+            "/a2a/providers/openrouter/invoke/reviewer",
+            json={"message": "review the patch"},
+        )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["provider_id"] == "openrouter"
+    assert body["agent_name"] == "reviewer"
+    assert body["model_spec"].startswith("openrouter:")
+    assert graph_calls == [
+        {
+            "command": "review the patch",
+            "agent_sub_type": "reviewer",
+            "model_name": body["model_spec"],
+            "task_id": body["invocation_id"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_provider_invoke_rejects_unknown_provider_before_pep(monkeypatch) -> None:
+    app = _app()
+    app.dependency_overrides[_auth.require_operator] = _operator
+
+    async def _fail_pep(**kwargs):
+        raise AssertionError("PEP should not run for unknown providers")
+
+    monkeypatch.setattr(a2a_inbound._pep, "evaluate", _fail_pep)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.post(
+            "/a2a/providers/not-real/invoke/hal",
+            json={"message": "inspect HAL driver"},
+        )
+
+    assert res.status_code == 404
 
 
 @pytest.mark.asyncio

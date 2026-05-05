@@ -36,6 +36,9 @@ A2A_PROTOCOL_VERSION: Literal["0.3.0"] = "0.3.0"
 DEFAULT_DISCOVERY_PATH = "/.well-known/agent.json"
 DEFAULT_INVOKE_PATH_TEMPLATE = "/a2a/invoke/{agent_name}"
 DEFAULT_STREAM_PATH_TEMPLATE = "/a2a/invoke/{agent_name}?stream=true"
+PROVIDER_DISCOVERY_PATH_TEMPLATE = "/.well-known/a2a/providers/{provider_id}/agent.json"
+PROVIDER_INVOKE_PATH_TEMPLATE = "/a2a/providers/{provider_id}/invoke/{agent_name}"
+PROVIDER_STREAM_PATH_TEMPLATE = "/a2a/providers/{provider_id}/invoke/{agent_name}?stream=true"
 DEFAULT_INPUT_MODES: tuple[str, ...] = ("text/plain", "application/json")
 DEFAULT_OUTPUT_MODES: tuple[str, ...] = (
     "text/plain",
@@ -49,6 +52,17 @@ DEFAULT_STREAM_EVENTS: tuple[str, ...] = (
     "artifact_delta",
     "task_completed",
     "task_failed",
+)
+A2A_PROVIDER_IDS: tuple[str, ...] = (
+    "anthropic",
+    "openai",
+    "google",
+    "xai",
+    "groq",
+    "deepseek",
+    "together",
+    "openrouter",
+    "ollama",
 )
 
 
@@ -118,6 +132,68 @@ _EXTRA_SPECIALIST_DESCRIPTORS = (
         "tags": ("pcb", "si-pi", "hardware"),
     },
 )
+
+_GRAPH_SPECIALIST_DESCRIPTORS = (
+    {
+        "agent_name": "firmware",
+        "display_name": "Firmware",
+        "description": "Firmware implementation, driver bring-up, cross-compilation, and embedded integration specialist.",
+        "admitted_tiers": (SandboxTier.T1.value, SandboxTier.T3.value),
+        "tags": ("langgraph", "firmware", "specialist"),
+    },
+    {
+        "agent_name": "software",
+        "display_name": "Software",
+        "description": "Application code, backend/frontend implementation, algorithm, and refactor specialist.",
+        "admitted_tiers": (SandboxTier.T1.value, SandboxTier.T2.value),
+        "tags": ("langgraph", "software", "specialist"),
+    },
+    {
+        "agent_name": "validator",
+        "display_name": "Validator",
+        "description": "Validation, regression test, benchmark, lint, and verification specialist.",
+        "admitted_tiers": (SandboxTier.T0.value, SandboxTier.T1.value),
+        "tags": ("langgraph", "validator", "specialist"),
+    },
+    {
+        "agent_name": "reviewer",
+        "display_name": "Reviewer",
+        "description": "Code review, patchset analysis, Gerrit review, and implementation risk specialist.",
+        "admitted_tiers": (SandboxTier.T0.value, SandboxTier.T1.value),
+        "tags": ("langgraph", "reviewer", "specialist"),
+    },
+    {
+        "agent_name": "general",
+        "display_name": "General",
+        "description": "Fallback specialist for tasks that do not map cleanly to a narrower domain.",
+        "admitted_tiers": (SandboxTier.T0.value,),
+        "tags": ("langgraph", "general", "specialist"),
+    },
+)
+
+_PROVIDER_DISPLAY_NAMES = MappingProxyType({
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "google": "Google",
+    "xai": "xAI",
+    "groq": "Groq",
+    "deepseek": "DeepSeek",
+    "together": "Together",
+    "openrouter": "OpenRouter",
+    "ollama": "Ollama",
+})
+
+_PROVIDER_DEFAULT_MODELS = MappingProxyType({
+    "anthropic": "claude-sonnet-4-20250514",
+    "openai": "gpt-4o",
+    "google": "gemini-1.5-pro",
+    "xai": "grok-3-mini",
+    "groq": "llama-3.3-70b-versatile",
+    "deepseek": "deepseek-chat",
+    "together": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+    "openrouter": "anthropic/claude-sonnet-4",
+    "ollama": "llama3.1",
+})
 
 
 class AgentCardEndpoints(BaseModel):
@@ -189,13 +265,15 @@ class CapabilityDescriptor(BaseModel):
     agent_name: str = Field(..., min_length=1)
     display_name: str = Field(..., min_length=1)
     description: str = Field(..., min_length=1)
-    source: Literal["guild", "runtime_specialist", "domain_specialist"]
+    source: Literal["guild", "runtime_specialist", "domain_specialist", "provider_specialist"]
     endpoint_url: str = Field(..., min_length=1)
     stream_endpoint_url: str = Field(..., min_length=1)
     admitted_tiers: tuple[str, ...] = Field(default_factory=tuple)
     input_modes: tuple[str, ...] = DEFAULT_INPUT_MODES
     output_modes: tuple[str, ...] = DEFAULT_OUTPUT_MODES
     tags: tuple[str, ...] = Field(default_factory=tuple)
+    provider_id: str | None = None
+    model_spec: str | None = None
 
     @field_validator("agent_name")
     @classmethod
@@ -236,6 +314,23 @@ class AgentCard(BaseModel):
     default_output_modes: tuple[str, ...] = DEFAULT_OUTPUT_MODES
 
 
+class SpecialistA2AEndpoint(BaseModel):
+    """Provider-scoped specialist endpoint visible to orchestrator routing."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    provider_id: str = Field(..., min_length=1)
+    agent_name: str = Field(..., min_length=1)
+    endpoint_url: str = Field(..., min_length=1)
+    stream_endpoint_url: str = Field(..., min_length=1)
+    model_spec: str = Field(..., min_length=1)
+    protocol: Literal["a2a"] = "a2a"
+
+
 def _normalise_public_base_url(public_base_url: str) -> str:
     base = (public_base_url or "").strip().rstrip("/")
     if not base:
@@ -248,6 +343,27 @@ def _normalise_public_base_url(public_base_url: str) -> str:
 def _endpoint_url(public_base_url: str, path_template: str, agent_name: str) -> str:
     agent_slug = quote(agent_name, safe="")
     return public_base_url + path_template.format(agent_name=agent_slug)
+
+
+def _provider_endpoint_url(
+    public_base_url: str,
+    path_template: str,
+    provider_id: str,
+    agent_name: str = "",
+) -> str:
+    provider_slug = quote(provider_id, safe="")
+    agent_slug = quote(agent_name, safe="")
+    return public_base_url + path_template.format(
+        provider_id=provider_slug,
+        agent_name=agent_slug,
+    )
+
+
+def _require_provider_id(provider_id: str) -> str:
+    provider = (provider_id or "").strip().lower()
+    if provider not in A2A_PROVIDER_IDS:
+        raise ValueError(f"unknown A2A provider {provider_id!r}")
+    return provider
 
 
 def _guild_capability(public_base_url: str, guild: Guild) -> CapabilityDescriptor:
@@ -294,6 +410,71 @@ def build_capability_descriptors(public_base_url: str) -> tuple[CapabilityDescri
     return guild_descriptors + extra_descriptors
 
 
+def build_provider_capability_descriptors(
+    public_base_url: str,
+    provider_id: str,
+) -> tuple[CapabilityDescriptor, ...]:
+    """Generate provider-scoped specialist descriptors for BP.A2A.9."""
+
+    base = _normalise_public_base_url(public_base_url)
+    provider = _require_provider_id(provider_id)
+    model_spec = f"{provider}:{_PROVIDER_DEFAULT_MODELS[provider]}"
+    base_descriptors = list(build_capability_descriptors(base))
+    known = {descriptor.agent_name for descriptor in base_descriptors}
+    base_descriptors.extend(
+        CapabilityDescriptor(
+            agent_name=str(seed["agent_name"]),
+            display_name=str(seed["display_name"]),
+            description=str(seed["description"]),
+            source="runtime_specialist",
+            endpoint_url=_endpoint_url(
+                base,
+                DEFAULT_INVOKE_PATH_TEMPLATE,
+                str(seed["agent_name"]),
+            ),
+            stream_endpoint_url=_endpoint_url(
+                base,
+                DEFAULT_STREAM_PATH_TEMPLATE,
+                str(seed["agent_name"]),
+            ),
+            admitted_tiers=tuple(seed["admitted_tiers"]),
+            tags=tuple(seed["tags"]),
+        )
+        for seed in _GRAPH_SPECIALIST_DESCRIPTORS
+        if seed["agent_name"] not in known
+    )
+    return tuple(
+        CapabilityDescriptor(
+            agent_name=descriptor.agent_name,
+            display_name=f"{_PROVIDER_DISPLAY_NAMES[provider]} {descriptor.display_name}",
+            description=(
+                f"{descriptor.description} Invoked through the "
+                f"{_PROVIDER_DISPLAY_NAMES[provider]} A2A provider endpoint."
+            ),
+            source="provider_specialist",
+            endpoint_url=_provider_endpoint_url(
+                base,
+                PROVIDER_INVOKE_PATH_TEMPLATE,
+                provider,
+                descriptor.agent_name,
+            ),
+            stream_endpoint_url=_provider_endpoint_url(
+                base,
+                PROVIDER_STREAM_PATH_TEMPLATE,
+                provider,
+                descriptor.agent_name,
+            ),
+            admitted_tiers=descriptor.admitted_tiers,
+            input_modes=descriptor.input_modes,
+            output_modes=descriptor.output_modes,
+            tags=("provider", provider, *descriptor.tags),
+            provider_id=provider,
+            model_spec=model_spec,
+        )
+        for descriptor in base_descriptors
+    )
+
+
 def build_agent_card(public_base_url: str) -> AgentCard:
     """Build the public OmniSight AgentCard for BP.A2A.2 discovery."""
 
@@ -309,12 +490,94 @@ def build_agent_card(public_base_url: str) -> AgentCard:
     )
 
 
+def build_provider_agent_card(public_base_url: str, provider_id: str) -> AgentCard:
+    """Build one provider-scoped A2A AgentCard for specialist routing."""
+
+    base = _normalise_public_base_url(public_base_url)
+    provider = _require_provider_id(provider_id)
+    discovery_path = PROVIDER_DISCOVERY_PATH_TEMPLATE.format(
+        provider_id=quote(provider, safe=""),
+    )
+    display = _PROVIDER_DISPLAY_NAMES[provider]
+    return AgentCard(
+        name=f"OmniSight {display} Specialist Agents",
+        description=(
+            "Provider-scoped OmniSight specialist AgentCard. Internal "
+            "orchestrators route through these A2A endpoints instead of "
+            "binding to provider SDK classes."
+        ),
+        provider=display,
+        url=base + discovery_path,
+        endpoints=AgentCardEndpoints(
+            discovery_url=base + discovery_path,
+            invoke_url_template=base + PROVIDER_INVOKE_PATH_TEMPLATE.format(
+                provider_id=quote(provider, safe=""),
+                agent_name="{agent_name}",
+            ),
+            stream_url_template=base + PROVIDER_STREAM_PATH_TEMPLATE.format(
+                provider_id=quote(provider, safe=""),
+                agent_name="{agent_name}",
+            ),
+        ),
+        capabilities=build_provider_capability_descriptors(base, provider),
+    )
+
+
+def build_provider_agent_cards(public_base_url: str) -> tuple[AgentCard, ...]:
+    """Build AgentCards for all nine supported LLM providers."""
+
+    return tuple(
+        build_provider_agent_card(public_base_url, provider)
+        for provider in A2A_PROVIDER_IDS
+    )
+
+
+def resolve_specialist_a2a_endpoint(
+    public_base_url: str,
+    *,
+    provider_id: str,
+    agent_name: str,
+) -> SpecialistA2AEndpoint:
+    """Return the only provider/specialist handle the orchestrator needs."""
+
+    base = _normalise_public_base_url(public_base_url)
+    provider = _require_provider_id(provider_id)
+    agent = (agent_name or "").strip().lower()
+    known = {
+        descriptor.agent_name
+        for descriptor in build_provider_capability_descriptors(base, provider)
+    }
+    if agent not in known:
+        raise ValueError(f"unknown A2A specialist {agent_name!r}")
+    return SpecialistA2AEndpoint(
+        provider_id=provider,
+        agent_name=agent,
+        endpoint_url=_provider_endpoint_url(
+            base,
+            PROVIDER_INVOKE_PATH_TEMPLATE,
+            provider,
+            agent,
+        ),
+        stream_endpoint_url=_provider_endpoint_url(
+            base,
+            PROVIDER_STREAM_PATH_TEMPLATE,
+            provider,
+            agent,
+        ),
+        model_spec=f"{provider}:{_PROVIDER_DEFAULT_MODELS[provider]}",
+    )
+
+
 __all__ = [
     "A2A_PROTOCOL_VERSION",
+    "A2A_PROVIDER_IDS",
     "DEFAULT_A2A_SCOPES",
     "DEFAULT_DISCOVERY_PATH",
     "DEFAULT_INVOKE_PATH_TEMPLATE",
     "DEFAULT_STREAM_PATH_TEMPLATE",
+    "PROVIDER_DISCOVERY_PATH_TEMPLATE",
+    "PROVIDER_INVOKE_PATH_TEMPLATE",
+    "PROVIDER_STREAM_PATH_TEMPLATE",
     "SCHEMA_VERSION",
     "AgentCard",
     "AgentCardAuth",
@@ -322,6 +585,11 @@ __all__ = [
     "AgentCardProtocolCapabilities",
     "AgentCardStreaming",
     "CapabilityDescriptor",
+    "SpecialistA2AEndpoint",
     "build_agent_card",
     "build_capability_descriptors",
+    "build_provider_agent_card",
+    "build_provider_agent_cards",
+    "build_provider_capability_descriptors",
+    "resolve_specialist_a2a_endpoint",
 ]
