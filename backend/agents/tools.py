@@ -21,6 +21,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 
@@ -2131,7 +2132,124 @@ MCP_TOOLS = [android_skill_search]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  13. Image generation tool (V9 #325 row 2708)
+#  13. Web search tool (BP.N.4)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _web_search_host_allowed(
+    url: str,
+    *,
+    allowed_domains: list[str] | None = None,
+    blocked_domains: list[str] | None = None,
+) -> bool:
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    if not host:
+        return True
+
+    def matches(domain: str) -> bool:
+        d = domain.strip().lower().removeprefix("www.")
+        return bool(d) and (host == d or host.endswith(f".{d}"))
+
+    blocked = [str(d) for d in (blocked_domains or []) if str(d).strip()]
+    if any(matches(domain) for domain in blocked):
+        return False
+
+    allowed = [str(d) for d in (allowed_domains or []) if str(d).strip()]
+    if allowed and not any(matches(domain) for domain in allowed):
+        return False
+    return True
+
+
+@tool("WebSearch")
+async def web_search(
+    query: str,
+    allowed_domains: list[str] | None = None,
+    blocked_domains: list[str] | None = None,
+) -> str:
+    """Search the web through the configured BP.N provider.
+
+    Module-global state audit: this tool has no process-local mutable state;
+    every worker derives the same loadout from the module-constant
+    ``AGENT_TOOLS`` mapping while rate/cost coordination stays inside
+    ``backend.web_search``.
+
+    Args:
+        query: Search query.
+        allowed_domains: Optional domain allow-list.
+        blocked_domains: Optional domain block-list.
+    """
+    cleaned_query = str(query or "").strip()
+    if not cleaned_query:
+        return "[ERROR] WebSearch: query is required."
+
+    from backend.config import settings
+    from backend.web_sanitizer import sanitize_web_content
+    from backend.web_search import (
+        WebSearchBudgetExceeded,
+        WebSearchCredentialMissing,
+        WebSearchRateLimited,
+        make_web_search_client,
+    )
+
+    try:
+        client = make_web_search_client(settings=settings)
+    except Exception as exc:
+        return f"[ERROR] WebSearch: failed to configure provider: {type(exc).__name__}: {exc}"
+    if client is None:
+        return "[DISABLED] WebSearch: OMNISIGHT_WEB_SEARCH_PROVIDER=none."
+
+    try:
+        response = await asyncio.to_thread(
+            client.search,
+            cleaned_query,
+            max_results=5,
+            include_answer=True,
+        )
+    except WebSearchRateLimited as exc:
+        return f"[BLOCKED] WebSearch: {exc}"
+    except WebSearchBudgetExceeded as exc:
+        return f"[BLOCKED] WebSearch: {exc}"
+    except WebSearchCredentialMissing as exc:
+        return f"[ERROR] WebSearch: {exc}"
+
+    if response.error:
+        return f"[ERROR] WebSearch: {response.error}"
+
+    filtered = [
+        result
+        for result in response.results
+        if _web_search_host_allowed(
+            result.url,
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+        )
+    ]
+
+    lines = [
+        f"[OK] WebSearch: provider={response.provider} results={len(filtered)} query={response.query!r}",
+        f"Cost estimate: ${response.cost_usd_estimated:.4f} · fetched_at={response.fetched_at}",
+    ]
+    if response.answer:
+        lines.append("")
+        lines.append("Answer:")
+        lines.append(sanitize_web_content(response.answer).sanitized_text)
+    for index, result in enumerate(filtered, 1):
+        lines.append("")
+        lines.append(f"{index}. {result.title}")
+        lines.append(f"URL: {result.url}")
+        if result.published_date:
+            lines.append(f"Published: {result.published_date}")
+        if result.content:
+            lines.append(sanitize_web_content(result.content, source_url=result.url).sanitized_text)
+    if response.results and not filtered:
+        lines.append("")
+        lines.append("No results remained after domain filtering.")
+    return "\n".join(lines)
+
+
+WEB_SEARCH_TOOLS = [web_search]
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  14. Image generation tool (V9 #325 row 2708)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # Cap on how long a single image-gen API call may take. Image APIs are
@@ -2419,10 +2537,12 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
+    "architect":      ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS,
     "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
+    "intel":          ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS,
     "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS,
     "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
     "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
