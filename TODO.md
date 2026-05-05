@@ -259,21 +259,21 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.L — Test 分級聚合（~2-3 週，最後一哩）
 > 收尾：957 既有 + ~680 新增 = ~1640 test
-- [ ] BP.L.1 pytest marker 分級：`@critical`(~200) / `@guild_loadout`(~400) / `@compliance`(~200)
-- [ ] BP.L.2 CI workflow 分三階段（critical 5min / loadout 30min / compliance 60min）
-- [ ] BP.L.3 CI shard 4-way → 8-way
-- [ ] BP.L.4 Coverage gate 套到 new module
-- [ ] BP.L.5 Full suite 時間目標 ≤ 240 min
+- [x][G] BP.L.1 pytest marker 分級：`@critical`(~200) / `@guild_loadout`(~400) / `@compliance`(~200)
+- [x][G] BP.L.2 CI workflow 分三階段（critical 5min / loadout 30min / compliance 60min）
+- [x][G] BP.L.3 CI shard 4-way → 8-way
+- [x][G] BP.L.4 Coverage gate 套到 new module
+- [x][G] BP.L.5 Full suite 時間目標 ≤ 240 min
 
 ### BP.M — L1 Skill Auto-Distillation（~2 週）— **2026-04-25 D' 主線新增**
 > 補完 `docs/design/agentic-self-improvement.md` §L1 設計實作落差；仿 Hermes Agent (NousResearch) skill distillation pattern；human-review gate 後升格 production skill pack。
-- [ ] BP.M.1 alembic migration `auto_distilled_skills` table（id / tenant_id / skill_name / source_task_id / markdown_content / version / status `draft|reviewed|promoted` / created_at）
-- [ ] BP.M.2 `backend/skill_distiller.py` — trajectory → markdown summarizer，Architect Guild 接 hook（trigger: `tool_calls > 5 OR iterations > 3` AND `success == true`）
-- [ ] BP.M.3 `backend/routers/auto_skills.py` — REST CRUD + `POST {id}/review` + `POST {id}/promote` endpoint
-- [ ] BP.M.4 `components/omnisight/skill-review-panel.tsx` — operator 審核 UI（draft → reviewed → promoted 三階段）
-- [ ] BP.M.5 audit_log 紀錄 distillation event + promotion event（Phase D traceability）
-- [ ] BP.M.6 與 R3 Scratchpad 關係文件化：scratchpad in-task working memory / distiller cross-task knowledge
-- [ ] BP.M.7 `backend/tests/test_skill_distiller.py` ~40 test
+- [x][G] BP.M.1 alembic migration `auto_distilled_skills` table（id / tenant_id / skill_name / source_task_id / markdown_content / version / status `draft|reviewed|promoted` / created_at）
+- [x][G] BP.M.2 `backend/skill_distiller.py` — trajectory → markdown summarizer，Architect Guild 接 hook（trigger: `tool_calls > 5 OR iterations > 3` AND `success == true`）
+- [x][G] BP.M.3 `backend/routers/auto_skills.py` — REST CRUD + `POST {id}/review` + `POST {id}/promote` endpoint
+- [x][G] BP.M.4 `components/omnisight/skill-review-panel.tsx` — operator 審核 UI（draft → reviewed → promoted 三階段）
+- [x][G] BP.M.5 audit_log 紀錄 distillation event + promotion event（Phase D traceability）
+- [x][G] BP.M.6 與 R3 Scratchpad 關係文件化：scratchpad in-task working memory / distiller cross-task knowledge
+- [x][G] BP.M.7 `backend/tests/test_skill_distiller.py` ~40 test
 
 ### BP.N — Web Search Tool + Sanitization Layer（~1 週）— **2026-04-25 D' 主線新增**
 > 解 LLM knowledge cutoff、為 Intel + Architect Guild 加 latest-knowledge 通道；per-tenant cost cap + sanitization + audit_log。
@@ -306,14 +306,14 @@ rows from 2026-04-20 onwards should use the layered convention:
 ### BP.Q — Internal Knowledge Retrieval Layer (Vector RAG)（~2-3 週）— **2026-05-02 新增 (from Agentic Design Patterns Ch 14)**
 > 借鑑 [Agentic Design Patterns Ch 14 — Knowledge Retrieval (RAG)](https://github.com/evoiz/Agentic-Design-Patterns)。OmniSight user workflow 必備能力：對 user project / codebase / docs / TODO / 規範文件做語意檢索，不再只能 Read + Grep。**範圍邊界**：BP.Q 是 vector / embedding RAG 基礎層；BP.E (在 BP.W4) GraphRAG / Neo4j 是 graph-RAG 進階版、前置依賴 BP.Q；本 epic 不接 GraphRAG。**對比 BP.N (Web Search)**：BP.N 是「**外部** web search」、BP.Q 是「**內部** codebase / docs 語意檢索」，互補不重疊。**對比 sub_agent (Phase 3) Explore type**：Explore 現走 Read / Grep / Glob (字面)；BP.Q 落地後 Explore 預設改走 RAG (語意)，Grep 留 fallback。
 
-- [ ] BP.Q.1 `backend/agents/rag.py` — VectorStore Protocol (`upsert / query / delete / list_by_tenant`) + 3 adapter (`PgvectorStore` 預設 / `QdrantStore` / `ChromaStore`) + 統一 embedding interface (`OpenAIEmbedding` / `AnthropicEmbedding` / `GoogleEmbedding` / `LocalSentenceTransformerEmbedding` for air-gap)
-- [ ] BP.Q.2 `backend/agents/rag_indexer.py` — workspace git tree / docs / SKILL.md / TODO.md 自動 chunk (tree-sitter for code / markdown header for docs) + embed + 持久化 (initial bulk + incremental on git change via post-merge hook 沿用 BP.J.2 pattern)
-- [ ] BP.Q.3 `KnowledgeRetrieval` tool schema (`backend/agents/tool_schemas.py`) + handler (`backend/agents/runner_handlers.py` 沿用 Phase 1 pattern) — agentic loop 可呼叫、回傳 top-K relevant chunks + citation (path + line range + similarity score)
-- [ ] BP.Q.4 alembic 0186 `embedding_chunks` table — `chunk_id / tenant_id / source_path / chunk_text / embedding (pgvector) / metadata JSONB / created_at`、indexes on `(tenant_id, source_path)` + ivfflat 或 hnsw on embedding column
-- [ ] BP.Q.5 整合 sub_agent (Phase 3) — Explore sub-agent 預設用 RAG 而非 Grep 做 codebase 探索；保留 Grep 作為 fallback (沒 RAG index 或語法 / 字面查詢時)
-- [ ] BP.Q.6 Per-tenant isolation — tenant A 不能 query tenant B 的 chunks；走 RLS + tenant filter at query time (跟 KS.1 envelope encryption 一起 review，embedding 是否需要也 envelope 加密)
-- [ ] BP.Q.7 `backend/tests/test_rag.py` — ~50 test (chunking strategy correctness / retrieval relevance on canned corpus / tenant isolation / multi-adapter contract / handler integration / pgvector live test)
-- [ ] BP.Q.8 `docs/operations/rag-setup.md` — operator 怎麼啟用 RAG (pgvector extension / 預設 embedding model / 索引 cron schedule)
+- [x][G] BP.Q.1 `backend/agents/rag.py` — VectorStore Protocol (`upsert / query / delete / list_by_tenant`) + 3 adapter (`PgvectorStore` 預設 / `QdrantStore` / `ChromaStore`) + 統一 embedding interface (`OpenAIEmbedding` / `AnthropicEmbedding` / `GoogleEmbedding` / `LocalSentenceTransformerEmbedding` for air-gap)
+- [x][G] BP.Q.2 `backend/agents/rag_indexer.py` — workspace git tree / docs / SKILL.md / TODO.md 自動 chunk (tree-sitter for code / markdown header for docs) + embed + 持久化 (initial bulk + incremental on git change via post-merge hook 沿用 BP.J.2 pattern)
+- [x][G] BP.Q.3 `KnowledgeRetrieval` tool schema (`backend/agents/tool_schemas.py`) + handler (`backend/agents/runner_handlers.py` 沿用 Phase 1 pattern) — agentic loop 可呼叫、回傳 top-K relevant chunks + citation (path + line range + similarity score)
+- [x][G] BP.Q.4 alembic 0186 `embedding_chunks` table — `chunk_id / tenant_id / source_path / chunk_text / embedding (pgvector) / metadata JSONB / created_at`、indexes on `(tenant_id, source_path)` + ivfflat 或 hnsw on embedding column
+- [x][G] BP.Q.5 整合 sub_agent (Phase 3) — Explore sub-agent 預設用 RAG 而非 Grep 做 codebase 探索；保留 Grep 作為 fallback (沒 RAG index 或語法 / 字面查詢時)
+- [x][G] BP.Q.6 Per-tenant isolation — tenant A 不能 query tenant B 的 chunks；走 RLS + tenant filter at query time (跟 KS.1 envelope encryption 一起 review，embedding 是否需要也 envelope 加密)
+- [x][G] BP.Q.7 `backend/tests/test_rag.py` — ~50 test (chunking strategy correctness / retrieval relevance on canned corpus / tenant isolation / multi-adapter contract / handler integration / pgvector live test)
+- [x][G] BP.Q.8 `docs/operations/rag-setup.md` — operator 怎麼啟用 RAG (pgvector extension / 預設 embedding model / 索引 cron schedule)
 
 ### BP.W3 — Backlog 收尾（Blueprint 完成後，~30-50 週）
 > 等 Phase B 完成後按 Guild 歸屬批次重做
@@ -350,7 +350,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] B7 R0-R4 加 guild_id label（implements: BP.B.9）
 - [ ] C1 Bootstrap Wizard Guild Step 6（implements: BP.K.6）
 - [ ] C2 Multi-tenancy tenant_guild_config（獨立 alembic 0021）
-- [ ] C3 Test 分級（implements: BP.L.1-2）
+- [x] C3 Test 分級（implements: BP.L.1-2）
 - [x] C4 ProjectClass 三維正交（implements: BP.C.6）
 - [x] C5 Notification Red Card 映射（implements: BP.H.3）
 - [ ] C6 37 role skill 物理位置遷移（implements: BP.B.6）
@@ -3310,15 +3310,15 @@ ls backend/alembic/versions/ | tail -3
 
 > 5 tier flag（debug / dogfood / preview / release / runtime push）+ atomic 讀取、BP / HD / KS 漸進 ship 必備。
 
-- [ ] WP.7.1 **alembic 0118 — `feature_flags` 表 + audit log**（`flag_name` / `tier` / `state` / `expires_at` / `owner` / `created_at`）
-- [ ] WP.7.2 **5 tier 定義**：DEBUG / DOGFOOD / PREVIEW / RELEASE / RUNTIME
-- [ ] WP.7.3 **Resolution priority**：test-override → user preference → global state → default
-- [ ] WP.7.4 **Atomic 讀**：hot path 友好（in-memory cache + Redis pub/sub invalidate）
-- [ ] WP.7.5 **過期強制**：`expires_at` field、過期未清理 CI fail（防 R62 flag 爆炸）
-- [ ] WP.7.6 **季度 flag review SOP**：進 N10 ledger、長期未動 flag 警報
-- [ ] WP.7.7 **既有散落 ENV knob 收編**：`OMNISIGHT_BP_*` / `OMNISIGHT_HD_*` / `OMNISIGHT_KS_*` / `OMNISIGHT_WP_*` 統一進 registry（漸進、不一次全改）
-- [ ] WP.7.8 **Operator UI**：admin role read-only inspect + toggle、其他 role 只看；改 flag 進 N10 audit
-- [ ] WP.7.9 **Test**：5 tier resolution + atomic 讀 + push reload + expire enforcement
+- [x][G] WP.7.1 **alembic 0118 — `feature_flags` 表 + audit log**（`flag_name` / `tier` / `state` / `expires_at` / `owner` / `created_at`）
+- [x][G] WP.7.2 **5 tier 定義**：DEBUG / DOGFOOD / PREVIEW / RELEASE / RUNTIME
+- [x][G] WP.7.3 **Resolution priority**：test-override → user preference → global state → default
+- [x][G] WP.7.4 **Atomic 讀**：hot path 友好（in-memory cache + Redis pub/sub invalidate）
+- [x][G] WP.7.5 **過期強制**：`expires_at` field、過期未清理 CI fail（防 R62 flag 爆炸）
+- [x][G] WP.7.6 **季度 flag review SOP**：進 N10 ledger、長期未動 flag 警報
+- [x][G] WP.7.7 **既有散落 ENV knob 收編**：`OMNISIGHT_BP_*` / `OMNISIGHT_HD_*` / `OMNISIGHT_KS_*` / `OMNISIGHT_WP_*` 統一進 registry（漸進、不一次全改）
+- [x][G] WP.7.8 **Operator UI**：admin role read-only inspect + toggle、其他 role 只看；改 flag 進 N10 audit
+- [x][G] WP.7.9 **Test**：5 tier resolution + atomic 讀 + push reload + expire enforcement
 
 ### WP.9 `shareable_objects` Generic Table（與 WP.1 配對）
 

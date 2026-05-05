@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 399
+entry_count: 404
 status_counts:
-  dev-only: 389
+  dev-only: 394
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3734,3 +3734,48 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — staging 以真實 Redis/pubsub + DB registry seed 跑一次 operator toggle smoke，確認 backend test 鎖住的
     reload / expire guard 契約可在多 worker topology 觀察到。
+- id: 2026-05-05--BP.L.1
+  header_line: 46370
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.L.1
+  title: BP.L.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.L.2 在 CI workflow 中接上三階段 marker job（critical / guild_loadout / compliance），並以 CI collect-only
+    或 dry-run artifact 確認 marker count drift 在可接受區間。
+- id: 2026-05-05--BP.L.2
+  header_line: 46385
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.L.2
+  title: BP.L.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認三個新 backend tier jobs 分別在 5 / 30 / 60 min budget 內完成，然後 BP.L.3
+    再處理 full-suite shard 4-way → 8-way。
+- id: 2026-05-05--BP.L.3
+  header_line: 46400
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.L.3
+  title: BP.L.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 8 個 `backend-tests` matrix shard 都有產出 coverage artifact，且 `backend-coverage-combine`
+    aggregate floor 仍通過；BP.L.5 再評估 full suite wall-clock 目標。
+- id: 2026-05-05--BP.L.4
+  header_line: 46415
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.L.4
+  title: BP.L.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 `backend-coverage-combine` 下載 8 shard 的 `.coverage.*` 後仍以 aggregate
+    floor gate backend 新 module；BP.L.5 再評估 full suite wall-clock 目標。
+- id: 2026-05-05--BP.L.5
+  header_line: 46430
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.L.5
+  title: BP.L.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 `backend-tests` 最慢 shard 加 `backend-coverage-combine` 在 240
+    min wall-clock budget 內完成。

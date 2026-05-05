@@ -11,6 +11,9 @@ permissions:
 
 # Phase 51 — pipeline:
 #   lint              ruff (backend) + tsc --noEmit (frontend) + eslint
+#   backend-critical  pytest -m critical (5 min)
+#   backend-loadout   pytest -m guild_loadout after critical (30 min)
+#   backend-compliance pytest -m compliance after loadout (60 min)
 #   backend-tests     pytest sharded by folder + coverage thresholds
 #   backend-migrate   alembic upgrade head from a clean DB
 #   frontend-unit     vitest + coverage
@@ -279,9 +282,83 @@ jobs:
       - name: eslint
         run: pnpm run lint || true
 
-  backend-tests:
+  backend-critical:
+    # BP.L.2 — fastest blocking backend tier. Keep this job small and
+    # marker-driven; the legacy coverage shard remains below until BP.L.3
+    # changes the full-suite sharding shape.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install --require-hashes -r backend/requirements.txt
+      # FX.6.7 (2026-05-04): pytest / pytest-asyncio / pytest-cov / respx
+      # live in requirements-dev.txt (peeled out of the prod lockfile).
+      - run: pip install --require-hashes -r backend/requirements-dev.txt
+      - name: pytest critical
+        env:
+          OMNISIGHT_DATABASE_PATH: /tmp/ci-omnisight-critical.db
+        run: |
+          python3 -m pytest backend/tests/ \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -m critical \
+            -q
+
+  backend-loadout:
+    # BP.L.2 — second tier runs only after the critical path passes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: backend-critical
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install --require-hashes -r backend/requirements.txt
+      # FX.6.7 (2026-05-04): pytest / pytest-asyncio / pytest-cov / respx
+      # live in requirements-dev.txt (peeled out of the prod lockfile).
+      - run: pip install --require-hashes -r backend/requirements-dev.txt
+      - name: pytest guild_loadout
+        env:
+          OMNISIGHT_DATABASE_PATH: /tmp/ci-omnisight-loadout.db
+        run: |
+          python3 -m pytest backend/tests/ \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -m guild_loadout \
+            -q
+
+  backend-compliance:
+    # BP.L.2 — longest tier runs after loadout to keep PR feedback ordered.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: backend-loadout
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install --require-hashes -r backend/requirements.txt
+      # FX.6.7 (2026-05-04): pytest / pytest-asyncio / pytest-cov / respx
+      # live in requirements-dev.txt (peeled out of the prod lockfile).
+      - run: pip install --require-hashes -r backend/requirements-dev.txt
+      - name: pytest compliance
+        env:
+          OMNISIGHT_DATABASE_PATH: /tmp/ci-omnisight-compliance.db
+        run: |
+          python3 -m pytest backend/tests/ \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -m compliance \
+            -q
+
+  backend-tests:
+    # BP.L.5 — full backend suite wall-clock target is <= 240 min.
+    # The longest path is this matrix job plus backend-coverage-combine
+    # (235 + 5), so the workflow fails before exceeding the target while
+    # leaving enough headroom for the known 60-180 min full-suite range.
+    runs-on: ubuntu-latest
+    timeout-minutes: 235
     strategy:
       fail-fast: false
       matrix:
@@ -302,6 +379,10 @@ jobs:
           - { name: decision, paths: "backend/tests/test_decision_engine.py backend/tests/test_decision_rules.py backend/tests/test_decision_rules_persistence.py backend/tests/test_decision_api.py backend/tests/test_decision_sse.py backend/tests/test_ambiguity_budget.py backend/tests/test_stuck_detector.py", min: 0 }
           - { name: pipeline, paths: "backend/tests/test_pipeline.py backend/tests/test_release.py backend/tests/test_handoff.py", min: 0 }
           - { name: schema,   paths: "backend/tests/test_schema.py backend/tests/test_event_system.py backend/tests/test_artifact_pipeline.py backend/tests/test_artifacts.py", min: 0 }
+          - { name: auth-security, paths: "backend/tests/test_account*.py backend/tests/test_auth*.py backend/tests/test_oauth*.py backend/tests/test_security*.py", min: 0 }
+          - { name: runtime, paths: "backend/tests/test_background*.py backend/tests/test_bootstrap*.py backend/tests/test_tool*.py backend/tests/test_turn*.py backend/tests/test_workflow*.py", min: 0 }
+          - { name: product, paths: "backend/tests/test_catalog*.py backend/tests/test_mobile*.py backend/tests/test_skill*.py backend/tests/test_software*.py backend/tests/test_web*.py", min: 0 }
+          - { name: infra, paths: "backend/tests/test_alembic*.py backend/tests/test_db*.py backend/tests/test_deploy*.py backend/tests/test_feature_flag*.py backend/tests/test_git*.py", min: 0 }
           - { name: rest,     paths: "backend/tests/", min: 60 }
     steps:
       - uses: actions/checkout@v4
@@ -316,7 +397,7 @@ jobs:
           OMNISIGHT_DATABASE_PATH: /tmp/ci-omnisight-${{ matrix.shard.name }}.db
           # H6 audit (2026-04-19): per-shard COVERAGE_FILE so the .coverage
           # binary data files don't overwrite each other when the
-          # combine job downloads all four artifacts into one directory.
+          # combine job downloads all eight artifacts into one directory.
           # pytest-cov honours this env; the XML report still lands at
           # the path below.
           COVERAGE_FILE: .coverage.${{ matrix.shard.name }}
@@ -365,11 +446,11 @@ jobs:
 
   backend-coverage-combine:
     # H6 audit (2026-04-19): enforces the *aggregate* coverage floor
-    # across all four shards. Per-shard thresholds are meaningless —
+    # across all eight shards. Per-shard thresholds are meaningless —
     # decision's 7 tests can't exercise 85% of ~5,700 backend files.
     # The rest shard runs everything, but its own --cov-fail-under=60
-    # doesn't count work the other three shards did.
-    # Combining the four .coverage data files gives the real full-suite
+    # doesn't count work the other seven shards did.
+    # Combining the eight .coverage data files gives the real full-suite
     # percentage, which is what we actually want to gate on.
     needs: backend-tests
     runs-on: ubuntu-latest
@@ -405,10 +486,11 @@ jobs:
           }
           python3 -m coverage combine .coverage.*
           # 60 is the aggregate floor (H6 audit): `rest` shard alone hits
-          # this when run solo; combining all four should comfortably
-          # exceed it. If combined coverage drops below 60 something
-          # went very wrong — either a shard didn't run, or a large
-          # new module landed without any tests.
+          # this when run solo; combining all shards should comfortably
+          # exceed it. BP.L.4 keeps this gate on `source = backend`
+          # (backend/pytest.ini), so a newly added backend module with no
+          # tests is counted as 0% instead of silently falling outside the
+          # report.
           python3 -m coverage report --rcfile=backend/pytest.ini --fail-under=60
           python3 -m coverage xml -o coverage-combined.xml --rcfile=backend/pytest.ini
       - name: upload combined report

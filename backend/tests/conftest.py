@@ -177,16 +177,70 @@ _skip_live = pytest.mark.skip(
 )
 
 
-def pytest_collection_modifyitems(config, items):
-    """Apply auto-skip to ``live`` tests when CI keys are absent, and fail
-    collection if a ``p0`` test carries a static skip marker.
+_BP_L_MARKER_TIERS = {
+    "critical": frozenset(
+        {
+            "test_auth.py",
+            "test_auth_audit_bridge.py",
+            "test_auth_baseline.py",
+            "test_auth_event.py",
+            "test_permission_errors.py",
+            "test_quota.py",
+            "test_rate_limit_middleware.py",
+            "test_webhooks.py",
+        }
+    ),
+    "guild_loadout": frozenset(
+        {
+            "test_skill_fastapi.py",
+            "test_skill_framework.py",
+            "test_skill_go_service.py",
+            "test_skill_rust_cli.py",
+            "test_software_role_skills.py",
+            "test_task_skills.py",
+            "test_web_role_skills.py",
+        }
+    ),
+    "compliance": frozenset(
+        {
+            "test_compliance_harness.py",
+            "test_mobile_compliance.py",
+            "test_safety_compliance.py",
+        }
+    ),
+}
 
-    Z.7.1: ``live`` marker auto-skip — Y-prep.1 #287 CI gate.
+
+def _bp_l_marker_for_path(path: str | Path) -> str | None:
+    """Return the BP.L marker tier for a test file path, if one applies.
+
+    The table above is immutable module-global state; each pytest worker
+    derives the same values from source at import time, so no cross-worker
+    coordination is required.
+    """
+    name = Path(path).name
+    for marker_name, filenames in _BP_L_MARKER_TIERS.items():
+        if name in filenames:
+            return marker_name
+    return None
+
+
+def pytest_collection_modifyitems(config, items):
+    """Apply BP.L tiers, auto-skip ``live`` tests when CI keys are absent,
+    and fail collection if a ``p0`` test carries a static skip marker.
+
+    BP.L.1: marker aggregation — Z.7.1: ``live`` marker auto-skip —
+    Y-prep.1 #287 CI gate.
     """
     import pytest
 
     offenders = []
     for item in items:
+        # ── BP.L.1: aggregate existing tests into CI marker tiers ───────
+        tier_marker = _bp_l_marker_for_path(item.fspath)
+        if tier_marker is not None:
+            item.add_marker(getattr(pytest.mark, tier_marker))
+
         # ── Z.7.1: skip live tests when no CI key is present ──────────────
         if _live_keys_missing and item.get_closest_marker("live") is not None:
             item.add_marker(_skip_live)
