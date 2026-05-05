@@ -19,6 +19,7 @@ changes.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import secrets
@@ -346,6 +347,83 @@ async def create_shareable_object(
     raise ShareSlugCollisionError(
         "share_id collision retry budget exhausted; retry the request",
     )
+
+
+def enforce_share_redaction_mask(
+    payload: Mapping[str, Any],
+    redaction_mask: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a share payload with every durable redaction path masked.
+
+    The persisted ``shareable_objects.redaction_applied`` mask is
+    authoritative at read/share time.  Missing paths fail closed instead
+    of silently returning the original value, because a stale or malformed
+    mask must not become a bypass.
+    """
+
+    redacted = copy.deepcopy(dict(payload))
+    for path, reason in sorted(dict(redaction_mask or {}).items()):
+        _set_redacted_share_path(redacted, str(path), _share_redaction_placeholder(reason))
+    return redacted
+
+
+def build_share_payload(
+    share: ShareableObject | Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project a share payload after enforcing the row's durable mask."""
+
+    return enforce_share_redaction_mask(
+        payload,
+        _share_field(share, "redaction_applied"),
+    )
+
+
+def _share_redaction_placeholder(reason: Any) -> str:
+    raw = reason if isinstance(reason, (list, tuple, set)) else (reason,)
+    reasons = [str(item).strip() for item in raw if str(item).strip()]
+    if not reasons or "none" in reasons:
+        raise ValueError("redaction_mask entries must be applied reasons")
+    return f"[REDACTED:{'+'.join(reasons)}]"
+
+
+def _set_redacted_share_path(target: dict[str, Any], path: str, value: Any) -> None:
+    if not path:
+        raise ValueError("redaction_mask path must not be empty")
+
+    parts = path.split(".")
+    cursor: Any = target
+    for part in parts[:-1]:
+        cursor = _descend_share_path(cursor, part, path)
+
+    leaf = parts[-1]
+    if isinstance(cursor, list):
+        idx = _list_index_for_share_path(cursor, leaf, path)
+        cursor[idx] = value
+        return
+    if isinstance(cursor, dict):
+        if leaf not in cursor:
+            raise ValueError(f"redaction_mask path not found: {path}")
+        cursor[leaf] = value
+        return
+    raise ValueError(f"redaction_mask path not found: {path}")
+
+
+def _descend_share_path(cursor: Any, part: str, path: str) -> Any:
+    if isinstance(cursor, list):
+        return cursor[_list_index_for_share_path(cursor, part, path)]
+    if isinstance(cursor, dict) and part in cursor:
+        return cursor[part]
+    raise ValueError(f"redaction_mask path not found: {path}")
+
+
+def _list_index_for_share_path(cursor: list[Any], part: str, path: str) -> int:
+    if not part.isdigit():
+        raise ValueError(f"redaction_mask path not found: {path}")
+    idx = int(part)
+    if idx >= len(cursor):
+        raise ValueError(f"redaction_mask path not found: {path}")
+    return idx
 
 
 async def user_can_access_shareable_object(

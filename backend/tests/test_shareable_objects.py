@@ -64,6 +64,69 @@ def test_expiry_cleanup_sql_uses_row_locking_and_returning_delete() -> None:
     assert "RETURNING share_id" in so._DELETE_EXPIRED_SHAREABLE_OBJECT_SQL
 
 
+def test_enforce_share_redaction_mask_masks_nested_paths_without_mutating_source() -> None:
+    source = {
+        "payload": {
+            "stdout": [
+                {"line": "public"},
+                {"line": "secret token"},
+            ],
+            "stderr": "secret error",
+        },
+        "metadata": {"customer": {"email": "alice@example.com"}},
+    }
+
+    redacted = so.enforce_share_redaction_mask(
+        source,
+        {
+            "payload.stdout.1.line": "secret",
+            "metadata.customer.email": ["pii", "customer_ip"],
+        },
+    )
+
+    assert redacted["payload"]["stdout"][0]["line"] == "public"
+    assert redacted["payload"]["stdout"][1]["line"] == "[REDACTED:secret]"
+    assert redacted["payload"]["stderr"] == "secret error"
+    assert redacted["metadata"]["customer"]["email"] == (
+        "[REDACTED:pii+customer_ip]"
+    )
+    assert source["payload"]["stdout"][1]["line"] == "secret token"
+    assert source["metadata"]["customer"]["email"] == "alice@example.com"
+
+
+def test_build_share_payload_uses_durable_row_mask_without_override() -> None:
+    share = _expired_row()
+    share["redaction_applied"] = {"payload.command": "secret"}
+    payload = {
+        "payload": {
+            "command": "curl https://internal.test",
+            "stdout": "public",
+        },
+    }
+
+    redacted = so.build_share_payload(share, payload)
+
+    assert redacted == {
+        "payload": {
+            "command": "[REDACTED:secret]",
+            "stdout": "public",
+        },
+    }
+
+
+@pytest.mark.parametrize("bad_mask", [
+    {"payload.missing": "secret"},
+    {"payload.stdout.3": "secret"},
+    {"payload.stdout": "none"},
+])
+def test_enforce_share_redaction_mask_fails_closed_for_bypass_masks(bad_mask) -> None:
+    with pytest.raises(ValueError, match="redaction_mask"):
+        so.enforce_share_redaction_mask(
+            {"payload": {"stdout": ["line"]}},
+            bad_mask,
+        )
+
+
 class FakeConn:
     def __init__(self, rows):
         self._rows = list(rows)
