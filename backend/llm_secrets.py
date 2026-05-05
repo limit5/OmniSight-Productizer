@@ -4,10 +4,9 @@ Stores API keys and auxiliary credentials (Azure endpoint, Ollama
 base URL, model override) for each LLM provider in a KS.1 envelope
 JSON marker under ``data/.llm_secrets.enc``. Values never land on disk
 in plaintext; only the last four chars of a key are ever shown back to
-callers (via :func:`fingerprint`). Legacy Fernet markers remain
-readable during the KS.1.11 compatibility window.
-``OMNISIGHT_KS_ENVELOPE_ENABLED=false`` temporarily writes the same
-single-Fernet store payload during the migration rollback window.
+callers (via :func:`fingerprint`). The KS.1.11 legacy Fernet marker
+compatibility window is complete; non-envelope files are treated as
+deprecated data and read as empty until an operator backfills them.
 
 ``load_into_settings`` mirrors the decrypted values into
 :mod:`backend.config.settings` so the existing agent factory
@@ -164,8 +163,6 @@ def _load_store_carrier(
 
 
 def _encrypt_store_payload(payload: str) -> str:
-    if not tenant_envelope.is_enabled():
-        return secret_store.encrypt(payload)
     ciphertext, dek_ref = tenant_envelope.encrypt(
         payload,
         _LLM_SECRET_TENANT_ID,
@@ -179,7 +176,7 @@ def _decrypt_store_payload(ciphertext: str) -> str:
         inner, dek_ref = _load_store_carrier(ciphertext)
     except (TypeError, ValueError, tenant_envelope.EnvelopeEncryptionError):
         if isinstance(ciphertext, str) and not ciphertext.lstrip().startswith("{"):
-            return secret_store.decrypt(ciphertext)
+            raise ValueError("legacy Fernet provider credential path is deprecated")
         raise
     return tenant_envelope.decrypt(inner, dek_ref)
 

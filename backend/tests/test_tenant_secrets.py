@@ -33,7 +33,8 @@ def test_secret_value_envelope_helpers_survive_hard_restart(monkeypatch):
 
     ``tenant_secrets`` persists the returned string in the existing
     ``encrypted_value`` column; decrypting that value in a fresh
-    interpreter simulates a random hard restart during the dual-write
+    interpreter simulates a random hard restart after the envelope
+    migration contract
     window.
     """
     monkeypatch.setenv(
@@ -80,25 +81,26 @@ print(sec._decrypt_secret_value(
     assert proc.stdout.strip() == "sk-proj-tenant-hard-restart"
 
 
-def test_secret_value_legacy_fernet_helper_fallback(monkeypatch):
+def test_secret_value_legacy_fernet_helper_is_deprecated(monkeypatch):
     """Existing Fernet-only ``tenant_secrets.encrypted_value`` cells
-    remain readable during the KS.1.11 compatibility window."""
+    are rejected after the KS.1 compatibility window."""
     monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-11-tenant-legacy-secret")
     from backend import secret_store
     from backend import tenant_secrets as sec
     secret_store._reset_for_tests()
     legacy = secret_store.encrypt("sk-legacy-tenant")
-    assert sec._decrypt_secret_value(
-        legacy,
-        DEFAULT_TENANT,
-        "provider_key",
-        "legacy",
-    ) == "sk-legacy-tenant"
+    with pytest.raises(ValueError, match="legacy Fernet tenant secret"):
+        sec._decrypt_secret_value(
+            legacy,
+            DEFAULT_TENANT,
+            "provider_key",
+            "legacy",
+        )
 
 
-def test_secret_value_envelope_disabled_writes_single_fernet(monkeypatch):
-    """KS.1.12: knob-off writes the old single-Fernet tenant secret
-    format during the migration rollback window."""
+def test_secret_value_envelope_disabled_env_still_writes_envelope(monkeypatch):
+    """KS.1 completion: knob-off no longer writes the old single-Fernet
+    tenant secret format."""
     monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-12-tenant-rollback-secret")
     from backend import secret_store
     from backend import tenant_secrets as sec
@@ -113,7 +115,7 @@ def test_secret_value_envelope_disabled_writes_single_fernet(monkeypatch):
         "sk-proj-tenant-rollback",
     )
 
-    assert not stored.lstrip().startswith("{")
+    assert stored.lstrip().startswith("{")
     assert sec._decrypt_secret_value(
         stored,
         DEFAULT_TENANT,
@@ -199,11 +201,11 @@ async def test_new_secret_writes_use_ks_envelope_carrier(_secrets_db, pg_test_po
 
 
 @pytest.mark.asyncio
-async def test_legacy_fernet_secret_reads_during_compat_window(
+async def test_legacy_fernet_secret_rejected_after_compat_window(
     _secrets_db, pg_test_pool,
 ):
-    """Existing Fernet-only ``tenant_secrets`` rows stay readable while
-    KS.1.11 writes use the new envelope carrier."""
+    """Existing Fernet-only ``tenant_secrets`` rows are rejected after
+    KS.1 completion."""
     from backend import secret_store
     sec = _secrets_db
     async with pg_test_pool.acquire() as conn:
@@ -214,8 +216,10 @@ async def test_legacy_fernet_secret_reads_during_compat_window(
             "sec-legacy-fernet", DEFAULT_TENANT, "provider_key", "legacy",
             secret_store.encrypt("sk-legacy-fernet"),
         )
-    assert await sec.get_secret_value("sec-legacy-fernet") == "sk-legacy-fernet"
-    assert await sec.get_secret_by_name("legacy", "provider_key") == "sk-legacy-fernet"
+    with pytest.raises(ValueError, match="legacy Fernet tenant secret"):
+        await sec.get_secret_value("sec-legacy-fernet")
+    with pytest.raises(ValueError, match="legacy Fernet tenant secret"):
+        await sec.get_secret_by_name("legacy", "provider_key")
 
 
 @pytest.mark.asyncio

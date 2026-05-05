@@ -491,9 +491,9 @@ print(json.dumps(llm_secrets.get_provider_credentials("openai"), sort_keys=True)
     secret_store._reset_for_tests()
 
 
-def test_legacy_fernet_provider_credentials_still_read(tmp_path, monkeypatch):
-    """Existing Fernet-only provider-key files remain readable during
-    the KS.1.11 compatibility window."""
+def test_legacy_fernet_provider_credentials_are_deprecated(tmp_path, monkeypatch):
+    """Existing Fernet-only provider-key files are treated as empty
+    after the KS.1 compatibility window."""
     monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-11-legacy-llm-secret")
     from backend import secret_store
     secret_store._reset_for_tests()
@@ -505,16 +505,16 @@ def test_legacy_fernet_provider_credentials_still_read(tmp_path, monkeypatch):
         encoding="ascii",
     )
     _secrets._reset_for_tests(path)
-    assert _secrets.get_provider_credentials("anthropic")["api_key"] == "sk-ant-legacy"
+    assert _secrets.get_provider_credentials("anthropic") == {}
     _secrets._reset_for_tests()
     secret_store._reset_for_tests()
 
 
-def test_provider_credentials_envelope_disabled_writes_single_fernet(
+def test_provider_credentials_envelope_disabled_env_still_writes_envelope(
     tmp_path, monkeypatch,
 ):
-    """KS.1.12: knob-off writes provider credentials in the legacy
-    single-Fernet marker format during the migration rollback window."""
+    """KS.1 completion: knob-off no longer writes provider credentials
+    in the legacy single-Fernet marker format."""
     monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-1-12-llm-rollback-secret")
     from backend import secret_store
     from backend.security import envelope as tenant_envelope
@@ -526,7 +526,7 @@ def test_provider_credentials_envelope_disabled_writes_single_fernet(
     _secrets.set_provider_credentials("openai", api_key="sk-proj-rollback")
     raw = path.read_text(encoding="ascii")
 
-    assert not raw.lstrip().startswith("{")
+    assert raw.lstrip().startswith("{")
     assert _secrets.get_provider_credentials("openai")["api_key"] == "sk-proj-rollback"
     _secrets._reset_for_tests()
     secret_store._reset_for_tests()

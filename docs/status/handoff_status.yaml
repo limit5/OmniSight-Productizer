@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 463
+entry_count: 464
 status_counts:
-  dev-only: 453
+  dev-only: 454
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4310,3 +4310,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 合併後讓 GitHub PR required checks 包含 `secret-pre-commit` 與 backend test shard；下一個 PR 觀察 log/gitleaks/backup-DLP
     acceptance row 綠燈後，可由 security owner 把此 DoD 視為 CI-enforced。
+- id: 2026-05-06--ks-dod-legacy-fernet-deprecate
+  header_line: 47314
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: KS.DOD legacy Fernet deprecate 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後在 staging/production 先跑 OAuth refresh/revoke、tenant secret read/write、bootstrap LLM provision
+    三個 smoke，確認所有新寫入為 envelope JSON；若仍有 legacy Fernet rows/files，先用既有 backfill/re-provision 工具轉 envelope，否則讀取會明確 fail closed。

@@ -1,8 +1,10 @@
 """I4 — Tenant-scoped secrets management.
 
 CRUD API for storing encrypted credentials per tenant. KS.1.11 writes
-new values through the per-tenant DEK envelope while preserving legacy
-``secret_store`` Fernet reads during the migration window. Secret types:
+new values through the per-tenant DEK envelope. The legacy
+``secret_store`` Fernet compatibility window is complete; non-envelope
+cells are treated as deprecated data that must be backfilled before
+read. Secret types:
 
   - ``git_credential``   — per-repo tokens (GitHub, GitLab, Gerrit…)
   - ``provider_key``     — LLM / SaaS API keys
@@ -22,14 +24,10 @@ one wins with UNIQUE, the other raised an integrity error and the
 caller never got a deterministic "last write wins" that the old
 SQLite single-writer behaviour had implicitly provided).
 
-Module-global state: none. ``secret_store._fernet`` is lazily
-cached per-worker from env / disk; all workers compute the same
-key from the same source, so ciphertext is interoperable across
-workers (the small race on first-boot key-file generation lives in
-secret_store.py, not here — flagged for follow-up).
-``OMNISIGHT_KS_ENVELOPE_ENABLED=false`` is read lazily per write and
-temporarily emits the same single-Fernet plaintext payload during the
-migration rollback window.
+Module-global state: none. Envelope encryption delegates local KEK
+material to ``secret_store`` via the KS envelope helper; all workers
+compute the same key from the same env / disk source, so ciphertext is
+interoperable across workers.
 """
 
 from __future__ import annotations
@@ -120,8 +118,6 @@ def _load_binding_payload(
 def _encrypt_secret_value(
     tid: str, secret_type: str, key_name: str, plaintext: str,
 ) -> str:
-    if not tenant_envelope.is_enabled():
-        return secret_store.encrypt(plaintext)
     payload = _binding_payload(tid, secret_type, key_name, plaintext)
     ciphertext, dek_ref = tenant_envelope.encrypt(
         payload,
@@ -138,7 +134,7 @@ def _decrypt_secret_value(
         ciphertext, dek_ref = _load_secret_carrier(encrypted_value)
     except (TypeError, ValueError, tenant_envelope.EnvelopeEncryptionError):
         if isinstance(encrypted_value, str) and not encrypted_value.lstrip().startswith("{"):
-            return secret_store.decrypt(encrypted_value)
+            raise ValueError("legacy Fernet tenant secret path is deprecated")
         raise
     payload = tenant_envelope.decrypt(ciphertext, dek_ref)
     return _load_binding_payload(payload, tid, secret_type, key_name)

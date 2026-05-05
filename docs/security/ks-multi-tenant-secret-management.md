@@ -295,11 +295,11 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 | key_version column | 預留欄位（AS.2.1 §） | **正式啟用**為 KEK rotation 索引 |
 | Audit | partial（AS.1.4 oauth_audit 涵蓋 OAuth 路徑） | full（每筆 decryption 寫 N10） |
 | Anomaly detection | 無 | 有（per-tenant rate threshold） |
-| Compat | — | 雙讀雙寫 30 天、之後 deprecate single Fernet |
+| Compat | — | 雙讀雙寫觀察窗已完成、single Fernet 已 deprecate |
 
 **Migration 策略**：
-- KS.1.3 雙讀雙寫期間：寫只走新 envelope、讀 fallback 到舊 Fernet
-- 30 天後：所有 row 已 re-encrypt、deprecate 舊 Fernet 路徑
+- KS.1.3 雙讀雙寫期間（已結束）：寫只走新 envelope、讀 fallback 到舊 Fernet
+- 完成後：所有 row 預期已 re-encrypt；舊 Fernet 讀取與 rollback 寫入路徑已 deprecate
 - AS.0.4 §3 invariant 升級成「single master Fernet key OR envelope (DEK + KEK)、二擇一不混用」、新 invariant 寫進 AS migration discipline 文件
 
 ---
@@ -332,7 +332,7 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 ### 8.1 Single-Knob Rollback
 
 每個 Phase 各自有獨立 env knob、彼此正交：
-- `OMNISIGHT_KS_ENVELOPE_ENABLED=false` → Phase 1 退回 single Fernet（migration 雙寫期間有效）
+- `OMNISIGHT_KS_ENVELOPE_ENABLED=false` → Phase 1 migration rollback knob（已 deprecate；不再讓 AS / tenant / bootstrap secret writer 退回 single Fernet）
 - `OMNISIGHT_KS_CMEK_ENABLED=false` → Phase 2 隱藏 Tier 2 wizard、所有 tenant 退回 Tier 1
 - `OMNISIGHT_KS_BYOG_ENABLED=false` → Phase 3 隱藏 Tier 3 註冊、proxy 模式不可選
 
@@ -344,7 +344,7 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 - DEK / KEK 分離：master KEK compromise 測試（模擬 master key 洩漏 + 確認 per-tenant DEK 仍需個別 unwrap）
 - Envelope round-trip：encrypt → store → fetch → decrypt 與 plaintext byte-equal
-- 雙讀雙寫遷移：任何時間點 hard-restart、雙寫 row 都能 read（新／舊路徑各驗一次）
+- 雙讀雙寫遷移完成：hard-restart 後 envelope row 可讀，legacy Fernet row 被明確拒絕
 - KEK rotation：rotate 後新 row 用新 KEK、舊 row decrypt 仍通
 - Decryption audit log：每次 decrypt 都寫 N10、leak ledger 比對全 match
 - Spend anomaly detector：注入「rate spike 50x」事件、驗 throttle + alert 在 60 sec 內觸發
@@ -369,7 +369,7 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 ### 9.4 Compat Regression
 
-- KS 全套 disable（三 knob 全 false）→ 退回 single Fernet、既有 AS / OAuth / customer secret 0 回歸
+- KS 全套 disable（三 knob 全 false）→ 停用後續 CMEK / BYOG surface；Phase 1 envelope 不再退回 single Fernet，既有 AS / OAuth / customer secret 需維持 envelope 讀寫
 
 ---
 
