@@ -112,6 +112,28 @@ def test_soc2_checklist_requires_readiness_gates_and_n10_row() -> None:
     assert not missing, f"soc2 checklist missing readiness gate terms: {missing}"
 
 
+def test_soc2_checklist_defines_operator_readiness_packet() -> None:
+    body = _read(CHECKLIST).lower()
+    required = [
+        "operator readiness packet",
+        "control matrix export",
+        "evidence index covering access",
+        "grc platform comparison scorecard",
+        "auditor shortlist and final cpa firm scorecard",
+        "exception tracker export",
+        "readiness disposition",
+        "ready-for-observation",
+    ]
+    missing = [phrase for phrase in required if phrase not in body]
+    assert not missing, f"soc2 checklist missing operator packet terms: {missing}"
+
+
+def test_soc2_checklist_has_canonical_production_status_fields() -> None:
+    body = _read(CHECKLIST)
+    assert "**Production status:** dev-only" in body
+    assert "**Next gate:** deployed-active" in body
+
+
 def test_n10_ledger_has_soc2_readiness_table() -> None:
     body = _read(LEDGER)
     assert "## SOC 2 Readiness" in body

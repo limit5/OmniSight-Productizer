@@ -168,7 +168,38 @@ Do not start the Type II observation window until all gates are true:
 If any gate fails, do not silently narrow the report. Record the gap,
 owner, due date, and risk decision in the private evidence vault.
 
-## 7. N10 ledger row template
+## 7. Operator readiness packet
+
+Before declaring the SOC 2 Type II readiness checklist complete for KS
+DoD, the security owner must assemble one operator handoff packet in the
+private evidence vault. The packet is the source of truth for the first
+observation-window decision; this repository stores only the checklist,
+ledger row, and fingerprints.
+
+Required packet contents:
+
+- Control matrix export with every in-scope TSC item mapped to an
+  OmniSight control, owner, evidence cadence, and auditor test method.
+- Evidence index covering access, change management, vulnerability
+  management, incident response, backup / recovery, availability,
+  confidentiality, vendor management, and people controls.
+- GRC platform comparison scorecard for Vanta, Drata, and Secureframe,
+  including connected systems, data classes, export rights, and
+  termination data return.
+- Auditor shortlist and final CPA firm scorecard with independence
+  confirmation, engagement-letter status, observation-window dates, and
+  auditor request SLA.
+- Exception tracker export with severity, owner, due date,
+  remediation evidence, and risk-acceptance path.
+- N10 `SOC 2 Readiness` row linking the packet via evidence-index
+  SHA-256 and readiness disposition.
+
+The packet is ready only when the N10 disposition is `planned` or
+`ready-for-observation`. Use `ready-for-observation` only after the
+auditor, security owner, product owner, legal owner, and sales owner
+agree that the observation window can start.
+
+## 8. N10 ledger row template
 
 Append one row to `## SOC 2 Readiness` when the program is planned,
 ready for observation, observation starts, observation ends, draft report
@@ -181,7 +212,7 @@ is received, final report is issued, delayed, or materially rescoped:
 Do not edit previous rows. If a row is wrong, add a correction row with
 `correction -> <quarter/auditor/evidence-index-sha256>` in Notes.
 
-## 8. Evidence checklist
+## 9. Evidence checklist
 
 - [ ] Trust Services Categories selected
 - [ ] System description draft created
@@ -198,7 +229,7 @@ Do not edit previous rows. If a row is wrong, add a correction row with
 - [ ] Observation window start date approved
 - [ ] N10 `SOC 2 Readiness` row appended
 
-## 9. References
+## 10. References
 
 - AICPA SOC 2 Trust Services Criteria resources:
   <https://www.aicpa-cima.com/topic/audit-assurance/audit-and-assurance-greater-than-soc-2>
@@ -209,9 +240,15 @@ Do not edit previous rows. If a row is wrong, add a correction row with
 - Secureframe SOC 2 product page:
   <https://secureframe.com/soc2>
 
-## 10. Production status
+## 11. Production status
 
 This checklist does not deploy runtime code. Production readiness is
 operational: SOC 2 Type II observation may start only after the control
 matrix, evidence collection cadence, exception tracker, and independent
 auditor engagement are ready.
+
+**Production status:** dev-only
+**Next gate:** deployed-active - security owner assembles the operator
+readiness packet, selects the GRC platform and independent CPA auditor,
+stores the packet in the private security evidence vault, and appends an
+N10 `SOC 2 Readiness` row with `Disposition = ready-for-observation`.

@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 478
+entry_count: 479
 status_counts:
-  dev-only: 468
+  dev-only: 469
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4451,3 +4451,13 @@ entries:
   production_status: dev-only
   next_gate: deployed-active — security owner 執行第一次外部 pentest，將 final report 存入 private security evidence vault，修復/重測或 risk-accept
     findings，並在 N10 `Pentest Reports` 追加 disposition 為 `closed` 或 `risk-accepted` 的 row；之後再由 agent 補交完成 handoff。
+- id: 2026-05-06--ks-dod-soc2-readiness-checklist
+  header_line: 47493
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: KS.DOD.SOC2-readiness-checklist 完工
+  production_status: dev-only
+  next_gate: deployed-active — security owner assembles the SOC 2 operator readiness packet in the private evidence vault,
+    selects the GRC platform and independent CPA auditor, records the evidence-index SHA-256 in N10 `SOC 2 Readiness`, and
+    flips disposition to `ready-for-observation` only after owner/auditor approval.
