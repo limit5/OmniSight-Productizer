@@ -21,9 +21,10 @@ prod.
 
 ## 1. Install gVisor (runsc)
 
-The default runtime is `runsc`. Without it the backend silently falls
-back to `runc`, and the container shares the host kernel — escape
-resistance is **downgraded**.
+The default runtime is `runsc`. In `ENV=production`, missing `runsc`
+hard-fails sandbox launch. In dev / CI the backend falls back to `runc`,
+and the container shares the host kernel — escape resistance is
+**downgraded**.
 
 ### Linux (Debian/Ubuntu)
 
@@ -59,8 +60,8 @@ Trigger one container launch (any agent task) and tail the logs for:
 sandbox_runtime_fallback   # = silent downgrade to runc
 ```
 
-If you see this in prod, gVisor is missing. Fix the host before
-shipping.
+If you see this outside prod, gVisor is missing. In prod the same
+condition should fail closed before the sandbox starts.
 
 ---
 
@@ -172,6 +173,7 @@ action=sandbox_image_rejected  actor=agent:<id>
 ## 6. Pre-prod checklist
 
 - [ ] `runsc` installed and `docker info` lists it
+- [ ] `ENV=production` set on production backend hosts
 - [ ] `OMNISIGHT_DOCKER_RUNTIME=runsc` (or omit — same default)
 - [ ] `OMNISIGHT_DOCKER_IMAGE_ALLOWED_DIGESTS` set to your build's
       sha256
@@ -182,10 +184,40 @@ action=sandbox_image_rejected  actor=agent:<id>
 - [ ] Grafana panels for the four `sandbox_*` counters
 - [ ] Alert on any `sandbox_image_rejected_total` increase
 - [ ] Alert on `sandbox_runtime_fallback` SSE in prod
+- [ ] First production sandbox audit row has `after.runtime=runsc`
+
+## 7. gVisor vs Docker-default benchmark
+
+Before flipping Phase U to observed, run the same micro-workload under
+Docker default `runc` and gVisor `runsc` on each sandbox host class:
+
+```bash
+OMNISIGHT_GVISOR_BENCH_IMAGE=omnisight-agent:<tag> \
+OMNISIGHT_GVISOR_BENCH_REPEATS=5 \
+scripts/benchmark_gvisor_runtime.sh
+```
+
+The script refuses hosts where either runtime is missing and emits CSV:
+
+```csv
+runtime,iteration,elapsed_ms
+runc,1,842
+runsc,1,1119
+```
+
+Interpretation:
+
+- Compare medians, not a single run; cold image pulls must be excluded.
+- Use `OMNISIGHT_GVISOR_BENCH_CMD='...'` to mirror a real compile /
+  simulate workload when CPU or filesystem profile matters.
+- If `runsc` median latency is more than 2x `runc`, hold the rollout in
+  staging and tune image/workload before declaring `deployed-observed`.
+- Store the CSV with the release evidence so R12 close-out is tied to a
+  measured compatibility/performance envelope, not only to an env knob.
 
 ---
 
-## 7. Tier 2 — Networked Sandbox (Phase 64-B)
+## 8. Tier 2 — Networked Sandbox (Phase 64-B)
 
 Tier 2 inverts T1's policy: **public internet is reachable, private
 RFC1918 / link-local / ULA addresses are DROPped** at iptables. Use
@@ -235,6 +267,7 @@ Audit row carries `after.tier="networked"`, `after.network=omnisight-egress-t2`.
 ## Related
 
 - `docs/design/tiered-sandbox-architecture.md` — design rationale
+- `scripts/benchmark_gvisor_runtime.sh` — runc vs runsc host benchmark
 - `scripts/setup_t1_egress_iptables.sh` — egress hardening script
 - `backend/sandbox_net.py` — Python-side egress decision
 - `backend/container.py::_lifetime_killswitch` — wall-clock killer

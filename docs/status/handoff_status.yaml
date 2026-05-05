@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 455
+entry_count: 456
 status_counts:
-  dev-only: 445
+  dev-only: 446
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4236,3 +4236,13 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 合併後在 EVK 連接機安裝 systemd unit，配置三個 `OMNISIGHT_HW_BRIDGE_*_CMD` wrapper 與 mTLS / LAN ACL，跑 staging
     smoke：flash test firmware、讀 UART boot log、擷取一段 I2C/SPI/GPIO signal。
+- id: 2026-05-06--W3.13
+  header_line: 47216
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: W3.13
+  title: BP.W3.13 完工
+  production_status: dev-only
+  next_gate: deployed-active — 合併後在 production sandbox host 安裝 / 驗證 `runsc`，設定 `ENV=production`，rolling restart backend，跑第一個
+    Tier 1 sandbox smoke 並確認 audit row `after.runtime=runsc`、metric `omnisight_sandbox_launch_total{runtime="runsc",result="success"}`，再執行
+    `scripts/benchmark_gvisor_runtime.sh` 保存 runc/runsc CSV；24h 無 runtime fallback / mismatch 後翻 `deployed-observed`。

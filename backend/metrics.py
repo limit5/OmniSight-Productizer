@@ -151,7 +151,8 @@ if _AVAILABLE:
     sandbox_launch_total = Counter(
         "omnisight_sandbox_launch_total",
         "Sandbox launch attempts by tier, runtime, and outcome",
-        labelnames=("tier", "runtime", "result"),  # result: success | error
+        # result: success | error | image_rejected | quota_exceeded | runtime_mismatch
+        labelnames=("tier", "runtime", "result"),
         registry=REGISTRY,
     )
 

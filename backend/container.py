@@ -101,6 +101,12 @@ def _compute_resource_limits(
 _RUNTIME_RESOLVED: str | None = None
 
 
+def _is_production_env() -> bool:
+    """True only for the deployment mode that must fail closed on gVisor."""
+    from backend.config import settings as _settings
+    return (_settings.env or "").strip().lower() == "production"
+
+
 async def _detect_available_runtimes() -> set[str]:
     """Return the set of OCI runtimes registered with the local docker.
 
@@ -128,20 +134,40 @@ async def resolve_runtime(force_redetect: bool = False) -> str:
     isn't installed. Cached after first call (idempotent for callers)."""
     global _RUNTIME_RESOLVED
     if _RUNTIME_RESOLVED is not None and not force_redetect:
+        if _is_production_env() and _RUNTIME_RESOLVED != "runsc":
+            raise RuntimeError(
+                "ENV=production requires cached sandbox runtime to be runsc; "
+                f"got {_RUNTIME_RESOLVED!r}",
+            )
         return _RUNTIME_RESOLVED
     from backend.config import settings as _settings
     preferred = (_settings.docker_runtime or "runc").strip().lower()
     if preferred not in {"runsc", "runc"}:
+        if _is_production_env():
+            raise RuntimeError(
+                "ENV=production requires OMNISIGHT_DOCKER_RUNTIME=runsc; "
+                f"got {preferred!r}",
+            )
         logger.warning(
             "OMNISIGHT_DOCKER_RUNTIME=%r not in {runsc,runc}; using runc",
             preferred,
         )
         _RUNTIME_RESOLVED = "runc"
         return _RUNTIME_RESOLVED
+    if _is_production_env() and preferred != "runsc":
+        raise RuntimeError(
+            "ENV=production requires OMNISIGHT_DOCKER_RUNTIME=runsc. "
+            "Use non-production env for explicit runc compatibility tests.",
+        )
     available = await _detect_available_runtimes()
     if preferred in available:
         _RUNTIME_RESOLVED = preferred
     else:
+        if _is_production_env():
+            raise RuntimeError(
+                "ENV=production requires gVisor runsc registered with "
+                f"Docker; available runtimes={sorted(available)}",
+            )
         if preferred != "runc":
             logger.warning(
                 "Tier-1 sandbox runtime %r not registered with docker "
@@ -157,6 +183,27 @@ async def resolve_runtime(force_redetect: bool = False) -> str:
                 pass
         _RUNTIME_RESOLVED = "runc"
     return _RUNTIME_RESOLVED
+
+
+async def _assert_container_runtime(container_name: str, expected: str) -> None:
+    """Verify Docker actually launched the sandbox with the requested runtime.
+
+    In production this is the request-time guard that makes Tier 1 gVisor
+    load-bearing instead of trusting an env knob or a cached docker-info probe.
+    """
+    if expected != "runsc" or not _is_production_env():
+        return
+    rc, out, err = await _run(
+        f"docker inspect --format '{{{{.HostConfig.Runtime}}}}' {container_name}",
+        timeout=10,
+    )
+    actual = (out or "").strip()
+    if rc != 0 or actual != expected:
+        await _run(f"docker rm -f {container_name} 2>/dev/null", timeout=15)
+        raise RuntimeError(
+            "Tier-1 sandbox runtime assertion failed: expected runsc, "
+            f"got {actual or '<empty>'}; docker inspect error={err or '<none>'}",
+        )
 
 
 def _reset_runtime_cache_for_tests() -> None:
@@ -732,6 +779,16 @@ async def start_container(agent_id: str, workspace_path: Path,
         raise RuntimeError(f"Failed to start container: {err or out}")
 
     container_id = out.strip()[:12]
+    try:
+        await _assert_container_runtime(container_name, runtime)
+    except Exception:
+        try:
+            _m.sandbox_launch_total.labels(
+                tier=tier, runtime=runtime, result="runtime_mismatch",
+            ).inc()
+        except Exception:
+            pass
+        raise
 
     # Configure git inside container
     await exec_in_container(
