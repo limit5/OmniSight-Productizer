@@ -19,11 +19,13 @@ from fastapi.responses import JSONResponse
 from backend import auth as _au
 from backend import skills_extractor  # late attr-lookup so fixture monkeypatch wins
 from backend import skill_registry
+from backend.agents import skills_loader
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/skills", tags=["skills"])
 
 _SKILLS_LIVE = Path(__file__).resolve().parent.parent.parent / "configs" / "skills"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _pending_dir() -> Path:
@@ -46,6 +48,16 @@ def _safe_pending_path(name: str) -> Path:
     return target
 
 
+def _effective_skill_entry(skill: skills_loader.Skill) -> dict:
+    return {
+        "name": skill.name,
+        "description": skill.description,
+        "keywords": list(skill.keywords),
+        "scope": skill.scope,
+        "source_path": str(skill.source_path) if skill.source_path else None,
+    }
+
+
 @router.get("/pending")
 async def list_pending(_user=Depends(_au.require_operator)) -> dict:
     """List all skill candidates awaiting promotion."""
@@ -59,6 +71,19 @@ async def list_pending(_user=Depends(_au.require_operator)) -> dict:
             "size_bytes": p.stat().st_size,
             "modified_at": p.stat().st_mtime,
         })
+    return {"items": items, "count": len(items)}
+
+
+@router.get("/effective")
+async def list_effective_skills(_user=Depends(_au.require_operator)) -> dict:
+    """Expose the WP.2 effective skill registry to UI surfaces.
+
+    Module-global state audit: this endpoint does not keep process-global
+    registry state; every worker derives the same effective catalog from the
+    shared filesystem using the WP.2 precedence rules.
+    """
+    registry = skills_loader.load_default_scopes(_PROJECT_ROOT)
+    items = [_effective_skill_entry(skill) for skill in registry.list_all()]
     return {"items": items, "count": len(items)}
 
 

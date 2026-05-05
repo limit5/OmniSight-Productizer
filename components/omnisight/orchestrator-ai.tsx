@@ -31,6 +31,7 @@ import { matchCommands as slashMatchCommands, CATEGORY_COLORS as slashCategoryCo
 import { TokenUsageStats } from "./token-usage-stats"
 import { TurnTimeline } from "./turn-timeline"
 import { PromptVersionDrawer } from "./prompt-version-drawer"
+import { listEffectiveSkills, type EffectiveSkill } from "@/lib/api"
 
 // Orchestrator message types
 export interface OrchestratorMessage {
@@ -48,6 +49,23 @@ function formatTime(): string {
   const minutes = date.getMinutes().toString().padStart(2, "0")
   const seconds = date.getSeconds().toString().padStart(2, "0")
   return `${hours}:${minutes}:${seconds}`
+}
+
+function currentSkillMentionQuery(value: string): string | null {
+  const token = value.split(/\s/).at(-1) ?? ""
+  if (!token.startsWith("@")) return null
+  return token.slice(1).toLowerCase()
+}
+
+function replaceCurrentSkillMention(value: string, skillName: string): string {
+  const parts = value.split(/(\s+)/)
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    if (parts[i].startsWith("@")) {
+      parts[i] = `@${skillName}`
+      return `${parts.join("")} `
+    }
+  }
+  return `${value}${value && !value.endsWith(" ") ? " " : ""}@${skillName} `
 }
 
 export interface AISuggestion {
@@ -191,6 +209,9 @@ export function OrchestratorAI({
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [slashSuggestions, setSlashSuggestions] = useState<SlashCommand[]>([])
   const [slashSelectedIdx, setSlashSelectedIdx] = useState(0)
+  const [skills, setSkills] = useState<EffectiveSkill[]>([])
+  const [skillSuggestions, setSkillSuggestions] = useState<EffectiveSkill[]>([])
+  const [skillSelectedIdx, setSkillSelectedIdx] = useState(0)
   const [showAgentGrid, setShowAgentGrid] = useState(true)
   // ZZ.C1 #305-1 checkbox 3 (2026-04-24): system-prompt version drawer
   // — opens from the LLM MODEL section as a "System Prompt Versions"
@@ -200,6 +221,57 @@ export function OrchestratorAI({
   
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    listEffectiveSkills()
+      .then((res) => {
+        if (!cancelled) setSkills(res.items)
+      })
+      .catch(() => {
+        if (!cancelled) setSkills([])
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const onInsert = (event: Event) => {
+      const detail = (event as CustomEvent<{ text?: string }>).detail
+      const text = detail?.text
+      if (!text) return
+      setInputValue((prev) => `${prev}${prev && !prev.endsWith(" ") ? " " : ""}${text}`)
+      setSkillSuggestions([])
+      setSlashSuggestions([])
+      setTimeout(() => inputRef.current?.focus(), 0)
+    }
+    window.addEventListener("omnisight:chat-insert-text", onInsert as EventListener)
+    return () => window.removeEventListener("omnisight:chat-insert-text", onInsert as EventListener)
+  }, [])
+
+  const updateSkillSuggestions = useCallback((value: string) => {
+    const query = currentSkillMentionQuery(value)
+    if (query === null) {
+      setSkillSuggestions([])
+      return
+    }
+    const matches = skills.filter((skill) => {
+      const haystack = [
+        skill.name,
+        skill.description,
+        skill.scope,
+        ...skill.keywords,
+      ].join(" ").toLowerCase()
+      return haystack.includes(query)
+    })
+    setSkillSuggestions(matches.slice(0, 6))
+    setSkillSelectedIdx(0)
+  }, [skills])
+
+  const pickSkillMention = useCallback((skillName: string) => {
+    setInputValue((prev) => replaceCurrentSkillMention(prev, skillName))
+    setSkillSuggestions([])
+  }, [])
   
   // Auto-scroll to bottom
   useEffect(() => {
@@ -381,6 +453,7 @@ export function OrchestratorAI({
 
     // Clear autocomplete immediately
     setSlashSuggestions([])
+    setSkillSuggestions([])
 
     const cmd = inputValue.toLowerCase().trim()
 
@@ -976,6 +1049,24 @@ export function OrchestratorAI({
               })}
             </div>
           )}
+          {slashSuggestions.length === 0 && skillSuggestions.length > 0 && (
+            <div className="absolute left-0 right-0 bottom-full mb-1 z-50 bg-[var(--card)] border border-[var(--border)] rounded-md shadow-lg overflow-hidden max-h-[180px] overflow-y-auto">
+              {skillSuggestions.map((skill, idx) => (
+                <button
+                  key={skill.name}
+                  type="button"
+                  onMouseDown={(e) => { e.preventDefault(); pickSkillMention(skill.name) }}
+                  className={`w-full flex items-center gap-1.5 px-2 py-1 text-left transition-colors ${
+                    idx === skillSelectedIdx ? "bg-[var(--artifact-purple)]/10" : "hover:bg-[var(--secondary)]"
+                  }`}
+                >
+                  <span className="font-mono text-[8px] px-1 rounded text-[var(--artifact-purple)]">{skill.scope.toUpperCase()}</span>
+                  <span className="font-mono text-[10px] text-[var(--artifact-purple)]">@{skill.name}</span>
+                  <span className="font-mono text-[9px] text-[var(--muted-foreground)] ml-auto truncate max-w-[50%]">{skill.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <form onSubmit={handleSubmit} className="flex items-center gap-1.5 fui-input px-2 py-1.5">
             <span className="font-mono text-xs text-[var(--muted-foreground)] shrink-0">{">"}</span>
             <input
@@ -983,13 +1074,16 @@ export function OrchestratorAI({
               type="text"
               value={inputValue}
               onChange={e => {
-                setInputValue(e.target.value)
-                if (e.target.value.startsWith("/")) {
-                  const matches = slashMatchCommands(e.target.value)
+                const value = e.target.value
+                setInputValue(value)
+                if (value.startsWith("/")) {
+                  const matches = slashMatchCommands(value)
                   setSlashSuggestions(matches.slice(0, 6))
                   setSlashSelectedIdx(0)
+                  setSkillSuggestions([])
                 } else {
                   setSlashSuggestions([])
+                  updateSkillSuggestions(value)
                 }
               }}
               onKeyDown={e => {
@@ -998,9 +1092,18 @@ export function OrchestratorAI({
                   else if (e.key === "ArrowUp") { e.preventDefault(); setSlashSelectedIdx(i => Math.max(i - 1, 0)) }
                   else if (e.key === "Tab") { e.preventDefault(); setInputValue(`/${slashSuggestions[slashSelectedIdx]?.name} `); setSlashSuggestions([]) }
                   else if (e.key === "Escape") { setSlashSuggestions([]) }
+                } else if (skillSuggestions.length > 0) {
+                  if (e.key === "ArrowDown") { e.preventDefault(); setSkillSelectedIdx(i => Math.min(i + 1, skillSuggestions.length - 1)) }
+                  else if (e.key === "ArrowUp") { e.preventDefault(); setSkillSelectedIdx(i => Math.max(i - 1, 0)) }
+                  else if (e.key === "Tab") {
+                    e.preventDefault()
+                    const skill = skillSuggestions[skillSelectedIdx]
+                    if (skill) pickSkillMention(skill.name)
+                  }
+                  else if (e.key === "Escape") { setSkillSuggestions([]) }
                 }
               }}
-              onBlur={() => setTimeout(() => setSlashSuggestions([]), 150)}
+              onBlur={() => setTimeout(() => { setSlashSuggestions([]); setSkillSuggestions([]) }, 150)}
               placeholder="Ask or type /command ..."
               className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none"
             />

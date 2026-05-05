@@ -50,6 +50,42 @@ def format_workspace_list(rows: list[dict[str, Any]]) -> str:
     return "\n".join([header, sep, *body, f"\n{len(rows)} workspace(s)"])
 
 
+def format_skills_list(rows: list[dict[str, Any]]) -> str:
+    """Render effective WP.2 skills into an aligned text table."""
+    if not rows:
+        return "No effective skills found."
+    cols = ("name", "scope", "provider_rank", "source_path", "description")
+    widths = {c: len(c) for c in cols}
+    rendered: list[tuple[str, ...]] = []
+    for r in rows:
+        cells = tuple(str(r.get(c, "") or "") for c in cols)
+        rendered.append(cells)
+        for c, v in zip(cols, cells):
+            widths[c] = max(widths[c], len(v))
+    header = "  ".join(c.upper().ljust(widths[c]) for c in cols)
+    sep = "  ".join("-" * widths[c] for c in cols)
+    body = [
+        "  ".join(v.ljust(widths[c]) for c, v in zip(cols, cells))
+        for cells in rendered
+    ]
+    return "\n".join([header, sep, *body, f"\n{len(rows)} skill(s)"])
+
+
+def format_skill_resolve(row: dict[str, Any]) -> str:
+    """Render one effective WP.2 skill source resolution."""
+    lines = [
+        f"Skill: {row.get('name', '?')}",
+        f"Description: {row.get('description', '')}",
+        f"Scope: {row.get('scope', '')}",
+        f"Provider rank: {row.get('provider_rank', '')}",
+        f"Source: {row.get('source_path', '')}",
+    ]
+    keywords = row.get("keywords") or []
+    if keywords:
+        lines.append(f"Keywords: {', '.join(str(k) for k in keywords)}")
+    return "\n".join(lines)
+
+
 def format_inspect(agent: dict[str, Any], workspace: dict[str, Any] | None) -> str:
     """Render agent + optional workspace info as markdown."""
     status = agent.get("status", "?")

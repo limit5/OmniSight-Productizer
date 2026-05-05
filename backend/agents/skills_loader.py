@@ -7,11 +7,15 @@ from three precedence layers:
   1. **Project** — ``<project>/.claude/skills/`` and
      ``<project>/.omnisight/skills/`` (highest)
   2. **Home** — ``~/.claude/skills/`` and ``~/.omnisight/skills/``
-  3. **Bundled** — ``<project>/configs/skills/`` (lowest, ships with repo)
+  3. **Bundled** — ``<project>/omnisight/agents/skills/`` (lowest,
+     ships with repo). ``<project>/configs/skills/`` remains a legacy
+     bundled fallback while existing packs are migrated.
 
 Same skill name in a higher scope shadows lower scopes — operators can
 override a bundled skill by dropping a same-named ``SKILL.md`` into
-their project ``.claude/skills/``.
+their project ``.claude/skills/`` or ``.omnisight/skills/``. Within the
+same scope, ``.omnisight/skills`` has higher provider rank than
+``.claude/skills``.
 
 Format support:
 
@@ -44,7 +48,9 @@ ADR: TODO row WP.2 freezes this contract.
 from __future__ import annotations
 
 import logging
+import os
 import re
+from hashlib import sha256
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -56,6 +62,47 @@ logger = logging.getLogger(__name__)
 # (resolver, scope_label) pair — resolver takes the project_root and
 # returns a list of directories to scan. Lower index = higher priority.
 SCOPE_ORDER: tuple[str, ...] = ("project", "home", "bundled")
+_DEFAULT_PROVIDER_RANK = 0
+SKILLS_LOADER_ENABLED_ENV = "OMNISIGHT_WP_SKILLS_LOADER_ENABLED"
+
+# WP.2.7 rollback registry: mirrors the pre-WP.2.5 hard-coded
+# SKILL_HD_* table from backend.agents.tool_schemas.
+_HARD_CODED_SKILL_REGISTRY: tuple[tuple[str, str], ...] = (
+    ("SKILL_HD_PARSE", "[HD.1] Parse an EDA file into HDIR."),
+    ("SKILL_HD_DIFF_REFERENCE", "[HD.4] Reference vs customer design diff."),
+    ("SKILL_HD_SENSOR_SWAP_FEASIBILITY", "[HD.5] Sensor substitution feasibility."),
+    ("SKILL_HD_FW_SYNC_PATCH", "[HD.7] HW change -> FW patch list."),
+    ("SKILL_HD_PCB_SI_ANALYZE", "[HD.2] PCB signal integrity analysis."),
+    ("SKILL_HD_HIL_RUN", "[HD.8] Hardware-in-the-loop session execution."),
+    ("SKILL_HD_RAG_QUERY", "[HD.9] Datasheet RAG retrieval."),
+    ("SKILL_HD_CERT_RETEST_PLAN", "[HD.10] EMC / safety retest plan generator."),
+    ("SKILL_HD_PLATFORM_RESOLVE", "[HD.16] SoC mark -> platform spec lookup."),
+    ("SKILL_HD_VENDOR_SYNC", "[HD.16] Vendor SDK upstream sync pipeline."),
+    ("SKILL_HD_VENDOR_REBASE", "[HD.16] Patch rebase conflict auto-attempt."),
+    ("SKILL_HD_NDA_GATE", "[HD.16] NDA boundary enforcement check."),
+    ("SKILL_HD_CUSTOMER_OVERLAY", "[HD.17] Per-customer overlay manifest resolver."),
+    ("SKILL_HD_LIFECYCLE_AUDIT", "[HD.18] Annual reproducibility audit."),
+    ("SKILL_HD_CVE_IMPACT", "[HD.18] CVE feed -> SBOM impact analysis."),
+    (
+        "SKILL_HD_CVE_AUTO_BACKPORT",
+        "[HD.18] Vendor patch -> customer-overlay backport proposal.",
+    ),
+    ("SKILL_HD_BRINGUP_CHECKLIST", "[HD.19] SoC-specific bring-up checklist generator."),
+    ("SKILL_HD_BRINGUP_LIVE_PARSE", "[HD.19] Live boot console -> AI parse blockers."),
+    (
+        "SKILL_HD_PORT_ADVISOR",
+        "[HD.19] Cross-SoC port required-changes + effort estimate.",
+    ),
+    ("SKILL_HD_DEVKIT_FORK", "[HD.19] DevKit reference -> customer fork starting point."),
+    ("SKILL_HD_ISP_TUNING_DIFF", "[HD.20] ISP tuning binary before/after compare."),
+    ("SKILL_HD_BLOB_COMPAT", "[HD.20] (BSP-version, blob-version) compatibility matrix."),
+    ("SKILL_HD_PRODUCTION_BUNDLE", "[HD.21] EMS production access bundle generator."),
+    ("SKILL_HD_OTA_PACKAGE_GEN", "[HD.21] OTA bundle generation (SWUpdate / RAUC / A-B)."),
+    ("SKILL_HD_SBOM_GENERATE", "[HD.21] SBOM CycloneDX + SPDX generation."),
+    ("SKILL_HD_LICENSE_AUDIT", "[HD.21] Ship-time license conflict check."),
+    ("SKILL_HD_AUTHENTICITY_VERIFY", "[HD.21] Chip authenticity challenge / verification."),
+    ("SKILL_HD_AI_COMPANION", "[HD.21] Unified chat surface skill router."),
+)
 
 
 @dataclass(frozen=True)
@@ -230,23 +277,60 @@ def parse_skill_file(path: Path, scope: str) -> Skill | None:
 class SkillRegistry:
     """In-memory skill catalog with shadowing semantics.
 
-    Add skills in **highest-priority-first** order (project → home →
-    bundled); :meth:`add` is a no-op when a higher-priority entry with
-    the same name already exists. Iteration order is alphabetical.
+    Add skills with a provider rank; higher rank wins, equal/lower rank
+    conflicts are shadowed. Iteration order is alphabetical.
+
+    Module-global state audit: registry instances are caller-local. Every
+    worker rebuilds rank decisions from the same filesystem sources.
     """
 
     def __init__(self) -> None:
         self._skills: dict[str, Skill] = {}
+        self._provider_ranks: dict[str, int] = {}
 
-    def add(self, skill: Skill) -> bool:
-        """Add ``skill`` unless a higher-priority entry already won.
+    def add(self, skill: Skill, *, provider_rank: int = _DEFAULT_PROVIDER_RANK) -> bool:
+        """Add ``skill`` unless a higher/equal-priority entry already won.
 
-        Returns True if accepted, False if shadowed.
+        Returns True if accepted, False if shadowed. Duplicate names always
+        WARN so operators can see which on-disk source became effective.
         """
-        if skill.name in self._skills:
-            return False
+        previous = self._skills.get(skill.name)
+        if previous is not None:
+            previous_rank = self._provider_ranks.get(
+                skill.name, _DEFAULT_PROVIDER_RANK
+            )
+            if provider_rank <= previous_rank:
+                logger.warning(
+                    "skills_loader: skill %r from %s (%s, rank=%d) "
+                    "shadowed by %s (%s, rank=%d)",
+                    skill.name,
+                    skill.source_path,
+                    skill.scope,
+                    provider_rank,
+                    previous.source_path,
+                    previous.scope,
+                    previous_rank,
+                )
+                return False
+            logger.warning(
+                "skills_loader: skill %r from %s (%s, rank=%d) "
+                "overrides %s (%s, rank=%d)",
+                skill.name,
+                skill.source_path,
+                skill.scope,
+                provider_rank,
+                previous.source_path,
+                previous.scope,
+                previous_rank,
+            )
         self._skills[skill.name] = skill
+        self._provider_ranks[skill.name] = provider_rank
         return True
+
+    def provider_rank(self, name: str) -> int | None:
+        if name not in self._skills:
+            return None
+        return self._provider_ranks.get(name, _DEFAULT_PROVIDER_RANK)
 
     def get(self, name: str) -> Skill | None:
         return self._skills.get(name)
@@ -262,6 +346,72 @@ class SkillRegistry:
 
     def __len__(self) -> int:
         return len(self._skills)
+
+
+class ProjectWatchedSkillRegistry:
+    """Long-lived registry proxy that reloads when project skills change.
+
+    Module-global state audit: each instance keeps a per-worker cache
+    derived from the project skill files on disk. Cross-worker consistency
+    is guaranteed because workers independently rebuild from the same
+    shared filesystem when the project-scope signature changes.
+    """
+
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        home: Path | None = None,
+        extra_dirs: Iterable[tuple[Path, str]] = (),
+    ) -> None:
+        self._project_root = project_root
+        self._home = home
+        self._extra_dirs = tuple(extra_dirs)
+        self._signature: tuple[tuple[str, int, int, int], ...] | None = None
+        self._registry = SkillRegistry()
+
+    def reload(self) -> None:
+        self._signature = _project_scope_signature(self._project_root)
+        self._registry = load_default_scopes(
+            self._project_root,
+            home=self._home,
+            extra_dirs=self._extra_dirs,
+        )
+
+    def _refresh_if_needed(self) -> None:
+        signature = _project_scope_signature(self._project_root)
+        if self._signature == signature:
+            return
+        self._signature = signature
+        self._registry = load_default_scopes(
+            self._project_root,
+            home=self._home,
+            extra_dirs=self._extra_dirs,
+        )
+
+    def provider_rank(self, name: str) -> int | None:
+        self._refresh_if_needed()
+        return self._registry.provider_rank(name)
+
+    def get(self, name: str) -> Skill | None:
+        self._refresh_if_needed()
+        return self._registry.get(name)
+
+    def has(self, name: str) -> bool:
+        self._refresh_if_needed()
+        return self._registry.has(name)
+
+    def names(self) -> list[str]:
+        self._refresh_if_needed()
+        return self._registry.names()
+
+    def list_all(self) -> list[Skill]:
+        self._refresh_if_needed()
+        return self._registry.list_all()
+
+    def __len__(self) -> int:
+        self._refresh_if_needed()
+        return len(self._registry)
 
 
 # ─── Scope walking ───────────────────────────────────────────────
@@ -303,23 +453,95 @@ def _scan_dir_for_skills(
     return out
 
 
-def _project_scope_dirs(project_root: Path) -> list[Path]:
+def _project_scope_signature(
+    project_root: Path,
+) -> tuple[tuple[str, int, int, int], ...]:
+    """Return a deterministic signature for project-scope skill files."""
+    entries: list[tuple[str, int, int, int]] = []
+    for root, _provider_rank in _project_scope_dirs(project_root):
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*")):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if path.is_dir() or path.name == "SKILL.md" or path.suffix == ".md":
+                content_sig = st.st_mtime_ns
+                if path.is_file():
+                    try:
+                        content_sig = int.from_bytes(
+                            sha256(path.read_bytes()).digest()[:8],
+                            "big",
+                        )
+                    except OSError:
+                        continue
+                entries.append(
+                    (
+                        str(path.relative_to(project_root)),
+                        int(path.is_dir()),
+                        st.st_size,
+                        content_sig,
+                    )
+                )
+    return tuple(entries)
+
+
+def _project_scope_dirs(project_root: Path) -> list[tuple[Path, int]]:
     return [
-        project_root / ".claude" / "skills",
-        project_root / ".omnisight" / "skills",
+        (project_root / ".claude" / "skills", 310),
+        (project_root / ".omnisight" / "skills", 320),
     ]
 
 
-def _home_scope_dirs(home: Path | None = None) -> list[Path]:
+def _home_scope_dirs(home: Path | None = None) -> list[tuple[Path, int]]:
     h = home or Path.home()
     return [
-        h / ".claude" / "skills",
-        h / ".omnisight" / "skills",
+        (h / ".claude" / "skills", 210),
+        (h / ".omnisight" / "skills", 220),
     ]
 
 
-def _bundled_scope_dirs(project_root: Path) -> list[Path]:
-    return [project_root / "configs" / "skills"]
+def _bundled_scope_dirs(project_root: Path) -> list[tuple[Path, int]]:
+    return [
+        (project_root / "omnisight" / "agents" / "skills", 120),
+        (project_root / "configs" / "skills", 110),
+    ]
+
+
+def _skills_loader_enabled() -> bool:
+    """Master switch for WP.2 filesystem skill loading.
+
+    Default ON; set ``OMNISIGHT_WP_SKILLS_LOADER_ENABLED=false`` to use
+    the pre-WP.2.5 hard-coded SKILL_HD registry. Module-global state audit:
+    this reads process env only and returns an immutable decision per call.
+    """
+    raw = (os.environ.get(SKILLS_LOADER_ENABLED_ENV) or "true").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _load_hard_coded_registry() -> SkillRegistry:
+    """Return the pre-WP.2.5 hard-coded SKILL_HD registry."""
+    registry = SkillRegistry()
+    for name, description in _HARD_CODED_SKILL_REGISTRY:
+        registry.add(
+            Skill(
+                name=name,
+                description=description,
+                body=(
+                    f"# {name}\n\n"
+                    "Hard-coded WP.2 rollback placeholder. Re-enable "
+                    f"filesystem skills by unsetting {SKILLS_LOADER_ENABLED_ENV}."
+                ),
+                scope="hardcoded",
+            )
+        )
+    logger.warning(
+        "skills_loader: %s=false; using hard-coded SKILL registry (%d skills)",
+        SKILLS_LOADER_ENABLED_ENV,
+        len(registry),
+    )
+    return registry
 
 
 def load_default_scopes(
@@ -331,26 +553,29 @@ def load_default_scopes(
     """Load skills with 3-scope precedence.
 
     Args:
-      project_root: Repository root. ``.claude/skills/`` and
-        ``configs/skills/`` are scanned relative to it.
+      project_root: Repository root. Project and bundled skill roots are
+        scanned relative to it.
       home: Override ``~`` for tests. Defaults to :func:`Path.home`.
       extra_dirs: Optional ``(path, scope_label)`` pairs. Iterated in
         order, treated as the **lowest** priority — useful for embedded
         skill bundles distributed alongside a customer install.
     """
+    if not _skills_loader_enabled():
+        return _load_hard_coded_registry()
+
     registry = SkillRegistry()
 
-    def _add_all(dirs: list[Path], scope: str) -> None:
-        for d in dirs:
+    def _add_all(dirs: list[tuple[Path, int]], scope: str) -> None:
+        for d, provider_rank in dirs:
             for sk in _scan_dir_for_skills(d, scope):
-                registry.add(sk)
+                registry.add(sk, provider_rank=provider_rank)
 
     _add_all(_project_scope_dirs(project_root), "project")
     _add_all(_home_scope_dirs(home), "home")
     _add_all(_bundled_scope_dirs(project_root), "bundled")
     for extra_dir, label in extra_dirs:
         for sk in _scan_dir_for_skills(extra_dir, label):
-            registry.add(sk)
+            registry.add(sk, provider_rank=_DEFAULT_PROVIDER_RANK)
 
     if len(registry) > 0:
         scope_counts: dict[str, int] = {}
@@ -362,6 +587,20 @@ def load_default_scopes(
             ", ".join(f"{k}={v}" for k, v in sorted(scope_counts.items())),
         )
     return registry
+
+
+def watch_project_scopes(
+    project_root: Path,
+    *,
+    home: Path | None = None,
+    extra_dirs: Iterable[tuple[Path, str]] = (),
+) -> ProjectWatchedSkillRegistry:
+    """Return a registry proxy that reloads on project skill file changes."""
+    return ProjectWatchedSkillRegistry(
+        project_root,
+        home=home,
+        extra_dirs=extra_dirs,
+    )
 
 
 # ─── Tool handler ────────────────────────────────────────────────

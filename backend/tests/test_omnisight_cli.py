@@ -4,8 +4,8 @@ The tests substitute a stub :class:`OmniSightClient` via Click's
 context object so no HTTP traffic is generated. Coverage:
 
 * Group-level wiring (``--help``, ``--version``, env-var resolution).
-* Each of the five operator-visible commands (status / workspace list
-  / run / inspect / inject), human + ``--json`` paths.
+* Each operator-visible command group (status / workspace list / skills
+  list / skills resolve / run / inspect / inject), human + ``--json`` paths.
 * Pure formatters and the SSE frame decoder.
 * HTTP failure → user-visible :class:`click.ClickException` message.
 """
@@ -13,6 +13,7 @@ context object so no HTTP traffic is generated. Coverage:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
@@ -130,10 +131,10 @@ class TestCliConfig:
 
 
 class TestGroupPlumbing:
-    def test_help_lists_five_commands(self):
+    def test_help_lists_commands(self):
         result = CliRunner().invoke(cli, ["--help"])
         assert result.exit_code == 0
-        for cmd in ("status", "workspace", "run", "inspect", "inject"):
+        for cmd in ("status", "workspace", "skills", "run", "inspect", "inject"):
             assert cmd in result.output
 
     def test_version_flag(self):
@@ -145,6 +146,128 @@ class TestGroupPlumbing:
         result = CliRunner().invoke(cli, ["workspace", "--help"])
         assert result.exit_code == 0
         assert "list" in result.output
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  skills list / resolve
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _write_skill(path: Path, name: str, description: str, body: str = "body\n") -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        "---\n"
+        f"{body}",
+        encoding="utf-8",
+    )
+
+
+def _skills_obj(project: Path, home: Path) -> dict[str, Any]:
+    return {
+        "config": CliConfig(base_url="http://test", token="t", timeout=5.0),
+        "project_root": project,
+        "skills_home": home,
+    }
+
+
+class TestSkillsCommand:
+    def test_list_prints_effective_source_paths(self, tmp_path: Path):
+        project = tmp_path / "project"
+        home = tmp_path / "home"
+        _write_skill(
+            project / "omnisight" / "agents" / "skills" / "alpha" / "SKILL.md",
+            "alpha",
+            "bundled alpha",
+        )
+        _write_skill(
+            project / ".omnisight" / "skills" / "shared" / "SKILL.md",
+            "shared",
+            "project shared",
+        )
+        _write_skill(
+            project / "configs" / "skills" / "shared" / "SKILL.md",
+            "shared",
+            "bundled shared",
+        )
+        home.mkdir()
+
+        result = CliRunner().invoke(
+            cli, ["skills", "list"], obj=_skills_obj(project, home),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "NAME" in result.output
+        assert "SOURCE_PATH" in result.output
+        assert "alpha" in result.output
+        assert "shared" in result.output
+        assert ".omnisight/skills/shared/SKILL.md" in result.output
+        assert "configs/skills/shared/SKILL.md" not in result.output
+
+    def test_list_json_includes_provider_rank(self, tmp_path: Path):
+        project = tmp_path / "project"
+        home = tmp_path / "home"
+        _write_skill(
+            project / ".claude" / "skills" / "projected" / "SKILL.md",
+            "projected",
+            "project skill",
+        )
+        home.mkdir()
+
+        result = CliRunner().invoke(
+            cli, ["--json", "skills", "list"], obj=_skills_obj(project, home),
+        )
+
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        assert parsed == [
+            {
+                "description": "project skill",
+                "keywords": [],
+                "name": "projected",
+                "provider_rank": 310,
+                "scope": "project",
+                "source_path": str(
+                    project / ".claude" / "skills" / "projected" / "SKILL.md"
+                ),
+            }
+        ]
+
+    def test_resolve_prints_single_effective_source(self, tmp_path: Path):
+        project = tmp_path / "project"
+        home = tmp_path / "home"
+        _write_skill(
+            home / ".omnisight" / "skills" / "shared" / "SKILL.md",
+            "shared",
+            "home shared",
+        )
+        _write_skill(
+            project / "configs" / "skills" / "shared" / "SKILL.md",
+            "shared",
+            "bundled shared",
+        )
+
+        result = CliRunner().invoke(
+            cli, ["skills", "resolve", "shared"], obj=_skills_obj(project, home),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Skill: shared" in result.output
+        assert "Scope: home" in result.output
+        assert "Provider rank: 220" in result.output
+        assert str(home / ".omnisight" / "skills" / "shared" / "SKILL.md") in result.output
+
+    def test_resolve_unknown_skill_is_click_error(self, tmp_path: Path):
+        project = tmp_path / "project"
+        home = tmp_path / "home"
+        home.mkdir()
+        result = CliRunner().invoke(
+            cli, ["skills", "resolve", "missing"], obj=_skills_obj(project, home),
+        )
+        assert result.exit_code != 0
+        assert "missing" in result.output
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -427,13 +427,13 @@ Execute a registered skill (markdown-based capability). Skills come from .claude
 
 ### `SKILL_HD_AUTHENTICITY_VERIFY`  *(deferred)*
 
-[HD.21] Chip authenticity challenge / verification. (placeholder; input_schema fills as phase ships)
+[HD.21] Chip authenticity challenge and verification. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
 ### `SKILL_HD_BLOB_COMPAT`  *(deferred)*
 
-[HD.20] (BSP-version, blob-version) compatibility matrix. (placeholder; input_schema fills as phase ships)
+[HD.20] BSP-version and blob-version compatibility matrix. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
@@ -445,13 +445,13 @@ Execute a registered skill (markdown-based capability). Skills come from .claude
 
 ### `SKILL_HD_BRINGUP_LIVE_PARSE`  *(deferred)*
 
-[HD.19] Live boot console → AI parse blockers. (placeholder; input_schema fills as phase ships)
+[HD.19] Live boot console parse for bring-up blockers. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
 ### `SKILL_HD_CERT_RETEST_PLAN`  *(deferred)*
 
-[HD.10] EMC / safety retest plan generator. (placeholder; input_schema fills as phase ships)
+[HD.10] EMC and safety retest plan generator. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
@@ -463,31 +463,31 @@ Execute a registered skill (markdown-based capability). Skills come from .claude
 
 ### `SKILL_HD_CVE_AUTO_BACKPORT`  *(deferred)*
 
-[HD.18] Vendor patch → customer-overlay backport proposal. (placeholder; input_schema fills as phase ships)
+[HD.18] Vendor patch to customer-overlay backport proposal. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
 ### `SKILL_HD_CVE_IMPACT`  *(deferred)*
 
-[HD.18] CVE feed → SBOM impact analysis. (placeholder; input_schema fills as phase ships)
+[HD.18] CVE feed to SBOM impact analysis. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
 ### `SKILL_HD_DEVKIT_FORK`  *(deferred)*
 
-[HD.19] DevKit reference → customer fork starting point. (placeholder; input_schema fills as phase ships)
+[HD.19] DevKit reference to customer fork starting point. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
 ### `SKILL_HD_DIFF_REFERENCE`  *(deferred)*
 
-[HD.4] Reference vs customer design diff. (placeholder; input_schema fills as phase ships)
+[HD.4] Reference design versus customer design diff. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
 ### `SKILL_HD_FW_SYNC_PATCH`  *(deferred)*
 
-[HD.7] HW change → FW patch list. (placeholder; input_schema fills as phase ships)
+[HD.7] Hardware change to firmware patch list. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
@@ -499,7 +499,7 @@ Execute a registered skill (markdown-based capability). Skills come from .claude
 
 ### `SKILL_HD_ISP_TUNING_DIFF`  *(deferred)*
 
-[HD.20] ISP tuning binary before/after compare. (placeholder; input_schema fills as phase ships)
+[HD.20] ISP tuning binary before and after compare. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
@@ -523,13 +523,13 @@ Execute a registered skill (markdown-based capability). Skills come from .claude
 
 ### `SKILL_HD_OTA_PACKAGE_GEN`  *(deferred)*
 
-[HD.21] OTA bundle generation (SWUpdate / RAUC / A-B). (placeholder; input_schema fills as phase ships)
+[HD.21] OTA bundle generation for SWUpdate, RAUC, or A-B. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
 ### `SKILL_HD_PARSE`  *(deferred)*
 
-[HD.1] Parse an EDA file (KiCad / Altium / OrCAD / etc) into HDIR. (placeholder; input_schema fills as phase ships)
+[HD.1] Parse an EDA file into HDIR. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
@@ -541,13 +541,13 @@ Execute a registered skill (markdown-based capability). Skills come from .claude
 
 ### `SKILL_HD_PLATFORM_RESOLVE`  *(deferred)*
 
-[HD.16] SoC mark → platform spec lookup. (placeholder; input_schema fills as phase ships)
+[HD.16] SoC mark to platform spec lookup. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
 ### `SKILL_HD_PORT_ADVISOR`  *(deferred)*
 
-[HD.19] Cross-SoC port required-changes + effort estimate. (placeholder; input_schema fills as phase ships)
+[HD.19] Cross-SoC port required changes and effort estimate. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 
@@ -565,7 +565,7 @@ Execute a registered skill (markdown-based capability). Skills come from .claude
 
 ### `SKILL_HD_SBOM_GENERATE`  *(deferred)*
 
-[HD.21] SBOM CycloneDX + SPDX generation. (placeholder; input_schema fills as phase ships)
+[HD.21] SBOM generation for CycloneDX and SPDX. (placeholder; input_schema fills as phase ships)
 
 *Input schema TBD (placeholder).*
 

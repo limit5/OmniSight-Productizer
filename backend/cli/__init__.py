@@ -4,6 +4,8 @@ Terminal equivalent of the workspace dashboard + R1 ChatOps surface:
 
 * ``omnisight status``              — system KPI snapshot
 * ``omnisight workspace list``      — active workspace table
+* ``omnisight skills list``         — effective WP.2 skill source table
+* ``omnisight skills resolve NAME`` — show one effective skill source
 * ``omnisight run "NL prompt"``     — drive ``POST /invoke/stream``
 * ``omnisight inspect <agent_id>``  — agent detail + workspace pointer
 * ``omnisight inject <agent_id> "hint"`` — operator hint via ChatOps

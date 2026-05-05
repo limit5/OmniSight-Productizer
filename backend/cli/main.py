@@ -8,10 +8,12 @@ a fake client via ``CliRunner(obj=...)`` without needing the network.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any
 
 import click
 
+from backend.agents import skills_loader
 from backend.cli import formatters
 from backend.cli.client import CliConfig, OmniSightCliError, OmniSightClient
 
@@ -36,6 +38,37 @@ def _emit(ctx: click.Context, payload: Any, text: str) -> None:
         click.echo(formatters.format_json(payload))
     else:
         click.echo(text)
+
+
+def _skills_registry_from_ctx(ctx: click.Context) -> skills_loader.SkillRegistry:
+    """Load the effective WP.2 skill registry for local CLI inspection.
+
+    Module-global state audit: this command keeps no global registry; each
+    invocation derives the effective source from the same filesystem inputs.
+    """
+    obj = ctx.ensure_object(dict)
+    existing = obj.get("skills_registry")
+    if existing is not None:
+        return existing
+    project_root = Path(obj.get("project_root") or Path.cwd())
+    home = obj.get("skills_home")
+    registry = skills_loader.load_default_scopes(
+        project_root,
+        home=Path(home) if home is not None else None,
+    )
+    obj["skills_registry"] = registry
+    return registry
+
+
+def _skill_entry(registry: skills_loader.SkillRegistry, skill: skills_loader.Skill) -> dict[str, Any]:
+    return {
+        "name": skill.name,
+        "description": skill.description,
+        "keywords": list(skill.keywords),
+        "scope": skill.scope,
+        "provider_rank": registry.provider_rank(skill.name),
+        "source_path": str(skill.source_path) if skill.source_path else "",
+    }
 
 
 @click.group(
@@ -102,6 +135,34 @@ def workspace_list_cmd(ctx: click.Context) -> None:
     except OmniSightCliError as exc:
         raise click.ClickException(str(exc))
     _emit(ctx, rows, formatters.format_workspace_list(rows))
+
+
+# ─── skills list / resolve ────────────────────────────────────
+
+
+@cli.group("skills", help="Inspect effective WP.2 skill sources.")
+def skills_group() -> None:
+    pass
+
+
+@skills_group.command("list", help="List effective skills and source paths.")
+@click.pass_context
+def skills_list_cmd(ctx: click.Context) -> None:
+    registry = _skills_registry_from_ctx(ctx)
+    rows = [_skill_entry(registry, skill) for skill in registry.list_all()]
+    _emit(ctx, rows, formatters.format_skills_list(rows))
+
+
+@skills_group.command("resolve", help="Show the effective source for NAME.")
+@click.argument("name")
+@click.pass_context
+def skills_resolve_cmd(ctx: click.Context, name: str) -> None:
+    registry = _skills_registry_from_ctx(ctx)
+    skill = registry.get(name)
+    if skill is None:
+        raise click.ClickException(f"skill {name!r} not found")
+    row = _skill_entry(registry, skill)
+    _emit(ctx, row, formatters.format_skill_resolve(row))
 
 
 # ─── run (NL prompt → /invoke/stream) ─────────────────────────

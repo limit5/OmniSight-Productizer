@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 361
+entry_count: 369
 status_counts:
-  dev-only: 351
+  dev-only: 359
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3392,3 +3392,75 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — BP.C Phase C test gate 已補齊；production 仍需 operator 顯式設定 `OMNISIGHT_TOPOLOGY_MODE=smxl`、重啟服務並完成
     live smoke 後才啟用 S/XL runtime traffic。
+- id: 2026-05-05--WP.2.1
+  header_line: 45790
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.1
+  title: WP.2.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.2.2 需在同名 shadow/衝突時補 WARN log；production 若要啟用新 bundled source，需把內建 skills 實際放入 `omnisight/agents/skills/`
+    或完成從 legacy `configs/skills/` 的遷移。
+- id: 2026-05-05--WP.2.2
+  header_line: 45805
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.2
+  title: WP.2.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.2.3 需補 project scope FS-watch reload；production 若要啟用新 bundled source，仍需把內建 skills 實際放入
+    `omnisight/agents/skills/` 或完成從 legacy `configs/skills/` 的遷移。
+- id: 2026-05-05--WP.2.3
+  header_line: 45821
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.3
+  title: WP.2.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.2.4 需把 watched registry 接到 command palette / chat mention 的 registry surface；production
+    若要使用 project overrides，需在實際 project checkout 放置 `.claude/skills/` 或 `.omnisight/skills/` skill files 並完成 live smoke。
+- id: 2026-05-05--WP.2.4
+  header_line: 45837
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.4
+  title: WP.2.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image / frontend bundle 需重建後 live smoke：開 command palette 搜尋 skill、選取後確認 Orchestrator
+    chat 收到 `@skill-name`。
+- id: 2026-05-05--WP.2.5
+  header_line: 45855
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.5
+  title: WP.2.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image 重建後，以 BP.B/HD task smoke 確認 `to_anthropic_tools(["SKILL_HD_PARSE"])` 仍可取
+    schema，且 bundled skill source path 出現在 `/skills/effective`。
+- id: 2026-05-05--WP.2.6
+  header_line: 45870
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.6
+  title: WP.2.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image / CLI package 重建後，於實際 repo checkout 執行 `omnisight skills list` 與 `omnisight
+    skills resolve SKILL_HD_PARSE` smoke，確認 source path 顯示 canonical bundled skill。
+- id: 2026-05-05--WP.2.7
+  header_line: 45885
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.7
+  title: WP.2.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image / CLI package 重建後，以 `OMNISIGHT_WP_SKILLS_LOADER_ENABLED=false omnisight
+    skills resolve SKILL_HD_PARSE` smoke 確認 rollback path 可用；正式啟用仍維持 env unset/default。
+- id: 2026-05-05--WP.2.8
+  header_line: 45901
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: WP.2.8
+  title: WP.2.8 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image / CLI package 重建後，對實際 checkout 跑 `omnisight skills list`、`omnisight skills
+    resolve SKILL_HD_PARSE`，並手動覆寫一個 project skill smoke watched reload。

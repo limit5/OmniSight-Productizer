@@ -162,6 +162,43 @@ async def test_pending_path_traversal_blocked(client):
 
 
 @pytest.mark.asyncio
+async def test_effective_skills_endpoint_uses_wp2_loader(
+    client,
+    tmp_path: Path,
+    monkeypatch,
+):
+    project = tmp_path / "repo"
+    skill_file = project / ".omnisight" / "skills" / "flash-fw" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(
+        "---\n"
+        "name: flash-fw\n"
+        "description: Flash firmware safely.\n"
+        "keywords: [firmware, evk]\n"
+        "---\n"
+        "Body stays server-side.\n",
+        encoding="utf-8",
+    )
+
+    from backend.routers import skills as _sk_router
+
+    monkeypatch.setattr(_sk_router, "_PROJECT_ROOT", project, raising=False)
+    r = await client.get("/api/v1/skills/effective")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["items"] == [
+        {
+            "name": "flash-fw",
+            "description": "Flash firmware safely.",
+            "keywords": ["firmware", "evk"],
+            "scope": "project",
+            "source_path": str(skill_file),
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_promote_moves_into_live_tree(
     client, isolated_pending_dir, monkeypatch,
 ):
