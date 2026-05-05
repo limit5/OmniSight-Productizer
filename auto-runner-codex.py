@@ -98,6 +98,49 @@ WORKTREE_DIR = os.environ.get(
 )
 
 
+# ── Live repo state probes (governance lesson #3 mitigation, 2026-05-05) ──
+#
+# Codex has shipped 2 alembic regressions in 2 consecutive runs (BP.Q
+# revision label "0186" + WP.7 broken chain `down_revision="0186"`).
+# Root cause: TODO.md drafts often contain stale alembic numbers from
+# when the epic was written months ago. Codex treats those literals as
+# authoritative instead of probing the live filesystem.
+#
+# Mitigation: scan ``backend/alembic/versions/`` at runner startup and
+# inject "current head + next free number + chain rule" into every
+# codex prompt. Codex sees the truth even if TODO.md is stale.
+#
+# Probe runs against BASE_DIR (master/main worktree) not WORK_CWD; for
+# Tier B the codex worktree may have been ahead-of-main mid-epic but
+# alembic head should be derived from main since that's the canonical
+# chain target.
+def _current_alembic_head() -> tuple[str, str] | None:
+    """Return ``(current_head, next_free)`` as 4-digit zero-padded
+    strings, or None if the alembic directory cannot be scanned.
+
+    Scans only filenames matching ``NNNN_*.py`` — does NOT parse
+    ``revision = "..."`` inside files (the file-name convention is
+    enforced by every existing migration in the tree, and parsing
+    contents would mean importing files which has side-effects in
+    some alembic stacks).
+    """
+    versions_dir = Path(BASE_DIR) / "backend" / "alembic" / "versions"
+    if not versions_dir.is_dir():
+        return None
+    nums: list[int] = []
+    for entry in versions_dir.iterdir():
+        name = entry.name
+        if not name.endswith(".py"):
+            continue
+        head = name[:4]
+        if head.isdigit():
+            nums.append(int(head))
+    if not nums:
+        return None
+    current = max(nums)
+    return f"{current:04d}", f"{current + 1:04d}"
+
+
 # ── 可調參數 ──
 TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_CODEX_TIMEOUT_S", "1800"))
 MAX_RETRIES = int(os.environ.get("OMNISIGHT_CODEX_MAX_RETRIES", "2"))
@@ -369,10 +412,36 @@ def run_codex_item(section_title: str, item_line: str, section_context: str) -> 
 
     # codex's prompt mirrors auto-runner.py + adds codex-specific
     # discipline reminders that AGENTS.md spells out in detail.
+
+    # Live-state injection (governance lesson #3, 2026-05-05): probe
+    # alembic head from the filesystem so codex doesn't trust stale
+    # numbers in TODO.md drafts. Probe is best-effort — if the scan
+    # fails (no versions/ dir, etc.), we degrade silently and codex
+    # falls back to its own discovery; that's safer than blocking.
+    alembic_state = _current_alembic_head()
+    live_state_block = ""
+    if alembic_state is not None:
+        current_head, next_free = alembic_state
+        live_state_block = f"""
+
+【🔴 LIVE REPO STATE — auto-injected, takes precedence over TODO.md drafts】
+Current alembic head (scanned from `ls backend/alembic/versions/`): **{current_head}**
+Next free migration number: **{next_free}**
+
+If your task creates a new alembic migration, USE `revision = "{next_free}"`
+with `down_revision = "{current_head}"`. **Ignore any literal alembic
+number written in the TODO.md item description** — those drafts were
+authored months ago and carry stale numbering (e.g. TODO might say
+"alembic 0118" but the live head is {current_head}, so the next free
+number is {next_free}, NOT 0118 and NOT 0186 and NOT whatever TODO says).
+
+If your task does NOT touch alembic, ignore this block.
+"""
+
     prompt = f"""你現在是 OpenAI Codex (codex-cli) 在 OmniSight-Productizer 專案中
 進行「全自動化無人值守」開發。**這個專案有兩個 LLM 並行協作**：你（Codex）跟
 Claude (Opus)。協作規則在 {COORDINATION_FILE}，你的特定規則在 {AGENTS_FILE}。
-
+{live_state_block}
 **你只需要完成以下【單一項目】，不要做其他項目：**
 
 ➤ {item_line}
