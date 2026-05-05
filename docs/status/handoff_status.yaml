@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 485
+entry_count: 486
 status_counts:
-  dev-only: 475
+  dev-only: 476
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4518,3 +4518,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.9.3-WP.9.5 接上 router/ACL/expiry/redaction enforcement 後，operator rebuild production backend
     image 並跑 share permalink live smoke。
+- id: 2026-05-06--WP.9.3
+  header_line: 47572
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.9.3
+  title: WP.9.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.9.4 expiry cleanup 與 WP.9.5 redaction enforcement 接上後，operator rebuild production backend
+    image 並跑 share permalink ACL smoke。

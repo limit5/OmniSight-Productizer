@@ -34,18 +34,34 @@ _SHARE_SLUG_RE = re.compile(SHARE_SLUG_PATTERN)
 OBJECT_KIND_PATTERN = r"^[a-z][a-z0-9_.-]{0,63}$"
 _OBJECT_KIND_RE = re.compile(OBJECT_KIND_PATTERN)
 
+SHARE_VISIBILITIES = ("private", "team", "tenant", "public")
+_SHARE_VISIBILITIES_SET = frozenset(SHARE_VISIBILITIES)
+
+# ``team`` is the tenant's working set (owner/admin/member). ``tenant``
+# additionally includes viewer, matching the existing tenant membership
+# enum while still keeping the two share tiers distinct.
+_TEAM_VISIBILITY_MEMBERSHIP_ROLES = frozenset({"owner", "admin", "member"})
+_TENANT_VISIBILITY_MEMBERSHIP_ROLES = frozenset(
+    {"owner", "admin", "member", "viewer"}
+)
+
 
 _INSERT_SHAREABLE_OBJECT_SQL = """
 INSERT INTO shareable_objects (
     share_id, object_kind, object_id, tenant_id, owner_user_id,
-    redaction_applied
+    visibility, redaction_applied
 ) VALUES (
-    $1, $2, $3, $4, $5, $6::jsonb
+    $1, $2, $3, $4, $5, $6, $7::jsonb
 )
 ON CONFLICT (share_id) DO NOTHING
 RETURNING share_id, object_kind, object_id, tenant_id, owner_user_id,
           visibility, expires_at, redaction_applied, created_at
 """
+
+_FETCH_USER_TENANT_MEMBERSHIP_SQL = (
+    "SELECT role, status FROM user_tenant_memberships "
+    "WHERE user_id = $1 AND tenant_id = $2"
+)
 
 
 class ShareSlugCollisionError(RuntimeError):
@@ -104,6 +120,19 @@ def _validate_object_kind(object_kind: str) -> None:
         )
 
 
+def validate_visibility(visibility: str) -> None:
+    if visibility not in _SHARE_VISIBILITIES_SET:
+        raise ValueError(
+            "visibility must be one of private, team, tenant, public",
+        )
+
+
+def _share_field(share: ShareableObject | Mapping[str, Any], key: str) -> Any:
+    if isinstance(share, ShareableObject):
+        return getattr(share, key)
+    return share[key]
+
+
 def _row_to_shareable_object(row) -> ShareableObject:
     return ShareableObject(
         share_id=row["share_id"],
@@ -125,17 +154,20 @@ async def create_shareable_object(
     object_id: str,
     tenant_id: str,
     owner_user_id: str,
+    visibility: str = "private",
     redaction_applied: Mapping[str, Any] | None = None,
     max_attempts: int = SHARE_SLUG_MAX_ATTEMPTS,
 ) -> ShareableObject:
-    """Insert a private share row with a collision-checked permalink slug.
+    """Insert a share row with a collision-checked permalink slug.
 
-    The helper deliberately leaves ACL level, expiry, and redaction policy
-    decisions to WP.9.3-WP.9.5.  It only mints a non-guessable slug and
-    lets the database primary key atomically accept or reject it.
+    The helper accepts only the four WP.9 ACL tiers; expiry and redaction
+    policy decisions remain owned by WP.9.4-WP.9.5.  It mints a
+    non-guessable slug and lets the database primary key atomically accept
+    or reject it.
     """
 
     _validate_object_kind(object_kind)
+    validate_visibility(visibility)
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
 
@@ -153,6 +185,7 @@ async def create_shareable_object(
             object_id,
             tenant_id,
             owner_user_id,
+            visibility,
             redaction_json,
         )
         if row is not None:
@@ -161,3 +194,50 @@ async def create_shareable_object(
     raise ShareSlugCollisionError(
         "share_id collision retry budget exhausted; retry the request",
     )
+
+
+async def user_can_access_shareable_object(
+    conn,
+    share: ShareableObject | Mapping[str, Any],
+    *,
+    caller_user_id: str | None,
+    caller_role: str = "",
+) -> bool:
+    """Return whether the caller may read a share row.
+
+    ACL source of truth mirrors the tenant-project visibility helpers:
+    ``users.tenant_id`` is not trusted for access; non-public tiers read
+    the active ``user_tenant_memberships`` row from PG.  The four levels
+    are:
+
+    * ``private`` -- owner only, plus platform super-admin.
+    * ``team`` -- owner, super-admin, or active owner/admin/member.
+    * ``tenant`` -- owner, super-admin, or any active tenant member.
+    * ``public`` -- anyone with the permalink slug.
+    """
+
+    visibility = _share_field(share, "visibility")
+    validate_visibility(visibility)
+    if visibility == "public":
+        return True
+
+    if caller_role == "super_admin":
+        return True
+    if not caller_user_id:
+        return False
+    if caller_user_id == _share_field(share, "owner_user_id"):
+        return True
+    if visibility == "private":
+        return False
+
+    row = await conn.fetchrow(
+        _FETCH_USER_TENANT_MEMBERSHIP_SQL,
+        caller_user_id,
+        _share_field(share, "tenant_id"),
+    )
+    if row is None or row["status"] != "active":
+        return False
+
+    if visibility == "team":
+        return row["role"] in _TEAM_VISIBILITY_MEMBERSHIP_ROLES
+    return row["role"] in _TENANT_VISIBILITY_MEMBERSHIP_ROLES
