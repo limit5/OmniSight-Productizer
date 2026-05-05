@@ -127,6 +127,24 @@ On **every KS KMS control review** (R46):
 4. Follow `ks_cross_cutting_evidence.md` and `cmek_siem_ingest.md` for
    the R46 mitigation evidence boundary.
 
+On **every incident response tabletop drill or real security incident**
+(KS.4.6):
+
+1. Store the timeline, responder roster, redacted command transcript,
+   customer notification decision, evidence inventory, and corrective
+   action tracker in the private security evidence vault; do not commit
+   raw logs, customer data, secrets, exploit payloads, screenshots, or
+   full incident artefacts.
+2. Compute SHA-256 fingerprints for the evidence bundle and postmortem
+   packet when one exists.
+3. Append one row to the "Incident Response Drills" table after each
+   tabletop drill or real incident closure. Use `Disposition = passed`
+   only when the 24-hour SOP was exercised, evidence handling was clean,
+   and corrective actions have owners.
+4. Follow `../security/incident-response-runbook.md` for severity,
+   role assignment, containment, rotation, notification, forensics, and
+   blameless postmortem requirements.
+
 On **every WP.3 diff-validation cascade match**:
 
 1. Append one row to the "Diff Validation Confidence" table with the
@@ -245,6 +263,18 @@ KS KMS control review rows are append-only. Do not store raw CloudTrail,
 Cloud Audit Logs, Vault audit payloads, principals, customer data,
 secrets, plaintext DEKs, or wrapped DEK material in this ledger. Use
 `correction -> <quarter/provider-scope/evidence-sha256>` in Notes to
+correct a prior row.
+
+## Incident Response Drills
+
+| Completed (UTC) | Scenario / Incident ID | Severity | Evidence SHA-256 | Postmortem SHA-256 | Corrective actions | Disposition | Notes |
+|---|---|---|---|---|---|---|---|
+| _Q2 2026 tabletop target_ | _pending_ | _SEV-2 exercise_ | _pending_ | _pending_ | _pending_ | _pending_ | _KS.4.6 runbook ship effective 2026-05-06; first passed tabletop required before marking deployed-active_ |
+
+Incident response drill rows are append-only. Do not store raw incident
+artefacts, customer data, secrets, exploit payloads, screenshots, or full
+log exports in this ledger. Use
+`correction -> <scenario-or-incident-id/evidence-sha256>` in Notes to
 correct a prior row.
 
 ## Diff Validation Confidence

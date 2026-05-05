@@ -53,7 +53,9 @@ The drift guard is `backend/tests/test_ks46_incident_response_runbook.py`.
 Production readiness is operational: the runbook becomes active when the
 on-call roster has incident commander, engineering, forensics,
 communications, and scribe coverage, and the private security evidence
-vault is reachable during a tabletop drill.
+vault is reachable during a tabletop drill. Tabletop and real incident
+closure evidence is tracked in the N10 `Incident Response Drills` table
+in [`docs/ops/upgrade_rollback_ledger.md`](upgrade_rollback_ledger.md).
 
 ## 4. External pentest gate
 

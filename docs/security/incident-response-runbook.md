@@ -12,6 +12,32 @@ stop the exposure, rotate affected credentials, notify impacted
 customers when required, preserve evidence, and close with a blameless
 postmortem.
 
+## 0. Ship contract
+
+This runbook is shipped when all of these repository and operational
+links exist:
+
+1. The canonical runbook lives at
+   `docs/security/incident-response-runbook.md`.
+2. `backend/tests/test_ks46_incident_response_runbook.py` pins the
+   first 24-hour SOP, roles, containment, rotation, notification,
+   forensics, evidence handling, and postmortem coverage.
+3. `docs/ops/ks_cross_cutting_evidence.md` links this runbook as the
+   KS cross-cutting incident response evidence source.
+4. `docs/ops/upgrade_rollback_ledger.md` has an `Incident Response
+   Drills` append-only table for tabletop drills and real incidents.
+
+Operational activation is separate from repository ship. On-call must
+confirm the current rotation has incident commander, engineering,
+forensics, communications, and scribe coverage; the private security
+evidence vault must be reachable; and one tabletop drill must exercise
+this 24-hour SOP before marking the runbook `deployed-active`.
+
+Record only drill / incident metadata, evidence bundle fingerprints,
+ticket links, and corrective-action trackers in the N10 ledger. Do not
+commit raw incident artefacts, customer data, secrets, exploit payloads,
+screenshots, or full log exports.
+
 ## 1. Severity and roles
 
 Declare an incident when any signal suggests active exploitation,
@@ -214,4 +240,6 @@ Corrective actions need owners, due dates, and verification criteria.
 This SOP does not deploy runtime code. Production readiness is
 operational: the runbook is active when on-call responders can access it,
 the private evidence vault exists, and incident commander / security /
-engineering / communications roles are assigned for the current rotation.
+engineering / communications roles are assigned for the current rotation,
+with at least one tabletop drill or real incident row recorded in the N10
+`Incident Response Drills` table.

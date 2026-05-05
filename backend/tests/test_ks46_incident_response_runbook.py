@@ -13,6 +13,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK = PROJECT_ROOT / "docs" / "security" / "incident-response-runbook.md"
+EVIDENCE = PROJECT_ROOT / "docs" / "ops" / "ks_cross_cutting_evidence.md"
+LEDGER = PROJECT_ROOT / "docs" / "ops" / "upgrade_rollback_ledger.md"
 
 
 def _read(path: Path) -> str:
@@ -37,6 +39,34 @@ def test_incident_response_runbook_covers_first_24_hour_sop() -> None:
     ]
     missing = [phrase for phrase in required if phrase not in body]
     assert not missing, f"incident-response-runbook.md missing timeline: {missing}"
+
+
+def test_incident_response_runbook_defines_ship_contract() -> None:
+    body = _read(RUNBOOK)
+    ledger = _read(LEDGER)
+    ledger_normalized = " ".join(ledger.split())
+    evidence = _read(EVIDENCE)
+
+    for phrase in [
+        "## 0. Ship contract",
+        "backend/tests/test_ks46_incident_response_runbook.py",
+        "docs/ops/ks_cross_cutting_evidence.md",
+        "Incident Response Drills",
+        "deployed-active",
+        "tabletop drill",
+    ]:
+        assert phrase in body
+
+    for phrase in [
+        "## Incident Response Drills",
+        "Evidence SHA-256",
+        "Postmortem SHA-256",
+        "Disposition = passed",
+    ]:
+        assert phrase in ledger
+
+    assert "raw incident artefacts" in ledger_normalized
+    assert "Incident Response Drills" in evidence
 
 
 def test_incident_response_runbook_defines_roles_and_severity() -> None:
