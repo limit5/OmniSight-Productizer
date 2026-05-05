@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 469
+entry_count: 470
 status_counts:
-  dev-only: 459
+  dev-only: 460
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4366,3 +4366,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-active — 合併後在 staging/production Tier 2 sandbox tenant 以真實 AWS/GCP/Vault key disable 跑 live revoke smoke，確認
     60 秒內 `/cmek/status` 顯示 revoked 且所有 CMEK-protected routes 回 graceful 403；觀察 24h 無 false positive 後再翻 deployed-observed。
+- id: 2026-05-06--ks-dod-phase2-reencrypt
+  header_line: 47390
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: KS.DOD.Phase2.reencrypt 完工
+  production_status: dev-only
+  next_gate: deployed-active — 合併後在 staging/production Tier 2 sandbox tenant 以真實 AWS/GCP/Vault CMK 跑 tier-upgrade → decrypt
+    smoke → tier-downgrade → decrypt smoke；確認 replacement refs persist 到 durable tier assignment path 後，再撤回 customer IAM dependency。

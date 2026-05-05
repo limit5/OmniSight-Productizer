@@ -497,6 +497,89 @@ def test_tier_upgrade_and_downgrade_rewrap_without_changing_tenant_ciphertext():
 
 
 @pytest.mark.asyncio
+async def test_tier_upgrade_and_downgrade_http_reencrypt_round_trip(monkeypatch):
+    """Pin the mounted tier transition routes to real DEK rewrap semantics."""
+
+    from backend import auth as _auth
+    from backend import bootstrap as _boot
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green_bootstrap():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    cmk = _FakeTenantCMK()
+
+    def _fake_target_adapter(_provider, *, key_id):
+        assert key_id == AWS_KEY_ID
+        return cmk
+
+    ciphertext, tier1_ref = envelope.encrypt("http enterprise secret", TENANT)
+    monkeypatch.setattr(cmek_upgrade, "build_target_adapter", _fake_target_adapter)
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green_bootstrap)
+    _boot._gate_cache_reset()
+    app.dependency_overrides[_auth.current_user] = lambda: _actor()
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            upgrade = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/tier-upgrade",
+                json={
+                    "provider": "aws-kms",
+                    "key_id": AWS_KEY_ID,
+                    "dek_refs": [tier1_ref.to_dict()],
+                },
+            )
+            upgrade_body = upgrade.json()
+            assert upgrade.status_code == 200
+            assert upgrade_body["status"] == "completed"
+            assert upgrade_body["from_security_tier"] == "tier-1"
+            assert upgrade_body["to_security_tier"] == "tier-2"
+            tier2_ref = envelope.TenantDEKRef.from_dict(
+                upgrade_body["items"][0]["replacement_dek_ref"]
+            )
+            assert tier2_ref.provider == "aws-kms"
+            assert (
+                envelope.decrypt(ciphertext, tier2_ref, kms_adapter=cmk)
+                == "http enterprise secret"
+            )
+
+            downgrade = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/tier-downgrade",
+                json={
+                    "provider": "aws-kms",
+                    "key_id": AWS_KEY_ID,
+                    "dek_refs": [tier2_ref.to_dict()],
+                },
+            )
+            downgrade_body = downgrade.json()
+            assert downgrade.status_code == 200
+            assert downgrade_body["status"] == "completed"
+            assert downgrade_body["from_security_tier"] == "tier-2"
+            assert downgrade_body["to_security_tier"] == "tier-1"
+            assert downgrade_body["customer_iam_dependency"] == (
+                "required-until-downgrade-persisted"
+            )
+            tier1_restored_ref = envelope.TenantDEKRef.from_dict(
+                downgrade_body["items"][0]["replacement_dek_ref"]
+            )
+            assert tier1_restored_ref.provider == "local-fernet"
+            assert tier1_restored_ref.dek_id == tier1_ref.dek_id
+            assert (
+                envelope.decrypt(ciphertext, tier1_restored_ref)
+                == "http enterprise secret"
+            )
+    finally:
+        app.dependency_overrides.pop(_auth.current_user, None)
+        _boot._gate_cache_reset()
+
+
+@pytest.mark.asyncio
 async def test_tier1_customer_has_zero_behavior_change_under_cmek_phase2_events():
     from backend.routers import cmek_wizard
 
