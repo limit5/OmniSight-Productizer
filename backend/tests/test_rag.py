@@ -105,6 +105,14 @@ class TestPgvectorStore:
         await store.upsert([_doc()])
 
         sql, rows = conn.executemany_calls[0]
+        assert conn.execute_calls[0] == (
+            "SELECT set_config($1, $2, false)",
+            (rag.PGVECTOR_TENANT_SETTING, "t-acme"),
+        )
+        assert conn.execute_calls[-1] == (
+            "SELECT set_config($1, '', false)",
+            (rag.PGVECTOR_TENANT_SETTING,),
+        )
         assert "INSERT INTO embedding_chunks" in sql
         assert rows[0][0:5] == (
             "c-1",
@@ -114,6 +122,20 @@ class TestPgvectorStore:
             "[0.1,0.2,0.3]",
         )
         assert '"line_start": 10' in rows[0][5]
+
+    @pytest.mark.asyncio
+    async def test_upsert_rejects_cross_tenant_batch_before_pg_write(self):
+        conn = _FakeConn()
+        store = rag.PgvectorStore(conn)
+
+        with pytest.raises(ValueError, match="exactly one tenant"):
+            await store.upsert([
+                _doc(chunk_id="c-a", tenant_id="t-acme"),
+                _doc(chunk_id="c-b", tenant_id="t-beta"),
+            ])
+
+        assert conn.execute_calls == []
+        assert conn.executemany_calls == []
 
     @pytest.mark.asyncio
     async def test_query_always_filters_by_tenant(self):
@@ -140,6 +162,14 @@ class TestPgvectorStore:
         )
 
         sql, values = conn.fetch_calls[0]
+        assert conn.execute_calls[0] == (
+            "SELECT set_config($1, $2, false)",
+            (rag.PGVECTOR_TENANT_SETTING, "t-acme"),
+        )
+        assert conn.execute_calls[-1] == (
+            "SELECT set_config($1, '', false)",
+            (rag.PGVECTOR_TENANT_SETTING,),
+        )
         assert "tenant_id = $1" in sql
         assert "metadata @>" in sql
         assert values[0] == "t-acme"
@@ -153,6 +183,18 @@ class TestPgvectorStore:
             await store.delete(tenant_id="t-acme")
 
         assert await store.delete(tenant_id="t-acme", chunk_ids=["c-1"]) == 2
+        conn = store._db
+        assert conn.execute_calls[0] == (
+            "SELECT set_config($1, $2, false)",
+            (rag.PGVECTOR_TENANT_SETTING, "t-acme"),
+        )
+        assert "DELETE FROM embedding_chunks WHERE tenant_id = $1" in (
+            conn.execute_calls[1][0]
+        )
+        assert conn.execute_calls[-1] == (
+            "SELECT set_config($1, '', false)",
+            (rag.PGVECTOR_TENANT_SETTING,),
+        )
 
     @pytest.mark.asyncio
     async def test_list_by_tenant_returns_documents(self):
@@ -172,9 +214,41 @@ class TestPgvectorStore:
         docs = await store.list_by_tenant("t-acme", source_path="docs/guide.md")
 
         sql, values = conn.fetch_calls[0]
+        assert conn.execute_calls[0] == (
+            "SELECT set_config($1, $2, false)",
+            (rag.PGVECTOR_TENANT_SETTING, "t-acme"),
+        )
+        assert conn.execute_calls[-1] == (
+            "SELECT set_config($1, '', false)",
+            (rag.PGVECTOR_TENANT_SETTING,),
+        )
         assert "tenant_id = $1" in sql
         assert values[:2] == ("t-acme", "docs/guide.md")
         assert docs[0].chunk_id == "c-1"
+
+    @pytest.mark.asyncio
+    async def test_pg_tenant_scope_resets_after_query_error(self):
+        class FailingConn(_FakeConn):
+            async def fetch(self, sql: str, *values: Any) -> list[dict[str, Any]]:
+                self.fetch_calls.append((sql, values))
+                raise RuntimeError("boom")
+
+        conn = FailingConn()
+        store = rag.PgvectorStore(conn)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await store.query(rag.VectorQuery(tenant_id="t-acme", embedding=[1.0]))
+
+        assert conn.execute_calls == [
+            (
+                "SELECT set_config($1, $2, false)",
+                (rag.PGVECTOR_TENANT_SETTING, "t-acme"),
+            ),
+            (
+                "SELECT set_config($1, '', false)",
+                (rag.PGVECTOR_TENANT_SETTING,),
+            ),
+        ]
 
 
 class TestQdrantStore:
@@ -344,4 +418,3 @@ class TestEmbeddingAdapters:
         vectors = await embedder.embed_texts(["aa", "bbbb"])
 
         assert vectors == [[2.0], [4.0]]
-

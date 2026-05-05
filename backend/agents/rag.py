@@ -3,9 +3,15 @@
 This module mirrors the hosted-search adapter shape in ``backend.search``:
 small provider-neutral dataclasses, Protocol/ABC contracts, and provider
 adapters that lazy-touch external systems only when called. BP.Q.4 owns the
-``embedding_chunks`` migration/RLS policy; this file keeps the runtime
-contract tenant-scoped so later handlers cannot query across tenants by
-accident.
+``embedding_chunks`` migration/RLS policy; BP.Q.6 sets the per-operation
+PG tenant setting and keeps explicit query-time tenant filters so later
+handlers cannot query across tenants by accident.
+
+KS.1 review note: embeddings are not envelope-encrypted in this layer.
+The retrievable ``chunk_text`` is the sensitive payload; embeddings remain
+non-reversible index vectors and are protected by tenant FK + RLS + explicit
+tenant filters. If KS later encrypts chunk text at rest, embeddings should be
+regenerated inside the tenant scope rather than decrypted from vector storage.
 
 Module-global state audit (per implement_phase_step.md SOP §1)
 --------------------------------------------------------------
@@ -27,6 +33,7 @@ import httpx
 
 
 DEFAULT_PGVECTOR_TABLE = "embedding_chunks"
+PGVECTOR_TENANT_SETTING = "omnisight.tenant_id"
 DEFAULT_QDRANT_API_BASE = "http://localhost:6333"
 DEFAULT_CHROMA_API_BASE = "http://localhost:8000"
 
@@ -351,6 +358,7 @@ class PgvectorStore:
     async def upsert(self, documents: list[VectorDocument]) -> None:
         if not documents:
             raise ValueError("at least one document is required")
+        tenant_id = _single_tenant_id(documents)
         sql = f"""
             INSERT INTO {self._table}
                 (chunk_id, tenant_id, source_path, chunk_text, embedding, metadata)
@@ -374,7 +382,8 @@ class PgvectorStore:
             for doc in documents
         ]
         async with _acquire(self._db) as conn:
-            await conn.executemany(sql, rows)
+            async with _pg_tenant_scope(conn, tenant_id):
+                await conn.executemany(sql, rows)
 
     async def query(self, query: VectorQuery) -> list[VectorHit]:
         clauses = ["tenant_id = $1"]
@@ -396,7 +405,8 @@ class PgvectorStore:
             LIMIT ${len(values)}
         """
         async with _acquire(self._db) as conn:
-            rows = await conn.fetch(sql, *values)
+            async with _pg_tenant_scope(conn, query.tenant_id):
+                rows = await conn.fetch(sql, *values)
         return [_hit_from_pg_row(row) for row in rows]
 
     async def delete(
@@ -420,7 +430,8 @@ class PgvectorStore:
             clauses.append(f"source_path = ${len(values)}")
         sql = f"DELETE FROM {self._table} WHERE {' AND '.join(clauses)}"
         async with _acquire(self._db) as conn:
-            status = await conn.execute(sql, *values)
+            async with _pg_tenant_scope(conn, tenant_id):
+                status = await conn.execute(sql, *values)
         return _rows_from_status(status)
 
     async def list_by_tenant(
@@ -450,7 +461,8 @@ class PgvectorStore:
             LIMIT ${len(values) - 1} OFFSET ${len(values)}
         """
         async with _acquire(self._db) as conn:
-            rows = await conn.fetch(sql, *values)
+            async with _pg_tenant_scope(conn, tenant_id):
+                rows = await conn.fetch(sql, *values)
         return [_document_from_pg_row(row) for row in rows]
 
 
@@ -693,6 +705,13 @@ def _required(name: str, value: str) -> str:
     return clean
 
 
+def _single_tenant_id(documents: list[VectorDocument]) -> str:
+    tenant_ids = {doc.tenant_id for doc in documents}
+    if len(tenant_ids) != 1:
+        raise ValueError("documents must belong to exactly one tenant")
+    return next(iter(tenant_ids))
+
+
 def _safe_identifier(value: str) -> str:
     clean = value.strip()
     if not clean or not all(ch.isalnum() or ch == "_" for ch in clean):
@@ -732,6 +751,29 @@ class _ConnectionContext:
 
 def _acquire(db: Any) -> _ConnectionContext:
     return _ConnectionContext(db)
+
+
+class _PgTenantScope:
+    def __init__(self, conn: Any, tenant_id: str):
+        self._conn = conn
+        self._tenant_id = tenant_id
+
+    async def __aenter__(self) -> None:
+        await self._conn.execute(
+            "SELECT set_config($1, $2, false)",
+            PGVECTOR_TENANT_SETTING,
+            self._tenant_id,
+        )
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        await self._conn.execute(
+            "SELECT set_config($1, '', false)",
+            PGVECTOR_TENANT_SETTING,
+        )
+
+
+def _pg_tenant_scope(conn: Any, tenant_id: str) -> _PgTenantScope:
+    return _PgTenantScope(conn, _required("tenant_id", tenant_id))
 
 
 async def _post_json(
@@ -937,6 +979,7 @@ __all__ = [
     "GoogleEmbedding",
     "LocalSentenceTransformerEmbedding",
     "OpenAIEmbedding",
+    "PGVECTOR_TENANT_SETTING",
     "PgvectorStore",
     "QdrantStore",
     "RagError",

@@ -50,6 +50,31 @@ def test_pg_branch_uses_pgvector_jsonb_and_hnsw_index() -> None:
     )
 
 
+def test_pg_branch_enforces_tenant_rls_policy() -> None:
+    m0186 = _load_module(MIGRATION_0186, "_alembic_test_0186_rls")
+
+    assert m0186._PG_ENABLE_RLS == (
+        "ALTER TABLE embedding_chunks ENABLE ROW LEVEL SECURITY"
+    )
+    assert m0186._PG_FORCE_RLS == (
+        "ALTER TABLE embedding_chunks FORCE ROW LEVEL SECURITY"
+    )
+    assert "embedding_chunks_tenant_isolation" in m0186._PG_CREATE_TENANT_POLICY
+    assert "current_setting('omnisight.tenant_id', true)" in (
+        m0186._PG_CREATE_TENANT_POLICY
+    )
+    assert "USING (tenant_id =" in m0186._PG_CREATE_TENANT_POLICY
+    assert "WITH CHECK (tenant_id =" in m0186._PG_CREATE_TENANT_POLICY
+
+
+def test_ks_review_note_keeps_embeddings_out_of_envelope_scope() -> None:
+    source = MIGRATION_0186.read_text()
+
+    assert "KS.1 review note" in source
+    assert "does not envelope-encrypt raw embeddings" in source
+    assert "Chunk text remains the sensitive retrieval payload" in source
+
+
 def test_sqlite_upgrade_creates_dev_parity_table_and_index() -> None:
     m0186 = _load_module(MIGRATION_0186, "_alembic_test_0186_sqlite")
     conn = sqlite3.connect(":memory:")

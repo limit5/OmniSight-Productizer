@@ -46,6 +46,16 @@ Production readiness gate
   the same table shape with pgvector/JSONB downgraded to TEXT so fresh
   dev SQLite DBs and the migrator drift guard see the table before
   runtime code starts writing.
+* BP.Q.6 tenant isolation: PG enables and forces RLS on
+  ``embedding_chunks``.  Runtime code must set
+  ``omnisight.tenant_id`` for each tenant-scoped operation; missing
+  settings deny reads/writes and the app-level query path still keeps
+  an explicit ``tenant_id = $N`` filter.
+* KS.1 review note: BP.Q.6 does not envelope-encrypt raw embeddings.
+  Chunk text remains the sensitive retrieval payload and is isolated by
+  tenant FK + RLS + query-time filters; if KS later encrypts chunk text
+  at rest, embeddings should be regenerated from decrypted plaintext
+  inside the tenant scope rather than stored as reversible secrets.
 * Production status of THIS commit: **dev-only**.  Next gate:
   ``deployed-inactive`` once the alembic chain (0192 -> 0186) is run
   against prod PG with pgvector available.
@@ -101,6 +111,21 @@ _PG_INDEX_EMBEDDING_HNSW = (
     "ON embedding_chunks USING hnsw (embedding vector_cosine_ops)"
 )
 
+_PG_ENABLE_RLS = (
+    "ALTER TABLE embedding_chunks ENABLE ROW LEVEL SECURITY"
+)
+
+_PG_FORCE_RLS = (
+    "ALTER TABLE embedding_chunks FORCE ROW LEVEL SECURITY"
+)
+
+_PG_CREATE_TENANT_POLICY = (
+    "CREATE POLICY embedding_chunks_tenant_isolation "
+    "ON embedding_chunks "
+    "USING (tenant_id = current_setting('omnisight.tenant_id', true)) "
+    "WITH CHECK (tenant_id = current_setting('omnisight.tenant_id', true))"
+)
+
 
 def upgrade() -> None:
     conn = op.get_bind()
@@ -109,6 +134,13 @@ def upgrade() -> None:
         conn.exec_driver_sql(_PG_CREATE_TABLE)
         conn.exec_driver_sql(_INDEX_TENANT_SOURCE)
         conn.exec_driver_sql(_PG_INDEX_EMBEDDING_HNSW)
+        conn.exec_driver_sql(_PG_ENABLE_RLS)
+        conn.exec_driver_sql(_PG_FORCE_RLS)
+        conn.exec_driver_sql(
+            "DROP POLICY IF EXISTS embedding_chunks_tenant_isolation "
+            "ON embedding_chunks"
+        )
+        conn.exec_driver_sql(_PG_CREATE_TENANT_POLICY)
     else:
         conn.exec_driver_sql(_SQLITE_CREATE_TABLE)
         conn.exec_driver_sql(_INDEX_TENANT_SOURCE)
@@ -117,6 +149,13 @@ def upgrade() -> None:
 def downgrade() -> None:
     conn = op.get_bind()
     if conn.dialect.name == "postgresql":
+        conn.exec_driver_sql(
+            "DROP POLICY IF EXISTS embedding_chunks_tenant_isolation "
+            "ON embedding_chunks"
+        )
+        conn.exec_driver_sql(
+            "ALTER TABLE embedding_chunks DISABLE ROW LEVEL SECURITY"
+        )
         conn.exec_driver_sql("DROP INDEX IF EXISTS idx_embedding_chunks_embedding_hnsw")
     conn.exec_driver_sql("DROP INDEX IF EXISTS idx_embedding_chunks_tenant_source")
     op.execute("DROP TABLE IF EXISTS embedding_chunks")
