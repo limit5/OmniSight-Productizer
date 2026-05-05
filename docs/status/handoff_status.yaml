@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 425
+entry_count: 426
 status_counts:
-  dev-only: 415
+  dev-only: 416
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3968,3 +3968,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production image rebuild 後，以 API key scopes `a2a:discover:*` / `a2a:invoke:*` 做 discovery
     + sync invoke + SSE invoke smoke，並查 `audit_log` 只有 hash metadata、無 payload 明文。
+- id: 2026-05-06--bp-a2a-4
+  header_line: 46769
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: BP.A2A.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production 跑 alembic 0195→0196 後，BP.A2A runtime writer 接入此 table，並以 sync/SSE invoke smoke
+    確認只寫 hash metadata、無 payload 明文。

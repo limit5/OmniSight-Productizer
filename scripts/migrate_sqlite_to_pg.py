@@ -120,6 +120,12 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # ``block_id`` and JSON payload columns are TEXT in SQLite / JSONB in
     # PG, so NOT in TABLES_WITH_IDENTITY_ID.
     "blocks",
+    # BP.A2A.4 (alembic 0196): tenant-scoped inbound A2A invocation
+    # audit/replay rows. FK ``tenant_id -> tenants.id`` (CASCADE) so it
+    # MUST replay after tenants. PK is app-generated TEXT
+    # ``invocation_id`` and payload/response bodies are absent; only
+    # hashes are replayed. NOT in TABLES_WITH_IDENTITY_ID.
+    "a2a_invocations",
     # BP.Q.4 (alembic 0186): tenant-scoped RAG embedding chunks. FK
     # ``tenant_id -> tenants.id`` (CASCADE) so it MUST replay after
     # tenants. PK is app-generated TEXT ``chunk_id``; embedding and

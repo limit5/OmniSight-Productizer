@@ -175,6 +175,7 @@ def test_identity_subset_only_contains_integer_pk_tables():
     a TEXT id."""
     non_integer_pks = {
         "adaptive_budget_state",
+        "a2a_invocations",
         "auto_distilled_skills",
         "blocks",
         "cmek_configs",

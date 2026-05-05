@@ -611,6 +611,27 @@ CREATE INDEX IF NOT EXISTS idx_blocks_tenant_session
 CREATE INDEX IF NOT EXISTS idx_blocks_parent
     ON blocks(parent_id);
 
+-- BP.A2A.4 (alembic 0196): inbound A2A invocation audit/replay index.
+-- Stores only caller identity and payload/response hashes; request and
+-- response plaintext remain outside this table.
+CREATE TABLE IF NOT EXISTS a2a_invocations (
+    invocation_id   TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL
+                          REFERENCES tenants(id) ON DELETE CASCADE,
+    agent_name      TEXT NOT NULL,
+    caller_identity TEXT NOT NULL,
+    payload_hash    TEXT NOT NULL,
+    response_hash   TEXT NOT NULL,
+    latency_ms      INTEGER NOT NULL CHECK (latency_ms >= 0),
+    status          TEXT NOT NULL
+                          CHECK (status IN ('completed','failed')),
+    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_a2a_invocations_tenant_agent_time
+    ON a2a_invocations(tenant_id, agent_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_a2a_invocations_payload_hash
+    ON a2a_invocations(payload_hash);
+
 CREATE TABLE IF NOT EXISTS agents (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
