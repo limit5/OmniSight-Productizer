@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 470
+entry_count: 471
 status_counts:
-  dev-only: 460
+  dev-only: 461
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4375,3 +4375,13 @@ entries:
   production_status: dev-only
   next_gate: deployed-active — 合併後在 staging/production Tier 2 sandbox tenant 以真實 AWS/GCP/Vault CMK 跑 tier-upgrade → decrypt
     smoke → tier-downgrade → decrypt smoke；確認 replacement refs persist 到 durable tier assignment path 後，再撤回 customer IAM dependency。
+- id: 2026-05-06--ks-dod-phase3
+  header_line: 47401
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: KS.DOD.Phase3 完工
+  production_status: dev-only
+  next_gate: deployed-active — 發佈 immutable `omnisight-proxy` release image，為第一個 Tier 3 staging/customer tenant 部署並記錄 GHCR/customer
+    digest、mTLS/replay/proxied-provider smoke、SaaS metadata-only audit、provider key purge 與 proxy-unreachable no-fallback
+    evidence。
