@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 402
+entry_count: 403
 status_counts:
-  dev-only: 392
+  dev-only: 393
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3761,3 +3761,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 8 個 `backend-tests` matrix shard 都有產出 coverage artifact，且 `backend-coverage-combine`
     aggregate floor 仍通過；BP.L.5 再評估 full suite wall-clock 目標。
+- id: 2026-05-05--BP.L.4
+  header_line: 46415
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.L.4
+  title: BP.L.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 `backend-coverage-combine` 下載 8 shard 的 `.coverage.*` 後仍以 aggregate
+    floor gate backend 新 module；BP.L.5 再評估 full suite wall-clock 目標。

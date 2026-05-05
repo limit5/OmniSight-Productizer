@@ -482,10 +482,11 @@ jobs:
           }
           python3 -m coverage combine .coverage.*
           # 60 is the aggregate floor (H6 audit): `rest` shard alone hits
-          # this when run solo; combining all four should comfortably
-          # exceed it. If combined coverage drops below 60 something
-          # went very wrong — either a shard didn't run, or a large
-          # new module landed without any tests.
+          # this when run solo; combining all shards should comfortably
+          # exceed it. BP.L.4 keeps this gate on `source = backend`
+          # (backend/pytest.ini), so a newly added backend module with no
+          # tests is counted as 0% instead of silently falling outside the
+          # report.
           python3 -m coverage report --rcfile=backend/pytest.ini --fail-under=60
           python3 -m coverage xml -o coverage-combined.xml --rcfile=backend/pytest.ini
       - name: upload combined report

@@ -1,4 +1,4 @@
-"""BP.L.1 regression tests for pytest marker tier aggregation."""
+"""BP.L regression tests for pytest marker tier aggregation and CI gates."""
 
 from __future__ import annotations
 
@@ -97,3 +97,32 @@ def test_bp_l_ci_backend_tests_uses_eight_coverage_shards() -> None:
                 assert (_REPO_ROOT / path_token).is_dir(), path_token
             else:
                 assert (_REPO_ROOT / path_token).is_file(), path_token
+
+
+def test_bp_l_ci_coverage_gate_counts_new_backend_modules() -> None:
+    workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+
+    parser = ConfigParser()
+    parser.read(_REPO_ROOT / "backend" / "pytest.ini")
+
+    assert parser.get("coverage:run", "source").strip() == "backend"
+    omitted = {
+        line.strip()
+        for line in parser.get("coverage:run", "omit").splitlines()
+        if line.strip()
+    }
+    assert "backend/*.py" not in omitted
+
+    combine_steps = jobs["backend-coverage-combine"]["steps"]
+    combine_runs = [
+        step.get("run", "")
+        for step in combine_steps
+        if step.get("name") == "combine + report"
+    ]
+    assert len(combine_runs) == 1
+    combine_run = combine_runs[0]
+
+    assert "python3 -m coverage combine .coverage.*" in combine_run
+    assert "python3 -m coverage report --rcfile=backend/pytest.ini --fail-under=60" in combine_run
+    assert "python3 -m coverage xml -o coverage-combined.xml --rcfile=backend/pytest.ini" in combine_run
