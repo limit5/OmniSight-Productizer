@@ -122,6 +122,7 @@ import {
   type WebSandboxInstanceWire,
   type WebSandboxStatus,
 } from "@/lib/api"
+import { Block } from "./block"
 
 // Touch interval: W14.5 reaper defaults to 30 min idle timeout; pinging
 // every 5 min keeps the sandbox alive with comfortable headroom even if
@@ -546,11 +547,14 @@ export function LivePreviewPanel({
   const viewportSpec = VIEWPORT_SPECS[viewport]
 
   return (
-    <div
+    <Block
+      as="section"
       data-testid="live-preview-panel"
       data-workspace-id={workspaceId}
       data-status={status ?? "missing"}
-      className="flex flex-col rounded-xl border border-[var(--border)] bg-[var(--card)]"
+      kind="web_sandbox.preview"
+      status={status ?? "missing"}
+      className="flex flex-col gap-0 rounded-xl border-[var(--border)] bg-[var(--card)] p-0"
     >
       {/* ─── Toolbar ─── */}
       <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] px-3 py-2">
@@ -662,13 +666,16 @@ export function LivePreviewPanel({
         )}
 
         {state.status === "ready" && state.error && (
-          <div
+          <Block
             data-testid="live-preview-inline-error"
-            className="absolute bottom-3 right-3 max-w-md rounded-md border border-[var(--critical-red)] bg-[var(--card)] px-3 py-2 text-[11px] font-mono text-[var(--critical-red)]"
+            kind="web_sandbox.preview.error"
+            status="error"
+            tone="danger"
+            className="absolute bottom-3 right-3 max-w-md rounded-md border-[var(--critical-red)] bg-[var(--card)] px-3 py-2 text-[11px] font-mono text-[var(--critical-red)]"
           >
             <AlertTriangle size={12} className="mr-1 inline" />
             {state.error}
-          </div>
+          </Block>
         )}
       </div>
 
@@ -688,7 +695,7 @@ export function LivePreviewPanel({
           )}
         </div>
       )}
-    </div>
+    </Block>
   )
 }
 
@@ -871,9 +878,12 @@ function BodyLoader({ label }: { label: string }) {
 
 function BodyError({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <div
+    <Block
       data-testid="live-preview-error"
-      className="flex max-w-md flex-col items-center gap-3 px-6 text-center"
+      kind="web_sandbox.preview.body_error"
+      status="error"
+      tone="danger"
+      className="flex max-w-md flex-col items-center gap-3 border-transparent bg-transparent px-6 text-center"
     >
       <AlertTriangle size={24} className="text-[var(--critical-red)]" />
       <p className="text-[11px] font-mono text-[var(--critical-red)]">{message}</p>
@@ -884,7 +894,7 @@ function BodyError({ message, onRetry }: { message: string; onRetry: () => void 
       >
         Retry
       </button>
-    </div>
+    </Block>
   )
 }
 

@@ -146,6 +146,22 @@ CREATE INDEX idx_blocks_parent ON blocks(parent_id);
 
 **React primitive**：`<Block />` 統一取代既有 message / output 卡片散落實作。
 
+### WP.1.6 Migration Strategy（surface-by-surface）
+
+WP.1 的 rollout 不一次替換所有卡片，而是採 **surface 漸進 + 雙寫期 feature flag + 30 天舊 surface 退回路徑**。每一波只允許一組 owner surface 進入 Block data model；下一波開始前，前一波必須完成 UI snapshot、Block projection、share/redaction smoke 與 rollback 演練。
+
+| Wave | Surface | 切換 flag | 雙寫期行為 | 進下一波 gate |
+|------|---------|-----------|------------|---------------|
+| 1 | **ORCHESTRATOR / TokenUsageStats** | `wp.block_model.orchestrator_token_usage` | 新 path 寫 `blocks` projection；舊 ad-hoc message / token card state 保留讀取與 render fallback | 24h dogfood，Block wrapper snapshot zero-regression，TokenUsageStats totals 與舊 selector 一致 |
+| 2 | **BP** dispatch board / batch progress / fleet lanes | `wp.block_model.bp` | BP run / command / output 生成 Block；舊 BP card props 保留並從同一 payload fan-out | Wave 1 flag 穩定 enabled ≥ 7 天，BP dispatch board snapshot zero-regression |
+| 3 | **HD** bring-up workbench / finding rows / runbook steps | `wp.block_model.hd` | HD finding / runbook output 生成 Block；舊 HD finding row renderer 保留 fallback | BP flag 穩定 enabled ≥ 7 天，HD workbench smoke + finding share/redaction round-trip |
+
+**Dual-write invariant**：在任一 wave 的 30 天相容窗內，producer 必須同時維持 Block projection 與舊 surface payload。Block path 失敗時不可吞錯；UI 應立即回到舊 ad-hoc surface，並用 N10 / debug finding 記錄 `block_model_fallback`，讓 reviewer 能看到 dual-write 不一致。
+
+**Feature flag switch**：切換順序固定為 `disabled → dogfood enabled → preview enabled → release enabled`，採 WP.7 registry hot-path read；registry row 缺席時保持舊 surface。WP.1.7 會補 single-knob `OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false` 作全域 kill switch，本節只定義 per-surface strategy，不提前接 env knob。
+
+**30 天退回路徑**：每個 wave 的舊 renderer / payload adapter 從該 wave release-enabled 當天起保留 30 天。30 天內 rollback 只需關閉該 wave flag；30 天後才允許刪除舊 surface fallback，且刪除前必須有 drift guard 證明該 surface 已無 active fallback event。
+
 ### WP.2 Skills Loader（`.claude/skills` + `.warp/skills` 共用慣例）
 
 **Pattern 來源**：Warp `crates/ai/src/skills/skill_provider.rs`。

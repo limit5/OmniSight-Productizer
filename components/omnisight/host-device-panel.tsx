@@ -12,6 +12,7 @@ import {
   useHostMetricsTick,
   type HostMetricsHistoryPoint,
 } from "@/hooks/use-host-metrics-tick"
+import { Block } from "./block"
 import {
   Activity,
   Boxes,
@@ -123,7 +124,7 @@ function DeviceCard({
   const statusColor = getStatusColor(device.status)
 
   return (
-    <div 
+    <Block
       className={`
         relative group p-2 rounded transition-all duration-300
         ${device.status === "connected" 
@@ -135,6 +136,8 @@ function DeviceCard({
           : "bg-[var(--secondary)] border border-[var(--border)] opacity-50"
         }
       `}
+      kind="host_device.device"
+      status={device.status}
     >
       {/* Top Row: Icon + Name + Status */}
       <div className="flex items-center gap-2">
@@ -204,7 +207,7 @@ function DeviceCard({
           <Minus size={10} className="text-[var(--critical-red)]" />
         </button>
       )}
-    </div>
+    </Block>
   )
 }
 
@@ -577,10 +580,12 @@ function TenantRow({ row, highlight = false }: { row: TenantUsage; highlight?: b
   const cpuWidth = Math.min(100, (row.cpu_percent / TENANT_CPU_BAR_FULL) * 100)
   const memWidth = Math.min(100, (row.mem_used_gb / TENANT_MEM_BAR_FULL_GB) * 100)
   return (
-    <div
+    <Block
       className={`p-2 rounded ${highlight
         ? "bg-[var(--neural-blue-dim)] border border-[var(--neural-blue)]/30"
         : "bg-[var(--secondary)]"}`}
+      kind="host_device.tenant_usage"
+      status={highlight ? "current" : "active"}
     >
       <div className="flex items-center justify-between mb-1.5">
         <span className="font-mono text-xs font-medium text-[var(--foreground)] truncate" title={row.tenant_id}>
@@ -620,7 +625,7 @@ function TenantRow({ row, highlight = false }: { row: TenantUsage; highlight?: b
           {row.disk_used_gb.toFixed(2)} GiB on disk
         </span>
       </div>
-    </div>
+    </Block>
   )
 }
 

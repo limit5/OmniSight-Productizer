@@ -34,6 +34,7 @@ import {
   type AwaitingHumanEntry,
   type SSEEvent,
 } from "@/lib/api"
+import { Block } from "./block"
 
 const POLL_MS = 10_000
 const PRIORITIES = ["P0", "P1", "P2", "P3"] as const
@@ -152,7 +153,7 @@ export function OrchestrationPanel() {
 function QueueBlock({ snap }: { snap: OrchestrationSnapshot }) {
   const total = snap.queue.total
   return (
-    <BlockShell icon={Activity} title="QUEUE">
+    <Block icon={Activity} title="QUEUE" kind="orchestration.queue">
       <div className="grid grid-cols-4 gap-1.5">
         {PRIORITIES.map((p) => {
           const value = snap.queue.by_priority[p] ?? 0
@@ -173,7 +174,7 @@ function QueueBlock({ snap }: { snap: OrchestrationSnapshot }) {
             .join("  ")}
         </span>
       </div>
-    </BlockShell>
+    </Block>
   )
 }
 
@@ -182,7 +183,7 @@ function WorkerBlock({ snap }: { snap: OrchestrationSnapshot }) {
   const utilTone: Tone = w.utilisation >= 0.9 ? "bad"
     : w.utilisation >= 0.7 ? "warn" : "ok"
   return (
-    <BlockShell icon={Users} title="WORKERS">
+    <Block icon={Users} title="WORKERS" kind="orchestration.workers">
       <div className="grid grid-cols-3 gap-1.5">
         <Kpi label="ACTIVE" value={String(Math.round(w.active))} tone="info" />
         <Kpi label="INFLIGHT" value={String(Math.round(w.inflight))} tone="info" />
@@ -200,7 +201,7 @@ function WorkerBlock({ snap }: { snap: OrchestrationSnapshot }) {
           </span>
         </div>
       )}
-    </BlockShell>
+    </Block>
   )
 }
 
@@ -270,7 +271,7 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
   ]
 
   return (
-    <BlockShell icon={GitMerge} title="MERGER">
+    <Block icon={GitMerge} title="MERGER" kind="orchestration.merger">
       {/* Headline row: total votes is the denominator everything else
           is a fraction of, so it leads the block. Right-aligned warn
           chip when over-confidence threshold is hit so operators see
@@ -389,7 +390,7 @@ function MergerBlock({ snap }: { snap: OrchestrationSnapshot }) {
           conflict-resolution patchset.
         </div>
       )}
-    </BlockShell>
+    </Block>
   )
 }
 
@@ -433,7 +434,7 @@ function LocksBlock({ snap }: { snap: OrchestrationSnapshot }) {
         : TONE_CLASS.ok
 
   return (
-    <BlockShell icon={Lock} title="LOCKS">
+    <Block icon={Lock} title="LOCKS" kind="orchestration.locks">
       <div className="grid grid-cols-2 gap-1.5">
         <Kpi
           label="TASKS"
@@ -512,7 +513,7 @@ function LocksBlock({ snap }: { snap: OrchestrationSnapshot }) {
           </ul>
         </>
       )}
-    </BlockShell>
+    </Block>
   )
 }
 
@@ -520,7 +521,7 @@ function AwaitingHumanBlock({ snap }: { snap: OrchestrationSnapshot }) {
   const items = snap.awaiting_human_plus_two
   const warnSec = snap.awaiting_human_warn_hours * 3600
   return (
-    <BlockShell icon={Shield} title="AWAITING HUMAN +2">
+    <Block icon={Shield} title="AWAITING HUMAN +2" kind="orchestration.awaiting_human">
       {items.length === 0 ? (
         <div className="flex items-center gap-1 font-mono text-[10px] text-[var(--validation-emerald,#10b981)]">
           <CheckCircle2 size={11} aria-hidden />
@@ -565,7 +566,7 @@ function AwaitingHumanBlock({ snap }: { snap: OrchestrationSnapshot }) {
       <div className="mt-1 font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)]">
         WARN ≥ {snap.awaiting_human_warn_hours}H
       </div>
-    </BlockShell>
+    </Block>
   )
 }
 
@@ -578,28 +579,6 @@ const TONE_CLASS: Record<Tone, string> = {
   warn: "text-[var(--fui-orange,#f59e0b)]",
   bad:  "text-[var(--critical-red,#ef4444)]",
   info: "text-[var(--neural-cyan,#67e8f9)]",
-}
-
-function BlockShell({
-  icon: Icon, title, children,
-}: { icon: typeof Activity; title: string; children: React.ReactNode }) {
-  // R22.2 (2026-04-25): ``min-w-0`` is critical here. Parent dashboard
-  // grid is ``grid-cols-1 md:grid-cols-2`` (each child is ``1fr``),
-  // and CSS Grid items default to ``min-width: auto`` — i.e. they
-  // refuse to shrink below their min-content. Without ``min-w-0``,
-  // any block whose content has a wide intrinsic min-width (the
-  // MERGER bars: label + bar + percent) overflowed into the
-  // neighbouring column (LOCKS). Adding ``min-w-0`` lets the cell
-  // shrink and the inner flex layout decide who absorbs the squeeze.
-  return (
-    <div className="flex flex-col gap-1.5 p-2 rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.25))] bg-white/[0.02] min-w-0">
-      <div className="flex items-center gap-1 font-mono text-[10px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)]">
-        <Icon className="w-3 h-3" aria-hidden />
-        {title}
-      </div>
-      {children}
-    </div>
-  )
 }
 
 function Kpi({ label, value, tone }: { label: string; value: string; tone: Tone }) {

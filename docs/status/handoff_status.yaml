@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 414
+entry_count: 422
 status_counts:
-  dev-only: 404
+  dev-only: 412
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3869,3 +3869,75 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — operator 將第三方簽署 legal report 存入 private evidence vault，重建 production image，並對 `/compliance-matrix/matrices`
     做 live smoke 後再提升狀態。
+- id: 2026-05-06--WP.1.1
+  header_line: 46601
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.1
+  title: WP.1.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.1.2 以 live head 0194 後的下一個 migration 建立 `blocks` table + indexes，並同步 migrator/static schema
+    drift guards 後再進下一 gate。
+- id: 2026-05-06--WP.1.2
+  header_line: 46616
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.2
+  title: WP.1.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator/Claude 跑 production alembic chain 0194→0195，並在 production image 對 `blocks` table
+    做 live schema smoke 後再提升狀態。
+- id: 2026-05-06--WP.1.3
+  header_line: 46631
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.3
+  title: WP.1.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.1.4/WP.1.5 接 share/redaction 行為後，production image rebuild + dashboard smoke 檢查各 migrated
+    surface 的 block wrappers 再提升狀態。
+- id: 2026-05-06--WP.1.4
+  header_line: 46646
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.4
+  title: WP.1.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.9.1-WP.9.5 建立 `shareable_objects` table/router/ACL/redaction enforcement 後，production
+    image rebuild + 右鍵 Block share live smoke 再提升狀態。
+- id: 2026-05-06--WP.1.5
+  header_line: 46661
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.5
+  title: WP.1.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.9 router/table 落地後接上 `redact_block_for_share()`，將 mask 寫入 `shareable_objects.redaction_applied`，並做
+    production share permalink live smoke。
+- id: 2026-05-06--WP.1.6
+  header_line: 46676
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.6
+  title: WP.1.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.1.7 接上 `OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false` 全域 kill switch；之後各 surface 依 WP.1.6 wave
+    gate 在 staging 逐步開 flag 並做 snapshot / share / redaction smoke。
+- id: 2026-05-06--WP.1.7
+  header_line: 46691
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.7
+  title: WP.1.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator/Claude 在 staging/prod image 設 `OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false` 做 dashboard
+    smoke，確認 ORCHESTRATOR / TokenUsageStats / BP / HD migrated card 皆無 `data-block-*` 與 share menu 後再提升狀態。
+- id: 2026-05-06--WP.1.8
+  header_line: 46706
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.8
+  title: WP.1.8 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.9 `shareable_objects` router/table 落地後，把此 round-trip test 接到真 endpoint，並在 staging/prod
+    image 做 Block CRUD + permalink + redaction live smoke。

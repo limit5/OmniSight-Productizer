@@ -5434,6 +5434,40 @@ export async function shareReport(
   })
 }
 
+// ─── WP.1.4 / WP.9 — Generic shareable object permalink client ───
+
+export type ShareableObjectVisibility = "private" | "team" | "tenant" | "public"
+
+export interface CreateShareableObjectRequest {
+  object_kind: string
+  object_id: string
+  tenant_id?: string | null
+  visibility?: ShareableObjectVisibility
+  regions?: string[]
+  redaction_mask?: Record<string, unknown>
+  base_url?: string
+  expires_at?: string | null
+}
+
+export interface CreateShareableObjectResponse {
+  share_id: string
+  object_kind: string
+  object_id: string
+  visibility: ShareableObjectVisibility
+  permalink_url?: string
+  url?: string
+  expires_at?: string | null
+}
+
+export async function createShareableObject(
+  body: CreateShareableObjectRequest,
+): Promise<CreateShareableObjectResponse> {
+  return request<CreateShareableObjectResponse>("/shareable-objects", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
 // ─── API Keys (K6) ─────────────────────────────────────────
 
 export interface ApiKeyItem {

@@ -25,6 +25,7 @@ import {
 import { ProviderStatusBadge } from "./provider-status-badge"
 import { ProviderCardExpansion } from "./provider-card-expansion"
 import { LiveTestStatusChip } from "./live-test-status-chip"
+import { Block } from "./block"
 import {
   subscribeEvents,
   fetchTokenBurnRate,
@@ -600,7 +601,7 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
           {/* Summary Stats - Vertical Stack */}
           <div className="space-y-2 mb-3">
             {/* Total Tokens */}
-            <div className="p-2.5 rounded-lg bg-[var(--secondary)]">
+            <Block kind="token_usage.total_tokens" className="p-2.5 rounded-lg border-transparent bg-[var(--secondary)]">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <BarChart3 size={14} className="text-[var(--neural-blue)] shrink-0" />
@@ -616,10 +617,10 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                   Output: <span className="text-[var(--neural-blue)]">{formatTokens(totals.outputTokens)}</span>
                 </span>
               </div>
-            </div>
+            </Block>
             
             {/* Total Cost */}
-            <div className="p-2.5 rounded-lg bg-[var(--secondary)]">
+            <Block kind="token_usage.total_cost" className="p-2.5 rounded-lg border-transparent bg-[var(--secondary)]">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <DollarSign size={14} className="text-[var(--hardware-orange)] shrink-0" />
@@ -632,11 +633,11 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                   Avg per Request: <span className="text-[var(--foreground)]">{formatCost(totals.cost / totals.requestCount)}</span>
                 </span>
               </div>
-            </div>
+            </Block>
             
             {/* Requests + Active Models Row */}
             <div className="grid grid-cols-2 gap-2">
-              <div className="p-2.5 rounded-lg bg-[var(--secondary)]">
+              <Block kind="token_usage.requests" className="p-2.5 rounded-lg border-transparent bg-[var(--secondary)]">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Zap size={14} className="text-[var(--artifact-purple)] shrink-0" />
@@ -644,8 +645,8 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                   </div>
                   <p className="font-mono text-sm font-semibold text-[var(--foreground)]">{totals.requestCount}</p>
                 </div>
-              </div>
-              <div className="p-2.5 rounded-lg bg-[var(--secondary)]">
+              </Block>
+              <Block kind="token_usage.models" className="p-2.5 rounded-lg border-transparent bg-[var(--secondary)]">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <TrendingUp size={14} className="text-[var(--validation-emerald)] shrink-0" />
@@ -653,7 +654,7 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                   </div>
                   <p className="font-mono text-sm font-semibold text-[var(--foreground)]">{usageData.length}</p>
                 </div>
-              </div>
+              </Block>
             </div>
           </div>
           
@@ -751,7 +752,11 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
               const isPlaceholder = item.requestCount === 0 && item.totalTokens === 0
 
               return (
-                <button
+                <Block
+                  as="button"
+                  type="button"
+                  kind="token_usage.model"
+                  status={isPlaceholder ? "ready" : isSelected ? "selected" : "active"}
                   onClick={() => setSelectedModel(isSelected ? null : item.model)}
                   className={`w-full text-left p-3 rounded-lg transition-all ${
                     isSelected
@@ -1232,7 +1237,7 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                       </div>
                     </div>
                   )}
-                </button>
+                </Block>
               )
             }}
           />

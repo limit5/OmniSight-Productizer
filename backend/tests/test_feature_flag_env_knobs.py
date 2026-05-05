@@ -15,6 +15,8 @@ from backend.agents import tools_patch
 from backend.agents.skills_loader import SKILLS_LOADER_ENABLED_ENV
 from backend.security import cmek_wizard, envelope
 
+BLOCK_MODEL_ENABLED_ENV = "OMNISIGHT_WP_BLOCK_MODEL_ENABLED"
+
 
 def _registry(flag_name: str, state: FeatureFlagState) -> FeatureFlagRegistry:
     return FeatureFlagRegistry(lambda: [
@@ -34,9 +36,13 @@ def test_env_knob_manifest_covers_existing_ks_and_wp_knobs() -> None:
         cmek_wizard.BYOG_ENABLED_ENV,
         tools_patch.DIFF_VALIDATION_ENABLED_ENV,
         SKILLS_LOADER_ENABLED_ENV,
+        BLOCK_MODEL_ENABLED_ENV,
     }
     assert ff.FEATURE_FLAG_ENV_KNOBS[cmek_wizard.CMEK_ENABLED_ENV].flag_name == (
         "ks.cmek.enabled"
+    )
+    assert ff.FEATURE_FLAG_ENV_KNOBS[BLOCK_MODEL_ENABLED_ENV].flag_name == (
+        "wp.block_model.enabled"
     )
 
 
@@ -47,6 +53,7 @@ def test_env_knob_manifest_covers_existing_ks_and_wp_knobs() -> None:
         ("OMNISIGHT_HD_PCB_SI_ENABLED", "hd.pcb.si.enabled"),
         ("OMNISIGHT_KS_CMEK_ENABLED", "ks.cmek.enabled"),
         ("OMNISIGHT_WP_DIFF_VALIDATION_ENABLED", "wp.diff_validation.enabled"),
+        (BLOCK_MODEL_ENABLED_ENV, "wp.block_model.enabled"),
     ],
 )
 def test_feature_flag_name_for_env_knob_is_progressive(
