@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 369
+entry_count: 370
 status_counts:
-  dev-only: 359
+  dev-only: 360
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3464,3 +3464,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — production image / CLI package 重建後，對實際 checkout 跑 `omnisight skills list`、`omnisight skills
     resolve SKILL_HD_PARSE`，並手動覆寫一個 project skill smoke watched reload。
+- id: 2026-05-05--BP.N.1
+  header_line: 45916
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.N.1
+  title: BP.N.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.N.3 需補正式 env knobs / production config，BP.N.4-BP.N.5 接 tool loadout + audit_log；production
+    image 重建後用 fake/mock provider 或 staging Tavily key 做 smoke。
