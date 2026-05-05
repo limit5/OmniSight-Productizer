@@ -1,4 +1,4 @@
-"""WP.7.2-WP.7.4 -- feature flag registry primitives.
+"""WP.7.2-WP.7.5 -- feature flag registry primitives.
 
 This module is declarative only: it defines the legal tier / state
 labels that may appear in ``feature_flags`` and the frozen metadata
@@ -18,10 +18,15 @@ consistency uses qualified answer #2: writers call
 broadcasts ``FEATURE_FLAGS_INVALIDATE_EVENT`` over Redis pub/sub so peer
 workers clear their local snapshots. Without Redis, invalidation is
 local-only and intentionally a single-worker/dev fallback.
+
+WP.7.5 expiry enforcement is data-only: every worker derives the same
+expired-flag verdict from the same registry snapshot plus caller-supplied
+CI clock. It does not mutate cache state.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 import threading
 import time
@@ -103,6 +108,16 @@ class FeatureFlagRecord(NamedTuple):
     expires_at: str | None = None
     owner: str = ""
     created_at: str = ""
+
+
+class FeatureFlagExpiryViolation(NamedTuple):
+    """One expired feature flag that must be cleaned before CI passes."""
+
+    flag_name: str
+    tier: FeatureFlagTier
+    state: FeatureFlagState
+    expires_at: str
+    owner: str
 
 
 class FeatureFlagRegistrySnapshot(NamedTuple):
@@ -218,6 +233,72 @@ def resolve_feature_flag_state(
                 source=source,
             )
     raise AssertionError("default feature flag state must not be None")
+
+
+def _parse_expires_at(raw: str) -> datetime:
+    value = raw.strip()
+    if value.endswith("Z"):
+        value = f"{value[:-1]}+00:00"
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def find_expired_feature_flags(
+    records: Iterable[FeatureFlagRecord],
+    *,
+    now: datetime | None = None,
+) -> tuple[FeatureFlagExpiryViolation, ...]:
+    """Return feature flags whose ``expires_at`` is earlier than ``now``.
+
+    ``expires_at=None`` means the flag has no expiry to enforce yet; this
+    helper only fails stale rows that have crossed their declared cleanup
+    deadline. CI callers should pass one registry snapshot so every
+    worker reaches the same verdict from the same source data.
+    """
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    else:
+        clock = clock.astimezone(timezone.utc)
+
+    violations: list[FeatureFlagExpiryViolation] = []
+    for record in records:
+        if record.expires_at is None:
+            continue
+        expires_at = _parse_expires_at(record.expires_at)
+        if expires_at < clock:
+            violations.append(
+                FeatureFlagExpiryViolation(
+                    flag_name=record.flag_name,
+                    tier=record.tier,
+                    state=record.state,
+                    expires_at=record.expires_at,
+                    owner=record.owner,
+                )
+            )
+    return tuple(violations)
+
+
+def assert_no_expired_feature_flags(
+    records: Iterable[FeatureFlagRecord],
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Fail close when any feature flag has passed ``expires_at``."""
+    violations = find_expired_feature_flags(records, now=now)
+    if not violations:
+        return
+    details = ", ".join(
+        f"{v.flag_name} (tier={v.tier.value}, owner={v.owner or '<unset>'}, "
+        f"expires_at={v.expires_at})"
+        for v in violations
+    )
+    raise AssertionError(
+        "expired feature flags must be cleaned before CI passes: "
+        f"{details}"
+    )
 
 
 FeatureFlagLoader = Callable[[], Iterable[FeatureFlagRecord | Mapping[str, Any]]]
@@ -404,13 +485,16 @@ __all__ = [
     "FEATURE_FLAG_TIER_VALUE_SET",
     "FeatureFlagResolution",
     "FeatureFlagResolutionSource",
+    "FeatureFlagExpiryViolation",
     "FeatureFlagRegistry",
     "FeatureFlagRegistrySnapshot",
     "FeatureFlagRecord",
     "FeatureFlagState",
     "FeatureFlagTier",
     "FeatureFlagTierDefinition",
+    "assert_no_expired_feature_flags",
     "default_feature_flag_registry",
+    "find_expired_feature_flags",
     "get_feature_flag_global_state",
     "invalidate_feature_flags_cache",
     "is_feature_flag_state",
