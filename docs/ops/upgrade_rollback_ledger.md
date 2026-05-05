@@ -95,6 +95,22 @@ On **every GDPR / DSAR request lifecycle change** (KS.4.8):
    purge, audit metadata retention, raw payload deletion, and DSAR export
    workflow.
 
+On **every Priority I multi-tenancy readiness sign-off** (KS.DOD):
+
+1. Store the KS.1 test transcript, KMS evidence, production image import
+   smoke, runtime env snapshot, tenant isolation smoke, and 24h
+   observation packet in the private security evidence vault; do not
+   commit raw logs, customer data, secrets, plaintext tokens, plaintext
+   DEKs, or wrapped DEK material.
+2. Compute SHA-256 fingerprints for the KS.1 evidence packet, KMS
+   evidence packet, and tenant isolation smoke packet.
+3. Append one row to the "Priority I Readiness" table before Priority I
+   starts. Use `Disposition = ready-to-start` only when every gate in
+   `priority_i_multi_tenancy_readiness.md` is green.
+4. Follow `priority_i_multi_tenancy_readiness.md` for KS.1 evidence,
+   production image/env proof, multi-tenant isolation smoke, legacy
+   Fernet deprecation proof, and 24h observation requirements.
+
 On **every WP.3 diff-validation cascade match**:
 
 1. Append one row to the "Diff Validation Confidence" table with the
@@ -191,6 +207,17 @@ data, raw audit payloads, secrets, plaintext tokens, plaintext DEKs, or
 wrapped DEK material in this ledger. Use
 `correction -> <request-id/evidence-sha256>` in Notes to correct a prior
 row.
+
+## Priority I Readiness
+
+| Signed off (UTC) | Commit | Backend image digest | KS.1 evidence SHA-256 | KMS evidence SHA-256 | Tenant smoke SHA-256 | Observation window | Disposition | Notes |
+|---|---|---|---|---|---|---|---|---|
+| _(pending Priority I start)_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _KS.DOD policy effective 2026-05-06; use ready-to-start only after every gate in priority_i_multi_tenancy_readiness.md passes_ |
+
+Priority I readiness rows are append-only. Do not store raw logs,
+customer data, secrets, plaintext tokens, plaintext DEKs, or wrapped DEK
+material in this ledger. Use
+`correction -> <commit/evidence-sha256>` in Notes to correct a prior row.
 
 ## Diff Validation Confidence
 

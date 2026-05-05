@@ -412,6 +412,18 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 **BP 完工 + KS.1 ship 完成 = multi-tenant gate 解鎖** — 此時可打開 self-service signup + 收費入口、HD.17 多客戶 NDA 隔離也可開工。
 
+### 12.1.1 Priority I readiness gate（KS.DOD）
+
+KS.1 完工後、Priority I 啟動前必須跑
+[`docs/ops/priority_i_multi_tenancy_readiness.md`](../ops/priority_i_multi_tenancy_readiness.md)。
+該 checklist 是 Priority I readiness gate：它要求 KS.1 acceptance
+evidence、live KMS evidence、legacy Fernet deprecation proof、N10
+`ks.decryption` coverage、spend anomaly shared-state proof、production
+image/env smoke、multi-tenant isolation smoke、rollback/no-fallback
+proof、24h observation clean，並在 N10 `Priority I Readiness` table 記
+`Disposition = ready-to-start`。沒有 `ready-to-start`（或 security owner
+明確 `risk-accepted`）時，Priority I 不得啟動。
+
 ### 12.2 Phase 2 — Tier 2 CMEK（**HD 之後 commercial-driven、~3 週**）
 
 **觸發條件**：第一個 mid-market enterprise 詢盤要求 CMEK（security questionnaire 通常必問）。
@@ -464,5 +476,5 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 - **Owner**: Agent-software-beta + nanakusa sora
 - **Date**: 2026-04-29
-- **Status**: Accepted（Phase 1 待排程於 Priority I 之前；Phase 2 / 3 商務驅動）
-- **Next review**: Phase 1 完工後、Priority I 啟動前
+- **Status**: Accepted（Phase 1 已進入 Priority I readiness gate；Phase 2 / 3 商務驅動）
+- **Next review**: Phase 1 完工後、Priority I 啟動前，以 `priority_i_multi_tenancy_readiness.md` 的 `ready-to-start` N10 row 為準
