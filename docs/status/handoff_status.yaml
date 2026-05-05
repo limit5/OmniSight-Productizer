@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 381
+entry_count: 382
 status_counts:
-  dev-only: 371
+  dev-only: 372
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3572,3 +3572,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — BP.M.7 補完整 distiller test matrix 後，production image 重建並 staging smoke：產生 draft、確認 `skill_distilled`
     audit row、promote、確認 `skill_promoted` audit row 與 skill registry 可讀。
+- id: 2026-05-05--BP.M.7
+  header_line: 46096
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.M.7
+  title: BP.M.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production image 重建並 staging smoke：`OMNISIGHT_SELF_IMPROVE_LEVEL=l1` 產生 draft、確認 `skill_distilled`
+    audit row、review/promote、確認 `skill_promoted` audit row 與 skill registry 可讀。
