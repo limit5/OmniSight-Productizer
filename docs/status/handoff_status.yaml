@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 422
+entry_count: 423
 status_counts:
-  dev-only: 412
+  dev-only: 413
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3941,3 +3941,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.9 `shareable_objects` router/table 落地後，把此 round-trip test 接到真 endpoint，並在 staging/prod
     image 做 Block CRUD + permalink + redaction live smoke。
+- id: 2026-05-06--bp-a2a-1
+  header_line: 46722
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: BP.A2A.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — BP.A2A.2 掛上 `/.well-known/agent.json` 與 `/a2a/invoke/{agent_name}` 後，production image rebuild
+    並做 discovery + sync invoke + SSE live smoke。
