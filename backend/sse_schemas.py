@@ -259,6 +259,7 @@ class SSEPepDecision(BaseModel):
     tool: str
     command: str = ""
     tier: str = "t1"
+    guild_id: str = ""
     action: str  # "auto_allow" | "hold" | "deny"
     rule: str = ""
     reason: str = ""

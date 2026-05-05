@@ -79,6 +79,9 @@ def test_policy_endpoint_lists_tier_whitelists(client):
     assert data["prod_hold_rule_count"] > 3
     assert "rm_rf_root" in data["destructive_rules"]
     assert "deploy_prod" in data["prod_hold_rules"]
+    assert "git_push" in data["guild_policy_matrix"]["backend"]["t2"]
+    assert data["guild_policy_matrix"]["backend"]["t1"] == []
+    assert data["guild_policy_matrix"]["auditor"]["t1"] == []
 
 
 def test_status_endpoint_returns_breaker_state(client):

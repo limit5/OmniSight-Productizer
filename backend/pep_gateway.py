@@ -39,7 +39,10 @@ import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Optional
+
+from backend.sandbox_tier import Guild, SandboxTier, is_admitted
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +144,15 @@ TIER_T3_EXTRA: frozenset[str] = frozenset({
 })
 
 
+_PEP_TIER_TO_SANDBOX_TIER: MappingProxyType[str, SandboxTier] = MappingProxyType({
+    "t0": SandboxTier.T0,
+    "t1": SandboxTier.T1,
+    "t2": SandboxTier.T2,
+    "networked": SandboxTier.T2,
+    "t3": SandboxTier.T3,
+})
+
+
 def tier_whitelist(tier: str) -> frozenset[str]:
     """Return the cumulative whitelist for the given tier."""
     t = (tier or "t1").lower()
@@ -152,6 +164,87 @@ def tier_whitelist(tier: str) -> frozenset[str]:
         return TIER_T1_WHITELIST | TIER_T2_EXTRA | TIER_T3_EXTRA
     # Unknown tier → assume most restrictive.
     return TIER_T1_WHITELIST
+
+
+def _coerce_guild(guild_id: str | None) -> Guild | None:
+    if guild_id is None:
+        return None
+    slug = str(guild_id).strip()
+    if not slug:
+        return None
+    try:
+        return Guild(slug)
+    except ValueError:
+        return None
+
+
+def _coerce_pep_tier(tier: str) -> SandboxTier | None:
+    return _PEP_TIER_TO_SANDBOX_TIER.get((tier or "t1").lower())
+
+
+def _guild_policy_violation(
+    guild_id: str | None,
+    tier: str,
+) -> tuple[PepAction, str, str, str] | None:
+    """Return a deny tuple when ``guild_id`` may not inherit ``tier``.
+
+    SOP §1 module-global state audit: the Guild × Tier matrix is immutable
+    compile-time data from ``backend.sandbox_tier``; every worker derives the
+    same effective policy from the same constants and no runtime cache is
+    shared across workers.
+    """
+    if guild_id is None or str(guild_id).strip() == "":
+        return None
+    guild = _coerce_guild(guild_id)
+    if guild is None:
+        return (
+            PepAction.deny,
+            "guild_unknown",
+            f"unknown guild_id {guild_id!r}",
+            "local",
+        )
+    sandbox_tier = _coerce_pep_tier(tier)
+    if sandbox_tier is None:
+        return (
+            PepAction.deny,
+            "guild_tier_unknown",
+            f"guild {guild.value!r} requested unknown PEP tier {tier!r}",
+            "local",
+        )
+    if not is_admitted(guild, sandbox_tier):
+        return (
+            PepAction.deny,
+            "guild_tier_inadmissible",
+            (
+                f"guild {guild.value!r} is not admitted to "
+                f"{sandbox_tier.value!r}"
+            ),
+            "local",
+        )
+    return None
+
+
+def guild_tier_whitelist(guild_id: str | None, tier: str) -> frozenset[str]:
+    """Return the inherited tier whitelist for a Guild × PEP-tier pair.
+
+    The policy matrix is intentionally conservative: omitted ``guild_id``
+    preserves R0 behaviour, valid admitted Guilds inherit the existing tier
+    whitelist, and inadmissible / unknown pairs inherit an empty whitelist.
+    """
+    if _guild_policy_violation(guild_id, tier) is not None:
+        return frozenset()
+    return tier_whitelist(tier)
+
+
+def guild_policy_matrix() -> dict[str, dict[str, list[str]]]:
+    """Expose the effective static Guild × tier whitelist matrix."""
+    return {
+        guild.value: {
+            tier: sorted(guild_tier_whitelist(guild.value, tier))
+            for tier in ("t1", "t2", "t3")
+        }
+        for guild in Guild
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -173,6 +266,7 @@ class PepDecision:
     command: str
     tier: str
     action: PepAction
+    guild_id: str = ""
     rule: str = ""
     reason: str = ""
     impact_scope: str = ""        # "local" | "prod" | "destructive"
@@ -287,16 +381,25 @@ def _extract_command(tool: str, arguments: dict[str, Any]) -> str:
     return f"{tool} {arguments!r}"
 
 
-def classify(tool: str, arguments: dict[str, Any], tier: str) -> tuple[PepAction, str, str, str]:
+def classify(
+    tool: str,
+    arguments: dict[str, Any],
+    tier: str,
+    guild_id: str | None = None,
+) -> tuple[PepAction, str, str, str]:
     """Pure function: return (action, rule_id, reason, impact_scope).
 
-    Ordering matters: destructive ⟶ production hold ⟶ tier whitelist.
+    Ordering matters: Guild × Tier admission ⟶ destructive ⟶
+    production hold ⟶ inherited tier whitelist.
     A tool *not* on the tier whitelist but without a destructive /
     production rule hit still gets HELD (so the operator can wave it
     through). This is safer than a pure allow-list deny because it
     keeps the LLM usable while humans expand the allow-list over time.
     """
     command = _extract_command(tool, arguments)
+    guild_violation = _guild_policy_violation(guild_id, tier)
+    if guild_violation is not None:
+        return guild_violation
     # 1. Destructive patterns — always DENY.
     for rule_id, rx in _DESTRUCTIVE_RULES:
         if rx.search(command):
@@ -315,7 +418,7 @@ def classify(tool: str, arguments: dict[str, Any], tier: str) -> tuple[PepAction
             "local",
         )
     # 3. Tier whitelist membership.
-    allow = tier_whitelist(tier)
+    allow = guild_tier_whitelist(guild_id, tier)
     if tool in allow:
         return PepAction.auto_allow, "tier_whitelist", f"tool in {tier} whitelist", "local"
     # 4. Not destructive, not prod, not whitelisted → HOLD with "unlisted"
@@ -349,6 +452,7 @@ def _emit_audit(dec: PepDecision, action_override: str | None = None) -> None:
             entity_id=dec.id,
             after={
                 "agent_id": dec.agent_id,
+                "guild_id": dec.guild_id,
                 "tool": dec.tool,
                 "command": dec.command[:500],
                 "tier": dec.tier,
@@ -475,6 +579,7 @@ async def evaluate(
     arguments: dict[str, Any],
     agent_id: str = "",
     tier: str = "t1",
+    guild_id: str | None = None,
     propose_fn: Callable[..., Any] | None = None,
     wait_for_decision: Callable[[str, float], Awaitable[Any]] | None = None,
     hold_timeout_s: float = 1800.0,
@@ -501,6 +606,11 @@ async def evaluate(
     On PEP internal failure (propose raises, etc.) the circuit breaker
     opens and subsequent calls fall back to a "degraded" HOLD→deny
     path so we fail closed.
+
+    BP.D.8/B1 adds ``guild_id`` as a non-breaking policy dimension:
+    callers that omit it keep the legacy tier-only matrix, while callers
+    that pass it must satisfy ``sandbox_tier`` Guild × Tier admission before
+    inheriting the tier whitelist.
     """
     command_flat = _extract_command(tool, arguments)
     firewall = await _enforce_firewall_before_pep(
@@ -521,12 +631,13 @@ async def evaluate(
             command=f"input_sha256={firewall.input_sha256}",
             tier=tier,
             action=PepAction.deny,
+            guild_id=str(guild_id or ""),
             rule=_LLM_FIREWALL_RULE,
             reason=firewall.refusal_message or "LLM firewall blocked input",
             impact_scope="destructive",
         )
 
-    action, rule, reason, scope = classify(tool, arguments, tier)
+    action, rule, reason, scope = classify(tool, arguments, tier, guild_id=guild_id)
     dec = PepDecision(
         id=f"pep-{uuid.uuid4().hex[:10]}",
         ts=time.time(),
@@ -535,6 +646,7 @@ async def evaluate(
         command=command_flat,
         tier=tier,
         action=action,
+        guild_id=str(guild_id or ""),
         rule=rule,
         reason=reason,
         impact_scope=scope,
@@ -978,6 +1090,7 @@ def _propose_hold(
         source={
             "pep_id": dec.id,
             "agent_id": dec.agent_id,
+            "guild_id": dec.guild_id,
             "tool": dec.tool,
             "command": dec.command[:500],
             "tier": dec.tier,
