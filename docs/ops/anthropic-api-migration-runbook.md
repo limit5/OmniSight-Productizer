@@ -192,12 +192,30 @@ curl -X POST http://localhost:8000/api/v1/anthropic-mode/rollback
 
 ## 6. Finalize Disable Subscription（grace 結束後執行）
 
+先把 API mode single knob 寫進所有 backend worker 共同使用的 env，並重啟每個
+replica：
+
+```bash
+sed -i.bak 's/^OMNISIGHT_AB_API_MODE_ENABLED=.*/OMNISIGHT_AB_API_MODE_ENABLED=true/' /opt/omnisight/.env
+grep -q '^OMNISIGHT_AB_API_MODE_ENABLED=' /opt/omnisight/.env \
+  || echo 'OMNISIGHT_AB_API_MODE_ENABLED=true' >> /opt/omnisight/.env
+
+docker compose up -d --force-recreate backend-a backend-b
+docker compose exec -T backend-a env | grep '^OMNISIGHT_AB_API_MODE_ENABLED=true$'
+docker compose exec -T backend-b env | grep '^OMNISIGHT_AB_API_MODE_ENABLED=true$'
+```
+
+`finalize_disable_subscription()` 會拒絕在這個 lock 缺失或為 false 時執行；
+避免 30 天觀察期後一邊刪掉訂閱 fallback、一邊仍有 worker 因 env 漏設而走回
+subscription path。
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/anthropic-mode/finalize
 ```
 
 只在以下條件全滿足時執行：
 - [ ] `state.current_step == "confirmed"` 已超過 30 天
+- [ ] `OMNISIGHT_AB_API_MODE_ENABLED=true` 已套用到所有 backend replica
 - [ ] 過去 30 天 monthly spend 在預算內
 - [ ] DLQ entries < 10（沒有結構性 retry 問題）
 - [ ] dev velocity 比訂閱版時代有明顯提升（非主觀感受）

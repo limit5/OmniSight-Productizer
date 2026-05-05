@@ -17,7 +17,8 @@ Locks:
   - Rollback from CONFIRMED state succeeds (mode → subscription),
     rollback from MODE_SWITCHED succeeds, rollback after finalize raises
   - finalize_disable_subscription: requires CONFIRMED, requires grace
-    elapsed (or 0-day grace operator override path), drops fallback flag
+    elapsed (or 0-day grace operator override path), requires
+    OMNISIGHT_AB_API_MODE_ENABLED=true, drops fallback flag
   - cancel_wizard: resets state but keeps mode
 
 ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §7
@@ -31,6 +32,7 @@ import pytest
 from backend.agents.anthropic_mode_manager import (
     AnthropicMode,
     AnthropicModeManager,
+    API_MODE_ENABLED_ENV,
     InvalidApiKeyError,
     SmokeTestResult,
     WizardAlreadyConfirmedError,
@@ -358,11 +360,30 @@ async def test_finalize_blocked_during_grace_period():
 
 
 @pytest.mark.asyncio
-async def test_finalize_succeeds_with_zero_grace():
+async def test_finalize_requires_api_mode_env_lock(monkeypatch):
+    """Disabling subscription fallback requires the deployed API-mode knob."""
+    async def smoke_ok(fp, ws):
+        return SmokeTestResult(call_id="ok", success=True, latency_ms=10, cost_usd=0.001)
+
+    monkeypatch.delenv(API_MODE_ENABLED_ENV, raising=False)
+    mgr = AnthropicModeManager(smoke_test_runner=smoke_ok, rollback_grace_days=0)
+    await _drive_through_confirm(mgr)
+
+    with pytest.raises(WizardError, match=f"{API_MODE_ENABLED_ENV}=true"):
+        await mgr.finalize_disable_subscription()
+
+    monkeypatch.setenv(API_MODE_ENABLED_ENV, "false")
+    with pytest.raises(WizardError, match=f"{API_MODE_ENABLED_ENV}=true"):
+        await mgr.finalize_disable_subscription()
+
+
+@pytest.mark.asyncio
+async def test_finalize_succeeds_with_zero_grace(monkeypatch):
     """rollback_grace_days=0 lets operator finalize immediately."""
     async def smoke_ok(fp, ws):
         return SmokeTestResult(call_id="ok", success=True, latency_ms=10, cost_usd=0.001)
 
+    monkeypatch.setenv(API_MODE_ENABLED_ENV, "true")
     mgr = AnthropicModeManager(smoke_test_runner=smoke_ok, rollback_grace_days=0)
     await _drive_through_confirm(mgr)
     s = await mgr.finalize_disable_subscription()
@@ -370,10 +391,11 @@ async def test_finalize_succeeds_with_zero_grace():
 
 
 @pytest.mark.asyncio
-async def test_rollback_after_finalize_raises():
+async def test_rollback_after_finalize_raises(monkeypatch):
     async def smoke_ok(fp, ws):
         return SmokeTestResult(call_id="ok", success=True, latency_ms=10, cost_usd=0.001)
 
+    monkeypatch.setenv(API_MODE_ENABLED_ENV, "true")
     mgr = AnthropicModeManager(smoke_test_runner=smoke_ok, rollback_grace_days=0)
     await _drive_through_confirm(mgr)
     await mgr.finalize_disable_subscription()

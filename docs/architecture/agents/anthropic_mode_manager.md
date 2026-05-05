@@ -13,6 +13,7 @@
 - Every advance is idempotent and monotonic: `_max_step` never moves the wizard backwards just because a step is re-called; out-of-order calls raise `WizardOutOfOrderError`.
 - Wizard state is **not** persisted across worker restarts in v1 — recovery relies on operators re-entering steps interactively.
 - `fallback_subscription_kept=True` is the rollback contract: `rollback()` works any time post-`MODE_SWITCHED` until `finalize_disable_subscription()` flips it off (one-way; re-enrollment then requires manual Anthropic auth).
+- `finalize_disable_subscription()` requires `OMNISIGHT_AB_API_MODE_ENABLED=true` in the deployed worker env after the rollback grace window; every worker independently derives the same lock value from env.
 - Smoke-test failure does **not** auto-rollback — operator chooses retry vs. `rollback()`. Only the fingerprint of the key is ever stored; full key never logged.
 
 **Cross-module touchpoints**:

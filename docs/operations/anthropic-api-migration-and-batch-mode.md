@@ -499,14 +499,14 @@ Mitigation evidence is consolidated in
 ### 10.1 Single Knob
 
 - `OMNISIGHT_AB_BATCH_ENABLED=false` → 整套 batch dispatcher disable、退回 real-time only
-- `OMNISIGHT_AB_API_MODE_ENABLED=true` → 切 API 模式（false 退回訂閱版）
+- `OMNISIGHT_AB_API_MODE_ENABLED=true` → 切 API 模式；30 天觀察期結束後，`finalize_disable_subscription()` 會要求這個值已鎖成 true 才能 disable 訂閱版 fallback（false / unset 保留 rollback path）
 - `OMNISIGHT_AB_COST_GUARD_ENABLED=true` → cost guard 強制（false debug only）
 
 ---
 
 ## 11. Open Questions
 
-1. **訂閱版 fallback 保留多久**：建議切 API 後留訂閱版 30 天觀察期、確認無 regression 才完全 disable。
+1. **訂閱版 fallback 保留多久**：切 API 後留訂閱版 30 天觀察期；觀察期過後只有在 `OMNISIGHT_AB_API_MODE_ENABLED=true` 已部署鎖定時，才允許完全 disable fallback。
 2. **Anthropic Workspace 切分粒度**：dev / batch / production 三 workspace 是否夠？是否要 per-priority workspace（HD / WP / L4 各自）？傾向**先三 workspace、後續按 cost report 拆分**。
 3. **Batch 任務的 prompt cache 策略**：batch 內每 task 有 70-80% 重複 system prompt + tool schema、是否走 cache？傾向**強制走 cache（90% 折扣）**、設計 task template 確保 cacheable。
 4. **與 BP.B Guild 整合的優先級**：batch dispatcher 應該是 Guild 的 worker mode 還是獨立模組？傾向**獨立模組 + Guild 走 dispatcher API**、避免 Guild 升級時 batch 受影響。
