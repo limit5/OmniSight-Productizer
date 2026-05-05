@@ -123,6 +123,11 @@ async def test_web_search_tool_disabled_when_provider_none(monkeypatch) -> None:
 
     monkeypatch.setattr("backend.web_search.make_web_search_client", lambda **_: None)
 
+    async def fake_audit_log(**kwargs):  # noqa: ANN003
+        return 1
+
+    monkeypatch.setattr("backend.audit.log", fake_audit_log)
+
     result = await web_search.ainvoke({"query": "latest camera ISP guidance"})
 
     assert result == "[DISABLED] WebSearch: OMNISIGHT_WEB_SEARCH_PROVIDER=none."
@@ -137,6 +142,7 @@ async def test_web_search_tool_formats_sanitized_domain_filtered_results(monkeyp
     class _FakeClient:
         def search(self, query: str, **kwargs):  # noqa: ANN003
             assert query == "secure architecture"
+            assert kwargs["tenant_id"] == "t-default"
             assert kwargs["max_results"] == 5
             assert kwargs["include_answer"] is True
             return WebSearchResponse(
@@ -164,6 +170,11 @@ async def test_web_search_tool_formats_sanitized_domain_filtered_results(monkeyp
 
     monkeypatch.setattr("backend.web_search.make_web_search_client", lambda **_: _FakeClient())
 
+    async def fake_audit_log(**kwargs):  # noqa: ANN003
+        return 1
+
+    monkeypatch.setattr("backend.audit.log", fake_audit_log)
+
     result = await tools.web_search.ainvoke(
         {
             "query": "secure architecture",
@@ -176,3 +187,66 @@ async def test_web_search_tool_formats_sanitized_domain_filtered_results(monkeyp
     assert "evil.example.net" not in result
     assert WEB_CONTENT_MARKER_START in result
     assert "\u200b" not in result
+
+
+@pytest.mark.asyncio
+async def test_web_search_tool_audits_each_query(monkeypatch) -> None:
+    """BP.N.5 records each WebSearch query for Phase D traceability."""
+    from backend.agents import tools
+    from backend.db_context import set_tenant_id
+    from backend.web_search import WebSearchResponse, WebSearchResult
+
+    calls: list[dict] = []
+
+    class _FakeClient:
+        def search(self, query: str, **kwargs):  # noqa: ANN003
+            assert kwargs["tenant_id"] == "t-audit"
+            return WebSearchResponse(
+                provider="tavily",
+                query=query,
+                tenant_id=kwargs["tenant_id"],
+                fetched_at="2026-05-05T00:00:00Z",
+                search_depth="basic",
+                credits_charged=1,
+                cost_usd_estimated=0.001,
+                request_id="tvly-req-1",
+                results=[
+                    WebSearchResult(
+                        title="Traceability",
+                        url="https://docs.example.com/trace",
+                        content="Audit every query.",
+                    ),
+                ],
+            )
+
+    async def fake_audit_log(**kwargs):  # noqa: ANN003
+        calls.append(kwargs)
+        return 123
+
+    monkeypatch.setattr("backend.web_search.make_web_search_client", lambda **_: _FakeClient())
+    monkeypatch.setattr("backend.audit.log", fake_audit_log)
+
+    try:
+        set_tenant_id("t-audit")
+        result = await tools.web_search.ainvoke({"query": "phase d traceability"})
+    finally:
+        set_tenant_id(None)
+
+    assert result.startswith("[OK] WebSearch: provider=tavily results=1")
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["action"] == "web_search.query"
+    assert call["entity_kind"] == "web_search_query"
+    assert call["entity_id"]
+    assert call["actor"] == "agent:unknown"
+    assert call["after"] == {
+        "query": "phase d traceability",
+        "provider": "tavily",
+        "status": "ok",
+        "tenant_id": "t-audit",
+        "allowed_domains": [],
+        "blocked_domains": [],
+        "result_count": 1,
+        "cost_usd_estimated": 0.001,
+        "request_id": "tvly-req-1",
+    }

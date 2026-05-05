@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import logging
 import os
 import re
@@ -2159,6 +2160,50 @@ def _web_search_host_allowed(
     return True
 
 
+async def _audit_web_search_query(
+    *,
+    query: str,
+    provider: str,
+    status: str,
+    allowed_domains: list[str] | None,
+    blocked_domains: list[str] | None,
+    result_count: int | None = None,
+    cost_usd_estimated: float | None = None,
+    error: str | None = None,
+    tenant_id: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    """Best-effort BP.N.5 trace for each WebSearch tool query."""
+    from backend import audit as _audit
+    from backend.db_context import current_tenant_id
+
+    after = {
+        "query": query,
+        "provider": provider,
+        "status": status,
+        "tenant_id": tenant_id or current_tenant_id() or "t-default",
+        "allowed_domains": list(allowed_domains or []),
+        "blocked_domains": list(blocked_domains or []),
+    }
+    if result_count is not None:
+        after["result_count"] = int(result_count)
+    if cost_usd_estimated is not None:
+        after["cost_usd_estimated"] = float(cost_usd_estimated)
+    if request_id:
+        after["request_id"] = request_id
+    if error:
+        after["error"] = error
+
+    await _audit.log(
+        action="web_search.query",
+        entity_kind="web_search_query",
+        entity_id=hashlib.sha256(query.encode("utf-8")).hexdigest()[:16],
+        before=None,
+        after=after,
+        actor=f"agent:{get_active_agent_id() or 'unknown'}",
+    )
+
+
 @tool("WebSearch")
 async def web_search(
     query: str,
@@ -2182,6 +2227,7 @@ async def web_search(
         return "[ERROR] WebSearch: query is required."
 
     from backend.config import settings
+    from backend.db_context import current_tenant_id
     from backend.web_sanitizer import sanitize_web_content
     from backend.web_search import (
         WebSearchBudgetExceeded,
@@ -2193,25 +2239,80 @@ async def web_search(
     try:
         client = make_web_search_client(settings=settings)
     except Exception as exc:
+        await _audit_web_search_query(
+            query=cleaned_query,
+            provider="unknown",
+            status="config_error",
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         return f"[ERROR] WebSearch: failed to configure provider: {type(exc).__name__}: {exc}"
     if client is None:
+        await _audit_web_search_query(
+            query=cleaned_query,
+            provider="none",
+            status="disabled",
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+        )
         return "[DISABLED] WebSearch: OMNISIGHT_WEB_SEARCH_PROVIDER=none."
 
+    tenant_id = current_tenant_id() or "t-default"
     try:
         response = await asyncio.to_thread(
             client.search,
             cleaned_query,
+            tenant_id=tenant_id,
             max_results=5,
             include_answer=True,
         )
     except WebSearchRateLimited as exc:
+        await _audit_web_search_query(
+            query=cleaned_query,
+            provider="tavily",
+            status="rate_limited",
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+            error=str(exc),
+            tenant_id=tenant_id,
+        )
         return f"[BLOCKED] WebSearch: {exc}"
     except WebSearchBudgetExceeded as exc:
+        await _audit_web_search_query(
+            query=cleaned_query,
+            provider="tavily",
+            status="budget_exceeded",
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+            error=str(exc),
+            tenant_id=tenant_id,
+        )
         return f"[BLOCKED] WebSearch: {exc}"
     except WebSearchCredentialMissing as exc:
+        await _audit_web_search_query(
+            query=cleaned_query,
+            provider="tavily",
+            status="credential_missing",
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+            error=str(exc),
+            tenant_id=tenant_id,
+        )
         return f"[ERROR] WebSearch: {exc}"
 
     if response.error:
+        await _audit_web_search_query(
+            query=cleaned_query,
+            provider=response.provider,
+            status="provider_error",
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+            cost_usd_estimated=response.cost_usd_estimated,
+            error=response.error,
+            tenant_id=response.tenant_id,
+            request_id=response.request_id,
+        )
         return f"[ERROR] WebSearch: {response.error}"
 
     filtered = [
@@ -2223,6 +2324,18 @@ async def web_search(
             blocked_domains=blocked_domains,
         )
     ]
+
+    await _audit_web_search_query(
+        query=cleaned_query,
+        provider=response.provider,
+        status="ok",
+        allowed_domains=allowed_domains,
+        blocked_domains=blocked_domains,
+        result_count=len(filtered),
+        cost_usd_estimated=response.cost_usd_estimated,
+        tenant_id=response.tenant_id,
+        request_id=response.request_id,
+    )
 
     lines = [
         f"[OK] WebSearch: provider={response.provider} results={len(filtered)} query={response.query!r}",
