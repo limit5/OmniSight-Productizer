@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 440
+entry_count: 441
 status_counts:
-  dev-only: 430
+  dev-only: 431
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4103,3 +4103,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 合併後 production backend / agent runtime image 重 build，在 staging agent smoke 嘗試 `Read(build/compile.log)`
     應被 PEP deny，再以 `Bash(rtk cat build/compile.log)` 或等價 tail/sed path 讀取壓縮輸出。
+- id: 2026-05-06--BP.R.6
+  header_line: 46997
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: BP.R.6
+  title: BP.R.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後 production backend / agent runtime image 重 build，staging scrape `/metrics` 確認三條 RTK series
+    存在，並用 compile-failure smoke 觸發 `omnisight_rtk_fallback_total`。

@@ -383,6 +383,11 @@ async def lifespan(app: FastAPI):
     # H1: whole-host ring buffer (60 × 5s snapshots = 5 min history).
     # Feeds the AIMD capacity planner + the GET /host/metrics endpoint.
     host_ringbuf_task = asyncio.create_task(_hm.run_host_sampling_loop())
+    # BP.R.6: per-worker RTK install health gauge. The Dockerfile
+    # hard-fails missing RTK, but this keeps the running image visible
+    # to Prometheus after deploy.
+    from backend import rtk_observability as _rtk_obs
+    _rtk_obs.probe_install_status()
     # G7 (HA-07): flip the backend_instance_up gauge to 1 once the
     # app is fully booted. Shutdown flips it back to 0 so the
     # reverse-proxy drops this replica from rotation before the

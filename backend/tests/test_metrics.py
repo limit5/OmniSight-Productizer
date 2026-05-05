@@ -41,7 +41,9 @@ def test_reset_for_tests_replaces_registry():
                  "provider_latency_seconds", "sse_subscribers",
                  "sse_dropped_total", "workflow_step_total",
                  "auth_login_total", "persist_failure_total",
-                 "subprocess_orphan_total", "process_start_time"):
+                 "subprocess_orphan_total", "rtk_compression_ratio",
+                 "rtk_fallback_total", "rtk_install_status",
+                 "process_start_time"):
         assert getattr(m, name) is not None, f"{name} unbound after reset"
 
 
@@ -58,12 +60,13 @@ def test_reset_for_tests_replaces_registry():
     ("auth_login_total", {"outcome": "success"}),
     ("persist_failure_total", {"module": "notifications"}),
     ("subprocess_orphan_total", {"target": "jenkins"}),
+    ("rtk_fallback_total", {}),
 ])
 def test_labelled_metrics_accept_declared_labels(name, labels):
     m.reset_for_tests()
     metric = getattr(m, name)
     # labels(**x) returns a bound child; .inc / .observe must work.
-    child = metric.labels(**labels)
+    child = metric.labels(**labels) if labels else metric
     if name.endswith("_seconds"):
         child.observe(0.1)
     else:
@@ -113,6 +116,9 @@ def test_registry_has_all_declared_metrics_by_name():
         "omnisight_auth_login",
         "omnisight_persist_failure",
         "omnisight_subprocess_orphan",
+        "omnisight_rtk_compression_ratio",
+        "omnisight_rtk_fallback",
+        "omnisight_rtk_install_status",
         "omnisight_process_start_time",
     }
     for prefix in expected:

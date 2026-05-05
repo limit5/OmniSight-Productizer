@@ -1075,6 +1075,11 @@ async def error_check_node(state: GraphState) -> dict:
         command=fallback_command,
     )
     if rtk_decision:
+        try:
+            from backend import metrics as _m
+            _m.rtk_fallback_total.inc()
+        except Exception:
+            logger.debug("RTK fallback metric publish failed", exc_info=True)
         emit_pipeline_phase("rtk_fallback", rtk_decision.message[:200])
         error_summary = f"{error_summary}; {rtk_decision.message}"
 

@@ -94,3 +94,20 @@ class TestCompressionStats:
         stats = get_compression_stats()
         assert stats["compression_count"] == 0
         assert stats["total_original_bytes"] == 0
+
+    @pytest.mark.asyncio
+    async def test_compression_updates_prometheus_ratio(self):
+        from backend import metrics as m
+
+        if not m.is_available():
+            pytest.skip("prometheus_client not installed")
+        m.reset_for_tests()
+        reset_compression_stats()
+        lines = ["same line repeated for compression threshold test padding"] * 50
+        await compress_output("\n".join(lines), "run_bash")
+
+        from prometheus_client import generate_latest
+
+        text = generate_latest(m.REGISTRY).decode()
+        assert "omnisight_rtk_compression_ratio" in text
+        assert "omnisight_rtk_compression_ratio 0.0" not in text

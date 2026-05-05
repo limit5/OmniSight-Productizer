@@ -154,6 +154,10 @@ class TestErrorCheckNode:
 
     @pytest.mark.asyncio
     async def test_second_same_compile_error_enables_no_rtk_fallback(self):
+        from backend import metrics as m
+
+        if m.is_available():
+            m.reset_for_tests()
         state = GraphState(
             task_id="BP.R.4",
             user_command="make all",
@@ -180,6 +184,11 @@ class TestErrorCheckNode:
         assert update["rtk_bypass"] is True
         assert "RTK fallback active" in update["last_error"]
         assert "rtk --no-rtk make all" in update["last_error"]
+        if m.is_available():
+            from prometheus_client import generate_latest
+
+            text = generate_latest(m.REGISTRY).decode()
+            assert "omnisight_rtk_fallback_total 1.0" in text
 
     @pytest.mark.asyncio
     async def test_second_generic_error_does_not_enable_rtk_fallback(self):

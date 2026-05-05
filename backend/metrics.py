@@ -401,6 +401,24 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # BP.R.6: RTK hardening observability. These are per-worker process
+    # metrics: Prometheus aggregates them across replicas at scrape time.
+    rtk_compression_ratio = Gauge(
+        "omnisight_rtk_compression_ratio",
+        "Latest RTK output compression savings ratio (0..1)",
+        registry=REGISTRY,
+    )
+    rtk_fallback_total = Counter(
+        "omnisight_rtk_fallback_total",
+        "RTK raw-output fallback activations",
+        registry=REGISTRY,
+    )
+    rtk_install_status = Gauge(
+        "omnisight_rtk_install_status",
+        "1 when the RTK binary is installed and runnable, 0 otherwise",
+        registry=REGISTRY,
+    )
+
     # Phase 63-D D3: daily IQ benchmark score per model ─────────
     intelligence_iq_score = Gauge(
         "omnisight_intelligence_iq_score",
@@ -793,6 +811,9 @@ else:
     finetune_eval_score = _NoOp()  # type: ignore
     prompt_cache_hit_total = _NoOp()  # type: ignore
     prompt_cache_miss_total = _NoOp()  # type: ignore
+    rtk_compression_ratio = _NoOp()  # type: ignore
+    rtk_fallback_total = _NoOp()  # type: ignore
+    rtk_install_status = _NoOp()  # type: ignore
     intelligence_iq_score = _NoOp()  # type: ignore
     intelligence_iq_regression_total = _NoOp()  # type: ignore
     rag_prefetch_total = _NoOp()  # type: ignore
@@ -874,6 +895,7 @@ def reset_for_tests() -> None:
     global training_set_rows
     global finetune_eval_score
     global prompt_cache_hit_total, prompt_cache_miss_total
+    global rtk_compression_ratio, rtk_fallback_total, rtk_install_status
     global intelligence_iq_score, intelligence_iq_regression_total
     global rag_prefetch_total
     global memory_decay_total
@@ -1107,6 +1129,21 @@ def reset_for_tests() -> None:
     prompt_cache_miss_total = Counter(
         "omnisight_prompt_cache_miss_total", "Uncached input tokens",
         labelnames=("provider",), registry=REGISTRY,
+    )
+    rtk_compression_ratio = Gauge(
+        "omnisight_rtk_compression_ratio",
+        "Latest RTK output compression savings ratio (0..1)",
+        registry=REGISTRY,
+    )
+    rtk_fallback_total = Counter(
+        "omnisight_rtk_fallback_total",
+        "RTK raw-output fallback activations",
+        registry=REGISTRY,
+    )
+    rtk_install_status = Gauge(
+        "omnisight_rtk_install_status",
+        "1 when the RTK binary is installed and runnable, 0 otherwise",
+        registry=REGISTRY,
     )
     intelligence_iq_score = Gauge(
         "omnisight_intelligence_iq_score", "Latest IQ weighted score",
