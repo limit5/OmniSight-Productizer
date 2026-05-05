@@ -6,10 +6,14 @@
 
 **Totals**: 61 tools  ·  11 eager  ·  50 deferred (lazy-load via ToolSearch)  ·  28 HD skills (placeholder).
 
+**Tool schema version**: `1.0.0`.
+
 **Conventions**:
 
 - *eager* tools are always included in the default Anthropic `tools=[]` payload
 - *deferred* tools must be explicitly requested via `ToolSearch` or by name
+- ToolSearch lazy-load responses include the registry-level `schema_version`
+  plus each returned tool's own `schema_version`
 - HD skills are `category: skill_hd`, deferred, and become `input_schema`-rich
   as their owning HD phase (HD.1 - HD.21) ships
 
@@ -200,6 +204,14 @@ Fetch JSON schemas for deferred tools so they can be called. Use 'select:Tool1,T
       "type": "integer",
       "default": 5,
       "minimum": 1
+    },
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "1.0.0"
+      ],
+      "default": "1.0.0",
+      "description": "ToolSearch response schema version accepted by caller."
     }
   },
   "required": [

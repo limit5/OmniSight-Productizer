@@ -53,6 +53,8 @@ ToolCategory = Literal[
     "skill_hd",
 ]
 
+TOOL_SCHEMA_VERSION = "1.0.0"
+
 
 class ToolSchema(BaseModel):
     """Single tool definition. Serializable to Anthropic tools=[] payload."""
@@ -64,6 +66,10 @@ class ToolSchema(BaseModel):
     input_schema: dict[str, Any] = Field(..., description="JSON Schema for tool input")
     category: ToolCategory = Field(..., description="Grouping for documentation")
     deferred: bool = Field(False, description="Lazy-load via ToolSearch")
+    schema_version: str = Field(
+        TOOL_SCHEMA_VERSION,
+        description="ToolSearch lazy-load schema contract version",
+    )
 
     def to_anthropic(self) -> dict[str, Any]:
         """Serialize to Anthropic Messages API tools=[] payload entry."""
@@ -71,6 +77,17 @@ class ToolSchema(BaseModel):
             "name": self.name,
             "description": self.description,
             "input_schema": self.input_schema,
+        }
+
+    def to_toolsearch(self) -> dict[str, Any]:
+        """Serialize to ToolSearch lazy-load response entry."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema,
+            "category": self.category,
+            "deferred": self.deferred,
+            "schema_version": self.schema_version,
         }
 
 
@@ -110,6 +127,26 @@ def to_anthropic_tools(names: list[str] | None = None) -> list[dict[str, Any]]:
     if names is None:
         return [s.to_anthropic() for s in list_schemas()]
     return [_REGISTRY[n].to_anthropic() for n in names]
+
+
+def to_toolsearch_schemas(names: list[str]) -> dict[str, Any]:
+    """Serialize deferred schemas for ToolSearch lazy-load responses.
+
+    Module-global state audit: this reads the import-time registry only; every
+    worker derives the same versioned payload from the same checked-out files.
+    """
+    tools: list[dict[str, Any]] = []
+    for name in names:
+        schema = _REGISTRY[name]
+        if not schema.deferred:
+            raise ValueError(
+                f"ToolSearch may only lazy-load deferred tools; got {name!r}"
+            )
+        tools.append(schema.to_toolsearch())
+    return {
+        "schema_version": TOOL_SCHEMA_VERSION,
+        "tools": tools,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -407,6 +444,14 @@ register_tool(
             "properties": {
                 "query": {"type": "string"},
                 "max_results": {"type": "integer", "default": 5, "minimum": 1},
+                "schema_version": {
+                    "type": "string",
+                    "enum": [TOOL_SCHEMA_VERSION],
+                    "default": TOOL_SCHEMA_VERSION,
+                    "description": (
+                        "ToolSearch response schema version accepted by caller."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -600,10 +645,14 @@ def generate_markdown_reference() -> str:
         f"{deferred_count} deferred (lazy-load via ToolSearch)  ·  "
         f"{skill_hd_count} HD skills (placeholder).",
         "",
+        f"**Tool schema version**: `{TOOL_SCHEMA_VERSION}`.",
+        "",
         "**Conventions**:",
         "",
         "- *eager* tools are always included in the default Anthropic `tools=[]` payload",
         "- *deferred* tools must be explicitly requested via `ToolSearch` or by name",
+        "- ToolSearch lazy-load responses include the registry-level `schema_version`",
+        "  plus each returned tool's own `schema_version`",
         "- HD skills are `category: skill_hd`, deferred, and become `input_schema`-rich",
         "  as their owning HD phase (HD.1 - HD.21) ships",
         "",
@@ -677,6 +726,11 @@ def _validate_schemas() -> int:
     """
     errors: list[str] = []
     for schema in _REGISTRY.values():
+        if schema.schema_version != TOOL_SCHEMA_VERSION:
+            errors.append(
+                f"{schema.name}: schema_version {schema.schema_version!r} "
+                f"does not match registry version {TOOL_SCHEMA_VERSION!r}"
+            )
         s = schema.input_schema
         if not isinstance(s, dict):
             errors.append(f"{schema.name}: input_schema must be a dict, got {type(s).__name__}")
