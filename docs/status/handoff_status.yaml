@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 488
+entry_count: 489
 status_counts:
-  dev-only: 478
+  dev-only: 479
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4545,3 +4545,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.9.6 redaction round-trip tests 落地後，operator rebuild production backend image 並跑 share
     permalink redaction smoke。
+- id: 2026-05-06--WP.9.6
+  header_line: 47608
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.9.6
+  title: WP.9.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator rebuild production backend image，套用 WP.9 schema/runtime 後跑 live share permalink
+    smoke，涵蓋 ACL、expiry cleanup 與 redaction payload。

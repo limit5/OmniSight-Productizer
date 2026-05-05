@@ -442,3 +442,102 @@ async def test_acl_public_and_super_admin_short_circuit_membership_lookup() -> N
         caller_role="super_admin",
     )
     assert conn.calls == []
+
+
+@pytest.mark.asyncio
+async def test_acl_permalink_expiry_redaction_round_trip(monkeypatch) -> None:
+    """WP.9.6 -- exercise the generic share row contract end-to-end."""
+
+    now = datetime(2026, 5, 6, tzinfo=UTC)
+    expires_at = datetime(2026, 5, 5, tzinfo=UTC)
+    monkeypatch.setattr(so.secrets, "token_urlsafe", lambda _n: "roundtrip_slug________")
+    row = {
+        "share_id": "sh-roundtrip_slug________",
+        "object_kind": "block",
+        "object_id": "blk-roundtrip",
+        "tenant_id": "t-a",
+        "owner_user_id": "u-owner",
+        "visibility": "team",
+        "expires_at": expires_at,
+        "redaction_applied": {
+            "payload.command": "secret",
+            "metadata.customer.email": "pii",
+        },
+        "created_at": now,
+    }
+    create_conn = FakeConn([row])
+
+    share = await so.create_shareable_object(
+        create_conn,
+        object_kind="block",
+        object_id="blk-roundtrip",
+        tenant_id="t-a",
+        owner_user_id="u-owner",
+        visibility="team",
+        redaction_applied=row["redaction_applied"],
+    )
+    permalink = f"https://omnisight.local/share/{share.share_id}"
+
+    assert so.is_valid_share_slug(share.share_id)
+    assert permalink.endswith("/share/sh-roundtrip_slug________")
+    assert create_conn.calls[0][1][5] == "team"
+    assert create_conn.calls[0][1][6] == (
+        '{"metadata.customer.email":"pii","payload.command":"secret"}'
+    )
+
+    assert await so.user_can_access_shareable_object(
+        FakeMembershipConn({"role": "member", "status": "active"}),
+        share,
+        caller_user_id="u-member",
+    )
+    assert not await so.user_can_access_shareable_object(
+        FakeMembershipConn({"role": "viewer", "status": "active"}),
+        share,
+        caller_user_id="u-viewer",
+    )
+
+    source = {
+        "payload": {
+            "command": "curl -H 'Authorization: Bearer live-token'",
+            "stdout": "public output",
+        },
+        "metadata": {"customer": {"email": "alice@example.com"}},
+    }
+    shared_payload = so.build_share_payload(share, source)
+
+    assert shared_payload == {
+        "payload": {
+            "command": "[REDACTED:secret]",
+            "stdout": "public output",
+        },
+        "metadata": {"customer": {"email": "[REDACTED:pii]"}},
+    }
+    assert source["payload"]["command"].endswith("live-token'")
+
+    cleanup_conn = FakeCleanupConn(
+        [share.to_dict()],
+        [{"share_id": share.share_id}],
+    )
+    audit_calls = []
+
+    async def audit_log(**kwargs):
+        audit_calls.append((current_tenant_id(), kwargs))
+        return 123
+
+    summary = await so.cleanup_expired_shareable_objects(
+        cleanup_conn,
+        now=now,
+        audit_log=audit_log,
+    )
+
+    assert summary.to_dict() == {
+        "scanned": 1,
+        "audited": 1,
+        "deleted": 1,
+        "skipped_audit": 0,
+    }
+    assert audit_calls[0][0] == "t-a"
+    assert audit_calls[0][1]["before"]["share_id"] == share.share_id
+    assert cleanup_conn.fetchrow_calls == [
+        (so._DELETE_EXPIRED_SHAREABLE_OBJECT_SQL, (share.share_id, now)),
+    ]
