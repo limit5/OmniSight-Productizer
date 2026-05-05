@@ -42,6 +42,7 @@ import subprocess
 import sys
 
 import pytest
+from cryptography.fernet import InvalidToken
 
 from backend import account_linking, secret_store
 from backend.security import envelope as tenant_envelope
@@ -127,8 +128,7 @@ def test_envelope_carries_salt_field() -> None:
 
 
 def test_token_envelope_shape_is_pinned() -> None:
-    """KS.1.3 writes only the new token envelope; the legacy Fernet
-    shape is produced only when the KS.1.12 rollback knob is off."""
+    """KS.1.3 completion writes only the new token envelope."""
     encrypted = tv.encrypt_for_user("user-peek", "google", "tok-peek")
     outer = json.loads(encrypted.ciphertext)
     assert encrypted.key_version == tv.KEY_VERSION_CURRENT
@@ -149,14 +149,36 @@ def test_token_envelope_shape_is_pinned() -> None:
     assert outer["dek_ref"]["encryption_context"]["purpose"] == "as-token-vault"
 
 
-def test_envelope_disabled_writes_legacy_fernet_token(monkeypatch) -> None:
-    """KS.1.12: migration rollback knob makes new OAuth token writes
-    use the same single-Fernet carrier accepted by the legacy reader."""
+def test_default_write_is_not_single_fernet_ciphertext() -> None:
+    """KS.1 Phase 1: AS Token Vault must not regress to raw
+    ``secret_store`` Fernet for default writes."""
+    encrypted = tv.encrypt_for_user(
+        "user-envelope-only",
+        "github",
+        "ghp_envelope_only",
+    )
+
+    with pytest.raises(InvalidToken):
+        secret_store.decrypt(encrypted.ciphertext)
+
+    outer = json.loads(encrypted.ciphertext)
+    assert outer["fmt"] == tv.TOKEN_ENVELOPE_FORMAT_VERSION
+    assert (
+        tv.decrypt_for_user("user-envelope-only", "github", encrypted)
+        == "ghp_envelope_only"
+    )
+
+
+def test_envelope_disabled_env_no_longer_writes_legacy_fernet_token(monkeypatch) -> None:
+    """KS.1 completion: the old rollback env no longer produces
+    single-Fernet OAuth token rows."""
     monkeypatch.setenv(tenant_envelope.ENVELOPE_ENABLED_ENV, "false")
     encrypted = tv.encrypt_for_user("user-rollback", "google", "tok-rollback")
 
     assert encrypted.key_version == tv.KEY_VERSION_CURRENT
-    assert not encrypted.ciphertext.lstrip().startswith("{")
+    assert encrypted.ciphertext.lstrip().startswith("{")
+    with pytest.raises(InvalidToken):
+        secret_store.decrypt(encrypted.ciphertext)
     assert tv.decrypt_for_user("user-rollback", "google", encrypted) == "tok-rollback"
 
 
@@ -176,7 +198,7 @@ def test_oauth_token_envelope_survives_hard_restart(monkeypatch) -> None:
     """KS.1.11 compat regression: an ``oauth_tokens`` ciphertext
     written on the new envelope path must decrypt in a fresh interpreter.
 
-    This simulates the dual-write window's random hard-restart case:
+    This simulates the post-contract random hard-restart case:
     no module-global Fernet / KMS adapter cache is shared with the
     reader process; both workers derive the same local KEK from
     ``OMNISIGHT_SECRET_KEY``.
@@ -424,14 +446,12 @@ def test_tampered_ciphertext_raises_corrupted() -> None:
 
 
 def test_envelope_with_unknown_format_raises_binding_mismatch() -> None:
-    """If the inner envelope JSON parses but its ``fmt`` is unknown,
-    treat it as a binding-version mismatch (Fernet auth already passed,
-    so the ciphertext itself is intact — it just speaks a different
-    dialect)."""
+    """Legacy Fernet binding envelopes are deprecated even when their
+    inner JSON would have parsed during the compatibility window."""
     bogus = json.dumps({"fmt": 99, "uid": "u1", "prv": "google", "tok": "x", "salt": "AA=="})
     ciphertext = secret_store.encrypt(bogus)
     fake = tv.EncryptedToken(ciphertext=ciphertext, key_version=1)
-    with pytest.raises(tv.BindingMismatchError):
+    with pytest.raises(tv.LegacyFernetFallbackDeprecatedError):
         tv.decrypt_for_user("u1", "google", fake)
 
 
@@ -439,20 +459,20 @@ def test_envelope_missing_uid_raises_corrupted() -> None:
     bogus = json.dumps({"fmt": 1, "prv": "google", "tok": "x", "salt": "AA=="})
     ciphertext = secret_store.encrypt(bogus)
     fake = tv.EncryptedToken(ciphertext=ciphertext, key_version=1)
-    with pytest.raises(tv.CiphertextCorruptedError):
+    with pytest.raises(tv.LegacyFernetFallbackDeprecatedError):
         tv.decrypt_for_user("u1", "google", fake)
 
 
 def test_non_dict_envelope_raises_corrupted() -> None:
     ciphertext = secret_store.encrypt(json.dumps(["just", "a", "list"]))
     fake = tv.EncryptedToken(ciphertext=ciphertext, key_version=tv.KEY_VERSION_LEGACY_FERNET)
-    with pytest.raises(tv.CiphertextCorruptedError):
+    with pytest.raises(tv.LegacyFernetFallbackDeprecatedError):
         tv.decrypt_for_user("u1", "google", fake)
 
 
-def test_legacy_fernet_fallback_reads_old_rows() -> None:
-    """KS.1.3 migration window: key_version=1 old Fernet rows still
-    decrypt so operators can backfill existing oauth_tokens rows."""
+def test_legacy_fernet_fallback_rejects_old_rows() -> None:
+    """KS.1 completion: key_version=1 old Fernet rows no longer
+    decrypt after the migration/backfill window."""
     legacy_payload = json.dumps(
         {"fmt": 1, "uid": "u1", "prv": "google", "tok": "legacy", "salt": "AA=="},
         sort_keys=True,
@@ -462,10 +482,11 @@ def test_legacy_fernet_fallback_reads_old_rows() -> None:
         ciphertext=secret_store.encrypt(legacy_payload),
         key_version=tv.KEY_VERSION_LEGACY_FERNET,
     )
-    assert tv.decrypt_for_user("u1", "google", token) == "legacy"
+    with pytest.raises(tv.LegacyFernetFallbackDeprecatedError):
+        tv.decrypt_for_user("u1", "google", token)
 
 
-def test_legacy_fernet_fallback_deprecates_after_30_days(monkeypatch) -> None:
+def test_legacy_fernet_fallback_is_inactive_after_completion() -> None:
     legacy_payload = json.dumps(
         {"fmt": 1, "uid": "u1", "prv": "google", "tok": "legacy", "salt": "AA=="},
         sort_keys=True,
@@ -475,7 +496,9 @@ def test_legacy_fernet_fallback_deprecates_after_30_days(monkeypatch) -> None:
         ciphertext=secret_store.encrypt(legacy_payload),
         key_version=tv.KEY_VERSION_LEGACY_FERNET,
     )
-    monkeypatch.setattr(tv, "_utc_today", lambda: tv.LEGACY_FERNET_FALLBACK_DEPRECATES_ON)
+    assert tv.legacy_fernet_fallback_is_active(
+        as_of=tv.LEGACY_FERNET_FALLBACK_DEPRECATES_ON
+    ) is False
     with pytest.raises(tv.LegacyFernetFallbackDeprecatedError):
         tv.decrypt_for_user("u1", "google", token)
 
@@ -525,14 +548,14 @@ def test_fingerprint_matches_secret_store() -> None:
 
 
 def test_token_vault_uses_ks_envelope_for_new_writes() -> None:
-    """KS.1.3 / KS.1.12 invariant: default writes MUST go through
-    ``backend.security.envelope``; legacy Fernet is allowed only behind
-    the single rollback knob."""
+    """KS.1 completion invariant: writes MUST go through
+    ``backend.security.envelope``; legacy Fernet writer fallback is
+    deprecated."""
     src = inspect.getsource(tv)
     assert "from backend.security import envelope as tenant_envelope" in src
     assert "tenant_envelope.encrypt" in src
-    assert "tenant_envelope.is_enabled()" in src, (
-        "KS.1.12 rollback must be controlled by the central envelope knob"
+    assert "tenant_envelope.is_enabled()" not in src, (
+        "KS.1 completion must not retain the single-Fernet rollback writer"
     )
     assert "os.environ" not in src, (
         "token_vault must not parse the KS knob itself"

@@ -94,6 +94,43 @@ async def test_docker_info_failure_defaults_to_runc(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_production_requires_runsc_preference(monkeypatch):
+    _patch_docker_info(monkeypatch, json.dumps({
+        "runc": {"path": "runc"}, "runsc": {"path": "runsc"},
+    }))
+    monkeypatch.setattr("backend.config.settings.env", "production", raising=False)
+    monkeypatch.setattr(
+        "backend.config.settings.docker_runtime", "runc", raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="requires OMNISIGHT_DOCKER_RUNTIME=runsc"):
+        await ct.resolve_runtime()
+
+
+@pytest.mark.asyncio
+async def test_production_requires_runsc_registered(monkeypatch):
+    _patch_docker_info(monkeypatch, json.dumps({"runc": {"path": "runc"}}))
+    monkeypatch.setattr("backend.config.settings.env", "production", raising=False)
+    monkeypatch.setattr(
+        "backend.config.settings.docker_runtime", "runsc", raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="requires gVisor runsc registered"):
+        await ct.resolve_runtime()
+
+
+@pytest.mark.asyncio
+async def test_production_rejects_cached_runc(monkeypatch):
+    _patch_docker_info(monkeypatch, json.dumps({"runc": {"path": "runc"}}))
+    monkeypatch.setattr("backend.config.settings.docker_runtime", "runc", raising=False)
+    assert await ct.resolve_runtime() == "runc"
+
+    monkeypatch.setattr("backend.config.settings.env", "production", raising=False)
+    with pytest.raises(RuntimeError, match="cached sandbox runtime"):
+        await ct.resolve_runtime()
+
+
+@pytest.mark.asyncio
 async def test_resolve_runtime_is_cached(monkeypatch):
     calls = {"n": 0}
     async def counting_run(cmd: str, timeout: int = 60):

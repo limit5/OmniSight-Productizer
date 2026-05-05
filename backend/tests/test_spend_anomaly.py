@@ -122,6 +122,42 @@ async def test_crossing_threshold_auto_throttles_and_alerts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_alert_fires_at_60_second_boundary_before_returning() -> None:
+    alerts: list[sa.SpendAnomalyAlert] = []
+
+    async def sink(alert: sa.SpendAnomalyAlert) -> None:
+        alerts.append(alert)
+
+    detector = sa.SpendAnomalyDetector(
+        store=sa.InMemorySpendAnomalyStore(),
+        alert_sink=sink,
+    )
+    await detector.configure_threshold(
+        "t-ks16",
+        token_rate_limit=500,
+        window_seconds=60,
+        throttle_seconds=120,
+    )
+    started_at = datetime(2026, 5, 3, 1, 0, tzinfo=timezone.utc)
+
+    first = await detector.record_and_check(
+        _event(input_tokens=250, output_tokens=100, request_id="req-ks16-a"),
+        now=started_at,
+    )
+    second = await detector.record_and_check(
+        _event(input_tokens=200, output_tokens=50, request_id="req-ks16-b"),
+        now=datetime(2026, 5, 3, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert first.allowed
+    assert not second.allowed
+    assert second.alert is not None
+    assert (second.alert.fired_at - started_at).total_seconds() == 60
+    assert alerts == [second.alert]
+    assert await detector.alerts_since("t-ks16") == [second.alert]
+
+
+@pytest.mark.asyncio
 async def test_active_throttle_blocks_without_recording_more_usage() -> None:
     async def sink(alert: sa.SpendAnomalyAlert) -> None:
         del alert

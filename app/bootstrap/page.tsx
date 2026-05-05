@@ -69,6 +69,7 @@ import {
   type BootstrapAdminPasswordKind,
   type BootstrapGates,
   type BootstrapHealthCheckResult,
+  type BootstrapFrontendFreshness,
   type BootstrapInitTenantKind,
   type BootstrapInitTenantRequest,
   type BootstrapInitTenantResponse,
@@ -108,6 +109,7 @@ type StepId =
   | "git_forge"
   | "vertical_setup"
   | "services_ready"
+  | "frontend_freshness"
   | "smoke"
   | "finalize"
 
@@ -129,6 +131,7 @@ interface StepDef {
     g: BootstrapGates,
     finalized: boolean,
     localGreen: Record<StepId, boolean>,
+    status?: BootstrapStatusResponse,
   ) => boolean
 }
 
@@ -197,6 +200,14 @@ const STEPS: StepDef[] = [
     subtitle: "Verify backend / frontend / DB / tunnel are all live",
     icon: Activity,
     isGreen: (_g, _finalized, localGreen) => localGreen.services_ready === true,
+  },
+  {
+    id: "frontend_freshness",
+    title: "Frontend Freshness",
+    subtitle: "Compare the production bundle commit with master HEAD",
+    icon: GitBranch,
+    isGreen: (_g, _finalized, _localGreen, status) =>
+      status?.frontend_freshness.status === "fresh",
   },
   {
     id: "smoke",
@@ -3777,6 +3788,85 @@ function SmokeSubsetStep({
   )
 }
 
+function _shortCommit(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return "unknown"
+  return trimmed.length > 12 ? trimmed.slice(0, 12) : trimmed
+}
+
+function FrontendFreshnessStep({
+  freshness,
+}: {
+  freshness: BootstrapFrontendFreshness
+}) {
+  const isStale = freshness.status === "stale"
+  const isUnknown = freshness.status === "unknown"
+  const border = isStale
+    ? "border-[var(--status-red)] bg-[var(--status-red)]/10"
+    : isUnknown
+      ? "border-[var(--status-yellow,#d97706)] bg-[var(--status-yellow,#d97706)]/10"
+      : "border-[var(--status-green)] bg-[var(--status-green)]/10"
+  const text = isStale
+    ? "text-[var(--status-red)]"
+    : isUnknown
+      ? "text-[var(--status-yellow,#d97706)]"
+      : "text-[var(--status-green)]"
+
+  return (
+    <div
+      data-testid="bootstrap-frontend-freshness"
+      data-status={freshness.status}
+      className={`flex flex-col gap-3 p-4 rounded border ${border}`}
+    >
+      <div className={`flex items-center gap-2 font-mono text-xs ${text}`}>
+        {isStale ? <AlertCircle size={14} /> : <Check size={14} />}
+        <span>{freshness.detail}</span>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div className="p-3 rounded border border-[var(--border)] bg-[var(--background)]">
+          <div className="font-mono text-[10px] text-[var(--muted-foreground)]">
+            Prod build
+          </div>
+          <code
+            data-testid="bootstrap-frontend-prod-commit"
+            className="font-mono text-xs text-[var(--foreground)] break-all"
+          >
+            {_shortCommit(freshness.prod_build_commit)}
+          </code>
+        </div>
+        <div className="p-3 rounded border border-[var(--border)] bg-[var(--background)]">
+          <div className="font-mono text-[10px] text-[var(--muted-foreground)]">
+            Master HEAD
+          </div>
+          <code
+            data-testid="bootstrap-frontend-master-commit"
+            className="font-mono text-xs text-[var(--foreground)] break-all"
+          >
+            {_shortCommit(freshness.master_head_commit)}
+          </code>
+        </div>
+        <div className="p-3 rounded border border-[var(--border)] bg-[var(--background)]">
+          <div className="font-mono text-[10px] text-[var(--muted-foreground)]">
+            Lag
+          </div>
+          <code
+            data-testid="bootstrap-frontend-lag"
+            className={`font-mono text-xs ${text}`}
+          >
+            {freshness.lag_commits} commits
+          </code>
+        </div>
+      </div>
+      <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+        Alert threshold: Prometheus fires when
+        <code> omnisight_frontend_build_lag_commits </code>
+        reaches 10. CI fails earlier when more than 5 frontend commits
+        land after the recorded frontend deploy.
+      </p>
+    </div>
+  )
+}
+
 function StepBodyPlaceholder({ step }: { step: StepDef }) {
   // Each step's actual UI lands in its own TODO slot (L3–L5). Until then
   // the shell just surfaces what this step IS so the operator knows what's
@@ -3809,6 +3899,10 @@ function StepBodyPlaceholder({ step }: { step: StepDef }) {
     services_ready: {
       gate: "parallel-health-check.all_green === true",
       todo: "L5 — backend/frontend/DB/CF connector live ticks",
+    },
+    frontend_freshness: {
+      gate: "omnisight_frontend_build_lag_commits < 10",
+      todo: "BP.W3.14 — prod frontend build commit vs master HEAD",
     },
     smoke: {
       gate: "smoke_passed === true",
@@ -3906,7 +4000,7 @@ export default function BootstrapPage() {
   useEffect(() => {
     if (!status || userPinned) return
     const firstRed = STEPS.find(
-      (s) => !s.isGreen(status.status, status.finalized, localGreen),
+      (s) => !s.isGreen(status.status, status.finalized, localGreen, status),
     )
     if (firstRed) setActiveId(firstRed.id)
   }, [status, userPinned, localGreen])
@@ -3918,7 +4012,7 @@ export default function BootstrapPage() {
       "green" | "pending" | "active"
     >
     for (const s of STEPS) {
-      const green = s.isGreen(status.status, status.finalized, localGreen)
+      const green = s.isGreen(status.status, status.finalized, localGreen, status)
       out[s.id] = green ? "green" : s.id === activeId ? "active" : "pending"
     }
     return out
@@ -4153,6 +4247,10 @@ export default function BootstrapPage() {
                   onChanged={(allGreen) =>
                     setLocalGreenFor("services_ready", allGreen)
                   }
+                />
+              ) : activeStep.id === "frontend_freshness" ? (
+                <FrontendFreshnessStep
+                  freshness={status.frontend_freshness}
                 />
               ) : activeStep.id === "smoke" ? (
                 <SmokeSubsetStep

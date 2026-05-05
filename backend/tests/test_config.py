@@ -5,9 +5,10 @@ from __future__ import annotations
 import pytest
 
 
-def test_default_settings_have_sane_defaults():
+def test_default_settings_have_sane_defaults(monkeypatch):
+    monkeypatch.delenv("OMNISIGHT_LLM_PROVIDER", raising=False)
     from backend.config import Settings
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.api_prefix == "/api/v1"
     assert s.llm_provider == "anthropic"
     assert s.llm_temperature == 0.3
@@ -76,6 +77,20 @@ def test_validate_startup_config_warns_on_bad_web_search_budget(monkeypatch):
     monkeypatch.setattr(cfg.settings, "web_search_daily_budget_usd", -1)
     warnings = cfg.validate_startup_config(strict=False)
     assert any("WEB_SEARCH_DAILY_BUDGET_USD" in w for w in warnings)
+
+
+def test_validate_startup_config_rejects_production_runc(monkeypatch):
+    from backend import config as cfg
+
+    monkeypatch.setattr(cfg.settings, "env", "production")
+    monkeypatch.setattr(cfg.settings, "docker_runtime", "runc")
+    monkeypatch.setattr(cfg.settings, "llm_provider", "ollama")
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "strict")
+    monkeypatch.setenv("OMNISIGHT_DECISION_BEARER", "x" * 32)
+    monkeypatch.setenv("OMNISIGHT_ADMIN_PASSWORD", "correct horse battery")
+
+    with pytest.raises(cfg.ConfigValidationError, match="DOCKER_RUNTIME=runsc"):
+        cfg.validate_startup_config(strict=True)
 
 
 @pytest.mark.parametrize("provider,default_model", [

@@ -94,6 +94,7 @@ BACKGROUND_JOB_DEFINITION_IDS: tuple[str, ...] = (
     "tenant-quota-sweep",
     "user-drafts-gc",
     "workspace-gc",
+    "shareable-objects-expiry-cleanup",
 )
 
 
@@ -129,6 +130,14 @@ BACKGROUND_JOB_DEFINITION_ITEMS: tuple[BackgroundJobDefinition, ...] = (
         handler="backend.workspace_gc.sweep_once",
         cron="0 * * * *",
         tags={"subsystem": "workspace"},
+    ),
+    BackgroundJobDefinition(
+        job_id="shareable-objects-expiry-cleanup",
+        display_name="Shareable objects expiry cleanup",
+        description="Audit and delete expired shareable_objects rows.",
+        handler="backend.shareable_objects.cleanup_expired_shareable_objects",
+        cron="0 * * * *",
+        tags={"subsystem": "sharing"},
     ),
 )
 

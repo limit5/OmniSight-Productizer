@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import Any, Awaitable, Callable
 
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
@@ -27,6 +28,7 @@ from backend.prompt_loader import (
     extract_load_skill_requests,
     _resolve_skill_loading_mode,
 )
+from backend.rtk_fallback import update_rtk_fallback_history
 from backend.web.vite_error_prompt import build_last_vite_error_banner
 from backend.web.vite_retry_budget import (
     emit_vite_pattern_escalation,
@@ -42,6 +44,9 @@ _TOOL_ERROR_PREFIXES = (
     "[PATCH-FAILED]",
     "[REJECTED]",
 )
+
+ExternalAgentPayloadBuilder = Callable[[GraphState], dict[str, Any]]
+ExternalAgentRegistryLike = Any
 
 
 def _parse_model_spec(model_name: str) -> tuple[str | None, str | None]:
@@ -871,6 +876,105 @@ async def tool_executor_node(state: GraphState) -> dict:
     }
 
 
+def external_agent_node_factory(
+    agent_id: str,
+    *,
+    registry: ExternalAgentRegistryLike,
+    tenant_id: str,
+    bearer_token: str = "",
+    payload_builder: ExternalAgentPayloadBuilder | None = None,
+) -> Callable[[GraphState], Awaitable[dict]]:
+    """Build a LangGraph node that invokes an operator-registered A2A agent.
+
+    Module-global state audit (SOP Step 1): the factory stores no module-level
+    mutable state. Each node closes over its workflow configuration and the
+    injected registry; durable cross-worker consistency remains owned by that
+    registry implementation, matching ``ExternalAgentRegistry``.
+    """
+    clean_agent_id = agent_id.strip()
+    if not clean_agent_id:
+        raise ValueError("agent_id is required")
+    if not tenant_id.strip():
+        raise ValueError("tenant_id is required")
+
+    async def external_agent_node(state: GraphState) -> dict:
+        tool_name = f"external_agent:{clean_agent_id}"
+        emit_tool_progress(
+            tool_name,
+            "start",
+            f"Invoking external A2A agent {clean_agent_id}",
+        )
+        try:
+            endpoint = await registry.get_endpoint(
+                clean_agent_id,
+                require_enabled=True,
+            )
+            client = await registry.build_client(
+                clean_agent_id,
+                tenant_id=tenant_id,
+                bearer_token=bearer_token,
+            )
+            payload_fn = payload_builder or _default_external_agent_payload
+            result = await client.invoke(endpoint.agent_name, payload_fn(state))
+            output = json.dumps(result.payload, ensure_ascii=False, sort_keys=True)
+            success = _a2a_payload_success(result.payload)
+            emit_tool_progress(
+                tool_name,
+                "done" if success else "error",
+                output,
+                success=success,
+            )
+            return {
+                "tool_results": [
+                    ToolResult(
+                        tool_name=tool_name,
+                        output=output,
+                        success=success,
+                    )
+                ],
+                "messages": [ToolMessage(content=output, tool_call_id=tool_name)],
+            }
+        except Exception as exc:
+            output = f"[ERROR] {tool_name} failed: {exc}"
+            emit_tool_progress(tool_name, "error", output, success=False)
+            return {
+                "tool_results": [
+                    ToolResult(
+                        tool_name=tool_name,
+                        output=output,
+                        success=False,
+                    )
+                ],
+                "messages": [ToolMessage(content=output, tool_call_id=tool_name)],
+            }
+
+    external_agent_node.__name__ = f"external_agent_{clean_agent_id.replace('-', '_')}_node"
+    return external_agent_node
+
+
+def _default_external_agent_payload(state: GraphState) -> dict[str, Any]:
+    return {
+        "command": state.user_command,
+        "task_id": state.task_id,
+        "routed_to": state.routed_to,
+        "secondary_routes": list(state.secondary_routes),
+        "workspace_path": state.workspace_path,
+        "tool_results": [
+            result.model_dump()
+            for result in state.tool_results
+        ],
+    }
+
+
+def _a2a_payload_success(payload: dict[str, Any]) -> bool:
+    status = str(payload.get("status", "")).lower()
+    if status in {"failed", "error", "cancelled", "canceled"}:
+        return False
+    if payload.get("last_error"):
+        return False
+    return True
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Error check node — self-healing loop gate
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -962,6 +1066,22 @@ async def error_check_node(state: GraphState) -> dict:
     error_summary = "; ".join(
         f"{r.tool_name}: {r.output[:200]}" for r in failed
     )
+    fallback_command = state.user_command if failed and failed[0].tool_name in {"run_bash", "Bash"} else ""
+    rtk_history, rtk_decision = update_rtk_fallback_history(
+        task_id=state.task_id,
+        failed_tool_name=failed[0].tool_name if failed else "",
+        failed_output=failed[0].output if failed else error_summary,
+        prior_history=state.rtk_fallback_history,
+        command=fallback_command,
+    )
+    if rtk_decision:
+        try:
+            from backend import metrics as _m
+            _m.rtk_fallback_total.inc()
+        except Exception:
+            logger.debug("RTK fallback metric publish failed", exc_info=True)
+        emit_pipeline_phase("rtk_fallback", rtk_decision.message[:200])
+        error_summary = f"{error_summary}; {rtk_decision.message}"
 
     # Permission/environment auto-fix — attempt before counting as retry.
     # Loop guard (H8): if we've already auto-fixed the same category twice in
@@ -1098,7 +1218,8 @@ async def error_check_node(state: GraphState) -> dict:
         "loop_breaker_triggered": loop_triggered,
         "tool_calls": [],
         "tool_results": [],
-        "rtk_bypass": new_retry >= 2,
+        "rtk_bypass": rtk_decision is not None,
+        "rtk_fallback_history": rtk_history,
         **({"messages": l3_hint_messages} if l3_hint_messages else {}),
     }
 

@@ -806,7 +806,7 @@ curl -s https://ai.sora-dev.app/ | grep -oE '/_next/static/chunks/[^"]+' | head 
 | R7 | Test suite 時間暴漲拖慢 CI | 🟢 低 | 🟡 中 | CI shard 4→8-way + pytest marker 分級 |
 | R8 | Neo4j 延後後重啟技術債 | 🟢 低 | 🟢 低 | v1.0 後開 ADR-002 重啟議題 |
 | R9 | D1/D2 pilot 豁免後 D3-D29 陸續有人「跟進 pilot」推進造成範圍失控 | 🟡 低 | 🟡 中 | **明確 gate**：僅 D1 (SKILL-UVC) + D2 (SKILL-IPCAM) 享豁免（source_of_truth 在此 ADR R9 + TODO BP.W3.1 註腳）；D3+ 須 Phase B 完後才啟動；任何 agent session 若欲繞過須先提交 ADR 修訂 PR |
-| R10 | RLM library 整合誘惑 — `rlms` PyPI 包看似一行 swap 解 long-context、但 reproduction paper [arXiv 2603.02615] 揭露 depth>1 latency 96x、simple task regression、unbounded cost | 🟡 中 | 🟢 低 | **per-Guild opt-in flag** + **硬 depth=1 cap** + token budget 必繼承 + 反向測試「RLM mode vs vanilla 比較」必跑；Option B 借模式不裝 library；Option A full integration 須 ≥3 reproduction papers + ≥1 big-co prod report 才重啟（見 §Appendix C trigger） |
+| R10 | RLM library 整合誘惑 — `rlms` PyPI 包看似一行 swap 解 long-context、但 reproduction paper [arXiv 2603.02615] 揭露 depth>1 latency 96x、simple task regression、unbounded cost | 🟡 中 | 🟢 低 | **per-Guild opt-in flag** + **硬 depth=1 cap** + token budget 必繼承 + 反向測試「RLM mode vs vanilla 比較」必跑；Option B 借模式不裝 library；Option A full integration 須 ≥3 reproduction papers + ≥1 big-co prod report 才重啟（見 §Appendix C trigger）；BP.W3.9 2026-05-06 re-check: trigger not met, keep Option B (`docs/security/r10-rlm-library-full-integration-feasibility.md`) |
 | R11 | RTK install 在 `Dockerfile.agent` 失敗被 `\|\| true` 吞掉 → agent 假設有壓縮但實際無、context overflow 變相風險 | 🟠 中 | 🟡 中 | Phase R 移除 `\|\| true`、改 hard-fail + prod log；新 Prometheus metric `omnisight_rtk_install_status` 監控 base image RTK 是否正常 |
 | R12 | gVisor 在 `sandbox_capacity.py` 是 cost weight 而非 actual runtime — 文件聲稱有但 prod 跑 docker default → **誤導性安全 claim** | 🔴 高 | 🟢 低 | Phase S 文件化此事實 + Risk R12 explicit warning「合規 claim 不可引用 gVisor」；正式 gVisor adoption 留 Phase U Window 3；防止 Phase D 第三方 legal review 被誤導 |
 | R13 | Hardware Bridge Daemon (Tier 3 RPC `flash_board`) 只在 test enum 字串、無實際 daemon 服務 → 自動化燒錄韌體不可能、所有「flash 韌體」task 仍需 operator 手動 | 🟠 中 | 🟡 中 | Phase T (Window 3) ship FastAPI daemon；在此之前 Priority A1 prod hardware 驗證走 operator 手動 SOP（已記錄於 docs/ops/）|
@@ -948,6 +948,13 @@ class ReviewTemplate(BaseModel):
 | 既有 risk register 中 R10/R11/R12/R13/R14 任一 mitigation 失效 | 該 Risk 行重做風險評估 |
 | 外部 paper 引用既有 OmniSight design doc 或公開 benchmark | 評估反向採納可能性（OmniSight pattern 是否值得對外推廣）|
 | Phase B 完成後（Guild 重組 land）| 重新評估 RLM/L2/L4 等延後項目 |
+
+**BP.W3.9 re-check (2026-05-06):** RLM full-integration trigger
+not met. Current public evidence includes the original paper, official
+library, follow-on variants, and startup/vendor production discussions,
+but not three qualifying independent reproduction papers plus one
+big-company production deployment report. Keep Option B; see
+`docs/security/r10-rlm-library-full-integration-feasibility.md`.
 
 ### C.3 Lesson-Learned：RLM 評估案例（2026-04-25）
 

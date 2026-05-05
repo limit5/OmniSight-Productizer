@@ -1,6 +1,6 @@
 ---
 audience: operator + architect
-status: accepted
+status: accepted + complete for repository DoD
 date: 2026-05-01
 priority: AB — Anthropic API + Batch Mode（加速 OmniSight 自身開發）
 related:
@@ -8,11 +8,19 @@ related:
   - backend/llm_adapter.py (既有 Anthropic provider integration)
   - backend/security/token_vault.py (AS Token Vault — 存 API key)
   - docs/integrations/llm-observability.md
+  - docs/ops/anthropic-api-migration-runbook.md
+  - docs/ops/ab_r76_r80_mitigation_evidence.md
+  - docs/ops/ab_batch_velocity_evidence.md
 ---
 
 # ADR — Anthropic API 模式 + Batch 模式遷移與整合（加速 OmniSight 自身開發）
 
 > **One-liner**：把 OmniSight 自身的 dev workflow 從 Claude 訂閱版（Pro / Max plan via Claude Code CLI）切換到 **Anthropic API key + Batch API**，用批次執行 + 50% 折扣 + multi-agent dispatch 跑 TODO 規劃中的大量任務。涵蓋：(1) 工具 schema 完整盤點 / (2) Messages API 即時 tool calling / (3) Batch API 批次 tool calling / (4) 外部工具 / MCP / subprocess 對接清單 / (5) 成本與 rate-limit 估算 / (6) 訂閱版 → API 切換 SOP。
+
+> **Completion note（2026-05-06）**：AB.1-AB.10 的 repo-level runtime / test /
+> evidence artefacts 已落地。本 ADR 現在是 accepted decision record +
+> completion index；production activation 仍依 runbook、30-day grace 與
+> evidence docs 的 `Production status` gate 推進。
 
 ---
 
@@ -51,6 +59,21 @@ OmniSight backend 已支援 Anthropic API：
 - **Batch task queue + dispatcher**（要排程 100+ 任務）
 - **Cost / rate-limit 估算工具**（避免不知不覺燒爆）
 - **MCP / subprocess 工具對接清單**（KiCAD-MCP / vision-parse / 等）
+
+### 1.3 Repository completion scope（2026-05-06）
+
+本 ADR 的「完整」定義是 repository DoD：runtime contracts、tests、operator
+runbook、risk evidence、velocity evidence 都已進 repo。它**不是** production
+已啟用的宣告；API mode dogfood、第一個 100-task batch、30-day fallback disable
+與 velocity uplift 都由對應 evidence/runbook row 記錄。
+
+| Gate | Repository status | Evidence |
+|------|-------------------|----------|
+| AB.1-AB.10 runtime / tests | complete | `backend/agents/*` AB modules + `backend/tests/test_ab_e2e_smoke.py`、`test_ab_cost_regression.py`、`test_tool_schemas.py` |
+| R76-R80 mitigation | complete | [`docs/ops/ab_r76_r80_mitigation_evidence.md`](../ops/ab_r76_r80_mitigation_evidence.md) |
+| Seven-family batch velocity contract | complete | [`docs/ops/ab_batch_velocity_evidence.md`](../ops/ab_batch_velocity_evidence.md) |
+| Operator migration SOP | complete | [`docs/ops/anthropic-api-migration-runbook.md`](../ops/anthropic-api-migration-runbook.md) |
+| Production activation | operator gate | API-mode smoke、100-task batch、30-day grace、`OMNISIGHT_AB_API_MODE_ENABLED=true` lock |
 
 ---
 
@@ -288,7 +311,9 @@ Batch Task Queue (Redis / Postgres queue)
    └── Write back to OmniSight DB + N10 audit
 ```
 
-**alembic 0181**：`batch_tasks` / `batch_runs` / `batch_results` 表
+**alembic 0181**：`batch_runs` / `batch_results` 表。Dispatcher input queue 由
+`BatchTaskQueue` / caller-side lane routing 管；durable Anthropic batch state 只落
+`batch_runs` + `batch_results`，避免把 transient queue contract 固化成 schema。
 
 ---
 
@@ -388,7 +413,7 @@ OmniSight 內建：
 
 ---
 
-## 7. 第 5 段 — 訂閱版 → API 切換 SOP
+## 7. 第 6 段 — 訂閱版 → API 切換 SOP
 
 ### 7.1 切換前準備
 
@@ -439,22 +464,23 @@ Settings → Provider Keys → Anthropic
 
 ---
 
-## 8. OmniSight 整合計畫（Priority AB 對應）
+## 8. OmniSight 整合狀態（Priority AB 對應）
 
-| AB phase | 內容 | 預估 |
-|----------|------|------|
-| **AB.1** Tool schema canonical doc | 中央 registry + Pydantic validation + CI 鎖 | 3 day |
-| **AB.2** Anthropic Messages API native client | `anthropic_native_client.py`（繞 LangChain、給 batch + 高效能 path） | 2 day |
-| **AB.3** Anthropic Batch API integration | `batches.create / retrieve / results` 完整 wrapper | 3 day |
-| **AB.4** Batch task queue + dispatcher | Redis / PG queue + worker + poll | 3 day |
-| **AB.5** External MCP / subprocess tool registry | 接 KiCad-MCP / altium2kicad subprocess / OdbDesign sidecar / vision-parse / 等、按 task type dispatch | 4 day |
-| **AB.6** Cost estimator + budget guard | per-task / per-batch / daily / monthly cap + 80%/100%/120% alert | 2 day |
-| **AB.7** Rate limit + retry + backoff | 429 / 529 處理 + exponential backoff + dead-letter queue | 2 day |
-| **AB.8** Subscription → API migration UI + runbook | Settings UI + operator runbook + rollback | 1 day |
-| **AB.9** Batch eligible task identifier | per task type opt-in flag + 預設 routing 表 | 2 day |
-| **AB.10** Test strategy + smoke + CI | mock + integration + cost regression | 2 day |
+| AB phase | 內容 | Repo status / evidence |
+|----------|------|------------------------|
+| **AB.1** Tool schema canonical doc | 中央 registry + Pydantic validation + CI 鎖 | `backend/agents/tool_schemas.py` + `docs/agents/tool-reference.md` + `test_tool_schemas.py` |
+| **AB.2** Anthropic Messages API native client | `anthropic_native_client.py`（繞 LangChain、給 batch + 高效能 path） | `backend/agents/anthropic_native_client.py` + `test_anthropic_native_client.py` |
+| **AB.3** Anthropic Batch API integration | `batches.create / retrieve / results / cancel` wrapper | `backend/agents/batch_client.py` + alembic 0181 + `test_batch_client.py` |
+| **AB.4** Batch task queue + dispatcher | queue + grouping + worker + lane split + UI progress | `backend/agents/batch_dispatcher.py`、`components/omnisight/ab/batch-progress-panel.tsx`、`test_batch_dispatcher.py` |
+| **AB.5** External MCP / subprocess tool registry | KiCad-MCP / altium2kicad / OdbDesign / vision-parse / MCP injection | `backend/agents/external_tool_registry.py`、`mcp_integration.py`、alembic 0184、`test_external_tool_registry.py`、`test_mcp_integration.py` |
+| **AB.6** Cost estimator + budget guard | per-task / per-batch / daily / monthly cap + alerts | `backend/agents/cost_guard.py` + alembic 0183 + `test_cost_guard.py` + `test_ab_cost_regression.py` |
+| **AB.7** Rate limit + retry + backoff | 429 / 529 classification + retry + DLQ | `backend/agents/rate_limiter.py` + alembic 0185 + `test_rate_limiter.py` |
+| **AB.8** Subscription → API migration UI/runbook | mode manager + 30-day rollback grace + env lock | `backend/agents/anthropic_mode_manager.py` + [`docs/ops/anthropic-api-migration-runbook.md`](../ops/anthropic-api-migration-runbook.md) + `test_anthropic_mode_manager.py` |
+| **AB.9** Batch eligible task identifier | per task type opt-in flag + seven-family routing | `backend/agents/batch_eligibility.py` + `test_batch_eligibility.py` + [`ab_batch_velocity_evidence.md`](../ops/ab_batch_velocity_evidence.md) |
+| **AB.10** Test strategy + smoke + CI | mock E2E, cost regression, doc/schema drift guards | `test_ab_e2e_smoke.py`、`test_ab_cost_regression.py`、`test_ab_r76_r80_mitigation_evidence.py`、`test_ab_batch_velocity_evidence.py` |
 
-**Total**: ~24 day（~5 週、可平行壓 ~3 週）
+**Repository Total**: AB.1-AB.10 complete as dev-only artefacts. Production
+rollout remains gated by runbook execution and observation evidence.
 
 ### 8.1 與既有 priority 的整合
 
@@ -477,37 +503,49 @@ Settings → Provider Keys → Anthropic
 - **R77 Batch 結果 24h 才回 → 排程錯亂**：dispatcher 預期分鐘級、batch 可能小時級。**Mitigation**：dispatcher 明確分 real-time vs batch lane；batch 任務帶 `expected_completion_within: 24h` SLA；UI 顯示 batch 進度條。
 - **R78 Rate limit 撞牆 → 任務丟失**：429 / 529 處理不周。**Mitigation**：AB.7 exponential backoff + retry（max 5）+ dead-letter queue + alert；Tier 4 申請避免 default tier 限制。
 - **R79 Tool schema drift**：Claude Code 升版、tool schema 改、OmniSight 自家 tool registry 跟不上。**Mitigation**：每月 schema diff vs Claude Code release notes；CI lock；deferred tool 走 ToolSearch 動態載入避免 hard-code。
-- **R80 Batch 任務跨 tenant 隔離**：multi-tenant 後、batch 共享 dispatcher 但結果不該滲漏。**Mitigation**：每 task 帶 `tenant_id`、result 寫回時嚴格 tenant scope；KS.1 envelope 邊界繼承；tenant 退出時所有 in-flight batch task cancel + 加密 deletion。
+- **R80 Batch 任務跨 tenant 隔離**：multi-tenant 後、batch 共享 dispatcher 但結果不該滲漏。**Mitigation**：每 task 帶 `tenant_id`、dispatcher 以 `(tenant_id, model, tools_signature)` 分 batch、callback 以 `(tenant_id, task_id)` 路由；KS.1 envelope 邊界繼承；tenant 退出時所有 in-flight batch task cancel + 加密 deletion。
+
+Mitigation evidence is consolidated in
+[`docs/ops/ab_r76_r80_mitigation_evidence.md`](../ops/ab_r76_r80_mitigation_evidence.md).
+
+Seven-family batch acceleration and velocity measurement evidence is
+consolidated in
+[`docs/ops/ab_batch_velocity_evidence.md`](../ops/ab_batch_velocity_evidence.md).
 
 ---
 
 ## 10. Migration / Schema
 
+Live repo state uses the following AB migrations. Do not allocate new
+AB-specific migration numbers from the old 0181-0190 planning block; use the
+current live Alembic head advertised by the runner when adding future schema.
+
 | Migration | 內容 |
 |-----------|------|
-| 0181 | `batch_tasks` / `batch_runs` / `batch_results` 表 |
-| 0182 | `tool_schema_registry` / `tool_schema_versions` |
-| 0183 | `cost_estimates` / `cost_alerts` 表 |
-| 0184 | `external_tool_registry`（MCP / subprocess sidecar 紀錄） |
-| 0185-0190 | 預留 |
+| 0181 | `batch_runs` / `batch_results` — durable Anthropic batch run/result state |
+| 0183 | `cost_estimates` / `cost_budgets` / `cost_alerts` — estimator + budget + alert state |
+| 0184 | `external_tool_registry` — MCP / subprocess / Docker sidecar registry rows |
+| 0185 | `dlq_entries` — retry exhaustion / rate-limit forensic queue |
 
-合計 **AB 0181-0190（10 slots 預留）**。
+`tool_schema_registry` / `tool_schema_versions` table was not created; tool
+schemas are source-controlled in `backend/agents/tool_schemas.py` and drift is
+guarded by generated docs + tests instead of DB schema.
 
 ### 10.1 Single Knob
 
 - `OMNISIGHT_AB_BATCH_ENABLED=false` → 整套 batch dispatcher disable、退回 real-time only
-- `OMNISIGHT_AB_API_MODE_ENABLED=true` → 切 API 模式（false 退回訂閱版）
+- `OMNISIGHT_AB_API_MODE_ENABLED=true` → 切 API 模式；30 天觀察期結束後，`finalize_disable_subscription()` 會要求這個值已鎖成 true 才能 disable 訂閱版 fallback（false / unset 保留 rollback path）
 - `OMNISIGHT_AB_COST_GUARD_ENABLED=true` → cost guard 強制（false debug only）
 
 ---
 
-## 11. Open Questions
+## 11. Resolved Decisions / Follow-up Gates
 
-1. **訂閱版 fallback 保留多久**：建議切 API 後留訂閱版 30 天觀察期、確認無 regression 才完全 disable。
-2. **Anthropic Workspace 切分粒度**：dev / batch / production 三 workspace 是否夠？是否要 per-priority workspace（HD / WP / L4 各自）？傾向**先三 workspace、後續按 cost report 拆分**。
-3. **Batch 任務的 prompt cache 策略**：batch 內每 task 有 70-80% 重複 system prompt + tool schema、是否走 cache？傾向**強制走 cache（90% 折扣）**、設計 task template 確保 cacheable。
-4. **與 BP.B Guild 整合的優先級**：batch dispatcher 應該是 Guild 的 worker mode 還是獨立模組？傾向**獨立模組 + Guild 走 dispatcher API**、避免 Guild 升級時 batch 受影響。
-5. **L4.9 Cost-per-Decision Meta-LLM 與 AB 整合時機**：AB 落地後、L4.9 自然有實作 substrate（已有 batch + cost estimator）；可同期或 AB 完工後接著做。
+1. **訂閱版 fallback 保留多久**：切 API 後留訂閱版 30 天觀察期；觀察期過後只有在 `OMNISIGHT_AB_API_MODE_ENABLED=true` 已部署鎖定時，才允許完全 disable fallback。此 gate 已在 `AnthropicModeManager.finalize_disable_subscription()` enforce。
+2. **Anthropic Workspace 切分粒度**：採 dev / batch / production 三 workspace 起步；後續只有 cost report 顯示 HD / WP / L4 等 priority 需要獨立 cap 時才拆。
+3. **Batch 任務的 prompt cache 策略**：native client 預設啟用 cache control，system 最後一個 block + tools 最後一個 entry 加 ephemeral cache marker；cache 關閉路徑保留給 debug / provider 行為差異排查。
+4. **與 BP.B Guild 整合的邊界**：batch dispatcher 保持獨立模組；Guild 透過 `submit_in_lane()` 作為 client，不把 dispatcher 變成 Guild 內部 worker。
+5. **L4.9 Cost-per-Decision Meta-LLM 時機**：AB 已提供 cost estimator + batch lane substrate；L4.9 是後續 priority，不屬於本 ADR closure。
 
 ---
 
@@ -516,7 +554,15 @@ Settings → Provider Keys → Anthropic
 - `TODO.md` Priority AB / Priority Z 既有 / Priority CL（cost / billing 整合）
 - `backend/llm_adapter.py`（既有 Anthropic provider integration）
 - `backend/security/token_vault.py`（AS Token Vault — API key 加密存）
+- `backend/agents/tool_schemas.py`（AB.1 tool schema registry）
+- `backend/agents/anthropic_native_client.py`（AB.2 native Messages client）
+- `backend/agents/batch_client.py` / `backend/agents/batch_dispatcher.py`（AB.3 / AB.4 Batch path）
+- `backend/agents/cost_guard.py` / `backend/agents/rate_limiter.py`（AB.6 / AB.7 guardrails）
+- `backend/agents/batch_eligibility.py`（AB.9 routing）
 - `docs/integrations/llm-observability.md`（Z 既有 LLM observability doc）
+- `docs/ops/anthropic-api-migration-runbook.md`（operator runbook）
+- `docs/ops/ab_r76_r80_mitigation_evidence.md`（risk mitigation evidence）
+- `docs/ops/ab_batch_velocity_evidence.md`（seven-family batch acceleration evidence）
 - `docs/security/ks-multi-tenant-secret-management.md`（KS.1 envelope 邊界）
 - Anthropic Messages API：https://docs.anthropic.com/en/api/messages
 - Anthropic Batch API：https://docs.anthropic.com/en/api/messages-batches
@@ -528,5 +574,12 @@ Settings → Provider Keys → Anthropic
 
 - **Owner**: Agent-software-beta + nanakusa sora
 - **Date**: 2026-05-01
-- **Status**: Accepted（Priority AB 排程依 OmniSight 實際 dev velocity 啟動、可立即開工不阻塞主路線）
-- **Next review**: AB.1-AB.4 完工後、第一個 100-task batch 跑完後 review 實際 cost vs estimate
+- **Completion update**: 2026-05-06
+- **Status**: Accepted + complete for repository DoD（dev-only；production activation remains an operator gate）
+- **Next review**: first production 100-task batch + 30-day API-mode grace closure；review actual cost vs estimate、50% batch discount evidence、DLQ rate、velocity uplift。
+
+**Production status:** dev-only
+**Next gate:** deployed-active — operator runs the migration runbook in the
+target environment, confirms API-mode smoke, submits the first >=100 task batch,
+records actual cost within 10% of estimate plus observed discount, then keeps
+`OMNISIGHT_AB_API_MODE_ENABLED=true` through the 30-day fallback-disable gate.

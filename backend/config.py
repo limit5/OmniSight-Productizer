@@ -1061,6 +1061,13 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
             f"(current: {auth_mode!r}). Refusing to start — exit 78."
         )
 
+    if env_name == "production" and (settings.docker_runtime or "").strip().lower() != "runsc":
+        hard_errors.append(
+            "ENV=production requires OMNISIGHT_DOCKER_RUNTIME=runsc so "
+            "Tier-1 sandboxes use gVisor. Use non-production env for "
+            "explicit runc compatibility tests."
+        )
+
     # The bootstrap admin password ships as `omnisight-admin`. Hard-
     # fail if that's still in use under prod, so an internet-exposed
     # instance can't have its default admin trivially logged into.

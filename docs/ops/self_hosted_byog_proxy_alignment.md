@@ -133,7 +133,29 @@ nonce.
 - [ ] Ticket records release tag, GHCR digest, mirrored digest, proxy id,
       tenant id, certificate fingerprint, and operator.
 
-## 6. Rollback Boundary
+## 6. HD.21.5 Shared Image Confirmation
+
+HD.21.5 self-hosted edition is confirmed to share the same customer-side
+proxy image as KS.3 BYOG SaaS tenants:
+
+- Canonical image: `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-proxy:${OMNISIGHT_IMAGE_TAG:-latest}`.
+- Canonical build source: `Dockerfile.omnisight-proxy`.
+- Canonical release path: `.github/workflows/docker-publish.yml` matrix
+  entry `image: omnisight-proxy`.
+- Self-hosted bundles may include `omnisight-proxy-${OMNISIGHT_IMAGE_TAG}.tar`
+  or mirror it to a customer registry, but the digest evidence must
+  match the GHCR release digest.
+- There is no self-hosted-only proxy Dockerfile, package, image name, or
+  registry repository. Keep `omnisight-proxy-self-hosted`,
+  `omnisight-selfhosted-proxy`, and customer-specific proxy images out
+  of release automation.
+
+This is an artifact-sharing confirmation only. KS.3 BYOG SaaS
+registration, HD.21.5.2 self-hosted annual license activation, air-gapped
+bundle export, heartbeat URL selection, and rollback decisions remain
+mode-specific.
+
+## 7. Rollback Boundary
 
 Image rollback is allowed by pinning `OMNISIGHT_IMAGE_TAG` back to the
 last known-good release and redeploying the same compose service.

@@ -82,6 +82,7 @@ async def compress_output(text: str, tool_name: str = "") -> tuple[str, int]:
                 _compression_stats["total_original_bytes"] += original_len
                 _compression_stats["total_compressed_bytes"] += len(compressed)
                 _compression_stats["compression_count"] += 1
+            _publish_compression_ratio(bytes_saved / original_len)
 
         return compressed, max(bytes_saved, 0)
 
@@ -95,6 +96,16 @@ def _looks_binary(text: str) -> bool:
     sample = text[:200]
     non_printable = sum(1 for c in sample if ord(c) < 32 and c not in "\n\r\t")
     return non_printable > len(sample) * 0.1
+
+
+def _publish_compression_ratio(ratio: float) -> None:
+    """Publish latest compression ratio without making compression fragile."""
+
+    try:
+        from backend import metrics as _m
+        _m.rtk_compression_ratio.set(max(0.0, min(1.0, ratio)))
+    except Exception:
+        logger.debug("RTK compression metric publish failed", exc_info=True)
 
 
 def _python_compress(text: str) -> str:

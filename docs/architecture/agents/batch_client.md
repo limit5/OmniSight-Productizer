@@ -4,7 +4,7 @@
 
 **Key types / public surface**:
 - `BatchClient` — submit / poll / stream / cancel batches; takes the SDK `messages` namespace + a `BatchPersistence` by injection.
-- `BatchRequest` / `BatchRun` / `BatchResult` — domain dataclasses; `BatchRun` mirrors Anthropic batch state, `BatchResult` carries per-request status + tokens + final text.
+- `BatchRequest` / `BatchRun` / `BatchResult` — domain dataclasses; `BatchRun` mirrors Anthropic batch state, `BatchResult` carries per-request status + tokens + final text. `BatchRequest` and `BatchResult` also carry `tenant_id` for R80 app-layer routing.
 - `BatchPersistence` (Protocol) and `InMemoryBatchPersistence` — storage abstraction; in-memory impl for dev/tests only.
 - `validate_batch_limits()` + `BatchLimitError` — enforces AB.3.3 limits (100k requests, 256 MB, custom_id 1–64 chars + unique).
 - Constants `MAX_REQUESTS_PER_BATCH`, `MAX_BATCH_SIZE_BYTES`, `MAX_PROCESSING_HOURS`.
@@ -14,7 +14,7 @@
 - Pending `BatchResult` rows are written *before* SDK submit so the AB.4 dispatcher can resolve `task_id` mappings even if the worker dies mid-flight.
 - `stream_results()` yields all results regardless of per-result status (partial failure per AB.3.6); caller filters. It assumes the batch has already ended — calling early relies on SDK-side errors.
 - `_async_iter` deliberately accepts both sync and async iterables, since SDK choice (`Anthropic` vs `AsyncAnthropic`) determines `results()`'s shape.
-- Postgres-backed persistence and `tenant_id` scoping are explicitly deferred (alembic 0181 exists but unused here; tracked by R80).
+- App-layer `tenant_id` identity is carried through pending and completed results. Postgres column-level filtering remains a production persistence migration follow-up; in-memory dev/test persistence already supports tenant-filtered task lookup.
 
 **Cross-module touchpoints**:
 - Imports only stdlib; the Anthropic SDK is injected (`sdk_messages_namespace`), keeping this module test-stubbable and decoupled from `AnthropicClient`.

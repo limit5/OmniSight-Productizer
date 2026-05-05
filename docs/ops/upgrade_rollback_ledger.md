@@ -95,6 +95,56 @@ On **every GDPR / DSAR request lifecycle change** (KS.4.8):
    purge, audit metadata retention, raw payload deletion, and DSAR export
    workflow.
 
+On **every Priority I multi-tenancy readiness sign-off** (KS.DOD):
+
+1. Store the KS.1 test transcript, KMS evidence, production image import
+   smoke, runtime env snapshot, tenant isolation smoke, and 24h
+   observation packet in the private security evidence vault; do not
+   commit raw logs, customer data, secrets, plaintext tokens, plaintext
+   DEKs, or wrapped DEK material.
+2. Compute SHA-256 fingerprints for the KS.1 evidence packet, KMS
+   evidence packet, and tenant isolation smoke packet.
+3. Append one row to the "Priority I Readiness" table before Priority I
+   starts. Use `Disposition = ready-to-start` only when every gate in
+   `priority_i_multi_tenancy_readiness.md` is green.
+4. Follow `priority_i_multi_tenancy_readiness.md` for KS.1 evidence,
+   production image/env proof, multi-tenant isolation smoke, legacy
+   Fernet deprecation proof, and 24h observation requirements.
+
+On **every KS KMS control review** (R46):
+
+1. Store the KEK rotation transcript, least-privilege IAM / Vault policy
+   snapshot, two-person KMS admin approval, and KMS audit export in the
+   private security evidence vault; do not commit raw CloudTrail, Cloud
+   Audit Logs, Vault audit payloads, principals, customer data, secrets,
+   plaintext DEKs, or wrapped DEK material.
+2. Compute SHA-256 fingerprints for the policy snapshot, admin approval,
+   and KMS audit export.
+3. Append one row to the "KS KMS Control Reviews" table before
+   Priority I starts and then once per quarter. Use `Disposition =
+   accepted` only when rotation cadence, least-privilege policy,
+   dual-control approval, and KMS audit evidence are all present.
+4. Follow `ks_cross_cutting_evidence.md` and `cmek_siem_ingest.md` for
+   the R46 mitigation evidence boundary.
+
+On **every incident response tabletop drill or real security incident**
+(KS.4.6):
+
+1. Store the timeline, responder roster, redacted command transcript,
+   customer notification decision, evidence inventory, and corrective
+   action tracker in the private security evidence vault; do not commit
+   raw logs, customer data, secrets, exploit payloads, screenshots, or
+   full incident artefacts.
+2. Compute SHA-256 fingerprints for the evidence bundle and postmortem
+   packet when one exists.
+3. Append one row to the "Incident Response Drills" table after each
+   tabletop drill or real incident closure. Use `Disposition = passed`
+   only when the 24-hour SOP was exercised, evidence handling was clean,
+   and corrective actions have owners.
+4. Follow `../security/incident-response-runbook.md` for severity,
+   role assignment, containment, rotation, notification, forensics, and
+   blameless postmortem requirements.
+
 On **every WP.3 diff-validation cascade match**:
 
 1. Append one row to the "Diff Validation Confidence" table with the
@@ -191,6 +241,41 @@ data, raw audit payloads, secrets, plaintext tokens, plaintext DEKs, or
 wrapped DEK material in this ledger. Use
 `correction -> <request-id/evidence-sha256>` in Notes to correct a prior
 row.
+
+## Priority I Readiness
+
+| Signed off (UTC) | Commit | Backend image digest | KS.1 evidence SHA-256 | KMS evidence SHA-256 | Tenant smoke SHA-256 | Observation window | Disposition | Notes |
+|---|---|---|---|---|---|---|---|---|
+| _(pending Priority I start)_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _KS.DOD policy effective 2026-05-06; use ready-to-start only after every gate in priority_i_multi_tenancy_readiness.md passes_ |
+
+Priority I readiness rows are append-only. Do not store raw logs,
+customer data, secrets, plaintext tokens, plaintext DEKs, or wrapped DEK
+material in this ledger. Use
+`correction -> <commit/evidence-sha256>` in Notes to correct a prior row.
+
+## KS KMS Control Reviews
+
+| Reviewed (UTC) | Quarter | Provider scope | KEK rotation SHA-256 | Policy snapshot SHA-256 | Dual-control approval SHA-256 | KMS audit export SHA-256 | Disposition | Notes |
+|---|---|---|---|---|---|---|---|---|
+| _Q2 2026 initial_ | _pending_ | _AWS/GCP/Vault/LocalFernet_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _R46 mitigation ledger effective 2026-05-06; first accepted row required before Priority I start_ |
+
+KS KMS control review rows are append-only. Do not store raw CloudTrail,
+Cloud Audit Logs, Vault audit payloads, principals, customer data,
+secrets, plaintext DEKs, or wrapped DEK material in this ledger. Use
+`correction -> <quarter/provider-scope/evidence-sha256>` in Notes to
+correct a prior row.
+
+## Incident Response Drills
+
+| Completed (UTC) | Scenario / Incident ID | Severity | Evidence SHA-256 | Postmortem SHA-256 | Corrective actions | Disposition | Notes |
+|---|---|---|---|---|---|---|---|
+| _Q2 2026 tabletop target_ | _pending_ | _SEV-2 exercise_ | _pending_ | _pending_ | _pending_ | _pending_ | _KS.4.6 runbook ship effective 2026-05-06; first passed tabletop required before marking deployed-active_ |
+
+Incident response drill rows are append-only. Do not store raw incident
+artefacts, customer data, secrets, exploit payloads, screenshots, or full
+log exports in this ledger. Use
+`correction -> <scenario-or-incident-id/evidence-sha256>` in Notes to
+correct a prior row.
 
 ## Diff Validation Confidence
 

@@ -32,8 +32,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── RTK (Rust Token Killer) for output compression ──
-RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh || true
-RUN rtk init --global 2>/dev/null || true
+RUN set -eux; \
+    mkdir -p /var/log/omnisight; \
+    mkdir -p /root/.claude; \
+    RTK_INSTALL_LOG=/var/log/omnisight/rtk-install.log; \
+    curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh -o /tmp/rtk-install.sh; \
+    sh /tmp/rtk-install.sh >"$RTK_INSTALL_LOG" 2>&1 || { cat "$RTK_INSTALL_LOG" >&2; exit 1; }; \
+    ln -sf /root/.local/bin/rtk /usr/local/bin/rtk; \
+    rtk --version >>"$RTK_INSTALL_LOG" 2>&1 || { cat "$RTK_INSTALL_LOG" >&2; exit 1; }; \
+    rtk init --global >>"$RTK_INSTALL_LOG" 2>&1 || { cat "$RTK_INSTALL_LOG" >&2; exit 1; }; \
+    cat "$RTK_INSTALL_LOG"; \
+    rm -f /tmp/rtk-install.sh
 
 # ── Git configuration ──
 RUN git config --system init.defaultBranch main \

@@ -36,6 +36,7 @@ from backend.agents.batch_dispatcher import (
     BatchDispatcher,
     BatchTaskQueue,
     chunk_by_model_tools,
+    submit_guild_task_in_lane,
     submit_in_lane,
 )
 
@@ -105,8 +106,15 @@ class _StubMessages:
 # ─── Helpers ─────────────────────────────────────────────────────
 
 
-def _task(task_id: str, *, model: str = "claude-sonnet-4-6", tools: list[str] | None = None,
-          callback=None, priority="P2") -> BatchableTask:
+def _task(
+    task_id: str,
+    *,
+    model: str = "claude-sonnet-4-6",
+    tools: list[str] | None = None,
+    callback=None,
+    priority="P2",
+    tenant_id: str | None = None,
+) -> BatchableTask:
     params: dict[str, Any] = {
         "model": model,
         "max_tokens": 1024,
@@ -114,7 +122,13 @@ def _task(task_id: str, *, model: str = "claude-sonnet-4-6", tools: list[str] | 
     }
     if tools:
         params["tools"] = [{"name": t, "description": "x", "input_schema": {"type": "object"}} for t in tools]
-    return BatchableTask(task_id=task_id, params=params, callback=callback, priority=priority)
+    return BatchableTask(
+        task_id=task_id,
+        params=params,
+        callback=callback,
+        priority=priority,
+        tenant_id=tenant_id,
+    )
 
 
 # ─── BatchTaskQueue ──────────────────────────────────────────────
@@ -182,13 +196,15 @@ def test_chunk_groups_by_model_and_tools():
         _task("b", model="opus", tools=["Read"]),
         _task("c", model="opus", tools=["Read", "Edit"]),
         _task("d", model="sonnet", tools=["Read"]),
+        _task("e", model="opus", tools=["Read"], tenant_id="tenant-b"),
     ]
     groups = chunk_by_model_tools(tasks)
-    keys = {(g.model, g.tools_signature, len(g.tasks)) for g in groups}
+    keys = {(g.tenant_id, g.model, g.tools_signature, len(g.tasks)) for g in groups}
     assert keys == {
-        ("opus", "Read", 2),
-        ("opus", "Edit|Read", 1),  # tools sorted alphabetically in signature
-        ("sonnet", "Read", 1),
+        (None, "opus", "Read", 2),
+        (None, "opus", "Edit|Read", 1),  # tools sorted alphabetically in signature
+        (None, "sonnet", "Read", 1),
+        ("tenant-b", "opus", "Read", 1),
     }
 
 
@@ -336,6 +352,58 @@ async def test_dispatcher_full_flow_submit_poll_dispatch(fake_sleep):
     assert received["t1"].final_text == "ans 1"
     assert received["t2"].final_text == "ans 2"
     assert len(dispatcher._active) == 0  # batch reaped
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_routes_duplicate_task_ids_by_tenant(fake_sleep):
+    """R80 — shared dispatcher callback routing is keyed by tenant + task."""
+    sdk_msgs = _StubMessages()
+    sdk_msgs.batches.next_create = [_StubBatch(id="b_a"), _StubBatch(id="b_b")]
+    sdk_msgs.batches.next_retrieve = [
+        _StubBatch(id="b_a", processing_status="ended"),
+        _StubBatch(id="b_b", processing_status="ended"),
+    ]
+    sdk_msgs.batches.next_results = [
+        [
+            {
+                "custom_id": "same-task",
+                "result": {
+                    "type": "succeeded",
+                    "message": {"content": [{"type": "text", "text": "tenant a"}]},
+                },
+            }
+        ],
+        [
+            {
+                "custom_id": "same-task",
+                "result": {
+                    "type": "succeeded",
+                    "message": {"content": [{"type": "text", "text": "tenant b"}]},
+                },
+            }
+        ],
+    ]
+    persistence = InMemoryBatchPersistence()
+    bc = BatchClient(sdk_msgs, persistence=persistence)
+    dispatcher = BatchDispatcher(bc, sleep=fake_sleep)
+
+    received: dict[str, list[str]] = {"tenant-a": [], "tenant-b": []}
+
+    async def cb_a(r: BatchResult) -> None:
+        received["tenant-a"].append(r.final_text)
+
+    async def cb_b(r: BatchResult) -> None:
+        received["tenant-b"].append(r.final_text)
+
+    await dispatcher.enqueue(_task("same-task", callback=cb_a, tenant_id="tenant-a"))
+    await dispatcher.enqueue(_task("same-task", callback=cb_b, tenant_id="tenant-b"))
+
+    await dispatcher._drain_and_submit_once()
+    await dispatcher._poll_active_once()
+
+    assert received == {"tenant-a": ["tenant a"], "tenant-b": ["tenant b"]}
+    runs = await persistence.list_batch_runs()
+    assert {r.tenant_id for r in runs} == {"tenant-a", "tenant-b"}
 
 
 @pytest.mark.asyncio
@@ -547,6 +615,95 @@ async def test_submit_in_lane_realtime_without_runner_raises():
 async def test_submit_in_lane_batch_without_dispatcher_raises():
     with pytest.raises(ValueError, match="dispatcher"):
         await submit_in_lane(lane="batch", task=_task("t1"))
+
+
+# ─── Guild dispatch client ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_submit_guild_task_batch_uses_submit_in_lane_and_stamps_metadata():
+    sdk_msgs = _StubMessages()
+    bc = BatchClient(sdk_msgs, persistence=InMemoryBatchPersistence())
+    dispatcher = BatchDispatcher(bc)
+
+    params = {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "parse board"}],
+    }
+    result = await submit_guild_task_in_lane(
+        guild_id="bsp",
+        lane="batch",
+        task_id="guild-task-1",
+        params=params,
+        task_kind="hd_parse_kicad",
+        priority="P1",
+        metadata={"tenant_id": "tenant-a", "guild_id": "spoof"},
+        dispatcher=dispatcher,
+    )
+
+    assert result is None
+    queued = await dispatcher.queue.drain()
+    assert len(queued) == 1
+    assert queued[0].task_id == "guild-task-1"
+    assert queued[0].priority == "P1"
+    assert queued[0].tenant_id == "tenant-a"
+    assert queued[0].metadata == {
+        "tenant_id": "tenant-a",
+        "dispatch_source": "guild",
+        "guild_id": "bsp",
+        "task_kind": "hd_parse_kicad",
+    }
+
+
+@pytest.mark.asyncio
+async def test_submit_guild_task_realtime_invokes_runner_with_guild_metadata():
+    received: list[BatchableTask] = []
+
+    async def runner(t: BatchableTask) -> BatchResult:
+        received.append(t)
+        return BatchResult(
+            batch_run_id="rt",
+            custom_id=t.task_id,
+            task_id=t.task_id,
+            status="succeeded",
+            final_text="done",
+        )
+
+    result = await submit_guild_task_in_lane(
+        guild_id="frontend",
+        lane="realtime",
+        task_id="guild-task-rt",
+        params={
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "fix ui"}],
+        },
+        task_kind="planning",
+        realtime_runner=runner,
+    )
+
+    assert result is not None
+    assert result.final_text == "done"
+    assert received[0].metadata["dispatch_source"] == "guild"
+    assert received[0].metadata["guild_id"] == "frontend"
+    assert received[0].metadata["task_kind"] == "planning"
+
+
+@pytest.mark.asyncio
+async def test_submit_guild_task_unknown_guild_raises_before_dispatch():
+    sdk_msgs = _StubMessages()
+    bc = BatchClient(sdk_msgs, persistence=InMemoryBatchPersistence())
+    dispatcher = BatchDispatcher(bc)
+
+    with pytest.raises(ValueError, match="not_a_guild"):
+        await submit_guild_task_in_lane(
+            guild_id="not_a_guild",
+            lane="batch",
+            task_id="bad",
+            params={"model": "claude-sonnet-4-6", "messages": []},
+            dispatcher=dispatcher,
+        )
+    assert len(dispatcher.queue) == 0
 
 
 # ─── BatchableTask metadata ──────────────────────────────────────

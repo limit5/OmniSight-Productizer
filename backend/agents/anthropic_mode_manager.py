@@ -45,6 +45,7 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §7
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -55,6 +56,9 @@ from backend.agents.cost_guard import CostGuard, ScopeKey
 from backend.agents.rate_limiter import WorkspaceKind
 
 logger = logging.getLogger(__name__)
+
+
+API_MODE_ENABLED_ENV = "OMNISIGHT_AB_API_MODE_ENABLED"
 
 
 # ─── Enums ────────────────────────────────────────────────────────
@@ -429,7 +433,8 @@ class AnthropicModeManager:
         ``rollback()`` is no longer available without manual re-enrollment.
 
         Operator typically calls this after ``rollback_grace_days``
-        elapsed and confirms the API path is healthy in production.
+        elapsed, confirms the API path is healthy in production, and
+        locks ``OMNISIGHT_AB_API_MODE_ENABLED=true`` in every worker env.
         """
         if self._state.current_step != WizardStep.CONFIRMED:
             raise WizardError(
@@ -439,6 +444,12 @@ class AnthropicModeManager:
             raise WizardError(
                 "Grace period not yet elapsed. Override by passing a fresh "
                 "rollback_grace_days=0 manager (operator decision)."
+            )
+        if not self._api_mode_env_locked():
+            raise WizardError(
+                f"{API_MODE_ENABLED_ENV}=true is required before disabling "
+                "the subscription fallback. Set it in the deployed worker "
+                "environment, restart every replica, then retry finalize."
             )
         self._state = replace(
             self._state,
@@ -465,3 +476,7 @@ class AnthropicModeManager:
                 "Wizard already confirmed. Use rollback() or "
                 "start_wizard() to begin a new migration."
             )
+
+    def _api_mode_env_locked(self) -> bool:
+        """Every worker derives the lock from the same deployed env."""
+        return (os.getenv(API_MODE_ENABLED_ENV) or "").strip().lower() == "true"

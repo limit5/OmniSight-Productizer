@@ -92,6 +92,54 @@ async def test_proxy_unreachable_closes_gracefully_without_response_body() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.ConnectTimeout("proxy connect timed out"),
+        httpx.ReadTimeout("proxy read timed out"),
+        httpx.ProxyError("proxy protocol rejected tunnel"),
+    ],
+)
+async def test_proxy_transport_failures_never_enter_provider_fallback_chain(
+    monkeypatch,
+    transport_error: httpx.TransportError,
+) -> None:
+    fallback_calls: list[str] = []
+
+    def _record_direct_provider_call(*_args, **_kwargs):  # noqa: ANN002
+        fallback_calls.append("direct-provider")
+        raise AssertionError("direct provider fallback must not be called")
+
+    monkeypatch.setenv("OMNISIGHT_LLM_FALLBACK_CHAIN", "openai,anthropic")
+    monkeypatch.setattr("backend.agents.llm.get_llm", _record_direct_provider_call)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        transport_error.request = request
+        raise transport_error
+
+    def client_factory(**kwargs) -> httpx.AsyncClient:  # noqa: ANN003
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
+
+    target = BYOGProxyTarget(
+        proxy_url="https://proxy.customer.example.com",
+        tenant_id="tenant-a",
+        nonce_hmac_key="0123456789abcdef0123456789abcdef",
+    )
+
+    with pytest.raises(BYOGProxyUnavailable):
+        await forward_llm_request_via_proxy(
+            target,
+            "openai",
+            "/v1/chat/completions",
+            content=b"{}",
+            client_factory=client_factory,
+        )
+
+    assert fallback_calls == []
+
+
+@pytest.mark.asyncio
 async def test_proxy_auth_rejection_fails_fast_without_direct_provider_fallback(
     monkeypatch,
 ) -> None:

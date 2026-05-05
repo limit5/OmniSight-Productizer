@@ -132,6 +132,14 @@ def test_validate_rejects_bad_custom_id_length():
         validate_batch_limits([BatchRequest(custom_id="x" * 65, params={})])
 
 
+def test_validate_rejects_mixed_tenant_ids():
+    with pytest.raises(BatchLimitError, match="cannot mix tenant_id"):
+        validate_batch_limits([
+            BatchRequest(custom_id="a", params={}, tenant_id="tenant-a"),
+            BatchRequest(custom_id="b", params={}, tenant_id="tenant-b"),
+        ])
+
+
 def test_validate_rejects_oversize_payload():
     big_str = "a" * (MAX_BATCH_SIZE_BYTES // 2)
     requests = [
@@ -186,6 +194,40 @@ async def test_submit_batch_persists_and_calls_sdk():
         "c1": ("pending", "t1"),
         "c2": ("pending", "t2"),
     }
+
+
+@pytest.mark.asyncio
+async def test_submit_batch_preserves_tenant_id_mapping():
+    """R80 — per-result task mapping carries tenant identity."""
+    sdk_msgs = _StubMessagesNamespace()
+    persistence = InMemoryBatchPersistence()
+    client = BatchClient(sdk_msgs, persistence=persistence)
+
+    run = await client.submit_batch([
+        BatchRequest(
+            custom_id="c1",
+            params={"messages": [{"role": "user", "content": "a"}]},
+            task_id="same-task",
+            tenant_id="tenant-a",
+        ),
+        BatchRequest(
+            custom_id="c2",
+            params={"messages": [{"role": "user", "content": "b"}]},
+            task_id="same-task",
+            tenant_id="tenant-a",
+        ),
+    ])
+
+    assert run.tenant_id == "tenant-a"
+    pending = await persistence.list_batch_results(run.batch_run_id)
+    assert {r.custom_id: r.tenant_id for r in pending} == {
+        "c1": "tenant-a",
+        "c2": "tenant-a",
+    }
+    found = await client.find_result_for_task("same-task", tenant_id="tenant-a")
+    assert found is not None
+    assert found.tenant_id == "tenant-a"
+    assert await client.find_result_for_task("same-task", tenant_id="tenant-b") is None
 
 
 @pytest.mark.asyncio

@@ -117,7 +117,7 @@ def test_envelope_round_trip_and_kek_rotation_lazy_reencrypt() -> None:
     ) == plaintext
 
 
-def test_dual_read_write_survives_hard_restart(monkeypatch) -> None:
+def test_envelope_only_writes_survive_hard_restart(monkeypatch) -> None:
     monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks113-hard-restart-secret")
     monkeypatch.delenv(envelope.ENVELOPE_ENABLED_ENV, raising=False)
     secret_store._reset_for_tests()
@@ -128,16 +128,16 @@ def test_dual_read_write_survives_hard_restart(monkeypatch) -> None:
         tenant_id="tenant-ks113-restart",
     )
     monkeypatch.setenv(envelope.ENVELOPE_ENABLED_ENV, "false")
-    legacy_token = tv.encrypt_for_user(
+    knob_off_token = tv.encrypt_for_user(
         "user-ks113-restart",
         "google",
-        "ya29.legacy-token",
+        "ya29.knob-off-token",
         tenant_id="tenant-ks113-restart",
     )
     payload = json.dumps(
         {
             "envelope": envelope_token.__dict__,
-            "legacy": legacy_token.__dict__,
+            "knob_off": knob_off_token.__dict__,
         }
     )
     code = """
@@ -147,7 +147,7 @@ from backend.security import token_vault as tv
 
 raw = json.loads(sys.stdin.read())
 out = []
-for name in ("envelope", "legacy"):
+for name in ("envelope", "knob_off"):
     token = tv.EncryptedToken(**raw[name])
     out.append(tv.decrypt_for_user("user-ks113-restart", "google", token))
 print("\\n".join(out))
@@ -162,7 +162,7 @@ print("\\n".join(out))
         check=True,
     )
 
-    assert proc.stdout.splitlines() == ["ya29.envelope-token", "ya29.legacy-token"]
+    assert proc.stdout.splitlines() == ["ya29.envelope-token", "ya29.knob-off-token"]
 
 
 @pytest.mark.asyncio
@@ -264,6 +264,25 @@ def test_log_scrubber_sink_receives_redacted_value() -> None:
     sink_value = stream.getvalue()
     assert "sk-abcdefghijklmnopqrstuvwxyz" not in sink_value
     assert "provider_key=[REDACTED]" in sink_value
+
+
+def test_ci_gitleaks_secret_scan_is_hard_gate() -> None:
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    pre_commit = (PROJECT_ROOT / ".pre-commit-config.yaml").read_text()
+
+    triggers = workflow.split("jobs:", 1)[0]
+    job = workflow.split("  secret-pre-commit:", 1)[1].split(
+        "\n  proxy-tests:",
+        1,
+    )[0]
+
+    assert "pull_request:" in triggers
+    assert "id: omnisight-gitleaks" in pre_commit
+    assert "--scanner gitleaks" in pre_commit
+    assert "go install github.com/gitleaks/gitleaks/v8@v8.24.0" in job
+    assert "pre-commit run --all-files --show-diff-on-failure" in job
+    assert "continue-on-error" not in job
+    assert "|| true" not in job
 
 
 def test_backup_dlp_blocks_plaintext_secret_before_export(tmp_path: Path) -> None:

@@ -46,6 +46,14 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
+      - name: Validate AWS KMS sandbox configuration
+        run: |
+          set -eu
+          : "${OMNISIGHT_TEST_AWS_KMS_KEY_ID:?missing OMNISIGHT_TEST_AWS_KMS_KEY_ID secret}"
+          : "${OMNISIGHT_TEST_AWS_KMS_REGION:?missing OMNISIGHT_TEST_AWS_KMS_REGION secret}"
+          : "${AWS_ACCESS_KEY_ID:?missing OMNISIGHT_TEST_AWS_ACCESS_KEY_ID secret}"
+          : "${AWS_SECRET_ACCESS_KEY:?missing OMNISIGHT_TEST_AWS_SECRET_ACCESS_KEY secret}"
+
       - name: Install backend dependencies
         run: |
           set -eu

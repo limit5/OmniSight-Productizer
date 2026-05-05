@@ -57,6 +57,26 @@ _run() {
     fi
 }
 
+_upsert_env() {
+    local key="$1"
+    local value="$2"
+    if [ "$DRY_RUN" = true ]; then
+        echo "  [dry-run] set $key=$value in .env"
+        return 0
+    fi
+    if [ ! -f .env ]; then
+        warn ".env missing; skip frontend freshness metadata persistence"
+        return 0
+    fi
+    if grep -qE "^#?${key}=" .env; then
+        local escaped
+        escaped=$(printf '%s' "$value" | sed 's/[\/&]/\\&/g')
+        sed -i "s/^#\\?${key}=.*/${key}=${escaped}/" .env
+    else
+        printf '\n%s=%s\n' "$key" "$value" >> .env
+    fi
+}
+
 step "OmniSight Production 零停機部署"
 echo "Compose: $COMPOSE_FILE"
 echo "Branch:  ${TAG:-$BRANCH}"
@@ -89,6 +109,26 @@ else
     _run "git merge origin/$BRANCH --ff-only"
 fi
 log "Code 更新完成：$(git log --oneline -1)"
+
+# BP.W3.14: persist frontend build freshness metadata for the backend
+# /metrics gauge + Bootstrap wizard L7 freshness panel. No shared
+# module state: every worker reads the same .env values after recreate.
+MASTER_HEAD_COMMIT="$(git rev-parse HEAD)"
+if [ "$SKIP_BUILD" = false ]; then
+    FRONTEND_BUILD_COMMIT="$MASTER_HEAD_COMMIT"
+else
+    FRONTEND_BUILD_COMMIT="$(grep -E '^OMNISIGHT_FRONTEND_BUILD_COMMIT=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+fi
+FRONTEND_BUILD_LAG_COMMITS=0
+if [ -n "${FRONTEND_BUILD_COMMIT:-}" ]; then
+    FRONTEND_BUILD_LAG_COMMITS="$(git rev-list --count "${FRONTEND_BUILD_COMMIT}..${MASTER_HEAD_COMMIT}" 2>/dev/null || echo 0)"
+fi
+_upsert_env "OMNISIGHT_MASTER_HEAD_COMMIT" "$MASTER_HEAD_COMMIT"
+if [ -n "${FRONTEND_BUILD_COMMIT:-}" ]; then
+    _upsert_env "OMNISIGHT_FRONTEND_BUILD_COMMIT" "$FRONTEND_BUILD_COMMIT"
+fi
+_upsert_env "OMNISIGHT_FRONTEND_BUILD_LAG_COMMITS" "$FRONTEND_BUILD_LAG_COMMITS"
+log "Frontend freshness metadata: build=${FRONTEND_BUILD_COMMIT:-unknown} head=$MASTER_HEAD_COMMIT lag=$FRONTEND_BUILD_LAG_COMMITS"
 
 # ── Step 1b: WAL-safe pre-deploy backup ──
 # H2 audit (2026-04-19): rolling deploys can still roll BACKWARDS in

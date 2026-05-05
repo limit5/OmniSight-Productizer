@@ -1,0 +1,473 @@
+"""WP.9.2 -- generic share permalink slug helpers.
+
+``shareable_objects.share_id`` doubles as the external permalink slug.
+This module keeps slug minting and collision-safe row creation in one
+small helper so later WP.9 ACL / expiry / redaction rows can reuse it
+without reimplementing permalink entropy.
+
+Module-global state audit (SOP Step 1): constants, regex objects, and SQL
+strings are immutable policy data.  No singleton, in-memory cache, or
+cross-worker mutable state is introduced; every worker mints request-local
+random slugs and PG arbitrates collisions / expiry cleanup races via the
+primary key plus ``FOR UPDATE SKIP LOCKED`` row locks.
+
+Read-after-write timing audit (SOP Step 1): row creation is one atomic
+``INSERT ... ON CONFLICT DO NOTHING RETURNING``.  A collision retries with
+a fresh slug in the same request; no downstream serial timing assumption
+changes.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import re
+import secrets
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Mapping
+
+from backend.db_context import current_tenant_id, set_tenant_id
+
+
+SHARE_SLUG_PREFIX = "sh-"
+SHARE_SLUG_BYTES = 16
+SHARE_SLUG_MAX_ATTEMPTS = 5
+SHARE_SLUG_PATTERN = r"^sh-[A-Za-z0-9_-]{22}$"
+_SHARE_SLUG_RE = re.compile(SHARE_SLUG_PATTERN)
+
+OBJECT_KIND_PATTERN = r"^[a-z][a-z0-9_.-]{0,63}$"
+_OBJECT_KIND_RE = re.compile(OBJECT_KIND_PATTERN)
+
+SHARE_VISIBILITIES = ("private", "team", "tenant", "public")
+_SHARE_VISIBILITIES_SET = frozenset(SHARE_VISIBILITIES)
+
+# ``team`` is the tenant's working set (owner/admin/member). ``tenant``
+# additionally includes viewer, matching the existing tenant membership
+# enum while still keeping the two share tiers distinct.
+_TEAM_VISIBILITY_MEMBERSHIP_ROLES = frozenset({"owner", "admin", "member"})
+_TENANT_VISIBILITY_MEMBERSHIP_ROLES = frozenset(
+    {"owner", "admin", "member", "viewer"}
+)
+
+
+_INSERT_SHAREABLE_OBJECT_SQL = """
+INSERT INTO shareable_objects (
+    share_id, object_kind, object_id, tenant_id, owner_user_id,
+    visibility, redaction_applied
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7::jsonb
+)
+ON CONFLICT (share_id) DO NOTHING
+RETURNING share_id, object_kind, object_id, tenant_id, owner_user_id,
+          visibility, expires_at, redaction_applied, created_at
+"""
+
+_FETCH_USER_TENANT_MEMBERSHIP_SQL = (
+    "SELECT role, status FROM user_tenant_memberships "
+    "WHERE user_id = $1 AND tenant_id = $2"
+)
+
+_SELECT_EXPIRED_SHAREABLE_OBJECTS_SQL = """
+SELECT share_id, object_kind, object_id, tenant_id, owner_user_id,
+       visibility, expires_at, redaction_applied, created_at
+FROM shareable_objects
+WHERE expires_at IS NOT NULL
+  AND expires_at <= $1
+ORDER BY expires_at ASC, share_id ASC
+LIMIT $2
+FOR UPDATE SKIP LOCKED
+"""
+
+_DELETE_EXPIRED_SHAREABLE_OBJECT_SQL = """
+DELETE FROM shareable_objects
+WHERE share_id = $1
+  AND expires_at IS NOT NULL
+  AND expires_at <= $2
+RETURNING share_id
+"""
+
+
+class ShareSlugCollisionError(RuntimeError):
+    """Raised when random slug minting exhausts the retry budget."""
+
+
+@dataclass(frozen=True)
+class ShareableObject:
+    """Created ``shareable_objects`` row projected for API callers."""
+
+    share_id: str
+    object_kind: str
+    object_id: str
+    tenant_id: str
+    owner_user_id: str
+    visibility: str
+    expires_at: Any
+    redaction_applied: Any
+    created_at: Any
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "share_id": self.share_id,
+            "object_kind": self.object_kind,
+            "object_id": self.object_id,
+            "tenant_id": self.tenant_id,
+            "owner_user_id": self.owner_user_id,
+            "visibility": self.visibility,
+            "expires_at": self.expires_at,
+            "redaction_applied": self.redaction_applied,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class ExpiredShareCleanupSummary:
+    """Result from one WP.9.4 expired-share cleanup pass."""
+
+    scanned: int
+    audited: int
+    deleted: int
+    skipped_audit: int
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "scanned": self.scanned,
+            "audited": self.audited,
+            "deleted": self.deleted,
+            "skipped_audit": self.skipped_audit,
+        }
+
+
+def is_valid_share_slug(value: str) -> bool:
+    """Return whether ``value`` matches the WP.9 permalink slug shape."""
+
+    return bool(value) and bool(_SHARE_SLUG_RE.fullmatch(value))
+
+
+def mint_share_slug() -> str:
+    """Return ``sh-`` + 128 bits encoded as URL-safe base64.
+
+    ``secrets.token_urlsafe(16)`` yields 22 URL-safe ASCII chars with no
+    padding, keeping permalinks short while leaving guessing attacks far
+    outside the practical search space.
+    """
+
+    return f"{SHARE_SLUG_PREFIX}{secrets.token_urlsafe(SHARE_SLUG_BYTES)}"
+
+
+def _validate_object_kind(object_kind: str) -> None:
+    if not _OBJECT_KIND_RE.fullmatch(object_kind):
+        raise ValueError(
+            "object_kind must match ^[a-z][a-z0-9_.-]{0,63}$",
+        )
+
+
+def validate_visibility(visibility: str) -> None:
+    if visibility not in _SHARE_VISIBILITIES_SET:
+        raise ValueError(
+            "visibility must be one of private, team, tenant, public",
+        )
+
+
+def _share_field(share: ShareableObject | Mapping[str, Any], key: str) -> Any:
+    if isinstance(share, ShareableObject):
+        return getattr(share, key)
+    return share[key]
+
+
+def _row_to_shareable_object(row) -> ShareableObject:
+    return ShareableObject(
+        share_id=row["share_id"],
+        object_kind=row["object_kind"],
+        object_id=row["object_id"],
+        tenant_id=row["tenant_id"],
+        owner_user_id=row["owner_user_id"],
+        visibility=row["visibility"],
+        expires_at=row["expires_at"],
+        redaction_applied=row["redaction_applied"],
+        created_at=row["created_at"],
+    )
+
+
+async def _audit_expired_share_delete(
+    share: ShareableObject,
+    *,
+    audit_log,
+    conn,
+) -> Any:
+    saved = current_tenant_id()
+    try:
+        set_tenant_id(share.tenant_id)
+        return await audit_log(
+            action="shareable_object.expired_deleted",
+            entity_kind="shareable_object",
+            entity_id=share.share_id,
+            before=share.to_dict(),
+            after={
+                "share_id": share.share_id,
+                "deleted": True,
+                "delete_reason": "expires_at",
+            },
+            actor="system:share-expiry-cleanup",
+            conn=conn,
+        )
+    finally:
+        set_tenant_id(saved)
+
+
+async def _cleanup_expired_shareable_objects_with_conn(
+    conn,
+    *,
+    now: datetime,
+    limit: int,
+    audit_log,
+) -> ExpiredShareCleanupSummary:
+    rows = await conn.fetch(
+        _SELECT_EXPIRED_SHAREABLE_OBJECTS_SQL,
+        now,
+        limit,
+    )
+
+    audited = 0
+    deleted = 0
+    skipped_audit = 0
+    for row in rows:
+        share = _row_to_shareable_object(row)
+        audit_id = await _audit_expired_share_delete(
+            share,
+            audit_log=audit_log,
+            conn=conn,
+        )
+        if audit_id is None:
+            skipped_audit += 1
+            continue
+        audited += 1
+        deleted_row = await conn.fetchrow(
+            _DELETE_EXPIRED_SHAREABLE_OBJECT_SQL,
+            share.share_id,
+            now,
+        )
+        if deleted_row is not None:
+            deleted += 1
+
+    return ExpiredShareCleanupSummary(
+        scanned=len(rows),
+        audited=audited,
+        deleted=deleted,
+        skipped_audit=skipped_audit,
+    )
+
+
+async def cleanup_expired_shareable_objects(
+    conn=None,
+    *,
+    now: datetime | None = None,
+    limit: int = 100,
+    audit_log=None,
+) -> ExpiredShareCleanupSummary:
+    """Audit then delete expired ``shareable_objects`` rows.
+
+    The cron job may run in multiple workers/providers. PG coordinates
+    that cross-worker race with ``FOR UPDATE SKIP LOCKED``; if audit
+    emission returns ``None`` the row is left in place for a later sweep
+    rather than being deleted without a receipt.
+    """
+
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    cutoff = now or datetime.now(UTC)
+    if audit_log is None:
+        from backend import audit as _audit
+        audit_log = _audit.log
+
+    if conn is not None:
+        async with conn.transaction():
+            return await _cleanup_expired_shareable_objects_with_conn(
+                conn,
+                now=cutoff,
+                limit=limit,
+                audit_log=audit_log,
+            )
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as owned_conn:
+        async with owned_conn.transaction():
+            return await _cleanup_expired_shareable_objects_with_conn(
+                owned_conn,
+                now=cutoff,
+                limit=limit,
+                audit_log=audit_log,
+            )
+
+
+async def create_shareable_object(
+    conn,
+    *,
+    object_kind: str,
+    object_id: str,
+    tenant_id: str,
+    owner_user_id: str,
+    visibility: str = "private",
+    redaction_applied: Mapping[str, Any] | None = None,
+    max_attempts: int = SHARE_SLUG_MAX_ATTEMPTS,
+) -> ShareableObject:
+    """Insert a share row with a collision-checked permalink slug.
+
+    The helper accepts only the four WP.9 ACL tiers; expiry and redaction
+    policy decisions remain owned by WP.9.4-WP.9.5.  It mints a
+    non-guessable slug and lets the database primary key atomically accept
+    or reject it.
+    """
+
+    _validate_object_kind(object_kind)
+    validate_visibility(visibility)
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be >= 1")
+
+    redaction_json = json.dumps(
+        dict(redaction_applied or {}),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    for _ in range(max_attempts):
+        share_id = mint_share_slug()
+        row = await conn.fetchrow(
+            _INSERT_SHAREABLE_OBJECT_SQL,
+            share_id,
+            object_kind,
+            object_id,
+            tenant_id,
+            owner_user_id,
+            visibility,
+            redaction_json,
+        )
+        if row is not None:
+            return _row_to_shareable_object(row)
+
+    raise ShareSlugCollisionError(
+        "share_id collision retry budget exhausted; retry the request",
+    )
+
+
+def enforce_share_redaction_mask(
+    payload: Mapping[str, Any],
+    redaction_mask: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a share payload with every durable redaction path masked.
+
+    The persisted ``shareable_objects.redaction_applied`` mask is
+    authoritative at read/share time.  Missing paths fail closed instead
+    of silently returning the original value, because a stale or malformed
+    mask must not become a bypass.
+    """
+
+    redacted = copy.deepcopy(dict(payload))
+    for path, reason in sorted(dict(redaction_mask or {}).items()):
+        _set_redacted_share_path(redacted, str(path), _share_redaction_placeholder(reason))
+    return redacted
+
+
+def build_share_payload(
+    share: ShareableObject | Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project a share payload after enforcing the row's durable mask."""
+
+    return enforce_share_redaction_mask(
+        payload,
+        _share_field(share, "redaction_applied"),
+    )
+
+
+def _share_redaction_placeholder(reason: Any) -> str:
+    raw = reason if isinstance(reason, (list, tuple, set)) else (reason,)
+    reasons = [str(item).strip() for item in raw if str(item).strip()]
+    if not reasons or "none" in reasons:
+        raise ValueError("redaction_mask entries must be applied reasons")
+    return f"[REDACTED:{'+'.join(reasons)}]"
+
+
+def _set_redacted_share_path(target: dict[str, Any], path: str, value: Any) -> None:
+    if not path:
+        raise ValueError("redaction_mask path must not be empty")
+
+    parts = path.split(".")
+    cursor: Any = target
+    for part in parts[:-1]:
+        cursor = _descend_share_path(cursor, part, path)
+
+    leaf = parts[-1]
+    if isinstance(cursor, list):
+        idx = _list_index_for_share_path(cursor, leaf, path)
+        cursor[idx] = value
+        return
+    if isinstance(cursor, dict):
+        if leaf not in cursor:
+            raise ValueError(f"redaction_mask path not found: {path}")
+        cursor[leaf] = value
+        return
+    raise ValueError(f"redaction_mask path not found: {path}")
+
+
+def _descend_share_path(cursor: Any, part: str, path: str) -> Any:
+    if isinstance(cursor, list):
+        return cursor[_list_index_for_share_path(cursor, part, path)]
+    if isinstance(cursor, dict) and part in cursor:
+        return cursor[part]
+    raise ValueError(f"redaction_mask path not found: {path}")
+
+
+def _list_index_for_share_path(cursor: list[Any], part: str, path: str) -> int:
+    if not part.isdigit():
+        raise ValueError(f"redaction_mask path not found: {path}")
+    idx = int(part)
+    if idx >= len(cursor):
+        raise ValueError(f"redaction_mask path not found: {path}")
+    return idx
+
+
+async def user_can_access_shareable_object(
+    conn,
+    share: ShareableObject | Mapping[str, Any],
+    *,
+    caller_user_id: str | None,
+    caller_role: str = "",
+) -> bool:
+    """Return whether the caller may read a share row.
+
+    ACL source of truth mirrors the tenant-project visibility helpers:
+    ``users.tenant_id`` is not trusted for access; non-public tiers read
+    the active ``user_tenant_memberships`` row from PG.  The four levels
+    are:
+
+    * ``private`` -- owner only, plus platform super-admin.
+    * ``team`` -- owner, super-admin, or active owner/admin/member.
+    * ``tenant`` -- owner, super-admin, or any active tenant member.
+    * ``public`` -- anyone with the permalink slug.
+    """
+
+    visibility = _share_field(share, "visibility")
+    validate_visibility(visibility)
+    if visibility == "public":
+        return True
+
+    if caller_role == "super_admin":
+        return True
+    if not caller_user_id:
+        return False
+    if caller_user_id == _share_field(share, "owner_user_id"):
+        return True
+    if visibility == "private":
+        return False
+
+    row = await conn.fetchrow(
+        _FETCH_USER_TENANT_MEMBERSHIP_SQL,
+        caller_user_id,
+        _share_field(share, "tenant_id"),
+    )
+    if row is None or row["status"] != "active":
+        return False
+
+    if visibility == "team":
+        return row["role"] in _TEAM_VISIBILITY_MEMBERSHIP_ROLES
+    return row["role"] in _TENANT_VISIBILITY_MEMBERSHIP_ROLES

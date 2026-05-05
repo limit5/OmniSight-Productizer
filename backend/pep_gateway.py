@@ -47,6 +47,7 @@ from backend.sandbox_tier import Guild, SandboxTier, is_admitted
 logger = logging.getLogger(__name__)
 
 _LLM_FIREWALL_RULE = "llm_firewall_blocked"
+_NATIVE_READ_HIGH_NOISE_RULE = "native_read_high_noise_path"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -115,6 +116,14 @@ _PROD_HOLD_RULES: list[tuple[str, re.Pattern[str]]] = [
     )),
 ]
 
+_NATIVE_READ_TOOL_NAMES: frozenset[str] = frozenset({"Read", "read_file"})
+_NATIVE_READ_PATH_KEYS: tuple[str, ...] = ("file_path", "path")
+_HIGH_NOISE_READ_PATH_RE = re.compile(
+    r"(^|/)(?:build|builds|cmake-build-[^/]+|bazel-(?:out|bin|testlogs)|logs?)(?:/|$)"
+    r"|(^|/)[^/]+\.(?:log|out|err)(?:\.\d+)?$",
+    re.IGNORECASE,
+)
+
 # Tier → whitelist of tools that never need approval in that tier.
 # Everything not on the tier whitelist is HELD (goes through decision
 # engine) rather than denied outright — the operator approves it.
@@ -180,6 +189,47 @@ def _coerce_guild(guild_id: str | None) -> Guild | None:
 
 def _coerce_pep_tier(tier: str) -> SandboxTier | None:
     return _PEP_TIER_TO_SANDBOX_TIER.get((tier or "t1").lower())
+
+
+def _native_read_high_noise_path(
+    tool: str,
+    arguments: dict[str, Any],
+) -> tuple[PepAction, str, str, str] | None:
+    """Deny native file reads for build/log paths so agents use Bash + RTK.
+
+    BP.R.5 module-global audit: this helper reads only immutable regex and
+    alias constants; every worker derives the same decision from the same
+    tool arguments without shared mutable state.
+    """
+    if tool not in _NATIVE_READ_TOOL_NAMES:
+        return None
+    raw_path: Any = None
+    for key in _NATIVE_READ_PATH_KEYS:
+        if arguments.get(key) is not None:
+            raw_path = arguments[key]
+            break
+    if raw_path is None:
+        return None
+    normalized = str(raw_path).replace("\\", "/")
+    if not _HIGH_NOISE_READ_PATH_RE.search(normalized):
+        return None
+    return (
+        PepAction.deny,
+        _NATIVE_READ_HIGH_NOISE_RULE,
+        (
+            "native Read_File_Tool cannot access build/log paths; "
+            "use Bash with an RTK-prefixed command instead"
+        ),
+        "local",
+    )
+
+
+def classify_native_read_path(
+    tool: str,
+    arguments: dict[str, Any],
+) -> tuple[PepAction, str, str, str] | None:
+    """Public pure guard for direct read handlers that do not call evaluate()."""
+    return _native_read_high_noise_path(tool, arguments)
 
 
 def _guild_policy_violation(
@@ -400,6 +450,9 @@ def classify(
     guild_violation = _guild_policy_violation(guild_id, tier)
     if guild_violation is not None:
         return guild_violation
+    native_read_violation = _native_read_high_noise_path(tool, arguments)
+    if native_read_violation is not None:
+        return native_read_violation
     # 1. Destructive patterns — always DENY.
     for rule_id, rx in _DESTRUCTIVE_RULES:
         if rx.search(command):

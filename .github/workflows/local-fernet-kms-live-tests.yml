@@ -1,0 +1,51 @@
+name: LocalFernet KMS Live Integration Tests
+
+on:
+  schedule:
+    - cron: "15 7 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/local-fernet-kms-live-tests.yml"
+      - "backend/security/kms_adapters.py"
+      - "backend/tests/test_security_kms_adapters.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-fernet-kms-live-tests
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  OMNISIGHT_SECRET_KEY: "local-fernet-kms-live-ci"
+
+jobs:
+  live-tests:
+    name: LocalFernet KMS sandbox live test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install backend dependencies
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install --require-hashes -r backend/requirements-dev.txt
+
+      - name: Run LocalFernet KMS live tests
+        run: |
+          python -m pytest \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -q \
+            backend/tests/test_security_kms_adapters.py::TestLocalFernetKMSLiveIntegration

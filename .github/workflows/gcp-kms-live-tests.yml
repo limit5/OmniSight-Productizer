@@ -39,8 +39,13 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
+      - name: Validate GCP KMS sandbox configuration
+        run: |
+          set -eu
+          : "${OMNISIGHT_TEST_GCP_KMS_KEY_ID:?missing OMNISIGHT_TEST_GCP_KMS_KEY_ID secret}"
+          : "${OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON:?missing OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON secret}"
+
       - name: Write GCP KMS sandbox credentials
-        if: env.OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON != ''
         run: |
           set -eu
           umask 077

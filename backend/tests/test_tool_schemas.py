@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from backend.agents.tool_schemas import (
+    TOOL_SCHEMA_VERSION,
     ToolSchema,
     _REGISTRY,
     _load_hd_skill_schemas,
@@ -27,6 +28,7 @@ from backend.agents.tool_schemas import (
     list_schemas,
     register_tool,
     to_anthropic_tools,
+    to_toolsearch_schemas,
 )
 
 
@@ -128,6 +130,55 @@ def test_to_anthropic_tools_named_subset_includes_deferred():
 def test_to_anthropic_tools_unknown_name_raises():
     with pytest.raises(KeyError):
         to_anthropic_tools(["DoesNotExist"])
+
+
+# ─── ToolSearch lazy-load versioning ─────────────────────────────
+
+
+def test_tool_schema_version_is_semver_pinned():
+    """AB.1.5: ToolSearch lazy-load schemas carry an explicit version."""
+    parts = TOOL_SCHEMA_VERSION.split(".")
+    assert len(parts) == 3
+    assert all(p.isdigit() for p in parts)
+    assert get_schema("WebSearch").schema_version == TOOL_SCHEMA_VERSION
+
+
+def test_to_anthropic_tools_omits_toolsearch_version_metadata():
+    """Anthropic tools=[] payload stays API-shaped; versioning is ToolSearch-only."""
+    [entry] = to_anthropic_tools(["WebSearch"])
+    assert set(entry) == {"name", "description", "input_schema"}
+
+
+def test_to_toolsearch_schemas_returns_versioned_deferred_payload():
+    """Deferred lazy-load response includes registry + per-tool schema versions."""
+    payload = to_toolsearch_schemas(["WebSearch", "SKILL_HD_PARSE"])
+    assert payload["schema_version"] == TOOL_SCHEMA_VERSION
+    assert [t["name"] for t in payload["tools"]] == ["WebSearch", "SKILL_HD_PARSE"]
+    for tool in payload["tools"]:
+        assert tool["schema_version"] == TOOL_SCHEMA_VERSION
+        assert set(tool) == {
+            "name",
+            "description",
+            "input_schema",
+            "category",
+            "deferred",
+            "schema_version",
+        }
+        assert tool["deferred"] is True
+
+
+def test_to_toolsearch_schemas_rejects_eager_tool():
+    """ToolSearch is the lazy-load lane; eager tools stay in the default payload."""
+    with pytest.raises(ValueError, match="only lazy-load deferred tools"):
+        to_toolsearch_schemas(["Read"])
+
+
+def test_toolsearch_input_schema_pins_accepted_schema_version():
+    """The ToolSearch call contract advertises the accepted lazy-load version."""
+    schema = get_schema("ToolSearch").input_schema
+    version_prop = schema["properties"]["schema_version"]
+    assert version_prop["enum"] == [TOOL_SCHEMA_VERSION]
+    assert version_prop["default"] == TOOL_SCHEMA_VERSION
 
 
 # ─── Registry mechanics ──────────────────────────────────────────
@@ -258,6 +309,23 @@ def test_validate_schemas_catches_non_object_root(monkeypatch):
         input_schema={"type": "array"},  # wrong
     )
     monkeypatch.setitem(_REGISTRY, "_BadRootType", bad)
+
+    assert _validate_schemas() >= 1
+
+
+def test_validate_schemas_catches_schema_version_drift(monkeypatch):
+    """AB.1.5: deferred lazy-load schemas must stay on registry version."""
+    from backend.agents.tool_schemas import _REGISTRY, _validate_schemas, ToolSchema
+
+    bad = ToolSchema(
+        name="_BadSchemaVersion",
+        description="x",
+        category="meta",
+        input_schema={"type": "object"},
+        deferred=True,
+        schema_version="9.9.9",
+    )
+    monkeypatch.setitem(_REGISTRY, "_BadSchemaVersion", bad)
 
     assert _validate_schemas() >= 1
 

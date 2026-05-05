@@ -32,8 +32,8 @@ DB-level row swap (attacker copies user-A's ``access_token_enc`` into
 user-B's row) decrypts but fails the binding check at the application
 layer.
 
-KS.1.3 migration window
-───────────────────────
+KS.1.3 migration window (completed)
+───────────────────────────────────
 New writes store a compact JSON token envelope in
 ``oauth_tokens.access_token_enc`` / ``refresh_token_enc``::
 
@@ -43,15 +43,11 @@ New writes store a compact JSON token envelope in
       "dek_ref": { ... TenantDEKRef ... }
     }
 
-Existing rows written by AS.2.1 carry the same ``key_version = 1`` but
-plain Fernet ciphertext from :mod:`backend.secret_store`. During the
-30-day KS.1.3 migration window, reads fall back to that legacy Fernet
-path only when the stored ciphertext is not a token-envelope JSON
-object. After ``LEGACY_FERNET_FALLBACK_DEPRECATES_ON`` the fallback
-raises :class:`LegacyFernetFallbackDeprecatedError`; writers never
-produce legacy Fernet ciphertext unless
-``OMNISIGHT_KS_ENVELOPE_ENABLED=false`` is set for the migration
-rollback window.
+Rows written by AS.2.1 carried the same ``key_version = 1`` but plain
+Fernet ciphertext from :mod:`backend.secret_store`. The KS.1.3
+compatibility window has completed: reads now reject those legacy
+Fernet rows with :class:`LegacyFernetFallbackDeprecatedError`, and
+writers always produce the token-envelope JSON carrier.
 
 ``key_version`` / master-KEK rotation (AS.0.4 §3.1 / KS.1.4)
 ────────────────────────────────────────────────────────────
@@ -174,10 +170,10 @@ BINDING_FORMAT_VERSION: int = 1
 #: inner KS.1.2 ciphertext has its own ``fmt``.
 TOKEN_ENVELOPE_FORMAT_VERSION: int = 1
 
-#: KS.1.3 legacy fallback window. The start date is this row's landing
-#: date; the old Fernet reader deprecates 30 calendar days later.
+#: KS.1.3 legacy fallback window. The start date is the original
+#: migration landing date; the old Fernet reader is now deprecated.
 LEGACY_FERNET_FALLBACK_STARTED_ON = _dt.date(2026, 5, 3)
-LEGACY_FERNET_FALLBACK_DEPRECATES_ON = _dt.date(2026, 6, 2)
+LEGACY_FERNET_FALLBACK_DEPRECATES_ON = _dt.date(2026, 5, 6)
 
 #: Per-row salt size (bytes). 16 bytes / 128 bits is comfortably above
 #: the 64-bit collision floor for any realistic OmniSight-scale row
@@ -431,12 +427,12 @@ def key_version_needs_lazy_reencrypt(
 def legacy_fernet_fallback_is_active(*, as_of: Optional[_dt.date] = None) -> bool:
     """Whether KS.1.3 should still read legacy Fernet token rows.
 
-    No shared runtime state: every worker derives the same answer from
-    UTC date constants baked into the row.
+    The compatibility window is complete, so every worker returns the
+    same immutable answer without sharing module-global mutable state.
     """
 
-    day = as_of or _utc_today()
-    return day < LEGACY_FERNET_FALLBACK_DEPRECATES_ON
+    del as_of
+    return False
 
 
 def _check_key_version(
@@ -590,11 +586,6 @@ def encrypt_for_user(
     tok = _check_plaintext(plaintext)
     tid = _tenant_id_for_user(uid, tenant_id)
     payload = _binding_payload(uid, p, tok)
-    if not tenant_envelope.is_enabled():
-        return EncryptedToken(
-            ciphertext=secret_store.encrypt(payload),
-            key_version=current_key_version(as_of=as_of),
-        )
     ciphertext, dek_ref = tenant_envelope.encrypt(
         payload,
         tid,
@@ -645,10 +636,12 @@ def decrypt_for_user(
 
     try:
         ciphertext, dek_ref = _load_token_envelope(token.ciphertext)
-    except CiphertextCorruptedError:
+    except CiphertextCorruptedError as exc:
         if token.ciphertext.lstrip().startswith("{"):
             raise
-        return _decrypt_legacy_fernet(uid, p, token)
+        if token.ciphertext.startswith("gAAAA"):
+            return _decrypt_legacy_fernet(uid, p, token)
+        raise exc
     try:
         payload = tenant_envelope.decrypt(ciphertext, dek_ref)
     except tenant_envelope.BindingMismatchError as exc:

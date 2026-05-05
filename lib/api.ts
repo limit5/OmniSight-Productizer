@@ -3094,6 +3094,79 @@ export async function patchFeatureFlag(
   )
 }
 
+// ─── External A2A agent registry (BP.A2A.6 operator UI) ─────────
+
+export type ExternalAgentAuthMode = "none" | "bearer" | "oauth2"
+export type ExternalAgentHealthStatus = "unknown" | "healthy" | "degraded" | "unreachable"
+
+export interface ExternalAgentRow {
+  agent_id: string
+  display_name: string
+  base_url: string
+  agent_card_url: string
+  agent_name: string
+  description: string
+  auth_mode: ExternalAgentAuthMode
+  token_ref: string
+  enabled: boolean
+  tags: string[]
+  capabilities: string[]
+  health_status: ExternalAgentHealthStatus
+  last_health_check: string | null
+  registered_at: string | null
+  updated_at: string | null
+  config: Record<string, unknown>
+}
+
+export interface ExternalAgentListResponse {
+  external_agents: ExternalAgentRow[]
+  can_register: boolean
+}
+
+export interface RegisterExternalAgentRequest {
+  agent_id: string
+  display_name: string
+  base_url: string
+  agent_name: string
+  description?: string
+  auth_mode?: ExternalAgentAuthMode
+  token_ref?: string
+  enabled?: boolean
+  tags?: string[]
+  capabilities?: string[]
+  config?: Record<string, unknown>
+}
+
+export interface ExternalAgentResponse {
+  external_agent: ExternalAgentRow
+}
+
+export async function listExternalAgents(): Promise<ExternalAgentListResponse> {
+  return request<ExternalAgentListResponse>("/external-agents")
+}
+
+export async function registerExternalAgent(
+  body: RegisterExternalAgentRequest,
+): Promise<ExternalAgentResponse> {
+  return request<ExternalAgentResponse>("/external-agents", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function patchExternalAgent(
+  agentId: string,
+  enabled: boolean,
+): Promise<ExternalAgentResponse> {
+  return request<ExternalAgentResponse>(
+    `/external-agents/${encodeURIComponent(agentId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    },
+  )
+}
+
 // ─── Tenant settings page (Y8 row 4) ───────────────────────────
 //
 // REST surface used by ``/tenants/{tid}/settings`` (tenant-admin
@@ -5533,11 +5606,20 @@ export interface BootstrapGates {
   smoke_passed: boolean
 }
 
+export interface BootstrapFrontendFreshness {
+  prod_build_commit: string
+  master_head_commit: string
+  lag_commits: number
+  status: "fresh" | "stale" | "unknown"
+  detail: string
+}
+
 export interface BootstrapStatusResponse {
   status: BootstrapGates
   all_green: boolean
   finalized: boolean
   missing_steps: string[]
+  frontend_freshness: BootstrapFrontendFreshness
 }
 
 export interface BootstrapFinalizeResponse {

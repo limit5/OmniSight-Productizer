@@ -74,6 +74,14 @@ def test_read_rejects_path_outside_base(
         read_handler({"file_path": str(f)})
 
 
+def test_read_rejects_build_log_path_via_pep(base_dir: Path) -> None:
+    f = base_dir / "build" / "compile.log"
+    f.parent.mkdir()
+    f.write_text("compiler noise")
+    with pytest.raises(PermissionError, match="PEP denied Read"):
+        read_handler({"file_path": str(f)})
+
+
 def test_read_missing_file_raises(base_dir: Path) -> None:
     with pytest.raises(FileNotFoundError):
         read_handler({"file_path": str(base_dir / "ghost.txt")})

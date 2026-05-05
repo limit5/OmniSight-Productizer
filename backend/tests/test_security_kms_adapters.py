@@ -7,10 +7,12 @@ import inspect
 import json
 import os
 import sys
+from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from backend import secret_store
 from backend.security import kms_adapters as kms
@@ -142,6 +144,29 @@ class TestLocalFernetKMSAdapter:
         assert "secret_store.decrypt" in source
         assert "Fernet.generate_key" not in source
         assert "OMNISIGHT_LOCAL_FERNET" not in source
+
+
+class TestLocalFernetKMSLiveIntegration:
+
+    def test_ci_sandbox_encrypt_decrypt_round_trip(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "ks-local-fernet-live")
+        secret_store._reset_for_tests()
+        adapter = kms.LocalFernetKMSAdapter()
+        context = {
+            "tenant_id": "ci-sandbox",
+            "dek_id": "ks-local-fernet-live",
+            "purpose": "cmek-verify:local-fernet",
+            "schema": "ks.1.2",
+        }
+
+        wrapped = adapter.wrap_dek(b"ks-local-fernet-live-dek", encryption_context=context)
+
+        assert wrapped.provider == "local-fernet"
+        assert wrapped.ciphertext != b"ks-local-fernet-live-dek"
+        assert (
+            adapter.unwrap_dek(wrapped, encryption_context=context)
+            == b"ks-local-fernet-live-dek"
+        )
 
 
 class FakeAWSKMSClient:
@@ -624,6 +649,85 @@ class TestVaultTransitKMSLiveIntegration:
         assert wrapped.provider == "vault-transit"
         assert wrapped.ciphertext != b"ks-2-4-live-dek"
         assert adapter.unwrap_dek(wrapped, encryption_context=context) == b"ks-2-4-live-dek"
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW_ROOT = REPO_ROOT / ".github" / "workflows"
+CLOUD_LIVE_WORKFLOWS = {
+    "aws-kms": {
+        "path": WORKFLOW_ROOT / "aws-kms-live-tests.yml",
+        "validate_step": "Validate AWS KMS sandbox configuration",
+        "required_env": (
+            "OMNISIGHT_TEST_AWS_KMS_KEY_ID",
+            "OMNISIGHT_TEST_AWS_KMS_REGION",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+        ),
+        "test_class": "TestAWSKMSLiveIntegration",
+    },
+    "gcp-kms": {
+        "path": WORKFLOW_ROOT / "gcp-kms-live-tests.yml",
+        "validate_step": "Validate GCP KMS sandbox configuration",
+        "required_env": (
+            "OMNISIGHT_TEST_GCP_KMS_KEY_ID",
+            "OMNISIGHT_TEST_GCP_KMS_CREDENTIALS_JSON",
+        ),
+        "test_class": "TestGCPKMSLiveIntegration",
+    },
+    "vault-transit": {
+        "path": WORKFLOW_ROOT / "vault-transit-live-tests.yml",
+        "validate_step": "Validate Vault Transit sandbox configuration",
+        "required_env": (
+            "OMNISIGHT_TEST_VAULT_TRANSIT_KEY_ID",
+            "OMNISIGHT_TEST_VAULT_TRANSIT_URL",
+            "OMNISIGHT_TEST_VAULT_TRANSIT_TOKEN",
+        ),
+        "test_class": "TestVaultTransitKMSLiveIntegration",
+    },
+}
+
+
+def _workflow(path: Path) -> dict:
+    assert path.exists(), f"KMS live workflow missing: {path}"
+    return yaml.safe_load(path.read_text())
+
+
+class TestCloudKMSLiveWorkflowGates:
+
+    @pytest.mark.parametrize("provider", sorted(CLOUD_LIVE_WORKFLOWS))
+    def test_cloud_live_workflow_fails_before_pytest_when_sandbox_env_missing(
+        self,
+        provider,
+    ):
+        spec = CLOUD_LIVE_WORKFLOWS[provider]
+        workflow = _workflow(spec["path"])
+        job = workflow["jobs"]["live-tests"]
+        assert job.get("continue-on-error") in (None, False)
+
+        steps = job["steps"]
+        names = [step.get("name") for step in steps]
+        assert spec["validate_step"] in names
+        assert names.index(spec["validate_step"]) < names.index(
+            next(name for name in names if name and name.startswith("Run "))
+        )
+
+        validate = steps[names.index(spec["validate_step"])]
+        validate_script = validate["run"]
+        for env_name in spec["required_env"]:
+            assert f"${{{env_name}:?" in validate_script
+
+        run_script = "\n".join(str(step.get("run", "")) for step in steps)
+        assert spec["test_class"] in run_script
+
+    @pytest.mark.parametrize("provider", sorted(CLOUD_LIVE_WORKFLOWS))
+    def test_cloud_live_workflow_maps_sandbox_secrets(self, provider):
+        spec = CLOUD_LIVE_WORKFLOWS[provider]
+        workflow = _workflow(spec["path"])
+        job_env = workflow["jobs"]["live-tests"].get("env") or {}
+
+        for env_name in spec["required_env"]:
+            assert env_name in job_env
+            assert "secrets." in str(job_env[env_name])
 
 
 class TestConfigAndDriftGuards:

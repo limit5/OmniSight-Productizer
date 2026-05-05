@@ -218,6 +218,8 @@ target tier.
 - [ ] OmniSight export bundle is sealed to customer migration key.
 - [ ] Customer import completed into `local_file`, `kms`, or `vault`.
 - [ ] One proxied request per provider succeeded.
+- [ ] Proxy-unreachable no-fallback smoke returned a BYOG error and
+      showed no direct provider egress.
 - [ ] Customer audit log contains full prompt and response.
 - [ ] OmniSight audit metadata contains no prompt or response.
 - [ ] SaaS-side provider key material cleared.

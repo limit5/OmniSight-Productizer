@@ -3,25 +3,23 @@ audience: internal
 risk_id: R12
 risk_title: gVisor cost-weight only / not actual runtime
 severity: 🔴 high (impact) × 🟢 low (likelihood) — see §3
-status: open — mitigated by documentation + auxiliary disclaimer
+status: closed — BP.W3.13 makes runsc load-bearing in production
 owners: architect / sa_sd / auditor
 landed: 2026-05-03 (BP.S.5)
-close_out: BP.W3.13 (Phase U gVisor adoption)
+close_out: BP.W3.13 (Phase U gVisor adoption, 2026-05-06)
 ---
 
-# Risk R12 — gVisor is a cost-weight label, not the actual sandbox runtime
+# Risk R12 — gVisor cost-weight label vs actual sandbox runtime
 
-> **TL;DR**: `SandboxCostWeight.gvisor_lightweight` (1.0 token) and the
-> `tiered-sandbox-architecture.md` Tier-1 description both *name* gVisor
-> as the lightweight sandbox engine. **They are nominal labels, not a
-> runtime guarantee.** Production today runs Docker's default `runc`
-> runtime unless an operator has explicitly set
-> `OMNISIGHT_DOCKER_RUNTIME=runsc` AND installed gVisor on every host.
-> No part of the codebase verifies that the configured runtime is in
-> fact `runsc` at request-handling time. **Compliance claims, customer-
-> facing security copy, third-party legal review, and audit reports
-> MUST NOT cite "gVisor isolation" as an active control until BP.W3.13
-> (Phase U) lands.**
+> **TL;DR**: BP.S.5 recorded that `SandboxCostWeight.gvisor_lightweight`
+> and Tier-1 design language were nominal labels, not proof that
+> production actually ran gVisor. BP.W3.13 closes that gap:
+> `ENV=production` now requires `OMNISIGHT_DOCKER_RUNTIME=runsc`,
+> Docker must advertise `runsc`, and every production sandbox launch
+> verifies `docker inspect --format '{{.HostConfig.Runtime}}'` is
+> `runsc`. Compliance claims may cite gVisor only when release evidence
+> includes the production launch audit row and the runc/runsc benchmark
+> CSV from `scripts/benchmark_gvisor_runtime.sh`.
 
 This document is the single canonical record of R12. Other docs may
 *reference* it, but they MUST NOT redefine the risk text or its
@@ -29,7 +27,7 @@ mitigations — that is how compliance claims drift.
 
 ---
 
-## 1. Why this risk exists (root cause)
+## 1. Why this risk existed (root cause)
 
 There are three independent sources of the "gVisor is in production"
 illusion. R12 is the *aggregate* of all three telling the same false
@@ -179,7 +177,7 @@ rating snaps back to 🟠 medium and a fresh re-evaluation per
 
 ---
 
-## 4. Mitigations (current state)
+## 4. Mitigations and close-out state
 
 ### 4.1 Documentation gates (✅ landed by BP.S.3 / BP.S.4 / BP.S.5)
 
@@ -223,29 +221,28 @@ This is a forward-looking requirement on the Phase D modules — those
 modules do not exist yet at the time R12 is recorded. The requirement
 is recorded here so that whoever writes them knows what to include.
 
-### 4.3 No runtime change in scope of R12
+### 4.3 BP.W3.13 runtime close-out
 
-R12 is **not** mitigated by switching the production runtime to
-`runsc`. That work is **BP.W3.13 (Phase U)**:
+BP.W3.13 makes the runtime claim load-bearing:
 
-* Adopt gVisor across all Tier 1 / Tier 2 hosts
-* Add a startup health check that `docker info` lists `runsc` as a
-  registered runtime
-* Add a Prometheus metric (`omnisight_container_runtime{runtime="…"}`)
-  exposing the runtime per launched sandbox
-* Add a request-time assertion that Tier 1 / Tier 2 sandboxes show
-  `Runtime: runsc` on `docker inspect`
-* Add a drift-guard test that the assertion is wired
-* Update `tiered-sandbox-architecture.md` to drop the "Phase U gating"
-  language and start describing the *current* state
-* Update §0 R12 callouts in `sandbox-tier-audit.md` and
-  `pep-gateway-tier-policy.md` to a "closed-out" line referring to
-  this file's change-log
-* Update this file's status from `open — mitigated by documentation`
-  to `closed — gVisor active in production` and add a close-out entry
-  in §6.
+* `backend/config.py` still defaults `docker_runtime` to `runsc`.
+* `backend/container.py::resolve_runtime()` hard-fails in
+  `ENV=production` unless the configured runtime is `runsc` and Docker
+  lists `runsc` in `docker info --format '{{json .Runtimes}}'`.
+* `backend/container.py::_assert_container_runtime()` verifies the
+  launched container via `docker inspect --format '{{.HostConfig.Runtime}}'`
+  and removes the container if production sees anything other than
+  `runsc`.
+* `omnisight_sandbox_launch_total{tier="t1",runtime="runsc",result="success"}`
+  and the `sandbox_launched.after.runtime=runsc` audit row are the
+  operational evidence for each launch.
+* `scripts/benchmark_gvisor_runtime.sh` records the runc/runsc
+  performance envelope before the deployment can move from
+  `deployed-active` to `deployed-observed`.
 
-Until all of that lands, R12 stays open.
+The old documentation-only mitigation remains useful for historical
+review, but R12 status is now `closed` once the BP.W3.13 commit is in
+the release branch and the first production launch evidence is attached.
 
 ### 4.4 What does NOT mitigate R12
 
@@ -263,40 +260,31 @@ For absolute clarity:
 
 ---
 
-## 5. Detection — how to verify the risk is currently latent
+## 5. Detection — how to verify the risk stays closed
 
-For an operator or auditor who needs to confirm R12 is truly nominal-
-only at any point in time:
+For an operator or auditor who needs to confirm the runtime claim:
 
 ```bash
 # 1. Check the host runtime configuration.
 docker info 2>/dev/null | grep -i 'Runtimes\|Default Runtime'
-# Expected output today: "Runtimes: io.containerd.runc.v2 runc"
-#                        "Default Runtime: runc"
-# If "runsc" appears, gVisor is INSTALLED but not necessarily DEFAULT.
+# Expected: runsc appears in the runtime list.
 
 # 2. Inspect a live sandbox container's actual runtime.
-docker inspect $(docker ps -q --filter "label=omnisight.sandbox") \
+docker inspect $(docker ps -q --filter "name=omnisight-agent-") \
   --format '{{.Name}} runtime={{.HostConfig.Runtime}}'
-# Expected output today: "/omnisight-sandbox-… runtime=" (empty = runc)
+# Expected: "/omnisight-agent-… runtime=runsc"
 
 # 3. Verify the env knob.
 grep -E '^OMNISIGHT_DOCKER_RUNTIME' .env
-# Expected today: no match (knob commented out in .env.example).
+# Expected in production: ENV=production and OMNISIGHT_DOCKER_RUNTIME=runsc
 
 # 4. Check container.py reads the knob (sanity).
-grep -n 'OMNISIGHT_DOCKER_RUNTIME\|runtime=' backend/container.py | head
+grep -n 'OMNISIGHT_DOCKER_RUNTIME\|_assert_container_runtime' backend/container.py | head
 ```
 
-If steps 1-3 all show `runc` / empty / no match, R12 is in its
-expected nominal state and the documentation mitigations are in force.
-If step 2 shows `runtime=runsc`, the operator has opted in but **R12
-is still open until BP.W3.13** because:
-
-* No drift-guard test enforces this state.
-* Silent fallback can re-occur after a host rebuild.
-* The compliance / customer copy still cannot cite gVisor without
-  BP.W3.13's runtime assertion + Prometheus metric.
+If any production check shows `runc`, empty runtime, or
+`sandbox_runtime_fallback`, treat it as a deployment regression and
+roll back to the last build with verified `runsc` launches.
 
 ---
 
@@ -331,4 +319,4 @@ is still open until BP.W3.13** because:
 | Date | What | Why | Who |
 |---|---|---|---|
 | 2026-05-03 | Initial publication (BP.S.5). Risk text aggregated from blueprint §11 row + audit §6 row + sandbox-tier-audit §0 callout. Three-callout mitigation pattern recorded. Phase U / BP.W3.13 close-out path documented. Detection runbook §5 added. | Audit register row 340 had `BP.S.5 待 record`; Phase D legal-review readiness needs a single canonical risk write-up before any compliance module ships. | Agent-row7-self-agent |
-
+| 2026-05-06 | BP.W3.13 close-out. Production runtime now fails closed unless Docker can launch and inspect Tier 1 sandboxes as `runsc`; benchmark script records runc/runsc performance evidence. | Close R12's label-vs-runtime gap and allow future compliance language to cite measured gVisor runtime evidence instead of the cost-weight enum name. | Codex/GPT-5.5 |

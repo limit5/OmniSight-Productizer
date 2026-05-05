@@ -383,6 +383,11 @@ async def lifespan(app: FastAPI):
     # H1: whole-host ring buffer (60 × 5s snapshots = 5 min history).
     # Feeds the AIMD capacity planner + the GET /host/metrics endpoint.
     host_ringbuf_task = asyncio.create_task(_hm.run_host_sampling_loop())
+    # BP.R.6: per-worker RTK install health gauge. The Dockerfile
+    # hard-fails missing RTK, but this keeps the running image visible
+    # to Prometheus after deploy.
+    from backend import rtk_observability as _rtk_obs
+    _rtk_obs.probe_install_status()
     # G7 (HA-07): flip the backend_instance_up gauge to 1 once the
     # app is fully booted. Shutdown flips it back to 0 so the
     # reverse-proxy drops this replica from rotation before the
@@ -1194,6 +1199,8 @@ app.include_router(health.router, prefix=settings.api_prefix)
 # at the server root so systemd / docker-compose / k8s / CF health
 # checks don't need to know about the API prefix.
 app.include_router(health.probe_router)
+from backend.routers import a2a_inbound as _a2a_inbound_router  # BP.A2A.2
+app.include_router(_a2a_inbound_router.router)
 app.include_router(agents.router, prefix=settings.api_prefix)
 app.include_router(tasks.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)
@@ -1345,6 +1352,8 @@ from backend.routers import auto_skills as _auto_skills_router  # BP.M.3 L1 skil
 app.include_router(_auto_skills_router.router, prefix=settings.api_prefix)
 from backend.routers import feature_flags as _feature_flags_router  # WP.7.8 operator feature flag registry UI
 app.include_router(_feature_flags_router.router, prefix=settings.api_prefix)
+from backend.routers import external_agents as _external_agents_router  # BP.A2A.6 external A2A agent registry UI
+app.include_router(_external_agents_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import

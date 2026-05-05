@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from backend.security import decryption_audit as da
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _ctx(**overrides) -> da.DecryptionAuditContext:
@@ -100,3 +105,26 @@ async def test_emit_decryption_lands_in_tamper_evident_chain(pg_test_pool):
     finally:
         async with pg_test_pool.acquire() as conn:
             await conn.execute("TRUNCATE audit_log RESTART IDENTITY CASCADE")
+
+
+def test_production_token_decrypt_call_sites_use_audited_wrapper():
+    """KS DoD: production OAuth plaintext recovery must write N10 rows.
+
+    ``token_vault.decrypt_for_user`` remains as the pure primitive for
+    tests, backfills, and the audited wrapper itself. Production modules
+    outside the vault must call ``decrypt_for_user_with_audit`` so every
+    runtime plaintext recovery emits ``ks.decryption``.
+    """
+
+    offenders = []
+    for path in (REPO_ROOT / "backend").rglob("*.py"):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel.startswith("backend/tests/"):
+            continue
+        if rel == "backend/security/token_vault.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "decrypt_for_user(" in source:
+            offenders.append(rel)
+
+    assert offenders == []

@@ -127,6 +127,14 @@ async def read_file(path: str) -> str:
     Args:
         path: Relative path from workspace root (e.g. "src/main.c").
     """
+    try:
+        from backend import pep_gateway as _pep
+        dec = _pep.classify_native_read_path("read_file", {"path": path})
+        if dec is not None:
+            _action, rule, reason, _scope = dec
+            return f"[BLOCKED] PEP denied read_file ({rule}): {reason}"
+    except Exception:
+        logger.warning("PEP native read-path guard raised", exc_info=True)
     target = _safe_path(path)
     if not target.exists():
         return f"[ERROR] File not found: {path}"

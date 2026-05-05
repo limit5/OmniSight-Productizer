@@ -295,11 +295,11 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 | key_version column | 預留欄位（AS.2.1 §） | **正式啟用**為 KEK rotation 索引 |
 | Audit | partial（AS.1.4 oauth_audit 涵蓋 OAuth 路徑） | full（每筆 decryption 寫 N10） |
 | Anomaly detection | 無 | 有（per-tenant rate threshold） |
-| Compat | — | 雙讀雙寫 30 天、之後 deprecate single Fernet |
+| Compat | — | 雙讀雙寫觀察窗已完成、single Fernet 已 deprecate |
 
 **Migration 策略**：
-- KS.1.3 雙讀雙寫期間：寫只走新 envelope、讀 fallback 到舊 Fernet
-- 30 天後：所有 row 已 re-encrypt、deprecate 舊 Fernet 路徑
+- KS.1.3 雙讀雙寫期間（已結束）：寫只走新 envelope、讀 fallback 到舊 Fernet
+- 完成後：所有 row 預期已 re-encrypt；舊 Fernet 讀取與 rollback 寫入路徑已 deprecate
 - AS.0.4 §3 invariant 升級成「single master Fernet key OR envelope (DEK + KEK)、二擇一不混用」、新 invariant 寫進 AS migration discipline 文件
 
 ---
@@ -332,7 +332,7 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 ### 8.1 Single-Knob Rollback
 
 每個 Phase 各自有獨立 env knob、彼此正交：
-- `OMNISIGHT_KS_ENVELOPE_ENABLED=false` → Phase 1 退回 single Fernet（migration 雙寫期間有效）
+- `OMNISIGHT_KS_ENVELOPE_ENABLED=false` → Phase 1 migration rollback knob（已 deprecate；不再讓 AS / tenant / bootstrap secret writer 退回 single Fernet）
 - `OMNISIGHT_KS_CMEK_ENABLED=false` → Phase 2 隱藏 Tier 2 wizard、所有 tenant 退回 Tier 1
 - `OMNISIGHT_KS_BYOG_ENABLED=false` → Phase 3 隱藏 Tier 3 註冊、proxy 模式不可選
 
@@ -344,7 +344,7 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 - DEK / KEK 分離：master KEK compromise 測試（模擬 master key 洩漏 + 確認 per-tenant DEK 仍需個別 unwrap）
 - Envelope round-trip：encrypt → store → fetch → decrypt 與 plaintext byte-equal
-- 雙讀雙寫遷移：任何時間點 hard-restart、雙寫 row 都能 read（新／舊路徑各驗一次）
+- 雙讀雙寫遷移完成：hard-restart 後 envelope row 可讀，legacy Fernet row 被明確拒絕
 - KEK rotation：rotate 後新 row 用新 KEK、舊 row decrypt 仍通
 - Decryption audit log：每次 decrypt 都寫 N10、leak ledger 比對全 match
 - Spend anomaly detector：注入「rate spike 50x」事件、驗 throttle + alert 在 60 sec 內觸發
@@ -369,11 +369,55 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 ### 9.4 Compat Regression
 
-- KS 全套 disable（三 knob 全 false）→ 退回 single Fernet、既有 AS / OAuth / customer secret 0 回歸
+- KS 全套 disable（三 knob 全 false）→ 停用後續 CMEK / BYOG surface；Phase 1 envelope 不再退回 single Fernet，既有 AS / OAuth / customer secret 需維持 envelope 讀寫
+
+### 9.5 Overall Definition of Done（KS.DOD）
+
+最終總體 row 的 source-of-truth evidence index 是
+[`docs/ops/ks_overall_rollout_evidence.md`](../ops/ks_overall_rollout_evidence.md)。
+該 index 聚合三個 runtime knob 的 regression guard、ADR completeness
+map、operator runbook、per-tier customer onboarding 與 production evidence
+packet。
+
+交付文件：
+- Operator runbook:
+  [`docs/ops/ks_operator_runbook.md`](../ops/ks_operator_runbook.md)
+- Per-tier customer onboarding:
+  [`docs/ops/ks_customer_onboarding.md`](../ops/ks_customer_onboarding.md)
+
+### 9.6 ADR Completion Closure（KS.DOD.ADR）
+
+本 ADR 以「architectural source of truth + evidence index links」為完成
+標準；它不複製 private evidence vault 內容，也不取代 operator runbook。
+完整狀態由下表釘住：
+
+| DoD area | Completion evidence | Drift guard |
+|----------|---------------------|-------------|
+| **Phase 1（Tier 1 envelope）** | `priority_i_multi_tenancy_readiness.md` covers KMS adapter live evidence, envelope migration, `ks.decryption` audit coverage, spend anomaly detector, log scrubber, backup DLP, and legacy Fernet deprecation. | `backend/tests/test_ks_priority_i_readiness.py`, `backend/tests/test_security_envelope.py`, `backend/tests/test_ks113_envelope_security_integration.py` |
+| **Phase 2（Tier 2 CMEK）** | CMEK wizard, AWS / GCP / Vault live adapters, revoke 60 sec graceful 403, SIEM ingest, and Tier upgrade / downgrade re-encrypt paths are linked through the CMEK runbooks and single-knob guards. | `backend/tests/test_cmek_phase2_regression.py`, `backend/tests/test_cmek_single_knob.py`, `backend/tests/test_ks32_cmek_revoke_recovery.py` |
+| **Phase 3（Tier 3 BYOG proxy）** | BYOG proxy GA, mTLS / signed nonce / replay defense, HD.21.5 self-hosted image alignment, Tier 2 -> Tier 3 cutover, p95 latency budget, and strict no-fallback behavior are linked through the BYOG evidence pages. | `backend/tests/test_ks_phase3_byog_proxy_ga.py`, `backend/tests/test_byog_single_knob.py`, `backend/tests/test_byog_proxy_fail_fast.py`, `backend/tests/test_ks38_byog_upgrade_runbook.py` |
+| **Cross-cutting** | R46-R50 mitigation, incident response runbook, external pentest operational gate, SOC 2 Type II readiness, DSAR / GDPR, bug bounty, and N10 ledger tables are consolidated in the cross-cutting index. | `backend/tests/test_ks_cross_cutting_evidence.py`, `backend/tests/test_ks46_incident_response_runbook.py`, `backend/tests/test_ks47_soc2_type2_readiness_checklist.py` |
+| **Overall rollout** | Three independent runtime knobs, no-regression packet, operator runbook, per-tier customer onboarding, and final production evidence gate are consolidated in the overall rollout index. | `backend/tests/test_ks_overall_dod.py` |
+
+Completion boundary:
+
+- Repository completion is `dev-only`: the design, evidence indexes,
+  runbooks, customer onboarding material, and drift guards are present.
+- Production completion is separate: operators must rebuild the
+  production backend image, capture the three-knob env snapshot, run the
+  regression evidence packet, attach customer onboarding packets, and
+  append the final N10 KS rollout row before marking the KS rollout
+  `deployed-active`.
+- The ADR remains the source of truth for architecture and risk
+  acceptance; `docs/ops/ks_overall_rollout_evidence.md` is the source of
+  truth for final DoD evidence and production gate status.
 
 ---
 
 ## 10. Risk Register（R46-R50）
+
+R46-R50 mitigation evidence is consolidated in
+[`docs/ops/ks_cross_cutting_evidence.md`](../ops/ks_cross_cutting_evidence.md).
 
 | ID | 風險 | Mitigation |
 |----|------|-----------|
@@ -411,6 +455,18 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 **Day 1 結束**：所有新建 tenant 已走 envelope、舊 tenant 雙寫漸進升級、operator 看不出差別。
 
 **BP 完工 + KS.1 ship 完成 = multi-tenant gate 解鎖** — 此時可打開 self-service signup + 收費入口、HD.17 多客戶 NDA 隔離也可開工。
+
+### 12.1.1 Priority I readiness gate（KS.DOD）
+
+KS.1 完工後、Priority I 啟動前必須跑
+[`docs/ops/priority_i_multi_tenancy_readiness.md`](../ops/priority_i_multi_tenancy_readiness.md)。
+該 checklist 是 Priority I readiness gate：它要求 KS.1 acceptance
+evidence、live KMS evidence、legacy Fernet deprecation proof、N10
+`ks.decryption` coverage、spend anomaly shared-state proof、production
+image/env smoke、multi-tenant isolation smoke、rollback/no-fallback
+proof、24h observation clean，並在 N10 `Priority I Readiness` table 記
+`Disposition = ready-to-start`。沒有 `ready-to-start`（或 security owner
+明確 `risk-accepted`）時，Priority I 不得啟動。
 
 ### 12.2 Phase 2 — Tier 2 CMEK（**HD 之後 commercial-driven、~3 週**）
 
@@ -463,6 +519,6 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 ## 15. Sign-off
 
 - **Owner**: Agent-software-beta + nanakusa sora
-- **Date**: 2026-04-29
-- **Status**: Accepted（Phase 1 待排程於 Priority I 之前；Phase 2 / 3 商務驅動）
-- **Next review**: Phase 1 完工後、Priority I 啟動前
+- **Date**: 2026-04-29; completion closure updated 2026-05-06
+- **Status**: Accepted + complete for repository DoD（dev-only；production activation remains an operator gate）
+- **Next review**: Final production promotion，以 `docs/ops/ks_overall_rollout_evidence.md` 的 regression evidence packet、per-tier customer onboarding packets、three-knob env snapshot、production backend image digest、與 final N10 KS rollout row 為準

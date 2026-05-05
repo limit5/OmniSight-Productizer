@@ -1,0 +1,90 @@
+# BP.A2A.10 sample model mapping for AgentCard generation.
+#
+# BP.F will enforce/warn/advisory-check this mapping in the LLM factory.
+# A2A reads it as runtime metadata only, so operator edits update discovery
+# cards without requiring a code change.
+
+version: 1
+mode: advisory
+
+providers:
+  anthropic:
+    default_model: claude-sonnet-4-20250514
+  openai:
+    default_model: gpt-4o
+  google:
+    default_model: gemini-1.5-pro
+  xai:
+    default_model: grok-3-mini
+  groq:
+    default_model: llama-3.3-70b-versatile
+  deepseek:
+    default_model: deepseek-chat
+  together:
+    default_model: meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
+  openrouter:
+    default_model: anthropic/claude-sonnet-4
+  ollama:
+    default_model: llama3.1
+
+guilds:
+  architect:
+    model_spec: anthropic:claude-opus-4-20250514
+  sa_sd:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  ux:
+    model_spec: google:gemini-1.5-pro
+  pm:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  gateway:
+    model_spec: anthropic:claude-haiku-4-20250506
+  bsp:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  hal:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  algo_cv:
+    model_spec: anthropic:claude-opus-4-20250514
+  optical:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  isp:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  audio:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  frontend:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  backend:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  sre:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  qa:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  auditor:
+    model_spec: anthropic:claude-opus-4-20250514
+  red_team:
+    model_spec: xai:grok-3-mini
+  forensics:
+    model_spec: google:gemini-1.5-pro
+  intel:
+    model_spec: google:gemini-1.5-pro
+  reporter:
+    model_spec: anthropic:claude-haiku-4-20250506
+  custom:
+    model_spec: anthropic:claude-sonnet-4-20250514
+
+runtime_specialists:
+  orchestrator:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  hd:
+    model_spec: anthropic:claude-sonnet-4-20250514
+
+graph_specialists:
+  firmware:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  software:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  validator:
+    model_spec: openai:gpt-4o
+  reviewer:
+    model_spec: anthropic:claude-sonnet-4-20250514
+  general:
+    model_spec: anthropic:claude-sonnet-4-20250514

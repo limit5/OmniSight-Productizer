@@ -33,6 +33,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend import auth as _au
 from backend import audit
 from backend import bootstrap as _boot
+from backend import frontend_freshness as _frontend_freshness
 from backend import llm_secrets as _secrets
 from backend.config import settings as _settings
 
@@ -3097,11 +3098,14 @@ async def bootstrap_status() -> dict:
     """
     status = await _boot.get_bootstrap_status()
     missing = await _boot.missing_required_steps()
+    freshness = _frontend_freshness.get_frontend_freshness()
+    _frontend_freshness.publish_frontend_build_lag(freshness)
     return {
         "status": status.to_dict(),
         "all_green": status.all_green,
         "finalized": _boot.is_bootstrap_finalized_flag(),
         "missing_steps": missing,
+        "frontend_freshness": freshness.to_dict(),
     }
 
 

@@ -19,13 +19,43 @@
 * **主要職責：** 思考、發派工單、分發憑證與監控底層沙盒狀態。
 
 ### 🔒 Tier 1: 嚴格隔離沙盒 (Strict Sandbox)
-* **環境屬性：** 瞬態微虛擬機 (Ephemeral MicroVM，如 Firecracker / gVisor) 或嚴格限制的 Docker。
+* **環境屬性：** Docker + gVisor (`runsc`) user-space kernel；非 production / dev fallback 才允許 Docker default `runc`。
 * **進駐角色：** C/C++ 開發 Agent、演算法重構 Agent、NPU 模型轉換 Agent。
 * **安全機制：**
   * **實體斷網 (Air-gapped)：** 除特定白名單 (如 Git Server) 外，禁止對外連線，防範資料外洩。
   * **資源配額 (Cgroups)：** 限制最高 4 vCPU / 8GB RAM，防範 AI 寫出死迴圈或內存溢出 (OOM) 導致宿主機崩潰。
   * **用完即毀：** 每次任務結束立即銷毀 Container，確保下次編譯環境 100% 乾淨 (Reproducibility)。
 * **主要職責：** `make` 交叉編譯、執行 Valgrind 檢測、跑 Python 數據分析腳本。
+
+#### Phase U 落地狀態 (BP.W3.13, 2026-05-06)
+
+Tier 1 的 production runtime 現在是 load-bearing gVisor，而不是
+`SandboxCostWeight.gvisor_lightweight` 的 cost label。runtime selection 仍集中在
+`backend/container.py`：
+
+| Gate | Production 行為 | Dev / CI 行為 |
+| :--- | :--- | :--- |
+| Runtime preference | `ENV=production` 時必須解析為 `OMNISIGHT_DOCKER_RUNTIME=runsc`；若 operator 設成 `runc` 或未知值，sandbox launch hard-fail | 預設偏好 `runsc`，但可顯式設 `runc` 供 macOS / WSL2 / local Docker 相容 |
+| Host capability | `docker info --format '{{json .Runtimes}}'` 必須列出 `runsc`；缺少 gVisor 時 hard-fail，不再 silent fallback | 缺少 `runsc` 時 fallback 到 `runc`，並 emit `sandbox_runtime_fallback` 方便 dev diagnosis |
+| Request-time assertion | container 啟動後以 `docker inspect --format '{{.HostConfig.Runtime}}' <container>` 驗證實際 runtime 是 `runsc`；若不符立即 `docker rm -f` 並記 `omnisight_sandbox_launch_total{result="runtime_mismatch"}` | 不做 request-time hard assertion，避免 local Docker implementation 差異阻塞測試 |
+| Observability | `omnisight_sandbox_launch_total{tier="t1",runtime="runsc",result="success"}` 是 production smoke 的必查 metric；audit row `sandbox_launched.after.runtime` 必須為 `runsc` | 相同 metric / audit label 仍存在，可看出 dev host 是否跑 `runc` |
+
+Operator adoption 順序：
+
+1. 每台 Tier 1 / Tier 2 sandbox host 安裝 gVisor：`runsc` 與
+   `containerd-shim-runsc-v1` 必須出現在 `docker info` runtime list。
+2. production `.env` 設 `ENV=production`，並保留預設
+   `OMNISIGHT_DOCKER_RUNTIME=runsc`。
+3. rolling restart backend；第一個 sandbox launch 需要同時通過
+   `docker info` capability gate 與 `docker inspect` request-time assertion。
+4. 跑 `scripts/benchmark_gvisor_runtime.sh` 產出 `runc` vs `runsc` CSV；
+   若同一 workload 的 `runsc` 中位數超過 `runc` 2 倍，先回到 staging 調整
+   workload / image / seccomp profile，不把 production row 翻
+   `deployed-observed`。
+
+此段關閉 Risk R12 的 runtime gap：production claim 可引用的是「每次 Tier 1
+sandbox launch 的 Docker HostConfig.Runtime 已驗證為 `runsc`」，不是 cost
+weight enum 名稱。
 
 ### 🌐 Tier 2: 網路穿透沙盒 (Networked Sandbox)
 * **環境屬性：** 具備 Egress (對外) 網路權限的 Docker 容器。
@@ -43,6 +73,35 @@
   * **RPC / API 代理介面：** 在實體機上部署一個「守門員程式 (Hardware Daemon)」。Agent 只能傳送高階 JSON 請求 (如 `{"action": "flash_board", "firmware_url": "..."}`)，由守門員進行參數校驗後代為執行。
   * 禁止危險系統指令 (如 `rm`, `dd` 覆寫系統磁區)。
 * **主要職責：** 燒錄韌體至 EVK、讀取 UART 串口日誌、擷取真實 I2C/SPI 訊號。
+
+#### Phase T 落地狀態 (BP.W3.12, 2026-05-06)
+
+Tier 3 的實作入口是 `tools/hardware_daemon/app.py`，作為部署在
+EVK 連接機上的獨立 FastAPI daemon。它不是 OmniSight backend 的一般
+router，也不給 Agent shell / SSH / arbitrary command surface；所有可執行
+能力都被固定在三個 JSON-only endpoint：
+
+| Endpoint | Action | 參數邊界 | 執行方式 |
+| :--- | :--- | :--- | :--- |
+| `POST /flash_board` | `flash_board` | `board_id`、`firmware_url` 或 artifact-root 內的 `artifact_path` | `OMNISIGHT_HW_BRIDGE_FLASH_CMD` argv |
+| `POST /read_uart` | `read_uart` | `/dev/tty*` 或 `/dev/serial/by-id/*`、baud、duration、max bytes | `OMNISIGHT_HW_BRIDGE_UART_CMD` argv |
+| `POST /capture_signal` | `capture_signal` | `bus ∈ {i2c, spi, gpio}`、channel、duration、sample rate | `OMNISIGHT_HW_BRIDGE_SIGNAL_CMD` argv |
+
+共同約束：
+
+* POST 必須是 `Content-Type: application/json`；非 JSON request 在 body
+  parsing 前回 `415`。
+* Pydantic model 使用 `extra="forbid"`，未知欄位不會被悄悄傳進硬體層。
+* 子程序一律走 `asyncio.create_subprocess_exec(*argv)`，不走 shell
+  interpolation；daemon 只把高階參數轉成白名單命令 argv。
+* `OMNISIGHT_HW_BRIDGE_TOKEN` 若有設定，caller 必須帶
+  `X-Omnisight-Bridge-Token`；mTLS / LAN ACL 仍由部署層負責。
+* systemd 範本在 `deploy/systemd/omnisight-hardware-bridge.service`，預設
+  綁定 `127.0.0.1:8765`，由反向 proxy / VPN / mTLS sidecar 決定是否暴露
+  給 Tier 0 控制面。
+
+這補上 Risk R13 的最小 runtime surface：自動化燒錄 / UART / 訊號擷取可走
+Tier 3 RPC，不再需要把 Agent 放進 EVK host。
 
 ---
 

@@ -374,8 +374,10 @@ async def revoke_record(
     ``"dsar:<ticket-id>"``) so the audit chain attributes the
     deletion to the operator, not to the data-subject.
 
-    *emit_audit* is True by default; tests can pass False to skip
-    the audit fan-out without monkey-patching the emitters.
+    *emit_audit* is True by default; tests can pass False to skip the
+    OAuth lifecycle audit fan-out without monkey-patching the emitters.
+    KS decryption audit is not optional: every plaintext recovery still
+    writes ``ks.decryption`` into the N10 ledger.
     """
 
     if trigger not in REVOKE_TRIGGERS:
@@ -416,21 +418,16 @@ async def revoke_record(
 
     # Step 4 — decrypt via vault.
     try:
-        if emit_audit:
-            eff_actor = actor or (
-                f"dsar:{record.user_id}"
-                if trigger == TRIGGER_DSAR_ERASURE
-                else record.user_id
-            )
-            plaintext = await token_vault.decrypt_for_user_with_audit(
-                record.user_id, record.provider, chosen,
-                request_id=request_id,
-                actor=eff_actor,
-            )
-        else:
-            plaintext = token_vault.decrypt_for_user(
-                record.user_id, record.provider, chosen,
-            )
+        eff_actor = actor or (
+            f"dsar:{record.user_id}"
+            if trigger == TRIGGER_DSAR_ERASURE
+            else record.user_id
+        )
+        plaintext = await token_vault.decrypt_for_user_with_audit(
+            record.user_id, record.provider, chosen,
+            request_id=request_id,
+            actor=eff_actor,
+        )
     except TokenVaultError as exc:
         outcome = RevokeOutcome(
             outcome=OUTCOME_VAULT_FAILURE,

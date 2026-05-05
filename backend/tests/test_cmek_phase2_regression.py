@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-import os
+import asyncio
+import contextlib
 import json
+import os
+import time
 from dataclasses import dataclass
 
 import pytest
@@ -115,6 +118,169 @@ def _actor() -> auth.User:
     )
 
 
+@pytest.mark.asyncio
+async def test_cmek_wizard_five_step_backend_e2e(monkeypatch):
+    from backend.routers import cmek_wizard
+
+    async def allow_guard(_tenant_id, _actor, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cmek_wizard, "_guard", allow_guard)
+
+    providers = await cmek_wizard.list_cmek_wizard_providers(TENANT, None, _actor())
+    provider_body = json.loads(providers.body)
+    assert providers.status_code == 200
+    assert [p["provider"] for p in provider_body["providers"]] == [
+        "aws-kms",
+        "gcp-kms",
+        "vault-transit",
+    ]
+
+    policy = await cmek_wizard.generate_cmek_wizard_policy(
+        TENANT,
+        cmek_wizard.GeneratePolicyRequest(
+            provider="aws-kms",
+            principal="arn:aws:iam::444455556666:role/OmniSightCMEKAccess",
+            key_id=AWS_KEY_ID,
+        ),
+        None,
+        _actor(),
+    )
+    policy_body = json.loads(policy.body)
+    assert policy.status_code == 200
+    assert policy_body["policy"]["Statement"][1]["Action"] == [
+        "kms:Encrypt",
+        "kms:Decrypt",
+    ]
+    assert policy_body["policy"]["Statement"][1]["Condition"]["StringEquals"] == {
+        "kms:EncryptionContext:tenant_id": TENANT,
+        "kms:EncryptionContext:schema": "ks.1.2",
+    }
+
+    key_id = await cmek_wizard.save_cmek_wizard_key_id(
+        TENANT,
+        cmek_wizard.KeyIdCMEKRequest(provider="aws-kms", key_id=f" {AWS_KEY_ID} "),
+        None,
+        _actor(),
+    )
+    key_id_body = json.loads(key_id.body)
+    assert key_id.status_code == 200
+    assert key_id_body["accepted"] is True
+    assert key_id_body["key_id"] == AWS_KEY_ID
+
+    verify = await cmek_wizard.verify_cmek_wizard_connection(
+        TENANT,
+        cmek_wizard.VerifyCMEKRequest(provider="aws-kms", key_id=AWS_KEY_ID),
+        None,
+        _actor(),
+    )
+    verify_body = json.loads(verify.body)
+    assert verify.status_code == 200
+    assert verify_body["ok"] is True
+    assert verify_body["operation"] == "encrypt-decrypt"
+    assert verify_body["verification_id"].startswith("cmekv_")
+    assert "plaintext" not in verify_body
+    assert "ciphertext" not in verify_body
+
+    complete = await cmek_wizard.complete_cmek_wizard(
+        TENANT,
+        cmek_wizard.CompleteCMEKRequest(
+            provider="aws-kms",
+            key_id=AWS_KEY_ID,
+            verification_id=verify_body["verification_id"],
+        ),
+        None,
+        _actor(),
+    )
+    complete_body = json.loads(complete.body)
+    assert complete.status_code == 200
+    assert complete_body["security_tier"] == "tier-2"
+    assert complete_body["provider"] == "aws-kms"
+    assert complete_body["config_status"] == "draft"
+    assert complete_body["persisted"] is False
+
+
+@pytest.mark.asyncio
+async def test_cmek_wizard_five_step_http_e2e(monkeypatch):
+    """Pin the mounted FastAPI surface for the tenant-settings 5-step wizard."""
+
+    from backend import bootstrap as _boot
+    from backend import auth as _auth
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green_bootstrap():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green_bootstrap)
+    _boot._gate_cache_reset()
+    app.dependency_overrides[_auth.current_user] = lambda: _actor()
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            providers = await client.get(f"/api/v1/tenants/{TENANT}/cmek/wizard/providers")
+            assert providers.status_code == 200
+            assert [p["provider"] for p in providers.json()["providers"]] == [
+                "aws-kms",
+                "gcp-kms",
+                "vault-transit",
+            ]
+
+            policy = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/wizard/policy",
+                json={
+                    "provider": "aws-kms",
+                    "principal": "arn:aws:iam::444455556666:role/OmniSightCMEKAccess",
+                    "key_id": AWS_KEY_ID,
+                },
+            )
+            assert policy.status_code == 200
+            policy_body = policy.json()
+            assert policy_body["policy"]["Statement"][1]["Action"] == [
+                "kms:Encrypt",
+                "kms:Decrypt",
+            ]
+
+            key_id = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/wizard/key-id",
+                json={"provider": "aws-kms", "key_id": f" {AWS_KEY_ID} "},
+            )
+            assert key_id.status_code == 200
+            assert key_id.json()["key_id"] == AWS_KEY_ID
+
+            verify = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/wizard/verify",
+                json={"provider": "aws-kms", "key_id": AWS_KEY_ID},
+            )
+            assert verify.status_code == 200
+            verify_body = verify.json()
+            assert verify_body["ok"] is True
+            assert verify_body["operation"] == "encrypt-decrypt"
+            assert verify_body["verification_id"].startswith("cmekv_")
+
+            complete = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/wizard/complete",
+                json={
+                    "provider": "aws-kms",
+                    "key_id": AWS_KEY_ID,
+                    "verification_id": verify_body["verification_id"],
+                },
+            )
+            assert complete.status_code == 200
+            complete_body = complete.json()
+            assert complete_body["security_tier"] == "tier-2"
+            assert complete_body["config_status"] == "draft"
+            assert complete_body["persisted"] is False
+    finally:
+        app.dependency_overrides.pop(_auth.current_user, None)
+        _boot._gate_cache_reset()
+
+
 @pytest.mark.parametrize("live", LIVE_PROVIDERS, ids=[p.provider for p in LIVE_PROVIDERS])
 def test_three_kms_adapters_live_describe_encrypt_decrypt_round_trip(live: _LiveProvider):
     if not live.configured():
@@ -175,6 +341,126 @@ async def test_cmek_revoke_blocks_new_wizard_requests_and_keeps_tier1_clear():
         envelope.decrypt(ciphertext, tier2_ref, kms_adapter=revoked_cmk)
 
 
+@pytest.mark.asyncio
+async def test_customer_disabled_key_detects_within_60s_and_blocks_tenant_http_surface(
+    monkeypatch,
+):
+    """Customer CMK disable -> detector snapshot -> tenant-wide graceful 403."""
+
+    from backend import bootstrap as _boot
+    from backend import auth as _auth
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green_bootstrap():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    cmk = _FakeTenantCMK()
+    healthy_seen = asyncio.Event()
+    revoked_seen = asyncio.Event()
+
+    def _record(result):
+        detector.record_cmek_health_result(result)
+        if result.revoked:
+            revoked_seen.set()
+        else:
+            healthy_seen.set()
+
+    task = asyncio.create_task(
+        detector.run_detection_loop(
+            interval_s=0.01,
+            load_checks=lambda: [detector.CMEKKeyCheck(TENANT, cmk)],
+            record_result=_record,
+        )
+    )
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green_bootstrap)
+    _boot._gate_cache_reset()
+    app.dependency_overrides[_auth.current_user] = lambda: _actor()
+    transport = ASGITransport(app=app)
+    try:
+        await asyncio.wait_for(healthy_seen.wait(), timeout=1.0)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            before_revoke = await client.get(
+                f"/api/v1/tenants/{TENANT}/cmek/wizard/providers"
+            )
+            assert before_revoke.status_code == 200
+
+            started = time.monotonic()
+            cmk.revoked = True
+            await asyncio.wait_for(revoked_seen.wait(), timeout=1.0)
+            assert time.monotonic() - started <= detector.MAX_DETECTION_WINDOW_S
+
+            status = await client.get(f"/api/v1/tenants/{TENANT}/cmek/status")
+            status_body = status.json()
+            assert status.status_code == 200
+            assert status_body["kms_health"] == "revoked"
+            assert status_body["revoke_status"] == "revoked"
+            assert status_body["provider"] == "aws-kms"
+
+            protected_requests = [
+                client.get(f"/api/v1/tenants/{TENANT}/cmek/wizard/providers"),
+                client.post(
+                    f"/api/v1/tenants/{TENANT}/cmek/wizard/policy",
+                    json={
+                        "provider": "aws-kms",
+                        "principal": (
+                            "arn:aws:iam::444455556666:role/OmniSightCMEKAccess"
+                        ),
+                        "key_id": AWS_KEY_ID,
+                    },
+                ),
+                client.post(
+                    f"/api/v1/tenants/{TENANT}/cmek/wizard/key-id",
+                    json={"provider": "aws-kms", "key_id": AWS_KEY_ID},
+                ),
+                client.post(
+                    f"/api/v1/tenants/{TENANT}/cmek/wizard/verify",
+                    json={"provider": "aws-kms", "key_id": AWS_KEY_ID},
+                ),
+                client.post(
+                    f"/api/v1/tenants/{TENANT}/cmek/wizard/complete",
+                    json={
+                        "provider": "aws-kms",
+                        "key_id": AWS_KEY_ID,
+                        "verification_id": "cmekv_revoked_e2e",
+                    },
+                ),
+                client.post(
+                    f"/api/v1/tenants/{TENANT}/cmek/siem/ingest-spec",
+                    json={"provider": "aws-kms", "key_id": AWS_KEY_ID},
+                ),
+                client.post(
+                    f"/api/v1/tenants/{TENANT}/cmek/tier-upgrade",
+                    json={"provider": "aws-kms", "key_id": AWS_KEY_ID, "dek_refs": []},
+                ),
+                client.post(
+                    f"/api/v1/tenants/{TENANT}/cmek/tier-downgrade",
+                    json={"provider": "aws-kms", "key_id": AWS_KEY_ID, "dek_refs": []},
+                ),
+            ]
+            for response in await asyncio.gather(*protected_requests):
+                body = response.json()
+                assert response.status_code == 403
+                assert "retry-after" not in {k.lower() for k in response.headers}
+                assert body["error_code"] == "cmek_revoked"
+                assert body["tenant_id"] == TENANT
+                assert body["retryable"] is False
+                assert body["provider"] == "aws-kms"
+                assert body["reason"] == "describe_failed"
+                assert "request start" in body["in_flight_policy"]
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        app.dependency_overrides.pop(_auth.current_user, None)
+        _boot._gate_cache_reset()
+
+
 def test_tier_upgrade_and_downgrade_rewrap_without_changing_tenant_ciphertext():
     source_ciphertext, tier1_ref = envelope.encrypt("enterprise secret", TENANT)
     cmk = _FakeTenantCMK()
@@ -208,6 +494,89 @@ def test_tier_upgrade_and_downgrade_rewrap_without_changing_tenant_ciphertext():
     assert source_ciphertext
     assert envelope.decrypt(source_ciphertext, tier2_ref, kms_adapter=cmk) == "enterprise secret"
     assert envelope.decrypt(source_ciphertext, tier1_restored_ref) == "enterprise secret"
+
+
+@pytest.mark.asyncio
+async def test_tier_upgrade_and_downgrade_http_reencrypt_round_trip(monkeypatch):
+    """Pin the mounted tier transition routes to real DEK rewrap semantics."""
+
+    from backend import auth as _auth
+    from backend import bootstrap as _boot
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green_bootstrap():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    cmk = _FakeTenantCMK()
+
+    def _fake_target_adapter(_provider, *, key_id):
+        assert key_id == AWS_KEY_ID
+        return cmk
+
+    ciphertext, tier1_ref = envelope.encrypt("http enterprise secret", TENANT)
+    monkeypatch.setattr(cmek_upgrade, "build_target_adapter", _fake_target_adapter)
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green_bootstrap)
+    _boot._gate_cache_reset()
+    app.dependency_overrides[_auth.current_user] = lambda: _actor()
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            upgrade = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/tier-upgrade",
+                json={
+                    "provider": "aws-kms",
+                    "key_id": AWS_KEY_ID,
+                    "dek_refs": [tier1_ref.to_dict()],
+                },
+            )
+            upgrade_body = upgrade.json()
+            assert upgrade.status_code == 200
+            assert upgrade_body["status"] == "completed"
+            assert upgrade_body["from_security_tier"] == "tier-1"
+            assert upgrade_body["to_security_tier"] == "tier-2"
+            tier2_ref = envelope.TenantDEKRef.from_dict(
+                upgrade_body["items"][0]["replacement_dek_ref"]
+            )
+            assert tier2_ref.provider == "aws-kms"
+            assert (
+                envelope.decrypt(ciphertext, tier2_ref, kms_adapter=cmk)
+                == "http enterprise secret"
+            )
+
+            downgrade = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/tier-downgrade",
+                json={
+                    "provider": "aws-kms",
+                    "key_id": AWS_KEY_ID,
+                    "dek_refs": [tier2_ref.to_dict()],
+                },
+            )
+            downgrade_body = downgrade.json()
+            assert downgrade.status_code == 200
+            assert downgrade_body["status"] == "completed"
+            assert downgrade_body["from_security_tier"] == "tier-2"
+            assert downgrade_body["to_security_tier"] == "tier-1"
+            assert downgrade_body["customer_iam_dependency"] == (
+                "required-until-downgrade-persisted"
+            )
+            tier1_restored_ref = envelope.TenantDEKRef.from_dict(
+                downgrade_body["items"][0]["replacement_dek_ref"]
+            )
+            assert tier1_restored_ref.provider == "local-fernet"
+            assert tier1_restored_ref.dek_id == tier1_ref.dek_id
+            assert (
+                envelope.decrypt(ciphertext, tier1_restored_ref)
+                == "http enterprise secret"
+            )
+    finally:
+        app.dependency_overrides.pop(_auth.current_user, None)
+        _boot._gate_cache_reset()
 
 
 @pytest.mark.asyncio

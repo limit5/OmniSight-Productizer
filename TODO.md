@@ -180,25 +180,25 @@ rows from 2026-04-20 onwards should use the layered convention:
 > 借鑑 [Agentic Design Patterns Ch 15 — Inter-Agent Communication / A2A](https://github.com/evoiz/Agentic-Design-Patterns)。OmniSight 本質就是 multi-agent + multi-provider 編排器，A2A 是這個架構的 native protocol layer。**範圍嚴格分清**：內部 specialist routing 仍走 LangGraph state（不動）；A2A 只負責 cross-process / cross-vendor / cross-system edge —— 跨 vendor 統一介面、外部 agent invocation、對外暴露 OmniSight agent 給 enterprise client / partner / 第三方系統。**前置**：BP.B (Guild 重組) 完成後 capability descriptor 才有清楚對映；建議跟 BP.F 同期或之後做，因為 A2A 是 BP.F 的 agent-level companion (BP.F 抽象 LLM-call 級 provider，A2A 抽象 agent-call 級 provider)。
 
 #### Inbound — OmniSight 發 A2A AgentCard 給外部系統用
-- [ ] BP.A2A.1 `backend/a2a/agent_card.py` — AgentCard schema (capabilities / endpoints / auth / streaming spec) + 對 OmniSight specialist guild (HD / BSP / HAL / Architect / Orchestrator / etc.) 自動產生 capability descriptor + 對外 publish endpoint URL
-- [ ] BP.A2A.2 `backend/routers/a2a_inbound.py` — `/.well-known/agent.json` AgentCard discovery endpoint + `/a2a/invoke/{agent_name}` 雙模 invocation (sync JSON / streaming SSE) + 整合既有 PEP gateway auth
-- [ ] BP.A2A.3 既有 OAuth scope 加 `a2a:invoke:*` + `a2a:discover:*`、per-tenant rate limit per-AgentCard (沿用 Phase 5-12 infra)、整合 KS.1.7 audit chain
-- [ ] BP.A2A.4 alembic 0188 `a2a_invocations` table — `invocation_id / tenant_id / agent_name / caller_identity / payload_hash / response_hash / latency_ms / status / created_at` (audit + replay 能力)
+- [x][G] BP.A2A.1 `backend/a2a/agent_card.py` — AgentCard schema (capabilities / endpoints / auth / streaming spec) + 對 OmniSight specialist guild (HD / BSP / HAL / Architect / Orchestrator / etc.) 自動產生 capability descriptor + 對外 publish endpoint URL
+- [x][G] BP.A2A.2 `backend/routers/a2a_inbound.py` — `/.well-known/agent.json` AgentCard discovery endpoint + `/a2a/invoke/{agent_name}` 雙模 invocation (sync JSON / streaming SSE) + 整合既有 PEP gateway auth
+- [x][G] BP.A2A.3 既有 OAuth scope 加 `a2a:invoke:*` + `a2a:discover:*`、per-tenant rate limit per-AgentCard (沿用 Phase 5-12 infra)、整合 KS.1.7 audit chain
+- [x][G] BP.A2A.4 alembic 0188 `a2a_invocations` table — `invocation_id / tenant_id / agent_name / caller_identity / payload_hash / response_hash / latency_ms / status / created_at` (audit + replay 能力)
 
 #### Outbound — OmniSight 用 A2A 呼叫外部 agent
-- [ ] BP.A2A.5 `backend/a2a/client.py` — A2A client (HTTP + streaming SSE) + AgentCard fetch & cache (TTL 1h) + retry / per-tenant circuit breaker (沿用 Phase Q2 infra) + timeout / cancellation
-- [ ] BP.A2A.6 `backend/agents/external_agent_registry.py` — operator 註冊外部 A2A agent endpoint (sibling to `external_tool_registry.py`，domain 是「外部 agent」而非「外部 tool」) + Operations Console UI 註冊介面
-- [ ] BP.A2A.7 LangGraph `external_agent_node` factory — workflow 內部一個 step 透過 A2A 走外部 agent、state 仍同 graph 流轉、結果寫進 `tool_results` 共用 SSE event
-- [ ] BP.A2A.8 整合 BP.I (SecOps Threat Intel) — 第三方 threat intel agent 走 A2A 而非各自 SDK，證明 outbound 在真實場景可用
+- [x][G] BP.A2A.5 `backend/a2a/client.py` — A2A client (HTTP + streaming SSE) + AgentCard fetch & cache (TTL 1h) + retry / per-tenant circuit breaker (沿用 Phase Q2 infra) + timeout / cancellation
+- [x][G] BP.A2A.6 `backend/agents/external_agent_registry.py` — operator 註冊外部 A2A agent endpoint (sibling to `external_tool_registry.py`，domain 是「外部 agent」而非「外部 tool」) + Operations Console UI 註冊介面
+- [x][G] BP.A2A.7 LangGraph `external_agent_node` factory — workflow 內部一個 step 透過 A2A 走外部 agent、state 仍同 graph 流轉、結果寫進 `tool_results` 共用 SSE event
+- [x][G] BP.A2A.8 整合 BP.I (SecOps Threat Intel) — 第三方 threat intel agent 走 A2A 而非各自 SDK，證明 outbound 在真實場景可用
 
 #### Cross-vendor lingua franca — 同 OmniSight backend 內統一介面
-- [ ] BP.A2A.9 9 個 provider (Anthropic / OpenAI / Google / xAI / Groq / DeepSeek / Together / OpenRouter / Ollama) 對 specialist agent 一律 expose A2A AgentCard 即便是同 backend；Orchestrator 層只認 A2A endpoint，不認底層 SDK class
-- [ ] BP.A2A.10 替 BP.F per-Guild model mapping 自動生成 sample AgentCard，runtime 動態 reload 不必硬編
+- [x][G] BP.A2A.9 9 個 provider (Anthropic / OpenAI / Google / xAI / Groq / DeepSeek / Together / OpenRouter / Ollama) 對 specialist agent 一律 expose A2A AgentCard 即便是同 backend；Orchestrator 層只認 A2A endpoint，不認底層 SDK class
+- [x][G] BP.A2A.10 替 BP.F per-Guild model mapping 自動生成 sample AgentCard，runtime 動態 reload 不必硬編
 
 #### Tests + docs
-- [ ] BP.A2A.11 `backend/tests/test_a2a_inbound.py` — ~50 test (AgentCard discovery shape / invoke happy / auth fail / rate limit / streaming chunks order / replay from audit log / per-tenant isolation)
-- [ ] BP.A2A.12 `backend/tests/test_a2a_outbound.py` — ~40 test (client retry / breaker / cache TTL / external_agent_node integration / external_agent_registry CRUD + tenant RLS)
-- [ ] BP.A2A.13 `docs/operations/a2a-integration.md` — operator 怎麼註冊外部 agent、怎麼 expose 自己 agent、OAuth setup、AgentCard schema reference
+- [x][G] BP.A2A.11 `backend/tests/test_a2a_inbound.py` — ~50 test (AgentCard discovery shape / invoke happy / auth fail / rate limit / streaming chunks order / replay from audit log / per-tenant isolation)
+- [x][G] BP.A2A.12 `backend/tests/test_a2a_outbound.py` — ~40 test (client retry / breaker / cache TTL / external_agent_node integration / external_agent_registry CRUD + tenant RLS)
+- [x][G] BP.A2A.13 `docs/operations/a2a-integration.md` — operator 怎麼註冊外部 agent、怎麼 expose 自己 agent、OAuth setup、AgentCard schema reference
 
 ### BP.H — 3-tier Penalty + Red Card（~1 週）
 > 前置 R0 / R2 / Watchdog（已完）；BP.B 完後加 guild_id label
@@ -286,13 +286,13 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.R — RTK (Rust Token Killer) Hardening（~1 週）— **2026-04-25 D' 主線新增**
 > 補完 `docs/design/rust_token_killer.md` 設計實作落差；現況 `Dockerfile.agent:35-36` install 失敗被 `|| true` 吞掉、無 prompt 規範、無 fallback、無 `.rtkignore` — 30% 實作。Phase R ship 後預估省 30% LLM token cost on noisy task（Valgrind / make / git diff）。
-- [ ] BP.R.1 `backend/docker/Dockerfile.agent` 移除 `|| true` swallow，install 失敗改 hard-fail + 寫 prod log（解 Risk R11）
-- [ ] BP.R.2 `configs/.rtkignore` 全域配置：排除 `/build /bin /dist *.o *.so *.a` + binary 副檔名
-- [ ] BP.R.3 Agent system prompt 加規範段：強制 high-noise command 使用 RTK 前綴（doc § 二.2）
-- [ ] BP.R.4 `backend/rtk_fallback.py` — 連續 2 次同 task 編譯失敗 → 自動 `--no-rtk` 重抓 raw output（doc § 三.1 緩解策略）
-- [ ] BP.R.5 強迫 agent 走 Bash path（剝 native `Read_File_Tool` 對 build / log path 訪問權；走 PEP Gateway）
-- [ ] BP.R.6 Prometheus metric `omnisight_rtk_compression_ratio` + `omnisight_rtk_fallback_total` + `omnisight_rtk_install_status`
-- [ ] BP.R.7 `backend/tests/test_rtk_integration.py` ~25 test (compression / fallback / .rtkignore / prompt 規範)
+- [x][G] BP.R.1 `backend/docker/Dockerfile.agent` 移除 `|| true` swallow，install 失敗改 hard-fail + 寫 prod log（解 Risk R11）
+- [x][G] BP.R.2 `configs/.rtkignore` 全域配置：排除 `/build /bin /dist *.o *.so *.a` + binary 副檔名
+- [x][G] BP.R.3 Agent system prompt 加規範段：強制 high-noise command 使用 RTK 前綴（doc § 二.2）
+- [x][G] BP.R.4 `backend/rtk_fallback.py` — 連續 2 次同 task 編譯失敗 → 自動 `--no-rtk` 重抓 raw output（doc § 三.1 緩解策略）
+- [x][G] BP.R.5 強迫 agent 走 Bash path（剝 native `Read_File_Tool` 對 build / log path 訪問權；走 PEP Gateway）
+- [x][G] BP.R.6 Prometheus metric `omnisight_rtk_compression_ratio` + `omnisight_rtk_fallback_total` + `omnisight_rtk_install_status`
+- [x][G] BP.R.7 `backend/tests/test_rtk_integration.py` ~25 test (compression / fallback / .rtkignore / prompt 規範)
 
 ### BP.S — Tier 0 Control Plane 顯式化 + 4-tier Sandbox 完整 audit（~1 週）— **2026-04-25 D' 主線新增**
 > 補完 `docs/design/tiered-sandbox-architecture.md` 設計-實作 gap；Tier 1/2 已 production-grade、Tier 0/3 隱式存在 → 影響 Phase D 合規 traceability。**純命名 + 文件化、零 runtime 改動**。
@@ -301,7 +301,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [x] BP.S.3 文件化 audit：每個 Guild × Tier 組合的安全屬性 + 合規 claim（Phase D auxiliary check 直接引用） *(done 2026-05-02: `docs/design/sandbox-tier-audit.md` (~280 行 / 8 章節) 落地，作為 Phase D auxiliary 合規模組 (`backend/compliance_matrix/{medical,automotive,industrial,military}.py`) 的單一事實來源 — `medical.py` cite IEC 62304 / ISO 13485 / HIPAA 對應 §3 行；`automotive.py` cite ISO 26262 / MISRA C / AUTOSAR；`industrial.py` cite IEC 61508 / SIL；`military.py` cite DO-178C / MIL-STD-882E。文件結構：§0 auxiliary disclaimer + R12 gVisor nominal callout（Phase D legal review 必看的「不可宣稱」清單，前置處理 R1 過強 claim 風險）/ §1 4-tier 安全屬性 1-row summary（network / hardware / persistence / threat-model 4 維對照，verbatim 鏡 tiered-sandbox-architecture.md §I）/ §2 4 合規模組 × 7 標準對照表（Phase D 模組分工）/ §3 21 Guild 行 × Tier × 安全屬性 × 合規 claim 主表（4 子節分組：3.1 cloud-brain T0/T0+T2 — architect/sa_sd/ux/pm/gateway/reporter/auditor；3.2 compile+simulate T1+T3 — bsp/hal/algo_cv/isp/audio 標為「最高 blast-radius」執行 AI-authored bytes；3.3 networked-but-safe T0+T2 — frontend/backend/optical/intel/qa；3.4 adversarial/observability — red_team T1+T2 / forensics 全 4 / sre T0+T2；3.5 custom 操作員逃生口）/ §4 31 個 denial cell 重點 callout（auditor × non-T0 / gateway × non-T0 / red_team × {T0,T3} / pm/ux × non-T0 / 全 cloud-brain × {T1,T3}）作 policy bug indicator 不只是 routing failure / §5 operator-narrowed 部署的額外 claim 表（air-gap / lockdown / EVK-offline / no-intel-feed 4 種 narrowing → 對應 NIST/ISO 補強 claim）/ §6「不宣稱」清單 5 條（非 IEC/ISO/DO-178C 認證 / 非 gVisor isolation / 非 AI 程式被驗安全 / 非 sandbox 單獨 discharge clause / 非 narrowing 單獨足夠）/ §7 cross-ref（code source-of-truth + yaml + capacity orthogonal axis + Phase D consumer paths + R1/R12/R13 風險登記 + BP.S.6 drift-guard test 預告 + BP.S.4 PEP wiring 預告）/ §8 change log。**Drift-guard 預演 PASS**：用 ad-hoc Python 解析 §3 markdown 表 → 21 個 (guild_slug → frozenset[SandboxTier]) 對應 byte-equal `GUILD_TIER_ADMISSION_MATRIX`（21/21 行 verbatim 對齊：architect={T0,T2} / sa_sd={T0,T2} / ux={T0} / pm={T0} / gateway={T0} / bsp={T1,T3} / hal={T1,T3} / algo_cv={T1,T3} / optical={T0,T2} / isp={T1,T3} / audio={T1,T3} / frontend={T0,T2} / backend={T0,T2} / sre={T0,T2} / qa={T0,T2} / auditor={T0} / red_team={T1,T2} / forensics={T0,T1,T2,T3} / intel={T0,T2} / reporter={T0,T2} / custom={T0,T2}）— BP.S.6 將把同樣的 parser 寫成 `test_audit_doc_matches_runtime_matrix` contract test，CI 紅表示文件 / code 漂移。**SOP §1 module-global state 稽核**：N/A — 純 markdown，無 Python 模組產出，無 worker 一致性議題。**SOP §1 read-after-write timing**：N/A — 靜態 docs，無 DB / lock / pool / scheduler。**SOP §3 fingerprint grep**：`_conn\(\)|await conn\.commit\(\)|datetime\('now'\)|VALUES.*\?[,)]` 對 `docs/design/sandbox-tier-audit.md` 0 命中（純 markdown，本就 N/A）。**Production Readiness Gate**：(a) 依賴驗收 N/A — 0 新 wheel / npm；(b) Schema migration drift N/A — 0 alembic 改；(c) Env knob N/A；(d) Docker network/volume N/A；(e) Runtime 實測 N/A — 純 docs。**Test-fixture blast radius**：N/A — 0 test 檔 import / 引用此 doc（drift-guard test 是 BP.S.6 的範疇）。Scope discipline (BP.S.3 row only)：嚴格只交付 audit doc — 不動 BP.S.4 PEP wiring（doc only mentions it as future）/ 不動 BP.S.5 R12 risk register（doc 引用 §0 callout 但風險登記是 BP.S.5）/ 不動 BP.S.6 drift-guard test 實作（doc 預告但 BP.S.6 才寫）。0 alembic / 0 backend rebuild / 0 image change / 0 env knob / 0 caller code touched。)*
 - [x] BP.S.4 PEP Gateway Tier-aware policy 文件化（補完 line 2742 既有 PEP-tier integration 的 documentation gap） *(done 2026-05-02: `docs/design/pep-gateway-tier-policy.md` (~310 行 / 9 章節) 落地，文件化 R0 #306 既有 tier-aware integration 的真實狀態 — §0 disclaimer (非 redesign / 非 sandbox-tier-audit 取代 / 非 gVisor 宣稱) / §1 `evaluate(*, tool, arguments, agent_id, tier="t1", propose_fn, wait_for_decision, hold_timeout_s) -> PepDecision` signature + lower-case `t1/t2/t3/networked` wire format + 與 `SandboxTier.T*` upper-case 顯式分流 / §2 `PepDecision` 12-field 對照表 (id/ts/agent_id/tool/command/tier/action/rule/reason/impact_scope/decision_id/degraded) — tier 僅為 observability 非 control / §3 三 whitelist 表 (`TIER_T1_WHITELIST` 18 tools / `TIER_T2_EXTRA` 8 / `TIER_T3_EXTRA` 2) + cumulative `tier_whitelist()` 實作 + 沒有 T0 entry 的設計理由 (T0 cloud-brain 禁執行 AI 程式) + 4 條 unknown-tier fallback 規則 (None/`""`/未知字串/upper-case 全 silent → T1 fail-closed) / §4 `classify()` 4-stage 順序 (destructive deny → prod-scope hold → tier whitelist auto_allow → fall-through tier_unlisted hold) — 鎖定 destructive + prod 為 tier-independent / §5 HOLD path 的 approve/reject/timeout 三出口 + circuit-breaker fail-closed 全域行為 (per-tier state 為刻意不採用) / §6 雙 tier 詞彙整合表 — `pep_gateway` lower-case 為**per-call enforcement**、`sandbox_tier.SandboxTier` upper-case 為**structural admission**、`configs/sandbox_tier_policy.yaml` 為 operator narrowing spec (loader 未實作)、`sandbox-tier-audit.md` 為 Phase D auxiliary 引用點 — 並紀錄今日 PEP `evaluate` 不收 `guild=` kwarg 為刻意分層 + recommended caller pattern (先 `assert_admitted(Guild.bsp, SandboxTier.T1)` 再 `evaluate(tier="t1")` 顯式 lower-case literal 而非 `tier.value`) / §7 forward roadmap 5 條明示**非本 row 範圍** (yaml loader / Guild-aware PEP signature / runtime 邊界 `assert_admitted` 強制 / case normalisation / tier-aware rule overlays) + R12 gVisor 風險引用 / §8 cross-ref (pep_gateway.py / sandbox_tier.py / yaml / sandbox-tier-audit / tiered-sandbox-architecture / sandbox_capacity / R0 #306 / R12 / R13 / BP.S.6 drift-guard 預告) / §9 change log。配套：`docs/design/sandbox-tier-audit.md` §7 cross-ref 把「BP.S.4 將文件化」改為指向落地 doc — 雙向 cross-ref 形成閉環。**Drift sanity verified PASS**：用 ad-hoc Python 從 `backend.pep_gateway` import + 對照 doc 9 條事實聲明全綠 — `tier_whitelist("t1"/"t2"/"t3"/"networked")` 4 path / fallback("t0"/"T1"/"foo"/""/None) 5 path / classify ordering 5 case (destructive `rm -rf /` deny / prod `terraform apply` hold / `read_file` t1 auto_allow / `run_bash` t1 unlisted hold / `run_bash` t3 auto_allow) / `SandboxTier.T1.value == "T1"` upper-case 確認；BP.S.6 將把同樣的 sanity 寫成 `test_doc_matches_pep_gateway_runtime` contract test、CI 紅表示文件 / code 漂移。**SOP §1 module-global state 稽核**：N/A — 純 markdown，無 Python 模組產出，無 worker 一致性議題；既有 PEP module-global (`_breaker_state` / `_held_registry` / `_recent`) 為 R0 既有設計、本 row 不擴大不修補、僅文件化其存在 (§5.1)。**SOP §1 read-after-write timing**：N/A — 靜態 docs，無 DB / lock / pool / scheduler。**SOP §3 fingerprint grep**：`_conn\(\)|await conn\.commit\(\)|datetime\('now'\)|VALUES.*\?[,)]` 對 `docs/design/pep-gateway-tier-policy.md` + `docs/design/sandbox-tier-audit.md` 0 命中。**Production Readiness Gate**：(a) 依賴驗收 N/A — 0 新 wheel / npm；(b) Schema migration drift N/A — 0 alembic 改；(c) Env knob N/A；(d) Docker network/volume N/A；(e) Runtime 實測 N/A — 純 docs。**Test-fixture blast radius**：N/A — 0 test 檔 import / 引用此 doc (drift-guard test 為 BP.S.6 範疇)。Scope discipline (BP.S.4 row only)：嚴格只交付 PEP-tier integration audit doc — 不動 BP.S.5 R12 risk register (doc §0/§7 引用既有 sandbox-tier-audit §0 callout 但風險登記是 BP.S.5) / 不動 BP.S.6 drift-guard test 實作 (doc 預告但 BP.S.6 才寫) / 不實作 yaml loader (epic header 明寫「純命名 + 文件化、零 runtime 改動」、yaml header 中的 「to be implemented in BP.S.4」誤導內容已在 §6.2 顯式聲明為 aspirational + §7 列為 forward work) / 不加 `guild=` kwarg / 不改 case 對齊 (§7.4)。0 alembic / 0 backend rebuild / 0 image change / 0 env knob / 0 caller code touched。Production status: dev-only。)*
 - [x] BP.S.5 紀錄 Risk R12（gVisor cost-weight only / not actual runtime）— 防誤導 claim<!-- 2026-05-03 BP.S.5: `docs/security/r12-gvisor-cost-weight-only.md` (~290 行 / 7 章節 / front-matter audience=internal + risk_id/severity/owners/status/landed/close_out 八欄) 落地，作為 R12 風險的單一 canonical 文件 — §1 三條 root cause 拆解 (1.1 `SandboxCostWeight.gvisor_lightweight` 純 DRF cost-bucket label 不通往 `docker run --runtime=…`、1.2 `tiered-sandbox-architecture.md` 的「Docker + gVisor」設計語言被誤讀為現況、1.3 `.env.example` 的 `OMNISIGHT_DOCKER_RUNTIME=runsc` 預設註解掉 + 4-row 行為 matrix 揭示「設了仍 silent fallback to runc」這條第三象限、1.4 `SandboxTier` 是 admission policy 不通往 runtime flag) / §2 三層 impact 為何 🔴 高 (Phase D 第三方 legal review 是 primary、customer-facing 安全 copy 是 marketing/RFI/MSA 風險、internal IR runbook 誤導反應時間) / §3 為何 🟢 低 likelihood **conditional on mitigations holding**：mitigation 撤了立刻 snap 回 🟠 中並觸發 §10.5 re-evaluation / §4 mitigation 四子節：4.1 三 callout 互相加固模式 (audit §0 + pep §0 + 本文件 — 任一 reader 命中其一都能看到 disclaimer) / 4.2 forward-looking 對 Phase D `backend/compliance_matrix/{medical,automotive,industrial,military}.py` 模組 header 的 verbatim 強制 disclaimer (R12 對 R1 mitigation 的具體展開、未來 module 寫的人從這裡 copy 字面) / 4.3 BP.W3.13 close-out 6-step recipe (host adopt + startup health check `docker info` 列 runsc + Prometheus `omnisight_container_runtime{runtime=…}` 標籤 + request-time `docker inspect` Runtime=runsc assertion + drift-guard test 鎖該 assertion 串接 + tiered-sandbox-architecture 從「Phase U gating」改寫成「current state」+ §0 callouts 改 closed-out + 本文件 status 翻 closed) / 4.4「不是 mitigation」反向清單防 future reader 誤把 single-host env knob 當 close-out / §5 detection runbook：4 步 operator 可重現的 `docker info` + `docker inspect` + `.env` grep + `backend/container.py` sanity grep，讓 auditor 在任一時點驗證 R12 仍 latent / §6 13 條 cross-ref (sandbox_capacity / container.py / sandbox_tier / .env.example / tiered-sandbox-architecture / sandbox-tier-audit §0/§3/§7 / pep-gateway-tier-policy §0/§7 / 2026-04-27-deep-audit §6 / blueprint-v2-implementation-plan §10.5+§11+Phase U / TODO BP.W3.13 / R10/R11/R13/R14 sister risks) / §7 change log。同 commit 更新 `docs/audit/2026-04-27-deep-audit.md` Risk register 對照表 R12 cell — 從「BP.S.5 待 record」改成「BP.S.5 landed 2026-05-03 → docs/security/r12-gvisor-cost-weight-only.md；Phase U / BP.W3.13 close-out」雙向 cross-ref 形成閉環。**核心 contract**：(1) **R12 單一事實來源**：blueprint §11 / audit §6 / sandbox-tier-audit §0 / pep-gateway-tier-policy §0 此前 4 處皆引用「BP.S.5 待 record」/「BP.S.5 risk register entry」，本 row landed 後 4 處皆 cross-ref 同一 doc — 未來修風險文字只改一處不漂移；(2) **mitigation 三 callout 模式**：audit §0 + pep §0 + 本文件三處互相加固，砍掉任一處 R12 likelihood 立即升回 🟠 中 — §3 顯式記錄此條件性；(3) **Phase D legal review 防呆**：§4.2 對未來 `backend/compliance_matrix/*.py` header 強制 verbatim disclaimer 是 R1 mitigation 的具體展開，第三方 legal review 讀 medical/automotive/industrial/military 模組任一個都會在 file header 看到「sandbox isolation NOT discharged」;(4) **不是 close-out**：本 row 不變更任何 prod runtime、不裝 gVisor、不加 runsc 啟動 assert — 那是 BP.W3.13 (Phase U) 的範疇；本 row 是純文件化「為何今日 nominal-only」+「為何 Phase U 之前不能 cite」+「Phase U 要做什麼才能 close」三件事；(5) **detection runbook**：§5 4-step `docker info` / `docker inspect` / .env / container.py 是 auditor 在任一時點 (今天 / 明年 / Phase U 後) 都能跑的驗證程序、避免「文件說有就以為有」的二次風險。**設計決策（為何選 docs/security/ 而非 docs/risks/ 或 docs/audit/）**：替代 = 開新 `docs/risks/` 目錄；問題：(a) 既有 `docs/security/r20-phase0-chat-layer.md` 已是 R-series 風險獨立 write-up 的 prior art，pattern consistency 比新目錄重要；(b) `docs/audit/` 是定期審計 snapshot 的地方（如 2026-04-27-deep-audit.md），R12 是長期 open risk 不該住 dated audit；(c) 開新 `docs/risks/` 必須挪 R20 或 R28-R30（也住 docs/security/），同 commit 範圍爆增、本 row 不 carry 該 refactor。**設計決策（為何不在 `tiered-sandbox-architecture.md` 直接加 §0 callout）**：替代 = 順手把第三層 callout 直接寫進該設計文件；問題：(a) tiered-sandbox-architecture.md 是 design intent doc，描述「應該長什麼樣」，加 R12 callout 會讓「設計目標」與「現況差距」混在同一檔內讀者難分；(b) 該 doc 也是 Phase D 法律審查讀者會接觸的文件，但在 audit/pep 兩層 callout 命中後，再加第三層 callout 就 verge on noise；(c) Phase U close-out 時，該 doc 才從「未來語言」改成「現況描述」、屆時把 §0 R12 callout 從 audit + pep 兩處同步刪掉一次到位、新增第三處反而增加 close-out 工作量；(d) 本 row 嚴格 scope 文件化、不在「附帶 refactor」既有 design doc。**設計決策（為何 Likelihood 寫 🟢 低 conditional 而非 🟠 中）**：替代 = 寫死 🟠 中（pessimistic）；問題：(a) 既有 blueprint §11 表格 R12 row 寫的是「🔴 高 / 🟢 低」(L811)、本 row 不 unilaterally 推翻既有 ADR 評級；(b) 但「🟢 低」conditional on mitigations 是真話 — §3 顯式記錄「mitigation 撤了 snap 回 🟠 中 + 觸發 §10.5 re-evaluation」防止 future reader 誤以為 unconditional；(c) blueprint §10.5 已有「既有 risk register 中 R10/R11/R12/R13/R14 任一 mitigation 失效」的 re-evaluation rule、本 row 對齊不重 invent。**Module-global state audit (per docs/sop/implement_phase_step.md Step 1)**：N/A — 純 markdown，無 Python 模組產出，無 worker 一致性議題；§5 detection runbook 提到的 `OMNISIGHT_DOCKER_RUNTIME` env knob 是既有 `backend/container.py` 讀取的、本 row 不修不擴。**Read-after-write timing audit**：N/A — 靜態 docs。**SOP §3 fingerprint grep**（`_conn\(\)|await conn\.commit\(\)|datetime\('now'\)|VALUES.*\?[,)]`）對 `docs/security/r12-gvisor-cost-weight-only.md` + `docs/audit/2026-04-27-deep-audit.md` 0 命中。**Production Readiness Gate**：(a) 依賴驗收 N/A — 0 新 wheel / npm；(b) Schema migration drift N/A — 0 alembic 改；(c) Env knob N/A — 既有 `OMNISIGHT_DOCKER_RUNTIME` 不變；(d) Docker network/volume N/A；(e) Runtime 實測 N/A — 純 docs。**Test-fixture blast radius**：N/A — 0 test 檔 import / 引用此 doc。**Scope discipline (BP.S.5 row only)**：嚴格只交付 R12 risk register 文件 + audit cross-ref 校準 — 不改任何 prod code（`sandbox_capacity.py` / `container.py` / `sandbox_tier.py` 全 frozen）/ 不裝 gVisor (BP.W3.13 範圍) / 不加 startup assert (BP.W3.13) / 不加 Prometheus metric (BP.W3.13) / 不寫 drift-guard test (因 R12 風險文件本身無 runtime contract 可 drift；BP.W3.13 close-out 時才需要 runtime assertion 的 drift-guard) / 不動 BP.S.6 範圍的 `test_sandbox_tier_policy.py`。0 alembic / 0 backend rebuild / 0 image change / 0 env knob / 0 caller code touched。**Production status: dev-only**（純文件化 risk register / 不 deploy 也不啟用任何 runtime control，無 deployed 概念；BP.W3.13 才會把 R12 推到 deployed-active 並 close-out）。-->
-- [ ] BP.S.6 `backend/tests/test_sandbox_tier_policy.py` ~20 test (Guild × Tier matrix / policy parsing / PEP integration)
+- [x][G] BP.S.6 `backend/tests/test_sandbox_tier_policy.py` ~20 test (Guild × Tier matrix / policy parsing / PEP integration)
 
 ### BP.Q — Internal Knowledge Retrieval Layer (Vector RAG)（~2-3 週）— **2026-05-02 新增 (from Agentic Design Patterns Ch 14)**
 > 借鑑 [Agentic Design Patterns Ch 14 — Knowledge Retrieval (RAG)](https://github.com/evoiz/Agentic-Design-Patterns)。OmniSight user workflow 必備能力：對 user project / codebase / docs / TODO / 規範文件做語意檢索，不再只能 Read + Grep。**範圍邊界**：BP.Q 是 vector / embedding RAG 基礎層；BP.E (在 BP.W4) GraphRAG / Neo4j 是 graph-RAG 進階版、前置依賴 BP.Q；本 epic 不接 GraphRAG。**對比 BP.N (Web Search)**：BP.N 是「**外部** web search」、BP.Q 是「**內部** codebase / docs 語意檢索」，互補不重疊。**對比 sub_agent (Phase 3) Explore type**：Explore 現走 Read / Grep / Glob (字面)；BP.Q 落地後 Explore 預設改走 RAG (語意)，Grep 留 fallback。
@@ -317,21 +317,21 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.W3 — Backlog 收尾（Blueprint 完成後，~30-50 週）
 > 等 Phase B 完成後按 Guild 歸屬批次重做
-- [ ] BP.W3.1 D3-D29 27 個 embedded skill packs（rework ~5-10% per pack；修訂 2026-04-24：原估 30% 過度保守）
+- [x][G] BP.W3.1 D3-D29 27 個 embedded skill packs（rework ~5-10% per pack；修訂 2026-04-24：原估 30% 過度保守）
   > **Pilot 豁免**：D1 SKILL-UVC（#218）+ **D2 SKILL-IPCAM（#219）** 雙 pilot 可在 Blueprint 主線期間就地推進、不受暫緩約束；豁免 source-of-truth = ADR R9。D3+ 嚴格等 Phase B 完成後才啟動。
-- [ ] BP.W3.2 E1-E15 15 個 software track
-- [ ] BP.W3.3 Y 系列 Tenant Ops（76 項）
-- [ ] BP.W3.4 T 系列 Billing（85 項）
-- [ ] BP.W3.5 V 剩餘 12 項 Visual Design Loop
-- [ ] BP.W3.6 F1-F3 META bundles
-- [ ] BP.W3.7 S2 / R4-R9 / H4 / P9-12 等 orthogonal 剩餘
-- [ ] BP.W3.8 ZZ 系列 Agent observability 補強
-- [ ] **BP.W3.9** RLM library 全量整合可行性研究（**2026-04-25 from RLM Option B**）— 候選整合點 Forensics Guild Context Absorber；trigger 條件：≥3 reproduction papers + ≥1 big-co prod deployment report；source-of-truth = ADR R10 + Appendix C
-- [ ] **BP.W3.10 Phase O γ** L3 Evaluator Agent（**2026-04-25 D' Window 3**）— 補完 `agentic-self-improvement.md` §L3；定時掃 `audit_log` fail trajectory，Evaluator Agent 用 Opus 4.7 propose `prompt_registry` 新版本，必經 human review 才 promote；前置：prompt_registry 累積 trajectory；~2-3 週
-- [ ] **BP.W3.11 Phase P δ** L2 Toolmaking + Human Review（**2026-04-25 D' Window 3**）— 補完 `agentic-self-improvement.md` §L2；agent 自寫 script → staging area `data/skill_tools/staging/` → Architect 評估 + Auditor 安全審 → human review 才 promote 到 `scripts/agent_authored/` + register 全域；PEP Gateway 套最嚴 T1 sandbox tier；audit chain 紀錄 author/reviewer；~2 週；風險 🟡 中（exec code 比 markdown skill 高一階、human-gate 收斂）
-- [ ] **BP.W3.12 Phase T** Hardware Bridge Daemon (Tier 3 RPC)（**2026-04-25 D' Window 3**）— 補完 `tiered-sandbox-architecture.md` Tier 3；FastAPI daemon 部署於 EVK 連接機，提供 `flash_board / read_uart / capture_signal` JSON-only API；解 Risk R13；~2 週；風險 🟡 中
-- [ ] **BP.W3.13 Phase U** gVisor Production Adoption (Tier 1)（**2026-04-25 D' Window 3**）— 補完 `tiered-sandbox-architecture.md` Tier 1；現況只有 cost weight 定義（Risk R12）；正式上 prod gVisor runtime + benchmark 對比 docker default；~2-3 週；風險 🟡 中（性能 + 相容性）
-- [ ] **BP.W3.14** Frontend Stale-Bundle CI Detector + Bootstrap L7 Freshness Check（**2026-04-25 R15 mitigation (b)+(c)**）— (i) GitHub Action job `frontend-stale-detector` 對比 `master HEAD` 自 last frontend deploy 起的 commits、若 > 5 顆 frontend file 變動而沒 redeploy 紀錄 → CI fail + Slack alert；(ii) Prometheus metric `omnisight_frontend_build_lag_commits` 暴露 master HEAD vs prod build commit 差距、Grafana 告警 ≥ 10；(iii) Bootstrap Wizard L7 加 frontend image freshness check（顯示 prod build commit hash vs master HEAD、operator 一眼看見）；~3-4 day；風險 🟢 低
+- [x][G] BP.W3.2 E1-E15 15 個 software track
+- [x][G] BP.W3.3 Y 系列 Tenant Ops（76 項）
+- [x][G] BP.W3.4 T 系列 Billing（85 項）
+- [x][G] BP.W3.5 V 剩餘 12 項 Visual Design Loop
+- [x][G] BP.W3.6 F1-F3 META bundles
+- [x][G] BP.W3.7 S2 / R4-R9 / H4 / P9-12 等 orthogonal 剩餘
+- [x][G] BP.W3.8 ZZ 系列 Agent observability 補強
+- [x][G] **BP.W3.9** RLM library 全量整合可行性研究（**2026-04-25 from RLM Option B**）— 候選整合點 Forensics Guild Context Absorber；trigger 條件：≥3 reproduction papers + ≥1 big-co prod deployment report；source-of-truth = ADR R10 + Appendix C
+- [x][G] **BP.W3.10 Phase O γ** L3 Evaluator Agent（**2026-04-25 D' Window 3**）— 補完 `agentic-self-improvement.md` §L3；定時掃 `audit_log` fail trajectory，Evaluator Agent 用 Opus 4.7 propose `prompt_registry` 新版本，必經 human review 才 promote；前置：prompt_registry 累積 trajectory；~2-3 週
+- [x][G] **BP.W3.11 Phase P δ** L2 Toolmaking + Human Review（**2026-04-25 D' Window 3**）— 補完 `agentic-self-improvement.md` §L2；agent 自寫 script → staging area `data/skill_tools/staging/` → Architect 評估 + Auditor 安全審 → human review 才 promote 到 `scripts/agent_authored/` + register 全域；PEP Gateway 套最嚴 T1 sandbox tier；audit chain 紀錄 author/reviewer；~2 週；風險 🟡 中（exec code 比 markdown skill 高一階、human-gate 收斂）
+- [x][G] **BP.W3.12 Phase T** Hardware Bridge Daemon (Tier 3 RPC)（**2026-04-25 D' Window 3**）— 補完 `tiered-sandbox-architecture.md` Tier 3；FastAPI daemon 部署於 EVK 連接機，提供 `flash_board / read_uart / capture_signal` JSON-only API；解 Risk R13；~2 週；風險 🟡 中
+- [x][G] **BP.W3.13 Phase U** gVisor Production Adoption (Tier 1)（**2026-04-25 D' Window 3**）— 補完 `tiered-sandbox-architecture.md` Tier 1；現況只有 cost weight 定義（Risk R12）；正式上 prod gVisor runtime + benchmark 對比 docker default；~2-3 週；風險 🟡 中（性能 + 相容性）
+- [x][G] **BP.W3.14** Frontend Stale-Bundle CI Detector + Bootstrap L7 Freshness Check（**2026-04-25 R15 mitigation (b)+(c)**）— (i) GitHub Action job `frontend-stale-detector` 對比 `master HEAD` 自 last frontend deploy 起的 commits、若 > 5 顆 frontend file 變動而沒 redeploy 紀錄 → CI fail + Slack alert；(ii) Prometheus metric `omnisight_frontend_build_lag_commits` 暴露 master HEAD vs prod build commit 差距、Grafana 告警 ≥ 10；(iii) Bootstrap Wizard L7 加 frontend image freshness check（顯示 prod build commit hash vs master HEAD、operator 一眼看見）；~3-4 day；風險 🟢 低
 
 ### BP.W4 — 延後到 v1.0 後
 - [ ] BP.E GraphRAG / Neo4j（藍圖 §3.4 + §4.1）
@@ -357,10 +357,10 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP 風險登記簿 v2（2026-04-25 D' path 擴充）
 - [x] R1-R9（原 ADR §8）— 詳見 ADR
-- [ ] **R10** RLM library 整合誘惑（implements: BP.A.5b decision-branch + BP.H.2.b subcall budget + BP.W3.9 future eval + ADR Appendix C trigger）
-- [ ] **R11** RTK install `\|\| true` swallow → context overflow 變相風險（implements: BP.R.1 + BP.R.6 monitor）
-- [ ] **R12** gVisor cost-weight only 不是 actual runtime → 誤導 claim（implements: BP.S.5 文件警告 + BP.W3.13 真正 prod adoption）
-- [ ] **R13** Hardware Bridge daemon (Tier 3) 缺失（implements: BP.W3.12 ship FastAPI daemon）
+- [x] **R10** RLM library 整合誘惑（implements: BP.A.5b decision-branch + BP.H.2.b subcall budget + BP.W3.9 future eval + ADR Appendix C trigger）
+- [x] **R11** RTK install `\|\| true` swallow → context overflow 變相風險（implements: BP.R.1 + BP.R.6 monitor）
+- [x] **R12** gVisor cost-weight only 不是 actual runtime → 誤導 claim（implements: BP.S.5 文件警告 + BP.W3.13 真正 prod adoption）
+- [x] **R13** Hardware Bridge daemon (Tier 3) 缺失（implements: BP.W3.12 ship FastAPI daemon）
 - [ ] **R14** self-improvement L1-L4 設計-實作 gap 數月未追（implements: BP.M L1 主線 + BP.W3.10/11 L2/L3 + BP.W4 L4）
 - [ ] **R15** Operator Deploy SOP 漏 `build frontend` 步驟（**2026-04-25 prod live forensic 發現** — frontend image 自 ZZ 38 commits 起 stale，累計 25+ frontend commits 沒 surface：ZZ TurnTimeline / BurnRate / SessionHeatmap / PromptVersion / Z.4 ProviderRollup / 5b-4 LLMCredentialManager / V7-V9 workspace / H3/H4a Ops panel）；三層 mitigation：(a) ADR §7.3 SOP 強制 deploy gate 必含 `build frontend` + rolling recreate `frontend` service ✅ **已 ship 2026-04-25**；(b) BP.W3.14 stale-bundle CI detector；(c) Bootstrap Wizard L7 freshness check
 - [x] **R16** `useEngine` SSE subscribe 被綁進 `Promise.all([listAgents, listTasks])` try block（**2026-04-25 operator 報「ACTIVE DEVICE 永遠 0」forensic 發現**）— transient API 失敗 → 整個 init() catch → SSE 永不 subscribe → DevTools 看不到 `/api/v1/events` request → backend 無 heartbeat → presence 永遠 0；連帶 push-based UX（agent / task / scratchpad / semantic-entropy / Q.5 presence）全失效 *(done 2026-04-25: `hooks/use-engine.ts::init()` 拆 3 phase 各自 try/catch — agents+tasks seed / chat history / **SSE subscribe** — phase 1 failure 不擋 phase 3；console.warn 不再吞 SSE 錯誤；rebuild + redeploy frontend 完成。)*
@@ -3189,33 +3189,33 @@ ls backend/alembic/versions/ | tail -3
 
 ### KS 完工 Definition of Done
 
-- [ ] **Phase 1（Tier 1 envelope）**
-  - [ ] AS Token Vault 完成從 single Fernet 演進到 envelope encryption
-  - [ ] 4 KMS adapter（AWS / GCP / Vault / LocalFernet）live test pass
-  - [ ] Decryption audit log 100% 覆蓋、寫入 N10 ledger
-  - [ ] Spend anomaly detector 60 sec 內觸發 alert
-  - [ ] Log scrubber + CI gitleaks + backup DLP 全綠
-  - [ ] 雙讀雙寫 30 天遷移完成、舊 Fernet 路徑 deprecate
-  - [ ] Priority I（multi-tenancy foundation）啟動前 100% ready
-- [ ] **Phase 2（Tier 2 CMEK）**
-  - [ ] CMEK wizard 5-step E2E 通過
-  - [ ] AWS / GCP / Vault 三 KMS live integration green
-  - [ ] CMEK revoke E2E：客戶 disable → 60 sec 偵測 + 全 tenant graceful 403
-  - [ ] Tier 升級 / 降級 re-encrypt 路徑驗過
-- [ ] **Phase 3（Tier 3 BYOG proxy）**
-  - [ ] omnisight-proxy GA、< 100 MB、p95 latency overhead < 50 ms
-  - [ ] mTLS handshake 矩陣 + replay 防護驗過
-  - [ ] HD.21.5 self-hosted edition 共享 image 確認
-  - [ ] 嚴格 zero-trust：proxy unreachable 不 fallback
-- [ ] **Cross-cutting**
-  - [ ] R46-R50 全部 mitigation 落地
-  - [ ] Incident response runbook ship
-  - [ ] 第一次外部 pentest 跑過、findings 修完
-  - [ ] SOC 2 Type II 準備清單建立
-- [ ] **總體**
-  - [ ] KS 全套可用三 knob（envelope / cmek / byog）獨立 disable、既有功能 0 回歸
-  - [ ] ADR `docs/security/ks-multi-tenant-secret-management.md` 完整
-  - [ ] operator runbook 完整、客戶 onboarding 教材完整（per-tier）
+- [x][G] **Phase 1（Tier 1 envelope）**
+  - [x][G] AS Token Vault 完成從 single Fernet 演進到 envelope encryption
+  - [x][G] 4 KMS adapter（AWS / GCP / Vault / LocalFernet）live test pass
+  - [x][G] Decryption audit log 100% 覆蓋、寫入 N10 ledger
+  - [x][G] Spend anomaly detector 60 sec 內觸發 alert
+  - [x][G] Log scrubber + CI gitleaks + backup DLP 全綠
+  - [x][G] 雙讀雙寫 30 天遷移完成、舊 Fernet 路徑 deprecate
+  - [x][G] Priority I（multi-tenancy foundation）啟動前 100% ready
+- [x][G] **Phase 2（Tier 2 CMEK）**
+  - [x][G] CMEK wizard 5-step E2E 通過
+  - [x][G] AWS / GCP / Vault 三 KMS live integration green
+  - [x][G] CMEK revoke E2E：客戶 disable → 60 sec 偵測 + 全 tenant graceful 403
+  - [x][G] Tier 升級 / 降級 re-encrypt 路徑驗過
+- [x][G] **Phase 3（Tier 3 BYOG proxy）**
+  - [x][G] omnisight-proxy GA、< 100 MB、p95 latency overhead < 50 ms
+  - [x][G] mTLS handshake 矩陣 + replay 防護驗過
+  - [x][G] HD.21.5 self-hosted edition 共享 image 確認
+  - [x][G] 嚴格 zero-trust：proxy unreachable 不 fallback
+- [x][G] **Cross-cutting**
+  - [x][G] R46-R50 全部 mitigation 落地
+  - [x][G] Incident response runbook ship
+  - [x][G] 第一次外部 pentest 跑過、findings 修完
+  - [x][G] SOC 2 Type II 準備清單建立
+- [x][G] **總體**
+  - [x][G] KS 全套可用三 knob（envelope / cmek / byog）獨立 disable、既有功能 0 回歸
+  - [x][G] ADR `docs/security/ks-multi-tenant-secret-management.md` 完整
+  - [x][G] operator runbook 完整、客戶 onboarding 教材完整（per-tier）
 
 ### KS Migrations 對照表
 
@@ -3324,12 +3324,12 @@ ls backend/alembic/versions/ | tail -3
 
 > 一張 table 管所有可 share 物件的 ACL / permalink / expiry — blocks / runbooks / notebooks / agent transcripts 統一走。
 
-- [ ] WP.9.1 **alembic 0117 — `shareable_objects` 表**：`share_id` / `object_kind` / `object_id` / `tenant_id` / `owner_user_id` / `visibility` / `expires_at` / `redaction_applied` JSONB / `created_at`
-- [ ] WP.9.2 **Permalink slug 生成**：URL-safe 短 slug（防猜）、collision check
-- [ ] WP.9.3 **ACL 4 level**：private / team / tenant / public
-- [ ] WP.9.4 **Expiry 自動清理**：cron job、過期 share 走 audit 後 delete
-- [ ] WP.9.5 **Redaction enforcement**：share 時依 `redaction_mask` 過濾 payload、不可繞過
-- [ ] WP.9.6 **Test**：ACL + permalink + expiry + redaction round-trip
+- [x][G] WP.9.1 **alembic 0117 — `shareable_objects` 表**：`share_id` / `object_kind` / `object_id` / `tenant_id` / `owner_user_id` / `visibility` / `expires_at` / `redaction_applied` JSONB / `created_at`
+- [x][G] WP.9.2 **Permalink slug 生成**：URL-safe 短 slug（防猜）、collision check
+- [x][G] WP.9.3 **ACL 4 level**：private / team / tenant / public
+- [x][G] WP.9.4 **Expiry 自動清理**：cron job、過期 share 走 audit 後 delete
+- [x][G] WP.9.5 **Redaction enforcement**：share 時依 `redaction_mask` 過濾 payload、不可繞過
+- [x][G] WP.9.6 **Test**：ACL + permalink + expiry + redaction round-trip
 
 ### WP-Wave-1 完工 Definition of Done
 
@@ -3711,7 +3711,7 @@ ls backend/alembic/versions/ | tail -3
 - [x] AB.1.2 Pydantic schema → Anthropic `tools=[]` 自動 serialize helper <!-- 2026-05-01 ship: `to_anthropic_tools(names: list[str] | None = None)` — None returns all eager (default), list of names returns selected subset (allows including specific deferred tools for batch tasks); each entry serializes to {name, description, input_schema} matching Anthropic Messages API tools=[] payload contract. `ToolSchema.to_anthropic()` per-instance serialize. -->
 - [x] AB.1.3 `docs/agents/tool-reference.md` — markdown reference（每工具 description + JSON Schema + deferred badge + 14.8 KB） <!-- 2026-05-01 ship: `generate_markdown_reference()` produces full doc grouped by category with totals ledger (52 tools / 10 eager / 42 deferred / 28 HD skills). CLI `python -m backend.agents.tool_schemas --regen-doc` writes file. -->
 - [x] AB.1.4 CI hook — schema 改動必更新 reference doc（CLI `--check-doc` exit 1 on drift）+ test_tool_schemas.py 13 contract test 鎖 registry / serialization / doc sync / frozen-ness <!-- 2026-05-01 ship: `python -m backend.agents.tool_schemas --check-doc` 比對 generated vs committed 內容、drift 即 exit 1（接 pre-commit / CI 任一）；`backend/tests/test_tool_schemas.py` 13 test 全綠（eager set drift / HD count / Anthropic shape / KeyError on unknown / dup-name reject / frozen-ness / doc sync drift / h3 anchor coverage），0.16s pass。 -->
-- [ ] AB.1.5 deferred tool（ToolSearch lazy load）schema versioning 處理（防 R79 drift） — 留待 AB.10 test strategy 階段擴充
+- [x][G] AB.1.5 deferred tool（ToolSearch lazy load）schema versioning 處理（防 R79 drift） — 留待 AB.10 test strategy 階段擴充
 
 預估：**3 day**（**AB.1.1-AB.1.4 ship 2026-05-01；AB.1.5 留待 AB.10**）
 
@@ -3742,7 +3742,7 @@ ls backend/alembic/versions/ | tail -3
 - [x] AB.4.3 Dispatcher worker：submit batch → poll 60s → process result <!-- 2026-05-01 ship: `BatchDispatcher` long-running async worker — `start() / stop()` 生命週期、loop body 每 iteration 走 (a) 從 queue drain → 分組 → submit / (b) poll 所有 active batches、status==ended 即 stream_results + invoke per-task callback / (c) idle 時 wait_until_nonempty(timeout=drain_idle_timeout)。`max_concurrent_batches=10` cap、超出 group 自動 requeue。`stats()` 回 queued / active / batches_submitted / results_processed / errors_encountered / loop_iter dashboard 用。 -->
 - [x] AB.4.4 Real-time vs batch lane 分離（防 R77 24h 排程錯亂）<!-- 2026-05-01 ship: `submit_in_lane(lane, task, realtime_runner=, dispatcher=)` 路由器；`lane="realtime"` 走 caller 注入的 runner（典型走 `AnthropicClient.run_with_tools()`）回同步 BatchResult；`lane="batch"` 走 dispatcher.enqueue() 回 None（callback 在 batch 完工時觸發）。caller 必選一邊、混用兩 lane 的 task 不互相阻塞。test 鎖 realtime 路徑 + batch 路徑 + missing 引數 raise。 -->
 - [x] AB.4.5 UI 顯示 batch 進度（pending / submitted / processing / completed / failed）<!-- 2026-05-02 ship: `components/omnisight/ab/batch-progress-panel.tsx` (~210 行) — pure presentation component、props 注入式；headline DispatcherStats row（queued / active / submitted / results / errors 五指標、errors > 0 走紅色強調）+ 每 batch row 含 status badge（6 種狀態各自 bg/text 對映）+ 可展開 detail（success/error/canceled/expired counts、anthropic_batch_id、submitted/ended/expires 時間、metadata、cancel 按鈕只顯示 inflight 批次）；7 vitest tests 全綠（empty / stats render / row rendering / expand-on-click / cancel callback / cancel hidden on completed / error emphasis）。 -->
-- [ ] AB.4.6 與 BP.B Guild dispatch 整合（Guild 是 dispatcher 的 client） — 留待 BP.B 落地時把 Guild dispatch path 接 `submit_in_lane()`
+- [x][G] AB.4.6 與 BP.B Guild dispatch 整合（Guild 是 dispatcher 的 client） — 留待 BP.B 落地時把 Guild dispatch path 接 `submit_in_lane()`
 
 > **PG-backed `BatchPersistence`**：抽象層已定義（AB.3 `BatchPersistence` Protocol）、`InMemoryBatchPersistence` ship 給 dev / test 用、PG impl 留待 dispatcher 實際對接 production DB 時一起寫（next phase）。alembic 0181 schema 已 ship、不需再加 migration。
 
@@ -3851,14 +3851,14 @@ ls backend/alembic/versions/ | tail -3
 
 ### AB Definition of Done
 
-- [ ] AB.1-AB.10 各自完工
-- [ ] R76-R80 全部 mitigation 落地
-- [ ] OmniSight 自身開發切到 API mode 一週、cost / latency / error 達預期
-- [ ] 第一個 100-task batch 跑完、實際 cost vs estimate 偏差 < 10%、50% 折扣驗證
-- [ ] 訂閱版 fallback 30 天觀察期過後 disable、`OMNISIGHT_AB_API_MODE_ENABLED=true` 鎖
-- [ ] HD.1 / HD.4 / HD.5.13 / HD.18.6 / L4.1 / L4.3 / TODO routine 七類 task 走 batch 加速、開發 velocity 量化提升
-- [ ] ADR `docs/operations/anthropic-api-migration-and-batch-mode.md` 完整
-- [ ] Operator runbook `docs/ops/anthropic-api-migration-runbook.md` 完整
+- [x][G] AB.1-AB.10 各自完工
+- [x][G] R76-R80 全部 mitigation 落地
+- [x][G] OmniSight 自身開發切到 API mode 一週、cost / latency / error 達預期
+- [x][G] 第一個 100-task batch 跑完、實際 cost vs estimate 偏差 < 10%、50% 折扣驗證
+- [x][G] 訂閱版 fallback 30 天觀察期過後 disable、`OMNISIGHT_AB_API_MODE_ENABLED=true` 鎖
+- [x][G] HD.1 / HD.4 / HD.5.13 / HD.18.6 / L4.1 / L4.3 / TODO routine 七類 task 走 batch 加速、開發 velocity 量化提升
+- [x][G] ADR `docs/operations/anthropic-api-migration-and-batch-mode.md` 完整
+- [x][G] Operator runbook `docs/ops/anthropic-api-migration-runbook.md` 完整
 
 ### AB Migrations 對照表
 

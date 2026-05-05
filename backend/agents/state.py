@@ -131,6 +131,11 @@ class GraphState(BaseModel):
     same_error_count: int = 0
     loop_breaker_triggered: bool = False
     rtk_bypass: bool = False  # When True, skip output compression (fallback for debug)
+    # BP.R.4 — per-graph-run history for the RTK raw-log fallback gate.
+    # Module-global audit: this is run-scoped LangGraph state, not shared
+    # process memory. Each worker computes fallback decisions from the
+    # state snapshot it receives; no cross-worker coordination required.
+    rtk_fallback_history: list[str] = Field(default_factory=list)
 
     # W15.4 #XXX — per-graph-run idempotency gate for the Vite 3-strike
     # auto-retry budget escalation.  Each entry is a W15.2 head-only

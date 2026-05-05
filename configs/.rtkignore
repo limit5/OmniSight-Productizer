@@ -1,0 +1,60 @@
+# RTK global ignore rules.
+#
+# Keep RTK focused on source code and text logs. Build trees and binary
+# artifacts can contain opaque bytes that waste compression work and pollute
+# agent context.
+
+# Build output roots
+/build/
+/bin/
+/dist/
+
+# Compiler and linker artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Executables, firmware images, and disk images
+*.bin
+*.elf
+*.exe
+*.out
+*.hex
+*.img
+*.iso
+*.dmg
+
+# Raw sensor/image buffers and media payloads
+*.raw
+*.nv12
+*.yuv
+*.rgb
+*.rgba
+*.bmp
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wav
+*.mp3
+
+# Binary archives and package blobs
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tar.xz
+*.txz
+*.7z
+*.rar
+*.gz
+*.xz

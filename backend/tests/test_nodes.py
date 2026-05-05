@@ -12,6 +12,7 @@ from backend.agents.nodes import (
     _should_retry,
 )
 from backend.agents.state import GraphState, ToolCall, ToolResult
+from backend.rtk_fallback import compile_failure_signature
 
 
 # ─── Rule-based routing ───
@@ -130,6 +131,81 @@ class TestErrorCheckNode:
         assert "read_file" in update["last_error"]
         assert update["tool_calls"] == []
         assert update["tool_results"] == []
+
+    @pytest.mark.asyncio
+    async def test_compile_error_first_retry_keeps_rtk_enabled(self):
+        state = GraphState(
+            task_id="BP.R.4",
+            user_command="make all",
+            tool_results=[
+                ToolResult(
+                    tool_name="run_bash",
+                    output="src/main.c:10: error: missing ';'",
+                    success=False,
+                ),
+            ],
+            retry_count=0,
+            max_retries=3,
+        )
+        update = await error_check_node(state)
+        assert update["retry_count"] == 1
+        assert update["rtk_bypass"] is False
+        assert len(update["rtk_fallback_history"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_second_same_compile_error_enables_no_rtk_fallback(self):
+        from backend import metrics as m
+
+        if m.is_available():
+            m.reset_for_tests()
+        state = GraphState(
+            task_id="BP.R.4",
+            user_command="make all",
+            tool_results=[
+                ToolResult(
+                    tool_name="run_bash",
+                    output="src/main.c:10: error: missing ';'",
+                    success=False,
+                ),
+            ],
+            retry_count=1,
+            max_retries=3,
+            rtk_fallback_history=[
+                compile_failure_signature(
+                    task_id="BP.R.4",
+                    tool_name="run_bash",
+                    output="src/main.c:10: error: missing ';'",
+                    command="make all",
+                ),
+            ],
+        )
+        update = await error_check_node(state)
+        assert update["retry_count"] == 2
+        assert update["rtk_bypass"] is True
+        assert "RTK fallback active" in update["last_error"]
+        assert "rtk --no-rtk make all" in update["last_error"]
+        if m.is_available():
+            from prometheus_client import generate_latest
+
+            text = generate_latest(m.REGISTRY).decode()
+            assert "omnisight_rtk_fallback_total 1.0" in text
+
+    @pytest.mark.asyncio
+    async def test_second_generic_error_does_not_enable_rtk_fallback(self):
+        state = GraphState(
+            task_id="BP.R.4",
+            user_command="ls missing",
+            tool_results=[
+                ToolResult(tool_name="run_bash", output="[ERROR] file not found", success=False),
+            ],
+            retry_count=1,
+            max_retries=3,
+            rtk_fallback_history=["rtk_compile:_non_compile"],
+        )
+        update = await error_check_node(state)
+        assert update["retry_count"] == 2
+        assert update["rtk_bypass"] is False
+        assert "RTK fallback active" not in update["last_error"]
 
     @pytest.mark.asyncio
     async def test_retries_exhausted_escalates(self):
