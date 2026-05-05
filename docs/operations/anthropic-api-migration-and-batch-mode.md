@@ -482,6 +482,10 @@ Settings → Provider Keys → Anthropic
 Mitigation evidence is consolidated in
 [`docs/ops/ab_r76_r80_mitigation_evidence.md`](../ops/ab_r76_r80_mitigation_evidence.md).
 
+Seven-family batch acceleration and velocity measurement evidence is
+consolidated in
+[`docs/ops/ab_batch_velocity_evidence.md`](../ops/ab_batch_velocity_evidence.md).
+
 ---
 
 ## 10. Migration / Schema

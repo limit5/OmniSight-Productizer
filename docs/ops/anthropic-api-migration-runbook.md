@@ -153,6 +153,24 @@ curl -X POST http://localhost:8000/api/v1/batch/submit \
 
 batch 進度跑完 ~10 分鐘後檢查實際 cost vs estimate（差距應 < 10%）。
 
+### 3.4 七類 batch velocity 量測（AB DoD）
+
+第一週 dogfood 後，把 HD.1 / HD.4 / HD.5.13 / HD.18.6 / L4.1 / L4.3 /
+TODO routine 七類任務各自提交到 batch lane，並依
+[`ab_batch_velocity_evidence.md`](ab_batch_velocity_evidence.md) 記錄：
+
+- `batch_tasks_submitted` / `batch_tasks_succeeded`
+- `subscription_baseline_tasks_per_day` / `api_batch_tasks_per_day`
+- `wall_clock_hours_saved`
+- `estimated_cost_usd` / `actual_cost_usd`
+- `batch_discount_observed_pct`
+- `p95_batch_completion_hours`
+- `dlq_rate_pct`
+
+完成條件：七類 routing 全覆蓋、第一個完整樣本 >= 100 tasks、API+Batch
+tasks/day >= 訂閱版 baseline 2x、actual cost vs estimate 偏差 < 10%、P95
+completion <= 24h、DLQ rate < 2%。
+
 ---
 
 ## 4. 30 天觀察期（每週 5 分鐘）
