@@ -610,6 +610,22 @@ CREATE TABLE IF NOT EXISTS task_comments (
     timestamp   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- BP.Q.4 (alembic 0186): tenant-scoped RAG embedding chunks.
+-- SQLite stores embedding + metadata as TEXT for dev parity; production
+-- PG uses pgvector + JSONB from the alembic migration.
+CREATE TABLE IF NOT EXISTS embedding_chunks (
+    chunk_id    TEXT PRIMARY KEY,
+    tenant_id   TEXT NOT NULL
+                     REFERENCES tenants(id) ON DELETE CASCADE,
+    source_path TEXT NOT NULL,
+    chunk_text  TEXT NOT NULL,
+    embedding   TEXT NOT NULL,
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_embedding_chunks_tenant_source
+    ON embedding_chunks(tenant_id, source_path);
+
 -- BP.M.1 (alembic 0192): L1 skill auto-distillation review queue.
 -- Runtime summarisation, review/promote endpoints, and audit events
 -- land in BP.M.2-BP.M.5.  TEXT PK avoids sequence-reset work during

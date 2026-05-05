@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 385
+entry_count: 386
 status_counts:
-  dev-only: 375
+  dev-only: 376
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3608,3 +3608,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — BP.Q.4 `embedding_chunks` migration/RLS 與 production vector-store env 完成後，production image
     重建並 staging smoke：index tenant chunks、呼叫 `KnowledgeRetrieval`、確認 citation line range 與 tenant filter。
+- id: 2026-05-05--BP.Q.4
+  header_line: 46155
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.Q.4
+  title: BP.Q.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — production PG 套用 alembic chain `0192 -> 0186` 並確認 pgvector extension 可建立 HNSW index；後續 BP.Q.5/BP.Q.6
+    staging smoke 應覆蓋 tenant A/B chunks 與 top-K retrieval。

@@ -108,6 +108,12 @@ logger = logging.getLogger("migrate_sqlite_to_pg")
 TABLES_IN_ORDER: tuple[str, ...] = (
     # Tenant root — MUST be first for FK parents below.
     "tenants",
+    # BP.Q.4 (alembic 0186): tenant-scoped RAG embedding chunks. FK
+    # ``tenant_id -> tenants.id`` (CASCADE) so it MUST replay after
+    # tenants. PK is app-generated TEXT ``chunk_id``; embedding and
+    # metadata are serialized as TEXT in SQLite and restored into
+    # pgvector / JSONB by the PG schema. NOT in TABLES_WITH_IDENTITY_ID.
+    "embedding_chunks",
     # Phase 50 baseline business tables.
     "agents",
     "tasks",
