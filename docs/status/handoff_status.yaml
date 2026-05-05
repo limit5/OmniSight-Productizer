@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 465
+entry_count: 466
 status_counts:
-  dev-only: 455
+  dev-only: 456
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4329,3 +4329,13 @@ entries:
   next_gate: deployed-inactive — 合併後由 security / Priority I owner 收集 checklist evidence packet，跑 target production image +
     staging tenant-isolation smoke + 24h observation，然後在 N10 `Priority I Readiness` table 寫入 `Disposition = ready-to-start`，Priority
     I 才可正式啟動。
+- id: 2026-05-06--ks-dod-phase2-tier-2-cmek
+  header_line: 47338
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: KS.DOD.Phase2 Tier 2 CMEK 完工
+  production_status: dev-only
+  next_gate: deployed-active — 在 CI/staging 注入 `OMNISIGHT_TEST_AWS_KMS_*` / `OMNISIGHT_TEST_GCP_KMS_*` / `OMNISIGHT_TEST_VAULT_TRANSIT_*`
+    後重跑 KS.2 Phase 2 regression，確認 3 個 live KMS tests 從 skipped 變 green；production cutover 前用一個 Tier 2 sandbox tenant 跑 revoke
+    + downgrade smoke。

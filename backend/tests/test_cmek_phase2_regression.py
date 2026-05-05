@@ -115,6 +115,88 @@ def _actor() -> auth.User:
     )
 
 
+@pytest.mark.asyncio
+async def test_cmek_wizard_five_step_backend_e2e(monkeypatch):
+    from backend.routers import cmek_wizard
+
+    async def allow_guard(_tenant_id, _actor, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cmek_wizard, "_guard", allow_guard)
+
+    providers = await cmek_wizard.list_cmek_wizard_providers(TENANT, None, _actor())
+    provider_body = json.loads(providers.body)
+    assert providers.status_code == 200
+    assert [p["provider"] for p in provider_body["providers"]] == [
+        "aws-kms",
+        "gcp-kms",
+        "vault-transit",
+    ]
+
+    policy = await cmek_wizard.generate_cmek_wizard_policy(
+        TENANT,
+        cmek_wizard.GeneratePolicyRequest(
+            provider="aws-kms",
+            principal="arn:aws:iam::444455556666:role/OmniSightCMEKAccess",
+            key_id=AWS_KEY_ID,
+        ),
+        None,
+        _actor(),
+    )
+    policy_body = json.loads(policy.body)
+    assert policy.status_code == 200
+    assert policy_body["policy"]["Statement"][1]["Action"] == [
+        "kms:Encrypt",
+        "kms:Decrypt",
+    ]
+    assert policy_body["policy"]["Statement"][1]["Condition"]["StringEquals"] == {
+        "kms:EncryptionContext:tenant_id": TENANT,
+        "kms:EncryptionContext:schema": "ks.1.2",
+    }
+
+    key_id = await cmek_wizard.save_cmek_wizard_key_id(
+        TENANT,
+        cmek_wizard.KeyIdCMEKRequest(provider="aws-kms", key_id=f" {AWS_KEY_ID} "),
+        None,
+        _actor(),
+    )
+    key_id_body = json.loads(key_id.body)
+    assert key_id.status_code == 200
+    assert key_id_body["accepted"] is True
+    assert key_id_body["key_id"] == AWS_KEY_ID
+
+    verify = await cmek_wizard.verify_cmek_wizard_connection(
+        TENANT,
+        cmek_wizard.VerifyCMEKRequest(provider="aws-kms", key_id=AWS_KEY_ID),
+        None,
+        _actor(),
+    )
+    verify_body = json.loads(verify.body)
+    assert verify.status_code == 200
+    assert verify_body["ok"] is True
+    assert verify_body["operation"] == "encrypt-decrypt"
+    assert verify_body["verification_id"].startswith("cmekv_")
+    assert "plaintext" not in verify_body
+    assert "ciphertext" not in verify_body
+
+    complete = await cmek_wizard.complete_cmek_wizard(
+        TENANT,
+        cmek_wizard.CompleteCMEKRequest(
+            provider="aws-kms",
+            key_id=AWS_KEY_ID,
+            verification_id=verify_body["verification_id"],
+        ),
+        None,
+        _actor(),
+    )
+    complete_body = json.loads(complete.body)
+    assert complete.status_code == 200
+    assert complete_body["security_tier"] == "tier-2"
+    assert complete_body["provider"] == "aws-kms"
+    assert complete_body["config_status"] == "draft"
+    assert complete_body["persisted"] is False
+
+
 @pytest.mark.parametrize("live", LIVE_PROVIDERS, ids=[p.provider for p in LIVE_PROVIDERS])
 def test_three_kms_adapters_live_describe_encrypt_decrypt_round_trip(live: _LiveProvider):
     if not live.configured():
