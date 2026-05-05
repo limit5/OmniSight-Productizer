@@ -3259,14 +3259,14 @@ ls backend/alembic/versions/ | tail -3
 
 > 每個 agent turn / 命令 / 輸出 / sandbox snapshot / HD finding 都是 addressable Block。是 BP / HD / W14 / Z / ORCHESTRATOR 共用 primitive。
 
-- [ ] WP.1.1 **`blocks` schema 定義**：`block_id` / `parent_id` / `tenant_id` / `user_id` / `project_id` / `session_id` / `kind` / `status` / `title` / `payload` JSONB / `metadata` JSONB / `redaction_mask` JSONB / `started_at` / `completed_at` / `created_at`
-- [ ] WP.1.2 **alembic 0116 — `blocks` table + indexes**（`(tenant_id, session_id, started_at DESC)` + `(parent_id)`）
-- [ ] WP.1.3 **`<Block />` React primitive**：統一替換既有 message / output / finding 卡片散落實作（ORCHESTRATOR / TokenUsageStats / W14 / HD bring-up workbench / BP dispatch board）
-- [ ] WP.1.4 **Share modal**：右鍵 Block → Share → 勾選 sub-region（command / output / metadata / screenshots）→ 走 WP.9 `shareable_objects` 開 permalink
-- [ ] WP.1.5 **Redaction mask 邏輯**：JSONB 標明哪些 sub-region 在 share 時遮（secret / PII / customer IP）；KS.1 envelope 邊界對齊
-- [ ] WP.1.6 **遷移策略**：分 surface 漸進 — 先 ORCHESTRATOR / TokenUsageStats → 後 BP → 後 HD；雙寫期 feature flag 切換、舊 surface 退回路徑保留 30 天
-- [ ] WP.1.7 **Single knob**：`OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false` 退回 ad-hoc 卡片
-- [ ] WP.1.8 **Test**：每 surface migration 前後 UI snapshot 零回歸 + Block CRUD + permalink + redaction round-trip
+- [x][G] WP.1.1 **`blocks` schema 定義**：`block_id` / `parent_id` / `tenant_id` / `user_id` / `project_id` / `session_id` / `kind` / `status` / `title` / `payload` JSONB / `metadata` JSONB / `redaction_mask` JSONB / `started_at` / `completed_at` / `created_at`
+- [x][G] WP.1.2 **alembic 0116 — `blocks` table + indexes**（`(tenant_id, session_id, started_at DESC)` + `(parent_id)`）
+- [x][G] WP.1.3 **`<Block />` React primitive**：統一替換既有 message / output / finding 卡片散落實作（ORCHESTRATOR / TokenUsageStats / W14 / HD bring-up workbench / BP dispatch board）
+- [x][G] WP.1.4 **Share modal**：右鍵 Block → Share → 勾選 sub-region（command / output / metadata / screenshots）→ 走 WP.9 `shareable_objects` 開 permalink
+- [x][G] WP.1.5 **Redaction mask 邏輯**：JSONB 標明哪些 sub-region 在 share 時遮（secret / PII / customer IP）；KS.1 envelope 邊界對齊
+- [x][G] WP.1.6 **遷移策略**：分 surface 漸進 — 先 ORCHESTRATOR / TokenUsageStats → 後 BP → 後 HD；雙寫期 feature flag 切換、舊 surface 退回路徑保留 30 天
+- [x][G] WP.1.7 **Single knob**：`OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false` 退回 ad-hoc 卡片
+- [x][G] WP.1.8 **Test**：每 surface migration 前後 UI snapshot 零回歸 + Block CRUD + permalink + redaction round-trip
 
 ### WP.2 Skills Loader（`.claude/skills` + `.omnisight/skills` 共用慣例）
 
