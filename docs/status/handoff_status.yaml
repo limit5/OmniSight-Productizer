@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 479
+entry_count: 480
 status_counts:
-  dev-only: 469
+  dev-only: 470
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4461,3 +4461,13 @@ entries:
   next_gate: deployed-active — security owner assembles the SOC 2 operator readiness packet in the private evidence vault,
     selects the GRC platform and independent CPA auditor, records the evidence-index SHA-256 in N10 `SOC 2 Readiness`, and
     flips disposition to `ready-for-observation` only after owner/auditor approval.
+- id: 2026-05-06--ks-dod-overall
+  header_line: 47504
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: KS.DOD.Overall 總體完工
+  production_status: dev-only
+  next_gate: deployed-active — rebuild production backend image，capture three-knob env snapshot，run final KS regression packet
+    in staging/production-equivalent topology，attach per-tier customer onboarding packets，and append final KS rollout N10
+    row with image/evidence/tenant-smoke SHA-256.

@@ -371,6 +371,20 @@ KS 不是新建系統、是 AS Token Vault 的**第二代演進**：
 
 - KS 全套 disable（三 knob 全 false）→ 停用後續 CMEK / BYOG surface；Phase 1 envelope 不再退回 single Fernet，既有 AS / OAuth / customer secret 需維持 envelope 讀寫
 
+### 9.5 Overall Definition of Done（KS.DOD）
+
+最終總體 row 的 source-of-truth evidence index 是
+[`docs/ops/ks_overall_rollout_evidence.md`](../ops/ks_overall_rollout_evidence.md)。
+該 index 聚合三個 runtime knob 的 regression guard、ADR completeness
+map、operator runbook、per-tier customer onboarding 與 production evidence
+packet。
+
+交付文件：
+- Operator runbook:
+  [`docs/ops/ks_operator_runbook.md`](../ops/ks_operator_runbook.md)
+- Per-tier customer onboarding:
+  [`docs/ops/ks_customer_onboarding.md`](../ops/ks_customer_onboarding.md)
+
 ---
 
 ## 10. Risk Register（R46-R50）
