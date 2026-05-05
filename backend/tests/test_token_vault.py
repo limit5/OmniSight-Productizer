@@ -42,6 +42,7 @@ import subprocess
 import sys
 
 import pytest
+from cryptography.fernet import InvalidToken
 
 from backend import account_linking, secret_store
 from backend.security import envelope as tenant_envelope
@@ -147,6 +148,26 @@ def test_token_envelope_shape_is_pinned() -> None:
     }
     assert outer["dek_ref"]["tenant_id"] == "user-peek"
     assert outer["dek_ref"]["encryption_context"]["purpose"] == "as-token-vault"
+
+
+def test_default_write_is_not_single_fernet_ciphertext() -> None:
+    """KS.1 Phase 1: AS Token Vault must not regress to raw
+    ``secret_store`` Fernet for default writes."""
+    encrypted = tv.encrypt_for_user(
+        "user-envelope-only",
+        "github",
+        "ghp_envelope_only",
+    )
+
+    with pytest.raises(InvalidToken):
+        secret_store.decrypt(encrypted.ciphertext)
+
+    outer = json.loads(encrypted.ciphertext)
+    assert outer["fmt"] == tv.TOKEN_ENVELOPE_FORMAT_VERSION
+    assert (
+        tv.decrypt_for_user("user-envelope-only", "github", encrypted)
+        == "ghp_envelope_only"
+    )
 
 
 def test_envelope_disabled_writes_legacy_fernet_token(monkeypatch) -> None:

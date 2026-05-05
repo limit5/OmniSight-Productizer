@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 458
+entry_count: 459
 status_counts:
-  dev-only: 448
+  dev-only: 449
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4265,3 +4265,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 在 CI / staging 提供 `OMNISIGHT_TEST_AWS_KMS_*`、`OMNISIGHT_TEST_GCP_KMS_*`、`OMNISIGHT_TEST_VAULT_TRANSIT_*`
     後跑三個 live KMS workflow，再由 Claude/security owner 確認 KS.1 可作為 Priority I multi-tenancy gate。
+- id: 2026-05-06--ks-1-as-token-vault-envelope
+  header_line: 47255
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: KS.1 完工 — AS Token Vault envelope
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後在 CI/staging 跑 `backend/tests/test_token_vault.py` 與 KS.1 acceptance matrix；live KMS gate
+    仍依 KS.1 Phase 1 handoff 由 AWS/GCP/Vault sandbox secrets 啟用。
