@@ -266,6 +266,25 @@ def test_log_scrubber_sink_receives_redacted_value() -> None:
     assert "provider_key=[REDACTED]" in sink_value
 
 
+def test_ci_gitleaks_secret_scan_is_hard_gate() -> None:
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    pre_commit = (PROJECT_ROOT / ".pre-commit-config.yaml").read_text()
+
+    triggers = workflow.split("jobs:", 1)[0]
+    job = workflow.split("  secret-pre-commit:", 1)[1].split(
+        "\n  proxy-tests:",
+        1,
+    )[0]
+
+    assert "pull_request:" in triggers
+    assert "id: omnisight-gitleaks" in pre_commit
+    assert "--scanner gitleaks" in pre_commit
+    assert "go install github.com/gitleaks/gitleaks/v8@v8.24.0" in job
+    assert "pre-commit run --all-files --show-diff-on-failure" in job
+    assert "continue-on-error" not in job
+    assert "|| true" not in job
+
+
 def test_backup_dlp_blocks_plaintext_secret_before_export(tmp_path: Path) -> None:
     db_path = tmp_path / "ks113-leaky-backup.db"
     _write_backup_db(db_path, "OpenAI key sk-abcdefghijklmnopqrstuvwxyz123456")
