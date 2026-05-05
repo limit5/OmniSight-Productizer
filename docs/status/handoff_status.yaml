@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 417
+entry_count: 418
 status_counts:
-  dev-only: 407
+  dev-only: 408
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3896,3 +3896,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.1.4/WP.1.5 接 share/redaction 行為後，production image rebuild + dashboard smoke 檢查各 migrated
     surface 的 block wrappers 再提升狀態。
+- id: 2026-05-06--WP.1.4
+  header_line: 46646
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.4
+  title: WP.1.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.9.1-WP.9.5 建立 `shareable_objects` table/router/ACL/redaction enforcement 後，production
+    image rebuild + 右鍵 Block share live smoke 再提升狀態。

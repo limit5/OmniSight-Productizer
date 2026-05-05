@@ -7,10 +7,11 @@
  */
 
 import { describe, expect, it, vi } from "vitest"
-import { render, screen, fireEvent } from "@testing-library/react"
+import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 import { Activity } from "lucide-react"
 
 import { Block } from "@/components/omnisight/block"
+import type { CreateShareableObjectRequest } from "@/lib/api"
 
 describe("<Block />", () => {
   it("renders the addressable block attributes and header", () => {
@@ -54,5 +55,60 @@ describe("<Block />", () => {
     expect(block.tagName).toBe("BUTTON")
     fireEvent.click(block)
     expect(onClick).toHaveBeenCalledTimes(1)
+  })
+
+  it("opens the right-click share modal and creates a WP.9 shareable object permalink", async () => {
+    const createShare = vi.fn(
+      async (_body: CreateShareableObjectRequest) => ({
+        share_id: "share-1",
+        object_kind: "block",
+        object_id: "block-1",
+        visibility: "private" as const,
+        permalink_url: "https://omnisight.local/share/share-1",
+        expires_at: null,
+      }),
+    )
+
+    render(
+      <Block
+        blockId="block-1"
+        tenantId="tenant-1"
+        kind="turn.tool"
+        status="ok"
+        createShare={createShare}
+        data-testid="shareable-block"
+      >
+        tool output
+      </Block>,
+    )
+
+    fireEvent.contextMenu(screen.getByTestId("shareable-block"))
+    fireEvent.click(await screen.findByText("Share"))
+    fireEvent.click(screen.getByLabelText("Share Output"))
+    fireEvent.click(screen.getByTestId("block-share-create"))
+
+    await waitFor(() => expect(createShare).toHaveBeenCalledTimes(1))
+    expect(createShare).toHaveBeenCalledWith({
+      object_kind: "block",
+      object_id: "block-1",
+      tenant_id: "tenant-1",
+      visibility: "private",
+      regions: ["command", "metadata", "screenshots"],
+      base_url: "http://localhost:3000",
+    })
+    expect(await screen.findByTestId("block-share-url")).toHaveTextContent(
+      "https://omnisight.local/share/share-1",
+    )
+  })
+
+  it("keeps blocks without blockId presentational and without a share menu", () => {
+    render(
+      <Block kind="turn.message" data-testid="plain-block">
+        body
+      </Block>,
+    )
+
+    fireEvent.contextMenu(screen.getByTestId("plain-block"))
+    expect(screen.queryByText("Share")).not.toBeInTheDocument()
   })
 })
