@@ -197,6 +197,87 @@ async def test_cmek_wizard_five_step_backend_e2e(monkeypatch):
     assert complete_body["persisted"] is False
 
 
+@pytest.mark.asyncio
+async def test_cmek_wizard_five_step_http_e2e(monkeypatch):
+    """Pin the mounted FastAPI surface for the tenant-settings 5-step wizard."""
+
+    from backend import bootstrap as _boot
+    from backend import auth as _auth
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green_bootstrap():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green_bootstrap)
+    _boot._gate_cache_reset()
+    app.dependency_overrides[_auth.current_user] = lambda: _actor()
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            providers = await client.get(f"/api/v1/tenants/{TENANT}/cmek/wizard/providers")
+            assert providers.status_code == 200
+            assert [p["provider"] for p in providers.json()["providers"]] == [
+                "aws-kms",
+                "gcp-kms",
+                "vault-transit",
+            ]
+
+            policy = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/wizard/policy",
+                json={
+                    "provider": "aws-kms",
+                    "principal": "arn:aws:iam::444455556666:role/OmniSightCMEKAccess",
+                    "key_id": AWS_KEY_ID,
+                },
+            )
+            assert policy.status_code == 200
+            policy_body = policy.json()
+            assert policy_body["policy"]["Statement"][1]["Action"] == [
+                "kms:Encrypt",
+                "kms:Decrypt",
+            ]
+
+            key_id = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/wizard/key-id",
+                json={"provider": "aws-kms", "key_id": f" {AWS_KEY_ID} "},
+            )
+            assert key_id.status_code == 200
+            assert key_id.json()["key_id"] == AWS_KEY_ID
+
+            verify = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/wizard/verify",
+                json={"provider": "aws-kms", "key_id": AWS_KEY_ID},
+            )
+            assert verify.status_code == 200
+            verify_body = verify.json()
+            assert verify_body["ok"] is True
+            assert verify_body["operation"] == "encrypt-decrypt"
+            assert verify_body["verification_id"].startswith("cmekv_")
+
+            complete = await client.post(
+                f"/api/v1/tenants/{TENANT}/cmek/wizard/complete",
+                json={
+                    "provider": "aws-kms",
+                    "key_id": AWS_KEY_ID,
+                    "verification_id": verify_body["verification_id"],
+                },
+            )
+            assert complete.status_code == 200
+            complete_body = complete.json()
+            assert complete_body["security_tier"] == "tier-2"
+            assert complete_body["config_status"] == "draft"
+            assert complete_body["persisted"] is False
+    finally:
+        app.dependency_overrides.pop(_auth.current_user, None)
+        _boot._gate_cache_reset()
+
+
 @pytest.mark.parametrize("live", LIVE_PROVIDERS, ids=[p.provider for p in LIVE_PROVIDERS])
 def test_three_kms_adapters_live_describe_encrypt_decrypt_round_trip(live: _LiveProvider):
     if not live.configured():
