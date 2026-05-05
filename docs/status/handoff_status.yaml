@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 419
+entry_count: 420
 status_counts:
-  dev-only: 409
+  dev-only: 410
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3914,3 +3914,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — WP.9 router/table 落地後接上 `redact_block_for_share()`，將 mask 寫入 `shareable_objects.redaction_applied`，並做
     production share permalink live smoke。
+- id: 2026-05-06--WP.1.6
+  header_line: 46676
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: WP.1.6
+  title: WP.1.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — WP.1.7 接上 `OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false` 全域 kill switch；之後各 surface 依 WP.1.6 wave
+    gate 在 staging 逐步開 flag 並做 snapshot / share / redaction smoke。
