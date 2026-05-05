@@ -280,6 +280,21 @@ class TestBuildSystemPrompt:
         )
         assert "[handoff truncated]" in prompt
 
+    def test_rtk_high_noise_command_rules_are_always_included(self):
+        prompt = build_system_prompt(
+            model_name="",
+            agent_type="firmware",
+            sub_type="bsp",
+            mode="lazy",
+        )
+
+        assert "RTK Output Compression Rules" in prompt
+        assert "For high-noise commands" in prompt
+        assert "put `rtk` before the command" in prompt
+        assert "`rtk make all`" in prompt
+        assert "`rtk git diff`" in prompt
+        assert "`rtk rg \"pattern\"`" in prompt
+
 
 class TestListAvailable:
 

@@ -95,6 +95,24 @@ _MAX_CLONE_SPEC_CONTEXT = 4000
 # import the W15.3 module just to know the budget.
 _MAX_VITE_ERROR_BANNER_SECTION = 512
 
+# BP.R.3: RTK prompt guardrail is static prompt text. Module-global
+# audit (SOP Step 1): every worker derives the same value from source,
+# so there is no cross-worker state to coordinate.
+_RTK_HIGH_NOISE_COMMAND_RULES = (
+    "# RTK Output Compression Rules (non-negotiable)\n\n"
+    "For high-noise commands, use the standard shell path and put `rtk` "
+    "before the command so RTK can compress output before it enters the "
+    "agent context.\n\n"
+    "High-noise commands include compiling or testing (`make`, `cmake`, "
+    "`ninja`, `pytest`, `cargo`, `go test`), large diffs or logs (`git diff`, "
+    "`git log`, `tail`, `journalctl`), broad searches (`rg`, `grep`, `find`), "
+    "and any `cat`/`sed` read that may print large source, build, or log "
+    "files.\n\n"
+    "Examples: `rtk make all`, `rtk git diff`, `rtk rg \"pattern\"`, "
+    "`rtk cat src/main.c`. Use the raw command only when the task explicitly "
+    "requires uncompressed output or an RTK fallback flow asks for it."
+)
+
 # L1 Core Rules cache (invalidated by watched rule-file signature)
 _core_rules_cache: tuple[tuple[tuple[str, int, int, int], ...], str] | None = None
 
@@ -1021,6 +1039,9 @@ def build_system_prompt(
         "These rules are stricter than the role skill below. When they\n"
         "conflict, this section wins."
     )
+
+    # 0b. RTK high-noise command discipline (BP.R.3, 2026-05-06)
+    sections.append(_RTK_HIGH_NOISE_COMMAND_RULES)
 
     # 1. Model rules
     model_rules = load_model_rules(model_name)
