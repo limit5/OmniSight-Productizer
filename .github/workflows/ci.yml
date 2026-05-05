@@ -353,8 +353,12 @@ jobs:
             -q
 
   backend-tests:
+    # BP.L.5 — full backend suite wall-clock target is <= 240 min.
+    # The longest path is this matrix job plus backend-coverage-combine
+    # (235 + 5), so the workflow fails before exceeding the target while
+    # leaving enough headroom for the known 60-180 min full-suite range.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 235
     strategy:
       fail-fast: false
       matrix:

@@ -126,3 +126,17 @@ def test_bp_l_ci_coverage_gate_counts_new_backend_modules() -> None:
     assert "python3 -m coverage combine .coverage.*" in combine_run
     assert "python3 -m coverage report --rcfile=backend/pytest.ini --fail-under=60" in combine_run
     assert "python3 -m coverage xml -o coverage-combined.xml --rcfile=backend/pytest.ini" in combine_run
+
+
+def test_bp_l_full_suite_wall_clock_budget_capped_at_240_minutes() -> None:
+    workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+
+    longest_full_suite_path = (
+        jobs["backend-tests"]["timeout-minutes"]
+        + jobs["backend-coverage-combine"]["timeout-minutes"]
+    )
+
+    assert jobs["backend-coverage-combine"]["needs"] == "backend-tests"
+    assert longest_full_suite_path <= 240
+    assert jobs["backend-tests"]["timeout-minutes"] >= 180

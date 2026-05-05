@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 403
+entry_count: 404
 status_counts:
-  dev-only: 393
+  dev-only: 394
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -3770,3 +3770,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 `backend-coverage-combine` 下載 8 shard 的 `.coverage.*` 後仍以 aggregate
     floor gate backend 新 module；BP.L.5 再評估 full suite wall-clock 目標。
+- id: 2026-05-05--BP.L.5
+  header_line: 46430
+  date: '2026-05-05'
+  author: Codex/GPT-5.5
+  task_id: BP.L.5
+  title: BP.L.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — GitHub Actions 實跑一輪 PR CI，確認 `backend-tests` 最慢 shard 加 `backend-coverage-combine` 在 240
+    min wall-clock budget 內完成。
