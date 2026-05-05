@@ -106,6 +106,23 @@ def test_alignment_sop_requires_cutover_evidence_and_no_payload_in_saas_audit() 
     assert not missing, f"alignment SOP missing cutover evidence: {missing}"
 
 
+def test_hd215_shared_image_confirmation_is_explicit() -> None:
+    body = _read(SOP)
+    required = [
+        "HD.21.5 Shared Image Confirmation",
+        "HD.21.5 self-hosted edition is confirmed",
+        "Canonical image: `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-proxy:${OMNISIGHT_IMAGE_TAG:-latest}`",
+        "Canonical build source: `Dockerfile.omnisight-proxy`",
+        "Canonical release path: `.github/workflows/docker-publish.yml` matrix",
+        "omnisight-proxy-${OMNISIGHT_IMAGE_TAG}.tar",
+        "There is no self-hosted-only proxy Dockerfile",
+        "artifact-sharing confirmation only",
+        "mode-specific",
+    ]
+    missing = [phrase for phrase in required if phrase not in body]
+    assert not missing, f"alignment SOP missing HD.21.5 shared image confirmation: {missing}"
+
+
 def test_alignment_sop_defines_mode_specific_rollback_boundary() -> None:
     body = _normalized_lower(SOP)
     required = [
