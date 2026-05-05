@@ -35,10 +35,11 @@ Locks the load-bearing behaviour of the AS.2.5 revoke hook
    actor=user_id; ``dsar_erasure`` → actor=``"dsar:<user_id>"``.
    Caller-supplied ``actor`` always wins.
 10. ``revoke_record`` AS.0.8 knob-off: pure helper still runs
-    (returns the outcome) but audit silent-skips per
-    :func:`oauth_audit._gate`.
+    (returns the outcome); OAuth lifecycle audit silent-skips while
+    KS decryption audit remains.
 11. ``revoke_record`` ``emit_audit=False`` opt-out: caller can skip
-    audit fan-out (test / inspection harness convenience).
+    OAuth lifecycle audit fan-out, but KS decryption audit remains
+    mandatory whenever the vault returns plaintext.
 12. ``emit_not_linked`` helper: ``OUTCOME_NOT_LINKED`` +
     audit row emits without touching vault / IdP; trigger
     validation applies; caller-supplied ``actor`` wins over default.
@@ -620,7 +621,7 @@ def test_is_enabled_returns_oauth_client_value(monkeypatch):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def test_revoke_record_emit_audit_false_skips_audit(monkeypatch):
+def test_revoke_record_emit_audit_false_keeps_decryption_audit(monkeypatch):
     rec = _make_record()
     events = _capture_audit(monkeypatch)
     fn, _ = _mock_revoke_fn(succeed=True)
@@ -630,7 +631,7 @@ def test_revoke_record_emit_audit_false_skips_audit(monkeypatch):
         emit_audit=False,
     ))
     assert out.outcome == ovr.OUTCOME_SUCCESS
-    assert events == []
+    assert [e["action"] for e in events] == ["ks.decryption"]
 
 
 def test_emit_not_linked_emit_audit_false_skips_audit(monkeypatch):

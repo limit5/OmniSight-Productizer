@@ -412,8 +412,10 @@ async def refresh_record(
     the default for the proactive-refresh path; an AS.2.5-style
     user-initiated "force refresh" passes ``"explicit_refresh"``.
 
-    *emit_audit* is True by default; tests can pass False to skip
-    the audit fan-out without monkey-patching the emitters.
+    *emit_audit* is True by default; tests can pass False to skip the
+    OAuth lifecycle audit fan-out without monkey-patching the emitters.
+    KS decryption audit is not optional: every plaintext recovery still
+    writes ``ks.decryption`` into the N10 ledger.
     """
 
     if trigger not in oauth_audit.ROTATION_TRIGGERS:
@@ -447,24 +449,16 @@ async def refresh_record(
         return outcome
 
     try:
-        if emit_audit:
-            access_plaintext = await token_vault.decrypt_for_user_with_audit(
-                record.user_id, record.provider, record.access_token_enc,
-                request_id=request_id,
-                actor=record.user_id,
-            )
-            refresh_plaintext = await token_vault.decrypt_for_user_with_audit(
-                record.user_id, record.provider, record.refresh_token_enc,
-                request_id=request_id,
-                actor=record.user_id,
-            )
-        else:
-            access_plaintext = token_vault.decrypt_for_user(
-                record.user_id, record.provider, record.access_token_enc,
-            )
-            refresh_plaintext = token_vault.decrypt_for_user(
-                record.user_id, record.provider, record.refresh_token_enc,
-            )
+        access_plaintext = await token_vault.decrypt_for_user_with_audit(
+            record.user_id, record.provider, record.access_token_enc,
+            request_id=request_id,
+            actor=record.user_id,
+        )
+        refresh_plaintext = await token_vault.decrypt_for_user_with_audit(
+            record.user_id, record.provider, record.refresh_token_enc,
+            request_id=request_id,
+            actor=record.user_id,
+        )
     except TokenVaultError as exc:
         outcome = RefreshOutcome(
             outcome=OUTCOME_VAULT_FAILURE,

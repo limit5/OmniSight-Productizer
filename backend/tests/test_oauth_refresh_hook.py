@@ -33,12 +33,13 @@ Locks the load-bearing behaviour of the AS.2.4 refresh hook
     DB row swap, or unknown key_version) → ``OUTCOME_VAULT_FAILURE``
     + audit emits ``provider_error`` with ``error="vault:..."``.
 11. ``refresh_record`` AS.0.8 knob-off: pure helper still runs
-    (re-encrypts new ciphertext, returns ``new_record``) but audit
-    silent-skips (mirrors ``oauth_audit._gate`` behaviour).
+    (re-encrypts new ciphertext, returns ``new_record``); OAuth
+    lifecycle audit silent-skips while KS decryption audit remains.
 12. ``refresh_record`` ``trigger`` validation: rejects strings outside
     :data:`oauth_audit.ROTATION_TRIGGERS` with :class:`InvalidTriggerError`.
 13. ``refresh_record`` ``emit_audit=False`` skip: caller can opt out
-    of the audit fan-out.
+    of OAuth lifecycle audit fan-out, but KS decryption audit remains
+    mandatory for every plaintext recovery.
 14. Module-global state audit per SOP §1: 0 module-level mutable
     containers (no list / dict / set), constants stable across
     ``importlib.reload``, ``__all__`` cross-check.
@@ -314,8 +315,9 @@ def test_refresh_record_success_bumps_version_and_encrypts_new_tokens(monkeypatc
     # refresh_fn was called with the OLD refresh_token plaintext
     assert captured["calls"] == ["1//refresh-token-old"]
 
-    # Audit emitted both `oauth.refresh` (success) and `oauth.token_rotated`
+    # Audit emitted two KS decryption rows plus the OAuth lifecycle rows.
     actions = [e["action"] for e in events]
+    assert actions.count("ks.decryption") == 2
     assert oauth_client.EVENT_OAUTH_REFRESH in actions
     assert oauth_client.EVENT_OAUTH_TOKEN_ROTATED in actions
 
@@ -691,7 +693,7 @@ def test_refresh_record_accepts_both_trigger_strings(monkeypatch):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def test_refresh_record_emit_audit_false_skips_audit(monkeypatch):
+def test_refresh_record_emit_audit_false_keeps_decryption_audit(monkeypatch):
     rec = _make_record(expires_at=1000.0)
     events = _capture_audit(monkeypatch)
     fn, _ = _mock_refresh_fn({
@@ -703,7 +705,7 @@ def test_refresh_record_emit_audit_false_skips_audit(monkeypatch):
                                   emit_audit=False))
 
     assert out.outcome == orh.OUTCOME_SUCCESS
-    assert events == []
+    assert [e["action"] for e in events] == ["ks.decryption", "ks.decryption"]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

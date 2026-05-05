@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 460
+entry_count: 461
 status_counts:
-  dev-only: 450
+  dev-only: 451
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4283,3 +4283,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — 合併後在 CI/staging 跑 `backend/tests/test_token_vault.py` 與 KS.1 acceptance matrix；live KMS gate
     仍依 KS.1 Phase 1 handoff 由 AWS/GCP/Vault sandbox secrets 啟用。
+- id: 2026-05-06--ks-dod-decryption-audit-100
+  header_line: 47281
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: KS DoD decryption audit 100% 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — 合併後在 CI/staging 跑同一組 audit coverage tests，並於 production image rebuild 後以 OAuth refresh/revoke
+    smoke 確認 `audit_log.action='ks.decryption'` row 數與 plaintext recovery 次數一致。
