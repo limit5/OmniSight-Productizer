@@ -1,8 +1,8 @@
 ---
 audience: operator
-status: accepted
-date: 2026-05-02
-priority: AB.8 — Subscription → API key migration runbook
+status: accepted + complete for repository DoD
+date: 2026-05-06
+priority: AB Definition of Done — Operator API migration runbook
 related:
   - docs/operations/anthropic-api-migration-and-batch-mode.md (AB ADR)
   - backend/agents/anthropic_mode_manager.py (state machine)
@@ -16,16 +16,46 @@ related:
 > via Claude Code CLI / OAuth）切到 **Anthropic API key + Batch mode**。
 > 5 分鐘 step-by-step、附 30 天 rollback grace 安全網。
 
+> **Completion note（2026-05-06）**：本 runbook 現在覆蓋 AB DoD 需要的
+> operator migration SOP：API key provisioning、wizard 切換、R76-R80 guard、
+> API-mode smoke、第一個 >=100 task batch、七類 batch velocity ledger、30 天
+> fallback grace、`OMNISIGHT_AB_API_MODE_ENABLED=true` finalize lock、rollback
+> 與 production evidence handoff。它不是「已在 production 啟用」的宣告；實際
+> 啟用仍由第 10 節 evidence ledger 和第 11 節 production gate 記錄。
+
 ## 0. 前置確認（5 分鐘）
 
 - [ ] 你有 Anthropic 帳號（console.anthropic.com 已登入）
 - [ ] 帳號已升 Tier 4（檢查：console → Plans & Billing 顯示 RPM ≥ 4000）
 - [ ] 確認本月 LLM 預算上限（建議：dev workspace ≤ $50 / month）
-- [ ] OmniSight backend 已部署 AB.1-AB.7（`python -m backend.agents.tool_schemas --list` 跑得起來）
+- [ ] OmniSight backend 已部署 AB.1-AB.10（`python -m backend.agents.tool_schemas --list` 跑得起來）
 - [ ] OmniSight 既有 Claude 訂閱版仍能用（驗 `claude --version` 成功）
+- [ ] R76-R80 mitigation evidence 已讀：
+      [`ab_r76_r80_mitigation_evidence.md`](ab_r76_r80_mitigation_evidence.md)
+- [ ] 七類 batch velocity evidence template 已讀：
+      [`ab_batch_velocity_evidence.md`](ab_batch_velocity_evidence.md)
 
 ⚠️ **這條 runbook 改 OmniSight 自身開發 workflow、不影響對外提供給客戶的
 LLM 整合**。客戶端走的 `backend/llm_adapter.py` multi-provider facade 不變。
+
+### 0.1 這條 runbook 不做的事
+
+- 不替客戶 LLM provider 切換 API key、不改 tenant provider settings。
+- 不手寫或修改 API key 明文；key 只進 AS Token Vault / KS.1 envelope path。
+- 不在 30 天 grace 前 disable 訂閱版 fallback。
+- 不把 batch lane 用在 chat UI、incident response、rollback、human-in-loop prompt
+  等 realtime-required path；這些 path 仍走 realtime lane。
+
+### 0.2 Live gate matrix
+
+| Gate | 必須保存的證據 | 完成條件 |
+|---|---|---|
+| API-mode smoke | wizard smoke response、Anthropic usage row、cost guard spend row | auth/tool/cost/rate-limit 全綠 |
+| 第一個 >=100 task batch | batch id、100 個 custom_id mapping、results export、estimate vs actual ledger | 100% task accounted、actual cost vs estimate 偏差 < 10% |
+| 50% batch discount | realtime equivalent estimate、batch actual、Anthropic usage export | observed discount 約 50%（cache input 另列） |
+| 七類 velocity | `ab_batch_velocity_evidence.md` ledger row | API+Batch tasks/day >= 訂閱版 baseline 2x |
+| 30 天 grace | daily/weekly spend、latency、error/DLQ、rollback 未觸發 | clean observation 才能 finalize |
+| Finalize lock | 每個 backend replica 的 env snapshot | `OMNISIGHT_AB_API_MODE_ENABLED=true` 全部 replica 可見 |
 
 ---
 
@@ -144,7 +174,9 @@ smoke test 那一發。
 
 ### 3.3 跑一個 batch（AB.3 + AB.4）
 
-提交 10 個 routine task 走 batch、預期 50% 折扣：
+先提交 10 個 routine task 走 batch，確認 lane / DLQ / cost path 工作；再提交
+第一個 AB DoD 要求的 >=100 task batch。10-task 是 smoke，>=100 task 才是 DoD
+evidence。
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/batch/submit \
@@ -152,6 +184,24 @@ curl -X POST http://localhost:8000/api/v1/batch/submit \
 ```
 
 batch 進度跑完 ~10 分鐘後檢查實際 cost vs estimate（差距應 < 10%）。
+
+第一個 >=100 task batch 執行時，把下列欄位貼進第 10 節 evidence ticket：
+
+```text
+batch_run_id:
+submitted_count:
+succeeded_count:
+errored_count:
+estimated_cost_usd:
+actual_cost_usd:
+variance_pct:
+realtime_equivalent_estimate_usd:
+batch_discount_observed_pct:
+anthropic_usage_export_path:
+batch_results_export_path:
+dlq_entries:
+operator_initials:
+```
 
 ### 3.4 七類 batch velocity 量測（AB DoD）
 
@@ -171,6 +221,21 @@ TODO routine 七類任務各自提交到 batch lane，並依
 tasks/day >= 訂閱版 baseline 2x、actual cost vs estimate 偏差 < 10%、P95
 completion <= 24h、DLQ rate < 2%。
 
+### 3.5 Realtime lane guard
+
+API mode 啟用後，operator 必須保留至少一個 realtime-required smoke，確認 batch
+eligibility 不會誤把互動 path 丟進 24h batch SLA：
+
+```text
+task_kind: chat_ui
+force_lane: batch
+expected: vetoed to realtime
+evidence: backend/tests/test_ab_e2e_smoke.py::test_e2e_realtime_required_cannot_be_batched
+```
+
+如果 UI/runner 看到 chat、rollback、incident task 進 batch queue，立即 rollback
+到 subscription mode 或停用 batch lane，因為這是 R77/R78 class regression。
+
 ---
 
 ## 4. 30 天觀察期（每週 5 分鐘）
@@ -180,7 +245,30 @@ completion <= 24h、DLQ rate < 2%。
 - [ ] 看 monthly spend 趨勢、確認不超預算
 - [ ] 檢查 DLQ entries：`curl /api/v1/dlq/list` → 預期 0 或極少
 - [ ] 比對訂閱版 vs API mode 的 dev velocity（task 完成速度 / 數量）
+- [ ] 抽查 Anthropic console Usage Limits 仍低於預算上限（R76 external hard cap）
+- [ ] 抽查 batch completion SLA：P95 <= 24h、DLQ rate < 2%
+- [ ] 抽查 realtime lane：human-interactive task 沒有被 batch queue 接走
 - [ ] 若有任何疑慮 → 走第 5 節 rollback、不要硬撐
+
+每週紀錄格式：
+
+```text
+week:
+observation_start:
+observation_end:
+api_mode_enabled_replicas:
+monthly_spend_usd:
+daily_peak_spend_usd:
+latency_p50_ms:
+latency_p95_ms:
+error_rate_pct:
+dlq_rate_pct:
+batch_p95_completion_hours:
+api_batch_tasks_per_day:
+subscription_baseline_tasks_per_day:
+rollback_triggered: yes/no
+operator_decision: continue/rollback/finalize-ready
+```
 
 ---
 
@@ -238,6 +326,22 @@ curl -X POST http://localhost:8000/api/v1/anthropic-mode/finalize
 - [ ] DLQ entries < 10（沒有結構性 retry 問題）
 - [ ] dev velocity 比訂閱版時代有明顯提升（非主觀感受）
 - [ ] 確認 Claude 訂閱不退費（Anthropic Pro / Max 月費）
+- [ ] 第 10 節 evidence ticket 已附 API-mode smoke、>=100 task batch、
+      50% discount、30-day observation、env lock snapshot
+
+Finalize 後做最後一次不可回復確認：
+
+```bash
+curl http://localhost:8000/api/v1/anthropic-mode/state
+claude --version
+```
+
+預期：
+- `fallback_subscription_kept=false`
+- `mode="api"`
+- `rollback` endpoint 回傳「fallback disabled」類錯誤
+- `claude --version` 可成功或失敗都不影響 OmniSight API mode，但若仍保留 CLI，
+  operator 應在 evidence ticket 註明它只作 manual emergency tool，不是 runtime fallback。
 
 ---
 
@@ -277,6 +381,35 @@ curl -X POST http://localhost:8000/api/v1/anthropic-mode/finalize
    - `claude --version` 是否 timeout
    - 重新跑 `claude login` 即可
 
+### 7.7 Batch 結果超過 24h 未回來
+
+→ 先視為 R77 lane/SLA incident，不要重送同一批 100 task 造成重複 cost。
+   檢查：
+   - Anthropic batch status 是否仍 processing
+   - OmniSight `batch_runs` / `batch_results` 是否有 partial result
+   - callback 是否已為 failed result fan-out
+   - DLQ 是否有 submit / stream_results failure
+
+若 Anthropic 端仍 processing，等到 24h SLA 結束；若 OmniSight callback 已 failure，
+把該 batch id、failed custom_id list、DLQ entry id 貼進第 10 節 evidence ticket。
+
+### 7.8 Cost actual vs estimate 偏差 >= 10%
+
+→ 不要 finalize。先判斷偏差來源：
+   - pricing table 是否過期（看 `backend/tests/test_ab_cost_regression.py`）
+   - prompt caching 是否讓 actual 明顯低於 estimate（可接受，但要另列）
+   - retry / duplicate submit 是否把 actual 墊高
+   - realtime equivalent 是否誤把 batch discount 重複折扣
+
+修正前，第一個 100-task batch DoD 不算完成。
+
+### 7.9 API-mode worker env 不一致
+
+→ 若 `backend-a` 有 `OMNISIGHT_AB_API_MODE_ENABLED=true` 但 `backend-b` 沒有，
+   停止 finalize。修 `.env` / compose env 後重啟所有 replica，再重跑第 6 節
+   env snapshot。這個 gate 是 cross-worker consistency guard：每個 worker 從同一
+   deployed env 推導 API-mode lock；沒有 Redis/PG 協調，env 必須一致。
+
 ---
 
 ## 8. 監控 + alert 閾值建議
@@ -302,10 +435,111 @@ real usage）會持續顯示 Anthropic 相關指標。**新增**：
 
 ---
 
-## 10. Sign-off
+## 10. Evidence ticket template（每次實際切換必填）
+
+把以下 template 貼到 deploy / dogfood ticket。不要貼 API key、OAuth token、
+完整 request payload、或任何 customer secret。
+
+```markdown
+## Anthropic API migration evidence
+
+- Operator:
+- Environment: dev/staging/production/dogfood
+- Git ref:
+- Backend image:
+- Wizard start:
+- Wizard confirmed:
+- Rollback grace until:
+- Finalize executed: yes/no
+
+### External hard caps
+- Anthropic workspace:
+- Console monthly usage cap:
+- OmniSight daily cap:
+- OmniSight monthly cap:
+- Evidence screenshot/export:
+
+### API-mode smoke
+- smoke timestamp:
+- model:
+- tool path exercised:
+- cost_estimate_id:
+- cost_actual_usd:
+- rate-limit usage row:
+- DLQ entries:
+
+### First >=100 task batch
+- batch_run_id:
+- submitted_count:
+- succeeded_count:
+- errored_count:
+- estimated_cost_usd:
+- actual_cost_usd:
+- variance_pct:
+- realtime_equivalent_estimate_usd:
+- batch_discount_observed_pct:
+- p95_completion_hours:
+- batch_results_export_path:
+- anthropic_usage_export_path:
+- DLQ entries:
+
+### Seven-family velocity
+- evidence doc updated:
+- HD.1:
+- HD.4:
+- HD.5.13:
+- HD.18.6:
+- L4.1:
+- L4.3:
+- TODO routine:
+- API+Batch tasks/day:
+- subscription baseline tasks/day:
+- uplift:
+
+### 30-day observation
+- observation window:
+- monthly spend max:
+- daily spend max:
+- latency p50/p95:
+- error rate:
+- DLQ rate:
+- rollback triggered: yes/no
+- incidents:
+
+### Finalize lock
+- backend-a env snapshot:
+- backend-b env snapshot:
+- fallback_subscription_kept after finalize:
+- rollback endpoint after finalize:
+```
+
+## 11. Production status gate
+
+Repository status for this runbook row is **dev-only**: the SOP is complete
+and linked by ADR / evidence tests, but production is not considered active
+until an operator runs the ticket template above in the target environment.
+
+Promotion states:
+
+| Status | Flip when |
+|---|---|
+| `dev-only` | runbook / tests / docs merged only |
+| `deployed-inactive` | backend image rebuilt, env/API key caps prepared, API mode still off |
+| `deployed-active` | wizard confirmed, API-mode smoke green, first >=100 task batch recorded |
+| `deployed-observed` | 30-day grace clean, finalize lock applied, subscription fallback disabled |
+
+**Production status:** dev-only
+**Next gate:** deployed-active — operator executes this runbook in the
+dogfood/production-equivalent environment, attaches the API-mode smoke,
+first >=100 task batch, observed batch discount, cost variance, DLQ/latency
+metrics, and starts the 30-day grace observation before finalize.
+
+---
+
+## 12. Sign-off
 
 - **Owner**: Agent-software-beta + nanakusa sora
-- **Date**: 2026-05-02
-- **Status**: 已 ship、與 AB.1-AB.7 backend 配套
-- **Next review**: 第一次完整跑過 wizard 後（內部 dogfood 完成）+
+- **Date**: 2026-05-06
+- **Status**: repository DoD complete；production activation pending operator evidence
+- **Next review**: 第一次完整跑過 wizard、第一個 >=100 task batch 完成、以及
   第一個 30-day grace 結束時更新故障排除節

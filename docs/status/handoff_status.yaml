@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 498
+entry_count: 499
 status_counts:
-  dev-only: 488
+  dev-only: 489
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4637,3 +4637,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-active — operator 依 runbook 啟動 API mode，提交第一個 >=100 task batch，記錄 actual cost within 10% of estimate、observed
     batch discount、DLQ rate，並通過 30-day fallback-disable gate。
+- id: 2026-05-06--ab-dod-runbook
+  header_line: 47724
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: AB.DOD.Runbook 完工
+  production_status: dev-only
+  next_gate: deployed-active — operator 依 runbook 在 dogfood/production-equivalent 環境切 API mode，提交第一個 >=100 task batch，附上 cost
+    variance、observed discount、DLQ/latency metrics，並啟動 30-day grace observation。
