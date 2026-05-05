@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 473
+entry_count: 474
 status_counts:
-  dev-only: 463
+  dev-only: 464
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4404,3 +4404,12 @@ entries:
   next_gate: deployed-active — 發佈 immutable `omnisight-proxy` release image 後，在第一個 self-hosted / air-gapped staging bundle
     記錄 GHCR digest、customer mirror digest、`omnisight-proxy-${OMNISIGHT_IMAGE_TAG}.tar` provenance、local backend heartbeat/audit
     smoke 與 no hosted fallback evidence。
+- id: 2026-05-06--ks-dod-phase3-zero-trust
+  header_line: 47436
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: null
+  title: KS.DOD.Phase3.zero-trust 完工
+  production_status: dev-only
+  next_gate: deployed-active — 第一個 Tier 3 staging/customer cutover 時實際關閉或阻斷 customer proxy，確認 SaaS 回 BYOGProxyUnavailable/等價
+    BYOG error、provider egress logs 無 direct call，再把 smoke evidence 附到 customer ticket。

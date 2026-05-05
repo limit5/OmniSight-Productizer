@@ -82,6 +82,8 @@ def test_byog_upgrade_runbook_requires_audit_split_and_zero_trust() -> None:
         "omnisight audit metadata contains only time",
         "no prompt or response payload appears in saas logs",
         "do not silently fall back to direct provider egress",
+        "proxy-unreachable no-fallback smoke returned a byog error",
+        "showed no direct provider egress",
         "zero-trust exit boundary",
     ]
     missing = [phrase for phrase in required if phrase not in body]
