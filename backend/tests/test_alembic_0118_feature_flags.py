@@ -56,6 +56,11 @@ class TestMigrationFileStructure:
         assert "DEFAULT 'disabled'" in m0118._PG_CREATE_TABLE
         assert "DEFAULT 'disabled'" in m0118._SQLITE_CREATE_TABLE
 
+    def test_tier_check_declared(self, m0118) -> None:
+        assert m0118._TIERS_SQL == "'debug','dogfood','preview','release','runtime'"
+        assert "CHECK (tier IN (" in m0118._PG_CREATE_TABLE
+        assert "CHECK (tier IN (" in m0118._SQLITE_CREATE_TABLE
+
     def test_created_and_expiry_timestamp_dialect_shape(self, m0118) -> None:
         assert "expires_at TIMESTAMPTZ" in m0118._PG_CREATE_TABLE
         assert "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()" in (
@@ -117,6 +122,26 @@ def test_sqlite_state_check_rejects_invalid_state(m0118) -> None:
                 "flag_name": "wp.registry.invalid-state",
                 "tier": "preview",
                 "state": "paused",
+                "owner": "platform",
+            },
+        )
+
+
+def test_sqlite_tier_check_rejects_invalid_tier(m0118) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(m0118._SQLITE_CREATE_TABLE)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO feature_flags (
+                flag_name, tier, state, owner
+            ) VALUES (:flag_name, :tier, :state, :owner)
+            """,
+            {
+                "flag_name": "wp.registry.invalid-tier",
+                "tier": "beta",
+                "state": "disabled",
                 "owner": "platform",
             },
         )

@@ -7,8 +7,8 @@ those later steps one durable source of truth and reserves the generic
 ``audit_log`` namespace they must write when flag rows change.
 
 * ``flag_name`` -- stable app-generated flag key and table primary key.
-* ``tier`` -- deployment tier label.  The exact five-tier definition is
-  intentionally left to WP.7.2; this row stores the label durably.
+* ``tier`` -- deployment tier label.  WP.7.2 defines and constrains the
+  exact five legal values: debug / dogfood / preview / release / runtime.
 * ``state`` -- global state seed used by later resolution code.
 * ``expires_at`` -- optional expiry timestamp for later CI enforcement.
 * ``owner`` -- accountable team / operator for review and cleanup.
@@ -69,12 +69,14 @@ depends_on = None
 
 
 _STATES_SQL = "'disabled','enabled'"
+_TIERS_SQL = "'debug','dogfood','preview','release','runtime'"
 
 
 _PG_CREATE_TABLE = (
     "CREATE TABLE IF NOT EXISTS feature_flags (\n"
     "    flag_name  TEXT PRIMARY KEY,\n"
-    "    tier       TEXT NOT NULL,\n"
+    "    tier       TEXT NOT NULL\n"
+    f"               CHECK (tier IN ({_TIERS_SQL})),\n"
     "    state      TEXT NOT NULL DEFAULT 'disabled'\n"
     f"               CHECK (state IN ({_STATES_SQL})),\n"
     "    expires_at TIMESTAMPTZ,\n"
@@ -86,7 +88,8 @@ _PG_CREATE_TABLE = (
 _SQLITE_CREATE_TABLE = (
     "CREATE TABLE IF NOT EXISTS feature_flags (\n"
     "    flag_name  TEXT PRIMARY KEY,\n"
-    "    tier       TEXT NOT NULL,\n"
+    "    tier       TEXT NOT NULL\n"
+    f"               CHECK (tier IN ({_TIERS_SQL})),\n"
     "    state      TEXT NOT NULL DEFAULT 'disabled'\n"
     f"               CHECK (state IN ({_STATES_SQL})),\n"
     "    expires_at TEXT,\n"

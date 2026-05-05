@@ -573,7 +573,8 @@ CREATE TABLE IF NOT EXISTS tenants (
 -- entity_kind='feature_flag'; this table is the durable source of truth.
 CREATE TABLE IF NOT EXISTS feature_flags (
     flag_name  TEXT PRIMARY KEY,
-    tier       TEXT NOT NULL,
+    tier       TEXT NOT NULL
+               CHECK (tier IN ('debug','dogfood','preview','release','runtime')),
     state      TEXT NOT NULL DEFAULT 'disabled'
                CHECK (state IN ('disabled','enabled')),
     expires_at TEXT,
