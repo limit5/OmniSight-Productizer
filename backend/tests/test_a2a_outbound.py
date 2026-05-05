@@ -17,6 +17,9 @@ from backend.a2a.client import (
     A2AStreamEvent,
     A2ATimeout,
 )
+from backend.agents.external_agent_registry import ExternalAgentEndpoint
+from backend.agents.nodes import external_agent_node_factory
+from backend.agents.state import GraphState, ToolResult
 
 
 BASE_URL = "https://remote-agent.example.com"
@@ -267,3 +270,139 @@ async def test_cancellation_propagates_without_opening_circuit() -> None:
         await client.invoke("hal", {"message": "cancel"})
 
     assert circuit_breaker.is_open(TENANT_ID, "a2a", client.circuit_fingerprint) is False
+
+
+class _FakeExternalAgentClient:
+    def __init__(self, payload: dict):
+        self.payload = payload
+        self.calls: list[tuple[str, dict]] = []
+
+    async def invoke(self, agent_name: str, payload: dict):
+        self.calls.append((agent_name, payload))
+        return type("_Result", (), {"payload": self.payload})()
+
+
+class _FakeExternalAgentRegistry:
+    def __init__(self, client: _FakeExternalAgentClient, *, bearer_token: str = "tok-a2a"):
+        self.endpoint = ExternalAgentEndpoint(
+            agent_id="threat-intel",
+            display_name="Threat Intel",
+            base_url=BASE_URL,
+            agent_name="intel",
+        )
+        self.client = client
+        self.bearer_token = bearer_token
+
+    async def get_endpoint(self, agent_id: str, *, require_enabled: bool = False):
+        assert agent_id == "threat-intel"
+        assert require_enabled is True
+        return self.endpoint
+
+    async def build_client(
+        self,
+        agent_id: str,
+        *,
+        tenant_id: str,
+        bearer_token: str = "",
+    ):
+        assert agent_id == "threat-intel"
+        assert tenant_id == TENANT_ID
+        assert bearer_token == self.bearer_token
+        return self.client
+
+
+@pytest.mark.asyncio
+async def test_external_agent_node_invokes_a2a_and_writes_tool_results(monkeypatch) -> None:
+    events: list[tuple[str, str, str, bool | None]] = []
+    client = _FakeExternalAgentClient({"status": "completed", "answer": "ioc enriched"})
+    registry = _FakeExternalAgentRegistry(client)
+
+    def _capture_tool_progress(tool_name, phase, output="", **extra):
+        events.append((tool_name, phase, output, extra.get("success")))
+
+    monkeypatch.setattr("backend.agents.nodes.emit_tool_progress", _capture_tool_progress)
+
+    node = external_agent_node_factory(
+        "threat-intel",
+        registry=registry,
+        tenant_id=TENANT_ID,
+        bearer_token="tok-a2a",
+    )
+    update = await node(
+        GraphState(
+            user_command="enrich 1.2.3.4",
+            task_id="task-a2a",
+            routed_to="validator",
+            tool_results=[
+                ToolResult(tool_name="ioc_extract", output="1.2.3.4"),
+            ],
+        )
+    )
+
+    assert client.calls == [
+        (
+            "intel",
+            {
+                "command": "enrich 1.2.3.4",
+                "task_id": "task-a2a",
+                "routed_to": "validator",
+                "secondary_routes": [],
+                "workspace_path": None,
+                "tool_results": [
+                    {
+                        "tool_name": "ioc_extract",
+                        "output": "1.2.3.4",
+                        "success": True,
+                    }
+                ],
+            },
+        )
+    ]
+    assert update["tool_results"] == [
+        ToolResult(
+            tool_name="external_agent:threat-intel",
+            output='{"answer": "ioc enriched", "status": "completed"}',
+            success=True,
+        )
+    ]
+    assert update["messages"][0].content == '{"answer": "ioc enriched", "status": "completed"}'
+    assert events[0][:2] == ("external_agent:threat-intel", "start")
+    assert events[-1] == (
+        "external_agent:threat-intel",
+        "done",
+        '{"answer": "ioc enriched", "status": "completed"}',
+        True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_agent_node_marks_failed_a2a_status_as_tool_error(monkeypatch) -> None:
+    events: list[tuple[str, str, str, bool | None]] = []
+    client = _FakeExternalAgentClient({"status": "failed", "last_error": "denied"})
+    registry = _FakeExternalAgentRegistry(client, bearer_token="")
+
+    monkeypatch.setattr(
+        "backend.agents.nodes.emit_tool_progress",
+        lambda tool_name, phase, output="", **extra: events.append(
+            (tool_name, phase, output, extra.get("success"))
+        ),
+    )
+
+    node = external_agent_node_factory(
+        "threat-intel",
+        registry=registry,
+        tenant_id=TENANT_ID,
+    )
+    update = await node(GraphState(user_command="triage cve"))
+
+    assert update["tool_results"][0].tool_name == "external_agent:threat-intel"
+    assert update["tool_results"][0].success is False
+    assert update["tool_results"][0].output == (
+        '{"last_error": "denied", "status": "failed"}'
+    )
+    assert events[-1] == (
+        "external_agent:threat-intel",
+        "error",
+        '{"last_error": "denied", "status": "failed"}',
+        False,
+    )
