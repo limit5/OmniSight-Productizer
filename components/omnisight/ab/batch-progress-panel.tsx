@@ -26,6 +26,7 @@ import {
   type DispatcherStats,
   formatDateRelative,
 } from "./types"
+import { Block } from "../block"
 
 const STATUS_COLOR: Record<BatchRunStatus, string> = {
   pending: "bg-gray-200 text-gray-700",
@@ -74,10 +75,14 @@ export function BatchProgressPanel(props: BatchProgressPanelProps): JSX.Element 
           {runs.map((run) => {
             const open = !!expanded[run.batch_run_id]
             return (
-              <li
+              <Block
+                as="li"
                 key={run.batch_run_id}
                 data-testid={`batch-run-row-${run.batch_run_id}`}
-                className="px-3 py-2"
+                kind="batch_dispatch.run"
+                status={run.status}
+                tone={run.error_count > 0 || run.status === "failed" ? "danger" : "neutral"}
+                className="rounded-none border-0 border-b border-gray-200 bg-transparent px-3 py-2 last:border-b-0"
               >
                 <button
                   type="button"
@@ -103,7 +108,7 @@ export function BatchProgressPanel(props: BatchProgressPanelProps): JSX.Element 
                 {open && (
                   <BatchRunDetail run={run} onCancel={onCancel} />
                 )}
-              </li>
+              </Block>
             )
           })}
         </ul>
@@ -176,7 +181,11 @@ function BatchRunDetail({
   ]
   const inFlight = run.status === "pending" || run.status === "submitted"
   return (
-    <div className="mt-2 space-y-2 pl-6 text-xs text-gray-700">
+    <Block
+      kind="batch_dispatch.run_detail"
+      status={run.status}
+      className="mt-2 space-y-2 border-transparent bg-transparent p-0 pl-6 text-xs text-gray-700"
+    >
       <dl className="grid grid-cols-4 gap-2">
         {counts.map((c) => (
           <div key={c.label}>
@@ -217,7 +226,7 @@ function BatchRunDetail({
           Cancel batch
         </button>
       )}
-    </div>
+    </Block>
   )
 }
 

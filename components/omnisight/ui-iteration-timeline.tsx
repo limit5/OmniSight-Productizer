@@ -61,6 +61,7 @@ import {
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Block } from "./block"
 
 // ─── Public shapes ─────────────────────────────────────────────────────────
 
@@ -664,11 +665,14 @@ function IterationDetailPanel({
   const hasScreenshot = typeof snapshot.screenshotSrc === "string" && snapshot.screenshotSrc.length > 0
 
   return (
-    <aside
+    <Block
+      as="aside"
       data-testid="ui-iteration-timeline-detail"
       data-snapshot-id={snapshot.id}
       aria-label={`Iteration ${index + 1} detail`}
-      className="flex flex-col gap-3 rounded-md border border-border bg-background/80 p-3"
+      kind="ui_iteration.detail"
+      status="selected"
+      className="flex flex-col gap-3 rounded-md border-border bg-background/80 p-3"
     >
       <header className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
@@ -734,9 +738,12 @@ function IterationDetailPanel({
       )}
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <figure
+        <Block
+          as="figure"
           data-testid="ui-iteration-timeline-detail-preview"
-          className="flex min-h-0 flex-col gap-1 rounded-sm border border-border bg-muted/20 p-2"
+          kind="ui_iteration.preview"
+          status={hasScreenshot ? "ready" : "empty"}
+          className="flex min-h-0 flex-col gap-1 rounded-sm border-border bg-muted/20 p-2"
         >
           <figcaption className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             <Camera className="size-3" aria-hidden="true" />
@@ -757,11 +764,13 @@ function IterationDetailPanel({
               (no screenshot available)
             </span>
           )}
-        </figure>
+        </Block>
 
-        <div
+        <Block
           data-testid="ui-iteration-timeline-detail-diff"
-          className="flex min-h-0 flex-col gap-1 rounded-sm border border-border bg-muted/20 p-2"
+          kind="ui_iteration.diff"
+          status={snapshot.diff ? "ready" : "empty"}
+          className="flex min-h-0 flex-col gap-1 rounded-sm border-border bg-muted/20 p-2"
         >
           <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             <span className="flex items-center gap-1">
@@ -804,9 +813,9 @@ function IterationDetailPanel({
               (no code changes)
             </span>
           )}
-        </div>
+        </Block>
       </div>
-    </aside>
+    </Block>
   )
 }
 

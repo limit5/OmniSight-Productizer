@@ -36,6 +36,7 @@ import {
 } from "lucide-react"
 import { subscribeEvents, fetchTurnHistory, type TurnCompletePayload } from "@/lib/api"
 import { getModelInfo } from "./agent-matrix-wall"
+import { Block } from "./block"
 
 const RING_BUFFER_SIZE = 100
 const LINE5_MAX_CHARS = 80
@@ -899,23 +900,27 @@ function TurnDetailDrawer({
           </div>
 
           {!hasMessages && (
-            <div
+            <Block
               data-testid="turn-detail-messages-placeholder"
-              className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40 px-3 py-4 font-mono text-[10px] text-[var(--muted-foreground)]"
+              kind="turn.message.placeholder"
+              status="waiting"
+              className="rounded-sm border-[var(--border)]/60 bg-[var(--secondary)]/40 px-3 py-4 font-mono text-[10px] text-[var(--muted-foreground)]"
             >
               Waiting for <code className="text-[var(--foreground)]">turn.complete</code> event — the
               backend checkbox that carries full message bodies + per-message token attribution has not shipped
               yet. Once it does, this section will render system / user / assistant / tool messages for this turn.
-            </div>
+            </Block>
           )}
 
           {messagesEmpty && (
-            <div
+            <Block
               data-testid="turn-detail-messages-empty"
-              className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40 px-3 py-4 font-mono text-[10px] text-[var(--muted-foreground)]"
+              kind="turn.message.empty"
+              status="empty"
+              className="rounded-sm border-[var(--border)]/60 bg-[var(--secondary)]/40 px-3 py-4 font-mono text-[10px] text-[var(--muted-foreground)]"
             >
               No messages recorded for this turn.
-            </div>
+            </Block>
           )}
 
           {hasMessages && !messagesEmpty && (
@@ -923,11 +928,13 @@ function TurnDetailDrawer({
               {messages!.map((msg, idx) => {
                 const style = ROLE_STYLES[msg.role]
                 return (
-                  <div
+                  <Block
                     key={`${msg.role}-${idx}`}
                     data-testid="turn-detail-message"
                     data-role={msg.role}
-                    className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40"
+                    kind="turn.message"
+                    status={msg.role}
+                    className="rounded-sm border-[var(--border)]/60 bg-[var(--secondary)]/40 p-0"
                   >
                     <div className="flex items-center justify-between px-2 py-1 border-b border-[var(--border)]/40">
                       <span
@@ -961,7 +968,7 @@ function TurnDetailDrawer({
                     >
                       {msg.content}
                     </pre>
-                  </div>
+                  </Block>
                 )
               })}
               <div
@@ -992,26 +999,31 @@ function TurnDetailDrawer({
           </div>
 
           {renderedTools.length === 0 && (
-            <div
+            <Block
               data-testid="turn-detail-tools-empty"
-              className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40 px-3 py-3 font-mono text-[10px] text-[var(--muted-foreground)]"
+              kind="turn.tool.empty"
+              status={turn.toolCallCount === 0 ? "empty" : "waiting"}
+              className="rounded-sm border-[var(--border)]/60 bg-[var(--secondary)]/40 px-3 py-3 font-mono text-[10px] text-[var(--muted-foreground)]"
             >
               {turn.toolCallCount === 0
                 ? "No tools invoked on this turn."
                 : hasExplicitTools
                   ? "No tool call details recorded."
                   : "Waiting for turn.complete event — tool call arguments and results will appear here once the backend emits them."}
-            </div>
+            </Block>
           )}
 
           {renderedTools.length > 0 && (
             <div className="space-y-2">
               {renderedTools.map((tc, idx) => (
-                <div
+                <Block
                   key={`${tc.name}-${idx}`}
                   data-testid="turn-detail-tool-call"
                   data-success={tc.success ? "true" : "false"}
-                  className="rounded-sm border border-[var(--border)]/60 bg-[var(--secondary)]/40"
+                  kind="turn.tool"
+                  status={tc.success ? "ok" : "failed"}
+                  tone={tc.success ? "success" : "danger"}
+                  className="rounded-sm border-[var(--border)]/60 bg-[var(--secondary)]/40 p-0"
                 >
                   <div className="flex items-center gap-2 px-2 py-1 border-b border-[var(--border)]/40">
                     {tc.success ? (
@@ -1063,7 +1075,7 @@ function TurnDetailDrawer({
                       </pre>
                     </div>
                   )}
-                </div>
+                </Block>
               ))}
             </div>
           )}

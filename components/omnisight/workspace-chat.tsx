@@ -61,6 +61,7 @@ import {
 import { useOptionalWorkspaceType } from "@/components/omnisight/workspace-context"
 import { useDraftPersistence } from "@/hooks/use-draft-persistence"
 import { useDraftRestore } from "@/hooks/use-draft-restore"
+import { Block } from "./block"
 
 // ─── Public shapes ─────────────────────────────────────────────────────────
 
@@ -455,12 +456,15 @@ function ChatPreviewViteError({
     ? "mt-2 flex flex-col gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/5 px-2 py-1.5 text-[12px]"
     : "mt-2 flex flex-col gap-1 rounded-md border border-amber-500/40 bg-amber-500/5 px-2 py-1.5 text-[12px]"
   return (
-    <div
+    <Block
       data-testid={`workspace-chat-message-vite-error-${messageId}`}
       data-status={trace.status}
       data-workspace-id={trace.workspaceId}
       data-error-class={trace.errorClass ?? ""}
       data-error-signature={trace.errorSignature ?? ""}
+      kind="workspace_chat.vite_error"
+      status={trace.status}
+      tone={isResolved ? "success" : "warning"}
       className={containerCls}
     >
       <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
@@ -491,7 +495,7 @@ function ChatPreviewViteError({
           {typeof trace.sourceLine === "number" ? `:${trace.sourceLine}` : null}
         </div>
       ) : null}
-    </div>
+    </Block>
   )
 }
 
@@ -522,9 +526,12 @@ function ChatPreviewNextSteps({
   onPickOption?: (slashCommand: string) => void
 }) {
   return (
-    <div
+    <Block
       data-testid={`workspace-chat-message-next-steps-${messageId}`}
       data-workspace-id={steps.workspaceId}
+      kind="workspace_chat.next_steps"
+      status="advisory"
+      tone="info"
       className="mt-2 flex flex-col gap-1 rounded-md border border-sky-500/40 bg-sky-500/5 px-2 py-1.5 text-[12px]"
     >
       <div
@@ -571,7 +578,7 @@ function ChatPreviewNextSteps({
           </li>
         ))}
       </ul>
-    </div>
+    </Block>
   )
 }
 
@@ -922,13 +929,16 @@ export function WorkspaceChat({
           </li>
         ) : (
           log.map((m) => (
-            <li
+            <Block
+              as="li"
               key={m.id}
               data-testid={`workspace-chat-message-${m.id}`}
               data-role={m.role}
               data-pending={m.pending ? "true" : "false"}
+              kind="workspace_chat.message"
+              status={m.pending ? "pending" : m.role}
               className={cn(
-                "flex flex-col gap-1 rounded-md px-3 py-2 text-sm",
+                "flex flex-col gap-1 rounded-md border-transparent px-3 py-2 text-sm",
                 m.role === "user"
                   ? "bg-primary/10 text-foreground"
                   : m.role === "agent"
@@ -1001,7 +1011,7 @@ export function WorkspaceChat({
                   onPickOption={(slash) => setDraftText(slash)}
                 />
               ) : null}
-            </li>
+            </Block>
           ))
         )}
         <div ref={logEndRef} data-testid="workspace-chat-log-end" />
