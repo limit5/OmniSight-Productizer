@@ -830,27 +830,22 @@ for s, ticket in scored:
 # all candidates failed checks → idle, retry next polling cycle (default 30s)
 ```
 
-### Transition period — Review/Merge currently combined in operator (2026-05-06)
+### Transition period ended for Story Published automation (2026-05-07)
 
-**Acknowledged ADR-0003 gap** until Gerrit integration ships:
+OP-689 shipped the Gerrit/JIRA bridge for the final Story workflow hop:
+`backend/agents/gerrit_jira_bridge.py` consumes Gerrit `stream-events`,
+runs a startup catchup pass, and uses only JIRA transition id=7
+(`Deploy`) to move `Approved` tickets to `Published` after a develop
+merge.
 
-`auto-runner-jira.py` MVP transitions ticket to `In Progress` then exits with a comment instructing the operator to push + advance the workflow. Currently no Gerrit push happens; codex commits land on `codex-work` or `feature/<key>-<slug>` branch in the worktree. The operator (with Claude assist) then performs:
+Remaining human/operator responsibility is Gerrit review approval:
 
 1. **Author review** — reads commit + tests + AC verification comment (posted by codex per the prompt, see §3 DoD)
-2. **Merge** — `git merge --no-ff <branch>` into local main + `git push origin main`
-3. **Workflow advancement** — JIRA transitions In Progress → Under Review → Approved → Published via REST API
+2. **Review** — human reviewer +2s in Gerrit UI per ADR 0003
+3. **Workflow advancement** — Gerrit/JIRA bridge transitions Approved → Published after merge
 
-All three roles collapsed into one operator pass. Per ADR 0003:
-- Reviewer must be a human distinct from author
-- AI bots may give +1 maximum (not +2)
-- Merge is automatic on +2 receipt, not a manual git operation
-
-This is **soft-violated** during transition. The operator's cognitive review substitutes for Gerrit's mechanical +2; Claude's git operations substitute for Gerrit's submit hook. Logged as `lessons-learned.md` L10. Tracked for resolution by [OP-247](https://soraapp.atlassian.net/browse/OP-247) META `meta:tooling` ticket — wire Gerrit integration into auto-runner-jira so codex pushes patchsets to `refs/for/develop`, Gerrit submit-hook drives JIRA transitions, and operator's role narrows to Reviewer (Gerrit UI +2).
-
-**Hard rule** until Gerrit lands:
-- Operator MUST manually verify each AC verification comment line before approving merge
-- Claude MUST NOT push without explicit operator instruction per merge
-- Any deviation requires META retrospective entry
+The bridge must not use transition id=4 (`Approve`). It only runs the
+terminal Deploy hop once the ticket is already in `Approved`.
 
 ### Pickup JQL prerequisites — reminder for runner implementations
 

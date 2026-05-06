@@ -250,7 +250,8 @@ def main() -> int:
     rc = _invoke_cli(AGENT_CLASS, prompt)
     if rc == 0:
         # Phase 1 of OP-247: auto-push to Gerrit + transition Under Review.
-        # Phase 3 (events-stream → Approved/Published) deferred.
+        # Phase 3 SHIPPED in OP-689; events-stream consumer:
+        # backend/agents/gerrit_jira_bridge.py.
         try:
             print(f"[runner] {snapshot.key} CLI returned 0; preparing Gerrit push...")
             # ensure_change_ids rebases onto sync_result.develop_sha (Phase 1.5 fix per L16),

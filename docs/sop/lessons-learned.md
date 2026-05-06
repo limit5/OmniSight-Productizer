@@ -32,6 +32,7 @@
 | 15 | 2026-05-06 | Worktree must have bot identity in `git config user.email/name` before agent commits; otherwise Gerrit rejects "email not registered" | OP-17 first auto-push run |
 | 16 | 2026-05-06 | Runner needs **per-ticket fresh-sync** from Gerrit develop — no carryover from prior tickets, no rebase onto local main | OP-17 worktree state confusion |
 | 17 | 2026-05-06 | `pre_pickup_ok` must check live_state in **worktree cwd**, not main repo cwd; sync runs first so checks see fresh state | OP-18 first-launch failed pre-pickup on stale main repo |
+| 18 | 2026-05-07 | Event consumers must combine stream handling with startup catchup and idempotent terminal-state checks | OP-689 Gerrit/JIRA bridge |
 
 ---
 
@@ -317,6 +318,18 @@ Sync now runs BEFORE pre-pickup, so when pre-pickup queries the live state it se
 **Verification**: 7 new tests in `test_live_state_check.py` + `test_jira_dispatch.py`. Pinned that `evaluate(cwd=tmp)` resolves `file_exists` against tmp; `evaluate(cwd=None)` keeps REPO_ROOT default. Pinned `pre_pickup_ok` signature. Empirical: OP-18 retry after the merge fix (before this refactor) succeeded — but ONLY because operator manually merged `origin/develop` into local main. After this refactor, that manual step is unnecessary.
 
 **Generalisation**: When tooling has multiple file-system "vantage points" (runner host, agent worktree, Gerrit develop, GitHub mirror, GitLab mirror), every check needs to specify which vantage it queries. Defaulting to "the runner's cwd" is correct for runner self-introspection but wrong for "what's the agent's actual workspace state". The cwd parameter makes this explicit, bypasses the silent ambiguity.
+
+---
+
+## Lesson 18 — Stream consumers need catchup plus idempotency (2026-05-07)
+
+**Situation**: OP-19 stayed in `Approved` for hours after operator +2 because the interactive session that previously handled ad-hoc JIRA advancement had ended. Gerrit merge state existed, but there was no long-running consumer to translate `change-merged` into JIRA `Published`.
+
+**Fix**: OP-689 added a stateless Gerrit `stream-events` consumer with a startup catchup pass and per-ticket status gate. The bridge only uses transition id=7 (`Deploy`) and first checks JIRA state, so duplicate stream/catchup races become harmless and the daemon cannot perform the ADR 0003 `Approve` hop.
+
+**Verification**: `backend/tests/test_gerrit_jira_bridge.py` covers startup catchup, stream merge handling, malformed events, duplicate/multi-ticket protection, reconnect, auth failure, JIRA retry classes, and transition id drift guard.
+
+**Generalisation**: Event-driven automation that represents terminal workflow state should never rely on the stream alone. Pair stream consumption with catchup from source-of-truth state, make the terminal transition idempotent, and make authority boundaries explicit in tests.
 
 ---
 

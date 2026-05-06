@@ -211,7 +211,7 @@ TRANSITION_IDS = {
     "to_in_progress": "21",      # JP locale: "進行中"
     "back_to_todo": "11",        # JP locale: "To Do"
     "to_under_review": "3",      # "Submit for Review" — In Progress → Under Review
-    # approved / published / archived: covered by gerrit_jira_bridge.py (deferred follow-up)
+    "to_published": "7",         # "Deploy" — Approved → Published; bridge-only per ADR 0003
 }
 
 
@@ -467,17 +467,16 @@ def transition_to_under_review(
 ) -> None:
     """JIRA In Progress → Under Review, with Gerrit URL in a comment.
 
-    Operator (or future events-stream consumer) handles +2 → Approved
-    and submit → Published transitions.
+    Operator handles +2 → Approved. OP-689 ships the events-stream
+    consumer that handles Gerrit submit → Published.
     """
     add_comment(
         client, key,
         (
             f"[runner-pushed-to-gerrit] Patchset on Gerrit: {gerrit_change_url}\n\n"
             f"Reviewer: please +2 in Gerrit UI. Gerrit submit-rule will replicate "
-            f"to GitLab/GitHub on merge. Operator: transition this ticket "
-            f"Approved → Published manually until OP-247 Phase 3 (events-stream "
-            f"consumer) ships."
+            f"to GitLab/GitHub on merge. The OP-689 Gerrit/JIRA bridge "
+            f"transitions Approved → Published after the develop merge."
         ),
     )
     _request(client, "POST", f"/issue/{key}/transitions", {

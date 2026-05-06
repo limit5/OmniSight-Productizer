@@ -1,0 +1,31 @@
+; systemd unit for the Gerrit stream-events → JIRA Published bridge.
+;
+; Install:
+;   sudo cp deploy/systemd/gerrit-jira-bridge.service /etc/systemd/system/
+;   # Edit USER_HOME / USERNAME placeholders below for your install.
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now gerrit-jira-bridge.service
+
+[Unit]
+Description=OmniSight Gerrit/JIRA bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=USERNAME
+WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
+Environment=PYTHONPATH=/home/USER_HOME/work/sora/OmniSight-Productizer
+ExecStart=/bin/sh -c 'exec $${OMNISIGHT_PYTHON:-python3} scripts/run_gerrit_jira_bridge.py --agent-class subscription-claude'
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/home/USER_HOME/.config/omnisight
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
