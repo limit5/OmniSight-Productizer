@@ -1,5 +1,35 @@
 # Scripts
 
+<<<<<<< PATCH SET (002e85da2f7d12c2af3ceafdec52e21a48ee61a6 [OP-688] Add topo submit order helper)
+## topo-submit-order.py
+
+Suggests a safe Gerrit submit order for batched JIRA approvals:
+
+```bash
+python3 scripts/topo-submit-order.py
+python3 scripts/topo-submit-order.py 'status = "Approved" AND assignee in (codex-bot, claude-bot)'
+python3 scripts/topo-submit-order.py --fixture synthetic-3
+```
+
+The default JQL is:
+
+```text
+status = "Under Review" AND assignee in (codex-bot, claude-bot)
+```
+
+The script reads matching OP tickets from JIRA, extracts the runner-posted
+Gerrit change URL, fetches each current patchset diff, builds a file-overlap
+graph, and prints an ordered submit list with rationale. Pairs that touch the
+same file and overlapping changed line ranges are flagged as:
+
+```text
+MANUAL REBASE REQUIRED
+```
+
+By default the script is idempotent and read-only. `--apply` creates a
+temporary local branch, cherry-picks the ordered patchset commits, and reports
+the first conflict point.
+=======
 ## `ship-pending.py`
 
 Manual Gerrit shipper for operator or interactive-Claude commits made
@@ -39,3 +69,4 @@ End-of-session use is intentionally manual: when `/loop` ends after
 operator or interactive-Claude commits landed directly on main, run the
 dry-run first, then the real command if the listed commits are the ones
 to ship. The script does not auto-push on its own.
+>>>>>>> BASE      (61fb8b8fd019c8709ffa609acf806efcabe21ee1 Merge "[OP-28] Add runtime cost estimate endpoint" into deve)
