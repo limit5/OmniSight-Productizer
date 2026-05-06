@@ -36,11 +36,12 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TODO_PATH = REPO_ROOT / "TODO.md"
 SCHEMA_PATH = REPO_ROOT / "config" / "agent_class_schema.yaml"
+BASELINE_PATH = REPO_ROOT / "config" / "agent_class_completed_epic_baseline.yaml"
 ASSIGNMENT_PATH = REPO_ROOT / "docs" / "adr" / "0008-agent-rpg-class-skill-leveling.md"
 
 CHECKBOX_RE = re.compile(r"^\s*-\s+\[(?P<state>[ xX])\](?P<agent>\[[A-Z]\])?\s+(?P<body>.*)$")
 CLASS_LABEL_RE = re.compile(r"\[class:(?P<value>[A-Za-z0-9_.-]+)\]")
-TASK_ID_RE = re.compile(r"\b(?P<task_id>[A-Z]{1,4}\d*(?:\.[A-Z0-9]+)+)\b")
+TASK_ID_RE = re.compile(r"\b(?P<task_id>W\d+[A-Z]|[A-Z]{1,4}\d*(?:\.[A-Z0-9]+)+)\b")
 WAVE_ID_RE = re.compile(r"\bW(?P<start>\d+)(?:\s*-\s*W?(?P<end>\d+))?\b")
 ASSIGNMENT_ROW_RE = re.compile(
     r"^\|\s*(?P<wave>[^|]+?)\s*\|\s*(?P<agent_class>`?[A-Za-z0-9_.-]+`?)\s*\|\s*(?P<why>[^|]+?)\s*\|$"
@@ -64,6 +65,15 @@ class AssignmentRule:
     agent_class: str
     why: str
     wave_ranges: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class CompletedEpicBaseline:
+    """One MP.W0.3 historical epic-to-agent-class seed."""
+
+    epic: str
+    task_prefixes: tuple[str, ...]
+    agent_class: str
 
 
 @dataclass(frozen=True)
@@ -159,6 +169,44 @@ def load_assignment_rules(
     return parse_assignment_rules(text, schema)
 
 
+def load_completed_epic_baselines(
+    schema: AgentClassSchema,
+    path: Path = BASELINE_PATH,
+) -> tuple[CompletedEpicBaseline, ...]:
+    """Load MP.W0.3 completed-epic agent_class seeds."""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except OSError:
+        return ()
+    if not isinstance(data, dict):
+        raise ValueError(f"baseline {path} did not parse as a mapping")
+    rows = data.get("completed_epic_baselines", [])
+    if not isinstance(rows, list):
+        raise ValueError("baseline completed_epic_baselines must be a list")
+    allowed = set(schema.allowed_values)
+    baselines: list[CompletedEpicBaseline] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"baseline row {index} must be a mapping")
+        epic = row.get("epic")
+        prefixes = row.get("task_prefixes")
+        agent_class = row.get("agent_class")
+        if not isinstance(epic, str) or not epic:
+            raise ValueError(f"baseline row {index} epic must be a non-empty string")
+        if not isinstance(prefixes, list) or not prefixes or not all(isinstance(v, str) and v for v in prefixes):
+            raise ValueError(f"baseline row {index} task_prefixes must be non-empty strings")
+        if not isinstance(agent_class, str) or agent_class not in allowed:
+            raise ValueError(f"baseline row {index} agent_class must be in schema allowed_values")
+        baselines.append(
+            CompletedEpicBaseline(
+                epic=epic,
+                task_prefixes=tuple(prefixes),
+                agent_class=agent_class,
+            )
+        )
+    return tuple(baselines)
+
+
 def iter_todo_items(text: str) -> Iterable[TodoItem]:
     """Yield TODO checkbox items whose first checkbox is open or done."""
     for line_no, raw_line in enumerate(text.splitlines(), start=1):
@@ -183,8 +231,13 @@ def infer_agent_class(
     item: TodoItem,
     rules: tuple[AssignmentRule, ...],
     schema: AgentClassSchema,
+    baselines: tuple[CompletedEpicBaseline, ...] = (),
 ) -> tuple[str, str]:
     """Return ``(suggested_class, source)`` for a TODO item."""
+    if item.state == "x" and item.task_id:
+        for baseline in baselines:
+            if any(item.task_id == prefix or item.task_id.startswith(f"{prefix}.") for prefix in baseline.task_prefixes):
+                return (baseline.agent_class, f"MPW0.3:{baseline.epic}")
     if not item.task_id or not item.task_id.startswith("W"):
         return (schema.unknown_value, "fallback:unassigned")
     m = re.match(r"W(?P<num>\d+)(?:\.|$)", item.task_id)
@@ -202,12 +255,13 @@ def find_label_gaps(
     items: Iterable[TodoItem],
     schema: AgentClassSchema,
     rules: tuple[AssignmentRule, ...],
+    baselines: tuple[CompletedEpicBaseline, ...] = (),
 ) -> list[Finding]:
     """Return missing or invalid ``[class:X]`` labels."""
     allowed = set(schema.allowed_values)
     findings: list[Finding] = []
     for item in items:
-        suggested, source = infer_agent_class(item, rules, schema)
+        suggested, source = infer_agent_class(item, rules, schema, baselines)
         if item.class_label is None:
             findings.append(
                 Finding(
@@ -242,16 +296,18 @@ def scan_todo(
     todo_path: Path = TODO_PATH,
     schema_path: Path = SCHEMA_PATH,
     assignment_path: Path = ASSIGNMENT_PATH,
+    baseline_path: Path = BASELINE_PATH,
 ) -> tuple[list[TodoItem], list[Finding], AgentClassSchema, tuple[AssignmentRule, ...]]:
     """Scan TODO.md and return items plus operator-action findings."""
     schema = load_schema(schema_path)
     rules = load_assignment_rules(schema, assignment_path)
+    baselines = load_completed_epic_baselines(schema, baseline_path)
     try:
         todo_text = todo_path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ValueError(f"could not read TODO file {todo_path}: {exc}") from exc
     items = list(iter_todo_items(todo_text))
-    findings = find_label_gaps(items, schema, rules)
+    findings = find_label_gaps(items, schema, rules, baselines)
     return (items, findings, schema, rules)
 
 
@@ -325,6 +381,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="ADR markdown path containing the Capability assignment table.",
     )
     parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=BASELINE_PATH,
+        help="MP.W0.3 completed-epic baseline YAML path.",
+    )
+    parser.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
@@ -342,6 +404,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             todo_path=args.todo,
             schema_path=args.schema,
             assignment_path=args.assignment,
+            baseline_path=args.baseline,
         )
     except ValueError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)

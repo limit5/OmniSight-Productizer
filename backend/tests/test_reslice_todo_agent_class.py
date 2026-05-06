@@ -40,15 +40,28 @@ ASSIGNMENT_TEXT = """\
 | W11 tests / docs | subscription-codex | mature pattern |
 """
 
+BASELINE_TEXT = """\
+schema_version: 1
+completed_epic_baselines:
+  - epic: BP.I
+    task_prefixes: [BP.I]
+    agent_class: subscription-codex
+  - epic: KS.2/KS.3
+    task_prefixes: [KS.2, KS.3]
+    agent_class: subscription-codex
+"""
 
-def _write_inputs(tmp_path: Path, todo_text: str) -> tuple[Path, Path, Path]:
+
+def _write_inputs(tmp_path: Path, todo_text: str) -> tuple[Path, Path, Path, Path]:
     todo = tmp_path / "TODO.md"
     schema = tmp_path / "agent_class_schema.yaml"
     assignment = tmp_path / "adr.md"
+    baseline = tmp_path / "baseline.yaml"
     todo.write_text(todo_text, encoding="utf-8")
     schema.write_text(SCHEMA_TEXT, encoding="utf-8")
     assignment.write_text(ASSIGNMENT_TEXT, encoding="utf-8")
-    return todo, schema, assignment
+    baseline.write_text(BASELINE_TEXT, encoding="utf-8")
+    return todo, schema, assignment, baseline
 
 
 class TestSchemaAndAssignment:
@@ -87,6 +100,64 @@ class TestSchemaAndAssignment:
             ("W11 tests / docs", "subscription-codex", ((11, 11),)),
         ]
 
+    def test_loads_completed_epic_baselines(self, tmp_path: Path) -> None:
+        baseline_path = tmp_path / "baseline.yaml"
+        baseline_path.write_text(BASELINE_TEXT, encoding="utf-8")
+        schema = reslicer.AgentClassSchema(
+            inline_label_prefix="class",
+            unknown_value="unassigned",
+            allowed_values=("subscription-codex", "api-anthropic", "unassigned"),
+        )
+
+        baselines = reslicer.load_completed_epic_baselines(schema, baseline_path)
+
+        assert [(b.epic, b.task_prefixes, b.agent_class) for b in baselines] == [
+            ("BP.I", ("BP.I",), "subscription-codex"),
+            ("KS.2/KS.3", ("KS.2", "KS.3"), "subscription-codex"),
+        ]
+
+    def test_completed_epic_baseline_rejects_unknown_class(self, tmp_path: Path) -> None:
+        baseline_path = tmp_path / "bad-baseline.yaml"
+        baseline_path.write_text(
+            BASELINE_TEXT.replace("agent_class: subscription-codex", "agent_class: typo", 1),
+            encoding="utf-8",
+        )
+        schema = reslicer.AgentClassSchema(
+            inline_label_prefix="class",
+            unknown_value="unassigned",
+            allowed_values=("subscription-codex", "api-anthropic", "unassigned"),
+        )
+
+        with pytest.raises(ValueError, match="agent_class"):
+            reslicer.load_completed_epic_baselines(schema, baseline_path)
+
+    def test_real_completed_epic_baseline_matches_schema(self) -> None:
+        schema = reslicer.load_schema()
+
+        baselines = reslicer.load_completed_epic_baselines(schema)
+
+        assert len(baselines) == 13
+        assert {b.agent_class for b in baselines} == {"subscription-codex"}
+        assert {prefix for b in baselines for prefix in b.task_prefixes} >= {
+            "BP.I",
+            "BP.H",
+            "BP.C",
+            "BP.N",
+            "BP.M",
+            "BP.Q",
+            "BP.L",
+            "BP.D",
+            "BP.W",
+            "BP.P",
+            "KS.2",
+            "KS.3",
+            "WP.2",
+            "WP.3",
+            "WP.5",
+            "WP.7",
+            "W1A",
+        }
+
 
 class TestTodoScan:
     def test_iter_todo_items_covers_open_done_and_agent_markers(self) -> None:
@@ -106,7 +177,7 @@ class TestTodoScan:
         ]
 
     def test_findings_include_missing_and_invalid_labels(self, tmp_path: Path) -> None:
-        todo, schema_path, assignment = _write_inputs(
+        todo, schema_path, assignment, baseline = _write_inputs(
             tmp_path,
             "\n".join([
                 "- [ ] W8.1 Build UI",
@@ -119,6 +190,7 @@ class TestTodoScan:
             todo_path=todo,
             schema_path=schema_path,
             assignment_path=assignment,
+            baseline_path=baseline,
         )
 
         assert len(items) == 3
@@ -128,25 +200,55 @@ class TestTodoScan:
         ]
 
     def test_non_w_task_without_label_falls_back_to_unassigned(self, tmp_path: Path) -> None:
-        todo, schema_path, assignment = _write_inputs(tmp_path, "- [ ] MP.W0.2 Helper\n")
+        todo, schema_path, assignment, baseline = _write_inputs(tmp_path, "- [ ] MP.W0.2 Helper\n")
 
         _items, findings, _schema, _rules = reslicer.scan_todo(
             todo_path=todo,
             schema_path=schema_path,
             assignment_path=assignment,
+            baseline_path=baseline,
         )
 
         assert findings[0].suggested_class == "unassigned"
         assert findings[0].suggestion_source == "fallback:unassigned"
 
+    def test_completed_epic_baseline_suggests_historical_class(self, tmp_path: Path) -> None:
+        todo, schema_path, assignment, baseline = _write_inputs(tmp_path, "- [x][G] BP.I.3 Hook integration\n")
+
+        _items, findings, _schema, _rules = reslicer.scan_todo(
+            todo_path=todo,
+            schema_path=schema_path,
+            assignment_path=assignment,
+            baseline_path=baseline,
+        )
+
+        assert [(f.task_id, f.suggested_class, f.suggestion_source) for f in findings] == [
+            ("BP.I.3", "subscription-codex", "MPW0.3:BP.I"),
+        ]
+
+    def test_completed_epic_baseline_does_not_override_open_rows(self, tmp_path: Path) -> None:
+        todo, schema_path, assignment, baseline = _write_inputs(tmp_path, "- [ ] BP.I.9 Future follow-up\n")
+
+        _items, findings, _schema, _rules = reslicer.scan_todo(
+            todo_path=todo,
+            schema_path=schema_path,
+            assignment_path=assignment,
+            baseline_path=baseline,
+        )
+
+        assert [(f.task_id, f.suggested_class, f.suggestion_source) for f in findings] == [
+            ("BP.I.9", "unassigned", "fallback:unassigned"),
+        ]
+
 
 class TestRenderingAndCli:
     def test_text_report_prompts_operator_with_line_and_suggestion(self, tmp_path: Path) -> None:
-        todo, schema_path, assignment = _write_inputs(tmp_path, "- [ ] W8.1 Build UI\n")
+        todo, schema_path, assignment, baseline = _write_inputs(tmp_path, "- [ ] W8.1 Build UI\n")
         items, findings, _schema, rules = reslicer.scan_todo(
             todo_path=todo,
             schema_path=schema_path,
             assignment_path=assignment,
+            baseline_path=baseline,
         )
 
         report = reslicer.render_text(findings, total_items=len(items), rules_count=len(rules))
@@ -155,7 +257,7 @@ class TestRenderingAndCli:
         assert "TODO.md:1: missing W8.1 -> [class:subscription-codex]" in report
 
     def test_cli_check_returns_one_when_findings_exist(self, tmp_path: Path) -> None:
-        todo, schema_path, assignment = _write_inputs(tmp_path, "- [ ] W8.1 Build UI\n")
+        todo, schema_path, assignment, baseline = _write_inputs(tmp_path, "- [ ] W8.1 Build UI\n")
 
         proc = subprocess.run(
             [
@@ -167,6 +269,8 @@ class TestRenderingAndCli:
                 str(schema_path),
                 "--assignment",
                 str(assignment),
+                "--baseline",
+                str(baseline),
                 "--check",
             ],
             cwd=str(REPO_ROOT),
@@ -178,7 +282,7 @@ class TestRenderingAndCli:
         assert "Operator actions needed: 1" in proc.stdout
 
     def test_cli_json_report_is_machine_readable(self, tmp_path: Path) -> None:
-        todo, schema_path, assignment = _write_inputs(tmp_path, "- [ ] W11.1 Guard\n")
+        todo, schema_path, assignment, baseline = _write_inputs(tmp_path, "- [ ] W11.1 Guard\n")
 
         proc = subprocess.run(
             [
@@ -190,6 +294,8 @@ class TestRenderingAndCli:
                 str(schema_path),
                 "--assignment",
                 str(assignment),
+                "--baseline",
+                str(baseline),
                 "--format",
                 "json",
             ],
