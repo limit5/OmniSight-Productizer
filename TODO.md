@@ -6116,11 +6116,11 @@ BP.E GraphRAG / Neo4j
 
 ### FX2.W1A — BLOCKERs cheap batch（codex 一次清，~1 day total）
 
-- [ ] FX2.D8.1 `.github/workflows/frontend-stale-detector.yml` — `branches: [main, master]` → `[main]`（Phase 1 sweep 漏的 1 個 CI workflow）
-- [ ] FX2.D9.1 `components/ui/button.tsx` — `size="icon"` variant 加 `min-h-[44px] min-w-[44px]`（WCAG AA click target）
-- [ ] FX2.D7.1 `HANDOFF.md:4899` — legacy "planning + audit doc landed" status normalise 成 canonical enum
-- [ ] FX2.D2.1 `components/omnisight/spec-template-editor.tsx` — 7 個 `as any` field-merging refactor 成 typed discriminated union
-- [ ] FX2.D9.4 `components/**/*.tsx` — focus-visible class sweep（補 130 omnisight components 中只有 8 個的覆蓋）
+- [x][G] FX2.D8.1 `.github/workflows/frontend-stale-detector.yml` — `branches: [main, master]` → `[main]`（Phase 1 sweep 漏的 1 個 CI workflow）
+- [x][G] FX2.D9.1 `components/ui/button.tsx` — `size="icon"` variant 加 `min-h-[44px] min-w-[44px]`（WCAG AA click target）
+- [x][G] FX2.D7.1 `HANDOFF.md:4899` — legacy "planning + audit doc landed" status normalise 成 canonical enum
+- [x][G] FX2.D2.1 `components/omnisight/spec-template-editor.tsx` — 7 個 `as any` field-merging refactor 成 typed discriminated union
+- [~][G] FX2.D9.4 `components/**/*.tsx` — focus-visible class sweep（補 130 omnisight components 中只有 8 個的覆蓋）
 - [ ] FX2.D4.3 `backend/auth.py` + `backend/routers/auth.py` — Q.2 new-device session TTL 從 8h 縮成 1h（fingerprint hit → force re-auth）
 
 ### FX2.W1B — BLOCKERs heavy batch（推薦 api-anthropic，後續單獨開）
@@ -6135,6 +6135,58 @@ BP.E GraphRAG / Neo4j
 - [ ] FX2.D6.1 `backend/tests/test_<module>.py` 寫 5 個關鍵 untested module（auth / bootstrap / db_pool / db_context / tenant_secrets）— pytest.ini §8.1 95% gate 模組
 - [ ] FX2.D6.2 BP.L marker auto-categorisation sweep（722→ goal 8000+ marked tests）
 - [ ] FX2.D9.3 ARIA label 47% → 80%+ 覆蓋；jsx-a11y rule 從 warn → error
+
+### FX2.D9.7 — OAuth 11-provider 完整實作（**CRITICAL — 所有 11 button 全壞**）
+
+> **2026-05-06 user 操作驗證發現**：所有 11 個 OAuth 登入 button (5 primary + 6 secondary) 點下去都回 `{"detail":"authentication required","path":"/api/v1/auth/oauth/<vendor>/authorize"}`。**根因：`AUTH_BASELINE_ALLOWLIST` 漏 `/api/v1/auth/oauth/`** — middleware 在進到 `oauth_authorize` handler 之前就 401 拒絕。**4 個應該 work 的 (google/github/microsoft/apple) 跟 7 個沒實作的 (discord/gitlab/bitbucket/slack/notion/salesforce/hubspot) 全部一起被擋。**
+>
+> **Scope**：完整的 11-provider OAuth login flow。Phase A allowlist fix 即刻解 4 個 supported provider；Phase B 加 7 個新 provider；Phase C UI polish。
+>
+> **依存**：AS.6.1 (`backend/security/oauth_login_handler.py`) 已 ship 4-provider 框架；新 7 個 provider 沿 frozenset + lookup_provider_credentials + userinfo extractor pattern。
+
+#### Phase A — 即刻解鎖（Tier S, ~30 min）
+
+- [ ] FX2.D9.7.0 `backend/auth_baseline.py:74` `AUTH_BASELINE_ALLOWLIST` 加 `/api/v1/auth/oauth/`（仿 OIDC 那條 `/api/v1/auth/oidc/`）— **解所有 11 button 的 401 死路**
+
+#### Phase B — 4 個 already-wired provider 端到端驗證（Tier M, 1 day）
+
+- [ ] FX2.D9.7.1 Google end-to-end test：`OMNISIGHT_OAUTH_GOOGLE_CLIENT_ID/SECRET` 配置文件化 + integration test（模擬 authorize → callback → session 建立）
+- [ ] FX2.D9.7.2 GitHub end-to-end test 同上
+- [ ] FX2.D9.7.3 Microsoft end-to-end test 同上
+- [ ] FX2.D9.7.4 Apple end-to-end test（含 id_token JWS unverify-decode quirk + 未來 JWKS verify follow-up TODO）
+
+#### Phase C — 7 個 new provider backend 實作（Tier L, ~5-7 days）
+
+每個 provider 的工作量：
+1. 加進 `SUPPORTED_PROVIDERS` frozenset
+2. `Settings`: `oauth_<vendor>_client_id` + `oauth_<vendor>_client_secret` 欄位 + env var hint
+3. `lookup_provider_credentials` 加 vendor 分支
+4. authorize / token / userinfo endpoint URL constants
+5. 標準 OAuth 2.0 scope list（取 email + name 最小集）
+6. userinfo extractor（subject / email / name 欄位映射；vendor-quirks 處理）
+7. ~10 contract tests（authorize URL build / token exchange / userinfo parse / error 路徑）
+
+- [ ] FX2.D9.7.5 **Discord** — 標準 OAuth2，scope `identify email`，userinfo `https://discord.com/api/users/@me`，subject = `id` field（snowflake string）
+- [ ] FX2.D9.7.6 **GitLab** — 標準 OAuth2 + OIDC，scope `read_user openid email profile`，userinfo `/oauth/userinfo`，subject = `sub`
+- [ ] FX2.D9.7.7 **Bitbucket** — 標準 OAuth2，scope `account email`，userinfo `https://api.bitbucket.org/2.0/user` + 額外 fetch `/user/emails` 拿主 email（**vendor quirk**：email 不在 user response 內）
+- [ ] FX2.D9.7.8 **Slack** — OAuth v2，scope `openid email profile`，**vendor quirk**：openid endpoint 是 `https://slack.com/api/openid.connect.userInfo`，response shape 跟標準不同（`sub` / `email` 在 root 沒 nested）
+- [ ] FX2.D9.7.9 **Notion** — OAuth 2.0，**vendor quirk**：access token response 直接含 user info（不需獨立 userinfo call）；token endpoint 用 Basic auth（client_id:client_secret base64）；scope 在授權時固定（沒 scope 參數）
+- [ ] FX2.D9.7.10 **Salesforce** — OAuth2 + OIDC，scope `id email profile openid`，userinfo `https://login.salesforce.com/services/oauth2/userinfo`（or sandbox URL），subject = `user_id`，**vendor quirk**：production / sandbox / community 分流 endpoint
+- [ ] FX2.D9.7.11 **HubSpot** — OAuth2，scope `oauth crm.objects.contacts.read`，userinfo `https://api.hubapi.com/integrations/v1/me`，**vendor quirk**：access token 用 Bearer 但需要 `Authorization: Bearer` 而非 `?access_token=` query param
+
+#### Phase D — UI polish + 監控（Tier S, ~3 hours）
+
+- [ ] FX2.D9.7.12 `app/login/page.tsx` + `lib/auth/oauth-providers.ts` — 加 supported flag (drift-guard 檢查 frontend list ⊆ backend SUPPORTED_PROVIDERS)，未配置 client_id/secret 的 provider 顯示 "Configure in Settings" disabled state（不再 silent 404）
+- [ ] FX2.D9.7.13 Settings → Auth providers UI panel 顯示 11 provider × (configured / not configured) 狀態 + 直連各 provider 的 OAuth app registration 文件 link
+- [ ] FX2.D9.7.14 `docs/operations/oauth-providers-setup.md` — 11 個 provider 的 OAuth app 申請 step-by-step（每家 console URL / redirect URI 設定 / scope 申請）
+- [ ] FX2.D9.7.15 audit log 加 `oauth_login_*` event family（initiated / success / failed_provider_not_configured / failed_callback_invalid 等）
+
+**估時**：~5-7 days 整段（Phase A 30 min unblocks immediately；Phase B 1 day verify；Phase C 5-7 days new providers；Phase D 3 hours polish）
+
+**Capability 分配**：
+- Phase A：subscription-codex（Tier S，30 min）
+- Phase B-D 多數 sub-task：subscription-codex（Tier M，1 codex pass 約 1 provider）
+- Phase C 比較複雜的（Slack v2 / Notion / Salesforce sandbox 分流）：可能要 api-anthropic 一次寫好
 
 ### FX2.W3 — DEBT（rolling, no hard deadline）
 
