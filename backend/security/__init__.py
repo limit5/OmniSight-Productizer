@@ -127,6 +127,13 @@ AS.1.4 (auth shared lib):
     silent skip per AS.0.8 §5 truth-table). TS twin lives at
     `templates/_shared/oauth-client/audit.ts`.
 
+FX2.D9.7.15 (OmniSight self-login audit bridge):
+  - oauth_login_audit — canonical `oauth_login_*` audit event family
+    for user-visible OAuth login button outcomes (initiated / success /
+    provider-not-configured / callback-invalid). Routes into
+    `backend.audit.log` as a best-effort troubleshooting trail alongside
+    the existing AS.1.4 forensic `oauth.login_*` rows.
+
 AS.2.1 (auth shared lib):
   - token_vault — per-user / per-provider OAuth credential at-rest
     encryption. KS.1.3 writes the KS.1.2 per-tenant DEK envelope and
@@ -355,6 +362,7 @@ from . import input_validation  # noqa: F401
 from . import llm_firewall  # noqa: F401
 from . import oauth_audit  # noqa: F401
 from . import oauth_client  # noqa: F401
+from . import oauth_login_audit  # noqa: F401
 from . import oauth_login_handler  # noqa: F401
 from . import oauth_refresh_hook  # noqa: F401
 from . import oauth_revoke  # noqa: F401
@@ -385,6 +393,7 @@ __all__ = [
     "looks_like_injection",
     "oauth_audit",
     "oauth_client",
+    "oauth_login_audit",
     "oauth_login_handler",
     "oauth_refresh_hook",
     "oauth_revoke",

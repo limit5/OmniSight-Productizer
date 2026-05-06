@@ -847,6 +847,7 @@ async def oauth_authorize(
     """
     from backend.security import oauth_login_handler as _olh
     from backend.security import oauth_audit as _oaudit
+    from backend.security import oauth_login_audit as _login_audit
 
     base_url = _oauth_resolve_redirect_base_url(request)
 
@@ -860,9 +861,31 @@ async def oauth_authorize(
             detail=f"oauth provider {provider!r} not supported",
         )
     except _olh.ProviderNotConfiguredError as exc:
+        _oauth_log_audit_safe(
+            lambda: _login_audit.emit_failure(
+                _login_audit.OAuthLoginFailureContext(
+                    provider=provider,
+                    reason="provider_not_configured",
+                    detail=str(exc),
+                )
+            ),
+            label="oauth_login_provider_not_configured",
+        )
         raise HTTPException(status_code=501, detail=str(exc))
     except _olh.SigningKeyUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+    _oauth_log_audit_safe(
+        lambda: _login_audit.emit_initiated(
+            _login_audit.OAuthLoginInitiatedContext(
+                provider=provider,
+                state=start.flow.state,
+                redirect_uri=start.flow.redirect_uri,
+                scope=start.flow.scope,
+            )
+        ),
+        label="oauth_login_initiated",
+    )
 
     # Audit: oauth.login_init (AS.1.4 forensic family). Best-effort
     # — failure shouldn't block the redirect.
@@ -917,6 +940,7 @@ async def oauth_callback(
     """
     from backend.security import oauth_login_handler as _olh
     from backend.security import oauth_audit as _oaudit
+    from backend.security import oauth_login_audit as _login_audit
     from backend.security.oauth_client import (
         StateMismatchError,
         StateExpiredError,
@@ -932,6 +956,17 @@ async def oauth_callback(
     def _emit_callback_failure(state_str: str, outcome: str, msg: str) -> None:
         """Emit oauth.login_callback (forensic) + auth.login_fail
         (rollup) for any callback failure mode."""
+        _oauth_log_audit_safe(
+            lambda: _login_audit.emit_failure(
+                _login_audit.OAuthLoginFailureContext(
+                    provider=provider,
+                    reason="callback_invalid",
+                    state=state_str or "",
+                    detail=msg,
+                )
+            ),
+            label="oauth_login_callback_invalid",
+        )
         _oauth_log_audit_safe(
             lambda: _oaudit.emit_login_callback(
                 _oaudit.LoginCallbackContext(
@@ -999,6 +1034,17 @@ async def oauth_callback(
             detail=f"oauth provider {provider!r} not supported",
         )
     except _olh.ProviderNotConfiguredError as exc:
+        _oauth_log_audit_safe(
+            lambda: _login_audit.emit_failure(
+                _login_audit.OAuthLoginFailureContext(
+                    provider=provider,
+                    reason="provider_not_configured",
+                    state=state,
+                    detail=str(exc),
+                )
+            ),
+            label="oauth_login_provider_not_configured",
+        )
         raise HTTPException(status_code=501, detail=str(exc))
     except _olh.SigningKeyUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -1115,6 +1161,14 @@ async def oauth_callback(
     )
 
     # ─── Audit emissions ──────────────────────────────────────────
+    _oauth_log_audit_safe(
+        lambda: _login_audit.emit_success(_login_audit.OAuthLoginSuccessContext(
+            provider=provider,
+            user_id=user.id,
+            state=state,
+        )),
+        label="oauth_login_success",
+    )
     _oauth_log_audit_safe(
         lambda: _oaudit.emit_login_callback(_oaudit.LoginCallbackContext(
             provider=provider,
