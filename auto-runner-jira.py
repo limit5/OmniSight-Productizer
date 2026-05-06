@@ -82,14 +82,14 @@ docs/sop/lessons-learned.md instead.
 Before you finish, post ONE final JIRA comment to ticket {key} listing
 each Acceptance Criteria item from the description with ✓ (verified)
 or ✗ (skipped/blocked, with reason). Each ✓ MUST cite concrete evidence
-— test name, file:line range, or commit sha. Vague evidence ("looks
+— test name, file:line range, or Gerrit Change-Id. Vague evidence ("looks
 right", "should work") is auto-rejected by the convention §3 DoD spirit
 and will be flagged in retrospective.
 
 Format:
 
   AC verification for {key}:
-  ✓ <AC item 1 paraphrased> — <test_name|file:Lstart-Lend|sha>
+  ✓ <AC item 1 paraphrased> — <test_name|file:Lstart-Lend|change-id>
   ✓ <AC item 2 paraphrased> — <evidence>
   ✗ <AC item N paraphrased> — <reason it could not be verified>
 

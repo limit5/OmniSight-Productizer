@@ -474,9 +474,9 @@ def transition_to_under_review(
         client, key,
         (
             f"[runner-pushed-to-gerrit] Patchset on Gerrit: {gerrit_change_url}\n\n"
-            f"Reviewer: please +2 in Gerrit UI. Gerrit submit-rule will replicate "
-            f"to GitLab/GitHub on merge. The OP-689 Gerrit/JIRA bridge "
-            f"transitions Approved → Published after the develop merge."
+            f"Operator: +2 in Gerrit. Once merged, the gerrit-jira-bridge daemon "
+            f"(`backend/agents/gerrit_jira_bridge.py`) will auto-transition "
+            f"Approved → Published within ~5s."
         ),
     )
     _request(client, "POST", f"/issue/{key}/transitions", {
