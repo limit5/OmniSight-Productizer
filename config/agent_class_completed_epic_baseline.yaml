@@ -1,0 +1,70 @@
+# MP.W0.3 — historical completed-epic agent_class baseline.
+#
+# This file is the machine-readable seed for MP.W2 cost-estimator baseline
+# data. Tier B runners must not edit TODO.md directly, so the re-slice helper
+# reads these rows to suggest the historical labels that an operator can apply
+# to the TODO source of truth.
+
+schema_version: 1
+label_key: agent_class
+source_schema: config/agent_class_schema.yaml
+default_agent_class: subscription-codex
+completed_epic_baselines:
+  - epic: BP.I
+    task_prefixes: [BP.I]
+    agent_class: subscription-codex
+    source: TODO BP.I completed rows with [G] marker
+  - epic: BP.H
+    task_prefixes: [BP.H]
+    agent_class: subscription-codex
+    source: TODO BP.H completed rows with [G] marker
+  - epic: BP.C
+    task_prefixes: [BP.C]
+    agent_class: subscription-codex
+    source: TODO BP.C completed rows with [G] marker
+  - epic: BP.N
+    task_prefixes: [BP.N]
+    agent_class: subscription-codex
+    source: MP.W0.3 historical completed epic list
+  - epic: BP.M
+    task_prefixes: [BP.M]
+    agent_class: subscription-codex
+    source: TODO BP.M completed rows with [G] marker
+  - epic: BP.Q
+    task_prefixes: [BP.Q]
+    agent_class: subscription-codex
+    source: TODO BP.Q completed rows with [G] marker
+  - epic: BP.L
+    task_prefixes: [BP.L]
+    agent_class: subscription-codex
+    source: TODO BP.L completed rows with [G] marker
+  - epic: BP.D
+    task_prefixes: [BP.D]
+    agent_class: subscription-codex
+    source: TODO BP.D completed rows with [G] marker
+  - epic: BP.W
+    task_prefixes: [BP.W]
+    agent_class: subscription-codex
+    source: MP.W0.3 historical completed epic list
+  - epic: BP.P
+    task_prefixes: [BP.P]
+    agent_class: subscription-codex
+    source: MP.W0.3 historical completed epic list
+  - epic: KS.2/KS.3
+    task_prefixes: [KS.2, KS.3]
+    agent_class: subscription-codex
+    source: TODO KS.2 and KS.3 completed rows with [G] marker
+  - epic: WP.3/WP.5/WP.2/WP.7
+    task_prefixes: [WP.3, WP.5, WP.2, WP.7]
+    agent_class: subscription-codex
+    source: TODO WP.3, WP.5, WP.7 completed rows and MP.W0.3 historical list
+  - epic: W1A
+    task_prefixes: [W1A]
+    agent_class: subscription-codex
+    source: MP.W0.3 historical completed epic list
+
+metadata:
+  task_id: MP.W0.3
+  updated_at: 2026-05-06
+  owner: Priority MP
+  note: TODO.md remains the source of truth; this baseline is an operator-reviewed seed.

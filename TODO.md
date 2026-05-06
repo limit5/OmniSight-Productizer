@@ -6221,11 +6221,11 @@ BP.E GraphRAG / Neo4j
 
 > 把整份 TODO 全部 item 都標 `agent_class` 標籤；W1 orchestrator routing + W2 cost estimator seed + ADR 0008 RPG `class` field 三邊共用 source of truth。
 
-- [ ] MP.W0.1 定義 `agent_class` 標籤 schema — `subscription-codex` / `subscription-claude` / `api-anthropic` / `api-openai` / `local-llm-qwen` / `unassigned`
-- [ ] MP.W0.2 `scripts/reslice_todo_agent_class.py` — 掃 TODO.md 所有 `- [ ]` / `- [x]` item，沒 `[class:X]` 內聯標籤就提示 operator 補；可半自動 (從 Capability assignment 表反推)
-- [ ] MP.W0.3 把 13 個已完成 epic（BP.I/H/C/N/M/Q/L/D/W/P 系列 + KS.2/3 + WP.3/5/2/7 + W1A）的 `agent_class` 補回（這是 W2 baseline data 的種子）
-- [ ] MP.W0.4 Drift guard test — `tests/test_todo_agent_class_complete.py` — 任何 `- [ ]` 沒標 `[class:X]` 就 fail（CI 阻擋未標 item 進 main）
-- [ ] MP.W0.5 ADR 0007 + ADR 0008 cross-link `agent_class` schema 為 shared canonical source（哪邊改另一邊跟）
+- [x][G] MP.W0.1 定義 `agent_class` 標籤 schema — `subscription-codex` / `subscription-claude` / `api-anthropic` / `api-openai` / `local-llm-qwen` / `unassigned`
+- [x][G] MP.W0.2 `scripts/reslice_todo_agent_class.py` — 掃 TODO.md 所有 `- [ ]` / `- [x]` item，沒 `[class:X]` 內聯標籤就提示 operator 補；可半自動 (從 Capability assignment 表反推)
+- [x][G] MP.W0.3 把 13 個已完成 epic（BP.I/H/C/N/M/Q/L/D/W/P 系列 + KS.2/3 + WP.3/5/2/7 + W1A）的 `agent_class` 補回（這是 W2 baseline data 的種子）
+- [x][G] MP.W0.4 Drift guard test — `tests/test_todo_agent_class_complete.py` — 任何 `- [ ]` 沒標 `[class:X]` 就 fail（CI 阻擋未標 item 進 main）
+- [x][G] MP.W0.5 ADR 0007 + ADR 0008 cross-link `agent_class` schema 為 shared canonical source（哪邊改另一邊跟）
 
 ### MP.W1 — Backend orchestrator + quota tracker（Week 1, ~3 day）
 

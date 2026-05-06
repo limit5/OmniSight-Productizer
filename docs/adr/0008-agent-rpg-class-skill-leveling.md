@@ -6,7 +6,7 @@
 
 **Authority**: Establishes Priority RPG as a top-level priority alongside BP / WP / KS / FX / MP. Touches the agent identity model, so every priority that spawns or schedules agents is downstream.
 
-**Note on schema lock-in**: BP.B (Guild definitions) is the upstream source of `Guild` enum. This ADR commits to the *shape* of the system (tables, layers, mechanics) but the canonical `Guild` value list is owned by BP.B. RPG.W2 (`guild_registry.py`) is an *importer*, not the source of truth.
+**Note on schema lock-in**: BP.B (Guild definitions) is the upstream source of `Guild` enum. This ADR commits to the *shape* of the system (tables, layers, mechanics) but the canonical `Guild` value list is owned by BP.B. RPG.W2 (`guild_registry.py`) is an *importer*, not the source of truth. Likewise, `config/agent_class_schema.yaml` is the canonical source for `agent_class` / RPG `class` values shared with ADR 0007; this ADR documents RPG usage but does not own a separate value list.
 
 ---
 
@@ -254,6 +254,7 @@ If a preferred instance is under-leveled, the policy logs a warning and falls ba
 
 This ADR commits to the **shape** but not the **content** of:
 
+- `agent_class` / RPG `class` values — owned by `config/agent_class_schema.yaml` from MP.W0.1 and shared with ADR 0007. Any class value change must update that YAML plus both ADR 0007 and ADR 0008 references in the same change.
 - `Guild` enum — owned by BP.B, imported by RPG.W2. ADR 0008 does NOT define the canonical Guild list.
 - `skill_id` namespace — owned by a canonical skill-matrix YAML (RPG.W11.2 drift guard). ADR 0008 does NOT enumerate skills.
 - `tool_id` namespace — owned by MCP server registry + A2A tool catalog. ADR 0008 does NOT enumerate tools.
