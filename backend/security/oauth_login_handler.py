@@ -1,7 +1,8 @@
 """AS.6.1 — OmniSight self-login OAuth backend handler.
 
 Wires the AS.1 OAuth shared library to OmniSight's own login flow:
-the four ``Sign in with Google / GitHub / Microsoft / Apple`` buttons
+the eleven ``Sign in with Google / GitHub / Microsoft / Apple / Discord /
+GitLab / Bitbucket / Slack / Notion / Salesforce / HubSpot`` buttons
 on ``/login`` (and the matching signup path) talk to two HTTP
 endpoints whose handlers live in :mod:`backend.routers.auth`:
 
@@ -50,7 +51,7 @@ It owns:
     * HTTP token-exchange + userinfo-fetch via :mod:`httpx`
       (caller-injectable client for tests).
     * Per-vendor userinfo / id_token claim extraction (subject,
-      email, display name) so the four vendors' wildly different
+      email, display name) so the supported vendors' wildly different
       response shapes converge to a single
       :class:`OAuthUserIdentity` dataclass the router can consume.
 
@@ -121,12 +122,13 @@ AS.0.8 single-knob behaviour
 
 Vendor coverage
 ───────────────
-This module handles the AS.6.1 four-vendor subset
-(Google / GitHub / Microsoft / Apple). The wider AS.1.3 catalog
-(GitLab / Bitbucket / Slack / Notion / Salesforce / HubSpot /
-Discord) is intentionally NOT exposed at the OmniSight self-login
-edge — those are dev-tool integrations, not consumer SSO buttons.
-Adding a new SSO button is a Settings field + one entry in
+This module handles the AS.6.1 / FX2.D9.7 self-login vendor subset
+(Google / GitHub / Microsoft / Apple / Discord / GitLab /
+Bitbucket / Slack / Notion). The wider AS.1.3 catalog (Salesforce /
+HubSpot plus already-enabled providers) is intentionally NOT exposed
+at the OmniSight self-login edge until each provider's Settings
+fields + extractor semantics land in a dedicated row. Adding a new
+SSO button is a Settings field + one entry in
 :data:`SUPPORTED_PROVIDERS` + a userinfo-extractor branch.
 """
 
@@ -138,8 +140,9 @@ import hmac
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional, Sequence
+from urllib.parse import urlparse
 
 import httpx
 
@@ -160,8 +163,8 @@ logger = logging.getLogger(__name__)
 #  Constants — supported providers + cookie envelope
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# The four AS.6.1 self-login providers. Mirrors the row's
-# ``Sign in with Google / GitHub / Microsoft / Apple`` literal —
+# The eleven AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
+# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack / Notion / Salesforce / HubSpot`` literal —
 # extending requires (a) adding the vendor entry to
 # ``backend.security.oauth_vendors``, (b) adding a Settings field
 # pair (``oauth_<vendor>_client_id`` + ``..._client_secret``),
@@ -172,6 +175,13 @@ SUPPORTED_PROVIDERS: frozenset[str] = frozenset({
     "github",
     "microsoft",
     "apple",
+    "discord",
+    "gitlab",
+    "bitbucket",
+    "slack",
+    "notion",
+    "salesforce",
+    "hubspot",
 })
 
 # In-flight FlowSession cookie name. Single namespace, HttpOnly,
@@ -199,6 +209,23 @@ _COOKIE_SEPARATOR: str = "."
 # exchange that an attacker without our client_secret cannot
 # fabricate. A future hardening row should land JWKS verification.
 _VENDORS_NO_USERINFO_ENDPOINT: frozenset[str] = frozenset({"apple"})
+
+# Notion has no separate userinfo call for this login flow: the
+# access-token response contains ``owner.user`` directly. Immutable
+# literal only; no shared mutable module state.
+_VENDORS_TOKEN_RESPONSE_USERINFO: frozenset[str] = frozenset({"notion"})
+
+# Bitbucket Cloud keeps primary email outside the ``/2.0/user`` payload.
+# The immutable endpoint literal is deterministic across workers; no
+# in-process cache or mutable module state is introduced.
+_BITBUCKET_EMAILS_ENDPOINT: str = "https://api.bitbucket.org/2.0/user/emails"
+
+# Salesforce uses the same OAuth path set on different hosts:
+# production ``login.salesforce.com``, sandbox ``test.salesforce.com``,
+# and customer community/My Domain hosts. This immutable path suffix is
+# combined with an operator-supplied base URL per request; no mutable
+# endpoint cache is introduced.
+_SALESFORCE_OAUTH_PATH_PREFIX: str = "/services/oauth2"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -471,6 +498,61 @@ def _resolve_settings(settings_obj: Optional[Any]) -> Any:
         return settings_obj
     from backend.config import settings as _live_settings
     return _live_settings
+
+
+def _resolve_vendor_config(
+    provider: str,
+    *,
+    settings_obj: Optional[Any] = None,
+) -> VendorConfig:
+    """Return the catalog vendor, applying Salesforce host override.
+
+    Salesforce Identity is one protocol on three host families:
+    production (default catalog host), sandbox, and community/My Domain.
+    ``oauth_salesforce_login_base_url`` lets operators route the exact
+    same path set at ``https://test.salesforce.com`` or a community
+    origin without mutating the AS.1.3 catalog singleton. SOP §1
+    module-global audit: every worker derives the replacement from the
+    same immutable Settings value, so no cross-worker coordination is
+    needed.
+    """
+    try:
+        vendor: VendorConfig = oauth_vendors.get_vendor(provider)
+    except VendorNotFoundError:
+        raise ProviderNotSupportedError(
+            f"vendor {provider!r} in SUPPORTED_PROVIDERS but missing "
+            f"from oauth_vendors catalog (drift)"
+        )
+
+    if provider != "salesforce":
+        return vendor
+
+    s = _resolve_settings(settings_obj)
+    raw_base = (getattr(s, "oauth_salesforce_login_base_url", "") or "").strip()
+    if not raw_base:
+        return vendor
+
+    parsed = urlparse(raw_base)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ProviderNotConfiguredError(
+            "OMNISIGHT_OAUTH_SALESFORCE_LOGIN_BASE_URL must be an https "
+            "base URL such as https://test.salesforce.com or "
+            "https://acme.my.site.com"
+        )
+    base = raw_base.rstrip("/")
+    return replace(
+        vendor,
+        authorize_endpoint=f"{base}{_SALESFORCE_OAUTH_PATH_PREFIX}/authorize",
+        token_endpoint=f"{base}{_SALESFORCE_OAUTH_PATH_PREFIX}/token",
+        userinfo_endpoint=f"{base}{_SALESFORCE_OAUTH_PATH_PREFIX}/userinfo",
+        revocation_endpoint=f"{base}{_SALESFORCE_OAUTH_PATH_PREFIX}/revoke",
+    )
 
 
 def compute_redirect_uri(
@@ -755,17 +837,7 @@ def begin_oauth_login(
     key = resolve_signing_key(settings_obj=settings_obj)
     redirect_uri = compute_redirect_uri(provider, base_url=base_url)
 
-    try:
-        vendor: VendorConfig = oauth_vendors.get_vendor(provider)
-    except VendorNotFoundError:
-        # Should never happen — SUPPORTED_PROVIDERS is a strict
-        # subset of the catalog. If it ever does, surface as the
-        # support error so the operator's logs say "supported
-        # column drifted from catalog".
-        raise ProviderNotSupportedError(
-            f"vendor {provider!r} in SUPPORTED_PROVIDERS but missing "
-            f"from oauth_vendors catalog (drift)"
-        )
+    vendor = _resolve_vendor_config(provider, settings_obj=settings_obj)
 
     authorize_url, flow = oauth_vendors.begin_authorization_for_vendor(
         vendor,
@@ -800,6 +872,8 @@ def begin_oauth_login(
 #     operator pre-mints the JWT and stores it in
 #     ``oauth_apple_client_secret``. A future row will land an
 #     auto-mint helper.
+#   * Notion: Basic auth over ``client_id:client_secret`` and no
+#     client credentials in the form body.
 #   * Microsoft / Google: standard form-encoded POST.
 
 _TOKEN_EXCHANGE_HEADERS_BASE: dict[str, str] = {
@@ -837,17 +911,24 @@ async def exchange_authorization_code(
     """
     if not code:
         raise TokenResponseError("authorization code missing")
-    if not code_verifier:
+    if not code_verifier and vendor.provider_id != "notion":
         raise TokenResponseError("code_verifier missing for PKCE exchange")
 
     body = {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": redirect_uri,
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "code_verifier": code_verifier,
     }
+    headers = dict(_TOKEN_EXCHANGE_HEADERS_BASE)
+    if vendor.provider_id == "notion":
+        raw = f"{client_id}:{client_secret}".encode("utf-8")
+        headers["Authorization"] = (
+            "Basic " + base64.b64encode(raw).decode("ascii")
+        )
+    else:
+        body["client_id"] = client_id
+        body["client_secret"] = client_secret
+        body["code_verifier"] = code_verifier
 
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=timeout_s)
@@ -856,7 +937,7 @@ async def exchange_authorization_code(
             resp = await client.post(
                 vendor.token_endpoint,
                 data=body,
-                headers=_TOKEN_EXCHANGE_HEADERS_BASE,
+                headers=headers,
             )
         except httpx.HTTPError as exc:
             raise TokenResponseError(
@@ -905,6 +986,12 @@ async def fetch_userinfo(
     chase that — if GitHub returns ``email: null``, the user is
     asked to re-authorize with a public-email setting. A future
     row may add the second-fetch path.
+
+    Bitbucket is special: ``api.bitbucket.org/2.0/user`` returns
+    the basic profile, but the user's primary email is at
+    ``/2.0/user/emails``. FX2.D9.7.7 performs that second fetch and
+    merges the selected address into the returned userinfo dict
+    under ``email`` before identity extraction.
     """
     if vendor.userinfo_endpoint is None:
         raise UserinfoFetchError(
@@ -940,6 +1027,34 @@ async def fetch_userinfo(
             raise UserinfoFetchError(
                 f"userinfo body not JSON: {exc}"
             ) from exc
+        if vendor.provider_id == "bitbucket" and isinstance(data, Mapping):
+            try:
+                emails_resp = await client.get(
+                    _BITBUCKET_EMAILS_ENDPOINT,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/json",
+                        "User-Agent": "omnisight-oauth-login/1.0",
+                    },
+                )
+            except httpx.HTTPError as exc:
+                raise UserinfoFetchError(
+                    f"bitbucket emails endpoint network error: {exc}"
+                ) from exc
+            if emails_resp.status_code >= 400:
+                raise UserinfoFetchError(
+                    f"bitbucket emails endpoint returned HTTP "
+                    f"{emails_resp.status_code}"
+                )
+            try:
+                emails_payload = emails_resp.json()
+            except ValueError as exc:
+                raise UserinfoFetchError(
+                    f"bitbucket emails body not JSON: {exc}"
+                ) from exc
+            email = _extract_bitbucket_primary_email(emails_payload)
+            data = dict(data)
+            data["email"] = email
     finally:
         if owns_client:
             await client.aclose()
@@ -949,6 +1064,26 @@ async def fetch_userinfo(
             f"userinfo body not a JSON object (got {type(data).__name__})"
         )
     return dict(data)
+
+
+def _extract_bitbucket_primary_email(payload: Any) -> str:
+    """Return Bitbucket Cloud's primary email from ``/2.0/user/emails``."""
+    if not isinstance(payload, Mapping):
+        raise UserinfoFetchError(
+            f"bitbucket emails body not a JSON object "
+            f"(got {type(payload).__name__})"
+        )
+    values = payload.get("values")
+    if not isinstance(values, list):
+        raise UserinfoFetchError("bitbucket emails body missing values list")
+    for item in values:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("is_primary") is True:
+            email = str(item.get("email") or "").strip()
+            if email:
+                return email
+    raise UserinfoFetchError("bitbucket primary email missing from emails response")
 
 
 def decode_id_token_claims_unverified(id_token: str) -> dict[str, Any]:
@@ -1000,6 +1135,13 @@ def extract_user_identity(
     | microsoft | userinfo["sub"]      | userinfo["email"] /   |
     |           |                      | "preferred_username"  |
     | apple     | id_token["sub"]      | id_token["email"]     |
+    | discord   | userinfo["id"]       | userinfo["email"]     |
+    | gitlab    | userinfo["sub"]      | userinfo["email"]     |
+    | bitbucket | userinfo["uuid"]     | merged primary email  |
+    | slack     | userinfo["sub"]      | userinfo["email"]     |
+    | notion    | token["owner"]["user"]["id"] | owner person email |
+    | salesforce | userinfo["user_id"] | userinfo["email"]     |
+    | hubspot   | userinfo["user_id"]  | userinfo["user"]      |
     +-----------+----------------------+-----------------------+
 
     Raises :class:`IdentityFieldMissingError` if either field is
@@ -1055,6 +1197,88 @@ def extract_user_identity(
             name = str(
                 userinfo.get("name")
                 or userinfo.get("given_name")
+                or ""
+            ).strip()
+        elif provider == "discord":
+            # Discord snowflakes are decimal strings. Preserve the
+            # exact string form instead of coercing to int.
+            sub = str(userinfo.get("id") or "").strip()
+            email = str(userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("global_name")
+                or userinfo.get("username")
+                or ""
+            ).strip()
+        elif provider == "gitlab":
+            sub = str(userinfo.get("sub") or "").strip()
+            email = str(userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("name")
+                or userinfo.get("nickname")
+                or ""
+            ).strip()
+        elif provider == "bitbucket":
+            sub = str(userinfo.get("uuid") or "").strip()
+            email = str(userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("display_name")
+                or userinfo.get("nickname")
+                or userinfo.get("username")
+                or ""
+            ).strip()
+        elif provider == "slack":
+            # Slack's OpenID userInfo endpoint is vendor-shaped but
+            # keeps ``sub`` / ``email`` at the JSON root.
+            sub = str(userinfo.get("sub") or "").strip()
+            email = str(userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("name")
+                or userinfo.get("given_name")
+                or ""
+            ).strip()
+        elif provider == "notion":
+            # Notion returns the installing user in the access token
+            # response under owner.user; no userinfo endpoint exists for
+            # this login flow.
+            owner = userinfo.get("owner")
+            user_obj: Mapping[str, Any] = {}
+            if isinstance(owner, Mapping) and isinstance(owner.get("user"), Mapping):
+                user_obj = owner["user"]
+            person = user_obj.get("person")
+            sub = str(user_obj.get("id") or "").strip()
+            email = str(
+                (person.get("email") if isinstance(person, Mapping) else "")
+                or user_obj.get("email")
+                or ""
+            ).strip()
+            name = str(
+                user_obj.get("name")
+                or userinfo.get("workspace_name")
+                or ""
+            ).strip()
+        elif provider == "salesforce":
+            # Salesforce userinfo returns both OIDC ``sub`` and the
+            # stable platform ``user_id``; the login row pins
+            # ``user_id`` as the subject so production/sandbox/community
+            # hosts all bind the same canonical Salesforce user id.
+            sub = str(userinfo.get("user_id") or "").strip()
+            email = str(userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("name")
+                or userinfo.get("preferred_username")
+                or ""
+            ).strip()
+        elif provider == "hubspot":
+            # HubSpot's integrations/v1/me response is token metadata:
+            # ``user_id`` is the stable user subject, while ``user`` is
+            # the installing user's email address. The endpoint accepts
+            # Bearer auth in the header, not an access_token query param;
+            # fetch_userinfo's shared header path intentionally covers it.
+            sub = str(userinfo.get("user_id") or "").strip()
+            email = str(userinfo.get("user") or userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("user")
+                or userinfo.get("hub_domain")
                 or ""
             ).strip()
         else:  # pragma: no cover — assert_provider_supported guards
@@ -1133,13 +1357,7 @@ async def complete_oauth_login(
         )
     oauth_client.verify_state_and_consume(flow, returned_state, now=now)
 
-    try:
-        vendor: VendorConfig = oauth_vendors.get_vendor(provider)
-    except VendorNotFoundError:
-        raise ProviderNotSupportedError(
-            f"vendor {provider!r} in SUPPORTED_PROVIDERS but missing "
-            f"from oauth_vendors catalog (drift)"
-        )
+    vendor = _resolve_vendor_config(provider, settings_obj=settings_obj)
 
     token = await exchange_authorization_code(
         vendor=vendor,
@@ -1160,6 +1378,9 @@ async def complete_oauth_login(
             )
         id_token_claims = decode_id_token_claims_unverified(token.id_token)
         userinfo = None
+    elif vendor.provider_id in _VENDORS_TOKEN_RESPONSE_USERINFO:
+        userinfo = dict(token.raw)
+        id_token_claims = None
     else:
         userinfo = await fetch_userinfo(
             vendor=vendor,

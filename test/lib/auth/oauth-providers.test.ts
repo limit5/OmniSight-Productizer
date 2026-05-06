@@ -16,6 +16,7 @@ import {
   getPrimaryProviders,
   getProvider,
   getSecondaryProviders,
+  resolveOAuthProviderConfigured,
 } from "@/lib/auth/oauth-providers"
 
 describe("AS.7.1 oauth-providers", () => {
@@ -42,12 +43,15 @@ describe("AS.7.1 oauth-providers", () => {
     expect(OAUTH_PROVIDER_CATALOG.length).toBe(OAUTH_PROVIDER_IDS.length)
   })
 
-  it("every catalog row has the 5 required fields", () => {
+  it("every catalog row has the required fields", () => {
     for (const row of OAUTH_PROVIDER_CATALOG) {
       expect(row.id).toBeTruthy()
       expect(row.displayName).toBeTruthy()
       expect(row.brandColor).toMatch(/^#[0-9A-Fa-f]{6,8}$/)
       expect(row.haloColor).toMatch(/^rgba?\(/)
+      expect(row.registrationDocsUrl).toMatch(/^https:\/\//)
+      expect(row.supported).toBe(true)
+      expect(typeof row.configured).toBe("boolean")
       expect(["primary", "secondary"]).toContain(row.tier)
     }
   })
@@ -55,6 +59,28 @@ describe("AS.7.1 oauth-providers", () => {
   it("ids are unique", () => {
     const ids = OAUTH_PROVIDER_CATALOG.map((p) => p.id)
     expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it("each provider has a direct OAuth app registration docs link", () => {
+    const docsHosts = Object.fromEntries(
+      OAUTH_PROVIDER_CATALOG.map((provider) => [
+        provider.id,
+        new URL(provider.registrationDocsUrl).hostname,
+      ]),
+    )
+    expect(docsHosts).toEqual({
+      apple: "developer.apple.com",
+      bitbucket: "developer.atlassian.com",
+      discord: "discord.com",
+      github: "docs.github.com",
+      gitlab: "docs.gitlab.com",
+      google: "developers.google.com",
+      hubspot: "developers.hubspot.com",
+      microsoft: "learn.microsoft.com",
+      notion: "developers.notion.com",
+      salesforce: "help.salesforce.com",
+      slack: "api.slack.com",
+    })
   })
 
   it("getPrimaryProviders() returns exactly 5 rows", () => {
@@ -111,6 +137,33 @@ describe("AS.7.1 oauth-providers", () => {
 
   it("OAUTH_AUTHORIZE_PATH_PREFIX matches AS.6.1 backend route shape", () => {
     expect(OAUTH_AUTHORIZE_PATH_PREFIX).toBe("/api/v1/auth/oauth/")
+  })
+
+  it("resolveOAuthProviderConfigured accepts the coarse public configured flag", () => {
+    expect(resolveOAuthProviderConfigured({ configured: "true" })).toBe(true)
+    expect(resolveOAuthProviderConfigured({ configured: "1" })).toBe(true)
+    expect(resolveOAuthProviderConfigured({ configured: "false" })).toBe(false)
+  })
+
+  it("resolveOAuthProviderConfigured accepts client id plus secret-present flag", () => {
+    expect(
+      resolveOAuthProviderConfigured({
+        clientId: "google-client-id",
+        clientSecretConfigured: "true",
+      }),
+    ).toBe(true)
+    expect(
+      resolveOAuthProviderConfigured({
+        clientId: "google-client-id",
+        clientSecretConfigured: "false",
+      }),
+    ).toBe(false)
+    expect(
+      resolveOAuthProviderConfigured({
+        clientId: "",
+        clientSecretConfigured: "true",
+      }),
+    ).toBe(false)
   })
 
   it("primary providers' brand colors are non-grey (visible halo guard)", () => {

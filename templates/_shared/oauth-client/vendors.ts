@@ -189,8 +189,8 @@ export const APPLE: VendorConfig = makeVendor({
 })
 
 /** GitLab.com SaaS. Self-hosted instances override at use site
- * (`https://gitlab.example.com/oauth/...`). OIDC supported when
- * `openid` is in scope. */
+ * (`https://gitlab.example.com/oauth/...`). FX2.D9.7.6 uses the
+ * OIDC userinfo flow, so default scopes include `openid`. */
 export const GITLAB: VendorConfig = makeVendor({
   providerId: "gitlab",
   displayName: "GitLab",
@@ -198,7 +198,7 @@ export const GITLAB: VendorConfig = makeVendor({
   tokenEndpoint: "https://gitlab.com/oauth/token",
   userinfoEndpoint: "https://gitlab.com/oauth/userinfo",
   revocationEndpoint: "https://gitlab.com/oauth/revoke",
-  defaultScopes: ["read_user"],
+  defaultScopes: ["read_user", "openid", "email", "profile"],
   isOidc: true,
   extraAuthorizeParams: [],
   supportsRefreshToken: true,
@@ -221,20 +221,19 @@ export const BITBUCKET: VendorConfig = makeVendor({
   supportsPkce: true,
 })
 
-/** Slack v2 OAuth (granular bot/user scopes). Slack also offers
- * "Sign in with Slack" OIDC at slack.com/openid/connect/authorize —
- * separate integration shape, override at use site if wanted. */
+/** Sign in with Slack OIDC. Slack's userInfo endpoint is the
+ * vendor-shaped openid.connect.userInfo method. */
 export const SLACK: VendorConfig = makeVendor({
   providerId: "slack",
   displayName: "Slack",
-  authorizeEndpoint: "https://slack.com/oauth/v2/authorize",
-  tokenEndpoint: "https://slack.com/api/oauth.v2.access",
-  userinfoEndpoint: null, // Slack uses users.info keyed by user id from token response
+  authorizeEndpoint: "https://slack.com/openid/connect/authorize",
+  tokenEndpoint: "https://slack.com/api/openid.connect.token",
+  userinfoEndpoint: "https://slack.com/api/openid.connect.userInfo",
   revocationEndpoint: "https://slack.com/api/auth.revoke",
-  defaultScopes: ["users:read", "users:read.email"],
-  isOidc: false,
+  defaultScopes: ["openid", "email", "profile"],
+  isOidc: true,
   extraAuthorizeParams: [],
-  supportsRefreshToken: true,
+  supportsRefreshToken: false,
   supportsPkce: true,
 })
 
@@ -246,7 +245,7 @@ export const NOTION: VendorConfig = makeVendor({
   displayName: "Notion",
   authorizeEndpoint: "https://api.notion.com/v1/oauth/authorize",
   tokenEndpoint: "https://api.notion.com/v1/oauth/token",
-  userinfoEndpoint: "https://api.notion.com/v1/users/me",
+  userinfoEndpoint: null,
   revocationEndpoint: null,
   defaultScopes: [],
   isOidc: false,
@@ -266,14 +265,14 @@ export const SALESFORCE: VendorConfig = makeVendor({
   tokenEndpoint: "https://login.salesforce.com/services/oauth2/token",
   userinfoEndpoint: "https://login.salesforce.com/services/oauth2/userinfo",
   revocationEndpoint: "https://login.salesforce.com/services/oauth2/revoke",
-  defaultScopes: ["openid", "email", "profile"],
+  defaultScopes: ["id", "email", "profile", "openid"],
   isOidc: true,
   extraAuthorizeParams: [],
   supportsRefreshToken: true,
   supportsPkce: true,
 })
 
-/** HubSpot OAuth 2.0. Authorize on app.hubspot.com, token on
+/** HubSpot OAuth 2.0. Authorize on app.hubspot.com, token/userinfo on
  * api.hubapi.com (vendor-canonical asymmetry). PKCE not documented;
  * conservatively flagged false. Revocation is non-RFC-7009 shape
  * (DELETE /oauth/v1/refresh-tokens/{token}) — handle in AS.2.5. */
@@ -282,9 +281,9 @@ export const HUBSPOT: VendorConfig = makeVendor({
   displayName: "HubSpot",
   authorizeEndpoint: "https://app.hubspot.com/oauth/authorize",
   tokenEndpoint: "https://api.hubapi.com/oauth/v1/token",
-  userinfoEndpoint: null, // No canonical userinfo
+  userinfoEndpoint: "https://api.hubapi.com/integrations/v1/me",
   revocationEndpoint: null, // DELETE /oauth/v1/refresh-tokens/{token} — non-RFC, handle in AS.2.5
-  defaultScopes: ["oauth"],
+  defaultScopes: ["oauth", "crm.objects.contacts.read"],
   isOidc: false,
   extraAuthorizeParams: [],
   supportsRefreshToken: true,

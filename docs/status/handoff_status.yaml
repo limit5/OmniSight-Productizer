@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 505
+entry_count: 521
 status_counts:
-  dev-only: 494
+  dev-only: 510
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4698,3 +4698,149 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑完整 Q.2 PG-backed suite，並在 production/staging rebuild backend
     後以新裝置登入 smoke 確認 session / CSRF cookie `Max-Age=3600`、known-device relogin `Max-Age=28800`。
+- id: 2026-05-06--D9.7
+  header_line: 47801
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.0 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator rebuild / redeploy backend 後，抽查 `/api/v1/auth/oauth/google/authorize` 等 supported
+    provider authorize path 不再被 auth baseline 401，並進入 provider config / redirect handler。
+- id: 2026-05-06--D9.7-2
+  header_line: 47812
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑 PG-backed integration，並在 staging/prod 設定 Google OAuth app
+    credentials 後 smoke `/api/v1/auth/oauth/google/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-3
+  header_line: 47823
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑 PG-backed GitHub integration，並在 staging/prod 設定 GitHub OAuth
+    App credentials 後 smoke `/api/v1/auth/oauth/github/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-4
+  header_line: 47834
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.3 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑 PG-backed Microsoft integration，並在 staging/prod 設定 Microsoft
+    Entra App Registration credentials 後 smoke `/api/v1/auth/oauth/microsoft/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-5
+  header_line: 47845
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.4 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑 PG-backed Apple integration，並在 staging/prod 設定 Apple Services
+    ID / signed client_secret JWT 後 smoke `/api/v1/auth/oauth/apple/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-6
+  header_line: 47857
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 設定 Discord OAuth app redirect URI / client credentials，提供 `OMNI_TEST_PG_URL` 跑 PG-backed
+    Discord integration，並在 staging/prod smoke `/api/v1/auth/oauth/discord/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-7
+  header_line: 47868
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.6 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 設定 GitLab OAuth app redirect URI / client credentials，提供 `OMNI_TEST_PG_URL` 跑 PG-backed
+    GitLab integration，並在 staging/prod smoke `/api/v1/auth/oauth/gitlab/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-8
+  header_line: 47879
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.7 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 設定 Bitbucket OAuth consumer callback URL / client credentials，提供 `OMNI_TEST_PG_URL`
+    跑 PG-backed Bitbucket integration，並在 staging/prod smoke `/api/v1/auth/oauth/bitbucket/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-9
+  header_line: 47891
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.8 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 設定 Slack App redirect URL / Sign in with Slack client credentials，提供 `OMNI_TEST_PG_URL`
+    跑 PG-backed Slack integration，並在 staging/prod smoke `/api/v1/auth/oauth/slack/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-10
+  header_line: 47903
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.9 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 設定 Notion integration OAuth redirect URI / client credentials，提供 `OMNI_TEST_PG_URL`
+    跑 PG-backed Notion integration，並在 staging/prod smoke `/api/v1/auth/oauth/notion/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-11
+  header_line: 47916
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.10 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 設定 Salesforce Connected App callback URL / client credentials，sandbox/community
+    時設定 `OMNISIGHT_OAUTH_SALESFORCE_LOGIN_BASE_URL`，提供 `OMNI_TEST_PG_URL` 跑 PG-backed Salesforce integration，並在 staging/prod
+    smoke `/api/v1/auth/oauth/salesforce/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-12
+  header_line: 47928
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.11 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 設定 HubSpot app redirect URL / client credentials，執行 alembic 0198，提供 `OMNI_TEST_PG_URL`
+    跑 PG-backed HubSpot integration，並在 staging/prod smoke `/api/v1/auth/oauth/hubspot/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-13
+  header_line: 47940
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.12 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 在 frontend build env 對已配置的 OAuth provider 設定 `NEXT_PUBLIC_OMNISIGHT_OAUTH_<VENDOR>_CONFIGURED=true`（或
+    public client-id + secret-present boolean），重 build frontend image，並 smoke `/login` provider disabled/enabled 狀態。
+- id: 2026-05-06--D9.7-14
+  header_line: 47952
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.13 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 在 frontend build env 設定各 OAuth provider 的 `NEXT_PUBLIC_OMNISIGHT_OAUTH_<VENDOR>_CONFIGURED=true`
+    或 public client-id + secret-present boolean，重 build frontend image，並 smoke `/settings/account` Auth providers panel 狀態與
+    docs links。
+- id: 2026-05-06--D9.7-15
+  header_line: 47963
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.14 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 依本 runbook 在 11 家 provider console 建 app / callback / scopes，設定 backend + frontend
+    env，重 build/restart，逐 provider smoke `/login` authorize → callback → session。
+- id: 2026-05-06--D9.7-16
+  header_line: 47974
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.15 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — backend rolling restart 後，在 staging/prod 點 `/login` OAuth provider：未配置 provider 應寫 `oauth_login_failed_provider_not_configured`，完整
+    callback 應寫 initiated → success；用 audit query 驗證新 action family 可查。

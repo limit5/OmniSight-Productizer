@@ -147,18 +147,18 @@ def test_vendor_extra_params_keys_unique(vendor: ov.VendorConfig):
 
 def test_vendor_oidc_vendors_match_design_intent():
     """Pin the OIDC subset against the AS.1.3 row design — Google,
-    Microsoft, Apple, GitLab, Salesforce ship as OIDC; the rest ship
-    as plain OAuth 2.0. Adding a new OIDC vendor (or flipping an
+    Microsoft, Apple, GitLab, Slack, Salesforce ship as OIDC; the rest
+    ship as plain OAuth 2.0. Adding a new OIDC vendor (or flipping an
     existing one) must update this assertion."""
     oidc = {v.provider_id for v in ov.ALL_VENDORS if v.is_oidc}
-    assert oidc == {"google", "microsoft", "apple", "gitlab", "salesforce"}
+    assert oidc == {"google", "microsoft", "apple", "gitlab", "slack", "salesforce"}
 
 
 def test_vendor_refresh_support_matches_design_intent():
     no_refresh = {v.provider_id for v in ov.ALL_VENDORS if not v.supports_refresh_token}
-    # Notion is the only vendor without refresh_token (long-lived
-    # access_token + no refresh grant).
-    assert no_refresh == {"notion"}
+    # Notion has long-lived workspace tokens; Slack Sign in with Slack
+    # returns a user token without a refresh grant.
+    assert no_refresh == {"notion", "slack"}
 
 
 def test_vendor_pkce_support_matches_design_intent():
@@ -299,6 +299,76 @@ def test_build_authorize_url_caller_extra_overrides_vendor_extra():
     assert q["prompt"] == ["login"]
     # Vendor's other params still apply.
     assert q["access_type"] == ["offline"]
+
+
+def test_gitlab_default_scopes_match_oidc_login_contract():
+    """FX2.D9.7.6 pins GitLab login to read_user + OIDC profile claims."""
+    url = ov.build_authorize_url_for_vendor(
+        ov.GITLAB,
+        client_id="gitlab.test",
+        redirect_uri="https://app.example/cb",
+        state="S",
+        code_challenge="C",
+    )
+    q = _query(url)
+    assert q["scope"] == ["read_user openid email profile"]
+
+
+def test_bitbucket_default_scopes_match_login_contract():
+    """FX2.D9.7.7 pins Bitbucket login to account + email scopes."""
+    url = ov.build_authorize_url_for_vendor(
+        ov.BITBUCKET,
+        client_id="bitbucket.test",
+        redirect_uri="https://app.example/cb",
+        state="S",
+        code_challenge="C",
+    )
+    q = _query(url)
+    assert q["scope"] == ["account email"]
+
+
+def test_slack_default_scopes_match_oidc_login_contract():
+    """FX2.D9.7.8 pins Slack login to OIDC profile claims."""
+    url = ov.build_authorize_url_for_vendor(
+        ov.SLACK,
+        client_id="slack.test",
+        redirect_uri="https://app.example/cb",
+        state="S",
+        code_challenge="C",
+    )
+    q = _query(url)
+    assert q["scope"] == ["openid email profile"]
+
+
+def test_notion_authorize_url_omits_scope_and_uses_owner_user():
+    """FX2.D9.7.9 pins Notion to fixed integration permissions."""
+    url = ov.build_authorize_url_for_vendor(
+        ov.NOTION,
+        client_id="notion.test",
+        redirect_uri="https://app.example/cb",
+        state="S",
+        code_challenge="C",
+    )
+    q = _query(url)
+    assert "scope" not in q
+    assert q["owner"] == ["user"]
+    assert ov.NOTION.userinfo_endpoint is None
+
+
+def test_hubspot_default_scopes_and_userinfo_match_login_contract():
+    """FX2.D9.7.11 pins HubSpot to OAuth + CRM contacts read scopes."""
+    url = ov.build_authorize_url_for_vendor(
+        ov.HUBSPOT,
+        client_id="hubspot.test",
+        redirect_uri="https://app.example/cb",
+        state="S",
+        code_challenge="C",
+    )
+    q = _query(url)
+    assert q["scope"] == ["oauth crm.objects.contacts.read"]
+    assert ov.HUBSPOT.userinfo_endpoint == (
+        "https://api.hubapi.com/integrations/v1/me"
+    )
 
 
 def test_begin_authorization_for_vendor_mints_nonce_for_oidc_only():

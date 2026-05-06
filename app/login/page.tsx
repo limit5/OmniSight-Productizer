@@ -110,6 +110,14 @@ function getSessionRevocationCopy(
   return tAuth("sessionDefault")
 }
 
+function getOAuthDisabledReason(provider: {
+  readonly supported: boolean
+  readonly configured: boolean
+}): string | null {
+  if (provider.supported && provider.configured) return null
+  return "Configure in Settings"
+}
+
 // ─────────────────────────────────────────────────────────────────
 // MFA challenge form — re-used inside the AS.7.0 glass card.
 // ─────────────────────────────────────────────────────────────────
@@ -507,16 +515,28 @@ function LoginForm() {
             data-testid="as7-oauth-row-primary"
             className="flex items-center justify-center gap-3 flex-wrap"
           >
-            {primaryProviders.map((p) => (
-              <OAuthEnergySphere
-                key={p.id}
-                level={level}
-                provider={p}
-                href={buildOAuthAuthorizeUrl(p.id, next)}
-                icon={<OAuthProviderIcon id={p.id as OAuthProviderId} />}
-                disabled={accountLocked}
-              />
-            ))}
+            {primaryProviders.map((p) => {
+              const disabledReason = getOAuthDisabledReason(p)
+              return (
+                <div key={p.id} className="flex flex-col items-center gap-1">
+                  <OAuthEnergySphere
+                    level={level}
+                    provider={p}
+                    href={buildOAuthAuthorizeUrl(p.id, next)}
+                    icon={<OAuthProviderIcon id={p.id as OAuthProviderId} />}
+                    disabled={accountLocked || Boolean(disabledReason)}
+                  />
+                  {disabledReason ? (
+                    <span
+                      data-testid={`as7-oauth-${p.id}-disabled-state`}
+                      className="max-w-[72px] text-center font-mono text-[9px] leading-tight text-[var(--muted-foreground)]"
+                    >
+                      {disabledReason}
+                    </span>
+                  ) : null}
+                </div>
+              )
+            })}
           </div>
           <button
             type="button"
@@ -539,17 +559,29 @@ function LoginForm() {
               data-testid="as7-oauth-row-secondary"
               className="flex items-center justify-center gap-2 flex-wrap"
             >
-              {secondaryProviders.map((p) => (
-                <OAuthEnergySphere
-                  key={p.id}
-                  level={level}
-                  provider={p}
-                  href={buildOAuthAuthorizeUrl(p.id, next)}
-                  icon={<OAuthProviderIcon id={p.id as OAuthProviderId} />}
-                  size="secondary"
-                  disabled={accountLocked}
-                />
-              ))}
+              {secondaryProviders.map((p) => {
+                const disabledReason = getOAuthDisabledReason(p)
+                return (
+                  <div key={p.id} className="flex flex-col items-center gap-1">
+                    <OAuthEnergySphere
+                      level={level}
+                      provider={p}
+                      href={buildOAuthAuthorizeUrl(p.id, next)}
+                      icon={<OAuthProviderIcon id={p.id as OAuthProviderId} />}
+                      size="secondary"
+                      disabled={accountLocked || Boolean(disabledReason)}
+                    />
+                    {disabledReason ? (
+                      <span
+                        data-testid={`as7-oauth-${p.id}-disabled-state`}
+                        className="max-w-[72px] text-center font-mono text-[9px] leading-tight text-[var(--muted-foreground)]"
+                      >
+                        {disabledReason}
+                      </span>
+                    ) : null}
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

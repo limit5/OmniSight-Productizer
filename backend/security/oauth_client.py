@@ -399,11 +399,12 @@ def build_authorize_url(
         ("response_type", "code"),
         ("client_id", client_id),
         ("redirect_uri", redirect_uri),
-        ("scope", " ".join(scope)),
         ("state", state),
         ("code_challenge", code_challenge),
         ("code_challenge_method", code_challenge_method),
     ]
+    if scope:
+        params.append(("scope", " ".join(scope)))
     if nonce is not None:
         params.append(("nonce", nonce))
     if extra_params:

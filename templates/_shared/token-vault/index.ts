@@ -95,7 +95,18 @@ export const BINDING_FORMAT_VERSION = 1
  * `SUPPORTED_PROVIDERS`. Drift is caught by the AS.1.5-style cross-twin
  * parity test. */
 export const SUPPORTED_PROVIDERS: ReadonlySet<string> = Object.freeze(
-  new Set<string>(["apple", "github", "google", "microsoft"]),
+  new Set<string>([
+    "apple",
+    "bitbucket",
+    "discord",
+    "github",
+    "gitlab",
+    "google",
+    "microsoft",
+    "notion",
+    "salesforce",
+    "slack",
+  ]),
 )
 
 /** Per-row salt size (bytes). 16 bytes / 128 bits matches the GUID /

@@ -7,7 +7,8 @@
  *   - Composition: AS.7.0 visual foundation + glass card + body
  *   - Header copy + back-to-dashboard link
  *   - Sections: connected accounts (orbital), auth methods,
- *     MFA setup, sessions, password change, API keys, GDPR
+ *     auth providers, MFA setup, sessions, password change,
+ *     API keys, GDPR
  *   - Unauthenticated guard redirects to /login
  *   - Password-change submit gate clears in cascade
  *   - Sessions revoke + revoke-all click handlers
@@ -214,7 +215,7 @@ describe("AS.7.7 AccountSettingsPage — composition", () => {
     )
   })
 
-  it("renders all 7 sections", async () => {
+  it("renders all 8 sections", async () => {
     render(<AccountSettingsPage />)
     await waitFor(() => {
       expect(
@@ -222,6 +223,7 @@ describe("AS.7.7 AccountSettingsPage — composition", () => {
       ).toBeInTheDocument()
     })
     expect(screen.getByTestId("as7-section-auth-methods")).toBeInTheDocument()
+    expect(screen.getByTestId("as7-section-auth-providers")).toBeInTheDocument()
     expect(screen.getByTestId("as7-section-mfa-setup")).toBeInTheDocument()
     expect(screen.getByTestId("as7-section-sessions")).toBeInTheDocument()
     expect(
@@ -255,6 +257,42 @@ describe("AS.7.7 AccountSettingsPage — connected accounts", () => {
         "rotating",
       )
     })
+  })
+})
+
+describe("AS.7.7 AccountSettingsPage — auth providers", () => {
+  it("renders the 11-provider configured-state panel", async () => {
+    render(<AccountSettingsPage />)
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("as7-section-auth-providers"),
+      ).toHaveAttribute("data-as7-provider-count", "11")
+    })
+    expect(screen.getByTestId("as7-section-auth-providers")).toHaveAttribute(
+      "data-as7-provider-configured-count",
+      "0",
+    )
+    for (const id of [
+      "google",
+      "github",
+      "microsoft",
+      "apple",
+      "discord",
+      "gitlab",
+      "bitbucket",
+      "slack",
+      "notion",
+      "salesforce",
+      "hubspot",
+    ]) {
+      expect(screen.getByTestId(`as7-auth-provider-${id}`)).toHaveAttribute(
+        "data-as7-provider-configured",
+        "no",
+      )
+      expect(
+        screen.getByTestId(`as7-auth-provider-docs-${id}`),
+      ).toHaveAttribute("href", expect.stringMatching(/^https:\/\//))
+    }
   })
 })
 

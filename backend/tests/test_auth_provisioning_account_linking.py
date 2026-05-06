@@ -7,6 +7,7 @@ import pytest
 from backend.auth_provisioning import (
     AccountLinkingStackOptions,
     UnsupportedAccountLinkingProviderError,
+    VendorOAuthAppConfigPlan,
     VendorOAuthAppConfigOptions,
     list_account_linking_stack_providers,
     render_account_linking_stack,
@@ -41,11 +42,32 @@ class TestAccountLinkingStackRegistry:
             "google",
             "microsoft",
             "apple",
+            "gitlab",
+            "bitbucket",
+            "slack",
+            "notion",
+            "salesforce",
+            "hubspot",
+            "discord",
         ]
 
     def test_rejects_provider_outside_account_linking_contract(self):
+        bad = VendorOAuthAppConfigPlan(
+            provider="facebook",
+            display_name="Facebook",
+            app_name="tenant-demo",
+            callback_url="https://app.example.com/api/auth/callback/facebook",
+            automation="manual",
+            console_url="https://developers.facebook.com/",
+            instructions=(),
+            required_env=(),
+            metadata={},
+        )
         with pytest.raises(UnsupportedAccountLinkingProviderError):
-            render_account_linking_stack(_opts("nextauth", "google", "discord"))
+            render_account_linking_stack(AccountLinkingStackOptions(
+                framework="nextauth",
+                provider_plans=(_plan("google"), bad),
+            ))
 
     def test_rejects_duplicate_providers(self):
         with pytest.raises(ValueError, match="duplicate provider"):

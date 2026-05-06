@@ -303,15 +303,15 @@ class TestOutboundOAuthScaffold:
         assert 'missingScopes: result.authorization!.missingScopes' in route
 
     def test_provider_metadata_marks_as2_token_vault_support(self):
-        result = _render("github", "slack")
+        result = _render("github", "slack", "notion")
         support = {p.provider: p.token_vault_supported for p in result.providers}
-        assert support == {"github": True, "slack": False}
+        assert support == {"github": True, "slack": True, "notion": True}
         data = result.to_dict()
         assert data["providers"][0]["token_vault_supported"] is True
-        assert data["providers"][1]["token_vault_supported"] is False
+        assert data["providers"][1]["token_vault_supported"] is True
+        assert data["providers"][2]["token_vault_supported"] is True
         helper = result.files[0].content
         assert "tokenVaultSupported: true" in helper
-        assert "tokenVaultSupported: false" in helper
         assert "revocationEndpoint:" in helper
 
     def test_env_declares_per_provider_secrets_without_values(self):

@@ -423,11 +423,13 @@ export function buildAuthorizeUrl(opts: BuildAuthorizeUrlOptions): string {
     ["response_type", "code"],
     ["client_id", clientId],
     ["redirect_uri", redirectUri],
-    ["scope", scope.join(" ")],
     ["state", state],
     ["code_challenge", codeChallenge],
     ["code_challenge_method", codeChallengeMethod],
   ]
+  if (scope.length > 0) {
+    params.push(["scope", scope.join(" ")])
+  }
   if (nonce !== undefined && nonce !== null) {
     params.push(["nonce", nonce])
   }

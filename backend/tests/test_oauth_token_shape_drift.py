@@ -42,7 +42,7 @@ Coverage shape
        * ``apple``       — id_token + refresh_token, *no* scope echo
        * ``gitlab``      — OIDC + ``created_at`` extra surfaced via raw
        * ``bitbucket``   — Cloud shape, ``state`` field surfaced via raw
-       * ``slack``       — v2 shape with nested ``authed_user`` extra
+       * ``slack``       — Sign in with Slack OIDC shape + id_token
        * ``notion``      — workspace-scoped, no expires_in, no refresh
        * ``salesforce``  — many extras (``instance_url``, ``signature``)
        * ``hubspot``     — minimal, no ``token_type`` echoed (defaults)
@@ -220,21 +220,15 @@ VENDOR_FIXTURES: Mapping[str, Mapping[str, Any]] = {
         "token_type": "bearer",
     },
     "slack": {
-        # Slack v2 — bot token at top level; nested ``authed_user``
-        # carries the per-user OAuth bundle. Both nested + extras land
-        # in raw verbatim.
+        # Sign in with Slack OIDC — root access_token + id_token;
+        # Slack-specific team/user extras land in raw verbatim.
         "ok": True,
         "app_id": "A012345",
-        "authed_user": {
-            "id": "U987654",
-            "scope": "users:read,users:read.email",
-            "access_token": "xoxp-user-aaa",
-            "token_type": "user",
-        },
-        "scope": "users:read,users:read.email",
+        "scope": "openid email profile",
         "token_type": "Bearer",
-        "access_token": "xoxb-bot-bbb",
-        "bot_user_id": "B012345",
+        "access_token": "xoxp-user-aaa",
+        "id_token": "eyJraWQi.slack-id.sig",
+        "user_id": "U987654",
         "team": {"id": "T012345", "name": "Acme"},
     },
     "notion": {

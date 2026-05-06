@@ -105,19 +105,42 @@ describe("AS.7.1 LoginPage — composition", () => {
     expect(screen.getByTestId("as7-field-password")).toBeInTheDocument()
   })
 
-  it("renders the 5 primary OAuth spheres as anchors", () => {
+  it("renders unconfigured primary OAuth spheres as disabled settings CTAs", () => {
     render(<LoginPage />)
     for (const id of ["google", "github", "microsoft", "apple", "discord"]) {
       const sphere = screen.getByTestId(`as7-oauth-${id}`)
       expect(sphere).toBeInTheDocument()
-      expect(sphere.tagName.toLowerCase()).toBe("a")
-      expect(sphere.getAttribute("href")).toContain(
+      expect(sphere.tagName.toLowerCase()).toBe("span")
+      expect(sphere).toHaveAttribute("aria-disabled", "true")
+      expect(
+        screen.getByTestId(`as7-oauth-${id}-disabled-state`),
+      ).toHaveTextContent("Configure in Settings")
+    }
+  })
+
+  it("builds the OAuth authorize path for configured providers", async () => {
+    vi.resetModules()
+    vi.stubEnv("NEXT_PUBLIC_OMNISIGHT_OAUTH_GOOGLE_CONFIGURED", "true")
+    const { buildOAuthAuthorizeUrl, getProvider } = await import(
+      "@/lib/auth/oauth-providers"
+    )
+    expect(getProvider("google").configured).toBe(true)
+    expect(buildOAuthAuthorizeUrl("google")).toBe(
+      "/api/v1/auth/oauth/google/authorize",
+    )
+    vi.unstubAllEnvs()
+  })
+
+  it("OAuth URL builder keeps backend route shape", async () => {
+    const { buildOAuthAuthorizeUrl } = await import("@/lib/auth/oauth-providers")
+    for (const id of ["google", "github", "microsoft", "apple", "discord"]) {
+      expect(buildOAuthAuthorizeUrl(id as never)).toContain(
         `/api/v1/auth/oauth/${id}/authorize`,
       )
     }
   })
 
-  it("More toggle reveals the secondary 6 spheres", async () => {
+  it("More toggle reveals the secondary 6 disabled settings CTAs", async () => {
     render(<LoginPage />)
     expect(screen.queryByTestId("as7-oauth-row-secondary")).toBeNull()
     await userEvent.click(screen.getByTestId("as7-oauth-more-toggle"))
@@ -130,7 +153,13 @@ describe("AS.7.1 LoginPage — composition", () => {
       "salesforce",
       "hubspot",
     ]) {
-      expect(screen.getByTestId(`as7-oauth-${id}`)).toBeInTheDocument()
+      expect(screen.getByTestId(`as7-oauth-${id}`)).toHaveAttribute(
+        "aria-disabled",
+        "true",
+      )
+      expect(
+        screen.getByTestId(`as7-oauth-${id}-disabled-state`),
+      ).toHaveTextContent("Configure in Settings")
     }
   })
 

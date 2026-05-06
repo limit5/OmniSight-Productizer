@@ -659,8 +659,8 @@ class Settings(BaseSettings):
     llm_credential_migrate: str = ""
 
     # ── AS.6.1 OmniSight self-login OAuth (Sign in with X) ──
-    # Per-vendor OAuth 2.0 client credentials for the four AS.6.1
-    # SSO buttons (Google / GitHub / Microsoft / Apple). Empty value
+    # Per-vendor OAuth 2.0 client credentials for the AS.6.1 /
+    # FX2.D9.7 SSO buttons. Empty value
     # ⇒ that provider's /authorize endpoint returns 501 "not
     # configured" so operators can ship the binary without wiring
     # any provider, then enable them one-by-one. The vendor catalog
@@ -685,7 +685,7 @@ class Settings(BaseSettings):
     # operators can rotate one without invalidating the other.
     #
     # Module-global state audit (per implement_phase_step.md SOP §1,
-    # type-1 answer): all 10 fields are immutable Settings literals
+    # type-1 answer): all 25 fields are immutable Settings literals
     # derived once at process boot from env / .env — every uvicorn
     # worker reads the same value from the same source so cross-
     # worker FlowSession cookie verification is deterministic
@@ -698,6 +698,21 @@ class Settings(BaseSettings):
     oauth_microsoft_client_secret: str = ""
     oauth_apple_client_id: str = ""
     oauth_apple_client_secret: str = ""
+    oauth_discord_client_id: str = ""
+    oauth_discord_client_secret: str = ""
+    oauth_gitlab_client_id: str = ""
+    oauth_gitlab_client_secret: str = ""
+    oauth_bitbucket_client_id: str = ""
+    oauth_bitbucket_client_secret: str = ""
+    oauth_slack_client_id: str = ""
+    oauth_slack_client_secret: str = ""
+    oauth_notion_client_id: str = ""
+    oauth_notion_client_secret: str = ""
+    oauth_salesforce_client_id: str = ""
+    oauth_salesforce_client_secret: str = ""
+    oauth_salesforce_login_base_url: str = ""
+    oauth_hubspot_client_id: str = ""
+    oauth_hubspot_client_secret: str = ""
     oauth_redirect_base_url: str = ""
     oauth_flow_signing_key: str = ""
 

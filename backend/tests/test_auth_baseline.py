@@ -44,6 +44,7 @@ from backend import auth_baseline
         "/api/v1/auth/login",
         "/api/v1/auth/bootstrap",
         "/api/v1/auth/oidc/callback",       # startswith
+        "/api/v1/auth/oauth/google/authorize",  # startswith
         "/api/v1/bootstrap/status",
         "/api/v1/webhooks/github",
         "/api/v1/chatops/webhook/discord",
