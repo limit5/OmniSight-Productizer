@@ -136,6 +136,14 @@ AUTH_BASELINE_ALLOWLIST: Final[tuple[str, ...]] = (
     # /auth/* paths (logout, change-password, etc.) stay gated.
     "/api/v1/auth/oidc/",
 
+    # OAuth callback / authorize URLs — the browser arrives here
+    # before a session cookie is set. The OAuth login handler either
+    # redirects to the external provider or establishes the session
+    # from the authorization code; after that one hit, the regular
+    # session cookie carries the auth. Scoped narrowly to /auth/oauth/
+    # so other /auth/* paths (logout, change-password, etc.) stay gated.
+    "/api/v1/auth/oauth/",
+
     # ─── Server-Sent Events (SSE) ────────────────────────────
     # /events uses passive session-cookie auth at handler level
     # (the EventSourceResponse reads Cookie from scope). Browsers

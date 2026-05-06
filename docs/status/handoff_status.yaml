@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 505
+entry_count: 506
 status_counts:
-  dev-only: 494
+  dev-only: 495
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4698,3 +4698,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑完整 Q.2 PG-backed suite，並在 production/staging rebuild backend
     後以新裝置登入 smoke 確認 session / CSRF cookie `Max-Age=3600`、known-device relogin `Max-Age=28800`。
+- id: 2026-05-06--D9.7
+  header_line: 47801
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.0 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator rebuild / redeploy backend 後，抽查 `/api/v1/auth/oauth/google/authorize` 等 supported
+    provider authorize path 不再被 auth baseline 401，並進入 provider config / redirect handler。
