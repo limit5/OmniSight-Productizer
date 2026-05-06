@@ -6212,6 +6212,20 @@ BP.E GraphRAG / Neo4j
 > **UI 流程 v3 mixed**：first-time (C) 2-step wizard → (A) Constellation + 6 overlay tooltips → 之後預設 (A) → (B) War Room toggle for power user。
 >
 > **時程**：4 週內 ship to v0.4.0 (2026-06-02 cut)。詳見 `docs/adr/0007-multi-provider-subscription-orchestrator.md`。
+>
+> **W0 是 W1 prereq**：W1 orchestrator routing 沒 `agent_class` 標籤就跑不起來；W2 cost estimator seed 也需要。
+>
+> **W17 ↔ ADR 0008 RPG.W13**：W17 是 *static upfront baseline*（出廠時就完善），RPG.W13 是 *runtime adaptive leveling*（agent 用過才知道哪裡不足 + 隨新技術持續改善）。兩者互補不重複。
+
+### MP.W0 — agent_class label re-slice（**W1 prereq**, ~1 day, blocking）
+
+> 把整份 TODO 全部 item 都標 `agent_class` 標籤；W1 orchestrator routing + W2 cost estimator seed + ADR 0008 RPG `class` field 三邊共用 source of truth。
+
+- [ ] MP.W0.1 定義 `agent_class` 標籤 schema — `subscription-codex` / `subscription-claude` / `api-anthropic` / `api-openai` / `local-llm-qwen` / `unassigned`
+- [ ] MP.W0.2 `scripts/reslice_todo_agent_class.py` — 掃 TODO.md 所有 `- [ ]` / `- [x]` item，沒 `[class:X]` 內聯標籤就提示 operator 補；可半自動 (從 Capability assignment 表反推)
+- [ ] MP.W0.3 把 13 個已完成 epic（BP.I/H/C/N/M/Q/L/D/W/P 系列 + KS.2/3 + WP.3/5/2/7 + W1A）的 `agent_class` 補回（這是 W2 baseline data 的種子）
+- [ ] MP.W0.4 Drift guard test — `tests/test_todo_agent_class_complete.py` — 任何 `- [ ]` 沒標 `[class:X]` 就 fail（CI 阻擋未標 item 進 main）
+- [ ] MP.W0.5 ADR 0007 + ADR 0008 cross-link `agent_class` schema 為 shared canonical source（哪邊改另一邊跟）
 
 ### MP.W1 — Backend orchestrator + quota tracker（Week 1, ~3 day）
 
@@ -6341,10 +6355,26 @@ BP.E GraphRAG / Neo4j
 - [ ] MP.W16.4 Cost estimator calibration walkthrough (per-tenant)
 - [ ] MP.W16.5 v0.5.0 + v0.6.0 enablement path (Gemini / xAI when ready)
 
+### MP.W17 — MCP/A2A upfront tooling robustness（Week 4, ~3 day, **complement to RPG.W13**）
+
+> **與 RPG.W13 的關係**：W17 = *出廠時就完善的 baseline*（audit 現有 MCP server / 補缺工具 / 統一錯誤語意 / 加 retry+timeout wrapper / system-prompt 內 tool catalog），讓 agent 第一次接觸工具就有穩定基礎。RPG.W13 = *runtime 升級*（用過才知道哪些工具不夠用 + 新技術持續加進來）。兩者互補：W17 把「初始品質」拉高，RPG.W13 把「長期品質」拉高。
+>
+> **為什麼放 W17 不是更早**：W1 orchestrator 用今天的工具表現也 OK；W17 是讓 *未來所有 agent 都吃到的標準工具集* 升級，不阻塞 W1。但要在 v0.4.0 ship 前完工，否則 RPG.W13 接手時 baseline 太低會浪費 leveling 的時間。
+
+- [ ] MP.W17.1 MCP server inventory audit — 列出當前 fleet 用到的所有 MCP servers + 每個 server 暴露的 tool 清單 + 30 day error rate 統計
+- [ ] MP.W17.2 高頻工具 hardening — top-10 invocation 工具補足：(1) 結構化 error message（vendor code + retry hint）(2) schema validation on input（避免 agent 亂塞參數）(3) idempotency key 支援（重試時不會 double-write）
+- [ ] MP.W17.3 缺工具補齊 — 至少加 Slack / Linear / GitHub Issues / GitLab API / Jira / Notion 6 個（依 fleet 實際需求補齊；MCP server 現成的就 wrap）
+- [ ] MP.W17.4 Standard tool-call wrapper — `backend/agents/tool_call_wrapper.py`：unified timeout（default 30s, override per-tool）+ retry budget（max 3, exponential backoff）+ circuit breaker（同 endpoint 連續 5 fail → trip 5 min）
+- [ ] MP.W17.5 A2A handoff envelope hardening — peer-handoff 在 partial failure 下的語意：(a) idempotent handoff token (b) handoff timeout + auto-rollback (c) cross-Guild handoff 的 envelope schema validation
+- [ ] MP.W17.6 System-prompt tool catalog injection — agent 啟動時自動把可用工具清單（含使用範例 + common pitfall）注入 system prompt，避免 trial-and-error；token cost cap 1KB
+- [ ] MP.W17.7 Tool invocation telemetry — emit `tool_invocation` event (tool_id / agent_id / outcome / latency / retry_count)，給 RPG.W13 proficiency tracker 當資料源
+- [ ] MP.W17.8 ~25 contract tests — wrapper retry / circuit breaker / handoff rollback / schema validation failure cases
+
 ### MP — Capability assignment
 
 | Wave | agent_class | 為什麼 |
 |---|---|---|
+| W0 prereq | api-anthropic | 整份 TODO 掃描 + 13 epic 歷史回填，1M context 一次看完比 codex chunked review 穩 |
 | W1, W2, W3 backend | api-anthropic | high blast radius (orchestrator core + DB schema)，1M context 看完 BP.F + BP.C + Z 整套 reuse |
 | W4 Constellation | api-anthropic | animation logic + sphere physics 複雜，需大 context 避免 react re-render bug |
 | W5 onboarding | subscription-codex | 6 個 tooltip + 2 wizard step 是 well-bounded |
@@ -6353,6 +6383,7 @@ BP.E GraphRAG / Neo4j
 | W13-W14 | subscription-codex | placeholder shell |
 | W15 tests | subscription-codex | drift guard pattern 已成熟 |
 | W16 docs | subscription-codex | docs |
+| W17 tool baseline | api-anthropic | wrapper + circuit breaker + A2A envelope schema 複雜，且影響整個 fleet 的工具基礎；錯一處全 fleet 都受影響 |
 
 ---
 

@@ -150,6 +150,13 @@ Per (`agent_id`, `tool_id`) pair, Lv 1-5:
 
 Auto-detected from invocation log + outcome. Drives feature-unlock gating: a low-Lv agent literally cannot call high-Lv-only flags.
 
+**Relation to MP.W17** (upfront tool baseline): MP.W17 ships the *static baseline quality* of the tool surface — audit existing MCP servers, harden top-10 tools, add 6 missing servers, standard wrapper (timeout / retry / circuit breaker), A2A envelope schema validation, system-prompt tool catalog injection. RPG.W13 consumes MP.W17's `tool_invocation` telemetry events (W17.7) as its proficiency tracker data source. The two are kept distinct because:
+
+- **MP.W17 is static** — it raises baseline-day-zero quality, so a Lv 1 agent's basic invoke already works reliably
+- **RPG.W13 is adaptive** — it grows per-agent proficiency over time as new tools land and existing tools accumulate fleet-wide usage data
+
+Collapsing W17 into W13 would force the runtime leveling layer to also fix baseline gaps, slowing leveling progression and giving operators no clear "ship-day quality" target.
+
 ### Talent tree (W14)
 
 Milestone gates at **Lv 10 / 30 / 50 / 80**. At each gate, operator picks a talent (e.g. backend Guild Lv 10: `schema-first` / `performance-first` / `security-first`). Choice is immutable per (agent_id, milestone), persisted to `agent_talent_choice`. Talents affect:
@@ -259,8 +266,10 @@ If BP.B / skill matrix / MCP registry change, RPG schema does not. The drift gua
 ## Related
 
 - [ADR 0005 — Tier S/M/L/X authority](0005-tier-authority-levels.md) — Tier gates that RPG level + skill feed into
-- [ADR 0007 — Multi-Provider Subscription Orchestrator](0007-multi-provider-subscription-orchestrator.md) — MP `routing_policy` consumes RPG `prefer_agent_id` + Tier gates
+- [ADR 0007 — Multi-Provider Subscription Orchestrator](0007-multi-provider-subscription-orchestrator.md) — MP `routing_policy` consumes RPG `prefer_agent_id` + Tier gates; MP.W0 establishes the canonical `agent_class` schema; MP.W17 ships baseline tool quality that RPG.W13 levels on top of
 - [TODO.md Priority RPG](../../TODO.md) — full W1-W21 implementation breakdown
+- [TODO.md Priority MP.W0](../../TODO.md) — `agent_class` re-slice (shared canonical schema source)
+- [TODO.md Priority MP.W17](../../TODO.md) — upfront MCP/A2A tool baseline (RPG.W13's static counterpart)
 - [TODO.md Priority BP.B](../../TODO.md) — Guild definition (upstream `Guild` enum source)
 - [TODO.md Priority BP.M](../../TODO.md) — dim memory (L2 storage backend)
 - [TODO.md Priority BP.F](../../TODO.md) — Guild model mapping (routing input)

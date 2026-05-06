@@ -223,11 +223,21 @@ Per-tenant calibration: model adjusts based on actual user task profile (e.g., "
 
 - [ADR 0001 — Five-branch Git Flow](0001-five-branch-gitflow.md) — v0.4.0 milestone cut from develop
 - [ADR 0005 — Tier S/M/L/X authority](0005-tier-authority-levels.md) — agent_class labels feed orchestrator routing
+- [ADR 0008 — Agent RPG class & skill leveling](0008-agent-rpg-class-skill-leveling.md) — shares `agent_class` schema (MP.W0 source of truth); MP.W17 (upfront tool baseline) ↔ RPG.W13 (runtime proficiency leveling) are static/adaptive complements
 - [Priority BP.F](../../TODO.md) — Mixed-mode Model Mapping (orchestrator consumer)
 - [Priority BP.C](../../TODO.md) — T-shirt Sizer (cost estimator input)
 - [Priority Z series](../../TODO.md) — LLM Provider Observability (rate-limit header reuse)
-- [Priority MP](../../TODO.md) — this ADR's implementation plan
+- [Priority MP](../../TODO.md) — this ADR's implementation plan (W0-W17)
 - 2026-05-06 deep audit — D5 observability gap (Sentry/OpenTelemetry) feeds MP debugging surface
+
+---
+
+## 2026-05-06 amendment — added W0 (prereq) + W17 (tool baseline)
+
+After ADR 0008 (Agent RPG) landed, two gaps became visible in the original W1-W16 plan:
+
+- **MP.W0** (`agent_class` label re-slice, blocking prereq before W1) — W1 orchestrator routing + W2 cost estimator seed both consume `agent_class` labels. Without re-slicing the existing TODO + 13 historical epics with these labels, W1 cannot run end-to-end tests and W2 cannot seed baseline data. ADR 0008 RPG `class` field shares the same canonical schema, so W0 establishes a single source of truth.
+- **MP.W17** (MCP/A2A upfront tooling robustness, parallel to W4-W16) — distinct from RPG.W13 (runtime proficiency leveling). W17 = "out-of-box baseline quality" (audit existing servers, harden top-10 tools, add 6 missing servers, standard wrapper, A2A envelope schema, system-prompt tool catalog). RPG.W13 = "ongoing leveling discovered through actual task execution + new tech adoption". Both are kept because static-baseline-quality and runtime-adaptive-leveling solve different halves of tooling reliability — collapsing them would force the runtime layer to also fix baseline gaps, slowing leveling progression.
 
 ---
 
