@@ -301,6 +301,19 @@ def test_build_authorize_url_caller_extra_overrides_vendor_extra():
     assert q["access_type"] == ["offline"]
 
 
+def test_gitlab_default_scopes_match_oidc_login_contract():
+    """FX2.D9.7.6 pins GitLab login to read_user + OIDC profile claims."""
+    url = ov.build_authorize_url_for_vendor(
+        ov.GITLAB,
+        client_id="gitlab.test",
+        redirect_uri="https://app.example/cb",
+        state="S",
+        code_challenge="C",
+    )
+    q = _query(url)
+    assert q["scope"] == ["read_user openid email profile"]
+
+
 def test_begin_authorization_for_vendor_mints_nonce_for_oidc_only():
     _, github_flow = ov.begin_authorization_for_vendor(
         ov.GITHUB, client_id="cid", redirect_uri="https://app/cb"

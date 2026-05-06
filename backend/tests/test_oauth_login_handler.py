@@ -1,8 +1,8 @@
 """AS.6.1 — backend.security.oauth_login_handler contract tests.
 
 Validates the OmniSight self-login OAuth backend handler that wires
-the AS.1 OAuth shared library to the five ``Sign in with Google /
-GitHub / Microsoft / Apple / Discord`` SSO buttons via two HTTP endpoints
+the AS.1 OAuth shared library to the six ``Sign in with Google /
+GitHub / Microsoft / Apple / Discord / GitLab`` SSO buttons via two HTTP endpoints
 (``GET /api/v1/auth/oauth/{vendor}/authorize`` and ``.../callback``)
 mounted in :mod:`backend.routers.auth`.
 
@@ -10,7 +10,7 @@ Test families
 ─────────────
 1. SUPPORTED_PROVIDERS / cookie-envelope constants — pinned values,
    immutable shapes, no module-level mutable container.
-2. assert_provider_supported — accepts the five AS.6.1 / FX2.D9.7 slugs,
+2. assert_provider_supported — accepts the six AS.6.1 / FX2.D9.7 slugs,
    rejects unknown / mixed-case slugs, raises the right exception
    class.
 3. lookup_provider_credentials — reads the per-vendor Settings
@@ -24,7 +24,7 @@ Test families
    tamper detection (HMAC mismatch), TTL expiry, malformed
    envelope, version pin.
 7. extract_user_identity — per-vendor field-name dispatch
-   (Google/GitHub/Microsoft/Discord userinfo + Apple id_token), missing
+   (Google/GitHub/Microsoft/Discord/GitLab userinfo + Apple id_token), missing
    fields raise IdentityFieldMissingError, name fallback to
    email-local-part.
 8. exchange_authorization_code — happy path with httpx
@@ -47,7 +47,7 @@ Test families
 13. Module-global state audit (per SOP §1) — no top-level mutable
     container, importing the module is side-effect-free.
 14. Settings field declaration drift guard.
-15. Google/GitHub/Microsoft/Apple/Discord router integration — mocked authorize → callback →
+15. Google/GitHub/Microsoft/Apple/Discord/GitLab router integration — mocked authorize → callback →
     OmniSight session cookie + DB session creation.
 """
 
@@ -99,6 +99,8 @@ class _FakeSettings:
             "oauth_apple_client_secret": "ap-secret",
             "oauth_discord_client_id": "dc-id",
             "oauth_discord_client_secret": "dc-secret",
+            "oauth_gitlab_client_id": "gl-id",
+            "oauth_gitlab_client_secret": "gl-secret",
             "oauth_redirect_base_url": "https://omnisight.example.com",
             "oauth_flow_signing_key": "test-signing-key-with-enough-entropy-1234",
             "decision_bearer": "decision-bearer-fallback-key-x",
@@ -121,7 +123,7 @@ def _mock_transport(handler):
 
 def test_supported_providers_pinned():
     assert olh.SUPPORTED_PROVIDERS == frozenset({
-        "google", "github", "microsoft", "apple", "discord",
+        "google", "github", "microsoft", "apple", "discord", "gitlab",
     })
 
 
@@ -166,7 +168,9 @@ def test_export_count_pinned():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@pytest.mark.parametrize("p", ["google", "github", "microsoft", "apple", "discord"])
+@pytest.mark.parametrize(
+    "p", ["google", "github", "microsoft", "apple", "discord", "gitlab"]
+)
 def test_assert_provider_supported_accepts_supported(p):
     olh.assert_provider_supported(p)  # no raise
 
@@ -197,6 +201,13 @@ def test_lookup_provider_credentials_discord():
     assert creds.provider == "discord"
     assert creds.client_id == "dc-id"
     assert creds.client_secret == "dc-secret"
+
+
+def test_lookup_provider_credentials_gitlab():
+    creds = olh.lookup_provider_credentials("gitlab", settings_obj=_FakeSettings())
+    assert creds.provider == "gitlab"
+    assert creds.client_id == "gl-id"
+    assert creds.client_secret == "gl-secret"
 
 
 def test_lookup_provider_credentials_raises_on_missing():
@@ -464,6 +475,38 @@ def test_extract_identity_discord_falls_back_to_username():
         id_token_claims=None,
     )
     assert ident.name == "discorduser"
+
+
+def test_extract_identity_gitlab_uses_oidc_sub_and_name():
+    ident = olh.extract_user_identity(
+        provider="gitlab",
+        userinfo={
+            "sub": "gitlab|42",
+            "email": "User.GitLab@Example.COM",
+            "name": "GitLab User",
+            "nickname": "gitlabuser",
+        },
+        id_token_claims=None,
+    )
+    assert ident == olh.OAuthUserIdentity(
+        provider="gitlab",
+        subject="gitlab|42",
+        email="user.gitlab@example.com",
+        name="GitLab User",
+    )
+
+
+def test_extract_identity_gitlab_falls_back_to_nickname():
+    ident = olh.extract_user_identity(
+        provider="gitlab",
+        userinfo={
+            "sub": "gitlab|43",
+            "email": "user@example.com",
+            "nickname": "gitlabuser",
+        },
+        id_token_claims=None,
+    )
+    assert ident.name == "gitlabuser"
 
 
 def test_extract_identity_apple_reads_id_token_claims():
@@ -797,6 +840,27 @@ def test_begin_oauth_login_discord_authorize_url():
     assert start.flow.nonce is None
 
 
+def test_begin_oauth_login_gitlab_authorize_url():
+    """GitLab is OIDC-flavoured OAuth2 with read_user+profile scopes."""
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="gitlab", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    parsed = urlparse(start.authorize_url)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "gitlab.com"
+    assert parsed.path == "/oauth/authorize"
+    assert query["client_id"] == ["gl-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/gitlab/callback"
+    ]
+    assert query["scope"] == ["read_user openid email profile"]
+    assert start.flow.provider == "gitlab"
+    assert start.flow.nonce is not None
+
+
 def test_begin_oauth_login_apple_includes_form_post_param():
     """Apple's catalog entry pre-bakes ``response_mode=form_post`` —
     must appear in the authorize URL."""
@@ -910,6 +974,46 @@ def test_complete_oauth_login_discord_full_flow():
     assert result.identity.name == "Dana Discord"
     assert result.token.access_token == "at-good"
     assert result.flow.provider == "discord"
+
+
+def test_complete_oauth_login_gitlab_full_flow():
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="gitlab", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+
+    def userinfo_handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://gitlab.com/oauth/userinfo"
+        assert request.headers["authorization"] == "Bearer at-good"
+        return httpx.Response(200, json={
+            "sub": "gitlab|777",
+            "email": "dana.gitlab@example.com",
+            "name": "Dana GitLab",
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(
+        _composite_handler(
+            _good_token_handler(scope="read_user openid email profile"),
+            userinfo_handler,
+        )
+    ))
+    result = _run(olh.complete_oauth_login(
+        provider="gitlab",
+        flow_cookie=start.flow_cookie,
+        returned_state=start.flow.state,
+        code="auth-code",
+        settings_obj=s,
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert result.identity.provider == "gitlab"
+    assert result.identity.subject == "gitlab|777"
+    assert result.identity.email == "dana.gitlab@example.com"
+    assert result.identity.name == "Dana GitLab"
+    assert result.token.access_token == "at-good"
+    assert result.flow.provider == "gitlab"
 
 
 def test_complete_oauth_login_apple_uses_id_token_claims():
@@ -1138,7 +1242,7 @@ def test_settings_declares_redirect_base_and_signing_key():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Family 15 — Google/GitHub/Microsoft/Apple/Discord router integration
+#  Family 15 — Google/GitHub/Microsoft/Apple/Discord/GitLab router integration
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
@@ -1626,6 +1730,169 @@ async def test_discord_oauth_authorize_callback_establishes_session(
     assert user["oidc_provider"] == "discord"
     assert user["oidc_subject"] == "80351110224678912"
     assert auth_methods == ["oauth_discord"]
+    assert session["user_id"] == user["id"]
+
+
+@pytest.fixture()
+async def _gitlab_oauth_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """PG-backed HTTP fixture for the GitLab authorize → callback flow.
+
+    Mirrors the Discord OAuth E2E fixture above: install the shared
+    pg_test_pool, pin bootstrap green, set the GitLab OAuth Settings
+    singleton knobs, and mock token/userinfo at the handler boundary.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+    monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "false")
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import bootstrap as _boot
+    from backend import config as _cfg
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    monkeypatch.setattr(_cfg.settings, "oauth_gitlab_client_id", "gitlab-client-id")
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_gitlab_client_secret", "gitlab-client-secret"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_redirect_base_url", "https://omnisight.example.com"
+    )
+    monkeypatch.setattr(
+        _cfg.settings,
+        "oauth_flow_signing_key",
+        "gitlab-oauth-flow-signing-key-2026",
+    )
+
+    async def _fake_exchange_authorization_code(**kwargs):
+        assert kwargs["client_id"] == "gitlab-client-id"
+        assert kwargs["client_secret"] == "gitlab-client-secret"
+        assert kwargs["code"] == "gitlab-auth-code"
+        assert kwargs["redirect_uri"] == (
+            "https://omnisight.example.com/api/v1/auth/oauth/gitlab/callback"
+        )
+        return oc.TokenSet(
+            access_token="gitlab-access-token",
+            refresh_token="gitlab-refresh-token",
+            token_type="Bearer",
+            expires_at=time.time() + 3600,
+            scope=("read_user", "openid", "email", "profile"),
+            id_token=None,
+            raw={"access_token": "gitlab-access-token"},
+        )
+
+    async def _fake_fetch_userinfo(**kwargs):
+        assert kwargs["vendor"].provider_id == "gitlab"
+        assert kwargs["access_token"] == "gitlab-access-token"
+        return {
+            "sub": "gitlab|9001",
+            "email": "Eve.GitLab@Example.COM",
+            "name": "Eve GitLab",
+            "nickname": "eve-gitlab",
+        }
+
+    monkeypatch.setattr(
+        olh, "exchange_authorization_code", _fake_exchange_authorization_code
+    )
+    monkeypatch.setattr(olh, "fetch_userinfo", _fake_fetch_userinfo)
+    monkeypatch.setattr(
+        "backend.routers.auth._oauth_log_audit_safe",
+        lambda *args, **kwargs: None,
+    )
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            follow_redirects=False,
+        ) as ac:
+            yield {"client": ac, "pool": pg_test_pool}
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_gitlab_oauth_authorize_callback_establishes_session(
+    _gitlab_oauth_http_client,
+):
+    env = _gitlab_oauth_http_client
+    client = env["client"]
+
+    authorize = await client.get("/api/v1/auth/oauth/gitlab/authorize")
+
+    assert authorize.status_code == 302
+    assert olh.FLOW_COOKIE_NAME in client.cookies
+    location = authorize.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "gitlab.com"
+    assert parsed.path == "/oauth/authorize"
+    assert query["client_id"] == ["gitlab-client-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/gitlab/callback"
+    ]
+    assert query["scope"] == ["read_user openid email profile"]
+    state = query["state"][0]
+
+    callback = await client.get(
+        "/api/v1/auth/oauth/gitlab/callback",
+        params={"code": "gitlab-auth-code", "state": state},
+        headers={
+            "cf-connecting-ip": "203.0.113.11",
+            "user-agent": "pytest-gitlab-oauth",
+        },
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/"
+    assert olh.FLOW_COOKIE_NAME not in client.cookies
+    assert "omnisight_session" in client.cookies
+    assert "omnisight_csrf" in client.cookies
+
+    async with env["pool"].acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, email, name, role, oidc_provider, oidc_subject, "
+            "auth_methods FROM users WHERE email = $1",
+            "eve.gitlab@example.com",
+        )
+        assert user is not None
+        session = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE user_id = $1",
+            user["id"],
+        )
+        assert session is not None
+
+    auth_methods = user["auth_methods"]
+    if isinstance(auth_methods, str):
+        auth_methods = json.loads(auth_methods)
+    assert user["name"] == "Eve GitLab"
+    assert user["role"] == "viewer"
+    assert user["oidc_provider"] == "gitlab"
+    assert user["oidc_subject"] == "gitlab|9001"
+    assert auth_methods == ["oauth_gitlab"]
     assert session["user_id"] == user["id"]
 
 

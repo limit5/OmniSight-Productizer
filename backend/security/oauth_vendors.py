@@ -299,17 +299,16 @@ APPLE = VendorConfig(
 GITLAB = VendorConfig(
     # GitLab.com SaaS. Self-hosted GitLab instances override the
     # endpoints (``https://gitlab.example.com/oauth/...``). OIDC is
-    # supported when ``openid`` is in the scope set; we ship
-    # ``read_user`` as the minimal default so the same catalog entry
-    # works for both OIDC + non-OIDC modes (caller adds ``openid``
-    # to the scope tuple for OIDC).
+    # supported when ``openid`` is in the scope set. FX2.D9.7.6
+    # uses GitLab's OIDC /oauth/userinfo flow, so the default scope
+    # tuple includes read_user + the standard OIDC profile claims.
     provider_id="gitlab",
     display_name="GitLab",
     authorize_endpoint="https://gitlab.com/oauth/authorize",
     token_endpoint="https://gitlab.com/oauth/token",
     userinfo_endpoint="https://gitlab.com/oauth/userinfo",
     revocation_endpoint="https://gitlab.com/oauth/revoke",
-    default_scopes=("read_user",),
+    default_scopes=("read_user", "openid", "email", "profile"),
     is_oidc=True,
     extra_authorize_params=(),
     supports_refresh_token=True,

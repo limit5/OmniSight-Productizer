@@ -285,6 +285,13 @@ BEHAVIOUR_FIXTURES: Mapping[str, dict[str, Any]] = {
         "plaintext": "discord-access-token-80351110224678912",
         "expect": "ok",
     },
+    "round_trip_gitlab": {
+        "kind": "round_trip",
+        "userId": "user-1",
+        "provider": "gitlab",
+        "plaintext": "gitlab-access-token-glpat-like-value",
+        "expect": "ok",
+    },
     "provider_case_normalised": {
         "kind": "round_trip",
         "userId": "u1",
@@ -747,7 +754,7 @@ def test_aggregate_sha256_parity_python_ts(
 
 def test_every_supported_provider_has_round_trip_fixture() -> None:
     """Every provider in the whitelist must have a parity fixture.
-    Catches "added a 5th provider but forgot the parity check" the same
+    Catches "added a provider but forgot the parity check" the same
     way AS.1.5 catches "added a 12th vendor but forgot the fixture".
     """
     covered = {

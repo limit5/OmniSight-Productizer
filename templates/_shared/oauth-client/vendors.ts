@@ -189,8 +189,8 @@ export const APPLE: VendorConfig = makeVendor({
 })
 
 /** GitLab.com SaaS. Self-hosted instances override at use site
- * (`https://gitlab.example.com/oauth/...`). OIDC supported when
- * `openid` is in scope. */
+ * (`https://gitlab.example.com/oauth/...`). FX2.D9.7.6 uses the
+ * OIDC userinfo flow, so default scopes include `openid`. */
 export const GITLAB: VendorConfig = makeVendor({
   providerId: "gitlab",
   displayName: "GitLab",
@@ -198,7 +198,7 @@ export const GITLAB: VendorConfig = makeVendor({
   tokenEndpoint: "https://gitlab.com/oauth/token",
   userinfoEndpoint: "https://gitlab.com/oauth/userinfo",
   revocationEndpoint: "https://gitlab.com/oauth/revoke",
-  defaultScopes: ["read_user"],
+  defaultScopes: ["read_user", "openid", "email", "profile"],
   isOidc: true,
   extraAuthorizeParams: [],
   supportsRefreshToken: true,
