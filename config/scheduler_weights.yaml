@@ -1,0 +1,41 @@
+# Cross-priority scheduler weights for runner ticket pickup.
+#
+# Per docs/sop/jira-ticket-conventions.md §16. Operator-tunable; runner
+# re-reads on every dispatch loop. Phase 0 (now → 4 weeks) uses these
+# defaults + logs decisions to metrics/jira_ticket_lifecycle.jsonl;
+# Phase 1 operator review tunes per observed dispatch behaviour.
+#
+# Score formula:
+#   score = priority_weight
+#         + min(downstream_blocked × per_downstream_unblock, max_unblock_bonus)
+#         + (deadline_pressure_coefficient / max(days_to_fix_version, 1))
+#         + (log10(days_since_created + 1) × age_bonus_coefficient)
+#         − (mutex_in_progress penalty if same mutex_with label has In Progress sibling)
+
+schema_version: 1
+phase: 0  # 0 = observation, 1 = enforced (after 4-week tune)
+
+priority_weights:
+  MP: 100        # Multi-Provider Subscription Orchestrator (v0.4.0 critical path)
+  RPG: 80        # Agent Class & Skill Leveling (v0.5.0)
+  META: 90       # Process / retro / lessons — must not starve, see §17
+  FX2: 60        # Audit findings v2 (2026-05-06)
+  FX: 50         # Audit findings v1 (mostly Done)
+  BP: 40         # Blueprint V2
+  WP: 40         # Warp-inspired Patterns
+  KS: 50         # Multi-Tenant Secret Management
+  Q: 30          # Multi-Device Parity
+  Z: 30
+  ZZ: 30
+  Y: 30
+  N: 30
+  default: 50    # any Component not explicitly listed
+
+bonuses:
+  per_downstream_unblock: 5      # per ticket unblocked by completing this one
+  max_unblock_bonus: 30          # cap so a 50-downstream ticket doesn't dominate
+  deadline_pressure_coefficient: 10
+  age_bonus_coefficient: 3       # log10-scaled, prevents low-priority starvation
+
+penalties:
+  mutex_in_progress: 50          # heavy — avoid parallel work on same resource

@@ -1,0 +1,31 @@
+# In Progress SLA config for ticket lifecycle policing.
+#
+# Per docs/sop/jira-ticket-conventions.md §15. Phase 0 (now → 4 weeks)
+# is observation: soft warnings at intuitive breakpoints, no hard
+# enforcement. Phase 1 operator reviews metrics/jira_ticket_lifecycle.jsonl
+# (p50 / p90 / p95) and tunes hard_revert_days. Phase 2 enforces.
+#
+# Effective progress signals (any one resets the In Progress timer):
+#   - new commit referencing OP-XXXX
+#   - JIRA comment from non-bot account
+#   - JIRA field modification
+# Non-effective signals (don't reset):
+#   - runner pickup heartbeat
+#   - status check from monitoring
+#   - mechanical retry comment
+
+schema_version: 1
+phase: 0  # 0 = observation only, 1 = enforced
+
+# Phase 0 soft warnings — no auto-revert
+soft_warning_days: 7      # comment "still active?"
+mention_at_days: 14       # @-mention operator
+hard_revert_days: 30      # auto-transition back to TODO + comment
+
+# Phase 1 (after 4-week observation, operator sets):
+# hard_revert_days: 21    # placeholder — set from observed p95 × 1.5
+# mention_at_days: 14
+# soft_warning_days: 7
+
+# Phase 2 zombie behaviour
+zombie_archive_multiplier: 2.0   # > 2× hard_revert → Archived + retrospective

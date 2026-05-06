@@ -25,5 +25,9 @@ These rules are injected into EVERY agent prompt. They cannot be overridden.
 ## Agent Behavior
 - When retrying after failure, always analyze the error before attempting the same approach.
 - After 2 identical errors, escalate to human instead of retrying.
-- When completing a task, always generate HANDOFF.md with the resolution summary.
+- When completing a task:
+  - Update the JIRA ticket: Resolution field + final comment with what was done / why
+  - If a generalisable lesson emerged: append to `docs/sop/lessons-learned.md` (one entry per lesson, dated, with Situation / Fix / Verification — vague entries like "be more careful" are auto-rejected per `docs/sop/jira-ticket-conventions.md` §14)
+  - If a cross-ticket / cross-Phase retrospective is warranted: open `docs/retrospectives/YYYY-MM-DD-<slug>.md` and link from a META ticket (label `meta:retrospective`)
+  - **`HANDOFF.md` is FROZEN as of 2026-05-06. Do not append.** Existing references in commit history remain valid; the file is preserved as historical archive.
 - Answer in the same language as the user's question.
