@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 519
+entry_count: 520
 status_counts:
-  dev-only: 508
+  dev-only: 509
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4826,3 +4826,12 @@ entries:
   next_gate: deployed-inactive — operator 在 frontend build env 設定各 OAuth provider 的 `NEXT_PUBLIC_OMNISIGHT_OAUTH_<VENDOR>_CONFIGURED=true`
     或 public client-id + secret-present boolean，重 build frontend image，並 smoke `/settings/account` Auth providers panel 狀態與
     docs links。
+- id: 2026-05-06--D9.7-15
+  header_line: 47963
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.14 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 依本 runbook 在 11 家 provider console 建 app / callback / scopes，設定 backend + frontend
+    env，重 build/restart，逐 provider smoke `/login` authorize → callback → session。
