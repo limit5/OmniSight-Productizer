@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""auto-runner-jira.py — JIRA-driven runner (replaces TODO.md scan).
+
+Per ``docs/sop/jira-ticket-conventions.md`` §16. Generic dispatch loop:
+
+1. Fetch pickable tickets via JQL (filtered by agent_class).
+2. Score via backend.agents.scheduler.
+3. Pre-pickup check via backend.agents.jira_dispatch.pre_pickup_ok
+   (live-state + future mutex + future blocker checks).
+4. Transition TODO → In Progress, set assignee, add pickup comment.
+5. Build prompt from ticket description + fetch fresh repo state.
+6. Invoke CLI (codex / claude) per agent_class.
+7. On success: prompt operator to push commits + transition →
+   Under Review (this MVP doesn't auto-push; that's step 3 polish).
+8. On failure: revert ticket to TODO with comment.
+
+ENV:
+  OMNISIGHT_RUNNER_CLASS   agent_class label, e.g. "subscription-codex"
+                           (defaults to subscription-codex)
+  OMNISIGHT_RUNNER_TARGET  optional ticket key override (skip scheduler,
+                           pickup specific ticket — for testing)
+  OMNISIGHT_RUNNER_DRY_RUN if "1", do everything except transition + invoke
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO))
+
+from backend.agents import jira_dispatch, scheduler
+
+AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
+TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
+DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
+
+
+def _build_prompt(client: jira_dispatch.DispatchClient, key: str, description: str) -> str:
+    """Construct the agent prompt per §5 prompt-injection contract."""
+    issue = jira_dispatch._request(client, "GET", f"/issue/{key}?fields=summary,labels,components")
+    f = issue["fields"]
+    summary = f.get("summary", "<no summary>")
+    labels = f.get("labels", [])
+    components = [c.get("name") for c in f.get("components", [])]
+
+    declared_areas = sorted(l.split(":", 1)[1] for l in labels if l.startswith("area:"))
+    all_areas = ["backend", "frontend", "devops", "tests", "db", "docs", "security", "embedded", "tooling"]
+    forbidden_areas = [a for a in all_areas if a not in declared_areas]
+    tier = next((l.split(":", 1)[1] for l in labels if l.startswith("tier:")), "M")
+    component_label = components[0] if components else next(
+        (l.split(":", 1)[1].upper() for l in labels if l.startswith("priority:")), "?"
+    )
+
+    forbidden_block = "\n  - ".join(forbidden_areas) if forbidden_areas else "(none)"
+    return f"""You are working on JIRA ticket {key}.
+
+Component: {component_label}
+Areas: {', '.join(declared_areas) or '<none declared>'}
+Tier: {tier}
+
+Ticket summary: {summary}
+
+Stay strictly within these boundaries. Do NOT introduce changes to:
+  - {forbidden_block}
+
+If you find that completing this ticket requires touching an out-of-area
+domain, halt, comment on the ticket, and transition back to TODO with
+a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
+
+Full ticket description follows:
+
+{description}
+
+When you complete the work, your final commit message must include
+[{key}] in the subject line.
+"""
+
+
+def _invoke_cli(agent_class: str, prompt: str) -> int:
+    """Invoke the underlying CLI for this agent_class. Returns exit code."""
+    if agent_class == "subscription-codex":
+        cmd = ["codex", "--yolo"]
+    elif agent_class == "subscription-claude":
+        cmd = ["claude"]  # subscription claude CLI
+    elif agent_class.startswith("api-"):
+        # API mode is via the SDK runner, not CLI. Out of scope for this MVP.
+        print(f"[runner] agent_class={agent_class} requires SDK invocation, not CLI. Skipping invoke.")
+        return 99
+    else:
+        print(f"[runner] unknown agent_class: {agent_class}", file=sys.stderr)
+        return 2
+
+    if DRY_RUN:
+        print(f"[runner] DRY_RUN: would invoke {cmd[0]} with {len(prompt)} char prompt")
+        return 0
+
+    print(f"[runner] invoking {cmd[0]}...")
+    proc = subprocess.run(cmd, input=prompt, text=True)
+    return proc.returncode
+
+
+def main() -> int:
+    print(f"[runner] agent_class={AGENT_CLASS}, dry_run={DRY_RUN}")
+    client = jira_dispatch.make_client(AGENT_CLASS)
+    print(f"[runner] authenticated as {client.bot_email} ({client.bot_account_id})")
+
+    # Step 1: ticket selection
+    if TARGET_OVERRIDE:
+        print(f"[runner] target override: {TARGET_OVERRIDE}")
+        # Fetch single ticket instead of running JQL
+        issue = jira_dispatch._request(client, "GET", f"/issue/{TARGET_OVERRIDE}")
+        snapshot = jira_dispatch.to_snapshot(issue)
+    else:
+        candidates_raw = jira_dispatch.fetch_pickable_tickets(client)
+        if not candidates_raw:
+            print("[runner] no pickable tickets — idling")
+            return 0
+        snapshots = [jira_dispatch.to_snapshot(i) for i in candidates_raw]
+        weights = scheduler.load_weights()
+        winner = scheduler.dispatch(
+            snapshots, weights,
+            pre_pickup_check=lambda t: jira_dispatch.pre_pickup_ok(client, t)[0],
+        )
+        if winner is None:
+            print("[runner] no candidate passed pre-pickup checks")
+            return 0
+        snapshot = winner
+
+    print(f"[runner] selected: {snapshot.key} (component={snapshot.component})")
+
+    # Step 2: pre-pickup check (re-run for the chosen — short-circuit if override)
+    ok, reason = jira_dispatch.pre_pickup_ok(client, snapshot)
+    if not ok:
+        print(f"[runner] pre-pickup fail: {reason}")
+        if not DRY_RUN:
+            jira_dispatch.add_comment(client, snapshot.key, f"[runner-live-state-fail]\n\nPre-pickup live-state check failed; not picking up.\n\n{reason}\n\nThis ticket will be retried on next polling cycle.")
+        return 1
+
+    # Step 3: transition + invoke
+    description = jira_dispatch.fetch_description(client, snapshot.key)
+    prompt = _build_prompt(client, snapshot.key, description)
+
+    if DRY_RUN:
+        print(f"[runner] DRY_RUN: would transition {snapshot.key} → In Progress")
+        print(f"[runner] DRY_RUN: prompt preview ({len(prompt)} chars):\n---\n{prompt[:1200]}\n---")
+        return 0
+
+    print(f"[runner] transitioning {snapshot.key} → In Progress")
+    jira_dispatch.transition_to_in_progress(client, snapshot.key)
+
+    rc = _invoke_cli(AGENT_CLASS, prompt)
+    if rc == 0:
+        print(f"[runner] {snapshot.key} CLI returned 0; operator must push + transition to Under Review")
+        jira_dispatch.add_comment(
+            client, snapshot.key,
+            f"[runner-cli-success] CLI exited 0. Operator: review changes, push commits, transition to Under Review.",
+        )
+    elif rc == 99:
+        print(f"[runner] {snapshot.key} skipped (API agent_class not yet wired in MVP)")
+        jira_dispatch.transition_back_to_todo(client, snapshot.key, "API agent_class not yet supported in auto-runner-jira.py MVP")
+    else:
+        print(f"[runner] {snapshot.key} CLI failed rc={rc}; reverting ticket")
+        jira_dispatch.transition_back_to_todo(client, snapshot.key, f"CLI exited {rc}; needs operator review.")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

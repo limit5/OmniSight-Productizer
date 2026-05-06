@@ -71,8 +71,23 @@ class SchedulerWeights:
 
 def load_weights(path: Path = WEIGHTS_PATH) -> SchedulerWeights:
     """Parse YAML weights config. Validates schema_version == 1."""
-    raise NotImplementedError(
-        "skeleton — yaml.safe_load + validate against §16 schema"
+    import yaml
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if raw.get("schema_version") != 1:
+        raise ValueError(
+            f"unsupported schema_version {raw.get('schema_version')!r} in {path}"
+        )
+    bonuses = raw.get("bonuses", {})
+    penalties = raw.get("penalties", {})
+    return SchedulerWeights(
+        schema_version=raw["schema_version"],
+        phase=int(raw.get("phase", 0)),
+        priority_weights={k: float(v) for k, v in raw["priority_weights"].items()},
+        per_downstream_unblock=float(bonuses.get("per_downstream_unblock", 5)),
+        max_unblock_bonus=float(bonuses.get("max_unblock_bonus", 30)),
+        deadline_pressure_coefficient=float(bonuses.get("deadline_pressure_coefficient", 10)),
+        age_bonus_coefficient=float(bonuses.get("age_bonus_coefficient", 3)),
+        mutex_in_progress_penalty=float(penalties.get("mutex_in_progress", 50)),
     )
 
 
@@ -80,9 +95,14 @@ def score(ticket: TicketSnapshot, weights: SchedulerWeights) -> float:
     """Compute scheduling score per §16 formula.
 
     Determinism contract: identical (ticket, weights) → identical score.
-    Tested by ``backend/tests/test_scheduler.py::test_score_determinism``.
     """
-    raise NotImplementedError("skeleton — implement formula above")
+    return (
+        _priority_weight(ticket.component, weights)
+        + _unblock_score(ticket.downstream_blocked_count, weights)
+        + _deadline_pressure(ticket.days_to_fix_version, weights)
+        + _age_bonus(ticket.days_since_created, weights)
+        - _mutex_penalty(ticket.has_mutex_in_progress_sibling, weights)
+    )
 
 
 def _priority_weight(component: str, weights: SchedulerWeights) -> float:
@@ -120,27 +140,42 @@ def _mutex_penalty(has_sibling_in_progress: bool, weights: SchedulerWeights) -> 
 def dispatch(
     candidates: list[TicketSnapshot],
     weights: SchedulerWeights,
-    pre_pickup_check: "Callable[[TicketSnapshot], bool]",
+    pre_pickup_check,
 ) -> TicketSnapshot | None:
     """Score-sort candidates, return first that passes pre_pickup_check.
 
-    Returns None when all candidates fail checks (caller should idle +
-    retry next polling cycle). Logs winner + runner-up + per-candidate
-    score to METRICS_PATH for Phase 0/1 review.
+    pre_pickup_check is a callable (TicketSnapshot) -> bool. Returns
+    None when all candidates fail checks (caller should idle).
     """
-    raise NotImplementedError(
-        "skeleton — score sort, iterate, call pre_pickup_check, log decision"
-    )
+    import datetime as _dt
+    scored = [(score(t, weights), t) for t in candidates]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    winner: TicketSnapshot | None = None
+    for s, ticket in scored:
+        if pre_pickup_check(ticket):
+            winner = ticket
+            break
+    log_dispatch_decision(winner, scored, _dt.datetime.utcnow().isoformat())
+    return winner
 
 
 def log_dispatch_decision(
     winner: TicketSnapshot | None,
-    scored: list[tuple[float, TicketSnapshot]],
+    scored: list[tuple[float, "TicketSnapshot"]],
     timestamp: str,
 ) -> None:
-    """Append one JSONL row to METRICS_PATH for observability.
-
-    Schema (used by Phase 1 metrics review):
-    ``{ts, winner, runner_up, score_breakdown, candidate_count}``.
-    """
-    raise NotImplementedError("skeleton — append-only JSONL write")
+    """Append one JSONL row to METRICS_PATH for observability."""
+    import json
+    METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "ts": timestamp,
+        "winner": winner.key if winner else None,
+        "runner_up": scored[1][1].key if len(scored) > 1 else None,
+        "candidate_count": len(scored),
+        "top_scores": [
+            {"key": t.key, "score": round(s, 2), "component": t.component}
+            for s, t in scored[:5]
+        ],
+    }
+    with METRICS_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")

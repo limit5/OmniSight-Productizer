@@ -123,3 +123,4 @@ deploy/blue-green/*.tmp.*
 
 # Phase-3 cutover pre-flight SQLite snapshots (rollback safety net)
 backups/
+metrics/
