@@ -6125,16 +6125,16 @@ BP.E GraphRAG / Neo4j
 
 ### FX2.W1B — BLOCKERs heavy batch（推薦 api-anthropic，後續單獨開）
 
-- [ ] FX2.D4.1 `backend/routers/auth.py:425-462` — wire `require_mfa_for_user()` 進 login flow（SOC 2 CC6.1 blocker；MFA enforcement 跟 has_verified_mfa 短路接起來）
-- [ ] FX2.D4.2 `backend/api_keys.py` + alembic — `expires_at` 欄位 + TTL 參數 + `validate_bearer()` 過期 check
-- [ ] FX2.D9.2 50+ omnisight components — dark mode sweep（31/3405 dark: classes，~2 週 batch）
+- [ ] FX2.D4.1 `backend/routers/auth.py:425-462` — wire `require_mfa_for_user()` 進 login flow（SOC 2 CC6.1 blocker；MFA enforcement 跟 has_verified_mfa 短路接起來） [class:subscription-codex]
+- [ ] FX2.D4.2 `backend/api_keys.py` + alembic — `expires_at` 欄位 + TTL 參數 + `validate_bearer()` 過期 check [class:subscription-codex]
+- [ ] FX2.D9.2 50+ omnisight components — dark mode sweep（31/3405 dark: classes，~2 週 batch） [class:subscription-codex]
 
 ### FX2.W2 — DEFECTs
 
-- [ ] FX2.D3.1 KS envelope migration 7 tables（api_keys / oauth_tokens / tenant_secrets / git_accounts / llm_credentials / provisioned_databases / provisioned_storage）— 仿 0189 sessions backfill pattern；3 週工程，api-anthropic
-- [ ] FX2.D6.1 `backend/tests/test_<module>.py` 寫 5 個關鍵 untested module（auth / bootstrap / db_pool / db_context / tenant_secrets）— pytest.ini §8.1 95% gate 模組
-- [ ] FX2.D6.2 BP.L marker auto-categorisation sweep（722→ goal 8000+ marked tests）
-- [ ] FX2.D9.3 ARIA label 47% → 80%+ 覆蓋；jsx-a11y rule 從 warn → error
+- [ ] FX2.D3.1 KS envelope migration 7 tables（api_keys / oauth_tokens / tenant_secrets / git_accounts / llm_credentials / provisioned_databases / provisioned_storage）— 仿 0189 sessions backfill pattern；3 週工程，api-anthropic [class:subscription-codex]
+- [ ] FX2.D6.1 `backend/tests/test_<module>.py` 寫 5 個關鍵 untested module（auth / bootstrap / db_pool / db_context / tenant_secrets）— pytest.ini §8.1 95% gate 模組 [class:subscription-codex]
+- [ ] FX2.D6.2 BP.L marker auto-categorisation sweep（722→ goal 8000+ marked tests） [class:subscription-codex]
+- [ ] FX2.D9.3 ARIA label 47% → 80%+ 覆蓋；jsx-a11y rule 從 warn → error [class:subscription-codex]
 
 ### FX2.D9.7 — OAuth 11-provider 完整實作（**CRITICAL — 所有 11 button 全壞**）
 
@@ -6190,14 +6190,14 @@ BP.E GraphRAG / Neo4j
 
 ### FX2.W3 — DEBT（rolling, no hard deadline）
 
-- [ ] FX2.D5.1 加 OpenTelemetry distributed tracing（W3C trace context + Jaeger / DataDog exporter）
-- [ ] FX2.D5.2 加 backend Sentry / DataDog error aggregation
-- [ ] FX2.D1.1 `sandbox_capacity.py:1025-1040` watchdog task cancel 改 await
-- [ ] FX2.D1.2 `notifications.py` 外部 dispatch task aggregate failure metric
-- [ ] FX2.D4.4 sunset `OMNISIGHT_DECISION_BEARER` legacy env var
-- [ ] FX2.D4.5 webhook secret fail-fast at app startup（不要 503 at runtime）
-- [ ] FX2.D6.3 audit 159 個 `pytest.skip()` runtime gate 是否合理
-- [ ] FX2.D9.5 `.toLocaleString()` → `Intl.DateTimeFormat`
+- [ ] FX2.D5.1 加 OpenTelemetry distributed tracing（W3C trace context + Jaeger / DataDog exporter） [class:subscription-codex]
+- [ ] FX2.D5.2 加 backend Sentry / DataDog error aggregation [class:subscription-codex]
+- [ ] FX2.D1.1 `sandbox_capacity.py:1025-1040` watchdog task cancel 改 await [class:subscription-codex]
+- [ ] FX2.D1.2 `notifications.py` 外部 dispatch task aggregate failure metric [class:subscription-codex]
+- [ ] FX2.D4.4 sunset `OMNISIGHT_DECISION_BEARER` legacy env var [class:subscription-codex]
+- [ ] FX2.D4.5 webhook secret fail-fast at app startup（不要 503 at runtime） [class:subscription-codex]
+- [ ] FX2.D6.3 audit 159 個 `pytest.skip()` runtime gate 是否合理 [class:subscription-codex]
+- [ ] FX2.D9.5 `.toLocaleString()` → `Intl.DateTimeFormat` [class:subscription-codex]
 
 ### FX2.W4 — COSMETIC（~50 items, rolling）
 
@@ -6229,131 +6229,131 @@ BP.E GraphRAG / Neo4j
 
 ### MP.W1 — Backend orchestrator + quota tracker（Week 1, ~3 day）
 
-- [ ] MP.W1.1 `backend/agents/provider_orchestrator.py` — central registry of `ProviderAdapter` + routing + circuit breaker
-- [ ] MP.W1.2 `backend/agents/provider_quota_tracker.py` — 5h-rolling + weekly cap state per provider, persists to PG, multi-worker safe via `pg_advisory_xact_lock`
-- [ ] MP.W1.3 alembic 0198 — `provider_quota_state` table（`provider / rolling_5h_tokens / weekly_tokens / last_reset_at / last_cap_hit_at / circuit_state` per row）
-- [ ] MP.W1.4 `backend/agents/provider_adapters/anthropic_subscription.py` — wraps `claude` CLI invocation + cap signal parsing (`usage_exceeded` 429 + retry-after)
-- [ ] MP.W1.5 `backend/agents/provider_adapters/openai_subscription.py` — wraps `codex` CLI invocation + `rate_limit_exceeded` 429 + reset_at
-- [ ] MP.W1.6 `backend/agents/routing_policy.py` — choose_provider() based on (task labels, quota state, user preferences); on_cap_hit() for task-boundary switch
-- [ ] MP.W1.7 `backend/tests/test_provider_orchestrator.py` ~30 test (registry / routing / cap-hit / circuit breaker)
-- [ ] MP.W1.8 `backend/tests/test_provider_quota_tracker.py` ~20 test (5h-window / weekly accumulation / multi-worker race)
-- [ ] MP.W1.9 `backend/tests/test_alembic_0198_provider_quota_state.py` ~10 test (schema / RLS / FK)
+- [ ] MP.W1.1 `backend/agents/provider_orchestrator.py` — central registry of `ProviderAdapter` + routing + circuit breaker [class:api-anthropic]
+- [ ] MP.W1.2 `backend/agents/provider_quota_tracker.py` — 5h-rolling + weekly cap state per provider, persists to PG, multi-worker safe via `pg_advisory_xact_lock` [class:api-anthropic]
+- [ ] MP.W1.3 alembic 0198 — `provider_quota_state` table（`provider / rolling_5h_tokens / weekly_tokens / last_reset_at / last_cap_hit_at / circuit_state` per row） [class:api-anthropic]
+- [ ] MP.W1.4 `backend/agents/provider_adapters/anthropic_subscription.py` — wraps `claude` CLI invocation + cap signal parsing (`usage_exceeded` 429 + retry-after) [class:api-anthropic]
+- [ ] MP.W1.5 `backend/agents/provider_adapters/openai_subscription.py` — wraps `codex` CLI invocation + `rate_limit_exceeded` 429 + reset_at [class:api-anthropic]
+- [ ] MP.W1.6 `backend/agents/routing_policy.py` — choose_provider() based on (task labels, quota state, user preferences); on_cap_hit() for task-boundary switch [class:api-anthropic]
+- [ ] MP.W1.7 `backend/tests/test_provider_orchestrator.py` ~30 test (registry / routing / cap-hit / circuit breaker) [class:api-anthropic]
+- [ ] MP.W1.8 `backend/tests/test_provider_quota_tracker.py` ~20 test (5h-window / weekly accumulation / multi-worker race) [class:api-anthropic]
+- [ ] MP.W1.9 `backend/tests/test_alembic_0198_provider_quota_state.py` ~10 test (schema / RLS / FK) [class:api-anthropic]
 
 ### MP.W2 — Cost estimator + token prediction（Week 1, ~2 day）
 
-- [ ] MP.W2.1 `backend/agents/cost_estimator.py` — `predict_token_count(task_spec) -> int` + `predict_wall_time(task, provider) -> seconds` + `predict_cost(task, provider) -> USD`
-- [ ] MP.W2.2 Initial baseline data — seed from this session's 13-epic average per `agent_class` (subscription-codex / api-anthropic / api-openai)
-- [ ] MP.W2.3 Per-tenant continuous calibration — adjust prediction based on actual outcome (drift > 50% → log warning)
-- [ ] MP.W2.4 `GET /runtime/cost-estimate` REST endpoint — input task batch + provider preference, output predicted cost + time + breakdown per task
-- [ ] MP.W2.5 `backend/tests/test_cost_estimator.py` ~20 test (prediction accuracy / drift detection / tenant calibration)
+- [ ] MP.W2.1 `backend/agents/cost_estimator.py` — `predict_token_count(task_spec) -> int` + `predict_wall_time(task, provider) -> seconds` + `predict_cost(task, provider) -> USD` [class:api-anthropic]
+- [ ] MP.W2.2 Initial baseline data — seed from this session's 13-epic average per `agent_class` (subscription-codex / api-anthropic / api-openai) [class:api-anthropic]
+- [ ] MP.W2.3 Per-tenant continuous calibration — adjust prediction based on actual outcome (drift > 50% → log warning) [class:api-anthropic]
+- [ ] MP.W2.4 `GET /runtime/cost-estimate` REST endpoint — input task batch + provider preference, output predicted cost + time + breakdown per task [class:api-anthropic]
+- [ ] MP.W2.5 `backend/tests/test_cost_estimator.py` ~20 test (prediction accuracy / drift detection / tenant calibration) [class:api-anthropic]
 
 ### MP.W3 — Anthropic + OpenAI subscription wiring (existing runners 接入)（Week 1, ~2 day）
 
-- [ ] MP.W3.1 `auto-runner-anthropic.py` 啟動時讀 quota tracker → 報告當前可用 token / 預估能跑多少 item
-- [ ] MP.W3.2 `auto-runner-codex.py` 同樣升級（已存在的 runner，+~30 LOC quota integration）
-- [ ] MP.W3.3 `auto-runner-multi.py` (NEW) — 替代單一 provider runner，用 orchestrator 動態派 task
-- [ ] MP.W3.4 Provider 啟動 health check — `claude` / `codex` CLI 是否安裝、subscription 是否 active
-- [ ] MP.W3.5 `OMNISIGHT_MP_ENABLED=true` env knob (WP.7 feature flag) — 切回 single-runner 兼容過渡
+- [ ] MP.W3.1 `auto-runner-anthropic.py` 啟動時讀 quota tracker → 報告當前可用 token / 預估能跑多少 item [class:api-anthropic]
+- [ ] MP.W3.2 `auto-runner-codex.py` 同樣升級（已存在的 runner，+~30 LOC quota integration） [class:api-anthropic]
+- [ ] MP.W3.3 `auto-runner-multi.py` (NEW) — 替代單一 provider runner，用 orchestrator 動態派 task [class:api-anthropic]
+- [ ] MP.W3.4 Provider 啟動 health check — `claude` / `codex` CLI 是否安裝、subscription 是否 active [class:api-anthropic]
+- [ ] MP.W3.5 `OMNISIGHT_MP_ENABLED=true` env knob (WP.7 feature flag) — 切回 single-runner 兼容過渡 [class:api-anthropic]
 
 ### MP.W4 — Provider Constellation (A) UI（Week 2, ~3 day）
 
-- [ ] MP.W4.1 `components/omnisight/multi-provider-orchestrator/ProviderConstellation.tsx` — main view 框
-- [ ] MP.W4.2 `components/omnisight/multi-provider-orchestrator/ProviderEnergySphere.tsx` — extends OAuthEnergySphere 加 quota viz (size / color / pulse)
-- [ ] MP.W4.3 `components/omnisight/multi-provider-orchestrator/ProjectCore.tsx` — 中央 node 顯示 task summary + total estimate
-- [ ] MP.W4.4 `components/omnisight/multi-provider-orchestrator/ConnectionBeam.tsx` — animated beam between sphere ↔ core; 隨 slider 變化 reflow
-- [ ] MP.W4.5 `components/omnisight/multi-provider-orchestrator/TradeoffSlider.tsx` — 底部 slider; live update spheres on drag
-- [ ] MP.W4.6 `components/omnisight/multi-provider-orchestrator/QuotaPulse.tsx` — sphere pulse animation respect prefers-reduced-motion
-- [ ] MP.W4.7 `components/omnisight/multi-provider-orchestrator/CostBreakdownDrawer.tsx` — click sphere → 展開 per-task allocation 細節
-- [ ] MP.W4.8 `test/components/provider-constellation.test.tsx` ~15 vitest (interaction / accessibility / responsive)
+- [ ] MP.W4.1 `components/omnisight/multi-provider-orchestrator/ProviderConstellation.tsx` — main view 框 [class:api-anthropic]
+- [ ] MP.W4.2 `components/omnisight/multi-provider-orchestrator/ProviderEnergySphere.tsx` — extends OAuthEnergySphere 加 quota viz (size / color / pulse) [class:api-anthropic]
+- [ ] MP.W4.3 `components/omnisight/multi-provider-orchestrator/ProjectCore.tsx` — 中央 node 顯示 task summary + total estimate [class:api-anthropic]
+- [ ] MP.W4.4 `components/omnisight/multi-provider-orchestrator/ConnectionBeam.tsx` — animated beam between sphere ↔ core; 隨 slider 變化 reflow [class:api-anthropic]
+- [ ] MP.W4.5 `components/omnisight/multi-provider-orchestrator/TradeoffSlider.tsx` — 底部 slider; live update spheres on drag [class:api-anthropic]
+- [ ] MP.W4.6 `components/omnisight/multi-provider-orchestrator/QuotaPulse.tsx` — sphere pulse animation respect prefers-reduced-motion [class:api-anthropic]
+- [ ] MP.W4.7 `components/omnisight/multi-provider-orchestrator/CostBreakdownDrawer.tsx` — click sphere → 展開 per-task allocation 細節 [class:api-anthropic]
+- [ ] MP.W4.8 `test/components/provider-constellation.test.tsx` ~15 vitest (interaction / accessibility / responsive) [class:api-anthropic]
 
 ### MP.W5 — Onboarding (C wizard 2-step + A overlay tooltips)（Week 2, ~2 day）
 
-- [ ] MP.W5.1 `components/omnisight/multi-provider-orchestrator/OnboardingWizardStep1.tsx` — Welcome step (4 spheres orbit-converge animation)
-- [ ] MP.W5.2 `components/omnisight/multi-provider-orchestrator/OnboardingWizardStep2.tsx` — "Open the workshop" step (spheres fly to corners, fade into A)
-- [ ] MP.W5.3 `components/omnisight/multi-provider-orchestrator/OnboardingTour.tsx` — 6 spotlight tooltips overlay on (A) elements (sphere / color / core / slider / start)
-- [ ] MP.W5.4 `seen_mp_tour` user_preference flag (Q.2 infra reuse) + tour completion handler
-- [ ] MP.W5.5 Skip path — any time `[Skip Tour]` → flag flip, drop overlay, continue at (A) bare
-- [ ] MP.W5.6 `test/components/onboarding-tour.test.tsx` ~10 test (skip path / step transition / tooltip visibility)
+- [ ] MP.W5.1 `components/omnisight/multi-provider-orchestrator/OnboardingWizardStep1.tsx` — Welcome step (4 spheres orbit-converge animation) [class:subscription-codex]
+- [ ] MP.W5.2 `components/omnisight/multi-provider-orchestrator/OnboardingWizardStep2.tsx` — "Open the workshop" step (spheres fly to corners, fade into A) [class:subscription-codex]
+- [ ] MP.W5.3 `components/omnisight/multi-provider-orchestrator/OnboardingTour.tsx` — 6 spotlight tooltips overlay on (A) elements (sphere / color / core / slider / start) [class:subscription-codex]
+- [ ] MP.W5.4 `seen_mp_tour` user_preference flag (Q.2 infra reuse) + tour completion handler [class:subscription-codex]
+- [ ] MP.W5.5 Skip path — any time `[Skip Tour]` → flag flip, drop overlay, continue at (A) bare [class:subscription-codex]
+- [ ] MP.W5.6 `test/components/onboarding-tour.test.tsx` ~10 test (skip path / step transition / tooltip visibility) [class:subscription-codex]
 
 ### MP.W6 — War Room (B) power-user toggle（Week 2, ~2 day）
 
-- [ ] MP.W6.1 `components/omnisight/multi-provider-orchestrator/WarRoom.tsx` — 4 detachable panel container
-- [ ] MP.W6.2 `components/omnisight/multi-provider-orchestrator/QuotaTrackerPanel.tsx` — full quota state with reset countdown
-- [ ] MP.W6.3 `components/omnisight/multi-provider-orchestrator/CostCalculatorPanel.tsx` — per-task breakdown
-- [ ] MP.W6.4 `components/omnisight/multi-provider-orchestrator/TasksBacklogPanel.tsx` — task selection checkboxes
-- [ ] MP.W6.5 `components/omnisight/multi-provider-orchestrator/TradeoffSliderPanel.tsx` — same slider (B) variant with finer-grained config
-- [ ] MP.W6.6 Panel drag/drop + minimize/maximize + connection lines between related panels
-- [ ] MP.W6.7 `user_preferences.mp_b_layout` persists panel positions across session
-- [ ] MP.W6.8 Mobile <1024px → toast "War Room desktop only" + auto-redirect to (A)
-- [ ] MP.W6.9 `test/components/war-room.test.tsx` ~12 test
+- [ ] MP.W6.1 `components/omnisight/multi-provider-orchestrator/WarRoom.tsx` — 4 detachable panel container [class:subscription-codex]
+- [ ] MP.W6.2 `components/omnisight/multi-provider-orchestrator/QuotaTrackerPanel.tsx` — full quota state with reset countdown [class:subscription-codex]
+- [ ] MP.W6.3 `components/omnisight/multi-provider-orchestrator/CostCalculatorPanel.tsx` — per-task breakdown [class:subscription-codex]
+- [ ] MP.W6.4 `components/omnisight/multi-provider-orchestrator/TasksBacklogPanel.tsx` — task selection checkboxes [class:subscription-codex]
+- [ ] MP.W6.5 `components/omnisight/multi-provider-orchestrator/TradeoffSliderPanel.tsx` — same slider (B) variant with finer-grained config [class:subscription-codex]
+- [ ] MP.W6.6 Panel drag/drop + minimize/maximize + connection lines between related panels [class:subscription-codex]
+- [ ] MP.W6.7 `user_preferences.mp_b_layout` persists panel positions across session [class:subscription-codex]
+- [ ] MP.W6.8 Mobile <1024px → toast "War Room desktop only" + auto-redirect to (A) [class:subscription-codex]
+- [ ] MP.W6.9 `test/components/war-room.test.tsx` ~12 test [class:subscription-codex]
 
 ### MP.W7 — Dashboard trigger button + modal integration（Week 2, ~1 day）
 
-- [ ] MP.W7.1 `app/page.tsx` — `<Button onClick={openMP}>⚡ Plan with All Providers</Button>` placement
-- [ ] MP.W7.2 Modal container with backdrop blur (`inset-2 backdrop-blur-2xl`); branch on seen_mp_tour
-- [ ] MP.W7.3 Close + Cancel + Start handlers
-- [ ] MP.W7.4 Integration with `useEngine()` SSE stream for live quota updates
+- [ ] MP.W7.1 `app/page.tsx` — `<Button onClick={openMP}>⚡ Plan with All Providers</Button>` placement [class:subscription-codex]
+- [ ] MP.W7.2 Modal container with backdrop blur (`inset-2 backdrop-blur-2xl`); branch on seen_mp_tour [class:subscription-codex]
+- [ ] MP.W7.3 Close + Cancel + Start handlers [class:subscription-codex]
+- [ ] MP.W7.4 Integration with `useEngine()` SSE stream for live quota updates [class:subscription-codex]
 
 ### MP.W8 — SSE real-time quota update channel（Week 3, ~1 day）
 
-- [ ] MP.W8.1 `backend/events.py::emit_provider_quota_update(provider, ...)` — broadcast_scope="user" per-tenant
-- [ ] MP.W8.2 `backend/events.py::emit_provider_allocation_preview(...)` — when slider drags, emit preview reflow
-- [ ] MP.W8.3 Frontend `ProviderConstellation` subscribes via existing useEngine SSE
-- [ ] MP.W8.4 ~5 SSE tests for new event types
+- [ ] MP.W8.1 `backend/events.py::emit_provider_quota_update(provider, ...)` — broadcast_scope="user" per-tenant [class:subscription-codex]
+- [ ] MP.W8.2 `backend/events.py::emit_provider_allocation_preview(...)` — when slider drags, emit preview reflow [class:subscription-codex]
+- [ ] MP.W8.3 Frontend `ProviderConstellation` subscribes via existing useEngine SSE [class:subscription-codex]
+- [ ] MP.W8.4 ~5 SSE tests for new event types [class:subscription-codex]
 
 ### MP.W9 — BP.F + BP.C integration（Week 3, ~1 day）
 
-- [ ] MP.W9.1 Routing policy reads BP.F Guild model mapping + provider matrix
-- [ ] MP.W9.2 Cost estimator uses BP.C T-shirt size as feature input
-- [ ] MP.W9.3 Tier S/M/L/X (ADR 0005) feeds provider preference (Tier S → cheapest; Tier X → highest reliability)
-- [ ] MP.W9.4 Integration tests covering BP.F+BP.C+MP routing
+- [ ] MP.W9.1 Routing policy reads BP.F Guild model mapping + provider matrix [class:subscription-codex]
+- [ ] MP.W9.2 Cost estimator uses BP.C T-shirt size as feature input [class:subscription-codex]
+- [ ] MP.W9.3 Tier S/M/L/X (ADR 0005) feeds provider preference (Tier S → cheapest; Tier X → highest reliability) [class:subscription-codex]
+- [ ] MP.W9.4 Integration tests covering BP.F+BP.C+MP routing [class:subscription-codex]
 
 ### MP.W10 — Z-series rate-limit header reuse（Week 3, ~0.5 day）
 
-- [ ] MP.W10.1 Reuse Z.1 `_PROVIDER_RATELIMIT_HEADERS` mapping for cap detection
-- [ ] MP.W10.2 SharedKV("provider_ratelimit") feeds quota tracker as fallback signal source
-- [ ] MP.W10.3 Drift-guard: rate-limit header keys must align between Z.1 + MP
+- [ ] MP.W10.1 Reuse Z.1 `_PROVIDER_RATELIMIT_HEADERS` mapping for cap detection [class:subscription-codex]
+- [ ] MP.W10.2 SharedKV("provider_ratelimit") feeds quota tracker as fallback signal source [class:subscription-codex]
+- [ ] MP.W10.3 Drift-guard: rate-limit header keys must align between Z.1 + MP [class:subscription-codex]
 
 ### MP.W11 — Help menu replay tour（Week 3, ~0.5 day）
 
-- [ ] MP.W11.1 Add "Replay multi-provider tour" entry in Help dropdown
-- [ ] MP.W11.2 Click → reset `seen_mp_tour=false` → next openMP triggers (C) wizard again
+- [ ] MP.W11.1 Add "Replay multi-provider tour" entry in Help dropdown [class:subscription-codex]
+- [ ] MP.W11.2 Click → reset `seen_mp_tour=false` → next openMP triggers (C) wizard again [class:subscription-codex]
 
 ### MP.W12 — Mobile responsive degradation（Week 3, ~1 day）
 
-- [ ] MP.W12.1 (A) Constellation mobile layout — spheres become vertical list with quota bars
-- [ ] MP.W12.2 Slider stays at bottom; full-height modal
-- [ ] MP.W12.3 (B) War Room mobile → toast + redirect to (A)
-- [ ] MP.W12.4 (C) onboarding wizard mobile-aware (full screen panels)
-- [ ] MP.W12.5 Playwright mobile snapshot test
+- [ ] MP.W12.1 (A) Constellation mobile layout — spheres become vertical list with quota bars [class:subscription-codex]
+- [ ] MP.W12.2 Slider stays at bottom; full-height modal [class:subscription-codex]
+- [ ] MP.W12.3 (B) War Room mobile → toast + redirect to (A) [class:subscription-codex]
+- [ ] MP.W12.4 (C) onboarding wizard mobile-aware (full screen panels) [class:subscription-codex]
+- [ ] MP.W12.5 Playwright mobile snapshot test [class:subscription-codex]
 
 ### MP.W13 — Gemini structural slot（Week 4, ~0.5 day, placeholder only）
 
-- [ ] MP.W13.1 `backend/agents/provider_adapters/gemini_subscription.py` — adapter shell with `NotImplementedError` raises + capability matrix entry
-- [ ] MP.W13.2 Frontend gray-out sphere with "Coming v0.5.0" tooltip
-- [ ] MP.W13.3 Doc 寫進 `docs/operations/multi-provider-setup.md` (when v0.5.0 lands what to enable)
+- [ ] MP.W13.1 `backend/agents/provider_adapters/gemini_subscription.py` — adapter shell with `NotImplementedError` raises + capability matrix entry [class:subscription-codex]
+- [ ] MP.W13.2 Frontend gray-out sphere with "Coming v0.5.0" tooltip [class:subscription-codex]
+- [ ] MP.W13.3 Doc 寫進 `docs/operations/multi-provider-setup.md` (when v0.5.0 lands what to enable) [class:subscription-codex]
 
 ### MP.W14 — xAI structural slot（Week 4, ~0.5 day, placeholder only）
 
-- [ ] MP.W14.1 同上但 Grok adapter shell
-- [ ] MP.W14.2 Frontend "Coming v0.6.0" tooltip
-- [ ] MP.W14.3 Doc cross-reference
+- [ ] MP.W14.1 同上但 Grok adapter shell [class:subscription-codex]
+- [ ] MP.W14.2 Frontend "Coming v0.6.0" tooltip [class:subscription-codex]
+- [ ] MP.W14.3 Doc cross-reference [class:subscription-codex]
 
 ### MP.W15 — Tests + drift guards（Week 4, ~1 day）
 
-- [ ] MP.W15.1 Drift guard: `lib/providers.ts` 4-vendor list ⊆ `backend/agents/provider_orchestrator.py` registry
-- [ ] MP.W15.2 Drift guard: vendor capability matrix in ADR 0007 ⊆ `routing_policy.py` consumed labels
-- [ ] MP.W15.3 Cap-hit integration test — simulate Anthropic 429 → orchestrator switches to OpenAI
-- [ ] MP.W15.4 Cost estimator drift test — prediction-vs-actual divergence > 50% triggers warning log
-- [ ] MP.W15.5 Onboarding tour skip-rate audit — log skip events + alert if > 50% of first-time users skip
+- [ ] MP.W15.1 Drift guard: `lib/providers.ts` 4-vendor list ⊆ `backend/agents/provider_orchestrator.py` registry [class:subscription-codex]
+- [ ] MP.W15.2 Drift guard: vendor capability matrix in ADR 0007 ⊆ `routing_policy.py` consumed labels [class:subscription-codex]
+- [ ] MP.W15.3 Cap-hit integration test — simulate Anthropic 429 → orchestrator switches to OpenAI [class:subscription-codex]
+- [ ] MP.W15.4 Cost estimator drift test — prediction-vs-actual divergence > 50% triggers warning log [class:subscription-codex]
+- [ ] MP.W15.5 Onboarding tour skip-rate audit — log skip events + alert if > 50% of first-time users skip [class:subscription-codex]
 
 ### MP.W16 — docs/operations/multi-provider-setup.md（Week 4, ~0.5 day）
 
-- [ ] MP.W16.1 Operator setup guide for Anthropic Pro/Max + OpenAI Codex Plus/Pro
-- [ ] MP.W16.2 Subscription account expiry monitoring path
-- [ ] MP.W16.3 Cap-hit recovery runbook
-- [ ] MP.W16.4 Cost estimator calibration walkthrough (per-tenant)
-- [ ] MP.W16.5 v0.5.0 + v0.6.0 enablement path (Gemini / xAI when ready)
+- [ ] MP.W16.1 Operator setup guide for Anthropic Pro/Max + OpenAI Codex Plus/Pro [class:subscription-codex]
+- [ ] MP.W16.2 Subscription account expiry monitoring path [class:subscription-codex]
+- [ ] MP.W16.3 Cap-hit recovery runbook [class:subscription-codex]
+- [ ] MP.W16.4 Cost estimator calibration walkthrough (per-tenant) [class:subscription-codex]
+- [ ] MP.W16.5 v0.5.0 + v0.6.0 enablement path (Gemini / xAI when ready) [class:subscription-codex]
 
 ### MP.W17 — MCP/A2A upfront tooling robustness（Week 4, ~3 day, **complement to RPG.W13**）
 
@@ -6361,14 +6361,14 @@ BP.E GraphRAG / Neo4j
 >
 > **為什麼放 W17 不是更早**：W1 orchestrator 用今天的工具表現也 OK；W17 是讓 *未來所有 agent 都吃到的標準工具集* 升級，不阻塞 W1。但要在 v0.4.0 ship 前完工，否則 RPG.W13 接手時 baseline 太低會浪費 leveling 的時間。
 
-- [ ] MP.W17.1 MCP server inventory audit — 列出當前 fleet 用到的所有 MCP servers + 每個 server 暴露的 tool 清單 + 30 day error rate 統計
-- [ ] MP.W17.2 高頻工具 hardening — top-10 invocation 工具補足：(1) 結構化 error message（vendor code + retry hint）(2) schema validation on input（避免 agent 亂塞參數）(3) idempotency key 支援（重試時不會 double-write）
-- [ ] MP.W17.3 缺工具補齊 — 至少加 Slack / Linear / GitHub Issues / GitLab API / Jira / Notion 6 個（依 fleet 實際需求補齊；MCP server 現成的就 wrap）
-- [ ] MP.W17.4 Standard tool-call wrapper — `backend/agents/tool_call_wrapper.py`：unified timeout（default 30s, override per-tool）+ retry budget（max 3, exponential backoff）+ circuit breaker（同 endpoint 連續 5 fail → trip 5 min）
-- [ ] MP.W17.5 A2A handoff envelope hardening — peer-handoff 在 partial failure 下的語意：(a) idempotent handoff token (b) handoff timeout + auto-rollback (c) cross-Guild handoff 的 envelope schema validation
-- [ ] MP.W17.6 System-prompt tool catalog injection — agent 啟動時自動把可用工具清單（含使用範例 + common pitfall）注入 system prompt，避免 trial-and-error；token cost cap 1KB
-- [ ] MP.W17.7 Tool invocation telemetry — emit `tool_invocation` event (tool_id / agent_id / outcome / latency / retry_count)，給 RPG.W13 proficiency tracker 當資料源
-- [ ] MP.W17.8 ~25 contract tests — wrapper retry / circuit breaker / handoff rollback / schema validation failure cases
+- [ ] MP.W17.1 MCP server inventory audit — 列出當前 fleet 用到的所有 MCP servers + 每個 server 暴露的 tool 清單 + 30 day error rate 統計 [class:api-anthropic]
+- [ ] MP.W17.2 高頻工具 hardening — top-10 invocation 工具補足：(1) 結構化 error message（vendor code + retry hint）(2) schema validation on input（避免 agent 亂塞參數）(3) idempotency key 支援（重試時不會 double-write） [class:api-anthropic]
+- [ ] MP.W17.3 缺工具補齊 — 至少加 Slack / Linear / GitHub Issues / GitLab API / Jira / Notion 6 個（依 fleet 實際需求補齊；MCP server 現成的就 wrap） [class:api-anthropic]
+- [ ] MP.W17.4 Standard tool-call wrapper — `backend/agents/tool_call_wrapper.py`：unified timeout（default 30s, override per-tool）+ retry budget（max 3, exponential backoff）+ circuit breaker（同 endpoint 連續 5 fail → trip 5 min） [class:api-anthropic]
+- [ ] MP.W17.5 A2A handoff envelope hardening — peer-handoff 在 partial failure 下的語意：(a) idempotent handoff token (b) handoff timeout + auto-rollback (c) cross-Guild handoff 的 envelope schema validation [class:api-anthropic]
+- [ ] MP.W17.6 System-prompt tool catalog injection — agent 啟動時自動把可用工具清單（含使用範例 + common pitfall）注入 system prompt，避免 trial-and-error；token cost cap 1KB [class:api-anthropic]
+- [ ] MP.W17.7 Tool invocation telemetry — emit `tool_invocation` event (tool_id / agent_id / outcome / latency / retry_count)，給 RPG.W13 proficiency tracker 當資料源 [class:api-anthropic]
+- [ ] MP.W17.8 ~25 contract tests — wrapper retry / circuit breaker / handoff rollback / schema validation failure cases [class:api-anthropic]
 
 ### MP — Capability assignment
 
@@ -6399,77 +6399,77 @@ BP.E GraphRAG / Neo4j
 
 ### RPG.W1 — Stat sheet schema + character card route（Core, ~2 day）
 
-- [ ] RPG.W1.1 alembic migration — `agent_character_card` table（`agent_id / class / instance_suffix / guild / level / xp / specialization_label / style_fingerprint / created_at`）
-- [ ] RPG.W1.2 `backend/agents/character_card.py` — CRUD + auto-create on first task
-- [ ] RPG.W1.3 `GET /api/v1/agents/{agent_id}/card` — 回傳 stat sheet JSON
-- [ ] RPG.W1.4 `backend/tests/test_character_card.py` ~15 test
+- [ ] RPG.W1.1 alembic migration — `agent_character_card` table（`agent_id / class / instance_suffix / guild / level / xp / specialization_label / style_fingerprint / created_at`） [class:api-anthropic]
+- [ ] RPG.W1.2 `backend/agents/character_card.py` — CRUD + auto-create on first task [class:api-anthropic]
+- [ ] RPG.W1.3 `GET /api/v1/agents/{agent_id}/card` — 回傳 stat sheet JSON [class:api-anthropic]
+- [ ] RPG.W1.4 `backend/tests/test_character_card.py` ~15 test [class:api-anthropic]
 
 ### RPG.W2 — Guild + class registry（Core, ~1 day）
 
-- [ ] RPG.W2.1 `backend/agents/guild_registry.py` — Guild enum + class → Guild 對應表
-- [ ] RPG.W2.2 BP.F Guild model mapping import — reuse 已有 routing labels
-- [ ] RPG.W2.3 Drift guard: registry ⊆ BP.F + ⊆ MP routing_policy consumed labels
+- [ ] RPG.W2.1 `backend/agents/guild_registry.py` — Guild enum + class → Guild 對應表 [class:api-anthropic]
+- [ ] RPG.W2.2 BP.F Guild model mapping import — reuse 已有 routing labels [class:api-anthropic]
+- [ ] RPG.W2.3 Drift guard: registry ⊆ BP.F + ⊆ MP routing_policy consumed labels [class:api-anthropic]
 
 ### RPG.W3 — Instance suffix + style fingerprint generator（Core, ~1 day）
 
-- [ ] RPG.W3.1 `backend/agents/instance_suffix.py` — alpha/beta/gamma allocator on parallel spawn
-- [ ] RPG.W3.2 `backend/agents/style_fingerprint.py` — hash of (commit-style / test-pattern / refactor-tendency) over last N tasks
-- [ ] RPG.W3.3 Daily cron — recompute fingerprints + log drift > threshold
+- [ ] RPG.W3.1 `backend/agents/instance_suffix.py` — alpha/beta/gamma allocator on parallel spawn [class:api-anthropic]
+- [ ] RPG.W3.2 `backend/agents/style_fingerprint.py` — hash of (commit-style / test-pattern / refactor-tendency) over last N tasks [class:api-anthropic]
+- [ ] RPG.W3.3 Daily cron — recompute fingerprints + log drift > threshold [class:api-anthropic]
 
 ### RPG.W4 — XP accrual rule + level curve（Core, ~1 day）
 
-- [ ] RPG.W4.1 `backend/agents/xp_engine.py` — `award_xp(agent_id, task_outcome) -> delta`
-- [ ] RPG.W4.2 Level curve: Lv N requires `100 × N^1.4` XP (sigmoid late-game)
-- [ ] RPG.W4.3 Outcome multipliers: success ×1.0 / partial ×0.4 / fail ×0.1 / Tier-L+ ×2.0 / first-time-skill ×3.0
-- [ ] RPG.W4.4 Anti-grinding: same task hash within 24h → ×0.2
+- [ ] RPG.W4.1 `backend/agents/xp_engine.py` — `award_xp(agent_id, task_outcome) -> delta` [class:api-anthropic]
+- [ ] RPG.W4.2 Level curve: Lv N requires `100 × N^1.4` XP (sigmoid late-game) [class:api-anthropic]
+- [ ] RPG.W4.3 Outcome multipliers: success ×1.0 / partial ×0.4 / fail ×0.1 / Tier-L+ ×2.0 / first-time-skill ×3.0 [class:api-anthropic]
+- [ ] RPG.W4.4 Anti-grinding: same task hash within 24h → ×0.2 [class:api-anthropic]
 
 ### RPG.W5 — Layer 1 (stat sheet PG) + Layer 2 (BP.M dim memory hook)（Core, ~2 day）
 
-- [ ] RPG.W5.1 BP.M dim memory tagged with `agent_id` + `skill_id` for retrieval scoping
-- [ ] RPG.W5.2 `lessons_learned` 寫入時自動算 distilled skill summary (≤ 200 token)
-- [ ] RPG.W5.3 Tests: layer 1 retrieval < 50ms / layer 2 retrieval < 300ms
+- [ ] RPG.W5.1 BP.M dim memory tagged with `agent_id` + `skill_id` for retrieval scoping [class:api-anthropic]
+- [ ] RPG.W5.2 `lessons_learned` 寫入時自動算 distilled skill summary (≤ 200 token) [class:api-anthropic]
+- [ ] RPG.W5.3 Tests: layer 1 retrieval < 50ms / layer 2 retrieval < 300ms [class:api-anthropic]
 
 ### RPG.W6 — Layer 3 reflection RAG（Core, ~2 day）
 
-- [ ] RPG.W6.1 `backend/agents/reflection_rag.py` — vectorize past success/fail summaries (pgvector)
-- [ ] RPG.W6.2 Pre-task hook: query top-K most-relevant past lessons → inject into prompt
-- [ ] RPG.W6.3 Cap context bloat: max 2KB inject per task, k=5 default
-- [ ] RPG.W6.4 Tests: relevance @5 ≥ 0.7 on synthetic eval set
+- [ ] RPG.W6.1 `backend/agents/reflection_rag.py` — vectorize past success/fail summaries (pgvector) [class:api-anthropic]
+- [ ] RPG.W6.2 Pre-task hook: query top-K most-relevant past lessons → inject into prompt [class:api-anthropic]
+- [ ] RPG.W6.3 Cap context bloat: max 2KB inject per task, k=5 default [class:api-anthropic]
+- [ ] RPG.W6.4 Tests: relevance @5 ≥ 0.7 on synthetic eval set [class:api-anthropic]
 
 ### RPG.W7 — Routing integration（Core, ~1 day）
 
-- [ ] RPG.W7.1 MP `routing_policy.py` accepts optional `prefer_agent_id` (operator 想找特定 instance)
-- [ ] RPG.W7.2 Tier S/M/L/X gate: Tier X 須 Lv ≥ 50 + 該 skill ≥ Lv 3
-- [ ] RPG.W7.3 BP.C T-shirt size feeds level requirement table
-- [ ] RPG.W7.4 Tests: routing fallback when preferred instance under-leveled
+- [ ] RPG.W7.1 MP `routing_policy.py` accepts optional `prefer_agent_id` (operator 想找特定 instance) [class:api-anthropic]
+- [ ] RPG.W7.2 Tier S/M/L/X gate: Tier X 須 Lv ≥ 50 + 該 skill ≥ Lv 3 [class:api-anthropic]
+- [ ] RPG.W7.3 BP.C T-shirt size feeds level requirement table [class:api-anthropic]
+- [ ] RPG.W7.4 Tests: routing fallback when preferred instance under-leveled [class:api-anthropic]
 
 ### RPG.W8 — Frontend Character Card panel（Core, ~2 day）
 
-- [ ] RPG.W8.1 `components/omnisight/agents/CharacterCard.tsx` — RPG-style card layout (portrait / Guild crest / level bar / specialization)
-- [ ] RPG.W8.2 `components/omnisight/agents/SkillRadarChart.tsx` — radar over Guild's canonical skill axes
-- [ ] RPG.W8.3 `components/omnisight/agents/InstanceCarousel.tsx` — alpha/beta/gamma 切換
-- [ ] RPG.W8.4 Animation: level-up emits flare effect + toast
-- [ ] RPG.W8.5 `test/components/character-card.test.tsx` ~12 test
+- [ ] RPG.W8.1 `components/omnisight/agents/CharacterCard.tsx` — RPG-style card layout (portrait / Guild crest / level bar / specialization) [class:subscription-codex]
+- [ ] RPG.W8.2 `components/omnisight/agents/SkillRadarChart.tsx` — radar over Guild's canonical skill axes [class:subscription-codex]
+- [ ] RPG.W8.3 `components/omnisight/agents/InstanceCarousel.tsx` — alpha/beta/gamma 切換 [class:subscription-codex]
+- [ ] RPG.W8.4 Animation: level-up emits flare effect + toast [class:subscription-codex]
+- [ ] RPG.W8.5 `test/components/character-card.test.tsx` ~12 test [class:subscription-codex]
 
 ### RPG.W9 — Guild Hall view（Core, ~1 day）
 
-- [ ] RPG.W9.1 `components/omnisight/agents/GuildHall.tsx` — grid of all Guilds with member count
-- [ ] RPG.W9.2 Click Guild → roster of all instances with level/spec
-- [ ] RPG.W9.3 Sort by level / XP / activity
-- [ ] RPG.W9.4 Empty Guild placeholder + "Recruit" CTA
+- [ ] RPG.W9.1 `components/omnisight/agents/GuildHall.tsx` — grid of all Guilds with member count [class:subscription-codex]
+- [ ] RPG.W9.2 Click Guild → roster of all instances with level/spec [class:subscription-codex]
+- [ ] RPG.W9.3 Sort by level / XP / activity [class:subscription-codex]
+- [ ] RPG.W9.4 Empty Guild placeholder + "Recruit" CTA [class:subscription-codex]
 
 ### RPG.W10 — Operator-facing onboarding（Core, ~0.5 day）
 
-- [ ] RPG.W10.1 First time openning Character Card → 3-step tooltip tour
-- [ ] RPG.W10.2 `seen_rpg_tour` flag in user_preferences
-- [ ] RPG.W10.3 Help dropdown "Replay agent tour"
+- [ ] RPG.W10.1 First time openning Character Card → 3-step tooltip tour [class:subscription-codex]
+- [ ] RPG.W10.2 `seen_rpg_tour` flag in user_preferences [class:subscription-codex]
+- [ ] RPG.W10.3 Help dropdown "Replay agent tour" [class:subscription-codex]
 
 ### RPG.W11 — Tests + drift guards + docs（Core, ~1 day）
 
-- [ ] RPG.W11.1 Drift guard: `agent_character_card.guild` ⊆ `guild_registry.GUILDS`
-- [ ] RPG.W11.2 Drift guard: skill_id space ⊆ canonical skill matrix YAML
-- [ ] RPG.W11.3 `docs/operations/agent-rpg-system.md` — operator guide
-- [ ] RPG.W11.4 Cross-link `docs/adr/0008-agent-rpg-class-skill-leveling.md` from operator guide + verify W1-W21 wave numbers in TODO match ADR 0008 Decision section
+- [ ] RPG.W11.1 Drift guard: `agent_character_card.guild` ⊆ `guild_registry.GUILDS` [class:subscription-codex]
+- [ ] RPG.W11.2 Drift guard: skill_id space ⊆ canonical skill matrix YAML [class:subscription-codex]
+- [ ] RPG.W11.3 `docs/operations/agent-rpg-system.md` — operator guide [class:subscription-codex]
+- [ ] RPG.W11.4 Cross-link `docs/adr/0008-agent-rpg-class-skill-leveling.md` from operator guide + verify W1-W21 wave numbers in TODO match ADR 0008 Decision section [class:subscription-codex]
 
 ---
 
@@ -6477,44 +6477,44 @@ BP.E GraphRAG / Neo4j
 
 #### RPG.W12 — Skill leveling + branching tree（**MUST**, ~3 day）
 
-- [ ] RPG.W12.1 `agent_skill_state` table — per (agent_id, skill_id) row：`level / skill_xp / last_used_at / mastery_effects[]`
-- [ ] RPG.W12.2 Skill XP curve: Lv 1 → 5（25 / 100 / 250 / 600 / 1500 task-success-tokens）
-- [ ] RPG.W12.3 Mastery effects table per skill — Lv 2 unlocks `extended_thinking`, Lv 3 unlocks `parallel_subtask`, Lv 4 reduces `prompt_overhead`, Lv 5 enables `teach_other_agent`
-- [ ] RPG.W12.4 Branching tree: 每個 base skill 在 Lv 3 分叉 2 條 (e.g. python → "perf-tuning" / "type-correctness")，operator 從 character card 選一條
-- [ ] RPG.W12.5 Skill decay: 30 day 未使用 → skill XP 衰減 5%/週 (cap 至下一級門檻 -1)
-- [ ] RPG.W12.6 Teaching mechanic: Lv 5 agent 可在 idle 時把 distilled skill summary 注入同 Guild 同 skill Lv ≤ 2 agent (one-shot +25 XP)
-- [ ] RPG.W12.7 Frontend: branching tree visualization on Character Card 第二 tab
-- [ ] RPG.W12.8 Tests: ~25 test (XP curve / branching exclusivity / decay / teaching cooldown)
+- [ ] RPG.W12.1 `agent_skill_state` table — per (agent_id, skill_id) row：`level / skill_xp / last_used_at / mastery_effects[]` [class:api-anthropic]
+- [ ] RPG.W12.2 Skill XP curve: Lv 1 → 5（25 / 100 / 250 / 600 / 1500 task-success-tokens） [class:api-anthropic]
+- [ ] RPG.W12.3 Mastery effects table per skill — Lv 2 unlocks `extended_thinking`, Lv 3 unlocks `parallel_subtask`, Lv 4 reduces `prompt_overhead`, Lv 5 enables `teach_other_agent` [class:api-anthropic]
+- [ ] RPG.W12.4 Branching tree: 每個 base skill 在 Lv 3 分叉 2 條 (e.g. python → "perf-tuning" / "type-correctness")，operator 從 character card 選一條 [class:api-anthropic]
+- [ ] RPG.W12.5 Skill decay: 30 day 未使用 → skill XP 衰減 5%/週 (cap 至下一級門檻 -1) [class:api-anthropic]
+- [ ] RPG.W12.6 Teaching mechanic: Lv 5 agent 可在 idle 時把 distilled skill summary 注入同 Guild 同 skill Lv ≤ 2 agent (one-shot +25 XP) [class:api-anthropic]
+- [ ] RPG.W12.7 Frontend: branching tree visualization on Character Card 第二 tab [class:api-anthropic]
+- [ ] RPG.W12.8 Tests: ~25 test (XP curve / branching exclusivity / decay / teaching cooldown) [class:api-anthropic]
 
 #### RPG.W13 — MCP/A2A tool proficiency（**MUST**, ~2 day）
 
-- [ ] RPG.W13.1 `agent_tool_proficiency` table — per (agent_id, tool_id) row：`level / invocation_count / success_rate / last_unlock_at`
-- [ ] RPG.W13.2 Tool levels Lv 1-5 — Lv 1 basic invoke / Lv 2 chain 2 calls / Lv 3 batch / Lv 4 advanced flags / Lv 5 author new MCP wrapper
-- [ ] RPG.W13.3 Feature unlock gating: 例如 `mcp__filesystem__write_multiple_files` 須 Lv ≥ 3
-- [ ] RPG.W13.4 A2A specific: peer-handoff 成功率 + 跨 Guild handoff 解鎖 Lv 4
-- [ ] RPG.W13.5 Auto-detect proficiency from invocation log + outcome
-- [ ] RPG.W13.6 Frontend: tool proficiency bars on Character Card 第三 tab
-- [ ] RPG.W13.7 Tests ~15 test (level gating / unlock event / handoff scoring)
+- [ ] RPG.W13.1 `agent_tool_proficiency` table — per (agent_id, tool_id) row：`level / invocation_count / success_rate / last_unlock_at` [class:api-anthropic]
+- [ ] RPG.W13.2 Tool levels Lv 1-5 — Lv 1 basic invoke / Lv 2 chain 2 calls / Lv 3 batch / Lv 4 advanced flags / Lv 5 author new MCP wrapper [class:api-anthropic]
+- [ ] RPG.W13.3 Feature unlock gating: 例如 `mcp__filesystem__write_multiple_files` 須 Lv ≥ 3 [class:api-anthropic]
+- [ ] RPG.W13.4 A2A specific: peer-handoff 成功率 + 跨 Guild handoff 解鎖 Lv 4 [class:api-anthropic]
+- [ ] RPG.W13.5 Auto-detect proficiency from invocation log + outcome [class:api-anthropic]
+- [ ] RPG.W13.6 Frontend: tool proficiency bars on Character Card 第三 tab [class:api-anthropic]
+- [ ] RPG.W13.7 Tests ~15 test (level gating / unlock event / handoff scoring) [class:api-anthropic]
 
 #### RPG.W14 — Talent tree at level milestones（**MUST**, ~2 day）
 
-- [ ] RPG.W14.1 Milestone gates: Lv 10 / 30 / 50 / 80 trigger talent fork
-- [ ] RPG.W14.2 Talent options per Guild — e.g. backend Guild Lv 10 picks "schema-first" / "performance-first" / "security-first"
-- [ ] RPG.W14.3 `agent_talent_choice` table — per (agent_id, milestone) row, immutable once chosen
-- [ ] RPG.W14.4 Talent affects routing weight + system prompt enrichment
-- [ ] RPG.W14.5 Frontend: talent fork modal blocks task assignment until operator chooses
-- [ ] RPG.W14.6 Lv 80 capstone — single signature ability (ex: "code-archaeologist" can read 1M context legacy + propose surgical refactor in ≤ 3 commit)
-- [ ] RPG.W14.7 Tests ~12 test (gate trigger / immutability / routing weight effect)
+- [ ] RPG.W14.1 Milestone gates: Lv 10 / 30 / 50 / 80 trigger talent fork [class:api-anthropic]
+- [ ] RPG.W14.2 Talent options per Guild — e.g. backend Guild Lv 10 picks "schema-first" / "performance-first" / "security-first" [class:api-anthropic]
+- [ ] RPG.W14.3 `agent_talent_choice` table — per (agent_id, milestone) row, immutable once chosen [class:api-anthropic]
+- [ ] RPG.W14.4 Talent affects routing weight + system prompt enrichment [class:api-anthropic]
+- [ ] RPG.W14.5 Frontend: talent fork modal blocks task assignment until operator chooses [class:api-anthropic]
+- [ ] RPG.W14.6 Lv 80 capstone — single signature ability (ex: "code-archaeologist" can read 1M context legacy + propose surgical refactor in ≤ 3 commit) [class:api-anthropic]
+- [ ] RPG.W14.7 Tests ~12 test (gate trigger / immutability / routing weight effect) [class:api-anthropic]
 
 #### RPG.W17 — Synergy / Party system（**MUST**, ~2 day）
 
-- [ ] RPG.W17.1 `agent_party` table — per (party_id, member_agent_id, role) row, soft-deletable
-- [ ] RPG.W17.2 Party formation rules — 2-5 members, cross-Guild composition gives "synergy bonus"
-- [ ] RPG.W17.3 Synergy bonus matrix — backend×frontend = "fullstack" +15% XP / security×devops = "hardening" +10% security skill XP / etc.
-- [ ] RPG.W17.4 Party tasks — Tier L+ task assignable to party (one party = one task at a time)
-- [ ] RPG.W17.5 Party-XP shared evenly + each member also accrues own personal XP
-- [ ] RPG.W17.6 Frontend: party builder modal + active-party indicator
-- [ ] RPG.W17.7 Tests ~15 test (synergy lookup / shared XP / party task assignment exclusivity)
+- [ ] RPG.W17.1 `agent_party` table — per (party_id, member_agent_id, role) row, soft-deletable [class:api-anthropic]
+- [ ] RPG.W17.2 Party formation rules — 2-5 members, cross-Guild composition gives "synergy bonus" [class:api-anthropic]
+- [ ] RPG.W17.3 Synergy bonus matrix — backend×frontend = "fullstack" +15% XP / security×devops = "hardening" +10% security skill XP / etc. [class:api-anthropic]
+- [ ] RPG.W17.4 Party tasks — Tier L+ task assignable to party (one party = one task at a time) [class:api-anthropic]
+- [ ] RPG.W17.5 Party-XP shared evenly + each member also accrues own personal XP [class:api-anthropic]
+- [ ] RPG.W17.6 Frontend: party builder modal + active-party indicator [class:api-anthropic]
+- [ ] RPG.W17.7 Tests ~15 test (synergy lookup / shared XP / party task assignment exclusivity) [class:api-anthropic]
 
 ---
 
@@ -6522,39 +6522,39 @@ BP.E GraphRAG / Neo4j
 
 #### RPG.W15 — Buff / Debuff system（progressive, ~2 day）
 
-- [ ] RPG.W15.1 Buff registry — `Fresh Tokens`（rolling 5h reset 後 +10% XP 30min） / `Well-Rested`（idle ≥ 4h 後第一個 task +20% XP） / `Streak`（連續 5 個 task 成功 +5% XP per task） / `Cap Warning`（quota < 10% → -20% routing priority）
-- [ ] RPG.W15.2 Debuff registry — `Burnout`（連續 fail 3 個 → -15% XP 直到一個 success） / `Stale Memory`（30 day 未 retrain → -10% routing weight）
-- [ ] RPG.W15.3 Frontend buff icons on Character Card
+- [ ] RPG.W15.1 Buff registry — `Fresh Tokens`（rolling 5h reset 後 +10% XP 30min） / `Well-Rested`（idle ≥ 4h 後第一個 task +20% XP） / `Streak`（連續 5 個 task 成功 +5% XP per task） / `Cap Warning`（quota < 10% → -20% routing priority） [class:subscription-codex]
+- [ ] RPG.W15.2 Debuff registry — `Burnout`（連續 fail 3 個 → -15% XP 直到一個 success） / `Stale Memory`（30 day 未 retrain → -10% routing weight） [class:subscription-codex]
+- [ ] RPG.W15.3 Frontend buff icons on Character Card [class:subscription-codex]
 
 #### RPG.W16 — Achievements / Badges（progressive, ~1.5 day）
 
-- [ ] RPG.W16.1 Achievement table — milestones (`100 PR merged` / `0 regression streak ×30` / `taught 5 agents` / etc.)
-- [ ] RPG.W16.2 Auto-unlock daemon scans daily
-- [ ] RPG.W16.3 Frontend badge wall on Character Card
+- [ ] RPG.W16.1 Achievement table — milestones (`100 PR merged` / `0 regression streak ×30` / `taught 5 agents` / etc.) [class:subscription-codex]
+- [ ] RPG.W16.2 Auto-unlock daemon scans daily [class:subscription-codex]
+- [ ] RPG.W16.3 Frontend badge wall on Character Card [class:subscription-codex]
 
 #### RPG.W18 — Multi-class / dual-class mastery（progressive, ~3 day）
 
-- [ ] RPG.W18.1 Lv 50 解鎖 secondary class — agent 可選第二 Guild
-- [ ] RPG.W18.2 Secondary class XP rate ×0.5；達 Lv 30 後恢復 ×1.0
-- [ ] RPG.W18.3 Dual-class agent gains hybrid synergy bonus when in party
+- [ ] RPG.W18.1 Lv 50 解鎖 secondary class — agent 可選第二 Guild [class:subscription-codex]
+- [ ] RPG.W18.2 Secondary class XP rate ×0.5；達 Lv 30 後恢復 ×1.0 [class:subscription-codex]
+- [ ] RPG.W18.3 Dual-class agent gains hybrid synergy bonus when in party [class:subscription-codex]
 
 #### RPG.W19 — Skill fusion / crafting（progressive, ~3 day）
 
-- [ ] RPG.W19.1 Two skills both Lv 5 → 可 fuse 出 hybrid skill (e.g. python-perf + python-types → "type-safe-fast-python")
-- [ ] RPG.W19.2 Fusion 後 component skill 各扣 1 級但 hybrid skill 起始 Lv 3
-- [ ] RPG.W19.3 Frontend fusion modal with preview
+- [ ] RPG.W19.1 Two skills both Lv 5 → 可 fuse 出 hybrid skill (e.g. python-perf + python-types → "type-safe-fast-python") [class:subscription-codex]
+- [ ] RPG.W19.2 Fusion 後 component skill 各扣 1 級但 hybrid skill 起始 Lv 3 [class:subscription-codex]
+- [ ] RPG.W19.3 Frontend fusion modal with preview [class:subscription-codex]
 
 #### RPG.W20 — Quest campaigns / narrative wrapping（progressive, ~2 day）
 
-- [ ] RPG.W20.1 Operator define multi-task "campaign" with narrative title (e.g. "Operation: Phase 2 Migration")
-- [ ] RPG.W20.2 Campaign progress bar + chapters
-- [ ] RPG.W20.3 Campaign-completion bonus XP + unique badge
+- [ ] RPG.W20.1 Operator define multi-task "campaign" with narrative title (e.g. "Operation: Phase 2 Migration") [class:subscription-codex]
+- [ ] RPG.W20.2 Campaign progress bar + chapters [class:subscription-codex]
+- [ ] RPG.W20.3 Campaign-completion bonus XP + unique badge [class:subscription-codex]
 
 #### RPG.W21 — Time-gated boss raids（progressive, ~3 day）
 
-- [ ] RPG.W21.1 Quarterly "boss" task — large refactor / cross-cutting upgrade requires Lv 50+ party of ≥ 4
-- [ ] RPG.W21.2 Time-gated: must complete in ≤ 14 day continuous engagement
-- [ ] RPG.W21.3 Boss-only loot — exclusive talent points / cosmetic frame for character card
+- [ ] RPG.W21.1 Quarterly "boss" task — large refactor / cross-cutting upgrade requires Lv 50+ party of ≥ 4 [class:subscription-codex]
+- [ ] RPG.W21.2 Time-gated: must complete in ≤ 14 day continuous engagement [class:subscription-codex]
+- [ ] RPG.W21.3 Boss-only loot — exclusive talent points / cosmetic frame for character card [class:subscription-codex]
 
 ---
 

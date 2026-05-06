@@ -25,6 +25,28 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import reslice_todo_agent_class as reslicer  # noqa: E402
 
 
+ACTIVE_PREFIXES: tuple[str, ...] = ("MP.", "RPG.", "FX2.")
+"""Priority prefixes whose open rows must carry [class:X] labels.
+
+Adding `[class:X]` to every one of TODO.md's 1100+ open rows would mostly
+mean spamming `[class:unassigned]` on speculative future-priority items
+that have no real routing signal yet. This allowlist scopes the drift
+guard to actively-staffed priorities — the ones a runner is about to pick
+up — and lets the rest stay unlabeled until they enter active execution.
+
+To activate enforcement on a new priority, add its task-id prefix here
+(e.g. `BP.` when BP staffing kicks off) and re-run the helper to fill in
+the `[class:X]` tags for that priority's open rows.
+"""
+
+
+def _is_active(task_id: str | None) -> bool:
+    """Return True iff ``task_id`` falls under an ACTIVE_PREFIXES priority."""
+    if not task_id:
+        return False
+    return any(task_id.startswith(prefix) for prefix in ACTIVE_PREFIXES)
+
+
 def _live_open_findings() -> tuple[
     reslicer.AgentClassSchema,
     list[reslicer.TodoItem],
@@ -36,7 +58,8 @@ def _live_open_findings() -> tuple[
     todo_text = reslicer.TODO_PATH.read_text(encoding="utf-8")
     items = list(reslicer.iter_todo_items(todo_text))
     open_items = [item for item in items if item.state == " "]
-    findings = reslicer.find_label_gaps(open_items, schema, rules, baselines)
+    active_open_items = [item for item in open_items if _is_active(item.task_id)]
+    findings = reslicer.find_label_gaps(active_open_items, schema, rules, baselines)
     return (schema, items, findings)
 
 
@@ -57,18 +80,25 @@ def test_open_todo_rows_missing_class_labels_are_reported() -> None:
 
 
 def test_live_open_todo_rows_have_agent_class_labels() -> None:
-    """Every open TODO row must carry a valid ``[class:X]`` label."""
+    """Every active-prefix open TODO row must carry a valid ``[class:X]`` label.
+
+    Scope is ``ACTIVE_PREFIXES`` (currently ``MP. / RPG. / FX2.``). Items
+    outside that set are out of scope until their priority is added to the
+    allowlist. The pre-slice Tier B skip remains for the case where no
+    active item carries any valid label yet.
+    """
     schema, items, findings = _live_open_findings()
     allowed = set(schema.allowed_values)
-    valid_labeled_items = [item for item in items if item.class_label in allowed]
-    if not valid_labeled_items:
+    active_items = [item for item in items if _is_active(item.task_id)]
+    valid_labeled_active = [item for item in active_items if item.class_label in allowed]
+    if not valid_labeled_active:
         pytest.skip(
-            "TODO.md is still a pre-MP.W0 re-slice snapshot in this Tier B "
-            "worktree; runner owns TODO.md marker/label writes."
+            "No active-prefix TODO rows carry a valid [class:X] label yet; "
+            "runner-managed pre-slice snapshot."
         )
 
     assert not findings, (
-        "Open TODO rows missing or using invalid [class:X] labels:\n"
+        "Active-prefix open TODO rows missing or using invalid [class:X] labels:\n"
         + "\n".join(
             f"TODO.md:{finding.line}: {finding.kind} "
             f"{finding.task_id or '<no-task-id>'} -> "
