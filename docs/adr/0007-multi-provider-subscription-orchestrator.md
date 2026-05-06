@@ -32,6 +32,15 @@ User asked (2026-05-06): "Anthropic + OpenAI + Google + xAI 訂閱版 CLI 都接
 
 Build **Priority MP — Multi-Provider Subscription Orchestrator** with these properties:
 
+### Shared `agent_class` schema
+
+`config/agent_class_schema.yaml` is the canonical machine-readable source for every
+`agent_class` value consumed by MP routing, MP cost estimation, TODO `[class:X]`
+labels, and ADR 0008's RPG `class` field. ADR 0007 and ADR 0008 may describe how
+each system uses the values, but they must not carry a second hand-maintained value
+list. Any `agent_class` addition, rename, or removal must update the YAML schema and
+then update both ADRs' prose / tables that reference that class in the same change.
+
 ### Provider coverage
 
 **MVP (v0.4.0)** — 2 first-class providers with full quota tracking + auto-switch:
