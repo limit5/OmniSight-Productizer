@@ -47,7 +47,7 @@ Test families
 13. Module-global state audit (per SOP §1) — no top-level mutable
     container, importing the module is side-effect-free.
 14. Settings field declaration drift guard.
-15. Google/GitHub router integration — mocked authorize → callback →
+15. Google/GitHub/Microsoft router integration — mocked authorize → callback →
     OmniSight session cookie + DB session creation.
 """
 
@@ -1038,7 +1038,7 @@ def test_settings_declares_redirect_base_and_signing_key():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Family 15 — Google/GitHub router integration
+#  Family 15 — Google/GitHub/Microsoft router integration
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
@@ -1363,4 +1363,168 @@ async def test_github_oauth_authorize_callback_establishes_session(
     assert user["oidc_provider"] == "github"
     assert user["oidc_subject"] == "424242"
     assert auth_methods == ["oauth_github"]
+    assert session["user_id"] == user["id"]
+
+
+@pytest.fixture()
+async def _microsoft_oauth_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """PG-backed HTTP fixture for the Microsoft authorize → callback flow.
+
+    Mirrors the GitHub OAuth E2E fixture above: install the shared
+    pg_test_pool, pin bootstrap green, set the Microsoft OAuth Settings
+    singleton knobs, and mock token/userinfo at the handler boundary.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+    monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "false")
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import bootstrap as _boot
+    from backend import config as _cfg
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_microsoft_client_id", "microsoft-client-id"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_microsoft_client_secret", "microsoft-client-secret"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_redirect_base_url", "https://omnisight.example.com"
+    )
+    monkeypatch.setattr(
+        _cfg.settings,
+        "oauth_flow_signing_key",
+        "microsoft-oauth-flow-signing-key-2026",
+    )
+
+    async def _fake_exchange_authorization_code(**kwargs):
+        assert kwargs["client_id"] == "microsoft-client-id"
+        assert kwargs["client_secret"] == "microsoft-client-secret"
+        assert kwargs["code"] == "microsoft-auth-code"
+        assert kwargs["redirect_uri"] == (
+            "https://omnisight.example.com/api/v1/auth/oauth/microsoft/callback"
+        )
+        return oc.TokenSet(
+            access_token="microsoft-access-token",
+            refresh_token="microsoft-refresh-token",
+            token_type="Bearer",
+            expires_at=time.time() + 3600,
+            scope=("openid", "email", "profile", "offline_access"),
+            id_token="header.payload.sig",
+            raw={"access_token": "microsoft-access-token"},
+        )
+
+    async def _fake_fetch_userinfo(**kwargs):
+        assert kwargs["vendor"].provider_id == "microsoft"
+        assert kwargs["access_token"] == "microsoft-access-token"
+        return {
+            "sub": "microsoft-subject-1",
+            "preferred_username": "Carol.Microsoft@Example.COM",
+            "name": "Carol Microsoft",
+        }
+
+    monkeypatch.setattr(
+        olh, "exchange_authorization_code", _fake_exchange_authorization_code
+    )
+    monkeypatch.setattr(olh, "fetch_userinfo", _fake_fetch_userinfo)
+    monkeypatch.setattr(
+        "backend.routers.auth._oauth_log_audit_safe",
+        lambda *args, **kwargs: None,
+    )
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            follow_redirects=False,
+        ) as ac:
+            yield {"client": ac, "pool": pg_test_pool}
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_microsoft_oauth_authorize_callback_establishes_session(
+    _microsoft_oauth_http_client,
+):
+    env = _microsoft_oauth_http_client
+    client = env["client"]
+
+    authorize = await client.get("/api/v1/auth/oauth/microsoft/authorize")
+
+    assert authorize.status_code == 302
+    assert olh.FLOW_COOKIE_NAME in client.cookies
+    location = authorize.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "login.microsoftonline.com"
+    assert parsed.path == "/common/oauth2/v2.0/authorize"
+    assert query["client_id"] == ["microsoft-client-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/microsoft/callback"
+    ]
+    assert query["scope"] == ["openid email profile offline_access"]
+    state = query["state"][0]
+
+    callback = await client.get(
+        "/api/v1/auth/oauth/microsoft/callback",
+        params={"code": "microsoft-auth-code", "state": state},
+        headers={
+            "cf-connecting-ip": "203.0.113.9",
+            "user-agent": "pytest-microsoft-oauth",
+        },
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/"
+    assert olh.FLOW_COOKIE_NAME not in client.cookies
+    assert "omnisight_session" in client.cookies
+    assert "omnisight_csrf" in client.cookies
+
+    async with env["pool"].acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, email, name, role, oidc_provider, oidc_subject, "
+            "auth_methods FROM users WHERE email = $1",
+            "carol.microsoft@example.com",
+        )
+        assert user is not None
+        session = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE user_id = $1",
+            user["id"],
+        )
+        assert session is not None
+
+    auth_methods = user["auth_methods"]
+    if isinstance(auth_methods, str):
+        auth_methods = json.loads(auth_methods)
+    assert user["name"] == "Carol Microsoft"
+    assert user["role"] == "viewer"
+    assert user["oidc_provider"] == "microsoft"
+    assert user["oidc_subject"] == "microsoft-subject-1"
+    assert auth_methods == ["oauth_microsoft"]
     assert session["user_id"] == user["id"]
