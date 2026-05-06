@@ -6114,7 +6114,7 @@ BP.E GraphRAG / Neo4j
 >
 > **修復策略**：拆 4 wave（W1 BLOCKER / W2 DEFECT / W3 DEBT / W4 COSMETIC）。subscription-codex 接 7/10，api-anthropic 推薦給高 blast radius 的 D4.1 / D4.2 / D3.1。
 
-### FX2.W1 — BLOCKERs cheap batch（codex 一次清，~1 day total）
+### FX2.W1A — BLOCKERs cheap batch（codex 一次清，~1 day total）
 
 - [ ] FX2.D8.1 `.github/workflows/frontend-stale-detector.yml` — `branches: [main, master]` → `[main]`（Phase 1 sweep 漏的 1 個 CI workflow）
 - [ ] FX2.D9.1 `components/ui/button.tsx` — `size="icon"` variant 加 `min-h-[44px] min-w-[44px]`（WCAG AA click target）
@@ -6123,7 +6123,7 @@ BP.E GraphRAG / Neo4j
 - [ ] FX2.D9.4 `components/**/*.tsx` — focus-visible class sweep（補 130 omnisight components 中只有 8 個的覆蓋）
 - [ ] FX2.D4.3 `backend/auth.py` + `backend/routers/auth.py` — Q.2 new-device session TTL 從 8h 縮成 1h（fingerprint hit → force re-auth）
 
-### FX2.W1 — BLOCKERs heavy batch（推薦 api-anthropic，後續單獨開）
+### FX2.W1B — BLOCKERs heavy batch（推薦 api-anthropic，後續單獨開）
 
 - [ ] FX2.D4.1 `backend/routers/auth.py:425-462` — wire `require_mfa_for_user()` 進 login flow（SOC 2 CC6.1 blocker；MFA enforcement 跟 has_verified_mfa 短路接起來）
 - [ ] FX2.D4.2 `backend/api_keys.py` + alembic — `expires_at` 欄位 + TTL 參數 + `validate_bearer()` 過期 check
