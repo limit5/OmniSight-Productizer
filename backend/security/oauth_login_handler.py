@@ -1,7 +1,8 @@
 """AS.6.1 — OmniSight self-login OAuth backend handler.
 
 Wires the AS.1 OAuth shared library to OmniSight's own login flow:
-the four ``Sign in with Google / GitHub / Microsoft / Apple`` buttons
+the seven ``Sign in with Google / GitHub / Microsoft / Apple / Discord /
+GitLab / Bitbucket`` buttons
 on ``/login`` (and the matching signup path) talk to two HTTP
 endpoints whose handlers live in :mod:`backend.routers.auth`:
 
@@ -50,7 +51,7 @@ It owns:
     * HTTP token-exchange + userinfo-fetch via :mod:`httpx`
       (caller-injectable client for tests).
     * Per-vendor userinfo / id_token claim extraction (subject,
-      email, display name) so the four vendors' wildly different
+      email, display name) so the supported vendors' wildly different
       response shapes converge to a single
       :class:`OAuthUserIdentity` dataclass the router can consume.
 
@@ -121,12 +122,13 @@ AS.0.8 single-knob behaviour
 
 Vendor coverage
 ───────────────
-This module handles the AS.6.1 four-vendor subset
-(Google / GitHub / Microsoft / Apple). The wider AS.1.3 catalog
-(GitLab / Bitbucket / Slack / Notion / Salesforce / HubSpot /
-Discord) is intentionally NOT exposed at the OmniSight self-login
-edge — those are dev-tool integrations, not consumer SSO buttons.
-Adding a new SSO button is a Settings field + one entry in
+This module handles the AS.6.1 / FX2.D9.7 self-login vendor subset
+(Google / GitHub / Microsoft / Apple / Discord / GitLab /
+Bitbucket). The wider AS.1.3 catalog (Slack / Notion / Salesforce /
+HubSpot plus already-enabled providers) is intentionally NOT exposed
+at the OmniSight self-login edge until each provider's Settings
+fields + extractor semantics land in a dedicated row. Adding a new
+SSO button is a Settings field + one entry in
 :data:`SUPPORTED_PROVIDERS` + a userinfo-extractor branch.
 """
 
@@ -160,8 +162,8 @@ logger = logging.getLogger(__name__)
 #  Constants — supported providers + cookie envelope
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# The six AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
-# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab`` literal —
+# The seven AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
+# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket`` literal —
 # extending requires (a) adding the vendor entry to
 # ``backend.security.oauth_vendors``, (b) adding a Settings field
 # pair (``oauth_<vendor>_client_id`` + ``..._client_secret``),
@@ -174,6 +176,7 @@ SUPPORTED_PROVIDERS: frozenset[str] = frozenset({
     "apple",
     "discord",
     "gitlab",
+    "bitbucket",
 })
 
 # In-flight FlowSession cookie name. Single namespace, HttpOnly,
@@ -201,6 +204,11 @@ _COOKIE_SEPARATOR: str = "."
 # exchange that an attacker without our client_secret cannot
 # fabricate. A future hardening row should land JWKS verification.
 _VENDORS_NO_USERINFO_ENDPOINT: frozenset[str] = frozenset({"apple"})
+
+# Bitbucket Cloud keeps primary email outside the ``/2.0/user`` payload.
+# The immutable endpoint literal is deterministic across workers; no
+# in-process cache or mutable module state is introduced.
+_BITBUCKET_EMAILS_ENDPOINT: str = "https://api.bitbucket.org/2.0/user/emails"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -907,6 +915,12 @@ async def fetch_userinfo(
     chase that — if GitHub returns ``email: null``, the user is
     asked to re-authorize with a public-email setting. A future
     row may add the second-fetch path.
+
+    Bitbucket is special: ``api.bitbucket.org/2.0/user`` returns
+    the basic profile, but the user's primary email is at
+    ``/2.0/user/emails``. FX2.D9.7.7 performs that second fetch and
+    merges the selected address into the returned userinfo dict
+    under ``email`` before identity extraction.
     """
     if vendor.userinfo_endpoint is None:
         raise UserinfoFetchError(
@@ -942,6 +956,34 @@ async def fetch_userinfo(
             raise UserinfoFetchError(
                 f"userinfo body not JSON: {exc}"
             ) from exc
+        if vendor.provider_id == "bitbucket" and isinstance(data, Mapping):
+            try:
+                emails_resp = await client.get(
+                    _BITBUCKET_EMAILS_ENDPOINT,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/json",
+                        "User-Agent": "omnisight-oauth-login/1.0",
+                    },
+                )
+            except httpx.HTTPError as exc:
+                raise UserinfoFetchError(
+                    f"bitbucket emails endpoint network error: {exc}"
+                ) from exc
+            if emails_resp.status_code >= 400:
+                raise UserinfoFetchError(
+                    f"bitbucket emails endpoint returned HTTP "
+                    f"{emails_resp.status_code}"
+                )
+            try:
+                emails_payload = emails_resp.json()
+            except ValueError as exc:
+                raise UserinfoFetchError(
+                    f"bitbucket emails body not JSON: {exc}"
+                ) from exc
+            email = _extract_bitbucket_primary_email(emails_payload)
+            data = dict(data)
+            data["email"] = email
     finally:
         if owns_client:
             await client.aclose()
@@ -951,6 +993,26 @@ async def fetch_userinfo(
             f"userinfo body not a JSON object (got {type(data).__name__})"
         )
     return dict(data)
+
+
+def _extract_bitbucket_primary_email(payload: Any) -> str:
+    """Return Bitbucket Cloud's primary email from ``/2.0/user/emails``."""
+    if not isinstance(payload, Mapping):
+        raise UserinfoFetchError(
+            f"bitbucket emails body not a JSON object "
+            f"(got {type(payload).__name__})"
+        )
+    values = payload.get("values")
+    if not isinstance(values, list):
+        raise UserinfoFetchError("bitbucket emails body missing values list")
+    for item in values:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("is_primary") is True:
+            email = str(item.get("email") or "").strip()
+            if email:
+                return email
+    raise UserinfoFetchError("bitbucket primary email missing from emails response")
 
 
 def decode_id_token_claims_unverified(id_token: str) -> dict[str, Any]:
@@ -1004,6 +1066,7 @@ def extract_user_identity(
     | apple     | id_token["sub"]      | id_token["email"]     |
     | discord   | userinfo["id"]       | userinfo["email"]     |
     | gitlab    | userinfo["sub"]      | userinfo["email"]     |
+    | bitbucket | userinfo["uuid"]     | merged primary email  |
     +-----------+----------------------+-----------------------+
 
     Raises :class:`IdentityFieldMissingError` if either field is
@@ -1077,6 +1140,15 @@ def extract_user_identity(
             name = str(
                 userinfo.get("name")
                 or userinfo.get("nickname")
+                or ""
+            ).strip()
+        elif provider == "bitbucket":
+            sub = str(userinfo.get("uuid") or "").strip()
+            email = str(userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("display_name")
+                or userinfo.get("nickname")
+                or userinfo.get("username")
                 or ""
             ).strip()
         else:  # pragma: no cover — assert_provider_supported guards

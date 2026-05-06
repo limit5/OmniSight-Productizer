@@ -8,7 +8,7 @@ through. Pinned invariants:
    the exact plaintext.
 2. Per-row salt — same plaintext encrypts to a different ciphertext on
    each call (binding-envelope salt + Fernet IV both contribute).
-3. Provider whitelist — only the four AS.1 providers are accepted, and
+3. Provider whitelist — only the supported AS.1 providers are accepted, and
    the whitelist byte-equals ``account_linking._AS1_OAUTH_PROVIDERS``
    (AS.0.4 §5.2 cross-module drift guard).
 4. Binding mismatch — decrypt with the wrong user_id / wrong provider
@@ -55,7 +55,8 @@ from backend.security import token_vault as tv
 
 
 @pytest.mark.parametrize(
-    "provider", ["google", "github", "apple", "microsoft", "discord", "gitlab"]
+    "provider",
+    ["google", "github", "apple", "microsoft", "discord", "gitlab", "bitbucket"],
 )
 def test_round_trip_each_provider(provider: str) -> None:
     plaintext = f"tok-for-{provider}-{'x' * 40}"
@@ -271,9 +272,9 @@ def test_unsupported_provider_error_subclasses_value_error() -> None:
 
 def test_supported_providers_aligned_with_account_linking() -> None:
     """AS.0.4 §5.2 hard invariant: vault whitelist == account_linking
-    whitelist == AS.1 vendor catalog (4-of-11 subset).
+    whitelist == AS.1 vendor catalog subset.
 
-    Adding a 5th OAuth provider requires touching both modules in the
+    Adding an OAuth provider requires touching both modules in the
     same PR — this drift guard fires red until they re-converge.
     """
     assert tv.SUPPORTED_PROVIDERS == account_linking._AS1_OAUTH_PROVIDERS

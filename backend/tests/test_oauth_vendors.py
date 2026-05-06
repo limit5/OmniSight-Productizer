@@ -314,6 +314,19 @@ def test_gitlab_default_scopes_match_oidc_login_contract():
     assert q["scope"] == ["read_user openid email profile"]
 
 
+def test_bitbucket_default_scopes_match_login_contract():
+    """FX2.D9.7.7 pins Bitbucket login to account + email scopes."""
+    url = ov.build_authorize_url_for_vendor(
+        ov.BITBUCKET,
+        client_id="bitbucket.test",
+        redirect_uri="https://app.example/cb",
+        state="S",
+        code_challenge="C",
+    )
+    q = _query(url)
+    assert q["scope"] == ["account email"]
+
+
 def test_begin_authorization_for_vendor_mints_nonce_for_oidc_only():
     _, github_flow = ov.begin_authorization_for_vendor(
         ov.GITHUB, client_id="cid", redirect_uri="https://app/cb"

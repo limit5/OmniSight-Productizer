@@ -1,8 +1,8 @@
 """AS.6.1 — backend.security.oauth_login_handler contract tests.
 
 Validates the OmniSight self-login OAuth backend handler that wires
-the AS.1 OAuth shared library to the six ``Sign in with Google /
-GitHub / Microsoft / Apple / Discord / GitLab`` SSO buttons via two HTTP endpoints
+the AS.1 OAuth shared library to the seven ``Sign in with Google /
+GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket`` SSO buttons via two HTTP endpoints
 (``GET /api/v1/auth/oauth/{vendor}/authorize`` and ``.../callback``)
 mounted in :mod:`backend.routers.auth`.
 
@@ -10,7 +10,7 @@ Test families
 ─────────────
 1. SUPPORTED_PROVIDERS / cookie-envelope constants — pinned values,
    immutable shapes, no module-level mutable container.
-2. assert_provider_supported — accepts the six AS.6.1 / FX2.D9.7 slugs,
+2. assert_provider_supported — accepts the seven AS.6.1 / FX2.D9.7 slugs,
    rejects unknown / mixed-case slugs, raises the right exception
    class.
 3. lookup_provider_credentials — reads the per-vendor Settings
@@ -24,7 +24,7 @@ Test families
    tamper detection (HMAC mismatch), TTL expiry, malformed
    envelope, version pin.
 7. extract_user_identity — per-vendor field-name dispatch
-   (Google/GitHub/Microsoft/Discord/GitLab userinfo + Apple id_token), missing
+   (Google/GitHub/Microsoft/Discord/GitLab/Bitbucket userinfo + Apple id_token), missing
    fields raise IdentityFieldMissingError, name fallback to
    email-local-part.
 8. exchange_authorization_code — happy path with httpx
@@ -47,7 +47,7 @@ Test families
 13. Module-global state audit (per SOP §1) — no top-level mutable
     container, importing the module is side-effect-free.
 14. Settings field declaration drift guard.
-15. Google/GitHub/Microsoft/Apple/Discord/GitLab router integration — mocked authorize → callback →
+15. Google/GitHub/Microsoft/Apple/Discord/GitLab/Bitbucket router integration — mocked authorize → callback →
     OmniSight session cookie + DB session creation.
 """
 
@@ -101,6 +101,8 @@ class _FakeSettings:
             "oauth_discord_client_secret": "dc-secret",
             "oauth_gitlab_client_id": "gl-id",
             "oauth_gitlab_client_secret": "gl-secret",
+            "oauth_bitbucket_client_id": "bb-id",
+            "oauth_bitbucket_client_secret": "bb-secret",
             "oauth_redirect_base_url": "https://omnisight.example.com",
             "oauth_flow_signing_key": "test-signing-key-with-enough-entropy-1234",
             "decision_bearer": "decision-bearer-fallback-key-x",
@@ -124,6 +126,7 @@ def _mock_transport(handler):
 def test_supported_providers_pinned():
     assert olh.SUPPORTED_PROVIDERS == frozenset({
         "google", "github", "microsoft", "apple", "discord", "gitlab",
+        "bitbucket",
     })
 
 
@@ -169,7 +172,8 @@ def test_export_count_pinned():
 
 
 @pytest.mark.parametrize(
-    "p", ["google", "github", "microsoft", "apple", "discord", "gitlab"]
+    "p",
+    ["google", "github", "microsoft", "apple", "discord", "gitlab", "bitbucket"],
 )
 def test_assert_provider_supported_accepts_supported(p):
     olh.assert_provider_supported(p)  # no raise
@@ -208,6 +212,13 @@ def test_lookup_provider_credentials_gitlab():
     assert creds.provider == "gitlab"
     assert creds.client_id == "gl-id"
     assert creds.client_secret == "gl-secret"
+
+
+def test_lookup_provider_credentials_bitbucket():
+    creds = olh.lookup_provider_credentials("bitbucket", settings_obj=_FakeSettings())
+    assert creds.provider == "bitbucket"
+    assert creds.client_id == "bb-id"
+    assert creds.client_secret == "bb-secret"
 
 
 def test_lookup_provider_credentials_raises_on_missing():
@@ -509,6 +520,38 @@ def test_extract_identity_gitlab_falls_back_to_nickname():
     assert ident.name == "gitlabuser"
 
 
+def test_extract_identity_bitbucket_uses_uuid_and_display_name():
+    ident = olh.extract_user_identity(
+        provider="bitbucket",
+        userinfo={
+            "uuid": "{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c123}",
+            "email": "User.Bitbucket@Example.COM",
+            "display_name": "Bitbucket User",
+            "nickname": "bitbucketuser",
+        },
+        id_token_claims=None,
+    )
+    assert ident == olh.OAuthUserIdentity(
+        provider="bitbucket",
+        subject="{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c123}",
+        email="user.bitbucket@example.com",
+        name="Bitbucket User",
+    )
+
+
+def test_extract_identity_bitbucket_falls_back_to_nickname():
+    ident = olh.extract_user_identity(
+        provider="bitbucket",
+        userinfo={
+            "uuid": "{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c124}",
+            "email": "user@example.com",
+            "nickname": "bitbucketuser",
+        },
+        id_token_claims=None,
+    )
+    assert ident.name == "bitbucketuser"
+
+
 def test_extract_identity_apple_reads_id_token_claims():
     ident = olh.extract_user_identity(
         provider="apple",
@@ -677,6 +720,67 @@ def test_fetch_userinfo_happy_path():
     _run(client.aclose())
     assert info["sub"] == "g-1"
     assert captured["auth"] == "Bearer at-1"
+
+
+def test_fetch_userinfo_bitbucket_merges_primary_email():
+    from backend.security.oauth_vendors import BITBUCKET
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        assert request.headers["authorization"] == "Bearer bb-at-1"
+        if str(request.url) == "https://api.bitbucket.org/2.0/user":
+            return httpx.Response(200, json={
+                "uuid": "{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c123}",
+                "display_name": "Bitbucket User",
+            })
+        return httpx.Response(200, json={
+            "values": [
+                {
+                    "email": "secondary.bitbucket@example.com",
+                    "is_primary": False,
+                    "is_confirmed": True,
+                },
+                {
+                    "email": "primary.bitbucket@example.com",
+                    "is_primary": True,
+                    "is_confirmed": True,
+                },
+            ],
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(handler))
+    info = _run(olh.fetch_userinfo(
+        vendor=BITBUCKET,
+        access_token="bb-at-1",
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert seen == [
+        "https://api.bitbucket.org/2.0/user",
+        "https://api.bitbucket.org/2.0/user/emails",
+    ]
+    assert info["uuid"] == "{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c123}"
+    assert info["email"] == "primary.bitbucket@example.com"
+
+
+def test_fetch_userinfo_bitbucket_missing_primary_email_raises():
+    from backend.security.oauth_vendors import BITBUCKET
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://api.bitbucket.org/2.0/user":
+            return httpx.Response(200, json={"uuid": "{bb}"})
+        return httpx.Response(200, json={"values": []})
+
+    client = httpx.AsyncClient(transport=_mock_transport(handler))
+    with pytest.raises(olh.UserinfoFetchError):
+        _run(olh.fetch_userinfo(
+            vendor=BITBUCKET,
+            access_token="bb-at-1",
+            http_client=client,
+        ))
+    _run(client.aclose())
 
 
 def test_fetch_userinfo_apple_no_endpoint_raises():
@@ -861,6 +965,27 @@ def test_begin_oauth_login_gitlab_authorize_url():
     assert start.flow.nonce is not None
 
 
+def test_begin_oauth_login_bitbucket_authorize_url():
+    """Bitbucket is standard OAuth2 with account+email scopes."""
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="bitbucket", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    parsed = urlparse(start.authorize_url)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "bitbucket.org"
+    assert parsed.path == "/site/oauth2/authorize"
+    assert query["client_id"] == ["bb-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/bitbucket/callback"
+    ]
+    assert query["scope"] == ["account email"]
+    assert start.flow.provider == "bitbucket"
+    assert start.flow.nonce is None
+
+
 def test_begin_oauth_login_apple_includes_form_post_param():
     """Apple's catalog entry pre-bakes ``response_mode=form_post`` —
     must appear in the authorize URL."""
@@ -1014,6 +1139,53 @@ def test_complete_oauth_login_gitlab_full_flow():
     assert result.identity.name == "Dana GitLab"
     assert result.token.access_token == "at-good"
     assert result.flow.provider == "gitlab"
+
+
+def test_complete_oauth_login_bitbucket_full_flow():
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="bitbucket", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+
+    def userinfo_handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer at-good"
+        if str(request.url) == "https://api.bitbucket.org/2.0/user":
+            return httpx.Response(200, json={
+                "uuid": "{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c123}",
+                "display_name": "Dana Bitbucket",
+            })
+        assert str(request.url) == "https://api.bitbucket.org/2.0/user/emails"
+        return httpx.Response(200, json={
+            "values": [
+                {
+                    "email": "dana.bitbucket@example.com",
+                    "is_primary": True,
+                    "is_confirmed": True,
+                },
+            ],
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(
+        _composite_handler(_good_token_handler(scope="account email"),
+                           userinfo_handler)
+    ))
+    result = _run(olh.complete_oauth_login(
+        provider="bitbucket",
+        flow_cookie=start.flow_cookie,
+        returned_state=start.flow.state,
+        code="auth-code",
+        settings_obj=s,
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert result.identity.provider == "bitbucket"
+    assert result.identity.subject == "{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c123}"
+    assert result.identity.email == "dana.bitbucket@example.com"
+    assert result.identity.name == "Dana Bitbucket"
+    assert result.token.access_token == "at-good"
+    assert result.flow.provider == "bitbucket"
 
 
 def test_complete_oauth_login_apple_uses_id_token_claims():
@@ -1242,7 +1414,7 @@ def test_settings_declares_redirect_base_and_signing_key():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Family 15 — Google/GitHub/Microsoft/Apple/Discord/GitLab router integration
+#  Family 15 — Google/GitHub/Microsoft/Apple/Discord/GitLab/Bitbucket router integration
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
@@ -1893,6 +2065,171 @@ async def test_gitlab_oauth_authorize_callback_establishes_session(
     assert user["oidc_provider"] == "gitlab"
     assert user["oidc_subject"] == "gitlab|9001"
     assert auth_methods == ["oauth_gitlab"]
+    assert session["user_id"] == user["id"]
+
+
+@pytest.fixture()
+async def _bitbucket_oauth_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """PG-backed HTTP fixture for the Bitbucket authorize → callback flow.
+
+    Mirrors the GitLab OAuth E2E fixture above: install the shared
+    pg_test_pool, pin bootstrap green, set the Bitbucket OAuth Settings
+    singleton knobs, and mock token/userinfo at the handler boundary.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+    monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "false")
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import bootstrap as _boot
+    from backend import config as _cfg
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_bitbucket_client_id", "bitbucket-client-id"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_bitbucket_client_secret", "bitbucket-client-secret"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_redirect_base_url", "https://omnisight.example.com"
+    )
+    monkeypatch.setattr(
+        _cfg.settings,
+        "oauth_flow_signing_key",
+        "bitbucket-oauth-flow-signing-key-2026",
+    )
+
+    async def _fake_exchange_authorization_code(**kwargs):
+        assert kwargs["client_id"] == "bitbucket-client-id"
+        assert kwargs["client_secret"] == "bitbucket-client-secret"
+        assert kwargs["code"] == "bitbucket-auth-code"
+        assert kwargs["redirect_uri"] == (
+            "https://omnisight.example.com/api/v1/auth/oauth/bitbucket/callback"
+        )
+        return oc.TokenSet(
+            access_token="bitbucket-access-token",
+            refresh_token="bitbucket-refresh-token",
+            token_type="Bearer",
+            expires_at=time.time() + 3600,
+            scope=("account", "email"),
+            id_token=None,
+            raw={"access_token": "bitbucket-access-token"},
+        )
+
+    async def _fake_fetch_userinfo(**kwargs):
+        assert kwargs["vendor"].provider_id == "bitbucket"
+        assert kwargs["access_token"] == "bitbucket-access-token"
+        return {
+            "uuid": "{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c123}",
+            "email": "Eve.Bitbucket@Example.COM",
+            "display_name": "Eve Bitbucket",
+            "nickname": "eve-bitbucket",
+        }
+
+    monkeypatch.setattr(
+        olh, "exchange_authorization_code", _fake_exchange_authorization_code
+    )
+    monkeypatch.setattr(olh, "fetch_userinfo", _fake_fetch_userinfo)
+    monkeypatch.setattr(
+        "backend.routers.auth._oauth_log_audit_safe",
+        lambda *args, **kwargs: None,
+    )
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            follow_redirects=False,
+        ) as ac:
+            yield {"client": ac, "pool": pg_test_pool}
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_bitbucket_oauth_authorize_callback_establishes_session(
+    _bitbucket_oauth_http_client,
+):
+    env = _bitbucket_oauth_http_client
+    client = env["client"]
+
+    authorize = await client.get("/api/v1/auth/oauth/bitbucket/authorize")
+
+    assert authorize.status_code == 302
+    assert olh.FLOW_COOKIE_NAME in client.cookies
+    location = authorize.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "bitbucket.org"
+    assert parsed.path == "/site/oauth2/authorize"
+    assert query["client_id"] == ["bitbucket-client-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/bitbucket/callback"
+    ]
+    assert query["scope"] == ["account email"]
+    state = query["state"][0]
+
+    callback = await client.get(
+        "/api/v1/auth/oauth/bitbucket/callback",
+        params={"code": "bitbucket-auth-code", "state": state},
+        headers={
+            "cf-connecting-ip": "203.0.113.11",
+            "user-agent": "pytest-bitbucket-oauth",
+        },
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/"
+    assert olh.FLOW_COOKIE_NAME not in client.cookies
+    assert "omnisight_session" in client.cookies
+    assert "omnisight_csrf" in client.cookies
+
+    async with env["pool"].acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, email, name, role, oidc_provider, oidc_subject, "
+            "auth_methods FROM users WHERE email = $1",
+            "eve.bitbucket@example.com",
+        )
+        assert user is not None
+        session = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE user_id = $1",
+            user["id"],
+        )
+        assert session is not None
+
+    auth_methods = user["auth_methods"]
+    if isinstance(auth_methods, str):
+        auth_methods = json.loads(auth_methods)
+    assert user["name"] == "Eve Bitbucket"
+    assert user["role"] == "viewer"
+    assert user["oidc_provider"] == "bitbucket"
+    assert user["oidc_subject"] == "{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c123}"
+    assert auth_methods == ["oauth_bitbucket"]
     assert session["user_id"] == user["id"]
 
 
