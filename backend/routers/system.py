@@ -5,6 +5,7 @@ Also serves spec (from hardware_manifest.yaml), logs, and token usage.
 """
 
 import asyncio
+import json
 import logging
 import os
 import platform
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 import yaml
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from backend import auth as _auth
 from backend.db_pool import get_conn as _get_conn
@@ -67,6 +68,66 @@ _BASH_TIMEOUT = 5
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _PLATFORMS_DIR = _PROJECT_ROOT / "configs" / "platforms"
 _TIER_RULES_PATH = _PROJECT_ROOT / "configs" / "tier_capabilities.yaml"
+
+_COST_ESTIMATE_DEFAULT_MODELS: dict[str, str] = {
+    "anthropic": "claude-sonnet-4-20250514",
+    "google": "gemini-1.5-pro",
+    "openai": "gpt-4o",
+    "xai": "grok-3-mini",
+    "groq": "llama-3.3-70b-versatile",
+    "deepseek": "deepseek-chat",
+    "together": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+    "openrouter": "anthropic/claude-sonnet-4",
+    "ollama": "gemma4:e4b",
+}
+
+
+class RuntimeCostEstimateTask(BaseModel):
+    """One planned task in ``GET /runtime/cost-estimate``."""
+
+    model_config = {"extra": "allow"}
+
+    task_id: str | None = None
+    title: str = ""
+    prompt: str = ""
+    description: str = ""
+    provider: str | None = None
+    model: str | None = None
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    estimated_tokens: int | None = Field(default=None, ge=0)
+    estimated_seconds: float | None = Field(default=None, ge=0)
+    estimated_time_seconds: float | None = Field(default=None, ge=0)
+
+
+class RuntimeCostEstimateTaskBreakdown(BaseModel):
+    """Per-task cost/time estimate returned to operators."""
+
+    task_id: str
+    provider: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    predicted_cost_usd: float
+    predicted_time_seconds: float
+    pricing: dict[str, float]
+
+
+class RuntimeCostEstimateResponse(BaseModel):
+    """Envelope for ``GET /runtime/cost-estimate``."""
+
+    provider_preference: list[str] = Field(default_factory=list)
+    provider: str
+    model: str
+    is_batch: bool
+    task_count: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_tokens: int
+    predicted_cost_usd: float
+    predicted_time_seconds: float
+    breakdown: list[RuntimeCostEstimateTaskBreakdown] = Field(default_factory=list)
 
 
 def _collect_toolchains() -> dict:
@@ -2201,6 +2262,201 @@ async def reset_token_freeze():
     from backend.events import emit_token_warning
     emit_token_warning("reset", "Token freeze manually cleared by operator.")
     return {"status": "unfrozen"}
+
+
+def _parse_cost_estimate_tasks(raw: str) -> list[RuntimeCostEstimateTask]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"tasks must be a JSON array: {exc.msg}",
+        ) from exc
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=400, detail="tasks must be a JSON array")
+    if not payload:
+        raise HTTPException(
+            status_code=400,
+            detail="tasks must contain at least one item",
+        )
+    try:
+        return [RuntimeCostEstimateTask.model_validate(item) for item in payload]
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+
+def _parse_provider_preference(
+    provider: str | None,
+    provider_preference: str | None,
+) -> list[str]:
+    raw = provider_preference or provider or ""
+    out = [p.strip().lower() for p in raw.split(",") if p.strip()]
+    if provider and provider.strip().lower() not in out:
+        out.insert(0, provider.strip().lower())
+    return out
+
+
+def _resolve_cost_estimate_provider(
+    task: RuntimeCostEstimateTask,
+    provider_preference: list[str],
+) -> str:
+    if task.provider and task.provider.strip():
+        return task.provider.strip().lower()
+    if provider_preference:
+        return provider_preference[0]
+    return _settings.llm_provider.strip().lower() or "anthropic"
+
+
+def _resolve_cost_estimate_model(
+    provider: str,
+    task: RuntimeCostEstimateTask,
+    model: str | None,
+) -> str:
+    if task.model and task.model.strip():
+        return task.model.strip()
+    if model and model.strip():
+        return model.strip()
+    if provider == (_settings.llm_provider or "").strip().lower():
+        return _settings.get_model_name()
+    return _COST_ESTIMATE_DEFAULT_MODELS.get(provider, _settings.get_model_name())
+
+
+def _estimate_task_tokens(task: RuntimeCostEstimateTask) -> tuple[int, int]:
+    if task.input_tokens is not None or task.output_tokens is not None:
+        return int(task.input_tokens or 0), int(task.output_tokens or 0)
+    if task.estimated_tokens is not None:
+        total = int(task.estimated_tokens or 0)
+        return int(total * 0.8), total - int(total * 0.8)
+
+    text = "\n".join(
+        part for part in (task.title, task.description, task.prompt) if part
+    )
+    input_tokens = max(1, len(text) // 4) if text else 1_000
+    output_tokens = max(1, int(input_tokens * 0.25))
+    return input_tokens, output_tokens
+
+
+def _estimate_task_seconds(
+    task: RuntimeCostEstimateTask,
+    input_tokens: int,
+    output_tokens: int,
+) -> float:
+    explicit = task.estimated_seconds
+    if explicit is None:
+        explicit = task.estimated_time_seconds
+    if explicit is not None:
+        return round(float(explicit), 3)
+    return round(30.0 + ((input_tokens + output_tokens) / 125.0), 3)
+
+
+def _runtime_cost_estimate(
+    *,
+    tasks: list[RuntimeCostEstimateTask],
+    provider_preference: list[str],
+    model: str | None,
+    is_batch: bool,
+) -> RuntimeCostEstimateResponse:
+    from backend import pricing as _pricing
+
+    breakdown: list[RuntimeCostEstimateTaskBreakdown] = []
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost = 0.0
+    total_seconds = 0.0
+
+    for idx, task in enumerate(tasks, start=1):
+        provider = _resolve_cost_estimate_provider(task, provider_preference)
+        task_model = _resolve_cost_estimate_model(provider, task, model)
+        input_tokens, output_tokens = _estimate_task_tokens(task)
+        input_rate, output_rate = _pricing.get_pricing(provider, task_model)
+        rate_multiplier = 0.5 if is_batch else 1.0
+        cost = (
+            (input_tokens / 1_000_000.0 * input_rate)
+            + (output_tokens / 1_000_000.0 * output_rate)
+        ) * rate_multiplier
+        seconds = _estimate_task_seconds(task, input_tokens, output_tokens)
+
+        total_input_tokens += input_tokens
+        total_output_tokens += output_tokens
+        total_cost += cost
+        total_seconds += seconds
+        breakdown.append(
+            RuntimeCostEstimateTaskBreakdown(
+                task_id=task.task_id or f"task-{idx}",
+                provider=provider,
+                model=task_model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                predicted_cost_usd=round(cost, 6),
+                predicted_time_seconds=seconds,
+                pricing={
+                    "input_per_mtok": input_rate,
+                    "output_per_mtok": output_rate,
+                    "batch_multiplier": rate_multiplier,
+                },
+            )
+        )
+
+    provider_out = breakdown[0].provider if breakdown else (
+        provider_preference[0] if provider_preference else _settings.llm_provider
+    )
+    model_out = breakdown[0].model if breakdown else (
+        model or _settings.get_model_name()
+    )
+    return RuntimeCostEstimateResponse(
+        provider_preference=provider_preference,
+        provider=provider_out,
+        model=model_out,
+        is_batch=is_batch,
+        task_count=len(tasks),
+        total_input_tokens=total_input_tokens,
+        total_output_tokens=total_output_tokens,
+        total_tokens=total_input_tokens + total_output_tokens,
+        predicted_cost_usd=round(total_cost, 6),
+        predicted_time_seconds=round(total_seconds, 3),
+        breakdown=breakdown,
+    )
+
+
+@router.get("/cost-estimate", response_model=RuntimeCostEstimateResponse)
+async def get_runtime_cost_estimate(
+    tasks: str = Query(
+        ...,
+        description="JSON array of task objects to estimate.",
+    ),
+    provider: str | None = Query(
+        default=None,
+        description="Preferred provider; used when provider_preference is absent.",
+    ),
+    provider_preference: str | None = Query(
+        default=None,
+        description="Comma-separated provider preference list.",
+    ),
+    model: str | None = Query(
+        default=None,
+        description="Model override for tasks that do not specify one.",
+    ),
+    is_batch: bool = Query(
+        default=False,
+        description="Apply provider batch-mode discount to token cost.",
+    ),
+):
+    """Estimate runtime cost and duration for a planned task batch.
+
+    MP.W2.4 / OP-28. This is a read-only planning endpoint: it does not
+    reserve quota, mutate provider state, or persist estimates. The
+    dollar math reuses ``backend.pricing`` so it tracks the live
+    ``config/llm_pricing.yaml`` table and its fallback chain.
+    """
+    parsed_tasks = _parse_cost_estimate_tasks(tasks)
+    preferences = _parse_provider_preference(provider, provider_preference)
+    return _runtime_cost_estimate(
+        tasks=parsed_tasks,
+        provider_preference=preferences,
+        model=model,
+        is_batch=is_batch,
+    )
 
 
 @router.get("/pricing")
