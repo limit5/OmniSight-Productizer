@@ -177,3 +177,5 @@ git commit
 ## Amendment block (corrections / additions to past entries)
 
 (none yet)
+
+<!-- e2e smoke 2026-05-06: validate Gerrit→GitLab→GitHub replication chain. To be reverted post-verify. -->
