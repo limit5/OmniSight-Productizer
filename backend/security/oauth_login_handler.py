@@ -1,8 +1,8 @@
 """AS.6.1 — OmniSight self-login OAuth backend handler.
 
 Wires the AS.1 OAuth shared library to OmniSight's own login flow:
-the ten ``Sign in with Google / GitHub / Microsoft / Apple / Discord /
-GitLab / Bitbucket / Slack / Notion / Salesforce`` buttons
+the eleven ``Sign in with Google / GitHub / Microsoft / Apple / Discord /
+GitLab / Bitbucket / Slack / Notion / Salesforce / HubSpot`` buttons
 on ``/login`` (and the matching signup path) talk to two HTTP
 endpoints whose handlers live in :mod:`backend.routers.auth`:
 
@@ -163,8 +163,8 @@ logger = logging.getLogger(__name__)
 #  Constants — supported providers + cookie envelope
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# The ten AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
-# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack / Notion / Salesforce`` literal —
+# The eleven AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
+# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack / Notion / Salesforce / HubSpot`` literal —
 # extending requires (a) adding the vendor entry to
 # ``backend.security.oauth_vendors``, (b) adding a Settings field
 # pair (``oauth_<vendor>_client_id`` + ``..._client_secret``),
@@ -181,6 +181,7 @@ SUPPORTED_PROVIDERS: frozenset[str] = frozenset({
     "slack",
     "notion",
     "salesforce",
+    "hubspot",
 })
 
 # In-flight FlowSession cookie name. Single namespace, HttpOnly,
@@ -1140,6 +1141,7 @@ def extract_user_identity(
     | slack     | userinfo["sub"]      | userinfo["email"]     |
     | notion    | token["owner"]["user"]["id"] | owner person email |
     | salesforce | userinfo["user_id"] | userinfo["email"]     |
+    | hubspot   | userinfo["user_id"]  | userinfo["user"]      |
     +-----------+----------------------+-----------------------+
 
     Raises :class:`IdentityFieldMissingError` if either field is
@@ -1264,6 +1266,19 @@ def extract_user_identity(
             name = str(
                 userinfo.get("name")
                 or userinfo.get("preferred_username")
+                or ""
+            ).strip()
+        elif provider == "hubspot":
+            # HubSpot's integrations/v1/me response is token metadata:
+            # ``user_id`` is the stable user subject, while ``user`` is
+            # the installing user's email address. The endpoint accepts
+            # Bearer auth in the header, not an access_token query param;
+            # fetch_userinfo's shared header path intentionally covers it.
+            sub = str(userinfo.get("user_id") or "").strip()
+            email = str(userinfo.get("user") or userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("user")
+                or userinfo.get("hub_domain")
                 or ""
             ).strip()
         else:  # pragma: no cover — assert_provider_supported guards

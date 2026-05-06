@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 516
+entry_count: 517
 status_counts:
-  dev-only: 505
+  dev-only: 506
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4798,3 +4798,12 @@ entries:
   next_gate: deployed-inactive — operator 設定 Salesforce Connected App callback URL / client credentials，sandbox/community
     時設定 `OMNISIGHT_OAUTH_SALESFORCE_LOGIN_BASE_URL`，提供 `OMNI_TEST_PG_URL` 跑 PG-backed Salesforce integration，並在 staging/prod
     smoke `/api/v1/auth/oauth/salesforce/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-12
+  header_line: 47928
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.11 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 設定 HubSpot app redirect URL / client credentials，執行 alembic 0198，提供 `OMNI_TEST_PG_URL`
+    跑 PG-backed HubSpot integration，並在 staging/prod smoke `/api/v1/auth/oauth/hubspot/authorize` 到 callback 建立 session。

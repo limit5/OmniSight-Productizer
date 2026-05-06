@@ -71,7 +71,7 @@ OAUTH_METHOD_PREFIX = "oauth_"
 """Prefix every OAuth-derived method name shares: ``oauth_google``,
 ``oauth_github``, ``oauth_apple``, ``oauth_microsoft``, ``oauth_discord``,
 ``oauth_gitlab``, ``oauth_bitbucket``, ``oauth_slack``, ``oauth_notion``,
-``oauth_salesforce``, ...
+``oauth_salesforce``, ``oauth_hubspot``, ...
 """
 
 # Whitelist of provider names AS.1 will land.  Adding a new
@@ -82,7 +82,7 @@ OAUTH_METHOD_PREFIX = "oauth_"
 _AS1_OAUTH_PROVIDERS = frozenset(
     {
         "google", "github", "apple", "microsoft", "discord", "gitlab",
-        "bitbucket", "slack", "notion", "salesforce",
+        "bitbucket", "slack", "notion", "salesforce", "hubspot",
     }
 )
 

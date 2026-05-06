@@ -355,6 +355,22 @@ def test_notion_authorize_url_omits_scope_and_uses_owner_user():
     assert ov.NOTION.userinfo_endpoint is None
 
 
+def test_hubspot_default_scopes_and_userinfo_match_login_contract():
+    """FX2.D9.7.11 pins HubSpot to OAuth + CRM contacts read scopes."""
+    url = ov.build_authorize_url_for_vendor(
+        ov.HUBSPOT,
+        client_id="hubspot.test",
+        redirect_uri="https://app.example/cb",
+        state="S",
+        code_challenge="C",
+    )
+    q = _query(url)
+    assert q["scope"] == ["oauth crm.objects.contacts.read"]
+    assert ov.HUBSPOT.userinfo_endpoint == (
+        "https://api.hubapi.com/integrations/v1/me"
+    )
+
+
 def test_begin_authorization_for_vendor_mints_nonce_for_oidc_only():
     _, github_flow = ov.begin_authorization_for_vendor(
         ov.GITHUB, client_id="cid", redirect_uri="https://app/cb"

@@ -272,7 +272,7 @@ export const SALESFORCE: VendorConfig = makeVendor({
   supportsPkce: true,
 })
 
-/** HubSpot OAuth 2.0. Authorize on app.hubspot.com, token on
+/** HubSpot OAuth 2.0. Authorize on app.hubspot.com, token/userinfo on
  * api.hubapi.com (vendor-canonical asymmetry). PKCE not documented;
  * conservatively flagged false. Revocation is non-RFC-7009 shape
  * (DELETE /oauth/v1/refresh-tokens/{token}) — handle in AS.2.5. */
@@ -281,9 +281,9 @@ export const HUBSPOT: VendorConfig = makeVendor({
   displayName: "HubSpot",
   authorizeEndpoint: "https://app.hubspot.com/oauth/authorize",
   tokenEndpoint: "https://api.hubapi.com/oauth/v1/token",
-  userinfoEndpoint: null, // No canonical userinfo
+  userinfoEndpoint: "https://api.hubapi.com/integrations/v1/me",
   revocationEndpoint: null, // DELETE /oauth/v1/refresh-tokens/{token} — non-RFC, handle in AS.2.5
-  defaultScopes: ["oauth"],
+  defaultScopes: ["oauth", "crm.objects.contacts.read"],
   isOidc: false,
   extraAuthorizeParams: [],
   supportsRefreshToken: true,

@@ -172,7 +172,7 @@ depends_on = None
 # ``backend.account_linking._AS1_OAUTH_PROVIDERS``.  Sorted alphabetically
 # so the CHECK clause is reproducible across both dialects and the
 # drift-guard test can string-match.
-_PROVIDERS_SQL = "'apple','bitbucket','discord','github','gitlab','google','microsoft','notion','salesforce','slack'"
+_PROVIDERS_SQL = "'apple','bitbucket','discord','github','gitlab','google','hubspot','microsoft','notion','salesforce','slack'"
 
 
 # ─── PG branch ───────────────────────────────────────────────────────────

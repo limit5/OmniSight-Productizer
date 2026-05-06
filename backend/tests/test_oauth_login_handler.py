@@ -1,9 +1,9 @@
 """AS.6.1 — backend.security.oauth_login_handler contract tests.
 
 Validates the OmniSight self-login OAuth backend handler that wires
-the AS.1 OAuth shared library to the ten ``Sign in with Google /
+the AS.1 OAuth shared library to the eleven ``Sign in with Google /
 GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack /
-Notion / Salesforce`` SSO buttons via two HTTP endpoints
+Notion / Salesforce / HubSpot`` SSO buttons via two HTTP endpoints
 (``GET /api/v1/auth/oauth/{vendor}/authorize`` and ``.../callback``)
 mounted in :mod:`backend.routers.auth`.
 
@@ -11,7 +11,7 @@ Test families
 ─────────────
 1. SUPPORTED_PROVIDERS / cookie-envelope constants — pinned values,
    immutable shapes, no module-level mutable container.
-2. assert_provider_supported — accepts the ten AS.6.1 / FX2.D9.7 slugs,
+2. assert_provider_supported — accepts the eleven AS.6.1 / FX2.D9.7 slugs,
    rejects unknown / mixed-case slugs, raises the right exception
    class.
 3. lookup_provider_credentials — reads the per-vendor Settings
@@ -26,7 +26,7 @@ Test families
    envelope, version pin.
 7. extract_user_identity — per-vendor field-name dispatch
    (Google/GitHub/Microsoft/Discord/GitLab/Bitbucket/Slack userinfo,
-   Notion token response + Apple id_token), missing
+   Notion token response, HubSpot token metadata userinfo + Apple id_token), missing
    fields raise IdentityFieldMissingError, name fallback to
    email-local-part.
 8. exchange_authorization_code — happy path with httpx
@@ -49,7 +49,7 @@ Test families
 13. Module-global state audit (per SOP §1) — no top-level mutable
     container, importing the module is side-effect-free.
 14. Settings field declaration drift guard.
-15. Google/GitHub/Microsoft/Apple/Discord/GitLab/Bitbucket/Slack/Notion router integration — mocked authorize → callback →
+15. Google/GitHub/Microsoft/Apple/Discord/GitLab/Bitbucket/Slack/Notion/Salesforce/HubSpot router integration — mocked authorize → callback →
     OmniSight session cookie + DB session creation.
 """
 
@@ -112,6 +112,8 @@ class _FakeSettings:
             "oauth_salesforce_client_id": "sf-id",
             "oauth_salesforce_client_secret": "sf-secret",
             "oauth_salesforce_login_base_url": "",
+            "oauth_hubspot_client_id": "hs-id",
+            "oauth_hubspot_client_secret": "hs-secret",
             "oauth_redirect_base_url": "https://omnisight.example.com",
             "oauth_flow_signing_key": "test-signing-key-with-enough-entropy-1234",
             "decision_bearer": "decision-bearer-fallback-key-x",
@@ -135,7 +137,7 @@ def _mock_transport(handler):
 def test_supported_providers_pinned():
     assert olh.SUPPORTED_PROVIDERS == frozenset({
         "google", "github", "microsoft", "apple", "discord", "gitlab",
-        "bitbucket", "slack", "notion", "salesforce",
+        "bitbucket", "slack", "notion", "salesforce", "hubspot",
     })
 
 
@@ -184,7 +186,7 @@ def test_export_count_pinned():
     "p",
     [
         "google", "github", "microsoft", "apple", "discord", "gitlab",
-        "bitbucket", "slack", "notion", "salesforce",
+        "bitbucket", "slack", "notion", "salesforce", "hubspot",
     ],
 )
 def test_assert_provider_supported_accepts_supported(p):
@@ -252,6 +254,13 @@ def test_lookup_provider_credentials_salesforce():
     assert creds.provider == "salesforce"
     assert creds.client_id == "sf-id"
     assert creds.client_secret == "sf-secret"
+
+
+def test_lookup_provider_credentials_hubspot():
+    creds = olh.lookup_provider_credentials("hubspot", settings_obj=_FakeSettings())
+    assert creds.provider == "hubspot"
+    assert creds.client_id == "hs-id"
+    assert creds.client_secret == "hs-secret"
 
 
 def test_lookup_provider_credentials_raises_on_missing():
@@ -692,6 +701,39 @@ def test_extract_identity_salesforce_falls_back_to_preferred_username():
     assert ident.name == "Salesforce Username"
 
 
+def test_extract_identity_hubspot_uses_user_id_and_user_email():
+    ident = olh.extract_user_identity(
+        provider="hubspot",
+        userinfo={
+            "user_id": 123456,
+            "user": "User.HubSpot@Example.COM",
+            "hub_domain": "example.hubspot.com",
+            "hub_id": 98765,
+        },
+        id_token_claims=None,
+    )
+    assert ident == olh.OAuthUserIdentity(
+        provider="hubspot",
+        subject="123456",
+        email="user.hubspot@example.com",
+        name="User.HubSpot@Example.COM",
+    )
+
+
+def test_extract_identity_hubspot_accepts_email_fallback():
+    ident = olh.extract_user_identity(
+        provider="hubspot",
+        userinfo={
+            "user_id": "123457",
+            "email": "hubspot.user@example.com",
+            "hub_domain": "fallback.hubspot.com",
+        },
+        id_token_claims=None,
+    )
+    assert ident.email == "hubspot.user@example.com"
+    assert ident.name == "fallback.hubspot.com"
+
+
 def test_extract_identity_apple_reads_id_token_claims():
     ident = olh.extract_user_identity(
         provider="apple",
@@ -965,6 +1007,35 @@ def test_fetch_userinfo_bitbucket_missing_primary_email_raises():
             http_client=client,
         ))
     _run(client.aclose())
+
+
+def test_fetch_userinfo_hubspot_uses_bearer_header_not_query_param():
+    from backend.security.oauth_vendors import HUBSPOT
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("authorization", "")
+        return httpx.Response(200, json={
+            "user_id": 123456,
+            "user": "hubspot.user@example.com",
+            "hub_id": 98765,
+            "hub_domain": "example.hubspot.com",
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(handler))
+    info = _run(olh.fetch_userinfo(
+        vendor=HUBSPOT,
+        access_token="hs-at-1",
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert captured["url"] == "https://api.hubapi.com/integrations/v1/me"
+    assert "access_token" not in captured["url"]
+    assert captured["auth"] == "Bearer hs-at-1"
+    assert info["user_id"] == 123456
+    assert info["user"] == "hubspot.user@example.com"
 
 
 def test_fetch_userinfo_apple_no_endpoint_raises():
@@ -1267,6 +1338,27 @@ def test_begin_oauth_login_salesforce_rejects_invalid_login_base_url():
             provider="salesforce", base_url="https://omnisight.example.com",
             settings_obj=s,
         )
+
+
+def test_begin_oauth_login_hubspot_authorize_url():
+    """FX2.D9.7.11 pins HubSpot to oauth + CRM contacts read scopes."""
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="hubspot", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    parsed = urlparse(start.authorize_url)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "app.hubspot.com"
+    assert parsed.path == "/oauth/authorize"
+    assert query["client_id"] == ["hs-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/hubspot/callback"
+    ]
+    assert query["scope"] == ["oauth crm.objects.contacts.read"]
+    assert start.flow.provider == "hubspot"
+    assert start.flow.nonce is None
 
 
 def test_begin_oauth_login_apple_includes_form_post_param():
@@ -1641,6 +1733,56 @@ def test_complete_oauth_login_salesforce_sandbox_uses_base_url_for_token_and_use
     ]
     assert result.identity.subject == "005xx000001Sv6hAAD"
     assert result.identity.email == "sandbox.salesforce@example.com"
+
+
+def test_complete_oauth_login_hubspot_full_flow_uses_bearer_header_userinfo():
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="hubspot", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if str(request.url) == "https://api.hubapi.com/oauth/v1/token":
+            return httpx.Response(200, json={
+                "access_token": "hubspot-access-token",
+                "refresh_token": "hubspot-refresh-token",
+                "expires_in": 1800,
+                "scope": "oauth crm.objects.contacts.read",
+            })
+        assert str(request.url) == "https://api.hubapi.com/integrations/v1/me"
+        assert "access_token" not in str(request.url)
+        assert request.headers["authorization"] == "Bearer hubspot-access-token"
+        return httpx.Response(200, json={
+            "user_id": 123456,
+            "user": "dana.hubspot@example.com",
+            "hub_id": 98765,
+            "hub_domain": "example.hubspot.com",
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(handler))
+    result = _run(olh.complete_oauth_login(
+        provider="hubspot",
+        flow_cookie=start.flow_cookie,
+        returned_state=start.flow.state,
+        code="auth-code",
+        settings_obj=s,
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert seen == [
+        "https://api.hubapi.com/oauth/v1/token",
+        "https://api.hubapi.com/integrations/v1/me",
+    ]
+    assert result.identity.provider == "hubspot"
+    assert result.identity.subject == "123456"
+    assert result.identity.email == "dana.hubspot@example.com"
+    assert result.identity.name == "dana.hubspot@example.com"
+    assert result.token.access_token == "hubspot-access-token"
+    assert result.flow.provider == "hubspot"
 
 
 def test_complete_oauth_login_apple_uses_id_token_claims():
@@ -3185,6 +3327,174 @@ async def test_salesforce_oauth_authorize_callback_establishes_session(
     assert user["oidc_provider"] == "salesforce"
     assert user["oidc_subject"] == "005xx000001Sv6hAAC"
     assert auth_methods == ["oauth_salesforce"]
+    assert session["user_id"] == user["id"]
+
+
+@pytest.fixture()
+async def _hubspot_oauth_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """PG-backed HTTP fixture for the HubSpot authorize → callback flow.
+
+    Mirrors the Salesforce OAuth E2E fixture above: install the shared
+    pg_test_pool, pin bootstrap green, set the HubSpot OAuth Settings
+    singleton knobs, and mock token/userinfo at the handler boundary.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+    monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "false")
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import bootstrap as _boot
+    from backend import config as _cfg
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    monkeypatch.setattr(_cfg.settings, "oauth_hubspot_client_id", "hubspot-client-id")
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_hubspot_client_secret", "hubspot-client-secret"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_redirect_base_url", "https://omnisight.example.com"
+    )
+    monkeypatch.setattr(
+        _cfg.settings,
+        "oauth_flow_signing_key",
+        "hubspot-oauth-flow-signing-key-2026",
+    )
+
+    async def _fake_exchange_authorization_code(**kwargs):
+        assert kwargs["client_id"] == "hubspot-client-id"
+        assert kwargs["client_secret"] == "hubspot-client-secret"
+        assert kwargs["code"] == "hubspot-auth-code"
+        assert kwargs["vendor"].provider_id == "hubspot"
+        assert kwargs["vendor"].token_endpoint == "https://api.hubapi.com/oauth/v1/token"
+        assert kwargs["redirect_uri"] == (
+            "https://omnisight.example.com/api/v1/auth/oauth/hubspot/callback"
+        )
+        return oc.TokenSet(
+            access_token="hubspot-access-token",
+            refresh_token="hubspot-refresh-token",
+            token_type="Bearer",
+            expires_at=time.time() + 1800,
+            scope=("oauth", "crm.objects.contacts.read"),
+            id_token=None,
+            raw={"access_token": "hubspot-access-token"},
+        )
+
+    async def _fake_fetch_userinfo(**kwargs):
+        assert kwargs["vendor"].provider_id == "hubspot"
+        assert kwargs["vendor"].userinfo_endpoint == (
+            "https://api.hubapi.com/integrations/v1/me"
+        )
+        assert kwargs["access_token"] == "hubspot-access-token"
+        return {
+            "user_id": 123456,
+            "user": "Eve.HubSpot@Example.COM",
+            "hub_id": 98765,
+            "hub_domain": "example.hubspot.com",
+        }
+
+    monkeypatch.setattr(
+        olh, "exchange_authorization_code", _fake_exchange_authorization_code
+    )
+    monkeypatch.setattr(olh, "fetch_userinfo", _fake_fetch_userinfo)
+    monkeypatch.setattr(
+        "backend.routers.auth._oauth_log_audit_safe",
+        lambda *args, **kwargs: None,
+    )
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            follow_redirects=False,
+        ) as ac:
+            yield {"client": ac, "pool": pg_test_pool}
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_hubspot_oauth_authorize_callback_establishes_session(
+    _hubspot_oauth_http_client,
+):
+    env = _hubspot_oauth_http_client
+    client = env["client"]
+
+    authorize = await client.get("/api/v1/auth/oauth/hubspot/authorize")
+
+    assert authorize.status_code == 302
+    assert olh.FLOW_COOKIE_NAME in client.cookies
+    location = authorize.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "app.hubspot.com"
+    assert parsed.path == "/oauth/authorize"
+    assert query["client_id"] == ["hubspot-client-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/hubspot/callback"
+    ]
+    assert query["scope"] == ["oauth crm.objects.contacts.read"]
+    state = query["state"][0]
+
+    callback = await client.get(
+        "/api/v1/auth/oauth/hubspot/callback",
+        params={"code": "hubspot-auth-code", "state": state},
+        headers={
+            "cf-connecting-ip": "203.0.113.14",
+            "user-agent": "pytest-hubspot-oauth",
+        },
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/"
+    assert olh.FLOW_COOKIE_NAME not in client.cookies
+    assert "omnisight_session" in client.cookies
+    assert "omnisight_csrf" in client.cookies
+
+    async with env["pool"].acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, email, name, role, oidc_provider, oidc_subject, "
+            "auth_methods FROM users WHERE email = $1",
+            "eve.hubspot@example.com",
+        )
+        assert user is not None
+        session = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE user_id = $1",
+            user["id"],
+        )
+        assert session is not None
+
+    auth_methods = user["auth_methods"]
+    if isinstance(auth_methods, str):
+        auth_methods = json.loads(auth_methods)
+    assert user["name"] == "Eve.HubSpot@Example.COM"
+    assert user["role"] == "viewer"
+    assert user["oidc_provider"] == "hubspot"
+    assert user["oidc_subject"] == "123456"
+    assert auth_methods == ["oauth_hubspot"]
     assert session["user_id"] == user["id"]
 
 

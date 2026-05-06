@@ -399,19 +399,19 @@ SALESFORCE = VendorConfig(
 
 HUBSPOT = VendorConfig(
     # HubSpot OAuth 2.0. Authorize endpoint is on app.hubspot.com,
-    # token endpoint is on api.hubapi.com — the asymmetry is
-    # vendor-canonical (the docs explicitly call this out). PKCE is
-    # not documented; flagged false conservatively. Revocation is
-    # ``DELETE /oauth/v1/refresh-tokens/{token}`` — non-RFC-7009
-    # shape, so revocation_endpoint=None and AS.2.5 wires HubSpot's
-    # quirk separately.
+    # token + integrations identity endpoints are on api.hubapi.com —
+    # the asymmetry is vendor-canonical. PKCE is not documented;
+    # flagged false conservatively. Revocation is ``DELETE
+    # /oauth/v1/refresh-tokens/{token}`` — non-RFC-7009 shape, so
+    # revocation_endpoint=None and AS.2.5 wires HubSpot's quirk
+    # separately.
     provider_id="hubspot",
     display_name="HubSpot",
     authorize_endpoint="https://app.hubspot.com/oauth/authorize",
     token_endpoint="https://api.hubapi.com/oauth/v1/token",
-    userinfo_endpoint=None,  # No canonical userinfo — caller queries CRM owner / portal-info
+    userinfo_endpoint="https://api.hubapi.com/integrations/v1/me",
     revocation_endpoint=None,  # DELETE /oauth/v1/refresh-tokens/{token} — non-RFC shape, handle in AS.2.5
-    default_scopes=("oauth",),
+    default_scopes=("oauth", "crm.objects.contacts.read"),
     is_oidc=False,
     extra_authorize_params=(),
     supports_refresh_token=True,
