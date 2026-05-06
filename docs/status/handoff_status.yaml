@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 507
+entry_count: 508
 status_counts:
-  dev-only: 496
+  dev-only: 497
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4716,3 +4716,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑 PG-backed integration，並在 staging/prod 設定 Google OAuth app
     credentials 後 smoke `/api/v1/auth/oauth/google/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-3
+  header_line: 47823
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.2 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑 PG-backed GitHub integration，並在 staging/prod 設定 GitHub OAuth
+    App credentials 後 smoke `/api/v1/auth/oauth/github/authorize` 到 callback 建立 session。
