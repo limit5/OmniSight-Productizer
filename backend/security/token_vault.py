@@ -187,7 +187,10 @@ _SALT_RAW_BYTES = 16
 #: :mod:`backend.tests.test_token_vault` fails red when the two
 #: diverge; AS.0.4 §5.2 codifies this as a hard cross-module invariant.
 SUPPORTED_PROVIDERS: frozenset[str] = frozenset(
-    {"google", "github", "apple", "microsoft", "discord", "gitlab", "bitbucket"}
+    {
+        "google", "github", "apple", "microsoft", "discord", "gitlab",
+        "bitbucket", "slack",
+    }
 )
 
 

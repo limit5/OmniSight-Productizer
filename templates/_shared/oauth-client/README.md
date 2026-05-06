@@ -148,7 +148,7 @@ The 11 shipped vendors as frozen `VendorConfig` objects:
 | `apple` | Apple | yes | yes | yes | `response_mode=form_post` required for `name` scope |
 | `gitlab` | GitLab | yes | yes | yes | OIDC active when `openid` is in scope |
 | `bitbucket` | Bitbucket | — | yes | yes | Cloud only — self-hosted overrides at use site |
-| `slack` | Slack | — | yes | yes | "Sign in with Slack" OIDC is a different endpoint |
+| `slack` | Slack | yes | — | yes | Sign in with Slack OIDC |
 | `notion` | Notion | — | — | — | Long-lived token, no refresh, no scopes, no PKCE |
 | `salesforce` | Salesforce | yes | yes | yes | Caller adds `refresh_token` scope for refresh tokens |
 | `hubspot` | HubSpot | — | yes | — | Authorize on `app.hubspot.com`, token on `api.hubapi.com` |

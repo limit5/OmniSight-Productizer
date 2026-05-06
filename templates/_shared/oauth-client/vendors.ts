@@ -221,20 +221,19 @@ export const BITBUCKET: VendorConfig = makeVendor({
   supportsPkce: true,
 })
 
-/** Slack v2 OAuth (granular bot/user scopes). Slack also offers
- * "Sign in with Slack" OIDC at slack.com/openid/connect/authorize —
- * separate integration shape, override at use site if wanted. */
+/** Sign in with Slack OIDC. Slack's userInfo endpoint is the
+ * vendor-shaped openid.connect.userInfo method. */
 export const SLACK: VendorConfig = makeVendor({
   providerId: "slack",
   displayName: "Slack",
-  authorizeEndpoint: "https://slack.com/oauth/v2/authorize",
-  tokenEndpoint: "https://slack.com/api/oauth.v2.access",
-  userinfoEndpoint: null, // Slack uses users.info keyed by user id from token response
+  authorizeEndpoint: "https://slack.com/openid/connect/authorize",
+  tokenEndpoint: "https://slack.com/api/openid.connect.token",
+  userinfoEndpoint: "https://slack.com/api/openid.connect.userInfo",
   revocationEndpoint: "https://slack.com/api/auth.revoke",
-  defaultScopes: ["users:read", "users:read.email"],
-  isOidc: false,
+  defaultScopes: ["openid", "email", "profile"],
+  isOidc: true,
   extraAuthorizeParams: [],
-  supportsRefreshToken: true,
+  supportsRefreshToken: false,
   supportsPkce: true,
 })
 

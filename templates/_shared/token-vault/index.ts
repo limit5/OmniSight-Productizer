@@ -103,6 +103,7 @@ export const SUPPORTED_PROVIDERS: ReadonlySet<string> = Object.freeze(
     "gitlab",
     "google",
     "microsoft",
+    "slack",
   ]),
 )
 

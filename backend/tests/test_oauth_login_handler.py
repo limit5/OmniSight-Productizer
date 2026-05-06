@@ -1,8 +1,8 @@
 """AS.6.1 — backend.security.oauth_login_handler contract tests.
 
 Validates the OmniSight self-login OAuth backend handler that wires
-the AS.1 OAuth shared library to the seven ``Sign in with Google /
-GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket`` SSO buttons via two HTTP endpoints
+the AS.1 OAuth shared library to the eight ``Sign in with Google /
+GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack`` SSO buttons via two HTTP endpoints
 (``GET /api/v1/auth/oauth/{vendor}/authorize`` and ``.../callback``)
 mounted in :mod:`backend.routers.auth`.
 
@@ -10,7 +10,7 @@ Test families
 ─────────────
 1. SUPPORTED_PROVIDERS / cookie-envelope constants — pinned values,
    immutable shapes, no module-level mutable container.
-2. assert_provider_supported — accepts the seven AS.6.1 / FX2.D9.7 slugs,
+2. assert_provider_supported — accepts the eight AS.6.1 / FX2.D9.7 slugs,
    rejects unknown / mixed-case slugs, raises the right exception
    class.
 3. lookup_provider_credentials — reads the per-vendor Settings
@@ -24,7 +24,7 @@ Test families
    tamper detection (HMAC mismatch), TTL expiry, malformed
    envelope, version pin.
 7. extract_user_identity — per-vendor field-name dispatch
-   (Google/GitHub/Microsoft/Discord/GitLab/Bitbucket userinfo + Apple id_token), missing
+   (Google/GitHub/Microsoft/Discord/GitLab/Bitbucket/Slack userinfo + Apple id_token), missing
    fields raise IdentityFieldMissingError, name fallback to
    email-local-part.
 8. exchange_authorization_code — happy path with httpx
@@ -47,7 +47,7 @@ Test families
 13. Module-global state audit (per SOP §1) — no top-level mutable
     container, importing the module is side-effect-free.
 14. Settings field declaration drift guard.
-15. Google/GitHub/Microsoft/Apple/Discord/GitLab/Bitbucket router integration — mocked authorize → callback →
+15. Google/GitHub/Microsoft/Apple/Discord/GitLab/Bitbucket/Slack router integration — mocked authorize → callback →
     OmniSight session cookie + DB session creation.
 """
 
@@ -103,6 +103,8 @@ class _FakeSettings:
             "oauth_gitlab_client_secret": "gl-secret",
             "oauth_bitbucket_client_id": "bb-id",
             "oauth_bitbucket_client_secret": "bb-secret",
+            "oauth_slack_client_id": "sl-id",
+            "oauth_slack_client_secret": "sl-secret",
             "oauth_redirect_base_url": "https://omnisight.example.com",
             "oauth_flow_signing_key": "test-signing-key-with-enough-entropy-1234",
             "decision_bearer": "decision-bearer-fallback-key-x",
@@ -126,7 +128,7 @@ def _mock_transport(handler):
 def test_supported_providers_pinned():
     assert olh.SUPPORTED_PROVIDERS == frozenset({
         "google", "github", "microsoft", "apple", "discord", "gitlab",
-        "bitbucket",
+        "bitbucket", "slack",
     })
 
 
@@ -173,7 +175,10 @@ def test_export_count_pinned():
 
 @pytest.mark.parametrize(
     "p",
-    ["google", "github", "microsoft", "apple", "discord", "gitlab", "bitbucket"],
+    [
+        "google", "github", "microsoft", "apple", "discord", "gitlab",
+        "bitbucket", "slack",
+    ],
 )
 def test_assert_provider_supported_accepts_supported(p):
     olh.assert_provider_supported(p)  # no raise
@@ -219,6 +224,13 @@ def test_lookup_provider_credentials_bitbucket():
     assert creds.provider == "bitbucket"
     assert creds.client_id == "bb-id"
     assert creds.client_secret == "bb-secret"
+
+
+def test_lookup_provider_credentials_slack():
+    creds = olh.lookup_provider_credentials("slack", settings_obj=_FakeSettings())
+    assert creds.provider == "slack"
+    assert creds.client_id == "sl-id"
+    assert creds.client_secret == "sl-secret"
 
 
 def test_lookup_provider_credentials_raises_on_missing():
@@ -550,6 +562,37 @@ def test_extract_identity_bitbucket_falls_back_to_nickname():
         id_token_claims=None,
     )
     assert ident.name == "bitbucketuser"
+
+
+def test_extract_identity_slack_uses_root_oidc_claims():
+    ident = olh.extract_user_identity(
+        provider="slack",
+        userinfo={
+            "sub": "U1234567890",
+            "email": "User.Slack@Example.COM",
+            "name": "Slack User",
+        },
+        id_token_claims=None,
+    )
+    assert ident == olh.OAuthUserIdentity(
+        provider="slack",
+        subject="U1234567890",
+        email="user.slack@example.com",
+        name="Slack User",
+    )
+
+
+def test_extract_identity_slack_falls_back_to_given_name():
+    ident = olh.extract_user_identity(
+        provider="slack",
+        userinfo={
+            "sub": "U1234567891",
+            "email": "user@example.com",
+            "given_name": "SlackGiven",
+        },
+        id_token_claims=None,
+    )
+    assert ident.name == "SlackGiven"
 
 
 def test_extract_identity_apple_reads_id_token_claims():
@@ -986,6 +1029,27 @@ def test_begin_oauth_login_bitbucket_authorize_url():
     assert start.flow.nonce is None
 
 
+def test_begin_oauth_login_slack_authorize_url():
+    """Slack sign-in uses OIDC scopes and Slack's OpenID authorize path."""
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="slack", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    parsed = urlparse(start.authorize_url)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "slack.com"
+    assert parsed.path == "/openid/connect/authorize"
+    assert query["client_id"] == ["sl-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/slack/callback"
+    ]
+    assert query["scope"] == ["openid email profile"]
+    assert start.flow.provider == "slack"
+    assert start.flow.nonce is not None
+
+
 def test_begin_oauth_login_apple_includes_form_post_param():
     """Apple's catalog entry pre-bakes ``response_mode=form_post`` —
     must appear in the authorize URL."""
@@ -1024,7 +1088,7 @@ def _composite_handler(token_handler, userinfo_handler):
     URL path tail (`token` vs `userinfo`)."""
     def handler(request: httpx.Request) -> httpx.Response:
         u = str(request.url)
-        if "userinfo" in u or "/user" in u:
+        if "userinfo" in u.lower() or "/user" in u:
             return userinfo_handler(request)
         return token_handler(request)
     return handler
@@ -1186,6 +1250,47 @@ def test_complete_oauth_login_bitbucket_full_flow():
     assert result.identity.name == "Dana Bitbucket"
     assert result.token.access_token == "at-good"
     assert result.flow.provider == "bitbucket"
+
+
+def test_complete_oauth_login_slack_full_flow():
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="slack", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+
+    def userinfo_handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://slack.com/api/openid.connect.userInfo"
+        assert request.headers["authorization"] == "Bearer at-good"
+        return httpx.Response(200, json={
+            "sub": "U1234567890",
+            "email": "dana.slack@example.com",
+            "name": "Dana Slack",
+            "https://slack.com/team_id": "T123",
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(
+        _composite_handler(
+            _good_token_handler(scope="openid email profile"),
+            userinfo_handler,
+        )
+    ))
+    result = _run(olh.complete_oauth_login(
+        provider="slack",
+        flow_cookie=start.flow_cookie,
+        returned_state=start.flow.state,
+        code="auth-code",
+        settings_obj=s,
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert result.identity.provider == "slack"
+    assert result.identity.subject == "U1234567890"
+    assert result.identity.email == "dana.slack@example.com"
+    assert result.identity.name == "Dana Slack"
+    assert result.token.access_token == "at-good"
+    assert result.flow.provider == "slack"
 
 
 def test_complete_oauth_login_apple_uses_id_token_claims():
@@ -2230,6 +2335,169 @@ async def test_bitbucket_oauth_authorize_callback_establishes_session(
     assert user["oidc_provider"] == "bitbucket"
     assert user["oidc_subject"] == "{0f4c9a2e-6d42-4d1f-a111-5a0f1f99c123}"
     assert auth_methods == ["oauth_bitbucket"]
+    assert session["user_id"] == user["id"]
+
+
+@pytest.fixture()
+async def _slack_oauth_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """PG-backed HTTP fixture for the Slack authorize → callback flow.
+
+    Mirrors the Bitbucket OAuth E2E fixture above: install the shared
+    pg_test_pool, pin bootstrap green, set the Slack OAuth Settings
+    singleton knobs, and mock token/userinfo at the handler boundary.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+    monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "false")
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import bootstrap as _boot
+    from backend import config as _cfg
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    monkeypatch.setattr(_cfg.settings, "oauth_slack_client_id", "slack-client-id")
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_slack_client_secret", "slack-client-secret"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_redirect_base_url", "https://omnisight.example.com"
+    )
+    monkeypatch.setattr(
+        _cfg.settings,
+        "oauth_flow_signing_key",
+        "slack-oauth-flow-signing-key-2026",
+    )
+
+    async def _fake_exchange_authorization_code(**kwargs):
+        assert kwargs["client_id"] == "slack-client-id"
+        assert kwargs["client_secret"] == "slack-client-secret"
+        assert kwargs["code"] == "slack-auth-code"
+        assert kwargs["redirect_uri"] == (
+            "https://omnisight.example.com/api/v1/auth/oauth/slack/callback"
+        )
+        return oc.TokenSet(
+            access_token="slack-access-token",
+            refresh_token=None,
+            token_type="Bearer",
+            expires_at=time.time() + 3600,
+            scope=("openid", "email", "profile"),
+            id_token=None,
+            raw={"access_token": "slack-access-token"},
+        )
+
+    async def _fake_fetch_userinfo(**kwargs):
+        assert kwargs["vendor"].provider_id == "slack"
+        assert kwargs["access_token"] == "slack-access-token"
+        return {
+            "sub": "U1234567890",
+            "email": "Eve.Slack@Example.COM",
+            "name": "Eve Slack",
+            "https://slack.com/team_id": "T123",
+        }
+
+    monkeypatch.setattr(
+        olh, "exchange_authorization_code", _fake_exchange_authorization_code
+    )
+    monkeypatch.setattr(olh, "fetch_userinfo", _fake_fetch_userinfo)
+    monkeypatch.setattr(
+        "backend.routers.auth._oauth_log_audit_safe",
+        lambda *args, **kwargs: None,
+    )
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            follow_redirects=False,
+        ) as ac:
+            yield {"client": ac, "pool": pg_test_pool}
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_slack_oauth_authorize_callback_establishes_session(
+    _slack_oauth_http_client,
+):
+    env = _slack_oauth_http_client
+    client = env["client"]
+
+    authorize = await client.get("/api/v1/auth/oauth/slack/authorize")
+
+    assert authorize.status_code == 302
+    assert olh.FLOW_COOKIE_NAME in client.cookies
+    location = authorize.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "slack.com"
+    assert parsed.path == "/openid/connect/authorize"
+    assert query["client_id"] == ["slack-client-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/slack/callback"
+    ]
+    assert query["scope"] == ["openid email profile"]
+    state = query["state"][0]
+
+    callback = await client.get(
+        "/api/v1/auth/oauth/slack/callback",
+        params={"code": "slack-auth-code", "state": state},
+        headers={
+            "cf-connecting-ip": "203.0.113.11",
+            "user-agent": "pytest-slack-oauth",
+        },
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/"
+    assert olh.FLOW_COOKIE_NAME not in client.cookies
+    assert "omnisight_session" in client.cookies
+    assert "omnisight_csrf" in client.cookies
+
+    async with env["pool"].acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, email, name, role, oidc_provider, oidc_subject, "
+            "auth_methods FROM users WHERE email = $1",
+            "eve.slack@example.com",
+        )
+        assert user is not None
+        session = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE user_id = $1",
+            user["id"],
+        )
+        assert session is not None
+
+    auth_methods = user["auth_methods"]
+    if isinstance(auth_methods, str):
+        auth_methods = json.loads(auth_methods)
+    assert user["name"] == "Eve Slack"
+    assert user["role"] == "viewer"
+    assert user["oidc_provider"] == "slack"
+    assert user["oidc_subject"] == "U1234567890"
+    assert auth_methods == ["oauth_slack"]
     assert session["user_id"] == user["id"]
 
 

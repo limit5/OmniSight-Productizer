@@ -299,6 +299,13 @@ BEHAVIOUR_FIXTURES: Mapping[str, dict[str, Any]] = {
         "plaintext": "bitbucket-access-token-app-password-like-value",
         "expect": "ok",
     },
+    "round_trip_slack": {
+        "kind": "round_trip",
+        "userId": "user-1",
+        "provider": "slack",
+        "plaintext": "slack-access-token-xoxp-like-value",
+        "expect": "ok",
+    },
     "provider_case_normalised": {
         "kind": "round_trip",
         "userId": "u1",

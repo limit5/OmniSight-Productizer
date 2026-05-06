@@ -150,9 +150,7 @@ class VendorConfig:
           * expect ``id_token`` in token response;
           * caller may verify ``id_token`` JWS signature (AS.1.4).
         Vendors with both modes (Slack, Salesforce) — the catalog
-        picks the dominant integration shape. Operators wanting the
-        OIDC-flavoured Slack flow override the authorize_endpoint
-        + is_oidc at call site.
+        picks the integration shape used by OmniSight self-login.
     extra_authorize_params
         Vendor-specific query params appended to the authorize URL
         (RFC 6749 §3.1 says servers MAY accept additional params —
@@ -163,8 +161,9 @@ class VendorConfig:
         Vendor issues a refresh_token along with the access_token
         (when scope or extra_authorize_params requests it).
         ``False`` for Notion (long-lived access_token, no expiry,
-        no refresh). The flag is informational — the parser still
-        reads the actual response, this just lets the caller
+        no refresh) and Slack Sign in with Slack (user token, no
+        refresh grant). The flag is informational — the parser
+        still reads the actual response, this just lets the caller
         short-circuit "schedule a refresh job" wiring.
     supports_pkce
         Vendor accepts the RFC 7636 PKCE ``code_challenge`` /
@@ -336,22 +335,21 @@ BITBUCKET = VendorConfig(
 
 
 SLACK = VendorConfig(
-    # Slack v2 OAuth (granular bot/user scopes). ``users:read`` +
-    # ``users:read.email`` are the user-identity scopes for sign-in.
-    # Slack also offers "Sign in with Slack" OIDC at
-    # ``slack.com/openid/connect/authorize`` — that's a separate
-    # integration shape and out of scope for the default catalog
-    # entry; operators wanting OIDC override at use site.
+    # Sign in with Slack OpenID Connect. Slack's OIDC flow uses the
+    # ``/openid/connect/authorize`` + ``openid.connect.token`` pair,
+    # and its userInfo method is the vendor-shaped
+    # ``openid.connect.userInfo`` endpoint rather than a standard
+    # nested-profile path.
     provider_id="slack",
     display_name="Slack",
-    authorize_endpoint="https://slack.com/oauth/v2/authorize",
-    token_endpoint="https://slack.com/api/oauth.v2.access",
-    userinfo_endpoint=None,  # Slack uses ``users.info`` keyed by user id from token response
+    authorize_endpoint="https://slack.com/openid/connect/authorize",
+    token_endpoint="https://slack.com/api/openid.connect.token",
+    userinfo_endpoint="https://slack.com/api/openid.connect.userInfo",
     revocation_endpoint="https://slack.com/api/auth.revoke",
-    default_scopes=("users:read", "users:read.email"),
-    is_oidc=False,
+    default_scopes=("openid", "email", "profile"),
+    is_oidc=True,
     extra_authorize_params=(),
-    supports_refresh_token=True,
+    supports_refresh_token=False,
     supports_pkce=True,
 )
 

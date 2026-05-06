@@ -162,8 +162,8 @@ logger = logging.getLogger(__name__)
 #  Constants — supported providers + cookie envelope
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# The seven AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
-# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket`` literal —
+# The eight AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
+# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack`` literal —
 # extending requires (a) adding the vendor entry to
 # ``backend.security.oauth_vendors``, (b) adding a Settings field
 # pair (``oauth_<vendor>_client_id`` + ``..._client_secret``),
@@ -177,6 +177,7 @@ SUPPORTED_PROVIDERS: frozenset[str] = frozenset({
     "discord",
     "gitlab",
     "bitbucket",
+    "slack",
 })
 
 # In-flight FlowSession cookie name. Single namespace, HttpOnly,
@@ -1067,6 +1068,7 @@ def extract_user_identity(
     | discord   | userinfo["id"]       | userinfo["email"]     |
     | gitlab    | userinfo["sub"]      | userinfo["email"]     |
     | bitbucket | userinfo["uuid"]     | merged primary email  |
+    | slack     | userinfo["sub"]      | userinfo["email"]     |
     +-----------+----------------------+-----------------------+
 
     Raises :class:`IdentityFieldMissingError` if either field is
@@ -1149,6 +1151,16 @@ def extract_user_identity(
                 userinfo.get("display_name")
                 or userinfo.get("nickname")
                 or userinfo.get("username")
+                or ""
+            ).strip()
+        elif provider == "slack":
+            # Slack's OpenID userInfo endpoint is vendor-shaped but
+            # keeps ``sub`` / ``email`` at the JSON root.
+            sub = str(userinfo.get("sub") or "").strip()
+            email = str(userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("name")
+                or userinfo.get("given_name")
                 or ""
             ).strip()
         else:  # pragma: no cover — assert_provider_supported guards
