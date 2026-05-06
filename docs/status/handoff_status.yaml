@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 521
+entry_count: 522
 status_counts:
-  dev-only: 510
+  dev-only: 511
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4844,3 +4844,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — backend rolling restart 後，在 staging/prod 點 `/login` OAuth provider：未配置 provider 應寫 `oauth_login_failed_provider_not_configured`，完整
     callback 應寫 initiated → success；用 audit query 驗證新 action family 可查。
+- id: 2026-05-06--W0.1
+  header_line: 47985
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: W0.1
+  title: MP.W0.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — MP.W0.2 讀 `config/agent_class_schema.yaml` 實作 TODO re-slice helper，MP.W0.4 再加 drift guard
+    阻擋缺漏或未知 `[class:X]` 標籤。

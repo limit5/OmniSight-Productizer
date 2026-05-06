@@ -1,0 +1,59 @@
+# Agent class label schema.
+#
+# MP.W0.1 — canonical value list for TODO inline labels consumed by the
+# multi-provider orchestrator, cost-estimator seeds, and future RPG
+# character-card imports. Keep this file machine-readable so follow-up
+# drift guards can compare TODO.md labels against the same source.
+#
+# Inline TODO syntax:
+#   [class:<agent_class>]
+#
+# Example:
+#   - [ ] MP.W1.1 ... [class:api-anthropic]
+
+schema_version: 1
+label_key: agent_class
+inline_label_prefix: class
+unknown_value: unassigned
+allowed_values:
+  - subscription-codex
+  - subscription-claude
+  - api-anthropic
+  - api-openai
+  - local-llm-qwen
+  - unassigned
+values:
+  subscription-codex:
+    provider_family: openai
+    access_mode: subscription
+    runner: codex
+    description: OpenAI Codex CLI subscription runner.
+  subscription-claude:
+    provider_family: anthropic
+    access_mode: subscription
+    runner: claude
+    description: Anthropic Claude Code subscription runner.
+  api-anthropic:
+    provider_family: anthropic
+    access_mode: api
+    runner: auto-runner-sdk.py
+    description: Anthropic API-backed runner for high-context or high-blast tasks.
+  api-openai:
+    provider_family: openai
+    access_mode: api
+    runner: openai-api
+    description: OpenAI API-backed runner for spillover or explicit API-mode routing.
+  local-llm-qwen:
+    provider_family: local
+    access_mode: local
+    runner: qwen
+    description: Local Qwen-family LLM runner slot.
+  unassigned:
+    provider_family: none
+    access_mode: none
+    runner: none
+    description: Temporary placeholder for TODO items that still need operator classification.
+metadata:
+  task_id: MP.W0.1
+  updated_at: 2026-05-06
+  owner: Priority MP
