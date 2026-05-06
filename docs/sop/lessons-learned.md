@@ -28,6 +28,9 @@
 | 11 | 2026-05-06 | Repo topology drift — local `origin = GitHub` instead of GitLab per ADR 0002; live and tracked but no migration date | governance migration plan re-read |
 | 12 | 2026-05-06 | Gerrit replication.config does NOT do env-var or `${name}` case substitution; lowercase target paths must be hardcoded per remote | OP-247 path validation |
 | 13 | 2026-05-06 | Gerrit replication URL must NOT contain credentials inline; put username + password in `secure.config` `[remote "name"]` block instead | OP-247 path validation |
+| 14 | 2026-05-06 | Git hooks for worktrees live in `--git-common-dir/hooks/`, NOT `--git-dir/hooks/`; the latter silently never fires | OP-17 first auto-push run |
+| 15 | 2026-05-06 | Worktree must have bot identity in `git config user.email/name` before agent commits; otherwise Gerrit rejects "email not registered" | OP-17 first auto-push run |
+| 16 | 2026-05-06 | Runner needs **per-ticket fresh-sync** from Gerrit develop — no carryover from prior tickets, no rebase onto local main | OP-17 worktree state confusion |
 
 ---
 
@@ -241,6 +244,51 @@ Gerrit auto-pairs the `[remote "gitlab-mirror"]` blocks across the two files.
 **Verification**: After moving creds to secure.config, `replication list --detail` shows the URL without any password leak. Replication still works because Gerrit uses secure.config username + password as HTTP basic auth.
 
 **Generalisation**: Credentials live in **dedicated secrets files** (per the tool's documented contract), never in URLs or general config. URL-inline auth is convenient for quick scripts but a leak vector in any config that gets `cat`'d or queried via API.
+
+---
+
+## Lesson 14 — Git hooks for worktrees live at `--git-common-dir`, not `--git-dir` (2026-05-06)
+
+**Situation**: OP-17 first auto-push run via `auto-runner-jira.py`'s OP-247 Phase 1 logic. `install_commit_msg_hook` resolved the hook path via `git rev-parse --git-dir` and wrote the script there. But codex's commits had no Change-Id; Gerrit rejected the push with `missing Change-Id in message footer`. Manual debug: ran the hook script directly with a test message → it worked. So the script was correct; git just wasn't invoking it.
+
+**Fix**: For Git worktrees, `--git-dir` returns the worktree-specific path (`.git/worktrees/<name>`), but git executes hooks from `--git-common-dir/hooks` (the parent's `.git/hooks`). Hooks installed at the worktree-specific path silently never fire. `install_commit_msg_hook` now uses `_git_common_dir()` which calls `git rev-parse --git-common-dir`. Commit `83e89baa` (Change #28).
+
+**Verification**: Post-fix, `git commit --amend --no-edit` triggers the hook and adds Change-Id. Confirmed by manual hook-trigger test before-after the path correction.
+
+**Generalisation**: Any tool that resolves git paths for worktree-shared resources (hooks, refs, config) needs to use `--git-common-dir`, not `--git-dir`. The two are interchangeable only for non-worktree repos. When integrating with worktrees, audit every git path lookup.
+
+---
+
+## Lesson 15 — Worktree needs bot identity set before agent commits (2026-05-06)
+
+**Situation**: OP-17 first auto-push run. After commit-msg hook fix (L14), the runner pushed to Gerrit `refs/for/develop` and Gerrit responded `email address row7-self-agent@omnisight.local is not registered in your account, and you lack 'forge committer' permission`. The codex commit's committer was the worktree's default git config user (the operator's env user `Agent-row7-self-agent`), not codex-bot's registered Gerrit email.
+
+**Fix**: `set_bot_identity_in_worktree(worktree, agent_class)` runs `git config user.email` + `user.name` in the worktree before invoking the CLI. Identity is derived from the agent_class via `_GERRIT_AUTH_BY_CLASS` (claude-bot for `subscription-claude` / `api-anthropic`; codex-bot for `subscription-codex` / `api-openai`). Email convention: `rt3628+<bot-username>@gmail.com`. Idempotent — setting same value is a no-op. Commit `83e89baa`.
+
+**Verification**: Post-fix, codex commits have `committer: codex-bot <rt3628+codex-bot@gmail.com>` which matches Gerrit's account. Push succeeds without manual `--reset-author` workaround.
+
+**Generalisation**: Whenever an automated agent commits in a shared workspace, the workspace's identity must match the agent's principal in downstream gates. Setting identity on every agent invocation is cheaper (and idempotent) than relying on workspace-state being correct from prior setup.
+
+---
+
+## Lesson 16 — Per-ticket fresh-sync to Gerrit develop (2026-05-06)
+
+**Situation**: OP-17 launch. The codex worktree was on `feature/OP-11-mp-w1-1-orchestrator` from the previous ticket; pre-pickup live_state checks in main repo cwd failed because main repo lacked the OP-11 module (chain divergence between local `main` and Gerrit `develop`). Manual fix: `git checkout -B develop FETCH_HEAD` in worktree, then `git merge --no-ff origin/develop` in main repo. After codex completed work, `ensure_change_ids` rebased onto local `main` which now contained a merge commit with row7-self-agent committer → Gerrit rejected (separate from L15's same-error-different-cause).
+
+**Fix**: `sync_to_gerrit_develop(worktree, agent_class, ticket_key)` runs at the start of every ticket pickup in `auto-runner-jira.py`:
+
+```python
+1. git fetch <gerrit-ssh-url> develop      # canonical source
+2. develop_sha = git rev-parse FETCH_HEAD  # capture explicitly
+3. git switch -C feature/<TICKET>-runner-fresh <develop_sha>
+4. git clean -fdx                          # discard any partial state
+```
+
+Returns `WorktreeSyncResult(branch_name, develop_sha, detail)`. Caller passes `develop_sha` to `ensure_change_ids` so rebase base is the Gerrit develop tip (not local main). Commit `83e89baa`.
+
+**Verification**: After Phase 1.5 ships, OP-18 (next codex run) is the first ticket expected to need zero manual recovery. Verification deferred to that run.
+
+**Generalisation**: Local refs (especially `main`) drift from canonical refs (Gerrit develop) over time. Rather than tracking + repairing drift, automate a fresh-sync at every ticket boundary. The workflow's source of truth is Gerrit; any local repo state is throwaway. Aligns with ADR 0001 5-branch flow ("feature/* are throwaway, develop is integration trunk").
 
 ---
 
