@@ -459,6 +459,12 @@ def main(argv: list[str]) -> int:
 
     for wave in waves:
         print(f"=== Wave {wave.wave_id} — {wave.title[:60]} ({len(wave.items)} items) ===")
+        # Per docs/sop/jira-ticket-conventions.md §10a Epic existence invariant:
+        # Epic must have ≥ 1 child Story. Skip empty Waves entirely.
+        if not wave.items:
+            print(f"  [SKIP] Wave has 0 active items — Epic existence invariant (§10a)")
+            print()
+            continue
         epic_result = _create_epic(wave, args.dry_run)
         print(f"  Epic: {epic_result}")
         for item in wave.items:
@@ -466,7 +472,8 @@ def main(argv: list[str]) -> int:
             print(f"    └─ {item.task_id}: {story_result}")
         print()
 
-    print(f"Summary: {len(waves)} epics, {total_items} stories.")
+    epic_count = sum(1 for w in waves if w.items)  # empty Waves skipped per §10a
+    print(f"Summary: {epic_count} epics, {total_items} stories.")
     return 0
 
 

@@ -334,7 +334,9 @@ external_blockers:
 
 ---
 
-## §10 Workflow states + 4-layer enforcement
+## §10 Workflow states + 4-layer enforcement (Story)
+
+> **Scope note**: This section defines the **Story** (and Sub-task) state machine. **Epic** has its own state machine, see §10a. **META** retrospective tickets follow Story flow with extra approval rules (see §17).
 
 ### State machine
 
@@ -384,6 +386,106 @@ In Atlassian Cloud workflow editor:
 4. Save + publish workflow
 
 Test by attempting transition on a ticket with an open `is blocked by` link — should fail with operator-visible error.
+
+---
+
+## §10a Epic lifecycle (Wave-level workflow)
+
+> **Why separate from §10**: Epic is a planning artifact representing a Wave. Its state captures *Wave-level* events (all children done, retro complete, release shipped) — distinct from any single Story's progress. Without an explicit lifecycle, Epics accumulate as "dead Epics in TODO state" forever after their children Publish.
+
+### Epic existence invariant
+
+> **An Epic in the OP project must have ≥ 1 child Story (Published or otherwise).**
+
+Empty Epics are forbidden:
+
+- `scripts/jira_migrate_active_tickets.py` MUST skip Wave sections with 0 checkbox items
+- `scripts/jira_epic_lifecycle.py` (daily cron) auto-Archives any Epic that becomes empty (all children re-parented out / cancelled) after a 7-day observation window
+- Manual Epic creation that produces an empty Epic is auto-tagged `wave:empty-pre-decompose` for operator attention
+
+This invariant prevents placeholder Epics from becoming silent bottlenecks in future automation (release cut, Wave dependency, scheduler weighting). If Epic exists, it represents real work.
+
+### Epic state machine
+
+```
+   TODO ──cron-detects-all-children-Published──> wave:complete-pending-retro
+            │
+            └──24h-elapsed──> [auto-create META wave-retrospective ticket]
+                                            │
+                                            └──retro Published──> Approved
+                                                                        │
+                                                                        └──fix_version released──> Published ──> Archived
+```
+
+### Epic state definitions
+
+| State | Meaning | Enter condition |
+|---|---|---|
+| `TODO` | Wave defined, children in flight | Epic created |
+| `wave:complete-pending-retro` (label, status stays TODO in JIRA) | All child Stories Published; retro pending | Cron detects no In-flight / Under-Review children |
+| `Approved` | Wave retrospective Published | META `meta:wave-retrospective` ticket transitions Published |
+| `Published` | Wave shipped with its release | `fix_version` deploy hook fires |
+| `Archived` | Closed out | Operator manual / placeholder cleanup |
+
+### 4-layer Epic lifecycle enforcement
+
+| Layer | Catches | Mechanism |
+|---|---|---|
+| L1: cron `jira_epic_lifecycle.py` (daily) | All children done, no retro yet | Adds `wave:complete-pending-retro` label, schedules L2 |
+| L2: 24h grace period + auto-create retro | Operator forgot to retro | Cron creates META `meta:wave-retrospective` ticket linked-by Epic |
+| L3: retro post-Approve hook | Retro Published → Epic Approved | `scripts/jira_epic_lifecycle.py` watches META retros |
+| L4: release pipeline hook | Release shipped → Epic Published | CI / release script transitions all Approved Epics matching `fix_version` |
+
+### Wave retrospective ticket
+
+Auto-created by L2 when Epic enters `wave:complete-pending-retro`:
+
+```yaml
+Component: META
+Issue Type: Story
+Summary: "Wave Retro: <wave_id> — <wave title>"
+Labels: meta:wave-retrospective, tier:S, area:docs
+Linked: caused-by <Epic key>
+Description:
+
+## Required structured fields
+
+```yaml
+wave_id:           # e.g. MP.W1
+items_completed:   # list of Published child Story keys
+items_cancelled:   # list of Archived-without-ship child Story keys
+items_spilled:     # list of Story keys re-parented to a future Wave
+estimate_vs_actual: # Wave-level wall time, target vs actual
+what_worked: |     # structured prose, not vague
+what_didnt: |
+next_wave_lessons: |
+                   # specific, actionable. Vague entries auto-rejected
+                   # per §14 retrospective rules.
+```
+```
+
+Workflow rules (per §17 META):
+- Cannot Approve without +1 from non-source-Wave operator
+- Cannot Approve with empty / vague structured fields (regex match against `(?i)be more careful|pay attention|try harder|N/A`)
+
+### Empty Epic special handling
+
+When an Epic legitimately has 0 children (operator created Wave placeholder; or all children re-parented out):
+
+| Scenario | Auto-action |
+|---|---|
+| Migration encounters empty Wave section | Skip — do NOT create Epic |
+| Operator creates Epic with 0 children | Tag `wave:empty-pre-decompose`, alert operator |
+| Epic loses all children (re-parented) | 7-day observation window → auto-Archive |
+| Epic auto-Archive with 0 history | No Wave retrospective created (nothing to retro about) |
+
+### Why not just auto-transition Epic to Published when last child Published
+
+- Skips Wave retrospective → loses the lesson-capture moment (§14 + §17 META spirit)
+- Conflates "feature complete" with "release shipped" — release cut is a separate event
+- 24h grace period gives operator time to add scope (e.g. realising one more Story is needed)
+
+The 4 layers preserve these as distinct events, each with its own ritual.
 
 ---
 
@@ -716,12 +818,15 @@ for s, ticket in scored:
 
 ```sql
 project = OP
+  AND issuetype = "ストーリー"                  -- only Story; NOT Epic / Sub-task
   AND status = "TODO"
   AND assignee is EMPTY
   AND labels = "class:subscription-codex"     -- or class:api-anthropic, etc.
   AND status != "Waiting for External"
 ORDER BY priority DESC, created ASC
 ```
+
+**Why `issuetype = "ストーリー"`**: Epic is a Wave-level planning artifact (§10a), not actionable work — agent picking it up would hallucinate implementation. Sub-task is reserved for §6 in-flight split, requiring operator-confirmed split before pickup. Both are excluded from runner self-dispatch.
 
 ### Why each component
 
@@ -760,7 +865,8 @@ Same observation-then-tune pattern as §15:
 
 | Label | Use |
 |---|---|
-| `meta:retrospective` | Auto-created by drift detector (§14) or manually for incidents |
+| `meta:retrospective` | Auto-created by drift detector (§14) for tier-drift signals |
+| `meta:wave-retrospective` | Auto-created by Epic lifecycle (§10a L2) when Wave completes |
 | `meta:lessons-learned` | Adding entry to `docs/sop/lessons-learned.md` |
 | `meta:tooling` | Runner / scripts / helpers improvement |
 | `meta:governance` | ADR amendments, SOP rewrites, CLAUDE.md changes |
