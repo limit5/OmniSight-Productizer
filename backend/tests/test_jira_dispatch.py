@@ -180,3 +180,104 @@ def test_fetch_pickable_tickets_returns_list() -> None:
         assert "key" in i
         labels = i["fields"]["labels"]
         assert "class:subscription-codex" in labels
+
+
+# ── Gerrit push helpers (OP-247 Phase 1) ─────────────────────────
+
+
+def test_gerrit_auth_mapping_covers_4_classes() -> None:
+    """_GERRIT_AUTH_BY_CLASS must include all 4 in-flight agent classes."""
+    expected = {"subscription-codex", "subscription-claude", "api-anthropic", "api-openai"}
+    assert expected.issubset(set(jd._GERRIT_AUTH_BY_CLASS.keys()))
+
+
+def test_gerrit_auth_codex_classes_share_codex_bot_key() -> None:
+    """subscription-codex + api-openai both use codex-bot key (per memory convention)."""
+    sub_user, sub_key = jd._GERRIT_AUTH_BY_CLASS["subscription-codex"]
+    api_user, api_key = jd._GERRIT_AUTH_BY_CLASS["api-openai"]
+    assert sub_user == api_user == "codex-bot"
+    assert sub_key == api_key
+
+
+def test_gerrit_auth_claude_classes_share_claude_bot_key() -> None:
+    """subscription-claude + api-anthropic both use claude-bot key."""
+    sub_user, sub_key = jd._GERRIT_AUTH_BY_CLASS["subscription-claude"]
+    api_user, api_key = jd._GERRIT_AUTH_BY_CLASS["api-anthropic"]
+    assert sub_user == api_user == "claude-bot"
+    assert sub_key == api_key
+
+
+def test_gerrit_ssh_url_for_codex() -> None:
+    url = jd._gerrit_ssh_url("subscription-codex")
+    assert url == "ssh://codex-bot@sora.services:29418/omnisight/OmniSight-Productizer"
+
+
+def test_gerrit_ssh_url_for_claude() -> None:
+    url = jd._gerrit_ssh_url("subscription-claude")
+    assert url == "ssh://claude-bot@sora.services:29418/omnisight/OmniSight-Productizer"
+
+
+def test_gerrit_ssh_url_unknown_class_falls_back_to_claude() -> None:
+    """Unknown agent_class defaults to claude-bot (safer default — less write power)."""
+    url = jd._gerrit_ssh_url("local-llm-qwen")
+    assert "claude-bot" in url
+
+
+def test_gerrit_change_url_regex_parses_sample_output() -> None:
+    """Real Gerrit push response format from 2026-05-06 cycle 2:
+    'remote:   https://sora.services:29420/c/omnisight/OmniSight-Productizer/+/24 docs: ...'
+    """
+    sample = (
+        "remote: Processing changes: refs: 1, new: 1, done\n"
+        "remote: \n"
+        "remote: SUCCESS\n"
+        "remote: \n"
+        "remote:   https://sora.services:29420/c/omnisight/OmniSight-Productizer/+/24 "
+        "docs: example commit subject [NEW]\n"
+        "To ssh://sora.services:29418/omnisight/OmniSight-Productizer\n"
+        " * [new reference]     HEAD -> refs/for/develop\n"
+    )
+    m = jd._GERRIT_CHANGE_URL_RE.search(sample)
+    assert m is not None
+    assert m.group(1) == "https://sora.services:29420/c/omnisight/OmniSight-Productizer/+/24"
+    assert m.group(2) == "24"
+
+
+def test_gerrit_change_url_regex_no_match_when_push_failed() -> None:
+    """Gerrit rejection responses don't contain Change URL."""
+    sample = "remote: ERROR: missing Change-Id\n[remote rejected]\n"
+    assert jd._GERRIT_CHANGE_URL_RE.search(sample) is None
+
+
+def test_gerrit_push_result_failure_shape() -> None:
+    """GerritPushResult dataclass — failure case has None for change fields."""
+    result = jd.GerritPushResult(success=False, change_number=None, change_url=None, detail="error")
+    assert not result.success
+    assert result.change_number is None
+
+
+def test_gerrit_push_result_success_shape() -> None:
+    """GerritPushResult dataclass — success case has populated fields."""
+    result = jd.GerritPushResult(
+        success=True,
+        change_number=42,
+        change_url="https://sora.services:29420/c/omnisight/OmniSight-Productizer/+/42",
+        detail="SUCCESS",
+    )
+    assert result.success
+    assert result.change_number == 42
+    assert "/+/42" in result.change_url
+
+
+def test_transition_ids_includes_under_review() -> None:
+    """OP-247 Phase 1 added to_under_review = '3' per §10 mapping."""
+    assert jd.TRANSITION_IDS["to_under_review"] == "3"
+
+
+def test_gerrit_constants_match_memory_reference() -> None:
+    """Endpoints must match reference_gerrit_self_hosted memory (Track C 2026-05-05)."""
+    assert jd.GERRIT_SSH_HOST == "sora.services"
+    assert jd.GERRIT_SSH_PORT == 29418
+    assert jd.GERRIT_PROJECT_PATH == "omnisight/OmniSight-Productizer"
+    assert "29420" in jd.GERRIT_HOOK_URL
+    assert jd.GERRIT_HOOK_URL.endswith("/tools/hooks/commit-msg")

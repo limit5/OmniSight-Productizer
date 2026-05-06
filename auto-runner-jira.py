@@ -215,11 +215,42 @@ def main() -> int:
 
     rc = _invoke_cli(AGENT_CLASS, prompt)
     if rc == 0:
-        print(f"[runner] {snapshot.key} CLI returned 0; operator must push + transition to Under Review")
-        jira_dispatch.add_comment(
-            client, snapshot.key,
-            f"[runner-cli-success] CLI exited 0. Operator: review changes, push commits, transition to Under Review.",
+        # Phase 1 of OP-247: auto-push to Gerrit + transition Under Review.
+        # Phase 3 (events-stream → Approved/Published) deferred.
+        worktree_path = Path(
+            CODEX_WORKTREE if AGENT_CLASS in ("subscription-codex", "api-openai")
+            else CLAUDE_WORKTREE
         )
+        try:
+            print(f"[runner] {snapshot.key} CLI returned 0; preparing Gerrit push...")
+            jira_dispatch.install_commit_msg_hook(worktree_path)
+            jira_dispatch.ensure_change_ids(worktree_path, base_ref="main")
+            push_result = jira_dispatch.push_to_gerrit_for_review(
+                worktree_path, AGENT_CLASS, target="develop"
+            )
+        except Exception as e:
+            print(f"[runner] Gerrit push setup failed: {e}", file=sys.stderr)
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[runner-gerrit-setup-fail] Could not prepare Gerrit push:\n{type(e).__name__}: {e}\n\n"
+                f"Operator: review changes in `{worktree_path}`, push manually, then transition Under Review.",
+            )
+            return 1
+
+        if push_result.success:
+            print(f"[runner] pushed Change #{push_result.change_number}: {push_result.change_url}")
+            jira_dispatch.transition_to_under_review(
+                client, snapshot.key, push_result.change_url
+            )
+            print(f"[runner] {snapshot.key} → Under Review. Reviewer: +2 in Gerrit UI.")
+        else:
+            print(f"[runner] Gerrit push failed:\n{push_result.detail}", file=sys.stderr)
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[runner-gerrit-push-fail] Gerrit rejected push:\n```\n{push_result.detail}\n```\n\n"
+                f"Operator: review + push manually.",
+            )
+            return 1
     elif rc == 99:
         print(f"[runner] {snapshot.key} skipped (API agent_class not yet wired in MVP)")
         jira_dispatch.transition_back_to_todo(client, snapshot.key, "API agent_class not yet supported in auto-runner-jira.py MVP")

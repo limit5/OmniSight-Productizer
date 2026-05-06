@@ -203,14 +203,160 @@ def to_snapshot(issue: dict) -> TicketSnapshot:
 
 # ── State transitions ─────────────────────────────────────────────
 
-# OP project workflow transition IDs (verified via /transitions endpoint).
-# These must match Atlassian Cloud project's workflow config.
-# If workflow changes, update this map and the convention §10 doc.
+# OP project workflow transition IDs (verified 2026-05-06 against
+# soraapp.atlassian.net via /transitions endpoint). Must match Atlassian
+# Cloud project's workflow config. If workflow changes, update this map
+# AND `docs/sop/jira-ticket-conventions.md` §10 mapping table.
 TRANSITION_IDS = {
-    "to_in_progress": "21",   # JP locale: "進行中"
-    "back_to_todo": "11",     # JP locale: "To Do"
-    # to_under_review / approved / published: TBD when workflow extended
+    "to_in_progress": "21",      # JP locale: "進行中"
+    "back_to_todo": "11",        # JP locale: "To Do"
+    "to_under_review": "3",      # "Submit for Review" — In Progress → Under Review
+    # approved / published / archived: covered by gerrit_jira_bridge.py (deferred follow-up)
 }
+
+
+# Gerrit endpoints (Track C verified 2026-05-05; reference_gerrit_self_hosted memory)
+GERRIT_SSH_HOST = "sora.services"
+GERRIT_SSH_PORT = 29418
+GERRIT_PROJECT_PATH = "omnisight/OmniSight-Productizer"
+GERRIT_HOOK_URL = "https://sora.services:29420/tools/hooks/commit-msg"
+
+# agent_class → (gerrit username, ssh private key path).
+# Memory: claude-bot for subscription-claude / api-anthropic; codex-bot for subscription-codex / api-openai.
+_GERRIT_AUTH_BY_CLASS: dict[str, tuple[str, Path]] = {
+    "subscription-codex":  ("codex-bot",  Path("~/.config/omnisight/gerrit-codex-bot-ed25519").expanduser()),
+    "api-openai":          ("codex-bot",  Path("~/.config/omnisight/gerrit-codex-bot-ed25519").expanduser()),
+    "subscription-claude": ("claude-bot", Path("~/.config/omnisight/gerrit-claude-bot-ed25519").expanduser()),
+    "api-anthropic":       ("claude-bot", Path("~/.config/omnisight/gerrit-claude-bot-ed25519").expanduser()),
+}
+
+
+@dataclass(frozen=True)
+class GerritPushResult:
+    """Outcome of pushing a worktree HEAD to Gerrit refs/for/<target>."""
+    success: bool
+    change_number: int | None
+    change_url: str | None
+    detail: str
+
+
+def _gerrit_ssh_url(agent_class: str) -> str:
+    user = _GERRIT_AUTH_BY_CLASS.get(agent_class, _GERRIT_AUTH_BY_CLASS["subscription-claude"])[0]
+    return f"ssh://{user}@{GERRIT_SSH_HOST}:{GERRIT_SSH_PORT}/{GERRIT_PROJECT_PATH}"
+
+
+def _git_dir(worktree_path: Path) -> Path:
+    """Resolve worktree's .git dir (handles worktree pattern where .git is a file)."""
+    import subprocess
+    out = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=worktree_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    p = Path(out)
+    return p if p.is_absolute() else (worktree_path / p).resolve()
+
+
+def install_commit_msg_hook(worktree_path: Path) -> bool:
+    """Idempotent: install Gerrit commit-msg hook in worktree.
+
+    Returns True if hook is now present (whether installed or already there).
+    Per memory `reference_gerrit_self_hosted.md` gotcha #1: scp subsystem
+    is disabled, so we use HTTP fallback to fetch the hook script.
+    """
+    hook_path = _git_dir(worktree_path) / "hooks" / "commit-msg"
+    if hook_path.exists() and hook_path.stat().st_size > 0:
+        return True
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(GERRIT_HOOK_URL, timeout=10) as r:
+        hook_path.write_bytes(r.read())
+    hook_path.chmod(0o755)
+    return True
+
+
+def ensure_change_ids(worktree_path: Path, base_ref: str = "main") -> None:
+    """Rebase commits between base_ref..HEAD with --exec amend, triggering
+    the commit-msg hook on each commit so they all get a Change-Id footer.
+
+    Idempotent: commits already containing a Change-Id are unchanged
+    (the standard Gerrit hook detects and skips).
+    """
+    import subprocess
+    subprocess.run(
+        ["git", "rebase", base_ref, "--exec", "git commit --amend --no-edit"],
+        cwd=worktree_path, check=True, capture_output=True, text=True
+    )
+
+
+_GERRIT_CHANGE_URL_RE = re.compile(r"(https://\S+/c/[^\s]+/\+/(\d+))")
+
+
+def push_to_gerrit_for_review(
+    worktree_path: Path,
+    agent_class: str,
+    target: str = "develop",
+) -> GerritPushResult:
+    """Push worktree HEAD to ``gerrit:refs/for/<target>``.
+
+    Returns parsed Change number + URL on success, or detail blob on
+    failure. Caller is responsible for having installed the commit-msg
+    hook + ensured all commits have Change-Id footers (use
+    :func:`install_commit_msg_hook` and :func:`ensure_change_ids` first).
+    """
+    import os
+    import subprocess
+    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
+    if auth is None:
+        return GerritPushResult(False, None, None, f"unknown agent_class for Gerrit auth: {agent_class}")
+    _, ssh_key = auth
+    if not ssh_key.exists():
+        return GerritPushResult(False, None, None, f"SSH key not found at {ssh_key}")
+
+    env = os.environ.copy()
+    env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key}"
+
+    result = subprocess.run(
+        ["git", "push", _gerrit_ssh_url(agent_class), f"HEAD:refs/for/{target}"],
+        cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120
+    )
+    blob = (result.stderr + "\n" + result.stdout).strip()
+    if result.returncode != 0:
+        return GerritPushResult(False, None, None, blob[-1500:])
+
+    m = _GERRIT_CHANGE_URL_RE.search(blob)
+    if not m:
+        return GerritPushResult(False, None, None, f"push succeeded but Change URL not parsed:\n{blob[-1500:]}")
+
+    return GerritPushResult(
+        success=True,
+        change_number=int(m.group(2)),
+        change_url=m.group(1),
+        detail=blob[-1500:],
+    )
+
+
+def transition_to_under_review(
+    client: "DispatchClient",
+    key: str,
+    gerrit_change_url: str,
+) -> None:
+    """JIRA In Progress → Under Review, with Gerrit URL in a comment.
+
+    Operator (or future events-stream consumer) handles +2 → Approved
+    and submit → Published transitions.
+    """
+    add_comment(
+        client, key,
+        (
+            f"[runner-pushed-to-gerrit] Patchset on Gerrit: {gerrit_change_url}\n\n"
+            f"Reviewer: please +2 in Gerrit UI. Gerrit submit-rule will replicate "
+            f"to GitLab/GitHub on merge. Operator: transition this ticket "
+            f"Approved → Published manually until OP-247 Phase 3 (events-stream "
+            f"consumer) ships."
+        ),
+    )
+    _request(client, "POST", f"/issue/{key}/transitions", {
+        "transition": {"id": TRANSITION_IDS["to_under_review"]},
+    })
 
 
 def transition_to_in_progress(client: DispatchClient, key: str) -> None:
