@@ -281,3 +281,125 @@ def test_gerrit_constants_match_memory_reference() -> None:
     assert jd.GERRIT_PROJECT_PATH == "omnisight/OmniSight-Productizer"
     assert "29420" in jd.GERRIT_HOOK_URL
     assert jd.GERRIT_HOOK_URL.endswith("/tools/hooks/commit-msg")
+
+
+# ── Phase 1.5: bot identity + worktree sync (OP-247 follow-up) ──
+
+
+def test_bot_email_for_codex_class() -> None:
+    """Per memory: bot emails are rt3628+<bot-username>@gmail.com."""
+    assert jd._bot_email_for("subscription-codex") == "rt3628+codex-bot@gmail.com"
+    assert jd._bot_email_for("api-openai") == "rt3628+codex-bot@gmail.com"
+
+
+def test_bot_email_for_claude_class() -> None:
+    assert jd._bot_email_for("subscription-claude") == "rt3628+claude-bot@gmail.com"
+    assert jd._bot_email_for("api-anthropic") == "rt3628+claude-bot@gmail.com"
+
+
+def test_bot_email_for_unknown_falls_back_to_claude() -> None:
+    """Unknown class → safe default = claude-bot."""
+    assert jd._bot_email_for("local-llm-qwen") == "rt3628+claude-bot@gmail.com"
+
+
+def test_worktree_sync_result_dataclass_shape() -> None:
+    r = jd.WorktreeSyncResult(
+        branch_name="feature/OP-99-runner-fresh",
+        develop_sha="abc123def456abc123def456abc123def456abc1",
+        detail="fresh branch feature/OP-99-runner-fresh at abc123def456",
+    )
+    assert r.branch_name.startswith("feature/")
+    assert len(r.develop_sha) >= 12
+    assert "abc123def456" in r.detail
+
+
+def test_set_bot_identity_calls_git_config_with_bot_email(tmp_path, monkeypatch):
+    """set_bot_identity_in_worktree shells out to `git config user.email` + `user.name`."""
+    calls = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return FakeResult()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    jd.set_bot_identity_in_worktree(tmp_path, "subscription-codex")
+
+    # Two calls: user.email + user.name
+    assert len(calls) == 2
+    email_call = next(c for c in calls if c[2] == "user.email")
+    name_call = next(c for c in calls if c[2] == "user.name")
+    assert email_call[3] == "rt3628+codex-bot@gmail.com"
+    assert name_call[3] == "codex-bot"
+
+
+def test_ensure_change_ids_rebase_command_shape(tmp_path, monkeypatch):
+    """ensure_change_ids invokes `git rebase <base_ref> --exec amend`."""
+    calls = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return FakeResult()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    jd.ensure_change_ids(tmp_path, base_ref="abcdef1234")
+
+    assert len(calls) == 1
+    assert calls[0][:3] == ["git", "rebase", "abcdef1234"]
+    assert "--exec" in calls[0]
+    # The exec command must run `git commit --amend --no-edit` to trigger commit-msg hook
+    exec_idx = calls[0].index("--exec") + 1
+    assert "commit --amend --no-edit" in calls[0][exec_idx]
+
+
+def test_sync_to_gerrit_develop_returns_branch_name_with_ticket_key(tmp_path, monkeypatch):
+    """sync_to_gerrit_develop returns branch_name = feature/<TICKET-KEY>-runner-fresh."""
+    fake_sha = "deadbeef1234deadbeef1234deadbeef12345678"
+    call_log = []
+
+    class FakeResult:
+        def __init__(self, stdout=""):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        call_log.append(cmd)
+        # rev-parse FETCH_HEAD returns fake_sha
+        if cmd[:3] == ["git", "rev-parse", "FETCH_HEAD"]:
+            return FakeResult(stdout=fake_sha + "\n")
+        return FakeResult()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = jd.sync_to_gerrit_develop(tmp_path, "subscription-codex", "OP-42")
+
+    assert result.branch_name == "feature/OP-42-runner-fresh"
+    assert result.develop_sha == fake_sha
+    assert fake_sha[:12] in result.detail
+
+    # Verify call sequence: fetch → rev-parse → switch → clean
+    fetch_calls = [c for c in call_log if c[:2] == ["git", "fetch"]]
+    switch_calls = [c for c in call_log if c[:2] == ["git", "switch"]]
+    clean_calls = [c for c in call_log if c[:2] == ["git", "clean"]]
+    assert len(fetch_calls) == 1
+    assert "develop" in fetch_calls[0]
+    assert len(switch_calls) == 1
+    assert "-C" in switch_calls[0]
+    assert f"feature/OP-42-runner-fresh" in switch_calls[0]
+    assert fake_sha in switch_calls[0]
+    assert len(clean_calls) == 1
+
+
+def test_sync_to_gerrit_develop_unknown_class_raises() -> None:
+    """Unknown agent_class for SSH auth raises ValueError before any git op."""
+    with pytest.raises(ValueError, match="unknown agent_class"):
+        jd.sync_to_gerrit_develop(Path("/tmp"), "no-such-class", "OP-1")

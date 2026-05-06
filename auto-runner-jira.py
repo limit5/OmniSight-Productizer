@@ -210,6 +210,35 @@ def main() -> int:
         print(f"[runner] DRY_RUN: prompt preview ({len(prompt)} chars):\n---\n{prompt[:1200]}\n---")
         return 0
 
+    # Resolve worktree path early — needed both for pre-CLI sync and post-CLI push.
+    worktree_path = Path(
+        CODEX_WORKTREE if AGENT_CLASS in ("subscription-codex", "api-openai")
+        else CLAUDE_WORKTREE
+    )
+
+    # OP-247 Phase 1.5: deterministic per-ticket fresh-sync to Gerrit develop.
+    # Bot identity + commit-msg hook + worktree sync MUST be set before codex runs,
+    # otherwise codex's commits use env user (rejected by Gerrit) and live on the
+    # leftover branch from the previous ticket.
+    try:
+        print(f"[runner] preparing worktree {worktree_path}...")
+        jira_dispatch.set_bot_identity_in_worktree(worktree_path, AGENT_CLASS)
+        jira_dispatch.install_commit_msg_hook(worktree_path)
+        sync_result = jira_dispatch.sync_to_gerrit_develop(
+            worktree_path, AGENT_CLASS, snapshot.key
+        )
+        print(f"[runner] worktree synced: {sync_result.detail}")
+    except Exception as e:
+        print(f"[runner] worktree pre-sync failed: {type(e).__name__}: {e}", file=sys.stderr)
+        jira_dispatch.add_comment(
+            client, snapshot.key,
+            f"[runner-presync-fail] Could not prepare worktree:\n"
+            f"{type(e).__name__}: {e}\n\n"
+            f"Operator: ensure {worktree_path} is a valid git worktree + "
+            f"Gerrit is reachable, then re-launch.",
+        )
+        return 1
+
     print(f"[runner] transitioning {snapshot.key} → In Progress")
     jira_dispatch.transition_to_in_progress(client, snapshot.key)
 
@@ -217,14 +246,11 @@ def main() -> int:
     if rc == 0:
         # Phase 1 of OP-247: auto-push to Gerrit + transition Under Review.
         # Phase 3 (events-stream → Approved/Published) deferred.
-        worktree_path = Path(
-            CODEX_WORKTREE if AGENT_CLASS in ("subscription-codex", "api-openai")
-            else CLAUDE_WORKTREE
-        )
         try:
             print(f"[runner] {snapshot.key} CLI returned 0; preparing Gerrit push...")
-            jira_dispatch.install_commit_msg_hook(worktree_path)
-            jira_dispatch.ensure_change_ids(worktree_path, base_ref="main")
+            # ensure_change_ids rebases onto sync_result.develop_sha (Phase 1.5 fix per L16),
+            # not local main; codex's commits get Change-Id via commit-msg hook.
+            jira_dispatch.ensure_change_ids(worktree_path, base_ref=sync_result.develop_sha)
             push_result = jira_dispatch.push_to_gerrit_for_review(
                 worktree_path, AGENT_CLASS, target="develop"
             )

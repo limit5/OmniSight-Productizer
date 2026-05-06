@@ -245,11 +245,29 @@ def _gerrit_ssh_url(agent_class: str) -> str:
     return f"ssh://{user}@{GERRIT_SSH_HOST}:{GERRIT_SSH_PORT}/{GERRIT_PROJECT_PATH}"
 
 
-def _git_dir(worktree_path: Path) -> Path:
-    """Resolve worktree's .git dir (handles worktree pattern where .git is a file)."""
+def _bot_email_for(agent_class: str) -> str:
+    """Per memory: bot accounts are rt3628+<bot-username>@gmail.com (plus-addressing
+    to operator's primary inbox). Returns email for the agent_class's bot.
+    """
+    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
+    if auth is None:
+        # fallback to claude-bot
+        auth = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
+    bot_user, _ = auth
+    return f"rt3628+{bot_user}@gmail.com"
+
+
+def _git_common_dir(worktree_path: Path) -> Path:
+    """Resolve worktree's COMMON git dir (where hooks actually run from).
+
+    Critical distinction (lessons-learned L14): `git rev-parse --git-dir`
+    returns the worktree-specific dir (e.g. `.git/worktrees/foo`), but
+    git executes hooks from `--git-common-dir` (the parent's `.git`).
+    Hooks installed at the worktree-specific path silently never fire.
+    """
     import subprocess
     out = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
+        ["git", "rev-parse", "--git-common-dir"],
         cwd=worktree_path, capture_output=True, text=True, check=True
     ).stdout.strip()
     p = Path(out)
@@ -257,13 +275,15 @@ def _git_dir(worktree_path: Path) -> Path:
 
 
 def install_commit_msg_hook(worktree_path: Path) -> bool:
-    """Idempotent: install Gerrit commit-msg hook in worktree.
+    """Idempotent: install Gerrit commit-msg hook in worktree's COMMON git dir.
 
     Returns True if hook is now present (whether installed or already there).
     Per memory `reference_gerrit_self_hosted.md` gotcha #1: scp subsystem
     is disabled, so we use HTTP fallback to fetch the hook script.
+    Per L14: hook MUST live in `--git-common-dir/hooks/`, not
+    `--git-dir/hooks/` — git's worktree pattern looks at common-dir.
     """
-    hook_path = _git_dir(worktree_path) / "hooks" / "commit-msg"
+    hook_path = _git_common_dir(worktree_path) / "hooks" / "commit-msg"
     if hook_path.exists() and hook_path.stat().st_size > 0:
         return True
     hook_path.parent.mkdir(parents=True, exist_ok=True)
@@ -273,17 +293,123 @@ def install_commit_msg_hook(worktree_path: Path) -> bool:
     return True
 
 
-def ensure_change_ids(worktree_path: Path, base_ref: str = "main") -> None:
+def set_bot_identity_in_worktree(worktree_path: Path, agent_class: str) -> None:
+    """Set worktree-local `git config user.email/user.name` to the bot identity
+    matching agent_class.
+
+    Critical (L15): without this, codex commits use whatever the worktree's
+    git config defaults to (typically the operator's env user
+    `Agent-row7-self-agent <row7-self-agent@omnisight.local>`). Gerrit then
+    rejects pushes with `email address ... is not registered in your
+    account` because that email isn't on the bot's Gerrit account.
+
+    Idempotent: setting same value twice is a no-op.
+    """
+    import subprocess
+    bot_email = _bot_email_for(agent_class)
+    bot_user = _GERRIT_AUTH_BY_CLASS.get(
+        agent_class, _GERRIT_AUTH_BY_CLASS["subscription-claude"]
+    )[0]
+    subprocess.run(
+        ["git", "config", "user.email", bot_email],
+        cwd=worktree_path, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", bot_user],
+        cwd=worktree_path, check=True, capture_output=True, text=True,
+    )
+
+
+@dataclass(frozen=True)
+class WorktreeSyncResult:
+    """Outcome of syncing a worktree to Gerrit's develop tip."""
+    branch_name: str           # e.g. "feature/OP-18-runner-fresh"
+    develop_sha: str           # SHA of fetched develop tip
+    detail: str                # short status string
+
+
+def sync_to_gerrit_develop(
+    worktree_path: Path,
+    agent_class: str,
+    ticket_key: str,
+) -> WorktreeSyncResult:
+    """Fetch latest develop from Gerrit + cut a fresh feature branch.
+
+    Per L16 + the per-ticket-fresh-sync design (see
+    `docs/sop/jira-ticket-conventions.md` §10/§16):
+
+    1. Fetch ``develop`` ref from Gerrit (canonical source).
+    2. Capture the fetched SHA explicitly (FETCH_HEAD changes on
+       subsequent git ops).
+    3. Force-create branch ``feature/<ticket_key>-runner-fresh`` at
+       the fetched develop tip; switch to it.
+    4. Codex commits land on this fresh branch on top of latest develop.
+
+    Discards any uncommitted state in worktree (warning: partial codex
+    work from prior runs is lost). Acceptable per design — Gerrit is
+    source of truth, JIRA tracks intent.
+
+    Raises CalledProcessError if any git op fails.
+    """
+    import os
+    import subprocess
+    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
+    if auth is None:
+        raise ValueError(f"unknown agent_class for Gerrit auth: {agent_class}")
+    _, ssh_key = auth
+
+    env = os.environ.copy()
+    env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key}"
+
+    # Step 1: fetch develop from Gerrit
+    subprocess.run(
+        ["git", "fetch", _gerrit_ssh_url(agent_class), "develop"],
+        cwd=worktree_path, env=env, check=True, capture_output=True, text=True, timeout=60,
+    )
+
+    # Step 2: capture fetched SHA
+    develop_sha = subprocess.run(
+        ["git", "rev-parse", "FETCH_HEAD"],
+        cwd=worktree_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Step 3: cut fresh feature branch + switch
+    branch_name = f"feature/{ticket_key}-runner-fresh"
+    subprocess.run(
+        ["git", "switch", "-C", branch_name, develop_sha],
+        cwd=worktree_path, check=True, capture_output=True, text=True,
+    )
+
+    # Step 4: clean untracked (defensive — discards stale partial work)
+    subprocess.run(
+        ["git", "clean", "-fdx"],
+        cwd=worktree_path, check=False, capture_output=True,
+    )
+
+    return WorktreeSyncResult(
+        branch_name=branch_name,
+        develop_sha=develop_sha,
+        detail=f"fresh branch {branch_name} at {develop_sha[:12]}",
+    )
+
+
+def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
     """Rebase commits between base_ref..HEAD with --exec amend, triggering
     the commit-msg hook on each commit so they all get a Change-Id footer.
 
     Idempotent: commits already containing a Change-Id are unchanged
     (the standard Gerrit hook detects and skips).
+
+    L16 fix: caller MUST pass an explicit base_ref (no default). Earlier
+    default of "main" rebased onto local main which could contain commits
+    with non-bot committer emails — Gerrit then rejects on push.
+
+    Recommended usage: pass `develop_sha` from `sync_to_gerrit_develop()`.
     """
     import subprocess
     subprocess.run(
         ["git", "rebase", base_ref, "--exec", "git commit --amend --no-edit"],
-        cwd=worktree_path, check=True, capture_output=True, text=True
+        cwd=worktree_path, check=True, capture_output=True, text=True,
     )
 
 
