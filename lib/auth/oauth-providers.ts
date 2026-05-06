@@ -160,6 +160,8 @@ const PUBLIC_CONFIG_BY_PROVIDER: Record<OAuthProviderId, OAuthProviderPublicConf
  *    - `displayName` is human-facing copy (used as `aria-label`)
  *    - `brandColor` is a hex string the energy-sphere CSS halo uses
  *    - `haloColor` may differ for contrast against the dark BG
+ *    - `registrationDocsUrl` links operators to the provider's OAuth
+ *      app registration / setup documentation
  *    - `supported` mirrors backend `SUPPORTED_PROVIDERS`
  *    - `configured` reflects frontend-safe client_id/secret presence
  *    - `tier === "primary"` for the 5 main spheres,
@@ -170,6 +172,7 @@ export interface OAuthProviderInfo {
   readonly displayName: string
   readonly brandColor: string
   readonly haloColor: string
+  readonly registrationDocsUrl: string
   readonly supported: boolean
   readonly configured: boolean
   readonly tier: "primary" | "secondary"
@@ -182,6 +185,7 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Google",
     brandColor: "#4285F4",
     haloColor: "rgba(66, 133, 244, 0.55)",
+    registrationDocsUrl: "https://developers.google.com/identity/protocols/oauth2",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.google),
     tier: "primary",
@@ -191,6 +195,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "GitHub",
     brandColor: "#E6EDF3",
     haloColor: "rgba(230, 237, 243, 0.55)",
+    registrationDocsUrl:
+      "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.github),
     tier: "primary",
@@ -200,6 +206,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Microsoft",
     brandColor: "#00A4EF",
     haloColor: "rgba(0, 164, 239, 0.55)",
+    registrationDocsUrl:
+      "https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.microsoft),
     tier: "primary",
@@ -209,6 +217,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Apple",
     brandColor: "#F5F5F7",
     haloColor: "rgba(245, 245, 247, 0.55)",
+    registrationDocsUrl:
+      "https://developer.apple.com/help/account/configure-app-capabilities/configure-sign-in-with-apple-for-the-web",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.apple),
     tier: "primary",
@@ -218,6 +228,7 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Discord",
     brandColor: "#5865F2",
     haloColor: "rgba(88, 101, 242, 0.55)",
+    registrationDocsUrl: "https://discord.com/developers/docs/topics/oauth2",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.discord),
     tier: "primary",
@@ -228,6 +239,7 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "GitLab",
     brandColor: "#FC6D26",
     haloColor: "rgba(252, 109, 38, 0.45)",
+    registrationDocsUrl: "https://docs.gitlab.com/integration/oauth_provider/",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.gitlab),
     tier: "secondary",
@@ -237,6 +249,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Bitbucket",
     brandColor: "#2684FF",
     haloColor: "rgba(38, 132, 255, 0.45)",
+    registrationDocsUrl:
+      "https://developer.atlassian.com/cloud/bitbucket/oauth-2/",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.bitbucket),
     tier: "secondary",
@@ -246,6 +260,7 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Slack",
     brandColor: "#4A154B",
     haloColor: "rgba(74, 21, 75, 0.45)",
+    registrationDocsUrl: "https://api.slack.com/authentication/sign-in-with-slack",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.slack),
     tier: "secondary",
@@ -255,6 +270,7 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Notion",
     brandColor: "#E2E2E2",
     haloColor: "rgba(226, 226, 226, 0.45)",
+    registrationDocsUrl: "https://developers.notion.com/docs/authorization",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.notion),
     tier: "secondary",
@@ -264,6 +280,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Salesforce",
     brandColor: "#00A1E0",
     haloColor: "rgba(0, 161, 224, 0.45)",
+    registrationDocsUrl:
+      "https://help.salesforce.com/s/articleView?id=platform.connected_app_create.htm&type=5",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.salesforce),
     tier: "secondary",
@@ -273,6 +291,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "HubSpot",
     brandColor: "#FF7A59",
     haloColor: "rgba(255, 122, 89, 0.45)",
+    registrationDocsUrl:
+      "https://developers.hubspot.com/docs/apps/legacy-apps/authentication/oauth-quickstart-guide",
     supported: true,
     configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.hubspot),
     tier: "secondary",

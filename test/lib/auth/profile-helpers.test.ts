@@ -43,10 +43,11 @@ import { OAUTH_PROVIDER_CATALOG } from "@/lib/auth/oauth-providers"
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 describe("AS.7.7 profile-helpers — section vocabulary", () => {
-  it("PROFILE_SECTION_KIND covers exactly 7 sections", () => {
+  it("PROFILE_SECTION_KIND covers exactly 8 sections", () => {
     expect(Object.values(PROFILE_SECTION_KIND)).toEqual([
       "connected_accounts",
       "auth_methods",
+      "auth_providers",
       "mfa_setup",
       "sessions",
       "password_change",
@@ -59,6 +60,7 @@ describe("AS.7.7 profile-helpers — section vocabulary", () => {
     expect([...PROFILE_SECTIONS_ORDERED]).toEqual([
       "connected_accounts",
       "auth_methods",
+      "auth_providers",
       "mfa_setup",
       "sessions",
       "password_change",
@@ -75,6 +77,7 @@ describe("AS.7.7 profile-helpers — section vocabulary", () => {
     expect(PROFILE_SECTION_COPY.connected_accounts.title).toBe(
       "Connected accounts",
     )
+    expect(PROFILE_SECTION_COPY.auth_providers.title).toBe("Auth providers")
     expect(PROFILE_SECTION_COPY.password_change.title).toBe("Change password")
     expect(PROFILE_SECTION_COPY.data_privacy.title).toBe("Data & privacy")
   })

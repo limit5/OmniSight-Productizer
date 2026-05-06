@@ -51,6 +51,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  ExternalLink,
   KeyRound,
   Loader2,
   Lock,
@@ -88,6 +89,7 @@ import {
   type PasswordChangeErrorOutcome,
   type GdprErrorOutcome,
 } from "@/lib/auth/profile-helpers"
+import { OAUTH_PROVIDER_CATALOG } from "@/lib/auth/oauth-providers"
 import {
   ApiError,
   changePassword as apiChangePassword,
@@ -295,7 +297,76 @@ function AuthMethodsSection({ rows }: { rows: readonly AuthMethodRow[] }) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 3. MFA setup
+// 3. Auth providers — configured state + registration docs
+// ─────────────────────────────────────────────────────────────────
+
+function AuthProvidersSection() {
+  const configuredCount = OAUTH_PROVIDER_CATALOG.filter(
+    (provider) => provider.configured,
+  ).length
+
+  return (
+    <section
+      data-testid="as7-section-auth-providers"
+      data-as7-provider-count={OAUTH_PROVIDER_CATALOG.length}
+      data-as7-provider-configured-count={configuredCount}
+      className="flex flex-col gap-3"
+    >
+      <SectionHeader
+        kind={PROFILE_SECTION_KIND.authProviders}
+        badge={`${configuredCount}/${OAUTH_PROVIDER_CATALOG.length} configured`}
+      />
+      <ul className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        {OAUTH_PROVIDER_CATALOG.map((provider) => (
+          <li
+            key={provider.id}
+            data-testid={`as7-auth-provider-${provider.id}`}
+            data-as7-provider-configured={
+              provider.configured ? "yes" : "no"
+            }
+            className="flex items-center justify-between gap-3 p-2 rounded border border-[var(--border)]"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span
+                aria-hidden="true"
+                className="shrink-0 text-[var(--artifact-purple)]"
+              >
+                <OAuthProviderIcon id={provider.id} />
+              </span>
+              <div className="min-w-0">
+                <div className="font-mono text-xs font-semibold text-[var(--foreground)] truncate">
+                  {provider.displayName}
+                </div>
+                <div className="flex items-center gap-1 font-mono text-[10px] text-[var(--muted-foreground)]">
+                  {provider.configured ? (
+                    <CheckCircle2 size={11} className="text-[var(--artifact-purple)]" />
+                  ) : (
+                    <XCircle size={11} />
+                  )}
+                  <span>
+                    {provider.configured ? "Configured" : "Not configured"}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <a
+              href={provider.registrationDocsUrl}
+              target="_blank"
+              rel="noreferrer"
+              data-testid={`as7-auth-provider-docs-${provider.id}`}
+              className="shrink-0 flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded border border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:border-[var(--artifact-purple)]"
+            >
+              Docs <ExternalLink size={10} />
+            </a>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 4. MFA setup
 // ─────────────────────────────────────────────────────────────────
 
 interface MfaSummary {
@@ -499,7 +570,7 @@ function MfaSetupSection({
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 4. Sessions list
+// 5. Sessions list
 // ─────────────────────────────────────────────────────────────────
 
 function SessionsSection({
@@ -619,7 +690,7 @@ function SessionsSection({
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 5. Password change
+// 6. Password change
 // ─────────────────────────────────────────────────────────────────
 
 function PasswordChangeSection() {
@@ -742,7 +813,7 @@ function PasswordChangeSection() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 6. API keys (admin-only)
+// 7. API keys (admin-only)
 // ─────────────────────────────────────────────────────────────────
 
 function ApiKeysSection({ visible, reason }: ReturnType<typeof apiKeysVisibility>) {
@@ -782,7 +853,7 @@ function ApiKeysSection({ visible, reason }: ReturnType<typeof apiKeysVisibility
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 7. Data & privacy (GDPR)
+// 8. Data & privacy (GDPR)
 // ─────────────────────────────────────────────────────────────────
 
 function DataPrivacySection({
@@ -975,7 +1046,7 @@ function DataPrivacySection({
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Page body — orchestrates the 7 sections + their data fetches.
+// Page body — orchestrates the 8 sections + their data fetches.
 // ─────────────────────────────────────────────────────────────────
 
 function AccountSettingsBody() {
@@ -1136,6 +1207,7 @@ function AccountSettingsBody() {
         busy={busy}
       />
       <AuthMethodsSection rows={authMethods} />
+      <AuthProvidersSection />
       <MfaSetupSection summary={mfaSummary} reload={reloadMfa} />
       <SessionsSection
         sessions={sessions}

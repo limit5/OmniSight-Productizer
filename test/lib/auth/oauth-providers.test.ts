@@ -49,6 +49,7 @@ describe("AS.7.1 oauth-providers", () => {
       expect(row.displayName).toBeTruthy()
       expect(row.brandColor).toMatch(/^#[0-9A-Fa-f]{6,8}$/)
       expect(row.haloColor).toMatch(/^rgba?\(/)
+      expect(row.registrationDocsUrl).toMatch(/^https:\/\//)
       expect(row.supported).toBe(true)
       expect(typeof row.configured).toBe("boolean")
       expect(["primary", "secondary"]).toContain(row.tier)
@@ -58,6 +59,28 @@ describe("AS.7.1 oauth-providers", () => {
   it("ids are unique", () => {
     const ids = OAUTH_PROVIDER_CATALOG.map((p) => p.id)
     expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it("each provider has a direct OAuth app registration docs link", () => {
+    const docsHosts = Object.fromEntries(
+      OAUTH_PROVIDER_CATALOG.map((provider) => [
+        provider.id,
+        new URL(provider.registrationDocsUrl).hostname,
+      ]),
+    )
+    expect(docsHosts).toEqual({
+      apple: "developer.apple.com",
+      bitbucket: "developer.atlassian.com",
+      discord: "discord.com",
+      github: "docs.github.com",
+      gitlab: "docs.gitlab.com",
+      google: "developers.google.com",
+      hubspot: "developers.hubspot.com",
+      microsoft: "learn.microsoft.com",
+      notion: "developers.notion.com",
+      salesforce: "help.salesforce.com",
+      slack: "api.slack.com",
+    })
   })
 
   it("getPrimaryProviders() returns exactly 5 rows", () => {

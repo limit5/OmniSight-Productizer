@@ -3,7 +3,7 @@
  *
  * Pure browser-safe helpers (no React, no DOM, no Next imports) the
  * AS.7.7 `/settings/account` page composes. The page is a single
- * scaffold around 7 distinct settings sections that share common
+ * scaffold around 8 distinct settings sections that share common
  * structural concerns:
  *
  *   1. **Connected OAuth accounts** — orbital-satellite layout where
@@ -15,24 +15,27 @@
  *   2. **Auth methods** — flat list of `password / oauth / passkey`
  *      that the user has enabled. Reuses the AS.7.1 OAuth catalog +
  *      AS.7.4 MFA status to compute `authMethodsSummary()`.
- *   3. **MFA setup** — TOTP enroll / disable + WebAuthn add / remove +
+ *   3. **Auth providers** — settings-facing status table for every
+ *      OAuth provider the login surface knows about, with configured
+ *      state and the provider's app-registration docs link.
+ *   4. **MFA setup** — TOTP enroll / disable + WebAuthn add / remove +
  *      Backup codes regenerate. The page composes the AS.7.4
  *      `<MfaMethodTabs>` for the TOTP-vs-WebAuthn pivot but the
  *      submit-gate predicates live here so the failure surface is
  *      consistent with the other rows.
- *   4. **Sessions list** — read-only table backed by
+ *   5. **Sessions list** — read-only table backed by
  *      `GET /auth/sessions` (already wired in `lib/api.ts::listSessions`).
  *      The `sessionsRowFingerprint()` helper produces a stable
  *      sort key so React keys stay stable across re-fetches.
- *   5. **Password change** — reuses the AS.7.2 password generator +
+ *   6. **Password change** — reuses the AS.7.2 password generator +
  *      AS.7.3 reset-password classifier (the backend
  *      `POST /auth/change-password` endpoint shares the same
  *      strength / history validation surface as the reset endpoint).
- *   6. **API keys** — list / create / rotate / revoke. The endpoints
+ *   7. **API keys** — list / create / rotate / revoke. The endpoints
  *      live behind `require_admin`; non-admin sessions render a
  *      disabled-state card with the canonical "ask your administrator"
  *      hint via `apiKeysVisibility()`.
- *   7. **Export data / delete account (GDPR)** — terminal-confirmation
+ *   8. **Export data / delete account (GDPR)** — terminal-confirmation
  *      forms. Both endpoints are not yet wired in the backend; the
  *      page surfaces a canonical `service_unavailable` banner until
  *      the endpoints exist. This mirrors the AS.7.2 / AS.7.3 / AS.7.5
@@ -60,12 +63,13 @@ import {
 //  Section vocabulary
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/** Canonical 7-section vocabulary the dedicated page renders.
+/** Canonical 8-section vocabulary the dedicated page renders.
  *  Frozen `as const` so adding a new section requires updating
  *  the test in lockstep. */
 export const PROFILE_SECTION_KIND = {
   connectedAccounts: "connected_accounts",
   authMethods: "auth_methods",
+  authProviders: "auth_providers",
   mfaSetup: "mfa_setup",
   sessions: "sessions",
   passwordChange: "password_change",
@@ -81,6 +85,7 @@ export type ProfileSectionKind =
 export const PROFILE_SECTIONS_ORDERED = [
   "connected_accounts",
   "auth_methods",
+  "auth_providers",
   "mfa_setup",
   "sessions",
   "password_change",
@@ -108,6 +113,11 @@ export const PROFILE_SECTION_COPY: Readonly<
     title: "Authentication methods",
     summary:
       "Every credential type that can sign you in to this account. Keep at least one fallback method alive at all times.",
+  }),
+  auth_providers: Object.freeze({
+    title: "Auth providers",
+    summary:
+      "Configuration status for each OAuth sign-in provider, plus the vendor documentation for registering its OAuth app.",
   }),
   mfa_setup: Object.freeze({
     title: "Multi-factor authentication",
