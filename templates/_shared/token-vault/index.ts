@@ -104,6 +104,7 @@ export const SUPPORTED_PROVIDERS: ReadonlySet<string> = Object.freeze(
     "google",
     "microsoft",
     "notion",
+    "salesforce",
     "slack",
   ]),
 )

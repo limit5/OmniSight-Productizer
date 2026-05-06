@@ -1,8 +1,8 @@
 """AS.6.1 — OmniSight self-login OAuth backend handler.
 
 Wires the AS.1 OAuth shared library to OmniSight's own login flow:
-the nine ``Sign in with Google / GitHub / Microsoft / Apple / Discord /
-GitLab / Bitbucket / Slack / Notion`` buttons
+the ten ``Sign in with Google / GitHub / Microsoft / Apple / Discord /
+GitLab / Bitbucket / Slack / Notion / Salesforce`` buttons
 on ``/login`` (and the matching signup path) talk to two HTTP
 endpoints whose handlers live in :mod:`backend.routers.auth`:
 
@@ -140,8 +140,9 @@ import hmac
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional, Sequence
+from urllib.parse import urlparse
 
 import httpx
 
@@ -162,8 +163,8 @@ logger = logging.getLogger(__name__)
 #  Constants — supported providers + cookie envelope
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# The nine AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
-# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack / Notion`` literal —
+# The ten AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
+# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack / Notion / Salesforce`` literal —
 # extending requires (a) adding the vendor entry to
 # ``backend.security.oauth_vendors``, (b) adding a Settings field
 # pair (``oauth_<vendor>_client_id`` + ``..._client_secret``),
@@ -179,6 +180,7 @@ SUPPORTED_PROVIDERS: frozenset[str] = frozenset({
     "bitbucket",
     "slack",
     "notion",
+    "salesforce",
 })
 
 # In-flight FlowSession cookie name. Single namespace, HttpOnly,
@@ -216,6 +218,13 @@ _VENDORS_TOKEN_RESPONSE_USERINFO: frozenset[str] = frozenset({"notion"})
 # The immutable endpoint literal is deterministic across workers; no
 # in-process cache or mutable module state is introduced.
 _BITBUCKET_EMAILS_ENDPOINT: str = "https://api.bitbucket.org/2.0/user/emails"
+
+# Salesforce uses the same OAuth path set on different hosts:
+# production ``login.salesforce.com``, sandbox ``test.salesforce.com``,
+# and customer community/My Domain hosts. This immutable path suffix is
+# combined with an operator-supplied base URL per request; no mutable
+# endpoint cache is introduced.
+_SALESFORCE_OAUTH_PATH_PREFIX: str = "/services/oauth2"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -488,6 +497,61 @@ def _resolve_settings(settings_obj: Optional[Any]) -> Any:
         return settings_obj
     from backend.config import settings as _live_settings
     return _live_settings
+
+
+def _resolve_vendor_config(
+    provider: str,
+    *,
+    settings_obj: Optional[Any] = None,
+) -> VendorConfig:
+    """Return the catalog vendor, applying Salesforce host override.
+
+    Salesforce Identity is one protocol on three host families:
+    production (default catalog host), sandbox, and community/My Domain.
+    ``oauth_salesforce_login_base_url`` lets operators route the exact
+    same path set at ``https://test.salesforce.com`` or a community
+    origin without mutating the AS.1.3 catalog singleton. SOP §1
+    module-global audit: every worker derives the replacement from the
+    same immutable Settings value, so no cross-worker coordination is
+    needed.
+    """
+    try:
+        vendor: VendorConfig = oauth_vendors.get_vendor(provider)
+    except VendorNotFoundError:
+        raise ProviderNotSupportedError(
+            f"vendor {provider!r} in SUPPORTED_PROVIDERS but missing "
+            f"from oauth_vendors catalog (drift)"
+        )
+
+    if provider != "salesforce":
+        return vendor
+
+    s = _resolve_settings(settings_obj)
+    raw_base = (getattr(s, "oauth_salesforce_login_base_url", "") or "").strip()
+    if not raw_base:
+        return vendor
+
+    parsed = urlparse(raw_base)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ProviderNotConfiguredError(
+            "OMNISIGHT_OAUTH_SALESFORCE_LOGIN_BASE_URL must be an https "
+            "base URL such as https://test.salesforce.com or "
+            "https://acme.my.site.com"
+        )
+    base = raw_base.rstrip("/")
+    return replace(
+        vendor,
+        authorize_endpoint=f"{base}{_SALESFORCE_OAUTH_PATH_PREFIX}/authorize",
+        token_endpoint=f"{base}{_SALESFORCE_OAUTH_PATH_PREFIX}/token",
+        userinfo_endpoint=f"{base}{_SALESFORCE_OAUTH_PATH_PREFIX}/userinfo",
+        revocation_endpoint=f"{base}{_SALESFORCE_OAUTH_PATH_PREFIX}/revoke",
+    )
 
 
 def compute_redirect_uri(
@@ -772,17 +836,7 @@ def begin_oauth_login(
     key = resolve_signing_key(settings_obj=settings_obj)
     redirect_uri = compute_redirect_uri(provider, base_url=base_url)
 
-    try:
-        vendor: VendorConfig = oauth_vendors.get_vendor(provider)
-    except VendorNotFoundError:
-        # Should never happen — SUPPORTED_PROVIDERS is a strict
-        # subset of the catalog. If it ever does, surface as the
-        # support error so the operator's logs say "supported
-        # column drifted from catalog".
-        raise ProviderNotSupportedError(
-            f"vendor {provider!r} in SUPPORTED_PROVIDERS but missing "
-            f"from oauth_vendors catalog (drift)"
-        )
+    vendor = _resolve_vendor_config(provider, settings_obj=settings_obj)
 
     authorize_url, flow = oauth_vendors.begin_authorization_for_vendor(
         vendor,
@@ -1085,6 +1139,7 @@ def extract_user_identity(
     | bitbucket | userinfo["uuid"]     | merged primary email  |
     | slack     | userinfo["sub"]      | userinfo["email"]     |
     | notion    | token["owner"]["user"]["id"] | owner person email |
+    | salesforce | userinfo["user_id"] | userinfo["email"]     |
     +-----------+----------------------+-----------------------+
 
     Raises :class:`IdentityFieldMissingError` if either field is
@@ -1199,6 +1254,18 @@ def extract_user_identity(
                 or userinfo.get("workspace_name")
                 or ""
             ).strip()
+        elif provider == "salesforce":
+            # Salesforce userinfo returns both OIDC ``sub`` and the
+            # stable platform ``user_id``; the login row pins
+            # ``user_id`` as the subject so production/sandbox/community
+            # hosts all bind the same canonical Salesforce user id.
+            sub = str(userinfo.get("user_id") or "").strip()
+            email = str(userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("name")
+                or userinfo.get("preferred_username")
+                or ""
+            ).strip()
         else:  # pragma: no cover — assert_provider_supported guards
             raise ProviderNotSupportedError(
                 f"no identity extractor for provider {provider!r}"
@@ -1275,13 +1342,7 @@ async def complete_oauth_login(
         )
     oauth_client.verify_state_and_consume(flow, returned_state, now=now)
 
-    try:
-        vendor: VendorConfig = oauth_vendors.get_vendor(provider)
-    except VendorNotFoundError:
-        raise ProviderNotSupportedError(
-            f"vendor {provider!r} in SUPPORTED_PROVIDERS but missing "
-            f"from oauth_vendors catalog (drift)"
-        )
+    vendor = _resolve_vendor_config(provider, settings_obj=settings_obj)
 
     token = await exchange_authorization_code(
         vendor=vendor,

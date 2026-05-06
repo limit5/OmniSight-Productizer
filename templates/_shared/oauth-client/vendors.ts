@@ -265,7 +265,7 @@ export const SALESFORCE: VendorConfig = makeVendor({
   tokenEndpoint: "https://login.salesforce.com/services/oauth2/token",
   userinfoEndpoint: "https://login.salesforce.com/services/oauth2/userinfo",
   revocationEndpoint: "https://login.salesforce.com/services/oauth2/revoke",
-  defaultScopes: ["openid", "email", "profile"],
+  defaultScopes: ["id", "email", "profile", "openid"],
   isOidc: true,
   extraAuthorizeParams: [],
   supportsRefreshToken: true,

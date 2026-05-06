@@ -1,9 +1,9 @@
 """AS.6.1 — backend.security.oauth_login_handler contract tests.
 
 Validates the OmniSight self-login OAuth backend handler that wires
-the AS.1 OAuth shared library to the nine ``Sign in with Google /
+the AS.1 OAuth shared library to the ten ``Sign in with Google /
 GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack /
-Notion`` SSO buttons via two HTTP endpoints
+Notion / Salesforce`` SSO buttons via two HTTP endpoints
 (``GET /api/v1/auth/oauth/{vendor}/authorize`` and ``.../callback``)
 mounted in :mod:`backend.routers.auth`.
 
@@ -11,7 +11,7 @@ Test families
 ─────────────
 1. SUPPORTED_PROVIDERS / cookie-envelope constants — pinned values,
    immutable shapes, no module-level mutable container.
-2. assert_provider_supported — accepts the nine AS.6.1 / FX2.D9.7 slugs,
+2. assert_provider_supported — accepts the ten AS.6.1 / FX2.D9.7 slugs,
    rejects unknown / mixed-case slugs, raises the right exception
    class.
 3. lookup_provider_credentials — reads the per-vendor Settings
@@ -109,6 +109,9 @@ class _FakeSettings:
             "oauth_slack_client_secret": "sl-secret",
             "oauth_notion_client_id": "nt-id",
             "oauth_notion_client_secret": "nt-secret",
+            "oauth_salesforce_client_id": "sf-id",
+            "oauth_salesforce_client_secret": "sf-secret",
+            "oauth_salesforce_login_base_url": "",
             "oauth_redirect_base_url": "https://omnisight.example.com",
             "oauth_flow_signing_key": "test-signing-key-with-enough-entropy-1234",
             "decision_bearer": "decision-bearer-fallback-key-x",
@@ -132,7 +135,7 @@ def _mock_transport(handler):
 def test_supported_providers_pinned():
     assert olh.SUPPORTED_PROVIDERS == frozenset({
         "google", "github", "microsoft", "apple", "discord", "gitlab",
-        "bitbucket", "slack", "notion",
+        "bitbucket", "slack", "notion", "salesforce",
     })
 
 
@@ -181,7 +184,7 @@ def test_export_count_pinned():
     "p",
     [
         "google", "github", "microsoft", "apple", "discord", "gitlab",
-        "bitbucket", "slack", "notion",
+        "bitbucket", "slack", "notion", "salesforce",
     ],
 )
 def test_assert_provider_supported_accepts_supported(p):
@@ -242,6 +245,13 @@ def test_lookup_provider_credentials_notion():
     assert creds.provider == "notion"
     assert creds.client_id == "nt-id"
     assert creds.client_secret == "nt-secret"
+
+
+def test_lookup_provider_credentials_salesforce():
+    creds = olh.lookup_provider_credentials("salesforce", settings_obj=_FakeSettings())
+    assert creds.provider == "salesforce"
+    assert creds.client_id == "sf-id"
+    assert creds.client_secret == "sf-secret"
 
 
 def test_lookup_provider_credentials_raises_on_missing():
@@ -647,6 +657,39 @@ def test_extract_identity_notion_falls_back_to_workspace_name():
         id_token_claims=None,
     )
     assert ident.name == "Workspace Name"
+
+
+def test_extract_identity_salesforce_uses_user_id_subject():
+    ident = olh.extract_user_identity(
+        provider="salesforce",
+        userinfo={
+            "user_id": "005xx000001Sv6hAAC",
+            "sub": "https://login.salesforce.com/id/00Dxx0000001gPFEAY/005xx000001Sv6hAAC",
+            "email": "User.Salesforce@Example.COM",
+            "name": "User Salesforce",
+            "preferred_username": "user.salesforce@example.com",
+        },
+        id_token_claims=None,
+    )
+    assert ident == olh.OAuthUserIdentity(
+        provider="salesforce",
+        subject="005xx000001Sv6hAAC",
+        email="user.salesforce@example.com",
+        name="User Salesforce",
+    )
+
+
+def test_extract_identity_salesforce_falls_back_to_preferred_username():
+    ident = olh.extract_user_identity(
+        provider="salesforce",
+        userinfo={
+            "user_id": "005xx000001Sv6hAAD",
+            "email": "user.salesforce@example.com",
+            "preferred_username": "Salesforce Username",
+        },
+        id_token_claims=None,
+    )
+    assert ident.name == "Salesforce Username"
 
 
 def test_extract_identity_apple_reads_id_token_claims():
@@ -1171,6 +1214,61 @@ def test_begin_oauth_login_notion_authorize_url_omits_scope():
     assert start.flow.nonce is None
 
 
+def test_begin_oauth_login_salesforce_authorize_url():
+    """Salesforce defaults to production login.salesforce.com."""
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="salesforce", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    parsed = urlparse(start.authorize_url)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "login.salesforce.com"
+    assert parsed.path == "/services/oauth2/authorize"
+    assert query["client_id"] == ["sf-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/salesforce/callback"
+    ]
+    assert query["scope"] == ["id email profile openid"]
+    assert start.flow.provider == "salesforce"
+    assert start.flow.nonce is not None
+
+
+def test_begin_oauth_login_salesforce_sandbox_authorize_url():
+    """Sandbox/community split is driven by login base URL setting."""
+    s = _FakeSettings(oauth_salesforce_login_base_url="https://test.salesforce.com")
+    start = olh.begin_oauth_login(
+        provider="salesforce", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    parsed = urlparse(start.authorize_url)
+    assert parsed.netloc == "test.salesforce.com"
+    assert parsed.path == "/services/oauth2/authorize"
+
+
+def test_begin_oauth_login_salesforce_community_authorize_url():
+    s = _FakeSettings(
+        oauth_salesforce_login_base_url="https://acme.my.site.com/"
+    )
+    start = olh.begin_oauth_login(
+        provider="salesforce", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    parsed = urlparse(start.authorize_url)
+    assert parsed.netloc == "acme.my.site.com"
+    assert parsed.path == "/services/oauth2/authorize"
+
+
+def test_begin_oauth_login_salesforce_rejects_invalid_login_base_url():
+    s = _FakeSettings(oauth_salesforce_login_base_url="http://test.salesforce.com")
+    with pytest.raises(olh.ProviderNotConfiguredError):
+        olh.begin_oauth_login(
+            provider="salesforce", base_url="https://omnisight.example.com",
+            settings_obj=s,
+        )
+
+
 def test_begin_oauth_login_apple_includes_form_post_param():
     """Apple's catalog entry pre-bakes ``response_mode=form_post`` —
     must appear in the authorize URL."""
@@ -1457,6 +1555,92 @@ def test_complete_oauth_login_notion_uses_token_response_identity():
     assert result.identity.name == "Dana Notion"
     assert result.token.access_token == "notion-access-token"
     assert result.flow.provider == "notion"
+
+
+def test_complete_oauth_login_salesforce_full_flow():
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="salesforce", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+
+    def userinfo_handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == (
+            "https://login.salesforce.com/services/oauth2/userinfo"
+        )
+        assert request.headers["authorization"] == "Bearer at-good"
+        return httpx.Response(200, json={
+            "user_id": "005xx000001Sv6hAAC",
+            "email": "dana.salesforce@example.com",
+            "name": "Dana Salesforce",
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(
+        _composite_handler(
+            _good_token_handler(scope="id email profile openid"),
+            userinfo_handler,
+        )
+    ))
+    result = _run(olh.complete_oauth_login(
+        provider="salesforce",
+        flow_cookie=start.flow_cookie,
+        returned_state=start.flow.state,
+        code="auth-code",
+        settings_obj=s,
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert result.identity.provider == "salesforce"
+    assert result.identity.subject == "005xx000001Sv6hAAC"
+    assert result.identity.email == "dana.salesforce@example.com"
+    assert result.identity.name == "Dana Salesforce"
+    assert result.token.access_token == "at-good"
+    assert result.flow.provider == "salesforce"
+
+
+def test_complete_oauth_login_salesforce_sandbox_uses_base_url_for_token_and_userinfo():
+    s = _FakeSettings(oauth_salesforce_login_base_url="https://test.salesforce.com")
+    start = olh.begin_oauth_login(
+        provider="salesforce", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if str(request.url) == "https://test.salesforce.com/services/oauth2/token":
+            return httpx.Response(200, json={
+                "access_token": "sf-at-1",
+                "token_type": "Bearer",
+                "scope": "id email profile openid",
+            })
+        assert str(request.url) == (
+            "https://test.salesforce.com/services/oauth2/userinfo"
+        )
+        return httpx.Response(200, json={
+            "user_id": "005xx000001Sv6hAAD",
+            "email": "sandbox.salesforce@example.com",
+            "name": "Sandbox Salesforce",
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(handler))
+    result = _run(olh.complete_oauth_login(
+        provider="salesforce",
+        flow_cookie=start.flow_cookie,
+        returned_state=start.flow.state,
+        code="auth-code",
+        settings_obj=s,
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert seen == [
+        "https://test.salesforce.com/services/oauth2/token",
+        "https://test.salesforce.com/services/oauth2/userinfo",
+    ]
+    assert result.identity.subject == "005xx000001Sv6hAAD"
+    assert result.identity.email == "sandbox.salesforce@example.com"
 
 
 def test_complete_oauth_login_apple_uses_id_token_claims():
@@ -2829,6 +3013,178 @@ async def test_notion_oauth_authorize_callback_establishes_session(
     assert user["oidc_provider"] == "notion"
     assert user["oidc_subject"] == "notion-user-123"
     assert auth_methods == ["oauth_notion"]
+    assert session["user_id"] == user["id"]
+
+
+@pytest.fixture()
+async def _salesforce_oauth_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """PG-backed HTTP fixture for the Salesforce authorize → callback flow.
+
+    Mirrors the Notion OAuth E2E fixture above: install the shared
+    pg_test_pool, pin bootstrap green, set the Salesforce OAuth Settings
+    singleton knobs, and mock token/userinfo at the handler boundary.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+    monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "false")
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import bootstrap as _boot
+    from backend import config as _cfg
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_salesforce_client_id", "salesforce-client-id"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_salesforce_client_secret", "salesforce-client-secret"
+    )
+    monkeypatch.setattr(_cfg.settings, "oauth_salesforce_login_base_url", "")
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_redirect_base_url", "https://omnisight.example.com"
+    )
+    monkeypatch.setattr(
+        _cfg.settings,
+        "oauth_flow_signing_key",
+        "salesforce-oauth-flow-signing-key-2026",
+    )
+
+    async def _fake_exchange_authorization_code(**kwargs):
+        assert kwargs["client_id"] == "salesforce-client-id"
+        assert kwargs["client_secret"] == "salesforce-client-secret"
+        assert kwargs["code"] == "salesforce-auth-code"
+        assert kwargs["vendor"].provider_id == "salesforce"
+        assert kwargs["vendor"].token_endpoint == (
+            "https://login.salesforce.com/services/oauth2/token"
+        )
+        assert kwargs["redirect_uri"] == (
+            "https://omnisight.example.com/api/v1/auth/oauth/salesforce/callback"
+        )
+        return oc.TokenSet(
+            access_token="salesforce-access-token",
+            refresh_token="salesforce-refresh-token",
+            token_type="Bearer",
+            expires_at=time.time() + 3600,
+            scope=("id", "email", "profile", "openid"),
+            id_token=None,
+            raw={"access_token": "salesforce-access-token"},
+        )
+
+    async def _fake_fetch_userinfo(**kwargs):
+        assert kwargs["vendor"].provider_id == "salesforce"
+        assert kwargs["vendor"].userinfo_endpoint == (
+            "https://login.salesforce.com/services/oauth2/userinfo"
+        )
+        assert kwargs["access_token"] == "salesforce-access-token"
+        return {
+            "user_id": "005xx000001Sv6hAAC",
+            "email": "Eve.Salesforce@Example.COM",
+            "name": "Eve Salesforce",
+        }
+
+    monkeypatch.setattr(
+        olh, "exchange_authorization_code", _fake_exchange_authorization_code
+    )
+    monkeypatch.setattr(olh, "fetch_userinfo", _fake_fetch_userinfo)
+    monkeypatch.setattr(
+        "backend.routers.auth._oauth_log_audit_safe",
+        lambda *args, **kwargs: None,
+    )
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            follow_redirects=False,
+        ) as ac:
+            yield {"client": ac, "pool": pg_test_pool}
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_salesforce_oauth_authorize_callback_establishes_session(
+    _salesforce_oauth_http_client,
+):
+    env = _salesforce_oauth_http_client
+    client = env["client"]
+
+    authorize = await client.get("/api/v1/auth/oauth/salesforce/authorize")
+
+    assert authorize.status_code == 302
+    assert olh.FLOW_COOKIE_NAME in client.cookies
+    location = authorize.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "login.salesforce.com"
+    assert parsed.path == "/services/oauth2/authorize"
+    assert query["client_id"] == ["salesforce-client-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/salesforce/callback"
+    ]
+    assert query["scope"] == ["id email profile openid"]
+    state = query["state"][0]
+
+    callback = await client.get(
+        "/api/v1/auth/oauth/salesforce/callback",
+        params={"code": "salesforce-auth-code", "state": state},
+        headers={
+            "cf-connecting-ip": "203.0.113.13",
+            "user-agent": "pytest-salesforce-oauth",
+        },
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/"
+    assert olh.FLOW_COOKIE_NAME not in client.cookies
+    assert "omnisight_session" in client.cookies
+    assert "omnisight_csrf" in client.cookies
+
+    async with env["pool"].acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, email, name, role, oidc_provider, oidc_subject, "
+            "auth_methods FROM users WHERE email = $1",
+            "eve.salesforce@example.com",
+        )
+        assert user is not None
+        session = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE user_id = $1",
+            user["id"],
+        )
+        assert session is not None
+
+    auth_methods = user["auth_methods"]
+    if isinstance(auth_methods, str):
+        auth_methods = json.loads(auth_methods)
+    assert user["name"] == "Eve Salesforce"
+    assert user["role"] == "viewer"
+    assert user["oidc_provider"] == "salesforce"
+    assert user["oidc_subject"] == "005xx000001Sv6hAAC"
+    assert auth_methods == ["oauth_salesforce"]
     assert session["user_id"] == user["id"]
 
 

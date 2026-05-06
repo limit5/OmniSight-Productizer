@@ -313,6 +313,13 @@ BEHAVIOUR_FIXTURES: Mapping[str, dict[str, Any]] = {
         "plaintext": "secret_notion_workspace_access_token",
         "expect": "ok",
     },
+    "round_trip_salesforce": {
+        "kind": "round_trip",
+        "userId": "user-1",
+        "provider": "salesforce",
+        "plaintext": "salesforce-access-token-00Dxx005xx",
+        "expect": "ok",
+    },
     "provider_case_normalised": {
         "kind": "round_trip",
         "userId": "u1",

@@ -45,12 +45,13 @@ class TestAccountLinkingStackRegistry:
             "bitbucket",
             "slack",
             "notion",
+            "salesforce",
             "discord",
         ]
 
     def test_rejects_provider_outside_account_linking_contract(self):
         with pytest.raises(UnsupportedAccountLinkingProviderError):
-            render_account_linking_stack(_opts("nextauth", "google", "salesforce"))
+            render_account_linking_stack(_opts("nextauth", "google", "hubspot"))
 
     def test_rejects_duplicate_providers(self):
         with pytest.raises(ValueError, match="duplicate provider"):
