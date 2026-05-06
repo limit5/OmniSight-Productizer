@@ -70,6 +70,44 @@ def test_five_hour_window_excludes_expired_events(quota_dsn: str) -> None:
     assert state.weekly_tokens == 100
 
 
+def test_five_hour_window_counts_multiple_active_events(quota_dsn: str) -> None:
+    provider = _provider("five-hour-active")
+    now = datetime.now(timezone.utc)
+
+    tracker.record_usage(provider, 11, ts=now - timedelta(hours=4, minutes=50))
+    tracker.record_usage(provider, 13, ts=now - timedelta(hours=2))
+    tracker.record_usage(provider, 17, ts=now - timedelta(minutes=5))
+    state = tracker.get_quota_state(provider)
+
+    assert state.rolling_5h_tokens == 41
+    assert state.weekly_tokens == 41
+
+
+def test_five_hour_window_keeps_events_inside_boundary_margin(
+    quota_dsn: str,
+) -> None:
+    provider = _provider("five-hour-boundary")
+    now = datetime.now(timezone.utc)
+
+    tracker.record_usage(provider, 19, ts=now - timedelta(hours=5, minutes=1))
+    tracker.record_usage(provider, 23, ts=now - timedelta(hours=4, minutes=59))
+    state = tracker.get_quota_state(provider)
+
+    assert state.rolling_5h_tokens == 23
+    assert state.weekly_tokens == 42
+
+
+def test_five_hour_window_accepts_naive_utc_timestamps(quota_dsn: str) -> None:
+    provider = _provider("five-hour-naive")
+    naive_now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    tracker.record_usage(provider, 29, ts=naive_now - timedelta(hours=1))
+    state = tracker.get_quota_state(provider)
+
+    assert state.rolling_5h_tokens == 29
+    assert state.weekly_tokens == 29
+
+
 def test_weekly_window_excludes_expired_events(quota_dsn: str) -> None:
     provider = _provider("weekly")
     now = datetime.now(timezone.utc)
@@ -83,6 +121,59 @@ def test_weekly_window_excludes_expired_events(quota_dsn: str) -> None:
     assert state.weekly_tokens == 70
 
 
+def test_weekly_window_accumulates_usage_outside_five_hour_window(
+    quota_dsn: str,
+) -> None:
+    provider = _provider("weekly-outside-5h")
+    now = datetime.now(timezone.utc)
+
+    tracker.record_usage(provider, 31, ts=now - timedelta(days=6))
+    tracker.record_usage(provider, 37, ts=now - timedelta(hours=6))
+    tracker.record_usage(provider, 41, ts=now - timedelta(hours=1))
+    state = tracker.get_quota_state(provider)
+
+    assert state.rolling_5h_tokens == 41
+    assert state.weekly_tokens == 109
+
+
+def test_weekly_window_counts_multiple_days_of_usage(quota_dsn: str) -> None:
+    provider = _provider("weekly-days")
+    now = datetime.now(timezone.utc)
+
+    for days, tokens in ((6, 3), (4, 5), (2, 7), (0, 11)):
+        tracker.record_usage(provider, tokens, ts=now - timedelta(days=days))
+    state = tracker.get_quota_state(provider)
+
+    assert state.rolling_5h_tokens == 11
+    assert state.weekly_tokens == 26
+
+
+def test_weekly_cap_hit_uses_accumulated_weekly_usage(
+    quota_dsn: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider("weekly-cap")
+    now = datetime.now(timezone.utc)
+    monkeypatch.setenv(
+        f"OMNISIGHT_PROVIDER_CAP_{tracker._env_provider(provider)}_5H",
+        "100",
+    )
+    monkeypatch.setenv(
+        f"OMNISIGHT_PROVIDER_CAP_{tracker._env_provider(provider)}_WEEKLY",
+        "50",
+    )
+
+    tracker.record_usage(provider, 30, ts=now - timedelta(days=2))
+    tracker.record_usage(provider, 25, ts=now - timedelta(hours=6))
+    state = tracker.get_quota_state(provider)
+
+    assert state.rolling_5h_tokens == 0
+    assert state.weekly_tokens == 55
+    assert state.circuit_state == "open"
+    assert tracker.is_at_cap(provider, "5h") is False
+    assert tracker.is_at_cap(provider, "weekly") is True
+
+
 def test_same_provider_concurrent_record_usage_has_no_lost_updates(
     quota_dsn: str,
 ) -> None:
@@ -94,6 +185,72 @@ def test_same_provider_concurrent_record_usage_has_no_lost_updates(
     state = tracker.get_quota_state(provider)
     assert state.rolling_5h_tokens == 55
     assert state.weekly_tokens == 55
+
+
+def test_same_provider_many_worker_race_preserves_event_rows(
+    quota_dsn: str,
+) -> None:
+    provider = _provider("many-race")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
+        list(pool.map(lambda _: tracker.record_usage(provider, 1), range(20)))
+
+    state = tracker.get_quota_state(provider)
+    assert state.rolling_5h_tokens == 20
+    assert state.weekly_tokens == 20
+    with psycopg2.connect(quota_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM provider_usage_event WHERE provider = %s",
+                (provider,),
+            )
+            assert cur.fetchone()[0] == 20
+
+
+def test_multi_worker_race_isolates_provider_totals(quota_dsn: str) -> None:
+    providers = [_provider(f"race-isolated-{idx}") for idx in range(4)]
+    jobs = [(providers[idx % len(providers)], idx + 1) for idx in range(24)]
+    expected = {provider: 0 for provider in providers}
+    for provider, tokens in jobs:
+        expected[provider] += tokens
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(lambda job: tracker.record_usage(*job), jobs))
+
+    for provider, tokens in expected.items():
+        state = tracker.get_quota_state(provider)
+        assert state.rolling_5h_tokens == tokens
+        assert state.weekly_tokens == tokens
+
+
+def test_concurrent_cap_hit_emits_single_audit_log(
+    quota_dsn: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider("race-cap")
+    monkeypatch.setenv(
+        f"OMNISIGHT_PROVIDER_CAP_{tracker._env_provider(provider)}_5H",
+        "5",
+    )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: tracker.record_usage(provider, 1), range(8)))
+
+    state = tracker.get_quota_state(provider)
+    assert state.rolling_5h_tokens == 8
+    assert state.circuit_state == "open"
+    with psycopg2.connect(quota_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM audit_log
+                WHERE action = 'provider_quota_cap_hit'
+                  AND entity_id = %s
+                """,
+                (provider,),
+            )
+            assert cur.fetchone()[0] == 1
 
 
 def test_different_provider_writes_do_not_wait_on_locked_provider(
