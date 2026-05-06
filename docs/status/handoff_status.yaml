@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 510
+entry_count: 511
 status_counts:
-  dev-only: 499
+  dev-only: 500
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4743,3 +4743,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑 PG-backed Apple integration，並在 staging/prod 設定 Apple Services
     ID / signed client_secret JWT 後 smoke `/api/v1/auth/oauth/apple/authorize` 到 callback 建立 session。
+- id: 2026-05-06--D9.7-6
+  header_line: 47857
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.5 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 設定 Discord OAuth app redirect URI / client credentials，提供 `OMNI_TEST_PG_URL` 跑 PG-backed
+    Discord integration，並在 staging/prod smoke `/api/v1/auth/oauth/discord/authorize` 到 callback 建立 session。

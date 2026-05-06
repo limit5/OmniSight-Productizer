@@ -159,7 +159,7 @@ def test_ts_binding_format_version_matches_python() -> None:
 
 
 def test_ts_supported_providers_matches_python() -> None:
-    """Cross-twin AS.0.4 §5.2 invariant: the four-provider whitelist
+    """Cross-twin AS.0.4 §5.2 invariant: the provider whitelist
     must agree byte-for-byte."""
     src = _ts_source()
     # Match the inline `new Set<string>([...])` literal regardless of
@@ -276,6 +276,13 @@ BEHAVIOUR_FIXTURES: Mapping[str, dict[str, Any]] = {
         "userId": "user-1",
         "provider": "microsoft",
         "plaintext": "EwBwA0X2A.ms-token-value",
+        "expect": "ok",
+    },
+    "round_trip_discord": {
+        "kind": "round_trip",
+        "userId": "user-1",
+        "provider": "discord",
+        "plaintext": "discord-access-token-80351110224678912",
         "expect": "ok",
     },
     "provider_case_normalised": {

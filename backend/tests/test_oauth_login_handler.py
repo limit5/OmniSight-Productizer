@@ -1,8 +1,8 @@
 """AS.6.1 — backend.security.oauth_login_handler contract tests.
 
 Validates the OmniSight self-login OAuth backend handler that wires
-the AS.1 OAuth shared library to the four ``Sign in with Google /
-GitHub / Microsoft / Apple`` SSO buttons via two HTTP endpoints
+the AS.1 OAuth shared library to the five ``Sign in with Google /
+GitHub / Microsoft / Apple / Discord`` SSO buttons via two HTTP endpoints
 (``GET /api/v1/auth/oauth/{vendor}/authorize`` and ``.../callback``)
 mounted in :mod:`backend.routers.auth`.
 
@@ -10,7 +10,7 @@ Test families
 ─────────────
 1. SUPPORTED_PROVIDERS / cookie-envelope constants — pinned values,
    immutable shapes, no module-level mutable container.
-2. assert_provider_supported — accepts the four AS.6.1 slugs,
+2. assert_provider_supported — accepts the five AS.6.1 / FX2.D9.7 slugs,
    rejects unknown / mixed-case slugs, raises the right exception
    class.
 3. lookup_provider_credentials — reads the per-vendor Settings
@@ -24,7 +24,7 @@ Test families
    tamper detection (HMAC mismatch), TTL expiry, malformed
    envelope, version pin.
 7. extract_user_identity — per-vendor field-name dispatch
-   (Google/GitHub/Microsoft userinfo + Apple id_token), missing
+   (Google/GitHub/Microsoft/Discord userinfo + Apple id_token), missing
    fields raise IdentityFieldMissingError, name fallback to
    email-local-part.
 8. exchange_authorization_code — happy path with httpx
@@ -41,13 +41,13 @@ Test families
     state + code_challenge + the cookie verifies + the FlowSession
     has the right TTL.
 12. complete_oauth_login — full flow with mocked vendor (token +
-    userinfo) for each of the four providers, state-mismatch /
+    userinfo) for each provider, state-mismatch /
     expired / cookie-tamper paths, cookie-provider mismatch
     rejection.
 13. Module-global state audit (per SOP §1) — no top-level mutable
     container, importing the module is side-effect-free.
 14. Settings field declaration drift guard.
-15. Google/GitHub/Microsoft/Apple router integration — mocked authorize → callback →
+15. Google/GitHub/Microsoft/Apple/Discord router integration — mocked authorize → callback →
     OmniSight session cookie + DB session creation.
 """
 
@@ -97,6 +97,8 @@ class _FakeSettings:
             "oauth_microsoft_client_secret": "ms-secret",
             "oauth_apple_client_id": "ap-id",
             "oauth_apple_client_secret": "ap-secret",
+            "oauth_discord_client_id": "dc-id",
+            "oauth_discord_client_secret": "dc-secret",
             "oauth_redirect_base_url": "https://omnisight.example.com",
             "oauth_flow_signing_key": "test-signing-key-with-enough-entropy-1234",
             "decision_bearer": "decision-bearer-fallback-key-x",
@@ -119,7 +121,7 @@ def _mock_transport(handler):
 
 def test_supported_providers_pinned():
     assert olh.SUPPORTED_PROVIDERS == frozenset({
-        "google", "github", "microsoft", "apple",
+        "google", "github", "microsoft", "apple", "discord",
     })
 
 
@@ -164,12 +166,12 @@ def test_export_count_pinned():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@pytest.mark.parametrize("p", ["google", "github", "microsoft", "apple"])
-def test_assert_provider_supported_accepts_four(p):
+@pytest.mark.parametrize("p", ["google", "github", "microsoft", "apple", "discord"])
+def test_assert_provider_supported_accepts_supported(p):
     olh.assert_provider_supported(p)  # no raise
 
 
-@pytest.mark.parametrize("p", ["Google", "GITHUB", "discord", "facebook", ""])
+@pytest.mark.parametrize("p", ["Google", "GITHUB", "facebook", ""])
 def test_assert_provider_supported_rejects_unknown(p):
     with pytest.raises(olh.ProviderNotSupportedError):
         olh.assert_provider_supported(p)
@@ -188,6 +190,13 @@ def test_lookup_provider_credentials_returns_frozen():
     with pytest.raises(Exception):
         # frozen dataclass — assignment must raise
         creds.client_id = "spoof"  # type: ignore[misc]
+
+
+def test_lookup_provider_credentials_discord():
+    creds = olh.lookup_provider_credentials("discord", settings_obj=_FakeSettings())
+    assert creds.provider == "discord"
+    assert creds.client_id == "dc-id"
+    assert creds.client_secret == "dc-secret"
 
 
 def test_lookup_provider_credentials_raises_on_missing():
@@ -210,7 +219,7 @@ def test_lookup_provider_credentials_raises_on_partial_missing():
 
 def test_lookup_provider_credentials_rejects_unsupported():
     with pytest.raises(olh.ProviderNotSupportedError):
-        olh.lookup_provider_credentials("discord", settings_obj=_FakeSettings())
+        olh.lookup_provider_credentials("facebook", settings_obj=_FakeSettings())
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -423,6 +432,38 @@ def test_extract_identity_microsoft_uses_preferred_username_for_email():
         id_token_claims=None,
     )
     assert ident.email == "alice@msft.com"
+
+
+def test_extract_identity_discord_uses_snowflake_id_and_global_name():
+    ident = olh.extract_user_identity(
+        provider="discord",
+        userinfo={
+            "id": "80351110224678912",
+            "email": "User.Discord@Example.COM",
+            "global_name": "Discord User",
+            "username": "discorduser",
+        },
+        id_token_claims=None,
+    )
+    assert ident == olh.OAuthUserIdentity(
+        provider="discord",
+        subject="80351110224678912",
+        email="user.discord@example.com",
+        name="Discord User",
+    )
+
+
+def test_extract_identity_discord_falls_back_to_username():
+    ident = olh.extract_user_identity(
+        provider="discord",
+        userinfo={
+            "id": "80351110224678912",
+            "email": "user@example.com",
+            "username": "discorduser",
+        },
+        id_token_claims=None,
+    )
+    assert ident.name == "discorduser"
 
 
 def test_extract_identity_apple_reads_id_token_claims():
@@ -684,7 +725,7 @@ def test_begin_oauth_login_knob_off_raises(monkeypatch):
 def test_begin_oauth_login_unsupported_provider():
     with pytest.raises(olh.ProviderNotSupportedError):
         olh.begin_oauth_login(
-            provider="discord",
+            provider="facebook",
             base_url="https://x.com",
             settings_obj=_FakeSettings(),
         )
@@ -732,6 +773,27 @@ def test_begin_oauth_login_github_no_nonce():
         provider="github", base_url="https://omnisight.example.com",
         settings_obj=s,
     )
+    assert start.flow.nonce is None
+
+
+def test_begin_oauth_login_discord_authorize_url():
+    """Discord is standard OAuth2 with identify+email scopes."""
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="discord", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    parsed = urlparse(start.authorize_url)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "discord.com"
+    assert parsed.path == "/oauth2/authorize"
+    assert query["client_id"] == ["dc-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/discord/callback"
+    ]
+    assert query["scope"] == ["identify email"]
+    assert start.flow.provider == "discord"
     assert start.flow.nonce is None
 
 
@@ -810,6 +872,44 @@ def test_complete_oauth_login_google_full_flow():
     assert result.identity.name == "Alice"
     assert result.token.access_token == "at-good"
     assert result.flow.provider == "google"
+
+
+def test_complete_oauth_login_discord_full_flow():
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="discord", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+
+    def userinfo_handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://discord.com/api/users/@me"
+        assert request.headers["authorization"] == "Bearer at-good"
+        return httpx.Response(200, json={
+            "id": "80351110224678912",
+            "email": "dana.discord@example.com",
+            "global_name": "Dana Discord",
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(
+        _composite_handler(_good_token_handler(scope="identify email"),
+                           userinfo_handler)
+    ))
+    result = _run(olh.complete_oauth_login(
+        provider="discord",
+        flow_cookie=start.flow_cookie,
+        returned_state=start.flow.state,
+        code="auth-code",
+        settings_obj=s,
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert result.identity.provider == "discord"
+    assert result.identity.subject == "80351110224678912"
+    assert result.identity.email == "dana.discord@example.com"
+    assert result.identity.name == "Dana Discord"
+    assert result.token.access_token == "at-good"
+    assert result.flow.provider == "discord"
 
 
 def test_complete_oauth_login_apple_uses_id_token_claims():
@@ -1017,7 +1117,7 @@ def test_mask_email_basic():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def test_settings_declares_all_eight_oauth_credential_fields():
+def test_settings_declares_all_oauth_credential_fields():
     """SOP §3 drift guard — adding a provider to SUPPORTED_PROVIDERS
     without adding the matching Settings fields would silently break
     lookup_provider_credentials at runtime."""
@@ -1038,7 +1138,7 @@ def test_settings_declares_redirect_base_and_signing_key():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Family 15 — Google/GitHub/Microsoft/Apple router integration
+#  Family 15 — Google/GitHub/Microsoft/Apple/Discord router integration
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
@@ -1363,6 +1463,169 @@ async def test_github_oauth_authorize_callback_establishes_session(
     assert user["oidc_provider"] == "github"
     assert user["oidc_subject"] == "424242"
     assert auth_methods == ["oauth_github"]
+    assert session["user_id"] == user["id"]
+
+
+@pytest.fixture()
+async def _discord_oauth_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """PG-backed HTTP fixture for the Discord authorize → callback flow.
+
+    Mirrors the GitHub OAuth E2E fixture above: install the shared
+    pg_test_pool, pin bootstrap green, set the Discord OAuth Settings
+    singleton knobs, and mock token/userinfo at the handler boundary.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+    monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "false")
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import bootstrap as _boot
+    from backend import config as _cfg
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    monkeypatch.setattr(_cfg.settings, "oauth_discord_client_id", "discord-client-id")
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_discord_client_secret", "discord-client-secret"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_redirect_base_url", "https://omnisight.example.com"
+    )
+    monkeypatch.setattr(
+        _cfg.settings,
+        "oauth_flow_signing_key",
+        "discord-oauth-flow-signing-key-2026",
+    )
+
+    async def _fake_exchange_authorization_code(**kwargs):
+        assert kwargs["client_id"] == "discord-client-id"
+        assert kwargs["client_secret"] == "discord-client-secret"
+        assert kwargs["code"] == "discord-auth-code"
+        assert kwargs["redirect_uri"] == (
+            "https://omnisight.example.com/api/v1/auth/oauth/discord/callback"
+        )
+        return oc.TokenSet(
+            access_token="discord-access-token",
+            refresh_token="discord-refresh-token",
+            token_type="Bearer",
+            expires_at=time.time() + 3600,
+            scope=("identify", "email"),
+            id_token=None,
+            raw={"access_token": "discord-access-token"},
+        )
+
+    async def _fake_fetch_userinfo(**kwargs):
+        assert kwargs["vendor"].provider_id == "discord"
+        assert kwargs["access_token"] == "discord-access-token"
+        return {
+            "id": "80351110224678912",
+            "email": "Eve.Discord@Example.COM",
+            "global_name": "Eve Discord",
+            "username": "eve-discord",
+        }
+
+    monkeypatch.setattr(
+        olh, "exchange_authorization_code", _fake_exchange_authorization_code
+    )
+    monkeypatch.setattr(olh, "fetch_userinfo", _fake_fetch_userinfo)
+    monkeypatch.setattr(
+        "backend.routers.auth._oauth_log_audit_safe",
+        lambda *args, **kwargs: None,
+    )
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            follow_redirects=False,
+        ) as ac:
+            yield {"client": ac, "pool": pg_test_pool}
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_discord_oauth_authorize_callback_establishes_session(
+    _discord_oauth_http_client,
+):
+    env = _discord_oauth_http_client
+    client = env["client"]
+
+    authorize = await client.get("/api/v1/auth/oauth/discord/authorize")
+
+    assert authorize.status_code == 302
+    assert olh.FLOW_COOKIE_NAME in client.cookies
+    location = authorize.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "discord.com"
+    assert parsed.path == "/oauth2/authorize"
+    assert query["client_id"] == ["discord-client-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/discord/callback"
+    ]
+    assert query["scope"] == ["identify email"]
+    state = query["state"][0]
+
+    callback = await client.get(
+        "/api/v1/auth/oauth/discord/callback",
+        params={"code": "discord-auth-code", "state": state},
+        headers={
+            "cf-connecting-ip": "203.0.113.10",
+            "user-agent": "pytest-discord-oauth",
+        },
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/"
+    assert olh.FLOW_COOKIE_NAME not in client.cookies
+    assert "omnisight_session" in client.cookies
+    assert "omnisight_csrf" in client.cookies
+
+    async with env["pool"].acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, email, name, role, oidc_provider, oidc_subject, "
+            "auth_methods FROM users WHERE email = $1",
+            "eve.discord@example.com",
+        )
+        assert user is not None
+        session = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE user_id = $1",
+            user["id"],
+        )
+        assert session is not None
+
+    auth_methods = user["auth_methods"]
+    if isinstance(auth_methods, str):
+        auth_methods = json.loads(auth_methods)
+    assert user["name"] == "Eve Discord"
+    assert user["role"] == "viewer"
+    assert user["oidc_provider"] == "discord"
+    assert user["oidc_subject"] == "80351110224678912"
+    assert auth_methods == ["oauth_discord"]
     assert session["user_id"] == user["id"]
 
 

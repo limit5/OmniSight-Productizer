@@ -54,7 +54,7 @@ from backend.security import token_vault as tv
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@pytest.mark.parametrize("provider", ["google", "github", "apple", "microsoft"])
+@pytest.mark.parametrize("provider", ["google", "github", "apple", "microsoft", "discord"])
 def test_round_trip_each_provider(provider: str) -> None:
     plaintext = f"tok-for-{provider}-{'x' * 40}"
     encrypted = tv.encrypt_for_user("user-42", provider, plaintext)

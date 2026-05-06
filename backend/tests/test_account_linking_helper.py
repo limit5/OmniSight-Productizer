@@ -118,7 +118,7 @@ class TestIsValidMethod:
         assert is_valid_method("password")
 
     @pytest.mark.parametrize(
-        "provider", ["google", "github", "apple", "microsoft"],
+        "provider", ["google", "github", "apple", "microsoft", "discord"],
     )
     def test_known_oauth_providers_valid(self, provider):
         assert is_valid_method(f"{OAUTH_METHOD_PREFIX}{provider}")

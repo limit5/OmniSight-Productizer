@@ -160,8 +160,8 @@ logger = logging.getLogger(__name__)
 #  Constants — supported providers + cookie envelope
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# The four AS.6.1 self-login providers. Mirrors the row's
-# ``Sign in with Google / GitHub / Microsoft / Apple`` literal —
+# The five AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
+# ``Sign in with Google / GitHub / Microsoft / Apple / Discord`` literal —
 # extending requires (a) adding the vendor entry to
 # ``backend.security.oauth_vendors``, (b) adding a Settings field
 # pair (``oauth_<vendor>_client_id`` + ``..._client_secret``),
@@ -172,6 +172,7 @@ SUPPORTED_PROVIDERS: frozenset[str] = frozenset({
     "github",
     "microsoft",
     "apple",
+    "discord",
 })
 
 # In-flight FlowSession cookie name. Single namespace, HttpOnly,
@@ -1000,6 +1001,7 @@ def extract_user_identity(
     | microsoft | userinfo["sub"]      | userinfo["email"] /   |
     |           |                      | "preferred_username"  |
     | apple     | id_token["sub"]      | id_token["email"]     |
+    | discord   | userinfo["id"]       | userinfo["email"]     |
     +-----------+----------------------+-----------------------+
 
     Raises :class:`IdentityFieldMissingError` if either field is
@@ -1055,6 +1057,16 @@ def extract_user_identity(
             name = str(
                 userinfo.get("name")
                 or userinfo.get("given_name")
+                or ""
+            ).strip()
+        elif provider == "discord":
+            # Discord snowflakes are decimal strings. Preserve the
+            # exact string form instead of coercing to int.
+            sub = str(userinfo.get("id") or "").strip()
+            email = str(userinfo.get("email") or "").strip()
+            name = str(
+                userinfo.get("global_name")
+                or userinfo.get("username")
                 or ""
             ).strip()
         else:  # pragma: no cover — assert_provider_supported guards

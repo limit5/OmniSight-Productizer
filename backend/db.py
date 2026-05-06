@@ -1725,7 +1725,7 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
     user_id            TEXT NOT NULL
                             REFERENCES users(id) ON DELETE CASCADE,
     provider           TEXT NOT NULL
-                            CHECK (provider IN ('apple','github','google','microsoft')),
+                            CHECK (provider IN ('apple','discord','github','google','microsoft')),
     access_token_enc   TEXT NOT NULL DEFAULT '',
     refresh_token_enc  TEXT NOT NULL DEFAULT '',
     expires_at         REAL,
