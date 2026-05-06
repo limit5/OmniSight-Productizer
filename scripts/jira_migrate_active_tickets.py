@@ -116,7 +116,9 @@ def _existing_ticket_key(summary_prefix: str) -> str | None:
 
 CHECKBOX_RE = re.compile(r"^- \[ \]\s+(.+)$")
 TASK_ID_RE = re.compile(r"^([A-Z]+\d*\.[WD]\d+(?:\.\w+)?)\s+")
-WAVE_HEADER_RE = re.compile(r"^###\s+([A-Z]+\d*\.[WD]\d+)\s+—\s+(.+?)(?:\(|$)")
+# Accept ### (Wave) and #### (sub-Wave like RPG MUST/progressive sections).
+# RPG.W12-W21 in TODO.md use #### (H4) under "### MUST-have for v0.5.0" group header.
+WAVE_HEADER_RE = re.compile(r"^#{3,4}\s+([A-Z]+\d*\.[WD]\d+[A-Z]?)\s+—\s+(.+?)(?:\(|$)")
 CLASS_TAG_RE = re.compile(r"\[class:([a-z\-]+)\]")
 FILE_PATH_RE = re.compile(r"`([^`]*\.(?:py|tsx?|md|sql|yaml|yml|json|toml|ini|sh))`")
 
