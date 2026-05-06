@@ -583,7 +583,7 @@ function TurnCard({
         }
       } : undefined}
       className={`rounded-md bg-[var(--secondary)] p-2 border border-[var(--border)]/50 ${
-        onClick ? "cursor-pointer hover:border-[var(--neural-blue)]/60 hover:bg-[var(--secondary)]/80 focus:outline-none focus:ring-1 focus:ring-[var(--neural-blue)]/60" : ""
+        onClick ? "cursor-pointer hover:border-[var(--neural-blue)]/60 hover:bg-[var(--secondary)]/80 focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--neural-blue)]/60 focus-visible:ring-[var(--neural-blue)]/60" : ""
       } ${
         compact ? "min-w-[280px] max-w-[300px] shrink-0" : "w-full"
       }`}

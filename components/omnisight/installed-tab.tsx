@@ -415,7 +415,7 @@ export function InstalledTab({
             data-testid="installed-tab-sort-select"
             value={sort}
             onChange={onSortChange}
-            className="h-8 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 font-mono text-xs text-[var(--foreground)] focus:border-[var(--neural-blue)] focus:outline-none"
+            className="h-8 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 font-mono text-xs text-[var(--foreground)] focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)] focus:outline-none focus-visible:outline-none"
           >
             {INSTALLED_TAB_SORTS.map((key) => (
               <option key={key} value={key}>
@@ -607,7 +607,7 @@ function InstalledTabRow({
           <DropdownMenuTrigger
             data-testid={`installed-tab-row-actions-${entry.id}`}
             aria-label={`Actions for ${entry.displayName}`}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-[var(--muted-foreground)] hover:border-[var(--border)] hover:text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--neural-blue)]"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-[var(--muted-foreground)] hover:border-[var(--border)] hover:text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-[var(--neural-blue)] focus-visible:ring-[var(--neural-blue)]"
           >
             <MoreVertical size={14} aria-hidden />
           </DropdownMenuTrigger>

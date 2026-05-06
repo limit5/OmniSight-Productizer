@@ -258,7 +258,7 @@ export function DecisionRulesEditor() {
                   value={r.kind_pattern}
                   onChange={(e) => updateRule(r.id, { kind_pattern: e.target.value })}
                   placeholder="e.g. stuck/*"
-                  className="mt-0.5 w-full bg-[var(--background,#020617)]/60 border border-[var(--neural-border,rgba(148,163,184,0.35))] rounded-sm px-1.5 py-0.5 font-mono text-[11px] text-[var(--foreground,#e2e8f0)] focus:outline-none focus:border-[var(--neural-cyan,#67e8f9)]"
+                  className="mt-0.5 w-full bg-[var(--background,#020617)]/60 border border-[var(--neural-border,rgba(148,163,184,0.35))] rounded-sm px-1.5 py-0.5 font-mono text-[11px] text-[var(--foreground,#e2e8f0)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-cyan,#67e8f9)] focus-visible:border-[var(--neural-cyan,#67e8f9)]"
                 />
               </label>
               <label className="font-mono text-[9px] text-[var(--muted-foreground,#94a3b8)]">
@@ -355,7 +355,7 @@ export function DecisionRulesEditor() {
             value={testKinds}
             onChange={(e) => setTestKinds(e.target.value)}
             placeholder="stuck/loop, ambiguity/spec, …"
-            className="flex-1 bg-[var(--background,#020617)]/60 border border-[var(--neural-border,rgba(148,163,184,0.35))] rounded-sm px-1.5 py-0.5 font-mono text-[11px] text-[var(--foreground,#e2e8f0)] focus:outline-none focus:border-[var(--neural-cyan,#67e8f9)]"
+            className="flex-1 bg-[var(--background,#020617)]/60 border border-[var(--neural-border,rgba(148,163,184,0.35))] rounded-sm px-1.5 py-0.5 font-mono text-[11px] text-[var(--foreground,#e2e8f0)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-cyan,#67e8f9)] focus-visible:border-[var(--neural-cyan,#67e8f9)]"
           />
           <select
             value={testMode}

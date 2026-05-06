@@ -1127,7 +1127,7 @@ function ShadowNode({ onSpawn, disabled = false }: ShadowNodeProps) {
                 <div className="px-2 py-1.5 border-b border-[var(--border)] flex items-center gap-2"
                   style={{ backgroundColor: `color-mix(in srgb, ${AGENT_TYPES[selectedType].color} 10%, transparent)` }}
                 >
-                  <button onClick={() => setSelectedType(null)} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+                  <button onClick={() => setSelectedType(null)} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-blue)]">
                     <ChevronUp size={12} />
                   </button>
                   <span className="font-mono text-[10px] font-semibold" style={{ color: AGENT_TYPES[selectedType].color }}>

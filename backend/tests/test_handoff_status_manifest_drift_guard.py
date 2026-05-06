@@ -150,9 +150,9 @@ def test_manifest_required_fields_per_entry(manifest: dict) -> None:
 def test_production_status_values_are_canonical(manifest: dict) -> None:
     """Every Production status must be canonical OR explicit "unknown".
 
-    "unknown" is the escape hatch for non-canonical statuses (e.g. the
-    Deep-Audit row uses "planning + audit doc landed"). When unknown,
-    the entry must carry a ``raw_status`` so the operator can triage.
+    "unknown" is the escape hatch for non-canonical statuses. When
+    unknown, the entry must carry a ``raw_status`` so the operator can
+    triage.
     """
     canonical = set(manifest["canonical_statuses"]) | {"unknown"}
     bad: list[tuple[str, str]] = []

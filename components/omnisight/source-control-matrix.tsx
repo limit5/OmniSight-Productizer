@@ -514,7 +514,7 @@ export function SourceControlMatrix({
                   value={newRepoName}
                   onChange={(e) => setNewRepoName(e.target.value)}
                   placeholder="Enter project name..."
-                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--artifact-purple)]"
+                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
                   disabled={isCreating}
                 />
               </div>
@@ -527,7 +527,7 @@ export function SourceControlMatrix({
                 <select
                   value={targetAgent}
                   onChange={(e) => setTargetAgent(e.target.value)}
-                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--artifact-purple)]"
+                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
                   disabled={isCreating}
                 >
                   <option value="">No auto-tether</option>
@@ -647,7 +647,7 @@ export function SourceControlMatrix({
                   value={newRepoUrl}
                   onChange={(e) => setNewRepoUrl(e.target.value)}
                   placeholder="git@github.com:user/repo.git"
-                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--neural-blue)]"
+                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-[var(--neural-blue)] focus-visible:ring-[var(--neural-blue)]"
                   disabled={isCloning}
                 />
               </div>
@@ -662,7 +662,7 @@ export function SourceControlMatrix({
                   value={newRepoBranch}
                   onChange={(e) => setNewRepoBranch(e.target.value)}
                   placeholder="main"
-                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--neural-blue)]"
+                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-[var(--neural-blue)] focus-visible:ring-[var(--neural-blue)]"
                   disabled={isCloning}
                 />
               </div>

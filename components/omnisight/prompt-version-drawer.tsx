@@ -569,7 +569,7 @@ export function PromptVersionDrawer({
             aria-label="Agent type"
             value={agentType}
             onChange={e => setAgentType(e.target.value)}
-            className="font-mono text-[11px] bg-[var(--secondary)] border border-[var(--border)] rounded px-2 py-1 text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--neural-blue)]"
+            className="font-mono text-[11px] bg-[var(--secondary)] border border-[var(--border)] rounded px-2 py-1 text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--neural-blue)] focus-visible:ring-[var(--neural-blue)]"
           >
             {grouped.map(g => (
               <optgroup key={g.group} label={g.group}>

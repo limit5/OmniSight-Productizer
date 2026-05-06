@@ -30,6 +30,15 @@ import time
 import pytest
 
 
+class _FakeSessionConn:
+    def __init__(self) -> None:
+        self.executes: list[tuple[str, tuple]] = []
+
+    async def execute(self, sql: str, *args):
+        self.executes.append((sql, args))
+        return "UPDATE 1"
+
+
 @pytest.fixture()
 async def _auth_db(pg_test_pool):
     """Clean start: empty ``users``, ``sessions``, ``session_fingerprints``.
@@ -84,6 +93,97 @@ async def test_same_fingerprint_second_session_not_new(_auth_db):
         "same fingerprint within the 30d window must de-dupe — no "
         "repeat alert on re-login from the same browser + subnet"
     )
+
+
+@pytest.mark.asyncio
+async def test_new_device_session_ttl_update_is_tied_to_fingerprint_miss(monkeypatch):
+    """Pure contract for the Q.2 branch: only a fingerprint miss
+    shortens the row and returned Session to the 1h TTL."""
+    from backend import auth
+
+    async def _tenant(_conn, _user_id):
+        return "t-default"
+
+    monkeypatch.setattr(auth, "_resolve_tenant_id_for_user", _tenant)
+    monkeypatch.setattr(auth, "_pack_session_token_envelope", lambda token, tenant_id: token)
+    monkeypatch.setattr(auth.time, "time", lambda: 1000.0)
+
+    async def _new_device(_conn, _user_id, _ua_hash, _subnet, _now):
+        return True
+
+    monkeypatch.setattr(auth, "_record_session_fingerprint", _new_device)
+    new_conn = _FakeSessionConn()
+    new_session = await auth._create_session_impl(
+        new_conn, "u-ttl", "10.0.0.42", "Mozilla/5.0",
+    )
+
+    assert new_session.is_new_device is True
+    assert new_session.expires_at - new_session.created_at == pytest.approx(
+        auth.NEW_DEVICE_SESSION_TTL_S,
+    )
+    assert any(
+        "UPDATE sessions SET expires_at" in sql
+        for sql, _args in new_conn.executes
+    ), "new-device session must update the inserted row to the short TTL"
+
+    async def _known_device(_conn, _user_id, _ua_hash, _subnet, _now):
+        return False
+
+    monkeypatch.setattr(auth, "_record_session_fingerprint", _known_device)
+    known_conn = _FakeSessionConn()
+    known_session = await auth._create_session_impl(
+        known_conn, "u-ttl", "10.0.0.42", "Mozilla/5.0",
+    )
+
+    assert known_session.is_new_device is False
+    assert known_session.expires_at - known_session.created_at == pytest.approx(
+        auth.SESSION_TTL_S,
+    )
+    assert not any(
+        "UPDATE sessions SET expires_at" in sql
+        for sql, _args in known_conn.executes
+    ), "known-device sessions keep the normal 8h TTL"
+
+
+@pytest.mark.asyncio
+async def test_new_device_session_uses_short_ttl(_auth_db, pg_test_pool):
+    """Q.2 hardening: a fingerprint miss issues only a 1h session so
+    the new device must re-auth quickly; a known fingerprint keeps the
+    normal 8h session TTL."""
+    auth = _auth_db
+    u = await auth.create_user(
+        "ttl@example.com", "TTL", role="operator",
+        password="ttl-qqq-111",
+    )
+
+    s1 = await auth.create_session(
+        u.id, ip="10.0.0.42", user_agent="Mozilla/5.0 (Laptop)",
+    )
+    s2 = await auth.create_session(
+        u.id, ip="10.0.0.42", user_agent="Mozilla/5.0 (Laptop)",
+    )
+
+    assert s1.is_new_device is True
+    assert s1.expires_at - s1.created_at == pytest.approx(
+        auth.NEW_DEVICE_SESSION_TTL_S,
+    )
+    assert s2.is_new_device is False
+    assert s2.expires_at - s2.created_at == pytest.approx(auth.SESSION_TTL_S)
+
+    async with pg_test_pool.acquire() as conn:
+        new_row_ttl = await conn.fetchval(
+            "SELECT expires_at - created_at FROM sessions "
+            "WHERE token_lookup_index = $1",
+            auth._token_lookup_hash(s1.token),
+        )
+        known_row_ttl = await conn.fetchval(
+            "SELECT expires_at - created_at FROM sessions "
+            "WHERE token_lookup_index = $1",
+            auth._token_lookup_hash(s2.token),
+        )
+
+    assert new_row_ttl == pytest.approx(auth.NEW_DEVICE_SESSION_TTL_S)
+    assert known_row_ttl == pytest.approx(auth.SESSION_TTL_S)
 
 
 @pytest.mark.asyncio

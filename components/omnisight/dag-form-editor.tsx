@@ -196,7 +196,7 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
           type="text"
           value={value.dag_id}
           onChange={(e) => patchDag({ dag_id: e.target.value })}
-          className="text-xs font-mono px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+          className="text-xs font-mono px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
           placeholder="REQ-my-dag"
           aria-label="dag_id"
         />
@@ -226,7 +226,7 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
                 onChange={(e) => patchTask(idx, { task_id: e.target.value })}
                 placeholder="task_id"
                 aria-label={`task ${idx + 1} id`}
-                className="flex-1 text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+                className="flex-1 text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
               />
               <select
                 value={t.required_tier}
@@ -277,7 +277,7 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
                 onChange={(e) => patchTask(idx, { toolchain: e.target.value })}
                 placeholder="toolchain (e.g. cmake)"
                 aria-label={`task ${idx + 1} toolchain`}
-                className="text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+                className="text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
               />
               <input
                 type="text"
@@ -285,7 +285,7 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
                 onChange={(e) => patchTask(idx, { expected_output: e.target.value })}
                 placeholder="expected_output (path | git:SHA | issue:ID)"
                 aria-label={`task ${idx + 1} expected_output`}
-                className="text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+                className="text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
               />
             </div>
 
@@ -296,7 +296,7 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
               onChange={(e) => patchTask(idx, { description: e.target.value })}
               placeholder="description — what this task does"
               aria-label={`task ${idx + 1} description`}
-              className="text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+              className="text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
             />
 
             {/* Row 4: inputs chips + typeahead */}
@@ -335,7 +335,7 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
                 onBlur={() => addInput(idx)}
                 placeholder="add input path (press Enter)"
                 aria-label={`task ${idx + 1} new input`}
-                className="flex-1 min-w-[120px] text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+                className="flex-1 min-w-[120px] text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
               />
             </div>
 

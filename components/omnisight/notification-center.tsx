@@ -123,7 +123,7 @@ export function NotificationCenter({ open, onClose, notifications, onMarkRead }:
               </span>
             )}
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--secondary)] transition-colors">
+          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--secondary)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-blue)]">
             <X size={14} className="text-[var(--muted-foreground)]" />
           </button>
         </div>

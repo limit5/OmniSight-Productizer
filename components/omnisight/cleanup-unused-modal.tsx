@@ -280,7 +280,7 @@ export function CleanupUnusedModal({
               <button
                 type="button"
                 onClick={toggleAll}
-                className="inline-flex items-center gap-2 font-mono text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--neural-blue)]"
+                className="inline-flex items-center gap-2 font-mono text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-[var(--neural-blue)] focus-visible:ring-[var(--neural-blue)]"
                 data-testid="cleanup-unused-modal-toggle-all"
                 aria-pressed={allSelected}
                 aria-label={
@@ -328,7 +328,7 @@ export function CleanupUnusedModal({
                     <button
                       type="button"
                       onClick={() => toggleEntry(entry.id)}
-                      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--neural-blue)]"
+                      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-[var(--neural-blue)] focus-visible:ring-[var(--neural-blue)]"
                       data-testid={`cleanup-unused-modal-checkbox-${entry.id}`}
                       aria-pressed={isChecked}
                       aria-label={

@@ -8,7 +8,7 @@ import {
 import {
   parseIntent, clarifyIntent, ingestRepo, uploadDocs,
   type ParsedSpec, type IntentField, type IntentConflict,
-  type IngestRepoResponse, type DocFileResult,
+  type DocFileResult,
 } from "@/lib/api"
 import { useAuth } from "@/lib/auth-context"
 import { useTenant } from "@/lib/tenant-context"
@@ -74,8 +74,43 @@ const OPTS = {
 } as const
 
 type FieldName =
-  | "project_type" | "runtime_model" | "target_arch" | "target_os"
-  | "framework" | "persistence" | "deploy_target" | "hardware_required"
+  | keyof typeof OPTS
+  | "framework"
+
+type SelectFieldName = keyof typeof OPTS
+
+type SelectFieldDef = {
+  kind: "select"
+  name: SelectFieldName
+  options: readonly string[]
+}
+
+type TextFieldDef = {
+  kind: "text"
+  name: "framework"
+}
+
+type SpecFieldDef = SelectFieldDef | TextFieldDef
+
+const SELECT_FIELD_DEFS: readonly SelectFieldDef[] = [
+  { kind: "select", name: "project_type", options: OPTS.project_type },
+  { kind: "select", name: "runtime_model", options: OPTS.runtime_model },
+  { kind: "select", name: "target_arch", options: OPTS.target_arch },
+  { kind: "select", name: "target_os", options: OPTS.target_os },
+  { kind: "select", name: "persistence", options: OPTS.persistence },
+  { kind: "select", name: "deploy_target", options: OPTS.deploy_target },
+  { kind: "select", name: "hardware_required", options: OPTS.hardware_required },
+]
+
+const SPEC_FIELD_DEFS: readonly SpecFieldDef[] = [
+  ...SELECT_FIELD_DEFS,
+  { kind: "text", name: "framework" },
+]
+
+const REQUIRED_SPEC_FIELDS: readonly FieldName[] = [
+  "project_type", "runtime_model", "target_arch", "target_os",
+  "framework", "persistence", "deploy_target",
+]
 
 const DEBOUNCE_MS = 600
 
@@ -102,19 +137,15 @@ function mergeIntoSpec(
 ): ParsedSpec {
   if (!base) return incoming
   const merged = { ...incoming }
-  const fields: FieldName[] = [
-    "project_type", "runtime_model", "target_arch", "target_os",
-    "framework", "persistence", "deploy_target", "hardware_required",
-  ]
-  for (const f of fields) {
-    const baseField = (base as any)[f] as IntentField
-    const incField = (incoming as any)[f] as IntentField
+  for (const { name } of SPEC_FIELD_DEFS) {
+    const baseField = base[name]
+    const incField = incoming[name]
     if (baseField.confidence >= 1.0) {
-      ;(merged as any)[f] = baseField
+      merged[name] = baseField
     } else if (incField.confidence > baseField.confidence) {
-      ;(merged as any)[f] = incField
+      merged[name] = incField
     } else {
-      ;(merged as any)[f] = baseField
+      merged[name] = baseField
     }
   }
   if (base.raw_text && base.raw_text !== incoming.raw_text) {
@@ -234,7 +265,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   const patchField = (name: FieldName, value: string) => {
     if (failure) setFailure(null)
     if (!spec) {
-      setSpec({
+      const next: ParsedSpec = {
         project_type:      { value: "unknown",  confidence: 0 },
         runtime_model:     { value: "unknown",  confidence: 0 },
         target_arch:       { value: "unknown",  confidence: 0 },
@@ -245,11 +276,14 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
         hardware_required: { value: "no",       confidence: 0.3 },
         raw_text: "",
         conflicts: [],
-        [name]: { value, confidence: 1.0 },
-      } as ParsedSpec)
+      }
+      next[name] = { value, confidence: 1.0 }
+      setSpec(next)
       return
     }
-    setSpec({ ...spec, [name]: { value, confidence: 1.0 } })
+    const next = { ...spec }
+    next[name] = { value, confidence: 1.0 }
+    setSpec(next)
   }
 
   const onClarify = async (conflictId: string, optionId: string) => {
@@ -274,11 +308,9 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
     setRepoDetectedFiles([])
     try {
       const result = await ingestRepo(repoUrl.trim())
-      const meta = (result as IngestRepoResponse)._ingest_meta
+      const { _ingest_meta: meta, ...cleaned } = result
       if (meta) setRepoDetectedFiles(meta.detected_files)
-      const cleaned = { ...result } as any
-      delete cleaned._ingest_meta
-      const merged = mergeIntoSpec(spec, cleaned as ParsedSpec)
+      const merged = mergeIntoSpec(spec, cleaned)
       setSpec(merged)
       setError(null)
     } catch (exc) {
@@ -326,11 +358,8 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   const canContinue = useMemo(() => {
     if (!spec) return false
     if (spec.conflicts.length > 0) return false
-    for (const n of [
-      "project_type", "runtime_model", "target_arch", "target_os",
-      "framework", "persistence", "deploy_target",
-    ] as FieldName[]) {
-      if ((spec as any)[n].confidence < 0.7) return false
+    for (const n of REQUIRED_SPEC_FIELDS) {
+      if (spec[n].confidence < 0.7) return false
     }
     return true
   }, [spec])
@@ -398,7 +427,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
             }}
             placeholder="Describe the project, or click a template chip above to start."
             aria-label="Project prose"
-            className="w-full min-h-[120px] max-h-[240px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)] resize-y"
+            className="w-full min-h-[120px] max-h-[240px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)] resize-y"
           />
         </div>
       )}
@@ -413,7 +442,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
               onChange={(e) => setRepoUrl(e.target.value)}
               placeholder="https://github.com/user/repo.git"
               aria-label="Repository URL"
-              className="flex-1 text-xs font-mono px-2 py-1.5 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+              className="flex-1 text-xs font-mono px-2 py-1.5 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
             />
             <button
               type="button"
@@ -531,17 +560,15 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
       {/* ─── Form tab ─── */}
       {tab === "form" && (
         <div className="grid grid-cols-2 gap-2">
-          {(["project_type", "runtime_model", "target_arch", "target_os",
-             "persistence", "deploy_target", "hardware_required"] as FieldName[])
-            .map((name) => (
-              <FieldDropdown
-                key={name}
-                name={name}
-                options={(OPTS as any)[name]}
-                current={spec ? (spec as any)[name] as IntentField : null}
-                onChange={(v) => patchField(name, v)}
-              />
-            ))}
+          {SELECT_FIELD_DEFS.map((field) => (
+            <FieldDropdown
+              key={field.name}
+              name={field.name}
+              options={field.options}
+              current={spec ? spec[field.name] : null}
+              onChange={(v) => patchField(field.name, v)}
+            />
+          ))}
           <label className="flex flex-col gap-0.5 col-span-2">
             <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--muted-foreground)]">
               framework
@@ -552,7 +579,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
               value={spec?.framework.value === "unknown" ? "" : spec?.framework.value || ""}
               onChange={(e) => patchField("framework", e.target.value || "unknown")}
               placeholder="nextjs, django, axum, ..."
-              className="text-xs font-mono px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+              className="text-xs font-mono px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
             />
           </label>
         </div>

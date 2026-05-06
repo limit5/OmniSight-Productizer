@@ -250,7 +250,7 @@ export function DagCanvas({ dag, errors = [], t3Runner }: Props) {
               role="button"
               tabIndex={0}
               aria-label={`Focus task ${n.id} in the Form editor`}
-              className="cursor-pointer focus:outline-none focus-visible:[&>rect]:stroke-[var(--artifact-purple)]"
+              className="cursor-pointer focus:outline-none focus-visible:outline-none focus-visible:[&>rect]:stroke-[var(--artifact-purple)]"
             >
               <rect
                 x={n.x}

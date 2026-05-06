@@ -204,6 +204,7 @@ class Session:
 
 
 SESSION_TTL_S = 8 * 60 * 60          # 8 hours
+NEW_DEVICE_SESSION_TTL_S = 60 * 60   # Q.2: new-device sessions force re-auth after 1h
 ROTATION_GRACE_S = 30                # old token stays valid 30s after rotation
 SESSION_COOKIE = "omnisight_session"
 CSRF_COOKIE = "omnisight_csrf"
@@ -455,7 +456,8 @@ async def find_admin_requiring_password_change(conn=None) -> Optional[User]:
 
     SP-4.2 (2026-04-20): SQLite's implicit ``rowid`` doesn't exist in
     PG. Replaced ``ORDER BY rowid ASC`` with ``ORDER BY created_at ASC``
-    — the schema stores created_at as ``TEXT NOT NULL DEFAULT (datetime('now'))``
+    — the legacy SQLite schema defaulted created_at to SQLite's current-time
+    expression
     in ``YYYY-MM-DD HH:MM:SS`` format, which is lexicographically
     chronological; oldest admin = smallest timestamp.
     """
@@ -919,10 +921,22 @@ async def _create_session_impl(
     is_new_device = await _record_session_fingerprint(
         conn, user_id, ua_h, compute_ip_subnet(ip), now,
     )
+    if is_new_device:
+        expires = now + NEW_DEVICE_SESSION_TTL_S
+        await conn.execute(
+            "UPDATE sessions SET expires_at = $1 "
+            "WHERE token_lookup_index = $2",
+            expires, lookup,
+        )
     return Session(token=token, user_id=user_id, csrf_token=csrf,
                    created_at=now, expires_at=expires, ip=ip,
                    user_agent=ua, last_seen_at=now,
                    is_new_device=is_new_device)
+
+
+def session_cookie_max_age(session: Session) -> int:
+    """Cookie Max-Age aligned to the session row's actual expiry."""
+    return int(max(0.0, session.expires_at - session.created_at))
 
 
 async def _record_session_fingerprint(

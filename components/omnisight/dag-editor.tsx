@@ -688,7 +688,7 @@ export function DagEditor() {
           onChange={(e) => setText(e.target.value)}
           spellCheck={false}
           aria-label="DAG JSON editor"
-          className="w-full min-h-[240px] max-h-[480px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)] resize-y"
+          className="w-full min-h-[240px] max-h-[480px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)] resize-y"
         />
       ) : tab === "form" ? (
         formDag ? (

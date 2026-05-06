@@ -251,7 +251,7 @@ export function MfaManagementPanel() {
                 autoFocus
                 value={totpCode}
                 onChange={(e) => setTotpCode(e.target.value)}
-                className="px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-sm text-[var(--foreground)] tracking-widest outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+                className="px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-sm text-[var(--foreground)] tracking-widest outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
                 placeholder="000000"
                 maxLength={8}
               />
@@ -384,7 +384,7 @@ export function MfaManagementPanel() {
               type="text"
               value={webauthnName}
               onChange={(e) => setWebauthnName(e.target.value)}
-              className="px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-sm text-[var(--foreground)] outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+              className="px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-sm text-[var(--foreground)] outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
               placeholder="e.g. YubiKey 5"
             />
           </label>

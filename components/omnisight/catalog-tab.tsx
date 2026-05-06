@@ -1002,7 +1002,7 @@ export function CatalogTab({
               value={search}
               onChange={onSearchChange}
               placeholder="Search name / vendor / id"
-              className="h-8 w-48 rounded-md border border-[var(--border)] bg-[var(--background)] pl-7 pr-7 font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:border-[var(--neural-blue)] focus:outline-none"
+              className="h-8 w-48 rounded-md border border-[var(--border)] bg-[var(--background)] pl-7 pr-7 font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)] focus:outline-none focus-visible:outline-none"
             />
             {search && (
               <button
@@ -1037,7 +1037,7 @@ export function CatalogTab({
               data-testid="catalog-tab-sort-select"
               value={sort}
               onChange={onSortChange}
-              className="h-8 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 font-mono text-xs text-[var(--foreground)] focus:border-[var(--neural-blue)] focus:outline-none"
+              className="h-8 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 font-mono text-xs text-[var(--foreground)] focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)] focus:outline-none focus-visible:outline-none"
             >
               {CATALOG_SORTS.map((key) => (
                 <option key={key} value={key}>

@@ -6120,8 +6120,8 @@ BP.E GraphRAG / Neo4j
 - [x][G] FX2.D9.1 `components/ui/button.tsx` — `size="icon"` variant 加 `min-h-[44px] min-w-[44px]`（WCAG AA click target）
 - [x][G] FX2.D7.1 `HANDOFF.md:4899` — legacy "planning + audit doc landed" status normalise 成 canonical enum
 - [x][G] FX2.D2.1 `components/omnisight/spec-template-editor.tsx` — 7 個 `as any` field-merging refactor 成 typed discriminated union
-- [~][G] FX2.D9.4 `components/**/*.tsx` — focus-visible class sweep（補 130 omnisight components 中只有 8 個的覆蓋）
-- [ ] FX2.D4.3 `backend/auth.py` + `backend/routers/auth.py` — Q.2 new-device session TTL 從 8h 縮成 1h（fingerprint hit → force re-auth）
+- [x][G] FX2.D9.4 `components/**/*.tsx` — focus-visible class sweep（補 130 omnisight components 中只有 8 個的覆蓋）
+- [x][G] FX2.D4.3 `backend/auth.py` + `backend/routers/auth.py` — Q.2 new-device session TTL 從 8h 縮成 1h（fingerprint hit → force re-auth）
 
 ### FX2.W1B — BLOCKERs heavy batch（推薦 api-anthropic，後續單獨開）
 
