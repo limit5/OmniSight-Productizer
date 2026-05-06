@@ -845,7 +845,7 @@ All three roles collapsed into one operator pass. Per ADR 0003:
 - AI bots may give +1 maximum (not +2)
 - Merge is automatic on +2 receipt, not a manual git operation
 
-This is **soft-violated** during transition. The operator's cognitive review substitutes for Gerrit's mechanical +2; Claude's git operations substitute for Gerrit's submit hook. Logged as `lessons-learned.md` L10. Tracked for resolution by META `meta:tooling` ticket (Gerrit wire-up).
+This is **soft-violated** during transition. The operator's cognitive review substitutes for Gerrit's mechanical +2; Claude's git operations substitute for Gerrit's submit hook. Logged as `lessons-learned.md` L10. Tracked for resolution by [OP-247](https://soraapp.atlassian.net/browse/OP-247) META `meta:tooling` ticket — wire Gerrit integration into auto-runner-jira so codex pushes patchsets to `refs/for/develop`, Gerrit submit-hook drives JIRA transitions, and operator's role narrows to Reviewer (Gerrit UI +2).
 
 **Hard rule** until Gerrit lands:
 - Operator MUST manually verify each AC verification comment line before approving merge

@@ -166,7 +166,7 @@ git commit
 
 **Fix (transitional acknowledgment)**: Convention §10/§16 update — explicit "transition period" disclaimer that operator currently combines roles; flag as ADR-0003-violating-in-practice; META tooling ticket tracks the Gerrit wire-up that will separate them.
 
-**Fix (target state)**: META `meta:tooling` ticket — wire codex push to `refs/for/develop` (Gerrit), Gerrit submit hook → JIRA transition, automatic merge on +2 vote. ADR 0003 separation enforced by tooling, not by operator discipline.
+**Fix (target state)**: [OP-247](https://soraapp.atlassian.net/browse/OP-247) META `meta:tooling` ticket — wire codex push to `refs/for/develop` (Gerrit), Gerrit submit hook → JIRA transition, automatic merge on +2 vote. ADR 0003 separation enforced by tooling, not by operator discipline. Tier L, blocks: nothing; soft prereq: governance migration plan Phase 2 items.
 
 **Verification (today)**: Operator manually validates each merge cognitively before instructing Claude to push. Claude does NOT vote +2 on its own work. Soft-enforce until hard-enforce lands.
 
