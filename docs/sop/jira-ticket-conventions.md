@@ -366,6 +366,22 @@ external_blockers:
 | Archived | Release shipped or manually closed | Operator transition |
 | Waiting for External | Human action required (§8 type f) | Operator transition |
 
+### JIRA OP project locale + transition ID mapping
+
+The OP project workflow uses Japanese locale names for some states. The `auto-runner-jira.py` runner + tooling must use the IDs (or untranslated English where supported) when calling the JIRA REST API. Verified 2026-05-06 against soraapp.atlassian.net.
+
+| §10 name | JIRA name (locale) | Status ID | Transition (from prior state) |
+|---|---|---|---|
+| TODO | `To Do` | 10006 | id=11 (To Do → To Do) / id=9 (Pause Work) / id=10 (Request Changes) |
+| In Progress | `進行中` | 3 | id=21 (進行中 self-loop) / id=2 (作業開始) |
+| Under Review | `Under Review` | 10014 | id=3 (Submit for Review) |
+| Approved | `承認済み` | 10015 | id=4 (Approve) — id=5 (Reject) goes to `却下` |
+| Published | `公開済み` | 10016 | id=7 (Deploy) |
+| Rejected | `却下` | 10018 | id=5 (Reject) |
+| Archived | `Archived` | 10017 | id=8 (Archive) — id=14 (Force Close) |
+
+JQL gotcha (per `lessons-learned.md` candidate L11): `issuetype = "ストーリー"` does NOT match Story-typed issues even though `/myself` API returns the localised name; use `issuetype = Story` (untranslated English) or `issuetype = 10006` (numeric).
+
 ### 4-layer dependency enforcement
 
 | Layer | Catches | Mechanism |
@@ -813,6 +829,32 @@ for s, ticket in scored:
         return pickup(ticket)
 # all candidates failed checks → idle, retry next polling cycle (default 30s)
 ```
+
+### Transition period — Review/Merge currently combined in operator (2026-05-06)
+
+**Acknowledged ADR-0003 gap** until Gerrit integration ships:
+
+`auto-runner-jira.py` MVP transitions ticket to `In Progress` then exits with a comment instructing the operator to push + advance the workflow. Currently no Gerrit push happens; codex commits land on `codex-work` or `feature/<key>-<slug>` branch in the worktree. The operator (with Claude assist) then performs:
+
+1. **Author review** — reads commit + tests + AC verification comment (posted by codex per the prompt, see §3 DoD)
+2. **Merge** — `git merge --no-ff <branch>` into local main + `git push origin main`
+3. **Workflow advancement** — JIRA transitions In Progress → Under Review → Approved → Published via REST API
+
+All three roles collapsed into one operator pass. Per ADR 0003:
+- Reviewer must be a human distinct from author
+- AI bots may give +1 maximum (not +2)
+- Merge is automatic on +2 receipt, not a manual git operation
+
+This is **soft-violated** during transition. The operator's cognitive review substitutes for Gerrit's mechanical +2; Claude's git operations substitute for Gerrit's submit hook. Logged as `lessons-learned.md` L10. Tracked for resolution by META `meta:tooling` ticket (Gerrit wire-up).
+
+**Hard rule** until Gerrit lands:
+- Operator MUST manually verify each AC verification comment line before approving merge
+- Claude MUST NOT push without explicit operator instruction per merge
+- Any deviation requires META retrospective entry
+
+### Pickup JQL prerequisites — reminder for runner implementations
+
+Runner must respect `tier:X` exclusion + Story-only filter. The §16 PICKUP_JQL_TEMPLATE already encodes both. New runners (claude-bot, future agent classes) must reuse the template, not re-derive.
 
 ### Pickup JQL (per agent_class)
 

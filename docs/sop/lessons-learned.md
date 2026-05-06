@@ -21,6 +21,10 @@
 | 4 | 2026-05-05 | Gerrit `gerrit create-group` auto-adds creator (sora) to created group → cleanup required | Gerrit setup |
 | 5 | 2026-05-05 | SSH transport strips outer quotes — use `"'multi word'"` for values containing spaces | Gerrit `create-group --description` |
 | 6 | 2026-05-06 | Sed content edit + `git mv` → must `git add` after sed before commit | BP.Q + WP.7 codex variants |
+| 7 | 2026-05-06 | `HANDOFF.md` is FROZEN — runner prompt MUST tell codex explicitly, CLAUDE.md amendment alone insufficient | OP-16 first run |
+| 8 | 2026-05-06 | Migration script `_infer_areas` must auto-add `area:tests` for alembic-keyword tickets | OP-16 prompt blocked test work |
+| 9 | 2026-05-06 | Codex cuts `feature/<key>-<slug>` per DoD; merger must scan multiple branch refs (`codex-work` + `feature/OP-*`) | OP-15 retry |
+| 10 | 2026-05-06 | Without Gerrit wired, operator does Author/Reviewer/Merger simultaneously — violates ADR 0003 in spirit | OP-15/16/246 first runs |
 
 ---
 
@@ -115,6 +119,58 @@ git commit
 **Verification**: Post-commit `git show HEAD:new` shows the content edit. Recurrence avoided on subsequent migrations by following the SOP.
 
 **Generalisation**: `git add -A` would also cover this case (`git status` after sed will flag the file as "modified, staged"). The trap is when operators rely on `git mv` having "staged the new file" and forget the post-edit re-add. Lint hint: any commit message containing "rename" should trigger a manual `git diff --cached` before commit.
+
+---
+
+## Lesson 7 — `HANDOFF.md` freeze rule needs prompt-level enforcement (2026-05-06)
+
+**Situation**: After CLAUDE.md L1 was amended 2026-05-06 to mark `HANDOFF.md` FROZEN (per `docs/sop/jira-ticket-conventions.md` §7), OP-16 codex run still appended a 12-line resolution entry to `HANDOFF.md`. Codex reads CLAUDE.md but the legacy "always generate HANDOFF.md" SOP from `auto-runner-codex.py` training history overrode the new convention.
+
+**Fix**: `auto-runner-jira.py::_build_prompt` adds explicit "DO NOT append to HANDOFF.md — that file is FROZEN" directive. Prompt-level instruction is deterministic; CLAUDE.md alone is too easy to skip when the model has prior training to the contrary. Commit `a6e6cd9f`.
+
+**Verification**: OP-246 + OP-15 (after fix) committed without touching HANDOFF.md. `git log main..HEAD -- HANDOFF.md` returns empty for both runs.
+
+**Generalisation**: Any rule change in CLAUDE.md / convention docs that overrides existing AI training MUST be mirrored as an explicit prompt directive when AI is invoked autonomously. The CLAUDE.md amendment is the *intent*; the prompt directive is the *enforcement*.
+
+---
+
+## Lesson 8 — Migration script area inference must auto-include `area:tests` (2026-05-06)
+
+**Situation**: OP-16 ticket had labels `area:backend, area:db` but not `area:tests`. The migration script's `_infer_areas` only added `db + backend` for alembic keywords. When the runner built the §5 prompt-injection, `area:tests` was on the forbidden list — codex would have refused to write the AC-required test file. Manual label patch needed before launch.
+
+**Fix**: `scripts/jira_migrate_active_tickets.py::_infer_areas` adds: any ticket with `alembic` / `schema` / `migration` keyword in title or `alembic` in any file path → auto-add `area:tests`. Migration ALWAYS needs contract tests in this project; convention. Commit `a6e6cd9f`.
+
+**Verification**: OP-246 (later created via the patched migration logic) had `area:tests` in labels from the start; codex worked tests without manual operator intervention.
+
+**Generalisation**: Area inference rules should reflect *project conventions about co-required artifacts*, not just file paths. If "X always needs Y" is true at the project level, the inference should encode it.
+
+---
+
+## Lesson 9 — Codex cuts feature branches per DoD; merger must scan multiple refs (2026-05-06)
+
+**Situation**: OP-15 first attempt: codex committed to `codex-work` branch. OP-15 retry: codex saw the DoD checklist line `Branch feature/OP-15-mp-w1-2-quota-tracker cut from develop (per ADR-0001)` and cut a real feature branch, committing there. The operator's merge SOP (mental model: "merge codex-work") didn't anticipate this — `git merge --no-ff codex-work` returned "Already up to date" because codex-work hadn't moved.
+
+**Fix (immediate)**: Manual fix — `git merge --no-ff feature/OP-15-mp-w1-2-quota-tracker` after diagnosing via `cat .git/worktrees/OmniSight-codex-worktree/HEAD`.
+
+**Fix (future)**: Convention §10/§16 update + `scripts/jira_merge_helper.py` (deferred to META tooling ticket): scan worktree's HEAD ref AND `git for-each-ref refs/heads/feature/OP-*`; merge whichever branch has the OP-N tag in commit messages.
+
+**Verification**: OP-15 retry merged successfully via `c41086f8` (later corrected to `df148f35`). Confirmed only after diagnosing the divergence — required ~10 min of manual investigation.
+
+**Generalisation**: When the AC mentions a specific branch name, codex will cut that branch. The merger's branch discovery cannot assume a single canonical name; must enumerate. This is a healthy behavior (ADR 0001 5-branch flow) — the tooling needs to catch up.
+
+---
+
+## Lesson 10 — Operator currently does Author/Reviewer/Merger simultaneously (2026-05-06)
+
+**Situation**: First step-3 cycle (OP-16 / OP-246 / OP-15). Runner posts `[runner-cli-success]` comment after codex exits 0; ticket sits in `In Progress` with codex-bot assignee. Operator (you, with Claude assist) then: (a) reads commit + tests + AC, (b) merges codex-work / feature branch into main, (c) pushes origin, (d) transitions through Under Review → Approved → Published manually. ADR 0003 mandates *human +2 review distinct from author* + *automatic merge after +2*; in practice all three roles are collapsed into one operator pass.
+
+**Fix (transitional acknowledgment)**: Convention §10/§16 update — explicit "transition period" disclaimer that operator currently combines roles; flag as ADR-0003-violating-in-practice; META tooling ticket tracks the Gerrit wire-up that will separate them.
+
+**Fix (target state)**: META `meta:tooling` ticket — wire codex push to `refs/for/develop` (Gerrit), Gerrit submit hook → JIRA transition, automatic merge on +2 vote. ADR 0003 separation enforced by tooling, not by operator discipline.
+
+**Verification (today)**: Operator manually validates each merge cognitively before instructing Claude to push. Claude does NOT vote +2 on its own work. Soft-enforce until hard-enforce lands.
+
+**Generalisation**: When the SOP defines roles (Author / Reviewer / Merger) but the tooling collapses them, it's the *tooling* that needs to mature, not the SOP that should be relaxed. Document the gap explicitly so future contributors don't think the relaxed practice is canonical.
 
 ---
 

@@ -75,9 +75,26 @@ a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
 DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.
 Future per-ticket resolution notes go into JIRA ticket comments, not
 HANDOFF.md. If a generalisable lesson emerged, append a new entry to
-docs/sop/lessons-learned.md instead. The runner will post a final
-JIRA comment automatically when the CLI exits cleanly; you do not
-need to write a HANDOFF entry yourself.
+docs/sop/lessons-learned.md instead.
+
+# Acceptance Criteria verification (REQUIRED before exit)
+
+Before you finish, post ONE final JIRA comment to ticket {key} listing
+each Acceptance Criteria item from the description with ✓ (verified)
+or ✗ (skipped/blocked, with reason). Each ✓ MUST cite concrete evidence
+— test name, file:line range, or commit sha. Vague evidence ("looks
+right", "should work") is auto-rejected by the convention §3 DoD spirit
+and will be flagged in retrospective.
+
+Format:
+
+  AC verification for {key}:
+  ✓ <AC item 1 paraphrased> — <test_name|file:Lstart-Lend|sha>
+  ✓ <AC item 2 paraphrased> — <evidence>
+  ✗ <AC item N paraphrased> — <reason it could not be verified>
+
+Use the runner's transition_back_to_todo or add_comment helpers in
+backend/agents/jira_dispatch.py if you need to comment programmatically.
 
 Full ticket description follows:
 
