@@ -758,7 +758,7 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
                 placeholder="Ask orchestrator..."
-                className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none"
+                className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none"
                 disabled={isAnalyzing}
               />
               <button
@@ -800,7 +800,7 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
                   onChange={(e) => setNewTaskTitle(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleAddTask()}
                   placeholder="What needs to be done?"
-                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--hardware-orange)]"
+                  className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-[var(--hardware-orange)] focus-visible:ring-[var(--hardware-orange)]"
                   autoFocus
                 />
               </div>

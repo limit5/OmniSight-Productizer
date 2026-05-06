@@ -185,7 +185,7 @@ function SettingField({ label, value, type = "text", onChange }: {
         type={type}
         value={value}
         onChange={e => onChange(e.target.value)}
-        className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+        className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
       />
     </div>
   )
@@ -294,7 +294,7 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
           <SettingField label="Name" value={newName} onChange={setNewName} />
           <SettingField label="Value" value={newValue} type="password" onChange={setNewValue} />
           <div className="flex gap-2 justify-end">
-            <button onClick={() => setAdding(false)} className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]">
+            <button onClick={() => setAdding(false)} className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-blue)]">
               CANCEL
             </button>
             <button
@@ -732,7 +732,7 @@ function AccountManagerSection({
               onChange={e => setForm(f => ({ ...f, url_patterns: e.target.value }))}
               rows={2}
               placeholder="github.com/acme-corp/*&#10;github.com/acme-corp/repo-x"
-              className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)] resize-none"
+              className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)] resize-none"
               data-testid="git-account-form-url-patterns"
             />
           </div>
@@ -2325,7 +2325,7 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
                     setResult(null)
                   }}
                   placeholder="https://gerrit.example.com (optional)"
-                  className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                  className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -2347,7 +2347,7 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
                     setResult(null)
                   }}
                   placeholder="merger-agent-bot@gerrit.example.com"
-                  className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                  className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -2371,7 +2371,7 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
                     setResult(null)
                   }}
                   placeholder={String(GERRIT_DEFAULT_SSH_PORT)}
-                  className="w-28 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                  className="w-28 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
                 />
                 <span className="font-mono text-[9px] text-[var(--muted-foreground)]">
                   (default {GERRIT_DEFAULT_SSH_PORT})
@@ -2803,7 +2803,7 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
                       setSubmitRuleVerify(null)
                     }}
                     placeholder="omnisight-productizer"
-                    className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                    className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
                   />
                 </div>
                 {submitRuleProject.trim().length > 0 && !submitRuleProjectValid && (
@@ -3928,7 +3928,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
               </div>
             )}
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--background)] transition-colors shrink-0">
+          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--background)] transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-blue)]">
             <X size={14} className="text-[var(--muted-foreground)]" />
           </button>
         </div>
@@ -4003,7 +4003,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                         const p = providers.find(pr => pr.id === e.target.value)
                         if (p) setVal("llm_model", p.default_model)
                       }}
-                      className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                      className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
                     >
                       {providers.map(p => (
                         <option key={p.id} value={p.id}>
@@ -4018,7 +4018,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                     <select
                       value={currentModel}
                       onChange={e => setVal("llm_model", e.target.value)}
-                      className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                      className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
                     >
                       {modelList.map(m => (
                         <option key={m} value={m}>{m}</option>
@@ -4431,7 +4431,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                         onChange={e => setVal(dirtyKey, e.target.value)}
                         placeholder={configured ? "••• configured •••" : "paste secret here"}
                         data-testid={`webhook-secret-input-${dirtyKey}`}
-                        className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50 focus:outline-none focus:border-[var(--neural-blue)]"
+                        className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50 focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
                       />
                     </div>
                   )

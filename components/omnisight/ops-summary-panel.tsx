@@ -546,7 +546,7 @@ function ForceTurboControl({
   // Visual treatment per phase. Borders + glows are stacked via the
   // animation classes from globals.css.
   const buttonClasses = [
-    "relative w-full overflow-hidden rounded-md border-2 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--critical-red,#ef4444)]",
+    "relative w-full overflow-hidden rounded-md border-2 transition-all duration-200 focus:outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--critical-red,#ef4444)]",
     isApplying
       ? "border-[var(--neural-cyan,#67e8f9)] bg-[var(--neural-cyan,#67e8f9)]/10 cursor-wait"
       : isArmed

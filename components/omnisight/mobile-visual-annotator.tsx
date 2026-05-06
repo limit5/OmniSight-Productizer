@@ -882,7 +882,7 @@ export function MobileVisualAnnotator({
               value={selectedAnnotation.componentHint ?? ""}
               disabled={disabled}
               onChange={(e) => updateComponentHint(selectedAnnotation.id, e.target.value)}
-              className="h-7 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary"
+              className="h-7 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary focus-visible:border-primary"
             />
             <Textarea
               data-testid={`mobile-visual-annotator-comment-${selectedAnnotation.id}`}

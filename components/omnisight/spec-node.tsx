@@ -290,14 +290,14 @@ function SpecLine({ item, depth, path, onValueChange, onRemoveItem, onAddItem, i
                       type={typeof item.value === "number" ? "number" : "text"}
                       value={editValue}
                       onChange={e => setEditValue(e.target.value)}
-                      className="font-mono text-xs px-1.5 py-0.5 bg-[var(--secondary)] border border-[var(--neural-blue)] rounded text-[var(--foreground)] w-28 focus:outline-none focus:ring-1 focus:ring-[var(--neural-blue)]"
+                      className="font-mono text-xs px-1.5 py-0.5 bg-[var(--secondary)] border border-[var(--neural-blue)] rounded text-[var(--foreground)] w-28 focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--neural-blue)] focus-visible:ring-[var(--neural-blue)]"
                       autoFocus
                     />
                   )}
-                  <button onClick={handleSave} className="text-[var(--validation-emerald)] hover:text-[var(--validation-emerald)]">
+                  <button onClick={handleSave} className="text-[var(--validation-emerald)] hover:text-[var(--validation-emerald)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-blue)]">
                     <Check size={12} />
                   </button>
-                  <button onClick={() => { setEditing(false); setEditValue(String(item.value)); setShowOptions(false); }} className="text-[var(--critical-red)]">
+                  <button onClick={() => { setEditing(false); setEditValue(String(item.value)); setShowOptions(false); }} className="text-[var(--critical-red)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-blue)]">
                     <X size={12} />
                   </button>
                 </div>
@@ -409,7 +409,7 @@ function SpecLine({ item, depth, path, onValueChange, onRemoveItem, onAddItem, i
               value={newItemKey}
               onChange={e => setNewItemKey(e.target.value)}
               placeholder="key_name"
-              className="flex-1 font-mono text-xs px-2 py-1 bg-[var(--secondary)] border border-[var(--border)] rounded text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+              className="flex-1 font-mono text-xs px-2 py-1 bg-[var(--secondary)] border border-[var(--border)] rounded text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
             />
             <select
               value={newItemType}
@@ -437,7 +437,7 @@ function SpecLine({ item, depth, path, onValueChange, onRemoveItem, onAddItem, i
                 value={newItemValue}
                 onChange={e => setNewItemValue(e.target.value)}
                 placeholder="value"
-                className="flex-1 font-mono text-xs px-2 py-1 bg-[var(--secondary)] border border-[var(--border)] rounded text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                className="flex-1 font-mono text-xs px-2 py-1 bg-[var(--secondary)] border border-[var(--border)] rounded text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
               />
             )}
             <button 

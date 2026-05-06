@@ -424,7 +424,7 @@ export function ChatSessionsSidebar({
                       aria-label="Rename session"
                       data-testid={`chat-session-rename-${s.session_id}`}
                       className={
-                        "flex shrink-0 items-center justify-center rounded-r border border-l-0 px-1.5 text-[var(--muted-foreground)] opacity-0 transition-opacity hover:bg-[var(--secondary)] hover:text-[var(--foreground)] focus:opacity-100 group-hover:opacity-100 " +
+                        "flex shrink-0 items-center justify-center rounded-r border border-l-0 px-1.5 text-[var(--muted-foreground)] opacity-0 transition-opacity hover:bg-[var(--secondary)] hover:text-[var(--foreground)] focus:opacity-100 focus-visible:opacity-100 group-hover:opacity-100 " +
                         (selected
                           ? "border-[var(--neural-blue)] bg-[var(--neural-blue)]/10"
                           : "border-transparent")

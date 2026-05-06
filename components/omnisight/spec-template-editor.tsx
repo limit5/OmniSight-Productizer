@@ -427,7 +427,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
             }}
             placeholder="Describe the project, or click a template chip above to start."
             aria-label="Project prose"
-            className="w-full min-h-[120px] max-h-[240px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)] resize-y"
+            className="w-full min-h-[120px] max-h-[240px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)] resize-y"
           />
         </div>
       )}
@@ -442,7 +442,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
               onChange={(e) => setRepoUrl(e.target.value)}
               placeholder="https://github.com/user/repo.git"
               aria-label="Repository URL"
-              className="flex-1 text-xs font-mono px-2 py-1.5 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+              className="flex-1 text-xs font-mono px-2 py-1.5 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
             />
             <button
               type="button"
@@ -579,7 +579,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
               value={spec?.framework.value === "unknown" ? "" : spec?.framework.value || ""}
               onChange={(e) => patchField("framework", e.target.value || "unknown")}
               placeholder="nextjs, django, axum, ..."
-              className="text-xs font-mono px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+              className="text-xs font-mono px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-1 focus-visible:ring-1 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
             />
           </label>
         </div>

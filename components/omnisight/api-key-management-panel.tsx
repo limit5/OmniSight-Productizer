@@ -141,10 +141,10 @@ export function ApiKeyManagementPanel() {
             <code className="flex-1 p-2 rounded bg-[var(--secondary)] break-all select-all">
               {showSecret ? newSecret : "••••••••••••••••••••"}
             </code>
-            <button onClick={() => setShowSecret(v => !v)} className="p-1 hover:bg-[var(--secondary)] rounded" title={showSecret ? "Hide" : "Reveal"}>
+            <button onClick={() => setShowSecret(v => !v)} className="p-1 hover:bg-[var(--secondary)] rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-blue)]" title={showSecret ? "Hide" : "Reveal"}>
               {showSecret ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>
-            <button onClick={copySecret} className="p-1 hover:bg-[var(--secondary)] rounded" title="Copy">
+            <button onClick={copySecret} className="p-1 hover:bg-[var(--secondary)] rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-blue)]" title="Copy">
               <Copy size={14} />
             </button>
           </div>

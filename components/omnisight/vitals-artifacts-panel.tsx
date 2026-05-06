@@ -202,7 +202,7 @@ function SimulationResults({
                   value={formModule}
                   onChange={(e) => setFormModule(e.target.value)}
                   placeholder="module name"
-                  className="flex-1 font-mono text-[9px] px-2 py-1 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                  className="flex-1 font-mono text-[9px] px-2 py-1 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
                 />
               </div>
               {/* NPU-specific fields */}
@@ -215,7 +215,7 @@ function SimulationResults({
                       value={formModelPath}
                       onChange={(e) => setFormModelPath(e.target.value)}
                       placeholder="model.rknn"
-                      className="flex-1 font-mono text-[9px] px-2 py-1 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:border-[var(--artifact-purple)]"
+                      className="flex-1 font-mono text-[9px] px-2 py-1 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--artifact-purple)] focus-visible:border-[var(--artifact-purple)]"
                     />
                   </div>
                   <div className="flex items-center gap-2">

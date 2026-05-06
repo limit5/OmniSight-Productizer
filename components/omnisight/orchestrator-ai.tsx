@@ -1105,7 +1105,7 @@ export function OrchestratorAI({
               }}
               onBlur={() => setTimeout(() => { setSlashSuggestions([]); setSkillSuggestions([]) }, 150)}
               placeholder="Ask or type /command ..."
-              className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none"
+              className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none"
             />
             <button
               type="submit"
