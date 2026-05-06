@@ -16,6 +16,11 @@
  * Module-global state audit (per implement_phase_step.md SOP §1):
  *   - All exports are `as const` frozen object literals + pure
  *     functions. No module-level mutable container.
+ *   - Provider configured flags are deterministic build-time
+ *     derivations from NEXT_PUBLIC_OMNISIGHT_OAUTH_* booleans /
+ *     client IDs. Client secrets are never exposed to the browser;
+ *     the public `*_CLIENT_SECRET_CONFIGURED` flag is the only
+ *     frontend-safe secret-side signal.
  *   - `buildOAuthAuthorizeUrl()` derives the redirect URL from
  *     the function arguments only — no env reads, no DOM access,
  *     no React state. SSR / browser / vitest see identical output
@@ -46,6 +51,107 @@ export const OAUTH_PROVIDER_IDS = [
 
 export type OAuthProviderId = (typeof OAUTH_PROVIDER_IDS)[number]
 
+export interface OAuthProviderPublicConfig {
+  readonly clientId?: string
+  readonly clientSecretConfigured?: string
+  readonly configured?: string
+}
+
+function isTruthyFlag(value: string | undefined): boolean {
+  if (!value) return false
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase())
+}
+
+/** Frontend-safe configured-state resolver.
+ *
+ *  Operators may set one coarse public flag:
+ *    NEXT_PUBLIC_OMNISIGHT_OAUTH_<VENDOR>_CONFIGURED=true
+ *
+ *  Or set the public client-id plus a boolean secret-presence flag:
+ *    NEXT_PUBLIC_OMNISIGHT_OAUTH_<VENDOR>_CLIENT_ID=...
+ *    NEXT_PUBLIC_OMNISIGHT_OAUTH_<VENDOR>_CLIENT_SECRET_CONFIGURED=true
+ *
+ *  The actual OAuth client secret remains server-only. Missing flags
+ *  intentionally resolve to false so the login page shows
+ *  "Configure in Settings" instead of navigating to a backend 501/404
+ *  path that looks like a broken button.
+ */
+export function resolveOAuthProviderConfigured(
+  env: OAuthProviderPublicConfig,
+): boolean {
+  if (env.configured !== undefined) return isTruthyFlag(env.configured)
+  return Boolean(env.clientId?.trim()) && isTruthyFlag(env.clientSecretConfigured)
+}
+
+const PUBLIC_CONFIG_BY_PROVIDER: Record<OAuthProviderId, OAuthProviderPublicConfig> = {
+  google: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_GOOGLE_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_GOOGLE_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_GOOGLE_CONFIGURED,
+  },
+  github: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_GITHUB_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_GITHUB_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_GITHUB_CONFIGURED,
+  },
+  microsoft: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_MICROSOFT_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_MICROSOFT_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_MICROSOFT_CONFIGURED,
+  },
+  apple: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_APPLE_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_APPLE_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_APPLE_CONFIGURED,
+  },
+  discord: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_DISCORD_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_DISCORD_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_DISCORD_CONFIGURED,
+  },
+  gitlab: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_GITLAB_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_GITLAB_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_GITLAB_CONFIGURED,
+  },
+  bitbucket: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_BITBUCKET_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_BITBUCKET_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_BITBUCKET_CONFIGURED,
+  },
+  slack: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_SLACK_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_SLACK_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_SLACK_CONFIGURED,
+  },
+  notion: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_NOTION_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_NOTION_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_NOTION_CONFIGURED,
+  },
+  salesforce: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_SALESFORCE_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_SALESFORCE_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_SALESFORCE_CONFIGURED,
+  },
+  hubspot: {
+    clientId: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_HUBSPOT_CLIENT_ID,
+    clientSecretConfigured:
+      process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_HUBSPOT_CLIENT_SECRET_CONFIGURED,
+    configured: process.env.NEXT_PUBLIC_OMNISIGHT_OAUTH_HUBSPOT_CONFIGURED,
+  },
+}
+
 /** Visual catalog row for one provider button. Frozen `as const`
  *  so mutation at runtime is a TS error.
  *
@@ -54,6 +160,8 @@ export type OAuthProviderId = (typeof OAUTH_PROVIDER_IDS)[number]
  *    - `displayName` is human-facing copy (used as `aria-label`)
  *    - `brandColor` is a hex string the energy-sphere CSS halo uses
  *    - `haloColor` may differ for contrast against the dark BG
+ *    - `supported` mirrors backend `SUPPORTED_PROVIDERS`
+ *    - `configured` reflects frontend-safe client_id/secret presence
  *    - `tier === "primary"` for the 5 main spheres,
  *      `tier === "secondary"` for the More dropdown
  */
@@ -62,6 +170,8 @@ export interface OAuthProviderInfo {
   readonly displayName: string
   readonly brandColor: string
   readonly haloColor: string
+  readonly supported: boolean
+  readonly configured: boolean
   readonly tier: "primary" | "secondary"
 }
 
@@ -72,6 +182,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Google",
     brandColor: "#4285F4",
     haloColor: "rgba(66, 133, 244, 0.55)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.google),
     tier: "primary",
   },
   {
@@ -79,6 +191,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "GitHub",
     brandColor: "#E6EDF3",
     haloColor: "rgba(230, 237, 243, 0.55)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.github),
     tier: "primary",
   },
   {
@@ -86,6 +200,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Microsoft",
     brandColor: "#00A4EF",
     haloColor: "rgba(0, 164, 239, 0.55)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.microsoft),
     tier: "primary",
   },
   {
@@ -93,6 +209,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Apple",
     brandColor: "#F5F5F7",
     haloColor: "rgba(245, 245, 247, 0.55)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.apple),
     tier: "primary",
   },
   {
@@ -100,6 +218,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Discord",
     brandColor: "#5865F2",
     haloColor: "rgba(88, 101, 242, 0.55)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.discord),
     tier: "primary",
   },
   // ── Secondary 6 (More dropdown) ──────────────────────────────
@@ -108,6 +228,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "GitLab",
     brandColor: "#FC6D26",
     haloColor: "rgba(252, 109, 38, 0.45)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.gitlab),
     tier: "secondary",
   },
   {
@@ -115,6 +237,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Bitbucket",
     brandColor: "#2684FF",
     haloColor: "rgba(38, 132, 255, 0.45)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.bitbucket),
     tier: "secondary",
   },
   {
@@ -122,6 +246,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Slack",
     brandColor: "#4A154B",
     haloColor: "rgba(74, 21, 75, 0.45)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.slack),
     tier: "secondary",
   },
   {
@@ -129,6 +255,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Notion",
     brandColor: "#E2E2E2",
     haloColor: "rgba(226, 226, 226, 0.45)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.notion),
     tier: "secondary",
   },
   {
@@ -136,6 +264,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "Salesforce",
     brandColor: "#00A1E0",
     haloColor: "rgba(0, 161, 224, 0.45)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.salesforce),
     tier: "secondary",
   },
   {
@@ -143,6 +273,8 @@ const _CATALOG: readonly OAuthProviderInfo[] = Object.freeze([
     displayName: "HubSpot",
     brandColor: "#FF7A59",
     haloColor: "rgba(255, 122, 89, 0.45)",
+    supported: true,
+    configured: resolveOAuthProviderConfigured(PUBLIC_CONFIG_BY_PROVIDER.hubspot),
     tier: "secondary",
   },
 ] as const)
