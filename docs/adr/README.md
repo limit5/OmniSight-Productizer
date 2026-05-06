@@ -15,6 +15,7 @@ Format: Michael Nygard style (Status / Context / Decision / Consequences) with l
 | [0005](0005-tier-authority-levels.md) | Tier S/M/L/X AI authority with 4-layer protection | Accepted | 2026-05-04 |
 | [0006](0006-tls-termination-synology-reverse-proxy.md) | TLS termination at Synology DSM Reverse Proxy + Sectigo wildcard cert | Accepted | 2026-05-05 |
 | [0007](0007-multi-provider-subscription-orchestrator.md) | Multi-provider subscription orchestrator + cost calculator (Anthropic / OpenAI MVP, Gemini / xAI structural slot, v3 onboarding) | Accepted | 2026-05-06 |
+| [0008](0008-agent-rpg-class-skill-leveling.md) | Agent RPG class & skill leveling system (Guild × instance × XP × 3-layer memory × talent tree × party synergy) | Accepted | 2026-05-06 |
 
 ## How to add a new ADR
 

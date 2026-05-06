@@ -6168,18 +6168,18 @@ BP.E GraphRAG / Neo4j
 
 - [x][G] FX2.D9.7.5 **Discord** — 標準 OAuth2，scope `identify email`，userinfo `https://discord.com/api/users/@me`，subject = `id` field（snowflake string）
 - [x][G] FX2.D9.7.6 **GitLab** — 標準 OAuth2 + OIDC，scope `read_user openid email profile`，userinfo `/oauth/userinfo`，subject = `sub`
-- [~][G] FX2.D9.7.7 **Bitbucket** — 標準 OAuth2，scope `account email`，userinfo `https://api.bitbucket.org/2.0/user` + 額外 fetch `/user/emails` 拿主 email（**vendor quirk**：email 不在 user response 內）
-- [ ] FX2.D9.7.8 **Slack** — OAuth v2，scope `openid email profile`，**vendor quirk**：openid endpoint 是 `https://slack.com/api/openid.connect.userInfo`，response shape 跟標準不同（`sub` / `email` 在 root 沒 nested）
-- [ ] FX2.D9.7.9 **Notion** — OAuth 2.0，**vendor quirk**：access token response 直接含 user info（不需獨立 userinfo call）；token endpoint 用 Basic auth（client_id:client_secret base64）；scope 在授權時固定（沒 scope 參數）
-- [ ] FX2.D9.7.10 **Salesforce** — OAuth2 + OIDC，scope `id email profile openid`，userinfo `https://login.salesforce.com/services/oauth2/userinfo`（or sandbox URL），subject = `user_id`，**vendor quirk**：production / sandbox / community 分流 endpoint
-- [ ] FX2.D9.7.11 **HubSpot** — OAuth2，scope `oauth crm.objects.contacts.read`，userinfo `https://api.hubapi.com/integrations/v1/me`，**vendor quirk**：access token 用 Bearer 但需要 `Authorization: Bearer` 而非 `?access_token=` query param
+- [x][G] FX2.D9.7.7 **Bitbucket** — 標準 OAuth2，scope `account email`，userinfo `https://api.bitbucket.org/2.0/user` + 額外 fetch `/user/emails` 拿主 email（**vendor quirk**：email 不在 user response 內）
+- [x][G] FX2.D9.7.8 **Slack** — OAuth v2，scope `openid email profile`，**vendor quirk**：openid endpoint 是 `https://slack.com/api/openid.connect.userInfo`，response shape 跟標準不同（`sub` / `email` 在 root 沒 nested）
+- [x][G] FX2.D9.7.9 **Notion** — OAuth 2.0，**vendor quirk**：access token response 直接含 user info（不需獨立 userinfo call）；token endpoint 用 Basic auth（client_id:client_secret base64）；scope 在授權時固定（沒 scope 參數）
+- [x][G] FX2.D9.7.10 **Salesforce** — OAuth2 + OIDC，scope `id email profile openid`，userinfo `https://login.salesforce.com/services/oauth2/userinfo`（or sandbox URL），subject = `user_id`，**vendor quirk**：production / sandbox / community 分流 endpoint
+- [x][G] FX2.D9.7.11 **HubSpot** — OAuth2，scope `oauth crm.objects.contacts.read`，userinfo `https://api.hubapi.com/integrations/v1/me`，**vendor quirk**：access token 用 Bearer 但需要 `Authorization: Bearer` 而非 `?access_token=` query param
 
 #### Phase D — UI polish + 監控（Tier S, ~3 hours）
 
-- [ ] FX2.D9.7.12 `app/login/page.tsx` + `lib/auth/oauth-providers.ts` — 加 supported flag (drift-guard 檢查 frontend list ⊆ backend SUPPORTED_PROVIDERS)，未配置 client_id/secret 的 provider 顯示 "Configure in Settings" disabled state（不再 silent 404）
-- [ ] FX2.D9.7.13 Settings → Auth providers UI panel 顯示 11 provider × (configured / not configured) 狀態 + 直連各 provider 的 OAuth app registration 文件 link
-- [ ] FX2.D9.7.14 `docs/operations/oauth-providers-setup.md` — 11 個 provider 的 OAuth app 申請 step-by-step（每家 console URL / redirect URI 設定 / scope 申請）
-- [ ] FX2.D9.7.15 audit log 加 `oauth_login_*` event family（initiated / success / failed_provider_not_configured / failed_callback_invalid 等）
+- [x][G] FX2.D9.7.12 `app/login/page.tsx` + `lib/auth/oauth-providers.ts` — 加 supported flag (drift-guard 檢查 frontend list ⊆ backend SUPPORTED_PROVIDERS)，未配置 client_id/secret 的 provider 顯示 "Configure in Settings" disabled state（不再 silent 404）
+- [x][G] FX2.D9.7.13 Settings → Auth providers UI panel 顯示 11 provider × (configured / not configured) 狀態 + 直連各 provider 的 OAuth app registration 文件 link
+- [x][G] FX2.D9.7.14 `docs/operations/oauth-providers-setup.md` — 11 個 provider 的 OAuth app 申請 step-by-step（每家 console URL / redirect URI 設定 / scope 申請）
+- [x][G] FX2.D9.7.15 audit log 加 `oauth_login_*` event family（initiated / success / failed_provider_not_configured / failed_callback_invalid 等）
 
 **估時**：~5-7 days 整段（Phase A 30 min unblocks immediately；Phase B 1 day verify；Phase C 5-7 days new providers；Phase D 3 hours polish）
 
@@ -6353,6 +6353,198 @@ BP.E GraphRAG / Neo4j
 | W13-W14 | subscription-codex | placeholder shell |
 | W15 tests | subscription-codex | drift guard pattern 已成熟 |
 | W16 docs | subscription-codex | docs |
+
+---
+
+## 🅡🅟🅖 Priority RPG — Agent Class & Skill Leveling System（**v0.5.0 milestone**）
+
+> **背景**：2026-05-06 設計 — Agent fleet 採 RPG 隱喻 (Guild × Tier × XP × Character Card)，把抽象的 agent class 變成 operator 可直觀理解 + 心理學動機循環的「角色養成系統」。重複同 class 的 instance 用 `alpha / beta / gamma` 後綴 + Guild XP 分歧 + style fingerprint 區分。
+>
+> **記憶階層**：Layer 1 stat sheet (PG)、Layer 2 distilled skills (BP.M dim memory)、Layer 3 reflection RAG（檢索成功/失敗範例）。
+>
+> **時程**：v0.5.0 ship MUST-have 3 + W1-W11 core；W15-W21 在 v0.5.0 之後逐步加入。
+>
+> **ADR**：[ADR 0008](docs/adr/0008-agent-rpg-class-skill-leveling.md) — Agent RPG Class & Skill Leveling System（已 Accepted 2026-05-06）。`Guild` enum 由 BP.B 擁有；RPG.W2 是 importer 不是 source of truth，所以 BP.B 還沒 ship 也不影響 ADR 落地。
+
+### RPG.W1 — Stat sheet schema + character card route（Core, ~2 day）
+
+- [ ] RPG.W1.1 alembic migration — `agent_character_card` table（`agent_id / class / instance_suffix / guild / level / xp / specialization_label / style_fingerprint / created_at`）
+- [ ] RPG.W1.2 `backend/agents/character_card.py` — CRUD + auto-create on first task
+- [ ] RPG.W1.3 `GET /api/v1/agents/{agent_id}/card` — 回傳 stat sheet JSON
+- [ ] RPG.W1.4 `backend/tests/test_character_card.py` ~15 test
+
+### RPG.W2 — Guild + class registry（Core, ~1 day）
+
+- [ ] RPG.W2.1 `backend/agents/guild_registry.py` — Guild enum + class → Guild 對應表
+- [ ] RPG.W2.2 BP.F Guild model mapping import — reuse 已有 routing labels
+- [ ] RPG.W2.3 Drift guard: registry ⊆ BP.F + ⊆ MP routing_policy consumed labels
+
+### RPG.W3 — Instance suffix + style fingerprint generator（Core, ~1 day）
+
+- [ ] RPG.W3.1 `backend/agents/instance_suffix.py` — alpha/beta/gamma allocator on parallel spawn
+- [ ] RPG.W3.2 `backend/agents/style_fingerprint.py` — hash of (commit-style / test-pattern / refactor-tendency) over last N tasks
+- [ ] RPG.W3.3 Daily cron — recompute fingerprints + log drift > threshold
+
+### RPG.W4 — XP accrual rule + level curve（Core, ~1 day）
+
+- [ ] RPG.W4.1 `backend/agents/xp_engine.py` — `award_xp(agent_id, task_outcome) -> delta`
+- [ ] RPG.W4.2 Level curve: Lv N requires `100 × N^1.4` XP (sigmoid late-game)
+- [ ] RPG.W4.3 Outcome multipliers: success ×1.0 / partial ×0.4 / fail ×0.1 / Tier-L+ ×2.0 / first-time-skill ×3.0
+- [ ] RPG.W4.4 Anti-grinding: same task hash within 24h → ×0.2
+
+### RPG.W5 — Layer 1 (stat sheet PG) + Layer 2 (BP.M dim memory hook)（Core, ~2 day）
+
+- [ ] RPG.W5.1 BP.M dim memory tagged with `agent_id` + `skill_id` for retrieval scoping
+- [ ] RPG.W5.2 `lessons_learned` 寫入時自動算 distilled skill summary (≤ 200 token)
+- [ ] RPG.W5.3 Tests: layer 1 retrieval < 50ms / layer 2 retrieval < 300ms
+
+### RPG.W6 — Layer 3 reflection RAG（Core, ~2 day）
+
+- [ ] RPG.W6.1 `backend/agents/reflection_rag.py` — vectorize past success/fail summaries (pgvector)
+- [ ] RPG.W6.2 Pre-task hook: query top-K most-relevant past lessons → inject into prompt
+- [ ] RPG.W6.3 Cap context bloat: max 2KB inject per task, k=5 default
+- [ ] RPG.W6.4 Tests: relevance @5 ≥ 0.7 on synthetic eval set
+
+### RPG.W7 — Routing integration（Core, ~1 day）
+
+- [ ] RPG.W7.1 MP `routing_policy.py` accepts optional `prefer_agent_id` (operator 想找特定 instance)
+- [ ] RPG.W7.2 Tier S/M/L/X gate: Tier X 須 Lv ≥ 50 + 該 skill ≥ Lv 3
+- [ ] RPG.W7.3 BP.C T-shirt size feeds level requirement table
+- [ ] RPG.W7.4 Tests: routing fallback when preferred instance under-leveled
+
+### RPG.W8 — Frontend Character Card panel（Core, ~2 day）
+
+- [ ] RPG.W8.1 `components/omnisight/agents/CharacterCard.tsx` — RPG-style card layout (portrait / Guild crest / level bar / specialization)
+- [ ] RPG.W8.2 `components/omnisight/agents/SkillRadarChart.tsx` — radar over Guild's canonical skill axes
+- [ ] RPG.W8.3 `components/omnisight/agents/InstanceCarousel.tsx` — alpha/beta/gamma 切換
+- [ ] RPG.W8.4 Animation: level-up emits flare effect + toast
+- [ ] RPG.W8.5 `test/components/character-card.test.tsx` ~12 test
+
+### RPG.W9 — Guild Hall view（Core, ~1 day）
+
+- [ ] RPG.W9.1 `components/omnisight/agents/GuildHall.tsx` — grid of all Guilds with member count
+- [ ] RPG.W9.2 Click Guild → roster of all instances with level/spec
+- [ ] RPG.W9.3 Sort by level / XP / activity
+- [ ] RPG.W9.4 Empty Guild placeholder + "Recruit" CTA
+
+### RPG.W10 — Operator-facing onboarding（Core, ~0.5 day）
+
+- [ ] RPG.W10.1 First time openning Character Card → 3-step tooltip tour
+- [ ] RPG.W10.2 `seen_rpg_tour` flag in user_preferences
+- [ ] RPG.W10.3 Help dropdown "Replay agent tour"
+
+### RPG.W11 — Tests + drift guards + docs（Core, ~1 day）
+
+- [ ] RPG.W11.1 Drift guard: `agent_character_card.guild` ⊆ `guild_registry.GUILDS`
+- [ ] RPG.W11.2 Drift guard: skill_id space ⊆ canonical skill matrix YAML
+- [ ] RPG.W11.3 `docs/operations/agent-rpg-system.md` — operator guide
+- [ ] RPG.W11.4 Cross-link `docs/adr/0008-agent-rpg-class-skill-leveling.md` from operator guide + verify W1-W21 wave numbers in TODO match ADR 0008 Decision section
+
+---
+
+### RPG MUST-have for v0.5.0（除 W1-W11 core 外，下列 4 個必須在 v0.5.0 ship）
+
+#### RPG.W12 — Skill leveling + branching tree（**MUST**, ~3 day）
+
+- [ ] RPG.W12.1 `agent_skill_state` table — per (agent_id, skill_id) row：`level / skill_xp / last_used_at / mastery_effects[]`
+- [ ] RPG.W12.2 Skill XP curve: Lv 1 → 5（25 / 100 / 250 / 600 / 1500 task-success-tokens）
+- [ ] RPG.W12.3 Mastery effects table per skill — Lv 2 unlocks `extended_thinking`, Lv 3 unlocks `parallel_subtask`, Lv 4 reduces `prompt_overhead`, Lv 5 enables `teach_other_agent`
+- [ ] RPG.W12.4 Branching tree: 每個 base skill 在 Lv 3 分叉 2 條 (e.g. python → "perf-tuning" / "type-correctness")，operator 從 character card 選一條
+- [ ] RPG.W12.5 Skill decay: 30 day 未使用 → skill XP 衰減 5%/週 (cap 至下一級門檻 -1)
+- [ ] RPG.W12.6 Teaching mechanic: Lv 5 agent 可在 idle 時把 distilled skill summary 注入同 Guild 同 skill Lv ≤ 2 agent (one-shot +25 XP)
+- [ ] RPG.W12.7 Frontend: branching tree visualization on Character Card 第二 tab
+- [ ] RPG.W12.8 Tests: ~25 test (XP curve / branching exclusivity / decay / teaching cooldown)
+
+#### RPG.W13 — MCP/A2A tool proficiency（**MUST**, ~2 day）
+
+- [ ] RPG.W13.1 `agent_tool_proficiency` table — per (agent_id, tool_id) row：`level / invocation_count / success_rate / last_unlock_at`
+- [ ] RPG.W13.2 Tool levels Lv 1-5 — Lv 1 basic invoke / Lv 2 chain 2 calls / Lv 3 batch / Lv 4 advanced flags / Lv 5 author new MCP wrapper
+- [ ] RPG.W13.3 Feature unlock gating: 例如 `mcp__filesystem__write_multiple_files` 須 Lv ≥ 3
+- [ ] RPG.W13.4 A2A specific: peer-handoff 成功率 + 跨 Guild handoff 解鎖 Lv 4
+- [ ] RPG.W13.5 Auto-detect proficiency from invocation log + outcome
+- [ ] RPG.W13.6 Frontend: tool proficiency bars on Character Card 第三 tab
+- [ ] RPG.W13.7 Tests ~15 test (level gating / unlock event / handoff scoring)
+
+#### RPG.W14 — Talent tree at level milestones（**MUST**, ~2 day）
+
+- [ ] RPG.W14.1 Milestone gates: Lv 10 / 30 / 50 / 80 trigger talent fork
+- [ ] RPG.W14.2 Talent options per Guild — e.g. backend Guild Lv 10 picks "schema-first" / "performance-first" / "security-first"
+- [ ] RPG.W14.3 `agent_talent_choice` table — per (agent_id, milestone) row, immutable once chosen
+- [ ] RPG.W14.4 Talent affects routing weight + system prompt enrichment
+- [ ] RPG.W14.5 Frontend: talent fork modal blocks task assignment until operator chooses
+- [ ] RPG.W14.6 Lv 80 capstone — single signature ability (ex: "code-archaeologist" can read 1M context legacy + propose surgical refactor in ≤ 3 commit)
+- [ ] RPG.W14.7 Tests ~12 test (gate trigger / immutability / routing weight effect)
+
+#### RPG.W17 — Synergy / Party system（**MUST**, ~2 day）
+
+- [ ] RPG.W17.1 `agent_party` table — per (party_id, member_agent_id, role) row, soft-deletable
+- [ ] RPG.W17.2 Party formation rules — 2-5 members, cross-Guild composition gives "synergy bonus"
+- [ ] RPG.W17.3 Synergy bonus matrix — backend×frontend = "fullstack" +15% XP / security×devops = "hardening" +10% security skill XP / etc.
+- [ ] RPG.W17.4 Party tasks — Tier L+ task assignable to party (one party = one task at a time)
+- [ ] RPG.W17.5 Party-XP shared evenly + each member also accrues own personal XP
+- [ ] RPG.W17.6 Frontend: party builder modal + active-party indicator
+- [ ] RPG.W17.7 Tests ~15 test (synergy lookup / shared XP / party task assignment exclusivity)
+
+---
+
+### RPG progressively-added items（v0.5.0 之後 rolling integration）
+
+#### RPG.W15 — Buff / Debuff system（progressive, ~2 day）
+
+- [ ] RPG.W15.1 Buff registry — `Fresh Tokens`（rolling 5h reset 後 +10% XP 30min） / `Well-Rested`（idle ≥ 4h 後第一個 task +20% XP） / `Streak`（連續 5 個 task 成功 +5% XP per task） / `Cap Warning`（quota < 10% → -20% routing priority）
+- [ ] RPG.W15.2 Debuff registry — `Burnout`（連續 fail 3 個 → -15% XP 直到一個 success） / `Stale Memory`（30 day 未 retrain → -10% routing weight）
+- [ ] RPG.W15.3 Frontend buff icons on Character Card
+
+#### RPG.W16 — Achievements / Badges（progressive, ~1.5 day）
+
+- [ ] RPG.W16.1 Achievement table — milestones (`100 PR merged` / `0 regression streak ×30` / `taught 5 agents` / etc.)
+- [ ] RPG.W16.2 Auto-unlock daemon scans daily
+- [ ] RPG.W16.3 Frontend badge wall on Character Card
+
+#### RPG.W18 — Multi-class / dual-class mastery（progressive, ~3 day）
+
+- [ ] RPG.W18.1 Lv 50 解鎖 secondary class — agent 可選第二 Guild
+- [ ] RPG.W18.2 Secondary class XP rate ×0.5；達 Lv 30 後恢復 ×1.0
+- [ ] RPG.W18.3 Dual-class agent gains hybrid synergy bonus when in party
+
+#### RPG.W19 — Skill fusion / crafting（progressive, ~3 day）
+
+- [ ] RPG.W19.1 Two skills both Lv 5 → 可 fuse 出 hybrid skill (e.g. python-perf + python-types → "type-safe-fast-python")
+- [ ] RPG.W19.2 Fusion 後 component skill 各扣 1 級但 hybrid skill 起始 Lv 3
+- [ ] RPG.W19.3 Frontend fusion modal with preview
+
+#### RPG.W20 — Quest campaigns / narrative wrapping（progressive, ~2 day）
+
+- [ ] RPG.W20.1 Operator define multi-task "campaign" with narrative title (e.g. "Operation: Phase 2 Migration")
+- [ ] RPG.W20.2 Campaign progress bar + chapters
+- [ ] RPG.W20.3 Campaign-completion bonus XP + unique badge
+
+#### RPG.W21 — Time-gated boss raids（progressive, ~3 day）
+
+- [ ] RPG.W21.1 Quarterly "boss" task — large refactor / cross-cutting upgrade requires Lv 50+ party of ≥ 4
+- [ ] RPG.W21.2 Time-gated: must complete in ≤ 14 day continuous engagement
+- [ ] RPG.W21.3 Boss-only loot — exclusive talent points / cosmetic frame for character card
+
+---
+
+### RPG — Rejected mechanics（記錄理由，避免將來重提）
+
+| 拒絕項 | 理由 |
+|---|---|
+| PvP leaderboard | 鼓勵投機行為 + 同隊互鬥損害合作；OmniSight fleet 是合作型，不是競爭型 |
+| Vendor faction reputation（"Anthropic loyalist" / "OpenAI sympathizer"） | 無實際運營意義，且容易誤導 routing decision；MP 已有 quota-based routing |
+| Permadeath（lv 重置 on critical fail） | 摧毀記憶資產，operator 心理負擔過高；用 debuff 已足夠 |
+
+### RPG — Capability assignment
+
+| Wave | agent_class | 為什麼 |
+|---|---|---|
+| W1-W7 backend core | api-anthropic | schema + RAG + routing 整套 high-blast，1M context 看完 BP.M + BP.F + MP |
+| W8-W10 frontend core | subscription-codex | well-bounded React component |
+| W11 tests/docs | subscription-codex | drift guard + docs 已成熟 |
+| W12-W14 + W17 MUST | api-anthropic | skill state machine + talent gate + party synergy 邏輯 dense，單錯傷及記憶資料完整性 |
+| W13 MCP/A2A | api-anthropic | tool proficiency 直接影響 invocation gating，不能 race 出問題 |
+| W15-W21 progressive | subscription-codex | 各自 well-bounded + 不影響核心 |
 
 ---
 
