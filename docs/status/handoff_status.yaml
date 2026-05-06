@@ -33,9 +33,9 @@ schema_version: 1
 generated_from: HANDOFF.md
 generator: scripts/extract_handoff_status.py
 drift_guard: backend/tests/test_handoff_status_manifest_drift_guard.py
-entry_count: 506
+entry_count: 507
 status_counts:
-  dev-only: 495
+  dev-only: 496
   deployed-inactive: 4
   deployed-active: 4
   deployed-observed: 0
@@ -4707,3 +4707,12 @@ entries:
   production_status: dev-only
   next_gate: deployed-inactive — operator rebuild / redeploy backend 後，抽查 `/api/v1/auth/oauth/google/authorize` 等 supported
     provider authorize path 不再被 auth baseline 401，並進入 provider config / redirect handler。
+- id: 2026-05-06--D9.7-2
+  header_line: 47812
+  date: '2026-05-06'
+  author: Codex/GPT-5.5
+  task_id: D9.7
+  title: FX2.D9.7.1 完工
+  production_status: dev-only
+  next_gate: deployed-inactive — operator 提供 `OMNI_TEST_PG_URL` 跑 PG-backed integration，並在 staging/prod 設定 Google OAuth app
+    credentials 後 smoke `/api/v1/auth/oauth/google/authorize` 到 callback 建立 session。

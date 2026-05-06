@@ -46,6 +46,9 @@ Test families
     rejection.
 13. Module-global state audit (per SOP §1) — no top-level mutable
     container, importing the module is side-effect-free.
+14. Settings field declaration drift guard.
+15. Google router integration — mocked authorize → callback →
+    OmniSight session cookie + DB session creation.
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ import importlib
 import json
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -1031,3 +1035,168 @@ def test_settings_declares_redirect_base_and_signing_key():
     from backend.config import Settings
     assert "oauth_redirect_base_url" in Settings.model_fields
     assert "oauth_flow_signing_key" in Settings.model_fields
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Family 15 — Google router integration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@pytest.fixture()
+async def _google_oauth_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """PG-backed HTTP fixture for the Google authorize → callback flow.
+
+    Mirrors the K3/Q2 E2E fixtures: install the shared pg_test_pool,
+    pin bootstrap green, set the Google OAuth Settings singleton knobs,
+    and keep token/userinfo network calls mocked at the handler boundary.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+    monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "false")
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import bootstrap as _boot
+    from backend import config as _cfg
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    monkeypatch.setattr(_cfg.settings, "oauth_google_client_id", "google-client-id")
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_google_client_secret", "google-client-secret"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_redirect_base_url", "https://omnisight.example.com"
+    )
+    monkeypatch.setattr(
+        _cfg.settings,
+        "oauth_flow_signing_key",
+        "google-oauth-flow-signing-key-2026",
+    )
+
+    async def _fake_exchange_authorization_code(**kwargs):
+        assert kwargs["client_id"] == "google-client-id"
+        assert kwargs["client_secret"] == "google-client-secret"
+        assert kwargs["code"] == "google-auth-code"
+        assert kwargs["redirect_uri"] == (
+            "https://omnisight.example.com/api/v1/auth/oauth/google/callback"
+        )
+        return oc.TokenSet(
+            access_token="google-access-token",
+            refresh_token="google-refresh-token",
+            token_type="Bearer",
+            expires_at=time.time() + 3600,
+            scope=("openid", "email", "profile"),
+            id_token="header.payload.sig",
+            raw={"access_token": "google-access-token"},
+        )
+
+    async def _fake_fetch_userinfo(**kwargs):
+        assert kwargs["access_token"] == "google-access-token"
+        return {
+            "sub": "google-subject-1",
+            "email": "Alice.Google@Example.COM",
+            "name": "Alice Google",
+        }
+
+    monkeypatch.setattr(
+        olh, "exchange_authorization_code", _fake_exchange_authorization_code
+    )
+    monkeypatch.setattr(olh, "fetch_userinfo", _fake_fetch_userinfo)
+    monkeypatch.setattr(
+        "backend.routers.auth._oauth_log_audit_safe",
+        lambda *args, **kwargs: None,
+    )
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            follow_redirects=False,
+        ) as ac:
+            yield {"client": ac, "pool": pg_test_pool}
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_google_oauth_authorize_callback_establishes_session(
+    _google_oauth_http_client,
+):
+    env = _google_oauth_http_client
+    client = env["client"]
+
+    authorize = await client.get("/api/v1/auth/oauth/google/authorize")
+
+    assert authorize.status_code == 302
+    assert olh.FLOW_COOKIE_NAME in client.cookies
+    location = authorize.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "accounts.google.com"
+    assert query["client_id"] == ["google-client-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/google/callback"
+    ]
+    assert query["scope"] == ["openid email profile"]
+    state = query["state"][0]
+
+    callback = await client.get(
+        "/api/v1/auth/oauth/google/callback",
+        params={"code": "google-auth-code", "state": state},
+        headers={
+            "cf-connecting-ip": "203.0.113.7",
+            "user-agent": "pytest-google-oauth",
+        },
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/"
+    assert olh.FLOW_COOKIE_NAME not in client.cookies
+    assert "omnisight_session" in client.cookies
+    assert "omnisight_csrf" in client.cookies
+
+    async with env["pool"].acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, email, name, role, oidc_provider, oidc_subject, "
+            "auth_methods FROM users WHERE email = $1",
+            "alice.google@example.com",
+        )
+        assert user is not None
+        session = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE user_id = $1",
+            user["id"],
+        )
+        assert session is not None
+
+    auth_methods = user["auth_methods"]
+    if isinstance(auth_methods, str):
+        auth_methods = json.loads(auth_methods)
+    assert user["name"] == "Alice Google"
+    assert user["role"] == "viewer"
+    assert user["oidc_provider"] == "google"
+    assert user["oidc_subject"] == "google-subject-1"
+    assert auth_methods == ["oauth_google"]
+    assert session["user_id"] == user["id"]

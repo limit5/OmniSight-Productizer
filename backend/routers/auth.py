@@ -878,7 +878,8 @@ async def oauth_authorize(
         label="login_init",
     )
 
-    response.set_cookie(
+    redirect = RedirectResponse(url=start.authorize_url, status_code=302)
+    redirect.set_cookie(
         key=_olh.FLOW_COOKIE_NAME,
         value=start.flow_cookie,
         max_age=_olh.FLOW_COOKIE_TTL_SECONDS,
@@ -887,7 +888,7 @@ async def oauth_authorize(
         samesite="lax",
         path=_olh.FLOW_COOKIE_PATH,
     )
-    return RedirectResponse(url=start.authorize_url, status_code=302)
+    return redirect
 
 
 @router.get("/auth/oauth/{provider}/callback")
@@ -1156,18 +1157,19 @@ async def oauth_callback(
     # ─── Cookies + redirect ──────────────────────────────────────
     secure = _cookie_secure()
     max_age = auth.session_cookie_max_age(sess)
-    response.set_cookie(
+    redirect = RedirectResponse(url=_OAUTH_REDIRECT_AFTER_LOGIN, status_code=302)
+    redirect.set_cookie(
         key=auth.SESSION_COOKIE, value=sess.token,
         max_age=max_age, httponly=True,
         secure=secure, samesite="lax",
     )
-    response.set_cookie(
+    redirect.set_cookie(
         key=auth.CSRF_COOKIE, value=sess.csrf_token,
         max_age=max_age, httponly=False,
         secure=secure, samesite="lax",
     )
-    response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
-    return RedirectResponse(url=_OAUTH_REDIRECT_AFTER_LOGIN, status_code=302)
+    redirect.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)
+    return redirect
 
 
 # ── User management (admin only) ────────────────────────────────
