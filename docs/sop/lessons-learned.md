@@ -25,6 +25,9 @@
 | 8 | 2026-05-06 | Migration script `_infer_areas` must auto-add `area:tests` for alembic-keyword tickets | OP-16 prompt blocked test work |
 | 9 | 2026-05-06 | Codex cuts `feature/<key>-<slug>` per DoD; merger must scan multiple branch refs (`codex-work` + `feature/OP-*`) | OP-15 retry |
 | 10 | 2026-05-06 | Without Gerrit wired, operator does Author/Reviewer/Merger simultaneously — violates ADR 0003 in spirit | OP-15/16/246 first runs |
+| 11 | 2026-05-06 | Repo topology drift — local `origin = GitHub` instead of GitLab per ADR 0002; live and tracked but no migration date | governance migration plan re-read |
+| 12 | 2026-05-06 | Gerrit replication.config does NOT do env-var or `${name}` case substitution; lowercase target paths must be hardcoded per remote | OP-247 path validation |
+| 13 | 2026-05-06 | Gerrit replication URL must NOT contain credentials inline; put username + password in `secure.config` `[remote "name"]` block instead | OP-247 path validation |
 
 ---
 
@@ -171,6 +174,73 @@ git commit
 **Verification (today)**: Operator manually validates each merge cognitively before instructing Claude to push. Claude does NOT vote +2 on its own work. Soft-enforce until hard-enforce lands.
 
 **Generalisation**: When the SOP defines roles (Author / Reviewer / Merger) but the tooling collapses them, it's the *tooling* that needs to mature, not the SOP that should be relaxed. Document the gap explicitly so future contributors don't think the relaxed practice is canonical.
+
+---
+
+## Lesson 11 — Repo topology drift: `origin = GitHub` vs ADR 0002 plan (2026-05-06)
+
+**Situation**: ADR 0002 (2026-05-04) declared the target topology as **GitLab self-hosted primary, GitHub one-way mirror**. By 2026-05-06 the repo's `origin` remote was still `https://github.com/limit5/OmniSight-Productizer.git` — every dev push goes direct-to-GitHub, GitLab is unused for dev work, and ADR 0002's "do not gate any merge on GitHub" is implicitly violated. Discovered while diagnosing OP-247 prerequisites: I assumed GitLab was the dev target and was wrong.
+
+**Fix (partial, 2026-05-06)**: 
+- Validated full `local → Gerrit → GitLab → GitHub` path (Steps 1-9 in this session)
+- All three remotes now have `develop` + `main` aligned at the same SHA
+- Origin remote not yet flipped — stays as GitHub for now (no migration date set per operator)
+- L11 documents the drift so it's tracked, not silent
+
+**Fix (target state)**: When governance Phase 2 cutover happens (no date yet — operator decides), local `origin` re-points to GitLab; GitHub becomes a `mirror` remote (read-only OSS visibility). Tracked indirectly by [OP-247](https://soraapp.atlassian.net/browse/OP-247) (runner Gerrit integration) which assumes the cutover is done; if cutover lags, OP-247 needs an explicit dependency note.
+
+**Verification**: `git remote -v` returns `origin = https://github.com/...` — confirms drift. After cutover, `origin = https://oauth2:...@sora.services:49156/omnisight/omnisight-productizer.git`.
+
+**Generalisation**: ADR records intent; reality may lag silently. Drift-scan periodically (e.g. as part of META audit cycles) — checked-in `git remote -v` output vs ADR 0002 should be a CI-runnable invariant once Phase 2 ships.
+
+---
+
+## Lesson 12 — Gerrit replication.config templating: no env vars, no case transform (2026-05-06)
+
+**Situation**: When wiring Gerrit → GitLab replication for OP-247 path validation, my first replication.config draft was:
+```ini
+url = https://oauth2:${GITLAB_TOKEN}@sora.services:49156/omnisight/${name}.git
+```
+Two bugs:
+1. **`${GITLAB_TOKEN}` is not substituted** — Gerrit's replication.config only recognises `${name}` (project name) as a template variable; arbitrary env-var-like names are kept literal. `replication list --detail` revealed the URL was stored with `${GITLAB_TOKEN}` as a literal string.
+2. **`${name}` preserves case** — Gerrit project name `omnisight/OmniSight-Productizer` substituted into URL gave `.../omnisight/OmniSight-Productizer.git` (mixed case). GitLab path is forcibly lowercase (`omnisight-productizer`), so the URL 404'd.
+3. **Plus a duplicate-prefix bug** — using `omnisight/${name}.git` doubled the `omnisight/` because `${name}` already contained it.
+
+**Fix**: Hardcode the URL per remote (no template variables). For single-project setups this is fine; for multi-project, write one `[remote "..."]` block per project. Final working config:
+```ini
+[remote "gitlab-mirror"]
+  url = https://sora.services:49156/omnisight/omnisight-productizer.git
+  push = +refs/heads/*:refs/heads/*
+  push = +refs/tags/*:refs/tags/*
+  projects = omnisight/OmniSight-Productizer
+  replicateOnStartup = true
+```
+
+**Verification**: After fix + `gerrit plugin reload replication`, `replication start --all --wait` returned `Replicate omnisight/OmniSight-Productizer refs ..all.. to sora.services:49156, Succeeded! (OK)`. GitLab's `develop` branch tip then byte-equal'd Gerrit's.
+
+**Generalisation**: When using template strings in config files, verify what *exactly* gets substituted by checking the runtime view (`replication list --detail` here) — never trust the source file as ground truth for what's loaded. Per-project hardcoding is more verbose but unambiguous.
+
+---
+
+## Lesson 13 — Gerrit credentials in URL is wrong; use `secure.config` (2026-05-06)
+
+**Situation**: Same OP-247 wire-up. My first replication.config put credentials inline in the URL: `https://oauth2:${GITLAB_TOKEN}@sora.services:...`. Even if `${GITLAB_TOKEN}` HAD substituted, this is **the wrong place**:
+- URLs in `replication.config` are stored in the world-readable section
+- `replication list --detail` (which any project member can run) shows the URL — exposing the token
+- The "blessed" path is `etc/secure.config` which Gerrit reads with restricted permissions
+
+**Fix**: Plain URL in `replication.config`, credentials in `etc/secure.config`:
+```ini
+# secure.config (chmod 600 typical)
+[remote "gitlab-mirror"]
+  username = oauth2
+  password = glpat-xxxxxxxxxxxxxxxx
+```
+Gerrit auto-pairs the `[remote "gitlab-mirror"]` blocks across the two files.
+
+**Verification**: After moving creds to secure.config, `replication list --detail` shows the URL without any password leak. Replication still works because Gerrit uses secure.config username + password as HTTP basic auth.
+
+**Generalisation**: Credentials live in **dedicated secrets files** (per the tool's documented contract), never in URLs or general config. URL-inline auth is convenient for quick scripts but a leak vector in any config that gets `cat`'d or queried via API.
 
 ---
 
