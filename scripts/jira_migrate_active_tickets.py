@@ -282,6 +282,15 @@ def _infer_areas(item: TodoItem) -> list[str]:
             areas.add("area:tests")
         else:
             areas.add("area:backend")  # safe default
+
+    # All alembic / schema / migration tickets require contract tests
+    # (per ADR 0001 + lessons from OP-16 first run 2026-05-06: tests
+    # were missing from the prompt-permitted area, blocking codex from
+    # writing the AC-required test file). Auto-add area:tests anytime
+    # the ticket touches alembic / schema work.
+    if "alembic" in text or "schema" in text or "migration" in text or any("alembic" in fp for fp in item.files):
+        areas.add("area:tests")
+
     return sorted(areas)
 
 

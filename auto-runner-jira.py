@@ -70,6 +70,15 @@ If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
 
+# Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
+
+DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.
+Future per-ticket resolution notes go into JIRA ticket comments, not
+HANDOFF.md. If a generalisable lesson emerged, append a new entry to
+docs/sop/lessons-learned.md instead. The runner will post a final
+JIRA comment automatically when the CLI exits cleanly; you do not
+need to write a HANDOFF entry yourself.
+
 Full ticket description follows:
 
 {description}
@@ -79,14 +88,30 @@ When you complete the work, your final commit message must include
 """
 
 
+CODEX_WORKTREE = os.environ.get(
+    "OMNISIGHT_CODEX_WORKTREE",
+    os.path.normpath(os.path.join(REPO, "..", "OmniSight-codex-worktree")),
+)
+CLAUDE_WORKTREE = os.environ.get(
+    "OMNISIGHT_CLAUDE_WORKTREE",
+    os.path.normpath(os.path.join(REPO, "..", "OmniSight-claude-worktree")),
+)
+TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_RUNNER_TIMEOUT_S", "1800"))
+
+
 def _invoke_cli(agent_class: str, prompt: str) -> int:
     """Invoke the underlying CLI for this agent_class. Returns exit code."""
     if agent_class == "subscription-codex":
-        cmd = ["codex", "--yolo"]
+        if not os.path.isdir(CODEX_WORKTREE):
+            print(f"[runner] codex worktree missing: {CODEX_WORKTREE}", file=sys.stderr)
+            return 2
+        cmd = ["codex", "exec", "--cd", CODEX_WORKTREE, "--yolo"]
     elif agent_class == "subscription-claude":
-        cmd = ["claude"]  # subscription claude CLI
+        if not os.path.isdir(CLAUDE_WORKTREE):
+            print(f"[runner] claude worktree missing: {CLAUDE_WORKTREE}", file=sys.stderr)
+            return 2
+        cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
     elif agent_class.startswith("api-"):
-        # API mode is via the SDK runner, not CLI. Out of scope for this MVP.
         print(f"[runner] agent_class={agent_class} requires SDK invocation, not CLI. Skipping invoke.")
         return 99
     else:
@@ -94,12 +119,32 @@ def _invoke_cli(agent_class: str, prompt: str) -> int:
         return 2
 
     if DRY_RUN:
-        print(f"[runner] DRY_RUN: would invoke {cmd[0]} with {len(prompt)} char prompt")
+        print(f"[runner] DRY_RUN: would invoke `{' '.join(cmd[:3])}...` with {len(prompt)} char prompt")
         return 0
 
-    print(f"[runner] invoking {cmd[0]}...")
-    proc = subprocess.run(cmd, input=prompt, text=True)
-    return proc.returncode
+    print(f"[runner] invoking {cmd[0]} (timeout {TASK_TIMEOUT_S}s)...")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE if cmd[0] == "codex" else None,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            text=True,
+            start_new_session=True,
+        )
+        if cmd[0] == "codex":
+            proc.communicate(input=prompt, timeout=TASK_TIMEOUT_S)
+        else:
+            proc.communicate(timeout=TASK_TIMEOUT_S)
+        return proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        print(f"[runner] CLI timed out after {TASK_TIMEOUT_S}s", file=sys.stderr)
+        return 124
+    except FileNotFoundError as e:
+        print(f"[runner] CLI not installed: {e}", file=sys.stderr)
+        return 127
 
 
 def main() -> int:
