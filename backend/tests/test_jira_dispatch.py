@@ -403,3 +403,18 @@ def test_sync_to_gerrit_develop_unknown_class_raises() -> None:
     """Unknown agent_class for SSH auth raises ValueError before any git op."""
     with pytest.raises(ValueError, match="unknown agent_class"):
         jd.sync_to_gerrit_develop(Path("/tmp"), "no-such-class", "OP-1")
+
+
+def test_pre_pickup_ok_signature_accepts_worktree_path() -> None:
+    """L17 refactor: pre_pickup_ok accepts optional worktree_path kwarg."""
+    import inspect
+    sig = inspect.signature(jd.pre_pickup_ok)
+    params = list(sig.parameters.keys())
+    assert "worktree_path" in params, f"pre_pickup_ok must take worktree_path; got params {params}"
+
+
+def test_pre_pickup_ok_default_worktree_path_is_none() -> None:
+    """Backward-compatible default — pre_pickup_ok(client, snapshot) without worktree still works."""
+    import inspect
+    sig = inspect.signature(jd.pre_pickup_ok)
+    assert sig.parameters["worktree_path"].default is None

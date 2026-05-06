@@ -193,15 +193,49 @@ def main() -> int:
 
     print(f"[runner] selected: {snapshot.key} (component={snapshot.component})")
 
-    # Step 2: pre-pickup check (re-run for the chosen — short-circuit if override)
-    ok, reason = jira_dispatch.pre_pickup_ok(client, snapshot)
+    # Resolve worktree path early — needed for sync, pre-pickup checks, push.
+    worktree_path = Path(
+        CODEX_WORKTREE if AGENT_CLASS in ("subscription-codex", "api-openai")
+        else CLAUDE_WORKTREE
+    )
+
+    # Step 2 (was Step 3 in Phase 1.5): sync worktree FIRST so pre-pickup checks
+    # see the actual workspace state, not stale runner-host main repo state.
+    # Per L17 — operator's request to refactor pre_pickup_ok cwd.
+    if DRY_RUN:
+        print(f"[runner] DRY_RUN: would sync worktree {worktree_path}")
+    else:
+        try:
+            print(f"[runner] preparing worktree {worktree_path}...")
+            jira_dispatch.set_bot_identity_in_worktree(worktree_path, AGENT_CLASS)
+            jira_dispatch.install_commit_msg_hook(worktree_path)
+            sync_result = jira_dispatch.sync_to_gerrit_develop(
+                worktree_path, AGENT_CLASS, snapshot.key
+            )
+            print(f"[runner] worktree synced: {sync_result.detail}")
+        except Exception as e:
+            print(f"[runner] worktree pre-sync failed: {type(e).__name__}: {e}", file=sys.stderr)
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[runner-presync-fail] Could not prepare worktree:\n"
+                f"{type(e).__name__}: {e}\n\n"
+                f"Operator: ensure {worktree_path} is a valid git worktree + "
+                f"Gerrit is reachable, then re-launch.",
+            )
+            return 1
+
+    # Step 3: pre-pickup check now runs against fresh worktree, not stale main repo.
+    ok, reason = jira_dispatch.pre_pickup_ok(
+        client, snapshot,
+        worktree_path=None if DRY_RUN else worktree_path,
+    )
     if not ok:
         print(f"[runner] pre-pickup fail: {reason}")
         if not DRY_RUN:
             jira_dispatch.add_comment(client, snapshot.key, f"[runner-live-state-fail]\n\nPre-pickup live-state check failed; not picking up.\n\n{reason}\n\nThis ticket will be retried on next polling cycle.")
         return 1
 
-    # Step 3: transition + invoke
+    # Step 4: build prompt + transition + invoke
     description = jira_dispatch.fetch_description(client, snapshot.key)
     prompt = _build_prompt(client, snapshot.key, description)
 
@@ -209,35 +243,6 @@ def main() -> int:
         print(f"[runner] DRY_RUN: would transition {snapshot.key} → In Progress")
         print(f"[runner] DRY_RUN: prompt preview ({len(prompt)} chars):\n---\n{prompt[:1200]}\n---")
         return 0
-
-    # Resolve worktree path early — needed both for pre-CLI sync and post-CLI push.
-    worktree_path = Path(
-        CODEX_WORKTREE if AGENT_CLASS in ("subscription-codex", "api-openai")
-        else CLAUDE_WORKTREE
-    )
-
-    # OP-247 Phase 1.5: deterministic per-ticket fresh-sync to Gerrit develop.
-    # Bot identity + commit-msg hook + worktree sync MUST be set before codex runs,
-    # otherwise codex's commits use env user (rejected by Gerrit) and live on the
-    # leftover branch from the previous ticket.
-    try:
-        print(f"[runner] preparing worktree {worktree_path}...")
-        jira_dispatch.set_bot_identity_in_worktree(worktree_path, AGENT_CLASS)
-        jira_dispatch.install_commit_msg_hook(worktree_path)
-        sync_result = jira_dispatch.sync_to_gerrit_develop(
-            worktree_path, AGENT_CLASS, snapshot.key
-        )
-        print(f"[runner] worktree synced: {sync_result.detail}")
-    except Exception as e:
-        print(f"[runner] worktree pre-sync failed: {type(e).__name__}: {e}", file=sys.stderr)
-        jira_dispatch.add_comment(
-            client, snapshot.key,
-            f"[runner-presync-fail] Could not prepare worktree:\n"
-            f"{type(e).__name__}: {e}\n\n"
-            f"Operator: ensure {worktree_path} is a valid git worktree + "
-            f"Gerrit is reachable, then re-launch.",
-        )
-        return 1
 
     print(f"[runner] transitioning {snapshot.key} → In Progress")
     jira_dispatch.transition_to_in_progress(client, snapshot.key)

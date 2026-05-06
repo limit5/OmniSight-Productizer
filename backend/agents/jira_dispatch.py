@@ -576,15 +576,29 @@ def parse_prerequisites(description: str) -> dict[str, list]:
 # ── Pre-pickup check (combined live-state + mutex + blocker) ──────
 
 
-def pre_pickup_ok(client: DispatchClient, snapshot: TicketSnapshot) -> tuple[bool, str]:
-    """Combined pre-pickup gate. Returns (ok, reason)."""
+def pre_pickup_ok(
+    client: DispatchClient,
+    snapshot: TicketSnapshot,
+    worktree_path: Path | None = None,
+) -> tuple[bool, str]:
+    """Combined pre-pickup gate. Returns (ok, reason).
+
+    Per L17 (2026-05-06): when ``worktree_path`` is provided, live-state
+    checks resolve relative to that path — the agent's actual workspace —
+    instead of the runner host's main repo. This is the correct cwd
+    because the runner has already fresh-synced the worktree to Gerrit
+    develop tip via ``sync_to_gerrit_develop`` before this gate runs.
+
+    Backward-compatible: ``worktree_path=None`` falls back to
+    ``live_state_check.REPO_ROOT`` (the legacy main-repo behaviour).
+    """
     from backend.agents.live_state_check import evaluate, all_passed, format_failures
     desc = fetch_description(client, snapshot.key)
     prereqs = parse_prerequisites(desc)
 
     # Live-state checks (§13)
     if prereqs.get("live_state_requires"):
-        results = evaluate(prereqs["live_state_requires"])
+        results = evaluate(prereqs["live_state_requires"], cwd=worktree_path)
         if not all_passed(results):
             return False, "live_state_requires failed:\n" + format_failures(results)
 

@@ -52,14 +52,19 @@ class CheckResult:
 # ── Built-in check kinds (handlers below) ─────────────────────────
 
 
-def _check_alembic_head(expected: Any) -> CheckResult:
-    """Pass iff ``alembic heads`` returns exactly the expected revision."""
+def _check_alembic_head(expected: Any, cwd: Path = None) -> CheckResult:
+    """Pass iff ``alembic heads`` returns exactly the expected revision.
+
+    Per L17 (2026-05-06): runs ``alembic`` in ``<cwd>/backend`` so the
+    check sees the worktree's actual state, not the runner-host main repo.
+    """
     if not isinstance(expected, str):
         return CheckResult(False, "alembic_head", f"argument must be str, got {type(expected).__name__}")
+    base = cwd if cwd is not None else REPO_ROOT
     try:
         result = subprocess.run(
             ["alembic", "heads"],
-            cwd=REPO_ROOT / "backend",
+            cwd=base / "backend",
             capture_output=True,
             text=True,
             timeout=30,
@@ -75,7 +80,7 @@ def _check_alembic_head(expected: Any) -> CheckResult:
     )
 
 
-def _check_feature_flag(expected: Any) -> CheckResult:
+def _check_feature_flag(expected: Any, cwd: Path = None) -> CheckResult:
     """Pass iff env feature flag matches.
 
     Argument shape: ``"OMNISIGHT_FOO_ENABLED=true"`` (env-only for now;
@@ -92,11 +97,12 @@ def _check_feature_flag(expected: Any) -> CheckResult:
     )
 
 
-def _check_file_exists(expected: Any) -> CheckResult:
-    """Pass iff path exists relative to repo root."""
+def _check_file_exists(expected: Any, cwd: Path = None) -> CheckResult:
+    """Pass iff path exists relative to ``cwd`` (default REPO_ROOT)."""
     if not isinstance(expected, str):
         return CheckResult(False, "file_exists", f"argument must be str path, got {type(expected).__name__}")
-    target = REPO_ROOT / expected
+    base = cwd if cwd is not None else REPO_ROOT
+    target = base / expected
     return CheckResult(
         target.exists(),
         "file_exists",
@@ -104,15 +110,16 @@ def _check_file_exists(expected: Any) -> CheckResult:
     )
 
 
-def _check_command_succeeds(expected: Any) -> CheckResult:
-    """Pass iff shell command returns exit code 0. 30s timeout, runs in REPO_ROOT."""
+def _check_command_succeeds(expected: Any, cwd: Path = None) -> CheckResult:
+    """Pass iff shell command returns exit code 0. 30s timeout, runs in ``cwd``."""
     if not isinstance(expected, str):
         return CheckResult(False, "command_succeeds", f"argument must be str command, got {type(expected).__name__}")
+    base = cwd if cwd is not None else REPO_ROOT
     try:
         result = subprocess.run(
             expected,
             shell=True,
-            cwd=REPO_ROOT,
+            cwd=base,
             capture_output=True,
             text=True,
             timeout=30,
@@ -129,7 +136,7 @@ def _check_command_succeeds(expected: Any) -> CheckResult:
     )
 
 
-def _check_db_row_count(expected: Any) -> CheckResult:
+def _check_db_row_count(expected: Any, cwd: Path = None) -> CheckResult:
     """Pass iff ``SELECT COUNT(*) FROM <table>`` satisfies range.
 
     Argument shape: ``{"table": "users", "min": 1, "max": 100}`` (max optional).
@@ -158,7 +165,7 @@ def _check_db_row_count(expected: Any) -> CheckResult:
     return CheckResult(True, "db_row_count", f"{expected['table']}: count={count}")
 
 
-def _check_deployed_version(expected: Any) -> CheckResult:
+def _check_deployed_version(expected: Any, cwd: Path = None) -> CheckResult:
     """Pass iff localhost:8000/healthz reports matching version."""
     if not isinstance(expected, str):
         return CheckResult(False, "deployed_version", f"argument must be version str, got {type(expected).__name__}")
@@ -177,7 +184,7 @@ def _check_deployed_version(expected: Any) -> CheckResult:
     )
 
 
-CHECK_KINDS: dict[str, Callable[[Any], CheckResult]] = {
+CHECK_KINDS: dict[str, Callable[[Any, Path], CheckResult]] = {
     "alembic_head": _check_alembic_head,
     "feature_flag": _check_feature_flag,
     "file_exists": _check_file_exists,
@@ -190,8 +197,18 @@ CHECK_KINDS: dict[str, Callable[[Any], CheckResult]] = {
 # ── Public API ─────────────────────────────────────────────────────
 
 
-def evaluate(requirements: list[dict[str, Any]]) -> list[CheckResult]:
-    """Dispatch each requirement to its handler. Order-independent."""
+def evaluate(
+    requirements: list[dict[str, Any]],
+    cwd: Path = None,
+) -> list[CheckResult]:
+    """Dispatch each requirement to its handler. Order-independent.
+
+    Per L17 (2026-05-06): ``cwd`` controls where path-relative checks
+    resolve (file_exists / command_succeeds / alembic_head). When the
+    runner calls this for pre-pickup of a worktree-bound ticket, pass
+    the worktree path so checks reflect the agent's actual environment,
+    not the runner host's main repo state.
+    """
     results: list[CheckResult] = []
     for req in requirements:
         if not isinstance(req, dict):
@@ -206,7 +223,7 @@ def evaluate(requirements: list[dict[str, Any]]) -> list[CheckResult]:
             results.append(CheckResult(False, kind, f"unknown check kind: {kind}"))
             continue
         try:
-            results.append(handler(arg))
+            results.append(handler(arg, cwd))
         except Exception as e:
             results.append(CheckResult(False, kind, f"handler raised {type(e).__name__}: {e}"))
     return results

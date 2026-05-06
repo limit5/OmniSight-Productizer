@@ -115,3 +115,52 @@ def test_evaluate_preserves_order_and_independence() -> None:
     ])
     assert [r.passed for r in results] == [True, False, False]
     assert lsc.all_passed(results) is False
+
+
+# ── L17 cwd parameter (per pre_pickup_ok refactor) ────────────────
+
+
+def test_evaluate_uses_custom_cwd_for_file_exists(tmp_path) -> None:
+    """When cwd is passed, file_exists resolves relative to it."""
+    (tmp_path / "marker.txt").write_text("present")
+    results = lsc.evaluate([{"file_exists": "marker.txt"}], cwd=tmp_path)
+    assert results[0].passed
+    assert "present" in results[0].detail
+
+
+def test_evaluate_custom_cwd_isolates_from_repo_root(tmp_path) -> None:
+    """A file present in REPO_ROOT but absent in custom cwd → fail."""
+    # TODO.md exists in REPO_ROOT
+    repo_results = lsc.evaluate([{"file_exists": "TODO.md"}])
+    assert repo_results[0].passed
+    # but not in tmp_path
+    tmp_results = lsc.evaluate([{"file_exists": "TODO.md"}], cwd=tmp_path)
+    assert not tmp_results[0].passed
+    assert "MISSING" in tmp_results[0].detail
+
+
+def test_evaluate_custom_cwd_for_command_succeeds(tmp_path) -> None:
+    """command_succeeds runs in custom cwd."""
+    (tmp_path / "smoke").write_text("hello")
+    results = lsc.evaluate([{"command_succeeds": "test -f smoke"}], cwd=tmp_path)
+    assert results[0].passed
+
+
+def test_evaluate_default_cwd_is_repo_root() -> None:
+    """When cwd=None (default), checks resolve relative to REPO_ROOT (backward-compat)."""
+    results_none = lsc.evaluate([{"file_exists": "TODO.md"}], cwd=None)
+    results_unset = lsc.evaluate([{"file_exists": "TODO.md"}])
+    # both should pass — TODO.md is in REPO_ROOT
+    assert results_none[0].passed
+    assert results_unset[0].passed
+
+
+def test_check_kinds_signature_takes_two_args() -> None:
+    """All registered handlers must accept (expected, cwd) per L17 refactor."""
+    import inspect
+    for kind, handler in lsc.CHECK_KINDS.items():
+        sig = inspect.signature(handler)
+        params = list(sig.parameters.values())
+        assert len(params) == 2, f"{kind} handler must take 2 args, got {len(params)}"
+        assert params[0].name == "expected"
+        assert params[1].name == "cwd"
