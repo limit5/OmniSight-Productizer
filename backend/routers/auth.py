@@ -496,13 +496,14 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
 
     await auth.notify_new_device_login(user, sess, client_ip, ua_header)
     secure = _cookie_secure()
+    max_age = auth.session_cookie_max_age(sess)
     response.set_cookie(
         key=auth.SESSION_COOKIE, value=sess.token,
-        max_age=auth.SESSION_TTL_S, httponly=True, secure=secure, samesite="lax",
+        max_age=max_age, httponly=True, secure=secure, samesite="lax",
     )
     response.set_cookie(
         key=auth.CSRF_COOKIE, value=sess.csrf_token,
-        max_age=auth.SESSION_TTL_S, httponly=False, secure=secure, samesite="lax",
+        max_age=max_age, httponly=False, secure=secure, samesite="lax",
     )
     return {"user": user.to_dict(), "csrf_token": sess.csrf_token}
 
@@ -663,14 +664,15 @@ async def change_password(req: ChangePasswordRequest, request: Request,
             )
             new_current_token = new_sess.token
             secure = _cookie_secure()
+            max_age = auth.session_cookie_max_age(new_sess)
             response.set_cookie(
                 key=auth.SESSION_COOKIE, value=new_sess.token,
-                max_age=auth.SESSION_TTL_S, httponly=True,
+                max_age=max_age, httponly=True,
                 secure=secure, samesite="lax",
             )
             response.set_cookie(
                 key=auth.CSRF_COOKIE, value=new_sess.csrf_token,
-                max_age=auth.SESSION_TTL_S, httponly=False,
+                max_age=max_age, httponly=False,
                 secure=secure, samesite="lax",
             )
             new_csrf = new_sess.csrf_token
@@ -1153,14 +1155,15 @@ async def oauth_callback(
 
     # ─── Cookies + redirect ──────────────────────────────────────
     secure = _cookie_secure()
+    max_age = auth.session_cookie_max_age(sess)
     response.set_cookie(
         key=auth.SESSION_COOKIE, value=sess.token,
-        max_age=auth.SESSION_TTL_S, httponly=True,
+        max_age=max_age, httponly=True,
         secure=secure, samesite="lax",
     )
     response.set_cookie(
         key=auth.CSRF_COOKIE, value=sess.csrf_token,
-        max_age=auth.SESSION_TTL_S, httponly=False,
+        max_age=max_age, httponly=False,
         secure=secure, samesite="lax",
     )
     response.delete_cookie(_olh.FLOW_COOKIE_NAME, path=_olh.FLOW_COOKIE_PATH)

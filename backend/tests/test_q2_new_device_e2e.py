@@ -150,8 +150,8 @@ async def _q2_e2e_client(pg_test_pool, pg_test_dsn, monkeypatch):
     _boot._gate_cache_reset()
 
     # The K1 fixture closes-then-reinits ``db`` to point at PG; we do
-    # the same so the login route's ``db._conn()`` call (still on the
-    # legacy compat path for some side effects) reads/writes the same
+    # the same so the login route's legacy db connection helper
+    # (still present for some side effects) reads/writes the same
     # PG that ``pg_test_pool`` truncated above.
     if db._db is not None:
         await db.close()
@@ -199,12 +199,12 @@ _API = (os.environ.get("OMNISIGHT_API_PREFIX") or "/api/v1").rstrip("/")
 LOGIN_URL = f"{_API}/auth/login"
 
 
-async def _do_login(env, *, ip: str, ua: str) -> dict:
+async def _do_login(env, *, ip: str, ua: str):
     """POST /auth/login with the supplied client IP + User-Agent.
 
     Uses ``cf-connecting-ip`` because that's what ``_client_key()`` in
     ``backend.routers.auth`` honours first (Cloudflare-tunnel parity).
-    Returns the parsed JSON; raises if the route 4xx/5xxs.
+    Returns the response; raises if the route 4xx/5xxs.
     """
     resp = await env["client"].post(
         LOGIN_URL,
@@ -214,7 +214,19 @@ async def _do_login(env, *, ip: str, ua: str) -> dict:
     assert resp.status_code == 200, (
         f"login expected 200 but got {resp.status_code}: {resp.text!r}"
     )
-    return resp.json()
+    return resp
+
+
+def _cookie_max_age(resp, cookie_name: str) -> int:
+    prefix = f"{cookie_name}="
+    for header in resp.headers.get_list("set-cookie"):
+        if not header.startswith(prefix):
+            continue
+        for part in header.split(";"):
+            key, _, value = part.strip().partition("=")
+            if key.lower() == "max-age":
+                return int(value)
+    raise AssertionError(f"missing Max-Age for cookie {cookie_name!r}")
 
 
 # ─── Tests ───────────────────────────────────────────────────────────
@@ -236,11 +248,13 @@ async def test_second_device_login_triggers_alert(_q2_e2e_client):
 
     # Login 1 — device A. From a cold fingerprint table this is itself
     # a "new device" event and fires the first alert.
-    await _do_login(
+    first_resp = await _do_login(
         env,
         ip="203.0.113.42",
         ua="Mozilla/5.0 (Macintosh; Intel Mac OS X) Chrome/120 - Device-A",
     )
+    assert _cookie_max_age(first_resp, "omnisight_session") == 3600
+    assert _cookie_max_age(first_resp, "omnisight_csrf") == 3600
     assert len(env["emits"]) == 1, (
         "first login from a cold fingerprint table must fire one alert"
     )
@@ -264,7 +278,7 @@ async def test_second_device_login_triggers_alert(_q2_e2e_client):
         import asyncio
         await asyncio.sleep(0.01)
 
-        await _do_login(
+        second_resp = await _do_login(
             env,
             ip="198.51.100.7",
             ua="Mozilla/5.0 (iPhone) Safari/17 - Device-B",
@@ -272,6 +286,8 @@ async def test_second_device_login_triggers_alert(_q2_e2e_client):
     finally:
         _auth_mod.NEW_DEVICE_ALERT_USER_WINDOW_S = original
 
+    assert _cookie_max_age(second_resp, "omnisight_session") == 3600
+    assert _cookie_max_age(second_resp, "omnisight_csrf") == 3600
     assert len(env["emits"]) == 2, (
         "logging in from a second, genuinely-different device must "
         "fire its own new-device alert"
@@ -301,16 +317,25 @@ async def test_same_device_relogin_does_not_realert(_q2_e2e_client):
 
     # Three back-to-back logins from the same (UA, /24).
     same_ua = "Mozilla/5.0 (X11; Linux) Firefox/123 - workstation"
+    responses = []
     for ip_last_octet in (10, 11, 12):
         # Same /24 (203.0.113.0/24) — host octet varies as DHCP would,
         # which the (user, ua_hash, ip_subnet) primary key collapses
         # into a single fingerprint row.
-        await _do_login(
-            env,
-            ip=f"203.0.113.{ip_last_octet}",
-            ua=same_ua,
+        responses.append(
+            await _do_login(
+                env,
+                ip=f"203.0.113.{ip_last_octet}",
+                ua=same_ua,
+            )
         )
 
+    assert _cookie_max_age(responses[0], "omnisight_session") == 3600
+    assert _cookie_max_age(responses[0], "omnisight_csrf") == 3600
+    assert _cookie_max_age(responses[1], "omnisight_session") == 28800
+    assert _cookie_max_age(responses[1], "omnisight_csrf") == 28800
+    assert _cookie_max_age(responses[2], "omnisight_session") == 28800
+    assert _cookie_max_age(responses[2], "omnisight_csrf") == 28800
     assert len(env["emits"]) == 1, (
         "three logins from one (UA, /24) tuple must produce exactly "
         "one alert — fingerprint dedup applies from the second login on"
