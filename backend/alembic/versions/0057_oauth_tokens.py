@@ -18,7 +18,7 @@ Column rationale
   cascade keeps GDPR / DSAR delete-user paths from leaving stranded
   ciphertext rows.
 
-* ``provider`` (TEXT, CHECK ∈ ``{google, github, apple, microsoft, discord, gitlab, bitbucket, slack}``):
+* ``provider`` (TEXT, CHECK ∈ ``{google, github, apple, microsoft, discord, gitlab, bitbucket, slack, notion}``):
   must byte-equal :data:`backend.security.token_vault.SUPPORTED_PROVIDERS`
   and :data:`backend.account_linking._AS1_OAUTH_PROVIDERS` — the
   cross-module drift guard tests in
@@ -172,7 +172,7 @@ depends_on = None
 # ``backend.account_linking._AS1_OAUTH_PROVIDERS``.  Sorted alphabetically
 # so the CHECK clause is reproducible across both dialects and the
 # drift-guard test can string-match.
-_PROVIDERS_SQL = "'apple','bitbucket','discord','github','gitlab','google','microsoft','slack'"
+_PROVIDERS_SQL = "'apple','bitbucket','discord','github','gitlab','google','microsoft','notion','slack'"
 
 
 # ─── PG branch ───────────────────────────────────────────────────────────

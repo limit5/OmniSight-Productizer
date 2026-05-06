@@ -245,7 +245,7 @@ export const NOTION: VendorConfig = makeVendor({
   displayName: "Notion",
   authorizeEndpoint: "https://api.notion.com/v1/oauth/authorize",
   tokenEndpoint: "https://api.notion.com/v1/oauth/token",
-  userinfoEndpoint: "https://api.notion.com/v1/users/me",
+  userinfoEndpoint: null,
   revocationEndpoint: null,
   defaultScopes: [],
   isOidc: false,

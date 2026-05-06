@@ -189,7 +189,7 @@ _SALT_RAW_BYTES = 16
 SUPPORTED_PROVIDERS: frozenset[str] = frozenset(
     {
         "google", "github", "apple", "microsoft", "discord", "gitlab",
-        "bitbucket", "slack",
+        "bitbucket", "slack", "notion",
     }
 )
 

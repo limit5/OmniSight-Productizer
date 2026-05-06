@@ -340,6 +340,21 @@ def test_slack_default_scopes_match_oidc_login_contract():
     assert q["scope"] == ["openid email profile"]
 
 
+def test_notion_authorize_url_omits_scope_and_uses_owner_user():
+    """FX2.D9.7.9 pins Notion to fixed integration permissions."""
+    url = ov.build_authorize_url_for_vendor(
+        ov.NOTION,
+        client_id="notion.test",
+        redirect_uri="https://app.example/cb",
+        state="S",
+        code_challenge="C",
+    )
+    q = _query(url)
+    assert "scope" not in q
+    assert q["owner"] == ["user"]
+    assert ov.NOTION.userinfo_endpoint is None
+
+
 def test_begin_authorization_for_vendor_mints_nonce_for_oidc_only():
     _, github_flow = ov.begin_authorization_for_vendor(
         ov.GITHUB, client_id="cid", redirect_uri="https://app/cb"

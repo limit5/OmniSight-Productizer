@@ -127,8 +127,8 @@ class VendorConfig:
         Optional URL the caller queries with the issued access_token
         to retrieve the user's identity (email, display name).
         OIDC: ``/userinfo``. Non-OIDC: vendor-specific
-        (``api.github.com/user``, ``api.notion.com/v1/users/me``,
-        ``discord.com/api/users/@me``, …). ``None`` means the vendor
+        (``api.github.com/user``, ``discord.com/api/users/@me``, …).
+        ``None`` means the vendor
         does not expose a single canonical endpoint and the caller
         must wire something vendor-specific.
     revocation_endpoint
@@ -366,7 +366,7 @@ NOTION = VendorConfig(
     display_name="Notion",
     authorize_endpoint="https://api.notion.com/v1/oauth/authorize",
     token_endpoint="https://api.notion.com/v1/oauth/token",
-    userinfo_endpoint="https://api.notion.com/v1/users/me",
+    userinfo_endpoint=None,  # User owner identity rides in token response
     revocation_endpoint=None,
     default_scopes=(),  # Notion does not use scopes — workspaces are the permission unit
     is_oidc=False,

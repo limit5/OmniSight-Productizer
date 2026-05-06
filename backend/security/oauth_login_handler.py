@@ -1,8 +1,8 @@
 """AS.6.1 — OmniSight self-login OAuth backend handler.
 
 Wires the AS.1 OAuth shared library to OmniSight's own login flow:
-the seven ``Sign in with Google / GitHub / Microsoft / Apple / Discord /
-GitLab / Bitbucket`` buttons
+the nine ``Sign in with Google / GitHub / Microsoft / Apple / Discord /
+GitLab / Bitbucket / Slack / Notion`` buttons
 on ``/login`` (and the matching signup path) talk to two HTTP
 endpoints whose handlers live in :mod:`backend.routers.auth`:
 
@@ -124,7 +124,7 @@ Vendor coverage
 ───────────────
 This module handles the AS.6.1 / FX2.D9.7 self-login vendor subset
 (Google / GitHub / Microsoft / Apple / Discord / GitLab /
-Bitbucket). The wider AS.1.3 catalog (Slack / Notion / Salesforce /
+Bitbucket / Slack / Notion). The wider AS.1.3 catalog (Salesforce /
 HubSpot plus already-enabled providers) is intentionally NOT exposed
 at the OmniSight self-login edge until each provider's Settings
 fields + extractor semantics land in a dedicated row. Adding a new
@@ -162,8 +162,8 @@ logger = logging.getLogger(__name__)
 #  Constants — supported providers + cookie envelope
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# The eight AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
-# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack`` literal —
+# The nine AS.6.1 / FX2.D9.7 self-login providers. Mirrors the
+# ``Sign in with Google / GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack / Notion`` literal —
 # extending requires (a) adding the vendor entry to
 # ``backend.security.oauth_vendors``, (b) adding a Settings field
 # pair (``oauth_<vendor>_client_id`` + ``..._client_secret``),
@@ -178,6 +178,7 @@ SUPPORTED_PROVIDERS: frozenset[str] = frozenset({
     "gitlab",
     "bitbucket",
     "slack",
+    "notion",
 })
 
 # In-flight FlowSession cookie name. Single namespace, HttpOnly,
@@ -205,6 +206,11 @@ _COOKIE_SEPARATOR: str = "."
 # exchange that an attacker without our client_secret cannot
 # fabricate. A future hardening row should land JWKS verification.
 _VENDORS_NO_USERINFO_ENDPOINT: frozenset[str] = frozenset({"apple"})
+
+# Notion has no separate userinfo call for this login flow: the
+# access-token response contains ``owner.user`` directly. Immutable
+# literal only; no shared mutable module state.
+_VENDORS_TOKEN_RESPONSE_USERINFO: frozenset[str] = frozenset({"notion"})
 
 # Bitbucket Cloud keeps primary email outside the ``/2.0/user`` payload.
 # The immutable endpoint literal is deterministic across workers; no
@@ -811,6 +817,8 @@ def begin_oauth_login(
 #     operator pre-mints the JWT and stores it in
 #     ``oauth_apple_client_secret``. A future row will land an
 #     auto-mint helper.
+#   * Notion: Basic auth over ``client_id:client_secret`` and no
+#     client credentials in the form body.
 #   * Microsoft / Google: standard form-encoded POST.
 
 _TOKEN_EXCHANGE_HEADERS_BASE: dict[str, str] = {
@@ -848,17 +856,24 @@ async def exchange_authorization_code(
     """
     if not code:
         raise TokenResponseError("authorization code missing")
-    if not code_verifier:
+    if not code_verifier and vendor.provider_id != "notion":
         raise TokenResponseError("code_verifier missing for PKCE exchange")
 
     body = {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": redirect_uri,
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "code_verifier": code_verifier,
     }
+    headers = dict(_TOKEN_EXCHANGE_HEADERS_BASE)
+    if vendor.provider_id == "notion":
+        raw = f"{client_id}:{client_secret}".encode("utf-8")
+        headers["Authorization"] = (
+            "Basic " + base64.b64encode(raw).decode("ascii")
+        )
+    else:
+        body["client_id"] = client_id
+        body["client_secret"] = client_secret
+        body["code_verifier"] = code_verifier
 
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=timeout_s)
@@ -867,7 +882,7 @@ async def exchange_authorization_code(
             resp = await client.post(
                 vendor.token_endpoint,
                 data=body,
-                headers=_TOKEN_EXCHANGE_HEADERS_BASE,
+                headers=headers,
             )
         except httpx.HTTPError as exc:
             raise TokenResponseError(
@@ -1069,6 +1084,7 @@ def extract_user_identity(
     | gitlab    | userinfo["sub"]      | userinfo["email"]     |
     | bitbucket | userinfo["uuid"]     | merged primary email  |
     | slack     | userinfo["sub"]      | userinfo["email"]     |
+    | notion    | token["owner"]["user"]["id"] | owner person email |
     +-----------+----------------------+-----------------------+
 
     Raises :class:`IdentityFieldMissingError` if either field is
@@ -1161,6 +1177,26 @@ def extract_user_identity(
             name = str(
                 userinfo.get("name")
                 or userinfo.get("given_name")
+                or ""
+            ).strip()
+        elif provider == "notion":
+            # Notion returns the installing user in the access token
+            # response under owner.user; no userinfo endpoint exists for
+            # this login flow.
+            owner = userinfo.get("owner")
+            user_obj: Mapping[str, Any] = {}
+            if isinstance(owner, Mapping) and isinstance(owner.get("user"), Mapping):
+                user_obj = owner["user"]
+            person = user_obj.get("person")
+            sub = str(user_obj.get("id") or "").strip()
+            email = str(
+                (person.get("email") if isinstance(person, Mapping) else "")
+                or user_obj.get("email")
+                or ""
+            ).strip()
+            name = str(
+                user_obj.get("name")
+                or userinfo.get("workspace_name")
                 or ""
             ).strip()
         else:  # pragma: no cover — assert_provider_supported guards
@@ -1266,6 +1302,9 @@ async def complete_oauth_login(
             )
         id_token_claims = decode_id_token_claims_unverified(token.id_token)
         userinfo = None
+    elif vendor.provider_id in _VENDORS_TOKEN_RESPONSE_USERINFO:
+        userinfo = dict(token.raw)
+        id_token_claims = None
     else:
         userinfo = await fetch_userinfo(
             vendor=vendor,

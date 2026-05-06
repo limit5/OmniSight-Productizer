@@ -306,6 +306,13 @@ BEHAVIOUR_FIXTURES: Mapping[str, dict[str, Any]] = {
         "plaintext": "slack-access-token-xoxp-like-value",
         "expect": "ok",
     },
+    "round_trip_notion": {
+        "kind": "round_trip",
+        "userId": "user-1",
+        "provider": "notion",
+        "plaintext": "secret_notion_workspace_access_token",
+        "expect": "ok",
+    },
     "provider_case_normalised": {
         "kind": "round_trip",
         "userId": "u1",

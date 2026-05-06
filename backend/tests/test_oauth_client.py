@@ -169,6 +169,19 @@ def test_authorize_url_has_required_params():
     assert "nonce" not in qs
 
 
+def test_authorize_url_omits_empty_scope_param():
+    url = oc.build_authorize_url(
+        authorize_endpoint="https://provider.example/authorize",
+        client_id="cid",
+        redirect_uri="https://app.example/cb",
+        scope=[],
+        state="S",
+        code_challenge="C",
+    )
+    qs = _parse_qs(url)
+    assert "scope" not in qs
+
+
 def test_authorize_url_includes_nonce_when_provided():
     url = oc.build_authorize_url(
         authorize_endpoint="https://provider.example/authorize",

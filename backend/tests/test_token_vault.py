@@ -58,7 +58,7 @@ from backend.security import token_vault as tv
     "provider",
     [
         "google", "github", "apple", "microsoft", "discord", "gitlab",
-        "bitbucket", "slack",
+        "bitbucket", "slack", "notion",
     ],
 )
 def test_round_trip_each_provider(provider: str) -> None:

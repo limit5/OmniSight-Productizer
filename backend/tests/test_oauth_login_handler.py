@@ -1,8 +1,9 @@
 """AS.6.1 — backend.security.oauth_login_handler contract tests.
 
 Validates the OmniSight self-login OAuth backend handler that wires
-the AS.1 OAuth shared library to the eight ``Sign in with Google /
-GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack`` SSO buttons via two HTTP endpoints
+the AS.1 OAuth shared library to the nine ``Sign in with Google /
+GitHub / Microsoft / Apple / Discord / GitLab / Bitbucket / Slack /
+Notion`` SSO buttons via two HTTP endpoints
 (``GET /api/v1/auth/oauth/{vendor}/authorize`` and ``.../callback``)
 mounted in :mod:`backend.routers.auth`.
 
@@ -10,7 +11,7 @@ Test families
 ─────────────
 1. SUPPORTED_PROVIDERS / cookie-envelope constants — pinned values,
    immutable shapes, no module-level mutable container.
-2. assert_provider_supported — accepts the eight AS.6.1 / FX2.D9.7 slugs,
+2. assert_provider_supported — accepts the nine AS.6.1 / FX2.D9.7 slugs,
    rejects unknown / mixed-case slugs, raises the right exception
    class.
 3. lookup_provider_credentials — reads the per-vendor Settings
@@ -24,7 +25,8 @@ Test families
    tamper detection (HMAC mismatch), TTL expiry, malformed
    envelope, version pin.
 7. extract_user_identity — per-vendor field-name dispatch
-   (Google/GitHub/Microsoft/Discord/GitLab/Bitbucket/Slack userinfo + Apple id_token), missing
+   (Google/GitHub/Microsoft/Discord/GitLab/Bitbucket/Slack userinfo,
+   Notion token response + Apple id_token), missing
    fields raise IdentityFieldMissingError, name fallback to
    email-local-part.
 8. exchange_authorization_code — happy path with httpx
@@ -47,7 +49,7 @@ Test families
 13. Module-global state audit (per SOP §1) — no top-level mutable
     container, importing the module is side-effect-free.
 14. Settings field declaration drift guard.
-15. Google/GitHub/Microsoft/Apple/Discord/GitLab/Bitbucket/Slack router integration — mocked authorize → callback →
+15. Google/GitHub/Microsoft/Apple/Discord/GitLab/Bitbucket/Slack/Notion router integration — mocked authorize → callback →
     OmniSight session cookie + DB session creation.
 """
 
@@ -105,6 +107,8 @@ class _FakeSettings:
             "oauth_bitbucket_client_secret": "bb-secret",
             "oauth_slack_client_id": "sl-id",
             "oauth_slack_client_secret": "sl-secret",
+            "oauth_notion_client_id": "nt-id",
+            "oauth_notion_client_secret": "nt-secret",
             "oauth_redirect_base_url": "https://omnisight.example.com",
             "oauth_flow_signing_key": "test-signing-key-with-enough-entropy-1234",
             "decision_bearer": "decision-bearer-fallback-key-x",
@@ -128,7 +132,7 @@ def _mock_transport(handler):
 def test_supported_providers_pinned():
     assert olh.SUPPORTED_PROVIDERS == frozenset({
         "google", "github", "microsoft", "apple", "discord", "gitlab",
-        "bitbucket", "slack",
+        "bitbucket", "slack", "notion",
     })
 
 
@@ -177,7 +181,7 @@ def test_export_count_pinned():
     "p",
     [
         "google", "github", "microsoft", "apple", "discord", "gitlab",
-        "bitbucket", "slack",
+        "bitbucket", "slack", "notion",
     ],
 )
 def test_assert_provider_supported_accepts_supported(p):
@@ -231,6 +235,13 @@ def test_lookup_provider_credentials_slack():
     assert creds.provider == "slack"
     assert creds.client_id == "sl-id"
     assert creds.client_secret == "sl-secret"
+
+
+def test_lookup_provider_credentials_notion():
+    creds = olh.lookup_provider_credentials("notion", settings_obj=_FakeSettings())
+    assert creds.provider == "notion"
+    assert creds.client_id == "nt-id"
+    assert creds.client_secret == "nt-secret"
 
 
 def test_lookup_provider_credentials_raises_on_missing():
@@ -595,6 +606,49 @@ def test_extract_identity_slack_falls_back_to_given_name():
     assert ident.name == "SlackGiven"
 
 
+def test_extract_identity_notion_uses_token_response_owner_user():
+    ident = olh.extract_user_identity(
+        provider="notion",
+        userinfo={
+            "access_token": "nt-at-1",
+            "workspace_name": "OmniSight",
+            "owner": {
+                "type": "user",
+                "user": {
+                    "id": "notion-user-123",
+                    "name": "Notion User",
+                    "person": {"email": "User.Notion@Example.COM"},
+                },
+            },
+        },
+        id_token_claims=None,
+    )
+    assert ident == olh.OAuthUserIdentity(
+        provider="notion",
+        subject="notion-user-123",
+        email="user.notion@example.com",
+        name="Notion User",
+    )
+
+
+def test_extract_identity_notion_falls_back_to_workspace_name():
+    ident = olh.extract_user_identity(
+        provider="notion",
+        userinfo={
+            "workspace_name": "Workspace Name",
+            "owner": {
+                "type": "user",
+                "user": {
+                    "id": "notion-user-124",
+                    "person": {"email": "user@example.com"},
+                },
+            },
+        },
+        id_token_claims=None,
+    )
+    assert ident.name == "Workspace Name"
+
+
 def test_extract_identity_apple_reads_id_token_claims():
     ident = olh.extract_user_identity(
         provider="apple",
@@ -743,6 +797,50 @@ def test_exchange_code_non_json_body_raises():
             http_client=client,
         ))
     _run(client.aclose())
+
+
+def test_exchange_code_notion_uses_basic_auth_without_client_secret_body():
+    from backend.security.oauth_vendors import NOTION
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["auth"] = request.headers.get("authorization")
+        captured["body"] = request.content.decode()
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "nt-at-1",
+                "token_type": "bearer",
+                "workspace_name": "OmniSight",
+                "owner": {
+                    "type": "user",
+                    "user": {
+                        "id": "notion-user-123",
+                        "name": "Notion User",
+                        "person": {"email": "notion@example.com"},
+                    },
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=_mock_transport(handler))
+    token = _run(olh.exchange_authorization_code(
+        vendor=NOTION,
+        code="notion-code",
+        code_verifier="v" * 50,
+        client_id="nt-id",
+        client_secret="nt-secret",
+        redirect_uri="https://x/cb",
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert token.access_token == "nt-at-1"
+    assert captured["auth"] == "Basic bnQtaWQ6bnQtc2VjcmV0"
+    assert "client_id=" not in captured["body"]
+    assert "client_secret=" not in captured["body"]
+    assert "code_verifier=" not in captured["body"]
+    assert "code=notion-code" in captured["body"]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1050,6 +1148,29 @@ def test_begin_oauth_login_slack_authorize_url():
     assert start.flow.nonce is not None
 
 
+def test_begin_oauth_login_notion_authorize_url_omits_scope():
+    """Notion permissions are fixed by the integration; no scope param."""
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="notion", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    parsed = urlparse(start.authorize_url)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "api.notion.com"
+    assert parsed.path == "/v1/oauth/authorize"
+    assert query["client_id"] == ["nt-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/notion/callback"
+    ]
+    assert "scope" not in query
+    assert query["owner"] == ["user"]
+    assert start.flow.provider == "notion"
+    assert start.flow.scope == ()
+    assert start.flow.nonce is None
+
+
 def test_begin_oauth_login_apple_includes_form_post_param():
     """Apple's catalog entry pre-bakes ``response_mode=form_post`` —
     must appear in the authorize URL."""
@@ -1291,6 +1412,51 @@ def test_complete_oauth_login_slack_full_flow():
     assert result.identity.name == "Dana Slack"
     assert result.token.access_token == "at-good"
     assert result.flow.provider == "slack"
+
+
+def test_complete_oauth_login_notion_uses_token_response_identity():
+    s = _FakeSettings()
+    start = olh.begin_oauth_login(
+        provider="notion", base_url="https://omnisight.example.com",
+        settings_obj=s,
+    )
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        assert request.headers["authorization"] == "Basic bnQtaWQ6bnQtc2VjcmV0"
+        return httpx.Response(200, json={
+            "access_token": "notion-access-token",
+            "token_type": "bearer",
+            "workspace_name": "OmniSight",
+            "owner": {
+                "type": "user",
+                "user": {
+                    "id": "notion-user-123",
+                    "name": "Dana Notion",
+                    "person": {"email": "dana.notion@example.com"},
+                },
+            },
+        })
+
+    client = httpx.AsyncClient(transport=_mock_transport(handler))
+    result = _run(olh.complete_oauth_login(
+        provider="notion",
+        flow_cookie=start.flow_cookie,
+        returned_state=start.flow.state,
+        code="auth-code",
+        settings_obj=s,
+        http_client=client,
+    ))
+    _run(client.aclose())
+
+    assert seen == ["https://api.notion.com/v1/oauth/token"]
+    assert result.identity.provider == "notion"
+    assert result.identity.subject == "notion-user-123"
+    assert result.identity.email == "dana.notion@example.com"
+    assert result.identity.name == "Dana Notion"
+    assert result.token.access_token == "notion-access-token"
+    assert result.flow.provider == "notion"
 
 
 def test_complete_oauth_login_apple_uses_id_token_claims():
@@ -2498,6 +2664,171 @@ async def test_slack_oauth_authorize_callback_establishes_session(
     assert user["oidc_provider"] == "slack"
     assert user["oidc_subject"] == "U1234567890"
     assert auth_methods == ["oauth_slack"]
+    assert session["user_id"] == user["id"]
+
+
+@pytest.fixture()
+async def _notion_oauth_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """PG-backed HTTP fixture for the Notion authorize → callback flow.
+
+    Mirrors the Slack OAuth E2E fixture above: install the shared
+    pg_test_pool, pin bootstrap green, set the Notion OAuth Settings
+    singleton knobs, and mock token exchange at the handler boundary.
+    Notion returns owner.user in the token response, so no userinfo
+    mock is installed.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+    monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "false")
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import bootstrap as _boot
+    from backend import config as _cfg
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    monkeypatch.setattr(_cfg.settings, "oauth_notion_client_id", "notion-client-id")
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_notion_client_secret", "notion-client-secret"
+    )
+    monkeypatch.setattr(
+        _cfg.settings, "oauth_redirect_base_url", "https://omnisight.example.com"
+    )
+    monkeypatch.setattr(
+        _cfg.settings,
+        "oauth_flow_signing_key",
+        "notion-oauth-flow-signing-key-2026",
+    )
+
+    async def _fake_exchange_authorization_code(**kwargs):
+        assert kwargs["client_id"] == "notion-client-id"
+        assert kwargs["client_secret"] == "notion-client-secret"
+        assert kwargs["code"] == "notion-auth-code"
+        assert kwargs["redirect_uri"] == (
+            "https://omnisight.example.com/api/v1/auth/oauth/notion/callback"
+        )
+        return oc.TokenSet(
+            access_token="notion-access-token",
+            refresh_token=None,
+            token_type="bearer",
+            expires_at=None,
+            scope=(),
+            id_token=None,
+            raw={
+                "access_token": "notion-access-token",
+                "workspace_name": "OmniSight",
+                "owner": {
+                    "type": "user",
+                    "user": {
+                        "id": "notion-user-123",
+                        "name": "Eve Notion",
+                        "person": {"email": "Eve.Notion@Example.COM"},
+                    },
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        olh, "exchange_authorization_code", _fake_exchange_authorization_code
+    )
+    monkeypatch.setattr(
+        "backend.routers.auth._oauth_log_audit_safe",
+        lambda *args, **kwargs: None,
+    )
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            follow_redirects=False,
+        ) as ac:
+            yield {"client": ac, "pool": pg_test_pool}
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_notion_oauth_authorize_callback_establishes_session(
+    _notion_oauth_http_client,
+):
+    env = _notion_oauth_http_client
+    client = env["client"]
+
+    authorize = await client.get("/api/v1/auth/oauth/notion/authorize")
+
+    assert authorize.status_code == 302
+    assert olh.FLOW_COOKIE_NAME in client.cookies
+    location = authorize.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "api.notion.com"
+    assert parsed.path == "/v1/oauth/authorize"
+    assert query["client_id"] == ["notion-client-id"]
+    assert query["redirect_uri"] == [
+        "https://omnisight.example.com/api/v1/auth/oauth/notion/callback"
+    ]
+    assert "scope" not in query
+    state = query["state"][0]
+
+    callback = await client.get(
+        "/api/v1/auth/oauth/notion/callback",
+        params={"code": "notion-auth-code", "state": state},
+        headers={
+            "cf-connecting-ip": "203.0.113.12",
+            "user-agent": "pytest-notion-oauth",
+        },
+    )
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/"
+    assert olh.FLOW_COOKIE_NAME not in client.cookies
+    assert "omnisight_session" in client.cookies
+    assert "omnisight_csrf" in client.cookies
+
+    async with env["pool"].acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, email, name, role, oidc_provider, oidc_subject, "
+            "auth_methods FROM users WHERE email = $1",
+            "eve.notion@example.com",
+        )
+        assert user is not None
+        session = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE user_id = $1",
+            user["id"],
+        )
+        assert session is not None
+
+    auth_methods = user["auth_methods"]
+    if isinstance(auth_methods, str):
+        auth_methods = json.loads(auth_methods)
+    assert user["name"] == "Eve Notion"
+    assert user["role"] == "viewer"
+    assert user["oidc_provider"] == "notion"
+    assert user["oidc_subject"] == "notion-user-123"
+    assert auth_methods == ["oauth_notion"]
     assert session["user_id"] == user["id"]
 
 

@@ -121,7 +121,7 @@ class TestIsValidMethod:
         "provider",
         [
             "google", "github", "apple", "microsoft", "discord", "gitlab",
-            "bitbucket", "slack",
+            "bitbucket", "slack", "notion",
         ],
     )
     def test_known_oauth_providers_valid(self, provider):

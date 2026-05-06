@@ -685,7 +685,7 @@ class Settings(BaseSettings):
     # operators can rotate one without invalidating the other.
     #
     # Module-global state audit (per implement_phase_step.md SOP §1,
-    # type-1 answer): all 18 fields are immutable Settings literals
+    # type-1 answer): all 20 fields are immutable Settings literals
     # derived once at process boot from env / .env — every uvicorn
     # worker reads the same value from the same source so cross-
     # worker FlowSession cookie verification is deterministic
@@ -706,6 +706,8 @@ class Settings(BaseSettings):
     oauth_bitbucket_client_secret: str = ""
     oauth_slack_client_id: str = ""
     oauth_slack_client_secret: str = ""
+    oauth_notion_client_id: str = ""
+    oauth_notion_client_secret: str = ""
     oauth_redirect_base_url: str = ""
     oauth_flow_signing_key: str = ""
 
