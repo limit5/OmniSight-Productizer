@@ -6146,14 +6146,14 @@ BP.E GraphRAG / Neo4j
 
 #### Phase A — 即刻解鎖（Tier S, ~30 min）
 
-- [ ] FX2.D9.7.0 `backend/auth_baseline.py:74` `AUTH_BASELINE_ALLOWLIST` 加 `/api/v1/auth/oauth/`（仿 OIDC 那條 `/api/v1/auth/oidc/`）— **解所有 11 button 的 401 死路**
+- [x][G] FX2.D9.7.0 `backend/auth_baseline.py:74` `AUTH_BASELINE_ALLOWLIST` 加 `/api/v1/auth/oauth/`（仿 OIDC 那條 `/api/v1/auth/oidc/`）— **解所有 11 button 的 401 死路**
 
 #### Phase B — 4 個 already-wired provider 端到端驗證（Tier M, 1 day）
 
-- [ ] FX2.D9.7.1 Google end-to-end test：`OMNISIGHT_OAUTH_GOOGLE_CLIENT_ID/SECRET` 配置文件化 + integration test（模擬 authorize → callback → session 建立）
-- [ ] FX2.D9.7.2 GitHub end-to-end test 同上
-- [ ] FX2.D9.7.3 Microsoft end-to-end test 同上
-- [ ] FX2.D9.7.4 Apple end-to-end test（含 id_token JWS unverify-decode quirk + 未來 JWKS verify follow-up TODO）
+- [x][G] FX2.D9.7.1 Google end-to-end test：`OMNISIGHT_OAUTH_GOOGLE_CLIENT_ID/SECRET` 配置文件化 + integration test（模擬 authorize → callback → session 建立）
+- [x][G] FX2.D9.7.2 GitHub end-to-end test 同上
+- [x][G] FX2.D9.7.3 Microsoft end-to-end test 同上
+- [x][G] FX2.D9.7.4 Apple end-to-end test（含 id_token JWS unverify-decode quirk + 未來 JWKS verify follow-up TODO）
 
 #### Phase C — 7 個 new provider backend 實作（Tier L, ~5-7 days）
 
@@ -6166,9 +6166,9 @@ BP.E GraphRAG / Neo4j
 6. userinfo extractor（subject / email / name 欄位映射；vendor-quirks 處理）
 7. ~10 contract tests（authorize URL build / token exchange / userinfo parse / error 路徑）
 
-- [ ] FX2.D9.7.5 **Discord** — 標準 OAuth2，scope `identify email`，userinfo `https://discord.com/api/users/@me`，subject = `id` field（snowflake string）
-- [ ] FX2.D9.7.6 **GitLab** — 標準 OAuth2 + OIDC，scope `read_user openid email profile`，userinfo `/oauth/userinfo`，subject = `sub`
-- [ ] FX2.D9.7.7 **Bitbucket** — 標準 OAuth2，scope `account email`，userinfo `https://api.bitbucket.org/2.0/user` + 額外 fetch `/user/emails` 拿主 email（**vendor quirk**：email 不在 user response 內）
+- [x][G] FX2.D9.7.5 **Discord** — 標準 OAuth2，scope `identify email`，userinfo `https://discord.com/api/users/@me`，subject = `id` field（snowflake string）
+- [x][G] FX2.D9.7.6 **GitLab** — 標準 OAuth2 + OIDC，scope `read_user openid email profile`，userinfo `/oauth/userinfo`，subject = `sub`
+- [~][G] FX2.D9.7.7 **Bitbucket** — 標準 OAuth2，scope `account email`，userinfo `https://api.bitbucket.org/2.0/user` + 額外 fetch `/user/emails` 拿主 email（**vendor quirk**：email 不在 user response 內）
 - [ ] FX2.D9.7.8 **Slack** — OAuth v2，scope `openid email profile`，**vendor quirk**：openid endpoint 是 `https://slack.com/api/openid.connect.userInfo`，response shape 跟標準不同（`sub` / `email` 在 root 沒 nested）
 - [ ] FX2.D9.7.9 **Notion** — OAuth 2.0，**vendor quirk**：access token response 直接含 user info（不需獨立 userinfo call）；token endpoint 用 Basic auth（client_id:client_secret base64）；scope 在授權時固定（沒 scope 參數）
 - [ ] FX2.D9.7.10 **Salesforce** — OAuth2 + OIDC，scope `id email profile openid`，userinfo `https://login.salesforce.com/services/oauth2/userinfo`（or sandbox URL），subject = `user_id`，**vendor quirk**：production / sandbox / community 分流 endpoint
@@ -6202,6 +6202,157 @@ BP.E GraphRAG / Neo4j
 ### FX2.W4 — COSMETIC（~50 items, rolling）
 
 > 沿 sub-epic-as-needed pattern 跑批；codex bulk-cleanup-friendly。
+
+---
+
+## 🅼🅿 Priority MP — Multi-Provider Subscription Orchestrator + Cost Calculator（**v0.4.0 milestone 必須**）
+
+> **背景**：2026-05-06 拍板 — 4 vendor (Anthropic / OpenAI / Google / xAI) subscription CLI 全接 + cap-aware switching + cost calculator showing time vs $ tradeoff。設計 ADR 0007、MVP 2 vendor (Anthropic + OpenAI)、預留 Gemini + xAI structural slot for v0.5.0+。
+>
+> **UI 流程 v3 mixed**：first-time (C) 2-step wizard → (A) Constellation + 6 overlay tooltips → 之後預設 (A) → (B) War Room toggle for power user。
+>
+> **時程**：4 週內 ship to v0.4.0 (2026-06-02 cut)。詳見 `docs/adr/0007-multi-provider-subscription-orchestrator.md`。
+
+### MP.W1 — Backend orchestrator + quota tracker（Week 1, ~3 day）
+
+- [ ] MP.W1.1 `backend/agents/provider_orchestrator.py` — central registry of `ProviderAdapter` + routing + circuit breaker
+- [ ] MP.W1.2 `backend/agents/provider_quota_tracker.py` — 5h-rolling + weekly cap state per provider, persists to PG, multi-worker safe via `pg_advisory_xact_lock`
+- [ ] MP.W1.3 alembic 0198 — `provider_quota_state` table（`provider / rolling_5h_tokens / weekly_tokens / last_reset_at / last_cap_hit_at / circuit_state` per row）
+- [ ] MP.W1.4 `backend/agents/provider_adapters/anthropic_subscription.py` — wraps `claude` CLI invocation + cap signal parsing (`usage_exceeded` 429 + retry-after)
+- [ ] MP.W1.5 `backend/agents/provider_adapters/openai_subscription.py` — wraps `codex` CLI invocation + `rate_limit_exceeded` 429 + reset_at
+- [ ] MP.W1.6 `backend/agents/routing_policy.py` — choose_provider() based on (task labels, quota state, user preferences); on_cap_hit() for task-boundary switch
+- [ ] MP.W1.7 `backend/tests/test_provider_orchestrator.py` ~30 test (registry / routing / cap-hit / circuit breaker)
+- [ ] MP.W1.8 `backend/tests/test_provider_quota_tracker.py` ~20 test (5h-window / weekly accumulation / multi-worker race)
+- [ ] MP.W1.9 `backend/tests/test_alembic_0198_provider_quota_state.py` ~10 test (schema / RLS / FK)
+
+### MP.W2 — Cost estimator + token prediction（Week 1, ~2 day）
+
+- [ ] MP.W2.1 `backend/agents/cost_estimator.py` — `predict_token_count(task_spec) -> int` + `predict_wall_time(task, provider) -> seconds` + `predict_cost(task, provider) -> USD`
+- [ ] MP.W2.2 Initial baseline data — seed from this session's 13-epic average per `agent_class` (subscription-codex / api-anthropic / api-openai)
+- [ ] MP.W2.3 Per-tenant continuous calibration — adjust prediction based on actual outcome (drift > 50% → log warning)
+- [ ] MP.W2.4 `GET /runtime/cost-estimate` REST endpoint — input task batch + provider preference, output predicted cost + time + breakdown per task
+- [ ] MP.W2.5 `backend/tests/test_cost_estimator.py` ~20 test (prediction accuracy / drift detection / tenant calibration)
+
+### MP.W3 — Anthropic + OpenAI subscription wiring (existing runners 接入)（Week 1, ~2 day）
+
+- [ ] MP.W3.1 `auto-runner-anthropic.py` 啟動時讀 quota tracker → 報告當前可用 token / 預估能跑多少 item
+- [ ] MP.W3.2 `auto-runner-codex.py` 同樣升級（已存在的 runner，+~30 LOC quota integration）
+- [ ] MP.W3.3 `auto-runner-multi.py` (NEW) — 替代單一 provider runner，用 orchestrator 動態派 task
+- [ ] MP.W3.4 Provider 啟動 health check — `claude` / `codex` CLI 是否安裝、subscription 是否 active
+- [ ] MP.W3.5 `OMNISIGHT_MP_ENABLED=true` env knob (WP.7 feature flag) — 切回 single-runner 兼容過渡
+
+### MP.W4 — Provider Constellation (A) UI（Week 2, ~3 day）
+
+- [ ] MP.W4.1 `components/omnisight/multi-provider-orchestrator/ProviderConstellation.tsx` — main view 框
+- [ ] MP.W4.2 `components/omnisight/multi-provider-orchestrator/ProviderEnergySphere.tsx` — extends OAuthEnergySphere 加 quota viz (size / color / pulse)
+- [ ] MP.W4.3 `components/omnisight/multi-provider-orchestrator/ProjectCore.tsx` — 中央 node 顯示 task summary + total estimate
+- [ ] MP.W4.4 `components/omnisight/multi-provider-orchestrator/ConnectionBeam.tsx` — animated beam between sphere ↔ core; 隨 slider 變化 reflow
+- [ ] MP.W4.5 `components/omnisight/multi-provider-orchestrator/TradeoffSlider.tsx` — 底部 slider; live update spheres on drag
+- [ ] MP.W4.6 `components/omnisight/multi-provider-orchestrator/QuotaPulse.tsx` — sphere pulse animation respect prefers-reduced-motion
+- [ ] MP.W4.7 `components/omnisight/multi-provider-orchestrator/CostBreakdownDrawer.tsx` — click sphere → 展開 per-task allocation 細節
+- [ ] MP.W4.8 `test/components/provider-constellation.test.tsx` ~15 vitest (interaction / accessibility / responsive)
+
+### MP.W5 — Onboarding (C wizard 2-step + A overlay tooltips)（Week 2, ~2 day）
+
+- [ ] MP.W5.1 `components/omnisight/multi-provider-orchestrator/OnboardingWizardStep1.tsx` — Welcome step (4 spheres orbit-converge animation)
+- [ ] MP.W5.2 `components/omnisight/multi-provider-orchestrator/OnboardingWizardStep2.tsx` — "Open the workshop" step (spheres fly to corners, fade into A)
+- [ ] MP.W5.3 `components/omnisight/multi-provider-orchestrator/OnboardingTour.tsx` — 6 spotlight tooltips overlay on (A) elements (sphere / color / core / slider / start)
+- [ ] MP.W5.4 `seen_mp_tour` user_preference flag (Q.2 infra reuse) + tour completion handler
+- [ ] MP.W5.5 Skip path — any time `[Skip Tour]` → flag flip, drop overlay, continue at (A) bare
+- [ ] MP.W5.6 `test/components/onboarding-tour.test.tsx` ~10 test (skip path / step transition / tooltip visibility)
+
+### MP.W6 — War Room (B) power-user toggle（Week 2, ~2 day）
+
+- [ ] MP.W6.1 `components/omnisight/multi-provider-orchestrator/WarRoom.tsx` — 4 detachable panel container
+- [ ] MP.W6.2 `components/omnisight/multi-provider-orchestrator/QuotaTrackerPanel.tsx` — full quota state with reset countdown
+- [ ] MP.W6.3 `components/omnisight/multi-provider-orchestrator/CostCalculatorPanel.tsx` — per-task breakdown
+- [ ] MP.W6.4 `components/omnisight/multi-provider-orchestrator/TasksBacklogPanel.tsx` — task selection checkboxes
+- [ ] MP.W6.5 `components/omnisight/multi-provider-orchestrator/TradeoffSliderPanel.tsx` — same slider (B) variant with finer-grained config
+- [ ] MP.W6.6 Panel drag/drop + minimize/maximize + connection lines between related panels
+- [ ] MP.W6.7 `user_preferences.mp_b_layout` persists panel positions across session
+- [ ] MP.W6.8 Mobile <1024px → toast "War Room desktop only" + auto-redirect to (A)
+- [ ] MP.W6.9 `test/components/war-room.test.tsx` ~12 test
+
+### MP.W7 — Dashboard trigger button + modal integration（Week 2, ~1 day）
+
+- [ ] MP.W7.1 `app/page.tsx` — `<Button onClick={openMP}>⚡ Plan with All Providers</Button>` placement
+- [ ] MP.W7.2 Modal container with backdrop blur (`inset-2 backdrop-blur-2xl`); branch on seen_mp_tour
+- [ ] MP.W7.3 Close + Cancel + Start handlers
+- [ ] MP.W7.4 Integration with `useEngine()` SSE stream for live quota updates
+
+### MP.W8 — SSE real-time quota update channel（Week 3, ~1 day）
+
+- [ ] MP.W8.1 `backend/events.py::emit_provider_quota_update(provider, ...)` — broadcast_scope="user" per-tenant
+- [ ] MP.W8.2 `backend/events.py::emit_provider_allocation_preview(...)` — when slider drags, emit preview reflow
+- [ ] MP.W8.3 Frontend `ProviderConstellation` subscribes via existing useEngine SSE
+- [ ] MP.W8.4 ~5 SSE tests for new event types
+
+### MP.W9 — BP.F + BP.C integration（Week 3, ~1 day）
+
+- [ ] MP.W9.1 Routing policy reads BP.F Guild model mapping + provider matrix
+- [ ] MP.W9.2 Cost estimator uses BP.C T-shirt size as feature input
+- [ ] MP.W9.3 Tier S/M/L/X (ADR 0005) feeds provider preference (Tier S → cheapest; Tier X → highest reliability)
+- [ ] MP.W9.4 Integration tests covering BP.F+BP.C+MP routing
+
+### MP.W10 — Z-series rate-limit header reuse（Week 3, ~0.5 day）
+
+- [ ] MP.W10.1 Reuse Z.1 `_PROVIDER_RATELIMIT_HEADERS` mapping for cap detection
+- [ ] MP.W10.2 SharedKV("provider_ratelimit") feeds quota tracker as fallback signal source
+- [ ] MP.W10.3 Drift-guard: rate-limit header keys must align between Z.1 + MP
+
+### MP.W11 — Help menu replay tour（Week 3, ~0.5 day）
+
+- [ ] MP.W11.1 Add "Replay multi-provider tour" entry in Help dropdown
+- [ ] MP.W11.2 Click → reset `seen_mp_tour=false` → next openMP triggers (C) wizard again
+
+### MP.W12 — Mobile responsive degradation（Week 3, ~1 day）
+
+- [ ] MP.W12.1 (A) Constellation mobile layout — spheres become vertical list with quota bars
+- [ ] MP.W12.2 Slider stays at bottom; full-height modal
+- [ ] MP.W12.3 (B) War Room mobile → toast + redirect to (A)
+- [ ] MP.W12.4 (C) onboarding wizard mobile-aware (full screen panels)
+- [ ] MP.W12.5 Playwright mobile snapshot test
+
+### MP.W13 — Gemini structural slot（Week 4, ~0.5 day, placeholder only）
+
+- [ ] MP.W13.1 `backend/agents/provider_adapters/gemini_subscription.py` — adapter shell with `NotImplementedError` raises + capability matrix entry
+- [ ] MP.W13.2 Frontend gray-out sphere with "Coming v0.5.0" tooltip
+- [ ] MP.W13.3 Doc 寫進 `docs/operations/multi-provider-setup.md` (when v0.5.0 lands what to enable)
+
+### MP.W14 — xAI structural slot（Week 4, ~0.5 day, placeholder only）
+
+- [ ] MP.W14.1 同上但 Grok adapter shell
+- [ ] MP.W14.2 Frontend "Coming v0.6.0" tooltip
+- [ ] MP.W14.3 Doc cross-reference
+
+### MP.W15 — Tests + drift guards（Week 4, ~1 day）
+
+- [ ] MP.W15.1 Drift guard: `lib/providers.ts` 4-vendor list ⊆ `backend/agents/provider_orchestrator.py` registry
+- [ ] MP.W15.2 Drift guard: vendor capability matrix in ADR 0007 ⊆ `routing_policy.py` consumed labels
+- [ ] MP.W15.3 Cap-hit integration test — simulate Anthropic 429 → orchestrator switches to OpenAI
+- [ ] MP.W15.4 Cost estimator drift test — prediction-vs-actual divergence > 50% triggers warning log
+- [ ] MP.W15.5 Onboarding tour skip-rate audit — log skip events + alert if > 50% of first-time users skip
+
+### MP.W16 — docs/operations/multi-provider-setup.md（Week 4, ~0.5 day）
+
+- [ ] MP.W16.1 Operator setup guide for Anthropic Pro/Max + OpenAI Codex Plus/Pro
+- [ ] MP.W16.2 Subscription account expiry monitoring path
+- [ ] MP.W16.3 Cap-hit recovery runbook
+- [ ] MP.W16.4 Cost estimator calibration walkthrough (per-tenant)
+- [ ] MP.W16.5 v0.5.0 + v0.6.0 enablement path (Gemini / xAI when ready)
+
+### MP — Capability assignment
+
+| Wave | agent_class | 為什麼 |
+|---|---|---|
+| W1, W2, W3 backend | api-anthropic | high blast radius (orchestrator core + DB schema)，1M context 看完 BP.F + BP.C + Z 整套 reuse |
+| W4 Constellation | api-anthropic | animation logic + sphere physics 複雜，需大 context 避免 react re-render bug |
+| W5 onboarding | subscription-codex | 6 個 tooltip + 2 wizard step 是 well-bounded |
+| W6 War Room | subscription-codex | 4 panel detachable，DnD 已成熟 lib |
+| W7-W12 | subscription-codex | 各自 well-bounded |
+| W13-W14 | subscription-codex | placeholder shell |
+| W15 tests | subscription-codex | drift guard pattern 已成熟 |
+| W16 docs | subscription-codex | docs |
 
 ---
 
