@@ -331,6 +331,32 @@ class PostgresCostStore:
                 estimate.task_type,
             )
 
+    async def get_estimate(self, call_id: str) -> CostEstimate | None:
+        async with _acquire(self._factory) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT call_id, model, is_batch,
+                       input_tokens_estimated, output_tokens_estimated,
+                       cost_usd_estimated, workspace, priority, task_type
+                FROM cost_estimates
+                WHERE call_id = $1
+                """,
+                call_id,
+            )
+        if row is None:
+            return None
+        return CostEstimate(
+            call_id=row["call_id"],
+            model=row["model"],
+            is_batch=row["is_batch"],
+            input_tokens_estimated=row["input_tokens_estimated"],
+            output_tokens_estimated=row["output_tokens_estimated"],
+            cost_usd_estimated=row["cost_usd_estimated"],
+            workspace=row["workspace"],
+            priority=row["priority"],
+            task_type=row["task_type"],
+        )
+
     async def update_actual(self, actual: CostActual) -> None:
         async with _acquire(self._factory) as conn:
             await conn.execute(

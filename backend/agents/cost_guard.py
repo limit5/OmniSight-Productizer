@@ -38,11 +38,16 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Literal, Protocol
 
 logger = logging.getLogger(__name__)
+
+
+_DRIFT_WARNING_THRESHOLD = 0.50
+_CALIBRATION_ALPHA = 0.20
+_DEFAULT_TENANT = "global"
 
 
 # ─── Pricing (module-const) ──────────────────────────────────────
@@ -168,6 +173,18 @@ class CostActual:
     cost_usd: float = 0.0
 
 
+@dataclass(frozen=True)
+class CostCalibration:
+    """Per-tenant rolling prediction multipliers."""
+
+    tenant: str
+    input_token_multiplier: float = 1.0
+    output_token_multiplier: float = 1.0
+    cost_multiplier: float = 1.0
+    samples: int = 0
+    updated_at: datetime | None = None
+
+
 def estimate_cost(
     *,
     model: str,
@@ -283,6 +300,7 @@ class CostStore(Protocol):
     """
 
     async def save_estimate(self, estimate: CostEstimate) -> None: ...
+    async def get_estimate(self, call_id: str) -> CostEstimate | None: ...
     async def update_actual(self, actual: CostActual) -> None: ...
     async def spend_in_period(
         self,
@@ -322,6 +340,9 @@ class InMemoryCostStore:
 
     async def save_estimate(self, estimate: CostEstimate) -> None:
         self._estimates[estimate.call_id] = estimate
+
+    async def get_estimate(self, call_id: str) -> CostEstimate | None:
+        return self._estimates.get(call_id)
 
     async def update_actual(self, actual: CostActual) -> None:
         self._actuals[actual.call_id] = actual
@@ -433,6 +454,7 @@ class CostGuard:
     ) -> None:
         self.store = store or InMemoryCostStore()
         self.alert_sink = alert_sink
+        self._calibrations: dict[str, CostCalibration] = {}
 
     async def configure_budget(
         self,
@@ -454,10 +476,61 @@ class CostGuard:
         return cap
 
     async def record_estimate(self, estimate: CostEstimate) -> None:
-        await self.store.save_estimate(estimate)
+        await self.store.save_estimate(self.apply_calibration(estimate))
 
     async def record_actual(self, actual: CostActual) -> None:
+        estimate = await self.store.get_estimate(actual.call_id)
         await self.store.update_actual(actual)
+        if estimate is not None:
+            self._record_calibration(estimate, actual)
+
+    def estimate_cost(
+        self,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        is_batch: bool = False,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        call_id: str | None = None,
+        workspace: str | None = None,
+        priority: str | None = None,
+        task_type: str | None = None,
+    ) -> CostEstimate:
+        """Build a tenant-calibrated CostEstimate from token counts."""
+        estimate = estimate_cost(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            is_batch=is_batch,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            call_id=call_id,
+            workspace=workspace,
+            priority=priority,
+            task_type=task_type,
+        )
+        return self.apply_calibration(estimate)
+
+    def apply_calibration(self, estimate: CostEstimate) -> CostEstimate:
+        """Return ``estimate`` adjusted by this tenant's rolling calibration."""
+        calibration = self._calibrations.get(_tenant_for_estimate(estimate))
+        if calibration is None:
+            return estimate
+        return replace(
+            estimate,
+            input_tokens_estimated=_scale_tokens(
+                estimate.input_tokens_estimated,
+                calibration.input_token_multiplier,
+            ),
+            output_tokens_estimated=_scale_tokens(
+                estimate.output_tokens_estimated,
+                calibration.output_token_multiplier,
+            ),
+            cost_usd_estimated=estimate.cost_usd_estimated
+            * calibration.cost_multiplier,
+        )
 
     async def check(
         self,
@@ -569,3 +642,87 @@ class CostGuard:
         self, scope: ScopeKey | None = None, *, since: datetime | None = None
     ) -> list[BudgetAlert]:
         return await self.store.list_alerts(scope, since=since)
+
+    def calibration_for(self, tenant: str) -> CostCalibration | None:
+        """Return the current calibration for one tenant, if observed."""
+        return self._calibrations.get(_normalise_tenant(tenant))
+
+    def _record_calibration(
+        self, estimate: CostEstimate, actual: CostActual
+    ) -> None:
+        tenant = _tenant_for_estimate(estimate)
+        now = datetime.now(timezone.utc)
+        prior = self._calibrations.get(tenant) or CostCalibration(tenant=tenant)
+        updated = CostCalibration(
+            tenant=tenant,
+            input_token_multiplier=_update_multiplier(
+                prior.input_token_multiplier,
+                estimate.input_tokens_estimated,
+                actual.input_tokens,
+            ),
+            output_token_multiplier=_update_multiplier(
+                prior.output_token_multiplier,
+                estimate.output_tokens_estimated,
+                actual.output_tokens,
+            ),
+            cost_multiplier=_update_multiplier(
+                prior.cost_multiplier,
+                estimate.cost_usd_estimated,
+                actual.cost_usd,
+            ),
+            samples=prior.samples + 1,
+            updated_at=now,
+        )
+        self._calibrations[tenant] = updated
+
+        drift = max(
+            _drift_ratio(estimate.input_tokens_estimated, actual.input_tokens),
+            _drift_ratio(estimate.output_tokens_estimated, actual.output_tokens),
+            _drift_ratio(estimate.cost_usd_estimated, actual.cost_usd),
+        )
+        if drift > _DRIFT_WARNING_THRESHOLD:
+            logger.warning(
+                "cost prediction drift >50%% for tenant=%s call_id=%s "
+                "drift=%.1f%% estimated_cost=%.6f actual_cost=%.6f "
+                "cost_multiplier=%.3f",
+                tenant,
+                actual.call_id,
+                drift * 100.0,
+                estimate.cost_usd_estimated,
+                actual.cost_usd,
+                updated.cost_multiplier,
+            )
+
+
+def _normalise_tenant(tenant: str | None) -> str:
+    out = (tenant or "").strip()
+    return out or _DEFAULT_TENANT
+
+
+def _tenant_for_estimate(estimate: CostEstimate) -> str:
+    return _normalise_tenant(estimate.workspace)
+
+
+def _scale_tokens(tokens: int, multiplier: float) -> int:
+    if tokens <= 0:
+        return 0
+    return max(int(round(tokens * multiplier)), 1)
+
+
+def _drift_ratio(estimated: float, actual: float) -> float:
+    if estimated <= 0:
+        return 0.0 if actual <= 0 else 1.0
+    return abs(actual - estimated) / estimated
+
+
+def _update_multiplier(
+    current: float,
+    estimated: float,
+    actual: float,
+) -> float:
+    if estimated <= 0 or actual < 0:
+        return current
+    observed = actual / estimated
+    return (current * (1.0 - _CALIBRATION_ALPHA)) + (
+        observed * _CALIBRATION_ALPHA
+    )
