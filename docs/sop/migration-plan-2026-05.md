@@ -177,14 +177,20 @@ The 1-week observation window is the key signal — if no regressions surface in
 ### Phase 2 entry gate (must satisfy)
 
 - [ ] Phase 1 1-week observation window passed without regression
-- [ ] GitLab `external_url` BLOCKER fixed
-- [ ] HTTPS enabled on GitLab (Cloudflare Tunnel or Let's Encrypt + reverse proxy)
+- [x] GitLab `external_url` BLOCKER fixed (Stage 1+2 complete 2026-05-05)
+- [x] HTTPS enabled on GitLab (Synology DSM Reverse Proxy + Sectigo wildcard cert, port 49156, 2026-05-05)
+- [x] HTTPS enabled on Gerrit (same Synology DSM RP setup, port 29420, 2026-05-05)
+- [x] Gerrit project `omnisight/OmniSight-Productizer` created with ACL + replication wired (2026-05-06)
+- [x] `local → Gerrit → GitLab → GitHub` 3-endpoint replication chain validated end-to-end (2026-05-06; both `develop` and `main` branches at byte-equal SHA)
 
 ### Step 2.1 — GitLab repo flip to primary
 
-- [ ] All 5 branches mirrored from GitHub to GitLab (initial sync)
-- [ ] GitLab repo settings: protected branches mirror Phase 1 config
-- [ ] Operator + bots have correct access (Owner / Maintainer / Developer)
+- [x] GitLab project `omnisight/OmniSight-Productizer` created (id 26, private, 2026-05-06)
+- [x] `develop` branch seeded from local main → Gerrit → GitLab via replication push (2026-05-06)
+- [x] `main` branch seeded directly from local (2026-05-06; aligned with develop SHA)
+- [ ] GitLab repo settings: protected branches mirror Phase 1 config (deferred — operator decides timing)
+- [ ] Local `origin` remote re-pointed from GitHub → GitLab (deferred — see L11 in `lessons-learned.md`)
+- [x] Operator (sora) + bots (claude-bot, codex-bot) have correct access — Maintainer on group, ACL on Gerrit project
 
 ### Step 2.2 — CI migration to GitLab CI
 
@@ -194,16 +200,34 @@ The 1-week observation window is the key signal — if no regressions surface in
 
 ### Step 2.3 — GitHub mirror push setup
 
-- [ ] GitLab repo settings → Mirroring → Push to GitHub
-- [ ] Schedule: every push (real-time mirror)
-- [ ] Verify: `git push origin develop` triggers GitHub update within 60s
-- [ ] PR auto-close webhook on GitHub mirror (any PR opened gets closed with link to GitLab equivalent)
+- [x] GitLab repo settings → Mirroring → Push to GitHub configured (2026-05-06)
+- [x] Schedule: every push + 5 min default cron — verified end-to-end via Change #22 submit at 13:16, GitHub `develop` matched within seconds
+- [x] Verify: Gerrit submit Change #22 → Gerrit replication → GitLab → GitHub within 30s (2026-05-06 smoke validation)
+- [ ] PR auto-close webhook on GitHub mirror (any PR opened gets closed with link to GitLab equivalent) — Phase 2 follow-up
 
 ### Step 2.4 — Validation
 
-- [ ] CI gates merge (red CI → merge blocked)
-- [ ] Mirror lag monitored (Prometheus alert if > 5 min lag)
-- [ ] Backup bundle from GitLab (replaces GitHub-as-backup)
+- [x] End-to-end smoke test passed (2026-05-06): cross-bot review (codex-bot +1) + sora +2 + Submit on Change #22 propagated to all 3 endpoints
+- [ ] CI gates merge (red CI → merge blocked) — depends on Step 2.2
+- [ ] Mirror lag monitored (Prometheus alert if > 5 min lag) — Phase 2 follow-up
+- [ ] Backup bundle from GitLab (replaces GitHub-as-backup) — Phase 2 follow-up
+
+### Phase 2 status (2026-05-06)
+
+**Entry gate**: 5/6 items ✓ (only Phase 1 1-week observation pending — observation window goes to 2026-05-12).
+
+**Step 2.1 Repo flip**: 4/6 items ✓; deferred items are operator-timing decisions, not technical blockers.
+
+**Step 2.3 Mirror**: 3/4 items ✓; PR auto-close webhook is Phase 2 follow-up.
+
+**Step 2.4 Validation**: smoke test ✓; CI / monitoring / backup are Phase 2 follow-up.
+
+**Operator-pending items**:
+- Set Phase 2 cutover date (origin remote flip GitHub → GitLab)
+- Decide CI migration ordering (Step 2.2)
+- Set up PR auto-close webhook + Prometheus mirror-lag alert + GitLab backup bundle
+
+These are all soft-deadline items; the *technical* readiness is achieved as of 2026-05-06.
 
 ---
 
