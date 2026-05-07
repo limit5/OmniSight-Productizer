@@ -128,6 +128,8 @@ async def create_task(
         issue_url=body.issue_url,
         acceptance_criteria=body.acceptance_criteria,
         labels=body.labels,
+        rpg_campaign_id=body.rpg_campaign_id,
+        rpg_campaign_title=body.rpg_campaign_title,
     )
     await _persist(task, conn)
     # Q.3-SUB-2 (#297): broadcast create so other devices append without

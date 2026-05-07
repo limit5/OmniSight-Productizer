@@ -237,6 +237,9 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("tasks", sa.Column("last_external_sync_at", _t())),
         # Pipeline linkage (Phase 46)
         ("tasks", sa.Column("npi_phase_id", _t())),
+        # RPG.W20.1 -- multi-task campaign grouping with narrative title.
+        ("tasks", sa.Column("rpg_campaign_id", _t())),
+        ("tasks", sa.Column("rpg_campaign_title", _t())),
         ("notifications", sa.Column("dispatch_status", _t(), nullable=False, server_default="pending")),
         ("notifications", sa.Column("send_attempts", _i(), nullable=False, server_default=_txt("0"))),
         ("notifications", sa.Column("last_error", _t())),
@@ -663,7 +666,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     external_issue_id   TEXT,
     issue_url           TEXT,
     acceptance_criteria TEXT,
-    labels              TEXT NOT NULL DEFAULT '[]'
+    labels              TEXT NOT NULL DEFAULT '[]',
+    rpg_campaign_id     TEXT,
+    rpg_campaign_title  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_comments (
@@ -2469,8 +2474,8 @@ async def get_task(conn, task_id: str) -> dict | None:
 
 
 async def upsert_task(conn, data: dict) -> None:
-    # Phase-3-Runtime-v2 SP-3.2: native asyncpg — 21 positional
-    # placeholders ($1..$21), ON CONFLICT DO UPDATE using EXCLUDED.*.
+    # Phase-3-Runtime-v2 SP-3.2: native asyncpg — positional
+    # placeholders, ON CONFLICT DO UPDATE using EXCLUDED.*.
     # Pool auto-commits each statement outside an explicit transaction
     # block — no explicit commit needed.
     #
@@ -2484,11 +2489,13 @@ async def upsert_task(conn, data: dict) -> None:
         """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id,
              created_at, completed_at, ai_analysis, suggested_agent_type, suggested_sub_type,
              parent_task_id, child_task_ids, external_issue_id, issue_url, acceptance_criteria,
-             labels, depends_on, external_issue_platform, last_external_sync_at, npi_phase_id)
+             labels, depends_on, external_issue_platform, last_external_sync_at, npi_phase_id,
+             rpg_campaign_id, rpg_campaign_title)
            VALUES ($1, $2, $3, $4, $5, $6,
                    $7, $8, $9, $10, $11,
                    $12, $13, $14, $15, $16,
-                   $17, $18, $19, $20, $21)
+                   $17, $18, $19, $20, $21,
+                   $22, $23)
            ON CONFLICT (id) DO UPDATE SET
              title=EXCLUDED.title, description=EXCLUDED.description, priority=EXCLUDED.priority,
              status=EXCLUDED.status, assigned_agent_id=EXCLUDED.assigned_agent_id,
@@ -2498,7 +2505,9 @@ async def upsert_task(conn, data: dict) -> None:
              external_issue_id=EXCLUDED.external_issue_id, issue_url=EXCLUDED.issue_url,
              acceptance_criteria=EXCLUDED.acceptance_criteria, labels=EXCLUDED.labels,
              depends_on=EXCLUDED.depends_on, external_issue_platform=EXCLUDED.external_issue_platform,
-             last_external_sync_at=EXCLUDED.last_external_sync_at, npi_phase_id=EXCLUDED.npi_phase_id
+             last_external_sync_at=EXCLUDED.last_external_sync_at, npi_phase_id=EXCLUDED.npi_phase_id,
+             rpg_campaign_id=EXCLUDED.rpg_campaign_id,
+             rpg_campaign_title=EXCLUDED.rpg_campaign_title
         """,
         data["id"],
         data["title"],
@@ -2521,6 +2530,8 @@ async def upsert_task(conn, data: dict) -> None:
         data.get("external_issue_platform"),
         data.get("last_external_sync_at"),
         data.get("npi_phase_id"),
+        data.get("rpg_campaign_id"),
+        data.get("rpg_campaign_title"),
     )
 
 
