@@ -574,6 +574,40 @@ def parse_prerequisites(description: str) -> dict[str, list]:
 
 # ── Pre-pickup check (combined live-state + mutex + blocker) ──────
 
+# Statuses that mean a ticket currently *holds* its mutex_with resources.
+# Anything else (TODO, Approved, Published, Archived, ...) is "released" —
+# pickup of a sibling sharing the same mutex:<path> may proceed.
+MUTEX_HOLDING_STATUSES = ("In Progress", "Under Review")
+
+
+def find_mutex_holders(
+    client: "DispatchClient",
+    mutex_labels: list[str],
+    exclude_key: str,
+) -> list[dict]:
+    """Return JIRA issues currently holding any of ``mutex_labels``.
+
+    "Holding" = status in :data:`MUTEX_HOLDING_STATUSES`. Used by
+    :func:`pre_pickup_ok` (OP-687) to enforce that two agents never
+    concurrently work tickets sharing a ``mutex:<resource-id>``.
+    """
+    if not mutex_labels:
+        return []
+    label_clause = " OR ".join(f'labels = "{m}"' for m in mutex_labels)
+    status_clause = ", ".join(f'"{s}"' for s in MUTEX_HOLDING_STATUSES)
+    jql = (
+        f'project = "{client.project_key}" '
+        f'AND status in ({status_clause}) '
+        f'AND ({label_clause}) '
+        f'AND key != "{exclude_key}"'
+    )
+    resp = _request(client, "POST", "/search/jql", {
+        "jql": jql,
+        "fields": ["status", "labels"],
+        "maxResults": 50,
+    })
+    return resp.get("issues", [])
+
 
 def pre_pickup_ok(
     client: DispatchClient,
@@ -590,6 +624,12 @@ def pre_pickup_ok(
 
     Backward-compatible: ``worktree_path=None`` falls back to
     ``live_state_check.REPO_ROOT`` (the legacy main-repo behaviour).
+
+    Mutex enforcement (OP-687): if Prerequisites YAML declares
+    ``mutex_with`` and any sibling ticket is currently holding one of
+    those labels, return False with a "mutex conflict:" reason. The
+    runner skips and tries the next pickup candidate; the JIRA workflow
+    validator handles ``blocks_on`` (§10) separately.
     """
     from backend.agents.live_state_check import evaluate, all_passed, format_failures
     desc = fetch_description(client, snapshot.key)
@@ -601,9 +641,23 @@ def pre_pickup_ok(
         if not all_passed(results):
             return False, "live_state_requires failed:\n" + format_failures(results)
 
-    # Hard blocker check via JIRA workflow validator is L1 (§10).
-    # Mutex check: TODO — JQL search siblings with same mutex_with In Progress.
-    # Skipped in this minimum-viable; the heavy penalty in scheduler.score
-    # already deprioritises mutex conflicts.
+    # Mutex sibling check (OP-687). Concrete failure mode without this:
+    # codex picks OP-A (mutex:foo) at 02:00, claude picks OP-B (mutex:foo)
+    # at 03:00, both push to Gerrit, second submit silently overwrites
+    # first. Hard blocker (`blocks_on`) check is JIRA workflow's job.
+    mutex_labels = list(prereqs.get("mutex_with") or [])
+    if mutex_labels:
+        holders = find_mutex_holders(client, mutex_labels, exclude_key=snapshot.key)
+        if holders:
+            lines = []
+            for h in holders:
+                hk = h.get("key", "?")
+                fields = h.get("fields") or {}
+                status = ((fields.get("status") or {}).get("name")) or "?"
+                hlabels = fields.get("labels") or []
+                shared = sorted(set(hlabels) & set(mutex_labels))
+                lbl = shared[0] if shared else mutex_labels[0]
+                lines.append(f"{lbl} held by {hk} (status: {status})")
+            return False, "mutex conflict:\n  " + "\n  ".join(lines)
 
     return True, "pre-pickup checks passed"

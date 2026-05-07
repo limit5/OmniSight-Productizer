@@ -418,3 +418,168 @@ def test_pre_pickup_ok_default_worktree_path_is_none() -> None:
     import inspect
     sig = inspect.signature(jd.pre_pickup_ok)
     assert sig.parameters["worktree_path"].default is None
+
+
+# ── OP-687: mutex enforcement at pre-pickup ───────────────────────
+
+
+def _fake_dispatch_client() -> jd.DispatchClient:
+    return jd.DispatchClient(
+        agent_class="subscription-codex",
+        base_url="https://test.invalid/rest/api/3",
+        project_key="OP",
+        auth_header="Basic dGVzdA==",
+        bot_account_id="acc-test",
+        bot_email="bot@example.invalid",
+    )
+
+
+def _snapshot(key: str = "OP-555", mutex: tuple = ("mutex:backend/foo.py",)):
+    from backend.agents.scheduler import TicketSnapshot
+    return TicketSnapshot(
+        key=key,
+        component="default",
+        fix_version=None,
+        created_at="2026-05-08T00:00:00.000+0000",
+        days_since_created=0.0,
+        days_to_fix_version=None,
+        downstream_blocked_count=0,
+        mutex_labels=mutex,
+        has_mutex_in_progress_sibling=False,
+    )
+
+
+def test_mutex_holding_statuses_include_in_progress_and_under_review() -> None:
+    """OP-687: holding window covers both In Progress and Under Review."""
+    assert "In Progress" in jd.MUTEX_HOLDING_STATUSES
+    assert "Under Review" in jd.MUTEX_HOLDING_STATUSES
+    assert "Approved" not in jd.MUTEX_HOLDING_STATUSES
+    assert "Archived" not in jd.MUTEX_HOLDING_STATUSES
+
+
+def test_find_mutex_holders_empty_labels_skips_jql(monkeypatch) -> None:
+    """No mutex_with declared → no JQL call (no-op fast path)."""
+    called: list = []
+    monkeypatch.setattr(jd, "_request", lambda *a, **kw: called.append(1) or {"issues": []})
+    holders = jd.find_mutex_holders(_fake_dispatch_client(), [], exclude_key="OP-555")
+    assert holders == []
+    assert called == []
+
+
+def test_find_mutex_holders_jql_excludes_self_and_filters_holding_statuses(monkeypatch) -> None:
+    """JQL must scope to project, holding statuses, mutex labels (OR'd), exclude self."""
+    captured: dict = {}
+
+    def fake_request(client, method, path, body=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"issues": []}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    jd.find_mutex_holders(
+        _fake_dispatch_client(),
+        ["mutex:backend/foo.py", "mutex:alembic-chain-head"],
+        exclude_key="OP-555",
+    )
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/search/jql"
+    jql = captured["body"]["jql"]
+    assert 'project = "OP"' in jql
+    assert 'key != "OP-555"' in jql
+    assert 'mutex:backend/foo.py' in jql
+    assert 'mutex:alembic-chain-head' in jql
+    assert ' OR ' in jql
+    assert '"In Progress"' in jql and '"Under Review"' in jql
+
+
+def test_pre_pickup_ok_blocks_when_mutex_held_by_in_progress_sibling(monkeypatch) -> None:
+    """Operator concern 2026-05-07: codex picks OP-A (mutex:foo) at 02:00,
+    claude picks OP-B (mutex:foo) at 03:00 — claude must NOT pick up.
+    """
+    desc = (
+        "## Goal\nfoo\n\n"
+        "## Prerequisites\n\n"
+        "```yaml\n"
+        "mutex_with:\n"
+        "  - mutex:backend/foo.py\n"
+        "```\n"
+    )
+    monkeypatch.setattr(jd, "fetch_description", lambda c, k: desc)
+    monkeypatch.setattr(
+        jd, "find_mutex_holders",
+        lambda c, m, exclude_key: [{
+            "key": "OP-100",
+            "fields": {
+                "status": {"name": "In Progress"},
+                "labels": ["mutex:backend/foo.py", "class:subscription-codex"],
+            },
+        }],
+    )
+    ok, reason = jd.pre_pickup_ok(_fake_dispatch_client(), _snapshot(key="OP-555"))
+    assert ok is False
+    assert reason.startswith("mutex conflict")
+    assert "mutex:backend/foo.py" in reason
+    assert "OP-100" in reason
+    assert "In Progress" in reason
+
+
+def test_pre_pickup_ok_releases_pickup_when_holder_transitions_to_approved(monkeypatch) -> None:
+    """Once the first ticket transitions Under Review → Approved (a non-holding
+    status), the JQL returns no holders and the second ticket can be picked up.
+    """
+    desc = (
+        "## Prerequisites\n\n"
+        "```yaml\n"
+        "mutex_with:\n"
+        "  - mutex:backend/foo.py\n"
+        "```\n"
+    )
+    monkeypatch.setattr(jd, "fetch_description", lambda c, k: desc)
+    # JQL excludes Approved (not in MUTEX_HOLDING_STATUSES) → empty holder list
+    monkeypatch.setattr(jd, "find_mutex_holders", lambda c, m, exclude_key: [])
+    ok, reason = jd.pre_pickup_ok(_fake_dispatch_client(), _snapshot(key="OP-555"))
+    assert ok is True
+    assert "passed" in reason
+
+
+def test_pre_pickup_ok_skips_mutex_check_when_no_mutex_with_declared(monkeypatch) -> None:
+    """No mutex_with in Prerequisites → find_mutex_holders is never called."""
+    desc = "## Goal\nNo prereqs section here.\n"
+    monkeypatch.setattr(jd, "fetch_description", lambda c, k: desc)
+    holder_calls: list = []
+    monkeypatch.setattr(
+        jd, "find_mutex_holders",
+        lambda c, m, exclude_key: holder_calls.append((m, exclude_key)) or [],
+    )
+    ok, _ = jd.pre_pickup_ok(_fake_dispatch_client(), _snapshot(mutex=()))
+    assert ok is True
+    assert holder_calls == []
+
+
+def test_pre_pickup_ok_mutex_reason_lists_each_blocking_sibling(monkeypatch) -> None:
+    """When multiple holders share the mutex, reason lists all of them."""
+    desc = (
+        "## Prerequisites\n\n"
+        "```yaml\n"
+        "mutex_with:\n"
+        "  - mutex:backend/foo.py\n"
+        "  - mutex:alembic-chain-head\n"
+        "```\n"
+    )
+    monkeypatch.setattr(jd, "fetch_description", lambda c, k: desc)
+    monkeypatch.setattr(
+        jd, "find_mutex_holders",
+        lambda c, m, exclude_key: [
+            {"key": "OP-100", "fields": {"status": {"name": "In Progress"},
+                                          "labels": ["mutex:backend/foo.py"]}},
+            {"key": "OP-101", "fields": {"status": {"name": "Under Review"},
+                                          "labels": ["mutex:alembic-chain-head"]}},
+        ],
+    )
+    ok, reason = jd.pre_pickup_ok(_fake_dispatch_client(), _snapshot(key="OP-555"))
+    assert ok is False
+    assert "OP-100" in reason
+    assert "OP-101" in reason
+    assert "mutex:backend/foo.py" in reason
+    assert "mutex:alembic-chain-head" in reason

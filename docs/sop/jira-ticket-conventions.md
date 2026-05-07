@@ -327,7 +327,7 @@ external_blockers:
 
 - `blocks_on`: list of JIRA ticket keys. Workflow validator (§10) gates pickup.
 - `soft_prereqs`: list of ticket keys. No gating, just hint.
-- `mutex_with`: list of `mutex:<resource-id>` strings. Runner queries siblings (§16).
+- `mutex_with`: list of `mutex:<resource-id>` strings. Runner pre-pickup gate (§16) hard-blocks pickup if any sibling ticket sharing one of these labels is currently `In Progress` or `Under Review`. Pickup is released as soon as the holder transitions out of those two states (Approved / Published / Archived / TODO all count as "released"). Implementation: `backend/agents/jira_dispatch.find_mutex_holders` runs `project = OP AND status in ("In Progress", "Under Review") AND (labels = … OR …) AND key != self`; non-empty result → blocked. The blocked candidate is skipped and the runner tries the next-best candidate from the dispatch queue. See OP-687 (operator concern 2026-05-07: overnight unattended runs producing silent merge collisions).
 - `schema_locks`: list of objects with `source_priority`, `target`, `contract`, `drift_guard_test`. CI test must exist and pass.
 - `live_state_requires`: list of single-key objects, one per check kind (§13).
 - `external_blockers`: list of objects with `operator_action` (free text) or `approval_required` (tier label).

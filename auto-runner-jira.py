@@ -225,14 +225,26 @@ def main() -> int:
             return 1
 
     # Step 3: pre-pickup check now runs against fresh worktree, not stale main repo.
+    # OP-687: a "mutex conflict" reason means a sibling ticket holds the same
+    # mutex:<path>; the dispatch loop already skipped to this candidate, so a
+    # failure here means a race (state changed between selection and re-check).
+    # Comment + return 1 so the cron polling cycle retries.
     ok, reason = jira_dispatch.pre_pickup_ok(
         client, snapshot,
         worktree_path=None if DRY_RUN else worktree_path,
     )
     if not ok:
-        print(f"[runner] pre-pickup fail: {reason}")
+        is_mutex = reason.startswith("mutex conflict")
+        tag = "runner-mutex-blocked" if is_mutex else "runner-live-state-fail"
+        if is_mutex:
+            print(f"[runner] runner.pickup_blocked_mutex {snapshot.key}: {reason}")
+        else:
+            print(f"[runner] pre-pickup fail: {reason}")
         if not DRY_RUN:
-            jira_dispatch.add_comment(client, snapshot.key, f"[runner-live-state-fail]\n\nPre-pickup live-state check failed; not picking up.\n\n{reason}\n\nThis ticket will be retried on next polling cycle.")
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[{tag}]\n\nPre-pickup gate failed; ticket not picked up.\n\n{reason}\n\nThis ticket will be retried on next polling cycle.",
+            )
         return 1
 
     # Step 4: build prompt + transition + invoke
