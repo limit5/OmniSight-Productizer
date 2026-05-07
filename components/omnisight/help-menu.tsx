@@ -119,6 +119,12 @@ const SECTIONS: Section[] = [
         icon: PlayCircle,
       },
       {
+        key: "replay-multi-provider-tour",
+        label: { en: "Replay multi-provider tour", "zh-TW": "重播多供應商導覽", "zh-CN": "重播多供应商导览", ja: "マルチプロバイダーツアーを再生" },
+        href: "/?panel=orchestrator&mpTour=1",
+        icon: PlayCircle,
+      },
+      {
         key: "search",
         label: { en: "Search docs   (⌘K)", "zh-TW": "搜尋文件   (⌘K)", "zh-CN": "搜索文档   (⌘K)", ja: "ドキュメント検索   (⌘K)" },
         href: (l) => `/docs/operator/${l}`,
