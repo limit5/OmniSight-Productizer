@@ -21,6 +21,11 @@
  *                          unsupported, error, plus one provider missing
  *                          from the envelope array (loading fallback).
  *
+ * OP-89 / MP.W12.5 adds two mobile snapshots against the same fixture:
+ * iPhone-class portrait and Android-class portrait. These keep the
+ * mobile responsive-degradation wave scoped to MP rendering without
+ * adding a second fixture or touching production components.
+ *
  * Determinism: `Date.now()` is frozen to a fixed epoch via
  * `page.addInitScript`, matching the `FROZEN_NOW_SEC` constant in the
  * fixture page so `formatLastSynced()` renders stable "N s ago" labels.
@@ -44,6 +49,18 @@
 import { test, expect, type Page } from "@playwright/test"
 
 const FROZEN_NOW_MS = 1777887600000  // 2026-04-25T10:00:00Z
+
+interface MobileViewport {
+  slug: string
+  width: number
+  height: number
+  description: string
+}
+
+const MOBILE_VIEWPORTS: ReadonlyArray<MobileViewport> = [
+  { slug: "iphone-portrait", width: 375, height: 667, description: "iPhone-class portrait" },
+  { slug: "android-portrait", width: 412, height: 915, description: "Android-class portrait" },
+]
 
 async function prepPage(page: Page) {
   // Freeze Date so formatLastSynced renders stable labels.
@@ -265,4 +282,46 @@ test.describe("Z.4 #293 — ProviderRollup visual regression", () => {
       fullPage: true,
     })
   })
+
+  for (const viewport of MOBILE_VIEWPORTS) {
+    test(`mobile snapshot · ${viewport.slug} (${viewport.width}×${viewport.height} — ${viewport.description})`, async ({
+      page,
+    }, testInfo) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height })
+      const rollup = await openFixture(page, "mixed")
+
+      await expect(rollup).toBeVisible()
+      await expect(rollup.locator('[data-testid^="provider-rollup-group-"]')).toHaveCount(7)
+
+      const viewportWidth = await page.evaluate(() => window.innerWidth)
+      for (const key of ["anthropic", "openai", "deepseek", "xai", "openrouter", "google", "local"]) {
+        const group = rollup.locator(`[data-provider-key="${key}"]`)
+        await expect(group).toBeVisible()
+        const box = await group.boundingBox()
+        expect(box, `provider group ${key} should have a rendered box`).not.toBeNull()
+        expect(
+          Math.ceil((box?.x ?? 0) + (box?.width ?? 0)),
+          `provider group ${key} should fit within the ${viewport.slug} viewport`,
+        ).toBeLessThanOrEqual(viewportWidth)
+      }
+
+      await expect(
+        rollup.locator('[data-testid="provider-rollup-status-slot-google"]'),
+      ).toBeVisible()
+      await expect(
+        rollup.locator('[data-testid="provider-card-expansion-unsupported-message"]'),
+      ).toBeVisible()
+      await expect(
+        rollup.locator('[data-testid="provider-card-expansion-error-message"]'),
+      ).toContainText(/401|Unauthorized/)
+
+      await rollup.screenshot({
+        path: testInfo.outputPath(`rollup-mobile-${viewport.slug}.png`),
+      })
+      await page.screenshot({
+        path: testInfo.outputPath(`page-mobile-${viewport.slug}.png`),
+        fullPage: true,
+      })
+    })
+  }
 })
