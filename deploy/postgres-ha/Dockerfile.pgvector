@@ -1,0 +1,50 @@
+# OmniSight PostgreSQL HA — pgvector-enabled pg16 image (OP-706)
+#
+# Builds pgvector from source against the bundled postgres-16 in
+# postgres:16-alpine.  Required by alembic 0193 (BP.Q.4 embedding_chunks
+# table) which calls `CREATE EXTENSION IF NOT EXISTS vector`.
+#
+# Why from-source vs apk:
+#   alpine community's `postgresql-pgvector` package targets postgresql18,
+#   not 16, and the .so files are not binary-compatible across PG major
+#   versions — landing the apk artefact in /usr/lib/postgresql18/ fails
+#   to load into PG16 at /usr/local/lib/postgresql/.
+#
+# Why from-source vs pgvector/pgvector:pg16 image:
+#   The official Debian-based image uses postgres uid=999, but the
+#   existing data volume was initialised by alpine's uid=70 — image swap
+#   would require a chown of /var/lib/postgresql/data (180 MB) and
+#   diverge from the rest of the OmniSight HA setup that assumes alpine
+#   conventions (init scripts, locale, etc.).
+#
+# This image keeps everything alpine-native, just adds the vector
+# extension files in their expected locations:
+#   /usr/local/lib/postgresql/vector.so
+#   /usr/local/share/postgresql/extension/vector.control
+#   /usr/local/share/postgresql/extension/vector*.sql
+FROM postgres:16-alpine AS build
+
+ARG PGVECTOR_VERSION=v0.8.0
+
+RUN apk add --no-cache --virtual .pgvector-build \
+        build-base \
+        clang19 \
+        llvm19 \
+        git \
+    && cd /tmp \
+    && git clone --branch ${PGVECTOR_VERSION} --depth 1 \
+        https://github.com/pgvector/pgvector.git \
+    && cd pgvector \
+    && make USE_PGXS=1 PG_CONFIG=/usr/local/bin/pg_config \
+    && make install USE_PGXS=1 PG_CONFIG=/usr/local/bin/pg_config \
+    && cd / \
+    && rm -rf /tmp/pgvector \
+    && apk del .pgvector-build
+
+# Sanity: vector.so + vector.control should be in the postgres extension
+# search path. RUN-time `CREATE EXTENSION vector;` verifies post-image
+# build (we cannot run server-dependent SQL inside Docker build).
+RUN test -f /usr/local/lib/postgresql/vector.so \
+    && test -f /usr/local/share/postgresql/extension/vector.control \
+    && echo "pgvector built OK" \
+    || (echo "pgvector files missing after build" && exit 1)

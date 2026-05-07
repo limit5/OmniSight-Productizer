@@ -36,7 +36,7 @@ services:
   # live-migration tests (G4 #1) so migration behaviour is identical
   # between CI and HA deploy.
   pg-primary:
-    image: postgres:16-alpine
+    image: omnisight-postgres-pgvector:16-alpine
     container_name: omnisight-pg-primary
     restart: always
     ports:
@@ -92,7 +92,7 @@ services:
   # with `service_healthy` makes the standby wait for the primary's
   # pg_isready to go green before booting.
   pg-standby:
-    image: postgres:16-alpine
+    image: omnisight-postgres-pgvector:16-alpine
     container_name: omnisight-pg-standby
     restart: always
     ports:
