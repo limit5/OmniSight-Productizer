@@ -29,6 +29,7 @@ class _FakeAdapter(ProviderAdapter):
         reachable: bool = True,
         quota_state: QuotaState | None = None,
         dispatch_success: bool = True,
+        dispatch_error: str | None = None,
         health_raises: bool = False,
         quota_raises: bool = False,
     ) -> None:
@@ -36,6 +37,7 @@ class _FakeAdapter(ProviderAdapter):
         self._reachable = reachable
         self._quota_state = quota_state or _quota_state(provider_id)
         self._dispatch_success = dispatch_success
+        self._dispatch_error = dispatch_error
         self._health_raises = health_raises
         self._quota_raises = quota_raises
         self.dispatches: list[TaskSpec] = []
@@ -49,7 +51,11 @@ class _FakeAdapter(ProviderAdapter):
             success=self._dispatch_success,
             tokens_used=17,
             latency_seconds=0.25,
-            error=None if self._dispatch_success else "fake failure",
+            error=(
+                None
+                if self._dispatch_success
+                else self._dispatch_error or "fake failure"
+            ),
             provider_id=self._provider_id,
         )
 
@@ -552,3 +558,37 @@ def test_routing_on_cap_hit_zero_retry_after_expires_after_now_boundary() -> Non
 def test_routing_invalid_cap_hit_provider_id_raises() -> None:
     with pytest.raises(ValueError, match="provider_id must be non-empty"):
         _policy([]).on_cap_hit(" ")
+
+
+def test_cap_hit_retry_boundary_switches_from_anthropic_to_openai(monkeypatch) -> None:
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_ANTHROPIC_TEST_5H", "100")
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_OPENAI_TEST_5H", "100")
+    now = {"value": 1000.0}
+    anthropic = _FakeAdapter(
+        "anthropic-test",
+        quota_state=_quota_state("anthropic-test", rolling_5h_tokens=1),
+        dispatch_success=False,
+        dispatch_error="HTTP 429: anthropic subscription cap hit; retry-after=45",
+    )
+    openai = _FakeAdapter(
+        "openai-test",
+        quota_state=_quota_state("openai-test", rolling_5h_tokens=10),
+    )
+    task = _task(agent_class="api-anthropic-openai")
+    policy = _policy([openai, anthropic], now=lambda: now["value"])
+
+    first = policy.choose_provider(task)
+    assert [adapter.provider_id() for adapter in first] == [
+        "anthropic-test",
+        "openai-test",
+    ]
+
+    result = first[0].dispatch(task)
+    assert result.success is False
+    assert "429" in (result.error or "")
+
+    policy.on_cap_hit(result.provider_id, retry_after_s=45)
+
+    second = policy.choose_provider(task)
+    assert [adapter.provider_id() for adapter in second] == ["openai-test"]
+    assert second[0].dispatch(task).success is True
