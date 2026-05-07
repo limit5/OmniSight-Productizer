@@ -388,3 +388,37 @@ Both go in refs/meta/config (admin-only readable), so secret-in-config is accept
 **Verification**: External curl test (`curl -X POST -H Authorization -H X-Jira-Webhook-Secret https://ai.sora-dev.app/api/v1/orchestrator/merge-conflict`) returned HTTP 200 — endpoint accepted both headers, validated payload, dispatched to merge_arbiter. Direct in-container invocation of `merge_arbiter.on_merge_conflict_webhook` also confirmed the merger code path runs (with downstream LLM bug found, separate ticket OP-709).
 
 **Generalisation**: When an endpoint name suggests "webhook" but auth requires user/operator credentials, the design intent is dual-gate (defense-in-depth: signature isolates abuse from external internet + user auth provides identity for audit). Don't simplify to "just signature" without team agreement — the operator identity is sometimes load-bearing for audit_log entries / per-user rate limits / etc. For Gerrit-side, configure custom headers; don't try to bend Gerrit's HMAC `secret` into the user-auth shape.
+
+
+## Lesson 22 — Gerrit webhooks plugin reads `webhooks.config`, NOT `project.config` (2026-05-07)
+
+**Situation**: OP-713 Phase 1 added a new `[remote "ai-reviewer-webhook"]` block to `project.config` on `refs/meta/config` (mirroring how OP-708 placed `[remote "merge-conflict-webhook"]` there). Pushed cleanly, plugin reload succeeded, projects cache flushed. Pushed 3 separate test patchsets (#80 patchsets 1-3) — **0 webhook calls reached the backend**. Caddy log was silent. Backend log was silent. Gerrit reported the patchsets as created normally.
+
+Root cause: per Gerrit webhooks plugin docs at `/plugins/webhooks/Documentation/config.html`: *"The webhooks plugin's per project configuration is stored in the **webhooks.config** file in project's refs/meta/config branch."* `project.config` is for ACL / submit-rules / labels — the webhooks plugin never reads it. The `[remote "..."]` blocks in `project.config` from OP-708 + OP-713 v1 were silently no-op.
+
+Implication: OP-708's verification (synthetic `curl` direct to `/api/v1/orchestrator/merge-conflict`) didn't actually exercise the Gerrit-delivery layer, so the OP-708 merger webhook had **never been confirmed working through real Gerrit events** prior to OP-713 — we just thought it had.
+
+**Fix**: Move all `[remote "..."]` blocks out of `project.config` and into a new `webhooks.config` file on `refs/meta/config`. Single commit handled both:
+1. Remove the OP-713 v1 ai-reviewer block from `project.config` (it was the orphan I just added)
+2. Add `webhooks.config` containing both the merger block (preserved from OP-708) AND the new ai-reviewer block
+
+Pushed as sora; webhooks plugin auto-reloaded.
+
+**Verification**: Pushed test patchset #81 → Caddy logged `POST /api/v1/webhooks/gerrit ... User-Agent: Apache-HttpClient/4.5.14 (Java/21.0.10) ... X-Origin-Url: https://sora.services:29420/ ... bytes_read: 1181 ... status: 401`. Confirmed Gerrit IS now firing patchset-created events. The 401 is a separate auth issue (Lesson 23).
+
+**Generalisation**: When a Gerrit plugin doesn't behave as configured, check whether the canonical config file is `project.config` or a plugin-specific file. Gerrit's plugin API allows plugins to read their own files from `refs/meta/config`. Always grep the plugin's `Documentation/` URL for the exact filename before assuming it's project.config. Webhook plumbing must always be verified by a real Gerrit-driven event (push a throwaway patchset), not by synthetic curl to the backend endpoint — the latter only proves the receiver works, not the sender → receiver chain.
+
+
+## Lesson 23 — Gerrit webhooks plugin v3.13.5 ignores `secret = ...` (no signature support) (2026-05-07)
+
+**Situation**: After Lesson 22, with `webhooks.config` correctly configured and Gerrit firing patchset-created events at `/api/v1/webhooks/gerrit`, every event still 401'd. Inspected Caddy log header dump for the inbound request — Gerrit sent NO `X-Gerrit-Signature` header and no other signature-shaped header. The `secret = <hmac>` line in the `[remote "..."]` block was being silently ignored by the plugin. Re-read the plugin's `Documentation/config.html` more carefully — the only documented `[remote "..."]` keys are `url`, `event`, `connectionTimeout`, `socketTimeout`, `maxTries`, `retryInterval`, `sslVerify`. **`secret` is not in the documented schema** of v3.13.5.
+
+**Fix** (deferred to OP-713 Phase 2 — backend-side wiring): use the same `header = Name: Value` pattern that OP-708 used for the merger block (which IS supported per Lesson 21). Two viable shapes:
+- `header = Authorization: Bearer <api_key>` → check via `require_operator` (matches merger pattern, mature path)
+- `header = X-Gerrit-Webhook-Secret: <secret>` → constant-time compare in custom validator
+
+Either way, drop the HMAC-signature path in `backend/routers/webhooks.py:240-287` for Gerrit since the plugin can't generate one. Patch will become OP-713 Phase 2's first commit.
+
+**Verification**: To be measured in Phase 2 — same test patchset pattern (push throwaway change to `refs/for/develop`), expect 200 instead of 401 in Caddy log.
+
+**Generalisation**: Don't trust documentation-by-analogy. The merger block's `header = ...` worked, and I assumed the obvious adjacent feature `secret = ...` would also work. It doesn't. When a plugin's docs explicitly enumerate config keys, treat that list as exhaustive — undocumented keys are silently dropped, no warning. For HMAC body signing on Gerrit webhooks, you need either a different plugin (e.g. `events-broker`) or a custom proxy in front of the backend.
