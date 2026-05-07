@@ -174,18 +174,22 @@ class TestProactiveMergerSkipConditions:
         mock_arbiter.assert_not_called()
 
     async def test_skip_when_mergeable_true(self, caplog):
-        """Clean change — no merger needed."""
+        """Clean change — no merger needed (OP-717: enrichment returns
+        mergeable=True instead of REST mergeable check)."""
         mock_client = MagicMock()
         mock_client.query_change = AsyncMock(return_value={
             "hashtags": [], "subject": "[OP-X] x",
         })
         mock_arbiter = AsyncMock()
 
+        from backend.agents.conflict_enrichment import EnrichmentResult
+        clean_result = EnrichmentResult(mergeable=True)
+
         with patch("backend.gerrit.gerrit_client", mock_client), \
              patch("backend.merge_arbiter.on_merge_conflict_webhook",
                    mock_arbiter), \
-             patch("backend.routers.webhooks._fetch_mergeable",
-                   AsyncMock(return_value={"mergeable": True})), \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=clean_result)), \
              caplog.at_level("INFO", logger="backend.routers.webhooks"):
             await _proactive_merger_check(_event())
 
@@ -198,26 +202,44 @@ class TestProactiveMergerSkipConditions:
 class TestProactiveMergerInvokes:
 
     async def test_invokes_merger_when_mergeable_false(self, caplog):
-        """The happy-path: stale base change → merger called once."""
+        """The happy-path: stale base change → enrichment finds the
+        conflict block → merger called with real conflict_text."""
         mock_client = MagicMock()
         mock_client.query_change = AsyncMock(return_value={
             "hashtags": [], "subject": "[OP-92] mergeable=false test",
         })
-        mock_client.add_hashtag = AsyncMock(
-            return_value={"status": "ok"},
+        mock_client.add_hashtag = AsyncMock(return_value={"status": "ok"})
+
+        # OP-717: enrichment returns one ConflictFile with real markers
+        from backend.agents.conflict_enrichment import (
+            ConflictFile, EnrichmentResult,
+        )
+        conflict_text = (
+            "def f():\n"
+            "<<<<<<< HEAD\n    return 1\n=======\n    return 2\n"
+            ">>>>>>> branch\n"
+        )
+        enrichment = EnrichmentResult(
+            mergeable=False,
+            conflict_files=[ConflictFile(
+                path="src/preferences.py",
+                conflict_text=conflict_text,
+                file_context=conflict_text,
+            )],
+            head_subject="head subj",
+            incoming_subject="incoming subj",
         )
 
         # Mock the arbiter outcome so we don't call into LLM.
         mock_outcome = MagicMock()
-        mock_outcome.reason = MagicMock()
-        mock_outcome.reason.value = "merger_abstained_jira_ticket_opened"
+        mock_outcome.reason = MagicMock(value="plus_two_voted")
         mock_arbiter = AsyncMock(return_value=mock_outcome)
 
         with patch("backend.gerrit.gerrit_client", mock_client), \
              patch("backend.merge_arbiter.on_merge_conflict_webhook",
                    mock_arbiter), \
-             patch("backend.routers.webhooks._fetch_mergeable",
-                   AsyncMock(return_value={"mergeable": False})), \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=enrichment)), \
              caplog.at_level("INFO", logger="backend.routers.webhooks"):
             await _proactive_merger_check(_event(change_number=92, ps_number=1))
 
@@ -227,18 +249,118 @@ class TestProactiveMergerInvokes:
         assert call.kwargs["hashtag"] == f"{_PROACTIVE_HASHTAG_PREFIX}1"
         assert call.kwargs["change_id"] == "92"
 
-        # Verify merger was called with the right task shape
+        # Verify merger was called with the enriched task shape (OP-717)
         mock_arbiter.assert_awaited_once()
         task = mock_arbiter.await_args.args[0]
         assert task.change_id == "92"
         assert task.patchset_revision == "d386745be2"
-        # OP-92 ticket extracted from subject
         assert task.jira_ticket == "OP-92"
+        # NEW: file_path + conflict_text now non-empty
+        assert task.file_path == "src/preferences.py"
+        assert "<<<<<<< HEAD" in task.conflict_text
+        assert ">>>>>>> branch" in task.conflict_text
+        assert task.head_commit_message == "head subj"
 
         assert any("decision=invoke_merger" in r.message
                    for r in caplog.records)
-        assert any("merger_outcome reason=merger_abstained_jira_ticket_opened"
-                   in r.message for r in caplog.records)
+        assert any("primary_file=src/preferences.py" in r.message
+                   for r in caplog.records)
+
+    async def test_invokes_merger_with_additional_files(self, caplog):
+        """Multi-file conflict → primary file is alphabetically-first,
+        additional_files lists the rest."""
+        mock_client = MagicMock()
+        mock_client.query_change = AsyncMock(return_value={
+            "hashtags": [], "subject": "[OP-92] multi conflict",
+        })
+        mock_client.add_hashtag = AsyncMock(return_value={"status": "ok"})
+
+        from backend.agents.conflict_enrichment import (
+            ConflictFile, EnrichmentResult,
+        )
+        cfs = [
+            ConflictFile(path=p, conflict_text=f"<<<<<<< {p}\nx\n=======\ny\n>>>>>>> b\n", file_context="")
+            for p in ["a.py", "b.py", "c.md"]
+        ]
+        enrichment = EnrichmentResult(mergeable=False, conflict_files=cfs)
+
+        mock_outcome = MagicMock()
+        mock_outcome.reason = MagicMock(value="abstained_low_confidence")
+        mock_arbiter = AsyncMock(return_value=mock_outcome)
+
+        with patch("backend.gerrit.gerrit_client", mock_client), \
+             patch("backend.merge_arbiter.on_merge_conflict_webhook",
+                   mock_arbiter), \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=enrichment)), \
+             caplog.at_level("INFO", logger="backend.routers.webhooks"):
+            await _proactive_merger_check(_event())
+
+        task = mock_arbiter.await_args.args[0]
+        assert task.file_path == "a.py"
+        assert task.additional_files == ["b.py", "c.md"]
+        assert any("additional_count=2" in r.message
+                   for r in caplog.records)
+
+    async def test_skips_too_many_conflicts(self, caplog):
+        """If enrichment caps out (>5 files) → set hashtag, no merger call."""
+        mock_client = MagicMock()
+        mock_client.query_change = AsyncMock(return_value={
+            "hashtags": [], "subject": "[OP-92] too many",
+        })
+        mock_client.add_hashtag = AsyncMock(return_value={"status": "ok"})
+
+        from backend.agents.conflict_enrichment import (
+            ConflictFile, EnrichmentResult,
+        )
+        many = [ConflictFile(path=f"f{i}.py", conflict_text="", file_context="")
+                for i in range(6)]
+        enrichment = EnrichmentResult(
+            mergeable=False, too_many=True, conflict_files=many,
+        )
+
+        mock_arbiter = AsyncMock()
+
+        with patch("backend.gerrit.gerrit_client", mock_client), \
+             patch("backend.merge_arbiter.on_merge_conflict_webhook",
+                   mock_arbiter), \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=enrichment)), \
+             caplog.at_level("INFO", logger="backend.routers.webhooks"):
+            await _proactive_merger_check(_event())
+
+        # Hashtag was set (so we don't re-attempt) but merger NOT called.
+        mock_client.add_hashtag.assert_awaited_once()
+        mock_arbiter.assert_not_called()
+        assert any("skip_reason=too_many_conflicts" in r.message
+                   for r in caplog.records)
+
+    async def test_skip_on_enrichment_error(self, caplog):
+        """Enrichment infrastructure failure → skip safely (next event retries)."""
+        mock_client = MagicMock()
+        mock_client.query_change = AsyncMock(return_value={
+            "hashtags": [], "subject": "[OP-92] x",
+        })
+        mock_client.add_hashtag = AsyncMock(return_value={"status": "ok"})
+
+        from backend.agents.conflict_enrichment import EnrichmentResult
+        broken = EnrichmentResult(
+            mergeable=False, error="fetch develop failed: network down",
+        )
+        mock_arbiter = AsyncMock()
+
+        with patch("backend.gerrit.gerrit_client", mock_client), \
+             patch("backend.merge_arbiter.on_merge_conflict_webhook",
+                   mock_arbiter), \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=broken)), \
+             caplog.at_level("WARNING", logger="backend.routers.webhooks"):
+            await _proactive_merger_check(_event())
+
+        mock_arbiter.assert_not_called()
+        mock_client.add_hashtag.assert_not_called()
+        assert any("skip_reason=enrichment_error" in r.message
+                   for r in caplog.records)
 
     async def test_swallows_arbiter_exception(self, caplog):
         """Arbiter failure must NOT propagate — webhook already returned."""
@@ -250,11 +372,23 @@ class TestProactiveMergerInvokes:
 
         mock_arbiter = AsyncMock(side_effect=RuntimeError("arbiter blew up"))
 
+        from backend.agents.conflict_enrichment import (
+            ConflictFile, EnrichmentResult,
+        )
+        enrichment = EnrichmentResult(
+            mergeable=False,
+            conflict_files=[ConflictFile(
+                path="x.py",
+                conflict_text="<<<<<<< x\na\n=======\nb\n>>>>>>> y\n",
+                file_context="",
+            )],
+        )
+
         with patch("backend.gerrit.gerrit_client", mock_client), \
              patch("backend.merge_arbiter.on_merge_conflict_webhook",
                    mock_arbiter), \
-             patch("backend.routers.webhooks._fetch_mergeable",
-                   AsyncMock(return_value={"mergeable": False})), \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=enrichment)), \
              caplog.at_level("ERROR", logger="backend.routers.webhooks"):
             # Must not raise
             await _proactive_merger_check(_event())
@@ -276,11 +410,23 @@ class TestProactiveMergerInvokes:
         mock_outcome.reason = MagicMock(value="abstained_low_confidence")
         mock_arbiter = AsyncMock(return_value=mock_outcome)
 
+        from backend.agents.conflict_enrichment import (
+            ConflictFile, EnrichmentResult,
+        )
+        enrichment = EnrichmentResult(
+            mergeable=False,
+            conflict_files=[ConflictFile(
+                path="x.py",
+                conflict_text="<<<<<<< x\na\n=======\nb\n>>>>>>> y\n",
+                file_context="",
+            )],
+        )
+
         with patch("backend.gerrit.gerrit_client", mock_client), \
              patch("backend.merge_arbiter.on_merge_conflict_webhook",
                    mock_arbiter), \
-             patch("backend.routers.webhooks._fetch_mergeable",
-                   AsyncMock(return_value={"mergeable": False})), \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=enrichment)), \
              caplog.at_level("WARNING", logger="backend.routers.webhooks"):
             await _proactive_merger_check(_event())
 

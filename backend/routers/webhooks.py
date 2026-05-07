@@ -505,20 +505,45 @@ async def _proactive_merger_check(event: dict) -> None:
             logger.info("%s skip_reason=private_change", log_prefix)
             return
 
-        # ── 4. Mergeability check ─────────────────────────────────
-        # Gerrit's stream-events / query --current-patch-set does not
-        # expose "mergeable" directly, so we go through REST. Failure
-        # to reach REST means we cannot decide → skip safely (next PS
-        # event will retry).
-        mergeable_info = await _fetch_mergeable(project, change_number, rev)
-        if mergeable_info is None:
-            logger.warning("%s skip_reason=mergeable_query_failed", log_prefix)
+        # ── 4. Mergeability check via local 3-way merge (OP-717) ──
+        # Replaces the OP-714 _fetch_mergeable REST call with a local
+        # `git merge --no-commit --no-ff` against origin/develop. The
+        # local-merge approach gives us BOTH the mergeable boolean AND
+        # the conflict markers in one shot, sidestepping the OP-716
+        # LDAP auth gap on the REST mergeable endpoint.
+        from backend.agents.conflict_enrichment import enrich_via_local_merge
+        result = await enrich_via_local_merge(
+            change_number=change_number,
+            patchset_revision=rev,
+            project=project,
+            patchset_number=ps_number,
+        )
+        if result.error:
+            logger.warning("%s skip_reason=enrichment_error err=%s",
+                           log_prefix, result.error[:200])
             return
-        if mergeable_info.get("mergeable", True) is True:
+        if result.mergeable:
             logger.info("%s skip_reason=mergeable", log_prefix)
             return
-        if mergeable_info.get("commit_merged") or mergeable_info.get("content_merged"):
-            logger.info("%s skip_reason=already_merged", log_prefix)
+        if result.too_many:
+            logger.info(
+                "%s skip_reason=too_many_conflicts files=%d",
+                log_prefix, len(result.conflict_files),
+            )
+            # Still mark the hashtag so we don't re-attempt on the same PS.
+            try:
+                await gerrit_client.add_hashtag(
+                    change_id=str(change_number),
+                    project=project,
+                    hashtag=f"{_PROACTIVE_HASHTAG_PREFIX}{ps_number}",
+                )
+            except Exception:
+                pass
+            return
+        if not result.conflict_files:
+            logger.warning(
+                "%s skip_reason=no_conflict_files_returned", log_prefix,
+            )
             return
 
         # ── 5. Mark before invoke (throttle) ──────────────────────
@@ -535,10 +560,11 @@ async def _proactive_merger_check(event: dict) -> None:
                            log_prefix, marker_hashtag, exc)
 
         # ── 6. Invoke merger via arbiter ──────────────────────────
-        # MVP: conflict_text="" → merger.resolve_conflict short-circuits
-        # to refused_no_conflict → arbiter routes to abstain JIRA
-        # ticket. Operator gets a notification + a ticket to manually
-        # rebase. Real conflict resolution awaits OP-715.
+        # OP-717: build MergeConflictTask from the FIRST conflict file
+        # (alphabetical). additional_files lists the rest so the merger
+        # has scope context. The merger's existing pipeline will
+        # resolve the primary file via LLM, push a resolved patchset,
+        # and set Merge-Conflict-Resolved hashtag on success.
         from backend.merge_arbiter import (
             MergeConflictTask, on_merge_conflict_webhook,
         )
@@ -547,19 +573,28 @@ async def _proactive_merger_check(event: dict) -> None:
         ticket_match = re.search(r"\bOP-\d+\b", subject)
         jira_ticket = ticket_match.group(0) if ticket_match else ""
 
+        primary = result.conflict_files[0]
+        additional = [cf.path for cf in result.conflict_files[1:]]
+
         task = MergeConflictTask(
             change_id=str(change_number),
             project=project,
-            file_path="",
-            conflict_text="",
-            head_commit_message=subject,
-            incoming_commit_message=subject,
+            file_path=primary.path,
+            conflict_text=primary.conflict_text,
+            file_context=primary.file_context,
+            head_commit_message=result.head_subject or subject,
+            incoming_commit_message=result.incoming_subject or subject,
             patchset_revision=rev,
             jira_ticket=jira_ticket,
+            additional_files=additional,
         )
 
-        logger.info("%s decision=invoke_merger jira_ticket=%s",
-                    log_prefix, jira_ticket or "<none>")
+        logger.info(
+            "%s decision=invoke_merger jira_ticket=%s primary_file=%s "
+            "additional_count=%d",
+            log_prefix, jira_ticket or "<none>",
+            primary.path, len(additional),
+        )
         try:
             outcome = await on_merge_conflict_webhook(task)
             outcome_reason = getattr(outcome, "reason", None)
@@ -577,75 +612,6 @@ async def _proactive_merger_check(event: dict) -> None:
             )
     except Exception as exc:  # pragma: no cover — final safety net
         logger.exception("merger_proactive_check unhandled error: %s", exc)
-
-
-async def _fetch_mergeable(
-    project: str, change_number: int | str, revision: str,
-) -> dict | None:
-    """Query Gerrit REST for mergeability of ``revision`` on
-    ``change_number``. Returns the REST JSON (with ``mergeable``,
-    ``commit_merged``, ``content_merged`` fields), or ``None`` if the
-    request failed.
-
-    Auth: uses the configured Gerrit account row's HTTP token (same
-    account merger-agent-bot uses for gerrit_client SSH ops).
-    """
-    if not change_number or not revision:
-        return None
-    try:
-        from backend.git_credentials import (
-            get_credential_registry_async, pick_default,
-        )
-        account: dict | None = None
-        if project:
-            registry = await get_credential_registry_async()
-            for entry in registry:
-                if entry.get("platform") != "gerrit":
-                    continue
-                if (entry.get("project") or "").strip().lower() == project.strip().lower():
-                    account = entry
-                    break
-        if account is None:
-            account = await pick_default("gerrit", touch=False)
-        if account is None:
-            logger.warning("_fetch_mergeable: no gerrit account configured")
-            return None
-
-        instance_url = (account.get("instance_url") or "").rstrip("/")
-        username = account.get("username") or ""
-        token = account.get("token") or ""
-        if not instance_url or not username or not token:
-            logger.warning("_fetch_mergeable: gerrit account missing url/user/token")
-            return None
-
-        url = f"{instance_url}/a/changes/{change_number}/revisions/{revision}/mergeable"
-        import base64 as _b64
-        cred = _b64.b64encode(f"{username}:{token}".encode()).decode()
-        import aiohttp
-        # ssl=False because the dev Gerrit's HTTPS cert is self-signed;
-        # production deploys behind a CA-signed cert can drop this.
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                headers={"Authorization": f"Basic {cred}"},
-                timeout=aiohttp.ClientTimeout(total=10),
-                ssl=False,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(
-                        "_fetch_mergeable: HTTP %s url=%s",
-                        resp.status, url,
-                    )
-                    return None
-                raw = await resp.text()
-        # Gerrit's REST prefixes responses with )]}' to defeat XSSI;
-        # strip the magic line before json-parse.
-        if raw.startswith(")]}'"):
-            raw = raw.split("\n", 1)[1] if "\n" in raw else ""
-        return json.loads(raw)
-    except Exception as exc:
-        logger.warning("_fetch_mergeable: %s", exc)
-        return None
 
 
 async def _on_comment_added(event: dict) -> None:
