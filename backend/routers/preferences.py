@@ -38,6 +38,13 @@ MP_WAR_ROOM_PANEL_LAYOUT_PREF_KEY = "mp_war_room_panel_layout"
 MP_MODAL_ACTION_PREF_KEY = "mp_modal_action"
 PREF_TRUE_VALUE = "1"
 PREF_FALSE_VALUE = "0"
+MP_ONBOARDING_AUDIT_ENTITY = "multi_provider_onboarding_tour"
+MP_ONBOARDING_COMPLETE_ACTION = "multi_provider.onboarding_tour.completed"
+MP_ONBOARDING_SKIP_ACTION = "multi_provider.onboarding_tour.skipped"
+MP_ONBOARDING_SKIP_RATE_ALERT_ACTION = (
+    "multi_provider.onboarding_tour.skip_rate_alerted"
+)
+MP_ONBOARDING_SKIP_RATE_THRESHOLD = 0.5
 
 
 class PrefBody(BaseModel):
@@ -52,6 +59,12 @@ class PreferenceResponse(BaseModel):
 class MultiProviderOnboardingTourStateResponse(BaseModel):
     key: str
     seen: bool
+
+
+class MultiProviderOnboardingTourDecisionResponse(BaseModel):
+    key: str
+    value: str
+    first_time: bool
 
 
 class MultiProviderModalActionResponse(BaseModel):
@@ -171,6 +184,150 @@ def _emit_preference_updated(key: str, value: str, user_id: str) -> None:
         )
 
 
+async def _audit_multi_provider_onboarding_tour_decision(
+    *,
+    action: str,
+    first_time: bool,
+    user: auth.User,
+) -> None:
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action=action,
+            entity_kind=MP_ONBOARDING_AUDIT_ENTITY,
+            entity_id=user.id,
+            before={"seen": not first_time},
+            after={
+                "seen": True,
+                "first_time": first_time,
+                "tenant_id": user.tenant_id,
+            },
+            actor=user.email or user.id,
+        )
+    except Exception as exc:
+        logger.debug("%s audit emit failed for user=%s: %s", action, user.id, exc)
+
+
+async def _multi_provider_onboarding_first_time_counts() -> tuple[int, int]:
+    from backend.db_pool import get_pool
+
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT "
+            "COUNT(*) FILTER ("
+            "  WHERE action = $1 "
+            "    AND after_json::jsonb ->> 'first_time' = 'true'"
+            ") AS skipped, "
+            "COUNT(*) FILTER ("
+            "  WHERE action IN ($1, $2) "
+            "    AND after_json::jsonb ->> 'first_time' = 'true'"
+            ") AS total "
+            "FROM audit_log "
+            "WHERE entity_kind = $3",
+            MP_ONBOARDING_SKIP_ACTION,
+            MP_ONBOARDING_COMPLETE_ACTION,
+            MP_ONBOARDING_AUDIT_ENTITY,
+        )
+    if not row:
+        return 0, 0
+    return int(row["skipped"] or 0), int(row["total"] or 0)
+
+
+async def _alert_if_multi_provider_skip_rate_crossed(
+    *,
+    user: auth.User,
+) -> None:
+    try:
+        skipped, total = await _multi_provider_onboarding_first_time_counts()
+    except Exception as exc:
+        logger.debug("mp onboarding skip-rate count failed: %s", exc)
+        return
+
+    if total <= 0:
+        return
+
+    rate = skipped / total
+    previous_total = total - 1
+    previous_skipped = skipped - 1
+    previous_rate = (
+        previous_skipped / previous_total
+        if previous_total > 0
+        else 0.0
+    )
+    if (
+        rate <= MP_ONBOARDING_SKIP_RATE_THRESHOLD
+        or previous_rate > MP_ONBOARDING_SKIP_RATE_THRESHOLD
+    ):
+        return
+
+    percent = round(rate * 100, 1)
+    try:
+        from backend import notifications
+        await notifications.notify(
+            level="warning",
+            severity="P2",
+            title="Multi-provider onboarding skip rate above 50%",
+            message=(
+                f"{skipped}/{total} first-time users skipped the "
+                f"multi-provider onboarding tour ({percent}%)."
+            ),
+            source="multi_provider:onboarding_tour",
+        )
+    except Exception as exc:
+        logger.debug("mp onboarding skip-rate notification failed: %s", exc)
+
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action=MP_ONBOARDING_SKIP_RATE_ALERT_ACTION,
+            entity_kind=MP_ONBOARDING_AUDIT_ENTITY,
+            entity_id="skip-rate",
+            before={
+                "skip_rate": previous_rate,
+                "skipped": max(previous_skipped, 0),
+                "total": max(previous_total, 0),
+            },
+            after={
+                "skip_rate": rate,
+                "skipped": skipped,
+                "total": total,
+                "threshold": MP_ONBOARDING_SKIP_RATE_THRESHOLD,
+            },
+            actor=user.email or user.id,
+        )
+    except Exception as exc:
+        logger.debug("mp onboarding skip-rate alert audit failed: %s", exc)
+
+
+async def _record_multi_provider_onboarding_tour_decision(
+    *,
+    action: Literal["complete", "skip"],
+    user: auth.User,
+) -> MultiProviderOnboardingTourDecisionResponse:
+    previous = await _get_preference_value(user.id, SEEN_MP_TOUR_PREF_KEY)
+    first_time = previous is None
+    await _upsert_preference(user.id, SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE)
+    _emit_preference_updated(SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE, user.id)
+
+    audit_action = (
+        MP_ONBOARDING_SKIP_ACTION
+        if action == "skip"
+        else MP_ONBOARDING_COMPLETE_ACTION
+    )
+    await _audit_multi_provider_onboarding_tour_decision(
+        action=audit_action,
+        first_time=first_time,
+        user=user,
+    )
+    if action == "skip" and first_time:
+        await _alert_if_multi_provider_skip_rate_crossed(user=user)
+    return {
+        "key": SEEN_MP_TOUR_PREF_KEY,
+        "value": PREF_TRUE_VALUE,
+        "first_time": first_time,
+    }
+
+
 @router.get("/user-preferences")
 async def list_preferences(
     user: auth.User = Depends(auth.current_user),
@@ -222,10 +379,21 @@ async def skip_tour(
 @router.post("/multi-provider/onboarding-tour/complete")
 async def complete_multi_provider_onboarding_tour(
     user: auth.User = Depends(auth.current_user),
-) -> PreferenceResponse:
-    await _upsert_preference(user.id, SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE)
-    _emit_preference_updated(SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE, user.id)
-    return {"key": SEEN_MP_TOUR_PREF_KEY, "value": PREF_TRUE_VALUE}
+) -> MultiProviderOnboardingTourDecisionResponse:
+    return await _record_multi_provider_onboarding_tour_decision(
+        action="complete",
+        user=user,
+    )
+
+
+@router.post("/multi-provider/onboarding-tour/skip")
+async def skip_multi_provider_onboarding_tour(
+    user: auth.User = Depends(auth.current_user),
+) -> MultiProviderOnboardingTourDecisionResponse:
+    return await _record_multi_provider_onboarding_tour_decision(
+        action="skip",
+        user=user,
+    )
 
 
 @router.post("/multi-provider/onboarding-tour/replay")
