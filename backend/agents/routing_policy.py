@@ -270,6 +270,8 @@ def _agent_class_allows_provider(agent_class: str, provider_id: str) -> bool:
         return agent_class in {"subscription-codex", "api-openai"}
     if provider_id == "gemini-subscription":
         return agent_class in {"subscription-gemini", "api-gemini"}
+    if provider_id == "xai-subscription":
+        return agent_class in {"subscription-xai", "api-xai"}
     provider_prefix = provider_id.split("-", 1)[0]
     return provider_prefix in agent_class
 
