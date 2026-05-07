@@ -1,0 +1,294 @@
+"use client"
+
+/**
+ * RPG.W8.1 — operator-facing agent Character Card shell.
+ *
+ * Scope: the compact RPG-style identity card only. Data loading,
+ * instance switching, skill radar, talent tree, and tool proficiency
+ * tabs are separate W8 follow-ups per ADR-0008.
+ */
+
+import {
+  BrainCircuit,
+  Code2,
+  Database,
+  Gem,
+  Laptop,
+  Medal,
+  ServerCog,
+  Shield,
+  Smartphone,
+  Sparkles,
+  Wrench,
+} from "lucide-react"
+import type { LucideIcon } from "lucide-react"
+import type { ReactElement } from "react"
+
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Badge } from "@/components/ui/badge"
+import { cn } from "@/lib/utils"
+
+export type AgentGuild =
+  | "backend"
+  | "frontend"
+  | "security"
+  | "devops"
+  | "data"
+  | "mobile"
+  | "embedded"
+  | "generalist"
+
+export interface CharacterCardProps {
+  agentId: string
+  displayName: string
+  guild: AgentGuild
+  level: number
+  xp: number
+  nextLevelXp: number
+  specialization: string
+  className?: string
+  portraitUrl?: string | null
+  instanceSuffix?: string | null
+  styleFingerprint?: string | null
+}
+
+interface GuildVisual {
+  label: string
+  crestLabel: string
+  Icon: LucideIcon
+  toneClass: string
+  barClass: string
+  portraitClass: string
+}
+
+const GUILD_VISUALS: Record<AgentGuild, GuildVisual> = {
+  backend: {
+    label: "Backend Guild",
+    crestLabel: "BE",
+    Icon: ServerCog,
+    toneClass: "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+    barClass: "bg-sky-500",
+    portraitClass: "from-sky-500/20 via-emerald-500/10 to-background",
+  },
+  frontend: {
+    label: "Frontend Guild",
+    crestLabel: "FE",
+    Icon: Code2,
+    toneClass:
+      "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300",
+    barClass: "bg-fuchsia-500",
+    portraitClass: "from-fuchsia-500/20 via-amber-500/10 to-background",
+  },
+  security: {
+    label: "Security Guild",
+    crestLabel: "SE",
+    Icon: Shield,
+    toneClass:
+      "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300",
+    barClass: "bg-rose-500",
+    portraitClass: "from-rose-500/20 via-slate-500/10 to-background",
+  },
+  devops: {
+    label: "DevOps Guild",
+    crestLabel: "DO",
+    Icon: Wrench,
+    toneClass:
+      "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300",
+    barClass: "bg-orange-500",
+    portraitClass: "from-orange-500/20 via-cyan-500/10 to-background",
+  },
+  data: {
+    label: "Data Guild",
+    crestLabel: "DA",
+    Icon: Database,
+    toneClass:
+      "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+    barClass: "bg-emerald-500",
+    portraitClass: "from-emerald-500/20 via-violet-500/10 to-background",
+  },
+  mobile: {
+    label: "Mobile Guild",
+    crestLabel: "MO",
+    Icon: Smartphone,
+    toneClass:
+      "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300",
+    barClass: "bg-cyan-500",
+    portraitClass: "from-cyan-500/20 via-lime-500/10 to-background",
+  },
+  embedded: {
+    label: "Embedded Guild",
+    crestLabel: "EM",
+    Icon: Laptop,
+    toneClass:
+      "border-lime-500/30 bg-lime-500/10 text-lime-700 dark:text-lime-300",
+    barClass: "bg-lime-500",
+    portraitClass: "from-lime-500/20 via-zinc-500/10 to-background",
+  },
+  generalist: {
+    label: "Generalist Guild",
+    crestLabel: "GN",
+    Icon: BrainCircuit,
+    toneClass:
+      "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300",
+    barClass: "bg-violet-500",
+    portraitClass: "from-violet-500/20 via-sky-500/10 to-background",
+  },
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(100, value))
+}
+
+export function getLevelProgressPercent(xp: number, nextLevelXp: number): number {
+  if (!Number.isFinite(nextLevelXp) || nextLevelXp <= 0) return 0
+  return clampPercent((xp / nextLevelXp) * 100)
+}
+
+function initialsFor(name: string): string {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+  if (parts.length === 0) return "AI"
+  return parts.map((part) => part[0]?.toUpperCase()).join("")
+}
+
+export function CharacterCard({
+  agentId,
+  displayName,
+  guild,
+  level,
+  xp,
+  nextLevelXp,
+  specialization,
+  className,
+  portraitUrl,
+  instanceSuffix,
+  styleFingerprint,
+}: CharacterCardProps): ReactElement {
+  const visual = GUILD_VISUALS[guild] ?? GUILD_VISUALS.generalist
+  const progress = getLevelProgressPercent(xp, nextLevelXp)
+  const GuildIcon = visual.Icon
+
+  return (
+    <article
+      className={cn(
+        "relative overflow-hidden rounded-lg border bg-card text-card-foreground shadow-sm",
+        "before:absolute before:inset-x-0 before:top-0 before:h-1 before:bg-gradient-to-r before:from-transparent before:via-primary/60 before:to-transparent",
+        className,
+      )}
+      data-agent-id={agentId}
+      data-agent-guild={guild}
+    >
+      <div className="grid gap-4 p-4 sm:grid-cols-[8rem_1fr]">
+        <div
+          className={cn(
+            "relative flex min-h-32 items-center justify-center rounded-md border bg-gradient-to-br p-3",
+            visual.portraitClass,
+          )}
+        >
+          <Avatar className="size-24 rounded-md border bg-background shadow-sm">
+            {portraitUrl ? (
+              <AvatarImage src={portraitUrl} alt={`${displayName} portrait`} />
+            ) : null}
+            <AvatarFallback className="rounded-md text-xl font-semibold">
+              {initialsFor(displayName)}
+            </AvatarFallback>
+          </Avatar>
+
+          <div
+            aria-label={visual.label}
+            className={cn(
+              "absolute -right-2 -top-2 flex size-11 items-center justify-center rounded-md border shadow-sm",
+              visual.toneClass,
+            )}
+            title={visual.label}
+          >
+            <GuildIcon className="size-5" aria-hidden="true" />
+            <span className="sr-only">{visual.crestLabel}</span>
+          </div>
+        </div>
+
+        <div className="flex min-w-0 flex-col gap-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="truncate text-lg font-semibold leading-tight">
+                  {displayName}
+                </h3>
+                {instanceSuffix ? (
+                  <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">
+                    {instanceSuffix}
+                  </Badge>
+                ) : null}
+              </div>
+              <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                {agentId}
+              </p>
+            </div>
+
+            <Badge
+              variant="outline"
+              className={cn("h-7 gap-1.5 px-2 text-xs", visual.toneClass)}
+            >
+              <GuildIcon className="size-3.5" aria-hidden="true" />
+              {visual.label}
+            </Badge>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
+            <div className="min-w-0">
+              <div className="mb-1.5 flex items-center justify-between gap-3 text-xs">
+                <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
+                  <Medal className="size-3.5 text-amber-500" aria-hidden="true" />
+                  Level {Math.max(1, Math.trunc(level))}
+                </span>
+                <span className="font-mono text-muted-foreground">
+                  {Math.max(0, Math.trunc(xp)).toLocaleString()} /{" "}
+                  {Math.max(0, Math.trunc(nextLevelXp)).toLocaleString()} XP
+                </span>
+              </div>
+              <div
+                aria-label={`Level progress ${Math.round(progress)} percent`}
+                className="h-2 overflow-hidden rounded-full bg-muted"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(progress)}
+              >
+                <div
+                  className={cn("h-full rounded-full transition-all", visual.barClass)}
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-md border bg-muted/30 px-3 py-2 sm:min-w-40">
+              <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground">
+                <Sparkles className="size-3 text-amber-500" aria-hidden="true" />
+                Specialization
+              </div>
+              <div className="mt-1 text-sm font-semibold leading-tight">
+                {specialization}
+              </div>
+            </div>
+          </div>
+
+          {styleFingerprint ? (
+            <div className="flex items-center gap-2 rounded-md border border-dashed bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+              <Gem className="size-3.5 text-emerald-500" aria-hidden="true" />
+              <span className="min-w-0 truncate">
+                Style fingerprint:{" "}
+                <span className="font-mono text-foreground">{styleFingerprint}</span>
+              </span>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </article>
+  )
+}
+
+export default CharacterCard
