@@ -18,8 +18,12 @@ more context — but those AI +2s can never substitute for the human
 hard gate.
 
 Policy location: `CLAUDE.md` → Safety Rules → "AI reviewer max score".
-Enforcement: `.gerrit/rules.pl` (Prolog) plus the mirror evaluator at
-`backend/submit_rule.py` (SSOT for arbiter + CI).
+Enforcement: declarative `[submit-requirement "..."]` blocks in
+`project.config` on `refs/meta/config` (per `.gerrit/project.config.example`),
+plus the mirror evaluator at `backend/submit_rule.py` (SSOT for arbiter
++ CI).  Note: the original Prolog `rules.pl` approach was abandoned in
+OP-697 — Gerrit 3.13 rejects new `rules.pl` uploads, and declarative
+submit-requirements cover the same policy with better introspection.
 
 ---
 
@@ -34,8 +38,9 @@ Enforcement: `.gerrit/rules.pl` (Prolog) plus the mirror evaluator at
 ### Why group-based, not account-based?
 
 Adding a new AI reviewer in the future (e.g. a perf-bot, a
-doc-bot, …) should require zero changes to `rules.pl`.  Admins add
-the new account to `ai-reviewer-bots`, and the rule Just Works.
+doc-bot, …) should require zero changes to the submit-requirements.
+Admins add the new account to `ai-reviewer-bots`, and the rule Just
+Works.
 
 ### Creating the groups
 
@@ -67,32 +72,53 @@ ssh -p 29418 gerrit-host gerrit ls-members non-ai-reviewer
 
 ## 2. Installing the submit-rule
 
-The OmniSight policy lives in two files:
+The OmniSight policy lives in **declarative `[submit-requirement "..."]`
+blocks in `project.config`** on `refs/meta/config` — NOT in a Prolog
+`rules.pl` file.  Gerrit 3.13 rejects new `rules.pl` uploads upstream;
+the obsolete `.gerrit/rules.pl` was removed in OP-697.
+
+The reference config lives at:
 
 * [`.gerrit/project.config.example`](../../.gerrit/project.config.example)
-* [`.gerrit/rules.pl`](../../.gerrit/rules.pl)
+  — three submit-requirement blocks: `Human-Plus-2`, `Merger-Plus-2`
+  (conditional on `hashtag:Merge-Conflict-Resolved` per OP-694), and
+  `No-Veto`.
 
-Install them on `refs/meta/config`:
+Install on `refs/meta/config`:
 
 ```sh
-git clone ssh://gerrit-host:29418/omnisight-productizer gerrit-meta
+git clone ssh://sora.services:29418/omnisight/OmniSight-Productizer gerrit-meta
 cd gerrit-meta
 git fetch origin refs/meta/config:refs/remotes/origin/meta/config
 git checkout meta/config
 
 cp ../.gerrit/project.config.example project.config
-cp ../.gerrit/rules.pl rules.pl
 
-git add project.config rules.pl
-git commit -m "O7: dual-+2 submit rule (human hard gate + merger bot)"
+git add project.config
+git commit -m "OP-692: dual-+2 submit-requirements (human hard gate + conditional merger)"
 git push origin HEAD:refs/meta/config
 ```
 
-Verify the rule loaded:
+Webhooks live in a separate `webhooks.config` file on the same ref —
+the webhooks plugin reads ONLY that file (per OP-713 lesson L22, and
+the upstream plugin docs at `/plugins/webhooks/Documentation/config.html`).
+Do NOT put `[remote "..."]` blocks in `project.config`; they will be
+silently ignored.
+
+Verify the submit-requirements loaded by inspecting any open change's
+submit-requirement evaluation:
 
 ```sh
-ssh -p 29418 gerrit-host gerrit rules --test-submit-rule omnisight-productizer <change-id>
+# Substitute <change-num> with a live open change number on the project.
+curl -sk "https://<gerrit-web-host>:29420/changes/<change-num>/?o=SUBMIT_REQUIREMENTS" \
+  | sed "s/^)]}'//" \
+  | python3 -c "import sys, json; d=json.loads(sys.stdin.read()); [print(s['name'], s['status']) for s in d.get('submit_requirements', [])]"
 ```
+
+Expect to see all three names — `Human-Plus-2`, `Merger-Plus-2`,
+`No-Veto` — in the output, with status `UNSATISFIED` until the change
+gets the required votes (and `NOT_APPLICABLE` for `Merger-Plus-2`
+on changes without the `Merge-Conflict-Resolved` hashtag).
 
 ---
 
@@ -100,7 +126,8 @@ ssh -p 29418 gerrit-host gerrit rules --test-submit-rule omnisight-productizer <
 
 The O7 specification mandates the following cases.  The matrix is
 enforced by `backend/tests/test_submit_rule_matrix.py` against the
-SSOT evaluator, and by the Gerrit Prolog rule at submit time.
+SSOT evaluator, and mirrored at Gerrit submit time by the
+`[submit-requirement "..."]` blocks on `refs/meta/config`.
 
 | Votes                                                        | Expected |
 |--------------------------------------------------------------|----------|
@@ -197,11 +224,16 @@ The dual-+2 rule is hard-enforced at Gerrit level.  If it blocks a
 time-critical hotfix, the emergency rollback is:
 
 ```sh
-# Revert rules.pl on refs/meta/config (admin-only):
+# Revert the [submit-requirement "..."] blocks on refs/meta/config (admin-only).
+# Find the originating commit (typically OP-692 or follow-ups OP-694 / OP-697):
 git checkout meta/config
-git revert <O7 rule commit>
+git log --oneline project.config | head -10
+git revert <commit-sha>
 git push origin HEAD:refs/meta/config
 ```
+
+Submit-requirements are hot-reloaded by Gerrit on `refs/meta/config`
+push — no plugin restart required.
 
 All emergency rollbacks MUST:
 
@@ -211,8 +243,8 @@ All emergency rollbacks MUST:
 
 ### 5.3 Authorisation gap detected
 
-If a change merges without a human +2 (e.g. due to a rules.pl bug),
-treat as a P0 incident:
+If a change merges without a human +2 (e.g. due to a submit-requirement
+misconfiguration on `refs/meta/config`), treat as a P0 incident:
 
 1. Lock the repo: `gerrit set-project --state read-only <project>`.
 2. Page security-oncall.
@@ -245,7 +277,9 @@ states is:
 ## 7. Related
 
 * [`CLAUDE.md`](../../CLAUDE.md) — L1 Safety Rules (the policy source).
-* [`.gerrit/rules.pl`](../../.gerrit/rules.pl) — Prolog source of truth.
+* [`.gerrit/project.config.example`](../../.gerrit/project.config.example)
+  — declarative submit-requirements (the Gerrit-side source of truth,
+  installed on `refs/meta/config`).
 * [`backend/submit_rule.py`](../../backend/submit_rule.py) — Python SSOT
   mirror, used by orchestrator + GitHub Actions.
 * [`backend/merge_arbiter.py`](../../backend/merge_arbiter.py) — the
