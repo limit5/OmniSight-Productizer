@@ -24,8 +24,19 @@ from backend.llm_adapter import (
     LLMResult,
     build_chat_model,
 )
-from backend.agents.ratelimit_headers import _PROVIDER_RATELIMIT_HEADERS
 from backend.config import settings
+# OP-80: import canonical key names + provider-header dict from the
+# shared contract module. ratelimit_headers.py (legacy module) still
+# re-exports _PROVIDER_RATELIMIT_HEADERS for any older Z.1 callers; the
+# refactor in this commit makes the contract module the source of truth.
+from backend.agents.ratelimit_contract import (
+    PROVIDER_RATELIMIT_HEADER_KEYS,
+    REMAINING_REQUESTS_KEY,
+    REMAINING_TOKENS_KEY,
+    RESET_AT_TS_KEY,
+    RETRY_AFTER_S_KEY,
+)
+from backend.agents.ratelimit_headers import _PROVIDER_RATELIMIT_HEADERS
 
 if TYPE_CHECKING:
     pass
@@ -116,10 +127,17 @@ def _serialize_message(msg) -> dict:  # noqa: ANN001
 # both, split into ``reset_requests_at_ts`` / ``reset_tokens_at_ts`` —
 # but right now one field keeps the SharedKV payload + UI card simple.
 #
-# Module-global audit (SOP Step 1, 2026-04-21): this is imported from
-# ``backend.agents.ratelimit_headers`` as the canonical module-const dict
-# every worker derives from the same source. No shared mutable state
-# introduced; the name remains re-exported here for the existing Z.1 tests.
+# Module-global audit (SOP Step 1): _PROVIDER_RATELIMIT_HEADERS is now
+# imported (above) from backend.agents.ratelimit_headers, which itself
+# re-exports the canonical PROVIDER_RATELIMIT_HEADER_KEYS dict from
+# backend.agents.ratelimit_contract. Single source of truth, no
+# duplicate dict literal needed here.
+#
+# Google Gemini uses a gRPC/REST API; LangChain's langchain-google-genai
+# does not currently surface per-request rate-limit headers through any
+# of the 5 paths ``_extract_response_headers`` walks, so it's omitted
+# from the contract alongside Ollama. Revisit if an adapter version
+# lands that mirrors the SDK's ``x-goog-quota-*`` headers.
 
 
 _DURATION_RE = re.compile(
@@ -286,16 +304,16 @@ def _normalize_ratelimit_headers(
     lower = {
         k.lower(): v for k, v in headers.items() if isinstance(k, str)
     }
-    raw_req = lower.get(mapping["remaining_requests"].lower())
-    raw_tok = lower.get(mapping["remaining_tokens"].lower())
+    raw_req = lower.get(mapping[REMAINING_REQUESTS_KEY].lower())
+    raw_tok = lower.get(mapping[REMAINING_TOKENS_KEY].lower())
     raw_reset = lower.get(mapping["reset_at"].lower())
     raw_retry = lower.get(mapping["retry_after"].lower())
 
     result: dict = {
-        "remaining_requests": _parse_int_or_none(raw_req),
-        "remaining_tokens": _parse_int_or_none(raw_tok),
-        "reset_at_ts": _parse_reset_value(raw_reset),
-        "retry_after_s": _parse_retry_after_seconds(raw_retry),
+        REMAINING_REQUESTS_KEY: _parse_int_or_none(raw_req),
+        REMAINING_TOKENS_KEY: _parse_int_or_none(raw_tok),
+        RESET_AT_TS_KEY: _parse_reset_value(raw_reset),
+        RETRY_AFTER_S_KEY: _parse_retry_after_seconds(raw_retry),
     }
     if all(v is None for v in result.values()):
         return {}

@@ -37,6 +37,7 @@ from backend.agents.provider_orchestrator import (
 )
 from backend.agents.provider_ratelimit_cap import ratelimit_cap_signal
 from backend.agents.provider_quota_tracker import QuotaState
+from backend.agents.ratelimit_contract import RESET_AT_TS_KEY
 
 
 PROVIDER_ID = "openai-subscription"
@@ -46,7 +47,7 @@ HEALTH_CHECK_TIMEOUT_S = 5
 
 _TOKEN_KEY_RE = re.compile(r"(?:^|_)(?:input|output|prompt|completion|total)?_?tokens?$")
 _TEXT_TOKEN_RE = re.compile(r"\b(?:total_)?tokens(?:_used)?\b\D{0,12}(\d+)", re.I)
-_RESET_AT_RE = re.compile(r"\breset_at\b[\"':=\s]*(\d+)", re.I)
+_RESET_AT_RE = re.compile(r"\b(?:reset_at|reset_at_ts)\b[\"':=\s]*(\d+)", re.I)
 
 
 class OpenAISubscriptionAdapter(ProviderAdapter):
@@ -236,7 +237,7 @@ def _cap_signal(stdout: str, stderr: str) -> dict[str, int | str] | None:
     out: dict[str, int | str] = {"kind": "rate_limit_exceeded"}
     reset_at = _reset_at(joined, payloads)
     if reset_at is not None:
-        out["reset_at"] = reset_at
+        out[RESET_AT_TS_KEY] = reset_at
     return out
 
 
@@ -288,7 +289,7 @@ def _reset_at(text: str, payloads: list[Any]) -> int | None:
 def _reset_at_from_json(value: Any) -> int | None:
     if isinstance(value, dict):
         for key, child in value.items():
-            if str(key).lower() == "reset_at":
+            if str(key).lower() in {"reset_at", RESET_AT_TS_KEY}:
                 parsed = _parse_reset_at_value(child)
                 if parsed is not None:
                     return parsed
