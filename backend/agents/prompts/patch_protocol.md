@@ -75,3 +75,7 @@ to emit correctly.
 - Patch failures (`[PATCH-FAILED]`) also count. If you see one, fix
   the SEARCH context and retry — don't fall back to `write_file` on
   the existing file, you'll be rejected again.
+
+<!-- op-698-allow-conflict-marker — the SEARCH/REPLACE blocks above are LLM patch DSL,
+     not git conflict markers. The check_no_conflict_markers.py drift guard sees this
+     token and skips the file. -->

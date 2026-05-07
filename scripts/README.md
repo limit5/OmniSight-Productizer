@@ -1,6 +1,5 @@
 # Scripts
 
-<<<<<<< PATCH SET (002e85da2f7d12c2af3ceafdec52e21a48ee61a6 [OP-688] Add topo submit order helper)
 ## topo-submit-order.py
 
 Suggests a safe Gerrit submit order for batched JIRA approvals:
@@ -69,4 +68,3 @@ End-of-session use is intentionally manual: when `/loop` ends after
 operator or interactive-Claude commits landed directly on main, run the
 dry-run first, then the real command if the listed commits are the ones
 to ship. The script does not auto-push on its own.
->>>>>>> BASE      (61fb8b8fd019c8709ffa609acf806efcabe21ee1 Merge "[OP-28] Add runtime cost estimate endpoint" into deve)

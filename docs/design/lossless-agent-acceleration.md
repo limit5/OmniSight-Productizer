@@ -64,3 +64,6 @@
 >>>>>>> REPLACE
 ```
 違規懲罰： 若你直接輸出超過 50 行未經修改的原始碼，系統攔截器將會判定任務失敗並強制重啟。
+
+<!-- op-698-allow-conflict-marker — the SEARCH/REPLACE example above is LLM patch DSL,
+     not a git conflict marker. -->

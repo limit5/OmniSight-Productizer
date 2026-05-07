@@ -26,6 +26,22 @@ permissions:
 
 jobs:
 
+  conflict-marker-drift:
+    # OP-698 action 3 — fail CI on unresolved git conflict markers
+    # anywhere in the working tree. Catches both the "Submit with
+    # conflicts → markers landed in develop" failure mode (incident
+    # #61) and any developer who pushes a partially resolved patchset
+    # by mistake. Runs first because it's a sub-second pure-Python
+    # sweep that gates the rest of the heavier matrix.
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: scan for conflict markers
+        run: python3 scripts/check_no_conflict_markers.py --verbose
+
   lockfile-drift:
     # N1 — fail CI when a source-of-truth manifest changes but its lockfile
     # doesn't, OR when a stray npm/yarn lockfile reappears. Runs first so

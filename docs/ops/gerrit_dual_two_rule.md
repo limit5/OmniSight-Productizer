@@ -241,6 +241,43 @@ All emergency rollbacks MUST:
 * Be re-applied within 24 h (tracked in the same ledger).
 * Be accompanied by a post-mortem if the rollback lasted > 4 h.
 
+### ⚠️ DO NOT click "Submit with conflicts" (OP-698)
+
+Two 2026-05-07 incidents proved that Gerrit's **Submit with conflicts**
+button has two distinct silent-failure modes:
+
+* **Mode A** (change #61) — the merged commit lands on develop with
+  unresolved conflict markers (`<<<<<<<` / `=======` / `>>>>>>>`)
+  embedded in the source tree, breaking the file (e.g.
+  `preferences.py` becomes invalid Python and crashes import).
+* **Mode B** (change #70) — Gerrit's UI reports `MERGED` and JIRA
+  transitions to `承認済み`, but `develop`'s git ref never advanced.
+  The conflicted merge commit is reachable only from the feature
+  branch. The feature is missing in production despite all the
+  bookkeeping saying it shipped.
+
+Both modes are operator-invisible without a post-merge audit.
+**Never** click *Submit* on a patchset that displays conflict markers
+in the diff. Always:
+
+1. Locally rebase against the latest `develop`,
+2. Resolve conflicts in your editor,
+3. Push the resolved result as a fresh patchset (`git push gerrit
+   HEAD:refs/for/develop`),
+4. Then click *Submit* on the clean patchset.
+
+CI guard: `scripts/check_no_conflict_markers.py` runs as the
+`conflict-marker-drift` job in `.github/workflows/ci.yml` and fails
+the build if any unresolved markers reach the source tree. This
+catches Mode A; it does not catch Mode B (phantom merge), so the
+rebase-locally rule above is still mandatory.
+
+OP-698 follow-ups still open: ACL-level disabling of the Submit-with-
+conflicts capability (action 1), a submit-requirement that hard-fails
+on conflict markers in the merged tree (action 2), and a post-submit
+git-ref reconciliation hook for Mode B detection (action 4). Track
+those as separate sub-tickets.
+
 ### 5.3 Authorisation gap detected
 
 If a change merges without a human +2 (e.g. due to a submit-requirement
