@@ -21,7 +21,6 @@ import asyncpg
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from backend import auth as _au
 from backend.config import settings
 from backend.db_pool import get_conn, get_pool
 from backend.email_delivery.webhooks import (
@@ -214,32 +213,34 @@ async def _on_stripe_webhook_event(event: StripeWebhookEvent) -> None:
 async def gerrit_webhook(
     request: Request,
     conn: asyncpg.Connection = Depends(get_conn),
-    _user=Depends(_au.require_operator),
 ):
     """Receive Gerrit events and trigger appropriate actions.
 
-    Auth model (OP-714 Phase 1): dual-header pattern, mirroring the
-    merger endpoint at ``/api/v1/orchestrator/merge-conflict``. Gerrit's
-    ``webhooks`` plugin v3.13.5 ignores ``secret = ...`` config (per
-    OP-713 lesson L23 — no signature header sent), so HMAC body verifi-
-    cation is replaced with two shared secrets in custom headers:
+    Auth model (OP-715 cleanup of OP-714):
+    Gerrit's webhooks plugin v3.13.5 has NO support for any form of
+    auth metadata — its config docs at ``/plugins/webhooks/Documentation/
+    config.html`` contain zero references to ``header``, ``auth``,
+    ``bearer``, ``signature``, ``secret`` or ``algorithm``. The plugin
+    just POSTs the event body. So OP-714's attempt to require
+    ``Authorization: Bearer`` + ``X-Jira-Webhook-Secret`` headers via
+    ``require_operator`` + ``_verify_jira_signature`` was structurally
+    impossible to satisfy and 401'd every real event.
 
-      * ``Authorization: Bearer <api_key>`` → satisfies
-        :func:`backend.auth.require_operator` (the ``Depends`` above).
-      * ``X-Jira-Webhook-Secret: <jira_webhook_secret>`` → constant-
-        time compare against ``settings.jira_webhook_secret`` via
-        :func:`backend.routers.orchestrator._verify_jira_signature`.
-
-    Both headers are required; either alone returns 401. Configuration
-    lives in ``refs/meta/config/webhooks.config`` as ``header = ...``
-    lines on the ``[remote "ai-reviewer-webhook"]`` block.
+    OP-715 moves the proactive merger trigger duty to the existing
+    stream-events SSH daemon at :mod:`backend.agents.gerrit_jira_bridge`,
+    which is auth'd at the SSH protocol layer. This webhook handler
+    stays in place to catch any events the daemon might miss, but
+    does NOT enforce header-level auth — the security boundary for
+    this endpoint is the Caddy / Cloudflare zero-trust tunnel
+    upstream of the backend.
 
     Event handling:
-      * ``patchset-created`` — fires (a) the existing AI reviewer task
+      * ``patchset-created`` — fires the existing AI reviewer task
         creation in :func:`_on_patchset_created` (OP-713 will rewire
-        this to a real LLM review), AND (b) OP-714 proactive merger
-        check :func:`_proactive_merger_check` as a background task
-        (fire-and-forget, never blocks the webhook response).
+        this to a real LLM review). The proactive merger trigger that
+        OP-714 wired here is now invoked by the daemon; we keep
+        :func:`_proactive_merger_check` exported so the daemon and a
+        future webhook-auth fix can share it.
       * ``comment-added`` with -1 — notifies coder agent.
       * ``change-merged`` — replication trigger.
 
@@ -257,11 +258,6 @@ async def gerrit_webhook(
     # Reject obviously oversized payloads (DoS guard) — Gerrit events are <64KB.
     if len(raw_body) > 1_048_576:
         return JSONResponse(status_code=413, content={"detail": "Payload too large"})
-
-    # OP-714 Phase 1: shared-secret check (mirror merger endpoint).
-    # Raises HTTPException(401) on bad/missing secret.
-    from backend.routers.orchestrator import _verify_jira_signature
-    _verify_jira_signature(request, raw_body)
 
     try:
         body = json.loads(raw_body)

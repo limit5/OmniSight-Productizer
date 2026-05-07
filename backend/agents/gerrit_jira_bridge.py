@@ -387,8 +387,18 @@ class GerritJiraBridge:
         self.counters.events_received += 1
         self.counters.last_event_at_ts = utc_now_iso()
         event_type = event.get("type")
-        if event_type != "change-merged":
+        if event_type == "change-merged":
+            self._handle_change_merged(event)
             return
+        if event_type == "patchset-created":
+            self._handle_patchset_created(event)
+            return
+        # Other event types are ignored — extend here if/when the daemon
+        # gains additional duties (e.g. comment-added → coder-fix flow).
+
+    # ─── change-merged → JIRA Approved → Published (OP-689) ─────────
+
+    def _handle_change_merged(self, event: dict[str, Any]) -> None:
         change = extract_gerrit_change(event)
         if change.branch and change.branch != "develop":
             self.log("INFO", "change_merged_non_develop_skip", change_id=change.change_id, branch=change.branch)
@@ -411,6 +421,88 @@ class GerritJiraBridge:
             )
             return
         self.process_ticket_for_change(ticket_keys[0], change.change_id)
+
+    # ─── patchset-created → proactive merger trigger (OP-715) ────────
+
+    def _handle_patchset_created(self, event: dict[str, Any]) -> None:
+        """Spawn the proactive merger check as a fire-and-forget thread.
+
+        OP-715 — Gerrit's webhooks plugin v3.13.5 has no auth surface,
+        so the proactive merger trigger that OP-714 attempted to wire
+        through ``/webhooks/gerrit`` runs from this stream-events
+        daemon instead. SSH transport is auth'd at the protocol layer
+        (``claude-bot`` SSH key), so we don't need any per-event
+        signature.
+
+        The shared decision logic lives in
+        :func:`backend.routers.webhooks._proactive_merger_check` —
+        same skip conditions (uploader=merger-bot, hashtag check,
+        WIP, mergeable check), same hashtag throttle
+        (``Merger-Proactive-PS<n>``), same arbiter invocation. We
+        keep ONE implementation so a future webhook-auth fix and the
+        daemon stay in sync without drift.
+
+        The function is async (uses aiohttp for the mergeable REST
+        query and asyncio for the merger LLM call), but
+        ``process_stream_event`` is synchronous because the daemon's
+        outer ``stream_forever`` loop is sync (subprocess Popen +
+        line iteration). Bridging the gap with a per-event daemon
+        thread that calls ``asyncio.run`` is acceptable here because:
+
+          1. Skip conditions early-exit fast (~10 ms each on the
+             cached path), so most events do NOT actually start an
+             event loop.
+          2. The merger invocation itself is rate-limited by the
+             ``Merger-Proactive-PS<n>`` hashtag throttle, so we cap
+             at one slow path per (change, patchset).
+          3. Daemon threads are auto-reaped on process shutdown, so
+             the systemd ``KillSignal=SIGTERM`` + ``TimeoutStopSec``
+             still cleans up.
+
+        Errors inside the spawned thread MUST NOT propagate up to
+        the stream loop — losing one merger check is recoverable
+        (next patchset re-runs the check), but losing the daemon
+        means OP-689's change-merged → Published transitions stop
+        too.
+        """
+        try:
+            from backend.routers.webhooks import _proactive_merger_check
+        except Exception as exc:  # pragma: no cover — import fail = bug
+            self.log(
+                "ERROR", "proactive_merger_import_failed",
+                err=f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        change = event.get("change") or {}
+        patchset = event.get("patchSet") or {}
+        change_number = change.get("number")
+        ps_number = patchset.get("number")
+
+        def _runner() -> None:
+            import asyncio
+            try:
+                asyncio.run(_proactive_merger_check(event))
+            except Exception as exc:  # pragma: no cover — async runtime safety
+                self.log(
+                    "ERROR", "proactive_merger_thread_error",
+                    change_id=str(change_number) if change_number else "",
+                    ps=str(ps_number) if ps_number else "",
+                    err=f"{type(exc).__name__}: {exc}",
+                )
+
+        import threading
+        thread = threading.Thread(
+            target=_runner,
+            name=f"proactive-merger-{change_number}-{ps_number}",
+            daemon=True,
+        )
+        thread.start()
+        self.log(
+            "INFO", "proactive_merger_thread_spawned",
+            change_id=str(change_number) if change_number else "",
+            ps=str(ps_number) if ps_number else "",
+        )
 
     def process_ticket_for_change(self, ticket_key: str, change_id: str) -> bool:
         lock = self._lock_for(ticket_key)

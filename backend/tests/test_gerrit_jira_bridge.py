@@ -351,3 +351,219 @@ def test_jira_5xx_retries_three_times_then_raises(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(RuntimeError):
         b.jira_request("GET", "/issue/OP-19")
     assert calls["n"] == 3
+
+
+# ──────────────────────────────────────────────────────────────────
+# OP-715 — patchset-created handler tests
+# ──────────────────────────────────────────────────────────────────
+
+
+def _patchset_event(
+    *,
+    change_number: int = 92,
+    project: str = "omnisight/OmniSight-Productizer",
+    rev: str = "d386745be2",
+    ps_number: int = 1,
+    uploader_name: str = "codex-bot",
+    uploader_email: str = "codex-bot@x.com",
+    branch: str = "develop",
+) -> dict[str, Any]:
+    """Build a synthetic Gerrit stream-events patchset-created payload."""
+    return {
+        "type": "patchset-created",
+        "change": {
+            "id": f"I{rev}",
+            "number": change_number,
+            "project": project,
+            "branch": branch,
+            "subject": "[OP-75] some change",
+        },
+        "patchSet": {
+            "number": ps_number,
+            "revision": rev,
+            "uploader": {
+                "name": uploader_name,
+                "email": uploader_email,
+                "username": uploader_name,
+            },
+        },
+    }
+
+
+def test_patchset_created_dispatches_to_handler() -> None:
+    """process_stream_event should route patchset-created to the new handler.
+
+    Lock the dispatcher contract so a future refactor (e.g. event
+    registry) can't accidentally drop the patchset-created branch.
+    """
+    b = bridge.GerritJiraBridge(_client(), sleep=lambda _: None,
+                                logger=lambda *a, **k: None)
+    calls = {"merged": 0, "patchset": 0}
+
+    def fake_merged(_event: dict[str, Any]) -> None:
+        calls["merged"] += 1
+
+    def fake_patchset(_event: dict[str, Any]) -> None:
+        calls["patchset"] += 1
+
+    b._handle_change_merged = fake_merged  # type: ignore[method-assign]
+    b._handle_patchset_created = fake_patchset  # type: ignore[method-assign]
+
+    b.process_stream_event(_patchset_event())
+    assert calls == {"merged": 0, "patchset": 1}
+
+    # Counter still increments for any event type
+    assert b.counters.events_received == 1
+
+
+def test_change_merged_still_routes_to_change_merged_handler() -> None:
+    """Regression: extending the dispatcher must not break OP-689's path."""
+    b = bridge.GerritJiraBridge(_client(), sleep=lambda _: None,
+                                logger=lambda *a, **k: None)
+    calls = {"merged": 0, "patchset": 0}
+
+    b._handle_change_merged = lambda _e: calls.__setitem__("merged", calls["merged"] + 1)  # type: ignore[method-assign]
+    b._handle_patchset_created = lambda _e: calls.__setitem__("patchset", calls["patchset"] + 1)  # type: ignore[method-assign]
+
+    merged_event = {
+        "type": "change-merged",
+        "change": {
+            "id": "I123abc",
+            "number": 90,
+            "project": "omnisight/OmniSight-Productizer",
+            "branch": "develop",
+            "subject": "[OP-700] something",
+        },
+    }
+    b.process_stream_event(merged_event)
+    assert calls == {"merged": 1, "patchset": 0}
+
+
+def test_unknown_event_type_is_ignored() -> None:
+    """Defensive: unknown event types must not raise + must increment counter."""
+    b = bridge.GerritJiraBridge(_client(), sleep=lambda _: None,
+                                logger=lambda *a, **k: None)
+    # No handler attribute exists for these — implicit no-op
+    b.process_stream_event({"type": "ref-updated", "change": {}, "refUpdate": {}})
+    b.process_stream_event({"type": "comment-added", "change": {}})
+    assert b.counters.events_received == 2
+
+
+def test_patchset_created_spawns_thread_with_proactive_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handler must spawn a daemon thread that calls
+    ``_proactive_merger_check`` with the event."""
+    captured_events: list[dict[str, Any]] = []
+    spawned_threads: list[Any] = []
+
+    async def fake_proactive(event: dict[str, Any]) -> None:
+        captured_events.append(event)
+
+    # Patch the import target so the handler picks up our fake.
+    import backend.routers.webhooks as _wh
+    monkeypatch.setattr(_wh, "_proactive_merger_check", fake_proactive)
+
+    # Capture the spawned thread so we can join() on it for the test
+    import threading
+    real_thread = threading.Thread
+
+    def spy_thread(*args: Any, **kwargs: Any) -> threading.Thread:
+        t = real_thread(*args, **kwargs)
+        spawned_threads.append(t)
+        return t
+
+    monkeypatch.setattr(threading, "Thread", spy_thread)
+
+    log_calls: list[tuple[str, str]] = []
+    b = bridge.GerritJiraBridge(
+        _client(),
+        sleep=lambda _: None,
+        logger=lambda level, label, **kw: log_calls.append((level, label)),
+    )
+    event = _patchset_event(change_number=92, ps_number=1)
+    b._handle_patchset_created(event)
+
+    # Wait for the spawned thread to finish (it's daemon=True so we
+    # need to actively join — the test process will exit otherwise).
+    assert len(spawned_threads) == 1
+    spawned_threads[0].join(timeout=2.0)
+    assert not spawned_threads[0].is_alive()
+
+    assert len(captured_events) == 1
+    assert captured_events[0]["change"]["number"] == 92
+    assert captured_events[0]["patchSet"]["number"] == 1
+
+    assert any(
+        label == "proactive_merger_thread_spawned"
+        for _level, label in log_calls
+    )
+
+
+def test_patchset_created_thread_swallows_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the proactive check raises, the bridge must log + survive
+    (daemon must not crash on a single bad event)."""
+    async def boom(_event: dict[str, Any]) -> None:
+        raise RuntimeError("synthetic")
+
+    import backend.routers.webhooks as _wh
+    monkeypatch.setattr(_wh, "_proactive_merger_check", boom)
+
+    spawned: list[Any] = []
+    import threading
+    real_thread = threading.Thread
+
+    def spy(*args: Any, **kwargs: Any) -> threading.Thread:
+        t = real_thread(*args, **kwargs)
+        spawned.append(t)
+        return t
+    monkeypatch.setattr(threading, "Thread", spy)
+
+    log_calls: list[tuple[str, str, dict[str, Any]]] = []
+    b = bridge.GerritJiraBridge(
+        _client(),
+        sleep=lambda _: None,
+        logger=lambda level, label, **kw: log_calls.append((level, label, kw)),
+    )
+    # Must not raise here — the bridge keeps running.
+    b._handle_patchset_created(_patchset_event())
+    spawned[0].join(timeout=2.0)
+
+    # The exception must have been logged from inside the thread.
+    err_logs = [
+        c for c in log_calls
+        if c[1] == "proactive_merger_thread_error"
+    ]
+    assert len(err_logs) == 1
+    assert "synthetic" in err_logs[0][2].get("err", "")
+
+
+def test_patchset_created_logs_thread_spawn_with_change_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spawn log line must carry the change/ps numbers so the
+    operator can correlate threads to events when triaging."""
+    # Make the proactive check a fast no-op so the spawned thread
+    # exits cleanly without external side effects.
+    async def fast_noop(_event: dict[str, Any]) -> None:
+        pass
+
+    import backend.routers.webhooks as _wh
+    monkeypatch.setattr(_wh, "_proactive_merger_check", fast_noop)
+
+    log_calls: list[tuple[str, str, dict[str, Any]]] = []
+    b = bridge.GerritJiraBridge(
+        _client(),
+        sleep=lambda _: None,
+        logger=lambda level, label, **kw: log_calls.append((level, label, kw)),
+    )
+    b._handle_patchset_created(
+        _patchset_event(change_number=42, ps_number=3),
+    )
+
+    spawn_logs = [c for c in log_calls if c[1] == "proactive_merger_thread_spawned"]
+    assert len(spawn_logs) == 1
+    assert spawn_logs[0][2].get("change_id") == "42"
+    assert spawn_logs[0][2].get("ps") == "3"
