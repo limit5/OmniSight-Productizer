@@ -557,6 +557,144 @@ def test_pre_pickup_ok_skips_mutex_check_when_no_mutex_with_declared(monkeypatch
     assert holder_calls == []
 
 
+# ── OP-691: Phase 1.5 transition idempotency ──────────────────────
+
+
+def test_get_issue_status_extracts_name_field(monkeypatch) -> None:
+    """get_issue_status returns issue.fields.status.name as a string."""
+    captured: dict = {}
+
+    def fake_request(client, method, path, body=None):
+        captured["method"] = method
+        captured["path"] = path
+        return {"fields": {"status": {"name": "Under Review"}}}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    name = jd.get_issue_status(_fake_dispatch_client(), "OP-691")
+    assert name == "Under Review"
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/issue/OP-691?fields=status"
+
+
+def test_get_issue_status_returns_empty_when_status_missing(monkeypatch) -> None:
+    """Defensive: malformed JIRA payload (no status) → empty string, no crash."""
+    monkeypatch.setattr(jd, "_request", lambda *a, **kw: {"fields": {}})
+    assert jd.get_issue_status(_fake_dispatch_client(), "OP-691") == ""
+
+
+def test_under_review_status_name_constant() -> None:
+    """The runner's idempotency check pins on this exact string. Don't drift."""
+    assert jd.UNDER_REVIEW_STATUS_NAME == "Under Review"
+
+
+def test_post_runner_pushed_comment_calls_add_comment_with_url(monkeypatch) -> None:
+    """post_runner_pushed_comment is a thin wrapper over add_comment; the
+    body must contain the [runner-pushed-to-gerrit] tag and the URL."""
+    captured: dict = {}
+
+    def fake_add_comment(client, key, text):
+        captured["key"] = key
+        captured["text"] = text
+
+    monkeypatch.setattr(jd, "add_comment", fake_add_comment)
+    jd.post_runner_pushed_comment(
+        _fake_dispatch_client(), "OP-691",
+        "https://sora.services:29420/c/omnisight/OmniSight-Productizer/+/42",
+    )
+    assert captured["key"] == "OP-691"
+    assert "[runner-pushed-to-gerrit]" in captured["text"]
+    assert "/+/42" in captured["text"]
+
+
+def test_post_runner_pushed_comment_does_not_call_transitions(monkeypatch) -> None:
+    """Splitting from transition_to_under_review (OP-691): the comment
+    helper must NOT POST /transitions — that's now a separate concern."""
+    transition_calls: list = []
+
+    def fake_request(client, method, path, body=None):
+        if "/transitions" in path:
+            transition_calls.append((method, path))
+        return {}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    jd.post_runner_pushed_comment(_fake_dispatch_client(), "OP-691", "https://x/+/1")
+    assert transition_calls == []
+
+
+def test_transition_to_under_review_if_needed_skips_when_already_under_review(monkeypatch) -> None:
+    """Idempotency: if status already Under Review, no transition POST is made
+    and the function returns False."""
+    transition_calls: list = []
+
+    monkeypatch.setattr(jd, "get_issue_status", lambda c, k: "Under Review")
+
+    def fake_request(client, method, path, body=None):
+        if "/transitions" in path:
+            transition_calls.append((method, path, body))
+        return {}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    transitioned = jd.transition_to_under_review_if_needed(_fake_dispatch_client(), "OP-691")
+    assert transitioned is False
+    assert transition_calls == []
+
+
+def test_transition_to_under_review_if_needed_transitions_when_in_progress(monkeypatch) -> None:
+    """Happy path: status In Progress → POST /transitions with id 3, returns True."""
+    transition_calls: list = []
+
+    monkeypatch.setattr(jd, "get_issue_status", lambda c, k: "In Progress")
+
+    def fake_request(client, method, path, body=None):
+        if "/transitions" in path:
+            transition_calls.append((method, path, body))
+        return {}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    transitioned = jd.transition_to_under_review_if_needed(_fake_dispatch_client(), "OP-691")
+    assert transitioned is True
+    assert len(transition_calls) == 1
+    method, path, body = transition_calls[0]
+    assert method == "POST"
+    assert path == "/issue/OP-691/transitions"
+    assert body["transition"]["id"] == jd.TRANSITION_IDS["to_under_review"]
+
+
+def test_transition_to_under_review_wrapper_idempotent_when_already_under_review(monkeypatch) -> None:
+    """Backward-compat wrapper: if ticket is already Under Review, neither
+    the comment nor the transition POST fires (OP-691 audit-trail hygiene)."""
+    monkeypatch.setattr(jd, "get_issue_status", lambda c, k: "Under Review")
+    comment_calls: list = []
+    transition_calls: list = []
+    monkeypatch.setattr(jd, "post_runner_pushed_comment",
+                        lambda c, k, url: comment_calls.append((k, url)))
+    monkeypatch.setattr(jd, "transition_to_under_review_if_needed",
+                        lambda c, k: transition_calls.append(k) or True)
+
+    jd.transition_to_under_review(_fake_dispatch_client(), "OP-691", "https://x/+/1")
+    assert comment_calls == []
+    assert transition_calls == []
+
+
+def test_transition_to_under_review_wrapper_posts_comment_and_transitions_in_progress(monkeypatch) -> None:
+    """Backward-compat wrapper happy path: In Progress ticket → comment posted
+    AND transition_to_under_review_if_needed called."""
+    monkeypatch.setattr(jd, "get_issue_status", lambda c, k: "In Progress")
+    calls: list = []
+    monkeypatch.setattr(jd, "post_runner_pushed_comment",
+                        lambda c, k, url: calls.append(("comment", k, url)))
+    monkeypatch.setattr(jd, "transition_to_under_review_if_needed",
+                        lambda c, k: calls.append(("transition", k)) or True)
+
+    jd.transition_to_under_review(_fake_dispatch_client(), "OP-691",
+                                  "https://sora.services:29420/c/x/+/42")
+    assert ("comment", "OP-691", "https://sora.services:29420/c/x/+/42") in calls
+    assert ("transition", "OP-691") in calls
+    # Comment must precede transition (so the transition timestamp matches the URL post)
+    assert calls.index(("comment", "OP-691", "https://sora.services:29420/c/x/+/42")) < \
+           calls.index(("transition", "OP-691"))
+
+
 def test_pre_pickup_ok_mutex_reason_lists_each_blocking_sibling(monkeypatch) -> None:
     """When multiple holders share the mutex, reason lists all of them."""
     desc = (
