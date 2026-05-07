@@ -37,6 +37,7 @@ MP_B_LAYOUT_PREF_KEY = "mp_b_layout"
 MP_WAR_ROOM_PANEL_LAYOUT_PREF_KEY = "mp_war_room_panel_layout"
 MP_MODAL_ACTION_PREF_KEY = "mp_modal_action"
 PREF_TRUE_VALUE = "1"
+PREF_FALSE_VALUE = "0"
 
 
 class PrefBody(BaseModel):
@@ -225,6 +226,15 @@ async def complete_multi_provider_onboarding_tour(
     await _upsert_preference(user.id, SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE)
     _emit_preference_updated(SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE, user.id)
     return {"key": SEEN_MP_TOUR_PREF_KEY, "value": PREF_TRUE_VALUE}
+
+
+@router.post("/multi-provider/onboarding-tour/replay")
+async def replay_multi_provider_onboarding_tour(
+    user: auth.User = Depends(auth.current_user),
+) -> PreferenceResponse:
+    await _upsert_preference(user.id, SEEN_MP_TOUR_PREF_KEY, PREF_FALSE_VALUE)
+    _emit_preference_updated(SEEN_MP_TOUR_PREF_KEY, PREF_FALSE_VALUE, user.id)
+    return {"key": SEEN_MP_TOUR_PREF_KEY, "value": PREF_FALSE_VALUE}
 
 
 @router.get("/multi-provider/onboarding-tour/state")
