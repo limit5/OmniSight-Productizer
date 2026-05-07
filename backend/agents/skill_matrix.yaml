@@ -1,0 +1,43 @@
+schema_version: 1
+skills:
+  algo_cv:
+    - skill_id: barcode_scanner
+      display_name: Barcode Scanner
+      summary: Barcode detection, decode validation, and HIL scanner recipes.
+    - skill_id: depth_sensing
+      display_name: Depth Sensing
+      summary: Depth-camera capture, validation, and range pipeline work.
+  backend:
+    - skill_id: enterprise_web
+      display_name: Enterprise Web
+      summary: Backend-facing enterprise web, workflow, auth, and RBAC support.
+  bsp:
+    - skill_id: connectivity-5g
+      display_name: 5G Connectivity
+      summary: Cellular modem bring-up and validation.
+    - skill_id: connectivity-ethernet
+      display_name: Ethernet Connectivity
+      summary: Ethernet, VLAN, PoE, and wired-network validation.
+  hal:
+    - skill_id: connectivity-ble
+      display_name: BLE Connectivity
+      summary: Bluetooth LE GATT and device connectivity support.
+    - skill_id: connectivity-can
+      display_name: CAN Connectivity
+      summary: CAN bus integration and SocketCAN validation.
+    - skill_id: connectivity-modbus
+      display_name: Modbus Connectivity
+      summary: Modbus RTU/TCP integration and validation.
+    - skill_id: connectivity-opcua
+      display_name: OPC UA Connectivity
+      summary: OPC UA server, namespace, and node validation.
+    - skill_id: connectivity-wifi
+      display_name: Wi-Fi Connectivity
+      summary: Wi-Fi station/AP integration and validation.
+  isp:
+    - skill_id: ipcam
+      display_name: IP Camera
+      summary: RTSP, ONVIF, and camera pipeline integration.
+    - skill_id: uvc
+      display_name: UVC
+      summary: USB video class device integration and validation.
