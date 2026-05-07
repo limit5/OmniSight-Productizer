@@ -460,15 +460,32 @@ def push_to_gerrit_for_review(
     )
 
 
-def transition_to_under_review(
+UNDER_REVIEW_STATUS_NAME = "Under Review"
+
+
+def get_issue_status(client: "DispatchClient", key: str) -> str:
+    """Return current status name for ``key`` (e.g. "In Progress", "Under Review").
+
+    Used by the runner's Phase 1.5 idempotency gate (OP-691): if the agent
+    already transitioned the ticket itself, skip the runner's duplicate
+    comment + transition.
+    """
+    issue = _request(client, "GET", f"/issue/{key}?fields=status")
+    return str(((issue.get("fields") or {}).get("status") or {}).get("name", ""))
+
+
+def post_runner_pushed_comment(
     client: "DispatchClient",
     key: str,
     gerrit_change_url: str,
 ) -> None:
-    """JIRA In Progress → Under Review, with Gerrit URL in a comment.
+    """Post the ``[runner-pushed-to-gerrit]`` comment with the Gerrit URL.
 
-    Operator handles +2 → Approved. OP-689 ships the events-stream
-    consumer that handles Gerrit submit → Published.
+    Split out from :func:`transition_to_under_review` (OP-691) so callers
+    can post the comment without coupling it to the transition POST. The
+    runner reads status first and only calls this when the ticket is not
+    already in Under Review (avoiding the duplicate-comment audit dirt
+    seen on OP-690 2026-05-07).
     """
     add_comment(
         client, key,
@@ -479,9 +496,46 @@ def transition_to_under_review(
             f"Approved → Published within ~5s."
         ),
     )
+
+
+def transition_to_under_review_if_needed(
+    client: "DispatchClient",
+    key: str,
+) -> bool:
+    """In Progress → Under Review, but only if not already there.
+
+    Returns True if a transition POST was issued, False if the ticket was
+    already in Under Review and the call was a no-op. Raises RuntimeError
+    on any non-4xx HTTP failure of the transition POST itself; the runner
+    catches and downgrades to a skip-comment per OP-691 AC.
+    """
+    if get_issue_status(client, key) == UNDER_REVIEW_STATUS_NAME:
+        return False
     _request(client, "POST", f"/issue/{key}/transitions", {
         "transition": {"id": TRANSITION_IDS["to_under_review"]},
     })
+    return True
+
+
+def transition_to_under_review(
+    client: "DispatchClient",
+    key: str,
+    gerrit_change_url: str,
+) -> None:
+    """JIRA In Progress → Under Review, with Gerrit URL in a comment.
+
+    Backward-compat wrapper around :func:`post_runner_pushed_comment` +
+    :func:`transition_to_under_review_if_needed` (OP-691). Idempotent: if
+    the ticket is already in Under Review, both the comment post and the
+    transition POST are skipped.
+
+    Operator handles +2 → Approved. OP-689 ships the events-stream
+    consumer that handles Gerrit submit → Published.
+    """
+    if get_issue_status(client, key) == UNDER_REVIEW_STATUS_NAME:
+        return
+    post_runner_pushed_comment(client, key, gerrit_change_url)
+    transition_to_under_review_if_needed(client, key)
 
 
 def transition_to_in_progress(client: DispatchClient, key: str) -> None:

@@ -93,8 +93,21 @@ Format:
   ✓ <AC item 2 paraphrased> — <evidence>
   ✗ <AC item N paraphrased> — <reason it could not be verified>
 
-Use the runner's transition_back_to_todo or add_comment helpers in
-backend/agents/jira_dispatch.py if you need to comment programmatically.
+For programmatic JIRA writes use ONLY these helpers from
+`backend/agents/jira_dispatch.py`:
+
+  - `add_comment(client, key, text)` — post the AC verification comment
+    (and any other operator-facing notes).
+  - `transition_back_to_todo(client, key, reason)` — only when you discover
+    an out-of-area dependency and need to surrender the ticket per §11.
+
+⚠ DO NOT call `transition_to_under_review` (or any other `transition_*`
+helper that moves the ticket forward) yourself. The runner owns forward
+transitions — after your CLI exits cleanly, the runner pushes to Gerrit
+and transitions the ticket to Under Review on your behalf. If you do it
+yourself you race the runner and create a duplicate
+`[runner-pushed-to-gerrit]` comment + a misleading "runner failed"
+signal even when the work shipped (OP-690 incident, 2026-05-07).
 
 Full ticket description follows:
 
@@ -162,6 +175,58 @@ def _invoke_cli(agent_class: str, prompt: str) -> int:
     except FileNotFoundError as e:
         print(f"[runner] CLI not installed: {e}", file=sys.stderr)
         return 127
+
+
+def _finalize_under_review(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    gerrit_change_url: str,
+) -> None:
+    """Phase 1.5 post-push idempotency block (OP-691).
+
+    Reads ticket status BEFORE attempting the transition. If the agent
+    already transitioned the ticket itself (the OP-690 incident pattern),
+    skips both the runner-pushed comment and the transition POST so the
+    audit trail stays clean. If the transition POST fails for any other
+    reason, logs a ``[runner-transition-skip]`` comment instead of raising
+    — the Gerrit push already succeeded so the ticket is shippable, and
+    a JIRA cosmetic failure should not turn the runner exit non-zero.
+    """
+    try:
+        status = jira_dispatch.get_issue_status(client, key)
+    except Exception as e:  # noqa: BLE001 — JIRA read failure → degrade to legacy path
+        print(f"[runner] could not read {key} status ({type(e).__name__}: {e}); "
+              f"attempting transition anyway", file=sys.stderr)
+        status = ""
+
+    if status == jira_dispatch.UNDER_REVIEW_STATUS_NAME:
+        print(f"[runner] {key} already in Under Review (agent transitioned itself); "
+              f"skipping duplicate comment + transition")
+        return
+
+    try:
+        jira_dispatch.post_runner_pushed_comment(client, key, gerrit_change_url)
+        transitioned = jira_dispatch.transition_to_under_review_if_needed(client, key)
+    except Exception as e:  # noqa: BLE001 — any 4xx etc → log skip, do not crash
+        print(f"[runner] transition to Under Review failed ({type(e).__name__}: {e}); "
+              f"Gerrit push already succeeded — logging skip comment", file=sys.stderr)
+        try:
+            jira_dispatch.add_comment(
+                client, key,
+                f"[runner-transition-skip] Could not transition to Under Review:\n"
+                f"{type(e).__name__}: {e}\n\n"
+                f"Gerrit push succeeded: {gerrit_change_url}\n\n"
+                f"Operator: inspect ticket workflow state and transition manually if needed.",
+            )
+        except Exception as inner:  # noqa: BLE001 — comment-post failure is informational
+            print(f"[runner] could not even post skip comment: {inner}", file=sys.stderr)
+        return
+
+    if transitioned:
+        print(f"[runner] {key} → Under Review. Reviewer: +2 in Gerrit UI.")
+    else:
+        print(f"[runner] {key} already Under Review at transition step (raced); "
+              f"comment posted, transition skipped")
 
 
 def main() -> int:
@@ -283,10 +348,7 @@ def main() -> int:
 
         if push_result.success:
             print(f"[runner] pushed Change #{push_result.change_number}: {push_result.change_url}")
-            jira_dispatch.transition_to_under_review(
-                client, snapshot.key, push_result.change_url
-            )
-            print(f"[runner] {snapshot.key} → Under Review. Reviewer: +2 in Gerrit UI.")
+            _finalize_under_review(client, snapshot.key, push_result.change_url)
         else:
             print(f"[runner] Gerrit push failed:\n{push_result.detail}", file=sys.stderr)
             jira_dispatch.add_comment(
