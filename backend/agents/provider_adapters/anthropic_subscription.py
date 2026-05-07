@@ -37,6 +37,7 @@ from backend.agents.provider_orchestrator import (
 )
 from backend.agents.provider_ratelimit_cap import ratelimit_cap_signal
 from backend.agents.provider_quota_tracker import QuotaState
+from backend.agents.ratelimit_contract import RETRY_AFTER_S_KEY
 
 
 PROVIDER_ID = "anthropic-subscription"
@@ -239,7 +240,7 @@ def _cap_signal(stdout: str, stderr: str) -> dict[str, int | str] | None:
     out: dict[str, int | str] = {"kind": "cap_exceeded"}
     retry_after_s = _retry_after_s(joined, payloads)
     if retry_after_s is not None:
-        out["retry_after_s"] = retry_after_s
+        out[RETRY_AFTER_S_KEY] = retry_after_s
     return out
 
 
