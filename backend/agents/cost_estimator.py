@@ -53,6 +53,11 @@ MIN_OUTPUT_TOKENS = 256
 MAX_OUTPUT_TOKENS = 8_192
 DRIFT_WARN_THRESHOLD = 0.50
 CALIBRATION_ALPHA = 0.30
+T_SHIRT_SIZE_TOKEN_MULTIPLIERS: dict[str, float] = {
+    "S": 0.65,
+    "M": 1.0,
+    "XL": 1.85,
+}
 
 
 @dataclass(frozen=True)
@@ -109,8 +114,12 @@ def predict_token_count(
     by_chars = math.ceil(len(text) / 4.0)
     by_words = math.ceil(len(text.split()) * 1.35)
     envelope = 16 if len(text) > 0 else 0
-    return _apply_int_multiplier(
+    predicted = _apply_int_multiplier(
         max(by_chars, by_words) + envelope,
+        _t_shirt_size_multiplier(task_spec),
+    )
+    return _apply_int_multiplier(
+        predicted,
         tenant_calibration.token_multiplier if tenant_calibration else 1.0,
     )
 
@@ -302,9 +311,9 @@ def _task_text(task_spec: Any) -> str:
     if isinstance(task_spec, bytes):
         return task_spec.decode("utf-8", errors="replace")
     if is_dataclass(task_spec) and not isinstance(task_spec, type):
-        return _stable_json(asdict(task_spec))
+        return _stable_json(_without_t_shirt_size_features(asdict(task_spec)))
     if isinstance(task_spec, dict):
-        return _stable_json(task_spec)
+        return _stable_json(_without_t_shirt_size_features(task_spec))
 
     prompt = getattr(task_spec, "prompt", None)
     if isinstance(prompt, str):
@@ -323,6 +332,18 @@ def _stable_json(value: Any) -> str:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     except TypeError:
         return str(value)
+
+
+def _without_t_shirt_size_features(value: dict[str, Any]) -> dict[str, Any]:
+    out = dict(value)
+    for key in ("size", "t_shirt_size", "tshirt_size"):
+        raw = out.get(key)
+        if (
+            isinstance(raw, str)
+            and raw.strip().upper() in T_SHIRT_SIZE_TOKEN_MULTIPLIERS
+        ):
+            out.pop(key, None)
+    return out
 
 
 def _provider_id(provider: Any) -> str:
@@ -372,9 +393,28 @@ def _first_int_attr(task: Any, attrs: tuple[str, ...]) -> int | None:
     return None
 
 
+def _t_shirt_size_multiplier(task: Any) -> float:
+    size = _first_str_attr(task, ("size", "t_shirt_size", "tshirt_size"))
+    if size is None:
+        return 1.0
+    return T_SHIRT_SIZE_TOKEN_MULTIPLIERS.get(size.strip().upper(), 1.0)
+
+
+def _first_str_attr(task: Any, attrs: tuple[str, ...]) -> str | None:
+    for attr in attrs:
+        if isinstance(task, dict):
+            value = task.get(attr)
+        else:
+            value = getattr(task, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 __all__ = [
     "CostActual",
     "CostPrediction",
+    "T_SHIRT_SIZE_TOKEN_MULTIPLIERS",
     "TenantCalibration",
     "predict",
     "predict_cost",

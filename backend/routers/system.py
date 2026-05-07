@@ -7,6 +7,7 @@ Also serves spec (from hardware_manifest.yaml), logs, and token usage.
 import asyncio
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -98,6 +99,8 @@ class RuntimeCostEstimateTask(BaseModel):
     estimated_tokens: int | None = Field(default=None, ge=0)
     estimated_seconds: float | None = Field(default=None, ge=0)
     estimated_time_seconds: float | None = Field(default=None, ge=0)
+    size: str | None = None
+    t_shirt_size: str | None = None
 
 
 class RuntimeCostEstimateTaskBreakdown(BaseModel):
@@ -2331,9 +2334,21 @@ def _estimate_task_tokens(task: RuntimeCostEstimateTask) -> tuple[int, int]:
     text = "\n".join(
         part for part in (task.title, task.description, task.prompt) if part
     )
-    input_tokens = max(1, len(text) // 4) if text else 1_000
+    multiplier = _cost_estimate_t_shirt_size_multiplier(task)
+    input_tokens = (
+        max(1, math.ceil((len(text) // 4) * multiplier)) if text else 1_000
+    )
     output_tokens = max(1, int(input_tokens * 0.25))
     return input_tokens, output_tokens
+
+
+def _cost_estimate_t_shirt_size_multiplier(task: RuntimeCostEstimateTask) -> float:
+    from backend.agents.cost_estimator import T_SHIRT_SIZE_TOKEN_MULTIPLIERS
+
+    size = task.size or task.t_shirt_size
+    if not size:
+        return 1.0
+    return T_SHIRT_SIZE_TOKEN_MULTIPLIERS.get(size.strip().upper(), 1.0)
 
 
 def _estimate_task_seconds(
