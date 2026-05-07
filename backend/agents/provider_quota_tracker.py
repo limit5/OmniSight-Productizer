@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -24,6 +25,8 @@ from psycopg2.extras import RealDictCursor
 
 from backend.db_url import parse
 
+
+logger = logging.getLogger(__name__)
 
 CircuitState = Literal["closed", "open", "half_open"]
 QuotaScope = Literal["5h", "weekly"]
@@ -48,6 +51,9 @@ def record_usage(provider: str, tokens: int, ts: datetime | None = None) -> None
     if tokens < 0:
         raise ValueError("tokens must be non-negative")
     event_ts = _normalise_ts(ts)
+    update_state: QuotaState | None = None
+    update_reason = "usage_recorded"
+    update_scopes: list[QuotaScope] = []
 
     with closing(_connect()) as conn:
         with conn:
@@ -68,6 +74,11 @@ def record_usage(provider: str, tokens: int, ts: datetime | None = None) -> None
                 _open_circuit(conn, provider, now)
                 after = _refresh_state(conn, provider)
                 _emit_cap_hit_audit(conn, after, cap_scopes)
+                update_reason = "cap_hit"
+                update_scopes = cap_scopes
+            update_state = after
+    if update_state is not None:
+        _emit_quota_update(update_state, update_reason, update_scopes)
 
 
 def get_quota_state(provider: str) -> QuotaState:
@@ -95,6 +106,7 @@ def reset_window(provider: str, scope: QuotaScope) -> None:
     if scope not in ("5h", "weekly"):
         raise ValueError(f"unknown quota scope: {scope!r}")
     interval = "5 hours" if scope == "5h" else "7 days"
+    update_state: QuotaState | None = None
 
     with closing(_connect()) as conn:
         with conn:
@@ -130,6 +142,14 @@ def reset_window(provider: str, scope: QuotaScope) -> None:
                         provider,
                     ),
                 )
+            update_state = replace(
+                state,
+                last_reset_at=now,
+                last_cap_hit_at=None,
+                circuit_state="closed",
+            )
+    if update_state is not None:
+        _emit_quota_update(update_state, "window_reset", [scope])
 
 
 def _normalise_provider(provider: str) -> str:
@@ -331,6 +351,31 @@ def _emit_cap_hit_audit(
                 curr,
             ),
         )
+
+
+def _emit_quota_update(
+    state: QuotaState,
+    reason: str,
+    scopes: list[QuotaScope],
+) -> None:
+    """Best-effort SSE emit for live dashboard quota consumers."""
+    try:
+        from backend.events import emit_provider_quota_updated
+        emit_provider_quota_updated(
+            state.provider,
+            state.rolling_5h_tokens,
+            state.weekly_tokens,
+            _cap_for(state.provider, "5h"),
+            _cap_for(state.provider, "weekly"),
+            state.circuit_state,
+            last_reset_at=state.last_reset_at,
+            last_cap_hit_at=state.last_cap_hit_at,
+            reason=reason,
+            scopes=list(scopes),
+            broadcast_scope="global",
+        )
+    except Exception as exc:
+        logger.debug("provider quota SSE publish failed: %s", exc)
 
 
 def _row_to_state(row: object) -> QuotaState:
