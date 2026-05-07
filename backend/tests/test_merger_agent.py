@@ -134,6 +134,20 @@ class _FakeReviewer:
         return ma.ReviewerResult(ok=self.ok, reason=self.reason)
 
 
+@dataclass
+class _FakeHashtagSetter:
+    ok: bool = True
+    reason: str = ""
+    raises: BaseException | None = None
+    calls: list[dict] = field(default_factory=list)
+
+    async def add_hashtag(self, **kwargs: Any) -> ma.HashtagSetterResult:
+        self.calls.append(kwargs)
+        if self.raises is not None:
+            raise self.raises
+        return ma.HashtagSetterResult(ok=self.ok, reason=self.reason)
+
+
 def _test_runner(ok: bool = True, summary: str = "pytest x passed"):
     async def runner(_req: ma.ConflictRequest) -> ma.TestRunResult:
         return ma.TestRunResult(ok=ok, summary=summary, command="pytest -x")
@@ -693,3 +707,99 @@ class TestSubmitRuleSimulator:
             [("merger-agent-bot", 2), ("lint-bot", 2),
              ("security-bot", 2), ("human-a", 2)]
         ) == "allow"
+
+
+# ──────────────────────────────────────────────────────────────
+#  OP-694 — Conflict-resolved hashtag is set on success
+# ──────────────────────────────────────────────────────────────
+
+
+class TestOp694HashtagOnSuccess:
+    """The Gerrit Merger-Plus-2 submit-requirement is gated on the
+    `Merge-Conflict-Resolved` hashtag (`applicableIf = ...`). The
+    merger must set this hashtag after a successful resolution +
+    +2 vote — otherwise the +2 it cast counts toward nothing
+    (Merger-Plus-2 stays NOT_APPLICABLE)."""
+
+    @staticmethod
+    def _good_llm():
+        return _FakeLLM({
+            "resolved_block": "    return f'Hello {name}!'\n",
+            "confidence": 0.95,
+            "rationale": "HEAD intent preserved",
+            "new_logic_detected": False,
+        })
+
+    def test_success_sets_conflict_resolved_hashtag(self):
+        """Happy path: +2 voted → hashtag setter called with the canonical name."""
+        hashtag_setter = _FakeHashtagSetter(ok=True)
+        deps = ma.MergerDeps(
+            llm=self._good_llm(),
+            pusher=_FakePusher(),
+            reviewer=_FakeReviewer(),
+            hashtag_setter=hashtag_setter,
+            test_runner=_test_runner(True),
+        )
+        outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
+
+        assert outcome.reason is ma.MergerReason.plus_two_voted
+        assert len(hashtag_setter.calls) == 1
+        call = hashtag_setter.calls[0]
+        assert call["hashtag"] == ma.CONFLICT_RESOLVED_HASHTAG
+        assert call["hashtag"] == "Merge-Conflict-Resolved"
+        assert call["change_id"]
+        assert call["project"]
+        assert outcome.metadata.get("hashtag_set_ok") is True
+
+    def test_hashtag_failure_does_not_block_plus_two(self):
+        """Hashtag-set returns ok=False: the +2 vote remains; outcome
+        records the failure for ops to spot. Conservative fall-through:
+        change behaves as a non-conflict change (Merger-Plus-2
+        NOT_APPLICABLE) so it can still merge on Human +2 alone."""
+        hashtag_setter = _FakeHashtagSetter(ok=False, reason="403 Forbidden")
+        deps = ma.MergerDeps(
+            llm=self._good_llm(),
+            pusher=_FakePusher(),
+            reviewer=_FakeReviewer(),
+            hashtag_setter=hashtag_setter,
+            test_runner=_test_runner(True),
+        )
+        outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
+
+        assert outcome.reason is ma.MergerReason.plus_two_voted
+        assert int(outcome.voted_score) == 2
+        assert outcome.metadata.get("hashtag_set_ok") is False
+        assert "403" in outcome.metadata.get("hashtag_set_reason", "")
+
+    def test_hashtag_setter_exception_handled_gracefully(self):
+        """A raised exception in the hashtag setter must NOT propagate
+        and undo the merger's success path — the +2 has already landed."""
+        hashtag_setter = _FakeHashtagSetter(
+            raises=RuntimeError("network down"),
+        )
+        deps = ma.MergerDeps(
+            llm=self._good_llm(),
+            pusher=_FakePusher(),
+            reviewer=_FakeReviewer(),
+            hashtag_setter=hashtag_setter,
+            test_runner=_test_runner(True),
+        )
+        outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
+
+        assert outcome.reason is ma.MergerReason.plus_two_voted
+        assert outcome.metadata.get("hashtag_set_ok") is False
+        assert "network down" in outcome.metadata.get("hashtag_set_reason", "")
+
+    def test_default_hashtag_setter_degrades_on_old_client(self):
+        """Production safety: GerritClientHashtagSetter probes for
+        client.add_hashtag and reports unsupported cleanly so a stale
+        gerrit_client doesn't crash the merger path."""
+        class _NoAddHashtag:
+            pass
+
+        setter = ma.GerritClientHashtagSetter(client=_NoAddHashtag())
+        result = _run(setter.add_hashtag(
+            change_id="Itest", project="omnisight", hashtag="x",
+        ))
+        assert result.ok is False
+        assert "add_hashtag" in result.reason

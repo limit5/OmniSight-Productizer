@@ -15,7 +15,8 @@ The Gerrit Prolog ``submit_rule`` in ``.gerrit/rules.pl`` is the
     clients without Gerrit get the same policy mirrored onto PR
     reviewers (``merger-agent-bot`` GitHub App + human approvers).
 
-Policy (matches CLAUDE.md L1 Safety Rules + .gerrit/rules.pl):
+Policy (matches CLAUDE.md L1 Safety Rules + the Gerrit submit-
+requirements deployed at OP-692/OP-694):
 
   A change is submittable **iff**:
 
@@ -23,9 +24,15 @@ Policy (matches CLAUDE.md L1 Safety Rules + .gerrit/rules.pl):
         the ``non-ai-reviewer`` group (the HUMAN hard gate).  No AI
         combination can substitute — this is the absolute rule.
 
-    (2) There is at least one ``Code-Review: +2`` from an account in
+    (2) **Conditional (OP-694)** — when ``had_conflict=True`` (the
+        change has the Gerrit hashtag ``Merge-Conflict-Resolved``),
+        there is at least one ``Code-Review: +2`` from an account in
         the ``merger-agent-bot`` group (the Merger has signed the
-        conflict-block correctness).
+        conflict-block correctness).  When ``had_conflict=False``,
+        this requirement is skipped — non-conflict changes only need
+        the Human +2 hard gate.  The Gerrit side mirrors this via
+        ``applicableIf = hashtag:Merge-Conflict-Resolved`` on the
+        Merger-Plus-2 submit-requirement.
 
     (3) No reviewer has cast ``Code-Review: -1`` or ``-2``.
 
@@ -34,6 +41,12 @@ Policy (matches CLAUDE.md L1 Safety Rules + .gerrit/rules.pl):
         and can lift the overall grade, **but they cannot replace or
         bypass the human hard gate.**  That is the core property the
         test matrix pins down: no N × AI-+2 ever satisfies rule (1).
+
+  ``had_conflict`` defaults to ``True`` to preserve the strict
+  pre-OP-694 behaviour for callers that don't opt in.  The Merge
+  Arbiter will pass ``True`` when invoked from a conflict-resolution
+  webhook flow and ``False`` for routine status checks on changes
+  that never needed a merger.
 
 Return shape
 ------------
@@ -153,9 +166,17 @@ class SubmitDecision:
 
 def evaluate_submit_rule(
     votes: Iterable[ReviewerVote | dict],
+    *,
+    had_conflict: bool = True,
 ) -> SubmitDecision:
     """Evaluate the dual-+2 rule over ``votes`` and return a
     :class:`SubmitDecision`.
+
+    ``had_conflict`` controls whether the Merger-Plus-2 requirement
+    applies (OP-694 conditional rule).  Defaults to ``True`` (strict)
+    so existing callers that don't opt in keep their pre-OP-694
+    behaviour — only the new arbiter / status-check sites should
+    pass ``False`` after confirming the change had no conflict.
 
     Accepts either :class:`ReviewerVote` instances or plain dicts (for
     JSON callers).  Never raises.
@@ -205,11 +226,11 @@ def evaluate_submit_rule(
         )
 
     # ── (1) HUMAN +2 hard gate ───────────────────────────────────
-    # ── (2) Merger +2 ────────────────────────────────────────────
+    # ── (2) Merger +2 — conditional on had_conflict (OP-694) ────
     missing: list[str] = []
     if human_plus_twos < 1:
         missing.append("human_plus_two")
-    if merger_plus_twos < 1:
+    if had_conflict and merger_plus_twos < 1:
         missing.append("merger_plus_two")
 
     if missing:

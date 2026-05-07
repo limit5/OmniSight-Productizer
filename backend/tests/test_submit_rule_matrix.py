@@ -243,3 +243,113 @@ def test_dict_with_bad_types_is_skipped_gracefully():
     # skipped entirely (submit_rule.from_dict catches via the outer
     # try/except in evaluate_submit_rule).
     assert decision.allow is True
+
+
+# ──────────────────────────────────────────────────────────────
+#  OP-694 — Conditional Merger-Plus-2 (had_conflict parameter)
+#
+#  When a change has no merge conflict (no Merge-Conflict-Resolved
+#  hashtag in Gerrit), the Merger-Plus-2 requirement is skipped.
+#  Mirrors `applicableIf = hashtag:Merge-Conflict-Resolved` on the
+#  Gerrit submit-requirement.
+# ──────────────────────────────────────────────────────────────
+
+
+def test_op694_default_is_strict_for_backward_compat():
+    """Calling evaluate_submit_rule without had_conflict keeps the
+    pre-OP-694 behavior — merger +2 still required. Existing callers
+    must not change verdict when this code is deployed."""
+    decision = evaluate_submit_rule([human_vote("alice@x")])
+    assert decision.allow is False
+    assert "merger_plus_two" in decision.missing
+
+
+def test_op694_no_conflict_only_needs_human_plus_two():
+    """Non-conflict change (had_conflict=False) needs only Human +2.
+    Merger-Plus-2 requirement is waived — matches Gerrit
+    NOT_APPLICABLE behavior when hashtag is absent."""
+    decision = evaluate_submit_rule(
+        [human_vote("alice@x")], had_conflict=False,
+    )
+    assert decision.allow is True
+    assert decision.reason is SubmitReason.allow
+    assert decision.missing == []
+    assert decision.merger_plus_twos == 0
+
+
+def test_op694_no_conflict_still_requires_human_plus_two():
+    """The HUMAN +2 hard gate stays absolute even when had_conflict
+    is False. This is the load-bearing CLAUDE.md L1 invariant — a
+    relaxed merger requirement must NOT also relax the human gate."""
+    # Only AI bots vote — should still reject (no human +2).
+    decision = evaluate_submit_rule(
+        [ai_bot_vote("lint-bot"), ai_bot_vote("security-bot")],
+        had_conflict=False,
+    )
+    assert decision.allow is False
+    assert decision.reason is SubmitReason.reject_missing_human_plus_two
+    assert "human_plus_two" in decision.missing
+    # And merger requirement was not added to missing (since waived).
+    assert "merger_plus_two" not in decision.missing
+
+
+def test_op694_no_conflict_still_blocks_on_negative_vote():
+    """The negative-vote kill-switch is unconditional — applies even
+    when had_conflict is False."""
+    decision = evaluate_submit_rule(
+        [human_vote("alice@x"), human_vote("bob@x", score=-1)],
+        had_conflict=False,
+    )
+    assert decision.allow is False
+    assert decision.reason is SubmitReason.reject_negative_vote
+
+
+def test_op694_conflict_change_with_merger_and_human_plus_two_allows():
+    """Sanity: a conflict change with both merger and human +2 still
+    allows (the strict path's happy case still works)."""
+    decision = evaluate_submit_rule(
+        [merger_vote(), human_vote("alice@x")], had_conflict=True,
+    )
+    assert decision.allow is True
+    assert decision.merger_plus_twos == 1
+    assert decision.human_plus_twos == 1
+
+
+def test_op694_conflict_change_without_merger_still_rejects():
+    """The point of had_conflict=True: missing merger +2 is fatal.
+    This is the test that pins the conditional rule's strict half."""
+    decision = evaluate_submit_rule(
+        [human_vote("alice@x")], had_conflict=True,
+    )
+    assert decision.allow is False
+    assert decision.reason is SubmitReason.reject_missing_merger_plus_two
+    assert "merger_plus_two" in decision.missing
+
+
+def test_op694_no_conflict_n_ai_plus_twos_plus_human_plus_two_allows():
+    """N AI bots + 1 human in a non-conflict change → allow. AI +2
+    votes are advisory and don't satisfy any requirement, but the
+    human +2 alone is enough when had_conflict=False."""
+    decision = evaluate_submit_rule(
+        [
+            ai_bot_vote("lint-bot"),
+            ai_bot_vote("security-bot"),
+            ai_bot_vote("perf-bot"),
+            human_vote("alice@x"),
+        ],
+        had_conflict=False,
+    )
+    assert decision.allow is True
+    assert decision.ai_plus_twos == 3
+    assert decision.human_plus_twos == 1
+
+
+def test_op694_no_conflict_with_merger_vote_is_still_allowed():
+    """Edge case: a non-conflict change where merger happens to have
+    voted (unusual but not impossible — an over-eager smoke-test
+    operator). Should still allow on Human +2 alone."""
+    decision = evaluate_submit_rule(
+        [merger_vote(), human_vote("alice@x")], had_conflict=False,
+    )
+    assert decision.allow is True
+    assert decision.merger_plus_twos == 1  # tracked but not required

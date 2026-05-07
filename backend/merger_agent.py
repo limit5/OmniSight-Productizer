@@ -289,6 +289,37 @@ class TestRunResult:
     command: str = ""
 
 
+CONFLICT_RESOLVED_HASHTAG = "Merge-Conflict-Resolved"
+"""Hashtag the merger sets after a successful resolution.  The Gerrit
+project.config Merger-Plus-2 submit-requirement is gated on this
+hashtag (``applicableIf = hashtag:Merge-Conflict-Resolved``) so non-
+conflict changes are not blocked waiting for a merger vote that will
+never come.  See OP-694 + docs/ops/gerrit_dual_two_rule.md."""
+
+
+class HashtagSetter(Protocol):
+    """Adds a hashtag to a Gerrit change — default wraps ``gerrit_client``.
+
+    Kept as its own Protocol so the merger's success path can fail
+    gracefully if hashtag-set is unavailable, without entangling the
+    +2 vote retry logic.
+    """
+
+    async def add_hashtag(
+        self,
+        *,
+        change_id: str,
+        project: str,
+        hashtag: str,
+    ) -> "HashtagSetterResult": ...
+
+
+@dataclass
+class HashtagSetterResult:
+    ok: bool
+    reason: str = ""
+
+
 AuditSink = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 """Audit callable: (action, entity_id, payload) -> None."""
 
@@ -455,6 +486,36 @@ class GerritClientReviewer:
         return ReviewerResult(ok=True)
 
 
+class GerritClientHashtagSetter:
+    """Wraps ``backend.gerrit.gerrit_client.add_hashtag`` so the merger
+    success path can mark a change as conflict-resolved without importing
+    Gerrit internals directly."""
+
+    def __init__(self, client: Any | None = None) -> None:
+        self._client = client or _default_gerrit_client
+
+    async def add_hashtag(
+        self,
+        *,
+        change_id: str,
+        project: str,
+        hashtag: str,
+    ) -> HashtagSetterResult:
+        # The default gerrit_client may or may not expose add_hashtag
+        # (it landed alongside this OP-694 work). Probe and degrade
+        # cleanly so an old client doesn't blow up the merger path.
+        fn = getattr(self._client, "add_hashtag", None)
+        if fn is None:
+            return HashtagSetterResult(
+                ok=False,
+                reason="gerrit_client lacks add_hashtag (pre-OP-694)",
+            )
+        res = await fn(change_id=change_id, project=project, hashtag=hashtag)
+        if isinstance(res, dict) and "error" in res:
+            return HashtagSetterResult(ok=False, reason=str(res.get("error")))
+        return HashtagSetterResult(ok=True)
+
+
 async def _default_test_runner(_req: ConflictRequest) -> TestRunResult:
     """No-op test runner.  Production deployments inject a real runner
     keyed off the touched file (e.g. pytest for backend/, vitest for
@@ -516,6 +577,7 @@ class MergerDeps:
     llm: MergerLLM = _default_llm
     pusher: PatchsetPusher = field(default_factory=GitPatchsetPusher)
     reviewer: GerritReviewer = field(default_factory=GerritClientReviewer)
+    hashtag_setter: HashtagSetter = field(default_factory=GerritClientHashtagSetter)
     test_runner: TestRunner = _default_test_runner
     audit: AuditSink = _default_audit
 
@@ -998,6 +1060,36 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
+    # ── 10b. Mark change with Merge-Conflict-Resolved hashtag ────
+    # OP-694: the Gerrit Merger-Plus-2 submit-requirement is gated on
+    # this hashtag (`applicableIf = hashtag:Merge-Conflict-Resolved`).
+    # Setting it here is what makes the +2 we just cast actually count
+    # toward the dual-sign gate. Best-effort: a hashtag failure does
+    # NOT undo the +2 vote — fall-through is "non-conflict semantics"
+    # (Merger-Plus-2 NOT_APPLICABLE), which is conservative for merge
+    # decisions and surfaces via the audit log + outcome.metadata for
+    # ops to spot.
+    hashtag_set_ok = True
+    hashtag_set_reason = ""
+    try:
+        ht_res = await deps.hashtag_setter.add_hashtag(
+            change_id=change_id,
+            project=request.project,
+            hashtag=CONFLICT_RESOLVED_HASHTAG,
+        )
+        hashtag_set_ok = ht_res.ok
+        hashtag_set_reason = ht_res.reason
+    except Exception as exc:                               # pragma: no cover
+        hashtag_set_ok = False
+        hashtag_set_reason = f"hashtag_setter raised: {exc!r}"
+    if not hashtag_set_ok:
+        logger.warning(
+            "merger_agent: +2 cast on %s but Merge-Conflict-Resolved "
+            "hashtag set failed (%s); change will be treated as non-"
+            "conflict by submit-rule (Merger-Plus-2 NOT_APPLICABLE).",
+            change_id, hashtag_set_reason,
+        )
+
     # ── 11. Success — +2 voted ───────────────────────────────────
     _reset_failure(change_id)
     outcome = ResolutionOutcome(
@@ -1013,7 +1105,12 @@ async def resolve_conflict(
         failure_count=0,
         test_result={"ok": True, "summary": test_result.summary,
                      "command": test_result.command},
-        metadata={"conflict_lines": total_lines, "blocks": len(blocks)},
+        metadata={
+            "conflict_lines": total_lines,
+            "blocks": len(blocks),
+            "hashtag_set_ok": hashtag_set_ok,
+            "hashtag_set_reason": hashtag_set_reason,
+        },
     )
     _observe_metric(outcome)
     await _safe_audit(deps.audit, outcome)
