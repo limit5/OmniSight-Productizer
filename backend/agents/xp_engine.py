@@ -18,6 +18,8 @@ from dataclasses import dataclass, fields, is_dataclass
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
+from backend.agents.buff_registry import xp_multiplier_for_buff_ids
+
 OutcomeStatus = Literal["success", "partial", "fail", "failed"]
 
 BASE_TASK_XP = 100
@@ -46,6 +48,7 @@ class TaskOutcome:
     tier_l_plus: bool = False
     first_time_skill_use: bool = False
     duplicate_task_within_24h: bool = False
+    active_buff_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -68,7 +71,8 @@ def award_xp(
     ``task_outcome`` may be a :class:`TaskOutcome`, a mapping, or a dataclass /
     object with matching attributes. The calculation mirrors ADR-0008:
     outcome multiplier, optional Tier-L+ multiplier, optional first-time skill
-    multiplier, and optional duplicate-task anti-grinding multiplier.
+    multiplier, optional W15 buff multipliers, and optional duplicate-task
+    anti-grinding multiplier.
     """
     clean_agent_id = _clean_agent_id(agent_id)
     outcome = _normalise_task_outcome(task_outcome)
@@ -137,6 +141,9 @@ def _normalise_task_outcome(
                     values.get("same_task_hash_within_24h", False),
                 )
             ),
+            active_buff_ids=_clean_active_buff_ids(
+                values.get("active_buff_ids", values.get("buff_ids", ()))
+            ),
         )
     _validate_outcome(outcome)
     return outcome
@@ -161,6 +168,8 @@ def _outcome_values(task_outcome: Mapping[str, Any] | Any) -> Mapping[str, Any]:
             "first_time_skill_use",
             "duplicate_task_within_24h",
             "same_task_hash_within_24h",
+            "active_buff_ids",
+            "buff_ids",
         )
         if hasattr(task_outcome, name)
     }
@@ -189,6 +198,7 @@ def _clean_base_xp(base_xp: Any) -> int:
 def _validate_outcome(outcome: TaskOutcome) -> None:
     _clean_status(outcome.status)
     _clean_base_xp(outcome.base_xp)
+    _clean_active_buff_ids(outcome.active_buff_ids)
 
 
 def _outcome_multiplier(outcome: TaskOutcome) -> float:
@@ -197,9 +207,33 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
         multiplier *= TIER_L_PLUS_MULTIPLIER
     if outcome.first_time_skill_use:
         multiplier *= FIRST_TIME_SKILL_MULTIPLIER
+    multiplier *= xp_multiplier_for_buff_ids(
+        _clean_active_buff_ids(outcome.active_buff_ids)
+    )
     if outcome.duplicate_task_within_24h:
         multiplier *= DUPLICATE_TASK_MULTIPLIER
     return multiplier
+
+
+def _clean_active_buff_ids(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        items = (value,)
+    else:
+        try:
+            items = tuple(value)
+        except TypeError as exc:
+            raise TypeError("task_outcome active_buff_ids must be iterable") from exc
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise TypeError("task_outcome active_buff_ids entries must be strings")
+        clean = item.strip()
+        if not clean:
+            raise ValueError("task_outcome active_buff_ids entries must be non-empty")
+        out.append(clean)
+    return tuple(out)
 
 
 __all__ = [
