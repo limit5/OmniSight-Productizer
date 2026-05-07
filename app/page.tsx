@@ -42,6 +42,7 @@ import { SourceControlMatrix, type Repository } from "@/components/omnisight/sou
 import { TaskBacklog } from "@/components/omnisight/task-backlog"
 import { OrchestratorAI } from "@/components/omnisight/orchestrator-ai"
 import { MobileNav, TabletNav, type PanelId } from "@/components/omnisight/mobile-nav"
+import { Button } from "@/components/ui/button"
 import { useEngine } from "@/hooks/use-engine"
 import * as api from "@/lib/api"
 
@@ -196,6 +197,10 @@ export default function Home() {
     const cmd = invokeCommandRef.current.trim() || undefined
     await engine.invoke(cmd)
   }, [engine])
+
+  const openMP = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("omnisight:open-mp"))
+  }, [])
 
   const handleAddAgent = useCallback(async (type?: Agent["type"], _tools?: string[], subType?: string, aiModel?: string) => {
     const agentType = type || (() => {
@@ -654,6 +659,14 @@ export default function Home() {
           onToggleNotifications={() => setShowNotifications(prev => !prev)}
           settingsButton={
             <span className="inline-flex items-center gap-1">
+              <Button
+                type="button"
+                size="sm"
+                onClick={openMP}
+                className="hidden border border-[var(--neural-cyan,#67e8f9)]/40 bg-[var(--neural-cyan,#67e8f9)]/10 font-mono text-xs text-[var(--neural-cyan,#67e8f9)] hover:bg-[var(--neural-cyan,#67e8f9)]/20 sm:inline-flex"
+              >
+                ⚡ Plan with All Providers
+              </Button>
               <PresenceBadge />
               <TenantSwitcher />
               <ProjectSwitcher />
