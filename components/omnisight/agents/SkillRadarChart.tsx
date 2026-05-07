@@ -28,6 +28,11 @@ export interface SkillRadarChartProps {
   className?: string
 }
 
+export interface SkillFusionRecipe {
+  componentSkillIds: [string, string]
+  hybridSkill: Omit<SkillRadarAxis, "level"> & { level?: number }
+}
+
 interface SkillRadarDatum {
   id: string
   label: string
@@ -37,6 +42,8 @@ interface SkillRadarDatum {
 }
 
 const DEFAULT_MAX_LEVEL = 5
+export const COMPONENT_FUSION_LEVEL_COST = 1
+export const HYBRID_FUSION_START_LEVEL = 3
 
 function clampLevel(level: number, maxLevel: number): number {
   if (!Number.isFinite(level)) return 0
@@ -59,6 +66,50 @@ function toRadarData(axes: SkillRadarAxis[], fallbackMaxLevel: number): SkillRad
       xp: axis.xp,
     }
   })
+}
+
+export function applySkillFusionOutcome(
+  axes: SkillRadarAxis[],
+  recipe: SkillFusionRecipe,
+  fallbackMaxLevel = DEFAULT_MAX_LEVEL,
+): SkillRadarAxis[] {
+  const componentSkillIds = new Set(recipe.componentSkillIds)
+  const hybridMaxLevel = recipe.hybridSkill.maxLevel ?? fallbackMaxLevel
+  const hybridLevel = clampLevel(
+    recipe.hybridSkill.level ?? HYBRID_FUSION_START_LEVEL,
+    hybridMaxLevel,
+  )
+  let foundHybrid = false
+
+  const fusedAxes = axes.map((axis) => {
+    const maxLevel = axis.maxLevel ?? fallbackMaxLevel
+
+    if (axis.id === recipe.hybridSkill.id) {
+      foundHybrid = true
+      return {
+        ...axis,
+        ...recipe.hybridSkill,
+        level: hybridLevel,
+      }
+    }
+
+    if (!componentSkillIds.has(axis.id)) return axis
+
+    return {
+      ...axis,
+      level: clampLevel(axis.level - COMPONENT_FUSION_LEVEL_COST, maxLevel),
+    }
+  })
+
+  if (foundHybrid) return fusedAxes
+
+  return [
+    ...fusedAxes,
+    {
+      ...recipe.hybridSkill,
+      level: hybridLevel,
+    },
+  ]
 }
 
 function SkillRadarTooltip({
