@@ -28,22 +28,34 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL_BY_PROVIDER: dict[str, str] = {
     "anthropic": "claude-sonnet-4-20250514",
     "anthropic-subscription": "claude-sonnet-4-20250514",
+    "gemini": "gemini-1.5-pro",
+    "gemini-subscription": "gemini-1.5-pro",
     "openai": "gpt-4o",
     "openai-subscription": "gpt-4o",
+    "xai": "grok-3-mini",
+    "xai-subscription": "grok-3-mini",
 }
 
 PROVIDER_SECONDS_PER_1K_TOKENS: dict[str, float] = {
     "anthropic": 2.4,
     "anthropic-subscription": 2.4,
+    "gemini": 2.0,
+    "gemini-subscription": 2.0,
     "openai": 1.8,
     "openai-subscription": 1.8,
+    "xai": 2.6,
+    "xai-subscription": 2.6,
 }
 
 PROVIDER_BASE_SECONDS: dict[str, float] = {
     "anthropic": 8.0,
     "anthropic-subscription": 8.0,
+    "gemini": 7.0,
+    "gemini-subscription": 7.0,
     "openai": 6.0,
     "openai-subscription": 6.0,
+    "xai": 9.0,
+    "xai-subscription": 9.0,
 }
 
 DEFAULT_SECONDS_PER_1K_TOKENS = 2.5

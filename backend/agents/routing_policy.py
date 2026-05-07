@@ -44,6 +44,7 @@ from backend.sandbox_tier import Guild
 import backend.agents.provider_adapters.anthropic_subscription  # noqa: F401,E402
 import backend.agents.provider_adapters.gemini_subscription  # noqa: F401,E402
 import backend.agents.provider_adapters.openai_subscription  # noqa: F401,E402
+import backend.agents.provider_adapters.xai_subscription  # noqa: F401,E402
 
 
 DEFAULT_CAP_SUPPRESSION_S = 5 * 60 * 60
