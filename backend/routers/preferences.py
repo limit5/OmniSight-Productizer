@@ -35,6 +35,7 @@ TOUR_SEEN_PREF_KEY = "tour_seen"
 SEEN_MP_TOUR_PREF_KEY = "seen_mp_tour"
 MP_B_LAYOUT_PREF_KEY = "mp_b_layout"
 MP_WAR_ROOM_PANEL_LAYOUT_PREF_KEY = "mp_war_room_panel_layout"
+MP_MODAL_ACTION_PREF_KEY = "mp_modal_action"
 PREF_TRUE_VALUE = "1"
 
 
@@ -50,6 +51,11 @@ class PreferenceResponse(BaseModel):
 class MultiProviderOnboardingTourStateResponse(BaseModel):
     key: str
     seen: bool
+
+
+class MultiProviderModalActionResponse(BaseModel):
+    key: str
+    action: Literal["close", "cancel", "start"]
 
 
 class WarRoomPanel(BaseModel):
@@ -227,6 +233,36 @@ async def get_multi_provider_onboarding_tour_state(
 ) -> MultiProviderOnboardingTourStateResponse:
     value = await _get_preference_value(user.id, SEEN_MP_TOUR_PREF_KEY)
     return {"key": SEEN_MP_TOUR_PREF_KEY, "seen": value == PREF_TRUE_VALUE}
+
+
+async def _record_multi_provider_modal_action(
+    action: Literal["close", "cancel", "start"],
+    user: auth.User,
+) -> MultiProviderModalActionResponse:
+    await _upsert_preference(user.id, MP_MODAL_ACTION_PREF_KEY, action)
+    _emit_preference_updated(MP_MODAL_ACTION_PREF_KEY, action, user.id)
+    return {"key": MP_MODAL_ACTION_PREF_KEY, "action": action}
+
+
+@router.post("/multi-provider/modal/close")
+async def close_multi_provider_modal(
+    user: auth.User = Depends(auth.current_user),
+) -> MultiProviderModalActionResponse:
+    return await _record_multi_provider_modal_action("close", user)
+
+
+@router.post("/multi-provider/modal/cancel")
+async def cancel_multi_provider_modal(
+    user: auth.User = Depends(auth.current_user),
+) -> MultiProviderModalActionResponse:
+    return await _record_multi_provider_modal_action("cancel", user)
+
+
+@router.post("/multi-provider/modal/start")
+async def start_multi_provider_modal(
+    user: auth.User = Depends(auth.current_user),
+) -> MultiProviderModalActionResponse:
+    return await _record_multi_provider_modal_action("start", user)
 
 
 @router.get("/multi-provider/war-room/layout")
