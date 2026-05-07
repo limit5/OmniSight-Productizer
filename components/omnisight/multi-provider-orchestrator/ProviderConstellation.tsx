@@ -278,6 +278,7 @@ export function ProviderConstellation({
 
   return (
     <section
+      id="mp-provider-constellation"
       className={cn(
         "holo-glass-simple corner-brackets-full relative min-h-[620px] overflow-hidden rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.35))]",
         className,
