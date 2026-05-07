@@ -29,9 +29,47 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["preferences"])
 
+SEEN_MP_TOUR_PREF_KEY = "seen_mp_tour"
+PREF_TRUE_VALUE = "1"
+
 
 class PrefBody(BaseModel):
     value: str = Field(max_length=65536)
+
+
+class PreferenceResponse(BaseModel):
+    key: str
+    value: str
+
+
+async def _upsert_preference(user_id: str, key: str, value: str) -> None:
+    from backend.db_pool import get_pool
+
+    now = time.time()
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO user_preferences "
+            "(user_id, pref_key, value, updated_at, tenant_id) "
+            "VALUES ($1, $2, $3, $4, $5) "
+            "ON CONFLICT (user_id, pref_key) DO UPDATE SET "
+            "  value = EXCLUDED.value, "
+            "  updated_at = EXCLUDED.updated_at",
+            user_id, key, value, now, tenant_insert_value(),
+        )
+
+
+def _emit_preference_updated(key: str, value: str, user_id: str) -> None:
+    # Q.3-SUB-4 (#297): cross-device sync push. Best-effort — a flaky
+    # bus / Redis outage must not fail the mutation (PG is source of
+    # truth, the emit is latency-optimisation only).
+    try:
+        from backend.events import emit_preferences_updated
+        emit_preferences_updated(key, value, user_id)
+    except Exception as exc:
+        logger.debug(
+            "emit_preferences_updated failed for key=%s user=%s: %s",
+            key, user_id, exc,
+        )
 
 
 @router.get("/user-preferences")
@@ -73,28 +111,16 @@ async def set_preference(
     key: str,
     body: PrefBody,
     user: auth.User = Depends(auth.current_user),
-) -> dict:
-    from backend.db_pool import get_pool
-    now = time.time()
-    async with get_pool().acquire() as conn:
-        await conn.execute(
-            "INSERT INTO user_preferences "
-            "(user_id, pref_key, value, updated_at, tenant_id) "
-            "VALUES ($1, $2, $3, $4, $5) "
-            "ON CONFLICT (user_id, pref_key) DO UPDATE SET "
-            "  value = EXCLUDED.value, "
-            "  updated_at = EXCLUDED.updated_at",
-            user.id, key, body.value, now, tenant_insert_value(),
-        )
-    # Q.3-SUB-4 (#297): cross-device sync push. Best-effort — a flaky
-    # bus / Redis outage must not fail the mutation (PG is source of
-    # truth, the emit is latency-optimisation only).
-    try:
-        from backend.events import emit_preferences_updated
-        emit_preferences_updated(key, body.value, user.id)
-    except Exception as exc:
-        logger.debug(
-            "emit_preferences_updated failed for key=%s user=%s: %s",
-            key, user.id, exc,
-        )
+) -> PreferenceResponse:
+    await _upsert_preference(user.id, key, body.value)
+    _emit_preference_updated(key, body.value, user.id)
     return {"key": key, "value": body.value}
+
+
+@router.post("/multi-provider/onboarding-tour/complete")
+async def complete_multi_provider_onboarding_tour(
+    user: auth.User = Depends(auth.current_user),
+) -> PreferenceResponse:
+    await _upsert_preference(user.id, SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE)
+    _emit_preference_updated(SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE, user.id)
+    return {"key": SEEN_MP_TOUR_PREF_KEY, "value": PREF_TRUE_VALUE}
