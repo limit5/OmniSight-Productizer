@@ -338,3 +338,53 @@ Sync now runs BEFORE pre-pickup, so when pre-pickup queries the live state it se
 (none yet)
 
 <!-- e2e smoke 2026-05-06: validate Gerrit→GitLab→GitHub replication chain. To be reverted post-verify. -->
+
+
+## Lesson 19 — Production Readiness Gate Q1 must check DB image, not just app image (2026-05-07)
+
+**Situation**: OP-693 deploy attempt (16:25) hit alembic 0193 (BP.Q.4 embedding_chunks) failing with `extension "vector" is not available`. The migration's docstring (line 36-38) says "PostgreSQL deployments must enable the existing vector extension" but the running pg-primary container used `postgres:16-alpine` which doesn't ship pgvector. SOP §1 Production Readiness Gate Q1 ("這條 code path 在 production image 真的跑得起來嗎") had been checked against the backend image (correctly verified `import backend.merger_agent` works), but never against the DB image — pgvector is a DB-side dependency that the alembic apply touches.
+
+**Fix**: SOP §1 Production Readiness Gate Q1 needs to be answered for EACH artifact the migration / deploy / runtime touches: backend image, DB image, sidecar images (caddy, cloudflared), external services (Gerrit, JIRA). For DB migrations specifically, run `docker compose run backend-a python -m alembic upgrade --sql heads` against fresh DB locally (or staging) to surface CREATE EXTENSION / CREATE INDEX / CHECK constraint issues that only fail at apply time.
+
+The operator-side fix landed: deploy/postgres-ha/Dockerfile.pgvector builds `omnisight-postgres-pgvector:16-alpine` from `postgres:16-alpine` + `apk build-base + git + clone pgvector v0.8.0 + make install`. Compose updated to use this image. Replication preserved (alpine uid 70 stays consistent across primary + standby).
+
+**Verification**: After image swap, alembic upgrade heads applied all 13 migrations cleanly. CREATE EXTENSION vector + CREATE INDEX hnsw both succeeded. Subsequently exposed a separate bug (HNSW on bare-dim vector — fixed via OP-707 #72) but that's downstream of the pgvector availability issue.
+
+**Generalisation**: "Static lists / catalogs aligned with live" (SOP § Production Readiness Gate Q2) needs to extend beyond the app's TABLES_IN_ORDER / drift-guard tests — DB-level extension requirements (`CREATE EXTENSION`), DB-level CHECK constraints, sidecar version pins, and runtime feature flags all need their own pre-flight verification against the live image they'll run on.
+
+
+## Lesson 20 — `echo >>` to .env without trailing-newline guard concatenates with last token (2026-05-07)
+
+**Situation**: OP-693 SP-D added `OMNISIGHT_GERRIT_ENABLED=true` to .env via `echo "..." >> .env`. The .env's last line (`OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN=eyJ...`) lacked a trailing newline, so `echo` appended directly to that line: the resulting line read `...OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN=eyJ...gAzOMNISIGHT_GERRIT_ENABLED=true`. Both vars corrupted: cloudflared's running container kept a copy of the pre-edit token in memory (didn't re-read .env) and stayed alive, but a subsequent restart would've broken cloudflared. Backend rolling restart picked up the corrupted .env on the env_file load and silently misread BOTH values.
+
+**Fix**: Always check + ensure trailing newline before appending to .env / config files via `echo >>`. Pattern:
+```bash
+[ -z "$(tail -c 1 .env)" ] || echo "" >> .env  # add newline if last char isn't already
+printf '%s=%s\n' "$KEY" "$VALUE" >> .env
+```
+
+Or use Python's pathlib for safer text editing: `text = p.read_text(); if not text.endswith('\n'): text += '\n'; text += new_line + '\n'; p.write_text(text)`.
+
+**Verification**: Repaired with regex split — `re.compile(r'^(OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN=[A-Za-z0-9+/=]+)(OMNISIGHT_GERRIT_ENABLED=true)$', re.M).sub(r'\1\n\2\n', text)`. Backend restart re-read corrected .env; cloudflared restart_count stayed 0 (its token was loaded at startup before .env was touched, and the in-memory copy is not affected by re-reads); subsequent restart picked up the fixed token.
+
+**Generalisation**: Any tool that appends to a config file via shell redirection MUST guard against missing trailing newlines. Production secrets in .env are particularly risky because a corrupted long token (like a JWT or OAuth token) can produce VERY hard-to-debug failures (the whole token becomes one giant invalid string, which fails parsing in different layers depending on consumer).
+
+
+## Lesson 21 — Webhook endpoints with `require_operator + signature` are dual-gate, not redundant (2026-05-07)
+
+**Situation**: OP-708 surfaced that backend's `/api/v1/orchestrator/merge-conflict` endpoint requires BOTH a valid Bearer api_key (passes `require_operator`) AND a separate `X-Jira-Webhook-Secret` header (passes `_verify_jira_signature`). Gerrit's webhooks plugin natively supports `secret` for HMAC body signing into `X-Hub-Signature`, but the backend doesn't verify HMAC of the body — it does a constant-time string compare against `settings.jira_webhook_secret`. So Gerrit needs to set TWO custom headers, not one HMAC signature.
+
+**Fix**: Gerrit webhooks plugin supports `header = Name: Value` lines in `[remote "..."]` blocks (Gerrit 3.13 confirmed via project.config push). Set:
+```
+[remote "merge-conflict-webhook"]
+  url = ...
+  event = change-merge-failed
+  header = Authorization: Bearer <api_key>          # require_operator
+  header = X-Jira-Webhook-Secret: <jira_webhook_secret>  # _verify_jira_signature
+```
+
+Both go in refs/meta/config (admin-only readable), so secret-in-config is acceptable for this deployment topology.
+
+**Verification**: External curl test (`curl -X POST -H Authorization -H X-Jira-Webhook-Secret https://ai.sora-dev.app/api/v1/orchestrator/merge-conflict`) returned HTTP 200 — endpoint accepted both headers, validated payload, dispatched to merge_arbiter. Direct in-container invocation of `merge_arbiter.on_merge_conflict_webhook` also confirmed the merger code path runs (with downstream LLM bug found, separate ticket OP-709).
+
+**Generalisation**: When an endpoint name suggests "webhook" but auth requires user/operator credentials, the design intent is dual-gate (defense-in-depth: signature isolates abuse from external internet + user auth provides identity for audit). Don't simplify to "just signature" without team agreement — the operator identity is sometimes load-bearing for audit_log entries / per-user rate limits / etc. For Gerrit-side, configure custom headers; don't try to bend Gerrit's HMAC `secret` into the user-auth shape.
