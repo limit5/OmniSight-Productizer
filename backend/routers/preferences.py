@@ -47,6 +47,11 @@ class PreferenceResponse(BaseModel):
     value: str
 
 
+class MultiProviderOnboardingTourStateResponse(BaseModel):
+    key: str
+    seen: bool
+
+
 class WarRoomPanel(BaseModel):
     id: str = Field(
         min_length=1,
@@ -214,6 +219,14 @@ async def complete_multi_provider_onboarding_tour(
     await _upsert_preference(user.id, SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE)
     _emit_preference_updated(SEEN_MP_TOUR_PREF_KEY, PREF_TRUE_VALUE, user.id)
     return {"key": SEEN_MP_TOUR_PREF_KEY, "value": PREF_TRUE_VALUE}
+
+
+@router.get("/multi-provider/onboarding-tour/state")
+async def get_multi_provider_onboarding_tour_state(
+    user: auth.User = Depends(auth.current_user),
+) -> MultiProviderOnboardingTourStateResponse:
+    value = await _get_preference_value(user.id, SEEN_MP_TOUR_PREF_KEY)
+    return {"key": SEEN_MP_TOUR_PREF_KEY, "seen": value == PREF_TRUE_VALUE}
 
 
 @router.get("/multi-provider/war-room/layout")
