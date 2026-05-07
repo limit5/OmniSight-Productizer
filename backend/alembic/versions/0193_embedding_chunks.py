@@ -106,11 +106,6 @@ _INDEX_TENANT_SOURCE = (
     "ON embedding_chunks(tenant_id, source_path)"
 )
 
-_PG_INDEX_EMBEDDING_HNSW = (
-    "CREATE INDEX IF NOT EXISTS idx_embedding_chunks_embedding_hnsw "
-    "ON embedding_chunks USING hnsw (embedding vector_cosine_ops)"
-)
-
 _PG_ENABLE_RLS = (
     "ALTER TABLE embedding_chunks ENABLE ROW LEVEL SECURITY"
 )
@@ -133,7 +128,6 @@ def upgrade() -> None:
         conn.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS vector")
         conn.exec_driver_sql(_PG_CREATE_TABLE)
         conn.exec_driver_sql(_INDEX_TENANT_SOURCE)
-        conn.exec_driver_sql(_PG_INDEX_EMBEDDING_HNSW)
         conn.exec_driver_sql(_PG_ENABLE_RLS)
         conn.exec_driver_sql(_PG_FORCE_RLS)
         conn.exec_driver_sql(
@@ -156,6 +150,5 @@ def downgrade() -> None:
         conn.exec_driver_sql(
             "ALTER TABLE embedding_chunks DISABLE ROW LEVEL SECURITY"
         )
-        conn.exec_driver_sql("DROP INDEX IF EXISTS idx_embedding_chunks_embedding_hnsw")
     conn.exec_driver_sql("DROP INDEX IF EXISTS idx_embedding_chunks_tenant_source")
     op.execute("DROP TABLE IF EXISTS embedding_chunks")
