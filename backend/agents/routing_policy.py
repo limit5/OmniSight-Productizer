@@ -27,12 +27,17 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from threading import RLock
+from typing import Any
+
+import yaml
 
 from backend import feature_flags
 from backend.agents import provider_orchestrator
 from backend.agents.provider_orchestrator import ProviderAdapter, TaskSpec
 from backend.agents.provider_quota_tracker import DEFAULT_5H_CAP_TOKENS, QuotaState
+from backend.sandbox_tier import Guild
 
 # Register shipped MVP providers.
 import backend.agents.provider_adapters.anthropic_subscription  # noqa: F401,E402
@@ -42,9 +47,12 @@ import backend.agents.provider_adapters.openai_subscription  # noqa: F401,E402
 DEFAULT_CAP_SUPPRESSION_S = 5 * 60 * 60
 HIGH_QUOTA_RATIO = 0.50
 MP_ENABLED_ENV = "OMNISIGHT_MP_ENABLED"
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_MODEL_MAPPING_PATH = _PROJECT_ROOT / "configs" / "model_mapping.yaml"
 
 _recently_capped: dict[str, float] = {}
 _RECENTLY_CAPPED_LOCK = RLock()
+_MODEL_ROUTING_CACHE: tuple[float | None, dict[str, str], set[str]] | None = None
 
 HumanAssignmentResolver = Callable[[TaskSpec], str | None]
 
@@ -105,8 +113,10 @@ class RoutingPolicy:
             if high_quota:
                 candidates = high_quota
 
+        preferred_provider = _preferred_provider_family_for_task(task)
         candidates.sort(
             key=lambda candidate: (
+                0 if _provider_family(candidate.provider_id) == preferred_provider else 1,
                 -candidate.remaining_5h_quota_ratio,
                 candidate.circuit_open_count,
                 candidate.provider_id,
@@ -226,6 +236,114 @@ def _agent_class_allows_provider(agent_class: str, provider_id: str) -> bool:
         return agent_class in {"subscription-codex", "api-openai"}
     provider_prefix = provider_id.split("-", 1)[0]
     return provider_prefix in agent_class
+
+
+def _preferred_provider_family_for_task(task: TaskSpec) -> str | None:
+    guild = _task_guild(task)
+    if guild is None:
+        return None
+    guild_specs, provider_matrix = _load_model_routing_matrix()
+    model_spec = guild_specs.get(guild.value, "")
+    provider = _provider_from_model_spec(model_spec)
+    if provider in provider_matrix:
+        return provider
+    return None
+
+
+def _task_guild(task: TaskSpec) -> Guild | None:
+    for attr in ("guild_id", "guild", "agent_name"):
+        value = getattr(task, attr, None)
+        guild = _coerce_guild(value)
+        if guild is not None:
+            return guild
+    for area in task.area:
+        guild = _coerce_guild(area)
+        if guild is not None:
+            return guild
+    return None
+
+
+def _coerce_guild(value: object) -> Guild | None:
+    if isinstance(value, Guild):
+        return value
+    if not isinstance(value, str):
+        return None
+    slug = value.strip().lower().replace("-", "_")
+    if not slug:
+        return None
+    try:
+        return Guild(slug)
+    except ValueError:
+        return None
+
+
+def _load_model_routing_matrix() -> tuple[dict[str, str], set[str]]:
+    """Load BP.F guild model mapping + provider matrix for routing order."""
+
+    global _MODEL_ROUTING_CACHE
+    try:
+        mtime = _MODEL_MAPPING_PATH.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _MODEL_ROUTING_CACHE is not None and _MODEL_ROUTING_CACHE[0] == mtime:
+        return _MODEL_ROUTING_CACHE[1], _MODEL_ROUTING_CACHE[2]
+
+    guild_specs: dict[str, str] = {}
+    provider_matrix: set[str] = set()
+    try:
+        if mtime is not None:
+            parsed = yaml.safe_load(_MODEL_MAPPING_PATH.read_text(encoding="utf-8")) or {}
+            guild_specs, provider_matrix = _parse_model_routing_matrix(parsed)
+    except Exception:
+        guild_specs, provider_matrix = {}, set()
+    _MODEL_ROUTING_CACHE = (mtime, guild_specs, provider_matrix)
+    return guild_specs, provider_matrix
+
+
+def _parse_model_routing_matrix(raw: Any) -> tuple[dict[str, str], set[str]]:
+    if not isinstance(raw, dict):
+        return {}, set()
+
+    provider_matrix: set[str] = set()
+    providers = raw.get("providers")
+    if isinstance(providers, dict):
+        for provider_id, provider_cfg in providers.items():
+            provider = str(provider_id).strip().lower()
+            if not provider or not isinstance(provider_cfg, dict):
+                continue
+            if isinstance(provider_cfg.get("default_model"), str):
+                provider_matrix.add(provider)
+
+    guild_specs: dict[str, str] = {}
+    guilds = raw.get("guilds")
+    if isinstance(guilds, dict):
+        for guild_id, cfg in guilds.items():
+            guild = _coerce_guild(str(guild_id))
+            model_spec = _model_spec_from_mapping_value(cfg)
+            if guild is not None and model_spec:
+                guild_specs[guild.value] = model_spec
+    return guild_specs, provider_matrix
+
+
+def _model_spec_from_mapping_value(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        model_spec = value.get("model_spec")
+        if isinstance(model_spec, str):
+            return model_spec.strip()
+    return ""
+
+
+def _provider_from_model_spec(model_spec: str) -> str | None:
+    provider, sep, model = model_spec.partition(":")
+    if not sep or not provider.strip() or not model.strip():
+        return None
+    return provider.strip().lower()
+
+
+def _provider_family(provider_id: str) -> str:
+    return _normalise_provider_id(provider_id).split("-", 1)[0].lower()
 
 
 def _default_human_assignment_resolver(task: TaskSpec) -> str | None:
