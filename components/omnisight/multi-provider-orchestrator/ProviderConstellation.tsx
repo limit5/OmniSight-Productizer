@@ -23,6 +23,7 @@ import {
   Zap,
 } from "lucide-react"
 
+import type { ProviderQuotaUpdate } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 export type ProviderConstellationSlot =
@@ -44,6 +45,7 @@ export interface ProviderConstellationProvider {
   allocationPercent: number
   quotaState: ProviderConstellationQuotaState
   activityLevel?: number
+  liveQuota?: ProviderQuotaUpdate
 }
 
 export interface ProviderConstellationTaskSummary {
@@ -57,6 +59,7 @@ export interface ProviderConstellationProps {
   providers: ReadonlyArray<ProviderConstellationProvider>
   taskSummary: ProviderConstellationTaskSummary
   tradeoffValue: number
+  providerQuotas?: ReadonlyArray<ProviderQuotaUpdate>
   className?: string
   renderProvider?: (provider: ProviderConstellationProvider) => ReactNode
   renderProjectCore?: (summary: ProviderConstellationTaskSummary) => ReactNode
@@ -102,6 +105,63 @@ function formatCost(cost: number | undefined): string {
   return `$${cost.toFixed(cost >= 1 ? 2 : 3)}`
 }
 
+function providerKey(value: string): string {
+  return value.toLowerCase().replace(/[_\s]+/g, "-")
+}
+
+function quotaRatio(snapshot: ProviderQuotaUpdate): number {
+  const ratios = [
+    snapshot.remaining_5h_quota_ratio,
+    snapshot.remaining_weekly_quota_ratio,
+  ].filter((value) => Number.isFinite(value))
+  if (ratios.length === 0) return 0
+  return Math.min(...ratios)
+}
+
+function quotaStateFromSnapshot(
+  snapshot: ProviderQuotaUpdate,
+): ProviderConstellationQuotaState {
+  if (snapshot.circuit_state === "open") return "critical"
+  const ratio = quotaRatio(snapshot)
+  if (ratio >= 0.7) return "healthy"
+  if (ratio >= 0.3) return "watch"
+  return "critical"
+}
+
+function findQuotaSnapshot(
+  provider: ProviderConstellationProvider,
+  snapshots: ReadonlyArray<ProviderQuotaUpdate>,
+): ProviderQuotaUpdate | undefined {
+  const id = providerKey(provider.id)
+  const name = providerKey(provider.name)
+  return snapshots.find((snapshot) => {
+    const liveProvider = providerKey(snapshot.provider)
+    return (
+      liveProvider === id ||
+      liveProvider === name ||
+      liveProvider.startsWith(`${id}-`) ||
+      liveProvider.startsWith(`${name}-`)
+    )
+  })
+}
+
+function applyLiveQuotaSnapshots(
+  providers: ReadonlyArray<ProviderConstellationProvider>,
+  snapshots: ReadonlyArray<ProviderQuotaUpdate>,
+): ProviderConstellationProvider[] {
+  if (snapshots.length === 0) return providers.slice(0, 4)
+  return providers.slice(0, 4).map((provider) => {
+    const snapshot = findQuotaSnapshot(provider, snapshots)
+    if (!snapshot) return provider
+    return {
+      ...provider,
+      quotaState: quotaStateFromSnapshot(snapshot),
+      activityLevel: provider.activityLevel ?? 1 - quotaRatio(snapshot),
+      liveQuota: snapshot,
+    }
+  })
+}
+
 function DefaultProviderSphere({
   provider,
 }: {
@@ -109,6 +169,9 @@ function DefaultProviderSphere({
 }) {
   const allocation = clampPercent(provider.allocationPercent)
   const activity = clampPercent((provider.activityLevel ?? 0) * 100)
+  const remainingPct = provider.liveQuota
+    ? clampPercent(quotaRatio(provider.liveQuota) * 100)
+    : null
 
   return (
     <div
@@ -116,6 +179,7 @@ function DefaultProviderSphere({
         "flex h-28 w-28 flex-col items-center justify-center rounded-full border p-3 text-center shadow-[0_0_28px_rgba(56,189,248,0.16)] sm:h-32 sm:w-32",
         QUOTA_CLASS[provider.quotaState],
       )}
+      data-mp-provider-quota-source={provider.liveQuota ? "sse" : "props"}
     >
       <div className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em]">
         <Activity className="h-3 w-3" aria-hidden />
@@ -125,6 +189,11 @@ function DefaultProviderSphere({
         {provider.name}
       </div>
       <div className="mt-1 font-mono text-lg">{allocation.toFixed(0)}%</div>
+      {remainingPct !== null ? (
+        <div className="font-mono text-[10px] text-current/80">
+          {remainingPct.toFixed(0)}% quota
+        </div>
+      ) : null}
       <div className="mt-1 h-1 w-16 overflow-hidden rounded-full bg-white/15">
         <div
           className="h-full rounded-full bg-current"
@@ -198,13 +267,14 @@ export function ProviderConstellation({
   providers,
   taskSummary,
   tradeoffValue,
+  providerQuotas = [],
   className,
   renderProvider,
   renderProjectCore,
   renderConnectionBeam,
   renderTradeoffSlider,
 }: ProviderConstellationProps) {
-  const orderedProviders = providers.slice(0, 4)
+  const orderedProviders = applyLiveQuotaSnapshots(providers, providerQuotas)
 
   return (
     <section
