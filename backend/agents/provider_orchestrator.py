@@ -79,6 +79,7 @@ class HealthStatus:
     last_checked_at: datetime
     cli_installed: bool = False
     subscription_active: bool = False
+    subscription_expires_at: datetime | None = None
     detail: str = ""
 
 
