@@ -82,6 +82,31 @@ class SSETokenWarning(BaseModel):
     timestamp: str = ""
 
 
+class SSEProviderQuotaUpdated(BaseModel):
+    """provider.quota.updated — subscription-provider quota snapshot.
+
+    Emitted by :mod:`backend.agents.provider_quota_tracker` after provider
+    usage or reset mutations commit. The dashboard's ``useEngine()`` SSE
+    stream can replace cached quota rows with this payload instead of
+    polling after each subscription dispatch.
+    """
+    provider: str
+    rolling_5h_tokens: int = 0
+    weekly_tokens: int = 0
+    cap_5h_tokens: int = 0
+    cap_weekly_tokens: int = 0
+    remaining_5h_tokens: int = 0
+    remaining_weekly_tokens: int = 0
+    remaining_5h_quota_ratio: float = 0.0
+    remaining_weekly_quota_ratio: float = 0.0
+    circuit_state: str = "closed"
+    last_reset_at: Optional[str] = None
+    last_cap_hit_at: Optional[str] = None
+    reason: str = ""
+    scopes: list[str] = Field(default_factory=list)
+    timestamp: str = ""
+
+
 class SSESimulation(BaseModel):
     """simulation — Dual-track simulation lifecycle events."""
     sim_id: str
@@ -604,6 +629,7 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "container": SSEContainer,
     "invoke": SSEInvoke,
     "token_warning": SSETokenWarning,
+    "provider.quota.updated": SSEProviderQuotaUpdated,
     "simulation": SSESimulation,
     "debug_finding": SSEDebugFinding,
     "notification": SSENotification,

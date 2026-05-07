@@ -509,6 +509,73 @@ def emit_token_warning(level: str, message: str, usage: float = 0, budget: float
     _log(f"[TOKEN] {level.upper()}: {message}", level=level_label)
 
 
+def emit_provider_quota_updated(
+    provider: str,
+    rolling_5h_tokens: int,
+    weekly_tokens: int,
+    cap_5h_tokens: int,
+    cap_weekly_tokens: int,
+    circuit_state: str,
+    *,
+    reason: str = "",
+    scopes: list[str] | None = None,
+    last_reset_at: Any = None,
+    last_cap_hit_at: Any = None,
+    session_id: str | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+    **extra: Any,
+) -> None:
+    """Provider subscription quota update for the dashboard SSE stream."""
+    broadcast_scope = _resolve_scope(
+        "emit_provider_quota_updated",
+        broadcast_scope,
+        "global",
+    )
+    remaining_5h = max(int(cap_5h_tokens) - int(rolling_5h_tokens), 0)
+    remaining_weekly = max(int(cap_weekly_tokens) - int(weekly_tokens), 0)
+    bus.publish("provider.quota.updated", {
+        "provider": provider,
+        "rolling_5h_tokens": int(rolling_5h_tokens),
+        "weekly_tokens": int(weekly_tokens),
+        "cap_5h_tokens": int(cap_5h_tokens),
+        "cap_weekly_tokens": int(cap_weekly_tokens),
+        "remaining_5h_tokens": remaining_5h,
+        "remaining_weekly_tokens": remaining_weekly,
+        "remaining_5h_quota_ratio": (
+            round(remaining_5h / int(cap_5h_tokens), 4)
+            if int(cap_5h_tokens) > 0
+            else 0.0
+        ),
+        "remaining_weekly_quota_ratio": (
+            round(remaining_weekly / int(cap_weekly_tokens), 4)
+            if int(cap_weekly_tokens) > 0
+            else 0.0
+        ),
+        "circuit_state": circuit_state,
+        "last_reset_at": _iso_or_none(last_reset_at),
+        "last_cap_hit_at": _iso_or_none(last_cap_hit_at),
+        "reason": reason,
+        "scopes": list(scopes or []),
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[PROVIDER-QUOTA] {provider} 5h={rolling_5h_tokens}/{cap_5h_tokens} "
+        f"weekly={weekly_tokens}/{cap_weekly_tokens} circuit={circuit_state}",
+        "warn" if circuit_state == "open" else "info",
+    )
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+    return str(value)
+
+
 def emit_turn_metrics(
     model: str,
     input_tokens: int,
