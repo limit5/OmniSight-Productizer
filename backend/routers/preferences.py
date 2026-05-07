@@ -33,7 +33,11 @@ router = APIRouter(tags=["preferences"])
 
 TOUR_SEEN_PREF_KEY = "tour_seen"
 SEEN_MP_TOUR_PREF_KEY = "seen_mp_tour"
+<<<<<<< PATCH SET (0a809664c499401733b06b47f6fbf6f7fb79ab87 [OP-59] Add MP war room layout preference routes)
+MP_B_LAYOUT_PREF_KEY = "mp_b_layout"
+=======
 MP_WAR_ROOM_PANEL_LAYOUT_PREF_KEY = "mp_war_room_panel_layout"
+>>>>>>> BASE      (eee30e6d9a21b2c2c6c279c35ae37b9cbddedb0f [OP-58] Add MP war room panel layout preference API)
 PREF_TRUE_VALUE = "1"
 
 
@@ -215,6 +219,32 @@ async def complete_multi_provider_onboarding_tour(
     return {"key": SEEN_MP_TOUR_PREF_KEY, "value": PREF_TRUE_VALUE}
 
 
+<<<<<<< PATCH SET (0a809664c499401733b06b47f6fbf6f7fb79ab87 [OP-59] Add MP war room layout preference routes)
+@router.get("/multi-provider/war-room/layout")
+async def get_multi_provider_war_room_layout(
+    user: auth.User = Depends(auth.current_user),
+) -> PreferenceResponse:
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT value FROM user_preferences "
+            "WHERE user_id = $1 AND pref_key = $2",
+            user.id, MP_B_LAYOUT_PREF_KEY,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="preference not found")
+    return {"key": MP_B_LAYOUT_PREF_KEY, "value": row["value"]}
+
+
+@router.put("/multi-provider/war-room/layout")
+async def set_multi_provider_war_room_layout(
+    body: PrefBody,
+    user: auth.User = Depends(auth.current_user),
+) -> PreferenceResponse:
+    await _upsert_preference(user.id, MP_B_LAYOUT_PREF_KEY, body.value)
+    _emit_preference_updated(MP_B_LAYOUT_PREF_KEY, body.value, user.id)
+    return {"key": MP_B_LAYOUT_PREF_KEY, "value": body.value}
+=======
 @router.get("/multi-provider/war-room/panel-layout")
 async def get_multi_provider_war_room_panel_layout(
     user: auth.User = Depends(auth.current_user),
@@ -239,3 +269,4 @@ async def set_multi_provider_war_room_panel_layout(
     await _upsert_preference(user.id, MP_WAR_ROOM_PANEL_LAYOUT_PREF_KEY, value)
     _emit_preference_updated(MP_WAR_ROOM_PANEL_LAYOUT_PREF_KEY, value, user.id)
     return {"key": MP_WAR_ROOM_PANEL_LAYOUT_PREF_KEY, "value": body}
+>>>>>>> BASE      (eee30e6d9a21b2c2c6c279c35ae37b9cbddedb0f [OP-58] Add MP war room panel layout preference API)
