@@ -372,7 +372,7 @@ def _emit_quota_update(
             last_cap_hit_at=state.last_cap_hit_at,
             reason=reason,
             scopes=list(scopes),
-            broadcast_scope="global",
+            broadcast_scope="user",
         )
     except Exception as exc:
         logger.debug("provider quota SSE publish failed: %s", exc)

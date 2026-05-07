@@ -530,7 +530,7 @@ def emit_provider_quota_updated(
     broadcast_scope = _resolve_scope(
         "emit_provider_quota_updated",
         broadcast_scope,
-        "global",
+        "user",
     )
     remaining_5h = max(int(cap_5h_tokens) - int(rolling_5h_tokens), 0)
     remaining_weekly = max(int(cap_weekly_tokens) - int(weekly_tokens), 0)
