@@ -372,7 +372,11 @@ class CharacterCardRegistry:
         agent_id: str,
         patch: CharacterCardUpdate,
     ) -> CharacterCard:
-        return await self.store.update_card(agent_id, patch)
+        previous = await self.store.get_card(agent_id)
+        updated = await self.store.update_card(agent_id, patch)
+        if previous is not None and updated.level > previous.level:
+            _emit_level_up_safely(previous, updated)
+        return updated
 
     async def delete_card(self, agent_id: str) -> bool:
         return await self.store.delete_card(agent_id)
@@ -462,3 +466,18 @@ def _execute_count(status: str) -> int:
         return int(status.split()[-1])
     except (IndexError, TypeError, ValueError):
         return 0
+
+
+def _emit_level_up_safely(previous: CharacterCard, updated: CharacterCard) -> None:
+    try:
+        from backend.events import emit_rpg_level_up
+
+        emit_rpg_level_up(
+            updated.agent_id,
+            previous_level=previous.level,
+            level=updated.level,
+            xp=updated.xp,
+            broadcast_scope="global",
+        )
+    except Exception:
+        pass

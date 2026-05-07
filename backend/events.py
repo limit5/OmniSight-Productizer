@@ -388,6 +388,37 @@ def emit_agent_update(agent_id: str, status: str, thought_chain: str = "",
             pass
 
 
+def emit_rpg_level_up(
+    agent_id: str,
+    *,
+    previous_level: int,
+    level: int,
+    xp: int,
+    session_id: str | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+    **extra: Any,
+) -> None:
+    """RPG character-card level-up animation trigger for operator UIs."""
+    broadcast_scope = _resolve_scope("emit_rpg_level_up", broadcast_scope, "global")
+    bus.publish("rpg.level_up", {
+        "agent_id": agent_id,
+        "previous_level": previous_level,
+        "level": level,
+        "xp": xp,
+        "effect": "flare",
+        "toast": {
+            "title": "Level up",
+            "message": f"{agent_id} reached level {level}.",
+        },
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[RPG] {agent_id} level up {previous_level}->{level} (xp={xp})",
+    )
+
+
 def emit_task_update(task_id: str, status: str, assigned_agent_id: str | None = None,
                      session_id: str | None = None,
                      broadcast_scope: str | None = None,
