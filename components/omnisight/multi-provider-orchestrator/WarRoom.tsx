@@ -14,7 +14,7 @@
  */
 
 import type { JSX, ReactNode } from "react"
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   Calculator,
   CheckSquare,
@@ -49,6 +49,9 @@ export interface WarRoomProps {
   panels?: Partial<Record<WarRoomPanelId, WarRoomPanelSlot>>
   initialDetachedPanel?: WarRoomPanelId | null
   onDetachedPanelChange?: (panelId: WarRoomPanelId | null) => void
+  mobileRedirectTarget?: string
+  mobileRedirectEnabled?: boolean
+  onMobileRedirect?: (target: string) => void
 }
 
 interface WarRoomPanelMeta {
@@ -89,6 +92,10 @@ const PANEL_META: readonly WarRoomPanelMeta[] = Object.freeze([
     icon: Gauge,
   },
 ])
+
+const MOBILE_BREAKPOINT_PX = 768
+const MOBILE_REDIRECT_DELAY_MS = 600
+const DEFAULT_MOBILE_REDIRECT_TARGET = "#mp-provider-constellation"
 
 function panelLabel(meta: WarRoomPanelMeta, slot?: WarRoomPanelSlot): string {
   return slot?.title ?? meta.title
@@ -199,9 +206,15 @@ export function WarRoom({
   panels,
   initialDetachedPanel = null,
   onDetachedPanelChange,
+  mobileRedirectTarget = DEFAULT_MOBILE_REDIRECT_TARGET,
+  mobileRedirectEnabled = true,
+  onMobileRedirect,
 }: WarRoomProps): JSX.Element {
   const [detachedPanel, setLocalDetachedPanel] =
     useState<WarRoomPanelId | null>(initialDetachedPanel)
+  const [mobileRedirectToastVisible, setMobileRedirectToastVisible] =
+    useState(false)
+  const mobileRedirectFiredRef = useRef(false)
 
   const panelSlots = useMemo(
     () =>
@@ -218,6 +231,43 @@ export function WarRoom({
 
   const detachedMeta = PANEL_META.find((meta) => meta.id === detachedPanel)
 
+  useEffect(() => {
+    if (!mobileRedirectEnabled || typeof window === "undefined") return
+
+    let redirectTimer: number | null = null
+
+    const redirectToTarget = () => {
+      if (onMobileRedirect) {
+        onMobileRedirect(mobileRedirectTarget)
+        return
+      }
+      if (mobileRedirectTarget.startsWith("#")) {
+        window.location.hash = mobileRedirectTarget
+        return
+      }
+      window.location.assign(mobileRedirectTarget)
+    }
+
+    const maybeRedirect = () => {
+      if (
+        mobileRedirectFiredRef.current ||
+        window.innerWidth >= MOBILE_BREAKPOINT_PX
+      ) {
+        return
+      }
+      mobileRedirectFiredRef.current = true
+      setMobileRedirectToastVisible(true)
+      redirectTimer = window.setTimeout(redirectToTarget, MOBILE_REDIRECT_DELAY_MS)
+    }
+
+    maybeRedirect()
+    window.addEventListener("resize", maybeRedirect)
+    return () => {
+      window.removeEventListener("resize", maybeRedirect)
+      if (redirectTimer !== null) window.clearTimeout(redirectTimer)
+    }
+  }, [mobileRedirectEnabled, mobileRedirectTarget, onMobileRedirect])
+
   return (
     <section
       data-testid="mp-war-room"
@@ -228,6 +278,17 @@ export function WarRoom({
         className,
       )}
     >
+      {mobileRedirectToastVisible ? (
+        <div
+          data-testid="mp-war-room-mobile-redirect-toast"
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-4 left-4 z-[70] w-[min(360px,calc(100vw-2rem))] rounded-sm border border-[var(--neural-cyan,#67e8f9)]/55 bg-[var(--background,#020617)]/95 px-3 py-2 text-sm text-[var(--foreground,#e2e8f0)] shadow-[0_0_28px_rgba(103,232,249,0.22)]"
+        >
+          War Room is desktop-only on this viewport. Opening Provider Constellation.
+        </div>
+      ) : null}
+
       <header className="flex flex-col gap-3 border-b border-[var(--neural-border,rgba(148,163,184,0.35))] pb-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <p className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--neural-cyan,#67e8f9)]">
