@@ -50,6 +50,28 @@ export interface CharacterCardProps {
   portraitUrl?: string | null
   instanceSuffix?: string | null
   styleFingerprint?: string | null
+  buffs?: readonly CharacterBuff[]
+}
+
+export type CharacterBuffKind =
+  | "fresh_tokens"
+  | "well_rested"
+  | "streak"
+  | "cap_warning"
+  | "burnout"
+  | "stale_memory"
+  | "custom"
+
+export type CharacterBuffPolarity = "buff" | "debuff" | "warning"
+
+export interface CharacterBuff {
+  id?: string
+  kind: CharacterBuffKind
+  label?: string | null
+  description?: string | null
+  expiresIn?: string | null
+  stacks?: number | null
+  polarity?: CharacterBuffPolarity | null
 }
 
 interface GuildVisual {
@@ -59,6 +81,12 @@ interface GuildVisual {
   toneClass: string
   barClass: string
   portraitClass: string
+}
+
+interface BuffVisual {
+  label: string
+  Icon: LucideIcon
+  toneClass: string
 }
 
 const GUILD_VISUALS: Record<AgentGuild, GuildVisual> = {
@@ -135,6 +163,44 @@ const GUILD_VISUALS: Record<AgentGuild, GuildVisual> = {
   },
 }
 
+const BUFF_VISUALS: Record<CharacterBuffKind, BuffVisual> = {
+  fresh_tokens: {
+    label: "Fresh Tokens",
+    Icon: Sparkles,
+    toneClass: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  },
+  well_rested: {
+    label: "Well-Rested",
+    Icon: Gem,
+    toneClass: "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300",
+  },
+  streak: {
+    label: "Streak",
+    Icon: Medal,
+    toneClass: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  },
+  cap_warning: {
+    label: "Cap Warning",
+    Icon: Shield,
+    toneClass: "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300",
+  },
+  burnout: {
+    label: "Burnout",
+    Icon: Wrench,
+    toneClass: "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300",
+  },
+  stale_memory: {
+    label: "Stale Memory",
+    Icon: BrainCircuit,
+    toneClass: "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300",
+  },
+  custom: {
+    label: "Custom Effect",
+    Icon: Sparkles,
+    toneClass: "border-muted-foreground/30 bg-muted/40 text-muted-foreground",
+  },
+}
+
 function clampPercent(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(100, value))
@@ -155,6 +221,16 @@ function initialsFor(name: string): string {
   return parts.map((part) => part[0]?.toUpperCase()).join("")
 }
 
+function buffTitle(buff: CharacterBuff, fallbackLabel: string): string {
+  const parts = [buff.label?.trim() || fallbackLabel]
+  if (buff.description?.trim()) parts.push(buff.description.trim())
+  if (buff.expiresIn?.trim()) parts.push(`Expires ${buff.expiresIn.trim()}`)
+  if (Number.isFinite(buff.stacks) && Number(buff.stacks) > 1) {
+    parts.push(`${Math.trunc(Number(buff.stacks))} stacks`)
+  }
+  return parts.join(" · ")
+}
+
 export function CharacterCard({
   agentId,
   displayName,
@@ -167,10 +243,12 @@ export function CharacterCard({
   portraitUrl,
   instanceSuffix,
   styleFingerprint,
+  buffs = [],
 }: CharacterCardProps): ReactElement {
   const visual = GUILD_VISUALS[guild] ?? GUILD_VISUALS.generalist
   const progress = getLevelProgressPercent(xp, nextLevelXp)
   const GuildIcon = visual.Icon
+  const activeBuffs = buffs.filter((buff) => buff && BUFF_VISUALS[buff.kind])
 
   return (
     <article
@@ -237,6 +315,47 @@ export function CharacterCard({
               {visual.label}
             </Badge>
           </div>
+
+          {activeBuffs.length > 0 ? (
+            <div
+              aria-label="Active character buffs"
+              className="flex flex-wrap items-center gap-1.5"
+              data-testid="character-card-buffs"
+            >
+              {activeBuffs.map((buff, index) => {
+                const buffVisual = BUFF_VISUALS[buff.kind]
+                const BuffIcon = buffVisual.Icon
+                const label = buff.label?.trim() || buffVisual.label
+                const stacks =
+                  Number.isFinite(buff.stacks) && Number(buff.stacks) > 1
+                    ? Math.trunc(Number(buff.stacks))
+                    : null
+
+                return (
+                  <div
+                    key={buff.id ?? `${buff.kind}-${index}`}
+                    aria-label={label}
+                    className={cn(
+                      "relative flex size-8 items-center justify-center rounded-md border",
+                      buffVisual.toneClass,
+                    )}
+                    data-buff-kind={buff.kind}
+                    data-buff-polarity={buff.polarity ?? ""}
+                    data-testid="character-card-buff"
+                    title={buffTitle(buff, buffVisual.label)}
+                  >
+                    <BuffIcon className="size-4" aria-hidden="true" />
+                    <span className="sr-only">{label}</span>
+                    {stacks ? (
+                      <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full border bg-background px-1 font-mono text-[9px] leading-4 text-foreground shadow-sm">
+                        {stacks}
+                      </span>
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
+          ) : null}
 
           <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
             <div className="min-w-0">
