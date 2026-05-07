@@ -212,9 +212,20 @@ def test_update_tenant_calibration_warns_when_drift_exceeds_50_percent(caplog):
     )
     caplog.set_level(logging.WARNING, logger="backend.agents.cost_estimator")
     updated = ce.update_tenant_calibration(prediction, actual)
+    warning_records = [
+        record
+        for record in caplog.records
+        if "cost estimator drift exceeded threshold" in record.getMessage()
+    ]
     assert updated.last_cost_drift == pytest.approx(1.5)
-    assert "tenant=t-acme" in caplog.text
-    assert "drift_pct=1.500" in caplog.text
+    assert len(warning_records) == 1
+    assert warning_records[0].levelno == logging.WARNING
+    assert warning_records[0].name == "backend.agents.cost_estimator"
+    assert "provider=anthropic" in warning_records[0].getMessage()
+    assert "tenant=t-acme" in warning_records[0].getMessage()
+    assert "axis=cost" in warning_records[0].getMessage()
+    assert "drift_pct=1.500" in warning_records[0].getMessage()
+    assert "threshold=0.500" in warning_records[0].getMessage()
 
 
 def test_update_tenant_calibration_blends_existing_samples():
