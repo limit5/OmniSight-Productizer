@@ -17,7 +17,7 @@ import time
 from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import psycopg2
 from psycopg2.extensions import connection as PsycopgConnection
@@ -33,6 +33,8 @@ QuotaScope = Literal["5h", "weekly"]
 
 DEFAULT_5H_CAP_TOKENS = 200_000
 DEFAULT_WEEKLY_CAP_TOKENS = 2_000_000
+RATELIMIT_KV_NAMESPACE = "provider_ratelimit"
+RATELIMIT_SUBSCRIPTION_SUFFIX = "-subscription"
 
 
 @dataclass(frozen=True)
@@ -87,17 +89,20 @@ def get_quota_state(provider: str) -> QuotaState:
     with closing(_connect()) as conn:
         with conn:
             _lock_provider(conn, provider)
-            return _refresh_state(conn, provider)
+            state = _refresh_state(conn, provider)
+    return _with_ratelimit_fallback(state)
 
 
 def is_at_cap(provider: str, scope: QuotaScope) -> bool:
     """Return whether the provider is at the configured cap for *scope*."""
+    if scope not in ("5h", "weekly"):
+        raise ValueError(f"unknown quota scope: {scope!r}")
     state = get_quota_state(provider)
+    if state.circuit_state == "open" and _ratelimit_is_exhausted(state.provider):
+        return True
     if scope == "5h":
-        return state.rolling_5h_tokens >= _cap_for(provider, "5h")
-    if scope == "weekly":
-        return state.weekly_tokens >= _cap_for(provider, "weekly")
-    raise ValueError(f"unknown quota scope: {scope!r}")
+        return state.rolling_5h_tokens >= _cap_for(state.provider, "5h")
+    return state.weekly_tokens >= _cap_for(state.provider, "weekly")
 
 
 def reset_window(provider: str, scope: QuotaScope) -> None:
@@ -165,6 +170,71 @@ def _normalise_ts(ts: datetime | None) -> datetime:
     if ts.tzinfo is None:
         return ts.replace(tzinfo=timezone.utc)
     return ts.astimezone(timezone.utc)
+
+
+def _with_ratelimit_fallback(state: QuotaState) -> QuotaState:
+    """Overlay fresh provider rate-limit exhaustion onto SQL quota state.
+
+    MP.W10.2 / OP-79: SQL rolling windows remain the primary quota source.
+    ``SharedKV("provider_ratelimit")`` is a fallback signal from response
+    headers captured by ``backend.agents.llm``; it only opens the returned
+    state when the latest unexpired snapshot explicitly reports zero
+    remaining requests or tokens.
+    """
+    if state.circuit_state == "open":
+        return state
+    if not _ratelimit_is_exhausted(state.provider):
+        return state
+    return replace(
+        state,
+        circuit_state="open",
+        last_cap_hit_at=state.last_cap_hit_at or datetime.now(timezone.utc),
+    )
+
+
+def _ratelimit_is_exhausted(provider: str) -> bool:
+    snapshot = _read_ratelimit_snapshot(provider)
+    if not isinstance(snapshot, dict):
+        return False
+    for key in ("remaining_requests", "remaining_tokens"):
+        remaining = _coerce_remaining(snapshot.get(key))
+        if remaining == 0:
+            return True
+    return False
+
+
+def _read_ratelimit_snapshot(provider: str) -> Any:
+    try:
+        from backend.shared_state import SharedKV
+
+        kv = SharedKV(RATELIMIT_KV_NAMESPACE)
+        for key in _ratelimit_keys_for(provider):
+            value = kv.get_with_ttl(key)
+            if value is not None:
+                return value
+    except Exception as exc:
+        logger.debug("provider quota rate-limit fallback skipped: %s", exc)
+    return None
+
+
+def _ratelimit_keys_for(provider: str) -> list[str]:
+    keys = [provider]
+    if provider.endswith(RATELIMIT_SUBSCRIPTION_SUFFIX):
+        keys.append(provider[: -len(RATELIMIT_SUBSCRIPTION_SUFFIX)])
+    out: list[str] = []
+    for key in keys:
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def _coerce_remaining(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
 
 
 def _connect() -> PsycopgConnection:
