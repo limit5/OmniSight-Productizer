@@ -19,6 +19,8 @@ from typing import FrozenSet, Mapping
 
 from backend.sandbox_tier import Guild
 
+SECONDARY_GUILD_UNLOCK_LEVEL = 50
+
 
 @dataclass(frozen=True)
 class GuildDefinition:
@@ -27,6 +29,16 @@ class GuildDefinition:
     guild: Guild
     display_name: str
     summary: str
+
+
+@dataclass(frozen=True)
+class SecondaryGuildChoice:
+    """Validated Lv 50 secondary-Guild selection for one agent class."""
+
+    agent_class: str
+    primary_guild: Guild
+    secondary_guild: Guild
+    level: int
 
 
 GUILD_DEFINITIONS: Mapping[Guild, GuildDefinition] = MappingProxyType(
@@ -207,6 +219,14 @@ class UnknownAgentClassError(KeyError):
     """Raised when an agent_class is absent from the RPG Guild matrix."""
 
 
+class SecondaryGuildLockedError(ValueError):
+    """Raised when an agent has not reached the secondary-Guild unlock."""
+
+
+class SecondaryGuildChoiceError(ValueError):
+    """Raised when a secondary Guild selection is invalid for the agent."""
+
+
 def get_guild_definition(guild: Guild) -> GuildDefinition:
     """Return RPG-facing metadata for ``guild``."""
 
@@ -235,6 +255,67 @@ def agent_class_supports_guild(agent_class: str, guild: Guild) -> bool:
     """Whether ``agent_class`` may specialize into ``guild``."""
 
     return guild in eligible_guilds_for_agent_class(agent_class)
+
+
+def secondary_guilds_for_agent_class(
+    agent_class: str,
+    primary_guild: Guild | str,
+    level: int,
+) -> FrozenSet[Guild]:
+    """Return Lv 50 secondary-Guild choices for an agent class.
+
+    The primary Guild is excluded so W18 multi-classing always adds a second
+    specialization rather than re-selecting the current one.
+    """
+
+    _validate_level(level)
+    if level < SECONDARY_GUILD_UNLOCK_LEVEL:
+        return frozenset()
+
+    primary = _coerce_guild(primary_guild, field="primary_guild")
+    return frozenset(
+        guild
+        for guild in eligible_guilds_for_agent_class(agent_class)
+        if guild != primary
+    )
+
+
+def choose_secondary_guild(
+    agent_class: str,
+    primary_guild: Guild | str,
+    secondary_guild: Guild | str,
+    level: int,
+) -> SecondaryGuildChoice:
+    """Validate and return an agent's Lv 50 secondary-Guild choice."""
+
+    _validate_level(level)
+    if level < SECONDARY_GUILD_UNLOCK_LEVEL:
+        raise SecondaryGuildLockedError(
+            "secondary Guild unlock requires level "
+            f"{SECONDARY_GUILD_UNLOCK_LEVEL}; got level {level}"
+        )
+
+    primary = _coerce_guild(primary_guild, field="primary_guild")
+    secondary = _coerce_guild(secondary_guild, field="secondary_guild")
+    if secondary == primary:
+        raise SecondaryGuildChoiceError(
+            "secondary Guild must be different from primary Guild"
+        )
+
+    choices = secondary_guilds_for_agent_class(agent_class, primary, level)
+    if secondary not in choices:
+        allowed = ", ".join(sorted(guild.value for guild in choices)) or "none"
+        raise SecondaryGuildChoiceError(
+            f"secondary Guild {secondary.value!r} is not eligible for "
+            f"agent_class {agent_class.strip()!r}; allowed: {allowed}"
+        )
+
+    return SecondaryGuildChoice(
+        agent_class=agent_class.strip(),
+        primary_guild=primary,
+        secondary_guild=secondary,
+        level=level,
+    )
 
 
 def list_agent_class_guild_mappings() -> tuple[tuple[str, tuple[Guild, ...]], ...]:
@@ -269,6 +350,27 @@ def _assert_matrix_values_are_guilds() -> None:
                 )
 
 
+def _coerce_guild(value: Guild | str, *, field: str) -> Guild:
+    if isinstance(value, Guild):
+        return value
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a Guild or string")
+    clean = value.strip()
+    if not clean:
+        raise ValueError(f"{field} is required")
+    try:
+        return Guild(clean)
+    except ValueError as exc:
+        raise ValueError(f"unknown {field}: {clean!r}") from exc
+
+
+def _validate_level(level: int) -> None:
+    if isinstance(level, bool) or not isinstance(level, int):
+        raise TypeError("level must be an int")
+    if level < 1:
+        raise ValueError("level must be >= 1")
+
+
 _assert_registry_complete()
 _assert_matrix_values_are_guilds()
 
@@ -276,11 +378,17 @@ _assert_matrix_values_are_guilds()
 __all__ = [
     "AGENT_CLASS_GUILD_MATRIX",
     "GUILD_DEFINITIONS",
+    "SECONDARY_GUILD_UNLOCK_LEVEL",
     "GuildDefinition",
+    "SecondaryGuildChoice",
+    "SecondaryGuildChoiceError",
+    "SecondaryGuildLockedError",
     "UnknownAgentClassError",
     "agent_class_supports_guild",
+    "choose_secondary_guild",
     "eligible_guilds_for_agent_class",
     "get_guild_definition",
     "list_agent_class_guild_mappings",
     "list_guild_definitions",
+    "secondary_guilds_for_agent_class",
 ]
