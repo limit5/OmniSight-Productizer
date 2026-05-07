@@ -113,24 +113,22 @@ class AnthropicSubscriptionAdapter(ProviderAdapter):
             self._circuit_breaker.record_outcome(False)
 
     def health_check(self) -> HealthStatus:
-        proc: subprocess.Popen[str] | None = None
-        try:
-            proc = subprocess.Popen(
-                ["claude", "--version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            proc.communicate(timeout=HEALTH_CHECK_TIMEOUT_S)
-            reachable = proc.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            reachable = False
-            if proc is not None:
-                proc.kill()
+        version = _run_cli(["claude", "--version"])
+        cli_installed = version.returncode == 0
+        auth = (
+            _run_cli(["claude", "auth", "status"])
+            if cli_installed
+            else _CliResult(127, "", "")
+        )
+        subscription_active = _subscription_active(auth.stdout, auth.stderr)
+        reachable = cli_installed and subscription_active
         return HealthStatus(
             provider_id=PROVIDER_ID,
             reachable=reachable,
             last_checked_at=datetime.now(timezone.utc),
+            cli_installed=cli_installed,
+            subscription_active=subscription_active,
+            detail=_health_detail(version, auth),
         )
 
     def get_quota_state(self) -> QuotaState:
@@ -150,6 +148,54 @@ def _dispatch_timeout_s() -> int:
 
 def _record_usage(tokens_used: int) -> None:
     provider_quota_tracker.record_usage(PROVIDER_ID, max(tokens_used, 0))
+
+
+class _CliResult:
+    def __init__(self, returncode: int, stdout: str, stderr: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _run_cli(argv: list[str]) -> _CliResult:
+    try:
+        proc = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=HEALTH_CHECK_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return _CliResult(127, "", str(exc))
+    return _CliResult(proc.returncode, proc.stdout, proc.stderr)
+
+
+def _subscription_active(stdout: str, stderr: str) -> bool:
+    payloads = list(_json_payloads(stdout, stderr))
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        subscription_type = (
+            str(payload.get("subscriptionType") or "").strip().lower()
+        )
+        return (
+            payload.get("loggedIn") is True
+            and payload.get("authMethod") == "claude.ai"
+            and subscription_type not in {"", "none", "unknown"}
+        )
+    return False
+
+
+def _health_detail(version: _CliResult, auth: _CliResult) -> str:
+    if version.returncode != 0:
+        return "claude CLI not installed or not executable"
+    if auth.returncode != 0:
+        return "claude auth status failed"
+    if not _subscription_active(auth.stdout, auth.stderr):
+        return "claude subscription is not active"
+    return "claude CLI installed and subscription active"
 
 
 def _tokens_used(stdout: str, stderr: str) -> int:

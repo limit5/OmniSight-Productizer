@@ -77,6 +77,9 @@ class HealthStatus:
     provider_id: str
     reachable: bool
     last_checked_at: datetime
+    cli_installed: bool = False
+    subscription_active: bool = False
+    detail: str = ""
 
 
 class ProviderNotRegistered(Exception):
