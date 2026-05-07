@@ -324,6 +324,11 @@ _ENTRIES: tuple[ShadcnComponent, ...] = (
         ),
         example='<Slider defaultValue={[50]} max={100} step={1} />',
         aria_pattern="Slider (APG)",
+        notes=(
+            "When a slider controls modal content, place it in the modal footer "
+            "or another sticky bottom control row so scrollable content cannot "
+            "push it off-screen on mobile.",
+        ),
     ),
     _cmp(
         name="toggle",
@@ -480,6 +485,11 @@ _ENTRIES: tuple[ShadcnComponent, ...] = (
             "</Sheet>"
         ),
         aria_pattern="Dialog (Modal) (APG)",
+        notes=(
+            "For mobile responsive flows, make right/left sheets full-height "
+            "and keep primary controls in a sticky bottom footer outside the "
+            "scrolling body.",
+        ),
     ),
     _cmp(
         name="drawer",
@@ -504,6 +514,10 @@ _ENTRIES: tuple[ShadcnComponent, ...] = (
             "</Drawer>"
         ),
         aria_pattern="Dialog (Modal) (APG)",
+        notes=(
+            "Use a full-height mobile drawer for long content; keep the footer "
+            "fixed at the bottom and scroll only the body region.",
+        ),
     ),
     _cmp(
         name="dialog",
@@ -530,7 +544,11 @@ _ENTRIES: tuple[ShadcnComponent, ...] = (
             "</Dialog>"
         ),
         aria_pattern="Dialog (Modal) (APG)",
-        notes=("DialogTitle is required (use VisuallyHidden if you need it hidden).",),
+        notes=(
+            "DialogTitle is required (use VisuallyHidden if you need it hidden).",
+            "On mobile, full-height dialog content should use a scrollable body "
+            "plus a sticky bottom footer for sliders and primary actions.",
+        ),
     ),
     _cmp(
         name="alert-dialog",
