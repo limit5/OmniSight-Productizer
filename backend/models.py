@@ -160,6 +160,9 @@ class Task(BaseModel):
     labels: list[str] = Field(default_factory=list)
     # Pipeline linkage (Phase 46)
     npi_phase_id: Optional[str] = None  # Links task to an NPI phase for pipeline tracking
+    # RPG.W20.1 -- narrative campaign grouping for multi-task operations.
+    rpg_campaign_id: Optional[str] = None
+    rpg_campaign_title: Optional[str] = None
     # Q.7 #301 — optimistic-lock version. Incremented on every successful
     # PATCH; clients echo via ``If-Match`` so two devices racing on the
     # same task produce exactly one winner + one 409 loser.
@@ -177,6 +180,8 @@ class TaskCreate(BaseModel):
     issue_url: Optional[str] = None
     acceptance_criteria: Optional[str] = None
     labels: list[str] = Field(default_factory=list)
+    rpg_campaign_id: Optional[str] = None
+    rpg_campaign_title: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):
@@ -192,6 +197,8 @@ class TaskUpdate(BaseModel):
     issue_url: Optional[str] = None
     acceptance_criteria: Optional[str] = None
     labels: Optional[list[str]] = None
+    rpg_campaign_id: Optional[str] = None
+    rpg_campaign_title: Optional[str] = None
 
 
 # ---------- Chat / Orchestrator ----------
