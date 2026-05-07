@@ -5,6 +5,17 @@ from __future__ import annotations
 import argparse
 import sys
 
+# OP-717 deploy fix: explicit basicConfig so logger.info() lines reach
+# stdout. Without this, the root logger defaults to WARNING and the
+# proactive-merger 'skip_reason=mergeable' decisions get silently
+# dropped — making the daemon look broken when it's actually working.
+import logging
+import os
+logging.basicConfig(
+    level=os.environ.get('OMNISIGHT_LOG_LEVEL', 'INFO').upper(),
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+)
+
 from backend.agents.gerrit_jira_bridge import run
 
 

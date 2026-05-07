@@ -1,31 +1,47 @@
-; systemd unit for the Gerrit stream-events → JIRA Published bridge.
+; systemd unit for the OmniSight Gerrit/JIRA bridge (OP-689 + OP-715 + OP-717).
 ;
-; Install:
-;   sudo cp deploy/systemd/gerrit-jira-bridge.service /etc/systemd/system/
-;   # Edit USER_HOME / USERNAME placeholders below for your install.
-;   sudo systemctl daemon-reload
-;   sudo systemctl enable --now gerrit-jira-bridge.service
+; Install (user-level — no sudo):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/gerrit-jira-bridge.service ~/.config/systemd/user/
+;   # Edit the Environment= lines below to match your bot identity + paths.
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now gerrit-jira-bridge
+;   loginctl enable-linger $USER     # survive logout
 
 [Unit]
-Description=OmniSight Gerrit/JIRA bridge
+Description=OmniSight Gerrit/JIRA bridge (OP-689 + OP-715 + OP-717)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=USERNAME
-WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
-Environment=PYTHONPATH=/home/USER_HOME/work/sora/OmniSight-Productizer
-ExecStart=/bin/sh -c 'exec $${OMNISIGHT_PYTHON:-python3} scripts/run_gerrit_jira_bridge.py --agent-class subscription-claude'
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+; OP-717 deploy fix #1: keep stdout line-buffered so logger.info() lands
+; in the systemd journal in real time (without this Python buffers and
+; logs only flush at process exit, making live debugging impossible).
+Environment=PYTHONUNBUFFERED=1
+; OP-717 deploy fix #2: gerrit_enabled gates the legacy shim's
+; `default-gerrit` virtual git_accounts row construction. Without this
+; True, gerrit_client.query_change returns 'no account configured'
+; and every proactive-merger thread short-circuits with skip_reason
+; =gerrit_query_no_result before reaching the enrichment step.
+Environment=OMNISIGHT_GERRIT_ENABLED=true
+; SSH host MUST include the bot username (claude-bot@host) — the
+; `_ssh_args_for` helper does not auto-prepend username to the SSH
+; argv, so plain hostname falls through to $USER@host (= the system
+; user, who has no Gerrit ACL).
+Environment=OMNISIGHT_GERRIT_SSH_HOST=claude-bot@sora.services
+Environment=OMNISIGHT_GERRIT_URL=https://sora.services:29420
+Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
+Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-claude-bot-ed25519
+ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/run_gerrit_jira_bridge.py --agent-class subscription-claude
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=30
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadOnlyPaths=/home/USER_HOME/.config/omnisight
-PrivateTmp=yes
+StandardOutput=append:/home/user/work/sora/logs/bridge/systemd.log
+StandardError=append:/home/user/work/sora/logs/bridge/systemd.log
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
