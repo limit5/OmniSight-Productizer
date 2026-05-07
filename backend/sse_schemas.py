@@ -107,6 +107,25 @@ class SSEProviderQuotaUpdated(BaseModel):
     timestamp: str = ""
 
 
+class SSEProviderAllocationPreview(BaseModel):
+    """provider.allocation.preview — subscription-provider preview reflow.
+
+    Emitted when the Provider Constellation cheap/fast slider asks the
+    backend for a new pre-dispatch allocation preview. The event is
+    transient: subscribers replace the current preview layout with this
+    payload instead of persisting it as quota state.
+    """
+    preview_id: Optional[str] = None
+    user_id: Optional[str] = None
+    slider_value: float = 0.0
+    reason: str = "slider_drag"
+    allocations: list[dict] = Field(default_factory=list)
+    total_estimated_tokens: Optional[int] = None
+    total_estimated_seconds: Optional[float] = None
+    total_estimated_cost_usd: Optional[float] = None
+    timestamp: str = ""
+
+
 class SSESimulation(BaseModel):
     """simulation — Dual-track simulation lifecycle events."""
     sim_id: str
@@ -630,6 +649,7 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "invoke": SSEInvoke,
     "token_warning": SSETokenWarning,
     "provider.quota.updated": SSEProviderQuotaUpdated,
+    "provider.allocation.preview": SSEProviderAllocationPreview,
     "simulation": SSESimulation,
     "debug_finding": SSEDebugFinding,
     "notification": SSENotification,

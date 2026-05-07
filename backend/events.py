@@ -567,6 +567,57 @@ def emit_provider_quota_updated(
     )
 
 
+def emit_provider_allocation_preview(
+    allocations: list[dict[str, Any]],
+    *,
+    slider_value: float,
+    reason: str = "slider_drag",
+    preview_id: str | None = None,
+    total_estimated_tokens: int | None = None,
+    total_estimated_seconds: float | None = None,
+    total_estimated_cost_usd: float | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+    **extra: Any,
+) -> None:
+    """Provider allocation preview reflow for the dashboard SSE stream."""
+    broadcast_scope = _resolve_scope(
+        "emit_provider_allocation_preview",
+        broadcast_scope,
+        "user",
+    )
+    bus.publish("provider.allocation.preview", {
+        "preview_id": preview_id,
+        "user_id": user_id,
+        "slider_value": float(slider_value),
+        "reason": reason,
+        "allocations": [dict(item) for item in allocations],
+        "total_estimated_tokens": (
+            int(total_estimated_tokens)
+            if total_estimated_tokens is not None
+            else None
+        ),
+        "total_estimated_seconds": (
+            float(total_estimated_seconds)
+            if total_estimated_seconds is not None
+            else None
+        ),
+        "total_estimated_cost_usd": (
+            float(total_estimated_cost_usd)
+            if total_estimated_cost_usd is not None
+            else None
+        ),
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id), user_id=user_id)
+    _log(
+        f"[PROVIDER-ALLOC] preview slider={float(slider_value):.3f} "
+        f"allocations={len(allocations)} reason={reason}",
+    )
+
+
 def _iso_or_none(value: Any) -> str | None:
     if value is None:
         return None
