@@ -159,6 +159,7 @@ class TestSSESchemaExport:
             # Core runtime
             "agent_update", "task_update", "tool_progress", "pipeline",
             "workspace", "container", "invoke", "token_warning",
+            "provider.quota.updated",
             "simulation", "debug_finding", "notification",
             "artifact_created", "heartbeat",
             # Phase 47 Autonomous Decision Engine
@@ -182,6 +183,8 @@ class TestSSESchemaExport:
             "turn_metrics",
             # ZZ.A3 (#303-3) per-turn tool-execution summary
             "turn_tool_stats",
+            # ZZ.B1 / ZZ.B2 per-turn terminal + session title events
+            "turn.complete", "session.titled",
         }
         assert set(SSE_EVENT_SCHEMAS.keys()) == expected_events
 
