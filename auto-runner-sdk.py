@@ -47,10 +47,14 @@ from backend.agents.cost_guard import (  # noqa: E402
     InMemoryCostStore,
     estimate_cost,
 )
+from backend.agents.cost_estimator_baseline import (  # noqa: E402
+    get_agent_class_cost_baseline,
+)
 from backend.agents.mcp_integration import (  # noqa: E402
     RemoteMCPRegistry,
     build_registry_from_env,
 )
+from backend.agents import provider_quota_tracker  # noqa: E402
 from backend.agents.project_memory import (  # noqa: E402
     load_all_memory,
     parse_ignored_paths,
@@ -119,6 +123,14 @@ DAILY_BUDGET_USD = float(os.environ.get("OMNISIGHT_SDK_DAILY_BUDGET", "0") or 0)
 # pattern that burned $25 on W14.5. Set to 0 to disable. Default $8
 # leaves headroom for large items but stops runaway retries.
 MAX_PER_ITEM_USD = float(os.environ.get("OMNISIGHT_SDK_MAX_PER_ITEM_USD", "8") or 0)
+QUOTA_PROVIDER_ID = os.environ.get(
+    "OMNISIGHT_SDK_QUOTA_PROVIDER",
+    "anthropic-subscription",
+).strip()
+QUOTA_AGENT_CLASS = os.environ.get(
+    "OMNISIGHT_SDK_QUOTA_AGENT_CLASS",
+    "api-anthropic",
+).strip()
 
 # Phase 7 — what to do when an item fails / is deferred.
 #   stop     (default): write structured stop reason to HANDOFF.md and
@@ -450,6 +462,70 @@ def _fmt_duration(seconds: float) -> str:
     return f"{s}s ({seconds:.1f}s)"
 
 
+def _provider_cap_for(provider: str, scope: str) -> int:
+    """Mirror provider_quota_tracker's env cap convention for reporting."""
+    suffix = "5H" if scope == "5h" else "WEEKLY"
+    env_provider = "".join(ch if ch.isalnum() else "_" for ch in provider.upper())
+    env_name = f"OMNISIGHT_PROVIDER_CAP_{env_provider}_{suffix}"
+    raw = (os.environ.get(env_name) or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    if scope == "5h":
+        return provider_quota_tracker.DEFAULT_5H_CAP_TOKENS
+    return provider_quota_tracker.DEFAULT_WEEKLY_CAP_TOKENS
+
+
+def _fmt_int(value: int) -> str:
+    return f"{value:,}"
+
+
+def _print_quota_tracker_startup_report() -> None:
+    """Print current quota headroom and rough item capacity at startup."""
+    if not QUOTA_PROVIDER_ID:
+        print("🧮 Quota tracker: disabled (OMNISIGHT_SDK_QUOTA_PROVIDER empty)")
+        return
+    try:
+        state = provider_quota_tracker.get_quota_state(QUOTA_PROVIDER_ID)
+    except Exception as e:  # noqa: BLE001 - startup operator visibility
+        print(
+            "⚠️ Quota tracker: unavailable "
+            f"provider={QUOTA_PROVIDER_ID} ({type(e).__name__}: {e})"
+        )
+        return
+
+    cap_5h = _provider_cap_for(QUOTA_PROVIDER_ID, "5h")
+    cap_weekly = _provider_cap_for(QUOTA_PROVIDER_ID, "weekly")
+    remaining_5h = max(cap_5h - state.rolling_5h_tokens, 0)
+    remaining_weekly = max(cap_weekly - state.weekly_tokens, 0)
+    available_tokens = min(remaining_5h, remaining_weekly)
+    if state.circuit_state == "open":
+        available_tokens = 0
+
+    try:
+        avg_tokens = get_agent_class_cost_baseline(
+            QUOTA_AGENT_CLASS,
+        ).avg_tokens_per_item
+    except KeyError:
+        avg_tokens = 25_000
+    estimated_items = available_tokens // max(avg_tokens, 1)
+
+    print(
+        "🧮 Quota tracker: "
+        f"provider={state.provider} circuit={state.circuit_state} "
+        f"5h={_fmt_int(state.rolling_5h_tokens)}/{_fmt_int(cap_5h)} "
+        f"weekly={_fmt_int(state.weekly_tokens)}/{_fmt_int(cap_weekly)}"
+    )
+    print(
+        "🧮 Quota available: "
+        f"{_fmt_int(available_tokens)} tokens "
+        f"≈ {estimated_items} items "
+        f"at {_fmt_int(avg_tokens)} tokens/item ({QUOTA_AGENT_CLASS})"
+    )
+
+
 # ─── Item runner ─────────────────────────────────────────────────
 
 
@@ -686,6 +762,7 @@ async def main() -> None:
         f"⚙️ 設定：model={MODEL_NAME} max_iter={MAX_ITERATIONS} "
         f"max_tokens={MAX_TOKENS} retries={MAX_RETRIES}"
     )
+    _print_quota_tracker_startup_report()
     if RUNNER_FILTER:
         print(
             f"🏷️ Track filter：只處理 {', '.join(sorted(RUNNER_FILTER))} 系列"
