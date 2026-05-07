@@ -33,11 +33,17 @@ router = APIRouter(tags=["preferences"])
 
 TOUR_SEEN_PREF_KEY = "tour_seen"
 SEEN_MP_TOUR_PREF_KEY = "seen_mp_tour"
+SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY = "seen_rpg_character_card_tour"
 MP_B_LAYOUT_PREF_KEY = "mp_b_layout"
 MP_WAR_ROOM_PANEL_LAYOUT_PREF_KEY = "mp_war_room_panel_layout"
 MP_MODAL_ACTION_PREF_KEY = "mp_modal_action"
 PREF_TRUE_VALUE = "1"
 PREF_FALSE_VALUE = "0"
+RPG_CHARACTER_CARD_TOUR_STEPS = (
+    "identity",
+    "progression",
+    "memory",
+)
 MP_ONBOARDING_AUDIT_ENTITY = "multi_provider_onboarding_tour"
 MP_ONBOARDING_COMPLETE_ACTION = "multi_provider.onboarding_tour.completed"
 MP_ONBOARDING_SKIP_ACTION = "multi_provider.onboarding_tour.skipped"
@@ -65,6 +71,19 @@ class MultiProviderOnboardingTourDecisionResponse(BaseModel):
     key: str
     value: str
     first_time: bool
+
+
+class RpgCharacterCardTourStateResponse(BaseModel):
+    key: str
+    seen: bool
+    steps: list[str]
+
+
+class RpgCharacterCardTourDecisionResponse(BaseModel):
+    key: str
+    value: str
+    first_time: bool
+    steps: list[str]
 
 
 class MultiProviderModalActionResponse(BaseModel):
@@ -328,6 +347,32 @@ async def _record_multi_provider_onboarding_tour_decision(
     }
 
 
+async def _record_rpg_character_card_tour_decision(
+    user: auth.User,
+) -> RpgCharacterCardTourDecisionResponse:
+    previous = await _get_preference_value(
+        user.id,
+        SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY,
+    )
+    first_time = previous is None
+    await _upsert_preference(
+        user.id,
+        SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY,
+        PREF_TRUE_VALUE,
+    )
+    _emit_preference_updated(
+        SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY,
+        PREF_TRUE_VALUE,
+        user.id,
+    )
+    return {
+        "key": SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY,
+        "value": PREF_TRUE_VALUE,
+        "first_time": first_time,
+        "steps": list(RPG_CHARACTER_CARD_TOUR_STEPS),
+    }
+
+
 @router.get("/user-preferences")
 async def list_preferences(
     user: auth.User = Depends(auth.current_user),
@@ -411,6 +456,55 @@ async def get_multi_provider_onboarding_tour_state(
 ) -> MultiProviderOnboardingTourStateResponse:
     value = await _get_preference_value(user.id, SEEN_MP_TOUR_PREF_KEY)
     return {"key": SEEN_MP_TOUR_PREF_KEY, "seen": value == PREF_TRUE_VALUE}
+
+
+@router.post("/rpg/character-card/onboarding-tour/complete")
+async def complete_rpg_character_card_tour(
+    user: auth.User = Depends(auth.current_user),
+) -> RpgCharacterCardTourDecisionResponse:
+    return await _record_rpg_character_card_tour_decision(user)
+
+
+@router.post("/rpg/character-card/onboarding-tour/skip")
+async def skip_rpg_character_card_tour(
+    user: auth.User = Depends(auth.current_user),
+) -> RpgCharacterCardTourDecisionResponse:
+    return await _record_rpg_character_card_tour_decision(user)
+
+
+@router.post("/rpg/character-card/onboarding-tour/replay")
+async def replay_rpg_character_card_tour(
+    user: auth.User = Depends(auth.current_user),
+) -> PreferenceResponse:
+    await _upsert_preference(
+        user.id,
+        SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY,
+        PREF_FALSE_VALUE,
+    )
+    _emit_preference_updated(
+        SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY,
+        PREF_FALSE_VALUE,
+        user.id,
+    )
+    return {
+        "key": SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY,
+        "value": PREF_FALSE_VALUE,
+    }
+
+
+@router.get("/rpg/character-card/onboarding-tour/state")
+async def get_rpg_character_card_tour_state(
+    user: auth.User = Depends(auth.current_user),
+) -> RpgCharacterCardTourStateResponse:
+    value = await _get_preference_value(
+        user.id,
+        SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY,
+    )
+    return {
+        "key": SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY,
+        "seen": value == PREF_TRUE_VALUE,
+        "steps": list(RPG_CHARACTER_CARD_TOUR_STEPS),
+    }
 
 
 async def _record_multi_provider_modal_action(
