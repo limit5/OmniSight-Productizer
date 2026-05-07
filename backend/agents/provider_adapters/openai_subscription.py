@@ -35,6 +35,7 @@ from backend.agents.provider_orchestrator import (
     TaskSpec,
     register_adapter,
 )
+from backend.agents.provider_ratelimit_cap import ratelimit_cap_signal
 from backend.agents.provider_quota_tracker import QuotaState
 
 
@@ -222,6 +223,14 @@ def _token_child_value(key: str, child: Any) -> int:
 def _cap_signal(stdout: str, stderr: str) -> dict[str, int | str] | None:
     joined = "\n".join((stdout, stderr))
     payloads = list(_json_payloads(stdout, stderr))
+    header_signal = ratelimit_cap_signal(
+        PROVIDER_ID,
+        stdout,
+        stderr,
+        kind="rate_limit_exceeded",
+    )
+    if header_signal is not None:
+        return header_signal
     if not _has_cap_marker(joined, payloads):
         return None
     out: dict[str, int | str] = {"kind": "rate_limit_exceeded"}

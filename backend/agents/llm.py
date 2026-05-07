@@ -24,6 +24,7 @@ from backend.llm_adapter import (
     LLMResult,
     build_chat_model,
 )
+from backend.agents.ratelimit_headers import _PROVIDER_RATELIMIT_HEADERS
 from backend.config import settings
 
 if TYPE_CHECKING:
@@ -115,59 +116,10 @@ def _serialize_message(msg) -> dict:  # noqa: ANN001
 # both, split into ``reset_requests_at_ts`` / ``reset_tokens_at_ts`` —
 # but right now one field keeps the SharedKV payload + UI card simple.
 #
-# Module-global audit (SOP Step 1, 2026-04-21): this is a module-const
-# dict literal — every uvicorn worker derives the same mapping from
-# the same source (answer #1 "不共享，因為每 worker 從同樣來源推導出
-# 同樣的值"). No shared mutable state introduced.
-_PROVIDER_RATELIMIT_HEADERS: dict[str, dict[str, str]] = {
-    "anthropic": {
-        "remaining_requests": "anthropic-ratelimit-requests-remaining",
-        "remaining_tokens": "anthropic-ratelimit-tokens-remaining",
-        "reset_at": "anthropic-ratelimit-tokens-reset",
-        "retry_after": "retry-after",
-    },
-    "openai": {
-        "remaining_requests": "x-ratelimit-remaining-requests",
-        "remaining_tokens": "x-ratelimit-remaining-tokens",
-        "reset_at": "x-ratelimit-reset-tokens",
-        "retry_after": "retry-after",
-    },
-    "xai": {
-        "remaining_requests": "x-ratelimit-remaining-requests",
-        "remaining_tokens": "x-ratelimit-remaining-tokens",
-        "reset_at": "x-ratelimit-reset-tokens",
-        "retry_after": "retry-after",
-    },
-    "groq": {
-        "remaining_requests": "x-ratelimit-remaining-requests",
-        "remaining_tokens": "x-ratelimit-remaining-tokens",
-        "reset_at": "x-ratelimit-reset-tokens",
-        "retry_after": "retry-after",
-    },
-    "deepseek": {
-        "remaining_requests": "x-ratelimit-remaining-requests",
-        "remaining_tokens": "x-ratelimit-remaining-tokens",
-        "reset_at": "x-ratelimit-reset-tokens",
-        "retry_after": "retry-after",
-    },
-    "together": {
-        "remaining_requests": "x-ratelimit-remaining-requests",
-        "remaining_tokens": "x-ratelimit-remaining-tokens",
-        "reset_at": "x-ratelimit-reset-tokens",
-        "retry_after": "retry-after",
-    },
-    "openrouter": {
-        "remaining_requests": "x-ratelimit-remaining-requests",
-        "remaining_tokens": "x-ratelimit-remaining-tokens",
-        "reset_at": "x-ratelimit-reset-tokens",
-        "retry_after": "retry-after",
-    },
-    # Google Gemini uses a gRPC/REST API; LangChain's langchain-google-
-    # genai does not currently surface per-request rate-limit headers
-    # through any of the 5 paths ``_extract_response_headers`` walks,
-    # so it's omitted here alongside Ollama. Revisit if an adapter
-    # version lands that mirrors the SDK's ``x-goog-quota-*`` headers.
-}
+# Module-global audit (SOP Step 1, 2026-04-21): this is imported from
+# ``backend.agents.ratelimit_headers`` as the canonical module-const dict
+# every worker derives from the same source. No shared mutable state
+# introduced; the name remains re-exported here for the existing Z.1 tests.
 
 
 _DURATION_RE = re.compile(
