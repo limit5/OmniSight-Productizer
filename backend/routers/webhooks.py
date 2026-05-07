@@ -1,7 +1,8 @@
 """Webhook endpoints for external system integrations.
 
 Currently supports Gerrit Code Review events:
-- ``patchset-created`` → triggers AI Reviewer agent
+- ``patchset-created`` → triggers AI Reviewer agent + OP-714 proactive
+  merger check (mergeable=false fires merger before any Submit attempt).
 - ``comment-added`` with -1 → notifies coder agent to fix
 - ``change-merged`` → triggers replication to GitHub/GitLab
 """
@@ -13,12 +14,14 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import uuid
 
 import asyncpg
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from backend import auth as _au
 from backend.config import settings
 from backend.db_pool import get_conn, get_pool
 from backend.email_delivery.webhooks import (
@@ -211,85 +214,69 @@ async def _on_stripe_webhook_event(event: StripeWebhookEvent) -> None:
 async def gerrit_webhook(
     request: Request,
     conn: asyncpg.Connection = Depends(get_conn),
+    _user=Depends(_au.require_operator),
 ):
     """Receive Gerrit events and trigger appropriate actions.
 
-    Gerrit sends JSON events via its webhook plugin or stream-events.
-    Supports optional HMAC-SHA256 signature via X-Gerrit-Signature header.
+    Auth model (OP-714 Phase 1): dual-header pattern, mirroring the
+    merger endpoint at ``/api/v1/orchestrator/merge-conflict``. Gerrit's
+    ``webhooks`` plugin v3.13.5 ignores ``secret = ...`` config (per
+    OP-713 lesson L23 — no signature header sent), so HMAC body verifi-
+    cation is replaced with two shared secrets in custom headers:
+
+      * ``Authorization: Bearer <api_key>`` → satisfies
+        :func:`backend.auth.require_operator` (the ``Depends`` above).
+      * ``X-Jira-Webhook-Secret: <jira_webhook_secret>`` → constant-
+        time compare against ``settings.jira_webhook_secret`` via
+        :func:`backend.routers.orchestrator._verify_jira_signature`.
+
+    Both headers are required; either alone returns 401. Configuration
+    lives in ``refs/meta/config/webhooks.config`` as ``header = ...``
+    lines on the ``[remote "ai-reviewer-webhook"]`` block.
+
+    Event handling:
+      * ``patchset-created`` — fires (a) the existing AI reviewer task
+        creation in :func:`_on_patchset_created` (OP-713 will rewire
+        this to a real LLM review), AND (b) OP-714 proactive merger
+        check :func:`_proactive_merger_check` as a background task
+        (fire-and-forget, never blocks the webhook response).
+      * ``comment-added`` with -1 — notifies coder agent.
+      * ``change-merged`` — replication trigger.
 
     Phase-3-Runtime-v2 SP-3.1: handler takes a pool-backed
     ``asyncpg.Connection`` so the agent-spawn code path inside
     ``_on_patchset_created`` can persist the spawned reviewer via
     the ported ``db.upsert_agent`` API. Background tasks started from
-    here (``_run_review``) acquire their OWN conn since the request
-    scope ends before they run.
+    here acquire their OWN conn since the request scope ends before
+    they run.
     """
     if not settings.gerrit_enabled:
         return JSONResponse(status_code=503, content={"detail": "Gerrit integration disabled"})
 
-    # Authenticate — verify signature BEFORE parsing payload to avoid DoS on
-    # untrusted JSON and to keep payload-derived host lookup post-verification.
     raw_body = await request.body()
     # Reject obviously oversized payloads (DoS guard) — Gerrit events are <64KB.
     if len(raw_body) > 1_048_576:
         return JSONResponse(status_code=413, content={"detail": "Payload too large"})
 
-    import hashlib
-    import hmac as _hmac
-    signature = request.headers.get("X-Gerrit-Signature", "")
-    scalar_secret = settings.gerrit_webhook_secret
-    scalar_ok = False
-    if scalar_secret:
-        expected = _hmac.new(
-            scalar_secret.encode(), raw_body, hashlib.sha256,
-        ).hexdigest()
-        scalar_ok = _hmac.compare_digest(signature, expected)
+    # OP-714 Phase 1: shared-secret check (mirror merger endpoint).
+    # Raises HTTPException(401) on bad/missing secret.
+    from backend.routers.orchestrator import _verify_jira_signature
+    _verify_jira_signature(request, raw_body)
 
     try:
         body = json.loads(raw_body)
     except Exception:
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
 
-    # Phase 5-7 (#multi-account-forge): per-instance secret check is now
-    # routed through ``get_webhook_secret_for_host_async`` so operator-
-    # added ``git_accounts(platform='gerrit')`` rows are honoured. The
-    # async path reads the canonical PG table; the legacy shim continues
-    # to synthesise a virtual ``default-gerrit`` row from
-    # ``settings.gerrit_*`` scalars so single-instance deployments stay
-    # working with no operator action required.
-    gerrit_host = ""
-    try:
-        change_url = (body.get("change") or {}).get("url", "") or ""
-        if change_url:
-            from urllib.parse import urlparse as _urlparse
-            gerrit_host = (_urlparse(change_url).hostname or "")
-    except Exception:
-        gerrit_host = ""
-
-    host_ok = False
-    if gerrit_host:
-        try:
-            from backend.git_credentials import (
-                get_webhook_secret_for_host_async,
-            )
-            host_secret = await get_webhook_secret_for_host_async(
-                gerrit_host, "gerrit",
-            )
-        except Exception:
-            host_secret = ""
-        if host_secret:
-            expected_h = _hmac.new(
-                host_secret.encode(), raw_body, hashlib.sha256,
-            ).hexdigest()
-            host_ok = _hmac.compare_digest(signature, expected_h)
-
-    if (scalar_secret or gerrit_host) and not (scalar_ok or host_ok):
-        return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
-
     event_type = body.get("type", "")
     logger.info("Gerrit webhook: type=%s", event_type)
 
     if event_type == "patchset-created":
+        # OP-714 Phase 2: proactive merger check runs in the background
+        # so the webhook returns fast (Gerrit retries on slow responses
+        # and rate-limits otherwise). Errors inside the task are caught
+        # there and never propagate.
+        asyncio.create_task(_proactive_merger_check(body))
         await _on_patchset_created(conn, body)
     elif event_type == "comment-added":
         await _on_comment_added(body)
@@ -417,6 +404,252 @@ async def _run_review(reviewer: Agent, change_id: str, commit: str, subject: str
     # background context → call with None and it acquires from pool.
     await _persist_agent(reviewer)
     emit_agent_update(reviewer.id, reviewer.status, reviewer.thought_chain)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OP-714 — proactive merger trigger on patchset-created with mergeable=false
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+_MERGER_BOT_NAMES = ("merger-agent-bot",)
+_PROACTIVE_HASHTAG_PREFIX = "Merger-Proactive-PS"
+_RESOLVED_HASHTAG = "Merge-Conflict-Resolved"
+
+
+def _is_merger_uploader(uploader: dict) -> bool:
+    """Loop prevention — recognise merger-agent-bot's own patchset uploads."""
+    name = (uploader.get("name") or "").lower()
+    email = (uploader.get("email") or "").lower()
+    username = (uploader.get("username") or "").lower()
+    for marker in _MERGER_BOT_NAMES:
+        if marker in name or marker in email or marker in username:
+            return True
+    return False
+
+
+async def _proactive_merger_check(event: dict) -> None:
+    """OP-714 Phase 2 — invoke merger preemptively when a fresh patchset
+    arrives already mergeable=false.
+
+    Background coroutine (fire-and-forget). MUST NOT raise — the caller
+    already returned the webhook 200 to Gerrit, and a thrown exception
+    here would just spam the backend log without operator visibility.
+
+    Decision flow (each step logs ``merger_proactive_decision`` for
+    observability; caller can grep ``skip_reason=`` for triage):
+
+      1. Skip if uploader is ``merger-agent-bot`` (loop prevention —
+         the merger's own resolution patchset must not retrigger).
+      2. Query the change for hashtags. Skip if any
+         ``Merger-Proactive-PS*`` is set (already attempted) or if
+         ``Merge-Conflict-Resolved`` is set (merger succeeded; awaiting
+         human +2).
+      3. Skip if change is ``work_in_progress`` or private.
+      4. Query mergeability. Skip if ``mergeable=true`` or commit is
+         already merged.
+      5. Mark the change with ``Merger-Proactive-PS<n>`` BEFORE
+         invoking the merger so concurrent events don't double-fire.
+      6. Invoke ``merge_arbiter.on_merge_conflict_webhook`` with a
+         synthesised :class:`MergeConflictTask`. ``conflict_text`` is
+         left empty for the MVP — the merger short-circuits to
+         ``refused_no_conflict`` and the arbiter routes the change to
+         the abstain JIRA ticket pipeline, which still gives the
+         operator a visible notification ("merger detected mergeable=
+         false on change X — please rebase locally"). Real conflict_
+         text enrichment via worktree merge is OP-715 follow-up scope.
+    """
+    try:
+        change = event.get("change") or {}
+        patchset = event.get("patchSet") or {}
+
+        change_id_str = str(change.get("id") or "")
+        change_number = change.get("number") or ""
+        project = str(change.get("project") or "")
+        rev = str(patchset.get("revision") or "")
+        ps_number = patchset.get("number") or 0
+        uploader = patchset.get("uploader") or {}
+        log_prefix = (
+            f"merger_proactive_decision change={change_number} ps={ps_number}"
+        )
+
+        # ── 1. Loop prevention ────────────────────────────────────
+        if _is_merger_uploader(uploader):
+            logger.info("%s skip_reason=uploader_is_merger", log_prefix)
+            return
+
+        # ── 2/3. Hashtag + WIP check via gerrit query ─────────────
+        from backend.gerrit import gerrit_client
+        try:
+            change_data = await gerrit_client.query_change(
+                str(change_number) if change_number else change_id_str,
+                project,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("%s skip_reason=gerrit_query_error err=%s",
+                           log_prefix, exc)
+            return
+        if change_data is None:
+            logger.warning("%s skip_reason=gerrit_query_no_result", log_prefix)
+            return
+
+        hashtags = change_data.get("hashtags") or []
+        if any(h.startswith(_PROACTIVE_HASHTAG_PREFIX) for h in hashtags):
+            logger.info("%s skip_reason=hashtag_already_attempted hashtags=%s",
+                        log_prefix, hashtags)
+            return
+        if _RESOLVED_HASHTAG in hashtags:
+            logger.info("%s skip_reason=hashtag_resolved hashtags=%s",
+                        log_prefix, hashtags)
+            return
+
+        if change_data.get("wip") or change_data.get("workInProgress"):
+            logger.info("%s skip_reason=work_in_progress", log_prefix)
+            return
+        if change_data.get("private"):
+            logger.info("%s skip_reason=private_change", log_prefix)
+            return
+
+        # ── 4. Mergeability check ─────────────────────────────────
+        # Gerrit's stream-events / query --current-patch-set does not
+        # expose "mergeable" directly, so we go through REST. Failure
+        # to reach REST means we cannot decide → skip safely (next PS
+        # event will retry).
+        mergeable_info = await _fetch_mergeable(project, change_number, rev)
+        if mergeable_info is None:
+            logger.warning("%s skip_reason=mergeable_query_failed", log_prefix)
+            return
+        if mergeable_info.get("mergeable", True) is True:
+            logger.info("%s skip_reason=mergeable", log_prefix)
+            return
+        if mergeable_info.get("commit_merged") or mergeable_info.get("content_merged"):
+            logger.info("%s skip_reason=already_merged", log_prefix)
+            return
+
+        # ── 5. Mark before invoke (throttle) ──────────────────────
+        marker_hashtag = f"{_PROACTIVE_HASHTAG_PREFIX}{ps_number}"
+        try:
+            await gerrit_client.add_hashtag(
+                change_id=str(change_number),
+                project=project,
+                hashtag=marker_hashtag,
+            )
+        except Exception as exc:
+            # Non-fatal — at worst we double-fire merger on the same PS.
+            logger.warning("%s set_hashtag_failed hashtag=%s err=%s",
+                           log_prefix, marker_hashtag, exc)
+
+        # ── 6. Invoke merger via arbiter ──────────────────────────
+        # MVP: conflict_text="" → merger.resolve_conflict short-circuits
+        # to refused_no_conflict → arbiter routes to abstain JIRA
+        # ticket. Operator gets a notification + a ticket to manually
+        # rebase. Real conflict resolution awaits OP-715.
+        from backend.merge_arbiter import (
+            MergeConflictTask, on_merge_conflict_webhook,
+        )
+
+        subject = change_data.get("subject", "")
+        ticket_match = re.search(r"\bOP-\d+\b", subject)
+        jira_ticket = ticket_match.group(0) if ticket_match else ""
+
+        task = MergeConflictTask(
+            change_id=str(change_number),
+            project=project,
+            file_path="",
+            conflict_text="",
+            head_commit_message=subject,
+            incoming_commit_message=subject,
+            patchset_revision=rev,
+            jira_ticket=jira_ticket,
+        )
+
+        logger.info("%s decision=invoke_merger jira_ticket=%s",
+                    log_prefix, jira_ticket or "<none>")
+        try:
+            outcome = await on_merge_conflict_webhook(task)
+            outcome_reason = getattr(outcome, "reason", None)
+            outcome_label = (
+                outcome_reason.value if hasattr(outcome_reason, "value")
+                else str(outcome_reason)
+            )
+            logger.info(
+                "%s merger_outcome reason=%s",
+                log_prefix, outcome_label,
+            )
+        except Exception as exc:
+            logger.exception(
+                "%s merger_invocation_failed err=%s", log_prefix, exc,
+            )
+    except Exception as exc:  # pragma: no cover — final safety net
+        logger.exception("merger_proactive_check unhandled error: %s", exc)
+
+
+async def _fetch_mergeable(
+    project: str, change_number: int | str, revision: str,
+) -> dict | None:
+    """Query Gerrit REST for mergeability of ``revision`` on
+    ``change_number``. Returns the REST JSON (with ``mergeable``,
+    ``commit_merged``, ``content_merged`` fields), or ``None`` if the
+    request failed.
+
+    Auth: uses the configured Gerrit account row's HTTP token (same
+    account merger-agent-bot uses for gerrit_client SSH ops).
+    """
+    if not change_number or not revision:
+        return None
+    try:
+        from backend.git_credentials import (
+            get_credential_registry_async, pick_default,
+        )
+        account: dict | None = None
+        if project:
+            registry = await get_credential_registry_async()
+            for entry in registry:
+                if entry.get("platform") != "gerrit":
+                    continue
+                if (entry.get("project") or "").strip().lower() == project.strip().lower():
+                    account = entry
+                    break
+        if account is None:
+            account = await pick_default("gerrit", touch=False)
+        if account is None:
+            logger.warning("_fetch_mergeable: no gerrit account configured")
+            return None
+
+        instance_url = (account.get("instance_url") or "").rstrip("/")
+        username = account.get("username") or ""
+        token = account.get("token") or ""
+        if not instance_url or not username or not token:
+            logger.warning("_fetch_mergeable: gerrit account missing url/user/token")
+            return None
+
+        url = f"{instance_url}/a/changes/{change_number}/revisions/{revision}/mergeable"
+        import base64 as _b64
+        cred = _b64.b64encode(f"{username}:{token}".encode()).decode()
+        import aiohttp
+        # ssl=False because the dev Gerrit's HTTPS cert is self-signed;
+        # production deploys behind a CA-signed cert can drop this.
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"Authorization": f"Basic {cred}"},
+                timeout=aiohttp.ClientTimeout(total=10),
+                ssl=False,
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(
+                        "_fetch_mergeable: HTTP %s url=%s",
+                        resp.status, url,
+                    )
+                    return None
+                raw = await resp.text()
+        # Gerrit's REST prefixes responses with )]}' to defeat XSSI;
+        # strip the magic line before json-parse.
+        if raw.startswith(")]}'"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else ""
+        return json.loads(raw)
+    except Exception as exc:
+        logger.warning("_fetch_mergeable: %s", exc)
+        return None
 
 
 async def _on_comment_added(event: dict) -> None:

@@ -348,6 +348,44 @@ class GerritClient:
             return {"error": err or out}
         return {"status": "ok", "change": change, "reviewer": target}
 
+    # ─── Hashtag set (OP-714 / OP-694) ───
+
+    async def add_hashtag(
+        self,
+        *,
+        change_id: str,
+        project: str = "",
+        hashtag: str,
+    ) -> dict:
+        """Add a single hashtag to ``change_id``.
+
+        Uses Gerrit's SSH ``set-hashtags`` command (idempotent: adding
+        an existing hashtag is a no-op). Returns ``{"status": "ok"}``
+        on success, ``{"error": ...}`` otherwise.
+
+        Used by:
+          * OP-694 — merger sets ``Merge-Conflict-Resolved`` after a
+            successful conflict-resolution patchset.
+          * OP-714 — proactive merger trigger sets
+            ``Merger-Proactive-PS<n>`` to throttle re-fires on the
+            same patchset.
+        """
+        account = await self._resolve_account(project)
+        if account is None:
+            return {"error": "Gerrit not configured"}
+        # Gerrit SSH set-hashtags expects --add <tag> [--add <tag> ...].
+        # Hashtag values may not contain whitespace per Gerrit's rules,
+        # so simple shlex-style quoting is enough.
+        from shlex import quote as _q
+        cmd = (
+            f"gerrit set-hashtags {_q(change_id)} "
+            f"--add {_q(hashtag)}"
+        )
+        rc, out, err = await self._ssh_with(account, cmd)
+        if rc != 0:
+            return {"error": err or out or f"set-hashtags rc={rc}"}
+        return {"status": "ok", "change": change_id, "hashtag": hashtag}
+
     # ─── Connectivity test ───
 
     async def test_connection(self, project: str = "") -> dict:
