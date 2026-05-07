@@ -28,6 +28,24 @@ const API_V1 = _resolveApiBase()
 
 // ─── Persistent SSE Events ───
 
+export interface ProviderQuotaUpdate {
+  provider: string
+  rolling_5h_tokens: number
+  weekly_tokens: number
+  cap_5h_tokens: number
+  cap_weekly_tokens: number
+  remaining_5h_tokens: number
+  remaining_weekly_tokens: number
+  remaining_5h_quota_ratio: number
+  remaining_weekly_quota_ratio: number
+  circuit_state: "closed" | "open" | "half_open" | string
+  last_reset_at: string | null
+  last_cap_hit_at: string | null
+  reason: string
+  scopes: string[]
+  timestamp: string
+}
+
 export type SSEEvent =
   | { event: "agent_update"; data: { agent_id: string; status: string; thought_chain: string; timestamp: string } }
   | { event: "task_update"; data: { task_id: string; status: string; assigned_agent_id: string | null; timestamp: string } }
@@ -305,6 +323,8 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  // ─── MP.W8 provider subscription quota updates ───
+  | { event: "provider.quota.updated"; data: ProviderQuotaUpdate }
 
 export interface HostMetricsTickSample {
   cpu_percent: number

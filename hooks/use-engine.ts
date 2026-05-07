@@ -138,6 +138,7 @@ export function useEngine() {
   const [artifacts, setArtifacts] = useState<api.ArtifactItem[]>([])
   const [simulations, setSimulations] = useState<api.SimulationItem[]>([])
   const [npiData, setNpiData] = useState<api.NPIData | null>(null)
+  const [providerQuotas, setProviderQuotas] = useState<api.ProviderQuotaUpdate[]>([])
   // Z.4 #293 checkbox 5: nine-provider balance envelopes polled on a
   // dedicated 60 s cadence (decoupled from the 10 s dashboard-summary
   // tick — balance is low-frequency data refreshed by the background
@@ -534,6 +535,14 @@ export function useEngine() {
               const preview = ((d.content as string) || "").slice(0, 60)
               logMsg = `[CHAT] ${role.toUpperCase()} ${d.id}: ${preview}`
               logLevel = "info"
+            } else if (event.event === "provider.quota.updated") {
+              const ratio = Math.min(
+                Number(d.remaining_5h_quota_ratio) || 0,
+                Number(d.remaining_weekly_quota_ratio) || 0,
+              )
+              const state = (d.circuit_state as string) || "closed"
+              logMsg = `[MP QUOTA] ${d.provider} ${state} ${(ratio * 100).toFixed(0)}% remaining`
+              logLevel = state === "open" ? "error" : ratio < 0.3 ? "warn" : "info"
             }
 
             if (logMsg) {
@@ -746,6 +755,12 @@ export function useEngine() {
               // user filtering once auth context carries a real uid.
               void incomingUserId
               return [...prev, msg]
+            })
+          } else if (event.event === "provider.quota.updated") {
+            const d = event.data
+            setProviderQuotas(prev => {
+              const next = prev.filter(q => q.provider !== d.provider)
+              return [d, ...next]
             })
           }
           }, () => {
@@ -1213,6 +1228,7 @@ export function useEngine() {
     notifications,
     unreadCount,
     setUnreadCount,
+    providerQuotas,
     providerBalances,
     // Setters (for local-only operations like emergency stop)
     setAgents,
