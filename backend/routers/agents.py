@@ -6,13 +6,20 @@ a request-scoped ``asyncpg.Connection`` parameter that propagates
 to ``_persist()`` and downstream ``db.*`` calls.
 """
 
+from contextlib import asynccontextmanager
 import uuid
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
-from backend.models import Agent, AgentCreate, AgentProgress, AgentStatus, AgentWorkspace
+from backend.agents.character_card import (
+    CharacterCardRegistry,
+    CharacterCardRosterEntry,
+    CharacterCardSort,
+    PostgresCharacterCardStore,
+)
 from backend.events import emit_agent_update
+from backend.models import Agent, AgentCreate, AgentProgress, AgentStatus, AgentWorkspace
 from backend import db
 from backend.db_pool import get_conn
 
@@ -116,6 +123,22 @@ async def _persist(agent: Agent, conn: asyncpg.Connection | None = None) -> None
 async def list_agents():
     # Reads the in-memory mirror — no DB conn needed.
     return list(_agents.values())
+
+
+@router.get("/cards")
+async def list_agent_cards(
+    guild: str | None = None,
+    sort_by: CharacterCardSort = "level",
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    registry = CharacterCardRegistry(
+        PostgresCharacterCardStore(lambda: _borrowed_conn(conn))
+    )
+    try:
+        entries = await registry.list_cards(guild=guild, sort_by=sort_by)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return [_roster_entry_to_dict(entry) for entry in entries]
 
 
 @router.get("/{agent_id}", response_model=Agent)
@@ -229,3 +252,24 @@ async def delete_agent(
     emit_agent_update(agent_id, "terminated", "Agent removed")
     del _agents[agent_id]
     await db.delete_agent(conn, agent_id)
+
+
+@asynccontextmanager
+async def _borrowed_conn(conn: asyncpg.Connection):
+    yield conn
+
+
+def _roster_entry_to_dict(entry: CharacterCardRosterEntry) -> dict:
+    card = entry.card
+    return {
+        "agent_id": card.agent_id,
+        "agent_class": card.agent_class,
+        "instance_suffix": card.instance_suffix,
+        "guild": card.guild,
+        "level": card.level,
+        "xp": card.xp,
+        "specialization_label": card.specialization_label,
+        "style_fingerprint": card.style_fingerprint,
+        "created_at": card.created_at,
+        "last_activity_at": entry.last_activity_at,
+    }
