@@ -44,6 +44,7 @@ from backend.sandbox_tier import Guild
 import backend.agents.provider_adapters.anthropic_subscription  # noqa: F401,E402
 import backend.agents.provider_adapters.gemini_subscription  # noqa: F401,E402
 import backend.agents.provider_adapters.openai_subscription  # noqa: F401,E402
+import backend.agents.provider_adapters.xai_subscription  # noqa: F401,E402
 
 
 DEFAULT_CAP_SUPPRESSION_S = 5 * 60 * 60
@@ -270,6 +271,8 @@ def _agent_class_allows_provider(agent_class: str, provider_id: str) -> bool:
         return agent_class in {"subscription-codex", "api-openai"}
     if provider_id == "gemini-subscription":
         return agent_class in {"subscription-gemini", "api-gemini"}
+    if provider_id == "xai-subscription":
+        return agent_class in {"subscription-xai", "api-xai"}
     provider_prefix = provider_id.split("-", 1)[0]
     return provider_prefix in agent_class
 
