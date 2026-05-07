@@ -34,6 +34,7 @@ from typing import Any
 import yaml
 
 from backend import feature_flags
+from backend.agents import buff_registry
 from backend.agents import cost_estimator
 from backend.agents import provider_orchestrator
 from backend.agents.provider_orchestrator import ProviderAdapter, TaskSpec
@@ -236,13 +237,13 @@ def _tier_sort_key(tier: str, task: TaskSpec, candidate: _Candidate) -> tuple:
     if tier == "S":
         return (
             _predicted_cost_usd(task, candidate.adapter),
-            -candidate.remaining_5h_quota_ratio,
+            -_routing_priority_score(candidate),
             candidate.circuit_open_count,
             candidate.provider_id,
         )
     if tier == "X":
         return (
-            -candidate.remaining_5h_quota_ratio,
+            -_routing_priority_score(candidate),
             candidate.circuit_open_count,
             candidate.provider_id,
         )
@@ -251,9 +252,18 @@ def _tier_sort_key(tier: str, task: TaskSpec, candidate: _Candidate) -> tuple:
 
 def _quota_first_sort_key(candidate: _Candidate) -> tuple[float, int, str]:
     return (
-        -candidate.remaining_5h_quota_ratio,
+        -_routing_priority_score(candidate),
         candidate.circuit_open_count,
         candidate.provider_id,
+    )
+
+
+def _routing_priority_score(candidate: _Candidate) -> float:
+    return (
+        candidate.remaining_5h_quota_ratio
+        * buff_registry.routing_priority_multiplier_for_quota_ratio(
+            candidate.remaining_5h_quota_ratio
+        )
     )
 
 
