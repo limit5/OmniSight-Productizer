@@ -48,6 +48,22 @@ HEALTH_CHECK_TIMEOUT_S = 5
 _TOKEN_KEY_RE = re.compile(r"(?:^|_)(?:input|output|prompt|completion|total)?_?tokens?$")
 _TEXT_TOKEN_RE = re.compile(r"\b(?:total_)?tokens(?:_used)?\b\D{0,12}(\d+)", re.I)
 _RESET_AT_RE = re.compile(r"\b(?:reset_at|reset_at_ts)\b[\"':=\s]*(\d+)", re.I)
+_EXPIRY_TEXT_RE = re.compile(
+    r"\b(?:expires?|expiration|renews?|renewal|valid_until)\b"
+    r"[^0-9]{0,24}"
+    r"(\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)",
+    re.I,
+)
+_EXPIRY_JSON_KEYS = frozenset({
+    "expires_at",
+    "expiresAt",
+    "expiration",
+    "expirationDate",
+    "renewalDate",
+    "subscriptionExpiresAt",
+    "subscription_expires_at",
+    "valid_until",
+})
 
 
 class OpenAISubscriptionAdapter(ProviderAdapter):
@@ -130,6 +146,9 @@ class OpenAISubscriptionAdapter(ProviderAdapter):
             last_checked_at=datetime.now(timezone.utc),
             cli_installed=cli_installed,
             subscription_active=subscription_active,
+            subscription_expires_at=_subscription_expires_at(
+                auth.stdout, auth.stderr,
+            ),
             detail=_health_detail(version, auth),
         )
 
@@ -177,6 +196,64 @@ def _run_cli(argv: list[str]) -> _CliResult:
 def _subscription_active(stdout: str, stderr: str) -> bool:
     text = "\n".join((stdout, stderr)).strip().lower()
     return "logged in using chatgpt" in text
+
+
+def _subscription_expires_at(stdout: str, stderr: str) -> datetime | None:
+    for payload in _json_payloads(stdout, stderr):
+        found = _expiry_from_json(payload)
+        if found is not None:
+            return found
+    for match in _EXPIRY_TEXT_RE.finditer("\n".join((stdout, stderr))):
+        found = _parse_expiry(match.group(1))
+        if found is not None:
+            return found
+    return None
+
+
+def _expiry_from_json(value: Any) -> datetime | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in _EXPIRY_JSON_KEYS:
+                found = _parse_expiry(child)
+                if found is not None:
+                    return found
+            found = _expiry_from_json(child)
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _expiry_from_json(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _parse_expiry(value: Any) -> datetime | None:
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        try:
+            return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    normalised = raw.replace("Z", "+00:00")
+    if re.search(r"[+-]\d{4}$", normalised):
+        normalised = f"{normalised[:-5]}{normalised[-5:-2]}:{normalised[-2:]}"
+    try:
+        parsed = datetime.fromisoformat(normalised)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _health_detail(version: _CliResult, auth: _CliResult) -> str:
