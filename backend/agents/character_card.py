@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 
 ConnFactory = Callable[[], Any]
@@ -29,6 +29,7 @@ DEFAULT_INSTANCE_SUFFIX = "alpha"
 DEFAULT_GUILD = "backend"
 DEFAULT_SPECIALIZATION_LABEL = ""
 DEFAULT_STYLE_FINGERPRINT = ""
+CharacterCardSort = Literal["level", "xp", "activity"]
 
 _CARD_RETURNING_COLS = (
     'agent_id, "class" AS agent_class, instance_suffix, guild, level, xp, '
@@ -103,6 +104,17 @@ class CharacterCard:
 
 
 @dataclass(frozen=True)
+class CharacterCardRosterEntry:
+    """Guild Hall roster row with activity metadata for sorting/display."""
+
+    card: CharacterCard
+    last_activity_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "last_activity_at", _utc(self.last_activity_at))
+
+
+@dataclass(frozen=True)
 class CharacterCardCreate:
     """Inputs for creating a character card."""
 
@@ -166,6 +178,12 @@ class FirstTaskCharacterCard:
 class CharacterCardStore(Protocol):
     async def create_card(self, card: CharacterCardCreate) -> CharacterCard: ...
     async def get_card(self, agent_id: str) -> CharacterCard | None: ...
+    async def list_cards(
+        self,
+        *,
+        guild: str | None = None,
+        sort_by: CharacterCardSort = "level",
+    ) -> tuple[CharacterCardRosterEntry, ...]: ...
     async def update_card(
         self,
         agent_id: str,
@@ -195,6 +213,20 @@ class InMemoryCharacterCardStore:
 
     async def get_card(self, agent_id: str) -> CharacterCard | None:
         return self._cards.get(_required("agent_id", agent_id))
+
+    async def list_cards(
+        self,
+        *,
+        guild: str | None = None,
+        sort_by: CharacterCardSort = "level",
+    ) -> tuple[CharacterCardRosterEntry, ...]:
+        clean_guild = _optional_required("guild", guild)
+        entries = tuple(
+            CharacterCardRosterEntry(card=card, last_activity_at=card.created_at)
+            for card in self._cards.values()
+            if clean_guild is None or card.guild == clean_guild
+        )
+        return _sort_roster_entries(entries, sort_by)
 
     async def update_card(
         self,
@@ -275,6 +307,43 @@ class PostgresCharacterCardStore:
                 agent_id,
             )
         return _row_to_card(row) if row else None
+
+    async def list_cards(
+        self,
+        *,
+        guild: str | None = None,
+        sort_by: CharacterCardSort = "level",
+    ) -> tuple[CharacterCardRosterEntry, ...]:
+        clean_guild = _optional_required("guild", guild)
+        order_expr = _postgres_order_expr(sort_by)
+        params: list[Any] = []
+        where = ""
+        if clean_guild is not None:
+            params.append(clean_guild)
+            where = "WHERE c.guild = $1"
+
+        async with _acquire(self._factory) as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT c.agent_id, c."class" AS agent_class, c.instance_suffix,
+                       c.guild, c.level, c.xp, c.specialization_label,
+                       c.style_fingerprint, c.created_at,
+                       COALESCE(activity.last_activity_at, c.created_at)
+                           AS last_activity_at
+                FROM agent_character_card c
+                LEFT JOIN (
+                    SELECT assigned_agent_id,
+                           MAX(COALESCE(completed_at, created_at)) AS last_activity_at
+                    FROM tasks
+                    WHERE assigned_agent_id IS NOT NULL
+                    GROUP BY assigned_agent_id
+                ) activity ON activity.assigned_agent_id = c.agent_id
+                {where}
+                ORDER BY {order_expr} DESC, c.agent_id ASC
+                """,
+                *params,
+            )
+        return tuple(_row_to_roster_entry(row) for row in rows)
 
     async def update_card(
         self,
@@ -367,6 +436,14 @@ class CharacterCardRegistry:
             raise CharacterCardNotFoundError(f"character card not found: {agent_id}")
         return card
 
+    async def list_cards(
+        self,
+        *,
+        guild: str | None = None,
+        sort_by: CharacterCardSort = "level",
+    ) -> tuple[CharacterCardRosterEntry, ...]:
+        return await self.store.list_cards(guild=guild, sort_by=sort_by)
+
     async def update_card(
         self,
         agent_id: str,
@@ -441,11 +518,52 @@ def _row_to_card(row: Any) -> CharacterCard:
     )
 
 
+def _row_to_roster_entry(row: Any) -> CharacterCardRosterEntry:
+    return CharacterCardRosterEntry(
+        card=_row_to_card(row),
+        last_activity_at=row["last_activity_at"],
+    )
+
+
+def _sort_roster_entries(
+    entries: tuple[CharacterCardRosterEntry, ...],
+    sort_by: CharacterCardSort,
+) -> tuple[CharacterCardRosterEntry, ...]:
+    _validate_sort(sort_by)
+    if sort_by == "level":
+        key = lambda entry: (-entry.card.level, entry.card.agent_id)
+    elif sort_by == "xp":
+        key = lambda entry: (-entry.card.xp, entry.card.agent_id)
+    else:
+        key = lambda entry: (-entry.last_activity_at.timestamp(), entry.card.agent_id)
+    return tuple(sorted(entries, key=key))
+
+
+def _postgres_order_expr(sort_by: CharacterCardSort) -> str:
+    _validate_sort(sort_by)
+    if sort_by == "level":
+        return "c.level"
+    if sort_by == "xp":
+        return "c.xp"
+    return "COALESCE(activity.last_activity_at, c.created_at)"
+
+
+def _validate_sort(sort_by: CharacterCardSort) -> None:
+    if sort_by not in {"level", "xp", "activity"}:
+        raise ValueError("sort_by must be one of: level, xp, activity")
+
+
 def _required(field: str, value: str) -> str:
     stripped = value.strip()
     if not stripped:
         raise ValueError(f"{field} is required")
     return stripped
+
+
+def _optional_required(field: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    return _required(field, value)
 
 
 def _utc(value: datetime) -> datetime:
