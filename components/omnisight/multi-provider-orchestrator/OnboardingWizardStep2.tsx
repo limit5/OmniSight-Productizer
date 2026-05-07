@@ -1,238 +1,338 @@
 "use client"
 
 /**
- * OP-47 / MP.W5.2 — Onboarding wizard step 2.
+ * MP.W5.2 - Multi-provider onboarding, step 2.
  *
- * Self-contained "Open the workshop" motion stage for the
- * Multi-Provider Subscription Orchestrator onboarding flow. Spheres
- * launch from the centre toward the four workshop corners, then fade
- * as the A mark resolves in place.
+ * Renders the "Open the workshop" transition. Provider spheres start
+ * near the center, fly to the four workshop corners, then fade while
+ * the central Orchestrator A resolves in. The parent wizard owns
+ * step state; this leaf owns only the visual timing and completion
+ * callback.
  *
- * Module-global state audit: deterministic render data only. No mutable
- * module state, timers, storage, network calls, or backend coupling.
+ * Motion policy:
+ *   - full    - spheres travel to corners, fade, then A resolves in
+ *   - reduce  - static corner layout + visible A, no timer delay
+ *
+ * Module-global state audit: immutable config only. No mutable
+ * module-level container.
  */
 
-import type { CSSProperties } from "react"
-import { ArrowRight, Sparkles } from "lucide-react"
+import type { CSSProperties, JSX } from "react"
+import { useEffect } from "react"
 
-interface WorkshopSphere {
+export type OnboardingWizardStep2Motion = "full" | "reduce"
+
+export interface OnboardingWizardStep2Provider {
   id: string
   label: string
-  corner: "tl" | "tr" | "bl" | "br"
-  x: number
-  y: number
-  delayMs: number
-  hue: string
+  shortLabel: string
+  color: string
 }
 
-const SPHERES: readonly WorkshopSphere[] = Object.freeze([
-  {
-    id: "ingest",
-    label: "Ingest",
-    corner: "tl",
-    x: -128,
-    y: -76,
-    delayMs: 0,
-    hue: "var(--neural-cyan,#67e8f9)",
-  },
-  {
-    id: "policy",
-    label: "Policy",
-    corner: "tr",
-    x: 128,
-    y: -76,
-    delayMs: 110,
-    hue: "var(--artifact-purple,#c084fc)",
-  },
-  {
-    id: "routing",
-    label: "Routing",
-    corner: "bl",
-    x: -128,
-    y: 76,
-    delayMs: 220,
-    hue: "var(--validation-emerald,#34d399)",
-  },
-  {
-    id: "billing",
-    label: "Billing",
-    corner: "br",
-    x: 128,
-    y: 76,
-    delayMs: 330,
-    hue: "var(--hardware-orange,#fb923c)",
-  },
-])
+interface WorkshopSphere {
+  provider: OnboardingWizardStep2Provider
+  corner: "top-left" | "top-right" | "bottom-left" | "bottom-right"
+  startX: number
+  startY: number
+  endX: number
+  endY: number
+  delayMs: number
+}
 
 export interface OnboardingWizardStep2Props {
-  onContinue?: () => void
+  active?: boolean
+  motion?: OnboardingWizardStep2Motion
+  providers?: readonly OnboardingWizardStep2Provider[]
+  onComplete?: () => void
+}
+
+export const ONBOARDING_STEP2_DURATION_MS = 1600
+
+const DEFAULT_PROVIDERS: readonly OnboardingWizardStep2Provider[] =
+  Object.freeze([
+    {
+      id: "anthropic",
+      label: "Anthropic",
+      shortLabel: "A",
+      color: "#8b5cf6",
+    },
+    {
+      id: "openai",
+      label: "OpenAI",
+      shortLabel: "O",
+      color: "#22c55e",
+    },
+    {
+      id: "google",
+      label: "Google",
+      shortLabel: "G",
+      color: "#38bdf8",
+    },
+    {
+      id: "groq",
+      label: "Groq",
+      shortLabel: "Q",
+      color: "#f97316",
+    },
+  ])
+
+const CORNER_POSITIONS = [
+  {
+    corner: "top-left",
+    startX: -10,
+    startY: -8,
+    endX: -118,
+    endY: -82,
+    delayMs: 0,
+  },
+  {
+    corner: "top-right",
+    startX: 12,
+    startY: -10,
+    endX: 118,
+    endY: -82,
+    delayMs: 80,
+  },
+  {
+    corner: "bottom-left",
+    startX: -14,
+    startY: 12,
+    endX: -118,
+    endY: 82,
+    delayMs: 160,
+  },
+  {
+    corner: "bottom-right",
+    startX: 14,
+    startY: 10,
+    endX: 118,
+    endY: 82,
+    delayMs: 240,
+  },
+] as const
+
+function buildSpheres(
+  providers: readonly OnboardingWizardStep2Provider[],
+): readonly WorkshopSphere[] {
+  return CORNER_POSITIONS.map((position, index) => ({
+    provider: providers[index] ?? DEFAULT_PROVIDERS[index],
+    ...position,
+  }))
 }
 
 export function OnboardingWizardStep2({
-  onContinue,
-}: OnboardingWizardStep2Props) {
+  active = true,
+  motion = "full",
+  providers = DEFAULT_PROVIDERS,
+  onComplete,
+}: OnboardingWizardStep2Props): JSX.Element {
+  const spheres = buildSpheres(providers)
+  const shouldAnimate = active && motion === "full"
+
+  useEffect(() => {
+    if (!active || !onComplete) return
+    if (!shouldAnimate) {
+      const id = window.setTimeout(onComplete, 0)
+      return () => window.clearTimeout(id)
+    }
+
+    const id = window.setTimeout(onComplete, ONBOARDING_STEP2_DURATION_MS)
+    return () => window.clearTimeout(id)
+  }, [active, onComplete, shouldAnimate])
+
   return (
     <section
-      data-testid="mp-onboarding-step2"
-      aria-labelledby="mp-onboarding-step2-title"
-      className="relative overflow-hidden rounded-lg border border-[var(--neural-border,rgba(148,163,184,0.35))] bg-[rgba(2,6,23,0.88)] p-5 text-[var(--foreground,#e5e7eb)] shadow-[0_18px_70px_rgba(15,23,42,0.35)]"
+      data-testid="mp-w5-step2"
+      data-mp-w5-step2-active={active ? "yes" : "no"}
+      data-mp-w5-step2-motion={motion}
+      aria-labelledby="mp-w5-step2-title"
+      className="relative isolate min-h-[320px] overflow-hidden rounded-lg border border-slate-200 bg-slate-950 px-6 py-7 text-white shadow-sm"
     >
-      <div className="relative z-10 flex flex-col gap-5 md:flex-row md:items-center">
-        <div className="min-w-0 flex-1">
-          <div className="mb-2 flex items-center gap-2 font-mono text-[11px] uppercase text-[var(--neural-cyan,#67e8f9)]">
-            <Sparkles size={13} aria-hidden />
+      <div className="relative z-10 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-cyan-200">
             Step 2
-          </div>
+          </p>
           <h2
-            id="mp-onboarding-step2-title"
-            className="text-xl font-semibold tracking-normal text-white"
+            id="mp-w5-step2-title"
+            className="mt-2 text-xl font-semibold text-white"
           >
             Open the workshop
           </h2>
-          <p className="mt-2 max-w-md text-sm leading-6 text-slate-300">
-            Provider signals split into the workshop corners while the
-            orchestrator anchor comes online.
-          </p>
         </div>
-
-        <WorkshopStage />
+        <span className="rounded border border-white/15 bg-white/10 px-2 py-1 text-xs font-medium text-cyan-100">
+          Multi-provider
+        </span>
       </div>
 
-      <div className="relative z-10 mt-5 flex justify-end">
-        <button
-          type="button"
-          data-testid="mp-onboarding-step2-continue"
-          onClick={onContinue}
-          className="inline-flex h-9 items-center gap-2 rounded-sm border border-[var(--neural-cyan,#67e8f9)]/60 px-3 font-mono text-[11px] uppercase text-[var(--neural-cyan,#67e8f9)] transition-colors hover:bg-[var(--neural-cyan,#67e8f9)]/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neural-cyan,#67e8f9)]"
+      <div
+        data-testid="mp-w5-step2-stage"
+        data-mp-w5-step2-animate={shouldAnimate ? "yes" : "no"}
+        className="absolute inset-x-6 bottom-7 top-24"
+        aria-hidden="true"
+      >
+        <div className="absolute inset-0 rounded-lg border border-white/10 bg-white/[0.03]" />
+        <div className="mp-w5-step2-grid" />
+
+        {spheres.map((sphere) => (
+          <span
+            key={sphere.provider.id}
+            data-testid={`mp-w5-step2-sphere-${sphere.provider.id}`}
+            data-mp-w5-step2-corner={sphere.corner}
+            className="mp-w5-step2-sphere"
+            style={
+              {
+                "--mp-w5-step2-color": sphere.provider.color,
+                "--mp-w5-step2-start-x": `${sphere.startX}px`,
+                "--mp-w5-step2-start-y": `${sphere.startY}px`,
+                "--mp-w5-step2-end-x": `${sphere.endX}px`,
+                "--mp-w5-step2-end-y": `${sphere.endY}px`,
+                "--mp-w5-step2-delay": `${sphere.delayMs}ms`,
+              } as CSSProperties
+            }
+          >
+            <span className="mp-w5-step2-sphere-glow" />
+            <span className="mp-w5-step2-sphere-label">
+              {sphere.provider.shortLabel}
+            </span>
+          </span>
+        ))}
+
+        <div
+          data-testid="mp-w5-step2-a-mark"
+          className="mp-w5-step2-a-mark"
         >
-          Continue
-          <ArrowRight size={13} aria-hidden />
-        </button>
+          <span className="mp-w5-step2-a-ring" />
+          <span className="mp-w5-step2-a-letter">A</span>
+        </div>
       </div>
+
+      <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_50%_35%,rgba(14,165,233,0.24),transparent_42%)]" />
 
       <style>{`
-        @keyframes mp-step2-sphere-flight {
+        .mp-w5-step2-grid {
+          position: absolute;
+          inset: 16px;
+          opacity: 0.38;
+          background-image:
+            linear-gradient(rgba(255,255,255,0.08) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255,255,255,0.08) 1px, transparent 1px);
+          background-size: 28px 28px;
+          mask-image: radial-gradient(circle at center, black 34%, transparent 76%);
+        }
+
+        .mp-w5-step2-sphere,
+        .mp-w5-step2-a-mark {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+        }
+
+        .mp-w5-step2-sphere {
+          display: grid;
+          height: 46px;
+          width: 46px;
+          place-items: center;
+          border-radius: 999px;
+          border: 1px solid rgba(255,255,255,0.38);
+          background:
+            radial-gradient(circle at 32% 28%, rgba(255,255,255,0.86), transparent 18%),
+            radial-gradient(circle at center, var(--mp-w5-step2-color), rgba(15,23,42,0.92) 72%);
+          box-shadow:
+            0 0 26px color-mix(in srgb, var(--mp-w5-step2-color) 62%, transparent),
+            inset 0 0 18px rgba(255,255,255,0.18);
+          transform: translate(calc(-50% + var(--mp-w5-step2-end-x)), calc(-50% + var(--mp-w5-step2-end-y))) scale(0.82);
+          opacity: 0.28;
+        }
+
+        [data-mp-w5-step2-animate="yes"] .mp-w5-step2-sphere {
+          animation: mp-w5-step2-sphere-flight 1280ms cubic-bezier(0.22, 0.86, 0.28, 1) both;
+          animation-delay: var(--mp-w5-step2-delay);
+        }
+
+        .mp-w5-step2-sphere-glow {
+          position: absolute;
+          inset: -10px;
+          border-radius: inherit;
+          background: radial-gradient(circle, color-mix(in srgb, var(--mp-w5-step2-color) 42%, transparent), transparent 64%);
+        }
+
+        .mp-w5-step2-sphere-label {
+          position: relative;
+          font-size: 0.76rem;
+          font-weight: 800;
+          line-height: 1;
+          text-shadow: 0 1px 8px rgba(15,23,42,0.7);
+        }
+
+        .mp-w5-step2-a-mark {
+          display: grid;
+          height: 86px;
+          width: 86px;
+          place-items: center;
+          transform: translate(-50%, -50%);
+          opacity: 1;
+        }
+
+        [data-mp-w5-step2-animate="yes"] .mp-w5-step2-a-mark {
+          animation: mp-w5-step2-a-resolve 760ms ease-out 780ms both;
+        }
+
+        .mp-w5-step2-a-ring {
+          position: absolute;
+          inset: 0;
+          border-radius: 999px;
+          border: 1px solid rgba(125,211,252,0.58);
+          background: radial-gradient(circle, rgba(14,165,233,0.2), rgba(15,23,42,0.84) 70%);
+          box-shadow:
+            0 0 34px rgba(14,165,233,0.45),
+            inset 0 0 24px rgba(125,211,252,0.12);
+        }
+
+        .mp-w5-step2-a-letter {
+          position: relative;
+          font-size: 3rem;
+          font-weight: 900;
+          line-height: 1;
+          color: white;
+          text-shadow: 0 0 22px rgba(125,211,252,0.86);
+        }
+
+        @keyframes mp-w5-step2-sphere-flight {
           0% {
-            opacity: 0;
-            transform: translate(-50%, -50%) scale(0.58);
-          }
-          22% {
+            transform: translate(calc(-50% + var(--mp-w5-step2-start-x)), calc(-50% + var(--mp-w5-step2-start-y))) scale(1);
             opacity: 1;
           }
-          72% {
-            opacity: 0.82;
-            transform:
-              translate(calc(-50% + var(--mp-step2-x)), calc(-50% + var(--mp-step2-y)))
-              scale(0.92);
+          58% {
+            transform: translate(calc(-50% + var(--mp-w5-step2-end-x)), calc(-50% + var(--mp-w5-step2-end-y))) scale(0.9);
+            opacity: 1;
           }
           100% {
-            opacity: 0.2;
-            transform:
-              translate(calc(-50% + var(--mp-step2-x)), calc(-50% + var(--mp-step2-y)))
-              scale(0.74);
+            transform: translate(calc(-50% + var(--mp-w5-step2-end-x)), calc(-50% + var(--mp-w5-step2-end-y))) scale(0.72);
+            opacity: 0.18;
           }
         }
 
-        @keyframes mp-step2-anchor-online {
-          0%, 42% {
+        @keyframes mp-w5-step2-a-resolve {
+          0% {
+            transform: translate(-50%, -50%) scale(0.72);
             opacity: 0;
-            transform: scale(0.72);
-            filter: blur(8px);
-          }
-          74% {
-            opacity: 1;
-            transform: scale(1.08);
-            filter: blur(0);
+            filter: blur(10px);
           }
           100% {
+            transform: translate(-50%, -50%) scale(1);
             opacity: 1;
-            transform: scale(1);
             filter: blur(0);
           }
-        }
-
-        @keyframes mp-step2-workshop-scan {
-          0% { transform: translateY(-100%); opacity: 0; }
-          40%, 70% { opacity: 0.5; }
-          100% { transform: translateY(130%); opacity: 0; }
         }
 
         @media (prefers-reduced-motion: reduce) {
-          [data-mp-step2-sphere] {
-            animation: none !important;
-            opacity: 0.38;
-            transform:
-              translate(calc(-50% + var(--mp-step2-x)), calc(-50% + var(--mp-step2-y)))
-              scale(0.78);
-          }
-
-          [data-mp-step2-anchor] {
-            animation: none !important;
-            opacity: 1;
-            filter: none;
-            transform: scale(1);
-          }
-
-          [data-mp-step2-scan] {
-            display: none;
+          [data-mp-w5-step2-animate="yes"] .mp-w5-step2-sphere,
+          [data-mp-w5-step2-animate="yes"] .mp-w5-step2-a-mark {
+            animation: none;
           }
         }
       `}</style>
     </section>
   )
 }
-
-function WorkshopStage() {
-  return (
-    <div
-      data-testid="mp-onboarding-step2-stage"
-      className="relative mx-auto h-[220px] w-full max-w-[360px] shrink-0 overflow-hidden rounded-md border border-[var(--neural-border,rgba(148,163,184,0.28))] bg-[radial-gradient(circle_at_center,rgba(103,232,249,0.16),rgba(15,23,42,0.2)_42%,rgba(2,6,23,0.5))]"
-      aria-label="Workshop animation: provider spheres fly to the corners and fade into the orchestrator A"
-      role="img"
-    >
-      <div
-        data-mp-step2-scan
-        className="absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-transparent via-[var(--neural-cyan,#67e8f9)]/16 to-transparent"
-        style={{ animation: "mp-step2-workshop-scan 2.3s ease-out 120ms both" }}
-        aria-hidden
-      />
-      <div className="absolute inset-4 rounded border border-dashed border-slate-500/25" aria-hidden />
-      <div className="absolute left-1/2 top-1/2 h-px w-[72%] -translate-x-1/2 bg-gradient-to-r from-transparent via-slate-500/35 to-transparent" aria-hidden />
-      <div className="absolute left-1/2 top-1/2 h-[72%] w-px -translate-y-1/2 bg-gradient-to-b from-transparent via-slate-500/35 to-transparent" aria-hidden />
-
-      {SPHERES.map((sphere) => (
-        <span
-          key={sphere.id}
-          data-testid={`mp-onboarding-step2-sphere-${sphere.id}`}
-          data-mp-step2-sphere={sphere.corner}
-          className="absolute left-1/2 top-1/2 flex size-12 items-center justify-center rounded-full border text-[9px] font-mono uppercase"
-          style={
-            {
-              "--mp-step2-x": `${sphere.x}px`,
-              "--mp-step2-y": `${sphere.y}px`,
-              color: sphere.hue,
-              borderColor: sphere.hue,
-              background: `radial-gradient(circle, ${sphere.hue} 0%, rgba(15,23,42,0.88) 58%)`,
-              boxShadow: `0 0 22px ${sphere.hue}`,
-              animation: `mp-step2-sphere-flight 1.8s cubic-bezier(.2,.8,.2,1) ${sphere.delayMs}ms both`,
-            } as CSSProperties
-          }
-        >
-          {sphere.label}
-        </span>
-      ))}
-
-      <div
-        data-testid="mp-onboarding-step2-anchor"
-        data-mp-step2-anchor
-        className="absolute left-1/2 top-1/2 grid size-20 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-white/25 bg-slate-950/90 text-5xl font-semibold text-white shadow-[0_0_44px_rgba(103,232,249,0.42)]"
-        style={{ animation: "mp-step2-anchor-online 1.9s ease-out 520ms both" }}
-        aria-hidden
-      >
-        A
-      </div>
-    </div>
-  )
-}
-
-export default OnboardingWizardStep2
