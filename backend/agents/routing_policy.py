@@ -29,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from threading import RLock
 
+from backend import feature_flags
 from backend.agents import provider_orchestrator
 from backend.agents.provider_orchestrator import ProviderAdapter, TaskSpec
 from backend.agents.provider_quota_tracker import DEFAULT_5H_CAP_TOKENS, QuotaState
@@ -40,6 +41,7 @@ import backend.agents.provider_adapters.openai_subscription  # noqa: F401,E402
 
 DEFAULT_CAP_SUPPRESSION_S = 5 * 60 * 60
 HIGH_QUOTA_RATIO = 0.50
+MP_ENABLED_ENV = "OMNISIGHT_MP_ENABLED"
 
 _recently_capped: dict[str, float] = {}
 _RECENTLY_CAPPED_LOCK = RLock()
@@ -79,6 +81,9 @@ class RoutingPolicy:
         provider is registered, healthy, allowed by ``agent_class``, and eligible
         for the task tier.
         """
+        if not is_enabled():
+            return []
+
         assigned_provider_id = self._human_assignment_resolver(task)
         if _normalise_tier(task.tier) == "X" and assigned_provider_id is None:
             return []
@@ -254,6 +259,11 @@ def _env_provider(provider_id: str) -> str:
 _DEFAULT_POLICY = RoutingPolicy()
 
 
+def is_enabled() -> bool:
+    """Return whether multi-provider routing is enabled for this worker."""
+    return feature_flags.resolve_env_backed_feature_flag(MP_ENABLED_ENV)
+
+
 def choose_provider(task: TaskSpec) -> list[ProviderAdapter]:
     """Return ranked provider candidates using the module-default policy."""
     return _DEFAULT_POLICY.choose_provider(task)
@@ -265,8 +275,10 @@ def on_cap_hit(provider_id: str, retry_after_s: int | None = None) -> None:
 
 
 __all__ = [
+    "MP_ENABLED_ENV",
     "RoutingPolicy",
     "_recently_capped",
     "choose_provider",
+    "is_enabled",
     "on_cap_hit",
 ]

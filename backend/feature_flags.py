@@ -208,6 +208,7 @@ FEATURE_FLAG_ENV_PREFIXES: tuple[str, ...] = (
     "OMNISIGHT_BP_",
     "OMNISIGHT_HD_",
     "OMNISIGHT_KS_",
+    "OMNISIGHT_MP_",
     "OMNISIGHT_WP_",
 )
 
