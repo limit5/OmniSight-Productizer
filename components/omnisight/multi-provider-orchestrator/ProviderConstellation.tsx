@@ -204,6 +204,80 @@ function DefaultProviderSphere({
   )
 }
 
+function DefaultProviderListItem({
+  provider,
+  visual,
+}: {
+  provider: ProviderConstellationProvider
+  visual?: ReactNode
+}) {
+  const allocation = clampPercent(provider.allocationPercent)
+  const activity = clampPercent((provider.activityLevel ?? 0) * 100)
+  const quotaPct = provider.liveQuota
+    ? clampPercent(quotaRatio(provider.liveQuota) * 100)
+    : allocation
+
+  return (
+    <article
+      className={cn(
+        "flex min-w-0 items-center gap-3 rounded-sm border bg-[var(--background,#020617)]/72 p-3",
+        QUOTA_CLASS[provider.quotaState],
+      )}
+      data-testid={`mp-provider-constellation-mobile-${provider.id}`}
+      data-mp-provider-quota-source={provider.liveQuota ? "sse" : "props"}
+    >
+      <div className="grid size-16 shrink-0 place-items-center">
+        {visual ?? (
+          <div className="grid size-14 place-items-center rounded-full border border-current/70 bg-current/10 font-mono text-sm font-semibold text-current shadow-[0_0_18px_rgba(56,189,248,0.14)]">
+            {provider.name.slice(0, 2).toUpperCase()}
+          </div>
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] text-current/80">
+              <Activity className="size-3 shrink-0" aria-hidden />
+              <span>{QUOTA_LABEL[provider.quotaState]}</span>
+            </p>
+            <h3 className="mt-1 break-words text-sm font-semibold text-current">
+              {provider.name}
+            </h3>
+          </div>
+          <span className="shrink-0 font-mono text-lg text-current">
+            {allocation.toFixed(0)}%
+          </span>
+        </div>
+        <div className="mt-3 space-y-1.5">
+          <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-current/75">
+            <span>Quota</span>
+            <span>{quotaPct.toFixed(0)}%</span>
+          </div>
+          <div
+            className="h-2 overflow-hidden rounded-full bg-white/15"
+            role="meter"
+            aria-label={`${provider.name} quota ${quotaPct.toFixed(0)}%`}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Number(quotaPct.toFixed(0))}
+          >
+            <div
+              className="h-full rounded-full bg-current"
+              style={{ width: `${quotaPct}%` }}
+            />
+          </div>
+          <div className="h-1 overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full rounded-full bg-current opacity-60"
+              style={{ width: `${activity}%` }}
+            />
+          </div>
+        </div>
+      </div>
+    </article>
+  )
+}
+
 function DefaultProjectCore({
   summary,
 }: {
@@ -221,6 +295,30 @@ function DefaultProjectCore({
       </div>
       <div className="mt-2 font-mono text-xs text-[var(--neural-cyan,#67e8f9)]">
         {formatCost(summary.estimatedCostUsd)}
+      </div>
+    </div>
+  )
+}
+
+function MobileProjectSummary({
+  summary,
+}: {
+  summary: ProviderConstellationTaskSummary
+}) {
+  return (
+    <div className="rounded-sm border border-[var(--neural-cyan,#67e8f9)]/45 bg-[var(--background,#020617)]/72 p-3">
+      <div className="flex items-center gap-2">
+        <Network className="size-4 shrink-0 text-[var(--neural-cyan,#67e8f9)]" aria-hidden />
+        <h3 className="min-w-0 break-words text-sm font-semibold text-[var(--foreground,#e2e8f0)]">
+          {summary.title}
+        </h3>
+      </div>
+      <div className="mt-3 grid grid-cols-3 gap-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--muted-foreground,#94a3b8)]">
+        <span>{summary.taskCount} tasks</span>
+        <span>{formatTokens(summary.estimatedTokens)} tok</span>
+        <span className="text-[var(--neural-cyan,#67e8f9)]">
+          {formatCost(summary.estimatedCostUsd)}
+        </span>
       </div>
     </div>
   )
@@ -279,7 +377,7 @@ export function ProviderConstellation({
   return (
     <section
       className={cn(
-        "holo-glass-simple corner-brackets-full relative min-h-[620px] overflow-hidden rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.35))]",
+        "holo-glass-simple corner-brackets-full relative overflow-hidden rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.35))] md:min-h-[620px]",
         className,
       )}
       aria-label="Provider Constellation"
@@ -296,7 +394,34 @@ export function ProviderConstellation({
         </span>
       </header>
 
-      <div className="relative min-h-[560px] px-3 pb-20 pt-5 sm:px-5 sm:pb-24">
+      <div
+        className="relative space-y-3 px-3 py-3 md:hidden"
+        data-testid="mp-provider-constellation-mobile-list"
+      >
+        <MobileProjectSummary summary={taskSummary} />
+        <div className="space-y-2">
+          {orderedProviders.map((provider) => (
+            <DefaultProviderListItem
+              key={provider.id}
+              provider={provider}
+              visual={renderProvider ? renderProvider(provider) : undefined}
+            />
+          ))}
+        </div>
+        <div>
+          <div className="mb-2 flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground,#94a3b8)]">
+            <span>Cheap</span>
+            <span>Fast</span>
+          </div>
+          {renderTradeoffSlider ? (
+            renderTradeoffSlider(tradeoffValue)
+          ) : (
+            <DefaultTradeoffSlider value={tradeoffValue} />
+          )}
+        </div>
+      </div>
+
+      <div className="relative hidden min-h-[560px] px-3 pb-20 pt-5 sm:px-5 sm:pb-24 md:block">
         <div
           className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(103,232,249,0.12),transparent_42%)]"
           aria-hidden
