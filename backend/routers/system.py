@@ -117,9 +117,53 @@ class RuntimeCostEstimateTaskBreakdown(BaseModel):
     pricing: dict[str, float]
 
 
+class RuntimeCostCalibrationInput(BaseModel):
+    """Per-tenant calibration multipliers for ``GET /runtime/cost-estimate``."""
+
+    tenant_id: str | None = None
+    token_multiplier: float = Field(default=1.0, ge=0)
+    wall_time_multiplier: float = Field(default=1.0, ge=0)
+    cost_multiplier: float = Field(default=1.0, ge=0)
+    sample_count: int = Field(default=0, ge=0)
+    last_token_drift: float = 0.0
+    last_wall_time_drift: float = 0.0
+    last_cost_drift: float = 0.0
+
+
+class RuntimeCostActualInput(BaseModel):
+    """Observed usage row used to calibrate one estimated task."""
+
+    task_id: str | None = None
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    wall_time_seconds: float | None = Field(default=None, ge=0)
+    actual_time_seconds: float | None = Field(default=None, ge=0)
+    cost_usd: float = Field(ge=0)
+
+
+class RuntimeCostCalibrationStep(BaseModel):
+    """Prediction-vs-actual walkthrough for one calibration sample."""
+
+    task_id: str
+    tenant_id: str
+    provider: str
+    predicted_total_tokens: int
+    actual_total_tokens: int
+    predicted_time_seconds: float
+    actual_time_seconds: float
+    predicted_cost_usd: float
+    actual_cost_usd: float
+    token_drift: float
+    wall_time_drift: float
+    cost_drift: float
+    drift_exceeded: bool
+    updated_calibration: dict[str, float | int | str]
+
+
 class RuntimeCostEstimateResponse(BaseModel):
     """Envelope for ``GET /runtime/cost-estimate``."""
 
+    tenant_id: str | None = None
     provider_preference: list[str] = Field(default_factory=list)
     provider: str
     model: str
@@ -131,6 +175,12 @@ class RuntimeCostEstimateResponse(BaseModel):
     predicted_cost_usd: float
     predicted_time_seconds: float
     breakdown: list[RuntimeCostEstimateTaskBreakdown] = Field(default_factory=list)
+    calibration_applied: bool = False
+    calibration_updated: bool = False
+    calibration: dict[str, float | int | str] | None = None
+    calibration_walkthrough: list[RuntimeCostCalibrationStep] = Field(
+        default_factory=list
+    )
 
 
 def _collect_toolchains() -> dict:
@@ -2299,6 +2349,66 @@ def _parse_provider_preference(
     return out
 
 
+def _parse_cost_calibration(
+    raw: str | None,
+    tenant_id: str | None,
+):
+    from backend.agents import cost_estimator as _ce
+
+    if raw is None:
+        if tenant_id is None:
+            return None
+        parsed = RuntimeCostCalibrationInput(tenant_id=tenant_id)
+    else:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"calibration must be a JSON object: {exc.msg}",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="calibration must be a JSON object",
+            )
+        try:
+            parsed = RuntimeCostCalibrationInput.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+        if tenant_id is not None:
+            parsed.tenant_id = tenant_id
+
+    return _ce.TenantCalibration(
+        tenant_id=parsed.tenant_id or "t-default",
+        token_multiplier=parsed.token_multiplier,
+        wall_time_multiplier=parsed.wall_time_multiplier,
+        cost_multiplier=parsed.cost_multiplier,
+        sample_count=parsed.sample_count,
+        last_token_drift=parsed.last_token_drift,
+        last_wall_time_drift=parsed.last_wall_time_drift,
+        last_cost_drift=parsed.last_cost_drift,
+    )
+
+
+def _parse_cost_actuals(raw: str | None) -> list[RuntimeCostActualInput]:
+    if raw is None:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"actuals must be a JSON array: {exc.msg}",
+        ) from exc
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=400, detail="actuals must be a JSON array")
+    try:
+        return [RuntimeCostActualInput.model_validate(item) for item in payload]
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+
 def _resolve_cost_estimate_provider(
     task: RuntimeCostEstimateTask,
     provider_preference: list[str],
@@ -2351,6 +2461,20 @@ def _cost_estimate_t_shirt_size_multiplier(task: RuntimeCostEstimateTask) -> flo
     return T_SHIRT_SIZE_TOKEN_MULTIPLIERS.get(size.strip().upper(), 1.0)
 
 
+def _apply_runtime_cost_calibration(
+    input_tokens: int,
+    output_tokens: int,
+    seconds: float,
+    calibration,
+) -> tuple[int, int, float]:
+    if calibration is None:
+        return input_tokens, output_tokens, seconds
+    input_tokens = max(0, math.ceil(input_tokens * calibration.token_multiplier))
+    output_tokens = max(0, math.ceil(output_tokens * calibration.token_multiplier))
+    seconds = seconds * calibration.wall_time_multiplier
+    return input_tokens, output_tokens, seconds
+
+
 def _estimate_task_seconds(
     task: RuntimeCostEstimateTask,
     input_tokens: int,
@@ -2370,14 +2494,27 @@ def _runtime_cost_estimate(
     provider_preference: list[str],
     model: str | None,
     is_batch: bool,
+    tenant_calibration=None,
+    actuals: list[RuntimeCostActualInput] | None = None,
 ) -> RuntimeCostEstimateResponse:
+    from dataclasses import asdict
+
     from backend import pricing as _pricing
+    from backend.agents import cost_estimator as _ce
 
     breakdown: list[RuntimeCostEstimateTaskBreakdown] = []
+    calibration_steps: list[RuntimeCostCalibrationStep] = []
     total_input_tokens = 0
     total_output_tokens = 0
     total_cost = 0.0
     total_seconds = 0.0
+    current_calibration = tenant_calibration
+    actual_by_id = {actual.task_id: actual for actual in actuals or [] if actual.task_id}
+    actual_by_index = {
+        f"task-{idx}": actual
+        for idx, actual in enumerate(actuals or [], start=1)
+        if not actual.task_id
+    }
 
     for idx, task in enumerate(tasks, start=1):
         provider = _resolve_cost_estimate_provider(task, provider_preference)
@@ -2385,19 +2522,29 @@ def _runtime_cost_estimate(
         input_tokens, output_tokens = _estimate_task_tokens(task)
         input_rate, output_rate = _pricing.get_pricing(provider, task_model)
         rate_multiplier = 0.5 if is_batch else 1.0
-        cost = (
-            (input_tokens / 1_000_000.0 * input_rate)
-            + (output_tokens / 1_000_000.0 * output_rate)
-        ) * rate_multiplier
         seconds = _estimate_task_seconds(task, input_tokens, output_tokens)
+        input_tokens, output_tokens, seconds = _apply_runtime_cost_calibration(
+            input_tokens,
+            output_tokens,
+            seconds,
+            current_calibration,
+        )
+        cost = (
+            ((input_tokens / 1_000_000.0 * input_rate)
+            + (output_tokens / 1_000_000.0 * output_rate))
+            * rate_multiplier
+        )
+        if current_calibration is not None:
+            cost *= current_calibration.cost_multiplier
 
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
         total_cost += cost
         total_seconds += seconds
+        task_id = task.task_id or f"task-{idx}"
         breakdown.append(
             RuntimeCostEstimateTaskBreakdown(
-                task_id=task.task_id or f"task-{idx}",
+                task_id=task_id,
                 provider=provider,
                 model=task_model,
                 input_tokens=input_tokens,
@@ -2412,6 +2559,57 @@ def _runtime_cost_estimate(
                 },
             )
         )
+        actual = actual_by_id.get(task_id) or actual_by_index.get(task_id)
+        if actual is not None:
+            actual_seconds = actual.wall_time_seconds
+            if actual_seconds is None:
+                actual_seconds = actual.actual_time_seconds
+            if actual_seconds is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"actuals[{task_id}] requires wall_time_seconds",
+                )
+            prediction = _ce.CostPrediction(
+                tenant_id=(
+                    current_calibration.tenant_id
+                    if current_calibration is not None
+                    else "t-default"
+                ),
+                provider_id=provider,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                wall_time_seconds=seconds,
+                cost_usd=cost,
+            )
+            walkthrough = _ce.build_calibration_walkthrough(
+                prediction,
+                _ce.CostActual(
+                    input_tokens=actual.input_tokens,
+                    output_tokens=actual.output_tokens,
+                    wall_time_seconds=actual_seconds,
+                    cost_usd=actual.cost_usd,
+                ),
+                current_calibration,
+            )
+            current_calibration = walkthrough.updated_calibration
+            calibration_steps.append(
+                RuntimeCostCalibrationStep(
+                    task_id=task_id,
+                    tenant_id=walkthrough.tenant_id,
+                    provider=walkthrough.provider_id,
+                    predicted_total_tokens=walkthrough.predicted_total_tokens,
+                    actual_total_tokens=walkthrough.actual_total_tokens,
+                    predicted_time_seconds=walkthrough.predicted_wall_time_seconds,
+                    actual_time_seconds=walkthrough.actual_wall_time_seconds,
+                    predicted_cost_usd=walkthrough.predicted_cost_usd,
+                    actual_cost_usd=walkthrough.actual_cost_usd,
+                    token_drift=walkthrough.token_drift,
+                    wall_time_drift=walkthrough.wall_time_drift,
+                    cost_drift=walkthrough.cost_drift,
+                    drift_exceeded=walkthrough.drift_exceeded,
+                    updated_calibration=asdict(walkthrough.updated_calibration),
+                )
+            )
 
     provider_out = breakdown[0].provider if breakdown else (
         provider_preference[0] if provider_preference else _settings.llm_provider
@@ -2420,6 +2618,7 @@ def _runtime_cost_estimate(
         model or _settings.get_model_name()
     )
     return RuntimeCostEstimateResponse(
+        tenant_id=current_calibration.tenant_id if current_calibration else None,
         provider_preference=provider_preference,
         provider=provider_out,
         model=model_out,
@@ -2431,6 +2630,10 @@ def _runtime_cost_estimate(
         predicted_cost_usd=round(total_cost, 6),
         predicted_time_seconds=round(total_seconds, 3),
         breakdown=breakdown,
+        calibration_applied=tenant_calibration is not None,
+        calibration_updated=bool(calibration_steps),
+        calibration=asdict(current_calibration) if current_calibration else None,
+        calibration_walkthrough=calibration_steps,
     )
 
 
@@ -2456,6 +2659,18 @@ async def get_runtime_cost_estimate(
         default=False,
         description="Apply provider batch-mode discount to token cost.",
     ),
+    tenant_id: str | None = Query(
+        default=None,
+        description="Tenant id used to scope calibration math.",
+    ),
+    calibration: str | None = Query(
+        default=None,
+        description="JSON object with tenant calibration multipliers.",
+    ),
+    actuals: str | None = Query(
+        default=None,
+        description="JSON array of actual usage samples for calibration walkthrough.",
+    ),
 ):
     """Estimate runtime cost and duration for a planned task batch.
 
@@ -2466,11 +2681,15 @@ async def get_runtime_cost_estimate(
     """
     parsed_tasks = _parse_cost_estimate_tasks(tasks)
     preferences = _parse_provider_preference(provider, provider_preference)
+    tenant_calibration = _parse_cost_calibration(calibration, tenant_id)
+    parsed_actuals = _parse_cost_actuals(actuals)
     return _runtime_cost_estimate(
         tasks=parsed_tasks,
         provider_preference=preferences,
         model=model,
         is_batch=is_batch,
+        tenant_calibration=tenant_calibration,
+        actuals=parsed_actuals,
     )
 
 

@@ -96,6 +96,25 @@ class CostActual:
     cost_usd: float
 
 
+@dataclass(frozen=True)
+class CalibrationWalkthrough:
+    """One prediction-vs-actual comparison with the updated calibration."""
+
+    tenant_id: str
+    provider_id: str
+    predicted_total_tokens: int
+    actual_total_tokens: int
+    predicted_wall_time_seconds: float
+    actual_wall_time_seconds: float
+    predicted_cost_usd: float
+    actual_cost_usd: float
+    token_drift: float
+    wall_time_drift: float
+    cost_drift: float
+    drift_exceeded: bool
+    updated_calibration: TenantCalibration
+
+
 def predict_token_count(
     task_spec: Any,
     tenant_calibration: TenantCalibration | None = None,
@@ -226,6 +245,42 @@ def update_tenant_calibration(
         last_token_drift=token_drift,
         last_wall_time_drift=wall_time_drift,
         last_cost_drift=cost_drift,
+    )
+
+
+def build_calibration_walkthrough(
+    prediction: CostPrediction,
+    actual: CostActual,
+    current: TenantCalibration | None = None,
+    *,
+    drift_warn_threshold: float = DRIFT_WARN_THRESHOLD,
+) -> CalibrationWalkthrough:
+    """Return the operator-visible calibration walkthrough for one sample."""
+    updated = update_tenant_calibration(
+        prediction,
+        actual,
+        current,
+        drift_warn_threshold=drift_warn_threshold,
+    )
+    drift_exceeded = max(
+        abs(updated.last_token_drift),
+        abs(updated.last_wall_time_drift),
+        abs(updated.last_cost_drift),
+    ) > drift_warn_threshold
+    return CalibrationWalkthrough(
+        tenant_id=updated.tenant_id,
+        provider_id=prediction.provider_id,
+        predicted_total_tokens=prediction.input_tokens + prediction.output_tokens,
+        actual_total_tokens=actual.input_tokens + actual.output_tokens,
+        predicted_wall_time_seconds=prediction.wall_time_seconds,
+        actual_wall_time_seconds=actual.wall_time_seconds,
+        predicted_cost_usd=prediction.cost_usd,
+        actual_cost_usd=actual.cost_usd,
+        token_drift=updated.last_token_drift,
+        wall_time_drift=updated.last_wall_time_drift,
+        cost_drift=updated.last_cost_drift,
+        drift_exceeded=drift_exceeded,
+        updated_calibration=updated,
     )
 
 
@@ -412,10 +467,12 @@ def _first_str_attr(task: Any, attrs: tuple[str, ...]) -> str | None:
 
 
 __all__ = [
+    "CalibrationWalkthrough",
     "CostActual",
     "CostPrediction",
     "T_SHIRT_SIZE_TOKEN_MULTIPLIERS",
     "TenantCalibration",
+    "build_calibration_walkthrough",
     "predict",
     "predict_cost",
     "predict_token_count",
