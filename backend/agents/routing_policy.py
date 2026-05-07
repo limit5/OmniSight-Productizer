@@ -34,6 +34,7 @@ from typing import Any
 import yaml
 
 from backend import feature_flags
+from backend.agents import cost_estimator
 from backend.agents import provider_orchestrator
 from backend.agents.provider_orchestrator import ProviderAdapter, TaskSpec
 from backend.agents.provider_quota_tracker import DEFAULT_5H_CAP_TOKENS, QuotaState
@@ -113,15 +114,18 @@ class RoutingPolicy:
             if high_quota:
                 candidates = high_quota
 
-        preferred_provider = _preferred_provider_family_for_task(task)
-        candidates.sort(
-            key=lambda candidate: (
-                0 if _provider_family(candidate.provider_id) == preferred_provider else 1,
-                -candidate.remaining_5h_quota_ratio,
-                candidate.circuit_open_count,
-                candidate.provider_id,
-            )
-        )
+        # OP-75 + post-rebase note (2026-05-07): #92's tier-aware sort
+        # supersedes the family-match boost that landed on develop after
+        # this change was originally pushed. Tier S explicitly wants
+        # predicted-cost as the primary discriminator (per OP-75 commit
+        # message), and Tier X is quota-first; Tier M/L fall through to
+        # _quota_first_sort_key. The family-match boost from
+        # _preferred_provider_family_for_task is intentionally dropped
+        # here for Tier S — re-evaluate folding it back into Tier M/L
+        # _quota_first_sort_key if that boost was load-bearing for any
+        # production routing scenario.
+        tier = _normalise_tier(task.tier)
+        candidates.sort(key=lambda candidate: _tier_sort_key(tier, task, candidate))
         return [candidate.adapter for candidate in candidates]
 
     def on_cap_hit(self, provider_id: str, retry_after_s: int | None = None) -> None:
@@ -225,6 +229,35 @@ def _provider_5h_cap(provider_id: str) -> int:
 
 def _circuit_open_count(state: QuotaState) -> int:
     return 1 if state.circuit_state == "open" else 0
+
+
+def _tier_sort_key(tier: str, task: TaskSpec, candidate: _Candidate) -> tuple:
+    if tier == "S":
+        return (
+            _predicted_cost_usd(task, candidate.adapter),
+            -candidate.remaining_5h_quota_ratio,
+            candidate.circuit_open_count,
+            candidate.provider_id,
+        )
+    if tier == "X":
+        return (
+            -candidate.remaining_5h_quota_ratio,
+            candidate.circuit_open_count,
+            candidate.provider_id,
+        )
+    return _quota_first_sort_key(candidate)
+
+
+def _quota_first_sort_key(candidate: _Candidate) -> tuple[float, int, str]:
+    return (
+        -candidate.remaining_5h_quota_ratio,
+        candidate.circuit_open_count,
+        candidate.provider_id,
+    )
+
+
+def _predicted_cost_usd(task: TaskSpec, adapter: ProviderAdapter) -> float:
+    return cost_estimator.predict_cost(task, adapter)
 
 
 def _agent_class_allows_provider(agent_class: str, provider_id: str) -> bool:
