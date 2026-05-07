@@ -2,36 +2,47 @@
 #
 # This is the authoritative Gerrit submit-rule policy for OmniSight:
 #
-#   *** A change is only submittable when BOTH of the following hold ***
+#   *** A change is only submittable when ALL of the following hold ***
 #
 #     (A) ≥1 Code-Review: +2 from a member of the `non-ai-reviewer` group
 #         (i.e. a *human* reviewer).  This is the HARD GATE — no
 #         amount of AI approval can substitute for it.
 #
-#     (B) ≥1 Code-Review: +2 from a member of the `ai-reviewer-bots`
-#         group where the voter's account belongs specifically to the
-#         `merger-agent-bot` sub-identity (the O6 Merger Agent has
-#         simulated a clean merge of the conflict block).
+#     (B) When the change carries the `Merge-Conflict-Resolved` hashtag
+#         (set by the O6 Merger Agent after resolving a conflict block),
+#         ≥1 Code-Review: +2 from a member of the `merger-agent-bot`
+#         group is also required.  Non-conflict changes skip this rule
+#         (see OP-694 — conditional Merger-Plus-2).
+#
+#     (C) No -1 / -2 votes anywhere (No-Veto rule).
 #
 # Rule (A) is the CLAUDE.md L1 Safety Rule promotion.  Rule (B) is the
 # O6 Merger contract — the merge conflict region must be AI-verified by
-# the merger before humans are asked to sign off on it.
+# the merger before humans are asked to sign off on it.  All three rules
+# are encoded as declarative `[submit-requirement "..."]` blocks below.
 #
 # Group-based, NOT identity-based: adding a new AI reviewer (lint-bot /
 # security-bot / any future bot) only requires adding the account to
 # `ai-reviewer-bots` — no change to this rule.
 #
-# Drop this file into `refs/meta/config` on the target Gerrit project:
+# Install on `refs/meta/config` (per docs/ops/gerrit_dual_two_rule.md):
 #
 #   git fetch origin refs/meta/config:refs/remotes/origin/meta/config
 #   git checkout meta/config
-#   cp .gerrit/project.config.example project.config
-#   cp .gerrit/rules.pl rules.pl
-#   git add project.config rules.pl
-#   git commit -m "O7: dual-+2 submit rule (human hard gate + merger bot)"
+#   cp ../.gerrit/project.config.example project.config
+#   git add project.config
+#   git commit -m "OP-692: dual-+2 submit-requirements (human hard gate + conditional merger)"
 #   git push origin HEAD:refs/meta/config
 #
-# See ../docs/ops/gerrit_dual_two_rule.md for the full runbook.
+# Webhooks live in a separate `webhooks.config` file on the same ref —
+# the webhooks plugin reads ONLY that file (per OP-713 lesson L22).
+# See `.gerrit/webhooks.config.example` if/when added.
+#
+# Historical: an earlier attempt used a Prolog `rules.pl` for the
+# submit-rule.  Gerrit 3.13 rejects new `rules.pl` uploads, so the policy
+# moved entirely to declarative `[submit-requirement "..."]` blocks
+# (OP-692 / OP-694 / OP-697).  The previous `.gerrit/rules.pl` was
+# deleted as dead code.
 
 [project]
     description = OmniSight productizer backend + frontend.
@@ -88,24 +99,35 @@
     value = +2 Approved (scope-limited for AI, full for humans)
     copyCondition = is:MIN OR is:MAX
     # We intentionally do NOT set `function = MaxWithBlock` — the
-    # submit-rule in rules.pl enforces the dual-+2 condition
+    # submit-requirements below enforce the dual-+2 condition
     # explicitly (group-aware) rather than by label function alone.
 
 [submit]
-    # Prolog submit-rule lives in rules.pl at the project root on
-    # refs/meta/config.  See rules.pl for full derivation.
     mergeContent = true
 
-[plugin "webhooks"]
-    # Fired for every merge-conflict event.  Points at the OmniSight
-    # Orchestrator Gateway O7 endpoint — payload includes change-id +
-    # patchset sha so the Merger Agent can pick up the conflict.
-    remote = merge-conflict-webhook
-    url = https://orchestrator.omnisight.internal/api/orchestrator/merge-conflict
-    events = patchset-created
-    events = change-merge-failed
-    connectionTimeout = 5000
-    socketTimeout = 5000
-    maxTries = 3
-    retryInterval = 30000
-    sslVerify = true
+# Submit-Requirements (OP-692 / OP-694 — replace the originally-planned
+# Prolog rules.pl, which Gerrit 3.13 rejects).  Three blocks together
+# implement the ADR 0003 dual-sign gate.
+
+[submit-requirement "Human-Plus-2"]
+    description = Requires +2 from non-ai-reviewer group (CLAUDE.md L1 human hard gate)
+    submittableIf = label:Code-Review=+2,group=non-ai-reviewer
+    canOverrideInChildProjects = false
+
+[submit-requirement "Merger-Plus-2"]
+    description = Requires +2 from merger-agent-bot (O6 conflict sign-off). Conditional: only applies when the change has the `Merge-Conflict-Resolved` hashtag, which the O6 Merger Agent sets after resolving a conflict block.
+    applicableIf = hashtag:Merge-Conflict-Resolved
+    submittableIf = label:Code-Review=+2,group=merger-agent-bot
+    canOverrideInChildProjects = false
+
+[submit-requirement "No-Veto"]
+    description = No -1 or -2 votes blocking submission
+    submittableIf = -label:Code-Review=-1 AND -label:Code-Review=-2
+    canOverrideInChildProjects = false
+
+# NOTE: The webhooks plugin reads its config from `webhooks.config` on
+# the same `refs/meta/config` ref — NOT from this project.config file
+# (per OP-713 lesson L22).  Prior versions of this example placed a
+# `[plugin "webhooks"]` / `[remote "..."]` block here; they were silent
+# no-ops and have been removed.  See ops runbook for the canonical
+# webhooks.config layout.

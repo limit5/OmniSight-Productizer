@@ -15,7 +15,7 @@ This implies fine-grained scoring (`+1` separate from `+2`, `merger-agent-bot` d
 |---|---|---|---|
 | Per-reviewer score (+1 / +2 / -1 / -2) | ❌ binary | ❌ binary | ✓ |
 | Patchset-level review (rebase doesn't lose review) | ❌ | partial (re-review on push) | ✓ via Change-Id |
-| Submit-rule scriptable (e.g. "1 +2 from merger-bot AND 1 +2 from non-ai") | ❌ | partial (CODEOWNERS) | ✓ Prolog rules |
+| Submit-rule scriptable (e.g. "1 +2 from merger-bot AND 1 +2 from non-ai") | ❌ | partial (CODEOWNERS) | ✓ declarative submit-requirements |
 | `Depends-On` chain (multi-patchset dependency declaration) | ❌ | ❌ | ✓ |
 | Trivial rebase / reorder during review | partial | partial | ✓ first-class |
 
@@ -31,7 +31,7 @@ contributor's worktree
 Gerrit review queue
   ↓ +1 from AI reviewers (lint-bot / security-bot / merger-bot / claude / codex)
   ↓ +2 from non-ai-reviewer group member (human)
-  ↓ O7 submit-rule gate (Prolog): require ≥1 +2 from non-ai-reviewer
+  ↓ O7 submit-rule gate (declarative submit-requirements): require ≥1 +2 from non-ai-reviewer
   ↓ Gerrit submit (auto-creates merge commit on GitLab develop branch)
 GitLab develop branch
 ```
@@ -46,18 +46,27 @@ GitLab develop branch
 | `lint-bot` | `lint-bot` | +1 | automated style + format |
 | `security-bot` | `security-bot` | +1 | automated security scan |
 
-**O7 submit-rule (Prolog)**
+**O7 submit-rule (declarative submit-requirements)**
 
-```prolog
-% require at least one +2 from non-ai-reviewer group
-submit_rule(submit(R)) :-
-  gerrit:max_with_block(-2, 2, 'Code-Review', CR_max),
-  (CR_max = ok(_) ; CR_max = need(_)),
-  approver_in_group(non_ai_reviewer, _),
-  R = label('Code-Review-Human-Approved', ok).
+The submit-rule is encoded as `[submit-requirement "..."]` blocks on `refs/meta/config` (the original Prolog `rules.pl` design was abandoned in OP-697 — Gerrit 3.13 rejects new `rules.pl` uploads). The deployed configuration:
+
+```ini
+# Hard gate: requires +2 from a human reviewer.
+[submit-requirement "Human-Plus-2"]
+    submittableIf = label:Code-Review=+2,group=non-ai-reviewer
+
+# Conditional gate: applies only when the change carries the
+# `Merge-Conflict-Resolved` hashtag (set by O6 Merger Agent).
+[submit-requirement "Merger-Plus-2"]
+    applicableIf = hashtag:Merge-Conflict-Resolved
+    submittableIf = label:Code-Review=+2,group=merger-agent-bot
+
+# Veto: any -1 / -2 blocks submission.
+[submit-requirement "No-Veto"]
+    submittableIf = -label:Code-Review=-1 AND -label:Code-Review=-2
 ```
 
-Plus O6 path: a `merger-agent-bot` +2 is valid *only* if the patchset's diff is bounded to conflict-resolution markers (enforced by hook checking diff shape). Non-conflict diffs from merger-agent get its +2 demoted to +1.
+Plus O6 path: a `merger-agent-bot` +2 is valid only on changes that carry the `Merge-Conflict-Resolved` hashtag (the merger sets this hashtag when it pushes a conflict-resolution patchset). On non-conflict changes the `Merger-Plus-2` requirement evaluates to `NOT_APPLICABLE`, so the merger's +2 is effectively ignored for the gate.
 
 **Tier-based bypass (per [ADR 0005](0005-tier-authority-levels.md))**
 
@@ -68,7 +77,7 @@ For Tier S items (path-based whitelist, low blast radius), AI can self-+2 with 2
 Positive:
 - Per-reviewer score lets AI agents contribute partial signal (`+1` "looks good to me, lint clean") without holding up merge.
 - Patchset-level Change-Id survives rebase — review history doesn't reset on every push.
-- Prolog submit-rule is auditable + testable (separate from any UI / GitLab logic).
+- Declarative submit-requirements are auditable + testable (separate from any UI / GitLab logic), and Gerrit's UI surfaces the per-requirement status (`SATISFIED` / `UNSATISFIED` / `NOT_APPLICABLE`) directly on the change page.
 - O6 merger-agent path solves the "AI must resolve trivial merge conflicts" without giving full +2 authority.
 - `Depends-On` chain enables atomic multi-patchset features (e.g. backend + frontend in two commits but submit together).
 

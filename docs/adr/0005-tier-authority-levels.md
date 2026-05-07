@@ -60,20 +60,38 @@ If all paths whitelist → Tier S. Otherwise → Tier M (default for un-classifi
 
 **Submit-rule integration**
 
-Gerrit O7 submit-rule (per [ADR 0003](0003-gerrit-code-review.md)) reads tier label from change metadata:
+Gerrit O7 enforcement (per [ADR 0003](0003-gerrit-code-review.md)) is implemented as **declarative `[submit-requirement "..."]` blocks** in `project.config` on `refs/meta/config` (the original Prolog `rules.pl` plan was abandoned in OP-697 — Gerrit 3.13 rejects new `rules.pl` uploads). The Phase 3 tier-aware authority rule will extend the existing dual-+2 set with per-tier conditional gates:
 
-```prolog
-submit_rule(submit(ok(R))) :-
-  change_tier(Tier),
-  ( Tier = 's' -> ai_self_plus_2_allowed
-  ; Tier = 'm' -> ai_plus_1_and_human_plus_1
-  ; Tier = 'l' -> ai_plus_1_and_human_plus_2
-  ; Tier = 'x' -> human_plus_2_and_architectural_review
-  ),
-  R = approved.
+```ini
+# Tier S — AI self-+2 sufficient. Applies when tier label = "s".
+[submit-requirement "Tier-S-AI-Self-Plus-2"]
+    description = Tier S allows any AI +2 to satisfy review (24h revert window backstops misclassification)
+    applicableIf = label:Tier=s
+    submittableIf = label:Code-Review=+2,group=ai-reviewer-bots
+    canOverrideInChildProjects = false
+
+# Tier M — AI +1 plus human +1 (relaxed from default human +2).
+[submit-requirement "Tier-M-Mixed-Plus-2"]
+    description = Tier M needs at least 1 AI +1 AND at least 1 human +1
+    applicableIf = label:Tier=m
+    submittableIf = label:Code-Review=MAX,group=ai-reviewer-bots AND label:Code-Review=MAX,group=non-ai-reviewer
+    canOverrideInChildProjects = false
+
+# Tier L — default human-+2 hard gate (no relaxation).
+# (Phase 3 leaves the existing Human-Plus-2 / Merger-Plus-2 / No-Veto blocks in place;
+#  Tier L changes get them as-is.)
+
+# Tier X — human +2 plus mandatory architectural-reviewer +1.
+[submit-requirement "Tier-X-Architecture-Review"]
+    description = Tier X requires +2 from non-ai-reviewer AND +1 from architecture-reviewer subgroup
+    applicableIf = label:Tier=x
+    submittableIf = label:Code-Review=+2,group=non-ai-reviewer AND label:Code-Review>=+1,group=architecture-reviewer
+    canOverrideInChildProjects = false
 ```
 
-Tier label is computed automatically from path map + change-type keywords; contributor cannot manually set it lower than the computed minimum (only higher).
+The `Tier` label itself comes from a separate `[label "Tier"]` block (values `s`/`m`/`l`/`x`) populated automatically by a server-side hook from the path-glob map (`configs/governance/tier-paths.yaml` — Phase 3 deliverable). Contributors cannot manually downgrade the tier label; the hook overwrites any user-set value with the computed minimum on every patchset upload.
+
+Note: `applicableIf` chains can be combined with `AND` / `OR`, so non-conflict-free Tier S changes can still drop into the strict path. The Phase 3 spec must define the exact override matrix (e.g., what happens when a Tier S change touches the `Merge-Conflict-Resolved` hashtag — which gate wins).
 
 **Consequences**
 
@@ -81,7 +99,7 @@ Positive:
 - AI throughput on trivial work (Tier S) increases ~10× (no human gate)
 - Critical paths (auth / crypto / deploy / schema) keep strong human gates
 - Misclassification protection has 4 independent layers (single-layer breach insufficient to bypass)
-- Path-based rule is auditable + testable in isolation (Prolog rules + path map = pure functions)
+- Path-based rule is auditable + testable in isolation (declarative submit-requirements + path map = pure functions; Gerrit's `?o=SUBMIT_REQUIREMENTS` REST query exposes per-rule status for any change)
 - Compatible with Gerrit submit-rule infrastructure already planned
 
 Negative:
