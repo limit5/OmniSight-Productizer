@@ -134,12 +134,18 @@ def build_chat_model(
 
     if p == "anthropic":
         from langchain_anthropic import ChatAnthropic
+        actual_model = model or "claude-sonnet-4-20250514"
         kwargs: dict[str, Any] = {
-            "model": model or "claude-sonnet-4-20250514",
-            "temperature": temperature,
+            "model": actual_model,
             "max_tokens": max_tokens or 4096,
             "max_retries": max_retries,
         }
+        # OP-709: Anthropic deprecated `temperature` for the Opus 4.x
+        # extended-thinking family (claude-opus-4-*). Including the
+        # parameter raises 400 invalid_request_error at messages.create
+        # time. Sonnet / Haiku still accept it.
+        if not actual_model.startswith("claude-opus-4-"):
+            kwargs["temperature"] = temperature
         if api_key:
             kwargs["anthropic_api_key"] = api_key
         llm = ChatAnthropic(**kwargs)

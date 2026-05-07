@@ -564,6 +564,49 @@ class TestBuildChatModel:
         kwargs = fake_cls.call_args.kwargs
         assert kwargs["model"] == "claude-sonnet-4"
         assert kwargs["anthropic_api_key"] == "sk-a"
+        # Sonnet still accepts temperature.
+        assert "temperature" in kwargs
+
+    def test_anthropic_opus_4x_omits_temperature(self, monkeypatch):
+        """OP-709: Anthropic deprecated `temperature` for Opus 4.x family.
+        Including it raises 400 invalid_request_error at messages.create
+        time. The adapter must skip the kwarg for claude-opus-4-* models."""
+        fake_cls = MagicMock(return_value=MagicMock(spec=BaseChatModel))
+        import langchain_anthropic
+        monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", fake_cls, raising=True)
+        for opus_variant in (
+            "claude-opus-4-7",
+            "claude-opus-4-7-20260101",
+            "claude-opus-4-6",
+        ):
+            fake_cls.reset_mock()
+            build_chat_model("anthropic", model=opus_variant, api_key="sk-a",
+                             temperature=0.7)
+            fake_cls.assert_called_once()
+            kwargs = fake_cls.call_args.kwargs
+            assert kwargs["model"] == opus_variant
+            assert "temperature" not in kwargs, (
+                f"temperature must be dropped for {opus_variant} — Anthropic "
+                f"deprecated it for Opus 4.x; passing it raises 400 at API call"
+            )
+
+    def test_anthropic_haiku_keeps_temperature(self, monkeypatch):
+        """Sanity: only Opus 4.x is affected — Haiku/Sonnet still accept
+        temperature, so don't accidentally over-broaden the OP-709 fix."""
+        fake_cls = MagicMock(return_value=MagicMock(spec=BaseChatModel))
+        import langchain_anthropic
+        monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", fake_cls, raising=True)
+        for keep_variant in (
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-6",
+            "claude-3-5-haiku-20241022",
+        ):
+            fake_cls.reset_mock()
+            build_chat_model("anthropic", model=keep_variant, api_key="sk-a",
+                             temperature=0.5)
+            kwargs = fake_cls.call_args.kwargs
+            assert "temperature" in kwargs, f"{keep_variant} should keep temperature"
+            assert kwargs["temperature"] == 0.5
 
     def test_openai_family_uses_ChatOpenAI(self, monkeypatch):
         fake_cls = MagicMock(return_value=MagicMock(spec=BaseChatModel))
