@@ -1,0 +1,83 @@
+# OP-773 D12 (Sprint D) — feature flag rollout & segmentation registry.
+#
+# Source-of-truth for the rollout layer that the OP-773 SDK
+# (`backend/feature_flag_sdk.py`) reads on top of the WP.7.1 / 0194
+# `feature_flags` table.  The DB row provides the global enabled /
+# disabled boolean; this file provides:
+#
+#   - `rollout_pct`       (0..100, integer) — percent of (flag_name,
+#                                              user_id) buckets that
+#                                              receive the enabled
+#                                              outcome when the flag is
+#                                              globally enabled.
+#   - `segment_filter`    (mapping) — optional declarative filter the
+#                                     caller's segment must match
+#                                     (key/value equality on tenant_id,
+#                                     role, etc).
+#   - `env_alias`         (string) — legacy `OMNISIGHT_*_ENABLED` env
+#                                    var the flag replaces.  The SDK
+#                                    falls back to this env var when the
+#                                    DB row is missing, preserving the
+#                                    pre-OP-773 default value.
+#   - `default_enabled`   (bool)  — fallback boolean used when neither
+#                                   DB row nor env var is present.
+#
+# OP-773 AC #4: at least 5 existing `OMNISIGHT_*_ENABLED` env vars
+# migrated.  The list below carries 7 to leave headroom and to stay
+# above the AC threshold if any one entry is later retired.
+#
+# This file is rollout / segment metadata only — not a credentials
+# store, not a security policy.  Editing it is a config change owned
+# by the Sprint-D launch operator; the SDK reloads it via the same
+# 30 s TTL it uses for DB rows.
+
+flags:
+  - name: ks.envelope.enabled
+    rollout_pct: 100
+    env_alias: OMNISIGHT_KS_ENVELOPE_ENABLED
+    default_enabled: true
+    owner: ks
+    notes: KS envelope encryption (release tier).  Full rollout post-OP-693.
+
+  - name: ks.cmek.enabled
+    rollout_pct: 100
+    env_alias: OMNISIGHT_KS_CMEK_ENABLED
+    default_enabled: true
+    owner: ks
+    segment_filter:
+      tenant_class: enterprise
+    notes: Customer-managed encryption keys; gated to enterprise tenants.
+
+  - name: ks.byog.enabled
+    rollout_pct: 50
+    env_alias: OMNISIGHT_KS_BYOG_ENABLED
+    default_enabled: true
+    owner: ks
+    notes: Bring-your-own-gateway proxy.  50% canary while OP-693 stabilises.
+
+  - name: wp.diff_validation.enabled
+    rollout_pct: 100
+    env_alias: OMNISIGHT_WP_DIFF_VALIDATION_ENABLED
+    default_enabled: true
+    owner: wp
+
+  - name: wp.skills_loader.enabled
+    rollout_pct: 100
+    env_alias: OMNISIGHT_WP_SKILLS_LOADER_ENABLED
+    default_enabled: true
+    owner: wp
+
+  - name: wp.block_model.enabled
+    rollout_pct: 100
+    env_alias: OMNISIGHT_WP_BLOCK_MODEL_ENABLED
+    default_enabled: true
+    owner: wp
+
+  - name: prompt_cache.enabled
+    rollout_pct: 25
+    env_alias: OMNISIGHT_PROMPT_CACHE_ENABLED
+    default_enabled: true
+    owner: platform
+    segment_filter:
+      role: admin
+    notes: Anthropic prompt caching; 25% canary, admin role only while baseline metrics stabilise.
