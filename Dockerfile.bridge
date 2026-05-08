@@ -1,0 +1,73 @@
+# OP-763 D2 — Tier-3 Hardware Bridge Daemon image.
+#
+# Packages the daemon at `tools/hardware_daemon/app.py` so the
+# operator can `docker pull ghcr.io/<owner>/omnisight-bridge:<tag>`
+# instead of running `pip install` on the EVK-connected host.
+#
+# The systemd unit `deploy/systemd/omnisight-hardware-bridge.service`
+# remains the supported native install path. This container exists
+# for fleets where the bridge ships pre-baked alongside the rest of
+# the OmniSight images.
+#
+# Multi-stage to keep gcc/curl/git out of the runtime layer. Reuses
+# the same fastapi+uvicorn+pydantic pins as the backend (single
+# requirements.txt) — divergence between bridge & backend deps was
+# an explicit rejected design (see OP-763 ticket discussion).
+
+# ── Builder ──────────────────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install only the bridge's actual dependency surface.
+# `tools/hardware_daemon/app.py` imports fastapi + pydantic +
+# uvicorn (and stdlib only). We don't pull the full backend
+# requirements.txt to keep this image small and avoid dragging
+# weasyprint/Pango/etc that the bridge never uses.
+RUN pip install --no-cache-dir \
+        "fastapi==0.120.4" \
+        "pydantic==2.11.3" \
+        "pydantic-core==2.33.1" \
+        "uvicorn[standard]==0.34.2"
+
+# ── Runner ───────────────────────────────────────────────────────────
+FROM python:3.12-slim AS runner
+
+WORKDIR /app
+
+COPY --from=builder /usr/local/lib/python3.12/site-packages \
+                    /usr/local/lib/python3.12/site-packages
+
+# Strip pip + caches to shrink the runtime layer.
+RUN rm -rf /usr/local/lib/python3.12/site-packages/pip \
+           /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+           /usr/share/doc /usr/share/man \
+    && find /usr/local/lib/python3.12 -name '__pycache__' -type d -exec rm -rf {} + \
+    && find /usr/local/lib/python3.12 -name '*.pyc' -delete
+
+# Daemon code only — no backend, no frontend, no scripts.
+COPY tools/hardware_daemon/ ./tools/hardware_daemon/
+
+# Mirrors the systemd unit's defaults so a `docker run` without
+# explicit env still launches a working daemon. Operators must
+# bind-mount /dev for actual hardware access.
+ENV PYTHONPATH=/app \
+    OMNISIGHT_HW_BRIDGE_ARTIFACT_ROOT=/var/lib/omnisight/hardware-bridge/artifacts
+
+# Non-root runtime, mirrors Dockerfile.backend's uid 65532
+# (distroless/nonroot convention).
+RUN groupadd -g 65532 app && \
+    useradd  -u 65532 -g 65532 -M -s /usr/sbin/nologin app && \
+    mkdir -p /var/lib/omnisight/hardware-bridge/artifacts && \
+    chown -R app:app /app /var/lib/omnisight/hardware-bridge
+
+USER app
+
+EXPOSE 8765
+
+CMD ["python", "-m", "uvicorn", "tools.hardware_daemon.app:app", \
+     "--host", "0.0.0.0", "--port", "8765"]
