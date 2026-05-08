@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -487,6 +488,7 @@ class GerritPushResult:
     change_number: int | None
     change_url: str | None
     detail: str
+    recovery_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -494,6 +496,15 @@ class GerritMergedInfo:
     """Merged Gerrit sibling found for a JIRA key."""
 
     change_number: str
+    subject: str
+
+
+@dataclass(frozen=True)
+class GerritChangeInfo:
+    """Open or merged Gerrit change found for a Change-Id."""
+
+    change_number: int
+    change_url: str
     subject: str
 
 
@@ -784,6 +795,81 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
 
 
 _GERRIT_CHANGE_URL_RE = re.compile(r"(https://\S+/c/[^\s]+/\+/(\d+))")
+_GERRIT_CHANGE_ID_RE = re.compile(r"^Change-Id:\s*(I[0-9a-fA-F]+)\s*$", re.MULTILINE)
+_TRANSIENT_GERRIT_PUSH_RE = re.compile(
+    r"Missing tree|Unpack error|remote unpack failed|Connection reset|"
+    r"Connection timed out|timed out|Broken pipe|Connection refused|"
+    r"kex_exchange_identification|temporary failure",
+    re.IGNORECASE,
+)
+_GERRIT_PUSH_RETRY_BACKOFFS = (2, 4, 8)
+
+
+def _is_transient_gerrit_push_failure(detail: str) -> bool:
+    """Return True for Gerrit/SSH push failures worth retrying immediately."""
+
+    return bool(_TRANSIENT_GERRIT_PUSH_RE.search(str(detail or "")))
+
+
+def _head_change_id(worktree_path: Path) -> str | None:
+    """Return HEAD commit Change-Id, if the commit-msg hook added one."""
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%B"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    match = _GERRIT_CHANGE_ID_RE.search(result.stdout)
+    return match.group(1) if match else None
+
+
+def query_gerrit_change_by_change_id(
+    change_id: str,
+    agent_class: str = "subscription-codex",
+    instance_id: str | None = None,
+) -> GerritChangeInfo | None:
+    """Return Gerrit change metadata for ``change:<Change-Id>``, if present."""
+
+    bot_username, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
+        f"{bot_username}@{GERRIT_SSH_HOST}",
+        "gerrit", "query", "--format=JSON", f"change:{change_id}",
+    ]
+    result = BREAKERS["gerrit_ssh"].call(
+        subprocess.run,
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    for line in result.stdout.splitlines():
+        try:
+            change = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if change.get("type") == "stats":
+            continue
+        number = int(change.get("number") or change.get("_number") or 0)
+        if not number:
+            continue
+        url = str(
+            change.get("url")
+            or f"https://{GERRIT_SSH_HOST}:29420/c/{GERRIT_PROJECT_PATH}/+/{number}"
+        )
+        return GerritChangeInfo(
+            change_number=number,
+            change_url=url,
+            subject=str(change.get("subject") or ""),
+        )
+    return None
 
 
 def push_to_gerrit_for_review(
@@ -811,14 +897,64 @@ def push_to_gerrit_for_review(
     env = os.environ.copy()
     env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key}"
 
-    result = BREAKERS["gerrit_ssh"].call(
-        subprocess.run,
-        ["git", "push", _gerrit_ssh_url(agent_class, instance_id), f"HEAD:refs/for/{target}"],
-        cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
-    )
-    blob = (result.stderr + "\n" + result.stdout).strip()
+    change_id = _head_change_id(worktree_path)
+    retry_notes: list[str] = []
+    max_attempts = len(_GERRIT_PUSH_RETRY_BACKOFFS) + 1
+    result: subprocess.CompletedProcess[str] | None = None
+    blob = ""
+
+    for attempt in range(1, max_attempts + 1):
+        result = BREAKERS["gerrit_ssh"].call(
+            subprocess.run,
+            ["git", "push", _gerrit_ssh_url(agent_class, instance_id), f"HEAD:refs/for/{target}"],
+            cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
+        )
+        blob = (result.stderr + "\n" + result.stdout).strip()
+        if result.returncode == 0:
+            break
+        if attempt == max_attempts or not _is_transient_gerrit_push_failure(blob):
+            break
+
+        backoff = _GERRIT_PUSH_RETRY_BACKOFFS[attempt - 1]
+        note = (
+            f"attempt {attempt}/{max_attempts} failed with transient Gerrit "
+            f"push error; retrying in {backoff}s"
+        )
+        retry_notes.append(note)
+        log.warning("%s: %s", note, blob[-500:])
+        time.sleep(backoff)
+
+    if result is None:
+        return GerritPushResult(False, None, None, "git push did not run")
+
     if result.returncode != 0:
-        return GerritPushResult(False, None, None, blob[-1500:])
+        detail = blob[-1500:]
+        if retry_notes:
+            detail = "\n".join([*retry_notes, detail])
+        if change_id and retry_notes:
+            try:
+                change = query_gerrit_change_by_change_id(change_id, agent_class, instance_id)
+            except Exception as exc:  # noqa: BLE001 - preserve original push failure path
+                return GerritPushResult(
+                    False,
+                    None,
+                    None,
+                    f"{detail}\nGerrit recovery query failed: {type(exc).__name__}: {exc}",
+                )
+            if change:
+                note = (
+                    "Recovered after transient Gerrit push retries were exhausted: "
+                    f"{'; '.join(retry_notes)}. Gerrit query change:{change_id} "
+                    f"found Change #{change.change_number}."
+                )
+                return GerritPushResult(
+                    True,
+                    change.change_number,
+                    change.change_url,
+                    detail,
+                    recovery_note=note,
+                )
+        return GerritPushResult(False, None, None, detail)
 
     m = _GERRIT_CHANGE_URL_RE.search(blob)
     if not m:
