@@ -358,6 +358,24 @@ fi
 CURRENT_REF=$(git describe --tags --always --dirty)
 log "deploying $CURRENT_REF to $ENV (strategy=$STRATEGY)"
 
+run_staging_validation_gate() {
+  if [[ "$ENV" != "staging" ]]; then
+    return 0
+  fi
+  if [[ "${OMNISIGHT_SKIP_STAGING_VALIDATION:-0}" == "1" ]]; then
+    echo "[deploy] WARN: OMNISIGHT_SKIP_STAGING_VALIDATION=1 -- skipping OP-768 staging validation gate (DANGEROUS)" >&2
+    return 0
+  fi
+  log "OP-768: staging smoke + metric baseline gate (smoke <=5m, observe ${OMNISIGHT_STAGING_OBSERVE_SECONDS:-900}s)"
+  if ! python3 -m backend.staging_validation \
+      --base-url "${OMNISIGHT_STAGING_BASE_URL:-http://localhost:${BACKEND_PORT}}" \
+      --prometheus-url "${OMNISIGHT_PROMETHEUS_URL:-http://localhost:9090}" \
+      --observe-seconds "${OMNISIGHT_STAGING_OBSERVE_SECONDS:-900}"; then
+    echo "[deploy] OP-768: staging_regression event emitted; aborting before D9/prod promotion. Operator override required." >&2
+    exit 7
+  fi
+}
+
 # ───────────────────────────────────────────────────────────────────
 # 1b. N10 blue-green gate (prod only)
 # ───────────────────────────────────────────────────────────────────
@@ -703,6 +721,7 @@ if [[ "$STRATEGY" == "blue-green" ]]; then
   # `docker compose stop backend-<old>` after the retention_until
   # timestamp, or let row 1357 cron prune it.
   log "blue-green: deploy complete — new active is $BG_STANDBY (:$BG_STANDBY_PORT), old $BG_ACTIVE (:$BG_ACTIVE_PORT) kept warm for ${BLUEGREEN_RETENTION_HOURS}h rollback retention"
+  run_staging_validation_gate
 elif [[ "$STRATEGY" == "rolling" ]]; then
   log "rolling mode: compose=$COMPOSE_FILE (backend-a:8000 → backend-b:8001)"
   if [[ ! -f "$ROOT/$COMPOSE_FILE" ]]; then
@@ -716,6 +735,7 @@ elif [[ "$STRATEGY" == "rolling" ]]; then
   rolling_restart_replica "backend-b" 8001
 
   log "rolling: both replicas healthy, no traffic gap"
+  run_staging_validation_gate
 else
   log "systemd mode: restarting $BACKEND_UNIT"
   sudo systemctl restart "$BACKEND_UNIT"
@@ -737,6 +757,7 @@ else
 
   log "restarting $FRONTEND_UNIT"
   sudo systemctl restart "$FRONTEND_UNIT"
+  run_staging_validation_gate
 fi
 
 # ───────────────────────────────────────────────────────────────────
