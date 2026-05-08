@@ -3,6 +3,7 @@
 Revision ID: ${up_revision}
 Revises: ${down_revision | comma,n}
 Create Date: ${create_date}
+Backwards-compat: <safe|requires-coordinated-deploy>
 
 """
 from __future__ import annotations

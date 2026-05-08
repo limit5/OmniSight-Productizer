@@ -1,0 +1,86 @@
+name: Migration Compatibility
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/alembic/versions/*.py'
+      - 'backend/alembic/script.py.mako'
+      - 'scripts/check_migration_compat.py'
+      - '.github/workflows/migration-compat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migration_compat_check:
+    name: migration_compat_check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: omnisight
+          POSTGRES_PASSWORD: omnisight
+          POSTGRES_DB: omnitest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - name: install backend deps
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install "psycopg[binary]==3.2.3"
+
+      - name: wait for postgres
+        run: |
+          set -eu
+          for i in $(seq 1 30); do
+            if pg_isready -h 127.0.0.1 -p 5432 -U omnisight; then exit 0; fi
+            sleep 2
+          done
+          echo "::error::postgres never became ready"; exit 1
+
+      - name: patchset migration compatibility gate
+        env:
+          MIGRATION_COMPAT_DB_URL: postgresql+psycopg://omnisight:omnisight@127.0.0.1:5432/omnitest
+          MIGRATION_COMPAT_OLD_IMAGE: ${{ vars.MIGRATION_COMPAT_OLD_IMAGE }}
+          MIGRATION_COMPAT_SMOKE_CMD: ${{ vars.MIGRATION_COMPAT_SMOKE_CMD }}
+          JIRA_TICKET_KEY: ${{ github.event.pull_request.head.ref }}
+          JIRA_TICKET_LABELS: ${{ vars.MIGRATION_COMPAT_TICKET_LABELS }}
+          MIGRATION_COMPAT_APPROVED_BY: ${{ vars.MIGRATION_COMPAT_APPROVED_BY }}
+          MIGRATION_COMPAT_AUDIT_LOG: artifacts/migration-compat-overrides.jsonl
+        run: |
+          set -eu
+          mkdir -p artifacts
+          python3 scripts/check_migration_compat.py \
+              --engine postgres \
+              --base-ref origin/${{ github.base_ref }} \
+              --head-ref HEAD \
+              | tee artifacts/migration-compat-report.json
+
+      - name: upload migration compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-compat
+          path: artifacts/
+          retention-days: 30
