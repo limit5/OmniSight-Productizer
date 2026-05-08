@@ -25,6 +25,14 @@ The checker emits:
 - `milestone_ready` when every gate is green.
 - `milestone_blocked` with structured reason objects when any gate is red.
 
+OP-766 adds `backend.agents.auto_promote_main`, a daemon-style consumer
+for the checker log. On each `milestone_ready` event it verifies
+`main..develop` is non-empty and `develop..main` is empty, then pushes
+`develop:main` to Gerrit. If `main` has commits missing from `develop`,
+the daemon aborts and alerts the operator with the main-only commit list.
+Successful promotions emit `main_promoted` for the staging deploy
+consumer.
+
 The initial gates are:
 
 - every ticket in the fixVersion has status `Published` / `公開済み`
