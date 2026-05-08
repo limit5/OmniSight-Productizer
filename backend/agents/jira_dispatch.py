@@ -19,6 +19,8 @@ Authentication: reads ``~/.config/omnisight/jira-claude.env`` /
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import subprocess
 import urllib.error
@@ -31,6 +33,8 @@ from pathlib import Path
 from backend.config import settings
 from backend.agents.scheduler import TicketSnapshot
 from backend.agents.scope_to_paths import SCOPE_TO_PATHS
+
+log = logging.getLogger(__name__)
 
 # ── Auth + config per agent_class ─────────────────────────────────
 
@@ -458,6 +462,8 @@ def sync_to_gerrit_develop(
 
     Raises CalledProcessError if any git op fails.
     """
+    assert_worktree_clean(worktree_path)
+
     import os
     import subprocess
     auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
@@ -500,6 +506,59 @@ def sync_to_gerrit_develop(
     )
 
 
+def assert_worktree_clean(worktree_path: Path) -> None:
+    """Detect and recover stale git operation state before branch ops.
+
+    Idempotent: clean worktrees produce no side effects or logs. If git
+    reports an in-progress rebase/cherry-pick/merge/bisect/revert, this
+    attempts the matching abort/reset command and raises loudly if cleanup
+    fails.
+    """
+    git_dir_raw = subprocess.run(
+        ["git", "-C", str(worktree_path), "rev-parse", "--git-dir"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    git_dir = Path(git_dir_raw)
+    if not git_dir.is_absolute():
+        git_dir = worktree_path / git_dir
+
+    state_artifacts = {
+        "rebase-merge": ["git", "rebase", "--quit"],
+        "rebase-apply": ["git", "rebase", "--quit"],
+        "CHERRY_PICK_HEAD": ["git", "cherry-pick", "--abort"],
+        "MERGE_HEAD": ["git", "merge", "--abort"],
+        "BISECT_LOG": ["git", "bisect", "reset"],
+        "REVERT_HEAD": ["git", "revert", "--abort"],
+    }
+    recovered: list[str] = []
+    for artifact, cleanup_cmd in state_artifacts.items():
+        artifact_path = git_dir / artifact
+        if not artifact_path.exists():
+            continue
+
+        log.warning(
+            "worktree-state-leak detected: %s; running %s",
+            artifact,
+            cleanup_cmd,
+        )
+        result = subprocess.run(
+            cleanup_cmd,
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"worktree-state-leak unrecoverable: {artifact} cleanup failed "
+                f"(rc={result.returncode}, stderr={result.stderr[:200]}). "
+                "Manual fix needed."
+            )
+        recovered.append(artifact)
+
+    if recovered:
+        log.info("worktree pre-sync: recovered from %s", recovered)
+
+
 def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
     """Rebase commits between base_ref..HEAD with --exec amend, triggering
     the commit-msg hook on each commit so they all get a Change-Id footer.
@@ -513,11 +572,22 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
 
     Recommended usage: pass `develop_sha` from `sync_to_gerrit_develop()`.
     """
-    import subprocess
-    subprocess.run(
-        ["git", "rebase", base_ref, "--exec", "git commit --amend --no-edit"],
-        cwd=worktree_path, check=True, capture_output=True, text=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "git", "rebase", base_ref,
+                "--keep-empty",
+                "--exec", "git commit --amend --no-edit",
+            ],
+            cwd=worktree_path, check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError:
+        subprocess.run(
+            ["git", "rebase", "--quit"],
+            cwd=worktree_path,
+            capture_output=True,
+        )
+        raise
 
 
 _GERRIT_CHANGE_URL_RE = re.compile(r"(https://\S+/c/[^\s]+/\+/(\d+))")
