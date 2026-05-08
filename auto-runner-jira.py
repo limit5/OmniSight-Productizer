@@ -51,6 +51,41 @@ def _file_mutex_skip_comment(reason: str) -> str:
     return f"[runner-file-mutex] {stamp}\n\nSkipped - {reason}. Will retry next tick."
 
 
+def _dependency_skip_comment(reason: str) -> str:
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return f"[runner-dependency-blocked] {stamp}\n\nSkipped - {reason}. Will retry next tick."
+
+
+def _blocked_by_key(reason: str) -> str | None:
+    if not reason.startswith("blocked-by:"):
+        return None
+    return reason.split(None, 1)[0].split(":", 1)[1]
+
+
+def _add_dependency_waiting_marker(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+    reason: str,
+) -> None:
+    blocker_key = _blocked_by_key(reason)
+    if not blocker_key:
+        return
+    jira_dispatch.add_label(
+        client,
+        snapshot.key,
+        jira_dispatch.dependency_waiting_label(blocker_key),
+    )
+    jira_dispatch.add_comment(client, snapshot.key, _dependency_skip_comment(reason))
+
+
+def _clear_dependency_waiting_markers(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+) -> None:
+    for label in jira_dispatch.dependency_waiting_labels(getattr(snapshot, "labels", ())):
+        jira_dispatch.remove_label(client, snapshot.key, label)
+
+
 def already_merged_in_gerrit(ticket_key: str) -> tuple[int, str] | None:
     """Return merged Gerrit change metadata for ``ticket_key``, if any.
 
@@ -105,11 +140,15 @@ def _check_pre_pickup_candidate(
     stats: dict[str, int] | None = None,
 ) -> bool:
     """Runner selection predicate: existing pre-pickup gate + OP-731 file mutex."""
-    ok, _ = jira_dispatch.pre_pickup_ok(client, snapshot)
+    ok, reason = jira_dispatch.pre_pickup_ok(client, snapshot)
     if not ok:
         if stats is not None:
             stats["other_blocked"] = stats.get("other_blocked", 0) + 1
+        if not DRY_RUN and _blocked_by_key(reason):
+            _add_dependency_waiting_marker(client, snapshot, reason)
         return False
+    if not DRY_RUN:
+        _clear_dependency_waiting_markers(client, snapshot)
 
     description = jira_dispatch.fetch_description(client, snapshot.key)
     ok, reason = jira_dispatch.file_mutex_check(snapshot, description=description)
@@ -489,24 +528,40 @@ def main() -> int:
     # OP-687: a "mutex conflict" reason means a sibling ticket holds the same
     # mutex:<path>; the dispatch loop already skipped to this candidate, so a
     # failure here means a race (state changed between selection and re-check).
-    # Comment + return 1 so the cron polling cycle retries.
+    # Comment so the cron polling cycle can retry; dependency waits are a
+    # normal skip outcome, while live-state/mutex races remain failures.
     ok, reason = jira_dispatch.pre_pickup_ok(
         client, snapshot,
         worktree_path=None if DRY_RUN else worktree_path,
     )
     if not ok:
         is_mutex = reason.startswith("mutex conflict")
-        tag = "runner-mutex-blocked" if is_mutex else "runner-live-state-fail"
+        blocker_key = _blocked_by_key(reason)
+        tag = (
+            "runner-mutex-blocked"
+            if is_mutex
+            else "runner-dependency-blocked"
+            if blocker_key
+            else "runner-live-state-fail"
+        )
         if is_mutex:
             print(f"[runner] runner.pickup_blocked_mutex {snapshot.key}: {reason}")
         else:
             print(f"[runner] pre-pickup fail: {reason}")
         if not DRY_RUN:
+            if blocker_key:
+                jira_dispatch.add_label(
+                    client,
+                    snapshot.key,
+                    jira_dispatch.dependency_waiting_label(blocker_key),
+                )
             jira_dispatch.add_comment(
                 client, snapshot.key,
                 f"[{tag}]\n\nPre-pickup gate failed; ticket not picked up.\n\n{reason}\n\nThis ticket will be retried on next polling cycle.",
             )
-        return 1
+        return 0 if blocker_key else 1
+    if not DRY_RUN:
+        _clear_dependency_waiting_markers(client, snapshot)
 
     description = jira_dispatch.fetch_description(client, snapshot.key)
     ok, reason = jira_dispatch.file_mutex_check(snapshot, description=description)

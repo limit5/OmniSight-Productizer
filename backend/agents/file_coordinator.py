@@ -193,6 +193,14 @@ def has_unresolved_blockedby(
         return False, f"blockedBy check skipped: {type(exc).__name__}: {exc}"
     try:
         for blocker_key in blockers:
+            reverse_blockers = jira_get_blocked_by(client, blocker_key)
+            if snapshot.key in reverse_blockers:
+                log.warning(
+                    "JIRA Blocks cycle detected; treating as no-block for operator review: %s <-> %s",
+                    snapshot.key,
+                    blocker_key,
+                )
+                continue
             state = jira_get_state(client, blocker_key)
             if state not in PUBLISHED_STATES:
                 return True, f"blocked by {blocker_key} (state={state})"

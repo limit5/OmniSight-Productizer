@@ -980,6 +980,16 @@ def remove_label(client: DispatchClient, key: str, label: str, idem_key: str | N
     )
 
 
+def dependency_waiting_label(blocker_key: str) -> str:
+    """Return the runner label used while ``blocker_key`` gates pickup."""
+    return f"{DEPENDENCY_WAITING_LABEL_PREFIX}{blocker_key}"
+
+
+def dependency_waiting_labels(labels: Iterable[str]) -> list[str]:
+    """Return runner dependency-waiting labels from a JIRA label list."""
+    return sorted(label for label in labels if label.startswith(DEPENDENCY_WAITING_LABEL_PREFIX))
+
+
 # ── Description / Prerequisites parsing ───────────────────────────
 
 
@@ -1022,6 +1032,7 @@ PATH_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+"
 )
 FILE_COLLISION_SKIP_LABEL = "runner-skipped:file-collision"
+DEPENDENCY_WAITING_LABEL_PREFIX = "runner-blocked:waiting-"
 
 
 @dataclass(frozen=True)

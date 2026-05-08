@@ -153,6 +153,28 @@ def test_pre_pickup_ok_allows_next_ticket_when_blocker_is_published(
     assert reason == "pre-pickup checks passed"
 
 
+def test_blocks_cycle_logs_warning_and_treats_as_no_block(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    links = {
+        "OP-A": ["OP-B"],
+        "OP-B": ["OP-A"],
+    }
+    state_calls: list[str] = []
+    monkeypatch.setattr(fc, "jira_get_blocked_by", lambda c, k: links.get(k, []))
+    monkeypatch.setattr(fc, "jira_get_state", lambda c, k: state_calls.append(k) or "Under Review")
+
+    with caplog.at_level(logging.WARNING):
+        blocked, reason = fc.has_unresolved_blockedby(_client(), _snapshot("OP-A"))
+
+    assert blocked is False
+    assert reason == "all blockers resolved"
+    assert state_calls == []
+    assert "JIRA Blocks cycle detected" in caplog.text
+    assert "OP-A <-> OP-B" in caplog.text
+
+
 def test_synthetic_op_93_97_105_107_regression(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -185,3 +207,46 @@ def test_synthetic_op_93_97_105_107_regression(
         False,
         "all blockers resolved",
     )
+
+
+def test_synthetic_blocks_link_dispatch_picks_a_before_b_until_a_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = [_snapshot("OP-B"), _snapshot("OP-A")]
+    links = {"OP-B": ["OP-A"], "OP-A": []}
+    states = {"OP-A": "Under Review", "OP-B": "To Do"}
+
+    monkeypatch.setattr(jd, "fetch_description", lambda c, k: "## Goal\n")
+    monkeypatch.setattr(jd, "migration_freeze_check", lambda c, s, description=None: (True, "no freeze"))
+    monkeypatch.setattr(fc, "jira_get_blocked_by", lambda c, k: links.get(k, []))
+    monkeypatch.setattr(fc, "jira_get_state", lambda c, k: states[k])
+    monkeypatch.setattr(jd, "find_mutex_holders", lambda c, m, exclude_key: [])
+
+    weights = scheduler.SchedulerWeights(
+        schema_version=1,
+        phase=0,
+        priority_weights={"META": 90, "default": 50},
+        per_downstream_unblock=5,
+        max_unblock_bonus=30,
+        deadline_pressure_coefficient=10,
+        age_bonus_coefficient=3,
+        mutex_in_progress_penalty=50,
+    )
+    winner = scheduler.dispatch(
+        candidates,
+        weights,
+        pre_pickup_check=lambda t: jd.pre_pickup_ok(_client(), t)[0],
+    )
+
+    assert winner is not None
+    assert winner.key == "OP-A"
+
+    states["OP-A"] = "公開済み"
+    winner = scheduler.dispatch(
+        [_snapshot("OP-B")],
+        weights,
+        pre_pickup_check=lambda t: jd.pre_pickup_ok(_client(), t)[0],
+    )
+
+    assert winner is not None
+    assert winner.key == "OP-B"
