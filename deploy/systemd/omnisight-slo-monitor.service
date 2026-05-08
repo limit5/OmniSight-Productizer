@@ -1,0 +1,23 @@
+; [OP-772] Persistent 30-second SLO monitor for production deploys.
+;
+; The process runs continuously and evaluates config/slos.yaml every 30 s.
+; deploy-prod.sh writes OMNISIGHT_PREVIOUS_IMAGE_TAG into .env before the
+; new image is rolled out, so a breach can redeploy the previous tag.
+
+[Unit]
+Description=OmniSight deploy SLO monitor (OP-772)
+After=network-online.target omnisight-compose-prod.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%h/work/sora/OmniSight-Productizer/.env
+ExecStart=%h/work/sora/OmniSight-Productizer/backend/.venv/bin/python -m backend.slo_monitor
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
