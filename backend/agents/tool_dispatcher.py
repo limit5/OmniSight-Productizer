@@ -36,8 +36,9 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from backend.agents.tool_schemas import get_schema
@@ -48,6 +49,16 @@ logger = logging.getLogger(__name__)
 HandlerSync = Callable[[dict[str, Any]], Any]
 HandlerAsync = Callable[[dict[str, Any]], Awaitable[Any]]
 Handler = HandlerSync | HandlerAsync
+
+
+@dataclass(frozen=True)
+class ToolError:
+    """Vendor-agnostic tool error envelope."""
+
+    error: str
+    error_type: str
+    retryable: bool
+    hint: str
 
 
 @dataclass(frozen=True)
@@ -132,6 +143,16 @@ class ToolDispatcher:
                 )
         except Exception as e:  # noqa: BLE001 - boundary, must capture all
             logger.exception("Tool %s raised", tool_name)
+            if tool_name in _STRUCTURED_ERROR_TOOLS:
+                return _error_result(
+                    tool_use_id,
+                    _tool_error_from_exception(e),
+                    {
+                        "tool_name": tool_name,
+                        "exception_type": type(e).__name__,
+                        "message": str(e)[:1000],
+                    },
+                )
             return ToolResult(
                 tool_use_id=tool_use_id,
                 content=json.dumps(
@@ -145,6 +166,11 @@ class ToolDispatcher:
                 is_error=True,
             )
 
+        if tool_name == "Bash":
+            bash_error = _tool_error_from_bash_output(raw)
+            if bash_error is not None:
+                return _error_result(tool_use_id, bash_error)
+
         # Normalise to string content.
         if isinstance(raw, str):
             content = raw
@@ -157,6 +183,62 @@ class ToolDispatcher:
                 content = str(raw)
 
         return ToolResult(tool_use_id=tool_use_id, content=content, is_error=False)
+
+
+_STRUCTURED_ERROR_TOOLS = frozenset({"Read", "Edit", "Bash"})
+_BASH_EXIT_RE = re.compile(r"(?m)^EXIT_CODE: (-?\d+)$")
+_BASH_TIMEOUT_PREFIX = "❌ command timed out after "
+_BASH_TRUNCATED_MARKERS = (
+    "(... stdout truncated to last 30KB ...)",
+    "(... stderr truncated to last 10KB ...)",
+)
+
+
+def _error_result(
+    tool_use_id: str, error: ToolError, extra: dict[str, Any] | None = None
+) -> ToolResult:
+    payload = asdict(error)
+    if extra:
+        payload.update(extra)
+    content = json.dumps(payload, ensure_ascii=False)
+    return ToolResult(tool_use_id=tool_use_id, content=content, is_error=True)
+
+
+def _tool_error_from_exception(exc: Exception) -> ToolError:
+    return ToolError(
+        error="tool_raised",
+        error_type=type(exc).__name__,
+        retryable=isinstance(exc, (TimeoutError, asyncio.TimeoutError)),
+        hint=str(exc)[:1000],
+    )
+
+
+def _tool_error_from_bash_output(raw: Any) -> ToolError | None:
+    if not isinstance(raw, str):
+        return None
+    if raw.startswith(_BASH_TIMEOUT_PREFIX):
+        return ToolError(
+            error="bash_timeout",
+            error_type="timeout",
+            retryable=True,
+            hint=raw[:1000],
+        )
+    if any(marker in raw for marker in _BASH_TRUNCATED_MARKERS):
+        return ToolError(
+            error="bash_output_oversized",
+            error_type="oversized_output",
+            retryable=True,
+            hint="Narrow the command or redirect large output to a file.",
+        )
+    match = _BASH_EXIT_RE.search(raw)
+    if match and int(match.group(1)) != 0:
+        return ToolError(
+            error="bash_nonzero_exit",
+            error_type="nonzero_exit",
+            retryable=False,
+            hint=raw[:1000],
+        )
+    return None
 
 
 _default_dispatcher = ToolDispatcher()
