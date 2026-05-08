@@ -77,6 +77,9 @@ psycopg2-binary==2.9.10
 # --- Observability ----------------------------------------------------
 prometheus-client==0.21.1
 structlog==24.4.0
+# FX2.D5.1: backend distributed tracing (W3C trace context + Jaeger/Datadog export).
+opentelemetry-sdk==1.41.1
+opentelemetry-exporter-otlp-proto-http==1.41.1
 # H1 host-metrics: psutil drives cpu/mem/disk sampling in
 # backend/host_metrics.sample_host_once().
 psutil==7.2.2

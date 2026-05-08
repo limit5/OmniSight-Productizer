@@ -447,6 +447,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from backend import distributed_tracing as _distributed_tracing
+_distributed_tracing.install(app)
+
 # CORS — configurable origins (hardcoded localhost only in debug mode)
 _cors_origins = [settings.frontend_origin]
 if settings.extra_cors_origins:

@@ -155,6 +155,15 @@ class Settings(BaseSettings):
     rtk_strip_progress: bool = True  # Remove progress bars and spinner lines
     rtk_track_savings: bool = True  # Track compression metrics
 
+    # ── Distributed tracing ──
+    tracing_enabled: bool = False
+    tracing_exporter: str = ""  # "" | jaeger | datadog
+    tracing_service_name: str = "omnisight-backend"
+    tracing_sample_rate: float = 1.0
+    tracing_jaeger_otlp_endpoint: str = "http://localhost:4318/v1/traces"
+    tracing_datadog_otlp_endpoint: str = "http://localhost:4318/v1/traces"
+    tracing_datadog_api_key: str = ""
+
     # ── Notification Routing ──
     notification_slack_webhook: str = ""  # Slack Incoming Webhook URL
     notification_slack_mention: str = ""  # Slack user ID to @ for L3 events
