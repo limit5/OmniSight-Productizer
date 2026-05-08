@@ -28,9 +28,8 @@ from backend.email_delivery.webhooks import (
     normalize_email_webhook_provider,
     parse_email_feedback_events,
 )
-from backend.events import emit_invoke, emit_agent_update, emit_task_update
+from backend.events import emit_invoke, emit_task_update
 from backend.models import (
-    Agent, AgentProgress, AgentStatus,
     Task, TaskStatus, TaskPriority,
 )
 from backend.stripe_webhooks import (
@@ -287,119 +286,264 @@ async def gerrit_webhook(
 async def _on_patchset_created(
     conn: asyncpg.Connection, event: dict,
 ) -> None:
-    """A new patchset was pushed — spawn a reviewer agent to review it."""
+    """A new patchset was pushed — kick off the OP-713 AI Reviewer.
+
+    The synchronous portion (loop-prevention + throttle + L2 notify)
+    runs inline so the webhook returns in <100 ms; the LLM review
+    itself is fire-and-forget via :func:`_run_ai_review` because Gerrit
+    rate-limits webhook senders that take >5 s to respond.
+    """
     change = event.get("change", {})
     patchset = event.get("patchSet", {})
 
     change_id = change.get("id", "")
+    change_number = str(change.get("number") or "")
     change_subject = change.get("subject", "")
+    project = change.get("project", "")
     commit = patchset.get("revision", "")
-    uploader = patchset.get("uploader", {}).get("name", "unknown")
+    uploader = patchset.get("uploader", {}) or {}
+    uploader_name = uploader.get("name", "unknown")
+    insertions = int(patchset.get("sizeInsertions") or 0)
+    deletions = int(patchset.get("sizeDeletions") or 0)
 
     logger.info(
-        "Patchset created: change=%s subject=%s commit=%s uploader=%s",
-        change_id, change_subject, commit[:8], uploader,
+        "Patchset created: change=%s subject=%s commit=%s uploader=%s loc=%d",
+        change_id, change_subject, commit[:8] if commit else "",
+        uploader_name, insertions + deletions,
     )
 
-    # L2 notification: new patchset for review
+    # Loop prevention — never review patchsets the merger bot itself
+    # uploaded (the conflict-resolution patchsets land via the existing
+    # merger pipeline and carry their own audit trail).
+    if _is_merger_uploader(uploader):
+        logger.info(
+            "ai_reviewer skip change=%s reason=uploader_is_merger",
+            change_id,
+        )
+        return
+
+    # Idempotency throttle — same (change_id, revision) within 24 h
+    # produces only one review. Multi-worker dedup is best-effort; see
+    # ``ai_reviewer._THROTTLE`` for the rationale.
+    from backend.agents import ai_reviewer as _ai_reviewer
+    if _ai_reviewer.should_skip_recent(change_id, commit):
+        logger.info(
+            "ai_reviewer skip change=%s rev=%s reason=throttle_24h",
+            change_id, commit[:8] if commit else "",
+        )
+        return
+    _ai_reviewer.mark_reviewed(change_id, commit)
+
+    # L2 notification: humans want to see the patchset land before the
+    # review comment arrives, since the LLM call can take a few seconds.
     from backend.notifications import notify
     await notify(
         "warning", f"New patchset: {change_subject}",
-        message=f"Change {change_id} by {uploader} — commit {commit[:8]}",
+        message=f"Change {change_id} by {uploader_name} — commit {commit[:8] if commit else ''}",
         source="gerrit",
         action_url=f"{settings.gerrit_url}/c/{change_id}" if settings.gerrit_url else None,
         action_label="Review in Gerrit",
     )
 
-    # Create a review task
-    from backend.routers.tasks import _tasks, _persist as _persist_task
-    task_id = f"review-{uuid.uuid4().hex[:6]}"
-    task = Task(
-        id=task_id,
-        title=f"Review: {change_subject}",
-        description=f"Review Gerrit change {change_id} (commit {commit[:8]}) by {uploader}",
-        priority=TaskPriority.high,
-        status=TaskStatus.backlog,
-        suggested_agent_type="reviewer",
-    )
-    _tasks[task_id] = task
-    # SP-3.2: pass the request-scoped pool conn through to _persist so
-    # the webhook's atomic acquire is reused (no per-call pool churn).
-    await _persist_task(task, conn)
-
-    # Find or create a reviewer agent
-    from backend.routers.agents import _agents, _persist as _persist_agent
-    reviewer = None
-    for a in _agents.values():
-        if a.type == "reviewer" and a.status in (AgentStatus.idle, AgentStatus.booting):
-            reviewer = a
-            break
-
-    if not reviewer:
-        reviewer_id = f"reviewer-{uuid.uuid4().hex[:6]}"
-        reviewer = Agent(
-            id=reviewer_id,
-            name="Auto Reviewer",
-            type="reviewer",
-            sub_type="code-review",
-            status=AgentStatus.idle,
-            progress=AgentProgress(current=0, total=0),
-            thought_chain="Spawned by Gerrit webhook.",
-        )
-        _agents[reviewer_id] = reviewer
-        await _persist_agent(reviewer, conn)
-
-    # Assign and trigger
-    task.status = TaskStatus.assigned
-    task.assigned_agent_id = reviewer.id
-    reviewer.status = AgentStatus.running
-    reviewer.thought_chain = f"Reviewing change {change_id}: {change_subject}"
-    await _persist_task(task, conn)
-    await _persist_agent(reviewer, conn)
-
-    emit_task_update(task_id, task.status, reviewer.id)
-    emit_agent_update(reviewer.id, reviewer.status, reviewer.thought_chain)
-
-    # Execute review in background (webhook must return fast). _run_review
-    # acquires its OWN conn from the pool because the request-scoped conn
-    # is released when the webhook handler returns (asyncio.create_task
-    # runs after return).
-    asyncio.create_task(_run_review(reviewer, change_id, commit, change_subject))
+    # Background — runs after the webhook returns so Gerrit gets a
+    # fast 200 and isn't rate-limited.
+    asyncio.create_task(_run_ai_review(
+        change_id=change_id,
+        change_number=change_number,
+        revision=commit,
+        project=project,
+        subject=change_subject,
+        insertions=insertions,
+        deletions=deletions,
+    ))
 
 
-async def _run_review(reviewer: Agent, change_id: str, commit: str, subject: str) -> None:
-    """Background task: run LangGraph review pipeline and update agent status.
+async def _run_ai_review(
+    *,
+    change_id: str,
+    change_number: str,
+    revision: str,
+    project: str,
+    subject: str,
+    insertions: int,
+    deletions: int,
+) -> None:
+    """Background task: route → LLM-review → post Code-Review → record cost.
 
-    Acquires its own pool-backed conn via ``async with pool.acquire()``
-    — the webhook's request-scoped conn is gone by the time this task
-    runs.
+    Errors swallow at every step. The webhook already returned 200 so a
+    raised exception here would only spam the backend log. Each
+    failure mode logs at WARNING with enough context for triage.
     """
-    from backend.routers.agents import _persist as _persist_agent
-    try:
-        from backend.agents.graph import run_graph
-        review_command = (
-            f"Review Gerrit patchset for change {change_id}. "
-            f"Commit: {commit}. Subject: {subject}. "
-            f"Use gerrit_get_diff to read the diff, then analyze for issues. "
-            f"Post inline comments with gerrit_post_comment for any findings. "
-            f"Finally use gerrit_submit_review to give +1 or -1."
+    if not revision:
+        logger.warning(
+            "ai_reviewer: change=%s missing revision SHA, skipping",
+            change_id,
         )
-        result = await run_graph(
-            review_command,
-            model_name=reviewer.ai_model or "",
-            agent_sub_type=reviewer.sub_type,
-        )
-        reviewer.thought_chain = result.answer[:200] if result.answer else "Review complete."
-        reviewer.status = AgentStatus.success
-    except Exception as exc:
-        reviewer.thought_chain = f"Review failed: {exc}"
-        reviewer.status = AgentStatus.error
-        logger.error("Review failed: %s", exc)
+        return
 
-    # SP-3.2 (2026-04-20): _persist_agent is now polymorphic on conn —
-    # background context → call with None and it acquires from pool.
-    await _persist_agent(reviewer)
-    emit_agent_update(reviewer.id, reviewer.status, reviewer.thought_chain)
+    try:
+        from backend.agents import ai_reviewer
+        from backend.gerrit import gerrit_client
+
+        files_meta, fetched_subject = await _fetch_change_files(
+            change_number or change_id, project,
+        )
+        files = [f for f in files_meta if f and f != "/COMMIT_MSG"]
+        # Prefer the gerrit-provided LOC counts when available, falling
+        # back to the patchset-event totals (some Gerrit setups omit
+        # sizeInsertions/sizeDeletions on the event payload).
+        loc_total = insertions + deletions
+
+        # Size-cap fast path: skip the LLM entirely.
+        if ai_reviewer.is_too_large(
+            insertions=insertions,
+            deletions=deletions,
+            limit=ai_reviewer.DEFAULT_REVIEW_DIFF_LIMIT_LOC,
+        ):
+            chosen = ai_reviewer.route_model(files=files)
+            msg = ai_reviewer.too_large_message(
+                insertions=insertions,
+                deletions=deletions,
+                model_id=chosen,
+            )
+            result = await gerrit_client.post_review(
+                commit=revision,
+                message=msg,
+                labels={"Code-Review": 0},
+                project=project,
+            )
+            if "error" in result:
+                logger.warning(
+                    "ai_reviewer post_review (too-large) failed: %s",
+                    result["error"],
+                )
+            else:
+                logger.info(
+                    "ai_reviewer too_large change=%s loc=%d model=%s",
+                    change_id, loc_total, chosen,
+                )
+            return
+
+        diff = await _fetch_patchset_diff(revision, project)
+
+        chosen = ai_reviewer.route_model(diff=diff, files=files)
+        # ``invoke_chat`` is sync — push it off the event loop so the
+        # gerrit pool isn't blocked while the LLM is thinking.
+        review = await asyncio.to_thread(
+            ai_reviewer.review_patchset,
+            diff,
+            chosen,
+            files=tuple(files),
+            subject=subject or fetched_subject or "",
+            insertions=insertions,
+            deletions=deletions,
+        )
+
+        labels = {"Code-Review": review.score}
+        post = await gerrit_client.post_review(
+            commit=revision,
+            message=review.message,
+            labels=labels,
+            project=project,
+        )
+        if "error" in post:
+            logger.warning(
+                "ai_reviewer post_review failed change=%s err=%s",
+                change_id, post["error"],
+            )
+        else:
+            logger.info(
+                "ai_reviewer posted change=%s rev=%s model=%s score=%+d "
+                "tokens=%d/%d cost=$%.4f",
+                change_id, revision[:8], review.model_id,
+                review.score, review.input_tokens, review.output_tokens,
+                review.cost_usd,
+            )
+
+        # Best-effort billing-event recording. The runner already wires
+        # token_usage on its own LLM path; this row is the AI-Reviewer-
+        # specific one keyed by ``model_id`` for the cost dashboard.
+        if review.model_id and (review.input_tokens or review.output_tokens):
+            try:
+                from backend.billing_usage import record_llm_call
+                await record_llm_call(
+                    model=review.model_id,
+                    input_tokens=review.input_tokens,
+                    output_tokens=review.output_tokens,
+                    cost_usd=review.cost_usd,
+                    provider="anthropic",
+                    product_line="ai_reviewer",
+                    metadata={
+                        "change_id": change_id,
+                        "revision": revision,
+                        "score": review.score,
+                        "ticket": "OP-713",
+                    },
+                )
+            except Exception as exc:  # pragma: no cover — best-effort
+                logger.warning(
+                    "ai_reviewer billing record failed (non-critical): %s",
+                    exc,
+                )
+    except Exception as exc:
+        logger.exception(
+            "ai_reviewer unhandled error change=%s err=%s", change_id, exc,
+        )
+
+
+async def _fetch_change_files(
+    change_id: str, project: str,
+) -> tuple[list[str], str]:
+    """Best-effort fetch of file paths + subject for a Gerrit change.
+
+    Returns ``([], "")`` if Gerrit is misconfigured or the query fails
+    — the caller treats an empty file list as "default routing"
+    (haiku) which is the cheapest fallback.
+    """
+    try:
+        from backend.gerrit import gerrit_client
+        data = await gerrit_client.query_change(change_id, project)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "ai_reviewer.query_change err=%s change=%s",
+            exc, change_id,
+        )
+        return ([], "")
+    if not data:
+        return ([], "")
+    cps = data.get("currentPatchSet") or {}
+    files = []
+    for f in cps.get("files") or []:
+        path = f.get("file") or ""
+        if path:
+            files.append(path)
+    return (files, str(data.get("subject") or ""))
+
+
+async def _fetch_patchset_diff(revision: str, project: str) -> str:
+    """Fetch a unified diff for a patchset SHA from a local mirror.
+
+    Tries ``git show <revision>`` against the workspace's main repo;
+    returns ``""`` if the SHA isn't available locally (in which case
+    the LLM gets a file-list-only prompt). Truncated to 64 KB so a
+    pathological diff doesn't blow up the prompt budget.
+    """
+    try:
+        from backend.workspace import _MAIN_REPO, _run
+        rc, out, _err = await _run(
+            f'git show --format= --no-color {revision}',
+            cwd=_MAIN_REPO,
+        )
+        if rc != 0:
+            return ""
+        diff = out or ""
+        if len(diff) > 65_536:
+            diff = diff[:65_536] + "\n... [diff truncated at 64 KB]"
+        return diff
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("ai_reviewer.fetch_diff err=%s rev=%s",
+                       exc, revision[:8] if revision else "")
+        return ""
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

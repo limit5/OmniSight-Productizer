@@ -1,39 +1,55 @@
-"""OP-713 Phase 2+ / OP-735 -- AI Reviewer auto-+1 gating.
+"""OP-713 / OP-735 -- AI Reviewer for Gerrit patchsets.
 
-OP-713 Phase 1 ships an AI Reviewer agent that can post Code-Review +1
-or -1 on a Gerrit patchset. R5 (this module) adds a *confidence-gated*
-auto-+1 path on top of that: a patchset is auto-tagged
-``runner-batch-merge-candidate`` and auto-+1'd by the AI Reviewer only
-when ALL of the following are green:
+This module owns two related but separate responsibilities:
 
-  1. ``ai_verdict.severity == APPROVE`` (no findings from Phase 1).
-  2. Gerrit reports the change as ``mergeable=True``.
-  3. ``insertions + deletions <= 200`` lines.
-  4. No file in the patch sits under a ``SAFETY_CRITICAL_PATHS`` prefix
-     (alembic migrations, security configs, secret-handling code, …).
-  5. Trust score for this ``(bot, file_class)`` tuple is still healthy
-     (delegated to ``backend.agents.trust_scoring``).
+1. **OP-713 Phase 2** (this layer): tiered model routing + LLM review +
+   Code-Review +1 / 0 vote on every new patchset, plus the
+   ``(change_id, revision)`` idempotency throttle. Public API:
+   :func:`route_model`, :func:`is_too_large`, :func:`review_patchset`,
+   :func:`should_skip_recent`, :func:`mark_reviewed`,
+   :func:`too_large_message`, :class:`ReviewResult`.
 
-The +2 (Submit-blessing) is *never* given by the AI -- the operator
-still bulk-+2's selected candidates from the ``/admin/batch-merge``
-dashboard. CLAUDE.md L1 invariant ("AI reviewer max +1, human +2
-required for merge") is preserved.
+2. **OP-713 Phase 2+ / OP-735**: confidence-gated auto-+1 batch-merge
+   tagging on top of (1). A patchset is auto-tagged
+   ``runner-batch-merge-candidate`` only when ALL of:
 
-Pure-data design
-----------------
-``can_auto_plus_one`` is a pure function over already-resolved
-arguments: it does NOT call Gerrit, the DB, or the network. The caller
-(webhook handler in ``backend/routers/webhooks.py`` or the dashboard
-sweep in ``backend/routers/batch_merge.py``) is responsible for
-populating the ``Change`` and ``AIReviewVerdict`` snapshots. This keeps
-the gate trivially unit-testable without DB or SSH fixtures.
+     a. ``ai_verdict.severity == APPROVE`` (no findings from Phase 2).
+     b. Gerrit reports the change as ``mergeable=True``.
+     c. ``insertions + deletions <= 200`` lines.
+     d. No file sits under a ``SAFETY_CRITICAL_PATHS`` prefix.
+     e. Trust score for ``(bot, file_class)`` is still healthy.
+
+   The +2 (Submit-blessing) is *never* given by the AI -- the operator
+   still bulk-+2's candidates from ``/admin/batch-merge``. CLAUDE.md
+   L1 ("AI reviewer max +1, human +2") is preserved.
+
+Cost-over-correctness (sora 2026-05-07)
+---------------------------------------
+The AI +1 is signal-only because the human +2 is the absolute hard
+gate. That justifies aggressive cost optimisation on the routing tier:
+default to haiku, escalate to sonnet for general backend, opus only on
+high-risk paths. A noisy haiku review is fine; a runaway opus bill on
+every doc-typo patchset is not.
+
+Pure-data / I/O-injectable design
+---------------------------------
+``can_auto_plus_one``, :func:`route_model`, and :func:`is_too_large`
+are pure functions. :func:`review_patchset` accepts injectable
+``invoke`` and ``pricing`` callables so unit tests can stub the LLM
+without touching the network. The webhook handler in
+``backend/routers/webhooks.py`` is the only place that wires real I/O.
 """
 
 from __future__ import annotations
 
+import logging
+import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable
+from typing import Any, Callable, Iterable, Sequence
+
+logger = logging.getLogger(__name__)
 
 
 class Severity(str, Enum):
@@ -189,3 +205,488 @@ def auto_plus_one_skip_message(reason: str) -> str:
         f"[AUTO-+1 skipped: {reason}] AI Reviewer approves this change "
         "but auto-batch is gated; please review and +2 manually."
     )
+
+
+# ── OP-713 Phase 2: tiered model routing + LLM review + throttle ─────
+
+
+# Model tier IDs match the Anthropic provider naming used elsewhere in
+# the backend (see ``backend/llm_adapter.py``). Keeping them as module
+# constants makes the AC verification step ("footer shows
+# model=claude-haiku-4-5") textually checkable in test output.
+MODEL_HAIKU = "claude-haiku-4-5"
+MODEL_SONNET = "claude-sonnet-4-6"
+MODEL_OPUS = "claude-opus-4-7"
+
+
+# Spec-listed HIGH-RISK paths that *always* route to opus regardless of
+# diff size or other heuristics. Mix of prefixes (``alembic/versions/``)
+# and exact file names (``CLAUDE.md``); the ``_path_is_high_risk``
+# helper handles both. Adding a path here is a one-line change; please
+# also extend ``docs/ops/ai_reviewer.md`` so the runbook stays in sync.
+HIGH_RISK_PATH_PREFIXES: tuple[str, ...] = (
+    "alembic/versions/",
+    "backend/alembic/versions/",
+    "security/",
+    "backend/security/",
+    "deploy/",
+    ".gerrit/",
+    "config/",
+    "configs/",
+)
+
+HIGH_RISK_FILES: tuple[str, ...] = (
+    "backend/submit_rule.py",
+    "backend/merger_agent.py",
+    "backend/merge_arbiter.py",
+    "CLAUDE.md",
+)
+
+HIGH_RISK_SUFFIXES: tuple[str, ...] = (
+    ".sql",
+)
+
+
+# Path prefixes that route to sonnet (mid-risk). Anything not matching
+# high-risk *or* sonnet falls back to haiku (default / docs / scripts).
+SONNET_PATH_PREFIXES: tuple[str, ...] = (
+    "backend/",
+    "frontend/",
+    "lib/",
+    "components/",
+    "app/",
+)
+
+
+# Diff size cap (added + removed lines). Above this we skip the LLM
+# review entirely and post a "too large" comment with score 0 — humans
+# must deep-review oversized patches anyway, and the LLM's signal
+# degrades sharply past ~1k LOC of diff.
+DEFAULT_REVIEW_DIFF_LIMIT_LOC = 1500
+
+
+def _path_is_high_risk(path: str) -> bool:
+    """True if a file path matches any HIGH-RISK rule (prefix, exact, suffix)."""
+    if not path or path == "/COMMIT_MSG":
+        return False
+    if path in HIGH_RISK_FILES:
+        return True
+    for prefix in HIGH_RISK_PATH_PREFIXES:
+        if path.startswith(prefix):
+            return True
+    for suffix in HIGH_RISK_SUFFIXES:
+        if path.endswith(suffix):
+            return True
+    return False
+
+
+def _path_is_sonnet(path: str) -> bool:
+    """True if a file path falls into the sonnet (mid-risk) tier."""
+    if not path or path == "/COMMIT_MSG":
+        return False
+    return any(path.startswith(p) for p in SONNET_PATH_PREFIXES)
+
+
+def route_model(
+    diff: str = "",
+    *,
+    files: Iterable[str] = (),
+) -> str:
+    """Pick the model tier (haiku / sonnet / opus) for a patchset.
+
+    The decision is path-based:
+
+      * If *any* file matches HIGH-RISK rules → opus.
+      * Else if *any* file is under a sonnet prefix → sonnet.
+      * Else → haiku (the cheap baseline; docs, scripts, configs that
+        don't sit under a high-risk root, etc.).
+
+    *diff* is currently unused for routing but is part of the public
+    signature per the OP-713 spec — future heuristics (e.g. heuristic
+    LOC-based opus escalation) can drop in without breaking callers.
+    The unused-arg pattern matches the spec:
+    ``route_model(diff)`` from the ticket description.
+    """
+    file_list = [f for f in files if f and f != "/COMMIT_MSG"]
+    if any(_path_is_high_risk(f) for f in file_list):
+        return MODEL_OPUS
+    if any(_path_is_sonnet(f) for f in file_list):
+        return MODEL_SONNET
+    return MODEL_HAIKU
+
+
+def diff_loc(diff: str) -> int:
+    """Count added + removed lines in a unified diff string.
+
+    Counts lines beginning with ``+`` or ``-`` but not the ``+++ ``/
+    ``--- `` file headers. Empty / non-diff inputs return 0.
+    """
+    if not diff:
+        return 0
+    n = 0
+    for line in diff.splitlines():
+        if not line:
+            continue
+        first = line[0]
+        if first not in ("+", "-"):
+            continue
+        # Skip the file headers (``+++ b/foo.py`` / ``--- a/foo.py``)
+        if line.startswith("+++ ") or line.startswith("--- "):
+            continue
+        n += 1
+    return n
+
+
+def is_too_large(
+    *,
+    diff: str = "",
+    insertions: int | None = None,
+    deletions: int | None = None,
+    limit: int = DEFAULT_REVIEW_DIFF_LIMIT_LOC,
+) -> bool:
+    """Return True iff the diff is over the LLM review size cap.
+
+    Caller can pass either a raw ``diff`` string (we count via
+    :func:`diff_loc`) OR pre-counted ``insertions`` / ``deletions`` as
+    reported by Gerrit's patch-set metadata. When both are supplied the
+    pre-counted numbers win — they're cheaper and the Gerrit number is
+    authoritative.
+    """
+    if insertions is not None or deletions is not None:
+        total = (insertions or 0) + (deletions or 0)
+    else:
+        total = diff_loc(diff)
+    return total > limit
+
+
+def too_large_message(
+    *,
+    insertions: int | None = None,
+    deletions: int | None = None,
+    diff: str = "",
+    limit: int = DEFAULT_REVIEW_DIFF_LIMIT_LOC,
+    model_id: str = "",
+) -> str:
+    """Message posted when a patchset trips the size cap.
+
+    Phrasing pinned by AC #4: ``too large for AI review, please ensure
+    human deep-review``. The trailing footer convention keeps the comment
+    grep-able by the cost dashboard."""
+    if insertions is not None or deletions is not None:
+        total = (insertions or 0) + (deletions or 0)
+    else:
+        total = diff_loc(diff)
+    base = (
+        "too large for AI review, please ensure human deep-review "
+        f"(diff size {total} > {limit} LOC limit)."
+    )
+    return _with_footer(base, model_id=model_id, cost_usd=0.0)
+
+
+# ── Throttle / idempotency ───────────────────────────────────────────
+
+
+# Per-worker in-memory cache. Keyed by ``(change_id, revision)`` →
+# epoch-seconds of last review. Multi-worker dedup is best-effort: the
+# webhook plugin retries are usually re-delivered to the same worker
+# inside the throttle window, and Gerrit itself merges duplicate label
+# scores on the same revision (so worst-case duplicate posts are a
+# benign double-comment, not a double-score). Move to Redis if the dup
+# rate becomes operator-visible.
+_THROTTLE: dict[tuple[str, str], float] = {}
+DEFAULT_THROTTLE_TTL_S = 24 * 3600
+
+
+def should_skip_recent(
+    change_id: str,
+    revision: str,
+    *,
+    now: float | None = None,
+    ttl_s: float = DEFAULT_THROTTLE_TTL_S,
+) -> bool:
+    """True iff this ``(change_id, revision)`` was reviewed within ttl_s."""
+    if not change_id or not revision:
+        return False
+    key = (change_id, revision)
+    last = _THROTTLE.get(key)
+    if last is None:
+        return False
+    current = now if now is not None else time.time()
+    return (current - last) < ttl_s
+
+
+def mark_reviewed(
+    change_id: str,
+    revision: str,
+    *,
+    now: float | None = None,
+) -> None:
+    """Record a review event in the throttle cache."""
+    if not change_id or not revision:
+        return
+    _THROTTLE[(change_id, revision)] = (
+        now if now is not None else time.time()
+    )
+
+
+def reset_throttle() -> None:
+    """Clear the throttle cache. Test-only — production has no caller."""
+    _THROTTLE.clear()
+
+
+# ── Review result + LLM invocation ───────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ReviewResult:
+    """Outcome of one ``review_patchset`` call.
+
+    ``score`` is the Code-Review label value to post: +1 for approve, 0
+    for "uncertain / could not parse / size-cap skip" (the default
+    OP-713 skip score). The AI never posts -1 or +2. ``message`` is the
+    full Gerrit comment body, footer included. ``model_id`` /
+    ``input_tokens`` / ``output_tokens`` / ``cost_usd`` feed the
+    billing-event recorder.
+    """
+
+    score: int
+    message: str
+    model_id: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    skipped_reason: str = ""
+
+
+# Footer convention pinned by the OP-713 spec ("every AI review comment
+# ends with 'reviewed-by: <model_id> · cost: $X.XX' for observability").
+# Kept as a module-level format string so cost-dashboard greps stay
+# stable.
+_FOOTER_FMT = "reviewed-by: {model_id} · cost: ${cost_usd:.2f}"
+
+
+def _with_footer(message: str, *, model_id: str, cost_usd: float) -> str:
+    if not model_id:
+        return message
+    footer = _FOOTER_FMT.format(model_id=model_id, cost_usd=cost_usd)
+    return f"{message}\n\n{footer}"
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough char/4 fallback when the provider doesn't surface usage."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+_REVIEW_PROMPT_HEADER = (
+    "You are an automated AI code reviewer for a Gerrit patchset. The "
+    "human reviewer always casts the final +2; your role is signal "
+    "only. Be brief: at most 8 lines, no preamble. Comment on bugs, "
+    "missing tests, security risks, or contract violations. If the "
+    "diff looks fine, reply with a single line approving the patch."
+)
+
+
+def _build_review_prompt(
+    diff: str,
+    *,
+    files: Sequence[str] = (),
+    subject: str = "",
+) -> str:
+    parts = [_REVIEW_PROMPT_HEADER]
+    if subject:
+        parts.append(f"\nChange subject: {subject}")
+    if files:
+        joined = ", ".join(files[:20])
+        parts.append(f"\nFiles touched ({len(files)}): {joined}")
+    if diff:
+        parts.append("\nUnified diff:\n" + diff)
+    return "\n".join(parts)
+
+
+def review_patchset(
+    diff: str,
+    model: str = "",
+    *,
+    files: Sequence[str] = (),
+    subject: str = "",
+    insertions: int | None = None,
+    deletions: int | None = None,
+    diff_limit: int = DEFAULT_REVIEW_DIFF_LIMIT_LOC,
+    invoke: Callable[..., str] | None = None,
+    pricing: Callable[[str | None, str], tuple[float, float]] | None = None,
+) -> ReviewResult:
+    """Run one LLM-backed review pass over a diff.
+
+    *diff* is the unified-diff text. *model* is the explicit model tier
+    (defaults to :func:`route_model` over *files*). *files* /
+    *subject* are wired into the prompt for context. *insertions* /
+    *deletions* let the caller use Gerrit's authoritative LOC counts
+    when available.
+
+    Returns a :class:`ReviewResult` with score +1 on success or 0 on
+    over-cap / empty / parse-failed. The comment body always carries
+    the ``reviewed-by: <model> · cost: $X.XX`` footer.
+
+    *invoke* / *pricing* are dependency-injection seams for tests:
+
+      * ``invoke(messages, *, model)`` returning the reply string.
+        Default: ``backend.llm_adapter.invoke_chat`` with
+        ``provider="anthropic"``.
+      * ``pricing(provider, model)`` returning ``(input_per_mtok,
+        output_per_mtok)``. Default: ``backend.pricing.get_pricing``.
+    """
+    chosen_model = (model or route_model(diff, files=files)).strip()
+
+    # Size-cap fast path — no LLM call.
+    if is_too_large(
+        diff=diff,
+        insertions=insertions,
+        deletions=deletions,
+        limit=diff_limit,
+    ):
+        message = too_large_message(
+            insertions=insertions,
+            deletions=deletions,
+            diff=diff,
+            limit=diff_limit,
+            model_id=chosen_model,
+        )
+        return ReviewResult(
+            score=0,
+            message=message,
+            model_id=chosen_model,
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            skipped_reason="too_large",
+        )
+
+    prompt = _build_review_prompt(diff, files=tuple(files), subject=subject)
+
+    if invoke is None:
+        from backend.llm_adapter import invoke_chat as _invoke_chat
+        from langchain_core.messages import HumanMessage
+
+        def _default_invoke(messages: Any, *, model: str) -> str:
+            return _invoke_chat(
+                [HumanMessage(content=messages)] if isinstance(messages, str)
+                else messages,
+                provider="anthropic",
+                model=model,
+            )
+        invoke = _default_invoke
+
+    try:
+        reply_text = invoke(prompt, model=chosen_model) or ""
+    except Exception as exc:
+        logger.warning(
+            "ai_reviewer.review_patchset: LLM invocation failed: %s",
+            exc,
+        )
+        return ReviewResult(
+            score=0,
+            message=_with_footer(
+                "AI review skipped — LLM provider error. "
+                "Please review manually.",
+                model_id=chosen_model,
+                cost_usd=0.0,
+            ),
+            model_id=chosen_model,
+            skipped_reason="invoke_error",
+        )
+
+    reply = (reply_text or "").strip()
+    if not reply:
+        return ReviewResult(
+            score=0,
+            message=_with_footer(
+                "AI review produced no output. Please review manually.",
+                model_id=chosen_model,
+                cost_usd=0.0,
+            ),
+            model_id=chosen_model,
+            skipped_reason="empty_reply",
+        )
+
+    # Token + cost accounting. The adapter doesn't surface usage so we
+    # fall back to a char/4 estimate. Pricing rates come from the
+    # central pricing table so a YAML update is reflected here without
+    # code changes (matches the rest of the backend's billing path).
+    if pricing is None:
+        from backend.pricing import get_pricing as _get_pricing
+        pricing = _get_pricing
+    input_per_mtok, output_per_mtok = pricing("anthropic", chosen_model)
+    input_tokens = _estimate_tokens(prompt)
+    output_tokens = _estimate_tokens(reply)
+    cost_usd = round(
+        input_tokens * input_per_mtok / 1_000_000.0
+        + output_tokens * output_per_mtok / 1_000_000.0,
+        6,
+    )
+
+    return ReviewResult(
+        score=_score_from_reply(reply),
+        message=_with_footer(reply, model_id=chosen_model, cost_usd=cost_usd),
+        model_id=chosen_model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost_usd,
+    )
+
+
+_REJECT_RX = re.compile(
+    r"\b(REJECT|NEEDS[ _-]?WORK|BLOCKER|do not merge|cannot approve)\b",
+    re.IGNORECASE,
+)
+
+
+def _score_from_reply(reply: str) -> int:
+    """Map an LLM reply to a Code-Review score.
+
+    Per CLAUDE.md L1 the AI's max signal is +1; we never escalate to
+    +2. We return 0 (not -1) when the model's verdict is uncertain or
+    we can't parse it — that lets the human reviewer drive the
+    decision without an AI veto blocking submission via the No-Veto
+    submit-requirement.
+
+    OP-713 is intentionally permissive: cost-over-correctness, +1 is
+    signal-only. We only downgrade to 0 if the reply explicitly says
+    "REJECT" or equivalent. Future tickets may extend this to a -1
+    path if dashboards show we're rubber-stamping bad changes.
+    """
+    if _REJECT_RX.search(reply):
+        return 0
+    return 1
+
+
+__all__ = [
+    "AIReviewVerdict",
+    "BATCH_MERGE_HASHTAG",
+    "Change",
+    "ChangeFile",
+    "DEFAULT_REVIEW_DIFF_LIMIT_LOC",
+    "DEFAULT_THROTTLE_TTL_S",
+    "HIGH_RISK_FILES",
+    "HIGH_RISK_PATH_PREFIXES",
+    "HIGH_RISK_SUFFIXES",
+    "MODEL_HAIKU",
+    "MODEL_OPUS",
+    "MODEL_SONNET",
+    "ReviewResult",
+    "SAFETY_CRITICAL_PATHS",
+    "Severity",
+    "SONNET_PATH_PREFIXES",
+    "auto_plus_one_message",
+    "auto_plus_one_skip_message",
+    "can_auto_plus_one",
+    "diff_loc",
+    "is_too_large",
+    "mark_reviewed",
+    "reset_throttle",
+    "review_patchset",
+    "route_model",
+    "should_skip_recent",
+    "too_large_message",
+]

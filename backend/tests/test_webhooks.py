@@ -1080,3 +1080,274 @@ class TestGerritWebhookSignatureVerifier:
         mock_patchset.assert_called_once()
         mock_comment.assert_not_called()
         mock_merged.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# OP-713 — AI Reviewer wiring: _on_patchset_created + _run_ai_review
+# ──────────────────────────────────────────────────────────────────────
+#
+# These tests pin the ticket's Phase 2/3 wiring contract:
+#   * The merger-bot uploader is filtered before the LLM is touched
+#     (loop prevention — same rule the OP-714 proactive merger has).
+#   * The (change_id, revision) throttle skips a duplicate event for
+#     the same SHA inside the 24 h TTL (AC #6).
+#   * Oversized patchsets post score=0 with the canonical "too large"
+#     message (AC #4).
+#   * Happy path posts Code-Review +1 with the chosen model in the
+#     comment footer (AC #2 + AC #5).
+#
+# ``_run_ai_review`` is the unit tested directly — the dispatcher tests
+# above already lock that ``_on_patchset_created`` is invoked for the
+# event type. Going through ``_run_ai_review`` keeps these tests fast
+# (no asyncio.create_task race) while still exercising the real
+# routing/posting/recording wiring against a stub Gerrit client.
+
+
+class _StubGerritClient:
+    """In-memory stand-in for ``backend.gerrit.gerrit_client``.
+
+    Captures ``post_review`` invocations and serves a pre-set
+    ``query_change`` payload. Anything we don't override returns the
+    same ``{"error": "..."}`` shape the real client uses, so
+    ``_run_ai_review`` exercises its error branches identically.
+    """
+
+    def __init__(self, *, files=None, subject=""):
+        self._files = files or []
+        self._subject = subject
+        self.posted_reviews: list[dict] = []
+
+    async def query_change(self, change_id, project=""):
+        return {
+            "subject": self._subject,
+            "currentPatchSet": {
+                "files": [{"file": f} for f in self._files],
+            },
+        }
+
+    async def post_review(self, *, commit, message, labels, project=""):
+        self.posted_reviews.append({
+            "commit": commit,
+            "message": message,
+            "labels": dict(labels or {}),
+            "project": project,
+        })
+        return {"status": "ok", "commit": commit}
+
+
+class TestAIReviewerWiring:
+    """OP-713 — patchset-created → AI Reviewer plumbing."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_throttle(self):
+        from backend.agents import ai_reviewer
+        ai_reviewer.reset_throttle()
+        yield
+        ai_reviewer.reset_throttle()
+
+    @pytest.mark.asyncio
+    async def test_merger_uploader_short_circuits(self, monkeypatch):
+        """Loop prevention: a patchset uploaded by ``merger-agent-bot``
+        must never spawn an AI review (would feedback-loop with the
+        OP-714 conflict resolution patchsets)."""
+        from backend.routers import webhooks
+        from backend.agents import ai_reviewer
+
+        # Make sure we'd notice if the body fired
+        run_calls = []
+        async def fake_run_ai_review(**kw):
+            run_calls.append(kw)
+        monkeypatch.setattr(webhooks, "_run_ai_review", fake_run_ai_review)
+        # Silence the L2 notification.
+        from backend import notifications
+        async def _noop_notify(*a, **kw):
+            pass
+        monkeypatch.setattr(notifications, "notify", _noop_notify)
+
+        event = {
+            "type": "patchset-created",
+            "change": {"id": "Imerger01", "subject": "merger resolve"},
+            "patchSet": {
+                "revision": "deadbeef" * 5,
+                "uploader": {
+                    "name": "Merger Agent Bot",
+                    "username": "merger-agent-bot",
+                    "email": "merger-agent-bot@example.com",
+                },
+            },
+        }
+        await webhooks._on_patchset_created(conn=None, event=event)
+
+        assert run_calls == []
+        # Throttle entry must NOT be set — we want the next non-merger
+        # event for the same change to still trigger a review.
+        assert ai_reviewer.should_skip_recent(
+            "Imerger01", "deadbeef" * 5,
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_throttle_blocks_duplicate_revision_within_24h(
+        self, monkeypatch,
+    ):
+        """AC #6: same change re-uploaded with the same revision SHA
+        twice within 24 h → only one AI review fires."""
+        from backend.routers import webhooks
+        from backend.agents import ai_reviewer
+
+        run_calls = []
+        async def fake_run_ai_review(**kw):
+            run_calls.append(kw)
+        monkeypatch.setattr(webhooks, "_run_ai_review", fake_run_ai_review)
+        from backend import notifications
+        async def _noop_notify(*a, **kw):
+            pass
+        monkeypatch.setattr(notifications, "notify", _noop_notify)
+
+        event = {
+            "type": "patchset-created",
+            "change": {"id": "Idup01", "subject": "first push"},
+            "patchSet": {
+                "revision": "abc12345" * 5,
+                "uploader": {"name": "alice"},
+                "sizeInsertions": 10,
+                "sizeDeletions": 2,
+            },
+        }
+        # First delivery — fires.
+        await webhooks._on_patchset_created(conn=None, event=event)
+        # Yield once so the asyncio.create_task'd background coroutine
+        # actually runs against the stubbed _run_ai_review and appends
+        # to ``run_calls``.
+        import asyncio as _asyncio
+        await _asyncio.sleep(0)
+
+        # Second delivery (Gerrit retried, same SHA) — throttled.
+        await webhooks._on_patchset_created(conn=None, event=event)
+        await _asyncio.sleep(0)
+
+        assert len(run_calls) == 1
+        assert ai_reviewer.should_skip_recent(
+            "Idup01", "abc12345" * 5,
+        ) is True
+
+    @pytest.mark.asyncio
+    async def test_run_ai_review_oversize_posts_too_large_with_score_zero(
+        self, monkeypatch,
+    ):
+        """AC #4: a >1500 LOC patchset gets score=0 and the canonical
+        ``too large for AI review`` body, and the LLM is never invoked."""
+        from backend.routers import webhooks
+        from backend.gerrit import gerrit_client as _real
+
+        stub = _StubGerritClient(files=["backend/big.py"], subject="huge refactor")
+        monkeypatch.setattr("backend.gerrit.gerrit_client", stub)
+
+        # Diff fetch must not be needed for the over-cap path; stub it
+        # to assert that.
+        async def _fake_fetch_diff(rev, project):
+            raise AssertionError("diff must not be fetched for over-cap path")
+        monkeypatch.setattr(webhooks, "_fetch_patchset_diff", _fake_fetch_diff)
+
+        # Pin LLM stub: should never be called either.
+        from backend.agents import ai_reviewer
+
+        def _no_invoke(prompt, *, model):
+            raise AssertionError("LLM must not be invoked for over-cap diffs")
+
+        # Re-route through the public API so the size-cap fast path runs
+        # with our stub Gerrit client. _run_ai_review reads
+        # ``ai_reviewer.is_too_large`` etc., but invokes the LLM through
+        # ``review_patchset`` only when below the cap — we exercise the
+        # over-cap branch end-to-end here.
+        await webhooks._run_ai_review(
+            change_id="Ibig01",
+            change_number="123",
+            revision="cafef00d" * 5,
+            project="omnisight",
+            subject="huge refactor",
+            insertions=1200,
+            deletions=400,  # 1600 total
+        )
+
+        assert len(stub.posted_reviews) == 1
+        post = stub.posted_reviews[0]
+        assert post["labels"] == {"Code-Review": 0}
+        assert "too large for AI review" in post["message"]
+        assert "human deep-review" in post["message"]
+
+    @pytest.mark.asyncio
+    async def test_run_ai_review_happy_path_posts_plus_one_with_model_footer(
+        self, monkeypatch,
+    ):
+        """AC #2 + AC #5: low-risk docs PSet → footer shows haiku model
+        and Code-Review +1 lands on the change."""
+        from backend.routers import webhooks
+        from backend.agents import ai_reviewer
+
+        stub = _StubGerritClient(
+            files=["docs/howto.md"],
+            subject="docs typo",
+        )
+        monkeypatch.setattr("backend.gerrit.gerrit_client", stub)
+
+        # No real workspace in tests — short-circuit the diff fetch.
+        async def _empty_diff(rev, project):
+            return ""
+        monkeypatch.setattr(webhooks, "_fetch_patchset_diff", _empty_diff)
+
+        # Stub the LLM call inside review_patchset by patching the
+        # `invoke_chat` import target; the simpler path is to monkey-
+        # patch ``review_patchset`` itself.
+        from backend.agents.ai_reviewer import (
+            MODEL_HAIKU, ReviewResult, _with_footer,
+        )
+        captured: dict = {}
+
+        def fake_review_patchset(diff, model="", *, files=(), subject="",
+                                  insertions=None, deletions=None, **kw):
+            captured["diff"] = diff
+            captured["files"] = tuple(files)
+            captured["subject"] = subject
+            chosen = ai_reviewer.route_model(diff=diff, files=files)
+            return ReviewResult(
+                score=1,
+                message=_with_footer(
+                    "LGTM — docs only.",
+                    model_id=chosen, cost_usd=0.0001,
+                ),
+                model_id=chosen,
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=0.0001,
+            )
+        monkeypatch.setattr(
+            ai_reviewer, "review_patchset", fake_review_patchset,
+        )
+
+        # Avoid the optional billing record reaching the real PG pool.
+        async def _noop_record(**kw):
+            return None
+        monkeypatch.setattr(
+            "backend.billing_usage.record_llm_call", _noop_record,
+        )
+
+        await webhooks._run_ai_review(
+            change_id="Idoc01",
+            change_number="456",
+            revision="fee1c0de" * 5,
+            project="omnisight",
+            subject="docs typo",
+            insertions=5,
+            deletions=1,
+        )
+
+        assert len(stub.posted_reviews) == 1
+        post = stub.posted_reviews[0]
+        assert post["labels"] == {"Code-Review": 1}
+        # Footer pinned: ``reviewed-by: <model_id> · cost: $X.XX``
+        assert "reviewed-by:" in post["message"]
+        assert MODEL_HAIKU in post["message"]
+        # Routing input arrived intact — the AI Reviewer saw the file
+        # list pulled from query_change.
+        assert captured["files"] == ("docs/howto.md",)
+        assert captured["subject"] == "docs typo"
