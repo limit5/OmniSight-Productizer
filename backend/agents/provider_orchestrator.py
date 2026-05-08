@@ -43,6 +43,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from threading import RLock
+from types import MappingProxyType
 
 from backend.agents.provider_quota_tracker import QuotaState
 from backend.agents.provider_quota_tracker import get_quota_state as _get_quota_state
@@ -111,6 +112,13 @@ class ProviderAdapter(ABC):
 _REGISTRY_LOCK = RLock()
 _REGISTRY: dict[str, ProviderAdapter] = {}
 
+SUBSCRIPTION_VENDOR_REGISTRY = MappingProxyType({
+    "anthropic": "anthropic-subscription",
+    "google": "gemini-subscription",
+    "openai": "openai-subscription",
+    "xai": "xai-subscription",
+})
+
 
 def register_adapter(adapter: ProviderAdapter) -> None:
     """Register or replace a provider adapter by its stable provider id."""
@@ -133,6 +141,20 @@ def list_adapters() -> list[str]:
     """Return registered provider ids in stable sort order."""
     with _REGISTRY_LOCK:
         return sorted(_REGISTRY)
+
+
+def list_subscription_vendors() -> list[str]:
+    """Return frontend-facing vendor ids covered by subscription adapters."""
+    return sorted(SUBSCRIPTION_VENDOR_REGISTRY)
+
+
+def subscription_adapter_id_for_vendor(vendor_id: str) -> str:
+    """Return the subscription adapter id for a frontend-facing vendor."""
+    key = vendor_id.strip().lower()
+    try:
+        return SUBSCRIPTION_VENDOR_REGISTRY[key]
+    except KeyError as exc:
+        raise ProviderNotRegistered(key) from exc
 
 
 class CircuitBreaker:
@@ -195,8 +217,11 @@ __all__ = [
     "ProviderAdapter",
     "ProviderNotRegistered",
     "QuotaState",
+    "SUBSCRIPTION_VENDOR_REGISTRY",
     "TaskSpec",
     "get_adapter",
     "list_adapters",
+    "list_subscription_vendors",
     "register_adapter",
+    "subscription_adapter_id_for_vendor",
 ]
