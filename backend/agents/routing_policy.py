@@ -39,7 +39,9 @@ from backend import feature_flags
 from backend.agents import buff_registry
 from backend.agents import cost_estimator
 from backend.agents import debuff_registry
+from backend.agents import difficulty_estimator
 from backend.agents import provider_orchestrator
+from backend.agents.difficulty_estimator import TaskDifficultyEstimate
 from backend.agents.provider_orchestrator import ProviderAdapter, TaskSpec
 from backend.agents.provider_quota_tracker import DEFAULT_5H_CAP_TOKENS, QuotaState
 from backend.sandbox_tier import Guild
@@ -162,10 +164,17 @@ class RoutingPolicy:
         # here for Tier S — re-evaluate folding it back into Tier M/L
         # _quota_first_sort_key if that boost was load-bearing for any
         # production routing scenario.
+        # OP-676 (L4.9.2): when the Meta-LLM difficulty router is enabled,
+        # the per-task difficulty estimate is computed once here and
+        # threaded through the sort key so every candidate sees the same
+        # provider-family preference multiplier.
         tier = _normalise_tier(task.tier)
         now = self._utcnow()
+        difficulty = _difficulty_estimate_for_task(task)
         candidates.sort(
-            key=lambda candidate: _tier_sort_key(tier, task, candidate, now=now)
+            key=lambda candidate: _tier_sort_key(
+                tier, task, candidate, now=now, difficulty=difficulty
+            )
         )
         return [candidate.adapter for candidate in candidates]
 
@@ -279,30 +288,32 @@ def _tier_sort_key(
     candidate: _Candidate,
     *,
     now: datetime | None = None,
+    difficulty: TaskDifficultyEstimate | None = None,
 ) -> tuple:
     if tier == "S":
         return (
             _predicted_cost_usd(task, candidate.adapter),
-            -_routing_priority_score(candidate, now=now),
+            -_routing_priority_score(candidate, now=now, difficulty=difficulty),
             candidate.circuit_open_count,
             candidate.provider_id,
         )
     if tier == "X":
         return (
-            -_routing_priority_score(candidate, now=now),
+            -_routing_priority_score(candidate, now=now, difficulty=difficulty),
             candidate.circuit_open_count,
             candidate.provider_id,
         )
-    return _quota_first_sort_key(candidate, now=now)
+    return _quota_first_sort_key(candidate, now=now, difficulty=difficulty)
 
 
 def _quota_first_sort_key(
     candidate: _Candidate,
     *,
     now: datetime | None = None,
+    difficulty: TaskDifficultyEstimate | None = None,
 ) -> tuple[float, int, str]:
     return (
-        -_routing_priority_score(candidate, now=now),
+        -_routing_priority_score(candidate, now=now, difficulty=difficulty),
         candidate.circuit_open_count,
         candidate.provider_id,
     )
@@ -312,9 +323,10 @@ def _routing_priority_score(
     candidate: _Candidate,
     *,
     now: datetime | None = None,
+    difficulty: TaskDifficultyEstimate | None = None,
 ) -> float:
     now = now or _default_utcnow()
-    return (
+    base = (
         candidate.remaining_5h_quota_ratio
         * buff_registry.routing_priority_multiplier_for_quota_ratio(
             candidate.remaining_5h_quota_ratio
@@ -324,6 +336,19 @@ def _routing_priority_score(
             candidate.last_retrained_at,
         )
     )
+    if difficulty is None:
+        return base
+    family = _provider_family(candidate.provider_id)
+    return base * difficulty_estimator.provider_preference_multiplier(
+        difficulty.difficulty, family
+    )
+
+
+def _difficulty_estimate_for_task(task: TaskSpec) -> TaskDifficultyEstimate | None:
+    """Return the Meta-LLM difficulty estimate for ``task`` when enabled."""
+    if not difficulty_estimator.is_enabled():
+        return None
+    return difficulty_estimator.estimate_difficulty(task)
 
 
 def _predicted_cost_usd(task: TaskSpec, adapter: ProviderAdapter) -> float:
