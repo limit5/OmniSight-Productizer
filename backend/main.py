@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 import re
 import secrets
 
-from fastapi import APIRouter, FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response as StarletteResponse
 
@@ -15,26 +15,30 @@ from backend.config import settings
 from backend.routers import agents, artifacts, chat, events, health, host as _host_router, integration, invoke, providers, simulations, system, tasks, tools, webhooks, workflow as wf_router, workspaces
 from backend import db
 from backend import lifecycle as _lifecycle
+from backend import api_versioning as _api_versioning
 
-API_V1_PREFIX = "/api/v1"
-API_V2_PREFIX = "/api/v2"
-SUPPORTED_API_VERSIONS = ("v1", "v2")
-DEFAULT_API_VERSION = "v1"
-MIN_FRONTEND_API_VERSION = "v1"
-V1_SUNSET_HEADER = "Tue, 30 Jun 2026 23:59:59 GMT"
-DEPRECATED_API_VERSIONS = {
-    "v1": {"sunset": V1_SUNSET_HEADER},
-}
+# OP-797 refactor (2026-05-08): URL-versioned routers and middleware live in
+# backend.api_versioning. Re-exports preserve test/import contracts.
+API_V1_PREFIX = _api_versioning.API_V1_PREFIX
+API_V2_PREFIX = _api_versioning.API_V2_PREFIX
+SUPPORTED_API_VERSIONS = _api_versioning.SUPPORTED_API_VERSIONS
+DEFAULT_API_VERSION = _api_versioning.DEFAULT_API_VERSION
+MIN_FRONTEND_API_VERSION = _api_versioning.MIN_FRONTEND_API_VERSION
+V1_SUNSET_HEADER = _api_versioning.V1_SUNSET_HEADER
+DEPRECATED_API_VERSIONS = _api_versioning.DEPRECATED_API_VERSIONS
+api_v1_router = _api_versioning.api_v1_router
+api_v2_router = _api_versioning.api_v2_router
 
 
 def _api_relative_path(path: str) -> str:
-    """Return the route path after a supported API version prefix."""
-    for prefix in (API_V1_PREFIX, API_V2_PREFIX, settings.api_prefix):
-        if path == prefix:
-            return "/"
-        if path.startswith(prefix + "/"):
-            return path.removeprefix(prefix)
-    return path
+    """Return the route path after a supported API version prefix.
+
+    Thin wrapper that pins the fallback prefix to settings.api_prefix —
+    factored into backend.api_versioning so middleware gates compose
+    against a single source of truth.
+    """
+    return _api_versioning.api_relative_path(path, settings.api_prefix)
+
 
 async def _startup_cleanup(log):
     """Reset stuck states left over from a previous crash."""
@@ -1191,13 +1195,7 @@ async def _bootstrap_gate(request, call_next):
     return RedirectResponse(url="/bootstrap", status_code=307)
 
 
-@app.middleware("http")
-async def _api_deprecation_headers(request, call_next):
-    response = await call_next(request)
-    if request.url.path == API_V1_PREFIX or request.url.path.startswith(API_V1_PREFIX + "/"):
-        response.headers.setdefault("Deprecation", "true")
-        response.headers.setdefault("Sunset", V1_SUNSET_HEADER)
-    return response
+_api_versioning.install_deprecation_headers_middleware(app)
 
 
 @app.middleware("http")
@@ -1249,23 +1247,16 @@ from backend import error_aggregation as _error_aggregation
 _error_aggregation.install_error_aggregation(app)
 
 
-@app.get("/api/version", tags=["api-version"], include_in_schema=False)
-async def api_version():
-    return {
-        "supported_versions": list(SUPPORTED_API_VERSIONS),
-        "default_version": DEFAULT_API_VERSION,
-        "min_frontend_api_version": MIN_FRONTEND_API_VERSION,
-        "deprecated_versions": DEPRECATED_API_VERSIONS,
-    }
+_api_versioning.install_version_metadata_endpoint(app)
 
 
-api_v1_router = APIRouter()
-api_v2_router = APIRouter()
+def _include_versioned_router(router) -> None:
+    """Register a router under both /api/v1 and /api/v2 surfaces.
 
-
-def _include_versioned_router(router: APIRouter) -> None:
-    api_v1_router.include_router(router)
-    api_v2_router.include_router(router)
+    Thin wrapper kept for the historical mount block below; new code
+    should pass routers via backend.api_versioning.register_versioned_api.
+    """
+    _api_versioning.include_versioned_router(router)
 
 
 # Mount routers
@@ -1440,6 +1431,10 @@ _include_versioned_router(_ci_dead_letter_router.router)
 from backend.routers import conflict_dashboard as _conflict_dashboard_router  # OP-746 conflict-rate observability tile
 _include_versioned_router(_conflict_dashboard_router.router)
 
+# Final mount: attach the aggregate v1 + v2 routers to the app. The
+# routers themselves were populated above via _include_versioned_router
+# (kept for historical clarity); backend.api_versioning owns the prefix
+# choice and the include_in_schema split between v1 (canonical) and v2.
 app.include_router(api_v1_router, prefix=API_V1_PREFIX)
 app.include_router(api_v2_router, prefix=API_V2_PREFIX, include_in_schema=False)
 
