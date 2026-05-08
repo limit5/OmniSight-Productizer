@@ -32,11 +32,13 @@ debug/
 backend/.venv/
 /venv/
 /.venv/
+docs-site/.venv/
 __pycache__/
 *.pyc
 
 # build artifacts
 /build/
+/docs-site-dist/
 
 # docs-site build artifact (OP-785 / OP-792) — emitted by mkdocs build
 # (or backend.docs_static_site stop-gap) and published to GitHub Pages

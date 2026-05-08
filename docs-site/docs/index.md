@@ -1,25 +1,31 @@
+---
+title: OmniSight Docs
+---
+
 # OmniSight Docs
 
-This site is the public render of the OmniSight repository's living documentation.
+Internal documentation site for the OmniSight platform. The five top-level
+sections mirror the document classes in the repo:
 
-The framework decision is captured in [ADR-0012 — Docs-site framework](https://github.com/anthropics/OmniSight/blob/develop/docs/adr/ADR-0012-docs-site-framework.md) (META OP-785). Subsequent migration tickets will route the existing operator docs, ADRs, and tool reference into this site.
+- [SOPs](sop/index.md) — standard operating procedures that govern how work
+  is planned, reviewed, and shipped.
+- [ADRs](adr/index.md) — architecture decision records.
+- [Lessons](lessons/index.md) — per-ticket lessons captured after a non-trivial
+  fix or unexpected outcome.
+- [Runbooks](runbook/index.md) — step-by-step operator playbooks for live
+  systems (deploys, recovery, rotations).
+- [Operations](operations/index.md) — operational reference (pipelines,
+  dashboards, integrations).
 
-## Sections
+This site is built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/).
+The scaffold landed in OP-786; subsequent tickets migrate the full corpus from
+`docs/` and wire it into the OP-792 develop-merge publish pipeline.
 
-- [Lessons](lessons/index.md) — engineering lessons learned, one file per lesson, indexed by date and ticket.
+## Local preview
 
-## How to run locally
-
-```sh
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/mkdocs serve --dirty
+```bash
+make docs-serve
 ```
 
-The dev server reloads on every save with sub-second incremental rebuilds. To produce the publishable artifact, run:
-
-```sh
-.venv/bin/mkdocs build
-```
-
-Output lands in `docs-site-dist/` (configured via `site_dir` in `mkdocs.yml`), which the OP-792 GitHub Pages workflow already publishes on every `develop` merge.
+Then open <http://127.0.0.1:8765>. To use a different port, pass
+`DOCS_PORT=NNNN`.

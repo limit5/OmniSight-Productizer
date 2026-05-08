@@ -1,23 +1,18 @@
 ---
-title: Lessons Learned — index
+title: Lessons
 ---
 
 # Lessons Learned
 
-Each engineering lesson lives as a single file under `docs/sop/lessons/L-*.md`. This page is the human-friendly index that the OP-787 dynamic indexer will populate as part of the full migration. The spike below shows one entry rendered.
+Per-ticket lessons captured after a non-trivial fix, surprising failure, or
+generalisable insight. Each lesson is named `L-<TICKET>-<slug>.md` and follows
+the *Situation / Fix (immediate) / Fix (future) / Verification / Generalisation*
+template. Vague entries ("be more careful") are auto-rejected per the
+[ticket conventions](../sop/jira-ticket-conventions.md) §14.
 
-## Index (spike)
+Currently published in this scaffold:
 
-| ID | Date | Ticket | Lesson |
-|---|---|---|---|
-| L-OP-785 | 2026-05-08 | OP-785 | [MkDocs spike — framework decision](L-OP-785-mkdocs-spike.md) |
+- [L-OP-15 — Codex cuts feature branches per DoD; merger must scan multiple refs](L-OP-15-codex-feature-branches.md)
 
-## How JIRA cross-linking works on this site
-
-The hook at `docs-site/hooks/jira_links.py` rewrites bare ticket references in page markdown into Atlassian browse links. So a sentence that mentions OP-785 in prose lands on the rendered page as a clickable link to the ticket — no manual `[OP-785](https://...)` markup required at write-time.
-
-Inside fenced code blocks (`OP-785` here) and inline `code` spans, the rewrite is suppressed so example output stays verbatim:
-
-```text
-OP-785  ← stays bare inside code blocks
-```
+The full lessons corpus in `docs/sop/lessons/` will be migrated and indexed in
+follow-up tickets.
