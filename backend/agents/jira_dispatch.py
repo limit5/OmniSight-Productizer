@@ -19,7 +19,6 @@ Authentication: reads ``~/.config/omnisight/jira-claude.env`` /
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import urllib.error
@@ -28,8 +27,8 @@ from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
+from backend.config import settings
 from backend.agents.scheduler import TicketSnapshot
 from backend.agents.scope_to_paths import SCOPE_TO_PATHS
 
@@ -232,6 +231,84 @@ _GERRIT_AUTH_BY_CLASS: dict[str, tuple[str, Path]] = {
     "subscription-claude": ("claude-bot", Path("~/.config/omnisight/gerrit-claude-bot-ed25519").expanduser()),
     "api-anthropic":       ("claude-bot", Path("~/.config/omnisight/gerrit-claude-bot-ed25519").expanduser()),
 }
+
+
+def _backpressure_state_file(agent_class: str) -> Path:
+    return Path(f"/tmp/runner-backpressure-{agent_class}.state")
+
+
+def notify_operator(channel: str, severity: str, detail: str) -> None:
+    """Runner-local operator alert hook.
+
+    Kept deliberately small for OP-732: tests monkeypatch this function
+    to assert single-fire behaviour, while production gets a grep-able
+    stdout alert even if the broader notification stack is unavailable.
+    """
+    print(f"[{channel}] {severity}: {detail}")
+
+
+def _gerrit_auth_for_bot(bot_username: str) -> tuple[str, Path]:
+    for username, key_path in _GERRIT_AUTH_BY_CLASS.values():
+        if username == bot_username:
+            return username, key_path
+    raise ValueError(f"unknown Gerrit bot username: {bot_username}")
+
+
+def open_ps_count_for(bot_username: str) -> int:
+    """Return open Gerrit patchsets owned by ``bot_username``."""
+    user, ssh_key = _gerrit_auth_for_bot(bot_username)
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
+        f"{user}@{GERRIT_SSH_HOST}",
+        "gerrit", "query", "--format=JSON",
+        f"is:open owner:{bot_username}",
+    ]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    n = 0
+    for line in out.stdout.splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") == "stats":
+            n = int(data.get("rowCount", 0) or 0)
+    return n
+
+
+def backpressure_decide(agent_class: str) -> tuple[bool, str]:
+    """Hysteresis gate for runner pickup.
+
+    Returns ``(ok_to_pick_up, reason)``. A state file records only the
+    paused latch, so the runner re-notifies only when it crosses from
+    active to paused.
+    """
+    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
+    if auth is None:
+        raise ValueError(f"unknown agent_class for Gerrit auth: {agent_class}")
+
+    cap = settings.runner_ps_cap
+    floor = settings.runner_ps_floor
+    state_file = _backpressure_state_file(agent_class)
+    paused = state_file.exists() and state_file.read_text().strip() == "paused"
+    n = open_ps_count_for(auth[0])
+
+    if not paused and n >= cap:
+        state_file.write_text("paused")
+        notify_operator(
+            channel="runner-alerts",
+            severity="medium",
+            detail=(
+                f"{agent_class} runner paused: {n} open PSes >= {cap}. "
+                "Please review + +2 to drain the queue."
+            ),
+        )
+        return False, f"{n} open PSes (cap {cap})"
+    if paused and n <= floor:
+        state_file.unlink()
+        return True, f"resumed: {n} open PSes (floor {floor})"
+    if paused:
+        return False, f"{n} open PSes (cap {cap}, floor {floor})"
+    return True, f"active: {n} open PSes (cap {cap})"
 
 
 @dataclass(frozen=True)

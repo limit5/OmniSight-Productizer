@@ -268,6 +268,13 @@ def _finalize_under_review(
 def main() -> int:
     print(f"[runner] agent_class={AGENT_CLASS}, dry_run={DRY_RUN}")
     jira_dispatch.assert_worktree_config_enabled(REPO)
+    ok_to_pick_up, backpressure_reason = jira_dispatch.backpressure_decide(AGENT_CLASS)
+    if not ok_to_pick_up:
+        print(f"[runner] backpressure paused: {backpressure_reason}. Sleeping until next tick.")
+        return 0
+    if backpressure_reason.startswith("resumed"):
+        print(f"[runner] backpressure {backpressure_reason}")
+
     client = jira_dispatch.make_client(AGENT_CLASS)
     print(f"[runner] authenticated as {client.bot_email} ({client.bot_account_id})")
 

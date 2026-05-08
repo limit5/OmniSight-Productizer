@@ -600,6 +600,11 @@ class Settings(BaseSettings):
     # controls bucketing + cleanup semantics.
     prewarm_policy: str = "per_tenant"
 
+    # OP-732: per-bot Gerrit patchset backpressure for auto-runner-jira.py.
+    # Immutable per process: operators tune these via env before runner launch.
+    runner_ps_cap: int = 8
+    runner_ps_floor: int = 4
+
     # ─── Declared-only-to-satisfy-extra=forbid fields ────────────────
     # Phase-3-Runtime-v2 SP-3.1 (2026-04-20): these env vars are read
     # elsewhere in the codebase via ``os.environ.get(...)`` directly
