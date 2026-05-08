@@ -1,0 +1,50 @@
+# OP-713 — Gerrit webhooks plugin config (refs/meta/config)
+#
+# The Gerrit `webhooks` plugin v3.13.x reads ONLY from `webhooks.config`
+# on `refs/meta/config` — NOT from `project.config` (see lesson L22 in
+# docs/sop/lessons-learned.md). A `[plugin "webhooks"]` block inside
+# `project.config` is a silent no-op.
+#
+# Install procedure:
+#
+#   git fetch origin refs/meta/config:refs/remotes/origin/meta/config
+#   git checkout meta/config
+#   cp ../.gerrit/webhooks.config.example webhooks.config
+#   # edit `url` to point at the live backend host
+#   git add webhooks.config
+#   git commit -m "[OP-713] subscribe omnisight-bot webhook to patchset-created"
+#   git push origin HEAD:refs/meta/config
+#
+# Verify (within 30 s of the push, after a throwaway patchset):
+#
+#   journalctl -u omnisight-backend -f | grep "Gerrit webhook: type=patchset-created"
+#
+# Pre-OP-713 deployed state subscribed only to `change-merge-failed`
+# (OP-693 commit 0bf1b82c) — no AI reviewer touched any patchset. This
+# example sync-s the subscription up so AI Reviewer (OP-713) actually
+# fires.
+
+[remote "omnisight-backend"]
+    # Backend webhook handler — see backend/routers/webhooks.py::gerrit_webhook.
+    # Replace with the real host. Authentication is enforced upstream by
+    # Caddy / Cloudflare zero-trust (see OP-715 — the webhooks plugin
+    # itself has no signature support).
+    url = https://omnisight.example.internal/api/v1/webhooks/gerrit
+
+    # OP-713: AI Reviewer subscribes to patchset-created.
+    events = patchset-created
+
+    # OP-714 / OP-694: merger pipeline + replication signals.
+    events = change-merge-failed
+    events = comment-added
+    events = change-merged
+
+    # Optional retry tuning — defaults are usually fine, but override
+    # here if the backend takes >5 s on average (Gerrit rate-limits
+    # slow-responders globally). Today the AI Reviewer returns 200 in
+    # <100 ms because the LLM call is fire-and-forget via
+    # asyncio.create_task — so the default retry is a non-issue.
+    #
+    # connectionTimeout = 5000
+    # socketTimeout     = 5000
+    # maxTries          = 3
