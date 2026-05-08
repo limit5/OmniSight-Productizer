@@ -165,8 +165,12 @@ CLAUDE_WORKTREE = os.environ.get(
 TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_RUNNER_TIMEOUT_S", "1800"))
 
 
-def _invoke_cli(agent_class: str, prompt: str) -> int:
+def _invoke_cli(agent_class: str, prompt: str, failure_context: str | None = None) -> int:
     """Invoke the underlying CLI for this agent_class. Returns exit code."""
+    full_prompt = prompt
+    if failure_context:
+        full_prompt = f"{prompt.rstrip()}\n\n{failure_context.strip()}\n"
+
     if agent_class == "subscription-codex":
         if not os.path.isdir(CODEX_WORKTREE):
             print(f"[runner] codex worktree missing: {CODEX_WORKTREE}", file=sys.stderr)
@@ -176,7 +180,7 @@ def _invoke_cli(agent_class: str, prompt: str) -> int:
         if not os.path.isdir(CLAUDE_WORKTREE):
             print(f"[runner] claude worktree missing: {CLAUDE_WORKTREE}", file=sys.stderr)
             return 2
-        cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
+        cmd = ["claude", "--dangerously-skip-permissions", "-p", full_prompt]
     elif agent_class.startswith("api-"):
         print(f"[runner] agent_class={agent_class} requires SDK invocation, not CLI. Skipping invoke.")
         return 99
@@ -185,7 +189,7 @@ def _invoke_cli(agent_class: str, prompt: str) -> int:
         return 2
 
     if DRY_RUN:
-        print(f"[runner] DRY_RUN: would invoke `{' '.join(cmd[:3])}...` with {len(prompt)} char prompt")
+        print(f"[runner] DRY_RUN: would invoke `{' '.join(cmd[:3])}...` with {len(full_prompt)} char prompt")
         return 0
 
     print(f"[runner] invoking {cmd[0]} (timeout {TASK_TIMEOUT_S}s)...")
@@ -199,7 +203,7 @@ def _invoke_cli(agent_class: str, prompt: str) -> int:
             start_new_session=True,
         )
         if cmd[0] == "codex":
-            proc.communicate(input=prompt, timeout=TASK_TIMEOUT_S)
+            proc.communicate(input=full_prompt, timeout=TASK_TIMEOUT_S)
         else:
             proc.communicate(timeout=TASK_TIMEOUT_S)
         return proc.returncode

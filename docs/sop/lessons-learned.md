@@ -506,7 +506,6 @@ rebase behavior, and runbook migration notes.
 from "surface blocks submit." Ship the label/status/permission surface
 first, prove operators can read and recover it, then flip enforcement
 in a later change with live signal and rollback mechanics in place.
-<<<<<<< HEAD
 
 
 ## Lesson 29 — Terminal events should permissively converge workflow state (2026-05-08)
@@ -533,6 +532,21 @@ event should converge workflow state from any safe predecessor, not only
 from the ideal predecessor. Preserve explicit terminal/operator override
 states, but do not strand work because a best-effort intermediate event
 was missed.
-=======
->>>>>>> 0652e0a7 ([OP-737] Add runner-pickable JIRA ticket helper)
+<<<<<<< HEAD
+
+
+
 >>>>>>> 1adbec62 ([OP-737] Add runner-pickable JIRA ticket helper)
+=======
+
+
+## Lesson 30 — CI recovery needs a small explicit state machine (2026-05-08)
+
+**Situation**: OP-739's parallel CI gate makes Gerrit ``Verified -1`` a normal runner input instead of an operator-only event. Without a recovery state machine, a single flaky timeout, stale base, or simple test failure leaves the patchset stalled until a human notices.
+
+**Fix**: OP-741 models ``Verified -1`` as ``categorize -> loop guard -> strategy dispatch``. The failure category selects one of retry, R3 rebase, bot-patch, or escalation; the attempt labels fire a medium notification on attempt 3 and hard-stop on attempt 6 with ``runner-loop-paused-pending-review``.
+
+**Verification**: `backend/tests/test_ci_recovery.py` exercises the five categories, all strategy branches, timeout retry/escalation, the four operator escapes, and a synthetic 50-PS soak with audit trail coverage.
+
+**Generalisation**: CI automation should treat logs as typed events before taking action. Keep the categorizer small, make the loop guard run before any retry/rebase/patch action, and ensure every operator escape writes an audit trail so bypasses are reviewable later.
+>>>>>>> 67453754 ([OP-741] Add CI failure recovery state machine)

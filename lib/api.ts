@@ -3182,6 +3182,64 @@ export async function approveBatchMergeCandidates(
   })
 }
 
+// ─── CI recovery dead-letter dashboard (OP-741) ─────────────────
+
+export interface CiDeadLetterChange {
+  number: number
+  jira_key: string
+  patchset: number
+  commit_sha: string
+  subject: string
+  project: string
+  labels: string[]
+}
+
+export interface CiDeadLetterRow {
+  change: CiDeadLetterChange
+  reason: string
+  paused_at: number
+  attempt_count: number
+  audit_trail: Array<Record<string, unknown>>
+}
+
+export interface CiDeadLetterListResponse {
+  items: CiDeadLetterRow[]
+  operator: string
+  fetched_at: number
+}
+
+export type CiDeadLetterAction =
+  | "retrigger-ci"
+  | "abandon-ps"
+  | "mark-quarantine"
+  | "manual-review"
+
+export interface CiDeadLetterActionResponse {
+  ok: boolean
+  jira_key: string
+  action: CiDeadLetterAction
+  operator: string
+}
+
+export async function listCiDeadLetters(): Promise<CiDeadLetterListResponse> {
+  return request<CiDeadLetterListResponse>("/admin/ci-dead-letter")
+}
+
+export async function applyCiDeadLetterAction(
+  jiraKey: string,
+  action: CiDeadLetterAction,
+  reason?: string,
+): Promise<CiDeadLetterActionResponse> {
+  return request<CiDeadLetterActionResponse>("/admin/ci-dead-letter/action", {
+    method: "POST",
+    body: JSON.stringify({
+      jira_key: jiraKey,
+      action,
+      ...(reason ? { reason } : {}),
+    }),
+  })
+}
+
 // ─── External A2A agent registry (BP.A2A.6 operator UI) ─────────
 
 export type ExternalAgentAuthMode = "none" | "bearer" | "oauth2"

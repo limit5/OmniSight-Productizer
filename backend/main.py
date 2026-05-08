@@ -1366,6 +1366,8 @@ from backend.routers import external_agents as _external_agents_router  # BP.A2A
 app.include_router(_external_agents_router.router, prefix=settings.api_prefix)
 from backend.routers import batch_merge as _batch_merge_router  # OP-735 R5 AI Reviewer auto-+1 dashboard
 app.include_router(_batch_merge_router.router, prefix=settings.api_prefix)
+from backend.routers import ci_dead_letter as _ci_dead_letter_router  # OP-741 CI recovery dead-letter dashboard
+app.include_router(_ci_dead_letter_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import
