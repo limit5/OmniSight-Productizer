@@ -1,0 +1,139 @@
+# OP-806 — refs/meta/config patch: Tier label + Tier-S/M/L/X submit-requirements
+#
+# This is the patch the operator applies to `project.config` on the
+# `refs/meta/config` branch of the prod Gerrit project
+# `omnisight/OmniSight-Productizer`.
+#
+# It does THREE things:
+#
+#   (1) Adds a new `[label "Tier"]` block (values s / m / l / x, plus -1
+#       for mis-tier rejection) so a server-side hook (G3 — separate
+#       ticket) can stamp the computed tier on every patchset.
+#
+#   (2) Narrows the existing `[submit-requirement "Human-Plus-2"]` block
+#       to skip Tier S and Tier M changes. Without this scoping, the
+#       always-on human +2 hard gate would still fire on Tier S/M and
+#       defeat the relaxation the new blocks introduce. AC #4 of OP-806
+#       ("Tier S PS with ai +2 → merge succeeds") fails without it.
+#
+#   (3) Appends four new `[submit-requirement "Tier-*"]` blocks
+#       (S-AI-Self-Plus-2, M-Mixed-Plus-2, L-Default-Human-Plus-2,
+#       X-Architecture-Review) per ADR-0005 §submit-rule integration.
+#       Tier L's block is intentionally redundant with Human-Plus-2 —
+#       it exists for self-documentation so anyone reading project.config
+#       sees one row per tier.
+#
+# Base file: `.gerrit/project.config` @ commit 05ca3bb8 (OP-697 —
+# declarative submit-requirements, post-Prolog removal). The diff
+# applies cleanly with `patch -p1` or `git apply` against the in-repo
+# deployable copy. Before applying to prod, run
+#
+#     git fetch origin refs/meta/config:refs/meta/config
+#     git checkout refs/meta/config
+#     diff -u project.config /path/to/in-repo/.gerrit/project.config
+#
+# to confirm the prod state has not drifted from the in-repo copy. If it
+# has, regenerate this patch from the live state before pushing.
+#
+# Apply (after the dry-run on omnisight/sandbox is green — see
+# install-tier-submit-requirements.md):
+#
+#     git apply --check refs-meta-config-tier-blocks.diff   # validate first
+#     git apply refs-meta-config-tier-blocks.diff
+#     git add project.config
+#     git commit -s -m "[OP-806] Tier label + Tier-S/M/L/X submit-requirements"
+#     git push origin HEAD:refs/meta/config
+#
+# Rollback: see docs/operations/tier-authority-rollback.md.
+
+--- a/project.config
++++ b/project.config
+@@ -153,6 +153,33 @@
+     value = +1 Submit-ready (operator marks; queue picks up)
+     copyCondition = is:MIN OR is:MAX
+
++[label "Tier"]
++    # OP-806 — Tier S/M/L/X authority label per ADR-0005.
++    #
++    # The label value is set by a server-side hook (G3, separate ticket)
++    # that classifies every patchset by file paths against
++    # `configs/governance/tier-paths.yaml`. Contributors and reviewers
++    # CANNOT downgrade the tier — the hook overwrites any user-supplied
++    # value with the computed minimum on every patchset upload (per
++    # ADR-0005 4-layer-protection layer #3, monotonicity).
++    #
++    # Values: s = safe (AI may self-+2; 24h revert window)
++    #         m = medium (AI +2 AND human +2)
++    #         l = large (default — human +2 hard gate, no relaxation)
++    #         x = extreme (human +2 + architecture-reviewer +1)
++    #
++    # `-1 = block` is the rejection vote a reviewer can cast to flag a
++    # mis-tiered patchset; combined with the No-Veto rule this halts the
++    # submit until the tier is corrected.
++    function = NoBlock
++    defaultValue = 0
++    value = -1 block
++    value =  s safe
++    value =  m medium
++    value =  l large
++    value =  x extreme
++    copyCondition = is:MIN OR is:MAX
++
+ [submit]
+     mergeContent = true
+
+@@ -161,7 +188,8 @@
+ # implement the ADR 0003 dual-sign gate.
+
+ [submit-requirement "Human-Plus-2"]
+-    description = Requires +2 from non-ai-reviewer group (CLAUDE.md L1 human hard gate)
++    description = Requires +2 from non-ai-reviewer group (CLAUDE.md L1 human hard gate). Scoped by OP-806 to skip Tier S / Tier M, where the per-tier blocks below take over.
++    applicableIf = -label:Tier=s AND -label:Tier=m
+     submittableIf = label:Code-Review=+2,group=non-ai-reviewer
+     canOverrideInChildProjects = false
+
+@@ -182,6 +210,44 @@
+     submittableIf = label:Verified=+1
+     canOverrideInChildProjects = false
+
++# OP-806 — Per-tier submit-requirements (ADR-0005 §submit-rule integration).
++#
++# The four blocks below are mutually-exclusive on `applicableIf` (one
++# fires per tier), and they layer on top of Merger-Plus-2 / No-Veto /
++# Verified — those keep applying to ALL tiers as before.
++#
++# Hard prerequisite: the Tier label MUST be populated on every patchset
++# by the G3 server-side hook. Until G3 is live, no patchset has a Tier
++# vote, none of these `applicableIf` clauses match, and the blocks are
++# inert (Human-Plus-2 with the new `-label:Tier=s AND -label:Tier=m`
++# scope still fires for unset-Tier changes — same effective behavior as
++# pre-OP-806). This is the safe rollout order: ship the rules first,
++# wire the hook second.
++
++[submit-requirement "Tier-S-AI-Self-Plus-2"]
++    description = Tier S allows any AI +2 to satisfy review (24h revert window backstops misclassification per ADR-0005). Applies when label:Tier=s.
++    applicableIf = label:Tier=s
++    submittableIf = label:Code-Review=+2,group=ai-reviewer-bots
++    canOverrideInChildProjects = false
++
++[submit-requirement "Tier-M-Mixed-Plus-2"]
++    description = Tier M needs +2 from ai-reviewer-bots AND +2 from non-ai-reviewer (mixed dual-sign). Applies when label:Tier=m.
++    applicableIf = label:Tier=m
++    submittableIf = label:Code-Review=MAX,group=ai-reviewer-bots AND label:Code-Review=MAX,group=non-ai-reviewer
++    canOverrideInChildProjects = false
++
++[submit-requirement "Tier-L-Default-Human-Plus-2"]
++    description = Tier L (default) requires +2 from non-ai-reviewer — same as the unscoped Human-Plus-2 path, present here as documentation so each tier has a visible row in project.config. Applies when label:Tier=l.
++    applicableIf = label:Tier=l
++    submittableIf = label:Code-Review=+2,group=non-ai-reviewer
++    canOverrideInChildProjects = false
++
++[submit-requirement "Tier-X-Architecture-Review"]
++    description = Tier X requires +2 from non-ai-reviewer AND +1 (or higher) from architecture-reviewer. Applies when label:Tier=x.
++    applicableIf = label:Tier=x
++    submittableIf = label:Code-Review=+2,group=non-ai-reviewer AND label:Code-Review>=+1,group=architecture-reviewer
++    canOverrideInChildProjects = false
++
+ # NOTE: The webhooks plugin reads its config from `webhooks.config` on
+ # the same `refs/meta/config` ref — NOT from this project.config file
+ # (per OP-713 lesson L22).  Prior versions of this example placed a
