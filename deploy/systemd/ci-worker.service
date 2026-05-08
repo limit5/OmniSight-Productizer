@@ -1,0 +1,57 @@
+; systemd unit for the OmniSight CI worker (OP-742, parent META OP-739).
+;
+; The worker polls Gerrit for open patchsets that need a Verified vote,
+; runs the impact-analysed test selection, and posts Verified ±1 with a
+; failure-categorised comment for the C3 recovery state machine.
+;
+; Install (user-level, mirrors gerrit-jira-bridge.service convention):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/ci-worker.service ~/.config/systemd/user/
+;   # Tune Environment= lines below to match the local repo path / bot.
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now ci-worker
+;   loginctl enable-linger $USER     # keep running after logout
+;
+; The daemon has no enforcement role until OP-741 (C3 recovery) ships,
+; per the OP-742 spec ("ships AFTER C3 — don't enable enforcement until
+; C3 has recovery"). Run with OMNISIGHT_CI_WORKER_DRY_RUN=1 first to
+; observe vote payloads in the journal before live-firing them.
+
+[Unit]
+Description=OmniSight CI worker — selective + parallel Verified gate (OP-742)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONPATH=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+; Bot identity. claude-bot is the default; switch to codex-bot by
+; pointing the key path at gerrit-codex-bot-ed25519 and the user at
+; codex-bot. Either bot has Verified label permission per the
+; non-ai-reviewer / ai-reviewer ACL split.
+Environment=OMNISIGHT_CI_WORKER_USER=claude-bot
+Environment=OMNISIGHT_CI_WORKER_KEY=/home/user/.config/omnisight/gerrit-claude-bot-ed25519
+Environment=OMNISIGHT_CI_WORKER_HOST=sora.services
+Environment=OMNISIGHT_CI_WORKER_PORT=29418
+Environment=OMNISIGHT_CI_WORKER_PROJECT=omnisight/OmniSight-Productizer
+; 2 workers per the OP-742 spec default; raise to 4 once we observe
+; that the local pytest suite parallelism doesn't trip on shared DB
+; fixtures. 30s poll matches the spec.
+Environment=OMNISIGHT_CI_WORKER_PARALLEL=2
+Environment=OMNISIGHT_CI_WORKER_POLL_S=30
+Environment=OMNISIGHT_CI_WORKER_TIMEOUT=900
+; Toggle to "1" to make the daemon log the vote payload but not post
+; it. Useful for the first 24-48h of soak after install.
+Environment=OMNISIGHT_CI_WORKER_DRY_RUN=0
+ExecStart=/usr/bin/python3 /home/user/work/sora/OmniSight-Productizer/scripts/ci_worker.py
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=60
+StandardOutput=append:/home/user/work/sora/logs/ci/systemd.log
+StandardError=append:/home/user/work/sora/logs/ci/systemd.log
+
+[Install]
+WantedBy=default.target
