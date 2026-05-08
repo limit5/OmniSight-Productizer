@@ -13,6 +13,9 @@ GENERATED_DOC_PATHS = (
     "docs/sop/lessons-learned.md",
     "docs/status/handoff_status.yaml",
 )
+IGNORED_GENERATED_DOC_PATHS = GENERATED_DOC_PATHS + (
+    "docs/agents/tool-reference.md",
+)
 
 
 def _pre_commit_hook() -> dict:
@@ -27,11 +30,11 @@ def _pre_commit_hook() -> dict:
 def test_generated_docs_are_ignored_and_untracked() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
 
-    for path in GENERATED_DOC_PATHS:
+    for path in IGNORED_GENERATED_DOC_PATHS:
         assert path in gitignore
 
     proc = subprocess.run(
-        ["git", "ls-files", "--", *GENERATED_DOC_PATHS],
+        ["git", "ls-files", "--", *IGNORED_GENERATED_DOC_PATHS],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

@@ -149,8 +149,8 @@ BP.B Guild 內登錄的 skill（既有 + WP.2 升級後新格式）：
 ### 2.3 工具 schema 文件化策略
 
 - **canonical doc**：`backend/agents/tool_schemas.py`（type-stamped Pydantic / TypedDict）
-- **markdown reference**：`docs/agents/tool-reference.md`（每工具 2-3 段、user-facing）
-- **CI 鎖**：schema 改動必更新 reference doc（pre-commit hook）
+- **markdown reference**：`backend.docs_site_tool_reference.build_tool_reference()` at docs-site build time（每工具 2-3 段、user-facing）
+- **CI 鎖**：`--check-doc` 驗證 docs-site dynamic renderer 與 registry 同步
 - **Anthropic API 對接**：runtime 自動 serialize Pydantic → tools=[]
 
 ---
@@ -468,7 +468,7 @@ Settings → Provider Keys → Anthropic
 
 | AB phase | 內容 | Repo status / evidence |
 |----------|------|------------------------|
-| **AB.1** Tool schema canonical doc | 中央 registry + Pydantic validation + CI 鎖 | `backend/agents/tool_schemas.py` + `docs/agents/tool-reference.md` + `test_tool_schemas.py` |
+| **AB.1** Tool schema canonical doc | 中央 registry + Pydantic validation + CI 鎖 | `backend/agents/tool_schemas.py` + `backend/docs_site_tool_reference.py` + `test_tool_schemas.py` |
 | **AB.2** Anthropic Messages API native client | `anthropic_native_client.py`（繞 LangChain、給 batch + 高效能 path） | `backend/agents/anthropic_native_client.py` + `test_anthropic_native_client.py` |
 | **AB.3** Anthropic Batch API integration | `batches.create / retrieve / results / cancel` wrapper | `backend/agents/batch_client.py` + alembic 0181 + `test_batch_client.py` |
 | **AB.4** Batch task queue + dispatcher | queue + grouping + worker + lane split + UI progress | `backend/agents/batch_dispatcher.py`、`components/omnisight/ab/batch-progress-panel.tsx`、`test_batch_dispatcher.py` |

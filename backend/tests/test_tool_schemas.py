@@ -4,8 +4,7 @@ Locks:
   - registry has expected eager + deferred tool counts (drift guard)
   - HD skills (26) all registered with skill_hd category
   - to_anthropic_tools() serializes to valid Anthropic tools=[] shape
-  - generate_markdown_reference() output matches docs/agents/tool-reference.md
-    (run `python -m backend.agents.tool_schemas --regen-doc` if drift)
+  - generate_markdown_reference() output is stable for docs-site dynamic builds
   - register_tool() rejects duplicate names
   - list_schemas() filters work as documented
 
@@ -18,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from backend import docs_site_tool_reference
 from backend.agents.tool_schemas import (
     TOOL_SCHEMA_VERSION,
     ToolSchema,
@@ -218,30 +218,36 @@ def test_tool_schema_is_frozen():
         s.description = "mutated"  # type: ignore[misc]
 
 
-# ─── Doc sync drift guard ────────────────────────────────────────
+# ─── Docs-site dynamic reference ─────────────────────────────────
 
 
-DOC_PATH = (
-    Path(__file__).resolve().parents[2] / "docs" / "agents" / "tool-reference.md"
-)
-
-
-def test_generated_doc_matches_committed_doc():
-    """Catch registry/doc drift. Run `python -m backend.agents.tool_schemas --regen-doc`."""
-    assert DOC_PATH.exists(), (
-        f"{DOC_PATH} missing. Run: python -m backend.agents.tool_schemas --regen-doc"
-    )
+def test_docs_site_tool_reference_builds_from_registry():
+    """Docs site builds the reference from the registry instead of git."""
     expected = generate_markdown_reference()
-    actual = DOC_PATH.read_text()
-    assert actual == expected, (
-        "tool-reference.md out of sync with backend/agents/tool_schemas.py registry. "
-        "Run: python -m backend.agents.tool_schemas --regen-doc"
-    )
+    actual = docs_site_tool_reference.build_tool_reference()
+    assert actual == expected
+    assert "Auto-generated from `backend/agents/tool_schemas.py`" in actual
+    assert "backend.docs_site_tool_reference" in actual
 
 
-def test_doc_contains_all_eager_tool_anchors():
-    """Doc must have an h3 header for every eager tool (visible to readers)."""
-    doc = DOC_PATH.read_text()
+def test_check_doc_cli_validates_dynamic_renderer(capsys):
+    """Legacy CI flag now validates the docs-site renderer, not a git file."""
+    from backend.agents import tool_schemas
+
+    old_argv = __import__("sys").argv
+    try:
+        __import__("sys").argv = ["tool_schemas", "--check-doc"]
+        tool_schemas._main()
+    finally:
+        __import__("sys").argv = old_argv
+
+    out = capsys.readouterr().out
+    assert "docs-site tool reference renderer matches registry" in out
+
+
+def test_dynamic_doc_contains_all_eager_tool_anchors():
+    """Generated reference must have an h3 header for every eager tool."""
+    doc = docs_site_tool_reference.build_tool_reference()
     for name in EAGER_TOOL_NAMES:
         assert f"### `{name}`" in doc, f"Doc missing anchor for {name}"
 
