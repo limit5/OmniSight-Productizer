@@ -1,7 +1,7 @@
-"""OP-770 admin release approval page."""
+"""OP-770 admin release approval page (OP-779 D18: reason text + audit)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from backend import auth
@@ -29,6 +29,16 @@ def _load_for_request(tag: str | None):
     return record
 
 
+def _validate_reason(reason: str | None) -> str:
+    """OP-779 D18 -- the approval form must carry a non-empty reason."""
+    if reason is None or not reason.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="reason text is required (OP-779 audit requirement)",
+        )
+    return reason.strip()
+
+
 @router.get("", response_class=HTMLResponse)
 async def release_approval_page(
     tag: str | None = None,
@@ -51,9 +61,11 @@ async def release_approval_api(
 async def ship_release(
     request: Request,
     tag: str,
+    reason: str = Form(default=""),
     user: auth.User = Depends(auth.require_admin),
 ) -> Response:
-    record = await approve_and_ship(tag, actor=user.email)
+    reason_text = _validate_reason(reason)
+    record = await approve_and_ship(tag, actor=user.email, reason=reason_text)
     accept = request.headers.get("accept", "")
     if "application/json" in accept:
         return JSONResponse(record.__dict__)
@@ -67,9 +79,11 @@ async def ship_release(
 async def cancel_release_approval(
     request: Request,
     tag: str,
+    reason: str = Form(default=""),
     user: auth.User = Depends(auth.require_admin),
 ) -> Response:
-    record = await cancel_release(tag, actor=user.email)
+    reason_text = _validate_reason(reason)
+    record = await cancel_release(tag, actor=user.email, reason=reason_text)
     accept = request.headers.get("accept", "")
     if "application/json" in accept:
         return JSONResponse(record.__dict__)
