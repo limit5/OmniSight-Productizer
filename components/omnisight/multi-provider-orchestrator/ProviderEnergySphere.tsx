@@ -27,9 +27,20 @@ import {
   type ProviderStatusResult,
   type ProviderStatusTier,
 } from "@/components/omnisight/provider-status-badge"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 
 export type ProviderEnergySphereSize = "primary" | "secondary"
 export type ProviderEnergySpherePulse = "off" | "warning" | "critical"
+export type ProviderEnergySphereProvider = Omit<
+  Pick<OAuthProviderInfo, "id" | "displayName" | "brandColor">,
+  "id"
+> & {
+  id: string
+}
 
 export type ProviderEnergySphereQuota = Pick<
   ProviderStatusBadgeProps,
@@ -57,7 +68,7 @@ export interface ProviderEnergySphereViz {
 
 export interface ProviderEnergySphereProps {
   level: MotionLevel
-  provider: OAuthProviderInfo
+  provider: ProviderEnergySphereProvider
   icon: ReactNode
   quota?: ProviderEnergySphereQuota
   size?: ProviderEnergySphereSize
@@ -65,6 +76,7 @@ export interface ProviderEnergySphereProps {
   onSelect?: () => void
   disabled?: boolean
   selected?: boolean
+  comingVersion?: string
   className?: string
 }
 
@@ -115,7 +127,7 @@ export function computeProviderEnergySphereViz({
   quota,
   size = "primary",
 }: {
-  provider: OAuthProviderInfo
+  provider: ProviderEnergySphereProvider
   quota?: ProviderEnergySphereQuota
   size?: ProviderEnergySphereSize
 }): ProviderEnergySphereViz {
@@ -145,31 +157,38 @@ export function ProviderEnergySphere({
   onSelect,
   disabled = false,
   selected = false,
+  comingVersion,
   className = "",
 }: ProviderEnergySphereProps) {
   const budget = getAuthVisualBudget(level)
   const viz = computeProviderEnergySphereViz({ provider, quota, size })
+  const comingLabel = comingVersion ? `Coming ${comingVersion}` : undefined
+  const isDisabled = disabled || Boolean(comingVersion)
   const pulse =
-    !disabled && budget.glowFlicker ? viz.pulse : ("off" as const)
-  const actionable = !disabled && (Boolean(href) || Boolean(onSelect))
+    !isDisabled && budget.glowFlicker ? viz.pulse : ("off" as const)
+  const actionable = !isDisabled && (Boolean(href) || Boolean(onSelect))
   const label = actionable
     ? `Select ${provider.displayName}. ${viz.label}`
-    : `${provider.displayName}. ${viz.label}`
+    : comingLabel
+      ? `${provider.displayName}. ${comingLabel}`
+      : `${provider.displayName}. ${viz.label}`
+  const ringColor = comingVersion ? "var(--muted-foreground)" : viz.ringColor
   const style = {
     "--mp-provider-brand": provider.brandColor,
-    "--mp-provider-ring": viz.ringColor,
+    "--mp-provider-ring": ringColor,
     width: `${viz.diameterPx}px`,
     height: `${viz.diameterPx}px`,
     background:
       "radial-gradient(circle at 32% 28%, rgba(255,255,255,0.36), transparent 30%), var(--mp-provider-brand)",
     boxShadow: selected
-      ? `0 0 0 2px var(--background), 0 0 0 4px ${viz.ringColor}, 0 0 28px color-mix(in srgb, ${viz.ringColor} 55%, transparent)`
-      : `0 0 0 1px color-mix(in srgb, ${viz.ringColor} 58%, transparent), 0 0 22px color-mix(in srgb, ${viz.ringColor} 36%, transparent)`,
+      ? `0 0 0 2px var(--background), 0 0 0 4px ${ringColor}, 0 0 28px color-mix(in srgb, ${ringColor} 55%, transparent)`
+      : `0 0 0 1px color-mix(in srgb, ${ringColor} 58%, transparent), 0 0 22px color-mix(in srgb, ${ringColor} 36%, transparent)`,
   } as CSSProperties
   const rootClass =
     "relative inline-flex shrink-0 items-center justify-center overflow-visible rounded-full transition-[width,height,box-shadow,transform,opacity] duration-200 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--artifact-purple)] focus-visible:ring-offset-2 focus-visible:ring-offset-background " +
     (actionable ? "hover:scale-105 " : "") +
-    (disabled ? "opacity-45 cursor-not-allowed " : "") +
+    (comingVersion ? "opacity-50 cursor-not-allowed " : "") +
+    (disabled && !comingVersion ? "opacity-45 cursor-not-allowed " : "") +
     className
 
   const content = (
@@ -182,8 +201,8 @@ export function ProviderEnergySphere({
           (pulse !== "off" ? "animate-pulse" : "")
         }
         style={{
-          opacity: viz.tier === "gray" ? 0.55 : 0.9,
-          boxShadow: `0 0 18px color-mix(in srgb, ${viz.ringColor} 46%, transparent)`,
+          opacity: comingVersion || viz.tier === "gray" ? 0.55 : 0.9,
+          boxShadow: `0 0 18px color-mix(in srgb, ${ringColor} 46%, transparent)`,
         }}
       />
       <span
@@ -199,15 +218,15 @@ export function ProviderEnergySphere({
     </>
   )
 
-  if (disabled || (!href && !onSelect)) {
-    return (
+  if (isDisabled || (!href && !onSelect)) {
+    const sphere = (
       <span
         data-testid={`mp-provider-sphere-${provider.id}`}
         data-mp-provider-tier={size}
         data-mp-quota-tier={viz.tier}
         data-mp-quota-pulse={pulse}
         data-mp-selected={selected ? "true" : "false"}
-        aria-disabled={disabled ? "true" : undefined}
+        aria-disabled={isDisabled ? "true" : undefined}
         aria-label={label}
         title={label}
         className={rootClass}
@@ -215,6 +234,20 @@ export function ProviderEnergySphere({
       >
         {content}
       </span>
+    )
+    if (!comingLabel) return sphere
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>{sphere}</TooltipTrigger>
+        <TooltipContent
+          data-testid={`mp-provider-sphere-${provider.id}-coming-tooltip`}
+          side="top"
+          sideOffset={4}
+          className="border border-[var(--border)] bg-[var(--card)] font-mono text-[10px] tracking-wide text-[var(--foreground)]"
+        >
+          {comingLabel}
+        </TooltipContent>
+      </Tooltip>
     )
   }
 

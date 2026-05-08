@@ -25,10 +25,15 @@ import {
 
 import type { ProviderQuotaUpdate } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import {
+  ProviderEnergySphere,
+  type ProviderEnergySphereProvider,
+} from "./ProviderEnergySphere"
 
 export type ProviderConstellationSlot =
   | "top-left"
   | "top-right"
+  | "middle-right"
   | "bottom-left"
   | "bottom-right"
 
@@ -38,12 +43,16 @@ export type ProviderConstellationQuotaState =
   | "critical"
   | "unavailable"
 
+export type ProviderConstellationProviderState = "active" | "coming"
+
 export interface ProviderConstellationProvider {
   id: string
   name: string
   slot: ProviderConstellationSlot
   allocationPercent: number
   quotaState: ProviderConstellationQuotaState
+  state?: ProviderConstellationProviderState
+  version?: string
   activityLevel?: number
   liveQuota?: ProviderQuotaUpdate
 }
@@ -70,6 +79,7 @@ export interface ProviderConstellationProps {
 const SLOT_CLASS: Record<ProviderConstellationSlot, string> = {
   "top-left": "left-3 top-3 sm:left-5 sm:top-5",
   "top-right": "right-3 top-3 sm:right-5 sm:top-5",
+  "middle-right": "right-3 top-1/2 -translate-y-1/2 sm:right-5",
   "bottom-left": "bottom-20 left-3 sm:bottom-24 sm:left-5",
   "bottom-right": "bottom-20 right-3 sm:bottom-24 sm:right-5",
 }
@@ -86,6 +96,22 @@ const QUOTA_LABEL: Record<ProviderConstellationQuotaState, string> = {
   watch: "Watch",
   critical: "Critical",
   unavailable: "No subscription",
+}
+
+const GEMINI_COMING_PROVIDER: ProviderConstellationProvider = Object.freeze({
+  id: "gemini",
+  name: "Gemini",
+  slot: "middle-right",
+  allocationPercent: 0,
+  quotaState: "unavailable",
+  state: "coming",
+  version: "v0.5.0",
+})
+
+const GEMINI_ENERGY_PROVIDER: ProviderEnergySphereProvider = {
+  id: "gemini",
+  displayName: "Gemini",
+  brandColor: "var(--muted-foreground)",
 }
 
 function clampPercent(value: number): number {
@@ -149,8 +175,10 @@ function applyLiveQuotaSnapshots(
   providers: ReadonlyArray<ProviderConstellationProvider>,
   snapshots: ReadonlyArray<ProviderQuotaUpdate>,
 ): ProviderConstellationProvider[] {
-  if (snapshots.length === 0) return providers.slice(0, 4)
-  return providers.slice(0, 4).map((provider) => {
+  const withGemini = withGeminiComingProvider(providers.slice(0, 4))
+  if (snapshots.length === 0) return withGemini
+  return withGemini.map((provider) => {
+    if (provider.state === "coming") return provider
     const snapshot = findQuotaSnapshot(provider, snapshots)
     if (!snapshot) return provider
     return {
@@ -162,11 +190,41 @@ function applyLiveQuotaSnapshots(
   })
 }
 
+function withGeminiComingProvider(
+  providers: ReadonlyArray<ProviderConstellationProvider>,
+): ProviderConstellationProvider[] {
+  const next = providers.map((provider) =>
+    provider.id === GEMINI_COMING_PROVIDER.id
+      ? {
+          ...provider,
+          state: "coming" as const,
+          version: provider.version ?? GEMINI_COMING_PROVIDER.version,
+        }
+      : provider,
+  )
+  if (next.some((provider) => provider.id === GEMINI_COMING_PROVIDER.id)) {
+    return next
+  }
+  return [...next, GEMINI_COMING_PROVIDER]
+}
+
 function DefaultProviderSphere({
   provider,
 }: {
   provider: ProviderConstellationProvider
 }) {
+  if (provider.state === "coming") {
+    return (
+      <ProviderEnergySphere
+        level="normal"
+        provider={GEMINI_ENERGY_PROVIDER}
+        icon={<span className="font-mono text-sm font-semibold">G</span>}
+        size="secondary"
+        comingVersion={provider.version}
+      />
+    )
+  }
+
   const allocation = clampPercent(provider.allocationPercent)
   const activity = clampPercent((provider.activityLevel ?? 0) * 100)
   const remainingPct = provider.liveQuota
@@ -336,6 +394,7 @@ function DefaultConnectionBeam({
         "pointer-events-none absolute hidden h-px origin-center bg-[var(--neural-cyan,#67e8f9)]/35 shadow-[0_0_16px_rgba(103,232,249,0.45)] lg:block",
         provider.slot === "top-left" && "left-[18%] top-[27%] w-[25%] rotate-[24deg]",
         provider.slot === "top-right" && "right-[18%] top-[27%] w-[25%] -rotate-[24deg]",
+        provider.slot === "middle-right" && "right-[18%] top-1/2 w-[24%]",
         provider.slot === "bottom-left" && "bottom-[30%] left-[18%] w-[25%] -rotate-[24deg]",
         provider.slot === "bottom-right" && "bottom-[30%] right-[18%] w-[25%] rotate-[24deg]",
       )}
