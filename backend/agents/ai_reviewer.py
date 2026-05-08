@@ -1,4 +1,4 @@
-"""OP-713 / OP-735 -- AI Reviewer for Gerrit patchsets.
+"""OP-713 / OP-735 / OP-756 -- AI Reviewer for Gerrit patchsets.
 
 This module owns two related but separate responsibilities:
 
@@ -9,19 +9,22 @@ This module owns two related but separate responsibilities:
    :func:`should_skip_recent`, :func:`mark_reviewed`,
    :func:`too_large_message`, :class:`ReviewResult`.
 
-2. **OP-713 Phase 2+ / OP-735**: confidence-gated auto-+1 batch-merge
-   tagging on top of (1). A patchset is auto-tagged
-   ``runner-batch-merge-candidate`` only when ALL of:
+2. **OP-713 Phase 2+ / OP-735 / OP-756**: trust-tier-driven action
+   selection on top of (1). For each patchset that clears the LLM
+   review and yields ``Severity.APPROVE``, the trust tier for the
+   ``(bot, file_class)`` pair (see ``trust_scoring.trust_tier``) plus
+   the OP-735 hard gates (mergeable, size <= 200, no safety-critical
+   paths) determine which of four actions the reviewer takes:
 
-     a. ``ai_verdict.severity == APPROVE`` (no findings from Phase 2).
-     b. Gerrit reports the change as ``mergeable=True``.
-     c. ``insertions + deletions <= 200`` lines.
-     d. No file sits under a ``SAFETY_CRITICAL_PATHS`` prefix.
-     e. Trust score for ``(bot, file_class)`` is still healthy.
+     - AUTO_PLUS_ONE   — +1 + ``runner-batch-merge-candidate`` hashtag
+     - GLANCE_PLUS_ONE — +1 + ``runner-glance-required`` hashtag
+     - COMMENT_ONLY    — score 0, no hashtag (operator does normal +2)
+     - SKIP            — AI Reviewer disabled for this pair
 
-   The +2 (Submit-blessing) is *never* given by the AI -- the operator
-   still bulk-+2's candidates from ``/admin/batch-merge``. CLAUDE.md
-   L1 ("AI reviewer max +1, human +2") is preserved.
+   See :func:`resolve_reviewer_action`. The +2 (Submit-blessing) is
+   *never* given by the AI -- the operator still casts +2 from
+   ``/admin/batch-merge``. CLAUDE.md L1 ("AI reviewer max +1, human
+   +2") is preserved.
 
 Cost-over-correctness (sora 2026-05-07)
 ---------------------------------------
@@ -204,6 +207,143 @@ def auto_plus_one_skip_message(reason: str) -> str:
     return (
         f"[AUTO-+1 skipped: {reason}] AI Reviewer approves this change "
         "but auto-batch is gated; please review and +2 manually."
+    )
+
+
+# ── OP-756 graceful-degradation tier resolver ────────────────────────
+
+
+GLANCE_REQUIRED_HASHTAG = "runner-glance-required"
+
+
+class ReviewerAction(str, Enum):
+    """OP-756 outcome of the AI Reviewer's action selection.
+
+    AUTO_PLUS_ONE   — post +1 + ``runner-batch-merge-candidate`` hashtag.
+    GLANCE_PLUS_ONE — post +1 + ``runner-glance-required`` hashtag;
+                      operator confirms with one-click bulk +2.
+    COMMENT_ONLY    — post comment with score 0; operator does normal +2.
+    SKIP            — AI Reviewer is muted for this (bot, file_class).
+    """
+
+    AUTO_PLUS_ONE = "auto_plus_one"
+    GLANCE_PLUS_ONE = "glance_plus_one"
+    COMMENT_ONLY = "comment_only"
+    SKIP = "skip"
+
+
+@dataclass(frozen=True)
+class ReviewerDecision:
+    """Bundle of (action, tier, reason, hashtag) returned by
+    :func:`resolve_reviewer_action`. ``hashtag`` is empty for
+    COMMENT_ONLY / SKIP.
+    """
+
+    action: ReviewerAction
+    tier: str
+    reason: str
+    hashtag: str = ""
+
+
+def resolve_reviewer_action(
+    change: Change,
+    ai_verdict: AIReviewVerdict,
+    tier: Any,
+    *,
+    diff_limit: int = _AUTO_PLUS_ONE_DIFF_LIMIT,
+) -> ReviewerDecision:
+    """OP-756: pick the reviewer action for a patchset given its tier.
+
+    Trust tier (from ``trust_scoring.trust_tier``) sets the *ceiling*
+    on the action; the OP-735 hard gates (mergeable / diff size /
+    safety paths / verdict) can downgrade further to COMMENT_ONLY.
+
+    Tier ladder:
+
+      DISABLED  → SKIP (no review, no comment).
+      COMMENT   → COMMENT_ONLY (review + comment, score 0).
+      GLANCE    → GLANCE_PLUS_ONE if hard gates pass, else COMMENT_ONLY.
+      AUTO      → AUTO_PLUS_ONE  if hard gates pass, else COMMENT_ONLY.
+
+    Pure function so the webhook handler can call it without I/O.
+    ``tier`` is typed ``Any`` to avoid an import cycle with
+    ``backend.agents.trust_scoring``; in practice the caller passes a
+    ``TrustTier`` enum. Comparison is on the ``.value`` string.
+    """
+    tier_value = getattr(tier, "value", tier)
+
+    if tier_value == "disabled":
+        return ReviewerDecision(
+            action=ReviewerAction.SKIP,
+            tier=tier_value,
+            reason="tier=disabled",
+        )
+
+    if ai_verdict.severity != Severity.APPROVE:
+        # Even GLANCE / AUTO tier can't auto-vote when the LLM didn't
+        # approve. Drop to comment-only so the operator drives.
+        return ReviewerDecision(
+            action=ReviewerAction.COMMENT_ONLY,
+            tier=tier_value,
+            reason=f"AI verdict={ai_verdict.severity.value}",
+        )
+
+    if tier_value == "comment":
+        return ReviewerDecision(
+            action=ReviewerAction.COMMENT_ONLY,
+            tier=tier_value,
+            reason="tier=comment",
+        )
+
+    # AUTO and GLANCE share the OP-735 hard gates.
+    ok, gate_reason = can_auto_plus_one(
+        change, ai_verdict, diff_limit=diff_limit, trust_ok=True,
+    )
+    if not ok:
+        return ReviewerDecision(
+            action=ReviewerAction.COMMENT_ONLY,
+            tier=tier_value,
+            reason=gate_reason,
+        )
+
+    if tier_value == "glance":
+        return ReviewerDecision(
+            action=ReviewerAction.GLANCE_PLUS_ONE,
+            tier=tier_value,
+            reason=gate_reason,
+            hashtag=GLANCE_REQUIRED_HASHTAG,
+        )
+    return ReviewerDecision(
+        action=ReviewerAction.AUTO_PLUS_ONE,
+        tier=tier_value,
+        reason=gate_reason,
+        hashtag=BATCH_MERGE_HASHTAG,
+    )
+
+
+def glance_plus_one_message(reason: str = "all-green") -> str:
+    """Standard AI Reviewer comment posted with the GLANCE-tier +1 vote.
+
+    Mirrors :func:`auto_plus_one_message` but points at the
+    glance-required hashtag so the dashboard can render glance-tier
+    candidates in a separate column with a one-click bulk-+2 affordance.
+    """
+    return (
+        f"[GLANCE-+1] AI Reviewer auto-approved this change ({reason}). "
+        f"Tagged ``{GLANCE_REQUIRED_HASHTAG}`` for operator one-click "
+        "confirmation. Human +2 still required for submit (CLAUDE.md L1)."
+    )
+
+
+def comment_only_message(reason: str = "comment-only") -> str:
+    """Comment posted when the trust tier (or a hard-gate downgrade)
+    puts this change in COMMENT-only mode -- AI offers a verdict but
+    casts no +1, so operator runs a normal +2 review.
+    """
+    return (
+        f"[COMMENT-ONLY] AI Reviewer is in comment-only mode for this "
+        f"(bot, file_class) tier ({reason}). Operator should run a normal "
+        "+2 review; no auto-vote was cast."
     )
 
 
@@ -668,6 +808,7 @@ __all__ = [
     "ChangeFile",
     "DEFAULT_REVIEW_DIFF_LIMIT_LOC",
     "DEFAULT_THROTTLE_TTL_S",
+    "GLANCE_REQUIRED_HASHTAG",
     "HIGH_RISK_FILES",
     "HIGH_RISK_PATH_PREFIXES",
     "HIGH_RISK_SUFFIXES",
@@ -675,16 +816,21 @@ __all__ = [
     "MODEL_OPUS",
     "MODEL_SONNET",
     "ReviewResult",
+    "ReviewerAction",
+    "ReviewerDecision",
     "SAFETY_CRITICAL_PATHS",
     "Severity",
     "SONNET_PATH_PREFIXES",
     "auto_plus_one_message",
     "auto_plus_one_skip_message",
     "can_auto_plus_one",
+    "comment_only_message",
     "diff_loc",
+    "glance_plus_one_message",
     "is_too_large",
     "mark_reviewed",
     "reset_throttle",
+    "resolve_reviewer_action",
     "review_patchset",
     "route_model",
     "should_skip_recent",
