@@ -33,6 +33,7 @@
 | 16 | 2026-05-06 | Runner needs **per-ticket fresh-sync** from Gerrit develop — no carryover from prior tickets, no rebase onto local main | OP-17 worktree state confusion |
 | 17 | 2026-05-06 | `pre_pickup_ok` must check live_state in **worktree cwd**, not main repo cwd; sync runs first so checks see fresh state | OP-18 first-launch failed pre-pickup on stale main repo |
 | 18 | 2026-05-07 | Event consumers must combine stream handling with startup catchup and idempotent terminal-state checks | OP-689 Gerrit/JIRA bridge |
+| 25 | 2026-05-08 | Bot identity for sibling runner worktrees must use `extensions.worktreeConfig=true` + `git config --worktree` | OP-729 cross-runner forge-author race |
 
 ---
 
@@ -443,3 +444,19 @@ While evaluating OP-715 (the migration plan to stream-events), a second silent f
 - Don't trust that a daemon "exists in the repo" means it's running. Add a `systemctl is-active <unit>` line to deploy verification scripts; flag any service whose unit file is checked in but not installed.
 - For Gerrit specifically: if you need authenticated event ingest, prefer `gerrit stream-events` over the webhooks plugin. The SSH transport handles auth at the protocol layer with no plugin-level config gymnastics.
 - Webhook plumbing must always be verified by a real Gerrit-driven test event, not a synthetic curl — the latter only proves the receiver works, not the sender → receiver chain. (Repeated from L22.)
+
+
+## Lesson 25 — Runner bot identity must be worktree-local (2026-05-08)
+
+**Situation**: Claude and Codex runners use sibling worktrees under one main repository. Bare `git config user.email/name` writes from either worktree land in the shared `.git/config`, so the last runner to write wins. On 2026-05-08 this made the other runner commit with the wrong bot email and Gerrit rejected the push with `email address ... is not registered`, leaving tickets stuck in `進行中`.
+
+**Fix**: Enable per-worktree config in the main repo before runner startup:
+```bash
+git -C /home/user/work/sora/OmniSight-Productizer config core.repositoryformatversion 1
+git -C /home/user/work/sora/OmniSight-Productizer config extensions.worktreeConfig true
+```
+Runner startup now fails fast if this prerequisite is missing, and `set_bot_identity_in_worktree()` writes `user.email/name` via `git config --worktree` so each runner's identity is isolated.
+
+**Verification**: `backend/tests/test_jira_dispatch.py::test_interleaved_worktrees_commit_and_push_with_correct_email` creates two real git worktrees, seeds each bot identity, overwrites shared config, commits in both worktrees, and pushes both branches to a local bare remote with the correct author/committer email. `test_assert_worktree_config_enabled_fails_when_disabled` pins the startup remediation message.
+
+**Generalisation**: Any runner setting per-agent git identity in a shared worktree topology must write to the worktree config layer and fail closed when that layer is disabled. Shared repo config is acceptable for common hooks/remotes, but not for mutable per-agent identity.
