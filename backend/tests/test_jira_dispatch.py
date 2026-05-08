@@ -452,7 +452,7 @@ def test_interleaved_worktrees_commit_and_push_with_correct_email(tmp_path) -> N
 
 
 def test_ensure_change_ids_rebase_command_shape(tmp_path, monkeypatch):
-    """ensure_change_ids invokes `git rebase <base_ref> --exec amend`."""
+    """ensure_change_ids invokes `git rebase <base_ref> --keep-empty --exec amend`."""
     calls = []
 
     class FakeResult:
@@ -469,10 +469,148 @@ def test_ensure_change_ids_rebase_command_shape(tmp_path, monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][:3] == ["git", "rebase", "abcdef1234"]
+    assert "--keep-empty" in calls[0]
     assert "--exec" in calls[0]
     # The exec command must run `git commit --amend --no-edit` to trigger commit-msg hook
     exec_idx = calls[0].index("--exec") + 1
     assert "commit --amend --no-edit" in calls[0][exec_idx]
+
+
+def test_ensure_change_ids_quits_rebase_on_failure(tmp_path, monkeypatch):
+    """OP-736: failed rebase/amend cleanup must quit half-open rebase state."""
+    calls = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:2] == ["git", "rebase"] and "--exec" in cmd:
+            raise subprocess.CalledProcessError(returncode=1, cmd=cmd, stderr="paused")
+        return FakeResult()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    with pytest.raises(subprocess.CalledProcessError):
+        jd.ensure_change_ids(tmp_path, base_ref="abcdef1234")
+
+    assert calls[0][:3] == ["git", "rebase", "abcdef1234"]
+    assert "--keep-empty" in calls[0]
+    assert calls[1] == ["git", "rebase", "--quit"]
+
+
+@pytest.mark.parametrize(
+    ("artifact", "cleanup_cmd"),
+    [
+        ("rebase-merge", ["git", "rebase", "--quit"]),
+        ("rebase-apply", ["git", "rebase", "--quit"]),
+        ("CHERRY_PICK_HEAD", ["git", "cherry-pick", "--abort"]),
+        ("MERGE_HEAD", ["git", "merge", "--abort"]),
+        ("BISECT_LOG", ["git", "bisect", "reset"]),
+        ("REVERT_HEAD", ["git", "revert", "--abort"]),
+    ],
+)
+def test_assert_worktree_clean_recovers_each_state_artifact(
+    tmp_path, monkeypatch, artifact, cleanup_cmd,
+):
+    """OP-736: every known git mid-operation artifact maps to cleanup."""
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    artifact_path = git_dir / artifact
+    if artifact.startswith("rebase-"):
+        artifact_path.mkdir()
+    else:
+        artifact_path.write_text("state\n")
+    calls = []
+
+    class FakeResult:
+        def __init__(self, stdout="", returncode=0, stderr=""):
+            self.stdout = stdout
+            self.returncode = returncode
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:4] == ["git", "-C", str(tmp_path), "rev-parse"]:
+            return FakeResult(stdout=".git\n")
+        return FakeResult()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    jd.assert_worktree_clean(tmp_path)
+
+    assert cleanup_cmd in calls
+
+
+def test_assert_worktree_clean_clean_baseline_is_noop(tmp_path, monkeypatch, caplog):
+    """Clean worktree: no cleanup command and no warning/info log spam."""
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    calls = []
+
+    class FakeResult:
+        def __init__(self, stdout="", returncode=0, stderr=""):
+            self.stdout = stdout
+            self.returncode = returncode
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return FakeResult(stdout=".git\n")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    jd.assert_worktree_clean(tmp_path)
+
+    assert calls == [["git", "-C", str(tmp_path), "rev-parse", "--git-dir"]]
+    assert caplog.records == []
+
+
+def test_assert_worktree_clean_unrecoverable_failure_raises(tmp_path, monkeypatch):
+    """Cleanup failure must be actionable and visible to the caller."""
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "MERGE_HEAD").write_text("state\n")
+
+    class FakeResult:
+        def __init__(self, stdout="", returncode=0, stderr=""):
+            self.stdout = stdout
+            self.returncode = returncode
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["git", "-C", str(tmp_path), "rev-parse"]:
+            return FakeResult(stdout=".git\n")
+        return FakeResult(returncode=2, stderr="merge abort failed")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    with pytest.raises(RuntimeError, match="MERGE_HEAD cleanup failed.*Manual fix needed"):
+        jd.assert_worktree_clean(tmp_path)
+
+
+def test_assert_worktree_clean_rebase_leak_allows_next_switch(tmp_path):
+    """Synthetic OP-736 regression: stale rebase dir is cleared before switch -C."""
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "README.md").write_text("init\n")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=tester", "-c", "user.email=tester@example.invalid",
+            "commit", "-m", "init",
+        ],
+        cwd=tmp_path, check=True, capture_output=True, text=True,
+    )
+    (tmp_path / ".git" / "rebase-merge").mkdir()
+
+    jd.assert_worktree_clean(tmp_path)
+    result = subprocess.run(
+        ["git", "switch", "-C", "feature/OP-736-runner-fresh", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / ".git" / "rebase-merge").exists()
 
 
 def test_sync_to_gerrit_develop_returns_branch_name_with_ticket_key(tmp_path, monkeypatch):
@@ -488,6 +626,8 @@ def test_sync_to_gerrit_develop_returns_branch_name_with_ticket_key(tmp_path, mo
 
     def fake_run(cmd, **kwargs):
         call_log.append(cmd)
+        if cmd[:4] == ["git", "-C", str(tmp_path), "rev-parse"]:
+            return FakeResult(stdout=".git\n")
         # rev-parse FETCH_HEAD returns fake_sha
         if cmd[:3] == ["git", "rev-parse", "FETCH_HEAD"]:
             return FakeResult(stdout=fake_sha + "\n")
@@ -500,7 +640,8 @@ def test_sync_to_gerrit_develop_returns_branch_name_with_ticket_key(tmp_path, mo
     assert result.develop_sha == fake_sha
     assert fake_sha[:12] in result.detail
 
-    # Verify call sequence: fetch → rev-parse → switch → clean
+    # Verify pre-sync guard is first, then fetch → rev-parse → switch → clean.
+    assert call_log[0] == ["git", "-C", str(tmp_path), "rev-parse", "--git-dir"]
     fetch_calls = [c for c in call_log if c[:2] == ["git", "fetch"]]
     switch_calls = [c for c in call_log if c[:2] == ["git", "switch"]]
     clean_calls = [c for c in call_log if c[:2] == ["git", "clean"]]
@@ -513,8 +654,9 @@ def test_sync_to_gerrit_develop_returns_branch_name_with_ticket_key(tmp_path, mo
     assert len(clean_calls) == 1
 
 
-def test_sync_to_gerrit_develop_unknown_class_raises() -> None:
-    """Unknown agent_class for SSH auth raises ValueError before any git op."""
+def test_sync_to_gerrit_develop_unknown_class_raises(monkeypatch) -> None:
+    """Unknown agent_class for SSH auth raises ValueError after pre-sync guard."""
+    monkeypatch.setattr(jd, "assert_worktree_clean", lambda worktree_path: None)
     with pytest.raises(ValueError, match="unknown agent_class"):
         jd.sync_to_gerrit_develop(Path("/tmp"), "no-such-class", "OP-1")
 
