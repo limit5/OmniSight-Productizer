@@ -18,6 +18,10 @@ import {
   type WarRoomPanelId,
 } from "@/components/omnisight/multi-provider-orchestrator/WarRoom"
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+}))
+
 const PANEL_IDS: WarRoomPanelId[] = ["quota", "cost", "tasks", "tradeoff"]
 
 describe("<WarRoom />", () => {
