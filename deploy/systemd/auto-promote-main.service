@@ -1,0 +1,35 @@
+; [OP-766] Consumer for release milestone_ready events.
+;
+; Install (user-level — no sudo):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/auto-promote-main.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now auto-promote-main.service
+;   loginctl enable-linger $USER
+
+[Unit]
+Description=OmniSight develop-to-main auto-promoter (OP-766)
+After=network-online.target release-milestone-checker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m backend.agents.auto_promote_main \
+  --repo /home/user/sora-bridge \
+  --event-log /home/user/work/sora/logs/release-milestone/systemd.log \
+  --cursor /home/user/work/sora/logs/release-milestone/auto-promote.cursor \
+  --remote gerrit \
+  --source-branch develop \
+  --target-branch main
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/home/user/work/sora/logs/release-milestone/auto-promote.log
+StandardError=append:/home/user/work/sora/logs/release-milestone/auto-promote.log
+
+[Install]
+WantedBy=default.target
