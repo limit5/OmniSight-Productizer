@@ -6,9 +6,9 @@ Operator-facing setup guide for the Multi-Provider Subscription Orchestrator
 This file is being built out across Priority MP, Week 4. Sections below
 either link to where the content currently lives or are reserved as
 in-progress stubs for the wave that owns them. **MP.W13.3 owns the
-Gemini section**; the rest will be filled in by MP.W14.3 (xAI) and
-MP.W16 (operator setup, expiry monitoring, cap-hit recovery, cost
-calibration).
+Gemini section** and **MP.W16.3 owns the Cap-hit recovery runbook**;
+the rest will be filled in by MP.W14.3 (xAI) and the remaining MP.W16
+sub-waves (operator setup, expiry monitoring, cost calibration).
 
 ---
 
@@ -42,9 +42,238 @@ operational steps.
 
 ## Cap-hit recovery runbook
 
-> Reserved for **MP.W16.3**. Will document operator triage when a 5h /
-> weekly cap is hit and `routing_policy.py` is out of acceptable
-> providers.
+This is the **MP.W16.3 deliverable**: operator triage when a 5h-rolling
+or weekly cap is hit and `routing_policy.py` returns no acceptable
+providers.
+
+`record_usage()` in `backend/agents/provider_quota_tracker.py` opens the
+provider's circuit (`circuit_state = 'open'`) the first time rolling
+usage crosses the configured cap, writes an `audit_log` row with
+`action = 'provider_quota_cap_hit'`, and emits an SSE quota-update
+frame with `reason = 'cap_hit'`. From that moment until either the
+rolling window naturally drains or an operator runs the reset path
+below, `RoutingPolicy.choose_provider()` will skip the provider and —
+if every other vendor is also out — return an empty list to the
+caller. There is no exception raised; an empty list is the only signal
+that no provider is currently acceptable.
+
+### When this runbook applies
+
+Run this runbook when **any** of the following is true:
+
+- A dispatch attempt logs `RoutingPolicy.choose_provider()` returning
+  an empty list and the orchestrator's `subscription_account_monitor`
+  alert (MP.W16.2) shows all subscription accounts as `active` (i.e.
+  this is a quota issue, not an account-expiry issue).
+- The Provider Constellation UI shows every sphere in red (`<30 %`
+  remaining) or gray (no acceptable provider) at the same time.
+- The `audit_log` table has a fresh `provider_quota_cap_hit` row that
+  matches the provider you expected the next task to dispatch on, and
+  no fallback provider absorbed the queue.
+
+If only one provider is capped and another is still green/yellow, the
+orchestrator is doing its job — the task-boundary switch will route
+the next task to the healthy provider with no operator action needed.
+This runbook is for the all-providers-exhausted case.
+
+### Detection signals — what to look at first
+
+| Signal | Where | What "cap hit" looks like |
+| ------ | ----- | ------------------------- |
+| Audit row | `audit_log` (PG, control plane) | `action = 'provider_quota_cap_hit'`, `entity_kind = 'provider_quota'`, `entity_id = '<provider>-subscription'`, `after_json.circuit_state = 'open'` |
+| Quota row | `provider_quota_state` (PG, alembic 0199) | `circuit_state = 'open'`, non-NULL `last_cap_hit_at`, `rolling_5h_tokens` ≥ configured cap |
+| In-memory suppression | `routing_policy._recently_capped` (per-process) | provider id present with `until_ts` in the future; default suppression `DEFAULT_CAP_SUPPRESSION_S = 5 h`, or vendor `retry_after_s` if the adapter returned one |
+| Adapter return shape | `dispatch()` return value (Anthropic / OpenAI subscription adapters) | Anthropic: `{kind: 'cap_exceeded', retry_after_s: …}` (HTTP 429 + `usage_exceeded`); OpenAI: `{kind: 'rate_limit_exceeded', reset_at_ts: …}` (HTTP 429 + `rate_limit_exceeded`) |
+| SSE frame | quota-update channel (frontend Provider Constellation) | `reason = 'cap_hit'`, `scopes` containing `'5h'` and/or `'weekly'` |
+
+The audit row is the authoritative single record per cap event. The
+SQL row in `provider_quota_state` is the live state the routing layer
+reads on every dispatch.
+
+### Step 1 — Identify provider, scope, and timestamp
+
+Read the most recent cap-hit event from the audit log:
+
+```sql
+SELECT ts, entity_id, after_json
+FROM audit_log
+WHERE action = 'provider_quota_cap_hit'
+ORDER BY ts DESC
+LIMIT 5;
+```
+
+The `after_json` column carries `rolling_5h_tokens`, `weekly_tokens`,
+`last_cap_hit_at`, and `circuit_state` at the moment the cap tripped.
+Compare against the live row:
+
+```sql
+SELECT provider, rolling_5h_tokens, weekly_tokens,
+       last_reset_at, last_cap_hit_at, circuit_state
+FROM provider_quota_state
+WHERE circuit_state = 'open';
+```
+
+You will use the (provider, scope) pair from this step in every
+subsequent step. `scope` is `'5h'` if `rolling_5h_tokens` ≥ the
+provider's 5h cap, `'weekly'` if `weekly_tokens` ≥ the weekly cap, or
+both. Both caps default to the constants in
+`backend/agents/provider_quota_tracker.py` (`DEFAULT_5H_CAP_TOKENS`,
+`DEFAULT_WEEKLY_CAP_TOKENS`) unless `OMNISIGHT_PROVIDER_CAP_<NAME>_5H`
+is set in the environment.
+
+### Step 2 — Decide between **wait** and **operator override**
+
+In the absence of operator action, the system self-heals:
+
+- The 5h rolling window drains by SQL — once events older than 5 h
+  age out of `provider_usage_event`, the next `record_usage()` call
+  re-evaluates and `circuit_state` will return to `'closed'` on its
+  own. Same shape for the weekly window over 7 days.
+- The in-memory `_recently_capped` suppression decays after
+  `DEFAULT_CAP_SUPPRESSION_S` (5 h) or earlier if the adapter
+  surfaced a vendor `retry_after_s`.
+
+**Default to wait.** Manual override should only be used when the
+audit trail proves the cap was tripped by faulty accounting (e.g.
+duplicate event ingestion, a runaway test run, or a per-tenant
+calibration drift logged by `cost_estimator.py`) — not because the
+operator wants to keep dispatching past the vendor's actual limit.
+Resetting the window when the vendor still considers the account
+capped will trip the cap again on the very next dispatch and, on
+some plans, escalate to a longer hard block.
+
+Reset only when **all** of these hold:
+
+- The audit row's tokens-at-cap value is implausible compared to the
+  task volume the operator actually ran in the window (clear
+  accounting error, not real consumption).
+- A direct check against the vendor's own dashboard / billing UI shows
+  the subscription is **not** rate-limited from the vendor side.
+- No human-assigned task is currently in-flight on the affected
+  provider (Tier X dispatch — see `routing_policy.py`
+  `_human_assignment_resolver`).
+
+### Step 3 — Operator override (only after Step 2 says reset)
+
+For the affected (provider, scope) pair, call:
+
+```python
+from backend.agents.provider_quota_tracker import reset_window
+from backend.agents.routing_policy import on_cap_hit, _recently_capped
+
+# Clear the SQL window and close the circuit.
+reset_window("anthropic-subscription", "5h")     # or "weekly"
+
+# Drop the in-memory suppression so RoutingPolicy stops skipping the
+# provider before the natural 5 h timer elapses.
+with __import__("backend.agents.routing_policy", fromlist=["_RECENTLY_CAPPED_LOCK"])._RECENTLY_CAPPED_LOCK:
+    _recently_capped.pop("anthropic-subscription", None)
+```
+
+`reset_window()` (`backend/agents/provider_quota_tracker.py`):
+
+- `DELETE`s `provider_usage_event` rows for the provider in the chosen
+  rolling window.
+- `UPDATE`s `provider_quota_state` to set `circuit_state = 'closed'`,
+  `last_cap_hit_at = NULL`, refreshes `last_reset_at`.
+- Emits a quota-update frame with `reason = 'window_reset'` so the
+  frontend sphere flips back to green/yellow on the next SSE tick.
+
+Note that **only one uvicorn worker's `_recently_capped` dict can be
+reached from one Python session**, because the dict is process-local.
+For a clustered deployment, prefer relying on the natural decay
+(`DEFAULT_CAP_SUPPRESSION_S = 5 h`) rather than trying to clear every
+worker's dict. The SQL `circuit_state` is shared across workers and
+is the load-bearing piece; the in-memory dict is a per-process
+optimisation that drops a provider from rotation faster than the next
+SQL refresh — it does not gate the underlying state.
+
+### Step 4 — Verify the provider is back in rotation
+
+Re-read live state and confirm the routing layer accepts the provider
+again:
+
+```sql
+SELECT provider, circuit_state, last_cap_hit_at, last_reset_at,
+       rolling_5h_tokens, weekly_tokens
+FROM provider_quota_state
+WHERE provider = 'anthropic-subscription';
+```
+
+Expected: `circuit_state = 'closed'`, `last_cap_hit_at IS NULL`,
+`rolling_5h_tokens` (and/or `weekly_tokens`) reduced by the events
+just deleted.
+
+Then run a synthetic dispatch — pick a small task with the
+`agent_class` matching the provider family (`subscription-claude` for
+Anthropic, `subscription-codex` for OpenAI; see
+`ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS` in `routing_policy.py`)
+and confirm `RoutingPolicy.choose_provider()` returns a non-empty list
+with the recovered provider in it. The Provider Constellation sphere
+should flip back to its non-red colour on the next SSE tick.
+
+### Step 5 — All providers exhausted at once
+
+If Step 1 shows **every** provider with `circuit_state = 'open'`, the
+orchestrator has nowhere to send work and `choose_provider()` returns
+`[]` for every task. In that case:
+
+1. Do **not** reset all providers at once just to clear the queue —
+   that risks a same-second re-cap loop on whichever provider is
+   actually closest to the vendor-side limit.
+2. Pause the runner-driven dispatch (stop new task pickup) until at
+   least one provider has a believable wait-out path. The simplest
+   pause is to flip `OMNISIGHT_MP_ENABLED=0` — `is_enabled()` in
+   `routing_policy.py` short-circuits `choose_provider()` to `[]`
+   when the flag is off, and the runner-side dispatch loop treats
+   that as "park the task".
+3. Pick the provider whose `last_cap_hit_at` is oldest and whose 5h
+   window is closest to draining naturally; let it self-heal first.
+4. Re-enable `OMNISIGHT_MP_ENABLED` once at least one provider's row
+   has flipped back to `circuit_state = 'closed'`.
+
+### Step 6 — Record the incident
+
+After recovery:
+
+- If the cap-hit was anticipated (real consumption that crossed the
+  vendor's published limit), no further action — the audit row plus
+  the quota-update SSE frame are the durable record.
+- If the cap-hit was **unexpected** (accounting drift, duplicate
+  events, vendor-side outage masquerading as a cap, an unintended
+  runaway dispatch), append a one-entry note to
+  `docs/sop/lessons-learned.md` per
+  [docs/sop/jira-ticket-conventions.md §14](../sop/jira-ticket-conventions.md)
+  with Situation / Fix / Verification — vague "be more careful"
+  entries are auto-rejected.
+- If the cap was tripped by a `cost_estimator.py` prediction error
+  (estimated tokens diverged from actual by more than 50 %), this is
+  R-MP.2 territory — flag in the lesson and link to the per-tenant
+  calibration story (MP.W16.4 stub).
+
+### Reference — files and tests
+
+- `backend/agents/provider_quota_tracker.py` — `record_usage`,
+  `get_quota_state`, `is_at_cap`, `reset_window`, audit emit.
+- `backend/agents/routing_policy.py` — `RoutingPolicy.choose_provider`,
+  `on_cap_hit`, `_recently_capped` suppression dict,
+  `DEFAULT_CAP_SUPPRESSION_S`, `is_enabled` / `MP_ENABLED_ENV`.
+- `backend/agents/provider_adapters/anthropic_subscription.py`,
+  `openai_subscription.py` — vendor-specific cap signal parsing
+  (HTTP 429, `usage_exceeded` / `rate_limit_exceeded`,
+  `retry_after_s` / `reset_at_ts`).
+- `backend/alembic/versions/0199_provider_quota_state.py`,
+  `0200_provider_usage_event.py` — schema for the two tables this
+  runbook touches.
+- `backend/tests/test_provider_quota_tracker.py` — exercises
+  `record_usage` → cap-hit transition and the `audit_log` row
+  shape.
+- `backend/tests/test_provider_orchestrator.py` —
+  `test_routing_on_cap_hit_suppresses_provider_until_retry_after`,
+  `test_routing_on_cap_hit_uses_default_suppression_window`,
+  `test_cap_hit_retry_boundary_switches_from_anthropic_to_openai`
+  cover the suppression-window and task-boundary switch contracts
+  this runbook relies on.
 
 ## Cost-estimator calibration
 
