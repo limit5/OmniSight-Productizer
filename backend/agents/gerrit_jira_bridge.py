@@ -724,49 +724,55 @@ class GerritJiraBridge:
             return
         self.process_ticket_for_change(ticket_keys[0], change.change_id)
 
-    # ─── patchset-created → proactive merger trigger (OP-715) ────────
+    # ─── patchset-created → proactive merger + AI Reviewer (OP-715/801) ──
 
     def _handle_patchset_created(self, event: dict[str, Any]) -> None:
-        """Spawn the proactive merger check as a fire-and-forget thread.
+        """Spawn proactive merger + AI Reviewer as fire-and-forget threads.
 
-        OP-715 — Gerrit's webhooks plugin v3.13.5 has no auth surface,
-        so the proactive merger trigger that OP-714 attempted to wire
-        through ``/webhooks/gerrit`` runs from this stream-events
-        daemon instead. SSH transport is auth'd at the protocol layer
-        (``claude-bot`` SSH key), so we don't need any per-event
+        OP-715 / OP-801 — Gerrit's webhooks plugin v3.13.5 has no auth
+        surface, so the proactive merger trigger that OP-714 attempted
+        to wire through ``/webhooks/gerrit`` runs from this
+        stream-events daemon instead, and OP-801 mirrors that for the
+        AI Reviewer (OP-713). SSH transport is auth'd at the protocol
+        layer (``claude-bot`` SSH key), so we don't need any per-event
         signature.
 
         The shared decision logic lives in
-        :func:`backend.routers.webhooks._proactive_merger_check` —
-        same skip conditions (uploader=merger-bot, hashtag check,
-        WIP, mergeable check), same hashtag throttle
-        (``Merger-Proactive-PS<n>``), same arbiter invocation. We
+        :func:`backend.routers.webhooks._proactive_merger_check` and
+        :func:`backend.routers.webhooks._ai_reviewer_check` — both
         keep ONE implementation so a future webhook-auth fix and the
-        daemon stay in sync without drift.
+        daemon stay in sync without drift. Each spawns its own
+        per-event daemon thread because the two pipelines are
+        independent (a merger crash must not strand the AI review,
+        and vice versa).
 
-        The function is async (uses aiohttp for the mergeable REST
-        query and asyncio for the merger LLM call), but
-        ``process_stream_event`` is synchronous because the daemon's
-        outer ``stream_forever`` loop is sync (subprocess Popen +
-        line iteration). Bridging the gap with a per-event daemon
-        thread that calls ``asyncio.run`` is acceptable here because:
+        Bridging async pipelines with a per-event daemon thread that
+        calls ``asyncio.run`` is acceptable here because:
 
           1. Skip conditions early-exit fast (~10 ms each on the
              cached path), so most events do NOT actually start an
              event loop.
-          2. The merger invocation itself is rate-limited by the
-             ``Merger-Proactive-PS<n>`` hashtag throttle, so we cap
-             at one slow path per (change, patchset).
+          2. The merger invocation is rate-limited by the
+             ``Merger-Proactive-PS<n>`` hashtag throttle, and the AI
+             Reviewer is rate-limited by the
+             ``ai_reviewer._THROTTLE`` ``(change_id, revision)`` map,
+             so we cap at one slow path per (change, patchset) per
+             pipeline.
           3. Daemon threads are auto-reaped on process shutdown, so
              the systemd ``KillSignal=SIGTERM`` + ``TimeoutStopSec``
              still cleans up.
 
-        Errors inside the spawned thread MUST NOT propagate up to
-        the stream loop — losing one merger check is recoverable
-        (next patchset re-runs the check), but losing the daemon
-        means OP-689's change-merged → Published transitions stop
-        too.
+        Errors inside the spawned threads MUST NOT propagate up to
+        the stream loop — losing one merger check or one AI review
+        is recoverable (next patchset re-runs the pipeline), but
+        losing the daemon means OP-689's change-merged → Published
+        transitions stop too.
         """
+        self._spawn_proactive_merger_thread(event)
+        self._spawn_ai_reviewer_thread(event)
+
+    def _spawn_proactive_merger_thread(self, event: dict[str, Any]) -> None:
+        """OP-715 — fire the proactive merger pipeline in a daemon thread."""
         try:
             from backend.routers.webhooks import _proactive_merger_check
         except Exception as exc:  # pragma: no cover — import fail = bug
@@ -802,6 +808,55 @@ class GerritJiraBridge:
         thread.start()
         self.log(
             "INFO", "proactive_merger_thread_spawned",
+            change_id=str(change_number) if change_number else "",
+            ps=str(ps_number) if ps_number else "",
+        )
+
+    def _spawn_ai_reviewer_thread(self, event: dict[str, Any]) -> None:
+        """OP-801 — fire the AI Reviewer pipeline in a daemon thread.
+
+        Loop prevention (uploader=merger-agent-bot) and the 24 h
+        ``(change_id, revision)`` throttle live inside
+        :func:`backend.routers.webhooks._ai_reviewer_check`, so the
+        spawn here is unconditional — the inner pipeline early-exits
+        on skip conditions and emits its own ``ai_reviewer_skip`` log
+        line.
+        """
+        try:
+            from backend.routers.webhooks import _ai_reviewer_check
+        except Exception as exc:  # pragma: no cover — import fail = bug
+            self.log(
+                "ERROR", "ai_reviewer_import_failed",
+                err=f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        change = event.get("change") or {}
+        patchset = event.get("patchSet") or {}
+        change_number = change.get("number")
+        ps_number = patchset.get("number")
+
+        def _runner() -> None:
+            import asyncio
+            try:
+                asyncio.run(_ai_reviewer_check(event))
+            except Exception as exc:  # pragma: no cover — async runtime safety
+                self.log(
+                    "ERROR", "ai_reviewer_thread_error",
+                    change_id=str(change_number) if change_number else "",
+                    ps=str(ps_number) if ps_number else "",
+                    err=f"{type(exc).__name__}: {exc}",
+                )
+
+        import threading
+        thread = threading.Thread(
+            target=_runner,
+            name=f"ai-reviewer-{change_number}-{ps_number}",
+            daemon=True,
+        )
+        thread.start()
+        self.log(
+            "INFO", "ai_reviewer_thread_spawned",
             change_id=str(change_number) if change_number else "",
             ps=str(ps_number) if ps_number else "",
         )

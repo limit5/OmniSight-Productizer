@@ -401,6 +401,10 @@ async def _run_ai_review(
             limit=ai_reviewer.DEFAULT_REVIEW_DIFF_LIMIT_LOC,
         ):
             chosen = ai_reviewer.route_model(files=files)
+            logger.info(
+                "ai_reviewer_invoked change=%s model=%s loc=%d skip=too_large",
+                change_id, chosen, loc_total,
+            )
             msg = ai_reviewer.too_large_message(
                 insertions=insertions,
                 deletions=deletions,
@@ -427,6 +431,13 @@ async def _run_ai_review(
         diff = await _fetch_patchset_diff(revision, project)
 
         chosen = ai_reviewer.route_model(diff=diff, files=files)
+        # OP-801 — emit a single greppable invocation line carrying the
+        # picked tier so operators (and the OP-801 AC verification step)
+        # can confirm risk-tier routing fired before the LLM round-trip.
+        logger.info(
+            "ai_reviewer_invoked change=%s model=%s loc=%d",
+            change_id, chosen, loc_total,
+        )
         # ``invoke_chat`` is sync — push it off the event loop so the
         # gerrit pool isn't blocked while the LLM is thinking.
         review = await asyncio.to_thread(
@@ -544,6 +555,122 @@ async def _fetch_patchset_diff(revision: str, project: str) -> str:
         logger.warning("ai_reviewer.fetch_diff err=%s rev=%s",
                        exc, revision[:8] if revision else "")
         return ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OP-801 — AI Reviewer invocation from the bridge daemon
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def _ai_reviewer_check(event: dict) -> None:
+    """OP-801 — bridge-daemon-callable AI Reviewer pipeline.
+
+    Self-contained coroutine equivalent of :func:`_on_patchset_created`
+    but with the actual review *awaited* (no ``asyncio.create_task``)
+    so a caller running ``asyncio.run`` inside a daemon thread sees the
+    whole pipeline complete before the thread exits. The HTTP path
+    keeps using :func:`_on_patchset_created` so its existing fast-200
+    contract is preserved.
+
+    OP-801 background — Gerrit's webhooks plugin v3.13.5 has no
+    documented auth surface (Lesson L-OP-713 confirmed neither
+    ``secret`` nor any signature header are honoured), so the
+    ``/webhooks/gerrit`` endpoint is unreachable from the plugin's
+    auth-gated POST. OP-715 already moved the proactive merger trigger
+    to the SSH stream-events bridge; this coroutine is the matching
+    AI Reviewer migration. We keep ONE implementation so a future
+    plugin-auth fix and the daemon stay in sync.
+
+    Skip behaviour mirrors :func:`_on_patchset_created` exactly:
+
+      1. Loop prevention — uploader=merger-agent-bot returns early
+         (the merger's own conflict resolution patchsets must not
+         retrigger an AI review).
+      2. Idempotency — the (change_id, revision) throttle in
+         :mod:`backend.agents.ai_reviewer` skips repeats inside the
+         24 h TTL so a daemon restart that replays recent events
+         does NOT double-review.
+      3. L2 notification — operator dashboards still see the
+         "New patchset" warning so the heads-up arrives before the
+         LLM finishes.
+
+    Errors are caught at the outermost level — daemon survival is
+    higher priority than reporting one missed review (next patchset
+    re-runs the pipeline).
+    """
+    try:
+        change = event.get("change") or {}
+        patchset = event.get("patchSet") or {}
+
+        change_id = str(change.get("id") or "")
+        change_number = str(change.get("number") or "")
+        change_subject = str(change.get("subject") or "")
+        project = str(change.get("project") or "")
+        commit = str(patchset.get("revision") or "")
+        uploader = patchset.get("uploader") or {}
+        uploader_name = uploader.get("name", "unknown")
+        insertions = int(patchset.get("sizeInsertions") or 0)
+        deletions = int(patchset.get("sizeDeletions") or 0)
+
+        # 1. Loop prevention — never review the merger's own resolution
+        #    patchsets (would feedback-loop with OP-714 conflict fixes).
+        if _is_merger_uploader(uploader):
+            logger.info(
+                "ai_reviewer_skip change=%s reason=uploader_is_merger",
+                change_id,
+            )
+            return
+
+        # 2. Idempotency throttle — same (change_id, revision) within
+        #    24 h gets ONE review. Multi-worker dedup is best-effort;
+        #    see ``ai_reviewer._THROTTLE`` for the rationale.
+        from backend.agents import ai_reviewer as _ai_reviewer
+        if _ai_reviewer.should_skip_recent(change_id, commit):
+            logger.info(
+                "ai_reviewer_skip change=%s rev=%s reason=throttle_24h",
+                change_id, commit[:8] if commit else "",
+            )
+            return
+        _ai_reviewer.mark_reviewed(change_id, commit)
+
+        # 3. L2 notification — operator heads-up before the LLM call.
+        #    Errors here must NOT block the actual review.
+        try:
+            from backend.notifications import notify
+            await notify(
+                "warning",
+                f"New patchset: {change_subject}",
+                message=(
+                    f"Change {change_id} by {uploader_name} — "
+                    f"commit {commit[:8] if commit else ''}"
+                ),
+                source="gerrit",
+                action_url=(
+                    f"{settings.gerrit_url}/c/{change_id}"
+                    if settings.gerrit_url else None
+                ),
+                action_label="Review in Gerrit",
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "ai_reviewer notify failed change=%s err=%s",
+                change_id, exc,
+            )
+
+        # 4. Run the review (awaited, not create_task — see docstring).
+        await _run_ai_review(
+            change_id=change_id,
+            change_number=change_number,
+            revision=commit,
+            project=project,
+            subject=change_subject,
+            insertions=insertions,
+            deletions=deletions,
+        )
+    except Exception as exc:  # pragma: no cover — top-level safety net
+        logger.exception(
+            "_ai_reviewer_check unhandled error: %s", exc,
+        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

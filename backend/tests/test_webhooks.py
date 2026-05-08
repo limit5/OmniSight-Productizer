@@ -1351,3 +1351,227 @@ class TestAIReviewerWiring:
         # list pulled from query_change.
         assert captured["files"] == ("docs/howto.md",)
         assert captured["subject"] == "docs typo"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# OP-801 — bridge-daemon-callable AI Reviewer pipeline tests
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestAiReviewerCheckBridgePath:
+    """OP-801 — :func:`webhooks._ai_reviewer_check` is the in-process
+    coroutine the bridge daemon (``backend/agents/gerrit_jira_bridge.py``)
+    invokes via ``asyncio.run`` in a per-event thread. The tests below
+    pin the same skip behaviour the webhook ``_on_patchset_created``
+    path enforces, but exercised through the new shared entry point.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_throttle(self):
+        from backend.agents import ai_reviewer
+        ai_reviewer.reset_throttle()
+        yield
+        ai_reviewer.reset_throttle()
+
+    @pytest.mark.asyncio
+    async def test_merger_uploader_short_circuits(self, monkeypatch, caplog):
+        """Loop prevention — merger-agent-bot's own resolution patchsets
+        must NOT trigger an AI review (would feedback-loop with OP-714)."""
+        from backend.routers import webhooks
+        from backend.agents import ai_reviewer
+
+        run_calls = []
+
+        async def fake_run_ai_review(**kw):
+            run_calls.append(kw)
+        monkeypatch.setattr(webhooks, "_run_ai_review", fake_run_ai_review)
+
+        from backend import notifications
+
+        async def _noop_notify(*a, **kw):
+            pass
+        monkeypatch.setattr(notifications, "notify", _noop_notify)
+
+        event = {
+            "type": "patchset-created",
+            "change": {"id": "Imerger01", "subject": "merger resolve"},
+            "patchSet": {
+                "revision": "deadbeef" * 5,
+                "uploader": {
+                    "name": "Merger Agent Bot",
+                    "username": "merger-agent-bot",
+                    "email": "merger-agent-bot@example.com",
+                },
+            },
+        }
+        with caplog.at_level("INFO", logger="backend.routers.webhooks"):
+            await webhooks._ai_reviewer_check(event)
+
+        assert run_calls == []
+        # Throttle entry must NOT be set — a follow-up non-merger PS for
+        # the same change should still fire a review.
+        assert ai_reviewer.should_skip_recent(
+            "Imerger01", "deadbeef" * 5,
+        ) is False
+        # AC#4 wording — the bridge log surfaces the skip reason.
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "ai_reviewer_skip" in joined
+        assert "uploader_is_merger" in joined
+
+    @pytest.mark.asyncio
+    async def test_throttle_blocks_duplicate_revision_within_24h(
+        self, monkeypatch,
+    ):
+        """AC#2 — same (change_id, revision) re-delivered (e.g. on a
+        bridge restart that replays cursor events) → only one review."""
+        from backend.routers import webhooks
+        from backend.agents import ai_reviewer
+
+        run_calls = []
+
+        async def fake_run_ai_review(**kw):
+            run_calls.append(kw)
+        monkeypatch.setattr(webhooks, "_run_ai_review", fake_run_ai_review)
+
+        from backend import notifications
+
+        async def _noop_notify(*a, **kw):
+            pass
+        monkeypatch.setattr(notifications, "notify", _noop_notify)
+
+        event = {
+            "type": "patchset-created",
+            "change": {"id": "Idup01", "subject": "first push"},
+            "patchSet": {
+                "revision": "abc12345" * 5,
+                "uploader": {"name": "alice"},
+                "sizeInsertions": 10,
+                "sizeDeletions": 2,
+            },
+        }
+        # First delivery — fires.
+        await webhooks._ai_reviewer_check(event)
+        # Second delivery (replayed by the bridge) — throttled.
+        await webhooks._ai_reviewer_check(event)
+
+        assert len(run_calls) == 1
+        assert ai_reviewer.should_skip_recent(
+            "Idup01", "abc12345" * 5,
+        ) is True
+
+    @pytest.mark.asyncio
+    async def test_happy_path_invokes_run_ai_review_with_event_fields(
+        self, monkeypatch,
+    ):
+        """The shared entry point must pass the change/PS metadata on
+        to ``_run_ai_review`` unchanged so risk-tier routing fires
+        correctly downstream (AC#3 needs this end-to-end)."""
+        from backend.routers import webhooks
+
+        captured = {}
+
+        async def fake_run_ai_review(**kw):
+            captured.update(kw)
+        monkeypatch.setattr(webhooks, "_run_ai_review", fake_run_ai_review)
+
+        from backend import notifications
+
+        async def _noop_notify(*a, **kw):
+            pass
+        monkeypatch.setattr(notifications, "notify", _noop_notify)
+
+        event = {
+            "type": "patchset-created",
+            "change": {
+                "id": "Ialembic01",
+                "number": 555,
+                "subject": "[OP-801] add column",
+                "project": "omnisight/OmniSight-Productizer",
+            },
+            "patchSet": {
+                "revision": "abcd1234" * 5,
+                "uploader": {"name": "alice"},
+                "sizeInsertions": 30,
+                "sizeDeletions": 4,
+            },
+        }
+        await webhooks._ai_reviewer_check(event)
+
+        assert captured["change_id"] == "Ialembic01"
+        assert captured["change_number"] == "555"
+        assert captured["revision"] == "abcd1234" * 5
+        assert captured["project"] == "omnisight/OmniSight-Productizer"
+        assert captured["subject"] == "[OP-801] add column"
+        assert captured["insertions"] == 30
+        assert captured["deletions"] == 4
+
+    @pytest.mark.asyncio
+    async def test_run_ai_review_logs_invoked_with_model(
+        self, monkeypatch, caplog,
+    ):
+        """AC#3 — risk-tier routing observable in the bridge log line
+        ``ai_reviewer_invoked change=N model=opus`` (for an
+        alembic/versions/ touch). The same log line covers AC#1 for
+        haiku on a docs-only change."""
+        from backend.routers import webhooks
+        from backend.agents import ai_reviewer
+        from backend.agents.ai_reviewer import (
+            MODEL_OPUS, ReviewResult, _with_footer,
+        )
+
+        # Stub Gerrit + diff fetch. The change touches alembic/versions
+        # which the router pins to opus regardless of LOC.
+        stub = _StubGerritClient(
+            files=["backend/alembic/versions/0200_add_col.py"],
+            subject="db migration",
+        )
+        monkeypatch.setattr("backend.gerrit.gerrit_client", stub)
+
+        async def _empty_diff(rev, project):
+            return ""
+        monkeypatch.setattr(webhooks, "_fetch_patchset_diff", _empty_diff)
+
+        def fake_review_patchset(diff, model="", *, files=(), subject="",
+                                  insertions=None, deletions=None, **kw):
+            chosen = ai_reviewer.route_model(diff=diff, files=files)
+            return ReviewResult(
+                score=1,
+                message=_with_footer(
+                    "Migration looks safe.",
+                    model_id=chosen, cost_usd=0.01,
+                ),
+                model_id=chosen,
+                input_tokens=200,
+                output_tokens=40,
+                cost_usd=0.01,
+            )
+        monkeypatch.setattr(
+            ai_reviewer, "review_patchset", fake_review_patchset,
+        )
+
+        async def _noop_record(**kw):
+            return None
+        monkeypatch.setattr(
+            "backend.billing_usage.record_llm_call", _noop_record,
+        )
+
+        with caplog.at_level("INFO", logger="backend.routers.webhooks"):
+            await webhooks._run_ai_review(
+                change_id="Imig01",
+                change_number="800",
+                revision="ba110011" * 5,
+                project="omnisight",
+                subject="db migration",
+                insertions=30,
+                deletions=4,
+            )
+
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        # AC#1 + AC#3 — single greppable line carries the model tier.
+        assert "ai_reviewer_invoked" in joined
+        assert "change=Imig01" in joined
+        assert f"model={MODEL_OPUS}" in joined
+
+        # Sanity: the +1 actually landed on the change.
+        assert len(stub.posted_reviews) == 1
+        assert stub.posted_reviews[0]["labels"] == {"Code-Review": 1}
