@@ -1,0 +1,22 @@
+; [OP-807] Daily 08:00 UTC trigger for tier-cooldown-daily.service.
+;
+; Cadence: once a day at 08:00 UTC -- one hour ahead of conflict-report
+; (09:00 UTC) so any cooldown labels the sweep applies are visible on
+; the operator dashboard tile by the time conflict-report fires and the
+; oncall is at standup. Persistent=true so a host that was offline at
+; the scheduled tick fires immediately on resume rather than waiting
+; another full day -- a missed cooldown evaluation could leave a
+; misclassifying agent in service for an extra 24h, which defeats the
+; ADR-0005 §4 layer 4 guard.
+
+[Unit]
+Description=Daily 08:00 UTC trigger for tier-cooldown-daily.service (OP-807)
+
+[Timer]
+Unit=tier-cooldown-daily.service
+OnCalendar=*-*-* 08:00:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
