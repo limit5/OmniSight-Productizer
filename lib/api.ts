@@ -3114,6 +3114,74 @@ export async function patchFeatureFlag(
   )
 }
 
+// ─── Batch-merge candidate dashboard (OP-735 R5) ─────────────────
+
+export interface BatchMergeCandidateRow {
+  change_id: string
+  project: string
+  bot: string
+  file_class: string
+  insertions: number
+  deletions: number
+  files: string[]
+  ai_summary: string
+  tagged_at: number
+  revision: string
+  subject: string
+  agent_class: string
+  tier: string
+}
+
+export interface BatchMergeListResponse {
+  candidates: BatchMergeCandidateRow[]
+  hashtag: string
+  operator: string
+  fetched_at: number
+}
+
+export interface BatchMergeListFilters {
+  agent_class?: string
+  tier?: string
+  file_glob?: string
+}
+
+export async function listBatchMergeCandidates(
+  filters: BatchMergeListFilters = {},
+): Promise<BatchMergeListResponse> {
+  const qs = new URLSearchParams()
+  if (filters.agent_class) qs.set("agent_class", filters.agent_class)
+  if (filters.tier) qs.set("tier", filters.tier)
+  if (filters.file_glob) qs.set("file_glob", filters.file_glob)
+  const suffix = qs.toString() ? `?${qs.toString()}` : ""
+  return request<BatchMergeListResponse>(`/admin/batch-merge${suffix}`)
+}
+
+export interface BatchMergeApproveResult {
+  change_id: string
+  ok: boolean
+  reason: string
+}
+
+export interface BatchMergeApproveResponse {
+  results: BatchMergeApproveResult[]
+  succeeded: number
+  failed: number
+  operator: string
+}
+
+export async function approveBatchMergeCandidates(
+  changeIds: string[],
+  message?: string,
+): Promise<BatchMergeApproveResponse> {
+  return request<BatchMergeApproveResponse>("/admin/batch-merge/approve", {
+    method: "POST",
+    body: JSON.stringify({
+      change_ids: changeIds,
+      ...(message ? { message } : {}),
+    }),
+  })
+}
+
 // ─── External A2A agent registry (BP.A2A.6 operator UI) ─────────
 
 export type ExternalAgentAuthMode = "none" | "bearer" | "oauth2"
