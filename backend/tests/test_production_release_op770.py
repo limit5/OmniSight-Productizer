@@ -145,20 +145,27 @@ def test_ship_failure_triggers_rollback() -> None:
 async def test_approval_writes_audit_and_marks_shipped(tmp_path: Path) -> None:
     pr.save_approval(pr.ReleaseApproval(tag="v9.99.0"), tmp_path)
     audit_calls: list[dict] = []
+    deploy_audit_calls: list[dict] = []
 
     async def fake_audit(**kwargs):
         audit_calls.append(kwargs)
         return 123
 
+    def fake_deploy_audit(**kwargs):
+        deploy_audit_calls.append(kwargs)
+        return len(deploy_audit_calls)
+
     record = await pr.approve_and_ship(
         "v9.99.0",
         actor="operator@example.test",
+        reason="ship the v9.99.0 milestone after green smoke",
         store_dir=tmp_path,
         orchestrator=pr.ProductionDeployOrchestrator(
             runner=RecordingRunner(),
             clock=FakeClock(),
         ),
         audit_log=fake_audit,
+        deploy_audit_record=fake_deploy_audit,
     )
 
     assert record.status == "shipped"
@@ -166,23 +173,126 @@ async def test_approval_writes_audit_and_marks_shipped(tmp_path: Path) -> None:
     assert audit_calls[0]["action"] == "release.ship_approved"
     assert audit_calls[0]["entity_id"] == "v9.99.0"
     assert audit_calls[0]["actor"] == "operator@example.test"
+    # OP-779: the reason must reach the per-tenant audit chain
+    assert audit_calls[0]["after"]["reason"] == (
+        "ship the v9.99.0 milestone after green smoke"
+    )
+    # OP-779: deploy_audit must record both started + succeeded rows
+    kinds_statuses = [(c["kind"], c["status"]) for c in deploy_audit_calls]
+    assert kinds_statuses == [("deploy", "started"), ("deploy", "succeeded")]
+    assert all(c["reason"] for c in deploy_audit_calls)
+
+
+@pytest.mark.asyncio
+async def test_approval_without_reason_is_rejected(tmp_path: Path) -> None:
+    """OP-779 D18 -- prod approval workflow must enforce reason text."""
+    pr.save_approval(pr.ReleaseApproval(tag="v9.99.0"), tmp_path)
+
+    with pytest.raises(ValueError, match="reason"):
+        await pr.approve_and_ship(
+            "v9.99.0",
+            actor="op@example.test",
+            reason="",
+            store_dir=tmp_path,
+        )
+
+    with pytest.raises(ValueError, match="reason"):
+        await pr.approve_and_ship(
+            "v9.99.0",
+            actor="op@example.test",
+            reason=None,
+            store_dir=tmp_path,
+        )
+
+
+@pytest.mark.asyncio
+async def test_ship_failure_records_rollback_in_deploy_audit(tmp_path: Path) -> None:
+    """OP-779 D18 -- a failed ship must leave a rollback row in deploy_audit
+    so the compliance trail captures both ends of the abort."""
+    pr.save_approval(pr.ReleaseApproval(tag="v9.99.0"), tmp_path)
+    deploy_audit_calls: list[dict] = []
+
+    async def fake_audit(**kwargs):
+        return 0
+
+    def fake_deploy_audit(**kwargs):
+        deploy_audit_calls.append(kwargs)
+        return len(deploy_audit_calls)
+
+    runner = RecordingRunner(fail_on="backend-b")
+    with pytest.raises(RuntimeError):
+        await pr.approve_and_ship(
+            "v9.99.0",
+            actor="op@example.test",
+            reason="forced-failure test",
+            store_dir=tmp_path,
+            orchestrator=pr.ProductionDeployOrchestrator(
+                runner=runner,
+                clock=FakeClock(),
+            ),
+            audit_log=fake_audit,
+            deploy_audit_record=fake_deploy_audit,
+        )
+
+    kinds_statuses = [(c["kind"], c["status"]) for c in deploy_audit_calls]
+    assert kinds_statuses == [
+        ("deploy", "started"),
+        ("rollback", "succeeded"),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_cancel_rolls_back_staging_artifacts(tmp_path: Path) -> None:
     pr.save_approval(pr.ReleaseApproval(tag="v9.99.0"), tmp_path)
     runner = RecordingRunner()
+    deploy_audit_calls: list[dict] = []
+
+    def fake_deploy_audit(**kwargs):
+        deploy_audit_calls.append(kwargs)
+        return len(deploy_audit_calls)
 
     record = await pr.cancel_release(
         "v9.99.0",
         actor="operator@example.test",
+        reason="staging smoke regressed",
         store_dir=tmp_path,
         orchestrator=pr.ProductionDeployOrchestrator(
             runner=runner,
             staging_rollback_command=["rollback-staging-artifacts", "v9.99.0"],
         ),
+        deploy_audit_record=fake_deploy_audit,
     )
 
     assert record.status == "cancelled"
     assert record.cancelled_by == "operator@example.test"
     assert runner.calls == [["rollback-staging-artifacts", "v9.99.0"]]
+    assert deploy_audit_calls == [
+        {
+            "kind": "operator_action",
+            "status": "succeeded",
+            "tag": "v9.99.0",
+            "actor": "operator@example.test",
+            "reason": "staging smoke regressed",
+            "context": {"action": "release_cancelled"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_reason_is_rejected(tmp_path: Path) -> None:
+    """OP-779 -- cancel surfaces also need an audited reason."""
+    pr.save_approval(pr.ReleaseApproval(tag="v9.99.0"), tmp_path)
+    with pytest.raises(ValueError, match="reason"):
+        await pr.cancel_release(
+            "v9.99.0",
+            actor="op@example.test",
+            reason="",
+            store_dir=tmp_path,
+        )
+
+
+def test_render_html_includes_reason_input() -> None:
+    record = pr.ReleaseApproval(tag="v9.99.0")
+    html = pr.render_approval_html(record)
+    assert 'name="reason"' in html
+    assert "required" in html

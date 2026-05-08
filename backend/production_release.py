@@ -221,10 +221,14 @@ def render_approval_html(record: ReleaseApproval) -> str:
   <section><h2>Baseline Diff</h2><pre>{baseline}</pre></section>
   <section><h2>Change List</h2><ul>{changes}</ul></section>
   <section>
+    <h2>Operator reason (required)</h2>
+    <p>Per OP-779, every prod ship/cancel needs a free-form reason that lands in <code>deploy_audit</code>.</p>
     <form method="post" action="/admin/release-approval/ship?tag={tag}" style="display:inline">
+      <input type="text" name="reason" required minlength="1" placeholder="reason for shipping" size="60">
       <button class="ship" type="submit">SHIP IT</button>
     </form>
     <form method="post" action="/admin/release-approval/cancel?tag={tag}" style="display:inline">
+      <input type="text" name="reason" required minlength="1" placeholder="reason for cancelling" size="60">
       <button class="cancel" type="submit">Cancel</button>
     </form>
   </section>
@@ -307,14 +311,26 @@ class ProductionDeployOrchestrator:
         self._run(self.staging_rollback_command, timeout=120.0, tag=tag)
 
 
+def _require_reason(reason: str | None, action: str) -> str:
+    """OP-779 D18 -- prod approval workflow must capture an operator reason."""
+    if reason is None or not reason.strip():
+        raise ValueError(
+            f"{action} requires a non-empty reason (OP-779 audit requirement)"
+        )
+    return reason.strip()
+
+
 async def approve_and_ship(
     tag: str,
     *,
     actor: str,
+    reason: str | None = None,
     store_dir: Path = DEFAULT_STORE,
     orchestrator: ProductionDeployOrchestrator | None = None,
     audit_log: Callable[..., Any] | None = None,
+    deploy_audit_record: Callable[..., int] | None = None,
 ) -> ReleaseApproval:
+    reason = _require_reason(reason, "release.ship_approved")
     record = load_approval(tag, store_dir)
     now = datetime.now(timezone.utc).isoformat()
     record = ReleaseApproval.from_dict({
@@ -333,8 +349,20 @@ async def approve_and_ship(
         entity_kind="release",
         entity_id=tag,
         before={"status": "pending"},
-        after={"status": "deploying", "tag": tag},
+        after={"status": "deploying", "tag": tag, "reason": reason},
         actor=actor,
+    )
+
+    if deploy_audit_record is None:
+        from backend import deploy_audit as _deploy_audit
+        deploy_audit_record = _deploy_audit.record
+    await asyncio.to_thread(
+        deploy_audit_record,
+        kind="deploy",
+        status="started",
+        tag=tag,
+        actor=actor,
+        reason=reason,
     )
 
     orch = orchestrator or ProductionDeployOrchestrator()
@@ -348,6 +376,15 @@ async def approve_and_ship(
             "last_error": str(exc),
         })
         save_approval(failed, store_dir)
+        await asyncio.to_thread(
+            deploy_audit_record,
+            kind="rollback",
+            status="succeeded",
+            tag=tag,
+            actor=actor,
+            reason=f"automatic rollback after deploy failure: {exc}",
+            context={"trigger": "ship_failure", "error": str(exc)},
+        )
         raise
 
     shipped = ReleaseApproval.from_dict({
@@ -357,6 +394,15 @@ async def approve_and_ship(
         "deploy_elapsed_seconds": elapsed,
     })
     save_approval(shipped, store_dir)
+    await asyncio.to_thread(
+        deploy_audit_record,
+        kind="deploy",
+        status="succeeded",
+        tag=tag,
+        actor=actor,
+        reason=reason,
+        elapsed_seconds=elapsed,
+    )
     return shipped
 
 
@@ -364,9 +410,12 @@ async def cancel_release(
     tag: str,
     *,
     actor: str,
+    reason: str | None = None,
     store_dir: Path = DEFAULT_STORE,
     orchestrator: ProductionDeployOrchestrator | None = None,
+    deploy_audit_record: Callable[..., int] | None = None,
 ) -> ReleaseApproval:
+    reason = _require_reason(reason, "release.cancelled")
     record = load_approval(tag, store_dir)
     orch = orchestrator or ProductionDeployOrchestrator()
     await asyncio.to_thread(orch.cancel, tag)
@@ -377,6 +426,18 @@ async def cancel_release(
         "cancelled_at": datetime.now(timezone.utc).isoformat(),
     })
     save_approval(cancelled, store_dir)
+    if deploy_audit_record is None:
+        from backend import deploy_audit as _deploy_audit
+        deploy_audit_record = _deploy_audit.record
+    await asyncio.to_thread(
+        deploy_audit_record,
+        kind="operator_action",
+        status="succeeded",
+        tag=tag,
+        actor=actor,
+        reason=reason,
+        context={"action": "release_cancelled"},
+    )
     return cancelled
 
 

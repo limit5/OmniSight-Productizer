@@ -1422,6 +1422,8 @@ from backend.routers import canary_rollout as _canary_rollout_router  # OP-771 D
 _include_versioned_router(_canary_rollout_router.router)
 from backend.routers import release_approval as _release_approval_router  # OP-770 production release approval
 app.include_router(_release_approval_router.router)
+from backend.routers import deploy_audit as _deploy_audit_router  # OP-779 D18 change-management audit log
+app.include_router(_deploy_audit_router.router)
 from backend.routers import external_agents as _external_agents_router  # BP.A2A.6 external A2A agent registry UI
 _include_versioned_router(_external_agents_router.router)
 from backend.routers import batch_merge as _batch_merge_router  # OP-735 R5 AI Reviewer auto-+1 dashboard
