@@ -1,0 +1,51 @@
+site_name: OmniSight Docs
+site_url: https://docs.sora.services/
+site_description: Architecture decisions, lessons, and operator references for OmniSight.
+docs_dir: docs
+site_dir: ../docs-site-dist
+strict: true
+
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: indigo
+    accent: cyan
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - toc.follow
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search
+
+hooks:
+  - hooks/jira_links.py
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Lessons:
+      - Index: lessons/index.md
+      - 'L-OP-785 — MkDocs spike': lessons/L-OP-785-mkdocs-spike.md

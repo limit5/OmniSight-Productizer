@@ -1,0 +1,26 @@
+/* OmniSight palette tweaks — minimal overrides on top of Material's slate scheme. */
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #0b1220;
+  --md-default-fg-color: #dbeafe;
+  --md-default-fg-color--light: #cbd5f5;
+  --md-default-fg-color--lighter: #94a3b8;
+  --md-typeset-a-color: #67e8f9;
+  --md-code-bg-color: #111827;
+  --md-code-fg-color: #e2e8f0;
+}
+
+article.md-content__inner h1,
+article.md-content__inner h2,
+article.md-content__inner h3 {
+  color: #f8fafc;
+}
+
+article.md-content__inner table {
+  border-color: #334155;
+}
+
+article.md-content__inner table th,
+article.md-content__inner table td {
+  border-color: #334155;
+}
