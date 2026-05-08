@@ -130,6 +130,28 @@ fi
 _upsert_env "OMNISIGHT_FRONTEND_BUILD_LAG_COMMITS" "$FRONTEND_BUILD_LAG_COMMITS"
 log "Frontend freshness metadata: build=${FRONTEND_BUILD_COMMIT:-unknown} head=$MASTER_HEAD_COMMIT lag=$FRONTEND_BUILD_LAG_COMMITS"
 
+# OP-772: expose current/previous image tags to the persistent SLO monitor
+# before any replica is restarted. The monitor uses the previous tag as
+# its rollback target if three consecutive 30 s SLO windows breach.
+CURRENT_IMAGE_TAG="${OMNISIGHT_IMAGE_TAG:-${TAG:-$(git rev-parse --short=12 HEAD)}}"
+PREVIOUS_IMAGE_TAG="$(grep -E '^OMNISIGHT_IMAGE_TAG=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+if [ -n "${PREVIOUS_IMAGE_TAG:-}" ] && [ "$PREVIOUS_IMAGE_TAG" != "$CURRENT_IMAGE_TAG" ]; then
+    _upsert_env "OMNISIGHT_PREVIOUS_IMAGE_TAG" "$PREVIOUS_IMAGE_TAG"
+fi
+_upsert_env "OMNISIGHT_IMAGE_TAG" "$CURRENT_IMAGE_TAG"
+log "SLO monitor image tags: current=$CURRENT_IMAGE_TAG previous=${PREVIOUS_IMAGE_TAG:-unknown}"
+
+if [ "$DRY_RUN" = false ]; then
+    if systemctl --user list-unit-files omnisight-slo-monitor.service >/dev/null 2>&1; then
+        systemctl --user restart omnisight-slo-monitor.service || \
+            warn "omnisight-slo-monitor.service restart failed before deploy — check systemd user logs"
+    else
+        warn "omnisight-slo-monitor.service not installed — install deploy/systemd/omnisight-slo-monitor.service for OP-772"
+    fi
+else
+    echo "  [dry-run] systemctl --user restart omnisight-slo-monitor.service"
+fi
+
 # ── Step 1b: WAL-safe pre-deploy backup ──
 # H2 audit (2026-04-19): rolling deploys can still roll BACKWARDS in
 # data integrity if a migration blows up or a code change panics on
@@ -268,6 +290,18 @@ if [ "$DRY_RUN" = false ]; then
     else
         err "Smoke test 失敗：${HEALTH}"
     fi
+fi
+
+# OP-772: restart the persistent SLO monitor to cover the full post-deploy hour.
+if [ "$DRY_RUN" = false ]; then
+    if systemctl --user list-unit-files omnisight-slo-monitor.service >/dev/null 2>&1; then
+        systemctl --user restart omnisight-slo-monitor.service || \
+            warn "omnisight-slo-monitor.service restart failed — check systemd user logs"
+    else
+        warn "omnisight-slo-monitor.service not installed — install deploy/systemd/omnisight-slo-monitor.service for OP-772"
+    fi
+else
+    echo "  [dry-run] systemctl --user restart omnisight-slo-monitor.service"
 fi
 
 # ── Done ──

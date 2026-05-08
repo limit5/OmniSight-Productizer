@@ -1,0 +1,18 @@
+# OP-772 — production deploy SLOs consumed by backend.slo_monitor.
+#
+# Values are per route. The "*" route is the default for every route
+# label returned by the metrics backend unless a route-specific override
+# is added below.
+schema_version: 1
+interval_seconds: 30
+post_deploy_monitor_seconds: 3600
+breach_consecutive_windows: 3
+rollback_max_seconds: 300
+error_budget:
+  window: monthly
+  seconds: 3600
+routes:
+  "*":
+    error_rate_lt: 0.005
+    p95_latency_ms_lt: 500
+    success_rate_gt: 0.995
