@@ -33,7 +33,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
-from backend.agents import circuit_breaker, jira_dispatch, orphan_salvage, scheduler
+from backend.agents import (
+    circuit_breaker,
+    jira_dispatch,
+    orphan_salvage,
+    runner_failure_classifier,
+    scheduler,
+)
 
 AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
@@ -318,6 +324,61 @@ def _finalize_under_review(
               f"comment posted, transition skipped")
 
 
+def _handle_gerrit_push_failure(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    detail: str,
+    agent_class: str = AGENT_CLASS,
+) -> tuple[str, str]:
+    """Classify a Gerrit push failure and apply the JIRA recovery action."""
+
+    category, action = runner_failure_classifier.categorize_push_failure(detail)
+
+    if action == "force-publish":
+        merged_info = jira_dispatch.already_merged_in_gerrit(key, agent_class=agent_class)
+        if merged_info:
+            jira_dispatch.force_walk_to_published(client, key)
+            jira_dispatch.add_comment(
+                client,
+                key,
+                (
+                    "[runner-push-fail:no-new-changes] work already merged via "
+                    f"#{merged_info.change_number}; auto-walked ticket to 公開済み."
+                ),
+            )
+        else:
+            jira_dispatch.transition_back_to_todo(
+                client,
+                key,
+                "CLI produced no committable changes; reverting for re-pickup.",
+            )
+        return category, action
+
+    if action == "revert":
+        jira_dispatch.transition_back_to_todo(
+            client,
+            key,
+            f"[runner-push-fail:{category}] {detail[:200]}",
+        )
+        return category, action
+
+    if action == "retry":
+        jira_dispatch.add_comment(
+            client,
+            key,
+            f"[runner-push-fail:transient] {category}; will retry next tick.",
+        )
+        return category, action
+
+    jira_dispatch.add_comment(
+        client,
+        key,
+        f"[runner-push-fail:unknown] Manual review needed:\n{detail[:500]}",
+    )
+    jira_dispatch.add_label(client, key, "runner-loop-paused-pending-review")
+    return category, action
+
+
 def main() -> int:
     print(f"[runner] agent_class={AGENT_CLASS}, dry_run={DRY_RUN}")
     open_services = circuit_breaker.open_services()
@@ -496,10 +557,11 @@ def main() -> int:
             _finalize_under_review(client, snapshot.key, push_result.change_url)
         else:
             print(f"[runner] Gerrit push failed:\n{push_result.detail}", file=sys.stderr)
-            jira_dispatch.add_comment(
-                client, snapshot.key,
-                f"[runner-gerrit-push-fail] Gerrit rejected push:\n```\n{push_result.detail}\n```\n\n"
-                f"Operator: review + push manually.",
+            _handle_gerrit_push_failure(
+                client,
+                snapshot.key,
+                push_result.detail,
+                agent_class=AGENT_CLASS,
             )
             return 1
     elif rc == 99:

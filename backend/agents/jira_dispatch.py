@@ -360,6 +360,14 @@ class GerritPushResult:
     detail: str
 
 
+@dataclass(frozen=True)
+class GerritMergedInfo:
+    """Merged Gerrit sibling found for a JIRA key."""
+
+    change_number: str
+    subject: str
+
+
 def _gerrit_ssh_url(agent_class: str) -> str:
     user = _GERRIT_AUTH_BY_CLASS.get(agent_class, _GERRIT_AUTH_BY_CLASS["subscription-claude"])[0]
     return f"ssh://{user}@{GERRIT_SSH_HOST}:{GERRIT_SSH_PORT}/{GERRIT_PROJECT_PATH}"
@@ -675,6 +683,45 @@ def push_to_gerrit_for_review(
     )
 
 
+def already_merged_in_gerrit(
+    jira_key: str,
+    agent_class: str = "subscription-codex",
+) -> GerritMergedInfo | None:
+    """Return merged sibling change info for ``jira_key``, if Gerrit has one."""
+
+    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
+    if auth is None:
+        raise ValueError(f"unknown agent_class for Gerrit auth: {agent_class}")
+    _, ssh_key = auth
+    query = f"status:merged project:{GERRIT_PROJECT_PATH} {jira_key}"
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
+        f"{auth[0]}@{GERRIT_SSH_HOST}",
+        "gerrit", "query", "--format=JSON", query,
+    ]
+    result = BREAKERS["gerrit_ssh"].call(
+        subprocess.run,
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    for line in result.stdout.splitlines():
+        try:
+            change = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if change.get("type") == "stats":
+            continue
+        subject = str(change.get("subject") or "")
+        if jira_key not in subject and jira_key not in json.dumps(change):
+            continue
+        number = str(change.get("number") or change.get("_number") or "")
+        if number:
+            return GerritMergedInfo(number, subject)
+    return None
+
+
 TODO_STATUS_NAMES = {"To Do"}
 IN_PROGRESS_STATUS_NAMES = {"In Progress", "進行中"}
 UNDER_REVIEW_STATUS_NAME = "Under Review"
@@ -742,6 +789,55 @@ def transition_to_under_review_if_needed(
         idem_key,
     )
     return True
+
+
+def force_walk_to_published(
+    client: "DispatchClient",
+    key: str,
+    idem_key: str | None = None,
+) -> None:
+    """Walk a runner ticket from its current state to Published.
+
+    Used when Gerrit reports ``no new changes`` and a merged sibling already
+    contains the work. The normal bridge may have missed the earlier
+    change-merged event, so this function performs the same permissive
+    convergence path as the Gerrit/JIRA bridge.
+    """
+
+    status = get_issue_status(client, key)
+    if status in PUBLISHED_STATUS_NAMES:
+        return
+
+    base_key = idem_key or f"force-publish-{key}-{uuid.uuid4().hex[:12]}"
+    if status in IN_PROGRESS_STATUS_NAMES:
+        _request_idempotent(
+            client,
+            "POST",
+            f"/issue/{key}/transitions",
+            {"transition": {"id": TRANSITION_IDS["to_under_review"]}},
+            f"{base_key}-under-review",
+        )
+        status = UNDER_REVIEW_STATUS_NAME
+    if status == UNDER_REVIEW_STATUS_NAME:
+        _request_idempotent(
+            client,
+            "POST",
+            f"/issue/{key}/transitions",
+            {"transition": {"id": TRANSITION_IDS["to_approved"]}},
+            f"{base_key}-approved",
+        )
+        status = "Approved"
+    if status in APPROVED_STATUS_NAMES:
+        _request_idempotent(
+            client,
+            "POST",
+            f"/issue/{key}/transitions",
+            {"transition": {"id": TRANSITION_IDS["to_published"]}},
+            f"{base_key}-published",
+        )
+        return
+
+    raise RuntimeError(f"cannot force-publish {key} from status {status!r}")
 
 
 def transition_to_under_review(
