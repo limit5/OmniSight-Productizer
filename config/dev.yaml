@@ -1,0 +1,43 @@
+# OP-764 D3 — per-environment non-secret configuration (dev)
+#
+# Loaded by ``backend.config`` at import time when
+# ``OMNISIGHT_ENV`` (or the ``--env`` flag wired through
+# ``scripts/run_with_env.py``) resolves to ``dev``. Each top-level
+# key is a snake_case ``Settings`` field name; the loader translates
+# it into ``OMNISIGHT_<KEY>`` and only writes it into the process
+# environment when the variable is NOT already set.
+#
+# Precedence (lowest → highest):
+#   class default → vault secret → this YAML → real env / --override
+#
+# DO NOT put secrets in this file. Secrets live in the vault and are
+# selected via ``OMNISIGHT_SECRETS_BACKEND`` (env|file|hvac). The
+# migrate_dotenv_to_vault.py script enforces the split using the
+# ``backend.secrets_provider.SECRET_FIELDS`` registry.
+
+env: dev
+debug: true
+ci_mode: false
+
+# Auth — open mode only acceptable on dev boxes.
+auth_mode: open
+cookie_secure: "false"
+
+# Sandbox runtime — runc is acceptable on WSL2 / mac dev boxes.
+docker_runtime: runc
+
+# Frontend / API origin defaults for a localhost dev loop.
+frontend_origin: "http://localhost:3000"
+next_public_api_url: "http://localhost:8000"
+
+# LLM provider — leave provider blank so first-run wizard guides
+# the developer; explicit ``--override OMNISIGHT_LLM_PROVIDER=...``
+# overrides this for one-shot tests.
+llm_provider: ""
+
+# Web search disabled by default in dev to avoid burning quota.
+web_search_provider: "none"
+
+# Idle reaper — let dev sandboxes live longer so a debugging
+# session doesn't lose its preview to the 30-min cap.
+web_sandbox_idle_timeout_s: 7200.0
