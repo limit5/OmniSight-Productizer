@@ -2,7 +2,8 @@
 
 ## TL;DR
 
-A Gerrit change in OmniSight **only merges** when BOTH of these are true:
+A Gerrit change in OmniSight **currently merges** when these
+Code-Review conditions are true:
 
 1. At least one `Code-Review: +2` from a **human** in the
    `non-ai-reviewer` group.  *This is the hard gate — no combination
@@ -11,6 +12,12 @@ A Gerrit change in OmniSight **only merges** when BOTH of these are true:
    (the O6 Merger Agent has signed off on the merge-conflict block).
 
 Any `Code-Review: -1` or `-2` blocks submission outright.
+
+OP-740 adds the **Verified** CI track as default-off scaffolding:
+`ci-bot` can vote `Verified +1/-1`, but the `Verified` submit-
+requirement is `NOT_APPLICABLE` until C2 flips the enforcement flag.
+After C2, submit requires both the Code-Review track above and
+`Verified +1`.
 
 AI reviewers (Merger, lint-bot, security-bot, future AIs) **can add
 additional +2 votes** — this is encouraged because it gives humans
@@ -34,6 +41,7 @@ submit-requirements cover the same policy with better introspection.
 | `non-ai-reviewer`   | Human engineers ONLY.  Bot accounts are forbidden by policy (verify via `gerrit ls-members`). | `label Code-Review -2..+2`, `submit`.         |
 | `ai-reviewer-bots`  | Every AI reviewer account (merger-agent-bot, lint-bot, security-bot, future AIs). | `label Code-Review -2..+2`, `push to refs/for/*`. **NO submit.** |
 | `merger-agent-bot`  | The single bot account that runs the O6 Merger Agent.  Must also be in `ai-reviewer-bots`.   | Inherits from `ai-reviewer-bots`.            |
+| `ci-bot`            | CI service account. Must NOT be in `ai-reviewer-bots`, `non-ai-reviewer`, or `merger-agent-bot`. | `label Verified -1..+1` on `develop` and release branches only. |
 
 ### Why group-based, not account-based?
 
@@ -82,7 +90,9 @@ The reference config lives at:
 * [`.gerrit/project.config.example`](../../.gerrit/project.config.example)
   — three submit-requirement blocks: `Human-Plus-2`, `Merger-Plus-2`
   (conditional on `hashtag:Merge-Conflict-Resolved` per OP-694), and
-  `No-Veto`.
+  `No-Veto`, plus the OP-740 default-off `Verified` requirement.
+* [`.gerrit/project.config`](../../.gerrit/project.config)
+  — deployable copy used by OP-740 provisioning.
 
 Install on `refs/meta/config`:
 
@@ -119,6 +129,78 @@ Expect to see all three names — `Human-Plus-2`, `Merger-Plus-2`,
 `No-Veto` — in the output, with status `UNSATISFIED` until the change
 gets the required votes (and `NOT_APPLICABLE` for `Merger-Plus-2`
 on changes without the `Merge-Conflict-Resolved` hashtag).
+
+For OP-740 C1, also expect `Verified` to appear as `NOT_APPLICABLE`.
+That status is intentional during the C1 -> C3 -> C2 transition window:
+the label and ACL exist, but real CI does not enforce submit yet.
+
+### 2.1 OP-740 Verified parallel gate
+
+Default-off C1 flow:
+
+```text
+Patchset created
+    |
+    +--> Code-Review track
+    |       human non-ai-reviewer +2
+    |       merger-agent-bot +2 only for Merge-Conflict-Resolved changes
+    |       no Code-Review -1/-2 veto
+    |
+    +--> Verified track
+            ci-bot may vote Verified +1/-1
+            submit-requirement applicableIf = is:false during C1
+            C2 flips applicableIf off and enforces label:Verified=+1
+```
+
+Post-C2 enforced flow:
+
+```text
+Patchset created
+    |
+    +--> reviewer path: Code-Review submit-requirements satisfied
+    |
+    +--> CI path: ci-bot runs tests and votes Verified +1
+    |
+    +--> submit allowed only when both paths are green
+```
+
+Read the label state in the Gerrit change UI under the submit
+requirements / labels panel:
+
+* `Verified +1` means ci-bot asserted the current patchset passed.
+* `Verified -1` means ci-bot asserted CI failed and, after C2, blocks
+  submit through `MaxWithBlock`.
+* `Verified 0` or no vote means no CI result is present.
+* `Verified` submit-requirement `NOT_APPLICABLE` means the OP-740 C1
+  default-off flag is still active.
+
+Provision or repair the account and ACLs:
+
+```sh
+GERRIT_ADMIN_USER=sora \
+GERRIT_ADMIN_KEY=~/.ssh/id_ed25519 \
+deploy/scripts/provision-ci-bot.sh
+```
+
+Optional live permission smoke test against a disposable open change:
+
+```sh
+VERIFY_CHANGE=<change-number> deploy/scripts/provision-ci-bot.sh
+```
+
+The smoke test requires `ci-bot` to cast `Verified +1` and `Verified -1`,
+then fails if `ci-bot` can cast `Code-Review +1`.
+
+Migration plan:
+
+1. C1 ships label, ACL, account provisioning, and default-off
+   submit-requirement.
+2. C3 ships recovery / escape handling for broken CI state.
+3. C2 ships real CI and flips the `Verified` requirement from
+   `applicableIf = is:false` to normal enforcement of
+   `submittableIf = label:Verified=+1`.
+4. Operators verify a throwaway patchset shows `Verified` as
+   `UNSATISFIED` before ci-bot votes, then `SATISFIED` after `+1`.
 
 ---
 
@@ -240,6 +322,22 @@ All emergency rollbacks MUST:
 * Include a rollback ticket in `docs/ops/upgrade_rollback_ledger.md`.
 * Be re-applied within 24 h (tracked in the same ledger).
 * Be accompanied by a post-mortem if the rollback lasted > 4 h.
+
+### 5.2.1 Verified CI outage placeholder
+
+During OP-740 C1, `Verified` is default-off and cannot block submit.
+After C2 flips enforcement on, a CI outage should use the C3 recovery
+path first.  If C3 is unavailable and a production hotfix is blocked:
+
+1. Confirm the Code-Review track is satisfied and no `Code-Review`
+   veto is present.
+2. Record the outage ticket and affected change number.
+3. Use the Gerrit admin Force-Submit escape only for the named change.
+4. Add a rollback-ledger entry and restore normal `Verified`
+   enforcement immediately after the outage clears.
+
+This is an escape mechanism, not a second submit path.  Routine CI
+failures must be fixed or re-run through ci-bot.
 
 ### ⚠️ DO NOT click "Submit with conflicts" (OP-698)
 

@@ -460,3 +460,26 @@ Runner startup now fails fast if this prerequisite is missing, and `set_bot_iden
 **Verification**: `backend/tests/test_jira_dispatch.py::test_interleaved_worktrees_commit_and_push_with_correct_email` creates two real git worktrees, seeds each bot identity, overwrites shared config, commits in both worktrees, and pushes both branches to a local bare remote with the correct author/committer email. `test_assert_worktree_config_enabled_fails_when_disabled` pins the startup remediation message.
 
 **Generalisation**: Any runner setting per-agent git identity in a shared worktree topology must write to the worktree config layer and fail closed when that layer is disabled. Shared repo config is acceptable for common hooks/remotes, but not for mutable per-agent identity.
+
+
+## Lesson 28 — Parallel gates should ship default-off before enforcement (2026-05-08)
+
+**Situation**: OP-740 needed to introduce a Gerrit `Verified` label and
+ci-bot voting permission before real CI existed. Enforcing
+`label:Verified=+1` immediately would have made merge availability
+depend on a brand-new bot that could only vote unconditionally until C2.
+
+**Fix**: Land the label, ACL, account-provisioning script, sticky
+copyCondition, and submit-requirement block first, but set the new
+requirement `applicableIf = is:false`. C2 can flip that single
+project.config flag when real CI is ready; C3 provides the recovery
+path before enforcement.
+
+**Verification**: `backend/tests/test_gerrit_verified_gate.py` pins
+the default-off requirement, ci-bot Verified-only ACL, sticky trivial
+rebase behavior, and runbook migration notes.
+
+**Generalisation**: For any new parallel gate, separate "surface exists"
+from "surface blocks submit." Ship the label/status/permission surface
+first, prove operators can read and recover it, then flip enforcement
+in a later change with live signal and rollback mechanics in place.
