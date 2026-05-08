@@ -39,7 +39,10 @@ from backend.agents.scheduler import TicketSnapshot
 from backend.agents.scope_to_paths import (
     ALWAYS_TOUCHED,
     ALWAYS_TOUCHED_TEMPLATE,
+    FILES_SECTION_RE,
+    PATH_TOKEN_RE,
     SCOPE_TO_PATHS,
+    parse_files_section,
 )
 
 log = logging.getLogger(__name__)
@@ -1167,16 +1170,18 @@ def fetch_description(client: DispatchClient, key: str) -> str:
     return "".join(chunks)
 
 
-# ── File-level pickup mutex (OP-731) ───────────────────────────────
+# ── File-level pickup mutex (OP-731, extended in OP-800) ───────────
 
-FILES_SECTION_RE = re.compile(
-    r"(?ims)^#{0,6}\s*Files\s*/\s*Paths\s*$\n(?P<body>.*?)(?=^#{1,6}\s+\S|\Z)"
-)
-PATH_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+"
-)
 FILE_COLLISION_SKIP_LABEL = "runner-skipped:file-collision"
 DEPENDENCY_WAITING_LABEL_PREFIX = "runner-blocked:waiting-"
+# OP-800: operator escape hatch — bypass the file-overlap gate when the
+# operator has an explicit hand-merge plan. Symmetric with
+# ``MIGRATION_OVERRIDE_LABEL`` for migration-freeze scenarios.
+FILE_OVERLAP_OVERRIDE_LABEL = "runner-mutex-override:file-overlap"
+PATTERN_12_COOKBOOK_LINK = (
+    "docs/sop/architecture-anti-patterns.md"
+    "#12-spike--final-version-addadd-scaffold-race"
+)
 
 
 @dataclass(frozen=True)
@@ -1196,16 +1201,8 @@ class MigrationFreeze:
 
 
 def parse_files_section_from_description(description: str) -> set[str]:
-    """Extract path-looking tokens from the explicit ``Files / Paths`` section."""
-    match = FILES_SECTION_RE.search(description or "")
-    if not match:
-        return set()
-    paths: set[str] = set()
-    for raw in PATH_TOKEN_RE.findall(match.group("body")):
-        token = raw.strip("`'\".,;:()[]{}<>")
-        if token and "://" not in token:
-            paths.add(token)
-    return paths
+    """Backwards-compatible alias for :func:`scope_to_paths.parse_files_section`."""
+    return parse_files_section(description)
 
 
 def predict_target_files(
@@ -1226,7 +1223,7 @@ def predict_target_files(
     """
     files = set(ALWAYS_TOUCHED)
     files.add(ALWAYS_TOUCHED_TEMPLATE.format(ticket=snapshot.key))
-    explicit = parse_files_section_from_description(description or getattr(snapshot, "description", ""))
+    explicit = parse_files_section(description or getattr(snapshot, "description", ""))
     if explicit:
         return files | explicit
 
@@ -1373,7 +1370,16 @@ def file_mutex_check(
     snapshot: TicketSnapshot,
     description: str | None = None,
 ) -> tuple[bool, str]:
-    """Return whether ``snapshot`` can be picked up without file collision."""
+    """Return whether ``snapshot`` can be picked up without file collision.
+
+    OP-800: extended to detect overlap with currently-open Gerrit PSes
+    (Pattern 12 cure 3 — runtime layer). On collision the reason cites the
+    blocker's Gerrit change number, points at the Pattern 12 cookbook entry,
+    and lists the three operator resolution paths. The
+    ``runner-mutex-override:file-overlap`` label on the candidate ticket
+    bypasses the gate for cases where the operator has an explicit
+    hand-merge plan.
+    """
     target = predict_target_files(snapshot, description=description)
     if not target:
         return True, "no prediction available - mutex check skipped"
@@ -1389,10 +1395,25 @@ def file_mutex_check(
 
     first_path = sorted(overlap)[0]
     owner = in_flight_owners[first_path][0]
+
+    if FILE_OVERLAP_OVERRIDE_LABEL in set(getattr(snapshot, "labels", ())):
+        return (
+            True,
+            f"file-overlap override: {FILE_OVERLAP_OVERRIDE_LABEL} bypassed "
+            f"PS #{owner.change_number} on {first_path} (operator hand-merge plan)",
+        )
+
     return (
         False,
-        f"file collision: {first_path} already in open PS #{owner.change_number} "
-        f"(owner: {owner.owner})",
+        (
+            f"file collision: {first_path} already in open PS #{owner.change_number} "
+            f"(owner: {owner.owner})\n"
+            f"Pattern 12 cure 3 ({PATTERN_12_COOKBOOK_LINK}). Resolution: "
+            f"(a) merge PS #{owner.change_number} first then this ticket rebases, "
+            f"(b) rebase the conflicting PS onto the merged base, or "
+            f"(c) re-scope this ticket to a non-overlapping path set per Pattern 12 cure 1. "
+            f"Override: add label `{FILE_OVERLAP_OVERRIDE_LABEL}` for an explicit hand-merge plan."
+        ),
     )
 
 

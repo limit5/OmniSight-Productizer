@@ -208,6 +208,152 @@ def test_file_mutex_check_allows_ticket_with_only_lessons_path_when_unowned(
     assert "no collision" in reason
 
 
+# ── OP-800: Pattern 12 cure (3) — runtime layer ────────────────────
+
+
+_SCAFFOLD_DESCRIPTION_E1 = (
+    "## Goal\nE1 spike + ADR.\n\n"
+    "## Files / Paths\n"
+    "- docs-site/mkdocs.yml (NEW)\n"
+    "- docs-site/requirements.txt (NEW)\n"
+    "- docs-site/docs/index.md (NEW)\n"
+)
+_SCAFFOLD_DESCRIPTION_E2 = (
+    "## Goal\nE2 canonical scaffold.\n\n"
+    "## Files / Paths\n"
+    "- docs-site/mkdocs.yml (NEW)\n"
+    "- docs-site/Makefile (NEW)\n"
+)
+
+
+def test_op_800_second_ticket_with_overlapping_paths_is_blocked_until_first_ps_merges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC #1: synthetic Sprint E replay — E1 has open PS, E2 must mutex-block.
+
+    Once E1's PS merges (i.e. it leaves the open-bot-owned set), E2 unblocks.
+    """
+    e1_open: dict[str, list[jd.GerritFileOwner]] = {
+        "docs-site/mkdocs.yml": [jd.GerritFileOwner("264", "claude-bot")],
+        "docs-site/requirements.txt": [jd.GerritFileOwner("264", "claude-bot")],
+        "docs-site/docs/index.md": [jd.GerritFileOwner("264", "claude-bot")],
+    }
+    monkeypatch.setattr(jd, "_open_bot_owned_file_owners", lambda: e1_open)
+
+    e2 = _snapshot(key="OP-786", labels=())
+    ok, reason = jd.file_mutex_check(e2, description=_SCAFFOLD_DESCRIPTION_E2)
+    assert ok is False
+    assert "docs-site/mkdocs.yml" in reason
+    assert "#264" in reason
+
+    # E1 merges → empty open-bot set → E2 unblocks.
+    monkeypatch.setattr(jd, "_open_bot_owned_file_owners", lambda: {})
+    ok, reason = jd.file_mutex_check(e2, description=_SCAFFOLD_DESCRIPTION_E2)
+    assert ok is True
+    assert "no collision" in reason
+
+
+def test_op_800_non_overlapping_paths_do_not_false_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC #2: two tickets with disjoint Files / Paths sections both stay pickable."""
+    other_open: dict[str, list[jd.GerritFileOwner]] = {
+        "backend/agents/scheduler.py": [jd.GerritFileOwner("301", "codex-bot")],
+        "backend/tests/test_scheduler.py": [jd.GerritFileOwner("301", "codex-bot")],
+    }
+    monkeypatch.setattr(jd, "_open_bot_owned_file_owners", lambda: other_open)
+
+    candidate = _snapshot(key="OP-810", labels=())
+    description = (
+        "## Goal\nUnrelated work.\n\n"
+        "## Files / Paths\n"
+        "- backend/agents/cost_estimator.py\n"
+        "- backend/tests/test_cost_estimator.py\n"
+    )
+    ok, reason = jd.file_mutex_check(candidate, description=description)
+    assert ok is True
+    assert "no collision" in reason
+
+
+def test_op_800_collision_reason_cites_change_number_and_pattern_12_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC #3: collision reason carries the blocker's Gerrit change # and Pattern 12 link.
+
+    The runner copies the reason into a ``[runner-file-mutex]`` JIRA comment,
+    so this also covers the operator-facing resolution hint requirement.
+    """
+    monkeypatch.setattr(
+        jd,
+        "_open_bot_owned_file_owners",
+        lambda: {"docs-site/mkdocs.yml": [jd.GerritFileOwner("264", "claude-bot")]},
+    )
+    ok, reason = jd.file_mutex_check(
+        _snapshot(key="OP-786", labels=()),
+        description=_SCAFFOLD_DESCRIPTION_E2,
+    )
+    assert ok is False
+    # Gerrit change # (acceptance criterion: cite blocker's change number).
+    assert "#264" in reason
+    # Pattern 12 cookbook link (acceptance criterion: cite Pattern 12 link).
+    assert jd.PATTERN_12_COOKBOOK_LINK in reason
+    assert "Pattern 12" in reason
+    # Three resolution paths from the spec, in order: merge / rebase / re-scope.
+    assert "merge PS #264 first" in reason
+    assert "rebase the conflicting PS" in reason
+    assert "re-scope" in reason
+    # Operator override hint is mentioned so the operator knows the escape hatch.
+    assert jd.FILE_OVERLAP_OVERRIDE_LABEL in reason
+
+
+def test_op_800_override_label_bypasses_file_overlap_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC #5: ``runner-mutex-override:file-overlap`` label unblocks pickup.
+
+    The hand-merge plan is the operator's responsibility once they apply the
+    label, so the gate yields and the pickup proceeds — but the reason still
+    names the bypassed PS so the operator-facing log captures the override.
+    """
+    monkeypatch.setattr(
+        jd,
+        "_open_bot_owned_file_owners",
+        lambda: {"docs-site/mkdocs.yml": [jd.GerritFileOwner("264", "claude-bot")]},
+    )
+    overridden = _snapshot(key="OP-786", labels=(jd.FILE_OVERLAP_OVERRIDE_LABEL,))
+    ok, reason = jd.file_mutex_check(overridden, description=_SCAFFOLD_DESCRIPTION_E2)
+    assert ok is True
+    assert "file-overlap override" in reason
+    assert "#264" in reason
+    assert "docs-site/mkdocs.yml" in reason
+
+    # Without the label, identical inputs must block — sanity check that the
+    # override is the *only* thing letting this through.
+    not_overridden = _snapshot(key="OP-786", labels=())
+    ok2, _ = jd.file_mutex_check(not_overridden, description=_SCAFFOLD_DESCRIPTION_E2)
+    assert ok2 is False
+
+
+def test_op_800_files_section_parser_is_re_exported_from_scope_to_paths() -> None:
+    """The Files / Paths parser is owned by ``scope_to_paths`` per OP-800 spec."""
+    from backend.agents import scope_to_paths
+
+    parsed = scope_to_paths.parse_files_section(
+        "## Files / Paths\n- backend/agents/jira_dispatch.py (MODIFY)\n"
+        "- backend/tests/test_file_mutex.py (MODIFY)\n"
+    )
+    assert parsed == {
+        "backend/agents/jira_dispatch.py",
+        "backend/tests/test_file_mutex.py",
+    }
+    # Risk mitigation: bare globs without a literal `.` in the filename are
+    # rejected, so a sloppy ``backend/**/*.py`` line cannot accidentally
+    # mutex-block every other ticket.
+    assert scope_to_paths.parse_files_section(
+        "## Files / Paths\n- backend/**\n- backend/agents/**\n"
+    ) == set()
+
+
 def test_synthetic_pickup_skips_colliding_ticket_and_picks_next(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
