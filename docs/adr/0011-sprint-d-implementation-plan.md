@@ -74,6 +74,20 @@ Implement **milestone-driven semi-automated continuous delivery**: define a rele
                                           └──D17: dashboard / D18: audit log
 ```
 
+### D16 release notes automation
+
+`backend.agents.release_notes_generator` consumes the D8
+`release_tagged` event from the release milestone log and drafts
+`docs/releases/vX.Y.Z.md` within the 60-second service poll. The draft is
+assembled from JIRA tickets with `fixVersion=vX.Y.Z`, grouped into the
+release-note template sections, plus links to matching
+`docs/sop/lessons/L-OP-XXX-*.md` per-file lessons.
+
+The generator commits the markdown file and pushes `HEAD:refs/for/develop`
+through the existing Gerrit dispatch helper. It emits
+`release_notes_drafted` with the Gerrit change URL, but never merges the
+patchset; operator polish and human +2 remain the publishing boundary.
+
 ### Where automation stops, where humans stay
 
 | Decision | Automated | Human gate | Why |
