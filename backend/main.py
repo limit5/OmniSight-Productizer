@@ -1424,6 +1424,9 @@ from backend.routers import release_approval as _release_approval_router  # OP-7
 app.include_router(_release_approval_router.router)
 from backend.routers import deploy_audit as _deploy_audit_router  # OP-779 D18 change-management audit log
 app.include_router(_deploy_audit_router.router)
+# OP-778 deployment dashboard backend API
+from backend.routers import release_dashboard as _release_dashboard_router
+app.include_router(_release_dashboard_router.router)
 from backend.routers import external_agents as _external_agents_router  # BP.A2A.6 external A2A agent registry UI
 _include_versioned_router(_external_agents_router.router)
 from backend.routers import batch_merge as _batch_merge_router  # OP-735 R5 AI Reviewer auto-+1 dashboard
