@@ -1,0 +1,4 @@
+OP-704 E2E smoke conflict fixture
+
+variant: A
+resolution: keep canonical A wording
