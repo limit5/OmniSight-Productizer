@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sora.services/schemas/governance/tier-paths.schema.json",
+  "title": "OmniSight tier-paths.yaml",
+  "description": "Schema for configs/governance/tier-paths.yaml (ADR-0005). Constrains the path-glob -> AI-authority-tier mapping consumed by the G2 classifier and G3 Gerrit hook.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tiers"],
+  "properties": {
+    "schema_version": {
+      "description": "Bump only on incompatible structural change. Loader pinned to 1.",
+      "type": "integer",
+      "const": 1
+    },
+    "tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["s", "m", "l", "x"],
+      "properties": {
+        "s": {
+          "description": "Tier S — Safe. AI may self-+2 when EVERY touched path matches one of these globs.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["whitelist_globs"],
+          "properties": {
+            "whitelist_globs": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/glob" }
+            }
+          }
+        },
+        "m": {
+          "description": "Tier M — Medium. Implicit fallback for un-classified production code; carries no globs.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["default"],
+          "properties": {
+            "default": {
+              "type": "boolean",
+              "const": true
+            }
+          }
+        },
+        "l": {
+          "description": "Tier L — Large. AI +1 advisory + Human +2 mandatory. Triggered when ANY touched path matches.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["force_upgrade_globs"],
+          "properties": {
+            "force_upgrade_globs": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/glob" }
+            }
+          }
+        },
+        "x": {
+          "description": "Tier X — Extreme. Human +2 + architectural reviewer +1. Triggered when ANY touched path matches.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["force_upgrade_globs"],
+          "properties": {
+            "force_upgrade_globs": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/glob" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "glob": {
+      "description": "Repo-relative POSIX-style glob (forward slashes, fnmatch-extended with ** for recursive). Must be non-empty and must not start with a slash.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/].*$"
+    }
+  }
+}
