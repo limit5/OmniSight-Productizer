@@ -77,6 +77,7 @@ coverage-*.xml
 # Credential files (keep .example tracked)
 configs/ssh_credentials.yaml
 configs/git_credentials.yaml
+configs/credentials.yaml
 
 # SQLite database
 data/
