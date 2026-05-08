@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from backend.agents import auto_rebase
+from backend.agents.auto_resolve_config import AutoResolveRule, load_auto_resolve_config
 
 OP_KEY_RE = re.compile(r"\b(OP-\d+)\b")
 
@@ -128,6 +129,7 @@ class QueueResult:
     reject_reason: str = ""
     rebase_files: tuple[str, ...] = ()
     error: str = ""
+    auto_resolved: tuple[str, ...] = ()
 
 
 # ── Worker ───────────────────────────────────────────────────────────
@@ -161,6 +163,10 @@ class SubmitQueueWorker:
             auto_rebase.load_owner_http_password
         ),
         notify_jira: Callable[[str, str], None] | None = None,
+        audit_recorder: Callable[[dict[str, Any]], None] | None = None,
+        repo_root: Path = auto_rebase.REPO_ROOT,
+        auto_resolve_config_path: Path = auto_rebase.AUTO_RESOLVE_PATH,
+        local_rebase_runner: Callable[..., auto_rebase.RebaseResult] | None = None,
         ci_check: Callable[[dict[str, Any]], bool] | None = None,
         rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
@@ -179,6 +185,10 @@ class SubmitQueueWorker:
         self._urlopen = urlopen
         self._owner_password_loader = owner_password_loader
         self._notify_jira = notify_jira
+        self._audit_recorder = audit_recorder
+        self._repo_root = repo_root
+        self._auto_resolve_config_path = auto_resolve_config_path
+        self._local_rebase_runner = local_rebase_runner
         self._ci_check = ci_check
         self._rate_limit_s = float(rate_limit_seconds)
         self._poll_interval_s = float(poll_interval_seconds)
@@ -528,12 +538,81 @@ class SubmitQueueWorker:
             return SubmitQueueWorker._RebaseOutcome(ok=True)
         if status == 409:
             files = tuple(self._parse_conflict_files(payload))
+            auto_resolvers = self._load_auto_resolvers()
+            auto_handled = [f for f in files if f in auto_resolvers]
+            if files and set(files) == set(auto_handled):
+                result = self._run_local_auto_resolve(
+                    change,
+                    develop_tip,
+                    tuple(auto_handled),
+                    auto_resolvers,
+                )
+                if result.success:
+                    self._post_auto_resolve_jira_notice(
+                        change,
+                        develop_tip,
+                        result.auto_resolved,
+                        auto_resolvers,
+                    )
+                    self._record_auto_resolve_audit(
+                        change,
+                        result,
+                        auto_resolvers,
+                    )
+                    return SubmitQueueWorker._RebaseOutcome(ok=True)
+                self._post_auto_resolve_failed_jira_notice(change, result)
+                self._log(
+                    "WARN",
+                    "submit_queue_auto_resolve_failed",
+                    change_id=change_id,
+                    files=list(files),
+                    err=result.error,
+                )
             return SubmitQueueWorker._RebaseOutcome(
                 conflict=True, files=files,
             )
         return SubmitQueueWorker._RebaseOutcome(
             error=f"HTTP {status}: {payload.strip()[:200]}",
         )
+
+    def _load_auto_resolvers(self) -> dict[str, AutoResolveRule]:
+        try:
+            return load_auto_resolve_config(
+                self._repo_root / self._auto_resolve_config_path,
+                log=self._log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log(
+                "WARN", "auto_resolve_config_load_failed",
+                err=f"{type(exc).__name__}: {exc}",
+            )
+            return {}
+
+    def _run_local_auto_resolve(
+        self,
+        change: dict[str, Any],
+        target_sha: str,
+        files: tuple[str, ...],
+        resolvers: dict[str, AutoResolveRule],
+    ) -> auto_rebase.RebaseResult:
+        runner = self._local_rebase_runner or auto_rebase.local_rebase_with_resolvers
+        try:
+            return runner(
+                change=change,
+                target_sha=target_sha,
+                files=files,
+                resolvers=resolvers,
+                repo_root=self._repo_root,
+                run_command=self._run_command,
+                log=self._log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return auto_rebase.RebaseResult(
+                change_number=str(change.get("number") or ""),
+                conflict=True,
+                files=files,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
     def _reject(self, change: dict[str, Any], reason: str) -> None:
         """Vote Submit-Ready=-1 with ``reason`` as the review comment.
@@ -587,6 +666,89 @@ class SubmitQueueWorker:
                     ticket=ticket,
                     err=f"{type(exc).__name__}: {exc}",
                 )
+
+    def _post_auto_resolve_jira_notice(
+        self,
+        change: dict[str, Any],
+        target_sha: str,
+        files: tuple[str, ...],
+        resolvers: dict[str, AutoResolveRule],
+    ) -> None:
+        if self._notify_jira is None:
+            return
+        ticket = self._extract_ticket_key(change)
+        if not ticket:
+            return
+        details = ", ".join(
+            f"{path} via {Path(resolvers[path].resolver).name}"
+            for path in files
+            if path in resolvers
+        )
+        try:
+            self._notify_jira(
+                ticket,
+                f"[auto-resolve] Submit queue regenerated {details} to "
+                f"handle merge conflict against develop tip {target_sha}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log(
+                "WARN", "submit_queue_auto_resolve_jira_notify_failed",
+                ticket=ticket,
+                err=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _post_auto_resolve_failed_jira_notice(
+        self, change: dict[str, Any], result: auto_rebase.RebaseResult,
+    ) -> None:
+        if self._notify_jira is None:
+            return
+        ticket = self._extract_ticket_key(change)
+        if not ticket:
+            return
+        files = ", ".join(result.files) if result.files else "registered files"
+        try:
+            self._notify_jira(
+                ticket,
+                f"[auto-resolve] Submit queue could not regenerate {files}; "
+                "falling back to manual conflict handling. "
+                f"Reason: {result.error or 'unknown'}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log(
+                "WARN", "submit_queue_auto_resolve_jira_notify_failed",
+                ticket=ticket,
+                err=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _record_auto_resolve_audit(
+        self,
+        change: dict[str, Any],
+        result: auto_rebase.RebaseResult,
+        resolvers: dict[str, AutoResolveRule],
+    ) -> None:
+        change_id = str(change.get("id") or change.get("change_id") or "")
+        ps = str((change.get("currentPatchSet") or {}).get("number") or "")
+        for file_path in result.auto_resolved:
+            rule = resolvers.get(file_path)
+            record = {
+                "event": "auto_resolve.generated_file",
+                "change_id": change_id,
+                "change_number": result.change_number,
+                "ps": ps,
+                "file": file_path,
+                "resolver": rule.resolver if rule else "",
+            }
+            self._log("INFO", "auto_resolve_audit", **record)
+            if self._audit_recorder is not None:
+                try:
+                    self._audit_recorder(record)
+                except Exception as exc:  # noqa: BLE001
+                    self._log(
+                        "WARN", "auto_resolve_audit_record_failed",
+                        change_id=result.change_number,
+                        file=file_path,
+                        err=f"{type(exc).__name__}: {exc}",
+                    )
 
     def _post_jira_merge_notice(self, change: dict[str, Any]) -> None:
         if self._notify_jira is None:
