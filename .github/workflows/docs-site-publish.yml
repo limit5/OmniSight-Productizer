@@ -1,0 +1,92 @@
+name: Docs Site Publish
+
+# OP-792 — build and publish the static docs site on every develop merge.
+#
+# This is intentionally separate from the runtime Next.js app. The ticket
+# requires a static site publish and the existing app docs routes are dynamic
+# request-time readers, so CI builds a static artifact from the same markdown
+# sources and publishes it with GitHub Pages. The deploy job only runs after a
+# green build, which keeps the last published site live on failures.
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-site-publish-develop
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: pnpm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: restore previous docs artifact
+        uses: actions/cache@v4
+        with:
+          path: docs-site-dist
+          key: docs-site-${{ github.ref_name }}-${{ hashFiles('docs/**/*.md', 'backend/docs_site_*.py', 'backend/docs_static_site.py') }}
+          restore-keys: |
+            docs-site-${{ github.ref_name }}-
+
+      - name: install framework deps
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: build static docs site
+        run: python -m backend.docs_static_site --out docs-site-dist
+
+      - name: upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site-dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: publish to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  notify-operator:
+    needs: build
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: emit operator notification
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            core.error(`OP-792 docs-site build failed; live site was not updated. Run: ${url}`);
+            await core.summary
+              .addHeading('OP-792 docs-site publish blocked')
+              .addRaw(`Build failed on ${context.ref}; GitHub Pages deploy was skipped, so the last green site remains live.\n\n${url}\n`)
+              .write();
