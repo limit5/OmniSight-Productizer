@@ -1,0 +1,20 @@
+# OP-771 canary weighted upstream snippet.
+#
+# This file is the initial checked-in shape for the progressive canary
+# controller. During a rollout, backend.canary_rollout.CaddyWeightWriter
+# rewrites it atomically with stage-specific weights.
+#
+# Import with:
+#   import deploy/blue-green/canary-weighted.caddy
+#   import canary_weighted_upstream_rp
+#
+# Caddy's reverse_proxy weighted_round_robin policy takes one weight per
+# upstream. For the 5% stage below: backend-a receives 95 turns and
+# backend-b receives 5 turns per cycle.
+
+(canary_weighted_upstream_rp) {
+	reverse_proxy {$OMNISIGHT_UPSTREAM_A:backend-a:8000} {$OMNISIGHT_UPSTREAM_B:backend-b:8001} {
+		lb_policy weighted_round_robin 95 5
+		health_uri /readyz
+	}
+}
