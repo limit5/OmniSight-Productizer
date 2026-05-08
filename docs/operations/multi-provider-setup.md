@@ -6,9 +6,10 @@ Operator-facing setup guide for the Multi-Provider Subscription Orchestrator
 This file is being built out across Priority MP, Week 4. Sections below
 either link to where the content currently lives or are reserved as
 in-progress stubs for the wave that owns them. **MP.W13.3 owns the
-Gemini section**, **MP.W14.3 owns the xAI section**, and **MP.W16.3
-owns the Cap-hit recovery runbook**; the remaining MP.W16 sub-waves
-own operator setup, expiry monitoring, and cost calibration.
+Gemini section**, **MP.W14.3 owns the xAI section**, **MP.W16.1 owns
+the operator setup section**, and **MP.W16.3 owns the Cap-hit recovery
+runbook**; the remaining MP.W16 sub-waves own expiry monitoring and
+cost calibration.
 
 ---
 
@@ -30,9 +31,208 @@ operational steps.
 
 ## Operator setup (Anthropic + OpenAI MVP)
 
-> Reserved for **MP.W16.1**. Will cover Claude Pro/Max account creation,
-> `claude` CLI auth, OpenAI Codex Plus/Pro auth via `codex` CLI, and the
-> per-host credential locations the orchestrator reads.
+This is the **MP.W16.1 deliverable**: the end-to-end checklist an
+operator runs once per host before flipping `OMNISIGHT_MP_ENABLED=1`,
+to bring up the two first-class providers shipped in v0.4.0:
+
+- **Anthropic Claude** on a Pro / Max 5x / Max 20x subscription, dispatched
+  via the `claude` CLI by
+  [`anthropic_subscription.py`](../../backend/agents/provider_adapters/anthropic_subscription.py).
+- **OpenAI Codex** on a Plus / Pro / Business subscription, dispatched
+  via the `codex` CLI by
+  [`openai_subscription.py`](../../backend/agents/provider_adapters/openai_subscription.py).
+
+The two adapters are deliberately **CLI-mediated, not API-key-mediated**
+— ADR-0007 §Vendor capability matrix records why (subscription
+allowance is what the orchestrator is harvesting; it is not addressable
+by `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`). The setup below is therefore
+about getting two CLIs installed and signed-in on the host that runs
+the runner, not about provisioning API keys.
+
+### Pre-conditions
+
+- A host that can reach `claude.ai` and `chatgpt.com` over HTTPS for
+  the interactive sign-in flows.
+- One Anthropic subscription (Pro, Max 5x, or Max 20x) on an account
+  the operator controls. The plan tier is read back from
+  `claude auth status` JSON (`subscriptionType`); the adapter accepts
+  any non-empty, non-`"none"`, non-`"unknown"` value
+  ([`anthropic_subscription.py:196-208`](../../backend/agents/provider_adapters/anthropic_subscription.py)),
+  so all three tiers light up the same code path — what differs is the
+  vendor-side cap, which feeds into MP.W16.3.
+- One OpenAI Codex subscription (Plus, Pro, or Business). The adapter
+  accepts the literal string `"logged in using chatgpt"` from
+  `codex login status`
+  ([`openai_subscription.py:196-198`](../../backend/agents/provider_adapters/openai_subscription.py)),
+  so any of the three plan tiers works.
+- Node.js available if the operator wants the `npm` install path for
+  `codex`. The `claude` CLI is distributed by Anthropic separately —
+  install instructions are on Anthropic's `claude` CLI docs page (do
+  not memorise a binary URL here; the install method changes faster
+  than this doc).
+
+### Step 1 — Install the two CLIs
+
+```bash
+# Anthropic — install per the Anthropic docs page above. Verify with:
+claude --version
+
+# OpenAI Codex — npm or Homebrew (cross-link with codex-collaboration.md):
+npm install -g @openai/codex     # Linux / macOS / Windows
+# brew install --cask codex      # macOS only
+codex --version
+```
+
+Both binaries must be on the runner's `PATH`. The adapters invoke them
+by bare name (`["claude", ...]`,
+`["codex", "exec", "--cd", os.getcwd(), "--yolo", "--json", "-"]` — see
+[`openai_subscription.py:82`](../../backend/agents/provider_adapters/openai_subscription.py)
+and
+[`anthropic_subscription.py`](../../backend/agents/provider_adapters/anthropic_subscription.py))
+through `subprocess`; an absolute path or shim is not currently
+supported.
+
+### Step 2 — Sign in
+
+```bash
+# Anthropic — interactive browser flow against claude.ai:
+claude            # → "Sign in" → browser → return to terminal
+claude auth status
+#  expect JSON containing  "loggedIn": true,
+#                           "authMethod": "claude.ai",
+#                           "subscriptionType": "<pro|max-5x|max-20x>"
+
+# OpenAI Codex — interactive ChatGPT sign-in:
+codex             # → "Sign in with ChatGPT" → browser → return
+codex login status
+#  expect line containing  "Logged in using ChatGPT"
+```
+
+Auth state lives **on disk under the operator's home directory**
+(`~/.config/claude/` / `~/.claude/` for Anthropic;
+`~/.codex/` for Codex). It is **not** read from the OmniSight backend
+or the `git_accounts` table — those store git-side credentials only,
+not LLM subscription state. If the runner runs as a different OS user
+than the one that signed in, repeat Step 2 as that user; otherwise the
+adapter's health check will report `subscription_active=False` and
+`RoutingPolicy.choose_provider()` will skip the provider.
+
+### Step 3 — Wire the orchestrator's host-level knobs
+
+The orchestrator pulls a small set of env vars on every dispatch. The
+ones the operator controls at setup time:
+
+| Variable | Default | Effect |
+| -------- | ------- | ------ |
+| `OMNISIGHT_MP_ENABLED` | unset (off) | Master switch. `is_enabled()` in [`routing_policy.py:628`](../../backend/agents/routing_policy.py) gates `choose_provider()` to `[]` when off. Resolved through `feature_flags.resolve_env_backed_feature_flag` so a registry row in `feature_flags` overrides the env if both are present. |
+| `OMNISIGHT_PROVIDER_CAP_ANTHROPIC_SUBSCRIPTION_5H` | `200_000` tokens (`DEFAULT_5H_CAP_TOKENS` in [`provider_quota_tracker.py:34`](../../backend/agents/provider_quota_tracker.py)) | Per-provider 5h rolling cap that trips `provider_quota_cap_hit`. Set to the operator's chosen safety margin **below** the vendor's published Pro/Max cap. |
+| `OMNISIGHT_PROVIDER_CAP_ANTHROPIC_SUBSCRIPTION_WEEKLY` | `2_000_000` tokens (`DEFAULT_WEEKLY_CAP_TOKENS`) | Same, weekly window. |
+| `OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_5H` | `200_000` | OpenAI 5h cap. |
+| `OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_WEEKLY` | `2_000_000` | OpenAI weekly cap. |
+| `OMNISIGHT_ANTHROPIC_DISPATCH_TIMEOUT_S` | `1800` (30 min) | Per-task subprocess timeout for `claude`. Anything ≤0 falls back to the default ([`anthropic_subscription.py:159-167`](../../backend/agents/provider_adapters/anthropic_subscription.py)). |
+| `OMNISIGHT_OPENAI_DISPATCH_TIMEOUT_S` | `1800` | Same shape, for `codex`. |
+
+The cap env-var name is built by `_env_provider()` in
+[`provider_quota_tracker.py:342-357`](../../backend/agents/provider_quota_tracker.py):
+non-alphanumeric characters in the provider id become `_`, then
+upper-cased — so `anthropic-subscription` → `ANTHROPIC_SUBSCRIPTION`.
+Misspelling the env-var name is silently ignored (the default cap
+applies); double-check by reading back `_cap_for("anthropic-subscription", "5h")`
+from a Python REPL after exporting.
+
+The expiry-monitor knobs (`OMNISIGHT_MP_SUBSCRIPTION_MONITOR_INTERVAL_S`,
+`OMNISIGHT_MP_SUBSCRIPTION_EXPIRY_WARN_S`,
+`OMNISIGHT_MP_SUBSCRIPTION_EXPIRY_CRITICAL_S`) are MP.W16.2 territory —
+defaults (6 h / 14 d / 3 d) are sane and the operator does not normally
+need to tune them at first-time setup.
+
+API-key fallback variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) are
+**not** read by the subscription adapters — they belong to the separate
+API-mode adapters. Setting them does not bypass auth issues with the
+CLI sign-in.
+
+### Step 4 — Verify the adapter health check
+
+Before flipping `OMNISIGHT_MP_ENABLED=1`, confirm both adapters report
+`reachable=True`. The cleanest one-shot check is to import the adapter
+and call `health_check()` directly:
+
+```bash
+cd /home/user/work/sora/OmniSight-Productizer
+python3 -c '
+import json
+from backend.agents.provider_adapters.anthropic_subscription import (
+    AnthropicSubscriptionAdapter,
+)
+from backend.agents.provider_adapters.openai_subscription import (
+    OpenAISubscriptionAdapter,
+)
+for adapter in (AnthropicSubscriptionAdapter(), OpenAISubscriptionAdapter()):
+    h = adapter.health_check()
+    print(json.dumps({
+        "provider": h.provider_id,
+        "reachable": h.reachable,
+        "cli_installed": h.cli_installed,
+        "subscription_active": h.subscription_active,
+        "subscription_expires_at": (
+            h.subscription_expires_at.isoformat()
+            if h.subscription_expires_at else None
+        ),
+    }, indent=2))
+'
+```
+
+Both rows must show `reachable: true`. If `cli_installed: false`,
+re-run Step 1 as the runner OS user. If `cli_installed: true` but
+`subscription_active: false`, re-run Step 2 (the most common cause is
+that the operator signed in interactively as a different shell user
+than the runner runs under). The default health-check timeout is 5 s
+(`HEALTH_CHECK_TIMEOUT_S` in both adapter modules); if the host is
+behind a slow auth-proxy, the health check returns `(127, "", "")`
+without reaching the CLI — fix the network path rather than raising
+the timeout, since the same path is exercised by `subscription_account_monitor`
+every 6 h in production.
+
+### Step 5 — Flip `OMNISIGHT_MP_ENABLED` and dispatch one smoke task
+
+```bash
+export OMNISIGHT_MP_ENABLED=1
+```
+
+Then dispatch a tiny task with the right `agent_class` to force each
+adapter (the labels live in `ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS`
+in [`routing_policy.py`](../../backend/agents/routing_policy.py)):
+
+- `agent_class: subscription-claude` → must route to
+  `anthropic-subscription`.
+- `agent_class: subscription-codex` → must route to
+  `openai-subscription`.
+
+`RoutingPolicy.choose_provider()` should return a list of length 1
+containing the matching provider id. Confirm a row landed in
+`provider_usage_event` (alembic 0200) and that
+`provider_quota_state.circuit_state` is still `'closed'`. The Provider
+Constellation UI should show two green spheres (Anthropic + OpenAI)
+and two grayed-out "Coming v0.5.0/v0.6.0" spheres (Gemini, xAI).
+
+### Step 6 — Hand off to MP.W16.2 / MP.W16.3
+
+Once Step 5 is green, the Pro/Max account is in the orchestrator's
+hands. From that point:
+
+- `subscription_account_monitor.py` (MP.W16.2) polls the same
+  `health_check()` every `OMNISIGHT_MP_SUBSCRIPTION_MONITOR_INTERVAL_S`
+  (default 6 h) and emits an alert when `subscription_expires_at` falls
+  into the warning (14 d) or critical (3 d) window.
+- `provider_quota_tracker.record_usage()` opens the circuit on the first
+  cap-hit. If both providers go dark at once, follow the
+  [Cap-hit recovery runbook](#cap-hit-recovery-runbook) below.
+
+If at any point the operator changes plans (e.g., upgrades Anthropic
+Pro → Max 20x), there is **no** OmniSight-side reconfiguration to do —
+re-run Step 2's `claude auth status` to confirm the new
+`subscriptionType` flows through, and (optionally) bump the matching
+`OMNISIGHT_PROVIDER_CAP_…_5H` / `…_WEEKLY` to the new vendor cap.
 
 ## Subscription expiry monitoring
 
