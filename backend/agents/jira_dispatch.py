@@ -257,6 +257,32 @@ def _bot_email_for(agent_class: str) -> str:
     return f"rt3628+{bot_user}@gmail.com"
 
 
+def assert_worktree_config_enabled(repo_root: Path) -> None:
+    """Fail fast unless the main repo enables per-worktree git config.
+
+    Without ``extensions.worktreeConfig=true``, runner worktrees can read
+    sibling identity writes from the shared ``.git/config`` and Gerrit may
+    reject pushes with the wrong bot email.
+    """
+    import subprocess
+    import sys
+
+    r = subprocess.run(
+        ["git", "-C", str(repo_root), "config", "--get", "extensions.worktreeConfig"],
+        capture_output=True, text=True,
+    )
+    if r.stdout.strip().lower() == "true":
+        return
+
+    sys.exit(
+        "FATAL: extensions.worktreeConfig is not enabled in main repo. "
+        "Set it before starting the runner:\n"
+        f"  git -C {repo_root} config core.repositoryformatversion 1\n"
+        f"  git -C {repo_root} config extensions.worktreeConfig true\n"
+        "See OP-729 for the cross-runner bot identity race."
+    )
+
+
 def _git_common_dir(worktree_path: Path) -> Path:
     """Resolve worktree's COMMON git dir (where hooks actually run from).
 
@@ -297,11 +323,12 @@ def set_bot_identity_in_worktree(worktree_path: Path, agent_class: str) -> None:
     """Set worktree-local `git config user.email/user.name` to the bot identity
     matching agent_class.
 
-    Critical (L15): without this, codex commits use whatever the worktree's
-    git config defaults to (typically the operator's env user
-    `Agent-row7-self-agent <row7-self-agent@omnisight.local>`). Gerrit then
-    rejects pushes with `email address ... is not registered in your
-    account` because that email isn't on the bot's Gerrit account.
+    Critical (L15/L25): without this, codex commits use whatever the
+    worktree's git config defaults to (typically the operator's env user
+    `Agent-row7-self-agent <row7-self-agent@omnisight.local>`). Bare
+    ``git config`` writes land in the shared repo config, so sibling
+    runners can overwrite each other's identity; ``--worktree`` keeps each
+    runner isolated.
 
     Idempotent: setting same value twice is a no-op.
     """
@@ -311,11 +338,11 @@ def set_bot_identity_in_worktree(worktree_path: Path, agent_class: str) -> None:
         agent_class, _GERRIT_AUTH_BY_CLASS["subscription-claude"]
     )[0]
     subprocess.run(
-        ["git", "config", "user.email", bot_email],
+        ["git", "config", "--worktree", "user.email", bot_email],
         cwd=worktree_path, check=True, capture_output=True, text=True,
     )
     subprocess.run(
-        ["git", "config", "user.name", bot_user],
+        ["git", "config", "--worktree", "user.name", bot_user],
         cwd=worktree_path, check=True, capture_output=True, text=True,
     )
 

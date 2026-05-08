@@ -383,6 +383,7 @@ def _push_successful_work(
 
 def main() -> int:
     print(f"[multi-runner] classes={','.join(_configured_classes())}, dry_run={DRY_RUN}")
+    jira_dispatch.assert_worktree_config_enabled(REPO)
     if TARGET_OVERRIDE:
         candidate = _fetch_target_candidate(TARGET_OVERRIDE)
     else:

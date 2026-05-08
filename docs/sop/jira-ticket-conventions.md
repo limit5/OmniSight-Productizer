@@ -830,6 +830,22 @@ for s, ticket in scored:
 # all candidates failed checks → idle, retry next polling cycle (default 30s)
 ```
 
+### Runner host git config prerequisite
+
+Before starting `auto-runner-jira.py` or `auto-runner-multi.py`, the
+main repo must have per-worktree config enabled:
+
+```bash
+git -C /home/user/work/sora/OmniSight-Productizer config core.repositoryformatversion 1
+git -C /home/user/work/sora/OmniSight-Productizer config extensions.worktreeConfig true
+```
+
+The runners fail fast at startup if `extensions.worktreeConfig` is not
+`true`. This is required because sibling Claude/Codex worktrees share
+the main repo `.git/config`; bot identity writes must use
+`git config --worktree` so one runner cannot overwrite the other
+runner's effective `user.email`.
+
 ### Transition period ended for Story Published automation (2026-05-07)
 
 OP-689 shipped the Gerrit/JIRA bridge for the final Story workflow hop:

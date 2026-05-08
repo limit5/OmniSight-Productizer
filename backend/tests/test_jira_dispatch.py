@@ -10,6 +10,7 @@ JIRA credentials absent, so this suite runs offline cleanly.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -314,7 +315,7 @@ def test_worktree_sync_result_dataclass_shape() -> None:
 
 
 def test_set_bot_identity_calls_git_config_with_bot_email(tmp_path, monkeypatch):
-    """set_bot_identity_in_worktree shells out to `git config user.email` + `user.name`."""
+    """set_bot_identity_in_worktree shells out to per-worktree git config."""
     calls = []
 
     class FakeResult:
@@ -331,10 +332,123 @@ def test_set_bot_identity_calls_git_config_with_bot_email(tmp_path, monkeypatch)
 
     # Two calls: user.email + user.name
     assert len(calls) == 2
-    email_call = next(c for c in calls if c[2] == "user.email")
-    name_call = next(c for c in calls if c[2] == "user.name")
-    assert email_call[3] == "rt3628+codex-bot@gmail.com"
-    assert name_call[3] == "codex-bot"
+    email_call = next(c for c in calls if c[3] == "user.email")
+    name_call = next(c for c in calls if c[3] == "user.name")
+    assert email_call[:3] == ["git", "config", "--worktree"]
+    assert name_call[:3] == ["git", "config", "--worktree"]
+    assert email_call[4] == "rt3628+codex-bot@gmail.com"
+    assert name_call[4] == "codex-bot"
+
+
+def test_assert_worktree_config_enabled_fails_when_disabled(tmp_path) -> None:
+    """Startup guard exits with remediation commands when worktree config is disabled."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+
+    with pytest.raises(SystemExit) as excinfo:
+        jd.assert_worktree_config_enabled(repo)
+
+    message = str(excinfo.value)
+    assert "extensions.worktreeConfig is not enabled" in message
+    assert f"git -C {repo} config core.repositoryformatversion 1" in message
+    assert f"git -C {repo} config extensions.worktreeConfig true" in message
+
+
+def test_interleaved_worktrees_commit_and_push_with_correct_email(tmp_path) -> None:
+    """Regression: shared config writes cannot corrupt commits from sibling worktrees."""
+    remote = tmp_path / "origin.git"
+    main = tmp_path / "main"
+    claude = tmp_path / "claude"
+    codex = tmp_path / "codex"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+    main.mkdir()
+
+    subprocess.run(["git", "init"], cwd=main, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "operator@example.test"],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "operator"],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "seed"],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:refs/heads/main"],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.repositoryformatversion", "1"],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "config", "extensions.worktreeConfig", "true"],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "claude-work", str(claude)],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "codex-work", str(codex)],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+
+    jd.set_bot_identity_in_worktree(claude, "subscription-claude")
+    jd.set_bot_identity_in_worktree(codex, "subscription-codex")
+
+    subprocess.run(
+        ["git", "config", "user.email", "wrong-shared@example.test"],
+        cwd=main, check=True, capture_output=True, text=True,
+    )
+
+    claude_email = subprocess.run(
+        ["git", "config", "user.email"],
+        cwd=claude, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    codex_email = subprocess.run(
+        ["git", "config", "user.email"],
+        cwd=codex, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    assert claude_email == "rt3628+claude-bot@gmail.com"
+    assert codex_email == "rt3628+codex-bot@gmail.com"
+
+    (claude / "claude.txt").write_text("claude\n")
+    subprocess.run(["git", "add", "claude.txt"], cwd=claude, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "claude work"], cwd=claude, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:refs/heads/claude-work"],
+        cwd=claude, check=True, capture_output=True, text=True,
+    )
+
+    (codex / "codex.txt").write_text("codex\n")
+    subprocess.run(["git", "add", "codex.txt"], cwd=codex, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "codex work"], cwd=codex, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:refs/heads/codex-work"],
+        cwd=codex, check=True, capture_output=True, text=True,
+    )
+
+    claude_commit_email = subprocess.run(
+        ["git", "log", "-1", "--format=%ae %ce"],
+        cwd=claude, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    codex_commit_email = subprocess.run(
+        ["git", "log", "-1", "--format=%ae %ce"],
+        cwd=codex, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    assert claude_commit_email == "rt3628+claude-bot@gmail.com rt3628+claude-bot@gmail.com"
+    assert codex_commit_email == "rt3628+codex-bot@gmail.com rt3628+codex-bot@gmail.com"
 
 
 def test_ensure_change_ids_rebase_command_shape(tmp_path, monkeypatch):
