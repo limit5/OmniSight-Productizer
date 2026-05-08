@@ -76,5 +76,6 @@ nav:
       - "L-OP-15 Codex feature branches": lessons/L-OP-15-codex-feature-branches.md
   - Runbooks:
       - runbook/index.md
+      - "Docs-site operator workflow": runbook/docs-site-workflow.md
   - Operations:
       - operations/index.md
