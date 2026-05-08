@@ -17,7 +17,13 @@ PUSH_FAILURE_PATTERNS: tuple[tuple[str, str, str], ...] = (
     ),
     (r"invalid author|forge author", "invalid_author", "revert"),
     (r"invalid committer|forge committer", "invalid_committer", "revert"),
-    (r"Missing tree", "missing_tree", "revert"),
+    # OP-771 race: when codex CLI's internal git push lands a PS that is
+    # auto-+2 reviewed and submitted before the runner's secondary push runs,
+    # Gerrit repacks the objects and the runner's push hits "Missing tree".
+    # Reverting in that case duplicates work — re-route via "force-publish"
+    # (which checks for an already-merged PS and walks the ticket forward;
+    # if no merged PS exists the handler still falls back to revert).
+    (r"Missing tree", "missing_tree", "force-publish"),
     (
         r"remote rejected.*change-id|change-id.*remote rejected",
         "change_id_problem",

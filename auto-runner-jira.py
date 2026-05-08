@@ -388,8 +388,26 @@ def _handle_gerrit_push_failure(
                 client,
                 key,
                 (
-                    "[runner-push-fail:no-new-changes] work already merged via "
+                    f"[runner-push-fail:{category}] work already merged via "
                     f"#{merged_info.change_number}; auto-walked ticket to 公開済み."
+                ),
+            )
+        elif category == "missing_tree":
+            # OP-771 race: codex CLI's internal push may have just landed and
+            # the merge event hasn't propagated to `gerrit query` yet (or the
+            # PS is queued for submit). Don't revert — the bridge daemon will
+            # walk the ticket forward when the merge lands. Reverting here
+            # would re-queue the work and produce a duplicate PS.
+            jira_dispatch.add_comment(
+                client,
+                key,
+                (
+                    f"[runner-push-fail:{category}] secondary push hit "
+                    f"'Missing tree' but no merged PS found via query (timing "
+                    f"race with submit, or repack mid-tick). Ticket left in "
+                    f"current state; bridge daemon should walk forward when "
+                    f"the CLI's internal-push PS lands. Operator: verify "
+                    f"Gerrit if the ticket sticks."
                 ),
             )
         else:

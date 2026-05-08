@@ -95,7 +95,10 @@ def _patch_dispatch(
             "remote: invalid committer codex-bot cannot forge committer",
             ("invalid_committer", "revert"),
         ),
-        ("remote: Missing tree 3f7abc", ("missing_tree", "revert")),
+        # OP-771 race: missing_tree now routes to force-publish so the handler
+        # can detect a just-merged PS (codex CLI internal push) and walk the
+        # ticket forward instead of duplicating work.
+        ("remote: Missing tree 3f7abc", ("missing_tree", "force-publish")),
         (
             "remote rejected: commit 123 has missing Change-Id footer",
             ("change_id_problem", "revert"),
@@ -159,7 +162,7 @@ def test_no_new_changes_without_merged_sibling_reverts_to_todo(
     [
         ("remote: invalid author cannot forge author", "invalid_author"),
         ("remote: invalid committer cannot forge committer", "invalid_committer"),
-        ("remote: Missing tree deadbeef", "missing_tree"),
+        # missing_tree moved to force-publish (OP-771 race) — covered by separate test.
         ("remote rejected because Change-Id footer is malformed", "change_id_problem"),
         ("merge conflict\nConflicts: backend/x.py", "merge_conflict"),
     ],
@@ -178,6 +181,47 @@ def test_revert_categories_transition_back_to_todo(
     reason = calls["transition_back_to_todo"][0][0][2]
     assert f"[runner-push-fail:{category}]" in reason
     assert calls["add_label"] == []
+
+
+def test_missing_tree_with_merged_walks_to_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-771 race: Missing tree + already-merged PS → walk to published."""
+    mod = _load_jira_runner()
+    calls = _patch_dispatch(monkeypatch, mod)
+    # Stub already_merged_in_gerrit to return a merged-info object
+    from types import SimpleNamespace
+    monkeypatch.setattr(
+        mod.jira_dispatch, "already_merged_in_gerrit",
+        lambda *a, **kw: SimpleNamespace(change_number=240, change_url="x"),
+    )
+
+    decision = mod._handle_gerrit_push_failure(
+        _StubClient(), "OP-771", "remote: Missing tree 4cf036f9"
+    )
+
+    assert decision == ("missing_tree", "force-publish")
+    assert calls["force_walk_to_published"] != []
+    assert calls["transition_back_to_todo"] == []
+
+
+def test_missing_tree_without_merged_leaves_ticket_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-771 race hardening: Missing tree + NO merged PS found → leave alone
+    rather than reverting (could be timing race with submit; bridge daemon
+    will walk forward when the merge event lands)."""
+    mod = _load_jira_runner()
+    calls = _patch_dispatch(monkeypatch, mod)
+    monkeypatch.setattr(mod.jira_dispatch, "already_merged_in_gerrit", lambda *a, **kw: None)
+
+    decision = mod._handle_gerrit_push_failure(
+        _StubClient(), "OP-771", "remote: Missing tree 4cf036f9"
+    )
+
+    assert decision == ("missing_tree", "force-publish")
+    assert calls["force_walk_to_published"] == []
+    assert calls["transition_back_to_todo"] == []  # ← key assertion: no revert
 
 
 def test_transient_network_leaves_ticket_in_progress_for_retry(
