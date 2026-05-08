@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 VALID_CAUSE_CATEGORIES = frozenset({
     "sibling_merged",
+    "staging_regression",
     "verified_minus_one",
     "manual_rebase",
 })
