@@ -1379,6 +1379,8 @@ from backend.routers import feature_flags as _feature_flags_router  # WP.7.8 ope
 app.include_router(_feature_flags_router.router, prefix=settings.api_prefix)
 from backend.routers import canary_rollout as _canary_rollout_router  # OP-771 D10 canary rollout controls
 app.include_router(_canary_rollout_router.router, prefix=settings.api_prefix)
+from backend.routers import release_approval as _release_approval_router  # OP-770 production release approval
+app.include_router(_release_approval_router.router)
 from backend.routers import external_agents as _external_agents_router  # BP.A2A.6 external A2A agent registry UI
 app.include_router(_external_agents_router.router, prefix=settings.api_prefix)
 from backend.routers import batch_merge as _batch_merge_router  # OP-735 R5 AI Reviewer auto-+1 dashboard

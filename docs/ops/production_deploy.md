@@ -184,6 +184,32 @@ the newest `backend/alembic/versions/*.py`.
 > so the next operator knows the bootstrap is done and can go straight
 > to §4.3.
 
+### 4.0 OP-770 approval gate
+
+Sprint D production deploys are initiated from the backend-rendered
+approval page, not by directly running compose commands. When the D8
+automation emits `release_tagged`, `backend.production_release` writes
+`data/release-approvals/<tag>.json` and sends the operator an OP-722
+notification pointing at:
+
+```text
+/admin/release-approval?tag=vX.Y.Z
+```
+
+The page shows the tag, smoke result payload, baseline diff, and change
+list from the release event. `SHIP IT` records
+`audit_log.action=release.ship_approved` with the operator identity,
+then the deploy worker pulls `ghcr.io/omnisight/productizer:vX.Y.Z`,
+runs `alembic upgrade head`, restarts `backend-a`, waits on
+`:8000/readyz`, restarts `backend-b`, waits on `:8001/readyz`, and then
+updates `frontend`. Any failed step runs `scripts/deploy.sh --rollback`.
+
+Use `Cancel` when the release should not ship; it marks the approval
+`cancelled` and runs `OMNISIGHT_RELEASE_STAGING_ROLLBACK_CMD` to remove
+that tag's staging artifacts. Leave the env var unset only on hosts
+where the D6/D7 staging artifact cleanup is handled outside this
+backend worker.
+
 ### 4.1 First-time — Path A: systemd (single-host, recommended)
 
 Run these **in order** on a clean host. Each block is idempotent
