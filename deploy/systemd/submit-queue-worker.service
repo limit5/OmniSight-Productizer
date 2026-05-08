@@ -1,0 +1,51 @@
+; systemd unit for the OmniSight submit-queue worker (OP-751).
+;
+; Install (user-level — no sudo):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/submit-queue-worker.service ~/.config/systemd/user/
+;   # Edit the Environment= lines below to match your bot identity + paths.
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now submit-queue-worker
+;   loginctl enable-linger $USER     # survive logout
+;
+; What this daemon does:
+;   - Polls Gerrit for changes with `Submit-Ready=+1`.
+;   - For each: rebases onto develop tip (REST), runs CI when wired
+;     (OP-739), submits atomically.
+;   - On any failure: votes `Submit-Ready=-1` with a human-readable
+;     comment so the operator can fix manually and re-mark.
+;   - Holds a per-change-id lock file so a second instance of the
+;     daemon (e.g. blue/green rollover) cannot double-process.
+;
+; Kill switch: set `OMNISIGHT_SUBMIT_QUEUE_DISABLED=1` and reload.
+
+[Unit]
+Description=OmniSight submit-queue worker (OP-751)
+After=network-online.target gerrit-jira-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_GERRIT_SSH_HOST=claude-bot@sora.services
+Environment=OMNISIGHT_GERRIT_SSH_PORT=29418
+Environment=OMNISIGHT_GERRIT_URL=https://sora.services:29420
+Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
+Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-claude-bot-ed25519
+; Default 30s between merges — keeps the auto-rebase sweeper, CI, and
+; notifier from being drowned by a 5-PS burst on the same hot file.
+Environment=OMNISIGHT_SUBMIT_QUEUE_RATE_LIMIT_S=30
+Environment=OMNISIGHT_SUBMIT_QUEUE_POLL_INTERVAL_S=15
+Environment=OMNISIGHT_SUBMIT_QUEUE_LOCK_DIR=/home/user/.cache/omnisight/submit-queue-locks
+ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/run_submit_queue_worker.py --agent-class subscription-claude --worker-username claude-bot
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/home/user/work/sora/logs/submit-queue/systemd.log
+StandardError=append:/home/user/work/sora/logs/submit-queue/systemd.log
+
+[Install]
+WantedBy=default.target
