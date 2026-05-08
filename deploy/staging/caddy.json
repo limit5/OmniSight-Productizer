@@ -1,0 +1,45 @@
+{
+  "apps": {
+    "http": {
+      "servers": {
+        "staging": {
+          "listen": [":80", ":443"],
+          "routes": [
+            {
+              "match": [
+                {
+                  "path": ["/api/*", "/readyz", "/healthz"]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "health_checks": {
+                    "active": {
+                      "uri": "/readyz",
+                      "interval": "10s",
+                      "timeout": "3s"
+                    }
+                  },
+                  "upstreams": [
+                    {"dial": "backend-a:8000"},
+                    {"dial": "backend-b:8001"}
+                  ]
+                }
+              ]
+            },
+            {
+              "match": [{"host": ["staging.sora.services"]}],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [{"dial": "frontend:3000"}]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
