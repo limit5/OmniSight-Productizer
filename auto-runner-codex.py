@@ -51,6 +51,11 @@ from backend.agents.project_memory import (  # noqa: E402
     parse_ignored_paths,
     render_operator_summary as render_memory_operator_summary,
 )
+from backend.agents import provider_orchestrator, provider_quota_tracker  # noqa: E402
+
+# Import subscription adapters for provider registry side effects.
+import backend.agents.provider_adapters.anthropic_subscription  # noqa: E402,F401
+import backend.agents.provider_adapters.openai_subscription  # noqa: E402,F401
 
 # ── 優雅停機 ──
 _shutdown_requested = False
@@ -146,6 +151,7 @@ TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_CODEX_TIMEOUT_S", "1800"))
 MAX_RETRIES = int(os.environ.get("OMNISIGHT_CODEX_MAX_RETRIES", "2"))
 COOLDOWN_S = int(os.environ.get("OMNISIGHT_CODEX_COOLDOWN", "5"))
 SECTION_COOLDOWN_S = int(os.environ.get("OMNISIGHT_CODEX_SECTION_COOLDOWN", "10"))
+DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
 
 # codex CLI invocation — overridable for new versions / system installs.
 # Default model alias; codex-cli respects --model on each invocation.
@@ -157,6 +163,37 @@ CODEX_MODEL = os.environ.get("OMNISIGHT_CODEX_MODEL", "")  # empty = use codex d
 # disable, and supply their own flags via OMNISIGHT_CODEX_EXTRA_FLAGS.
 CODEX_APPROVAL = os.environ.get("OMNISIGHT_CODEX_APPROVAL", "yolo")
 CODEX_EXTRA_FLAGS = os.environ.get("OMNISIGHT_CODEX_EXTRA_FLAGS", "").strip()
+
+
+def _provider_cap_for(provider: str) -> int:
+    """Mirror provider_quota_tracker's 5h env cap convention for reporting."""
+    env_provider = "".join(ch if ch.isalnum() else "_" for ch in provider.upper())
+    env_name = f"OMNISIGHT_PROVIDER_CAP_{env_provider}_5H"
+    raw = (os.environ.get(env_name) or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return provider_quota_tracker.DEFAULT_5H_CAP_TOKENS
+
+
+def _quota_label(provider: str) -> str:
+    return provider.removesuffix("-subscription")
+
+
+def _print_quota_tracker_startup_report() -> None:
+    parts: list[str] = []
+    for provider in provider_orchestrator.list_adapters():
+        cap = _provider_cap_for(provider)
+        try:
+            state = provider_quota_tracker.get_quota_state(provider)
+            used = state.rolling_5h_tokens
+        except Exception:  # noqa: BLE001 - operator visibility must be best-effort
+            used = 0
+        parts.append(f"{_quota_label(provider)}: {used}/{cap} msg/5h")
+    if parts:
+        print(f"[quota] {' | '.join(parts)}")
 
 
 # ── Tier 與 worktree 路徑解析 ──
@@ -575,6 +612,7 @@ def main() -> None:
         f"approval={CODEX_APPROVAL or '<default>'} timeout={TASK_TIMEOUT_S}s "
         f"retries={MAX_RETRIES}"
     )
+    _print_quota_tracker_startup_report()
     print(f"🪧 Tier: {TIER}")
     print(f"📂 Working dir: {WORK_CWD}")
     if RUNNER_FILTER:
@@ -585,6 +623,9 @@ def main() -> None:
         print("🏷️ Track filter：無（處理所有 [G]-eligible 項目）")
     if TARGET_ITEM_SUBSTR:
         print(f"🎯 Target item lock: substring={TARGET_ITEM_SUBSTR!r}")
+    if DRY_RUN:
+        print("🧪 DRY_RUN: startup checks only; no TODO mutation or codex invoke.")
+        return
     memory_files = load_all_memory(Path(BASE_DIR), ignored_paths=RULE_IGNORE_PATHS)
     print(
         render_memory_operator_summary(
@@ -621,6 +662,7 @@ def main() -> None:
     last_section = None
 
     while True:
+        _print_quota_tracker_startup_report()
         section_title, item_line, section_context = get_next_pending_item()
         if not section_title:
             break
