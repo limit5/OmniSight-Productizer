@@ -465,7 +465,11 @@ def _handle_gerrit_push_failure(
         jira_dispatch.add_comment(
             client,
             key,
-            f"[runner-push-fail:transient] {category}; will retry next tick.",
+            (
+                f"[runner-push-fail:transient] {category}; immediate Gerrit "
+                f"push retries exhausted. Ticket left in current state for "
+                f"human triage.\n\n{detail[:500]}"
+            ),
         )
         return category, action
 
@@ -676,6 +680,12 @@ def main() -> int:
 
         if push_result.success:
             print(f"[runner] pushed Change #{push_result.change_number}: {push_result.change_url}")
+            if push_result.recovery_note:
+                jira_dispatch.add_comment(
+                    client,
+                    snapshot.key,
+                    f"[runner-gerrit-push-recovered] {push_result.recovery_note}",
+                )
             _finalize_under_review(client, snapshot.key, push_result.change_url)
         else:
             print(f"[runner] Gerrit push failed:\n{push_result.detail}", file=sys.stderr)
