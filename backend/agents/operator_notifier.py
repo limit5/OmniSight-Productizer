@@ -1,9 +1,25 @@
-"""Operator notification bridge — multi-channel alert fanout (OP-722).
+"""Operator notification bridge — multi-channel alert fanout (OP-722, OP-755).
 
 Foundation ticket of META OP-721. Every operator-facing alert in the
 program — JIRA daemon events, gerrit-jira-bridge errors, scanner
 findings — flows through ``notify()`` so we can rate-limit, deduplicate
 and route by severity centrally.
+
+OP-755 extends the bridge with:
+
+* **Grouping by ``(severity, scope, root_cause_key)``** — events that
+  share a root cause but use distinct ``code`` values still collapse
+  into a single aggregated alert. Pass ``scope=...`` (e.g. the failing
+  pipeline / subsystem) and ``root_cause_key=...`` to opt in; legacy
+  callers that pass only ``code`` keep the original ``(code, severity)``
+  grouping (root_cause_key defaults to ``code``, scope defaults to
+  ``"global"``).
+* **Aggregated header on count>1** — the dispatched body is prefixed
+  with ``[N events in M min] severity=<tier> scope=<scope> sample-event=<code>``.
+* **Per-channel rate-limit** — bounded delivery for low/medium severity
+  on each channel (default: medium = 5 alerts / 15min on every wired
+  channel; low = unconfigured, i.e. unlimited). High-severity
+  (CRITICAL / P0) bypasses the rate-limit but still dedupes.
 
 Severity → channel matrix:
 
@@ -60,6 +76,24 @@ Config (env vars; ``Notifier`` accepts overrides for tests):
     OMNISIGHT_NOTIFIER_AGENT_CLASS             agent_class for the JIRA
                                                dispatch client (default
                                                "subscription-claude")
+    OMNISIGHT_NOTIFIER_RATE_LIMIT_LOW          ``COUNT/WINDOW`` (e.g.
+                                               ``20/900``) — default
+                                               rate-limit for low
+                                               severity (``WARN``) on
+                                               every channel. Empty =
+                                               unlimited (default).
+    OMNISIGHT_NOTIFIER_RATE_LIMIT_MEDIUM       ``COUNT/WINDOW`` for
+                                               medium (``DEGRADED``).
+                                               Default ``5/900``.
+    OMNISIGHT_NOTIFIER_RATE_LIMIT_<CHAN>_<TIER>  Per-channel override,
+                                               e.g.
+                                               ``OMNISIGHT_NOTIFIER_RATE_LIMIT_SLACK_MEDIUM=10/900``.
+                                               Channels: JIRA, EMAIL,
+                                               SLACK, LINE. Tiers: LOW,
+                                               MEDIUM. CRITICAL/P0
+                                               cannot be rate-limited
+                                               (high severity bypasses
+                                               by spec).
 
 Canary self-test: :func:`canary_self_test` calls ``send`` directly
 on every wired channel — bypassing the dedup layer — so a misconfigured
@@ -112,6 +146,26 @@ def channels_for(severity: Severity) -> frozenset[str]:
     return _FANOUT[severity]
 
 
+# OP-755: severity-tier labels used by the aggregated-alert header and
+# the rate-limiter. Stable strings — the env-var rate-limit knobs use
+# the upper-cased forms (``OMNISIGHT_NOTIFIER_RATE_LIMIT_MEDIUM``).
+_SEVERITY_TIER: dict[Severity, str] = {
+    Severity.WARN: "low",
+    Severity.DEGRADED: "medium",
+    Severity.CRITICAL: "high",
+    Severity.P0: "high",
+}
+
+
+def severity_tier(severity: Severity) -> str:
+    return _SEVERITY_TIER[severity]
+
+
+def is_high_severity(severity: Severity) -> bool:
+    """High-severity alerts bypass rate-limit per OP-755 spec."""
+    return _SEVERITY_TIER[severity] == "high"
+
+
 # ── Channel protocol + implementations ────────────────────────────
 
 
@@ -127,7 +181,11 @@ class Channel(Protocol):
 @dataclass
 class Notification:
     """One outbound notification record. ``count`` reflects how many
-    upstream ``notify()`` calls collapsed into this single fanout."""
+    upstream ``notify()`` calls collapsed into this single fanout.
+
+    OP-755 fields ``scope`` / ``root_cause_key`` / ``aggregation_window_seconds``
+    drive the aggregated-header rendering. ``root_cause_key`` defaults
+    to ``code`` when not supplied, so legacy callers behave unchanged."""
 
     notification_id: str
     severity: Severity
@@ -138,13 +196,33 @@ class Notification:
     count: int = 1
     ack_url: str | None = None
     created_at: float = field(default_factory=time.time)
+    scope: str = "global"
+    root_cause_key: str | None = None
+    aggregation_window_seconds: float = 300.0
+
+    def __post_init__(self) -> None:
+        if self.root_cause_key is None:
+            self.root_cause_key = self.code
 
 
 def format_text(payload: Notification) -> str:
     """Plain-text body shared across channels. Centralised so the
-    dedup ``count=N`` and ack URL render consistently everywhere."""
+    aggregated-header (OP-755), dedup ``count=N`` and ack URL render
+    consistently everywhere."""
 
-    lines = [f"[{payload.severity.value}] {payload.code}: {payload.message}"]
+    lines: list[str] = []
+    if payload.count > 1:
+        # OP-755 aggregated alert header. Round to whole minutes for
+        # operator readability; keep a 1-min floor so very short windows
+        # still render a non-zero count.
+        window_min = max(1, int(round(payload.aggregation_window_seconds / 60)))
+        lines.append(
+            f"[{payload.count} events in {window_min} min] "
+            f"severity={severity_tier(payload.severity)} "
+            f"scope={payload.scope} "
+            f"sample-event={payload.code}"
+        )
+    lines.append(f"[{payload.severity.value}] {payload.code}: {payload.message}")
     if payload.count > 1:
         lines.append(f"(suppressed {payload.count - 1} duplicates within dedup window; count={payload.count})")
     if payload.context:
@@ -333,8 +411,12 @@ class LineNotifyChannel:
 
 @dataclass
 class _BurstEntry:
-    """In-memory burst state for a (code, severity) key. Held until
-    flush_expired runs or the entry is force-flushed."""
+    """In-memory burst state for an alert group. Held until
+    ``flush_expired`` runs or the entry is force-flushed.
+
+    OP-755: keyed on ``(severity, scope, root_cause_key)``; defaulting
+    ``scope="global"`` and ``root_cause_key=code`` recovers the OP-722
+    ``(code, severity)`` grouping for callers that pass neither."""
 
     notification_id: str
     severity: Severity
@@ -344,6 +426,8 @@ class _BurstEntry:
     ticket: str | None
     first_seen: float
     count: int
+    scope: str = "global"
+    root_cause_key: str = ""
 
 
 @dataclass
@@ -354,6 +438,139 @@ class _PendingAck:
     notification: Notification
     last_paged_at: float
     repage_interval: float
+
+
+# ── Rate-limiter (OP-755) ─────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class RateLimitConfig:
+    """Per-(channel, severity-tier) rate limits.
+
+    ``rules`` maps ``(channel, tier)`` → ``(max_count, window_seconds)``.
+    The wildcard channel ``"*"`` matches every channel that lacks a
+    specific override. CRITICAL/P0 (high tier) is never rate-limited —
+    no entry is consulted for those.
+
+    The frontend Settings page (out of scope for OP-755) is expected to
+    rebuild this config when an operator edits per-channel thresholds;
+    the backend here exposes the structure and an env-driven factory so
+    the config plumbing exists today."""
+
+    rules: dict[tuple[str, str], tuple[int, float]] = field(default_factory=dict)
+
+    def limit_for(self, channel: str, tier: str) -> tuple[int, float] | None:
+        """Resolve the most specific rule. Per-channel beats wildcard;
+        absent rule means unlimited."""
+
+        return self.rules.get((channel, tier)) or self.rules.get(("*", tier))
+
+
+def default_rate_limit_config() -> RateLimitConfig:
+    """OP-755 default: medium severity = 5 alerts / 15min on every
+    channel. Low severity (WARN) is unconfigured by default — operators
+    opt in via env var or per-channel override if desired."""
+
+    return RateLimitConfig(rules={("*", "medium"): (5, 900.0)})
+
+
+def _parse_rate_limit_spec(spec: str | None) -> tuple[int, float] | None:
+    """Parse ``"COUNT/WINDOW"``. Returns ``None`` for empty/invalid
+    specs — caller treats that as "no rule"."""
+
+    if not spec:
+        return None
+    raw = spec.strip()
+    if not raw:
+        return None
+    try:
+        count_s, window_s = raw.split("/", 1)
+        count = int(count_s)
+        window = float(window_s)
+    except (ValueError, TypeError):
+        logger.warning("notifier rate-limit spec %r invalid; expected COUNT/WINDOW", spec)
+        return None
+    if count <= 0 or window <= 0:
+        return None
+    return (count, window)
+
+
+def build_rate_limit_config_from_env(env: dict[str, str] | None = None) -> RateLimitConfig:
+    """Resolve the rate-limit config from env. Defaults match
+    :func:`default_rate_limit_config` unless overridden."""
+
+    e = env if env is not None else os.environ
+    rules: dict[tuple[str, str], tuple[int, float]] = {}
+
+    # Defaults (channel="*"). Medium has a baked-in default; low is
+    # unconfigured unless explicitly set.
+    medium_default = _parse_rate_limit_spec(
+        e.get("OMNISIGHT_NOTIFIER_RATE_LIMIT_MEDIUM", "5/900")
+    )
+    if medium_default is not None:
+        rules[("*", "medium")] = medium_default
+    low_default = _parse_rate_limit_spec(e.get("OMNISIGHT_NOTIFIER_RATE_LIMIT_LOW"))
+    if low_default is not None:
+        rules[("*", "low")] = low_default
+
+    # Per-channel overrides. We only honour the four wired channels and
+    # the two rate-limitable tiers — high (CRITICAL/P0) cannot be
+    # rate-limited per spec.
+    for ch_name in ("jira", "email", "slack", "line"):
+        for tier in ("low", "medium"):
+            key = f"OMNISIGHT_NOTIFIER_RATE_LIMIT_{ch_name.upper()}_{tier.upper()}"
+            parsed = _parse_rate_limit_spec(e.get(key))
+            if parsed is not None:
+                rules[(ch_name, tier)] = parsed
+
+    return RateLimitConfig(rules=rules)
+
+
+class RateLimiter:
+    """Sliding-window-log rate-limiter. Each ``(channel, tier)`` keeps
+    a list of accepted dispatch timestamps; on a new request, expired
+    entries are pruned and we accept iff the remaining count is below
+    the rule's threshold.
+
+    Only accepted dispatches are recorded — rejected ones do not extend
+    the window (otherwise we could never recover from a saturated
+    bucket)."""
+
+    def __init__(
+        self,
+        config: RateLimitConfig | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._config = config if config is not None else default_rate_limit_config()
+        self._clock = clock or time.time
+        self._buckets: dict[tuple[str, str], list[float]] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def config(self) -> RateLimitConfig:
+        return self._config
+
+    def allow(self, channel: str, severity: Severity) -> bool:
+        """Return True iff this dispatch is allowed. High-severity
+        notifications always pass through (OP-755 spec)."""
+
+        if is_high_severity(severity):
+            return True
+        tier = severity_tier(severity)
+        rule = self._config.limit_for(channel, tier)
+        if rule is None:
+            return True
+        max_count, window = rule
+        now = self._clock()
+        cutoff = now - window
+        with self._lock:
+            bucket = self._buckets.setdefault((channel, tier), [])
+            # Prune in-place so the next caller sees a small list.
+            bucket[:] = [t for t in bucket if t > cutoff]
+            if len(bucket) >= max_count:
+                return False
+            bucket.append(now)
+            return True
 
 
 # ── Notifier ──────────────────────────────────────────────────────
@@ -387,15 +604,21 @@ class Notifier:
         channels: dict[str, Channel],
         config: NotifierConfig | None = None,
         clock: Callable[[], float] | None = None,
+        rate_limit_config: RateLimitConfig | None = None,
     ) -> None:
         self.channels = dict(channels)
         self.config = config or NotifierConfig()
         self._clock = clock or time.time
         self._lock = threading.Lock()
-        self._bursts: dict[tuple[str, Severity], _BurstEntry] = {}
+        # OP-755: burst key broadened to (severity, scope, root_cause_key).
+        self._bursts: dict[tuple[Severity, str, str], _BurstEntry] = {}
         self._pending: dict[str, _PendingAck] = {}
         self._dispatch_thread: threading.Thread | None = None
         self._dispatch_stop = threading.Event()
+        self.rate_limiter = RateLimiter(
+            rate_limit_config if rate_limit_config is not None else default_rate_limit_config(),
+            clock=self._clock,
+        )
 
     # Public API ---------------------------------------------------
 
@@ -406,6 +629,8 @@ class Notifier:
         message: str,
         context: dict[str, Any] | None = None,
         ticket: str | None = None,
+        scope: str = "global",
+        root_cause_key: str | None = None,
     ) -> _BurstEntry:
         """Record a notify() call. Returns the in-memory burst entry —
         NOT an outbound :class:`Notification`. Outbound dispatch happens
@@ -413,8 +638,10 @@ class Notifier:
 
         Behaviour:
 
-        * No existing burst for ``(code, severity)`` → open a fresh one
-          with ``count=1``.
+        * No existing burst for ``(severity, scope, root_cause_key)`` →
+          open a fresh one with ``count=1``. ``root_cause_key`` defaults
+          to ``code`` (legacy ``(code, severity)`` grouping); ``scope``
+          defaults to ``"global"``.
         * Existing burst within window → increment ``count``; the latest
           message + context overwrite earlier ones (operator-friendly:
           the last sample is usually the most informative).
@@ -425,11 +652,12 @@ class Notifier:
 
         sev = Severity(severity) if not isinstance(severity, Severity) else severity
         ctx = dict(context or {})
+        rck = root_cause_key if root_cause_key is not None else code
         now = self._clock()
 
         stale_to_flush: _BurstEntry | None = None
         with self._lock:
-            key = (code, sev)
+            key = (sev, scope, rck)
             entry = self._bursts.get(key)
             if entry is not None and (now - entry.first_seen) > self.config.dedup_window_seconds:
                 stale_to_flush = entry
@@ -446,12 +674,18 @@ class Notifier:
                     ticket=ticket or self.config.default_ticket,
                     first_seen=now,
                     count=1,
+                    scope=scope,
+                    root_cause_key=rck,
                 )
                 self._bursts[key] = entry
             else:
                 entry.count += 1
                 entry.message = message
                 entry.context = ctx
+                # Sample-event tracks the most recent code under this
+                # root cause — useful when callers group multiple code
+                # variants under one root_cause_key.
+                entry.code = code
                 if ticket:
                     entry.ticket = ticket
             snapshot = _BurstEntry(**vars(entry))
@@ -474,7 +708,7 @@ class Notifier:
                 if (now - e.first_seen) >= self.config.dedup_window_seconds
             ]
             for e in due:
-                self._bursts.pop((e.code, e.severity), None)
+                self._bursts.pop((e.severity, e.scope, e.root_cause_key), None)
         return [self._dispatch_burst(e, now) for e in due]
 
     def flush_all(self) -> list[Notification]:
@@ -567,6 +801,9 @@ class Notifier:
             count=entry.count,
             ack_url=ack_url,
             created_at=entry.first_seen,
+            scope=entry.scope,
+            root_cause_key=entry.root_cause_key or entry.code,
+            aggregation_window_seconds=self.config.dedup_window_seconds,
         )
         self._dispatch(payload)
 
@@ -586,10 +823,23 @@ class Notifier:
     def _dispatch(self, payload: Notification) -> None:
         wanted = channels_for(payload.severity)
         errors: list[str] = []
+        rate_limited: list[str] = []
         for name in sorted(wanted):
             ch = self.channels.get(name)
             if ch is None:
                 logger.info("notifier skipping unconfigured channel=%s id=%s", name, payload.notification_id)
+                continue
+            if not self.rate_limiter.allow(name, payload.severity):
+                # OP-755: rate-limited drop. The dedup count is preserved
+                # on the payload so when a later notification on the same
+                # bucket *is* allowed (or a high-severity overrides), the
+                # accumulated count surfaces.
+                rate_limited.append(name)
+                logger.info(
+                    "notifier rate-limited channel=%s code=%s severity=%s id=%s count=%d",
+                    name, payload.code, payload.severity.value,
+                    payload.notification_id, payload.count,
+                )
                 continue
             try:
                 ch.send(payload)
@@ -606,6 +856,8 @@ class Notifier:
         # for observability instead of raised.
         if errors:
             payload.context.setdefault("_channel_errors", "; ".join(errors))
+        if rate_limited:
+            payload.context.setdefault("_rate_limited_channels", ", ".join(sorted(rate_limited)))
 
 
 # ── Env-driven factory + canary self-test ─────────────────────────
@@ -687,7 +939,11 @@ def build_notifier_from_env(env: dict[str, str] | None = None) -> Notifier:
         ack_base_url=e.get("OMNISIGHT_NOTIFIER_ACK_BASE_URL"),
         default_ticket=e.get("OMNISIGHT_NOTIFIER_JIRA_TICKET"),
     )
-    return Notifier(build_channels_from_env(e), cfg)
+    return Notifier(
+        build_channels_from_env(e),
+        cfg,
+        rate_limit_config=build_rate_limit_config_from_env(e),
+    )
 
 
 def canary_self_test(notifier: Notifier | None = None) -> dict[str, str]:
@@ -739,10 +995,19 @@ def notify(
     message: str,
     context: dict[str, Any] | None = None,
     ticket: str | None = None,
+    scope: str = "global",
+    root_cause_key: str | None = None,
 ) -> _BurstEntry:
     """Module-level convenience wrapper — most callers should use this.
-    Lazily builds the process-wide :class:`Notifier` from env."""
-    return get_default_notifier().notify(severity, code, message, context, ticket)
+    Lazily builds the process-wide :class:`Notifier` from env.
+
+    Pass ``scope`` and ``root_cause_key`` (OP-755) to opt into the
+    broader grouping; legacy callers that pass neither retain the
+    OP-722 ``(code, severity)`` grouping unchanged."""
+    return get_default_notifier().notify(
+        severity, code, message, context, ticket,
+        scope=scope, root_cause_key=root_cause_key,
+    )
 
 
 def acknowledge(notification_id: str) -> bool:
@@ -760,6 +1025,10 @@ __all__ = [
     "LineNotifyChannel",
     "Notifier",
     "NotifierConfig",
+    "RateLimitConfig",
+    "RateLimiter",
+    "default_rate_limit_config",
+    "build_rate_limit_config_from_env",
     "build_channels_from_env",
     "build_notifier_from_env",
     "canary_self_test",
@@ -768,4 +1037,6 @@ __all__ = [
     "acknowledge",
     "channels_for",
     "format_text",
+    "severity_tier",
+    "is_high_severity",
 ]
