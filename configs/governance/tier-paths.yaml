@@ -1,0 +1,189 @@
+# =====================================================================
+#  configs/governance/tier-paths.yaml
+#  Single source of truth: path glob -> AI-authority tier (S | M | L | X)
+#  ADR-0005 — Tier S/M/L/X AI authority levels with 4-layer protection
+# =====================================================================
+#
+# This file is consumed by:
+#
+#   * G2 backend classifier   - resolves a patchset's effective tier
+#                                from its touched-paths set
+#   * G3 Gerrit server hook   - overwrites the user-set Tier label on
+#                                every patchset upload (contributor
+#                                cannot manually downgrade)
+#   * G4 audit log            - records the input glob match that
+#                                produced the assigned tier
+#
+# Anyone editing this file is changing the merge gate for an entire
+# class of changes. Read the operator runbook first:
+#   docs/operations/tier-authority-config.md
+#
+# ─────────────────────────────────────────────────────────────────────
+#  Resolution order (G2 classifier contract — load-bearing)
+# ─────────────────────────────────────────────────────────────────────
+#
+#   tier(patchset) = max(
+#       L if any touched path matches tiers.l.force_upgrade_globs,
+#       X if any touched path matches tiers.x.force_upgrade_globs,
+#       S if every touched path matches tiers.s.whitelist_globs,
+#       M  # default for un-classified production code
+#   )
+#
+# Concretely, in priority order (highest tier wins):
+#
+#   1. **Force-upgrade match** (Tier L or X)
+#      If ANY touched path matches an L or X force_upgrade_globs entry,
+#      the change's effective tier is bumped to that minimum. No
+#      reasoning by an AI agent (and no contributor override) can
+#      lower it. This is the path-based misclassification defence
+#      from ADR-0005 §4 layer 1.
+#
+#   2. **Tier S whitelist** (only if no force-upgrade matched)
+#      The change is Tier S only if EVERY touched path matches a
+#      whitelist_globs entry. A single un-whitelisted path drops the
+#      change to Tier M. This is the deny-by-default for the most
+#      permissive tier (ADR-0005 §4 layer 2).
+#
+#   3. **Tier M (default)**
+#      Un-classified production code. AI +1 + Human +1 dual-+1 rule
+#      applies (per ADR-0005 §3).
+#
+# **Reviewer monotonicity** (ADR-0005 §4 layer 3): a reviewer MAY
+# promote (S → M, M → L, L → X) but MUST NOT demote. The hook
+# rejects any tier-label downgrade attempt and emits an audit event.
+#
+# ─────────────────────────────────────────────────────────────────────
+#  Glob syntax
+# ─────────────────────────────────────────────────────────────────────
+#
+# Globs follow PEP 0428 / fnmatch semantics with `**` for recursive:
+#
+#   *.md                        any .md file at repo root
+#   backend/tests/**            any path under backend/tests/, recursive
+#   .github/workflows/**        nested workflow yaml files
+#   backend/auth*.py            auth.py, auth_helpers.py, etc. at that path
+#
+# Globs are matched against repo-relative paths with forward slashes
+# (POSIX form), regardless of host OS.
+#
+# ─────────────────────────────────────────────────────────────────────
+#  Schema version
+# ─────────────────────────────────────────────────────────────────────
+#
+# Validated against configs/governance/__schema__/tier-paths.schema.json
+# (JSON Schema Draft 2020-12). Bumping schema_version requires a
+# coordinated change to the schema file and the G2 loader; backend
+# tests under backend/tests/test_tier_paths_yaml_schema.py lock the
+# contract at commit time.
+#
+# =====================================================================
+
+schema_version: 1
+
+tiers:
+  # -------------------------------------------------------------------
+  # Tier S — Safe. AI may self-+2; 24h revert window backstops misclass.
+  # -------------------------------------------------------------------
+  # A change reaches Tier S only when EVERY touched path matches one of
+  # these globs. A single non-whitelisted file drops the change to M.
+  # Keep this list tight — every entry directly translates into "AI may
+  # merge without human review".
+  s:
+    whitelist_globs:
+      # Test additions / edits. Production code under test/ is impossible
+      # by convention (tests don't ship); the value here is that
+      # mechanically-generated test scaffolding (golden updates, snapshot
+      # refresh, additional fixtures) doesn't need a human gate.
+      - "backend/tests/**"
+
+      # Documentation. ADR / SOP / runbook edits are reversible and
+      # carry no runtime risk; a misleading doc is still a doc.
+      - "*.md"
+      - "**/*.md"
+
+      # i18n locale strings. The schema is fixed; only the values move.
+      # A bad translation is a UX blemish, not an outage.
+      - "messages/*.json"
+
+      # OpenAPI auto-generated stubs. The generator is the contract;
+      # these files are mechanical output. (Hand-written OpenAPI specs
+      # live under openapi/*.yaml and are NOT whitelisted.)
+      - "openapi/*.generated.json"
+
+  # -------------------------------------------------------------------
+  # Tier M — Medium. AI +1 + Human +1 = mergeable. Default tier.
+  # -------------------------------------------------------------------
+  # Un-classified production code falls here. By design this section
+  # carries no globs — Tier M is the implicit fallback when neither a
+  # force-upgrade rule nor the S whitelist applies.
+  m:
+    default: true
+
+  # -------------------------------------------------------------------
+  # Tier L — Large. AI +1 advisory + Human +2 mandatory.
+  # -------------------------------------------------------------------
+  # New module, new schema, auth/security/crypto, public API surface.
+  # AI may comment but cannot merge — a human +2 is the hard gate.
+  l:
+    force_upgrade_globs:
+      # Security / cryptography surface. Anything here mishandled is a
+      # CVE. ADR-0005 §2 row 1.
+      - "backend/security/**"
+
+      # Auth modules at the backend root (auth.py, auth_helpers.py,
+      # auth_oidc.py, etc). Glob is `auth*.py`, not `auth_*.py`, so it
+      # picks up `auth.py` itself.
+      - "backend/auth*.py"
+
+      # Alembic migrations.
+      #
+      # NOTE on "(NEW files only)" semantics from ADR-0005 §2:
+      # the design intent is that creating a new revision is always
+      # Tier L (schema change). Modifying an already-merged revision
+      # is itself anomalous (revisions are append-only); the simpler
+      # any-touch=L rule encoded here also catches that anomaly and
+      # routes it through a human reviewer, which is the desired
+      # behaviour. The G2 classifier MAY narrow this to add-only when
+      # the code matures — the YAML stays the same.
+      - "backend/alembic/versions/*.py"
+
+  # -------------------------------------------------------------------
+  # Tier X — Extreme. Human +2 + architectural reviewer +1 (RFC/ADR).
+  # -------------------------------------------------------------------
+  # Branch structure, CI/CD, license, build infrastructure, deploy
+  # automation, anything with reversibility-impacting blast radius.
+  x:
+    force_upgrade_globs:
+      # Deploy automation — k8s manifests, helm charts, terraform,
+      # systemd units, anything under deploy/.
+      - "deploy/**"
+
+      # Deploy shell scripts. Strict glob pattern — only files that
+      # begin with `deploy-` count. (`scripts/check-*.sh` is not Tier X
+      # by this rule; it falls to Tier M unless its content trips
+      # another upgrade.)
+      - "scripts/deploy-*.sh"
+
+      # CI pipeline definitions. A malicious or incorrect pipeline
+      # change has every-merge blast radius.
+      - ".github/workflows/**"
+      - ".gitlab-ci.yml"
+
+      # Gerrit server config (project.config submit-rules, hooks,
+      # etc). Editing the gate that gates merges must itself go
+      # through the strictest gate.
+      - ".gerrit/**"
+
+      # Dependency manifests. Per the ticket spec hardening (vs
+      # ADR-0005 §2's softer "M" classification), changes to these
+      # files are routed through Tier X because:
+      #   - a malicious dep upgrade is a supply-chain attack
+      #   - a license-incompatible upgrade is a legal incident
+      #   - rollback requires coordinated lockfile + manifest revert
+      # The "M (security advisory blocks Tier S)" rule from the ADR is
+      # a strict subset of the Tier X rule: any change still has to
+      # clear Tier X review, which subsumes the security advisory
+      # concern.
+      - "requirements*.txt"
+      - "package.json"
+      - "pyproject.toml"
