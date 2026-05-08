@@ -22,7 +22,9 @@ from threading import Lock
 from typing import Any, Callable, Iterable
 from uuid import uuid4
 
+from backend import db_pool
 from backend.agents import jira_dispatch
+from backend.db import _resolve_pg_dsn
 
 CURSOR_FILE = Path("/var/lib/omnisight-bridge/event-cursor.json")
 
@@ -1094,9 +1096,31 @@ def build_bridge(agent_class: str = "subscription-claude") -> GerritJiraBridge:
     )
 
 
-def run(agent_class: str = "subscription-claude") -> int:
+async def _run_with_db_pool(agent_class: str = "subscription-claude") -> None:
+    """Run the bridge with an explicit pool lifecycle.
+
+    The stream-events daemon runs outside FastAPI's lifespan context,
+    but proactive merger audit writes still use ``backend.audit.log``.
+    Initialise the process-global pool here before any stream event can
+    spawn merger work.
+    """
+    dsn = _resolve_pg_dsn()
+    if not dsn:
+        raise BridgeFatalError(
+            "Gerrit/JIRA bridge requires a Postgres DSN for audit logging"
+        )
+    await db_pool.init_pool(dsn)
     try:
         build_bridge(agent_class).stream_forever()
+    finally:
+        await db_pool.close_pool()
+
+
+def run(agent_class: str = "subscription-claude") -> int:
+    import asyncio
+
+    try:
+        asyncio.run(_run_with_db_pool(agent_class))
         return 0
     except BridgeFatalError as exc:
         structured_log("ALERT", "bridge_fatal", err=str(exc))

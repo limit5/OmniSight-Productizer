@@ -48,6 +48,7 @@
 | L-OP-741 | 2026-05-08 | OP-741 | [CI recovery needs a small explicit state machine](docs/sop/lessons/L-OP-741-ci-recovery-needs-a-small-explicit-state-machine.md) | L30 |
 | L-OP-742 | 2026-05-08 | OP-742 | [Test-impact analysis must fail closed on the conservative side](docs/sop/lessons/L-OP-742-test-impact-analysis-must-fail-closed-on-the-conservative-si.md) | L29 |
 | L-OP-743 | 2026-05-08 | OP-743 | [Terminal events should permissively converge workflow state](docs/sop/lessons/L-OP-743-terminal-events-should-permissively-converge-workflow-state.md) | L29 |
+| L-OP-744 | 2026-05-08 | OP-744 | [Long-running daemons need explicit pool lifecycle management](docs/sop/lessons/L-OP-744-long-running-daemons-need-explicit-pool-lifecycle.md) | L29 |
 | L-OP-746 | 2026-05-08 | OP-746 | [Measure before optimising conflict pressure](docs/sop/lessons/L-OP-746-measure-before-optimising-conflict-pressure.md) |  |
 | L-OP-749 | 2026-05-08 | OP-749 | [External mutations need idempotency keys and circuit breakers](docs/sop/lessons/L-OP-749-idempotency-and-circuit-breakers-for-external-mutations.md) |  |
 
@@ -742,6 +743,34 @@ event should converge workflow state from any safe predecessor, not only
 from the ideal predecessor. Preserve explicit terminal/operator override
 states, but do not strand work because a best-effort intermediate event
 was missed.
+
+---
+
+## L-OP-744 — Long-running daemons need explicit pool lifecycle management (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-744-long-running-daemons-need-explicit-pool-lifecycle.md`](docs/sop/lessons/L-OP-744-long-running-daemons-need-explicit-pool-lifecycle.md)
+
+
+# Long-running daemons need explicit pool lifecycle management
+
+**Situation**: The Gerrit/JIRA bridge daemon runs outside the FastAPI
+lifespan context. Proactive merger work spawned from that daemon calls
+`backend.audit.log`, which depends on the process-global `db_pool`; the
+bridge never initialised it, so merger vote audit rows were dropped with
+`db_pool.get_pool called before init_pool` warnings.
+
+**Fix**: OP-744 gave the bridge daemon its own explicit pool lifecycle:
+resolve the Postgres DSN, call `db_pool.init_pool()` before starting the
+stream-events loop, and call `db_pool.close_pool()` in shutdown cleanup.
+
+**Verification**: `backend/tests/test_gerrit_jira_bridge.py::test_run_initializes_db_pool_before_stream_and_closes_after`
+pins that pool init happens before synthetic audit work reachable from
+stream processing and that close runs after the daemon returns.
+
+**Generalisation**: Any long-running process that imports backend code
+outside FastAPI must own the lifecycle of shared infrastructure it uses.
+Do not assume app lifespan side effects exist in workers, stream
+consumers, or one-shot scripts.
 
 ---
 

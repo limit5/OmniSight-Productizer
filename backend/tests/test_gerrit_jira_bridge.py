@@ -530,6 +530,33 @@ def test_jira_auth_error_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
         b.jira_request("GET", "/issue/OP-19?fields=status")
 
 
+def test_run_initializes_db_pool_before_stream_and_closes_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_init_pool(dsn: str) -> None:
+        calls.append(f"init:{dsn}")
+
+    async def fake_close_pool() -> None:
+        calls.append("close")
+
+    class FakeDaemon:
+        def stream_forever(self) -> None:
+            calls.append("stream")
+            # Synthetic stand-in for merger_agent_vote audit.log calls:
+            # these are only reachable after stream processing begins.
+            calls.append("audit.log")
+
+    monkeypatch.setattr(bridge, "_resolve_pg_dsn", lambda: "postgresql://unit")
+    monkeypatch.setattr(bridge.db_pool, "init_pool", fake_init_pool)
+    monkeypatch.setattr(bridge.db_pool, "close_pool", fake_close_pool)
+    monkeypatch.setattr(bridge, "build_bridge", lambda _agent_class: FakeDaemon())
+
+    assert bridge.run("subscription-codex") == 0
+    assert calls == ["init:postgresql://unit", "stream", "audit.log", "close"]
+
+
 def test_jira_429_respects_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
     sleeps: list[float] = []
     calls = {"n": 0}
