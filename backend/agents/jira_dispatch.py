@@ -1312,12 +1312,18 @@ def pre_pickup_ok(
     validator handles ``blocks_on`` (§10) separately.
     """
     from backend.agents.live_state_check import evaluate, all_passed, format_failures
+    from backend.agents.file_coordinator import has_unresolved_blockedby
     desc = fetch_description(client, snapshot.key)
     prereqs = parse_prerequisites(desc)
 
     ok, reason = migration_freeze_check(client, snapshot, description=desc)
     if not ok:
         return False, reason
+
+    blocked, blocked_reason = has_unresolved_blockedby(client, snapshot)
+    if blocked:
+        blocker_key = blocked_reason.split(" ", 3)[2]
+        return False, f"blocked-by:{blocker_key} {blocked_reason}"
 
     # Live-state checks (§13)
     if prereqs.get("live_state_requires"):
