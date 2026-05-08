@@ -1,0 +1,234 @@
+name: Postgres backup + DR restore test
+
+# OP-776 — scheduled Postgres disaster-recovery contract.
+#
+# This workflow is intentionally self-contained: CI cannot reach the
+# production database or the production S3 bucket, so it proves the same
+# primitives against an ephemeral Postgres 16 service:
+#
+#   * hourly cron path: WAL archiving cadence proof
+#   * daily cron path: pg_basebackup full snapshot
+#   * weekly cron path: restore the latest backup to an ephemeral
+#     Postgres instance and run the smoke SQL
+#   * offsite copy: local "S3-equivalent" mirror plus SHA-256
+#     verification; production operators set OMNISIGHT_DR_OFFSITE_URI
+#     per docs/operations/disaster-recovery.md
+#
+# RTO/RPO for OP-776 are both 1h. The weekly restore-test job has a
+# 60-minute timeout and records the wall-clock duration in the report.
+
+on:
+  schedule:
+    # Hourly backup / WAL archival cadence. Pick minute 7 to avoid the
+    # top-of-hour GitHub Actions thundering herd.
+    - cron: "7 * * * *"
+    # Daily full snapshot at 02:17 UTC, away from the existing DR drill
+    # and nightly audit windows.
+    - cron: "17 2 * * *"
+    # Weekly restore-test drill on Sunday at 03:37 UTC.
+    - cron: "37 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "DR mode to run"
+        required: false
+        default: "weekly-restore-test"
+        type: choice
+        options:
+          - hourly-backup
+          - daily-snapshot
+          - weekly-restore-test
+          - synthetic-dr-drill
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/postgres-backup-dr.yml"
+      - "docs/operations/disaster-recovery.md"
+      - "backend/tests/test_op776_postgres_backup_dr.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: postgres-backup-dr-${{ github.ref }}-${{ github.event.schedule || inputs.mode || 'push' }}
+  cancel-in-progress: false
+
+env:
+  PGHOST: 127.0.0.1
+  PGPORT: "5432"
+  PGDATABASE: omnisight
+  PGUSER: postgres
+  PGPASSWORD: postgres
+  RTO_TARGET_MINUTES: "60"
+  RPO_TARGET_MINUTES: "60"
+  BACKUP_ROOT: dr-artifacts/postgres
+  OFFSITE_ROOT: dr-artifacts/offsite-s3-equivalent
+  RESTORE_PORT: "55432"
+
+jobs:
+  postgres-backup-and-restore:
+    name: pg_basebackup + offsite SHA + restore smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: omnisight
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d omnisight"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install postgres client
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: classify schedule
+        id: classify
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          DISPATCH_MODE: ${{ inputs.mode }}
+        run: |
+          set -eu
+          mode="${DISPATCH_MODE:-}"
+          if [ -z "$mode" ]; then
+            case "$SCHEDULE" in
+              "7 * * * *") mode="hourly-backup" ;;
+              "17 2 * * *") mode="daily-snapshot" ;;
+              "37 3 * * 0") mode="weekly-restore-test" ;;
+              *) mode="synthetic-dr-drill" ;;
+            esac
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "DR mode: $mode"
+
+      - name: seed source database
+        run: |
+          set -eu
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE IF NOT EXISTS op776_smoke (
+              id integer PRIMARY KEY,
+              payload text NOT NULL,
+              created_at timestamptz NOT NULL DEFAULT now()
+          );
+          INSERT INTO op776_smoke (id, payload)
+          VALUES (1, 'op-776 synthetic drill')
+          ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload;
+          SELECT count(*) AS op776_smoke_rows FROM op776_smoke;
+          SQL
+
+      - name: hourly WAL archive proof
+        if: steps.classify.outputs.mode == 'hourly-backup' || steps.classify.outputs.mode == 'weekly-restore-test' || steps.classify.outputs.mode == 'synthetic-dr-drill'
+        run: |
+          set -eu
+          mkdir -p "$BACKUP_ROOT/wal-hourly"
+          psql -v ON_ERROR_STOP=1 -Atc "SELECT pg_switch_wal();" > "$BACKUP_ROOT/wal-hourly/switched-lsn.txt"
+          psql -v ON_ERROR_STOP=1 -Atc "SELECT pg_current_wal_lsn();" > "$BACKUP_ROOT/wal-hourly/current-lsn.txt"
+          sha256sum "$BACKUP_ROOT/wal-hourly/"*.txt > "$BACKUP_ROOT/wal-hourly/SHA256SUMS"
+          test -s "$BACKUP_ROOT/wal-hourly/SHA256SUMS"
+
+      - name: daily full snapshot via pg_basebackup
+        if: steps.classify.outputs.mode == 'daily-snapshot' || steps.classify.outputs.mode == 'weekly-restore-test' || steps.classify.outputs.mode == 'synthetic-dr-drill'
+        run: |
+          set -eu
+          mkdir -p "$BACKUP_ROOT/basebackup"
+          pg_basebackup \
+            --host "$PGHOST" \
+            --port "$PGPORT" \
+            --username "$PGUSER" \
+            --pgdata "$BACKUP_ROOT/basebackup" \
+            --format=tar \
+            --wal-method=stream \
+            --gzip \
+            --checkpoint=fast \
+            --progress
+          test -s "$BACKUP_ROOT/basebackup/base.tar.gz"
+          sha256sum "$BACKUP_ROOT/basebackup/"*.tar.gz > "$BACKUP_ROOT/basebackup/SHA256SUMS"
+
+      - name: offsite copy verified via SHA
+        if: steps.classify.outputs.mode == 'daily-snapshot' || steps.classify.outputs.mode == 'weekly-restore-test' || steps.classify.outputs.mode == 'synthetic-dr-drill'
+        run: |
+          set -eu
+          mkdir -p "$OFFSITE_ROOT/latest"
+          cp "$BACKUP_ROOT/basebackup/"*.tar.gz "$OFFSITE_ROOT/latest/"
+          cp "$BACKUP_ROOT/basebackup/SHA256SUMS" "$OFFSITE_ROOT/latest/SHA256SUMS"
+          (
+            cd "$OFFSITE_ROOT/latest"
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: restore latest backup to ephemeral postgres
+        if: steps.classify.outputs.mode == 'weekly-restore-test' || steps.classify.outputs.mode == 'synthetic-dr-drill'
+        run: |
+          set -eu
+          start_epoch="$(date +%s)"
+          mkdir -p "$BACKUP_ROOT/restore/pgdata"
+          tar -xzf "$OFFSITE_ROOT/latest/base.tar.gz" -C "$BACKUP_ROOT/restore/pgdata"
+          if [ -s "$OFFSITE_ROOT/latest/pg_wal.tar.gz" ]; then
+            tar -xzf "$OFFSITE_ROOT/latest/pg_wal.tar.gz" -C "$BACKUP_ROOT/restore/pgdata/pg_wal"
+          fi
+          sudo chown -R 999:999 "$BACKUP_ROOT/restore/pgdata"
+          docker run -d --rm \
+            --name op776-restore-postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -p "${RESTORE_PORT}:5432" \
+            -v "$PWD/$BACKUP_ROOT/restore/pgdata:/var/lib/postgresql/data" \
+            postgres:16-alpine
+          for _ in $(seq 1 60); do
+            if PGPASSWORD=postgres pg_isready -h 127.0.0.1 -p "$RESTORE_PORT" -U postgres -d omnisight >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          PGPASSWORD=postgres pg_isready -h 127.0.0.1 -p "$RESTORE_PORT" -U postgres -d omnisight
+          restored_count="$(PGPASSWORD=postgres psql -h 127.0.0.1 -p "$RESTORE_PORT" -U postgres -d omnisight -Atc "SELECT count(*) FROM op776_smoke WHERE payload = 'op-776 synthetic drill';")"
+          test "$restored_count" = "1"
+          elapsed="$(( $(date +%s) - start_epoch ))"
+          echo "restore_elapsed_seconds=$elapsed" | tee "$BACKUP_ROOT/restore/restore-metrics.env"
+          test "$elapsed" -le "$(( RTO_TARGET_MINUTES * 60 ))"
+
+      - name: write DR report
+        if: always()
+        env:
+          MODE: ${{ steps.classify.outputs.mode }}
+        run: |
+          set -eu
+          mkdir -p "$BACKUP_ROOT/report"
+          restore_metric="not-run"
+          if [ -f "$BACKUP_ROOT/restore/restore-metrics.env" ]; then
+            restore_metric="$(cat "$BACKUP_ROOT/restore/restore-metrics.env")"
+          fi
+          cat > "$BACKUP_ROOT/report/op776-dr-report.md" <<EOF
+          # OP-776 Postgres DR report
+
+          * Mode: \`$MODE\`
+          * RTO target: \`${RTO_TARGET_MINUTES} minutes\`
+          * RPO target: \`${RPO_TARGET_MINUTES} minutes\`
+          * Backup primitive: \`pg_basebackup --wal-method=stream\`
+          * WAL cadence proof: hourly cron \`7 * * * *\`
+          * Daily snapshot cron: \`17 2 * * *\`
+          * Weekly restore-test cron: \`37 3 * * 0\`
+          * Offsite SHA verification: \`sha256sum --check SHA256SUMS\`
+          * Restore metric: \`$restore_metric\`
+          EOF
+          cat "$BACKUP_ROOT/report/op776-dr-report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload OP-776 DR artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: op776-postgres-dr-report
+          path: dr-artifacts/postgres/report/op776-dr-report.md
+          retention-days: 30
+          if-no-files-found: warn
