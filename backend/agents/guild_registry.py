@@ -152,6 +152,9 @@ GUILD_DEFINITIONS: Mapping[Guild, GuildDefinition] = MappingProxyType(
 )
 
 
+GUILDS: FrozenSet[str] = frozenset(guild.value for guild in GUILD_DEFINITIONS)
+
+
 AGENT_CLASS_GUILD_MATRIX: Mapping[str, FrozenSet[Guild]] = MappingProxyType(
     {
         "subscription-codex": frozenset(
@@ -338,6 +341,12 @@ def _assert_registry_complete() -> None:
             "RPG Guild registry is incomplete; missing definitions for "
             f"Guild members: {missing_names}"
         )
+    extra = GUILDS - frozenset(guild.value for guild in Guild)
+    if extra:
+        raise RuntimeError(
+            "RPG Guild registry declares unknown Guild slugs: "
+            f"{sorted(extra)}"
+        )
 
 
 def _assert_matrix_values_are_guilds() -> None:
@@ -377,6 +386,7 @@ _assert_matrix_values_are_guilds()
 
 __all__ = [
     "AGENT_CLASS_GUILD_MATRIX",
+    "GUILDS",
     "GUILD_DEFINITIONS",
     "SECONDARY_GUILD_UNLOCK_LEVEL",
     "GuildDefinition",

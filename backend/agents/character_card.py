@@ -13,11 +13,13 @@ against the ``agent_character_card`` table from RPG.W1.1.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
+
+from backend.agents.guild_registry import GUILDS
 
 
 ConnFactory = Callable[[], Any]
@@ -29,6 +31,7 @@ DEFAULT_INSTANCE_SUFFIX = "alpha"
 DEFAULT_GUILD = "backend"
 DEFAULT_SPECIALIZATION_LABEL = ""
 DEFAULT_STYLE_FINGERPRINT = ""
+CHARACTER_CARD_GUILDS = frozenset({DEFAULT_GUILD})
 CharacterCardSort = Literal["level", "xp", "activity"]
 
 _CARD_RETURNING_COLS = (
@@ -59,6 +62,10 @@ class CharacterCardAlreadyExistsError(CharacterCardError):
     """Raised when creating a duplicate character card."""
 
 
+class CharacterCardGuildDriftError(RuntimeError):
+    """Raised when character-card Guild slugs drift outside the RPG registry."""
+
+
 @dataclass(frozen=True)
 class CharacterCard:
     """Layer-1 RPG stat sheet for one concrete agent instance."""
@@ -85,7 +92,7 @@ class CharacterCard:
             "instance_suffix",
             _required("instance_suffix", self.instance_suffix),
         )
-        object.__setattr__(self, "guild", _required("guild", self.guild))
+        object.__setattr__(self, "guild", _required_guild(self.guild))
         if self.level < 1:
             raise ValueError("level must be >= 1")
         if self.xp < 0:
@@ -488,7 +495,7 @@ def _update_values(patch: CharacterCardUpdate) -> list[tuple[str, Any]]:
             ("instance_suffix", _required("instance_suffix", patch.instance_suffix))
         )
     if patch.guild is not None:
-        values.append(("guild", _required("guild", patch.guild)))
+        values.append(("guild", _required_guild(patch.guild)))
     if patch.level is not None:
         if patch.level < 1:
             raise ValueError("level must be >= 1")
@@ -566,6 +573,13 @@ def _optional_required(field: str, value: str | None) -> str | None:
     return _required(field, value)
 
 
+def _required_guild(value: str) -> str:
+    guild = _required("guild", value)
+    if guild not in GUILDS:
+        raise ValueError(f"unknown guild: {guild!r}")
+    return guild
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -574,9 +588,30 @@ def _utc(value: datetime) -> datetime:
 
 def _guild_from_task_area(task_area: str) -> str:
     area = _required("task_area", task_area).lower()
-    if area == "backend":
-        return "backend"
-    return area
+    return _required_guild(area)
+
+
+def missing_character_card_guilds_from_registry(
+    declared_guilds: Iterable[str] | None = None,
+) -> tuple[str, ...]:
+    """Return character-card Guild slugs absent from the RPG Guild registry."""
+
+    declared = CHARACTER_CARD_GUILDS if declared_guilds is None else declared_guilds
+    missing = {_required("guild", guild) for guild in declared} - GUILDS
+    return tuple(sorted(missing))
+
+
+def assert_character_card_guilds_within_registry(
+    declared_guilds: Iterable[str] | None = None,
+) -> None:
+    """Raise if character-card Guild slugs drift outside the RPG registry."""
+
+    missing = missing_character_card_guilds_from_registry(declared_guilds)
+    if missing:
+        raise CharacterCardGuildDriftError(
+            "agent_character_card.guild drifted outside guild_registry.GUILDS: "
+            f"{list(missing)}"
+        )
 
 
 def _execute_count(status: str) -> int:
@@ -599,3 +634,6 @@ def _emit_level_up_safely(previous: CharacterCard, updated: CharacterCard) -> No
         )
     except Exception:
         pass
+
+
+assert_character_card_guilds_within_registry()
