@@ -1,0 +1,29 @@
+; [OP-762] systemd unit for the release milestone readiness checker.
+;
+; Install (user-level — no sudo):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/release-milestone-checker.{service,timer} ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now release-milestone-checker.timer
+;   loginctl enable-linger $USER
+
+[Unit]
+Description=OmniSight release milestone checker (OP-762)
+After=network-online.target gerrit-jira-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_JIRA_AGENT_CLASS=subscription-codex
+Environment=OMNISIGHT_GERRIT_SSH_HOST=codex-bot@sora.services
+Environment=OMNISIGHT_GERRIT_SSH_PORT=29418
+Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
+Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-codex-bot-ed25519
+Environment=OMNISIGHT_RELEASE_CANARY_LOG=/home/user/work/sora/logs/release-milestone/canary-status.jsonl
+Environment=OMNISIGHT_RELEASE_SMOKE_LOG=/home/user/work/sora/logs/release-milestone/smoke-status.jsonl
+ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/release_milestone_checker.py
+StandardOutput=append:/home/user/work/sora/logs/release-milestone/systemd.log
+StandardError=append:/home/user/work/sora/logs/release-milestone/systemd.log
