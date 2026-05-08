@@ -1,0 +1,56 @@
+; systemd template unit — OmniSight codex runner instance N (OP-783).
+;
+; The "@N" template lets the operator scale codex runners horizontally.
+; Each instance has its own bot account (codex-bot, codex-bot-2, ...),
+; its own JIRA cred file, its own Gerrit SSH key, its own worktree, and
+; its own backpressure / idempotency state.
+;
+; Install (user-level, no sudo — same identity that owns the worktree
+; and ~/.config/omnisight/* credentials):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/runner-codex@.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   # %i = "default" runs the legacy codex-bot single-instance setup.
+;   systemctl --user enable --now runner-codex@default
+;   # %i = N (N >= 2) runs codex-bot-N. Provision the bot first per
+;   # docs/operations/multi-instance-runner-provisioning.md.
+;   systemctl --user enable --now runner-codex@2
+;   systemctl --user enable --now runner-codex@3
+;   loginctl enable-linger $USER     # survive logout
+;
+; Why user-level: each bot's JIRA/Gerrit creds are scoped to one Linux
+; user's ~/.config/omnisight/, and tmux/launcher already use this layer.
+;
+; Operator workflow per instance:
+;   * One-shot launch via tmux + log file:
+;       scripts/launch_runner_instance.sh codex-bot-2
+;   * systemd persistent (this unit) replaces the tmux loop with a
+;     supervised daemon: SIGTERM-clean restarts, journald logs.
+
+[Unit]
+Description=OmniSight Codex Runner Instance %i (OP-783)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_RUNNER_CLASS=subscription-codex
+Environment=OMNISIGHT_RUNNER_INSTANCE_ID=%i
+; Per-instance idempotency DB so two instances don't dedup each other's
+; JIRA mutations against shared rows. Default-instance setups can leave
+; this unset and the runner falls back to ~/.config/omnisight/idem-keys.db.
+Environment=OMNISIGHT_IDEMPOTENCY_DB_PATH=%h/.config/omnisight/idem-keys-codex-bot-%i.db
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-Productizer/auto-runner-jira.py
+Restart=on-failure
+; 90s aligns with the launcher's tmux-loop tick cadence so the runner
+; doesn't tight-loop on a transient JIRA/Gerrit outage.
+RestartSec=90
+KillSignal=SIGTERM
+TimeoutStopSec=60
+StandardOutput=append:%h/work/sora/logs/runner/codex-bot-%i.log
+StandardError=append:%h/work/sora/logs/runner/codex-bot-%i.log
+
+[Install]
+WantedBy=default.target

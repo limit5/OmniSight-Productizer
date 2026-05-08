@@ -1,0 +1,34 @@
+; systemd template unit — OmniSight claude runner instance N (OP-783).
+;
+; Twin of runner-codex@.service, scoped to the Anthropic subscription
+; class. See that file's header for install + idempotency notes.
+;
+; Install:
+;   cp deploy/systemd/runner-claude@.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now runner-claude@default     # legacy
+;   systemctl --user enable --now runner-claude@2           # claude-bot-2
+;   systemctl --user enable --now runner-claude@3           # claude-bot-3
+
+[Unit]
+Description=OmniSight Claude Runner Instance %i (OP-783)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_RUNNER_CLASS=subscription-claude
+Environment=OMNISIGHT_RUNNER_INSTANCE_ID=%i
+Environment=OMNISIGHT_IDEMPOTENCY_DB_PATH=%h/.config/omnisight/idem-keys-claude-bot-%i.db
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-Productizer/auto-runner-jira.py
+Restart=on-failure
+RestartSec=90
+KillSignal=SIGTERM
+TimeoutStopSec=60
+StandardOutput=append:%h/work/sora/logs/runner/claude-bot-%i.log
+StandardError=append:%h/work/sora/logs/runner/claude-bot-%i.log
+
+[Install]
+WantedBy=default.target

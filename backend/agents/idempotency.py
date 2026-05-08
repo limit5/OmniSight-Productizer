@@ -11,13 +11,32 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 
-IDEMPOTENCY_DB = Path("~/.config/omnisight/idem-keys.db").expanduser()
+def _resolve_idempotency_db_path() -> Path:
+    """Resolve the SQLite path from env override or fall back to the legacy default.
+
+    OP-783: a multi-instance runner host runs several runner processes in
+    parallel; each one needs its own idempotency DB so that two
+    in-flight transitions for the same JIRA key (one per instance, both
+    targeting different tickets) don't share a row and silently dedup
+    each other. The launcher script sets ``OMNISIGHT_IDEMPOTENCY_DB_PATH``
+    to ``~/.config/omnisight/idem-keys-<bot>.db``; default-instance
+    runners and library callers without the env var keep the legacy
+    ``~/.config/omnisight/idem-keys.db`` path (backwards-compat).
+    """
+    override = os.environ.get("OMNISIGHT_IDEMPOTENCY_DB_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path("~/.config/omnisight/idem-keys.db").expanduser()
+
+
+IDEMPOTENCY_DB = _resolve_idempotency_db_path()
 TTL_SECONDS = 24 * 60 * 60
 
 F = TypeVar("F", bound=Callable[..., Any])

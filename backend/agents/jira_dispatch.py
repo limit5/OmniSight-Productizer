@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import urllib.error
@@ -51,16 +52,91 @@ MIGRATION_SCOPE_PREFIX = "migration:scope="
 
 CRED_DIR = Path("~/.config/omnisight").expanduser()
 
+# Per OP-783: a single host can run N runner processes, each pinned to its
+# own bot account (codex-bot, codex-bot-2, codex-bot-3, claude-bot, ...).
+# The instance_id distinguishes the processes; "default" = the legacy
+# single-instance setup and MUST keep the existing cred / state-file paths.
+DEFAULT_INSTANCE_ID = "default"
 
-def _cred_paths(agent_class: str) -> tuple[Path, Path]:
-    """Return (env_file, token_file) for agent_class.
 
-    Convention: 'subscription-codex' / 'api-openai' → codex bot creds
-                everything else → claude bot creds (shared default).
+def _instance_id_from_env() -> str:
+    """Resolve runner instance ID from env, defaulting to 'default'.
+
+    Empty string is treated as unset to make ``unset OMNISIGHT_RUNNER_INSTANCE_ID``
+    indistinguishable from setting it to ``default`` — matching how the
+    auto-runner loads the variable.
     """
-    if agent_class in ("subscription-codex", "api-openai"):
-        return CRED_DIR / "jira-codex.env", CRED_DIR / "jira-codex-token"
-    return CRED_DIR / "jira-claude.env", CRED_DIR / "jira-claude-token"
+    return os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or DEFAULT_INSTANCE_ID
+
+
+_BASE_BOT_BY_CLASS = {
+    "subscription-codex": "codex-bot",
+    "api-openai": "codex-bot",
+    "subscription-claude": "claude-bot",
+    "api-anthropic": "claude-bot",
+}
+
+
+def resolve_bot_username(agent_class: str, instance_id: str | None = None) -> str:
+    """Map (agent_class, instance_id) → Gerrit/JIRA bot username.
+
+    Default instance returns the legacy bare names (``codex-bot`` /
+    ``claude-bot``). Non-default instances append the ID (``codex-bot-2``,
+    ``claude-bot-3``...). The bot-username is the canonical instance key
+    used downstream for SSH key paths, JIRA cred files, backpressure
+    state, and idempotency DBs.
+    """
+    if instance_id is None:
+        instance_id = _instance_id_from_env()
+    base = _BASE_BOT_BY_CLASS.get(agent_class)
+    if base is None:
+        raise ValueError(f"unknown agent_class: {agent_class}")
+    if instance_id == DEFAULT_INSTANCE_ID:
+        return base
+    return f"{base}-{instance_id}"
+
+
+def _gerrit_ssh_key_for_bot(bot_username: str) -> Path:
+    """Per-bot SSH private key path: ``~/.config/omnisight/gerrit-<bot>-ed25519``."""
+    return CRED_DIR / f"gerrit-{bot_username}-ed25519"
+
+
+def _gerrit_auth_for_instance(
+    agent_class: str, instance_id: str | None = None
+) -> tuple[str, Path]:
+    """Return (bot_username, ssh_key_path) for (agent_class, instance_id).
+
+    For ``instance_id == "default"`` returns the legacy entry from
+    ``_GERRIT_AUTH_BY_CLASS`` so existing ssh-key paths are preserved
+    bit-for-bit. For non-default instances, derives a per-bot path
+    (``gerrit-codex-bot-2-ed25519`` etc.).
+    """
+    if instance_id is None:
+        instance_id = _instance_id_from_env()
+    if instance_id == DEFAULT_INSTANCE_ID:
+        legacy = _GERRIT_AUTH_BY_CLASS.get(agent_class)
+        if legacy is not None:
+            return legacy
+    bot_username = resolve_bot_username(agent_class, instance_id)
+    return bot_username, _gerrit_ssh_key_for_bot(bot_username)
+
+
+def _cred_paths(agent_class: str, instance_id: str | None = None) -> tuple[Path, Path]:
+    """Return (env_file, token_file) for (agent_class, instance_id).
+
+    Default instance keeps legacy filenames (``jira-codex.env`` /
+    ``jira-claude.env``) so existing single-instance setups continue to
+    work without re-provisioning. Non-default instances use bot-keyed
+    filenames (``jira-codex-bot-2.env``, ``jira-claude-bot-3.env`` ...).
+    """
+    if instance_id is None:
+        instance_id = _instance_id_from_env()
+    if instance_id == DEFAULT_INSTANCE_ID:
+        if agent_class in ("subscription-codex", "api-openai"):
+            return CRED_DIR / "jira-codex.env", CRED_DIR / "jira-codex-token"
+        return CRED_DIR / "jira-claude.env", CRED_DIR / "jira-claude-token"
+    bot_username = resolve_bot_username(agent_class, instance_id)
+    return CRED_DIR / f"jira-{bot_username}.env", CRED_DIR / f"jira-{bot_username}-token"
 
 
 def _load_env(env_file: Path) -> dict[str, str]:
@@ -86,13 +162,22 @@ class DispatchClient:
     bot_email: str
 
 
-def make_client(agent_class: str) -> DispatchClient:
-    env_file, token_file = _cred_paths(agent_class)
+def make_client(agent_class: str, instance_id: str | None = None) -> DispatchClient:
+    if instance_id is None:
+        instance_id = _instance_id_from_env()
+    env_file, token_file = _cred_paths(agent_class, instance_id)
     env = _load_env(env_file)
     token = token_file.read_text().strip()
-    # Email key varies per bot file
-    email_key = "OMNISIGHT_JIRA_CLAUDE_EMAIL" if "claude" in env_file.name else "OMNISIGHT_JIRA_CODEX_EMAIL"
-    email = env[email_key]
+    # Email key resolution: prefer the instance-agnostic ``OMNISIGHT_JIRA_BOT_EMAIL``
+    # (recommended for new per-instance .env files), then fall back to the legacy
+    # class-specific keys so existing default-instance .env files keep working.
+    legacy_key = "OMNISIGHT_JIRA_CLAUDE_EMAIL" if "claude" in env_file.name else "OMNISIGHT_JIRA_CODEX_EMAIL"
+    email = env.get("OMNISIGHT_JIRA_BOT_EMAIL") or env.get(legacy_key)
+    if not email:
+        raise RuntimeError(
+            f"{env_file} has no email key set; expected OMNISIGHT_JIRA_BOT_EMAIL "
+            f"or {legacy_key}."
+        )
     raw = f"{email}:{token}".encode()
     auth = "Basic " + b64encode(raw).decode()
     site = env["OMNISIGHT_JIRA_SITE_URL"].rstrip("/")
@@ -275,8 +360,23 @@ _GERRIT_AUTH_BY_CLASS: dict[str, tuple[str, Path]] = {
 }
 
 
-def _backpressure_state_file(agent_class: str) -> Path:
-    return Path(f"/tmp/runner-backpressure-{agent_class}.state")
+def _backpressure_state_file(
+    agent_class: str, instance_id: str | None = None
+) -> Path:
+    """Per-instance backpressure latch path.
+
+    Default instance keeps the legacy ``runner-backpressure-<class>.state``
+    name (so an existing single-instance runner restart picks up the
+    pre-existing latch). Non-default instances key on the bot username so
+    each ``codex-bot-N`` has its own quota state machine and doesn't pause
+    its siblings when its review queue saturates.
+    """
+    if instance_id is None:
+        instance_id = _instance_id_from_env()
+    if instance_id == DEFAULT_INSTANCE_ID:
+        return Path(f"/tmp/runner-backpressure-{agent_class}.state")
+    bot_username = resolve_bot_username(agent_class, instance_id)
+    return Path(f"/tmp/runner-backpressure-{bot_username}.state")
 
 
 def notify_operator(channel: str, severity: str, detail: str) -> None:
@@ -290,9 +390,18 @@ def notify_operator(channel: str, severity: str, detail: str) -> None:
 
 
 def _gerrit_auth_for_bot(bot_username: str) -> tuple[str, Path]:
+    """Resolve (bot_username, ssh_key) for a Gerrit username.
+
+    Default-instance bots (``codex-bot``, ``claude-bot``) come from the
+    static ``_GERRIT_AUTH_BY_CLASS`` table to preserve legacy ssh-key
+    paths. Per-instance bots (``codex-bot-2`` etc., per OP-783) derive
+    their key path via ``_gerrit_ssh_key_for_bot``.
+    """
     for username, key_path in _GERRIT_AUTH_BY_CLASS.values():
         if username == bot_username:
             return username, key_path
+    if bot_username.startswith(("codex-bot-", "claude-bot-")):
+        return bot_username, _gerrit_ssh_key_for_bot(bot_username)
     raise ValueError(f"unknown Gerrit bot username: {bot_username}")
 
 
@@ -319,22 +428,35 @@ def open_ps_count_for(bot_username: str) -> int:
     return n
 
 
-def backpressure_decide(agent_class: str) -> tuple[bool, str]:
+def backpressure_decide(
+    agent_class: str, instance_id: str | None = None
+) -> tuple[bool, str]:
     """Hysteresis gate for runner pickup.
 
     Returns ``(ok_to_pick_up, reason)``. A state file records only the
     paused latch, so the runner re-notifies only when it crosses from
     active to paused.
+
+    Per OP-783, the cap/floor and PS query are scoped to the per-instance
+    bot account: ``codex-bot-2`` saturating its review queue does not
+    pause ``codex-bot``. Default-instance behaviour (no env var, no
+    instance_id) is byte-identical to the pre-OP-783 path.
     """
-    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
-    if auth is None:
-        raise ValueError(f"unknown agent_class for Gerrit auth: {agent_class}")
+    if instance_id is None:
+        instance_id = _instance_id_from_env()
+    bot_username, _ = _gerrit_auth_for_instance(agent_class, instance_id)
 
     cap = settings.runner_ps_cap
     floor = settings.runner_ps_floor
-    state_file = _backpressure_state_file(agent_class)
+    state_file = _backpressure_state_file(agent_class, instance_id)
     paused = state_file.exists() and state_file.read_text().strip() == "paused"
-    n = open_ps_count_for(auth[0])
+    n = open_ps_count_for(bot_username)
+
+    instance_tag = (
+        agent_class
+        if instance_id == DEFAULT_INSTANCE_ID
+        else f"{agent_class} (instance {instance_id}, {bot_username})"
+    )
 
     if not paused and n >= cap:
         state_file.write_text("paused")
@@ -342,7 +464,7 @@ def backpressure_decide(agent_class: str) -> tuple[bool, str]:
             channel="runner-alerts",
             severity="medium",
             detail=(
-                f"{agent_class} runner paused: {n} open PSes >= {cap}. "
+                f"{instance_tag} runner paused: {n} open PSes >= {cap}. "
                 "Please review + +2 to drain the queue."
             ),
         )
@@ -372,20 +494,24 @@ class GerritMergedInfo:
     subject: str
 
 
-def _gerrit_ssh_url(agent_class: str) -> str:
-    user = _GERRIT_AUTH_BY_CLASS.get(agent_class, _GERRIT_AUTH_BY_CLASS["subscription-claude"])[0]
+def _gerrit_ssh_url(agent_class: str, instance_id: str | None = None) -> str:
+    try:
+        user, _ = _gerrit_auth_for_instance(agent_class, instance_id)
+    except ValueError:
+        user, _ = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
     return f"ssh://{user}@{GERRIT_SSH_HOST}:{GERRIT_SSH_PORT}/{GERRIT_PROJECT_PATH}"
 
 
-def _bot_email_for(agent_class: str) -> str:
+def _bot_email_for(agent_class: str, instance_id: str | None = None) -> str:
     """Per memory: bot accounts are rt3628+<bot-username>@gmail.com (plus-addressing
-    to operator's primary inbox). Returns email for the agent_class's bot.
+    to operator's primary inbox). Returns email for the (agent_class, instance_id)
+    bot. Default instance preserves the legacy ``rt3628+codex-bot@gmail.com`` /
+    ``rt3628+claude-bot@gmail.com`` mapping.
     """
-    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
-    if auth is None:
-        # fallback to claude-bot
-        auth = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
-    bot_user, _ = auth
+    try:
+        bot_user, _ = _gerrit_auth_for_instance(agent_class, instance_id)
+    except ValueError:
+        bot_user, _ = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
     return f"rt3628+{bot_user}@gmail.com"
 
 
@@ -451,9 +577,13 @@ def install_commit_msg_hook(worktree_path: Path) -> bool:
     return True
 
 
-def set_bot_identity_in_worktree(worktree_path: Path, agent_class: str) -> None:
+def set_bot_identity_in_worktree(
+    worktree_path: Path,
+    agent_class: str,
+    instance_id: str | None = None,
+) -> None:
     """Set worktree-local `git config user.email/user.name` to the bot identity
-    matching agent_class.
+    matching (agent_class, instance_id).
 
     Critical (L15/L25): without this, codex commits use whatever the
     worktree's git config defaults to (typically the operator's env user
@@ -465,10 +595,11 @@ def set_bot_identity_in_worktree(worktree_path: Path, agent_class: str) -> None:
     Idempotent: setting same value twice is a no-op.
     """
     import subprocess
-    bot_email = _bot_email_for(agent_class)
-    bot_user = _GERRIT_AUTH_BY_CLASS.get(
-        agent_class, _GERRIT_AUTH_BY_CLASS["subscription-claude"]
-    )[0]
+    try:
+        bot_user, _ = _gerrit_auth_for_instance(agent_class, instance_id)
+    except ValueError:
+        bot_user, _ = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
+    bot_email = _bot_email_for(agent_class, instance_id)
     subprocess.run(
         ["git", "config", "--worktree", "user.email", bot_email],
         cwd=worktree_path, check=True, capture_output=True, text=True,
@@ -491,6 +622,7 @@ def sync_to_gerrit_develop(
     worktree_path: Path,
     agent_class: str,
     ticket_key: str,
+    instance_id: str | None = None,
 ) -> WorktreeSyncResult:
     """Fetch latest develop from Gerrit + cut a fresh feature branch.
 
@@ -514,10 +646,7 @@ def sync_to_gerrit_develop(
 
     import os
     import subprocess
-    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
-    if auth is None:
-        raise ValueError(f"unknown agent_class for Gerrit auth: {agent_class}")
-    _, ssh_key = auth
+    _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
 
     env = os.environ.copy()
     env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key}"
@@ -525,7 +654,7 @@ def sync_to_gerrit_develop(
     # Step 1: fetch develop from Gerrit
     BREAKERS["gerrit_ssh"].call(
         subprocess.run,
-        ["git", "fetch", _gerrit_ssh_url(agent_class), "develop"],
+        ["git", "fetch", _gerrit_ssh_url(agent_class, instance_id), "develop"],
         cwd=worktree_path, env=env, check=True, capture_output=True, text=True, timeout=60,
     )
 
@@ -658,6 +787,7 @@ def push_to_gerrit_for_review(
     worktree_path: Path,
     agent_class: str,
     target: str = "develop",
+    instance_id: str | None = None,
 ) -> GerritPushResult:
     """Push worktree HEAD to ``gerrit:refs/for/<target>``.
 
@@ -668,10 +798,10 @@ def push_to_gerrit_for_review(
     """
     import os
     import subprocess
-    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
-    if auth is None:
-        return GerritPushResult(False, None, None, f"unknown agent_class for Gerrit auth: {agent_class}")
-    _, ssh_key = auth
+    try:
+        _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+    except ValueError as exc:
+        return GerritPushResult(False, None, None, str(exc))
     if not ssh_key.exists():
         return GerritPushResult(False, None, None, f"SSH key not found at {ssh_key}")
 
@@ -680,7 +810,7 @@ def push_to_gerrit_for_review(
 
     result = BREAKERS["gerrit_ssh"].call(
         subprocess.run,
-        ["git", "push", _gerrit_ssh_url(agent_class), f"HEAD:refs/for/{target}"],
+        ["git", "push", _gerrit_ssh_url(agent_class, instance_id), f"HEAD:refs/for/{target}"],
         cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
     )
     blob = (result.stderr + "\n" + result.stdout).strip()
@@ -702,17 +832,15 @@ def push_to_gerrit_for_review(
 def already_merged_in_gerrit(
     jira_key: str,
     agent_class: str = "subscription-codex",
+    instance_id: str | None = None,
 ) -> GerritMergedInfo | None:
     """Return merged sibling change info for ``jira_key``, if Gerrit has one."""
 
-    auth = _GERRIT_AUTH_BY_CLASS.get(agent_class)
-    if auth is None:
-        raise ValueError(f"unknown agent_class for Gerrit auth: {agent_class}")
-    _, ssh_key = auth
+    bot_username, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
     query = f"status:merged project:{GERRIT_PROJECT_PATH} {jira_key}"
     cmd = [
         "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
-        f"{auth[0]}@{GERRIT_SSH_HOST}",
+        f"{bot_username}@{GERRIT_SSH_HOST}",
         "gerrit", "query", "--format=JSON", query,
     ]
     result = BREAKERS["gerrit_ssh"].call(
@@ -1112,13 +1240,23 @@ def predict_target_files(
 
 
 def _open_bot_owned_file_owners() -> dict[str, list[GerritFileOwner]]:
-    """Return file → open bot-owned Gerrit PS metadata."""
+    """Return file → open bot-owned Gerrit PS metadata.
+
+    Per OP-783, file-mutex must catch PSes owned by per-instance bots
+    (``codex-bot-2``, ``claude-bot-3`` ...) too — otherwise instance-2's
+    in-flight work is invisible to instance-3 and they collide on the
+    same path. The query uses ``ownerin:`` group membership when an
+    operator-managed group exists; the default falls back to a broad
+    ``is:open`` filter with client-side bot-prefix filtering. The
+    Gerrit-side filter is preferred for cost; the client-side filter is
+    correctness.
+    """
     _, ssh_key = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
     cmd = [
         "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
         f"claude-bot@{GERRIT_SSH_HOST}",
         "gerrit", "query", "--format=JSON", "--current-patch-set", "--files",
-        "is:open AND (owner:claude-bot OR owner:codex-bot)",
+        "is:open",
     ]
     result = BREAKERS["gerrit_ssh"].call(
         subprocess.run, cmd, capture_output=True, text=True, timeout=15
@@ -1135,6 +1273,9 @@ def _open_bot_owned_file_owners() -> dict[str, list[GerritFileOwner]]:
             continue
         change_number = str(change.get("number") or change.get("_number") or "?")
         owner = str(((change.get("owner") or {}).get("username")) or "?")
+        # Client-side bot filter: catches codex-bot, codex-bot-2, claude-bot-3, ...
+        if not (owner.startswith("codex-bot") or owner.startswith("claude-bot")):
+            continue
         for file_info in (change.get("currentPatchSet") or {}).get("files", []):
             path = file_info.get("file")
             if path and path != "/COMMIT_MSG":
