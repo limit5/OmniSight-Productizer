@@ -20,8 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Iterable
+from uuid import uuid4
 
 from backend.agents import jira_dispatch
+
+CURSOR_FILE = Path("/var/lib/omnisight-bridge/event-cursor.json")
 
 APPROVED_STATUS_NAMES = {"Approved", "承認済み"}
 ARCHIVED_STATUS_NAMES = {"Archived"}
@@ -73,6 +76,23 @@ class GerritChange:
     branch: str = ""
 
 
+def load_cursor(path: Path = CURSOR_FILE) -> tuple[str, datetime] | None:
+    """Return the last successfully processed stream event cursor."""
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    return str(data["event_id"]), datetime.fromisoformat(str(data["timestamp"]))
+
+
+def save_cursor(event_id: str, ts: datetime, path: Path = CURSOR_FILE) -> None:
+    """Atomically persist the stream event cursor with daemon-private mode."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"event_id": event_id, "timestamp": ts.isoformat()}))
+    tmp.chmod(0o600)
+    tmp.replace(path)
+
+
 @dataclass
 class BridgeConfig:
     agent_class: str = "subscription-claude"
@@ -87,6 +107,7 @@ class BridgeConfig:
     periodic_catchup_seconds: float = 900.0
     max_backoff_seconds: float = 60.0
     alert_after_failures: int = 10
+    cursor_file: Path | None = CURSOR_FILE
     # OP-733 — debounce window for auto-rebase sweeps. A batch +2 of N
     # changes can fire N change-merged events within seconds; the
     # debounce coalesces them into a single sweep on the most recent
@@ -293,6 +314,7 @@ class GerritJiraBridge:
         self._started_at = time.monotonic()
         self._last_heartbeat = time.monotonic()
         self._last_periodic_catchup = time.monotonic()
+        self._cursor_missing_warned = False
         # OP-733 — lazy-initialised on the first change-merged event so
         # bridge construction stays cheap + tests that never exercise
         # the rebase path don't import the module at all.
@@ -428,6 +450,82 @@ class GerritJiraBridge:
             self.log("ERROR", "gerrit_query_failed", err=blob[-500:])
             return None
 
+    def replay_from_cursor(self) -> None:
+        if self.config.cursor_file is None:
+            return
+        cursor = load_cursor(self.config.cursor_file)
+        if cursor is None:
+            if not self._cursor_missing_warned:
+                self.log(
+                    "WARN",
+                    "event_cursor_missing_first_run",
+                    cursor_file=str(self.config.cursor_file),
+                )
+                self._cursor_missing_warned = True
+            return
+        event_id, last_ts = cursor
+        self.log(
+            "INFO",
+            "replaying_missed_events",
+            last_event=event_id,
+            since=last_ts.isoformat(),
+        )
+        self.replay_missed_events(last_ts)
+
+    def replay_missed_events(self, last_ts: datetime) -> int:
+        since_str = last_ts.strftime("%Y-%m-%d %H:%M:%S")
+        query = (
+            f"project:{jira_dispatch.GERRIT_PROJECT_PATH} "
+            f'status:merged after:"{since_str}"'
+        )
+        cmd = self._ssh_cmd(
+            "gerrit",
+            "query",
+            "--format=JSON",
+            query,
+            "--current-patch-set",
+        )
+        result = self.run_command(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=self._ssh_env(),
+        )
+        blob = (result.stderr or "") + "\n" + (result.stdout or "")
+        if result.returncode != 0:
+            if self._is_auth_failure(blob):
+                self.log("ALERT", "gerrit_auth_failed", err=blob[-500:])
+                raise GerritAuthError("Gerrit SSH auth failed")
+            self.log("ERROR", "replay_query_failed", err=blob[-500:], since=since_str)
+            return 0
+
+        backfill_count = 0
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                change = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if change.get("type") == "stats":
+                continue
+            synthetic_event = {
+                "type": "change-merged",
+                "change": change,
+                "_backfilled": True,
+            }
+            self.process_stream_event(synthetic_event)
+            backfill_count += 1
+        self.log("INFO", "replay_complete", backfill_count=backfill_count, since=since_str)
+        return backfill_count
+
+    def save_event_cursor(self, event: dict[str, Any]) -> None:
+        if self.config.cursor_file is None:
+            return
+        event_id = str(event.get("id") or uuid4())
+        save_cursor(event_id, datetime.now(timezone.utc), self.config.cursor_file)
+
     def _parse_gerrit_query_output(self, stdout: str) -> GerritChange | None:
         for line in stdout.splitlines():
             if not line.strip():
@@ -489,6 +587,13 @@ class GerritJiraBridge:
         self.counters.last_event_at_ts = utc_now_iso()
         event_type = event.get("type")
         if event_type == "change-merged":
+            change = extract_gerrit_change(event)
+            self.log(
+                "INFO",
+                "change_merged_event",
+                change_id=change.change_id,
+                source="replay" if event.get("_backfilled") else "live",
+            )
             self._emit_ps_merged_metrics(event)
             self._handle_change_merged(event)
             self._schedule_auto_rebase_sweep(event)
@@ -862,6 +967,7 @@ class GerritJiraBridge:
 
     def stream_forever(self) -> None:
         self.startup_catchup()
+        self.replay_from_cursor()
         consecutive_failures = 0
         backoff = 1.0
         while not self._stop:
@@ -882,6 +988,7 @@ class GerritJiraBridge:
                     self.log("WARN", "malformed_json_line", err=raw_line.strip()[:500])
                     continue
                 self.process_stream_event(payload)
+                self.save_event_cursor(payload)
                 if self._stop:
                     break
             rc = proc.wait()
@@ -904,9 +1011,11 @@ class GerritJiraBridge:
                 self.log("WARN", "gerrit_stream_disconnected", err=stderr[-500:], returncode=rc)
             self.sleep(backoff)
             backoff = min(backoff * 2, self.config.max_backoff_seconds)
+            self.replay_from_cursor()
 
     def run_once_from_lines(self, lines: Iterable[str]) -> None:
         self.startup_catchup()
+        self.replay_from_cursor()
         for line in lines:
             payload = parse_stream_line(line)
             if payload is None:
@@ -914,6 +1023,7 @@ class GerritJiraBridge:
                 self.log("WARN", "malformed_json_line", err=line.strip()[:500])
                 continue
             self.process_stream_event(payload)
+            self.save_event_cursor(payload)
         self._emit_heartbeat()
 
     def _maintenance_ticks(self) -> None:

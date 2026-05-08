@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import urllib.error
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +40,11 @@ class FakeBridge(bridge.GerritJiraBridge):
         self.logs: list[tuple[str, str, dict[str, Any]]] = []
         super().__init__(
             _client(),
-            bridge.BridgeConfig(heartbeat_seconds=9999, periodic_catchup_seconds=0),
+            bridge.BridgeConfig(
+                heartbeat_seconds=9999,
+                periodic_catchup_seconds=0,
+                cursor_file=None,
+            ),
             sleep=lambda _: None,
             logger=self._log,
         )
@@ -205,6 +211,142 @@ def test_stream_change_merged_fires_right_transition() -> None:
     b.run_once_from_lines([_merged_event()])
     assert ("POST", "/issue/OP-19/transitions", {"transition": {"id": "7"}}) in b.requests
     assert b.counters.events_received == 1
+
+
+def test_cursor_save_is_atomic_private_json(tmp_path: Path) -> None:
+    cursor = tmp_path / "event-cursor.json"
+    ts = datetime(2026, 5, 8, 7, 12, tzinfo=timezone.utc)
+
+    bridge.save_cursor("event-1", ts, cursor)
+
+    assert json.loads(cursor.read_text()) == {
+        "event_id": "event-1",
+        "timestamp": "2026-05-08T07:12:00+00:00",
+    }
+    assert oct(cursor.stat().st_mode & 0o777) == "0o600"
+    assert cursor.stat().st_uid == os.getuid()
+    assert not cursor.with_suffix(".tmp").exists()
+    assert bridge.load_cursor(cursor) == ("event-1", ts)
+
+
+def test_missing_cursor_logs_first_run_warning_once(tmp_path: Path) -> None:
+    b = FakeBridge()
+    b.config.cursor_file = tmp_path / "event-cursor.json"
+
+    b.replay_from_cursor()
+    b.replay_from_cursor()
+
+    warnings = [event for level, event, _extra in b.logs if level == "WARN"]
+    assert warnings == ["event_cursor_missing_first_run"]
+
+
+def test_replay_missed_events_queries_gerrit_and_marks_backfilled(tmp_path: Path) -> None:
+    captured_cmds: list[list[str]] = []
+    seen_events: list[dict[str, Any]] = []
+    stdout = "\n".join([
+        json.dumps({
+            "id": "Iop19",
+            "number": 19,
+            "subject": "[OP-19] merged while bridge was down",
+            "branch": "develop",
+            "project": "omnisight/OmniSight-Productizer",
+            "status": "MERGED",
+        }),
+        json.dumps({"type": "stats", "rowCount": 1}),
+    ])
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess:
+        captured_cmds.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    b = bridge.GerritJiraBridge(
+        _client(),
+        bridge.BridgeConfig(cursor_file=tmp_path / "event-cursor.json"),
+        sleep=lambda _: None,
+        run_command=fake_run,
+        logger=lambda *_args, **_kwargs: None,
+    )
+    b.process_stream_event = lambda event: seen_events.append(event)  # type: ignore[method-assign]
+
+    count = b.replay_missed_events(datetime(2026, 5, 8, 7, 0, 5, tzinfo=timezone.utc))
+
+    assert count == 1
+    assert seen_events[0]["type"] == "change-merged"
+    assert seen_events[0]["_backfilled"] is True
+    assert "gerrit" in captured_cmds[0]
+    assert "query" in captured_cmds[0]
+    assert "--current-patch-set" in captured_cmds[0]
+    assert 'project:omnisight/OmniSight-Productizer status:merged after:"2026-05-08 07:00:05"' in captured_cmds[0]
+
+
+def test_replay_from_cursor_catches_up_three_merges_before_live_stream(tmp_path: Path) -> None:
+    cursor = tmp_path / "event-cursor.json"
+    bridge.save_cursor(
+        "last-live-event",
+        datetime.now(timezone.utc) - timedelta(minutes=5),
+        cursor,
+    )
+    changes = [
+        {
+            "id": f"Iop{n}",
+            "number": n,
+            "subject": f"[OP-{n}] merged during disconnect",
+            "branch": "develop",
+            "status": "MERGED",
+        }
+        for n in (19, 20, 21)
+    ]
+    stdout = "\n".join(json.dumps(change) for change in changes)
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    b = FakeBridge()
+    b.config.cursor_file = cursor
+    b.run_command = fake_run
+    b.statuses = {"OP-19": "進行中", "OP-20": "Under Review", "OP-21": "Approved"}
+
+    b.replay_from_cursor()
+
+    assert b.counters.events_received == 3
+    transition_paths = [req[1] for req in b.requests if req[1].endswith("/transitions")]
+    assert transition_paths.count("/issue/OP-19/transitions") == 3
+    assert transition_paths.count("/issue/OP-20/transitions") == 2
+    assert transition_paths.count("/issue/OP-21/transitions") == 1
+    replay_logs = [
+        extra for _level, event, extra in b.logs
+        if event == "change_merged_event"
+    ]
+    assert [extra["source"] for extra in replay_logs] == ["replay", "replay", "replay"]
+
+
+def test_run_once_replays_cursor_before_live_stream_event(tmp_path: Path) -> None:
+    cursor = tmp_path / "event-cursor.json"
+    bridge.save_cursor(
+        "before-restart",
+        datetime(2026, 5, 8, 7, 0, tzinfo=timezone.utc),
+        cursor,
+    )
+    stdout = json.dumps({
+        "id": "Iop19",
+        "number": 19,
+        "subject": "[OP-19] replayed merge",
+        "branch": "develop",
+        "status": "MERGED",
+    })
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    b = FakeBridge()
+    b.config.cursor_file = cursor
+    b.run_command = fake_run
+    b.statuses = {"OP-19": "Approved", "OP-20": "Approved"}
+
+    b.run_once_from_lines([_merged_event(subject="[OP-20] live merge", change_id="Iop20")])
+
+    merge_logs = [extra["source"] for _level, event, extra in b.logs if event == "change_merged_event"]
+    assert merge_logs == ["replay", "live"]
 
 
 def test_change_id_without_matching_ticket_logs_info() -> None:
