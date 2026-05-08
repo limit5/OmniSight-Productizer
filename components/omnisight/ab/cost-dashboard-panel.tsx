@@ -46,9 +46,9 @@ const ALERT_LABEL: Record<AlertLevel, string> = {
 }
 
 const ALERT_BG: Record<AlertLevel, string> = {
-  warn_80: "bg-yellow-50 border-yellow-200",
-  cap_100: "bg-orange-50 border-orange-200",
-  over_120: "bg-red-50 border-red-200",
+  warn_80: "bg-yellow-50 border-yellow-200 dark:bg-yellow-900/30 dark:border-yellow-700",
+  cap_100: "bg-orange-50 border-orange-200 dark:bg-orange-900/30 dark:border-orange-700",
+  over_120: "bg-red-50 border-red-200 dark:bg-red-900/30 dark:border-red-700",
 }
 
 export interface CostDashboardPanelProps {
@@ -94,11 +94,11 @@ function SnapshotsTable({
   }
   return (
     <div data-testid="cost-snapshots" className="overflow-x-auto">
-      <h3 className="mb-2 text-sm font-medium text-gray-700">
+      <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
         Current spend
       </h3>
       <table className="w-full text-xs">
-        <thead className="border-b border-gray-200 text-gray-500">
+        <thead className="border-b border-gray-200 text-gray-500 dark:border-gray-700">
           <tr>
             <th className="text-left">Scope</th>
             <th className="text-right">Daily</th>
@@ -133,7 +133,7 @@ function SnapshotRow({ snap }: { snap: CostSnapshot }): JSX.Element {
   return (
     <tr
       data-testid={`cost-snapshot-${snap.scope.kind}-${snap.scope.key}`}
-      className="border-b border-gray-100"
+      className="border-b border-gray-100 dark:border-gray-800"
     >
       <td className="py-1">
         <span className="text-gray-400">{snap.scope.kind}=</span>
@@ -162,7 +162,7 @@ function SnapshotRow({ snap }: { snap: CostSnapshot }): JSX.Element {
 function capUtilClass(ratio: number): string {
   if (ratio >= 1.2) return "font-semibold text-red-600"
   if (ratio >= 1.0) return "font-semibold text-orange-600"
-  if (ratio >= 0.8) return "font-medium text-yellow-700"
+  if (ratio >= 0.8) return "font-medium text-yellow-700 dark:text-yellow-300"
   return ""
 }
 
@@ -178,7 +178,7 @@ function AlertsList({ alerts }: { alerts: BudgetAlert[] }): JSX.Element {
   }
   return (
     <div data-testid="cost-alerts">
-      <h3 className="mb-2 text-sm font-medium text-gray-700">Recent alerts</h3>
+      <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">Recent alerts</h3>
       <ul className="space-y-1">
         {alerts.map((a) => (
           <li
@@ -197,7 +197,7 @@ function AlertsList({ alerts }: { alerts: BudgetAlert[] }): JSX.Element {
                   {formatDateRelative(a.fired_at)}
                 </span>
               </div>
-              <div className="text-gray-700">
+              <div className="text-gray-700 dark:text-gray-300">
                 {formatUsd(a.observed_usd)} / {formatUsd(a.threshold_usd)} —
                 action <span className="font-medium">{a.action}</span>
               </div>
@@ -220,7 +220,7 @@ function BudgetsTable({
 }): JSX.Element {
   return (
     <div data-testid="cost-budgets">
-      <h3 className="mb-2 text-sm font-medium text-gray-700">
+      <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
         Configured budgets ({budgets.filter((b) => b.enabled).length} enabled)
       </h3>
       {budgets.length === 0 ? (
@@ -229,7 +229,7 @@ function BudgetsTable({
         </p>
       ) : (
         <table className="w-full text-xs">
-          <thead className="border-b border-gray-200 text-gray-500">
+          <thead className="border-b border-gray-200 text-gray-500 dark:border-gray-700">
             <tr>
               <th className="text-left">Scope</th>
               <th className="text-right">Per-batch</th>
@@ -245,8 +245,8 @@ function BudgetsTable({
                 data-testid={`cost-budget-${b.scope.kind}-${b.scope.key}`}
                 className={
                   b.enabled
-                    ? "border-b border-gray-100"
-                    : "border-b border-gray-100 text-gray-400"
+                    ? "border-b border-gray-100 dark:border-gray-800"
+                    : "border-b border-gray-100 text-gray-400 dark:border-gray-800"
                 }
               >
                 <td className="py-1">

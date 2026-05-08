@@ -649,7 +649,7 @@ export function LivePreviewPanel({
                   // HMR. The dev-server is operator-launched and we
                   // already gate it behind RBAC + SSO.
                   referrerPolicy="no-referrer"
-                  className="border border-[var(--border)] bg-white shadow-sm"
+                  className="border border-[var(--border)] bg-white shadow-sm dark:bg-zinc-900"
                   style={{
                     width: viewportSpec.width === null
                       ? "100%"
