@@ -100,6 +100,6 @@ def test_runbook_documents_parallel_gate_migration_and_escape() -> None:
 def test_lesson_28_records_parallel_gate_default_off_rationale() -> None:
     lessons = _LESSONS.read_text(encoding="utf-8")
 
-    assert "## Lesson 28" in lessons
+    assert "## L-OP-740" in lessons
     assert "Parallel gates should ship default-off before enforcement" in lessons
     assert "applicableIf = is:false" in lessons

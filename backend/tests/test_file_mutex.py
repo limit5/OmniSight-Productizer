@@ -102,11 +102,11 @@ _(refine on pickup)_
 """,
     ]
     expected = [
-        {"backend/agents/provider_orchestrator.py", "backend/tests/test_provider_orchestrator.py"},
-        {"backend/alembic/versions/XXXX_agent_character_card.py", "backend/tests/test_alembic_XXXX_agent_character_card.py"},
-        {"auto-runner-jira.py", "backend/agents/jira_dispatch.py", "backend/tests/test_file_mutex.py"},
-        {"docs/sop/jira-ticket-conventions.md"},
-        {"backend/agents/scope_to_paths.py", "backend/tests/test_file_mutex.py"},
+        {"docs/sop/lessons/*.md", "backend/agents/provider_orchestrator.py", "backend/tests/test_provider_orchestrator.py"},
+        {"docs/sop/lessons/*.md", "backend/alembic/versions/XXXX_agent_character_card.py", "backend/tests/test_alembic_XXXX_agent_character_card.py"},
+        {"docs/sop/lessons/*.md", "auto-runner-jira.py", "backend/agents/jira_dispatch.py", "backend/tests/test_file_mutex.py"},
+        {"docs/sop/lessons/*.md", "docs/sop/jira-ticket-conventions.md"},
+        {"docs/sop/lessons/*.md", "backend/agents/scope_to_paths.py", "backend/tests/test_file_mutex.py"},
     ]
 
     for description, paths in zip(descriptions, expected, strict=True):
@@ -115,8 +115,15 @@ _(refine on pickup)_
 
 def test_predict_target_files_uses_scope_label_when_files_section_missing() -> None:
     paths = jd.predict_target_files(_snapshot(labels=("scope:runner-pipeline",)), description="## Goal\n")
+    assert "docs/sop/lessons/*.md" in paths
     assert "auto-runner-jira.py" in paths
     assert "backend/agents/jira_*.py" in paths
+
+
+def test_predict_target_files_includes_lessons_for_unknown_scope() -> None:
+    assert jd.predict_target_files(_snapshot(labels=("scope:unknown",)), description="## Goal\n") == {
+        "docs/sop/lessons/*.md"
+    }
 
 
 def test_open_bot_owned_files_parses_three_open_patch_sets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,16 +181,13 @@ def test_file_mutex_check_blocks_when_target_overlaps_open_patch_set(
     assert "codex-bot" in reason
 
 
-def test_file_mutex_check_allows_ticket_with_no_predictable_paths(
+def test_file_mutex_check_allows_ticket_with_only_lessons_path_when_unowned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def must_not_query_gerrit():
-        raise AssertionError("Gerrit query should be skipped without predicted paths")
-
-    monkeypatch.setattr(jd, "_open_bot_owned_file_owners", must_not_query_gerrit)
+    monkeypatch.setattr(jd, "_open_bot_owned_file_owners", lambda: {})
     ok, reason = jd.file_mutex_check(_snapshot(labels=()), description="## Goal\nNo files listed.\n")
     assert ok is True
-    assert "skipped" in reason
+    assert "no collision" in reason
 
 
 def test_synthetic_pickup_skips_colliding_ticket_and_picks_next(

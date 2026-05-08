@@ -231,7 +231,7 @@ Example: `tier:X` parent split into 3 sub-tasks → each sub-task is `tier:X` (o
 |---|---|
 | Per-ticket resolution log | JIRA ticket Resolution field + final comment + linked Gerrit patchset |
 | Cross-agent handoff | JIRA ticket comment with @-mention of receiving bot/operator |
-| Lesson learned (process / pitfall) | `docs/sop/lessons-learned.md` (markdown, version-controlled) |
+| Lesson learned (process / pitfall) | `docs/sop/lessons/L-OP-<ticket>-<slug>.md` (per-lesson markdown, version-controlled) |
 | Multi-ticket retrospective | `docs/retrospectives/YYYY-MM-DD-<slug>.md` (one file per cycle / incident) |
 | Onboarding / wiki | Confluence (links to ADR / SOP / lessons-learned / recent retrospectives) |
 
@@ -243,8 +243,12 @@ CLAUDE.md L1 rules updated:
 When completing a task:
   - Update the JIRA ticket: Resolution field + final comment with what
     was done / why
-  - If a generalisable lesson emerged: append to docs/sop/lessons-learned.md
-    (one entry per lesson, dated, with situation/fix/verification)
+  - If a generalisable lesson emerged: create a new file
+    `docs/sop/lessons/L-OP-<ticket>-<slug>.md` using the front-matter
+    template at `docs/sop/lessons/_TEMPLATE.md`. Run
+    `scripts/build_lessons_index.py` to regenerate
+    `docs/sop/lessons-learned.md` (the aggregated index is generated,
+    not hand-edited).
   - If a cross-ticket / cross-Phase retrospective is warranted: open
     docs/retrospectives/YYYY-MM-DD-<slug>.md and link from META ticket
 HANDOFF.md is FROZEN as of 2026-05-06. Do not append.
@@ -920,7 +924,7 @@ Same observation-then-tune pattern as §15:
 |---|---|
 | `meta:retrospective` | Auto-created by drift detector (§14) for tier-drift signals |
 | `meta:wave-retrospective` | Auto-created by Epic lifecycle (§10a L2) when Wave completes |
-| `meta:lessons-learned` | Adding entry to `docs/sop/lessons-learned.md` |
+| `meta:lessons-learned` | Adding a per-lesson file under `docs/sop/lessons/` |
 | `meta:tooling` | Runner / scripts / helpers improvement |
 | `meta:governance` | ADR amendments, SOP rewrites, CLAUDE.md changes |
 | `meta:onboarding` | Confluence wiki / onboarding doc work |

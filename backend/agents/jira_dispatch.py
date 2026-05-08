@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import subprocess
 import urllib.error
@@ -32,7 +31,7 @@ from pathlib import Path
 
 from backend.config import settings
 from backend.agents.scheduler import TicketSnapshot
-from backend.agents.scope_to_paths import SCOPE_TO_PATHS
+from backend.agents.scope_to_paths import ALWAYS_TOUCHED, SCOPE_TO_PATHS
 
 log = logging.getLogger(__name__)
 
@@ -828,21 +827,23 @@ def predict_target_files(
     """Predict target paths for file-level mutex checks.
 
     Precedence:
-    1. explicit ``Files / Paths`` section;
-    2. first ``scope:<name>`` label mapped in :mod:`scope_to_paths`;
-    3. empty set, which callers treat as "do not block".
+    1. always-touched convention paths plus explicit ``Files / Paths`` section;
+    2. always-touched convention paths plus first ``scope:<name>`` label mapped
+       in :mod:`scope_to_paths`;
+    3. always-touched convention paths.
     """
+    files = set(ALWAYS_TOUCHED)
     explicit = parse_files_section_from_description(description or getattr(snapshot, "description", ""))
     if explicit:
-        return explicit
+        return files | explicit
 
     scope = next(
         (label.split(":", 1)[1] for label in getattr(snapshot, "labels", ()) if label.startswith("scope:")),
         None,
     )
     if scope and scope in SCOPE_TO_PATHS:
-        return set(SCOPE_TO_PATHS[scope])
-    return set()
+        return files | set(SCOPE_TO_PATHS[scope])
+    return files
 
 
 def _open_bot_owned_file_owners() -> dict[str, list[GerritFileOwner]]:

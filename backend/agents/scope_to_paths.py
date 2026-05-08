@@ -7,6 +7,11 @@ only delay pickup by one runner tick.
 from __future__ import annotations
 
 
+ALWAYS_TOUCHED: set[str] = {
+    "docs/sop/lessons/*.md",
+}
+
+
 SCOPE_TO_PATHS: dict[str, set[str]] = {
     "runner-pipeline": {
         "auto-runner-jira.py",
