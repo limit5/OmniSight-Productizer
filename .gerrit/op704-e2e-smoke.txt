@@ -1,3 +1,0 @@
-OP-704 merger smoke sandbox
-variant: A
-created: 2026-05-08T16:20:00Z
