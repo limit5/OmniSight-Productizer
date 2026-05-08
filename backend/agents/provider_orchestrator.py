@@ -84,6 +84,15 @@ class HealthStatus:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class ProviderRegistryEntry:
+    """Provider discovery row for available and future adapters."""
+
+    provider_id: str
+    status: str
+    coming_version: str | None = None
+
+
 class ProviderNotRegistered(Exception):
     """Raised when a provider id has no registered adapter."""
 
@@ -111,10 +120,12 @@ class ProviderAdapter(ABC):
 
 _REGISTRY_LOCK = RLock()
 _REGISTRY: dict[str, ProviderAdapter] = {}
+_COMING_PROVIDERS: dict[str, ProviderRegistryEntry] = {}
 
 SUBSCRIPTION_VENDOR_REGISTRY = MappingProxyType({
     "anthropic": "anthropic-subscription",
     "google": "gemini-subscription",
+    "grok": "grok-subscription",
     "openai": "openai-subscription",
     "xai": "xai-subscription",
 })
@@ -125,6 +136,22 @@ def register_adapter(adapter: ProviderAdapter) -> None:
     provider_id = _normalise_provider_id(adapter.provider_id())
     with _REGISTRY_LOCK:
         _REGISTRY[provider_id] = adapter
+        _COMING_PROVIDERS.pop(provider_id, None)
+
+
+def register_coming_provider(provider_id: str, *, coming_version: str) -> None:
+    """Register a future provider for discovery without routing to it."""
+    provider_id = _normalise_provider_id(provider_id)
+    version = coming_version.strip()
+    if not version:
+        raise ValueError("coming_version must be non-empty")
+    with _REGISTRY_LOCK:
+        if provider_id not in _REGISTRY:
+            _COMING_PROVIDERS[provider_id] = ProviderRegistryEntry(
+                provider_id=provider_id,
+                status="coming",
+                coming_version=version,
+            )
 
 
 def get_adapter(provider_id: str) -> ProviderAdapter:
@@ -141,6 +168,17 @@ def list_adapters() -> list[str]:
     """Return registered provider ids in stable sort order."""
     with _REGISTRY_LOCK:
         return sorted(_REGISTRY)
+
+
+def list_provider_entries() -> list[ProviderRegistryEntry]:
+    """Return discovery rows for active adapters and future providers."""
+    with _REGISTRY_LOCK:
+        entries = [
+            ProviderRegistryEntry(provider_id=provider_id, status="available")
+            for provider_id in _REGISTRY
+        ]
+        entries.extend(_COMING_PROVIDERS.values())
+    return sorted(entries, key=lambda entry: entry.provider_id)
 
 
 def list_subscription_vendors() -> list[str]:
@@ -216,12 +254,15 @@ __all__ = [
     "HealthStatus",
     "ProviderAdapter",
     "ProviderNotRegistered",
+    "ProviderRegistryEntry",
     "QuotaState",
     "SUBSCRIPTION_VENDOR_REGISTRY",
     "TaskSpec",
     "get_adapter",
     "list_adapters",
+    "list_provider_entries",
     "list_subscription_vendors",
     "register_adapter",
+    "register_coming_provider",
     "subscription_adapter_id_for_vendor",
 ]
