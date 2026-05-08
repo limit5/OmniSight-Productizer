@@ -1,0 +1,44 @@
+; [OP-807] systemd unit -- daily Tier-classification cooldown sweep.
+;
+; Runs scripts/cron/tier_cooldown_daily.py once. Triggered by the matching
+; .timer at 08:00 UTC each day -- before the conflict-report timer at
+; 09:00 UTC, so any cooldown labels the sweep applies are visible on the
+; operator dashboard tile during morning standup.
+;
+; Install (user-level -- same identity as the bridge it observes, so the
+; same OMNISIGHT_DATABASE_URL / OMNISIGHT_NOTIFIER_* env wiring applies):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/tier-cooldown-daily.service ~/.config/systemd/user/
+;   cp deploy/systemd/tier-cooldown-daily.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now tier-cooldown-daily.timer
+;
+; Why user-level: must share the OMNISIGHT_DATABASE_URL secret + JIRA
+; token wiring with the bridge that also reads/writes ticket labels.
+; Promotion to a system unit is fine and would just need its own
+; credentials drop-in.
+
+[Unit]
+Description=OmniSight daily Tier S/M/L/X cooldown sweep (OP-807)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+; Default JIRA ticket the OP-722 notifier comments on for alerts the
+; sweep emits. OP-807 is the tier-cooldown META ticket itself, so
+; cooldown-trigger alerts route there for operator visibility.
+Environment=OMNISIGHT_NOTIFIER_JIRA_TICKET=OP-807
+Environment=OMNISIGHT_NOTIFIER_AGENT_CLASS=subscription-claude
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-claude-worktree/scripts/cron/tier_cooldown_daily.py
+StandardOutput=append:%h/work/sora/logs/tier-cooldown/run.log
+StandardError=append:%h/work/sora/logs/tier-cooldown/run.log
+; Cap pathological hangs (DB unreachable, JIRA gigantic). 10 min is far
+; more than the steady-state run time (~2 s on a typical day with
+; <50 active agents).
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target
