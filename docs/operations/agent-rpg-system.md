@@ -360,6 +360,41 @@ either, treat the failure as an integrity issue, not a flake.
 
 ---
 
+## Wave alignment with ADR-0008 (W1-W21)
+
+This table is the explicit pairing of W1-W21 across [TODO.md Priority
+RPG](../../TODO.md) and [ADR-0008 §Decision](../adr/0008-agent-rpg-class-skill-leveling.md#decision).
+Last verified 2026-05-08 (OP-169 / RPG.W11.4) — all 21 numbers and
+names align. If a future TODO edit renumbers or renames a wave, amend
+ADR-0008 and this table together; the operator guide must not be the
+last surface to learn about the drift.
+
+| Wave | TODO.md heading                                        | ADR-0008 §Decision coverage                                |
+| ---- | ------------------------------------------------------ | ---------------------------------------------------------- |
+| W1   | Stat sheet schema + character card route               | "Identity model" + MUST table row 1                        |
+| W2   | Guild + class registry                                 | "Guild" paragraph + MUST table row 2                       |
+| W3   | Instance suffix + style fingerprint generator          | "Style fingerprint" + MUST table row 3                     |
+| W4   | XP accrual rule + level curve                          | "XP curve" subsection                                      |
+| W5   | Layer 1 (stat sheet PG) + Layer 2 (BP.M dim memory)    | "Memory hierarchy" L1 + L2 rows                            |
+| W6   | Layer 3 reflection RAG                                 | "Memory hierarchy" L3 row                                  |
+| W7   | Routing integration                                    | "Routing integration" subsection                           |
+| W8   | Frontend Character Card panel                          | "Operator-facing surfaces" — Character Card                |
+| W9   | Guild Hall view                                        | "Operator-facing surfaces" — Guild Hall                    |
+| W10  | Operator-facing onboarding                             | "Operator-facing surfaces" — Onboarding                    |
+| W11  | Tests + drift guards + docs                            | MUST table row 11                                          |
+| W12  | Skill leveling + branching tree (**MUST**)             | "Skill leveling (W12)" subsection                          |
+| W13  | MCP/A2A tool proficiency (**MUST**)                    | "MCP/A2A tool proficiency (W13)" subsection                |
+| W14  | Talent tree at level milestones (**MUST**)             | "Talent tree (W14)" subsection                             |
+| W15  | Buff / Debuff system (progressive)                     | "Progressively added post-v0.5.0" — W15 bullet             |
+| W16  | Achievements / Badges (progressive)                    | "Progressively added post-v0.5.0" — W16 bullet             |
+| W17  | Synergy / Party system (**MUST**)                      | "Party / Synergy system (W17)" subsection                  |
+| W18  | Multi-class / dual-class mastery (progressive)         | "Progressively added post-v0.5.0" — W18 bullet             |
+| W19  | Skill fusion / crafting (progressive)                  | "Progressively added post-v0.5.0" — W19 bullet             |
+| W20  | Quest campaigns / narrative wrapping (progressive)     | "Progressively added post-v0.5.0" — W20 bullet             |
+| W21  | Time-gated boss raids (progressive)                    | "Progressively added post-v0.5.0" — W21 bullet             |
+
+---
+
 ## Related
 
 - [ADR-0008 — Agent RPG Class & Skill Leveling](../adr/0008-agent-rpg-class-skill-leveling.md)
@@ -367,4 +402,4 @@ either, treat the failure as an integrity issue, not a flake.
 - [ADR-0005 — Tier S/M/L/X authority](../adr/0005-tier-authority-levels.md) — Tier gates feed off RPG level + skill (consumer side)
 - [`docs/operations/multi-provider-setup.md`](multi-provider-setup.md) — provider-side runbook (sister doc)
 - [`backend/agents/skill_matrix.yaml`](../../backend/agents/skill_matrix.yaml) — canonical skill registry
-- TODO.md — Priority RPG W1-W21 implementation breakdown
+- [TODO.md Priority RPG](../../TODO.md) — full W1-W21 implementation breakdown
