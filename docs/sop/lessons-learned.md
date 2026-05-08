@@ -474,6 +474,17 @@ Runner startup now fails fast if this prerequisite is missing, and `set_bot_iden
 **Generalisation**: Any daemon that reuses a git worktree across ticks must clear operation state before branch-changing commands. A local fix in the operation that caused the state leak is necessary but insufficient; the next tick also needs a guard at the sync boundary because the leak may come from a previous process, manual intervention, hooks, signing failures, or a different git operation.
 
 
+## Lesson 27 — JIRA ticket creation: 2 invariants for runner-pickability (2026-05-08)
+
+**Situation**: 15+ tickets created via JIRA REST API in one session (OP-721/722-728/729-736 family) used `issuetype=Task` and narrow `area:backend` labels. Runner saw 0 of them; codex hit self-halt loops on the converted ones because `area:backend` forbade docs/tests work that the AC required. About 30 minutes of runner ticks were wasted.
+
+**Fix**: Always file with (a) `issuetype=Story` because Task is invisible to runner JQL (`backend/agents/jira_dispatch.py:137`) and (b) `area:` labels covering every domain the AC + Files/Paths sections will touch. The runner prompt enforces "DO NOT introduce changes to <other areas>". New helper: `scripts/file_jira_ticket.py` enforces both at file-time.
+
+**Verification**: Synthetic ticket text with `area:backend` and AC referencing `docs/*` fails `--check` mode of the helper. Real ticket fix: OP-729's `area:backend` to `area:backend,docs,tests` removed the halt.
+
+**Generalisation**: Any agent or human filing runner-pickable tickets must (a) use the issuetype the runner JQL filters for and (b) cover the union of domains the AC will touch in `area:` labels. A helper script that fails at file-time is cheaper than discovering the trap during pickup.
+
+
 ## Lesson 28 — Parallel gates should ship default-off before enforcement (2026-05-08)
 
 **Situation**: OP-740 needed to introduce a Gerrit `Verified` label and
@@ -495,6 +506,7 @@ rebase behavior, and runbook migration notes.
 from "surface blocks submit." Ship the label/status/permission surface
 first, prove operators can read and recover it, then flip enforcement
 in a later change with live signal and rollback mechanics in place.
+<<<<<<< HEAD
 
 
 ## Lesson 29 — Terminal events should permissively converge workflow state (2026-05-08)
@@ -521,3 +533,6 @@ event should converge workflow state from any safe predecessor, not only
 from the ideal predecessor. Preserve explicit terminal/operator override
 states, but do not strand work because a best-effort intermediate event
 was missed.
+=======
+>>>>>>> 0652e0a7 ([OP-737] Add runner-pickable JIRA ticket helper)
+>>>>>>> 1adbec62 ([OP-737] Add runner-pickable JIRA ticket helper)
