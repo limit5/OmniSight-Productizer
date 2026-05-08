@@ -32,7 +32,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
-from backend.agents import jira_dispatch, scheduler
+from backend.agents import circuit_breaker, jira_dispatch, scheduler
 
 AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
@@ -271,6 +271,10 @@ def _finalize_under_review(
 
 def main() -> int:
     print(f"[runner] agent_class={AGENT_CLASS}, dry_run={DRY_RUN}")
+    open_services = circuit_breaker.open_services()
+    if open_services:
+        print(f"[runner] paused - {open_services} unreachable")
+        return 0
     jira_dispatch.assert_worktree_config_enabled(REPO)
     ok_to_pick_up, backpressure_reason = jira_dispatch.backpressure_decide(AGENT_CLASS)
     if not ok_to_pick_up:

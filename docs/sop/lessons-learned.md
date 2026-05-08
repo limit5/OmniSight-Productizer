@@ -49,6 +49,7 @@
 | L-OP-742 | 2026-05-08 | OP-742 | [Test-impact analysis must fail closed on the conservative side](docs/sop/lessons/L-OP-742-test-impact-analysis-must-fail-closed-on-the-conservative-si.md) | L29 |
 | L-OP-743 | 2026-05-08 | OP-743 | [Terminal events should permissively converge workflow state](docs/sop/lessons/L-OP-743-terminal-events-should-permissively-converge-workflow-state.md) | L29 |
 | L-OP-746 | 2026-05-08 | OP-746 | [Measure before optimising conflict pressure](docs/sop/lessons/L-OP-746-measure-before-optimising-conflict-pressure.md) |  |
+| L-OP-749 | 2026-05-08 | OP-749 | [External mutations need idempotency keys and circuit breakers](docs/sop/lessons/L-OP-749-idempotency-and-circuit-breakers-for-external-mutations.md) |  |
 
 Legacy sequential lesson numbers are retained only as migration metadata; duplicate legacy numbers from concurrent patchsets: L29.
 

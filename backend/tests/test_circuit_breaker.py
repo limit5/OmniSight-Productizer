@@ -31,6 +31,7 @@ import time
 import pytest
 
 from backend import circuit_breaker as cb
+from backend.agents import circuit_breaker as runner_cb
 from backend.db_context import set_tenant_id
 
 
@@ -41,10 +42,68 @@ from backend.db_context import set_tenant_id
 @pytest.fixture(autouse=True)
 def _reset_circuit_state():
     cb._reset_for_tests()
+    runner_cb.reset_for_tests()
     set_tenant_id(None)
     yield
     cb._reset_for_tests()
+    runner_cb.reset_for_tests()
     set_tenant_id(None)
+
+
+class TestRunnerCircuitBreaker:
+
+    def test_jira_503_five_times_opens_then_half_open_success_closes(self, monkeypatch):
+        now = {"value": 1000.0}
+        alerts: list[dict] = []
+        breaker = runner_cb.CircuitBreaker("jira_rest")
+
+        monkeypatch.setattr(runner_cb.time, "time", lambda: now["value"])
+        monkeypatch.setattr(runner_cb, "_notify_operator", lambda service: alerts.append({"service": service}))
+
+        def fail():
+            raise ConnectionError("jira 503")
+
+        for _ in range(5):
+            try:
+                breaker.call(fail)
+            except ConnectionError:
+                pass
+
+        assert breaker.state == "open"
+        assert breaker.consecutive_failures == 5
+        assert alerts == [{"service": "jira_rest"}]
+
+        try:
+            breaker.call(lambda: {"ok": False})
+        except runner_cb.CircuitBreakerOpen as exc:
+            assert str(exc) == "jira_rest"
+        else:  # pragma: no cover - assertion guard
+            raise AssertionError("open breaker must block calls")
+
+        now["value"] += 61
+        assert breaker.call(lambda: {"ok": True}) == {"ok": True}
+        assert breaker.state == "closed"
+        assert breaker.consecutive_failures == 0
+
+    def test_half_open_failure_reopens(self, monkeypatch):
+        now = {"value": 1000.0}
+        breaker = runner_cb.CircuitBreaker("gerrit_ssh", failure_threshold=1)
+        monkeypatch.setattr(runner_cb.time, "time", lambda: now["value"])
+        monkeypatch.setattr(runner_cb, "_notify_operator", lambda service: None)
+
+        try:
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        except ConnectionError:
+            pass
+        now["value"] += 61
+
+        try:
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("still down")))
+        except ConnectionError:
+            pass
+
+        assert breaker.state == "open"
+        assert breaker.consecutive_failures == 2
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

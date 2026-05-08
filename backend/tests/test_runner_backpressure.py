@@ -173,6 +173,27 @@ def test_runner_paused_exits_zero_before_jira_pickup(monkeypatch: pytest.MonkeyP
     assert "[runner] backpressure paused: 8 open PSes (cap 8). Sleeping until next tick." in out
 
 
+def test_runner_open_circuit_exits_zero_before_worktree_or_jira(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    mod = _load_jira_runner()
+    monkeypatch.setattr(mod.circuit_breaker, "open_services", lambda: ["jira_rest"])
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "assert_worktree_config_enabled",
+        lambda repo: pytest.fail("worktree config must not run while circuit is open"),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "make_client",
+        lambda agent_class: pytest.fail("make_client must not run while circuit is open"),
+    )
+
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert "[runner] paused - ['jira_rest'] unreachable" in out
+
+
 def test_runner_active_continues_to_target_flow(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     mod = _load_jira_runner()
     calls = {"make_client": 0, "request": 0}
@@ -215,6 +236,7 @@ def test_runner_active_continues_to_target_flow(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(mod.jira_dispatch, "_request", request)
     monkeypatch.setattr(mod.jira_dispatch, "pre_pickup_ok", lambda *args, **kwargs: (True, "ok"))
     monkeypatch.setattr(mod.jira_dispatch, "fetch_description", lambda client, key: "desc")
+    monkeypatch.setattr(mod.jira_dispatch, "file_mutex_check", lambda *args, **kwargs: (True, "ok"))
 
     assert mod.main() == 0
     assert calls == {"make_client": 1, "request": 2}
