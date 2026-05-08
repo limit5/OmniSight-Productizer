@@ -31,6 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from backend.db_pool import get_pool
+from backend.ks_secret_carrier import pack_secret
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,15 @@ def _hash_key(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _pack_hash(hashed: str, key_id: str, tenant_id: str = "t-default") -> str:
+    return pack_secret(
+        hashed,
+        tenant_id,
+        purpose="api-key-hash",
+        binding={"table": "api_keys", "id": key_id},
+    )
+
+
 _LIST_COLS = (
     "id, name, key_prefix, scopes, created_by, last_used_ip, "
     "last_used_at, enabled, created_at"
@@ -140,9 +150,11 @@ async def create_key(name: str, scopes: list[str] | None = None,
     async with get_pool().acquire() as conn:
         await conn.execute(
             "INSERT INTO api_keys "
-            "(id, name, key_hash, key_prefix, scopes, created_by, enabled) "
-            "VALUES ($1, $2, $3, $4, $5, $6, 1)",
-            key_id, name, hashed, prefix, scope_json, created_by,
+            "(id, name, key_hash, key_lookup_index, key_prefix, scopes, "
+            "created_by, enabled) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, 1)",
+            key_id, name, _pack_hash(hashed, key_id), hashed, prefix,
+            scope_json, created_by,
         )
     key = ApiKey(id=key_id, name=name, key_prefix=prefix, scopes=scope_list,
                  created_by=created_by, enabled=True)
@@ -155,7 +167,8 @@ async def rotate_key(key_id: str) -> tuple[ApiKey | None, str]:
     or (None, '') if key not found."""
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
-            "SELECT id, name, scopes, created_by, enabled, created_at "
+            "SELECT id, name, scopes, created_by, enabled, created_at, "
+            "COALESCE(tenant_id, 't-default') AS tenant_id "
             "FROM api_keys WHERE id = $1",
             key_id,
         )
@@ -165,7 +178,9 @@ async def rotate_key(key_id: str) -> tuple[ApiKey | None, str]:
         hashed = _hash_key(raw)
         prefix = raw[:KEY_PREFIX_LEN]
         await conn.execute(
-            "UPDATE api_keys SET key_hash = $1, key_prefix = $2 WHERE id = $3",
+            "UPDATE api_keys SET key_hash = $1, key_lookup_index = $2, "
+            "key_prefix = $3 WHERE id = $4",
+            _pack_hash(hashed, key_id, r["tenant_id"] or "t-default"),
             hashed, prefix, key_id,
         )
     scopes = json.loads(r["scopes"] or '["*"]')
@@ -234,7 +249,7 @@ async def validate_bearer(raw_token: str, ip: str = "") -> ApiKey | None:
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
             "SELECT id, name, key_prefix, scopes, created_by, enabled, created_at "
-            "FROM api_keys WHERE key_hash = $1 AND enabled = 1",
+            "FROM api_keys WHERE key_lookup_index = $1 AND enabled = 1",
             hashed,
         )
         if not r:
@@ -281,12 +296,13 @@ async def migrate_legacy_bearer() -> ApiKey | None:
     async with get_pool().acquire() as conn:
         inserted = await conn.fetchrow(
             "INSERT INTO api_keys "
-            "(id, name, key_hash, key_prefix, scopes, created_by, enabled) "
-            "VALUES ($1, 'legacy-bearer', $2, $3, '[\"*\"]', "
+            "(id, name, key_hash, key_lookup_index, key_prefix, scopes, "
+            "created_by, enabled) "
+            "VALUES ($1, 'legacy-bearer', $2, $3, $4, '[\"*\"]', "
             "'system/migration', 1) "
             "ON CONFLICT (id) DO NOTHING "
             "RETURNING id",
-            key_id, hashed, prefix,
+            key_id, _pack_hash(hashed, key_id), hashed, prefix,
         )
     if inserted is None:
         return None

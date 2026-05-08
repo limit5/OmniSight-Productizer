@@ -316,13 +316,16 @@ def _row_to_dict(row: Any) -> dict:
     (logged) rather than raising, so a single bad row can't take down
     the whole registry read.
     """
-    from backend.secret_store import decrypt
+    from backend.ks_secret_carrier import unpack_secret
 
     def _safe_decrypt(ciphertext: str) -> str:
         if not ciphertext:
             return ""
         try:
-            return decrypt(ciphertext)
+            return unpack_secret(
+                ciphertext,
+                binding={"table": "git_accounts", "id": row["id"]},
+            )
         except Exception as exc:
             logger.warning(
                 "git_accounts row %s: decrypt failed (%s) — "

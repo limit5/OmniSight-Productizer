@@ -64,7 +64,8 @@ from typing import Any
 import asyncpg
 
 from backend.db_context import require_current_tenant
-from backend.secret_store import decrypt, encrypt, fingerprint
+from backend.ks_secret_carrier import pack_secret, unpack_secret
+from backend.secret_store import fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -103,13 +104,22 @@ def _safe_decrypt(ciphertext: str, row_id: str = "?") -> str:
     if not ciphertext:
         return ""
     try:
-        return decrypt(ciphertext)
+        return unpack_secret(ciphertext, binding={"table": "git_accounts", "id": row_id})
     except Exception as exc:
         logger.warning(
             "git_accounts row %s: decrypt failed (%s) — treating as empty",
             row_id, type(exc).__name__,
         )
         return ""
+
+
+def _encrypt_field(plaintext: str, tid: str, row_id: str) -> str:
+    return pack_secret(
+        plaintext,
+        tid,
+        purpose="git-account",
+        binding={"table": "git_accounts", "id": row_id},
+    )
 
 
 def _row_to_public_dict(row: Any) -> dict[str, Any]:
@@ -307,9 +317,9 @@ async def create_account(
     meta_json = json.dumps(metadata or {})
     row_id = _new_id()
 
-    enc_token = encrypt(token) if token else ""
-    enc_ssh = encrypt(ssh_key) if ssh_key else ""
-    enc_whs = encrypt(webhook_secret) if webhook_secret else ""
+    enc_token = _encrypt_field(token, tid, row_id) if token else ""
+    enc_ssh = _encrypt_field(ssh_key, tid, row_id) if ssh_key else ""
+    enc_whs = _encrypt_field(webhook_secret, tid, row_id) if webhook_secret else ""
 
     insert_sql = (
         "INSERT INTO git_accounts ("
@@ -468,7 +478,7 @@ async def update_account(
                 params.append("")
             else:
                 set_clauses.append(f"{col} = ${idx}")
-                params.append(encrypt(v))
+                params.append(_encrypt_field(v, tid, account_id))
             idx += 1
 
     # Always refresh updated_at + bump version on any change path.

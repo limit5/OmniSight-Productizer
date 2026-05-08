@@ -292,6 +292,9 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("user_preferences", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
         # I4: tenant_id on api_keys
         ("api_keys", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
+        # OP-228: deterministic lookup for KS-enveloped api_keys.key_hash.
+        ("api_keys", sa.Column("key_lookup_index", _t())),
+        ("provisioned_storage", sa.Column("bucket_lookup_index", _t())),
         # Q.7 #301 — optimistic-lock version column expansion (mirrors
         # alembic 0023_optimistic_lock_expansion for SQLite bootstrap).
         ("tasks", sa.Column("version", _i(), nullable=False, server_default=_txt("0"))),
@@ -1301,6 +1304,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     key_hash        TEXT NOT NULL,
+    key_lookup_index TEXT,
     key_prefix      TEXT NOT NULL DEFAULT '',
     scopes          TEXT NOT NULL DEFAULT '["*"]',
     created_by      TEXT NOT NULL DEFAULT '',
@@ -1311,6 +1315,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_lookup
+    ON api_keys(key_lookup_index);
 
 -- J4: user preferences (per-user key/value)
 CREATE TABLE IF NOT EXISTS user_preferences (
@@ -1810,6 +1816,7 @@ CREATE TABLE IF NOT EXISTS provisioned_storage (
     provider    TEXT NOT NULL
                     CHECK (provider IN ('r2','s3','supabase-storage')),
     bucket_name TEXT NOT NULL,
+    bucket_lookup_index TEXT,
     created_at  REAL NOT NULL,
     PRIMARY KEY (tenant_id, provider)
 );
