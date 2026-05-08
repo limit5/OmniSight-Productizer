@@ -83,6 +83,11 @@ class BridgeConfig:
     periodic_catchup_seconds: float = 900.0
     max_backoff_seconds: float = 60.0
     alert_after_failures: int = 10
+    # OP-733 — debounce window for auto-rebase sweeps. A batch +2 of N
+    # changes can fire N change-merged events within seconds; the
+    # debounce coalesces them into a single sweep on the most recent
+    # merged SHA.
+    auto_rebase_debounce_seconds: float = 30.0
 
 
 def utc_now_iso() -> str:
@@ -217,6 +222,11 @@ class GerritJiraBridge:
         self._started_at = time.monotonic()
         self._last_heartbeat = time.monotonic()
         self._last_periodic_catchup = time.monotonic()
+        # OP-733 — lazy-initialised on the first change-merged event so
+        # bridge construction stays cheap + tests that never exercise
+        # the rebase path don't import the module at all.
+        self._auto_rebase_sweeper: Any = None
+        self._auto_rebase_scheduler: Any = None
 
     def stop(self) -> None:
         self._stop = True
@@ -389,6 +399,7 @@ class GerritJiraBridge:
         event_type = event.get("type")
         if event_type == "change-merged":
             self._handle_change_merged(event)
+            self._schedule_auto_rebase_sweep(event)
             return
         if event_type == "patchset-created":
             self._handle_patchset_created(event)
@@ -503,6 +514,89 @@ class GerritJiraBridge:
             change_id=str(change_number) if change_number else "",
             ps=str(ps_number) if ps_number else "",
         )
+
+    # ─── change-merged → auto-rebase sweep (OP-733) ──────────────────
+
+    def _schedule_auto_rebase_sweep(self, event: dict[str, Any]) -> None:
+        """OP-733: schedule a debounced sweep of open bot-owned PSes.
+
+        Fired alongside the OP-689 ticket-transition handler on every
+        ``change-merged`` event for ``develop``. Uses a 30 s debounce
+        (``BridgeConfig.auto_rebase_debounce_seconds``) so a batch +2
+        produces ONE sweep on the latest merged SHA, not N sweeps.
+
+        Errors are swallowed — a single bad sweep schedule must not
+        crash the OP-689 transition pipeline.
+        """
+        try:
+            change = event.get("change") or {}
+            branch = str(change.get("branch") or "")
+            if branch and branch != "develop":
+                return
+            project = str(change.get("project") or "")
+            merged_sha = (
+                str(event.get("newRev") or "")
+                or str((event.get("patchSet") or {}).get("revision") or "")
+            )
+            if not (project and merged_sha):
+                self.log(
+                    "INFO", "auto_rebase_sweep_skip_missing_fields",
+                    change_id=str(change.get("id") or ""),
+                    project=project, merged_sha=merged_sha,
+                )
+                return
+            scheduler = self._ensure_auto_rebase_scheduler()
+            scheduler.schedule(project=project, merged_sha=merged_sha)
+        except Exception as exc:  # pragma: no cover — defensive
+            self.log(
+                "ERROR", "auto_rebase_sweep_schedule_error",
+                err=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _ensure_auto_rebase_scheduler(self) -> Any:
+        if self._auto_rebase_scheduler is not None:
+            return self._auto_rebase_scheduler
+        from backend.agents.auto_rebase import (
+            AutoRebaseSweeper,
+            DebouncedSweepScheduler,
+        )
+        self._auto_rebase_sweeper = AutoRebaseSweeper(
+            ssh_cmd_builder=self._ssh_cmd,
+            ssh_env_builder=self._ssh_env,
+            run_command=self.run_command,
+            notify_jira=self._post_auto_rebase_jira_comment,
+            log=self.log,
+        )
+        sweeper = self._auto_rebase_sweeper
+
+        def _runner(project: str, merged_sha: str) -> None:
+            sweeper.sweep(project=project, merged_sha=merged_sha)
+
+        self._auto_rebase_scheduler = DebouncedSweepScheduler(
+            runner=_runner,
+            delay_seconds=self.config.auto_rebase_debounce_seconds,
+            log=self.log,
+        )
+        return self._auto_rebase_scheduler
+
+    def _post_auto_rebase_jira_comment(
+        self, ticket_key: str, message: str,
+    ) -> None:
+        """Post the auto-rebase notice as a JIRA comment.
+
+        Routed through :meth:`jira_request` so the daemon's existing
+        429 / 5xx retry logic + auth-error escalation applies.
+        """
+        body = {
+            "body": {
+                "type": "doc", "version": 1,
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": message}],
+                }],
+            },
+        }
+        self.jira_request("POST", f"/issue/{ticket_key}/comment", body)
 
     def process_ticket_for_change(self, ticket_key: str, change_id: str) -> bool:
         lock = self._lock_for(ticket_key)
