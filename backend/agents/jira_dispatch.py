@@ -670,7 +670,13 @@ def push_to_gerrit_for_review(
     )
 
 
+TODO_STATUS_NAMES = {"To Do"}
+IN_PROGRESS_STATUS_NAMES = {"In Progress", "進行中"}
 UNDER_REVIEW_STATUS_NAME = "Under Review"
+UNDER_REVIEW_STATUS_NAMES = {UNDER_REVIEW_STATUS_NAME}
+APPROVED_STATUS_NAMES = {"Approved", "承認済み"}
+PUBLISHED_STATUS_NAMES = {"Published", "公開済み"}
+ARCHIVED_STATUS_NAMES = {"Archived"}
 
 
 def get_issue_status(client: "DispatchClient", key: str) -> str:
@@ -754,6 +760,46 @@ def transition_to_under_review(
     base_key = idem_key or f"transition-{key}-under-review-{uuid.uuid4().hex[:12]}"
     post_runner_pushed_comment(client, key, gerrit_change_url, idem_key=f"{base_key}-comment")
     transition_to_under_review_if_needed(client, key, idem_key=f"{base_key}-transition")
+
+
+def force_walk_to_published(
+    client: "DispatchClient",
+    key: str,
+    idem_key: str | None = None,
+) -> bool:
+    """Force-walk a safe predecessor state to Published.
+
+    Used by runner-side H12 self-heal after Gerrit has already confirmed a
+    merged change for the ticket. Returns True when one or more transition
+    POSTs were issued, False when the ticket was already Published.
+    """
+    status = get_issue_status(client, key)
+    if status in PUBLISHED_STATUS_NAMES:
+        return False
+    if status in ARCHIVED_STATUS_NAMES:
+        raise RuntimeError(f"{key} is archived; refusing to force-publish")
+
+    if status in TODO_STATUS_NAMES:
+        steps = ("to_in_progress", "to_under_review", "to_approved", "to_published")
+    elif status in IN_PROGRESS_STATUS_NAMES:
+        steps = ("to_under_review", "to_approved", "to_published")
+    elif status in UNDER_REVIEW_STATUS_NAMES:
+        steps = ("to_approved", "to_published")
+    elif status in APPROVED_STATUS_NAMES:
+        steps = ("to_published",)
+    else:
+        raise RuntimeError(f"{key} has unsupported status for force-publish: {status}")
+
+    base_key = idem_key or f"force-publish-{key}-{uuid.uuid4().hex[:12]}"
+    for idx, transition_name in enumerate(steps, start=1):
+        _request_idempotent(
+            client,
+            "POST",
+            f"/issue/{key}/transitions",
+            {"transition": {"id": TRANSITION_IDS[transition_name]}},
+            f"{base_key}-{idx}-{transition_name}",
+        )
+    return True
 
 
 def transition_to_in_progress(client: DispatchClient, key: str, idem_key: str | None = None) -> None:
