@@ -146,7 +146,7 @@ export function OnboardingWizardStep2({
       data-mp-w5-step2-active={active ? "yes" : "no"}
       data-mp-w5-step2-motion={motion}
       aria-labelledby="mp-w5-step2-title"
-      className="relative isolate min-h-[320px] overflow-hidden rounded-lg border border-slate-200 bg-slate-950 px-6 py-7 text-white shadow-sm"
+      className="relative isolate min-h-[320px] overflow-hidden rounded-lg border border-slate-200 bg-slate-950 px-6 py-7 text-white shadow-sm dark:border-slate-700"
     >
       <div className="relative z-10 flex items-start justify-between gap-4">
         <div className="min-w-0">

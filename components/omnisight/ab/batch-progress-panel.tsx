@@ -29,12 +29,12 @@ import {
 import { Block } from "../block"
 
 const STATUS_COLOR: Record<BatchRunStatus, string> = {
-  pending: "bg-gray-200 text-gray-700",
-  submitted: "bg-blue-100 text-blue-800",
-  ended: "bg-green-100 text-green-800",
-  canceled: "bg-yellow-100 text-yellow-800",
-  expired: "bg-orange-100 text-orange-800",
-  failed: "bg-red-100 text-red-800",
+  pending: "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
+  submitted: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200",
+  ended: "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200",
+  canceled: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200",
+  expired: "bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-200",
+  failed: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200",
 }
 
 const STATUS_LABEL: Record<BatchRunStatus, string> = {
@@ -71,7 +71,7 @@ export function BatchProgressPanel(props: BatchProgressPanelProps): JSX.Element 
           No batches submitted yet.
         </p>
       ) : (
-        <ul className="divide-y divide-gray-200 rounded border border-gray-200">
+        <ul className="divide-y divide-gray-200 rounded border border-gray-200 dark:divide-gray-700 dark:border-gray-700">
           {runs.map((run) => {
             const open = !!expanded[run.batch_run_id]
             return (
@@ -82,7 +82,7 @@ export function BatchProgressPanel(props: BatchProgressPanelProps): JSX.Element 
                 kind="batch_dispatch.run"
                 status={run.status}
                 tone={run.error_count > 0 || run.status === "failed" ? "danger" : "neutral"}
-                className="rounded-none border-0 border-b border-gray-200 bg-transparent px-3 py-2 last:border-b-0"
+                className="rounded-none border-0 border-b border-gray-200 bg-transparent px-3 py-2 last:border-b-0 dark:border-gray-700"
               >
                 <button
                   type="button"
@@ -184,7 +184,7 @@ function BatchRunDetail({
     <Block
       kind="batch_dispatch.run_detail"
       status={run.status}
-      className="mt-2 space-y-2 border-transparent bg-transparent p-0 pl-6 text-xs text-gray-700"
+      className="mt-2 space-y-2 border-transparent bg-transparent p-0 pl-6 text-xs text-gray-700 dark:text-gray-300"
     >
       <dl className="grid grid-cols-4 gap-2">
         {counts.map((c) => (
@@ -221,7 +221,7 @@ function BatchRunDetail({
           type="button"
           data-testid={`batch-cancel-${run.batch_run_id}`}
           onClick={() => onCancel(run.batch_run_id)}
-          className="rounded border border-red-300 px-2 py-0.5 text-xs text-red-700 hover:bg-red-50"
+          className="rounded border border-red-300 px-2 py-0.5 text-xs text-red-700 hover:bg-red-50 dark:border-red-600 dark:text-red-300"
         >
           Cancel batch
         </button>

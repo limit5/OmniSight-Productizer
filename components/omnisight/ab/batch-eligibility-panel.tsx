@@ -51,8 +51,8 @@ export function BatchEligibilityBadge({
       title={decision.reason}
       className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium ${
         decision.lane === "batch"
-          ? "bg-blue-100 text-blue-800"
-          : "bg-orange-100 text-orange-800"
+          ? "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200"
+          : "bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-200"
       } ${className}`}
     >
       <Icon size={12} aria-hidden />
@@ -124,7 +124,7 @@ function OverridesList({
 }): JSX.Element {
   return (
     <div data-testid="eligibility-overrides">
-      <h3 className="mb-1 text-sm font-medium text-gray-700">
+      <h3 className="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">
         Active overrides ({overrides.length})
       </h3>
       {overrides.length === 0 ? (
@@ -140,7 +140,7 @@ function OverridesList({
             <li
               key={rule.task_kind}
               data-testid={`eligibility-override-${rule.task_kind}`}
-              className="flex items-center justify-between rounded border border-yellow-200 bg-yellow-50 px-2 py-1 text-xs"
+              className="flex items-center justify-between rounded border border-yellow-200 bg-yellow-50 px-2 py-1 text-xs dark:border-yellow-700 dark:bg-yellow-900/30"
             >
               <div>
                 <span className="font-mono">{rule.task_kind}</span>
@@ -181,9 +181,9 @@ function DefaultsTable({
   const [openOverrideFor, setOpenOverrideFor] = useState<string | null>(null)
   return (
     <div data-testid="eligibility-defaults">
-      <h3 className="mb-1 text-sm font-medium text-gray-700">Default routing</h3>
+      <h3 className="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">Default routing</h3>
       <table className="w-full text-xs">
-        <thead className="border-b border-gray-200 text-gray-500">
+        <thead className="border-b border-gray-200 text-gray-500 dark:border-gray-700">
           <tr>
             <th className="text-left">Task kind</th>
             <th className="text-left">Default lane</th>
@@ -226,7 +226,7 @@ function DefaultRow({
     <>
       <tr
         data-testid={`eligibility-default-${rule.task_kind}`}
-        className="border-b border-gray-100"
+        className="border-b border-gray-100 dark:border-gray-800"
       >
         <td className="py-1 font-mono">
           {rule.task_kind}
@@ -292,7 +292,7 @@ function OverrideRow({
   return (
     <tr
       data-testid={`eligibility-override-form-${rule.task_kind}`}
-      className="border-b border-gray-100 bg-gray-50"
+      className="border-b border-gray-100 bg-gray-50 dark:border-gray-800 dark:bg-gray-900"
     >
       <td colSpan={5} className="space-y-2 py-2 pl-4 pr-2 text-xs">
         <fieldset className="flex items-center gap-3">
@@ -321,7 +321,7 @@ function OverrideRow({
             <Zap size={12} aria-hidden /> Realtime
           </label>
           {realtimeOnly && (
-            <span className="text-yellow-700">
+            <span className="text-yellow-700 dark:text-yellow-300">
               <Lock size={10} className="inline" /> Batch unavailable
               (realtime_required)
             </span>
@@ -362,7 +362,7 @@ function DecisionsPreview({
 }): JSX.Element {
   return (
     <div data-testid="eligibility-preview">
-      <h3 className="mb-1 text-sm font-medium text-gray-700">
+      <h3 className="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">
         Live routing preview
       </h3>
       <ul className="space-y-1">

@@ -92,7 +92,7 @@ export function ProviderModeWizard(
 
       <Steps current={state.current_step} />
 
-      <div className="space-y-3 rounded border border-gray-200 p-3">
+      <div className="space-y-3 rounded border border-gray-200 p-3 dark:border-gray-700">
         {idx < 1 && (
           <Step1ApiKey
             currentWorkspace={state.target_workspace}
@@ -149,9 +149,9 @@ function Steps({ current }: { current: WizardStep }): JSX.Element {
             <span
               className={
                 done
-                  ? "text-gray-700"
+                  ? "text-gray-700 dark:text-gray-300"
                   : active
-                    ? "font-medium text-blue-700"
+                    ? "font-medium text-blue-700 dark:text-blue-300"
                     : "text-gray-400"
               }
             >
@@ -170,8 +170,8 @@ function ModeBadge({ mode }: { mode: "subscription" | "api" }): JSX.Element {
       data-testid={`mode-badge-${mode}`}
       className={
         mode === "api"
-          ? "rounded bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700"
-          : "rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700"
+          ? "rounded bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700 dark:bg-purple-900/40 dark:text-purple-300"
+          : "rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700 dark:bg-gray-800 dark:text-gray-300"
       }
     >
       {mode === "api" ? "API mode" : "Subscription mode"}
@@ -382,8 +382,8 @@ function Step4SmokeTest({
           data-testid="wizard-smoke-result"
           className={
             smokeTest.success
-              ? "rounded border border-green-200 bg-green-50 p-2 text-xs"
-              : "rounded border border-red-200 bg-red-50 p-2 text-xs"
+              ? "rounded border border-green-200 bg-green-50 p-2 text-xs dark:border-green-700 dark:bg-green-900/30"
+              : "rounded border border-red-200 bg-red-50 p-2 text-xs dark:border-red-700 dark:bg-red-900/30"
           }
         >
           {smokeTest.success ? (
@@ -471,10 +471,10 @@ function ConfirmedSummary({
     <div className="space-y-3">
       <div
         data-testid="wizard-confirmed-summary"
-        className="rounded border border-green-200 bg-green-50 p-3 text-sm"
+        className="rounded border border-green-200 bg-green-50 p-3 text-sm dark:border-green-700 dark:bg-green-900/30"
       >
         <div className="flex items-center gap-2">
-          <Check size={18} className="text-green-700" aria-hidden />
+          <Check size={18} className="text-green-700 dark:text-green-300" aria-hidden />
           <span className="font-medium">API mode active</span>
         </div>
         <dl className="mt-2 space-y-0.5 text-xs">
@@ -521,7 +521,7 @@ function ConfirmedSummary({
             await onRollback()
           }}
           data-testid="wizard-rollback"
-          className="rounded border border-yellow-300 px-3 py-1 text-sm text-yellow-800 hover:bg-yellow-50"
+          className="rounded border border-yellow-300 px-3 py-1 text-sm text-yellow-800 hover:bg-yellow-50 dark:border-yellow-600 dark:text-yellow-200"
         >
           <AlertTriangle size={14} className="mr-1 inline" aria-hidden />
           Rollback to subscription mode
