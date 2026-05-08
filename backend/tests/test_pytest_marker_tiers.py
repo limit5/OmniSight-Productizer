@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from configparser import ConfigParser
 from pathlib import Path
 
@@ -30,7 +31,28 @@ def test_bp_l_marker_for_path_assigns_representative_files() -> None:
     assert _bp_l_marker_for_path("backend/tests/test_auth.py") == "critical"
     assert _bp_l_marker_for_path("backend/tests/test_skill_framework.py") == "guild_loadout"
     assert _bp_l_marker_for_path("backend/tests/test_compliance_harness.py") == "compliance"
+    assert _bp_l_marker_for_path("backend/tests/test_oauth_login_handler.py") == "critical"
+    assert _bp_l_marker_for_path("backend/tests/test_ui_sandbox.py") == "guild_loadout"
+    assert _bp_l_marker_for_path("backend/tests/test_payment_compliance.py") == "compliance"
     assert _bp_l_marker_for_path("backend/tests/test_nodes.py") is None
+
+
+def test_bp_l_auto_categorisation_marks_at_least_8000_existing_tests() -> None:
+    marked_tests = 0
+    marked_files: set[str] = set()
+    for path in sorted((_REPO_ROOT / "backend" / "tests").glob("test_*.py")):
+        if _bp_l_marker_for_path(path) is None:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        marked_tests += sum(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+            for node in ast.walk(tree)
+        )
+        marked_files.add(path.name)
+
+    assert marked_tests >= 8000
+    assert len(marked_files) >= 300
 
 
 def test_bp_l_markers_registered_in_pytest_ini() -> None:

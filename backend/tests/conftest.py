@@ -211,16 +211,127 @@ _BP_L_MARKER_TIERS = {
 }
 
 
+_BP_L_MARKER_TOKEN_TIERS = {
+    "critical": frozenset(
+        {
+            "api",
+            "audit",
+            "auth",
+            "billing",
+            "bootstrap",
+            "cf",
+            "cmek",
+            "credential",
+            "credentials",
+            "database",
+            "db",
+            "envelope",
+            "firewall",
+            "health",
+            "key",
+            "keys",
+            "limit",
+            "login",
+            "mfa",
+            "notification",
+            "notifications",
+            "oauth",
+            "permission",
+            "permissions",
+            "quota",
+            "rate",
+            "recovery",
+            "rls",
+            "secret",
+            "secrets",
+            "security",
+            "session",
+            "sessions",
+            "severity",
+            "share",
+            "shares",
+            "spend",
+            "tenant",
+            "tenants",
+            "token",
+            "tokens",
+            "webhook",
+            "webhooks",
+        }
+    ),
+    "guild_loadout": frozenset(
+        {
+            "agent",
+            "agents",
+            "artifact",
+            "brand",
+            "browser",
+            "clone",
+            "component",
+            "components",
+            "content",
+            "design",
+            "figma",
+            "frontend",
+            "iteration",
+            "mobile",
+            "pipeline",
+            "preview",
+            "reference",
+            "references",
+            "role",
+            "roles",
+            "sandbox",
+            "site",
+            "skill",
+            "skills",
+            "task",
+            "tasks",
+            "template",
+            "templates",
+            "ui",
+            "vision",
+            "web",
+            "workflow",
+        }
+    ),
+    "compliance": frozenset(
+        {
+            "compliance",
+            "dlp",
+            "gdpr",
+            "governance",
+            "hipaa",
+            "pci",
+            "policies",
+            "policy",
+            "radio",
+            "risk",
+            "risks",
+            "safety",
+            "soc2",
+        }
+    ),
+}
+
+_BP_L_MARKER_TOKEN_ORDER = ("compliance", "critical", "guild_loadout")
+
+
 def _bp_l_marker_for_path(path: str | Path) -> str | None:
     """Return the BP.L marker tier for a test file path, if one applies.
 
-    The table above is immutable module-global state; each pytest worker
-    derives the same values from source at import time, so no cross-worker
-    coordination is required.
+    Exact filename assignments preserve the original BP.L.1 contract.
+    The token sweep below broadens adoption without per-test decorator
+    churn: each pytest worker derives the same immutable values from
+    source at import time, so no cross-worker coordination is required.
     """
     name = Path(path).name
     for marker_name, filenames in _BP_L_MARKER_TIERS.items():
         if name in filenames:
+            return marker_name
+    tokens = set(Path(path).stem.lower().removeprefix("test_").split("_"))
+    for marker_name in _BP_L_MARKER_TOKEN_ORDER:
+        if tokens & _BP_L_MARKER_TOKEN_TIERS[marker_name]:
             return marker_name
     return None
 
