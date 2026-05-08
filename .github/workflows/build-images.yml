@@ -1,0 +1,288 @@
+name: Build Images
+
+# OP-763 D2 — image build pipeline + signing + retention.
+#
+# Sibling of `docker-publish.yml` (which only fires on `v*` tags).
+# This workflow triggers on **every push to main** and on `v*` tags,
+# producing signed multi-image artifacts for the three runtime planes:
+#
+#   - backend         (Dockerfile.backend)         FastAPI core
+#   - frontend        (Dockerfile.frontend)        Next.js UI
+#   - bridge          (Dockerfile.bridge)          Tier-3 hardware-bridge daemon
+#
+# Tags applied per push:
+#   - :sha-<git-sha>           — always (truncated to 12 chars, immutable)
+#   - :v<X.Y.Z>                — only when triggered by a `v*` tag
+#   - :latest                  — only when triggered by a `v*` tag
+#
+# Signing model: cosign keyless via the GitHub OIDC token (sigstore /
+# fulcio / rekor). Verifier: `scripts/verify_image_signature.sh`.
+#
+# Retention: a separate scheduled `retention` job runs weekly. Tagged
+# images are kept forever; untagged images older than 30 days are
+# pruned, with a hard floor of "keep the last 20 untagged versions per
+# image" so a deletion bug can never wipe the build history mid-roll.
+#
+# OUT OF SCOPE: this workflow does not run unit tests — that gate is
+# `ci.yml`. Image build presumes the merge to `main` already passed
+# CI (branch protection enforces that on the destination side).
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Manual ref to build (defaults to current)"
+        required: false
+        default: ""
+  schedule:
+    # Weekly retention sweep — Monday 03:17 UTC. The minute is
+    # deliberately off-the-hour to avoid the GitHub-Actions hourly
+    # thundering-herd that delays cron jobs scheduled at :00.
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+  # GHCR push.
+  packages: write
+  # Required for cosign keyless: cosign exchanges the GitHub OIDC
+  # token for a short-lived sigstore/fulcio certificate. Without
+  # `id-token: write` the workflow cannot mint that token.
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: omnisight-backend
+  FRONTEND_IMAGE: omnisight-frontend
+  BRIDGE_IMAGE: omnisight-bridge
+  COSIGN_VERSION: v2.4.1
+
+jobs:
+  # =========================================================================
+  # build — the per-image fan-out. Skipped on the cron-only `schedule`
+  # event because we have nothing new to build.
+  # =========================================================================
+  build:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            image: omnisight-backend
+            dockerfile: Dockerfile.backend
+          - name: frontend
+            image: omnisight-frontend
+            dockerfile: Dockerfile.frontend
+          - name: bridge
+            image: omnisight-bridge
+            dockerfile: Dockerfile.bridge
+    outputs:
+      backend_digest: ${{ steps.publish.outputs.backend_digest }}
+      frontend_digest: ${{ steps.publish.outputs.frontend_digest }}
+      bridge_digest: ${{ steps.publish.outputs.bridge_digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: compute lowercase owner
+        id: owner
+        run: |
+          echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: derive tags
+        id: tags
+        # The :sha-<short> tag always applies. The :vX.Y.Z and :latest
+        # tags only apply when the trigger was a `v*` tag push — for
+        # main-branch pushes we deliberately do NOT touch :latest, so
+        # :latest stays pinned to the last release.
+        run: |
+          set -euo pipefail
+          short_sha="$(echo '${{ github.sha }}' | cut -c1-12)"
+          base="${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.image }}"
+          tags="${base}:sha-${short_sha}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+            tags="${tags}"$'\n'"${base}:${version}"$'\n'"${base}:latest"
+            echo "is_release=true"  >> "$GITHUB_OUTPUT"
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            echo "version="          >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "${tags}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "primary=${base}:sha-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
+      - name: set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build + push ${{ matrix.name }}
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: sign image (keyless)
+        # We sign every published tag. The image-ref is the digest
+        # form (`<image>@sha256:...`) — signing by digest, not by
+        # mutable tag, ensures the signature pins the exact bytes
+        # built above even if a later push moves the tag.
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          digest='${{ steps.publish.outputs.digest }}'
+          base='${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.image }}'
+          ref="${base}@${digest}"
+          echo "Signing ${ref}"
+          cosign sign --yes "${ref}"
+
+      - name: emit audit metadata
+        # D18 hook: emit a structured JSON record that the backend
+        # audit-log poller picks up via the workflow-artifact API.
+        # Keeping this as an artifact (rather than a direct REST
+        # call) avoids embedding a long-lived backend credential in
+        # CI; the poller authenticates from the prod side instead.
+        run: |
+          set -euo pipefail
+          mkdir -p .audit
+          cat > ".audit/${{ matrix.name }}.json" <<JSON
+          {
+            "event": "image.signed_pushed",
+            "image": "${{ matrix.image }}",
+            "registry": "${{ env.REGISTRY }}",
+            "digest": "${{ steps.publish.outputs.digest }}",
+            "git_sha": "${{ github.sha }}",
+            "git_ref": "${{ github.ref }}",
+            "is_release": "${{ steps.tags.outputs.is_release }}",
+            "version": "${{ steps.tags.outputs.version }}",
+            "actor": "${{ github.actor }}",
+            "run_id": "${{ github.run_id }}",
+            "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "signed_with": "cosign-keyless",
+            "cosign_version": "${{ env.COSIGN_VERSION }}"
+          }
+          JSON
+
+      - name: upload audit metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-audit-${{ matrix.name }}
+          path: .audit/${{ matrix.name }}.json
+          retention-days: 90
+
+  # =========================================================================
+  # verify — synthetic post-build check that the freshly-pushed image is
+  # signature-verifiable end-to-end. Runs after every successful build
+  # so a misconfigured cosign step (e.g. id-token permissions revoked)
+  # is caught here, not by an operator at deploy time.
+  # =========================================================================
+  verify:
+    if: github.event_name != 'schedule'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [omnisight-backend, omnisight-frontend, omnisight-bridge]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: compute lowercase owner
+        id: owner
+        run: |
+          echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: verify signature on freshly-built image
+        env:
+          # Identity claims that match the keyless certificate issued
+          # by fulcio for THIS workflow run. The verifier script also
+          # accepts these via env so callers don't have to hard-code.
+          COSIGN_CERT_IDENTITY_REGEX: "^https://github\\.com/${{ github.repository }}/\\.github/workflows/build-images\\.yml@.*$"
+          COSIGN_CERT_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
+        run: |
+          set -euo pipefail
+          short_sha="$(echo '${{ github.sha }}' | cut -c1-12)"
+          ref='${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.image }}:sha-'"${short_sha}"
+          ./scripts/verify_image_signature.sh "${ref}"
+
+  # =========================================================================
+  # retention — cron-driven prune of untagged versions.
+  #
+  # Policy (OP-763 spec):
+  #   1. Tagged versions (:v<X.Y.Z>, :latest, any non-empty tag list)
+  #      are kept FOREVER — never touched by this job.
+  #   2. Untagged versions younger than 30 days are kept.
+  #   3. Hard floor: the last 20 untagged versions per package are
+  #      always kept, regardless of age. This survives a clock skew
+  #      bug or a runaway-build window where >20 untagged versions
+  #      arrive in <30 days.
+  #
+  # `actions/delete-package-versions` does NOT support age filtering,
+  # so we drive the GHCR REST API directly. `gh api` honors the
+  # GITHUB_TOKEN's `packages: write` scope already granted at the
+  # workflow level.
+  # =========================================================================
+  retention:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [omnisight-backend, omnisight-frontend, omnisight-bridge]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: enforce retention policy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_NAME: ${{ matrix.package }}
+          OWNER: ${{ github.repository_owner }}
+          MIN_KEEP: "20"
+          MAX_AGE_DAYS: "30"
+        run: bash scripts/enforce_image_retention.sh
