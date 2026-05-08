@@ -21,6 +21,7 @@ on the latest merged SHA.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import json
 import os
 import re
@@ -37,6 +38,9 @@ OP_KEY_RE = re.compile(r"\b(OP-\d+)\b")
 
 GERRIT_REST_BASE_URL = "https://sora.services:29420"
 DEFAULT_SWEEP_DEBOUNCE_SECONDS = 30.0
+DEFAULT_REBASE_CONCURRENCY = 2
+REBASE_CONCURRENCY_ENV = "OMNISIGHT_REBASE_CONCURRENCY"
+SWEEP_MAX_WORKERS = 4
 
 SWEEP_DISABLE_ENV = "OMNISIGHT_AUTO_REBASE_DISABLED"
 
@@ -147,6 +151,7 @@ class AutoRebaseSweeper:
         load_password: Callable[[str], str | None] = load_owner_http_password,
         notify_jira: Callable[[str, str], None] | None = None,
         log: Callable[..., None] | None = None,
+        rebase_concurrency: int | None = None,
     ) -> None:
         self._ssh_cmd_builder = ssh_cmd_builder
         self._ssh_env_builder = ssh_env_builder
@@ -158,6 +163,12 @@ class AutoRebaseSweeper:
         self._log: Callable[..., None] = log or (lambda *args, **kwargs: None)
         self._rebased_onto: set[tuple[str, str]] = set()
         self._lock = threading.Lock()
+        self._rebase_concurrency = self._resolve_rebase_concurrency(
+            rebase_concurrency,
+        )
+        self._rebase_tokens = threading.Semaphore(
+            value=self._rebase_concurrency,
+        )
 
     # ── public API ──
 
@@ -181,10 +192,20 @@ class AutoRebaseSweeper:
                   project=project, merged_sha=merged_sha)
         open_changes = self._query_open_bot_changes(project)
         results: list[RebaseResult] = []
-        for change in open_changes:
-            result = self.attempt_rebase(change, target_sha=merged_sha)
-            results.append(result)
-            self._emit_result_log(result)
+        worker_count = min(SWEEP_MAX_WORKERS, max(1, len(open_changes)))
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=worker_count,
+        ) as executor:
+            futures = [
+                executor.submit(
+                    self._attempt_rebase_with_token, change, merged_sha,
+                )
+                for change in open_changes
+            ]
+            for future in futures:
+                result = future.result()
+                results.append(result)
+                self._emit_result_log(result)
         self._log("INFO", "auto_rebase_sweep_done",
                   project=project, merged_sha=merged_sha,
                   total=len(results),
@@ -193,6 +214,40 @@ class AutoRebaseSweeper:
                   skipped=sum(1 for r in results if r.skipped),
                   errors=sum(1 for r in results if r.error))
         return results
+
+    def _attempt_rebase_with_token(
+        self, change: dict[str, Any], target_sha: str,
+    ) -> RebaseResult:
+        with self._rebase_tokens:
+            return self.attempt_rebase(change, target_sha=target_sha)
+
+    def _resolve_rebase_concurrency(self, value: int | None) -> int:
+        if value is not None:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = DEFAULT_REBASE_CONCURRENCY
+            return max(1, parsed)
+        raw = os.environ.get(REBASE_CONCURRENCY_ENV, "").strip()
+        if not raw:
+            return DEFAULT_REBASE_CONCURRENCY
+        try:
+            parsed = int(raw)
+        except ValueError:
+            self._log(
+                "WARN", "auto_rebase_concurrency_invalid_env",
+                env=REBASE_CONCURRENCY_ENV, value=raw,
+                default=DEFAULT_REBASE_CONCURRENCY,
+            )
+            return DEFAULT_REBASE_CONCURRENCY
+        if parsed < 1:
+            self._log(
+                "WARN", "auto_rebase_concurrency_invalid_env",
+                env=REBASE_CONCURRENCY_ENV, value=raw,
+                default=DEFAULT_REBASE_CONCURRENCY,
+            )
+            return DEFAULT_REBASE_CONCURRENCY
+        return parsed
 
     def attempt_rebase(
         self, change: dict[str, Any], target_sha: str,

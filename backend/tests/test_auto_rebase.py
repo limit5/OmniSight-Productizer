@@ -11,6 +11,10 @@ Covers the OP-733 acceptance criteria:
 * AC#7 (idempotency) — :func:`test_sweep_twice_does_not_double_upload`
 * AC#8 (operator notification on conflict) —
   :func:`test_conflict_emits_warn_log_with_files`
+* OP-753 concurrency cap —
+  :func:`test_synthetic_eight_rebases_never_exceed_two_active_attempts`
+* OP-753 env override —
+  :func:`test_rebase_concurrency_env_override_allows_three_active_attempts`
 
 Plus owner-key-bag dispatch + env kill switch + missing-owner skip tests.
 """
@@ -19,6 +23,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -476,6 +482,77 @@ def test_sweep_twice_does_not_double_upload() -> None:
     assert results2[0].skipped is True
     assert results2[0].skip_reason == "already_rebased_in_session"
     assert len(rest_calls) == 1
+
+
+# ── OP-753 rebase concurrency token bucket ───────────────────────────
+
+
+def _instrument_attempts(
+    sweeper: auto_rebase.AutoRebaseSweeper,
+    *,
+    sleep_s: float = 0.02,
+) -> dict[str, int]:
+    counters = {"active": 0, "max_active": 0, "completed": 0}
+    lock = threading.Lock()
+
+    def fake_attempt(
+        change: dict[str, Any], target_sha: str,
+    ) -> auto_rebase.RebaseResult:
+        with lock:
+            counters["active"] += 1
+            counters["max_active"] = max(
+                counters["max_active"], counters["active"],
+            )
+        time.sleep(sleep_s)
+        with lock:
+            counters["active"] -= 1
+            counters["completed"] += 1
+        return auto_rebase.RebaseResult(
+            change_number=str(change["number"]),
+            success=True,
+            new_revision=f"rebased-{target_sha}",
+        )
+
+    sweeper.attempt_rebase = fake_attempt  # type: ignore[method-assign]
+    return counters
+
+
+def test_synthetic_eight_rebases_never_exceed_two_active_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """8 open PSes fan out, but the default token bucket permits only
+    two active rebase attempts at once."""
+    monkeypatch.delenv(auto_rebase.REBASE_CONCURRENCY_ENV, raising=False)
+    open_changes = [
+        _make_change(number=i, change_id=f"I{i}") for i in range(8)
+    ]
+    sweeper = _make_sweeper(open_changes=open_changes)
+    counters = _instrument_attempts(sweeper)
+
+    results = sweeper.sweep(project="p", merged_sha="merged")
+
+    assert len(results) == 8
+    assert all(r.success for r in results)
+    assert counters["completed"] == 8
+    assert counters["max_active"] == 2
+
+
+def test_rebase_concurrency_env_override_allows_three_active_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(auto_rebase.REBASE_CONCURRENCY_ENV, "3")
+    open_changes = [
+        _make_change(number=i, change_id=f"I{i}") for i in range(6)
+    ]
+    sweeper = _make_sweeper(open_changes=open_changes)
+    counters = _instrument_attempts(sweeper)
+
+    results = sweeper.sweep(project="p", merged_sha="merged")
+
+    assert len(results) == 6
+    assert all(r.success for r in results)
+    assert counters["completed"] == 6
+    assert counters["max_active"] == 3
 
 
 # ── env kill switch ──────────────────────────────────────────────────
