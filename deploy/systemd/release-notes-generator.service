@@ -1,0 +1,35 @@
+; [OP-777] Consumer for release_tagged events.
+;
+; Install (user-level — no sudo):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/release-notes-generator.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now release-notes-generator.service
+;   loginctl enable-linger $USER
+
+[Unit]
+Description=OmniSight release notes generator (OP-777)
+After=network-online.target release-milestone-checker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m backend.agents.release_notes_generator \
+  --repo /home/user/sora-bridge \
+  --event-log /home/user/work/sora/logs/release-milestone/systemd.log \
+  --cursor /home/user/work/sora/logs/release-milestone/release-notes.cursor \
+  --agent-class subscription-codex \
+  --target-branch develop \
+  --poll-seconds 60
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/home/user/work/sora/logs/release-milestone/release-notes.log
+StandardError=append:/home/user/work/sora/logs/release-milestone/release-notes.log
+
+[Install]
+WantedBy=default.target
