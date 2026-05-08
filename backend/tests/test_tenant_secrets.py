@@ -124,6 +124,40 @@ def test_secret_value_envelope_disabled_env_still_writes_envelope(monkeypatch):
     ) == "sk-proj-tenant-rollback"
 
 
+def test_secret_binding_rejects_wrong_tenant_type_or_key(monkeypatch):
+    monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "tenant-binding-unit-secret")
+    from backend import secret_store
+    from backend import tenant_secrets as sec
+
+    secret_store._reset_for_tests()
+    stored = sec._encrypt_secret_value(
+        DEFAULT_TENANT,
+        "provider_key",
+        "openai",
+        "sk-bound",
+    )
+
+    with pytest.raises(ValueError, match="secret binding mismatch: tid"):
+        sec._decrypt_secret_value(stored, OTHER_TENANT, "provider_key", "openai")
+    with pytest.raises(ValueError, match="secret binding mismatch: typ"):
+        sec._decrypt_secret_value(stored, DEFAULT_TENANT, "custom", "openai")
+    with pytest.raises(ValueError, match="secret binding mismatch: key"):
+        sec._decrypt_secret_value(stored, DEFAULT_TENANT, "provider_key", "anthropic")
+
+
+def test_secret_carrier_rejects_malformed_payloads():
+    from backend import tenant_secrets as sec
+
+    with pytest.raises(ValueError, match="secret envelope must be an object"):
+        sec._load_secret_carrier("[]")
+    with pytest.raises(ValueError, match="unknown secret envelope format"):
+        sec._load_secret_carrier('{"fmt":999}')
+    with pytest.raises(ValueError, match="secret envelope missing ciphertext"):
+        sec._load_secret_carrier('{"fmt":1,"ciphertext":"","dek_ref":{}}')
+    with pytest.raises(ValueError, match="secret envelope missing dek_ref"):
+        sec._load_secret_carrier('{"fmt":1,"ciphertext":"cipher"}')
+
+
 @pytest.fixture()
 async def _secrets_db(pg_test_pool, monkeypatch):
     # Fresh slate per test; tenant_secrets.tenant_id has an FK to
