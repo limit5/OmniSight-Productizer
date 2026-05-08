@@ -6,6 +6,8 @@ only delay pickup by one runner tick.
 """
 from __future__ import annotations
 
+import re
+
 
 # OP-795 Bug 1: previous value `{"docs/sop/lessons/*.md"}` matched any open PS
 # touching any per-file lesson, blocking every other ticket as soon as one
@@ -36,3 +38,37 @@ SCOPE_TO_PATHS: dict[str, set[str]] = {
         "docs/sop/*.md",
     },
 }
+
+
+# OP-800: Files / Paths section parser, lifted out of jira_dispatch so it can
+# be reused by predict_target_files and any future cross-PS overlap callers
+# without an import-cycle. The token regex requires a literal `.` in the file
+# name, which structurally rejects bare globs like ``backend/**/*.py`` (the
+# Pattern 12 risk in OP-800 spec) — broad scope labels stay in
+# :data:`SCOPE_TO_PATHS`, never in a ticket's declared Files section.
+FILES_SECTION_RE = re.compile(
+    r"(?ims)^#{0,6}\s*Files\s*/\s*Paths\s*$\n(?P<body>.*?)(?=^#{1,6}\s+\S|\Z)"
+)
+PATH_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+"
+)
+
+
+def parse_files_section(description: str) -> set[str]:
+    """Extract concrete file paths from a ticket's ``Files / Paths`` section.
+
+    Captures paths with explicit extensions (incl. ones annotated ``(NEW)`` /
+    ``(new, ~250 LOC)`` — the annotation is just trailing text and does not
+    interfere with extraction). Bare globs lacking a literal ``.`` (e.g.
+    ``backend/**/*.py``) are rejected by ``PATH_TOKEN_RE`` to avoid the
+    Pattern 12 false-positive cited in OP-800's Risk section.
+    """
+    match = FILES_SECTION_RE.search(description or "")
+    if not match:
+        return set()
+    paths: set[str] = set()
+    for raw in PATH_TOKEN_RE.findall(match.group("body")):
+        token = raw.strip("`'\".,;:()[]{}<>")
+        if token and "://" not in token:
+            paths.add(token)
+    return paths
