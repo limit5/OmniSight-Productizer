@@ -1,1 +1,1 @@
-OP-704 smoke conflict variant A
+OP-704 live E2E smoke conflict variant A
