@@ -30,6 +30,7 @@ the fix from scratch — these patterns have already been costed.
 | 8 | [Worktree state-leak across ticks](#8-worktree-state-leak-across-ticks) | Half-done git operation from previous tick poisons next tick |
 | 9 | [Auto-resolver brittle to nested markers](#9-auto-resolver-brittle-to-nested-markers) | Regex resolver matches first conflict region, leaks remaining markers into commit |
 | 10 | [Migration ticket fighting in-flight tickets](#10-migration-ticket-fighting-in-flight-tickets) | Structural ticket lands while siblings still write old format |
+| 11 | [Self-referential text-match false positive](#11-self-referential-text-match-false-positive) | Bulk-action filter matches the meta-document about pattern X (which mentions X by name) |
 
 ---
 
@@ -295,11 +296,35 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 
 **Generalisation**: Any "we're rewriting how X works" ticket needs a freeze window. The freeze should be expressed as a label that automation honours, not a Slack message that humans hopefully read.
 
+
+## 11. Self-referential text-match false positive
+
+**Symptom**: A bulk-action filter that uses full-text search to identify tickets matching pattern X (e.g. `text ~ "refine before pickup"`) accidentally matches the META ticket *about* pattern X. The meta-ticket gets the bulk action applied to itself, often disabling its own ability to ship the fix.
+
+**Root cause**: Full-text JQL / grep matches on substring presence regardless of meaning. A ticket whose Goal is "build a script to handle the 'refine before pickup' placeholder pattern" contains the search term as its subject matter, not as a placeholder. The filter cannot distinguish "uses X" from "discusses X".
+
+**Cure**:
+1. **Whitelist the meta-document**: bulk-action scripts must exclude tickets whose body indicates discussion-of-pattern, e.g. `AND text !~ "META"`, `AND labels != "meta:about-pattern"`, or excluding paths under `docs/sop/`.
+2. **Negative match heuristic**: if ticket Goal section contains the placeholder phrase OR the ticket has more than one occurrence of the phrase (true placeholders are 1-shot insertions), skip from bulk action.
+3. **Two-stage filter**: bulk-action proposes targets first (dry-run output), operator eyeballs the list before committing the action. Self-references stand out at this review step.
+4. **Tag meta-tickets explicitly**: add a `meta:about-X` label when filing. Bulk-actions exclude this label class.
+
+**Examples**:
+- 2026-05-08 OP-781 (the AI-assisted refinement helper itself) was caught in the "refine before pickup" bulk-pause sweep — its description discusses the placeholder phrase as its subject, hitting the JQL filter. Required immediate manual restoration (Story type + label removal).
+- Hypothetical: a bulk-action over tickets that "mention `eslint`" would catch the ticket *about adding eslint*, possibly excluding it from a queue it needs to be in.
+
+**Reference tickets**: OP-737 (ticket creation helper — could grow detection logic for self-reference patterns), OP-781 (concrete instance + post-incident audit comment).
+
+**Generalisation**: Any time a tool decides "do X to all things matching pattern Y", consider whether the tool's own definition or test artifacts contain Y. Static rules of thumb:
+- Documentation files (`docs/sop/**`, ADRs, retrospectives) discuss patterns — they should rarely be touched by content-pattern bulk actions.
+- META tickets (label `priority:meta`) discuss children — children are the action targets, not the META.
+- Test fixtures often contain example bad data deliberately — exclude `*/tests/**`, `*/fixtures/**` paths from production-content scans.
+
 ---
 
 ## Cross-cutting principles
 
-After 10 patterns, common threads:
+After 11 patterns, common threads:
 
 1. **Idempotency is non-negotiable** for any retry-eligible operation.
 2. **Convergence over correctness-of-predecessor** for terminal events.
@@ -308,8 +333,9 @@ After 10 patterns, common threads:
 5. **Make the cure mechanical** (script / label / hook) so future tickets cannot accidentally re-enter the trap.
 6. **Validate post-resolution**, not just pre-input. (Pattern #9 caught after corrupt commit was already pushed.)
 7. **Migration is a state, not a moment** — has a beginning, freeze period, and end.
+8. **Filters cannot distinguish "uses X" from "discusses X"** — exclude documentation + META + test paths from content-pattern bulk actions. (Pattern #11.)
 
-If you see a new symptom not in this cookbook, file it as the 11th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
+If you see a new symptom not in this cookbook, file it as the 12th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
 
 ---
 
