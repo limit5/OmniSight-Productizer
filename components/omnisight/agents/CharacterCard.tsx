@@ -9,16 +9,20 @@
  */
 
 import {
+  Award,
   BrainCircuit,
   Code2,
+  Crown,
   Database,
   Gem,
+  GraduationCap,
   Laptop,
   Medal,
   ServerCog,
   Shield,
   Smartphone,
   Sparkles,
+  Trophy,
   Wrench,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
@@ -51,6 +55,7 @@ export interface CharacterCardProps {
   instanceSuffix?: string | null
   styleFingerprint?: string | null
   buffs?: readonly CharacterBuff[]
+  badges?: readonly CharacterBadge[]
 }
 
 export type CharacterBuffKind =
@@ -74,6 +79,26 @@ export interface CharacterBuff {
   polarity?: CharacterBuffPolarity | null
 }
 
+export type CharacterBadgeKind =
+  | "pr_merged_100"
+  | "regression_streak_30"
+  | "taught_agents_5"
+  | "campaign"
+  | "custom"
+
+export type CharacterBadgeRarity = "bronze" | "silver" | "gold" | "legendary"
+
+export interface CharacterBadge {
+  id?: string
+  kind: CharacterBadgeKind
+  label?: string | null
+  description?: string | null
+  earnedAt?: string | null
+  progressLabel?: string | null
+  rarity?: CharacterBadgeRarity | null
+  locked?: boolean | null
+}
+
 interface GuildVisual {
   label: string
   crestLabel: string
@@ -84,6 +109,12 @@ interface GuildVisual {
 }
 
 interface BuffVisual {
+  label: string
+  Icon: LucideIcon
+  toneClass: string
+}
+
+interface BadgeVisual {
   label: string
   Icon: LucideIcon
   toneClass: string
@@ -201,6 +232,45 @@ const BUFF_VISUALS: Record<CharacterBuffKind, BuffVisual> = {
   },
 }
 
+const BADGE_VISUALS: Record<CharacterBadgeKind, BadgeVisual> = {
+  pr_merged_100: {
+    label: "100 PRs Merged",
+    Icon: Trophy,
+    toneClass:
+      "border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  },
+  regression_streak_30: {
+    label: "30 Regression-Free",
+    Icon: Shield,
+    toneClass:
+      "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  },
+  taught_agents_5: {
+    label: "Taught 5 Agents",
+    Icon: GraduationCap,
+    toneClass:
+      "border-cyan-500/35 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300",
+  },
+  campaign: {
+    label: "Campaign Badge",
+    Icon: Crown,
+    toneClass:
+      "border-fuchsia-500/35 bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300",
+  },
+  custom: {
+    label: "Achievement",
+    Icon: Award,
+    toneClass: "border-muted-foreground/30 bg-muted/40 text-muted-foreground",
+  },
+}
+
+const BADGE_RARITY_CLASS: Record<CharacterBadgeRarity, string> = {
+  bronze: "after:bg-orange-500",
+  silver: "after:bg-slate-400",
+  gold: "after:bg-amber-500",
+  legendary: "after:bg-fuchsia-500",
+}
+
 function clampPercent(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(100, value))
@@ -231,6 +301,14 @@ function buffTitle(buff: CharacterBuff, fallbackLabel: string): string {
   return parts.join(" · ")
 }
 
+function badgeTitle(badge: CharacterBadge, fallbackLabel: string): string {
+  const parts = [badge.label?.trim() || fallbackLabel]
+  if (badge.description?.trim()) parts.push(badge.description.trim())
+  if (badge.earnedAt?.trim()) parts.push(`Earned ${badge.earnedAt.trim()}`)
+  if (badge.progressLabel?.trim()) parts.push(badge.progressLabel.trim())
+  return parts.join(" · ")
+}
+
 export function CharacterCard({
   agentId,
   displayName,
@@ -244,11 +322,13 @@ export function CharacterCard({
   instanceSuffix,
   styleFingerprint,
   buffs = [],
+  badges = [],
 }: CharacterCardProps): ReactElement {
   const visual = GUILD_VISUALS[guild] ?? GUILD_VISUALS.generalist
   const progress = getLevelProgressPercent(xp, nextLevelXp)
   const GuildIcon = visual.Icon
   const activeBuffs = buffs.filter((buff) => buff && BUFF_VISUALS[buff.kind])
+  const visibleBadges = badges.filter((badge) => badge && BADGE_VISUALS[badge.kind])
 
   return (
     <article
@@ -403,6 +483,60 @@ export function CharacterCard({
                 <span className="font-mono text-foreground">{styleFingerprint}</span>
               </span>
             </div>
+          ) : null}
+
+          {visibleBadges.length > 0 ? (
+            <section
+              aria-label="Achievement badge wall"
+              className="rounded-md border bg-background/50 p-3"
+              data-testid="character-card-badge-wall"
+            >
+              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground">
+                <Trophy className="size-3.5 text-amber-500" aria-hidden="true" />
+                Badge wall
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                {visibleBadges.map((badge, index) => {
+                  const badgeVisual = BADGE_VISUALS[badge.kind]
+                  const BadgeIcon = badgeVisual.Icon
+                  const label = badge.label?.trim() || badgeVisual.label
+                  const rarity = badge.rarity ?? "bronze"
+                  const rarityClass = BADGE_RARITY_CLASS[rarity] ?? BADGE_RARITY_CLASS.bronze
+                  const locked = badge.locked === true
+
+                  return (
+                    <div
+                      key={badge.id ?? `${badge.kind}-${index}`}
+                      aria-label={label}
+                      className={cn(
+                        "relative min-w-0 rounded-md border p-2 shadow-sm",
+                        "after:absolute after:right-2 after:top-2 after:size-1.5 after:rounded-full",
+                        badgeVisual.toneClass,
+                        rarityClass,
+                        locked && "opacity-45 grayscale",
+                      )}
+                      data-badge-kind={badge.kind}
+                      data-badge-rarity={rarity}
+                      data-badge-locked={locked ? "true" : "false"}
+                      data-testid="character-card-badge"
+                      title={badgeTitle(badge, badgeVisual.label)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <BadgeIcon className="size-4 shrink-0" aria-hidden="true" />
+                        <span className="min-w-0 truncate text-xs font-semibold leading-tight">
+                          {label}
+                        </span>
+                      </div>
+                      {badge.progressLabel?.trim() ? (
+                        <div className="mt-1 truncate font-mono text-[10px] opacity-75">
+                          {badge.progressLabel.trim()}
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
           ) : null}
         </div>
       </div>
