@@ -16,7 +16,7 @@ audit logger raises `audit_pool_not_initialised`, retries on a 1-s
 backoff, and the second attempt always succeeds.
 
 This is a known, documented boot-time race
-(`docs/sop/lessons-learned.md` family L18).
+(`docs/sop/lessons/L-OP-19-stream-consumers-need-catchup-plus-idempotency.md` family).
 
 In **default** T3 config (`configs/error_pager.yaml`), this code is
 **allow-listed with `suppress: true`** — meaning the journal

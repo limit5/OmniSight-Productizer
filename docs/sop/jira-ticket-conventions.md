@@ -247,7 +247,7 @@ When completing a task:
     `docs/sop/lessons/L-OP-<ticket>-<slug>.md` using the front-matter
     template at `docs/sop/lessons/_TEMPLATE.md`. Run
     `scripts/build_lessons_index.py` to regenerate
-    `docs/sop/lessons-learned.md` (the aggregated index is generated,
+    the aggregated lesson index (generated from `docs/sop/lessons/`,
     not hand-edited).
   - If a cross-ticket / cross-Phase retrospective is warranted: open
     docs/retrospectives/YYYY-MM-DD-<slug>.md and link from META ticket
@@ -384,7 +384,7 @@ The OP project workflow uses Japanese locale names for some states. The `auto-ru
 | Rejected | `却下` | 10018 | id=5 (Reject) |
 | Archived | `Archived` | 10017 | id=8 (Archive) — id=14 (Force Close) |
 
-JQL gotcha (per `lessons-learned.md` candidate L11): `issuetype = "ストーリー"` does NOT match Story-typed issues even though `/myself` API returns the localised name; use `issuetype = Story` (untranslated English) or `issuetype = 10006` (numeric).
+JQL gotcha (per `docs/sop/lessons/L-OP-247-repo-topology-drift-origin-github-vs-adr-0002-plan.md` candidate L11): `issuetype = "ストーリー"` does NOT match Story-typed issues even though `/myself` API returns the localised name; use `issuetype = Story` (untranslated English) or `issuetype = 10006` (numeric).
 
 ### 4-layer dependency enforcement
 
@@ -1157,6 +1157,6 @@ This document is **Draft** as of 2026-05-06. Acceptance requires:
 5. Skeleton (signatures only) for `scripts/jira_prereq_audit.py`, `scripts/jira_drift_detector.py`, `backend/agents/live_state_check.py`, `backend/agents/scheduler.py`
 6. Skeleton tests for `backend/tests/test_jira_prereq_integrity.py`, `backend/tests/test_scheduler.py`
 7. CLAUDE.md L1 amendment for HANDOFF.md replacement (§7)
-8. `docs/sop/lessons-learned.md` created with seed entries (lesson #1-6 from governance migration plan)
+8. `docs/sop/lessons/` populated with seed entries (lesson #1-6 from governance migration plan) and indexed by the generated lesson index
 
 After acceptance, status transitions to `Accepted`. Future amendments require META `meta:governance` ticket per §17.

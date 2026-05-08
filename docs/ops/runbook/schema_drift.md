@@ -81,8 +81,8 @@ human decision because the wrong direction loses data.
 
 * `docs/ops/upgrade_rollback_ledger.md` — was a recent rollback
   applied to code but not to DB?
-* `docs/sop/lessons-learned.md` — search for `schema_drift`
-  entries; this code has fired before.
+* `docs/sop/lessons/` — search for `schema_drift` entries; this code
+  has fired before.
 * `docs/ops/dependency_upgrade_runbook.md` §alembic — the order of
   operations for migration deploys.
 

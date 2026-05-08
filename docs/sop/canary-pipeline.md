@@ -125,7 +125,7 @@ one DEGRADED record per failed run.
 ## See also
 
 - `docs/sop/gerrit-jira-bridge.md` — the daemon under test
-- `docs/sop/lessons-learned.md` lesson 17 — the OP-708 webhook
-  auth-surface incident this canary defends against
+- `docs/sop/lessons/L-OP-708-webhook-endpoints-with-require-operator-signature-are-dual-g.md`
+  — the OP-708 webhook auth-surface incident this canary defends against
 - `scripts/prod_smoke_test.py` — sister synthetic-DAG smoke check
   for the backend HTTP path (does NOT cover the Gerrit pipeline)

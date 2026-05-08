@@ -18,7 +18,7 @@
       Paths**. The runner prompt converts `area:X` labels into:
       `Stay strictly within these boundaries. Do NOT introduce changes to
       <every-area-NOT-listed>.`
-      If AC says "Lesson appended to docs/sop/lessons-learned.md" but
+      If AC says "Lesson appended to the generated lesson index" but
       label is `area:backend` only, CLI will correctly halt as out-of-scope.
 
 ## Common multi-area patterns

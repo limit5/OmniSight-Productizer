@@ -189,7 +189,7 @@ The 1-week observation window is the key signal — if no regressions surface in
 - [x] `develop` branch seeded from local main → Gerrit → GitLab via replication push (2026-05-06)
 - [x] `main` branch seeded directly from local (2026-05-06; aligned with develop SHA)
 - [ ] GitLab repo settings: protected branches mirror Phase 1 config (deferred — operator decides timing)
-- [ ] Local `origin` remote re-pointed from GitHub → GitLab (deferred — see L11 in `lessons-learned.md`)
+- [ ] Local `origin` remote re-pointed from GitHub → GitLab (deferred — see `docs/sop/lessons/L-OP-247-repo-topology-drift-origin-github-vs-adr-0002-plan.md`)
 - [x] Operator (sora) + bots (claude-bot, codex-bot) have correct access — Maintainer on group, ACL on Gerrit project
 
 ### Step 2.2 — CI migration to GitLab CI

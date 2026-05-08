@@ -131,4 +131,4 @@ systemctl --user stop ci-worker
 - Sibling C1: Verified label setup (Gerrit `project.config`)
 - Sibling C3: OP-741 — Verified -1 recovery state machine
 - Sibling R5: AI Reviewer auto-+1 (`backend/agents/ai_reviewer.py`)
-- Lesson L26 — test-impact analysis rationale (`docs/sop/lessons-learned.md`)
+- Lesson L26 — test-impact analysis rationale (`docs/sop/lessons/L-OP-736-runner-git-operations-need-layered-cleanup-for-stuck-rebase.md`)

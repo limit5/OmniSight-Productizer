@@ -72,7 +72,7 @@ The watchdog promotes to `unit_not_loaded` (P0) only when
 
 | Symptom in `py-spy` dump | Likely cause | Reference |
 |--------------------------|--------------|-----------|
-| Stuck in `urllib`/`httpx` socket read | Upstream LLM / Gerrit hang | OP-689 family; `docs/sop/lessons-learned.md` L18 |
+| Stuck in `urllib`/`httpx` socket read | Upstream LLM / Gerrit hang | OP-689 family; `docs/sop/lessons/L-OP-689-gerrit-webhooks-plugin-v3-13-5-has-zero-auth-surface-op-689.md` |
 | Stuck in `asyncpg.acquire` | Connection pool exhausted | `docs/ops/observability_runbook.md` §pool |
 | Stuck in `_emit_heartbeat` itself | Heartbeat mutex deadlock | unusual — open a META ticket |
 | Process is gone / pid invalid | Watchdog config drift | check `log_path` in `configs/watchdog.yaml` |

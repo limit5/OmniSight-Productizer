@@ -48,13 +48,13 @@ def test_area_mismatch_warning_requires_force(monkeypatch) -> None:
     mod = _load_script()
     warning = mod.validate_areas_match_description(
         {"backend"},
-        "## Acceptance Criteria\n- [ ] Append docs/sop/lessons-learned.md\n",
+        "## Acceptance Criteria\n- [ ] Add docs/sop/lessons/L-OP-737-example.md\n",
     )
     assert warning
     assert "['docs']" in warning[0]
     assert "Runner CLI will halt" in warning[0]
 
-    description = "## Acceptance Criteria\n- [ ] Append docs/sop/lessons-learned.md\n"
+    description = "## Acceptance Criteria\n- [ ] Add docs/sop/lessons/L-OP-737-example.md\n"
     with pytest.raises(SystemExit) as exc:
         mod.file_ticket(_args(areas=["backend"]), description)
     assert "pass --force" in str(exc.value)
@@ -145,7 +145,7 @@ def test_valid_full_flow_posts_story(monkeypatch) -> None:
 
     key = mod.file_ticket(
         _args(areas=["backend", "docs", "tests"]),
-        "## Acceptance Criteria\n- [ ] Update docs/sop/lessons-learned.md\n"
+        "## Acceptance Criteria\n- [ ] Update docs/sop/lessons/L-OP-737-example.md\n"
         "## Files / Paths\n- backend/tests/test_file_jira_ticket.py\n",
     )
 

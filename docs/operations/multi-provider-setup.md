@@ -441,8 +441,8 @@ After recovery:
   the quota-update SSE frame are the durable record.
 - If the cap-hit was **unexpected** (accounting drift, duplicate
   events, vendor-side outage masquerading as a cap, an unintended
-  runaway dispatch), append a one-entry note to
-  `docs/sop/lessons-learned.md` per
+  runaway dispatch), create a per-ticket lesson file under
+  `docs/sop/lessons/` per
   [docs/sop/jira-ticket-conventions.md §14](../sop/jira-ticket-conventions.md)
   with Situation / Fix / Verification — vague "be more careful"
   entries are auto-rejected.
@@ -618,7 +618,7 @@ After the above lands:
   "Structural slot" → "First-class (v0.5.0)".
 - Update [ADR-0007 § Vendor capability matrix](/docs/adr/ADR-0007-multi-provider-subscription-orchestrator/#vendor-capability-matrix-for-routing-policy)
   to flip the Gemini "MVP?" cell.
-- Append a `lessons-learned.md` entry per
+- Create a per-ticket lesson file under `docs/sop/lessons/` per
   [docs/sop/jira-ticket-conventions.md §14](../sop/jira-ticket-conventions.md)
   if anything in the upgrade surprised the operator (cap-signal shape,
   CLI quirks, etc.).
@@ -798,7 +798,7 @@ After the above lands:
 - Update [ADR-0007 § Vendor capability matrix](/docs/adr/ADR-0007-multi-provider-subscription-orchestrator/#vendor-capability-matrix-for-routing-policy)
   to flip the xAI "MVP?" cell and replace the "undocumented" cap-signal
   cell with the contract shape settled in Step 2.
-- Append a `lessons-learned.md` entry per
+- Create a per-ticket lesson file under `docs/sop/lessons/` per
   [docs/sop/jira-ticket-conventions.md §14](../sop/jira-ticket-conventions.md)
   if anything in the upgrade surprised the operator (cap-signal shape,
   CLI quirks, capability rating reality vs ADR estimate, etc.).

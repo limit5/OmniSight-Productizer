@@ -220,5 +220,5 @@ working but T1 isn't — typically a missing env var. Fix per
 * `docs/sop/notifier-config.md` — T1 OP-722 operator SOP (channels,
   env vars, canary self-test).
 * `tests/test_journal_error_forwarder.py` — AC matrix.
-* `docs/sop/lessons-learned.md` Lesson 24 — the OP-689 silent-failure
-  pattern this whole META was built to close.
+* `docs/sop/lessons/L-OP-689-gerrit-webhooks-plugin-v3-13-5-has-zero-auth-surface-op-689.md`
+  — the OP-689 silent-failure pattern this whole META was built to close.

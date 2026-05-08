@@ -83,7 +83,7 @@ allow_list:
   # Daemon startup race: the worker pool isn't initialised yet when
   # the audit logger first fires. The audit logger retries with backoff
   # and the second attempt always succeeds. Documented in
-  # docs/sop/lessons-learned.md L18 family.
+  # docs/sop/lessons/L-OP-19-stream-consumers-need-catchup-plus-idempotency.md family.
   - code: audit_pool_not_initialised
     suppress: true
     note: |

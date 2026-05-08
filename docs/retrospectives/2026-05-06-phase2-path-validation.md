@@ -27,7 +27,7 @@ The original assumption (per my pre-session estimate, before reading context pro
 Actually completed all 6 items + bonus end-to-end smoke test in a single ~3-hour collaborative session.
 
 Two full review cycles ran successfully:
-- Change #22: smoke commit on lessons-learned.md → cross-bot codex +1 → sora +2 → Submit → propagated through Gerrit → GitLab → GitHub in <30s
+- Change #22: smoke commit on the generated lesson index → cross-bot codex +1 → sora +2 → Submit → propagated through Gerrit → GitLab → GitHub in <30s
 - Change #23: actual docs commit (L11-L13 lessons + Phase 2 status update) → same flow, all 3 endpoints aligned at `b646345910d6f8`
 
 ADR 0003 dual-sign gate empirically validated:
@@ -59,9 +59,9 @@ Three reasons the work went much faster than estimated:
 
 Captured during the session, all already merged via Gerrit cycle #23 (commit `b646345910d6`):
 
-- `docs/sop/lessons-learned.md` L11: repo topology drift documented
-- `docs/sop/lessons-learned.md` L12: replication.config templating gotchas
-- `docs/sop/lessons-learned.md` L13: credentials in secure.config not URL
+- `docs/sop/lessons/L-OP-247-repo-topology-drift-origin-github-vs-adr-0002-plan.md`: repo topology drift documented
+- `docs/sop/lessons/L-OP-247-gerrit-replication-config-templating-no-env-vars-no-case-tra.md`: replication.config templating gotchas
+- `docs/sop/lessons/L-OP-247-gerrit-credentials-in-url-is-wrong-use-secure-config.md`: credentials in secure.config not URL
 - `docs/sop/migration-plan-2026-05.md`: Phase 2 entry gate marked 5/6 satisfied + Step 2.1/2.3 marked partially done + new "Phase 2 status (2026-05-06)" section
 - OP-247 description (in JIRA): refreshed to reflect that infra prerequisites are done; only runner-side wiring remains
 
