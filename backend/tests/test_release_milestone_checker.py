@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "release_milestone_checker.py"
 SERVICE = REPO_ROOT / "deploy" / "systemd" / "release-milestone-checker.service"
 TIMER = REPO_ROOT / "deploy" / "systemd" / "release-milestone-checker.timer"
-ADR = REPO_ROOT / "docs" / "adr" / "0010-deployment-automation.md"
+ADR = REPO_ROOT / "docs" / "adr" / "ADR-0010-deployment-automation.md"
 LESSON = (
     REPO_ROOT
     / "docs"

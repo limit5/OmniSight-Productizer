@@ -13,7 +13,7 @@ from backend.agents import auto_tag_release as atr
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SERVICE = REPO_ROOT / "deploy" / "systemd" / "auto-tag-release.service"
-ADR = REPO_ROOT / "docs" / "adr" / "0011-sprint-d-implementation-plan.md"
+ADR = REPO_ROOT / "docs" / "adr" / "ADR-0011-sprint-d-implementation-plan.md"
 LESSON = (
     REPO_ROOT
     / "docs"

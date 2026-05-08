@@ -2,7 +2,7 @@
 
 **Scope**: operational steps to migrate from single-`master` direct-push to the 5-branch Git Flow + GitLab primary + Gerrit review topology decided in 2026-05-04 strategic session.
 
-**Authority**: this SOP implements [ADR 0001](../adr/0001-five-branch-gitflow.md) - [ADR 0005](../adr/0005-tier-authority-levels.md). If conflict, ADR wins; SOP is the operational steps not the decision record.
+**Authority**: this SOP implements [ADR 0001](/docs/adr/ADR-0001-five-branch-gitflow/) - [ADR 0005](/docs/adr/ADR-0005-tier-authority-levels/). If conflict, ADR wins; SOP is the operational steps not the decision record.
 
 **Phases**:
 - Phase 0 — design freeze + Track A/B/C baseline (in progress 2026-05-04)

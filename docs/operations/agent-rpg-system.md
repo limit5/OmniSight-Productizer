@@ -3,7 +3,7 @@
 > **Status**: v0.5.0 partial ship (RPG.W1-W11 core + W15-W16 + W19-W20
 > shipped; W12-W14 + W17 + W18 + W21 deferred). Last reviewed 2026-05-08.
 > **Authoritative spec**: [ADR-0008 — Agent RPG Class & Skill Leveling
-> System](../adr/0008-agent-rpg-class-skill-leveling.md). This doc covers
+> System](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/). This doc covers
 > *operation*, not design — when the two diverge, ADR-0008 wins and this
 > doc gets corrected.
 
@@ -363,7 +363,7 @@ either, treat the failure as an integrity issue, not a flake.
 ## Wave alignment with ADR-0008 (W1-W21)
 
 This table is the explicit pairing of W1-W21 across [TODO.md Priority
-RPG](../../TODO.md) and [ADR-0008 §Decision](../adr/0008-agent-rpg-class-skill-leveling.md#decision).
+RPG](../../TODO.md) and [ADR-0008 §Decision](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/#decision).
 Last verified 2026-05-08 (OP-169 / RPG.W11.4) — all 21 numbers and
 names align. If a future TODO edit renumbers or renames a wave, amend
 ADR-0008 and this table together; the operator guide must not be the
@@ -397,9 +397,9 @@ last surface to learn about the drift.
 
 ## Related
 
-- [ADR-0008 — Agent RPG Class & Skill Leveling](../adr/0008-agent-rpg-class-skill-leveling.md)
-- [ADR-0007 — Multi-Provider Subscription Orchestrator](../adr/0007-multi-provider-subscription-orchestrator.md) — `prefer_agent_id` routing input
-- [ADR-0005 — Tier S/M/L/X authority](../adr/0005-tier-authority-levels.md) — Tier gates feed off RPG level + skill (consumer side)
+- [ADR-0008 — Agent RPG Class & Skill Leveling](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/)
+- [ADR-0007 — Multi-Provider Subscription Orchestrator](/docs/adr/ADR-0007-multi-provider-subscription-orchestrator/) — `prefer_agent_id` routing input
+- [ADR-0005 — Tier S/M/L/X authority](/docs/adr/ADR-0005-tier-authority-levels/) — Tier gates feed off RPG level + skill (consumer side)
 - [`docs/operations/multi-provider-setup.md`](multi-provider-setup.md) — provider-side runbook (sister doc)
 - [`backend/agents/skill_matrix.yaml`](../../backend/agents/skill_matrix.yaml) — canonical skill registry
 - [TODO.md Priority RPG](../../TODO.md) — full W1-W21 implementation breakdown

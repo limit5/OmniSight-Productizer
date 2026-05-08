@@ -59,7 +59,7 @@ MP_ENABLED_ENV = "OMNISIGHT_MP_ENABLED"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _MODEL_MAPPING_PATH = _PROJECT_ROOT / "configs" / "model_mapping.yaml"
 _ADR_0007_PATH = (
-    _PROJECT_ROOT / "docs" / "adr" / "0007-multi-provider-subscription-orchestrator.md"
+    _PROJECT_ROOT / "docs" / "adr" / "ADR-0007-multi-provider-subscription-orchestrator.md"
 )
 _ADR_VENDOR_MATRIX_HEADING = "## Vendor capability matrix (for routing policy)"
 

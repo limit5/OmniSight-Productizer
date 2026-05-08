@@ -10,7 +10,7 @@ from backend.agents import auto_promote_main as apm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SERVICE = REPO_ROOT / "deploy" / "systemd" / "auto-promote-main.service"
-ADR = REPO_ROOT / "docs" / "adr" / "0010-deployment-automation.md"
+ADR = REPO_ROOT / "docs" / "adr" / "ADR-0010-deployment-automation.md"
 LESSON = (
     REPO_ROOT
     / "docs"

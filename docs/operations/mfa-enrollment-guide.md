@@ -233,8 +233,8 @@ This means the **breaking change for users without MFA** is a one-time forced en
 
 ## Related docs
 
-- [ADR 0003 — Gerrit code review](../adr/0003-gerrit-code-review.md) — `non-ai-reviewer` group requires MFA-enrolled humans
-- [ADR 0005 — Tier S/M/L/X authority](../adr/0005-tier-authority-levels.md) — Tier S whitelist allows AI self-+2 only on auth-clean changes
+- [ADR 0003 — Gerrit code review](/docs/adr/ADR-0003-gerrit-code-review/) — `non-ai-reviewer` group requires MFA-enrolled humans
+- [ADR 0005 — Tier S/M/L/X authority](/docs/adr/ADR-0005-tier-authority-levels/) — Tier S whitelist allows AI self-+2 only on auth-clean changes
 - [Phase 1-5 SOP](../sop/migration-plan-2026-05.md) — Phase D / Commercial Launch milestones
 - `governance/migration-plan-2026-05.md` Phase D — when SOC 2 prep starts
 - TODO Priority CL — Commercial Launch (currently 0% complete; SOC 2 prep is CL.1)

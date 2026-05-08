@@ -11,7 +11,7 @@ from backend.agents import release_notes_generator as rng
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SERVICE = REPO_ROOT / "deploy" / "systemd" / "release-notes-generator.service"
-ADR = REPO_ROOT / "docs" / "adr" / "0011-sprint-d-implementation-plan.md"
+ADR = REPO_ROOT / "docs" / "adr" / "ADR-0011-sprint-d-implementation-plan.md"
 LESSON = (
     REPO_ROOT
     / "docs"

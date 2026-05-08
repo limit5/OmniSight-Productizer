@@ -1,7 +1,7 @@
 # Multi-Provider Setup
 
 Operator-facing setup guide for the Multi-Provider Subscription Orchestrator
-([ADR-0007](../adr/0007-multi-provider-subscription-orchestrator.md)).
+([ADR-0007](/docs/adr/ADR-0007-multi-provider-subscription-orchestrator/)).
 
 This file is being built out across Priority MP, Week 4. Sections below
 either link to where the content currently lives or are reserved as
@@ -23,7 +23,7 @@ cost calibration.
 | xAI Grok              | SuperGrok              | **Structural slot** — adapter shell present, dispatch returns `{kind: 'not_ready'}`. UI sphere grayed-out with "Coming v0.6.0" tooltip. | MP.W14 (this section) |
 
 The capability matrix that drives routing decisions lives in
-[ADR-0007 § Vendor capability matrix](../adr/0007-multi-provider-subscription-orchestrator.md#vendor-capability-matrix-for-routing-policy).
+[ADR-0007 § Vendor capability matrix](/docs/adr/ADR-0007-multi-provider-subscription-orchestrator/#vendor-capability-matrix-for-routing-policy).
 That ADR is the single source of truth — this doc only covers
 operational steps.
 
@@ -496,7 +496,7 @@ surface — running through this list is what flips it on.
 Do not begin until **all** of the following are true:
 
 - v0.5.0 release branch has been cut from `develop`
-  (per [ADR-0001](../adr/0001-five-branch-gitflow.md)).
+  (per [ADR-0001](/docs/adr/ADR-0001-five-branch-gitflow/)).
 - ADR-0007 has an addendum (or successor ADR) that promotes Gemini's
   row in the Vendor capability matrix from "placeholder" to "✅" and
   records the dispatch / cap-signal contract Google ships with their
@@ -507,7 +507,7 @@ Do not begin until **all** of the following are true:
   blocker we are waiting on).
 - Operator has a Gemini Advanced *or* Code Assist subscription on the
   account that owns the OmniSight `git_accounts` row for Google
-  (see [Backend credentials model](../adr/0003-gerrit-code-review.md)
+  (see [Backend credentials model](/docs/adr/ADR-0003-gerrit-code-review/)
   context — credentials live in PG, not `.env`).
 
 ### Step 1 — Promote `agent_class` schema
@@ -616,7 +616,7 @@ After the above lands:
 
 - Move the Gemini row in the §Provider status snapshot table from
   "Structural slot" → "First-class (v0.5.0)".
-- Update [ADR-0007 § Vendor capability matrix](../adr/0007-multi-provider-subscription-orchestrator.md#vendor-capability-matrix-for-routing-policy)
+- Update [ADR-0007 § Vendor capability matrix](/docs/adr/ADR-0007-multi-provider-subscription-orchestrator/#vendor-capability-matrix-for-routing-policy)
   to flip the Gemini "MVP?" cell.
 - Append a `lessons-learned.md` entry per
   [docs/sop/jira-ticket-conventions.md §14](../sop/jira-ticket-conventions.md)
@@ -658,7 +658,7 @@ need to be re-added.
 Do not begin until **all** of the following are true:
 
 - v0.6.0 release branch has been cut from `develop`
-  (per [ADR-0001](../adr/0001-five-branch-gitflow.md)).
+  (per [ADR-0001](/docs/adr/ADR-0001-five-branch-gitflow/)).
 - ADR-0007 has an addendum (or successor ADR) that promotes Grok's
   row in the Vendor capability matrix from "placeholder" to "✅",
   records the dispatch / cap-signal contract xAI ships at that point,
@@ -669,7 +669,7 @@ Do not begin until **all** of the following are true:
   blocker we are waiting on).
 - Operator has a SuperGrok subscription on the account that owns the
   OmniSight `git_accounts` row for xAI (see
-  [Backend credentials model](../adr/0003-gerrit-code-review.md)
+  [Backend credentials model](/docs/adr/ADR-0003-gerrit-code-review/)
   context — credentials live in PG, not `.env`).
 
 ### Step 1 — Promote `agent_class` schema
@@ -795,7 +795,7 @@ After the above lands:
 
 - Move the xAI row in the §Provider status snapshot table from
   "Structural slot" → "First-class (v0.6.0)".
-- Update [ADR-0007 § Vendor capability matrix](../adr/0007-multi-provider-subscription-orchestrator.md#vendor-capability-matrix-for-routing-policy)
+- Update [ADR-0007 § Vendor capability matrix](/docs/adr/ADR-0007-multi-provider-subscription-orchestrator/#vendor-capability-matrix-for-routing-policy)
   to flip the xAI "MVP?" cell and replace the "undocumented" cap-signal
   cell with the contract shape settled in Step 2.
 - Append a `lessons-learned.md` entry per
@@ -807,8 +807,8 @@ After the above lands:
 
 ## Related
 
-- [ADR-0007 — Multi-Provider Subscription Orchestrator](../adr/0007-multi-provider-subscription-orchestrator.md)
-- [ADR-0008 — Agent RPG class & skill leveling](../adr/0008-agent-rpg-class-skill-leveling.md)
+- [ADR-0007 — Multi-Provider Subscription Orchestrator](/docs/adr/ADR-0007-multi-provider-subscription-orchestrator/)
+- [ADR-0008 — Agent RPG class & skill leveling](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/)
   (shares the `agent_class` schema)
 - [`config/agent_class_schema.yaml`](../../config/agent_class_schema.yaml)
   — single source of truth for agent_class values

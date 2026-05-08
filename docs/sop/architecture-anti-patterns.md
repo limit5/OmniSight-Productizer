@@ -36,7 +36,7 @@ the fix from scratch — these patterns have already been costed.
 
 ## 1. Numbered flat-file registry
 
-**Symptom**: Single mutable file (e.g. `lessons-learned.md`, `docs/adr/0010-*.md`,
+**Symptom**: Single mutable file (e.g. `lessons-learned.md`, `docs/adr/ADR-0010-*.md`,
 `backend/main.py` router list, `lib/api.ts` exports) with sequential identifiers
 or appended sections. Every new feature ticket touches it. Conflicts on every
 parallel pair of PSes.
