@@ -35,6 +35,32 @@ Environment=OMNISIGHT_GERRIT_SSH_HOST=claude-bot@sora.services
 Environment=OMNISIGHT_GERRIT_URL=https://sora.services:29420
 Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
 Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-claude-bot-ed25519
+; OP-722: operator-notifier bridge. Channels with missing config are
+; silently omitted (the JIRA channel is always wired since the bridge
+; already has dispatch creds). Edit each value to match operator's
+; ops budget — see docs/sop/notifier-config.md for the recipe.
+;
+; Default JIRA ticket the notifier comments on when notify() callers
+; do not specify their own ticket (e.g. daemon-level alerts).
+Environment=OMNISIGHT_NOTIFIER_JIRA_TICKET=OP-721
+Environment=OMNISIGHT_NOTIFIER_AGENT_CLASS=subscription-claude
+; Email (DEGRADED+). Leave SMTP_HOST empty to disable. Submission port
+; 587 is implied if you don't include `:port`.
+;Environment=OMNISIGHT_NOTIFIER_SMTP_HOST=smtp.mailgun.org
+;Environment=OMNISIGHT_NOTIFIER_SMTP_USER=postmaster@mg.example.com
+;Environment=OMNISIGHT_NOTIFIER_SMTP_PASSWORD=__rotate_me__
+;Environment=OMNISIGHT_NOTIFIER_SMTP_FROM=ops@example.com
+;Environment=OMNISIGHT_NOTIFIER_EMAIL_RECIPIENTS=oncall@example.com
+; Slack (CRITICAL/P0). Webhook URL carries auth.
+;Environment=OMNISIGHT_NOTIFIER_SLACK_WEBHOOK=https://hooks.slack.com/services/T.../B.../...
+; LINE Notify (CRITICAL/P0).
+;Environment=OMNISIGHT_NOTIFIER_LINE_TOKEN=__rotate_me__
+; Ack URL prefix — operator-notifier appends /<notification_id>.
+;Environment=OMNISIGHT_NOTIFIER_ACK_BASE_URL=https://ops.example.com/notifier/ack
+; Coalescing + re-page tunables (see notifier-config.md for trade-offs).
+;Environment=OMNISIGHT_NOTIFIER_DEDUP_WINDOW_SECONDS=300
+;Environment=OMNISIGHT_NOTIFIER_CRITICAL_REPAGE_SECONDS=600
+;Environment=OMNISIGHT_NOTIFIER_P0_REPAGE_SECONDS=300
 ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/run_gerrit_jira_bridge.py --agent-class subscription-claude
 Restart=always
 RestartSec=5
