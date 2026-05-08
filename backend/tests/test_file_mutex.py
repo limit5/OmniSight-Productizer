@@ -246,6 +246,64 @@ def test_synthetic_pickup_skips_colliding_ticket_and_picks_next(
     assert "[runner-file-mutex]" in calls["comments"][0][1]
 
 
+def test_dependency_blocked_candidate_gets_waiting_label_and_comment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_jira_runner()
+    calls: dict[str, list] = {"labels": [], "comments": []}
+    snapshot = _snapshot("OP-B")
+
+    monkeypatch.setattr(mod, "DRY_RUN", False)
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "pre_pickup_ok",
+        lambda c, s: (False, "blocked-by:OP-A blocked by OP-A (state=Under Review)"),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_label",
+        lambda c, k, label: calls["labels"].append((k, label)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_comment",
+        lambda c, k, text: calls["comments"].append((k, text)),
+    )
+
+    assert mod._check_pre_pickup_candidate(_client(), snapshot) is False
+
+    assert calls["labels"] == [("OP-B", "runner-blocked:waiting-OP-A")]
+    assert len(calls["comments"]) == 1
+    assert calls["comments"][0][0] == "OP-B"
+    assert "[runner-dependency-blocked]" in calls["comments"][0][1]
+    assert "blocked-by:OP-A" in calls["comments"][0][1]
+
+
+def test_dependency_waiting_label_removed_after_blocker_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_jira_runner()
+    removed: list[tuple[str, str]] = []
+    snapshot = _snapshot("OP-B", labels=("runner-blocked:waiting-OP-A", "scope:runner-pipeline"))
+
+    monkeypatch.setattr(mod, "DRY_RUN", False)
+    monkeypatch.setattr(mod.jira_dispatch, "pre_pickup_ok", lambda c, s: (True, "pre-pickup checks passed"))
+    monkeypatch.setattr(mod.jira_dispatch, "fetch_description", lambda c, k: "## Goal\n")
+    monkeypatch.setattr(mod.jira_dispatch, "file_mutex_check", lambda s, description=None: (True, "no collision"))
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "remove_label",
+        lambda c, k, label: removed.append((k, label)),
+    )
+
+    assert mod._check_pre_pickup_candidate(_client(), snapshot) is True
+
+    assert removed == [
+        ("OP-B", "runner-blocked:waiting-OP-A"),
+        ("OP-B", jd.FILE_COLLISION_SKIP_LABEL),
+    ]
+
+
 def test_runner_main_all_candidates_blocked_by_file_mutex_returns_zero(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
