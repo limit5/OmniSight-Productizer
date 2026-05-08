@@ -29,6 +29,7 @@ from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 from backend.config import settings
 from backend.agents.circuit_breaker import BREAKERS
@@ -37,6 +38,10 @@ from backend.agents.scheduler import TicketSnapshot
 from backend.agents.scope_to_paths import ALWAYS_TOUCHED, SCOPE_TO_PATHS
 
 log = logging.getLogger(__name__)
+
+MIGRATION_IN_FLIGHT_LABEL = "migration:in-flight"
+MIGRATION_OVERRIDE_LABEL = "migration:override"
+MIGRATION_SCOPE_PREFIX = "migration:scope="
 
 # ── Auth + config per agent_class ─────────────────────────────────
 
@@ -885,6 +890,14 @@ class GerritFileOwner:
     owner: str
 
 
+@dataclass(frozen=True)
+class MigrationFreeze:
+    """One active migration ticket and the path globs it freezes."""
+
+    key: str
+    scope_globs: tuple[str, ...]
+
+
 def parse_files_section_from_description(description: str) -> set[str]:
     """Extract path-looking tokens from the explicit ``Files / Paths`` section."""
     match = FILES_SECTION_RE.search(description or "")
@@ -969,6 +982,76 @@ def _paths_overlap(targets: set[str], in_flight: set[str]) -> set[str]:
             if target == path or fnmatch.fnmatch(path, target) or fnmatch.fnmatch(target, path):
                 overlaps.add(path)
     return overlaps
+
+
+def migration_scope_globs(labels: Iterable[str]) -> tuple[str, ...]:
+    """Extract ``migration:scope=<glob>`` labels from a JIRA label list."""
+    scopes: list[str] = []
+    for label in labels:
+        if label.startswith(MIGRATION_SCOPE_PREFIX):
+            scope = label[len(MIGRATION_SCOPE_PREFIX):].strip()
+            if scope:
+                scopes.append(scope)
+    return tuple(scopes)
+
+
+def find_active_migrations(
+    client: DispatchClient,
+    exclude_key: str,
+) -> list[MigrationFreeze]:
+    """Return active META migrations holding path-scope freeze labels."""
+    jql = (
+        f'project = "{client.project_key}" '
+        f'AND labels = "{MIGRATION_IN_FLIGHT_LABEL}" '
+        f'AND status not in ("Published", "公開済み", "Archived") '
+        f'AND key != "{exclude_key}"'
+    )
+    resp = _request(client, "POST", "/search/jql", {
+        "jql": jql,
+        "fields": ["labels", "status"],
+        "maxResults": 50,
+    })
+    migrations: list[MigrationFreeze] = []
+    for issue in resp.get("issues", []):
+        fields = issue.get("fields") or {}
+        scopes = migration_scope_globs(fields.get("labels") or [])
+        if scopes:
+            migrations.append(MigrationFreeze(key=issue.get("key", "?"), scope_globs=scopes))
+    return migrations
+
+
+def migration_freeze_check(
+    client: DispatchClient,
+    snapshot: TicketSnapshot,
+    description: str | None = None,
+) -> tuple[bool, str]:
+    """Gate pickup while a META migration freezes overlapping paths."""
+    target_paths = predict_target_files(snapshot, description=description)
+    active = find_active_migrations(client, exclude_key=snapshot.key)
+    for migration in active:
+        overlap = _paths_overlap(target_paths, set(migration.scope_globs))
+        if not overlap:
+            continue
+        first = sorted(overlap)[0]
+        if MIGRATION_OVERRIDE_LABEL in set(getattr(snapshot, "labels", ())):
+            add_comment(
+                client,
+                snapshot.key,
+                (
+                    "[runner-migration-override] migration:override bypassed "
+                    f"{migration.key} freeze for {first}."
+                ),
+                idem_key=f"migration-override-{snapshot.key}-{migration.key}",
+            )
+            return True, f"migration override: {migration.key} overlaps {first}"
+        add_comment(
+            client,
+            snapshot.key,
+            f"[runner-migration-freeze] paused — waiting on {migration.key} migration to complete",
+            idem_key=f"migration-freeze-{snapshot.key}-{migration.key}",
+        )
+        return False, f"migration freeze: {migration.key} overlaps {first}"
+    return True, "no active migration freeze"
 
 
 def file_mutex_check(
@@ -1089,6 +1172,10 @@ def pre_pickup_ok(
     from backend.agents.live_state_check import evaluate, all_passed, format_failures
     desc = fetch_description(client, snapshot.key)
     prereqs = parse_prerequisites(desc)
+
+    ok, reason = migration_freeze_check(client, snapshot, description=desc)
+    if not ok:
+        return False, reason
 
     # Live-state checks (§13)
     if prereqs.get("live_state_requires"):

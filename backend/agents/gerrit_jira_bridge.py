@@ -887,6 +887,13 @@ class GerritJiraBridge:
         }
         self.jira_request("POST", f"/issue/{ticket_key}/comment", body)
 
+    def remove_jira_label(self, ticket_key: str, label: str) -> None:
+        self.jira_request(
+            "PUT",
+            f"/issue/{ticket_key}",
+            {"update": {"labels": [{"remove": label}]}},
+        )
+
     def process_ticket_for_change(self, ticket_key: str, change_id: str) -> bool:
         lock = self._lock_for(ticket_key)
         with lock:
@@ -921,6 +928,7 @@ class GerritJiraBridge:
                 if status in APPROVED_STATUS_NAMES:
                     self.transition_ticket(ticket_key, "to_published")
                     self.counters.transitions_made += 1
+                    self.remove_jira_label(ticket_key, jira_dispatch.MIGRATION_IN_FLIGHT_LABEL)
                 else:
                     self.log(
                         "WARN",

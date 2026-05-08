@@ -54,7 +54,7 @@ class FakeBridge(bridge.GerritJiraBridge):
 
     def jira_request(self, method: str, path: str, body: dict[str, Any] | None = None, *, max_attempts: int = 3) -> dict[str, Any]:
         self.requests.append((method, path, body))
-        if path.endswith("/transitions") or path.endswith("/comment"):
+        if method == "PUT" or path.endswith("/transitions") or path.endswith("/comment"):
             return {}
         raise AssertionError(f"unexpected request: {method} {path}")
 
@@ -203,6 +203,19 @@ def test_approved_ticket_transitions_with_id_7_and_comment() -> None:
     assert ("POST", "/issue/OP-19/transitions", {"transition": {"id": "7"}}) in b.requests
     assert any(req[1] == "/issue/OP-19/comment" for req in b.requests)
     assert b.counters.transitions_made == 1
+
+
+def test_published_migration_removes_in_flight_label() -> None:
+    b = FakeBridge()
+    b.statuses["OP-752"] = "Approved"
+
+    assert b.process_ticket_for_change("OP-752", "Iabc12345")
+
+    assert (
+        "PUT",
+        "/issue/OP-752",
+        {"update": {"labels": [{"remove": jira_dispatch.MIGRATION_IN_FLIGHT_LABEL}]}},
+    ) in b.requests
 
 
 def test_stream_change_merged_fires_right_transition() -> None:
