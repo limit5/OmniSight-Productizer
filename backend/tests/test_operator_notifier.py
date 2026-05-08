@@ -21,13 +21,19 @@ from backend.agents.operator_notifier import (
     Notification,
     Notifier,
     NotifierConfig,
+    RateLimitConfig,
+    RateLimiter,
     Severity,
     SlackChannel,
     SmtpConfig,
     build_channels_from_env,
+    build_rate_limit_config_from_env,
     canary_self_test,
     channels_for,
+    default_rate_limit_config,
     format_text,
+    is_high_severity,
+    severity_tier,
 )
 
 
@@ -68,6 +74,7 @@ def _make_notifier(
     default_ticket: str | None = "OP-722",
     channels: dict | None = None,
     clock: FakeClock | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
 ) -> tuple[Notifier, FakeClock, dict[str, RecordingChannel]]:
     clk = clock or FakeClock(1_000_000.0)
     chans = channels or {
@@ -83,7 +90,15 @@ def _make_notifier(
         ack_base_url=ack_base,
         default_ticket=default_ticket,
     )
-    return Notifier(chans, cfg, clock=clk.now), clk, chans  # type: ignore[arg-type]
+    # Default to "no rate-limit" for OP-722 tests so the existing AC
+    # tests (which dispatch many DEGRADED bursts) remain insensitive
+    # to OP-755 enforcement. OP-755 tests construct their own config.
+    rl_cfg = rate_limit_config if rate_limit_config is not None else RateLimitConfig()
+    return (
+        Notifier(chans, cfg, clock=clk.now, rate_limit_config=rl_cfg),  # type: ignore[arg-type]
+        clk,
+        chans,
+    )
 
 
 # ── AC1: WARN → JIRA only ─────────────────────────────────────────
@@ -515,3 +530,365 @@ def test_immediate_repeat_does_not_dispatch_until_window_expires():
     clk.advance(31)
     n.flush_expired()  # past window → dispatch
     assert len(ch["jira"].calls) == 1
+
+
+# ── OP-755: grouping by (severity, scope, root_cause_key) ─────────
+
+
+def test_op755_ac1_grouping_default_window_is_300s():
+    """AC: grouping window default 5 min (300s) — matches OP-722
+    dedup_window_seconds default."""
+    cfg = NotifierConfig()
+    assert cfg.dedup_window_seconds == 300.0
+
+
+def test_op755_ac2_distinct_codes_collapse_under_same_root_cause_key():
+    """AC: alerts within window for same (severity, scope, root_cause_key)
+    collapse into 1 aggregated alert.
+
+    Distinct ``code`` values that all share the same
+    ``root_cause_key`` should fold into one outbound — this is the
+    feature that OP-755 adds on top of OP-722's strict (code, severity)
+    grouping."""
+    n, clk, ch = _make_notifier(dedup=300.0)
+    for i in range(5):
+        n.notify(
+            Severity.DEGRADED,
+            f"ingest-error-{i}",  # different code each call
+            f"event #{i}",
+            scope="runner-pipeline",
+            root_cause_key="ingest-cluster-down",
+        )
+        clk.advance(10)
+
+    # Within window → no dispatch yet.
+    assert ch["jira"].calls == []
+    # Past window → exactly one outbound, count=5.
+    clk.advance(301)
+    n.flush_expired()
+    assert len(ch["jira"].calls) == 1
+    payload = ch["jira"].calls[0]
+    assert payload.count == 5
+    assert payload.scope == "runner-pipeline"
+    assert payload.root_cause_key == "ingest-cluster-down"
+
+
+def test_op755_distinct_scope_does_not_collapse():
+    """Same severity and root_cause_key but different scope → two
+    distinct outbound. Scope is part of the grouping key."""
+    n, _, ch = _make_notifier(dedup=60.0)
+    n.notify(Severity.DEGRADED, "x", "m", scope="runner-pipeline", root_cause_key="rk")
+    n.notify(Severity.DEGRADED, "x", "m", scope="ingest-pipeline", root_cause_key="rk")
+    n.flush_all()
+    scopes = sorted(c.scope for c in ch["jira"].calls)
+    assert scopes == ["ingest-pipeline", "runner-pipeline"]
+
+
+def test_op755_distinct_root_cause_key_does_not_collapse():
+    """Same severity and scope but different root_cause_key → two
+    distinct outbound. Root cause key is part of the grouping key."""
+    n, _, ch = _make_notifier(dedup=60.0)
+    n.notify(Severity.DEGRADED, "x", "m", scope="s", root_cause_key="rk-A")
+    n.notify(Severity.DEGRADED, "x", "m", scope="s", root_cause_key="rk-B")
+    n.flush_all()
+    rcks = sorted(c.root_cause_key for c in ch["jira"].calls)
+    assert rcks == ["rk-A", "rk-B"]
+
+
+def test_op755_distinct_severity_does_not_collapse():
+    """Severity remains part of the grouping key — a WARN and a
+    DEGRADED with identical scope+root_cause_key still split."""
+    n, _, ch = _make_notifier(dedup=60.0)
+    n.notify(Severity.WARN, "x", "m", scope="s", root_cause_key="rk")
+    n.notify(Severity.DEGRADED, "x", "m", scope="s", root_cause_key="rk")
+    n.flush_all()
+    severities = sorted(c.severity.value for c in ch["jira"].calls)
+    assert severities == ["DEGRADED", "WARN"]
+
+
+def test_op755_legacy_callers_without_scope_keep_op722_behavior():
+    """OP-722 callers that pass no scope/root_cause_key get the same
+    (code, severity) grouping as before — proves backward compat."""
+    n, _, ch = _make_notifier(dedup=60.0)
+    n.notify(Severity.DEGRADED, "code-A", "m1")
+    n.notify(Severity.DEGRADED, "code-A", "m2")
+    n.notify(Severity.DEGRADED, "code-B", "m3")
+    n.flush_all()
+    codes = sorted(c.code for c in ch["jira"].calls)
+    assert codes == ["code-A", "code-B"]
+    a = next(c for c in ch["jira"].calls if c.code == "code-A")
+    assert a.count == 2  # two code-A calls collapsed
+
+
+# ── OP-755 AC3: aggregated alert format ───────────────────────────
+
+
+def test_op755_ac3_aggregated_format_header_on_count_gt_one():
+    """AC: aggregated body = `[N events in M min] severity=<tier>
+    scope=<scope> sample-event=<code>`."""
+    n, clk, ch = _make_notifier(dedup=300.0)
+    for _ in range(3):
+        n.notify(
+            Severity.CRITICAL,
+            "rk-event",
+            "the system is on fire",
+            scope="runner-pipeline",
+            root_cause_key="rk",
+        )
+        clk.advance(5)
+    clk.advance(301)
+    n.flush_expired()
+
+    body = format_text(ch["slack"].calls[0])
+    # Header line is the first line.
+    first_line = body.splitlines()[0]
+    assert "[3 events in 5 min]" in first_line
+    assert "severity=high" in first_line
+    assert "scope=runner-pipeline" in first_line
+    assert "sample-event=rk-event" in first_line
+
+
+def test_op755_no_aggregated_header_on_single_event():
+    """count=1 dispatches must NOT carry the aggregated header — only
+    ``[<SEV>] <code>: <message>`` exactly as OP-722 emitted."""
+    n, _, ch = _make_notifier(dedup=1.0)
+    n.notify(Severity.WARN, "single", "one event")
+    n.flush_all()
+    body = format_text(ch["jira"].calls[0])
+    assert "events in" not in body
+    assert body.startswith("[WARN] single: one event")
+
+
+def test_op755_aggregated_format_uses_severity_tier_label():
+    """Header ``severity=`` field renders the tier (low/medium/high),
+    not the enum value."""
+    n, clk, ch = _make_notifier(dedup=60.0)
+    for _ in range(2):
+        n.notify(Severity.DEGRADED, "x", "m", scope="s", root_cause_key="rk")
+        clk.advance(5)
+    clk.advance(61)
+    n.flush_expired()
+    body = format_text(ch["jira"].calls[0])
+    assert "severity=medium" in body.splitlines()[0]
+
+
+# ── OP-755 AC4: per-channel rate limit ────────────────────────────
+
+
+def test_op755_ac4_medium_severity_rate_limited_to_5_per_15min():
+    """AC: max 5 alerts / 15min for medium severity (per channel).
+
+    Default rate-limit config is medium = 5/900s. The 6th medium burst
+    in a 15min window must be dropped on every channel."""
+    n, clk, ch = _make_notifier(
+        dedup=1.0,
+        rate_limit_config=default_rate_limit_config(),
+    )
+    # Six DEGRADED bursts on six distinct root_cause_keys → six
+    # distinct dispatches.
+    for i in range(6):
+        n.notify(
+            Severity.DEGRADED, f"code-{i}", "m",
+            scope="s", root_cause_key=f"rk-{i}",
+        )
+        clk.advance(2)
+        n.flush_expired()
+    # 5 dispatched, 6th rate-limited on every wired channel.
+    assert len(ch["jira"].calls) == 5
+    assert len(ch["email"].calls) == 5
+
+    # After 15-minute window expires, a fresh dispatch is allowed again.
+    clk.advance(901)
+    n.notify(Severity.DEGRADED, "recover", "m", scope="s", root_cause_key="rk-recover")
+    clk.advance(2)
+    n.flush_expired()
+    assert len(ch["jira"].calls) == 6
+
+
+def test_op755_ac4_rate_limit_per_channel_independent():
+    """A per-channel override on Slack must not leak to Email.
+
+    Configure slack to medium=2/900s but leave the wildcard at 10/900s.
+    On the 3rd burst, Slack is dropped but Email still sends."""
+    rl = RateLimitConfig(rules={
+        ("*", "medium"): (10, 900.0),
+        ("slack", "medium"): (2, 900.0),
+    })
+    n, clk, ch = _make_notifier(dedup=1.0, rate_limit_config=rl)
+    # CRITICAL bypasses rate limit entirely — use DEGRADED channels
+    # (jira+email) for this test instead.
+    # But we need a slack-routed severity. CRITICAL/P0 bypass per spec.
+    # Solution: build a custom RateLimiter and exercise allow() directly.
+    rl_inst = RateLimiter(rl)
+    assert rl_inst.allow("slack", Severity.DEGRADED) is True   # 1
+    assert rl_inst.allow("slack", Severity.DEGRADED) is True   # 2
+    assert rl_inst.allow("slack", Severity.DEGRADED) is False  # 3 dropped
+    # Email under the same severity still has 10-bucket headroom.
+    assert rl_inst.allow("email", Severity.DEGRADED) is True
+    # Touch ch so flake8/pyflakes don't drop the assignment in --strict.
+    _ = (n, clk, ch)
+
+
+def test_op755_ac5_high_severity_bypasses_rate_limit():
+    """AC: High severity (CRITICAL, P0) bypasses rate-limit but still
+    dedupes.
+
+    Even with a draconian medium=1/900s + low=1/900s config, CRITICAL
+    must dispatch every time (each on a different root_cause_key)."""
+    rl = RateLimitConfig(rules={
+        ("*", "low"): (1, 900.0),
+        ("*", "medium"): (1, 900.0),
+    })
+    n, clk, ch = _make_notifier(dedup=1.0, rate_limit_config=rl)
+    for i in range(10):
+        n.notify(
+            Severity.CRITICAL, f"page-{i}", "m",
+            scope="s", root_cause_key=f"rk-{i}",
+        )
+        clk.advance(2)
+        n.flush_expired()
+    assert len(ch["slack"].calls) == 10
+    assert len(ch["line"].calls) == 10
+
+
+def test_op755_high_severity_still_dedupes():
+    """AC: high-severity bypass applies to dispatch, not to grouping.
+    Five CRITICAL calls on the same root_cause_key in the window
+    collapse to one outbound carrying count=5."""
+    rl = RateLimitConfig()  # no rate limits at all
+    n, clk, ch = _make_notifier(dedup=60.0, rate_limit_config=rl)
+    for _ in range(5):
+        n.notify(
+            Severity.CRITICAL, "page-x", "m",
+            scope="s", root_cause_key="rk-shared",
+        )
+        clk.advance(5)
+    clk.advance(61)
+    n.flush_expired()
+    assert len(ch["slack"].calls) == 1
+    assert ch["slack"].calls[0].count == 5
+
+
+def test_op755_p0_bypasses_rate_limit():
+    """P0 is also "high" tier — must bypass alongside CRITICAL."""
+    rl = RateLimitConfig(rules={("*", "medium"): (1, 900.0)})
+    rl_inst = RateLimiter(rl)
+    assert rl_inst.allow("slack", Severity.P0) is True
+    assert rl_inst.allow("slack", Severity.P0) is True
+    assert rl_inst.allow("slack", Severity.P0) is True
+
+
+def test_op755_low_severity_unlimited_by_default():
+    """Default config rate-limits medium only; WARN must always pass."""
+    rl_inst = RateLimiter(default_rate_limit_config())
+    for _ in range(50):
+        assert rl_inst.allow("jira", Severity.WARN) is True
+
+
+def test_op755_rate_limited_drop_recorded_on_payload_context():
+    """When a dispatch is rate-limit-dropped on some channels, the
+    payload context records the dropped channel names for observability
+    — operators can grep ``_rate_limited_channels`` in JIRA threads."""
+    # Saturate JIRA to 1/900s, leave email open.
+    rl = RateLimitConfig(rules={
+        ("jira", "medium"): (1, 900.0),
+    })
+    n, clk, ch = _make_notifier(dedup=1.0, rate_limit_config=rl)
+    n.notify(Severity.DEGRADED, "a", "m1", scope="s", root_cause_key="rk-a")
+    clk.advance(2)
+    n.flush_expired()
+    # First burst: jira accepts, email accepts.
+    assert len(ch["jira"].calls) == 1
+    assert len(ch["email"].calls) == 1
+
+    n.notify(Severity.DEGRADED, "b", "m2", scope="s", root_cause_key="rk-b")
+    clk.advance(2)
+    n.flush_expired()
+    # Second burst: jira dropped, email still sent.
+    assert len(ch["jira"].calls) == 1  # unchanged
+    assert len(ch["email"].calls) == 2
+    second = ch["email"].calls[1]
+    assert second.context.get("_rate_limited_channels") == "jira"
+
+
+# ── OP-755 AC6: configurability ───────────────────────────────────
+
+
+def test_op755_ac6_rate_limits_configurable_via_env_default():
+    """AC: thresholds configurable per channel.
+
+    Default env (no overrides) yields medium=5/900 wildcard."""
+    cfg = build_rate_limit_config_from_env(env={})
+    assert cfg.limit_for("slack", "medium") == (5, 900.0)
+    assert cfg.limit_for("jira", "medium") == (5, 900.0)
+    # Low is unconfigured by default.
+    assert cfg.limit_for("slack", "low") is None
+
+
+def test_op755_rate_limits_configurable_via_env_overrides():
+    env = {
+        "OMNISIGHT_NOTIFIER_RATE_LIMIT_MEDIUM": "10/600",
+        "OMNISIGHT_NOTIFIER_RATE_LIMIT_LOW": "30/900",
+        "OMNISIGHT_NOTIFIER_RATE_LIMIT_SLACK_MEDIUM": "2/900",
+    }
+    cfg = build_rate_limit_config_from_env(env=env)
+    # Wildcard defaults applied to channels with no override.
+    assert cfg.limit_for("jira", "medium") == (10, 600.0)
+    assert cfg.limit_for("jira", "low") == (30, 900.0)
+    # Per-channel override beats wildcard.
+    assert cfg.limit_for("slack", "medium") == (2, 900.0)
+    # Channels not overridden still see the wildcard.
+    assert cfg.limit_for("email", "medium") == (10, 600.0)
+
+
+def test_op755_rate_limit_invalid_spec_falls_back_silently():
+    """An unparseable spec is logged and ignored — the env var must not
+    block notifier startup. Empty string disables the medium default."""
+    env = {
+        "OMNISIGHT_NOTIFIER_RATE_LIMIT_MEDIUM": "not-a-spec",
+    }
+    cfg = build_rate_limit_config_from_env(env=env)
+    # No medium rule in the resolved config (the default was overridden
+    # by an invalid spec, which parses to None).
+    assert cfg.limit_for("slack", "medium") is None
+
+
+def test_op755_rate_limit_zero_or_negative_disables_rule():
+    """A spec with ``count <= 0`` or ``window <= 0`` is treated as
+    "no rule" (unlimited), not "always block"."""
+    env = {"OMNISIGHT_NOTIFIER_RATE_LIMIT_MEDIUM": "0/900"}
+    cfg = build_rate_limit_config_from_env(env=env)
+    assert cfg.limit_for("slack", "medium") is None
+
+
+def test_op755_severity_tier_mapping():
+    """Stable mapping from Severity to tier label used by both the
+    aggregated header and rate-limit config."""
+    assert severity_tier(Severity.WARN) == "low"
+    assert severity_tier(Severity.DEGRADED) == "medium"
+    assert severity_tier(Severity.CRITICAL) == "high"
+    assert severity_tier(Severity.P0) == "high"
+    assert is_high_severity(Severity.CRITICAL) is True
+    assert is_high_severity(Severity.P0) is True
+    assert is_high_severity(Severity.DEGRADED) is False
+    assert is_high_severity(Severity.WARN) is False
+
+
+def test_op755_rate_limit_window_pruning_after_expiry():
+    """Sliding window — after entries expire, the bucket recovers
+    capacity. Without pruning, the bucket would block forever."""
+    clk = FakeClock(0.0)
+    rl = RateLimiter(
+        RateLimitConfig(rules={("*", "medium"): (3, 100.0)}),
+        clock=clk.now,
+    )
+    # Saturate.
+    assert rl.allow("slack", Severity.DEGRADED) is True   # t=0
+    clk.advance(10)
+    assert rl.allow("slack", Severity.DEGRADED) is True   # t=10
+    clk.advance(10)
+    assert rl.allow("slack", Severity.DEGRADED) is True   # t=20
+    assert rl.allow("slack", Severity.DEGRADED) is False  # t=20 — saturated
+    # Advance past the t=0 entry's expiry; bucket size drops to 2.
+    clk.advance(91)  # now t=111, cutoff=11 → t=0 dropped, t=10 dropped
+    assert rl.allow("slack", Severity.DEGRADED) is True   # accepted

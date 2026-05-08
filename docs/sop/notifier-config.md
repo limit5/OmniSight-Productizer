@@ -1,11 +1,12 @@
-# Operator Notifier — Configuration SOP (OP-722)
+# Operator Notifier — Configuration SOP (OP-722, OP-755)
 
 The operator notifier (`backend/agents/operator_notifier.py`) is the
 single fan-out layer for every operator-facing alert in OmniSight: JIRA
 events, daemon errors, scanner output. This doc walks an operator
 through wiring it up.
 
-> META ticket: OP-721. Foundation ticket: OP-722.
+> META ticket: OP-721. Foundation ticket: OP-722. Anti-flood
+> extension: OP-755 (alert grouping + per-channel rate-limit).
 
 ## 1. Severity → channel matrix
 
@@ -36,9 +37,12 @@ All read from the process environment on first call. The systemd unit
 | `OMNISIGHT_NOTIFIER_SLACK_WEBHOOK`             | Slack              | Slack incoming-webhook URL. URL carries auth.                |
 | `OMNISIGHT_NOTIFIER_LINE_TOKEN`                | LINE               | LINE Notify bearer token (per-recipient).                    |
 | `OMNISIGHT_NOTIFIER_ACK_BASE_URL`              | CRITICAL/P0 ack    | Notifier appends `/<notification_id>` for the ack URL.       |
-| `OMNISIGHT_NOTIFIER_DEDUP_WINDOW_SECONDS`      | tuning             | Default 300s. See §4 for the latency trade-off.              |
+| `OMNISIGHT_NOTIFIER_DEDUP_WINDOW_SECONDS`      | tuning             | Default 300s. Doubles as the OP-755 grouping window.         |
 | `OMNISIGHT_NOTIFIER_CRITICAL_REPAGE_SECONDS`   | tuning             | Default 600s.                                                |
 | `OMNISIGHT_NOTIFIER_P0_REPAGE_SECONDS`         | tuning             | Default 300s.                                                |
+| `OMNISIGHT_NOTIFIER_RATE_LIMIT_MEDIUM`         | OP-755 anti-flood  | `COUNT/WINDOW`, default `5/900` (5 alerts / 15min).          |
+| `OMNISIGHT_NOTIFIER_RATE_LIMIT_LOW`            | OP-755 anti-flood  | `COUNT/WINDOW` for `WARN`. Empty = unlimited (default).      |
+| `OMNISIGHT_NOTIFIER_RATE_LIMIT_<CHAN>_<TIER>`  | OP-755 anti-flood  | Per-channel override, e.g. `..._SLACK_MEDIUM=10/900`.        |
 
 ## 3. Channel-by-channel setup
 
@@ -116,6 +120,89 @@ Worst-case dispatch delay = `OMNISIGHT_NOTIFIER_DEDUP_WINDOW_SECONDS`.
 The dispatch loop in long-lived processes runs every 5s, so a 5s
 window means worst-case ~10s end-to-end (5s wait + 5s polling slack).
 
+## 4a. Grouping & rate-limit (OP-755)
+
+OP-722's dedup collapses on `(code, severity)`; OP-755 generalises this
+to `(severity, scope, root_cause_key)` so events that share a root
+cause but emit slightly-different `code` values still fold into a
+single aggregated alert during a cascade.
+
+### Caller API
+
+Pass `scope=` and `root_cause_key=` on the `notify()` call:
+
+```python
+from backend.agents.operator_notifier import notify, Severity
+
+notify(
+    Severity.DEGRADED,
+    code="ingest:scanner-503",        # the actual event identifier
+    message="scanner returned 503",
+    scope="runner-pipeline",          # subsystem / pipeline name
+    root_cause_key="ingest-cluster-down",  # the underlying cause
+)
+```
+
+Five calls within the dedup window with these `(severity, scope,
+root_cause_key)` values — even with five different `code`s — collapse
+into ONE outbound carrying `count=5`.
+
+Legacy callers (no `scope` / `root_cause_key`) keep the OP-722
+`(code, severity)` grouping unchanged: `root_cause_key` defaults to
+`code`, `scope` to `"global"`.
+
+### Aggregated alert format
+
+When `count > 1`, the dispatched body is prefixed with the OP-755
+header:
+
+```
+[5 events in 5 min] severity=high scope=runner-pipeline sample-event=ingest:scanner-503
+[CRITICAL] ingest:scanner-503: scanner returned 503
+(suppressed 4 duplicates within dedup window; count=5)
+Context:
+  ...
+Ack: https://ops.example.com/ack/<id>
+id=<id>
+```
+
+The `severity=` field shows the tier label (`low` / `medium` / `high`)
+not the enum value. `sample-event=` is the most recent `code` observed
+under the group.
+
+### Rate-limit (per channel × tier)
+
+The notifier enforces a sliding-window rate-limit per `(channel,
+severity-tier)`. CRITICAL and P0 (high tier) **always bypass** the
+rate-limit but still dedupe — high-severity alerts must not be
+silenced.
+
+Defaults:
+
+| Tier   | Channels               | Default rule  |
+|--------|------------------------|---------------|
+| low    | (whatever WARN routes) | unlimited     |
+| medium | every wired channel    | 5 per 15 min  |
+| high   | every wired channel    | bypassed      |
+
+Override the wildcard with `OMNISIGHT_NOTIFIER_RATE_LIMIT_MEDIUM` /
+`..._LOW` (`COUNT/WINDOW`, e.g. `10/600`). Override per channel with
+`OMNISIGHT_NOTIFIER_RATE_LIMIT_<CHAN>_<TIER>`. Per-channel beats
+wildcard. An invalid spec is logged and treated as "no rule"
+(unlimited).
+
+When a dispatch is dropped on some channels, the surviving channels
+still see the payload, and the dropped channel names are recorded on
+`payload.context["_rate_limited_channels"]` for observability.
+
+### Future Settings UI
+
+The frontend Settings page is expected to read/write these thresholds.
+The backend exposes the structure as `RateLimitConfig` (see
+`backend/agents/operator_notifier.py`), populated today from env
+vars; a future ticket replaces the env-var loader with a database
+read so the UI can edit them at runtime.
+
 ## 5. Acknowledgement loop
 
 CRITICAL and P0 carry an ack URL of the form
@@ -161,6 +248,11 @@ from backend.agents.operator_notifier import notify, acknowledge, Severity
 # Normal usage — convenience wrapper around the lazy module-level singleton.
 notify(Severity.WARN, "ingest:slow", "ingest queue lag > 30s",
        context={"queue_depth": 412}, ticket="OP-700")
+
+# OP-755: opt into broader grouping by passing scope + root_cause_key.
+notify(Severity.DEGRADED, "ingest:scanner-503",
+       "scanner 503", scope="runner-pipeline",
+       root_cause_key="ingest-cluster-down")
 
 # CRITICAL — fans out to every wired channel and starts the re-page clock.
 n = notify(Severity.CRITICAL, "scanner:db-down", "ingest scanner cannot reach db")
