@@ -1,0 +1,83 @@
+; OP-724 — ERROR-level journal → pager forwarder (META OP-721 T3).
+;
+; Long-running daemon. Tails the systemd journal for ERROR / CRIT /
+; ALERT records emitted by units listed in configs/error_pager.yaml,
+; classifies them, and routes survivors through T1 OP-722's operator
+; notifier. The pipeline is documented at the top of
+; scripts/journal_error_forwarder.py.
+;
+; Install (system-scope so we can read the system journal — backend +
+; worker units are system-scope; user-scope units like
+; gerrit-jira-bridge are reachable via journalctl --user-unit, which
+; the forwarder dispatches per configs/error_pager.yaml::units[].scope):
+;
+;   sudo cp deploy/systemd/omnisight-journal-error-forwarder.service \
+;           /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now omnisight-journal-error-forwarder.service
+;
+; AC #4 — "Forwarder itself crashes → systemd restarts, no log loss
+; > 10s" — is the load-bearing part of this unit. The contract:
+;
+;   1. Restart=always — a Python crash AND a clean exit are both
+;      restarted (the latter matters because a SIGPIPE on journalctl's
+;      stdout returns 0 from the python side; without `always` we'd
+;      silently stop forwarding).
+;   2. RestartSec=5 — restart in ≤ 5s. Combined with our 60s journal
+;      buffer plus the cursor-file resume in the python side, the
+;      worst-case "log loss" window is the 5s RestartSec gap, well
+;      under AC #4's 10s budget.
+;   3. StartLimitBurst=10 / StartLimitIntervalSec=600 — caps a
+;      permabug loop at 10 restarts in 10 min, after which systemd
+;      gives up. The watchdog (T2 OP-723) detects the silence on its
+;      next 5-min tick and pages the operator a different way.
+;   4. StandardError=journal — the python crash traceback lands in
+;      journald; the forwarder won't catch its own crash (it's dead
+;      at that point) but the operator can `journalctl -u
+;      omnisight-journal-error-forwarder` to root-cause.
+
+[Unit]
+Description=OmniSight ERROR-level journal forwarder (OP-724 / META OP-721 T3)
+Documentation=https://soraapp.atlassian.net/browse/OP-724
+After=network-online.target systemd-journald.service
+Wants=network-online.target
+Requires=systemd-journald.service
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=exec
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONPATH=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/user/work/sora/OmniSight-Productizer/scripts/journal_error_forwarder.py --config /home/user/work/sora/OmniSight-Productizer/configs/error_pager.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+
+; AC #4 — see file header. RestartSec=5 + cursor-file resume gives a
+; bounded ≤ 10s log-loss window; Restart=always covers both crashes
+; AND clean exits (e.g. journalctl SIGPIPE).
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+; SIGTERM gives daemon.request_stop a chance to flush in-flight T1
+; bursts (Pipeline.flush -> Notifier.flush_all) before exit. Without
+; this, a clean systemctl stop would lose the residual count from any
+; coalesced burst whose dedup window hadn't yet elapsed.
+KillSignal=SIGTERM
+SendSIGKILL=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=omnisight-journal-error-forwarder
+
+; The cursor file path matches configs/error_pager.yaml::cursor_file.
+; StateDirectory creates /var/lib/omnisight/ at unit start with the
+; right ownership so the python side can write the cursor without
+; needing root or pre-existing-dir handling.
+StateDirectory=omnisight
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target
