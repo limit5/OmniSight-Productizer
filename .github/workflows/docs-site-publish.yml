@@ -55,6 +55,14 @@ jobs:
       - name: build static docs site
         run: python -m backend.docs_static_site --out docs-site-dist
 
+      # OP-793 — copy the GitHub Pages custom-domain marker into the
+      # published artifact. Source-of-truth lives at docs-site/docs/CNAME so
+      # it is forward-compatible with the eventual `mkdocs build` migration
+      # (ADR-0013). The current hand-rolled builder does not copy non-md
+      # files, so this step bridges the gap.
+      - name: stage CNAME for custom domain
+        run: cp docs-site/docs/CNAME docs-site-dist/CNAME
+
       - name: upload pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
