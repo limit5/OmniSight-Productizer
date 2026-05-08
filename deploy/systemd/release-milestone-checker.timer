@@ -1,0 +1,18 @@
+; [OP-762] Five-minute trigger for release-milestone-checker.service.
+;
+; Cadence: every 5 minutes. Persistent=true catches up once after host
+; downtime so a ready milestone is not silently missed until the next
+; full interval.
+
+[Unit]
+Description=Five-minute trigger for release-milestone-checker.service (OP-762)
+
+[Timer]
+Unit=release-milestone-checker.service
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
