@@ -176,8 +176,8 @@ def test_runner_self_heals_merged_ticket_and_skips_pickup(
     monkeypatch.setattr(mod.circuit_breaker, "open_services", lambda: [])
     monkeypatch.setattr(mod.jira_dispatch, "assert_worktree_config_enabled", lambda repo: None)
     monkeypatch.setattr(mod.orphan_salvage, "salvage_orphan_commits", lambda path, cls: 0)
-    monkeypatch.setattr(mod.jira_dispatch, "backpressure_decide", lambda cls: (True, "active"))
-    monkeypatch.setattr(mod.jira_dispatch, "make_client", lambda cls: _StubClient())
+    monkeypatch.setattr(mod.jira_dispatch, "backpressure_decide", lambda *a, **kw: (True, "active"))
+    monkeypatch.setattr(mod.jira_dispatch, "make_client", lambda *a, **kw: _StubClient())
     monkeypatch.setattr(mod.jira_dispatch, "_request", lambda client, method, path: _issue())
     monkeypatch.setattr(mod.jira_dispatch, "to_snapshot", jd.to_snapshot)
     monkeypatch.setattr(
@@ -230,8 +230,8 @@ def test_runner_self_heal_is_noop_when_force_walk_reports_published(
     monkeypatch.setattr(mod.circuit_breaker, "open_services", lambda: [])
     monkeypatch.setattr(mod.jira_dispatch, "assert_worktree_config_enabled", lambda repo: None)
     monkeypatch.setattr(mod.orphan_salvage, "salvage_orphan_commits", lambda path, cls: 0)
-    monkeypatch.setattr(mod.jira_dispatch, "backpressure_decide", lambda cls: (True, "active"))
-    monkeypatch.setattr(mod.jira_dispatch, "make_client", lambda cls: _StubClient())
+    monkeypatch.setattr(mod.jira_dispatch, "backpressure_decide", lambda *a, **kw: (True, "active"))
+    monkeypatch.setattr(mod.jira_dispatch, "make_client", lambda *a, **kw: _StubClient())
     monkeypatch.setattr(mod.jira_dispatch, "_request", lambda client, method, path: _issue())
     monkeypatch.setattr(mod.jira_dispatch, "to_snapshot", jd.to_snapshot)
     monkeypatch.setattr(

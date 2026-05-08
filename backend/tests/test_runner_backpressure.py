@@ -75,7 +75,7 @@ def test_backpressure_pauses_and_notifies_once(monkeypatch: pytest.MonkeyPatch, 
     state_file = tmp_path / "subscription-claude.state"
     alerts = []
 
-    monkeypatch.setattr(jd, "_backpressure_state_file", lambda agent_class: state_file)
+    monkeypatch.setattr(jd, "_backpressure_state_file", lambda *a, **kw: state_file)
     monkeypatch.setattr(jd.settings, "runner_ps_cap", 8)
     monkeypatch.setattr(jd.settings, "runner_ps_floor", 4)
     monkeypatch.setattr(jd, "notify_operator", lambda **kwargs: alerts.append(kwargs))
@@ -105,7 +105,7 @@ def test_backpressure_hysteresis_stays_paused_above_floor(
     state_file = tmp_path / "subscription-claude.state"
     state_file.write_text("paused")
 
-    monkeypatch.setattr(jd, "_backpressure_state_file", lambda agent_class: state_file)
+    monkeypatch.setattr(jd, "_backpressure_state_file", lambda *a, **kw: state_file)
     monkeypatch.setattr(jd.settings, "runner_ps_cap", 8)
     monkeypatch.setattr(jd.settings, "runner_ps_floor", 4)
     monkeypatch.setattr(jd, "notify_operator", lambda **kwargs: pytest.fail("must not re-notify"))
@@ -122,7 +122,7 @@ def test_backpressure_resumes_at_floor(monkeypatch: pytest.MonkeyPatch, tmp_path
     state_file = tmp_path / "subscription-claude.state"
     state_file.write_text("paused")
 
-    monkeypatch.setattr(jd, "_backpressure_state_file", lambda agent_class: state_file)
+    monkeypatch.setattr(jd, "_backpressure_state_file", lambda *a, **kw: state_file)
     monkeypatch.setattr(jd.settings, "runner_ps_cap", 8)
     monkeypatch.setattr(jd.settings, "runner_ps_floor", 4)
     monkeypatch.setattr(jd, "open_ps_count_for", lambda bot_username: 4)
@@ -137,7 +137,7 @@ def test_backpressure_resumes_at_floor(monkeypatch: pytest.MonkeyPatch, tmp_path
 def test_backpressure_allows_active_runner_below_cap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     state_file = tmp_path / "subscription-claude.state"
 
-    monkeypatch.setattr(jd, "_backpressure_state_file", lambda agent_class: state_file)
+    monkeypatch.setattr(jd, "_backpressure_state_file", lambda *a, **kw: state_file)
     monkeypatch.setattr(jd.settings, "runner_ps_cap", 8)
     monkeypatch.setattr(jd.settings, "runner_ps_floor", 4)
     monkeypatch.setattr(jd, "open_ps_count_for", lambda bot_username: 7)
@@ -155,12 +155,12 @@ def test_runner_paused_exits_zero_before_jira_pickup(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         mod.jira_dispatch,
         "backpressure_decide",
-        lambda agent_class: (False, "8 open PSes (cap 8)"),
+        lambda *a, **kw: (False, "8 open PSes (cap 8)"),
     )
     monkeypatch.setattr(
         mod.jira_dispatch,
         "make_client",
-        lambda agent_class: pytest.fail("make_client must not run while paused"),
+        lambda *a, **kw: pytest.fail("make_client must not run while paused"),
     )
     monkeypatch.setattr(
         mod.jira_dispatch,
@@ -191,12 +191,12 @@ def test_runner_salvage_runs_before_backpressure_and_jira_pickup(
     monkeypatch.setattr(
         mod.jira_dispatch,
         "backpressure_decide",
-        lambda agent_class: order.append("backpressure") or (False, "8 open PSes (cap 8)"),
+        lambda *a, **kw: order.append("backpressure") or (False, "8 open PSes (cap 8)"),
     )
     monkeypatch.setattr(
         mod.jira_dispatch,
         "make_client",
-        lambda agent_class: pytest.fail("JIRA pickup must not run while backpressure pauses"),
+        lambda *a, **kw: pytest.fail("JIRA pickup must not run while backpressure pauses"),
     )
 
     assert mod.main() == 0
@@ -218,7 +218,7 @@ def test_runner_open_circuit_exits_zero_before_worktree_or_jira(
     monkeypatch.setattr(
         mod.jira_dispatch,
         "make_client",
-        lambda agent_class: pytest.fail("make_client must not run while circuit is open"),
+        lambda *a, **kw: pytest.fail("make_client must not run while circuit is open"),
     )
 
     assert mod.main() == 0
@@ -248,7 +248,7 @@ def test_runner_active_continues_to_target_flow(monkeypatch: pytest.MonkeyPatch,
         },
     }
 
-    def make_client(agent_class):
+    def make_client(*args, **kwargs):
         calls["make_client"] += 1
         return StubClient()
 
@@ -262,7 +262,7 @@ def test_runner_active_continues_to_target_flow(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(
         mod.jira_dispatch,
         "backpressure_decide",
-        lambda agent_class: (True, "active: 7 open PSes (cap 8)"),
+        lambda *a, **kw: (True, "active: 7 open PSes (cap 8)"),
     )
     monkeypatch.setattr(mod.jira_dispatch, "make_client", make_client)
     monkeypatch.setattr(mod.jira_dispatch, "_request", request)

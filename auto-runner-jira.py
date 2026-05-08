@@ -15,11 +15,21 @@ Per ``docs/sop/jira-ticket-conventions.md`` §16. Generic dispatch loop:
 8. On failure: revert ticket to TODO with comment.
 
 ENV:
-  OMNISIGHT_RUNNER_CLASS   agent_class label, e.g. "subscription-codex"
-                           (defaults to subscription-codex)
-  OMNISIGHT_RUNNER_TARGET  optional ticket key override (skip scheduler,
-                           pickup specific ticket — for testing)
-  OMNISIGHT_RUNNER_DRY_RUN if "1", do everything except transition + invoke
+  OMNISIGHT_RUNNER_CLASS       agent_class label, e.g. "subscription-codex"
+                               (defaults to subscription-codex)
+  OMNISIGHT_RUNNER_INSTANCE_ID horizontal-scaling instance ID (OP-783).
+                               "default" = legacy single-instance setup
+                               (codex-bot / claude-bot creds + state).
+                               "2", "3", ... = per-instance bot accounts
+                               (codex-bot-2, claude-bot-3, ...).
+  OMNISIGHT_RUNNER_TARGET      optional ticket key override (skip scheduler,
+                               pickup specific ticket — for testing)
+  OMNISIGHT_RUNNER_DRY_RUN     if "1", do everything except transition + invoke
+  OMNISIGHT_CODEX_WORKTREE     codex worktree override (defaults to
+                               ../OmniSight-codex-worktree for default
+                               instance; ../OmniSight-<bot>-worktree for
+                               non-default instances).
+  OMNISIGHT_CLAUDE_WORKTREE    claude worktree override (same shape).
 """
 from __future__ import annotations
 
@@ -42,8 +52,30 @@ from backend.agents import (
 )
 
 AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
+INSTANCE_ID = os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or "default"
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
 DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
+
+
+def _bot_username() -> str:
+    """Resolve the per-instance bot username for this runner process."""
+    return jira_dispatch.resolve_bot_username(AGENT_CLASS, INSTANCE_ID)
+
+
+def _default_worktree_for(agent_class: str) -> str:
+    """Compute the per-instance default worktree path.
+
+    Default instance preserves the legacy paths used by docs and tmux
+    sessions (``OmniSight-codex-worktree`` / ``OmniSight-claude-worktree``);
+    non-default instances use a bot-keyed sibling directory
+    (``OmniSight-codex-bot-2-worktree`` etc.) so two runner processes
+    never trample each other's working tree.
+    """
+    if INSTANCE_ID == "default":
+        suffix = "codex-worktree" if agent_class in ("subscription-codex", "api-openai") else "claude-worktree"
+        return os.path.normpath(os.path.join(REPO, "..", f"OmniSight-{suffix}"))
+    bot = jira_dispatch.resolve_bot_username(agent_class, INSTANCE_ID)
+    return os.path.normpath(os.path.join(REPO, "..", f"OmniSight-{bot}-worktree"))
 
 
 def _file_mutex_skip_comment(reason: str) -> str:
@@ -92,9 +124,10 @@ def already_merged_in_gerrit(ticket_key: str) -> tuple[int, str] | None:
     Fail-open by design: a Gerrit/network problem must not block legitimate
     pickup. Strict subject-prefix matching avoids body-only false positives.
     """
-    user, ssh_key = jira_dispatch._GERRIT_AUTH_BY_CLASS.get(
-        AGENT_CLASS, jira_dispatch._GERRIT_AUTH_BY_CLASS["subscription-claude"]
-    )
+    try:
+        user, ssh_key = jira_dispatch._gerrit_auth_for_instance(AGENT_CLASS, INSTANCE_ID)
+    except ValueError:
+        user, ssh_key = jira_dispatch._GERRIT_AUTH_BY_CLASS["subscription-claude"]
     cmd = [
         "ssh", "-i", str(ssh_key), "-p", str(jira_dispatch.GERRIT_SSH_PORT),
         f"{user}@{jira_dispatch.GERRIT_SSH_HOST}",
@@ -250,11 +283,11 @@ When you complete the work, your final commit message must include
 
 CODEX_WORKTREE = os.environ.get(
     "OMNISIGHT_CODEX_WORKTREE",
-    os.path.normpath(os.path.join(REPO, "..", "OmniSight-codex-worktree")),
+    _default_worktree_for("subscription-codex"),
 )
 CLAUDE_WORKTREE = os.environ.get(
     "OMNISIGHT_CLAUDE_WORKTREE",
-    os.path.normpath(os.path.join(REPO, "..", "OmniSight-claude-worktree")),
+    _default_worktree_for("subscription-claude"),
 )
 TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_RUNNER_TIMEOUT_S", "1800"))
 
@@ -381,7 +414,9 @@ def _handle_gerrit_push_failure(
     category, action = runner_failure_classifier.categorize_push_failure(detail)
 
     if action == "force-publish":
-        merged_info = jira_dispatch.already_merged_in_gerrit(key, agent_class=agent_class)
+        merged_info = jira_dispatch.already_merged_in_gerrit(
+            key, agent_class=agent_class, instance_id=INSTANCE_ID
+        )
         if merged_info:
             jira_dispatch.force_walk_to_published(client, key)
             jira_dispatch.add_comment(
@@ -444,7 +479,10 @@ def _handle_gerrit_push_failure(
 
 
 def main() -> int:
-    print(f"[runner] agent_class={AGENT_CLASS}, dry_run={DRY_RUN}")
+    print(
+        f"[runner] agent_class={AGENT_CLASS}, instance_id={INSTANCE_ID}, "
+        f"bot={_bot_username()}, dry_run={DRY_RUN}"
+    )
     open_services = circuit_breaker.open_services()
     if open_services:
         print(f"[runner] paused - {open_services} unreachable")
@@ -462,14 +500,16 @@ def main() -> int:
         if salvaged:
             print(f"[runner] salvaged {salvaged} orphan commits before starting tick")
 
-    ok_to_pick_up, backpressure_reason = jira_dispatch.backpressure_decide(AGENT_CLASS)
+    ok_to_pick_up, backpressure_reason = jira_dispatch.backpressure_decide(
+        AGENT_CLASS, INSTANCE_ID
+    )
     if not ok_to_pick_up:
         print(f"[runner] backpressure paused: {backpressure_reason}. Sleeping until next tick.")
         return 0
     if backpressure_reason.startswith("resumed"):
         print(f"[runner] backpressure {backpressure_reason}")
 
-    client = jira_dispatch.make_client(AGENT_CLASS)
+    client = jira_dispatch.make_client(AGENT_CLASS, INSTANCE_ID)
     print(f"[runner] authenticated as {client.bot_email} ({client.bot_account_id})")
 
     # Step 1: ticket selection
@@ -532,10 +572,12 @@ def main() -> int:
     else:
         try:
             print(f"[runner] preparing worktree {worktree_path}...")
-            jira_dispatch.set_bot_identity_in_worktree(worktree_path, AGENT_CLASS)
+            jira_dispatch.set_bot_identity_in_worktree(
+                worktree_path, AGENT_CLASS, INSTANCE_ID
+            )
             jira_dispatch.install_commit_msg_hook(worktree_path)
             sync_result = jira_dispatch.sync_to_gerrit_develop(
-                worktree_path, AGENT_CLASS, snapshot.key
+                worktree_path, AGENT_CLASS, snapshot.key, INSTANCE_ID
             )
             print(f"[runner] worktree synced: {sync_result.detail}")
         except Exception as e:
@@ -621,7 +663,7 @@ def main() -> int:
             # not local main; codex's commits get Change-Id via commit-msg hook.
             jira_dispatch.ensure_change_ids(worktree_path, base_ref=sync_result.develop_sha)
             push_result = jira_dispatch.push_to_gerrit_for_review(
-                worktree_path, AGENT_CLASS, target="develop"
+                worktree_path, AGENT_CLASS, target="develop", instance_id=INSTANCE_ID
             )
         except Exception as e:
             print(f"[runner] Gerrit push setup failed: {e}", file=sys.stderr)
