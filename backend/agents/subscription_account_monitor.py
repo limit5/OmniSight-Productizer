@@ -39,6 +39,7 @@ from backend.agents.routing_policy import MP_ENABLED_ENV
 import backend.agents.provider_adapters.anthropic_subscription  # noqa: F401,E402
 import backend.agents.provider_adapters.gemini_subscription  # noqa: F401,E402
 import backend.agents.provider_adapters.openai_subscription  # noqa: F401,E402
+import backend.agents.provider_adapters.xai_subscription  # noqa: F401,E402
 
 
 logger = logging.getLogger(__name__)

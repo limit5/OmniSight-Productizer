@@ -18,6 +18,9 @@ therefore make the adapter structurally visible with::
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+
 from backend.agents.provider_orchestrator import (
     DispatchResult,
     HealthStatus,
@@ -38,13 +41,33 @@ class GeminiSubscriptionAdapter(ProviderAdapter):
         return PROVIDER_ID
 
     def dispatch(self, task: TaskSpec) -> DispatchResult:
-        raise NotImplementedError("Gemini subscription dispatch is not implemented")
+        return DispatchResult(
+            success=False,
+            tokens_used=0,
+            latency_seconds=0.0,
+            error=json.dumps({"kind": "not_ready", "provider_id": PROVIDER_ID}),
+            provider_id=PROVIDER_ID,
+        )
 
     def health_check(self) -> HealthStatus:
-        raise NotImplementedError("Gemini subscription health check is not implemented")
+        return HealthStatus(
+            provider_id=PROVIDER_ID,
+            reachable=False,
+            last_checked_at=datetime.now(timezone.utc),
+            cli_installed=False,
+            subscription_active=False,
+            detail="Gemini subscription runtime is not wired yet",
+        )
 
     def get_quota_state(self) -> QuotaState:
-        raise NotImplementedError("Gemini subscription quota state is not implemented")
+        return QuotaState(
+            provider=PROVIDER_ID,
+            rolling_5h_tokens=0,
+            weekly_tokens=0,
+            last_reset_at=None,
+            last_cap_hit_at=None,
+            circuit_state="closed",
+        )
 
 
 register_adapter(GeminiSubscriptionAdapter())
