@@ -114,6 +114,7 @@ async def _log_impl(
     }
     payload_canon = _canonical(payload)
     ts = time.time()
+    ts_second = int(ts)
     tid = tenant_insert_value()
 
     # Advisory lock keyed on the tenant chain. hashtext returns int4;
@@ -124,6 +125,16 @@ async def _log_impl(
         f"audit-chain-{tid}",
     )
     prev = await _last_hash_for_tenant(conn, tid)
+    existing = await conn.fetchrow(
+        "SELECT id FROM audit_log "
+        "WHERE tenant_id = $1 AND action = $2 AND entity_kind = $3 "
+        "AND entity_id = $4 AND ts >= $5 AND ts < $6 "
+        "ORDER BY id ASC LIMIT 1",
+        tid, action, entity_kind, entity_id or "", ts_second, ts_second + 1,
+    )
+    if existing:
+        return existing["id"]
+
     curr = _hash(prev, payload_canon + str(round(ts, 6)))
     row = await conn.fetchrow(
         "INSERT INTO audit_log "

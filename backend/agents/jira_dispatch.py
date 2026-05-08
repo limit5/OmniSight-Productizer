@@ -24,12 +24,15 @@ import re
 import subprocess
 import urllib.error
 import urllib.request
+import uuid
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.config import settings
+from backend.agents.circuit_breaker import BREAKERS
+from backend.agents.idempotency import DEFAULT_STORE
 from backend.agents.scheduler import TicketSnapshot
 from backend.agents.scope_to_paths import ALWAYS_TOUCHED, SCOPE_TO_PATHS
 
@@ -97,18 +100,28 @@ def make_client(agent_class: str) -> DispatchClient:
     )
 
 
-def _request_raw(method: str, url: str, auth_header: str, body: dict | None) -> dict:
+def _request_raw(
+    method: str,
+    url: str,
+    auth_header: str,
+    body: dict | None,
+    idem_key: str | None = None,
+) -> dict:
     data = json.dumps(body).encode() if body is not None else None
+    headers = {
+        "Authorization": auth_header,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if idem_key:
+        headers["X-Atlassian-Token"] = "no-check"
+        headers["X-Idempotency-Key"] = idem_key
     req = urllib.request.Request(
         url, data=data, method=method,
-        headers={
-            "Authorization": auth_header,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        headers=headers,
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with BREAKERS["jira_rest"].call(urllib.request.urlopen, req, timeout=30) as resp:
             payload = resp.read().decode()
             return json.loads(payload) if payload else {}
     except urllib.error.HTTPError as e:
@@ -116,8 +129,24 @@ def _request_raw(method: str, url: str, auth_header: str, body: dict | None) -> 
         raise RuntimeError(f"{method} {url} → {e.code}: {body_text}") from e
 
 
-def _request(client: DispatchClient, method: str, path: str, body: dict | None = None) -> dict:
-    return _request_raw(method, client.base_url + path, client.auth_header, body)
+def _request(
+    client: DispatchClient,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    idem_key: str | None = None,
+) -> dict:
+    return _request_raw(method, client.base_url + path, client.auth_header, body, idem_key)
+
+
+def _request_idempotent(
+    client: DispatchClient,
+    method: str,
+    path: str,
+    body: dict | None,
+    idem_key: str,
+) -> dict:
+    return DEFAULT_STORE.run(idem_key, lambda: _request(client, method, path, body, idem_key))
 
 
 # ── ADF helpers ───────────────────────────────────────────────────
@@ -267,7 +296,9 @@ def open_ps_count_for(bot_username: str) -> int:
         "gerrit", "query", "--format=JSON",
         f"is:open owner:{bot_username}",
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    out = BREAKERS["gerrit_ssh"].call(
+        subprocess.run, cmd, capture_output=True, text=True, timeout=10
+    )
     n = 0
     for line in out.stdout.splitlines():
         try:
@@ -397,7 +428,7 @@ def install_commit_msg_hook(worktree_path: Path) -> bool:
     if hook_path.exists() and hook_path.stat().st_size > 0:
         return True
     hook_path.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(GERRIT_HOOK_URL, timeout=10) as r:
+    with BREAKERS["gerrit_rest"].call(urllib.request.urlopen, GERRIT_HOOK_URL, timeout=10) as r:
         hook_path.write_bytes(r.read())
     hook_path.chmod(0o755)
     return True
@@ -475,7 +506,8 @@ def sync_to_gerrit_develop(
     env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key}"
 
     # Step 1: fetch develop from Gerrit
-    subprocess.run(
+    BREAKERS["gerrit_ssh"].call(
+        subprocess.run,
         ["git", "fetch", _gerrit_ssh_url(agent_class), "develop"],
         cwd=worktree_path, env=env, check=True, capture_output=True, text=True, timeout=60,
     )
@@ -617,9 +649,10 @@ def push_to_gerrit_for_review(
     env = os.environ.copy()
     env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key}"
 
-    result = subprocess.run(
+    result = BREAKERS["gerrit_ssh"].call(
+        subprocess.run,
         ["git", "push", _gerrit_ssh_url(agent_class), f"HEAD:refs/for/{target}"],
-        cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120
+        cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
     )
     blob = (result.stderr + "\n" + result.stdout).strip()
     if result.returncode != 0:
@@ -655,6 +688,7 @@ def post_runner_pushed_comment(
     client: "DispatchClient",
     key: str,
     gerrit_change_url: str,
+    idem_key: str | None = None,
 ) -> None:
     """Post the ``[runner-pushed-to-gerrit]`` comment with the Gerrit URL.
 
@@ -672,12 +706,14 @@ def post_runner_pushed_comment(
             f"(`backend/agents/gerrit_jira_bridge.py`) will auto-transition "
             f"Approved → Published within ~5s."
         ),
+        idem_key=idem_key,
     )
 
 
 def transition_to_under_review_if_needed(
     client: "DispatchClient",
     key: str,
+    idem_key: str | None = None,
 ) -> bool:
     """In Progress → Under Review, but only if not already there.
 
@@ -688,9 +724,12 @@ def transition_to_under_review_if_needed(
     """
     if get_issue_status(client, key) == UNDER_REVIEW_STATUS_NAME:
         return False
-    _request(client, "POST", f"/issue/{key}/transitions", {
-        "transition": {"id": TRANSITION_IDS["to_under_review"]},
-    })
+    idem_key = idem_key or f"transition-{key}-under-review-{uuid.uuid4().hex[:12]}"
+    _request_idempotent(
+        client, "POST", f"/issue/{key}/transitions",
+        {"transition": {"id": TRANSITION_IDS["to_under_review"]}},
+        idem_key,
+    )
     return True
 
 
@@ -698,6 +737,7 @@ def transition_to_under_review(
     client: "DispatchClient",
     key: str,
     gerrit_change_url: str,
+    idem_key: str | None = None,
 ) -> None:
     """JIRA In Progress → Under Review, with Gerrit URL in a comment.
 
@@ -711,48 +751,86 @@ def transition_to_under_review(
     """
     if get_issue_status(client, key) == UNDER_REVIEW_STATUS_NAME:
         return
-    post_runner_pushed_comment(client, key, gerrit_change_url)
-    transition_to_under_review_if_needed(client, key)
+    base_key = idem_key or f"transition-{key}-under-review-{uuid.uuid4().hex[:12]}"
+    post_runner_pushed_comment(client, key, gerrit_change_url, idem_key=f"{base_key}-comment")
+    transition_to_under_review_if_needed(client, key, idem_key=f"{base_key}-transition")
 
 
-def transition_to_in_progress(client: DispatchClient, key: str) -> None:
+def transition_to_in_progress(client: DispatchClient, key: str, idem_key: str | None = None) -> None:
     """Set assignee = bot, transition TODO → In Progress, add pickup comment."""
-    _request(client, "PUT", f"/issue/{key}", {
-        "fields": {"assignee": {"accountId": client.bot_account_id}},
-    })
-    _request(client, "POST", f"/issue/{key}/transitions", {
-        "transition": {"id": TRANSITION_IDS["to_in_progress"]},
-    })
-    add_comment(client, key, f"Picked up by {client.agent_class} runner.")
+    base_key = idem_key or f"transition-{key}-in-progress-{uuid.uuid4().hex[:12]}"
+    _request_idempotent(
+        client, "PUT", f"/issue/{key}",
+        {"fields": {"assignee": {"accountId": client.bot_account_id}}},
+        f"{base_key}-assign",
+    )
+    _request_idempotent(
+        client, "POST", f"/issue/{key}/transitions",
+        {"transition": {"id": TRANSITION_IDS["to_in_progress"]}},
+        f"{base_key}-transition",
+    )
+    add_comment(
+        client, key, f"Picked up by {client.agent_class} runner.",
+        idem_key=f"{base_key}-comment",
+    )
 
 
-def transition_back_to_todo(client: DispatchClient, key: str, reason: str) -> None:
+def transition_back_to_todo(
+    client: DispatchClient,
+    key: str,
+    reason: str,
+    idem_key: str | None = None,
+) -> None:
     """In Progress → TODO with reason comment + clear assignee."""
-    add_comment(client, key, f"Reverting to TODO. Reason:\n{reason}")
-    _request(client, "PUT", f"/issue/{key}", {
-        "fields": {"assignee": None},
-    })
-    _request(client, "POST", f"/issue/{key}/transitions", {
-        "transition": {"id": TRANSITION_IDS["back_to_todo"]},
-    })
+    base_key = idem_key or f"transition-{key}-back-to-todo-{uuid.uuid4().hex[:12]}"
+    add_comment(
+        client, key, f"Reverting to TODO. Reason:\n{reason}",
+        idem_key=f"{base_key}-comment",
+    )
+    clear_assignee(client, key, idem_key=f"{base_key}-clear-assignee")
+    _request_idempotent(
+        client, "POST", f"/issue/{key}/transitions",
+        {"transition": {"id": TRANSITION_IDS["back_to_todo"]}},
+        f"{base_key}-transition",
+    )
 
 
-def add_comment(client: DispatchClient, key: str, text: str) -> None:
-    _request(client, "POST", f"/issue/{key}/comment", {"body": _adf_paragraph(text)})
+def add_comment(client: DispatchClient, key: str, text: str, idem_key: str | None = None) -> None:
+    idem_key = idem_key or f"comment-{key}-{uuid.uuid4().hex[:12]}"
+    _request_idempotent(
+        client, "POST", f"/issue/{key}/comment",
+        {"body": _adf_paragraph(text)},
+        idem_key,
+    )
 
 
-def add_label(client: DispatchClient, key: str, label: str) -> None:
+def clear_assignee(client: DispatchClient, key: str, idem_key: str | None = None) -> None:
+    idem_key = idem_key or f"clear-assignee-{key}-{uuid.uuid4().hex[:12]}"
+    _request_idempotent(
+        client, "PUT", f"/issue/{key}",
+        {"fields": {"assignee": None}},
+        idem_key,
+    )
+
+
+def add_label(client: DispatchClient, key: str, label: str, idem_key: str | None = None) -> None:
     """Add one JIRA label without replacing the existing label set."""
-    _request(client, "PUT", f"/issue/{key}", {
-        "update": {"labels": [{"add": label}]},
-    })
+    idem_key = idem_key or f"label-add-{key}-{label}-{uuid.uuid4().hex[:12]}"
+    _request_idempotent(
+        client, "PUT", f"/issue/{key}",
+        {"update": {"labels": [{"add": label}]}},
+        idem_key,
+    )
 
 
-def remove_label(client: DispatchClient, key: str, label: str) -> None:
+def remove_label(client: DispatchClient, key: str, label: str, idem_key: str | None = None) -> None:
     """Remove one JIRA label if present; JIRA treats absent labels as a no-op."""
-    _request(client, "PUT", f"/issue/{key}", {
-        "update": {"labels": [{"remove": label}]},
-    })
+    idem_key = idem_key or f"label-remove-{key}-{label}-{uuid.uuid4().hex[:12]}"
+    _request_idempotent(
+        client, "PUT", f"/issue/{key}",
+        {"update": {"labels": [{"remove": label}]}},
+        idem_key,
+    )
 
 
 # ── Description / Prerequisites parsing ───────────────────────────
@@ -855,7 +933,9 @@ def _open_bot_owned_file_owners() -> dict[str, list[GerritFileOwner]]:
         "gerrit", "query", "--format=JSON", "--current-patch-set", "--files",
         "is:open AND (owner:claude-bot OR owner:codex-bot)",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    result = BREAKERS["gerrit_ssh"].call(
+        subprocess.run, cmd, capture_output=True, text=True, timeout=15
+    )
     result.check_returncode()
 
     owners: dict[str, list[GerritFileOwner]] = {}
