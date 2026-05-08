@@ -62,7 +62,8 @@ from typing import Any
 import asyncpg
 
 from backend.db_context import require_current_tenant
-from backend.secret_store import decrypt, encrypt, fingerprint
+from backend.ks_secret_carrier import pack_secret, unpack_secret
+from backend.secret_store import fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -100,13 +101,25 @@ def _safe_decrypt(ciphertext: str, row_id: str = "?") -> str:
     if not ciphertext:
         return ""
     try:
-        return decrypt(ciphertext)
+        return unpack_secret(
+            ciphertext,
+            binding={"table": "llm_credentials", "id": row_id},
+        )
     except Exception as exc:
         logger.warning(
             "llm_credentials row %s: decrypt failed (%s) — treating as empty",
             row_id, type(exc).__name__,
         )
         return ""
+
+
+def _encrypt_field(plaintext: str, tid: str, row_id: str) -> str:
+    return pack_secret(
+        plaintext,
+        tid,
+        purpose="llm-credential",
+        binding={"table": "llm_credentials", "id": row_id},
+    )
 
 
 def _parse_metadata(raw: Any) -> dict[str, Any]:
@@ -290,7 +303,7 @@ async def create_credential(
     now = time.time()
     meta_json = json.dumps(metadata or {})
     row_id = _new_id()
-    enc_value = encrypt(value) if value else ""
+    enc_value = _encrypt_field(value, tid, row_id) if value else ""
 
     insert_sql = (
         "INSERT INTO llm_credentials ("
@@ -421,7 +434,7 @@ async def update_credential(
                 params.append("")
             else:
                 set_clauses.append(f"encrypted_value = ${idx}")
-                params.append(encrypt(v))
+                params.append(_encrypt_field(v, tid, credential_id))
             idx += 1
 
     now = time.time()

@@ -249,12 +249,15 @@ async def _fetch_db_row(provider: str, tenant_id: str) -> Optional[dict]:
     if row is None:
         return None
 
-    from backend.secret_store import decrypt
+    from backend.ks_secret_carrier import unpack_secret
 
     ciphertext = row["encrypted_value"] or ""
     if ciphertext:
         try:
-            plaintext = decrypt(ciphertext)
+            plaintext = unpack_secret(
+                ciphertext,
+                binding={"table": "llm_credentials", "id": row["id"]},
+            )
         except Exception as exc:
             logger.warning(
                 "llm_credentials row %s: decrypt failed (%s) — treating as "
