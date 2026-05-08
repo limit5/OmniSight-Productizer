@@ -1,0 +1,165 @@
+# OP-724 — ERROR-level journal → pager forwarder config (META OP-721 T3).
+#
+# Read by scripts/journal_error_forwarder.py — a long-running daemon
+# that tails the systemd journal for ERROR / ALERT / CRITICAL records
+# from the listed units and routes each surviving record through T1
+# (configs `notifier_module` → `notify(severity, code=..., **fields)`,
+# default `backend.agents.operator_notifier`).
+#
+# The pipeline order is intentional and load-bearing:
+#
+#   1. journalctl pre-filter  (cheapest — kernel does priority drop)
+#       --priority=err --unit=<unit>...
+#   2. Allow-list suppression (this file's `allow_list:` block)
+#       Match a derived "code" against `code:` patterns; suppress=true
+#       drops the record before any notify() call. Use this for
+#       known-transient noise (e.g. boot-time pool-not-ready warnings
+#       that the daemon is already designed to retry past).
+#   3. Severity mapping       (this file's `severity_map:` block)
+#       Default mapping is journal PRIORITY → severity:
+#         3 (ERROR)            → DEGRADED
+#         2 (CRITICAL)         → CRITICAL
+#         1 (ALERT) / 0 (EMERG)→ CRITICAL
+#       Per-code overrides in `severity_map:` win (e.g. promote a
+#       known-bad ERROR to CRITICAL, or demote noisy CRITICAL to WARN).
+#   4. T1 notifier            (T1 OP-722 owns dedup + channel fanout)
+#       The forwarder builds its OWN Notifier instance with a tightened
+#       dedup window (see `dedup_window_seconds` below) so AC #1's
+#       1-min latency budget is met without poisoning other T1 callers.
+#
+# Self-healing AC #4: this config is re-loaded on the FIRST journal
+# record after a SIGHUP, so an operator can ship a new allow-list rule
+# during an alert storm without restarting the unit and risking the
+# `RestartSec` outage window.
+
+# ── Units to follow ──────────────────────────────────────────────
+#
+# `journalctl --unit=<name>` accepts either user-scope unit names
+# (when scope=user) or system-scope (default). The forwarder fans these
+# out to a single journalctl process via repeated --unit args; that
+# process does the priority filter so this Python loop only sees lines
+# that already cleared the kernel-side gate.
+units:
+  - name: gerrit-jira-bridge
+    scope: user
+  - name: gerrit-jira-bridge-watchdog
+    scope: user
+  - name: omnisight-backend
+    scope: system
+  - name: omnisight-worker@
+    scope: system
+
+# ── Code derivation ──────────────────────────────────────────────
+#
+# T1's dedup window collapses identical (code, severity) bursts. For
+# that to be useful we need a STABLE code per failure-mode — a code
+# derived from the first 80 chars of MESSAGE alone would change every
+# time the offending log line includes a varying request-id.
+#
+# `code_extractors:` is an ordered list of regexes applied to the
+# journal MESSAGE field. The FIRST pattern that matches contributes
+# its named-capture group `code` to the record. If none match, the
+# code falls back to `<unit>:<priority>` — coarse but stable.
+code_extractors:
+  # OP-689 / OP-715 family — bridge daemon logs `event="<name>" ... level="ERROR"`.
+  # The event name is the canonical failure code there.
+  - pattern: '"event"\s*:\s*"(?P<code>[a-zA-Z0-9_.:-]+)"'
+  # Python tracebacks: ExceptionType: message  →  code = ExceptionType
+  - pattern: '^(?P<code>[A-Z][A-Za-z0-9_]+(?:Error|Exception|Timeout)):'
+  # Plain prefix-style "FOO_BAR: message"
+  - pattern: '^(?P<code>[A-Z][A-Z0-9_]{3,40})\b'
+
+# ── Allow-list (suppress) ────────────────────────────────────────
+#
+# Codes whose `suppress: true` flag means we DROP the record (no
+# notify call, no count increment). Use sparingly — this is the
+# escape hatch for the "expected during boot" / "already retried by
+# the caller" classes of noise that would otherwise burn the operator
+# out on the first day.
+#
+# Each entry is matched against the derived code (above). Plain
+# strings match exact code; entries with `code_pattern:` are regex.
+allow_list:
+  # Daemon startup race: the worker pool isn't initialised yet when
+  # the audit logger first fires. The audit logger retries with backoff
+  # and the second attempt always succeeds. Documented in
+  # docs/sop/lessons-learned.md L18 family.
+  - code: audit_pool_not_initialised
+    suppress: true
+    note: |
+      OP-689 boot-time race. The audit logger retries on a 1-second
+      backoff and the second attempt always succeeds. Flag this back
+      to ALERTABLE if it ever appears OUTSIDE the first 60s of daemon
+      boot — that would mean the pool actually died.
+
+  # Transient HTTP 5xx that the caller already retried successfully.
+  # We log+continue at ERROR rather than raise, so the human signal
+  # would be "the retry succeeded" — useless to page on.
+  - code: transient_5xx_retry_succeeded
+    suppress: true
+    note: |
+      Caller retries 5xx responses with exponential backoff and only
+      raises (→ unsuppressed ERROR) if the retry budget was exhausted.
+      This code is logged on the SUCCESSFUL retry path purely for
+      observability; do not page on it.
+
+  # Watchdog's own 'all_green' INFO line escapes journal priority
+  # filter when SyslogIdentifier collisions occur. Belt-and-suspenders.
+  - code: all_green
+    suppress: true
+
+# ── Severity overrides ───────────────────────────────────────────
+#
+# Per-code severity overrides (relative to the PRIORITY-derived
+# default). Use to promote known-load-bearing ERRORs to CRITICAL or
+# demote known-noisy CRITICALs.
+severity_map:
+  # Bridge daemon refused to call the LLM because the backing service
+  # was unreachable — silently degrades correctness if not paged on.
+  refused_llm_unavailable: CRITICAL
+  # Audit log write failure that wasn't the boot-race (handled above).
+  # Loss of audit trail is a compliance issue, not just a bug.
+  audit_write_failed: CRITICAL
+  # Gerrit SSH transport failures break the entire Track C pipeline.
+  gerrit_client_ssh_failed: CRITICAL
+
+# ── Dedup + dispatch tuning ──────────────────────────────────────
+#
+# AC #1 — 1-min latency budget — and AC #2 — 5 errors collapse into
+# count=5 — together force `dedup_window_seconds` to a value where
+# 5 errors in a typical retry-loop burst all land in the same window
+# AND the resulting alert reaches the operator within 60s.
+#
+# Settling on 55s window + 2s dispatch-poll cadence:
+#   * worst-case single-error latency = 55 + 2 = 57s   ≤ 1 min ✓ (AC #1)
+#   * 5 errors in a typical sub-second retry-loop burst stay in one
+#     dedup window → count=5 ✓ (AC #2)
+#   * deliberately tighter than T1's 5-min default (`OMNISIGHT_NOTIFIER_
+#     DEDUP_WINDOW_SECONDS`); we run our OWN Notifier instance instead
+#     of mutating the global default, so other T1 callers (watchdog
+#     etc.) keep their relaxed dedup.
+dedup_window_seconds: 55
+dispatch_poll_seconds: 2
+
+# ── Cursor file (no-log-loss across restart) ─────────────────────
+#
+# AC #4 — "Forwarder itself crashes → systemd restarts, no log loss
+# > 10s" — is upheld by:
+#   1. systemd Restart=always with RestartSec=5 → restart in ≤ 5s.
+#   2. journalctl --cursor-file=<path> resumes from the LAST committed
+#      cursor. The forwarder commits the cursor after each successful
+#      notify() so a crash mid-record at most replays the in-flight
+#      record (which T1 dedups anyway).
+cursor_file: /var/lib/omnisight/journal-error-forwarder.cursor
+
+# Optional: where the forwarder appends its own audit trail of every
+# emitted alert (one JSON record per line). Same defence-in-depth role
+# as configs/watchdog.yaml's `alerts_path` (OP-723 T2). If T1 is down,
+# this file is still written.
+alerts_path: /home/user/work/sora/logs/error-pager/alerts.jsonl
+
+# Optional: dotted-path to the Python notifier module. Matches T2's
+# wiring exactly. Until OP-722 (T1) is in this branch, the import
+# silently no-ops and the alerts file is the only sink. T1 then takes
+# over zero-config when its branch lands.
+notifier_module: backend.agents.operator_notifier
