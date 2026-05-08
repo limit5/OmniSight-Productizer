@@ -26,6 +26,7 @@ from backend.agents.debuff_registry import (
 )
 
 OutcomeStatus = Literal["success", "partial", "fail", "failed"]
+ClassXpTarget = Literal["primary", "secondary"]
 
 BASE_TASK_XP = 100
 MAX_LEVEL = 80
@@ -33,6 +34,8 @@ LEVEL_CURVE_EXPONENT = 1.4
 TIER_L_PLUS_MULTIPLIER = 2.0
 FIRST_TIME_SKILL_MULTIPLIER = 3.0
 DUPLICATE_TASK_MULTIPLIER = 0.2
+SECONDARY_CLASS_FULL_XP_LEVEL = 30
+SECONDARY_CLASS_RAMP_MULTIPLIER = 0.5
 
 OUTCOME_MULTIPLIERS: Mapping[str, float] = MappingProxyType(
     {
@@ -56,6 +59,8 @@ class TaskOutcome:
     active_buff_ids: tuple[str, ...] = ()
     consecutive_failures: int = 0
     active_debuff_ids: tuple[str, ...] = ()
+    class_xp_target: ClassXpTarget = "primary"
+    secondary_class_level: int = 1
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,14 @@ def level_for_xp(total_xp: int) -> int:
     return level
 
 
+def secondary_class_xp_multiplier(secondary_class_level: int) -> float:
+    """Return W18.2's XP multiplier for a secondary class at ``level``."""
+    _clean_level(secondary_class_level, field="secondary_class_level")
+    if secondary_class_level >= SECONDARY_CLASS_FULL_XP_LEVEL:
+        return 1.0
+    return SECONDARY_CLASS_RAMP_MULTIPLIER
+
+
 def _clean_agent_id(agent_id: str) -> str:
     if not isinstance(agent_id, str):
         raise TypeError("agent_id must be a string")
@@ -157,6 +170,11 @@ def _normalise_task_outcome(
             active_debuff_ids=_clean_active_debuff_ids(
                 values.get("active_debuff_ids", values.get("debuff_ids", ()))
             ),
+            class_xp_target=_class_xp_target_from_values(values),
+            secondary_class_level=_clean_level(
+                values.get("secondary_class_level", 1),
+                field="secondary_class_level",
+            ),
         )
     _validate_outcome(outcome)
     return outcome
@@ -186,6 +204,13 @@ def _outcome_values(task_outcome: Mapping[str, Any] | Any) -> Mapping[str, Any]:
             "consecutive_failures",
             "active_debuff_ids",
             "debuff_ids",
+            "class_xp_target",
+            "xp_target",
+            "class_target",
+            "secondary_class_xp",
+            "is_secondary_class",
+            "secondary_class",
+            "secondary_class_level",
         )
         if hasattr(task_outcome, name)
     }
@@ -217,6 +242,8 @@ def _validate_outcome(outcome: TaskOutcome) -> None:
     _clean_active_buff_ids(outcome.active_buff_ids)
     _clean_consecutive_failures(outcome.consecutive_failures)
     _clean_active_debuff_ids(outcome.active_debuff_ids)
+    _clean_class_xp_target(outcome.class_xp_target)
+    _clean_level(outcome.secondary_class_level, field="secondary_class_level")
 
 
 def _outcome_multiplier(outcome: TaskOutcome) -> float:
@@ -231,7 +258,38 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
     multiplier *= xp_multiplier_for_debuff_ids(_effective_debuff_ids(outcome))
     if outcome.duplicate_task_within_24h:
         multiplier *= DUPLICATE_TASK_MULTIPLIER
+    if outcome.class_xp_target == "secondary":
+        multiplier *= secondary_class_xp_multiplier(outcome.secondary_class_level)
     return multiplier
+
+
+def _clean_class_xp_target(value: Any) -> ClassXpTarget:
+    if not isinstance(value, str):
+        raise TypeError("task_outcome class_xp_target must be a string")
+    clean = value.strip().lower()
+    if clean not in ("primary", "secondary"):
+        raise ValueError(
+            "task_outcome class_xp_target must be 'primary' or 'secondary'"
+        )
+    return clean  # type: ignore[return-value]
+
+
+def _class_xp_target_from_values(values: Mapping[str, Any]) -> ClassXpTarget:
+    for key in ("class_xp_target", "xp_target", "class_target"):
+        if key in values:
+            return _clean_class_xp_target(values[key])
+    for key in ("secondary_class_xp", "is_secondary_class", "secondary_class"):
+        if bool(values.get(key, False)):
+            return "secondary"
+    return "primary"
+
+
+def _clean_level(value: Any, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"task_outcome {field} must be an int")
+    if value < 1:
+        raise ValueError(f"task_outcome {field} must be >= 1")
+    return value
 
 
 def _clean_active_buff_ids(value: Any) -> tuple[str, ...]:
@@ -294,11 +352,14 @@ def _effective_debuff_ids(outcome: TaskOutcome) -> tuple[str, ...]:
 
 __all__ = [
     "BASE_TASK_XP",
+    "ClassXpTarget",
     "DUPLICATE_TASK_MULTIPLIER",
     "FIRST_TIME_SKILL_MULTIPLIER",
     "LEVEL_CURVE_EXPONENT",
     "MAX_LEVEL",
     "OUTCOME_MULTIPLIERS",
+    "SECONDARY_CLASS_FULL_XP_LEVEL",
+    "SECONDARY_CLASS_RAMP_MULTIPLIER",
     "TIER_L_PLUS_MULTIPLIER",
     "OutcomeStatus",
     "TaskOutcome",
@@ -306,4 +367,5 @@ __all__ = [
     "award_xp",
     "level_for_xp",
     "level_threshold",
+    "secondary_class_xp_multiplier",
 ]
