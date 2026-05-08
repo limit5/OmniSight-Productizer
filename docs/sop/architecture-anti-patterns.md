@@ -31,6 +31,7 @@ the fix from scratch — these patterns have already been costed.
 | 9 | [Auto-resolver brittle to nested markers](#9-auto-resolver-brittle-to-nested-markers) | Regex resolver matches first conflict region, leaks remaining markers into commit |
 | 10 | [Migration ticket fighting in-flight tickets](#10-migration-ticket-fighting-in-flight-tickets) | Structural ticket lands while siblings still write old format |
 | 11 | [Self-referential text-match false positive](#11-self-referential-text-match-false-positive) | Bulk-action filter matches the meta-document about pattern X (which mentions X by name) |
+| 12 | [Spike + final-version add/add scaffold race](#12-spike--final-version-addadd-scaffold-race) | "Validate framework" spike ships full scaffold; sibling "initial scaffold" PR add/add conflicts on every shared file |
 
 ---
 
@@ -322,9 +323,33 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 
 ---
 
+## 12. Spike + final-version add/add scaffold race
+
+**Symptom**: A sprint splits "validate framework choice" into one ticket (E1: spike + ADR) and "build the proper scaffold" into a sibling ticket (E2). The spike ticket ships an *entire* working scaffold (mkdocs.yml, requirements.txt, docs/, theme files) instead of the minimum proof-of-concept it was scoped for. E2 is then written against a clean base, ADDs the same files, and `git merge` reports `add/add` conflicts on every shared scaffold file once E1 merges first.
+
+**Root cause**: "Spike to validate" and "build the thing" overlap unbounded. The spike implementer doesn't know which exact files they shouldn't write — and from inside the spike, writing the full scaffold is the *easiest* way to demonstrate the framework works end-to-end. The sprint planner's intent ("E1 = throwaway, E2 = canonical") never becomes a code-level constraint, only a Goal-section english sentence.
+
+Add/add is structurally different from edit/edit: there is no shared base for git to 3-way merge. Both sides claim to be the file-creator, and the resolver must pick one wholesale (or hand-merge). Auto-resolvers (the kind we'd build for OP-782) cannot pick between two greenfield versions semantically.
+
+**Cure**:
+1. **Spike-as-throwaway, written into spec**: E1's AC says "spike output stored in `_spike/`, NOT in the canonical path. Delete or move into E2 by hand." E2's AC starts with "remove `_spike/` if present, then build canonical scaffold."
+2. **Single-PS scaffold ownership**: collapse E1+E2 into one ticket if the spike's natural output is the same file set as the final scaffold. Splitting only makes sense when the spike output is genuinely separable (e.g. spike is a rendered screenshot or benchmark report, not code).
+3. **File-set lock at planning time**: each child ticket declares its `Files / Paths` section explicitly. CI / pre-pickup gate refuses to start E2 if E1's open PS already declares the same file paths. This is OP-731 (file-mutex pickup gate) — already shipped, but the gate is `assignee is EMPTY` based, doesn't catch the cross-ticket file-overlap case once two PSes are pushed.
+4. **Resolution playbook for when it fires**: take *theirs* (the final-version PS) — wholesale replace the spike's version. Don't try to merge spike + canonical; the final-version author has the more complete mental model.
+
+**Examples**:
+- 2026-05-08 Sprint E: OP-785 (E1 framework decision + 1h spike) shipped a full `docs-site/` scaffold with mkdocs.yml, requirements.txt, docs/index.md, docs/lessons/index.md, stylesheets/extra.css. OP-786 (E2 initial scaffold) was implemented against clean develop, ADDed all the same files. After E1 merged, E2's PS hit add/add on 5 files. Operator manually rebased + took theirs (E2's canonical version, which had a more complete 80-line mkdocs.yml + Makefile + ADR/lessons/operations/runbook/sop indices). See Gerrit #264 PS2.
+- General: any "spike" that produces the same file extension and path as the "final" version is at risk — frontend prototypes vs. final components, alembic spike migrations vs. proper migration, dockerfile experiments vs. canonical Dockerfile.
+
+**Reference tickets**: OP-785 (E1 spike that overshot), OP-786 (E2 canonical that hit add/add), OP-784 (Sprint E META — should grow a "spike scope discipline" line in its DoD).
+
+**Generalisation**: Two tickets that legitimately need to write to the same final files cannot run in parallel without a chosen winner. Either merge them, or scope one to a non-canonical output path with an explicit promotion step. "Spike" + "implementation" feels orthogonal in planning but is structurally identical at the file-system level.
+
+---
+
 ## Cross-cutting principles
 
-After 11 patterns, common threads:
+After 12 patterns, common threads:
 
 1. **Idempotency is non-negotiable** for any retry-eligible operation.
 2. **Convergence over correctness-of-predecessor** for terminal events.
@@ -334,8 +359,9 @@ After 11 patterns, common threads:
 6. **Validate post-resolution**, not just pre-input. (Pattern #9 caught after corrupt commit was already pushed.)
 7. **Migration is a state, not a moment** — has a beginning, freeze period, and end.
 8. **Filters cannot distinguish "uses X" from "discusses X"** — exclude documentation + META + test paths from content-pattern bulk actions. (Pattern #11.)
+9. **Two tickets writing to the same final file path cannot run in parallel without a chosen winner** — merge the tickets or scope one to a non-canonical output path with an explicit promotion step. (Pattern #12; "spike" is not orthogonal to "implementation" at the filesystem level.)
 
-If you see a new symptom not in this cookbook, file it as the 12th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
+If you see a new symptom not in this cookbook, file it as the 13th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
 
 ---
 
@@ -351,3 +377,4 @@ If you see a new symptom not in this cookbook, file it as the 12th pattern after
   - `OP-747` (cascade prevention + partial-state recovery)
   - `OP-758` (auto-import / decorator registry refactor — H11)
   - `OP-761` (Sprint D — deployment automation)
+  - `OP-784` (Sprint E — docs-site build-time generation; Pattern 12 incident)
