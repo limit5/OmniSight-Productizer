@@ -1,4 +1,4 @@
 auto_resolved_files:
   - path: docs/sop/lessons-learned.md
     resolver: scripts/build_lessons_index.py
-    description: OP-704 smoke seed A - cleanup required
+    description: Index regenerated from docs/sop/lessons/ frontmatter
