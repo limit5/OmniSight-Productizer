@@ -1,0 +1,24 @@
+; [OP-725] Hourly trigger for the canary pipeline check.
+;
+; Cadence: 1 hour, with `Persistent=true` so a host that was offline
+; during a scheduled tick fires immediately on resume rather than
+; waiting another full hour. AC #2 (failure-injection: DEGRADED
+; within 1 h) requires the cadence be exactly hourly.
+;
+; The 2-minute boot delay lets gerrit-jira-bridge.service (and the
+; backend it talks to) finish coming up before the canary starts
+; pushing — otherwise the very first run after a reboot would race
+; the daemon and false-positive DEGRADED.
+
+[Unit]
+Description=Hourly trigger for omnisight-canary.service (OP-725)
+
+[Timer]
+Unit=omnisight-canary.service
+OnBootSec=2min
+OnUnitActiveSec=1h
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

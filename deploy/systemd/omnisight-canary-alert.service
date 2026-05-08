@@ -1,0 +1,25 @@
+; [OP-725] OnFailure handler for omnisight-canary.service.
+;
+; Fires only when the canary exits non-zero (rc=2 = pipeline
+; DEGRADED, rc=3 = canary-config error). Re-emits a single
+; structured-log line to the journal so the T1 alerter (OP-722)
+; can route it to the operator alert channel.
+;
+; This unit is intentionally tiny — it does not retry, page, or
+; transition tickets. The contract is: emit one well-formed JSON
+; line tagged ``canary_pipeline_alert`` and exit 0. T1 owns the
+; routing policy (rate-limit, channel, escalation).
+;
+; The %i specifier is not used because the canary is non-templated;
+; one canary instance is sufficient. If we ever need multiple
+; canaries (per branch, per project), template both .service files
+; together rather than splitting alert and canary.
+
+[Unit]
+Description=OnFailure alert hook for omnisight-canary (OP-725 -> T1 OP-722)
+
+[Service]
+Type=oneshot
+StandardOutput=append:%h/work/sora/logs/canary/canary-alert.log
+StandardError=append:%h/work/sora/logs/canary/canary-alert.log
+ExecStart=/bin/sh -c 'printf "{\\"timestamp\\":\\"%%s\\",\\"level\\":\\"DEGRADED\\",\\"event\\":\\"canary_pipeline_alert\\",\\"source\\":\\"omnisight-canary.service\\"}\\n" "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)"'

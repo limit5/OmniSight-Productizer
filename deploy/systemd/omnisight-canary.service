@@ -1,0 +1,48 @@
+; [OP-725] systemd unit — hourly Gerrit -> bridge daemon canary.
+;
+; Runs scripts/canary_pipeline.py once. Triggered by the matching
+; .timer (or manually via `systemctl --user start omnisight-canary`).
+;
+; Install (user-level — same identity as the bridge it monitors):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/omnisight-canary.service ~/.config/systemd/user/
+;   cp deploy/systemd/omnisight-canary.timer   ~/.config/systemd/user/
+;   cp deploy/systemd/omnisight-canary-alert.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now omnisight-canary.timer
+;
+; Why user-level: must share the same SSH key, log path, and Gerrit
+; identity as gerrit-jira-bridge.service (which is also user-level).
+; Running the canary as root would require a separate ACL'd bot.
+
+[Unit]
+Description=OmniSight Gerrit-to-bridge canary (OP-725)
+After=network-online.target gerrit-jira-bridge.service
+Wants=network-online.target
+; OnFailure chains to a small alert handler that re-emits the
+; structured DEGRADED status to the journal where the T1 alerter
+; (OP-722) tails it. The chain fires only on non-zero exit, so the
+; happy path costs zero alert noise.
+OnFailure=omnisight-canary-alert.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_GERRIT_SSH_HOST=claude-bot@sora.services
+Environment=OMNISIGHT_GERRIT_SSH_PORT=29418
+Environment=OMNISIGHT_GIT_SSH_KEY_PATH=%h/.config/omnisight/gerrit-claude-bot-ed25519
+Environment=OMNISIGHT_CANARY_GERRIT_URL=ssh://claude-bot@sora.services:29418/omnisight/OmniSight-Productizer
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-claude-worktree/scripts/canary_pipeline.py --bridge-log %h/work/sora/logs/bridge/systemd.log
+; Append the JSON status line to a dedicated canary log so a single
+; `tail -F` can see the complete history without competing with the
+; bridge's own structured log.
+StandardOutput=append:%h/work/sora/logs/canary/canary.log
+StandardError=append:%h/work/sora/logs/canary/canary.log
+; Cap pathological hangs (workdir corruption, ssh stuck on auth,
+; Gerrit unreachable). 5 min ≫ the 60 s poll budget so we never
+; race the canary's own timeout.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
