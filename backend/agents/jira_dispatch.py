@@ -21,15 +21,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import urllib.error
 import urllib.request
 from base64 import b64encode
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from backend.agents.scheduler import TicketSnapshot
+from backend.agents.scope_to_paths import SCOPE_TO_PATHS
 
 # ── Auth + config per agent_class ─────────────────────────────────
 
@@ -198,6 +200,7 @@ def to_snapshot(issue: dict) -> TicketSnapshot:
         downstream_blocked_count=0,  # enrichment via separate JQL pass (deferred)
         mutex_labels=mutex_labels,
         has_mutex_in_progress_sibling=False,  # deferred mutex check
+        labels=tuple(labels),
     )
 
 
@@ -564,6 +567,20 @@ def add_comment(client: DispatchClient, key: str, text: str) -> None:
     _request(client, "POST", f"/issue/{key}/comment", {"body": _adf_paragraph(text)})
 
 
+def add_label(client: DispatchClient, key: str, label: str) -> None:
+    """Add one JIRA label without replacing the existing label set."""
+    _request(client, "PUT", f"/issue/{key}", {
+        "update": {"labels": [{"add": label}]},
+    })
+
+
+def remove_label(client: DispatchClient, key: str, label: str) -> None:
+    """Remove one JIRA label if present; JIRA treats absent labels as a no-op."""
+    _request(client, "PUT", f"/issue/{key}", {
+        "update": {"labels": [{"remove": label}]},
+    })
+
+
 # ── Description / Prerequisites parsing ───────────────────────────
 
 
@@ -595,6 +612,134 @@ def fetch_description(client: DispatchClient, key: str) -> str:
                     _walk(c)
     _walk(desc)
     return "".join(chunks)
+
+
+# ── File-level pickup mutex (OP-731) ───────────────────────────────
+
+FILES_SECTION_RE = re.compile(
+    r"(?ims)^#{0,6}\s*Files\s*/\s*Paths\s*$\n(?P<body>.*?)(?=^#{1,6}\s+\S|\Z)"
+)
+PATH_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+"
+)
+FILE_COLLISION_SKIP_LABEL = "runner-skipped:file-collision"
+
+
+@dataclass(frozen=True)
+class GerritFileOwner:
+    """One open Gerrit patch set touching a file."""
+
+    change_number: str
+    owner: str
+
+
+def parse_files_section_from_description(description: str) -> set[str]:
+    """Extract path-looking tokens from the explicit ``Files / Paths`` section."""
+    match = FILES_SECTION_RE.search(description or "")
+    if not match:
+        return set()
+    paths: set[str] = set()
+    for raw in PATH_TOKEN_RE.findall(match.group("body")):
+        token = raw.strip("`'\".,;:()[]{}<>")
+        if token and "://" not in token:
+            paths.add(token)
+    return paths
+
+
+def predict_target_files(
+    snapshot: TicketSnapshot,
+    description: str | None = None,
+) -> set[str]:
+    """Predict target paths for file-level mutex checks.
+
+    Precedence:
+    1. explicit ``Files / Paths`` section;
+    2. first ``scope:<name>`` label mapped in :mod:`scope_to_paths`;
+    3. empty set, which callers treat as "do not block".
+    """
+    explicit = parse_files_section_from_description(description or getattr(snapshot, "description", ""))
+    if explicit:
+        return explicit
+
+    scope = next(
+        (label.split(":", 1)[1] for label in getattr(snapshot, "labels", ()) if label.startswith("scope:")),
+        None,
+    )
+    if scope and scope in SCOPE_TO_PATHS:
+        return set(SCOPE_TO_PATHS[scope])
+    return set()
+
+
+def _open_bot_owned_file_owners() -> dict[str, list[GerritFileOwner]]:
+    """Return file → open bot-owned Gerrit PS metadata."""
+    _, ssh_key = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
+        f"claude-bot@{GERRIT_SSH_HOST}",
+        "gerrit", "query", "--format=JSON", "--current-patch-set", "--files",
+        "is:open AND (owner:claude-bot OR owner:codex-bot)",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    result.check_returncode()
+
+    owners: dict[str, list[GerritFileOwner]] = {}
+    for line in result.stdout.splitlines():
+        try:
+            change = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if change.get("type") == "stats":
+            continue
+        change_number = str(change.get("number") or change.get("_number") or "?")
+        owner = str(((change.get("owner") or {}).get("username")) or "?")
+        for file_info in (change.get("currentPatchSet") or {}).get("files", []):
+            path = file_info.get("file")
+            if path and path != "/COMMIT_MSG":
+                owners.setdefault(path, []).append(GerritFileOwner(change_number, owner))
+    return owners
+
+
+def open_bot_owned_files() -> set[str]:
+    """Return file paths covered by currently-open bot-owned Gerrit patch sets."""
+    return set(_open_bot_owned_file_owners())
+
+
+def _paths_overlap(targets: set[str], in_flight: set[str]) -> set[str]:
+    import fnmatch
+
+    overlaps: set[str] = set()
+    for target in targets:
+        for path in in_flight:
+            if target == path or fnmatch.fnmatch(path, target) or fnmatch.fnmatch(target, path):
+                overlaps.add(path)
+    return overlaps
+
+
+def file_mutex_check(
+    snapshot: TicketSnapshot,
+    description: str | None = None,
+) -> tuple[bool, str]:
+    """Return whether ``snapshot`` can be picked up without file collision."""
+    target = predict_target_files(snapshot, description=description)
+    if not target:
+        return True, "no prediction available - mutex check skipped"
+
+    try:
+        in_flight_owners = _open_bot_owned_file_owners()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return True, f"gerrit query failed - mutex check skipped: {type(exc).__name__}: {exc}"
+
+    overlap = _paths_overlap(target, set(in_flight_owners))
+    if not overlap:
+        return True, "no collision"
+
+    first_path = sorted(overlap)[0]
+    owner = in_flight_owners[first_path][0]
+    return (
+        False,
+        f"file collision: {first_path} already in open PS #{owner.change_number} "
+        f"(owner: {owner.owner})",
+    )
 
 
 PREREQS_RE = re.compile(

@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -36,6 +37,41 @@ from backend.agents import jira_dispatch, scheduler
 AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
 DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
+
+
+def _file_mutex_skip_comment(reason: str) -> str:
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return f"[runner-file-mutex] {stamp}\n\nSkipped - {reason}. Will retry next tick."
+
+
+def _check_pre_pickup_candidate(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+    stats: dict[str, int] | None = None,
+) -> bool:
+    """Runner selection predicate: existing pre-pickup gate + OP-731 file mutex."""
+    ok, _ = jira_dispatch.pre_pickup_ok(client, snapshot)
+    if not ok:
+        if stats is not None:
+            stats["other_blocked"] = stats.get("other_blocked", 0) + 1
+        return False
+
+    description = jira_dispatch.fetch_description(client, snapshot.key)
+    ok, reason = jira_dispatch.file_mutex_check(snapshot, description=description)
+    if ok:
+        if not DRY_RUN:
+            jira_dispatch.remove_label(
+                client, snapshot.key, jira_dispatch.FILE_COLLISION_SKIP_LABEL
+            )
+        return True
+
+    if stats is not None:
+        stats["file_mutex_blocked"] = stats.get("file_mutex_blocked", 0) + 1
+    print(f"[runner] runner.pickup_blocked_file_mutex {snapshot.key}: {reason}")
+    if not DRY_RUN:
+        jira_dispatch.add_label(client, snapshot.key, jira_dispatch.FILE_COLLISION_SKIP_LABEL)
+        jira_dispatch.add_comment(client, snapshot.key, _file_mutex_skip_comment(reason))
+    return False
 
 
 def _build_prompt(client: jira_dispatch.DispatchClient, key: str, description: str) -> str:
@@ -247,12 +283,16 @@ def main() -> int:
             return 0
         snapshots = [jira_dispatch.to_snapshot(i) for i in candidates_raw]
         weights = scheduler.load_weights()
+        pickup_stats: dict[str, int] = {"file_mutex_blocked": 0, "other_blocked": 0}
         winner = scheduler.dispatch(
             snapshots, weights,
-            pre_pickup_check=lambda t: jira_dispatch.pre_pickup_ok(client, t)[0],
+            pre_pickup_check=lambda t: _check_pre_pickup_candidate(client, t, pickup_stats),
         )
         if winner is None:
-            print("[runner] no candidate passed pre-pickup checks")
+            if pickup_stats["file_mutex_blocked"] and not pickup_stats["other_blocked"]:
+                print("[runner] all candidates blocked by file-mutex")
+            else:
+                print("[runner] no candidate passed pre-pickup checks")
             return 0
         snapshot = winner
 
@@ -312,8 +352,18 @@ def main() -> int:
             )
         return 1
 
-    # Step 4: build prompt + transition + invoke
     description = jira_dispatch.fetch_description(client, snapshot.key)
+    ok, reason = jira_dispatch.file_mutex_check(snapshot, description=description)
+    if not ok:
+        print(f"[runner] runner.pickup_blocked_file_mutex {snapshot.key}: {reason}")
+        if not DRY_RUN:
+            jira_dispatch.add_label(client, snapshot.key, jira_dispatch.FILE_COLLISION_SKIP_LABEL)
+            jira_dispatch.add_comment(client, snapshot.key, _file_mutex_skip_comment(reason))
+        return 0
+    if not DRY_RUN:
+        jira_dispatch.remove_label(client, snapshot.key, jira_dispatch.FILE_COLLISION_SKIP_LABEL)
+
+    # Step 4: build prompt + transition + invoke
     prompt = _build_prompt(client, snapshot.key, description)
 
     if DRY_RUN:
