@@ -690,7 +690,11 @@ def _fake_dispatch_client() -> jd.DispatchClient:
     )
 
 
-def _snapshot(key: str = "OP-555", mutex: tuple = ("mutex:backend/foo.py",)):
+def _snapshot(
+    key: str = "OP-555",
+    mutex: tuple = ("mutex:backend/foo.py",),
+    labels: tuple[str, ...] = (),
+):
     from backend.agents.scheduler import TicketSnapshot
     return TicketSnapshot(
         key=key,
@@ -702,6 +706,7 @@ def _snapshot(key: str = "OP-555", mutex: tuple = ("mutex:backend/foo.py",)):
         downstream_blocked_count=0,
         mutex_labels=mutex,
         has_mutex_in_progress_sibling=False,
+        labels=labels,
     )
 
 
@@ -762,6 +767,7 @@ def test_pre_pickup_ok_blocks_when_mutex_held_by_in_progress_sibling(monkeypatch
         "```\n"
     )
     monkeypatch.setattr(jd, "fetch_description", lambda c, k: desc)
+    monkeypatch.setattr(jd, "migration_freeze_check", lambda c, s, description=None: (True, "no freeze"))
     monkeypatch.setattr(
         jd, "find_mutex_holders",
         lambda c, m, exclude_key: [{
@@ -792,6 +798,7 @@ def test_pre_pickup_ok_releases_pickup_when_holder_transitions_to_approved(monke
         "```\n"
     )
     monkeypatch.setattr(jd, "fetch_description", lambda c, k: desc)
+    monkeypatch.setattr(jd, "migration_freeze_check", lambda c, s, description=None: (True, "no freeze"))
     # JQL excludes Approved (not in MUTEX_HOLDING_STATUSES) → empty holder list
     monkeypatch.setattr(jd, "find_mutex_holders", lambda c, m, exclude_key: [])
     ok, reason = jd.pre_pickup_ok(_fake_dispatch_client(), _snapshot(key="OP-555"))
@@ -803,6 +810,7 @@ def test_pre_pickup_ok_skips_mutex_check_when_no_mutex_with_declared(monkeypatch
     """No mutex_with in Prerequisites → find_mutex_holders is never called."""
     desc = "## Goal\nNo prereqs section here.\n"
     monkeypatch.setattr(jd, "fetch_description", lambda c, k: desc)
+    monkeypatch.setattr(jd, "migration_freeze_check", lambda c, s, description=None: (True, "no freeze"))
     holder_calls: list = []
     monkeypatch.setattr(
         jd, "find_mutex_holders",
@@ -811,6 +819,124 @@ def test_pre_pickup_ok_skips_mutex_check_when_no_mutex_with_declared(monkeypatch
     ok, _ = jd.pre_pickup_ok(_fake_dispatch_client(), _snapshot(mutex=()))
     assert ok is True
     assert holder_calls == []
+
+
+# ── OP-752: migration freeze at pre-pickup ────────────────────────
+
+
+def test_find_active_migrations_queries_in_flight_scope_labels(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_request(client, method, path, body=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {
+            "issues": [{
+                "key": "OP-747",
+                "fields": {
+                    "labels": [
+                        jd.MIGRATION_IN_FLIGHT_LABEL,
+                        "migration:scope=docs/sop/lessons/*",
+                    ],
+                },
+            }],
+        }
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    migrations = jd.find_active_migrations(_fake_dispatch_client(), exclude_key="OP-752")
+
+    assert migrations == [jd.MigrationFreeze("OP-747", ("docs/sop/lessons/*",))]
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/search/jql"
+    jql = captured["body"]["jql"]
+    assert f'labels = "{jd.MIGRATION_IN_FLIGHT_LABEL}"' in jql
+    assert 'status not in ("Published", "公開済み", "Archived")' in jql
+    assert 'key != "OP-752"' in jql
+    assert captured["body"]["fields"] == ["labels", "status"]
+
+
+def test_pre_pickup_ok_blocks_ticket_touching_active_migration_scope(monkeypatch) -> None:
+    desc = (
+        "## Goal\nAdd lesson.\n\n"
+        "## Files / Paths\n"
+        "- docs/sop/lessons/L-OP-752-freeze.md\n"
+    )
+    comments: list[tuple[str, str, str | None]] = []
+
+    monkeypatch.setattr(jd, "fetch_description", lambda c, k: desc)
+    monkeypatch.setattr(
+        jd,
+        "find_active_migrations",
+        lambda c, exclude_key: [jd.MigrationFreeze("OP-747", ("docs/sop/lessons/*",))],
+    )
+    monkeypatch.setattr(
+        jd,
+        "add_comment",
+        lambda c, k, text, idem_key=None: comments.append((k, text, idem_key)),
+    )
+
+    ok, reason = jd.pre_pickup_ok(_fake_dispatch_client(), _snapshot(key="OP-746"))
+
+    assert ok is False
+    assert reason == "migration freeze: OP-747 overlaps docs/sop/lessons/*"
+    assert comments == [(
+        "OP-746",
+        "[runner-migration-freeze] paused — waiting on OP-747 migration to complete",
+        "migration-freeze-OP-746-OP-747",
+    )]
+
+
+def test_migration_freeze_releases_after_migration_no_longer_active(monkeypatch) -> None:
+    desc = (
+        "## Files / Paths\n"
+        "- docs/sop/lessons/L-OP-752-freeze.md\n"
+    )
+    comments: list[str] = []
+    monkeypatch.setattr(jd, "find_active_migrations", lambda c, exclude_key: [])
+    monkeypatch.setattr(jd, "add_comment", lambda c, k, text, idem_key=None: comments.append(text))
+
+    ok, reason = jd.migration_freeze_check(
+        _fake_dispatch_client(),
+        _snapshot(key="OP-746"),
+        description=desc,
+    )
+
+    assert ok is True
+    assert reason == "no active migration freeze"
+    assert comments == []
+
+
+def test_migration_override_label_bypasses_and_audits(monkeypatch) -> None:
+    desc = (
+        "## Files / Paths\n"
+        "- docs/sop/lessons/L-OP-752-freeze.md\n"
+    )
+    comments: list[tuple[str, str, str | None]] = []
+    monkeypatch.setattr(
+        jd,
+        "find_active_migrations",
+        lambda c, exclude_key: [jd.MigrationFreeze("OP-747", ("docs/sop/lessons/*",))],
+    )
+    monkeypatch.setattr(
+        jd,
+        "add_comment",
+        lambda c, k, text, idem_key=None: comments.append((k, text, idem_key)),
+    )
+
+    ok, reason = jd.migration_freeze_check(
+        _fake_dispatch_client(),
+        _snapshot(key="OP-746", labels=(jd.MIGRATION_OVERRIDE_LABEL,)),
+        description=desc,
+    )
+
+    assert ok is True
+    assert reason == "migration override: OP-747 overlaps docs/sop/lessons/*"
+    assert comments == [(
+        "OP-746",
+        "[runner-migration-override] migration:override bypassed OP-747 freeze for docs/sop/lessons/*.",
+        "migration-override-OP-746-OP-747",
+    )]
 
 
 # ── OP-691: Phase 1.5 transition idempotency ──────────────────────
@@ -962,6 +1088,7 @@ def test_pre_pickup_ok_mutex_reason_lists_each_blocking_sibling(monkeypatch) -> 
         "```\n"
     )
     monkeypatch.setattr(jd, "fetch_description", lambda c, k: desc)
+    monkeypatch.setattr(jd, "migration_freeze_check", lambda c, s, description=None: (True, "no freeze"))
     monkeypatch.setattr(
         jd, "find_mutex_holders",
         lambda c, m, exclude_key: [
