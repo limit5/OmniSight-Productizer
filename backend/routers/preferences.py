@@ -447,6 +447,15 @@ async def skip_tour(
     return {"key": TOUR_SEEN_PREF_KEY, "value": PREF_TRUE_VALUE}
 
 
+@router.post("/user-preferences/tour_seen/replay")
+async def replay_tour(
+    user: auth.User = Depends(auth.current_user),
+) -> PreferenceResponse:
+    await _upsert_preference(user.id, TOUR_SEEN_PREF_KEY, PREF_FALSE_VALUE)
+    _emit_preference_updated(TOUR_SEEN_PREF_KEY, PREF_FALSE_VALUE, user.id)
+    return {"key": TOUR_SEEN_PREF_KEY, "value": PREF_FALSE_VALUE}
+
+
 @router.post("/multi-provider/onboarding-tour/complete")
 async def complete_multi_provider_onboarding_tour(
     user: auth.User = Depends(auth.current_user),
