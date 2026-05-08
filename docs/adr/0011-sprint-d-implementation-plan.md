@@ -95,6 +95,20 @@ The single human gate at production deploy is **deliberate** — Google SRE, Net
 - "Big red button" responsibility cannot be fully delegated to automation
 - Audit / compliance frameworks (SOC2, ISO 27001) require demonstrable human control over production changes
 
+### D8 tag + release branch contract
+
+OP-769 adds `backend.agents.auto_tag_release`, a daemon-style consumer for
+the staging gate log. On each `staging_passed` event it resolves the
+SemVer `fixVersion`, creates an annotated immutable `vX.Y.Z` tag on
+`main` HEAD, pushes the tag to Gerrit and GitLab, cherry-picks that commit
+onto `release/vX.Y`, pushes the release branch to both remotes, and emits
+`release_tagged` for D9.
+
+Existing tags are never moved. If a requested `vX.Y.Z` already points at
+any commit other than the current `main` HEAD, the automation fails closed
+so the operator can cut a new patch version instead of rewriting release
+evidence.
+
 ### Zero-downtime requirements (orthogonal to automation)
 
 The pipeline ENABLES zero-downtime; it does not GUARANTEE it. Each release must independently meet:
