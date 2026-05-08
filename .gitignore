@@ -38,6 +38,11 @@ __pycache__/
 # build artifacts
 /build/
 
+# docs-site build artifact (OP-785 / OP-792) — emitted by mkdocs build
+# (or backend.docs_static_site stop-gap) and published to GitHub Pages
+/docs-site-dist/
+/docs-site/.venv/
+
 # SDK auto-discovery cache (cloned vendor SDKs)
 /.sdks/
 
