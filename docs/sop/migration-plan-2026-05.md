@@ -247,11 +247,29 @@ These are all soft-deadline items; the *technical* readiness is achieved as of 2
 
 ### Step 3.2 — Submit-rule + Tier config
 
-- [ ] O7 submit-rule (Prolog) deployed
-- [ ] `configs/governance/tier-paths.yaml` deployed
-- [ ] 4-layer protection wired: path force-upgrade + S whitelist + reviewer monotonicity + audit log
-- [ ] Trial run: submit a Tier S patchset, verify ai-self-+2 works
-- [ ] Trial run: submit a Tier L patchset, verify human +2 required
+- [ ] ~~O7 submit-rule (Prolog) deployed~~ — replaced by declarative submit-requirements
+      (Gerrit 3.13 rejected new `rules.pl`; see OP-697, OP-695). Delivered via OP-806 G4 below.
+- [ ] `configs/governance/tier-paths.yaml` deployed → **OP-803 G1**
+- [ ] Backend tier classifier (path-list → tier resolver) → **OP-804 G2**
+- [ ] Gerrit server-side hook writes `Tier` label on patchset upload → **OP-805 G3**
+- [ ] `[label "Tier"]` + 4 `[submit-requirement "Tier-*"]` blocks pushed to prod
+      `refs/meta/config` + `ai-reviewer-bots` / `non-ai-reviewer` /
+      `architecture-reviewer` Gerrit groups created → **OP-806 G4**
+- [ ] 4-layer protection wired: path force-upgrade + S whitelist + reviewer
+      monotonicity + audit-log cooldown enforcement → **OP-807 G5**
+- [ ] Trial run: synthetic Tier S patchset → ai-self-+2 succeeds → **OP-807 G5 AC**
+- [ ] Trial run: synthetic Tier L patchset → human +2 still required → **OP-807 G5 AC**
+- [ ] Trial run: synthetic misclassification (security file labelled Tier S) → path
+      force-upgrade kicks in, change is upgraded to L, audit log records the
+      override → **OP-807 G5 AC**
+
+**Implementation tracker**: [OP-802](https://soraapp.atlassian.net/browse/OP-802)
+META — children OP-803 (G1) → OP-804 (G2) → OP-805 (G3) → OP-806 (G4) → OP-807 (G5).
+Dependency: G1 + G2 parallel; G3 needs G1; G4 needs G3; G5 needs G2 + G4.
+
+**Authority reference**: ADR-0005 §4 (4-layer protection) + §5 (submit-requirements
+example blocks). Tier S whitelist + force-upgrade rules in ADR-0005 §3 are the
+canonical spec for OP-803's `tier-paths.yaml`.
 
 ### Step 3.3 — MCP servers
 
