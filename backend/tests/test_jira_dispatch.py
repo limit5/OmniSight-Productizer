@@ -640,10 +640,11 @@ def test_sync_to_gerrit_develop_returns_branch_name_with_ticket_key(tmp_path, mo
     assert result.develop_sha == fake_sha
     assert fake_sha[:12] in result.detail
 
-    # Verify pre-sync guard is first, then fetch → rev-parse → switch → clean.
+    # Verify pre-sync guard is first, then fetch → rev-parse → switch → reset → clean.
     assert call_log[0] == ["git", "-C", str(tmp_path), "rev-parse", "--git-dir"]
     fetch_calls = [c for c in call_log if c[:2] == ["git", "fetch"]]
     switch_calls = [c for c in call_log if c[:2] == ["git", "switch"]]
+    reset_calls = [c for c in call_log if c[:2] == ["git", "reset"]]
     clean_calls = [c for c in call_log if c[:2] == ["git", "clean"]]
     assert len(fetch_calls) == 1
     assert "develop" in fetch_calls[0]
@@ -651,6 +652,10 @@ def test_sync_to_gerrit_develop_returns_branch_name_with_ticket_key(tmp_path, mo
     assert "-C" in switch_calls[0]
     assert f"feature/OP-42-runner-fresh" in switch_calls[0]
     assert fake_sha in switch_calls[0]
+    # OP-796: reset --hard must run between switch and clean to discard
+    # unstaged tracked-file edits (git switch -C alone preserves them).
+    assert len(reset_calls) == 1
+    assert reset_calls[0] == ["git", "reset", "--hard", fake_sha]
     assert len(clean_calls) == 1
 
 

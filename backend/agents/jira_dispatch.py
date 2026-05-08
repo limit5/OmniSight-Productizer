@@ -542,6 +542,18 @@ def sync_to_gerrit_develop(
         cwd=worktree_path, check=True, capture_output=True, text=True,
     )
 
+    # Step 3b (OP-796): `git switch -C` preserves unstaged tracked-file changes,
+    # so successive ticks could accumulate cross-ticket leftover edits until
+    # `ensure_change_ids` ran `git rebase --exec` which refused with "cannot
+    # rebase: You have unstaged changes" and wedged the runner. Hard-reset the
+    # worktree to the fetched develop tip to enforce the docstring's contract.
+    # `assert_worktree_clean` (pre-step) only handles in-progress git states
+    # (rebase/cherry-pick/merge/...), not unstaged tracked-file edits.
+    subprocess.run(
+        ["git", "reset", "--hard", develop_sha],
+        cwd=worktree_path, check=True, capture_output=True, text=True,
+    )
+
     # Step 4: clean untracked (defensive — discards stale partial work)
     subprocess.run(
         ["git", "clean", "-fdx"],
