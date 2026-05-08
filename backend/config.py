@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
@@ -748,6 +749,191 @@ class Settings(BaseSettings):
         }
         return defaults.get(self.llm_provider, "claude-sonnet-4-20250514")
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OP-764 D3 — multi-environment config + secrets overlay
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Before pre-OP-764: Settings read from ``.env`` only. A new staging
+# host meant ``scp .env`` from prod, hand-edit the few values that
+# differ, ship. That stored plaintext secrets on every host and
+# encouraged copy-paste drift between environments.
+#
+# Post-OP-764: per-environment YAML at ``config/<env>.yaml`` carries
+# non-secret defaults (env name, debug, auth mode, sandbox runtime,
+# CORS origin, …) and is checked into the repo. Secrets come from
+# a pluggable provider (``backend.secrets_provider``) that supports
+# a Fernet-encrypted local vault file or HashiCorp Vault. The two
+# halves are kept disjoint by :data:`backend.secrets_provider.
+# SECRET_FIELDS` — the migration script enforces the split, and
+# the overlay below refuses to apply a YAML entry that names a
+# secret field.
+#
+# Resolution order applied below (lowest → highest):
+#
+#   1. ``Settings`` class default
+#   2. Vault secret (when ``OMNISIGHT_SECRETS_BACKEND != env``)
+#   3. ``config/<env>.yaml`` value for non-secret fields
+#   4. ``.env`` value (legacy; pydantic loads after step 5 has run)
+#   5. Process env (shell / docker --env / deploy ``--override``)
+#
+# The overlay function writes into ``os.environ`` BEFORE the
+# ``Settings()`` singleton is instantiated, and only when the env
+# var is NOT already set — that ordering preserves rule 5 as the
+# top-priority path so a deploy ``--override`` still wins over the
+# YAML default.
+
+
+def _resolve_yaml_path(env_name: str) -> Path | None:
+    """Map ``env`` to ``config/<env>.yaml`` next to the repo root.
+
+    Accepts ``production`` as an alias for ``prod`` so production
+    hosts can keep ``OMNISIGHT_ENV=production`` (the value the
+    startup-config validator already special-cases) without us
+    having to ship a redundant ``config/production.yaml``.
+    """
+    aliases = {"production": "prod", "develop": "dev", "development": "dev"}
+    canonical = aliases.get(env_name, env_name)
+    repo_root = Path(__file__).resolve().parent.parent
+    candidate = repo_root / "config" / f"{canonical}.yaml"
+    return candidate if candidate.exists() else None
+
+
+def _set_env_if_unset(field_name: str, value: str) -> bool:
+    """Set ``OMNISIGHT_<UPPER>`` in ``os.environ`` if absent.
+
+    Returns True when the env was actually set, so the caller can
+    log the overlay decision deterministically. Empty / None
+    values are skipped — a yaml key that left the value empty is
+    semantically "fall through to next layer".
+    """
+    if value is None or value == "":
+        return False
+    env_name = f"OMNISIGHT_{field_name.upper()}"
+    if env_name in os.environ:
+        return False
+    os.environ[env_name] = str(value)
+    return True
+
+
+def _apply_yaml_overlay(yaml_path: Path) -> int:
+    """Inject non-secret YAML fields into ``os.environ``.
+
+    Returns the number of env vars actually written (i.e. excludes
+    keys that were already set via shell / .env, and excludes
+    secret-field entries which are rejected outright).
+
+    A yaml entry that names a key not declared on ``Settings`` is
+    logged at WARNING and skipped — pydantic-settings'
+    ``extra='forbid'`` would reject it on instantiation anyway, but
+    the explicit log line makes the source of the boot failure
+    obvious.
+    """
+    try:
+        import yaml as _yaml  # type: ignore[import-not-found]
+    except ImportError:
+        _startup_logger.error(
+            "PyYAML not installed; cannot apply config overlay from %s. "
+            "Install ``pyyaml`` or unset OMNISIGHT_ENV.",
+            yaml_path,
+        )
+        return 0
+
+    try:
+        raw = _yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        _startup_logger.error("config: failed to parse %s: %s", yaml_path, exc)
+        return 0
+    if not isinstance(raw, dict):
+        _startup_logger.error(
+            "config: %s top-level must be a mapping, got %s",
+            yaml_path, type(raw).__name__,
+        )
+        return 0
+
+    from backend.secrets_provider import is_secret_field
+    field_names = set(Settings.model_fields)
+    written = 0
+    for key, value in raw.items():
+        key = str(key)
+        if key not in field_names:
+            _startup_logger.warning(
+                "config: %s declares unknown Settings field %r — skipping",
+                yaml_path, key,
+            )
+            continue
+        if is_secret_field(key):
+            _startup_logger.error(
+                "config: %s declares secret field %r — secrets must be "
+                "in the vault, NEVER in checked-in YAML. Skipping.",
+                yaml_path, key,
+            )
+            continue
+        if isinstance(value, bool):
+            stringified = "true" if value else "false"
+        elif value is None:
+            continue
+        else:
+            stringified = str(value)
+        if _set_env_if_unset(key, stringified):
+            written += 1
+    return written
+
+
+def _apply_secrets_overlay() -> int:
+    """Pull secrets from the configured provider into ``os.environ``.
+
+    Returns the count of env vars actually written. The default
+    backend ``env`` is a no-op (the value is already where pydantic
+    will look). Misconfiguration (bad backend name, unreachable
+    Vault, undecryptable file) is logged at ERROR and re-raised so
+    the boot fails loudly instead of silently falling back to
+    plaintext .env values.
+    """
+    backend_name = (os.environ.get("OMNISIGHT_SECRETS_BACKEND") or "env").strip().lower()
+    if backend_name == "env":
+        return 0
+    from backend.secrets_provider import make_secrets_provider
+    provider = make_secrets_provider(backend_name)
+    written = 0
+    for key in provider.list_keys():
+        value = provider.get(key)
+        if value and _set_env_if_unset(key, value):
+            written += 1
+    _startup_logger.info(
+        "config: secrets overlay (%s backend) applied %d value(s)",
+        backend_name, written,
+    )
+    return written
+
+
+def _apply_env_overlay() -> None:
+    """Apply YAML + vault overlays to ``os.environ`` before Settings().
+
+    Idempotent — re-runs in tests by toggling
+    ``OMNISIGHT_ENV`` / ``OMNISIGHT_SECRETS_BACKEND`` only affect
+    keys not already set. Tests that need to flip the overlay should
+    monkeypatch the env, ``del`` any prior writes from the registry,
+    and re-import ``backend.config``.
+    """
+    env_name = (os.environ.get("OMNISIGHT_ENV") or "").strip().lower()
+    if env_name:
+        yaml_path = _resolve_yaml_path(env_name)
+        if yaml_path is not None:
+            applied = _apply_yaml_overlay(yaml_path)
+            _startup_logger.info(
+                "config: yaml overlay %s applied %d value(s)",
+                yaml_path.name, applied,
+            )
+        else:
+            _startup_logger.info(
+                "config: OMNISIGHT_ENV=%s but no config/<env>.yaml found; "
+                "running on env vars only", env_name,
+            )
+    _apply_secrets_overlay()
+
+
+_apply_env_overlay()
 
 settings = Settings()
 

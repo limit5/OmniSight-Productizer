@@ -1,0 +1,32 @@
+# OP-764 D3 — per-environment non-secret configuration (staging)
+#
+# Loaded by ``backend.config`` at import time when
+# ``OMNISIGHT_ENV`` resolves to ``staging``. See ``config/dev.yaml``
+# header for the precedence rules + secret/non-secret split.
+
+env: staging
+debug: false
+ci_mode: false
+
+# Auth — staging mirrors prod policy so we exercise the strict path
+# end-to-end before traffic hits prod.
+auth_mode: strict
+cookie_secure: "true"
+
+# Sandbox runtime — staging hosts must have gVisor installed.
+docker_runtime: runsc
+
+# Frontend / API — operator overrides the hostname per-deploy via
+# ``--override OMNISIGHT_FRONTEND_ORIGIN=https://staging.example.com``.
+frontend_origin: "http://localhost:3000"
+
+# LLM provider — staging defaults to anthropic; the actual API key
+# is fetched from the vault by the secrets provider on startup.
+llm_provider: anthropic
+
+# Token budgets — staging uses a small daily cap so a runaway loop
+# doesn't burn the prod budget while we're still validating.
+token_budget_daily: 5.0
+token_budget_hourly: 1.0
+
+web_search_provider: "none"

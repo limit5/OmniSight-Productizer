@@ -1,0 +1,43 @@
+# OP-764 D3 — per-environment non-secret configuration (prod)
+#
+# Loaded by ``backend.config`` at import time when
+# ``OMNISIGHT_ENV`` resolves to ``production``. See
+# ``config/dev.yaml`` header for the precedence rules + secret/
+# non-secret split.
+#
+# WARNING: this file is checked in, so it MUST contain only
+# non-secret values. The startup-config validator (``backend.config::
+# validate_startup_config``) hard-fails any prod boot whose
+# ``auth_mode`` is not ``strict`` and whose ``docker_runtime`` is
+# not ``runsc`` — both are pinned here so a fresh prod deploy can't
+# silently downgrade.
+
+env: production
+debug: false
+ci_mode: false
+
+# Auth — prod boots refuse to start unless this is ``strict``.
+auth_mode: strict
+cookie_secure: "true"
+
+# Sandbox runtime — gVisor required (config validator enforces this).
+docker_runtime: runsc
+
+# Frontend / API origin — operators set the public hostname via
+# ``--override OMNISIGHT_FRONTEND_ORIGIN=https://prod.example.com``
+# so we don't bake the production hostname into the YAML.
+frontend_origin: ""
+
+# LLM provider — anthropic is the prod default; the API key itself
+# is fetched from the vault by the secrets provider on startup.
+llm_provider: anthropic
+
+# Token budgets — prod gets the real budget. Operators tune via
+# vault / override; the YAML carries the safe fleet-wide default.
+token_budget_daily: 50.0
+token_budget_hourly: 5.0
+
+# Sandbox lifetime — match the documented 45-min cap for prod.
+sandbox_lifetime_s: 2700
+
+web_search_provider: "none"

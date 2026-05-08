@@ -842,3 +842,49 @@ cross-check the system that owns the terminal truth. Queue state is a
 pickup hint, not proof that work is still needed.
 
 ---
+
+## L-OP-764 — Keep secrets and non-secret config in separate stores from day one (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-764-secret-vs-config-separation.md`](docs/sop/lessons/L-OP-764-secret-vs-config-separation.md)
+
+
+# Keep secrets and non-secret config in separate stores from day one
+
+**Situation**: Pre-OP-764, every OmniSight host carried a hand-edited
+`.env` that mixed feature flags, hostnames, and timeouts (legitimate
+config) with API keys, OAuth client secrets, webhook HMAC secrets, and
+the bootstrap admin password (real secrets). Deploying a new staging
+host meant `scp .env` from prod, hand-edit the few values that
+differed, ship. That pattern (1) put plaintext secrets on every host,
+(2) silently drifted between environments because each host's `.env`
+was edited independently, and (3) gave us no audit trail when a key
+rotated.
+
+**Fix**: OP-764 split the world into two pipes that meet at boot:
+non-secret config lives in `config/<env>.yaml` checked into the repo;
+secrets live in a vault (Fernet file or HashiCorp Vault) fronted by
+`backend.secrets_provider` with a single `SECRET_FIELDS` registry that
+anchors the split. `backend.config._apply_env_overlay()` runs at
+module import — BEFORE `Settings()` — and writes both halves into
+`os.environ` only for keys not already set so a deploy `--override`
+still wins. The overlay refuses to apply a YAML entry whose key is in
+`SECRET_FIELDS` — accidental commits never reach Settings.
+
+**Verification**:
+`backend/tests/test_secrets_provider.py` pins SECRET_FIELDS membership
+and the file-vault round-trip + encryption canary;
+`backend/tests/test_config_multi_env_overlay.py::test_synthetic_staging_spinup_no_dotenv_required`
+is the headline AC — fresh process with only `OMNISIGHT_ENV=staging`
+plus a populated vault produces a fully-configured Settings;
+`backend/tests/test_migrate_dotenv_to_vault.py` covers the legacy
+`.env` → vault + yaml round-trip including conflict refusal.
+
+**Generalisation**: When a single store mixes secrets with feature
+flags, every operation on the store has the same blast radius as a
+secret rotation. Split them at the lowest layer that touches both —
+config loading — and pin the split in a registry that callers consult
+instead of re-deciding. A new Settings field carrying a credential
+MUST land both as a class attribute and as a SECRET_FIELDS entry, or
+the next migration silently leaks it into checked-in YAML.
+
+---
