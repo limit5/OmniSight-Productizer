@@ -126,10 +126,12 @@ class _GerritScenario:
         # If a change appears in ``conflict_on_rebase``, attempts to
         # rebase it return HTTP 409 instead of advancing its parent.
         conflict_on_rebase: set[str] | None = None,
+        conflict_files: dict[str, str] | None = None,
     ) -> None:
         self.changes = {str(c["number"]): json.loads(json.dumps(c)) for c in changes}
         self.develop_tip = develop_tip
         self.conflict_on_rebase = conflict_on_rebase or set()
+        self.conflict_files = conflict_files or {}
         self.merged_in_order: list[str] = []
         self.rebase_calls: list[dict[str, Any]] = []
         self.submit_calls: list[dict[str, Any]] = []
@@ -183,8 +185,11 @@ class _GerritScenario:
             if change is None:
                 raise _FakeHTTPError_to_urllib(404, b"not found")
             if str(change.get("number")) in self.conflict_on_rebase:
+                conflict_file = self.conflict_files.get(
+                    str(change.get("number")), "shared.py",
+                )
                 raise _FakeHTTPError_to_urllib(
-                    409, b"merge conflict in: shared.py",
+                    409, f"merge conflict in: {conflict_file}".encode(),
                 )
             new_parent = body.get("base") or self.develop_tip
             change["currentPatchSet"]["parents"] = [{"revision": new_parent}]
@@ -254,6 +259,8 @@ def _make_worker(
     rate_limit_seconds: float = 0.0,
     log_calls: list[tuple[str, str, dict[str, Any]]] | None = None,
     notify_calls: list[tuple[str, str]] | None = None,
+    local_rebase_runner: Any | None = None,
+    repo_root: Path | None = None,
     lock_dir: Path | None = None,
 ) -> sqw.SubmitQueueWorker:
     log_calls = log_calls if log_calls is not None else []
@@ -268,6 +275,8 @@ def _make_worker(
         urlopen=scenario.urlopen,
         owner_password_loader=lambda u: "owner-pw",
         notify_jira=lambda key, msg: notify_calls.append((key, msg)),
+        repo_root=repo_root or REPO_ROOT,
+        local_rebase_runner=local_rebase_runner,
         rate_limit_seconds=rate_limit_seconds,
         poll_interval_seconds=0.0,
         sleep=lambda s: None,
@@ -418,6 +427,61 @@ def test_rebase_conflict_votes_minus_one_with_comment(
         ("OP-200",
          "Submit queue rejected the change: " + msg),
     ]
+
+
+def test_submit_queue_auto_resolves_registered_conflict(
+    tmp_path: Path,
+) -> None:
+    """H1 submit queue must use the same registered resolver path as R3."""
+    cfg = tmp_path / ".gerrit" / "auto-resolve.yaml"
+    cfg.parent.mkdir()
+    cfg.write_text(
+        "auto_resolved_files:\n"
+        "  - path: docs/sop/lessons-learned.md\n"
+        "    resolver: scripts/build_lessons_index.py\n",
+        encoding="utf-8",
+    )
+    change = _make_change(
+        number=201,
+        change_id="I201",
+        parent_sha="stale_parent",
+        subject="[OP-201] generated index",
+    )
+    scenario = _GerritScenario(
+        changes=[change],
+        develop_tip="develop_tip_sha",
+        conflict_on_rebase={"201"},
+        conflict_files={"201": "docs/sop/lessons-learned.md"},
+    )
+    notify_calls: list[tuple[str, str]] = []
+
+    def local_runner(**kwargs: Any) -> sqw.auto_rebase.RebaseResult:
+        scenario.conflict_on_rebase.clear()
+        return sqw.auto_rebase.RebaseResult(
+            change_number="201",
+            success=True,
+            auto_resolved=("docs/sop/lessons-learned.md",),
+        )
+
+    worker = _make_worker(
+        scenario,
+        lock_dir=tmp_path,
+        notify_calls=notify_calls,
+        repo_root=tmp_path,
+        local_rebase_runner=local_runner,
+    )
+
+    [result] = worker.poll_once()
+
+    assert result.merged is True
+    assert scenario.review_calls == []
+    assert scenario.submit_calls == [{"change_id": "I201"}]
+    assert notify_calls[0] == (
+        "OP-201",
+        "[auto-resolve] Submit queue regenerated "
+        "docs/sop/lessons-learned.md via build_lessons_index.py to handle "
+        "merge conflict against develop tip develop_tip_sha",
+    )
 
 
 def test_after_minus_one_operator_can_retry_with_plus_one(

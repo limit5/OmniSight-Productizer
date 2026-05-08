@@ -22,17 +22,25 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import fcntl
 import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from backend.agents.auto_resolve_config import (
+    AutoResolveRule,
+    load_auto_resolve_config,
+)
 
 OP_KEY_RE = re.compile(r"\b(OP-\d+)\b")
 
@@ -43,6 +51,10 @@ REBASE_CONCURRENCY_ENV = "OMNISIGHT_REBASE_CONCURRENCY"
 SWEEP_MAX_WORKERS = 4
 
 SWEEP_DISABLE_ENV = "OMNISIGHT_AUTO_REBASE_DISABLED"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+AUTO_RESOLVE_PATH = Path(".gerrit/auto-resolve.yaml")
+AUTO_RESOLVE_LOCK_DIR = Path("~/.cache/omnisight/auto-resolve-locks").expanduser()
+CONFLICT_MARKERS = ("<<<<<<<", "=======", ">>>>>>>")
 
 
 # ── Owner-key dispatch (OP-720 Phase 3 Option A pattern) ──────────────
@@ -127,6 +139,7 @@ class RebaseResult:
     files: tuple[str, ...] = ()
     error: str = ""
     new_revision: str = ""
+    auto_resolved: tuple[str, ...] = ()
 
 
 class AutoRebaseSweeper:
@@ -150,6 +163,10 @@ class AutoRebaseSweeper:
         urlopen: Callable[..., Any] = urllib.request.urlopen,
         load_password: Callable[[str], str | None] = load_owner_http_password,
         notify_jira: Callable[[str, str], None] | None = None,
+        audit_recorder: Callable[[dict[str, Any]], None] | None = None,
+        repo_root: Path = REPO_ROOT,
+        auto_resolve_config_path: Path = AUTO_RESOLVE_PATH,
+        local_rebase_runner: Callable[..., RebaseResult] | None = None,
         log: Callable[..., None] | None = None,
         rebase_concurrency: int | None = None,
     ) -> None:
@@ -160,6 +177,10 @@ class AutoRebaseSweeper:
         self._urlopen = urlopen
         self._load_password = load_password
         self._notify_jira = notify_jira
+        self._audit_recorder = audit_recorder
+        self._repo_root = repo_root
+        self._auto_resolve_config_path = auto_resolve_config_path
+        self._local_rebase_runner = local_rebase_runner
         self._log: Callable[..., None] = log or (lambda *args, **kwargs: None)
         self._rebased_onto: set[tuple[str, str]] = set()
         self._lock = threading.Lock()
@@ -352,6 +373,36 @@ class AutoRebaseSweeper:
 
         if status == 409:
             files = self._parse_conflict_files(payload)
+            auto_resolvers = self._load_auto_resolvers()
+            auto_handled = [
+                f for f in files if f in auto_resolvers
+            ]
+            if files and set(files) == set(auto_handled):
+                result = self._run_local_auto_resolve(
+                    change,
+                    target_sha,
+                    tuple(auto_handled),
+                    auto_resolvers,
+                )
+                if result.success:
+                    with self._lock:
+                        self._rebased_onto.add(session_key)
+                    self._post_auto_resolve_jira_notice(
+                        change,
+                        target_sha,
+                        result.auto_resolved,
+                        auto_resolvers,
+                    )
+                    self._record_auto_resolve_audit(change, result, auto_resolvers)
+                    return result
+                self._post_auto_resolve_failed_jira_notice(change, result)
+                self._log(
+                    "WARN",
+                    "auto_rebase_auto_resolve_failed",
+                    change_id=change_number,
+                    files=files,
+                    err=result.error,
+                )
             return RebaseResult(
                 change_number=change_number,
                 conflict=True, files=tuple(files),
@@ -479,6 +530,45 @@ class AutoRebaseSweeper:
             ]
         return [text[:200]]
 
+    def _load_auto_resolvers(self) -> dict[str, AutoResolveRule]:
+        try:
+            return load_auto_resolve_config(
+                self._repo_root / self._auto_resolve_config_path,
+                log=self._log,
+            )
+        except Exception as exc:
+            self._log(
+                "WARN", "auto_resolve_config_load_failed",
+                err=f"{type(exc).__name__}: {exc}",
+            )
+            return {}
+
+    def _run_local_auto_resolve(
+        self,
+        change: dict[str, Any],
+        target_sha: str,
+        files: tuple[str, ...],
+        resolvers: dict[str, AutoResolveRule],
+    ) -> RebaseResult:
+        runner = self._local_rebase_runner or local_rebase_with_resolvers
+        try:
+            return runner(
+                change=change,
+                target_sha=target_sha,
+                files=files,
+                resolvers=resolvers,
+                repo_root=self._repo_root,
+                run_command=self._run_command,
+                log=self._log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return RebaseResult(
+                change_number=str(change.get("number") or ""),
+                conflict=True,
+                files=files,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
     def _summarise(self, payload: str) -> str:
         return payload.strip()[:200]
 
@@ -503,11 +593,96 @@ class AutoRebaseSweeper:
                       ticket_key=ticket_key,
                       err=f"{type(exc).__name__}: {exc}")
 
+    def _post_auto_resolve_jira_notice(
+        self,
+        change: dict[str, Any],
+        target_sha: str,
+        files: tuple[str, ...],
+        resolvers: dict[str, AutoResolveRule],
+    ) -> None:
+        if self._notify_jira is None:
+            return
+        ticket_key = self._extract_ticket_key(change)
+        if not ticket_key:
+            return
+        details = ", ".join(
+            f"{path} via {Path(resolvers[path].resolver).name}"
+            for path in files
+            if path in resolvers
+        )
+        message = (
+            f"[auto-resolve] R3 regenerated {details} to handle merge "
+            f"conflict against develop tip {target_sha}"
+        )
+        try:
+            self._notify_jira(ticket_key, message)
+        except Exception as exc:
+            self._log("WARN", "auto_rebase_jira_notify_failed",
+                      ticket_key=ticket_key,
+                      err=f"{type(exc).__name__}: {exc}")
+
+    def _post_auto_resolve_failed_jira_notice(
+        self, change: dict[str, Any], result: RebaseResult,
+    ) -> None:
+        if self._notify_jira is None:
+            return
+        ticket_key = self._extract_ticket_key(change)
+        if not ticket_key:
+            return
+        files = ", ".join(result.files) if result.files else "registered files"
+        message = (
+            f"[auto-resolve] R3 could not regenerate {files}; falling back "
+            f"to manual conflict handling. Reason: {result.error or 'unknown'}"
+        )
+        try:
+            self._notify_jira(ticket_key, message)
+        except Exception as exc:
+            self._log("WARN", "auto_rebase_jira_notify_failed",
+                      ticket_key=ticket_key,
+                      err=f"{type(exc).__name__}: {exc}")
+
+    def _extract_ticket_key(self, change: dict[str, Any]) -> str | None:
+        subject = str(change.get("subject") or "")
+        match = OP_KEY_RE.search(subject)
+        return match.group(1) if match else None
+
+    def _record_auto_resolve_audit(
+        self,
+        change: dict[str, Any],
+        result: RebaseResult,
+        resolvers: dict[str, AutoResolveRule],
+    ) -> None:
+        change_id = str(change.get("id") or change.get("change_id") or "")
+        ps = str((change.get("currentPatchSet") or {}).get("number") or "")
+        for file_path in result.auto_resolved:
+            rule = resolvers.get(file_path)
+            record = {
+                "event": "auto_resolve.generated_file",
+                "change_id": change_id,
+                "change_number": result.change_number,
+                "ps": ps,
+                "file": file_path,
+                "resolver": rule.resolver if rule else "",
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._log("INFO", "auto_resolve_audit", **record)
+            if self._audit_recorder is not None:
+                try:
+                    self._audit_recorder(record)
+                except Exception as exc:  # noqa: BLE001
+                    self._log(
+                        "WARN", "auto_resolve_audit_record_failed",
+                        change_id=result.change_number,
+                        file=file_path,
+                        err=f"{type(exc).__name__}: {exc}",
+                    )
+
     def _emit_result_log(self, result: RebaseResult) -> None:
         if result.success:
             self._log("INFO", "auto_rebase_success",
                       change_id=result.change_number,
-                      new_revision=result.new_revision)
+                      new_revision=result.new_revision,
+                      auto_resolved=list(result.auto_resolved))
         elif result.conflict:
             self._log("WARN", "auto_rebase_conflict",
                       change_id=result.change_number,
@@ -554,6 +729,226 @@ class AutoRebaseSweeper:
                 change_id=result.change_number,
                 err=f"{type(exc).__name__}: {exc}",
             )
+
+
+# ── Local generated-file resolver ────────────────────────────────────
+
+
+def local_rebase_with_resolvers(
+    *,
+    change: dict[str, Any],
+    target_sha: str,
+    files: tuple[str, ...],
+    resolvers: dict[str, AutoResolveRule],
+    repo_root: Path = REPO_ROOT,
+    run_command: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    log: Callable[..., None] | None = None,
+) -> RebaseResult:
+    """Fetch a PS into a temp clone, rebase, regenerate files, push PS+1."""
+    logger = log or (lambda *args, **kwargs: None)
+    change_number = str(change.get("number") or "")
+    change_id = str(change.get("id") or change.get("change_id") or "")
+    patchset = change.get("currentPatchSet") or {}
+    ps_number = str(patchset.get("number") or "")
+    ps_ref = str(patchset.get("ref") or "")
+    if not ps_ref and change_number and ps_number:
+        ps_ref = f"refs/changes/{change_number[-2:]}/{change_number}/{ps_number}"
+    if not ps_ref:
+        return RebaseResult(
+            change_number=change_number,
+            conflict=True,
+            files=files,
+            error="missing_patchset_ref",
+        )
+
+    lock_names = [path.replace("/", "_") for path in sorted(files)]
+    with _auto_resolve_file_locks(lock_names):
+        with tempfile.TemporaryDirectory(prefix="omnisight-auto-resolve-") as tmp:
+            worktree = Path(tmp) / "repo"
+            try:
+                clone_url = _origin_url(run_command, repo_root) or str(repo_root)
+                _run_git(
+                    run_command,
+                    ["git", "clone", "--quiet", clone_url, str(worktree)],
+                    cwd=repo_root,
+                )
+                _run_git(
+                    run_command,
+                    ["git", "fetch", "--quiet", "origin", ps_ref],
+                    cwd=worktree,
+                )
+                _run_git(
+                    run_command,
+                    ["git", "checkout", "--quiet", "FETCH_HEAD"],
+                    cwd=worktree,
+                )
+                rebase = run_command(
+                    ["git", "rebase", target_sha],
+                    cwd=worktree,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if rebase.returncode == 0:
+                    return RebaseResult(
+                        change_number=change_number,
+                        success=True,
+                        auto_resolved=(),
+                    )
+
+                for file_path in files:
+                    _run_git(
+                        run_command,
+                        ["git", "checkout", "--ours", "--", file_path],
+                        cwd=worktree,
+                    )
+                    rule = resolvers[file_path]
+                    before = _status_paths(run_command, worktree)
+                    _run_resolver(run_command, worktree, rule.resolver)
+                    after = _status_paths(run_command, worktree)
+                    touched = after - before
+                    unexpected = touched - {file_path}
+                    if unexpected:
+                        raise RuntimeError(
+                            "resolver touched unregistered files: "
+                            + ", ".join(sorted(unexpected)),
+                        )
+                    _reject_conflict_markers(worktree / file_path)
+
+                _run_git(run_command, ["git", "add", "--", *files], cwd=worktree)
+                env = os.environ.copy()
+                env["GIT_EDITOR"] = "true"
+                _run_git(
+                    run_command,
+                    ["git", "rebase", "--continue"],
+                    cwd=worktree,
+                    env=env,
+                    timeout=120,
+                )
+                _run_git(
+                    run_command,
+                    ["git", "push", "origin", "HEAD:refs/for/develop"],
+                    cwd=worktree,
+                    timeout=120,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger(
+                    "WARN",
+                    "auto_resolve_local_rebase_failed",
+                    change_id=change_id,
+                    change_number=change_number,
+                    err=f"{type(exc).__name__}: {exc}",
+                )
+                return RebaseResult(
+                    change_number=change_number,
+                    conflict=True,
+                    files=files,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+    return RebaseResult(
+        change_number=change_number,
+        success=True,
+        auto_resolved=files,
+    )
+
+
+class _auto_resolve_file_locks:
+    def __init__(self, names: list[str]) -> None:
+        self._names = names
+        self._fds: list[int] = []
+
+    def __enter__(self) -> "_auto_resolve_file_locks":
+        AUTO_RESOLVE_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        for name in self._names:
+            path = AUTO_RESOLVE_LOCK_DIR / f"{name}.lock"
+            fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except Exception:
+                os.close(fd)
+                raise
+            self._fds.append(fd)
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        for fd in reversed(self._fds):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+        self._fds.clear()
+
+
+def _run_git(
+    run_command: Callable[..., subprocess.CompletedProcess],
+    cmd: list[str],
+    *,
+    cwd: Path,
+    timeout: int = 60,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    result = run_command(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise RuntimeError(f"{' '.join(cmd)} failed: {detail}")
+    return result
+
+
+def _run_resolver(
+    run_command: Callable[..., subprocess.CompletedProcess],
+    worktree: Path,
+    resolver: str,
+) -> None:
+    cmd = ["python3", resolver] if resolver.endswith(".py") else [resolver]
+    _run_git(run_command, cmd, cwd=worktree, timeout=120)
+
+
+def _origin_url(
+    run_command: Callable[..., subprocess.CompletedProcess],
+    repo_root: Path,
+) -> str:
+    result = run_command(
+        ["git", "remote", "get-url", "origin"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def _status_paths(
+    run_command: Callable[..., subprocess.CompletedProcess],
+    worktree: Path,
+) -> set[str]:
+    result = _run_git(
+        run_command,
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=worktree,
+    )
+    paths: set[str] = set()
+    for line in (result.stdout or "").splitlines():
+        if not line:
+            continue
+        paths.add(line[3:].strip())
+    return paths
+
+
+def _reject_conflict_markers(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    for marker in CONFLICT_MARKERS:
+        if marker in text:
+            raise RuntimeError(f"{path}: unresolved conflict marker {marker}")
 
 
 # ── DebouncedSweepScheduler ───────────────────────────────────────────
