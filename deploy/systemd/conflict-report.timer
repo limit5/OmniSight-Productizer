@@ -1,0 +1,19 @@
+; [OP-746] Daily 09:00 UTC trigger for conflict-report.service.
+;
+; Cadence: once a day at 09:00 UTC. Persistent=true so a host that was
+; offline at the scheduled tick fires immediately on resume rather
+; than waiting another full day -- the report's value is "review
+; today's conflict rate at standup," and missing a day during an
+; outage would defeat the purpose.
+
+[Unit]
+Description=Daily 09:00 UTC trigger for conflict-report.service (OP-746)
+
+[Timer]
+Unit=conflict-report.service
+OnCalendar=*-*-* 09:00:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

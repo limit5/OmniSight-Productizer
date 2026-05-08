@@ -48,6 +48,7 @@
 | L-OP-741 | 2026-05-08 | OP-741 | [CI recovery needs a small explicit state machine](docs/sop/lessons/L-OP-741-ci-recovery-needs-a-small-explicit-state-machine.md) | L30 |
 | L-OP-742 | 2026-05-08 | OP-742 | [Test-impact analysis must fail closed on the conservative side](docs/sop/lessons/L-OP-742-test-impact-analysis-must-fail-closed-on-the-conservative-si.md) | L29 |
 | L-OP-743 | 2026-05-08 | OP-743 | [Terminal events should permissively converge workflow state](docs/sop/lessons/L-OP-743-terminal-events-should-permissively-converge-workflow-state.md) | L29 |
+| L-OP-746 | 2026-05-08 | OP-746 | [Measure before optimising conflict pressure](docs/sop/lessons/L-OP-746-measure-before-optimising-conflict-pressure.md) |  |
 
 Legacy sequential lesson numbers are retained only as migration metadata; duplicate legacy numbers from concurrent patchsets: L29.
 
@@ -740,5 +741,46 @@ event should converge workflow state from any safe predecessor, not only
 from the ideal predecessor. Preserve explicit terminal/operator override
 states, but do not strand work because a best-effort intermediate event
 was missed.
+
+---
+
+## L-OP-746 — Measure before optimising conflict pressure (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-746-measure-before-optimising-conflict-pressure.md`](docs/sop/lessons/L-OP-746-measure-before-optimising-conflict-pressure.md)
+
+
+# Measure before optimising conflict pressure
+
+**Situation**: On 2026-05-08 the runner pipeline hit the same conflict
+on `docs/sop/lessons-learned.md` for three different patchsets twice
+within an hour. The team had been shipping rate-suppression knobs (R1
+backpressure, R3 worktree fix, R4 lesson restructure) one after another
+on the assumption "more conflicts = bad, fewer = good," but with no
+signal to confirm whether each fix actually moved the underlying rate.
+Every fix was hopeful — none measured.
+
+**Fix**: OP-746 introduced a three-layer observability stack:
+
+1. `ps_merged_metrics` log line emitted by `gerrit_jira_bridge` on
+   every `change-merged` event (lifetime, patchset count, diff size,
+   verified -1 count).
+2. `conflict_observations` Postgres/SQLite table (alembic 0203) populated
+   on Verified -1 votes (bridge `comment-added` handler) and on
+   sibling-merged rebase conflicts (auto-rebase sweeper).
+3. Daily `scripts/conflict_report.py` that aggregates 24h totals,
+   medians, and hotspot files; dispatches three alert thresholds via
+   the OP-722 operator notifier; powers the new operator dashboard
+   tile (`/admin/conflict-trend`).
+
+**Verification**: `backend/tests/test_conflict_report.py` covers the
+acceptance criteria — `ps_merged_metrics` extraction, observation
+inserts, daily-report shape, alert envelopes, and a synthetic 10-PS
+tally that pins the totals/medians/hotspot ordering.
+
+**Generalisation**: Before shipping the next "fix" to a recurring
+process problem, ship the *measurement* first. A fix without a baseline
+metric is hopeful intervention; with one, it becomes engineering. The
+cost of one extra ticket for observability is far smaller than the cost
+of N speculative fixes whose aggregate effect nobody can decide on.
 
 ---

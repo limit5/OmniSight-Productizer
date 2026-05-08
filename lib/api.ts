@@ -3240,6 +3240,32 @@ export async function applyCiDeadLetterAction(
   })
 }
 
+// ─── Conflict-trend tile (OP-746) ────────────────────────────────
+
+export interface ConflictHotspotEntry {
+  file: string
+  events: number
+}
+
+export interface ConflictWindowSummary {
+  window_start: string
+  window_end: string
+  total_events: number
+  by_cause: Record<string, number>
+  hotspots: ConflictHotspotEntry[]
+  distinct_changes: number
+}
+
+export interface ConflictTrendResponse {
+  fetched_at: string
+  window_24h: ConflictWindowSummary
+  window_7d: ConflictWindowSummary
+}
+
+export async function getConflictTrend(): Promise<ConflictTrendResponse> {
+  return request<ConflictTrendResponse>("/admin/conflict-trend")
+}
+
 // ─── External A2A agent registry (BP.A2A.6 operator UI) ─────────
 
 export type ExternalAgentAuthMode = "none" | "bearer" | "oauth2"

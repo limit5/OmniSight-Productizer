@@ -211,14 +211,19 @@ def test_change_id_without_matching_ticket_logs_info() -> None:
     b = FakeBridge()
     b.process_stream_event(json.loads(_merged_event(subject="docs only")))
     assert b.requests == []
-    assert ("INFO", "change_no_matching_ticket") == b.logs[0][:2]
+    # OP-746 — every change-merged also emits ps_merged_metrics; assert
+    # by event name so the order between the two log lines does not
+    # become a brittle test invariant.
+    events = [e for _, e, _ in b.logs]
+    assert "change_no_matching_ticket" in events
 
 
 def test_multiple_jira_tickets_same_change_id_logs_error() -> None:
     b = FakeBridge()
     b.process_stream_event(json.loads(_merged_event(subject="[OP-19] [OP-20] title")))
     assert b.requests == []
-    assert ("ERROR", "multiple_tickets_for_change") == b.logs[0][:2]
+    events = [e for _, e, _ in b.logs]
+    assert "multiple_tickets_for_change" in events
 
 
 def test_catchup_force_walks_merged_under_review_ticket() -> None:

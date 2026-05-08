@@ -1368,6 +1368,8 @@ from backend.routers import batch_merge as _batch_merge_router  # OP-735 R5 AI R
 app.include_router(_batch_merge_router.router, prefix=settings.api_prefix)
 from backend.routers import ci_dead_letter as _ci_dead_letter_router  # OP-741 CI recovery dead-letter dashboard
 app.include_router(_ci_dead_letter_router.router, prefix=settings.api_prefix)
+from backend.routers import conflict_dashboard as _conflict_dashboard_router  # OP-746 conflict-rate observability tile
+app.include_router(_conflict_dashboard_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import

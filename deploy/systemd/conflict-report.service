@@ -1,0 +1,46 @@
+; [OP-746] systemd unit -- daily conflict-rate observability report.
+;
+; Runs scripts/conflict_report.py once. Triggered by the matching
+; .timer at 09:00 UTC each day. Writes the JSON + human report under
+; /var/log/omnisight/ and dispatches alert envelopes via the OP-722
+; operator notifier when thresholds breach.
+;
+; Install (user-level -- same identity as the bridge it observes, so
+; the same OMNISIGHT_NOTIFIER_* env wiring applies):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/conflict-report.service ~/.config/systemd/user/
+;   cp deploy/systemd/conflict-report.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now conflict-report.timer
+;
+; Why user-level: must share the OMNISIGHT_DATABASE_URL secret + log
+; dir with the bridge that writes the source data. Promoting this to
+; a system unit is fine; it would just need its own credentials.
+
+[Unit]
+Description=OmniSight daily conflict-rate observability report (OP-746)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+; Default JIRA ticket the OP-722 notifier comments on for alerts that
+; do not target a specific change-ticket. OP-721 is the conflict-rate
+; observability META ticket.
+Environment=OMNISIGHT_NOTIFIER_JIRA_TICKET=OP-721
+Environment=OMNISIGHT_NOTIFIER_AGENT_CLASS=subscription-claude
+; Bridge log path -- same one gerrit-jira-bridge.service writes to.
+Environment=OMNISIGHT_BRIDGE_LOG=%h/work/sora/logs/bridge/systemd.log
+; Output directory for the daily JSON + text artefacts.
+Environment=OMNISIGHT_CONFLICT_REPORT_DIR=/var/log/omnisight
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-claude-worktree/scripts/conflict_report.py
+StandardOutput=append:%h/work/sora/logs/conflict-report/run.log
+StandardError=append:%h/work/sora/logs/conflict-report/run.log
+; Cap pathological hangs (DB unreachable, log file gigantic). 10 min
+; is far more than the steady-state run time (~5 s on a typical day).
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

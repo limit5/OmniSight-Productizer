@@ -188,6 +188,73 @@ def extract_change_numbers_from_comments(comments: Iterable[dict[str, Any]]) -> 
     return list(dict.fromkeys(numbers))
 
 
+# OP-746 — per-merged-PS observability ────────────────────────────────
+
+
+def compute_ps_merged_metrics(event: dict[str, Any]) -> dict[str, Any]:
+    """Extract per-PS metrics from a Gerrit ``change-merged`` event.
+
+    Best-effort: the stream event payload exposes the *current* patchset
+    only, so per-PS-history fields (``rebase_count`` / ``rework_count``
+    by ``--patch-sets`` ``kind`` breakdown) are populated by the daemon
+    via a follow-up Gerrit query rather than this pure helper.
+
+    Returns a flat dict suitable for the structured logger ``**extra``
+    bag. Missing fields are emitted as ``None`` / ``0`` so the daily
+    report (``scripts/conflict_report.py``) can rely on the schema even
+    when Gerrit truncates the stream-event payload.
+    """
+    change = event.get("change") or {}
+    patch_set = event.get("patchSet") or {}
+    current_ps = change.get("currentPatchSet") or patch_set
+    subject = str(change.get("subject") or "")
+    ticket_keys = extract_ticket_keys_from_subject(subject)
+
+    created_on = _coerce_int(change.get("createdOn"))
+    last_updated = _coerce_int(change.get("lastUpdated"))
+    lifetime_min: float | None = None
+    if created_on is not None and last_updated is not None:
+        lifetime_min = round(max(0, last_updated - created_on) / 60.0, 2)
+
+    insertions = _coerce_int(current_ps.get("sizeInsertions")) or 0
+    deletions = _coerce_int(current_ps.get("sizeDeletions")) or 0
+    final_diff_size = abs(insertions) + abs(deletions)
+
+    patchset_count = _coerce_int(current_ps.get("number")) or 0
+
+    verified_minus_one = 0
+    for approval in current_ps.get("approvals") or []:
+        if approval.get("type") != "Verified":
+            continue
+        try:
+            if int(approval.get("value", 0)) <= -1:
+                verified_minus_one += 1
+        except (TypeError, ValueError):
+            continue
+
+    return {
+        "change_id": str(change.get("id") or ""),
+        "change_number": str(change.get("number") or ""),
+        "ticket": ticket_keys[0] if ticket_keys else None,
+        "lifetime_min": lifetime_min,
+        "patchset_count": patchset_count,
+        "rebase_count": 0,
+        "rework_count": 0,
+        "changed_files": [],
+        "final_diff_size": final_diff_size,
+        "verified_minus_one_count": verified_minus_one,
+    }
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def retry_after_seconds(headers: Any) -> float | None:
     raw = None
     if headers is not None:
@@ -422,14 +489,107 @@ class GerritJiraBridge:
         self.counters.last_event_at_ts = utc_now_iso()
         event_type = event.get("type")
         if event_type == "change-merged":
+            self._emit_ps_merged_metrics(event)
             self._handle_change_merged(event)
             self._schedule_auto_rebase_sweep(event)
             return
         if event_type == "patchset-created":
             self._handle_patchset_created(event)
             return
+        if event_type == "comment-added":
+            # OP-746 — record Verified -1 votes as conflict observations
+            # so the daily report can surface CI-failure clusters as
+            # conflict-equivalent friction signals.
+            self._record_verified_minus_one_if_applicable(event)
+            return
         # Other event types are ignored — extend here if/when the daemon
         # gains additional duties (e.g. comment-added → coder-fix flow).
+
+    # ─── change-merged → ps_merged_metrics (OP-746) ─────────────────
+
+    def _emit_ps_merged_metrics(self, event: dict[str, Any]) -> None:
+        """Emit one ``ps_merged_metrics`` log line per merged change.
+
+        Errors are swallowed — telemetry must never break the OP-689
+        ticket-transition path. The daily report (OP-746
+        ``scripts/conflict_report.py``) parses these lines from the
+        bridge's structured-log stream.
+        """
+        try:
+            metrics = compute_ps_merged_metrics(event)
+        except Exception as exc:  # pragma: no cover — defensive
+            self.log(
+                "WARN", "ps_merged_metrics_compute_failed",
+                err=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        self.log("INFO", "ps_merged_metrics", **metrics)
+
+    # ─── comment-added → conflict observations (OP-746) ─────────────
+
+    def _record_verified_minus_one_if_applicable(
+        self, event: dict[str, Any],
+    ) -> None:
+        """Detect a Verified -1 vote and write one conflict-observation row.
+
+        Gerrit emits ``comment-added`` for every label vote, including
+        ``Verified -1``. The vote payload is in the ``approvals`` array
+        on the event — each approval carries ``type``, ``value``, and
+        (for ``comment-added``) an ``oldValue`` so we know if THIS event
+        is the one that flipped the label to -1.
+        """
+        approvals = event.get("approvals") or []
+        triggered = False
+        for approval in approvals:
+            if approval.get("type") != "Verified":
+                continue
+            try:
+                value = int(approval.get("value", 0))
+            except (TypeError, ValueError):
+                continue
+            if value > -1:
+                continue
+            old_raw = approval.get("oldValue")
+            try:
+                old_value = int(old_raw) if old_raw is not None else None
+            except (TypeError, ValueError):
+                old_value = None
+            # Only record on the transition INTO -1 to avoid double-
+            # counting re-fires of the same vote (Gerrit replays an
+            # approvals snapshot on every comment-added).
+            if old_value is None or old_value > -1:
+                triggered = True
+                break
+        if not triggered:
+            return
+
+        change = extract_gerrit_change(event)
+        ticket_keys = extract_ticket_keys_from_subject(change.subject)
+        ticket = ticket_keys[0] if ticket_keys else None
+        change_number = _coerce_int(change.number)
+
+        try:
+            from datetime import datetime, timezone
+            from backend.agents.conflict_observations import (
+                ConflictObservation,
+                record_observation_sync,
+            )
+            obs = ConflictObservation(
+                ts=datetime.now(timezone.utc),
+                cause_category="verified_minus_one",
+                files_in_conflict=(),
+                ps_change_id=change.change_id or None,
+                ps_change_number=change_number,
+                ticket=ticket,
+                pre_existing_open_count=0,
+            )
+            record_observation_sync(obs, log=self.log)
+        except Exception as exc:  # noqa: BLE001
+            self.log(
+                "WARN", "verified_minus_one_record_failed",
+                change_id=change.change_id,
+                err=f"{type(exc).__name__}: {exc}",
+            )
 
     # ─── change-merged → JIRA Published (OP-689, OP-743) ────────────
 

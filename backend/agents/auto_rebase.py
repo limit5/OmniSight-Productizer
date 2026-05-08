@@ -457,6 +457,11 @@ class AutoRebaseSweeper:
             self._log("WARN", "auto_rebase_conflict",
                       change_id=result.change_number,
                       files=list(result.files))
+            # OP-746 — record one conflict observation per failed rebase
+            # so the daily report + dashboard tile can attribute the
+            # event to "sibling merged on develop". Errors are swallowed
+            # so telemetry doesn't break the sweeper.
+            self._record_sibling_merged_observation(result)
         elif result.skipped:
             self._log("INFO", "auto_rebase_skipped",
                       change_id=result.change_number,
@@ -465,6 +470,35 @@ class AutoRebaseSweeper:
             self._log("ERROR", "auto_rebase_failed",
                       change_id=result.change_number,
                       err=result.error)
+
+    def _record_sibling_merged_observation(self, result: RebaseResult) -> None:
+        try:
+            from datetime import datetime, timezone
+            from backend.agents.conflict_observations import (
+                ConflictObservation,
+                record_observation_sync,
+            )
+            change_number: int | None
+            try:
+                change_number = int(result.change_number) if result.change_number else None
+            except (TypeError, ValueError):
+                change_number = None
+            obs = ConflictObservation(
+                ts=datetime.now(timezone.utc),
+                cause_category="sibling_merged",
+                files_in_conflict=tuple(result.files),
+                ps_change_id=None,
+                ps_change_number=change_number,
+                ticket=None,
+                pre_existing_open_count=0,
+            )
+            record_observation_sync(obs, log=self._log)
+        except Exception as exc:  # noqa: BLE001
+            self._log(
+                "WARN", "sibling_merged_observation_record_failed",
+                change_id=result.change_number,
+                err=f"{type(exc).__name__}: {exc}",
+            )
 
 
 # ── DebouncedSweepScheduler ───────────────────────────────────────────
