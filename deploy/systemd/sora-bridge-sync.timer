@@ -1,0 +1,27 @@
+; OP-798 — Timer for sora-bridge git-sync.
+;
+; Cadence: 5 minutes. Matches the bridge daemon's heartbeat cadence so
+; staleness detection windows line up with liveness detection windows.
+; OnBootSec gives one extra firing 60 s after boot so a host reboot
+; doesn't have to wait the full 5 min before the first reconciliation.
+; Persistent=true catches up missed firings if the host was suspended
+; (laptops / dev hosts).
+;
+; AC #2 ("commit no-op to develop's bridge file → within 10 min sora-
+; bridge HEAD advances + restart counter increments") is satisfied by
+; this 5-min cadence: worst case is 1 timer interval, well within the
+; 10-minute budget.
+
+[Unit]
+Description=Run sora-bridge git-sync every 5 min (OP-798)
+Documentation=https://soraapp.atlassian.net/browse/OP-798
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=sora-bridge-sync.service
+
+[Install]
+WantedBy=timers.target
