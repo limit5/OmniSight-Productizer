@@ -14,16 +14,35 @@ permits submission (`CLAUDE.md` L1 + ADR-0003).
 
 ## Wiring
 
+The trigger comes from the **Gerrit stream-events SSH daemon** (OP-689 +
+OP-715 + OP-801), NOT the webhooks plugin. Gerrit's webhooks plugin
+v3.13.5 has zero auth surface (no `secret`, no signature header — see
+lessons L-OP-713 + L-OP-801), so the auth-gated `/webhooks/gerrit`
+endpoint is unreachable from a real Gerrit instance. OP-715 already
+moved the proactive merger trigger to the daemon; OP-801 mirrors that
+for AI Reviewer.
+
 ```
-Gerrit patchset-created webhook
+Gerrit stream-events SSH (claude-bot)
         │
         ▼
-backend/routers/webhooks.py::gerrit_webhook
-        │
+backend/agents/gerrit_jira_bridge.py::stream_forever
+        │  (subprocess Popen + line iteration)
         ▼
-_on_patchset_created   ── synchronous: loop-prevent + throttle + L2 notify
-        │
-        ▼  (asyncio.create_task — fire and forget)
+process_stream_event(event)
+        │  type=patchset-created
+        ▼
+_handle_patchset_created(event)
+        │  spawns 2 daemon threads (independent fire-and-forget)
+        ├──► _spawn_proactive_merger_thread → _proactive_merger_check  (OP-715)
+        └──► _spawn_ai_reviewer_thread     → _ai_reviewer_check        (OP-801)
+                                           │
+                                           ▼
+backend/routers/webhooks.py::_ai_reviewer_check     (in-process coroutine)
+        │  1. loop-prevent (uploader=merger-agent-bot)
+        │  2. (change_id, revision) throttle (24 h TTL)
+        │  3. L2 notify  (operator dashboard heads-up)
+        ▼
 _run_ai_review
         │  files,subject ←── gerrit_client.query_change
         │  diff          ←── git show <revision>  (best-effort, local mirror)
@@ -40,6 +59,26 @@ gerrit_client.post_review(..., labels={"Code-Review": +1 | 0})
         ▼
 billing_usage.record_llm_call(...)   — model_id + tokens + cost
 ```
+
+Greppable bridge log lines (per event):
+
+- `ai_reviewer_thread_spawned change=<n> ps=<n>` — structured JSON,
+  emitted by the bridge daemon at thread spawn.
+- `ai_reviewer_invoked change=<id> model=<tier> loc=<n>` — emitted by
+  `_run_ai_review` after `route_model` picks the tier; this is the
+  one operators grep to confirm risk-tier routing fired.
+- `ai_reviewer_skip change=<id> reason=uploader_is_merger` — emitted
+  when the uploader is `merger-agent-bot` (loop prevention).
+- `ai_reviewer_skip change=<id> rev=<sha8> reason=throttle_24h` —
+  emitted when the `(change_id, revision)` throttle short-circuits a
+  duplicate event (e.g. bridge restart that replays cursor events).
+- `ai_reviewer_thread_error change=<n> ps=<n> err=...` — emitted if
+  the per-event thread raises; the bridge survives.
+
+The HTTP endpoint `/webhooks/gerrit` (`backend/routers/webhooks.py::
+gerrit_webhook`) stays in place as-is — it accepts synthetic curl
+events for smoke tests and is the natural landing pad for a future
+plugin-auth fix. No real Gerrit traffic flows through it today.
 
 ## Model tiers
 
@@ -163,24 +202,35 @@ Both accounts are members of `ai-reviewer-bots` and DENY-listed for
 submit / push-force / addPatchSet by `.gerrit/project.config.example`
 (O10 least-privilege).
 
-## Gerrit subscription (Phase 1 — operator action)
+## Trigger source — bridge daemon stream-events
 
-The webhooks plugin reads from `webhooks.config` on `refs/meta/config`
-(NOT `project.config` — see lesson L22). The deployed config must
-include `events = patchset-created` on the omnisight-bot remote.
+OP-801: the AI Reviewer fires from the Gerrit stream-events SSH daemon
+running as `claude-bot`, NOT the webhooks plugin. The daemon
+subscribes via `ssh -p 29418 claude-bot@<host> gerrit stream-events`
+and routes `patchset-created` events through
+`gerrit_jira_bridge.py::_handle_patchset_created`, which spawns the
+AI Reviewer pipeline in a fire-and-forget daemon thread.
 
-Reference: `.gerrit/webhooks.config.example`.
-
-To verify the subscription is live:
+To verify the trigger is live:
 
 1. Push a throwaway test patchset to `refs/for/develop`.
-2. `journalctl -u omnisight-backend -f | grep 'Gerrit webhook'` —
-   look for `type=patchset-created` within 30 seconds.
+2. `journalctl -u omnisight-bridge -f | grep ai_reviewer` — within
+   ~30 seconds, look for two log lines:
+   - `ai_reviewer_thread_spawned change=N ps=M` (structured JSON)
+   - `ai_reviewer_invoked change=I... model=haiku|sonnet|opus loc=N`
 3. Within ~5 minutes, the patchset should carry a `Code-Review +1`
-   from `codex-bot` (or `claude-bot` for security paths) with a
+   from `claude-bot` (the bridge SSH identity, also resolved via
+   `git_accounts` for the actual `gerrit review` call) with a
    `reviewed-by:` footer.
 
+The legacy webhooks plugin path is **structurally broken** for AI
+Reviewer (no auth → `/webhooks/gerrit` 401s every event). The
+endpoint is preserved only for synthetic curl smoke tests + as a
+landing pad if Gerrit ever ships an auth-capable plugin.
+
 ## Manual smoke test
+
+End-to-end (via the bridge daemon's in-process pipeline):
 
 ```bash
 # In a backend shell
@@ -189,28 +239,40 @@ import asyncio
 from backend.routers import webhooks
 
 async def run():
-    await webhooks._run_ai_review(
-        change_id="Ismoke01",
-        change_number="0",
-        revision="0" * 40,
-        project="omnisight",
-        subject="smoke-test patchset",
-        insertions=2000,   # over cap on purpose
-        deletions=0,
-    )
+    await webhooks._ai_reviewer_check({
+        "type": "patchset-created",
+        "change": {
+            "id": "Ismoke01",
+            "number": 0,
+            "subject": "smoke-test patchset",
+            "project": "omnisight",
+        },
+        "patchSet": {
+            "revision": "0" * 40,
+            "uploader": {"name": "alice"},
+            "sizeInsertions": 2000,   # over cap on purpose
+            "sizeDeletions": 0,
+        },
+    })
 asyncio.run(run())
 PY
 ```
 
 Expected: a `[ERROR]` log from the Gerrit stub if no real change
 exists, or — if you supply a real revision — a `Code-Review 0` with
-the "too large" message and no LLM call.
+the "too large" message and no LLM call. This exercises the same
+coroutine the bridge daemon's `_spawn_ai_reviewer_thread` invokes.
+
+For a leaf-only smoke that bypasses skip checks, call
+`_run_ai_review(...)` directly with the same kwargs the shared
+function passes through.
 
 ## Failure modes & rollback
 
 | Symptom                                                    | Likely cause                       | Fix                                                                                                           |
 | ---------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| No `+1` after ~5 min on a fresh patchset                   | Webhook not delivered              | `journalctl -u omnisight-backend ` for `type=patchset-created`. If absent, re-check `webhooks.config` on `refs/meta/config`. |
+| No `+1` after ~5 min on a fresh patchset                   | Bridge daemon down or stream broken | `systemctl status omnisight-bridge`; `journalctl -u omnisight-bridge -f` for `gerrit_stream_disconnected` / `gerrit_auth_failed`. |
+| `ai_reviewer_thread_spawned` logged but no `ai_reviewer_invoked` | `_ai_reviewer_check` skipping early | Look for the matching `ai_reviewer_skip ...` line — usually `uploader_is_merger` or `throttle_24h`.       |
 | Comment posted but no `Code-Review` label                  | `gerrit_client.post_review` error  | Tail backend log for `ai_reviewer post_review failed` — usually missing SSH key or stale `git_accounts` row.  |
 | Wrong model in footer                                      | Routing rule changed unexpectedly  | `pytest backend/tests/test_ai_reviewer.py -k route_model` and inspect the parametrised cases.                 |
 | Cost spike on opus                                         | A widely-touched HIGH-RISK pattern | Narrow the pattern in `HIGH_RISK_*` and add a unit test pinning the new boundary.                             |
@@ -218,9 +280,11 @@ the "too large" message and no LLM call.
 
 To **disable** the AI Reviewer in an emergency without a redeploy:
 
-1. Remove `events = patchset-created` from `webhooks.config` on
-   `refs/meta/config`.
-2. `git push origin HEAD:refs/meta/config`.
-3. Existing in-flight events drain naturally (no new ones queue).
+1. `systemctl stop omnisight-bridge` (also halts the OP-689 ticket
+   transitions and OP-715 proactive merger — full bridge halt).
+2. For an AI-Reviewer-only kill: comment-out the
+   `_spawn_ai_reviewer_thread(event)` call in
+   `_handle_patchset_created` and redeploy. The merger and ticket-
+   transition paths keep running.
 
-To **re-enable**: revert the webhooks.config edit and push again.
+To **re-enable**: restart the bridge / revert the comment-out.

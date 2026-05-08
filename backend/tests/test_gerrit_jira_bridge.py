@@ -723,6 +723,11 @@ def test_patchset_created_spawns_thread_with_proactive_check(
     # Patch the import target so the handler picks up our fake.
     import backend.routers.webhooks as _wh
     monkeypatch.setattr(_wh, "_proactive_merger_check", fake_proactive)
+    # OP-801 — the bridge now also spawns an AI Reviewer thread; stub
+    # it to a fast no-op so this test stays focused on the merger path.
+    async def _ai_noop(_event: dict[str, Any]) -> None:
+        pass
+    monkeypatch.setattr(_wh, "_ai_reviewer_check", _ai_noop)
 
     # Capture the spawned thread so we can join() on it for the test
     import threading
@@ -744,18 +749,23 @@ def test_patchset_created_spawns_thread_with_proactive_check(
     event = _patchset_event(change_number=92, ps_number=1)
     b._handle_patchset_created(event)
 
-    # Wait for the spawned thread to finish (it's daemon=True so we
-    # need to actively join — the test process will exit otherwise).
-    assert len(spawned_threads) == 1
-    spawned_threads[0].join(timeout=2.0)
-    assert not spawned_threads[0].is_alive()
+    # Wait for both spawned threads to finish (daemon=True).
+    assert len(spawned_threads) == 2
+    for t in spawned_threads:
+        t.join(timeout=2.0)
+        assert not t.is_alive()
 
+    # The proactive merger fake captured the event exactly once.
     assert len(captured_events) == 1
     assert captured_events[0]["change"]["number"] == 92
     assert captured_events[0]["patchSet"]["number"] == 1
 
     assert any(
         label == "proactive_merger_thread_spawned"
+        for _level, label in log_calls
+    )
+    assert any(
+        label == "ai_reviewer_thread_spawned"
         for _level, label in log_calls
     )
 
@@ -770,6 +780,9 @@ def test_patchset_created_thread_swallows_exception(
 
     import backend.routers.webhooks as _wh
     monkeypatch.setattr(_wh, "_proactive_merger_check", boom)
+    async def _ai_noop(_event: dict[str, Any]) -> None:
+        pass
+    monkeypatch.setattr(_wh, "_ai_reviewer_check", _ai_noop)
 
     spawned: list[Any] = []
     import threading
@@ -789,7 +802,8 @@ def test_patchset_created_thread_swallows_exception(
     )
     # Must not raise here — the bridge keeps running.
     b._handle_patchset_created(_patchset_event())
-    spawned[0].join(timeout=2.0)
+    for t in spawned:
+        t.join(timeout=2.0)
 
     # The exception must have been logged from inside the thread.
     err_logs = [
@@ -812,6 +826,7 @@ def test_patchset_created_logs_thread_spawn_with_change_number(
 
     import backend.routers.webhooks as _wh
     monkeypatch.setattr(_wh, "_proactive_merger_check", fast_noop)
+    monkeypatch.setattr(_wh, "_ai_reviewer_check", fast_noop)
 
     log_calls: list[tuple[str, str, dict[str, Any]]] = []
     b = bridge.GerritJiraBridge(
@@ -827,3 +842,152 @@ def test_patchset_created_logs_thread_spawn_with_change_number(
     assert len(spawn_logs) == 1
     assert spawn_logs[0][2].get("change_id") == "42"
     assert spawn_logs[0][2].get("ps") == "3"
+
+    ai_spawn_logs = [c for c in log_calls if c[1] == "ai_reviewer_thread_spawned"]
+    assert len(ai_spawn_logs) == 1
+    assert ai_spawn_logs[0][2].get("change_id") == "42"
+    assert ai_spawn_logs[0][2].get("ps") == "3"
+
+
+# ──────────────────────────────────────────────────────────────────
+# OP-801 — AI Reviewer thread tests
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_patchset_created_spawns_ai_reviewer_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-801 — patchset-created must dispatch to ``_ai_reviewer_check``
+    in a daemon thread, alongside the OP-715 merger thread."""
+    captured: list[dict[str, Any]] = []
+
+    async def fake_ai_check(event: dict[str, Any]) -> None:
+        captured.append(event)
+
+    import backend.routers.webhooks as _wh
+    monkeypatch.setattr(_wh, "_ai_reviewer_check", fake_ai_check)
+    # Stub the merger so we don't accidentally fire its real path.
+    async def merger_noop(_event: dict[str, Any]) -> None:
+        pass
+    monkeypatch.setattr(_wh, "_proactive_merger_check", merger_noop)
+
+    # Capture all spawned threads so we can join + assert names.
+    import threading
+    real_thread = threading.Thread
+    spawned: list[Any] = []
+
+    def spy(*args: Any, **kwargs: Any) -> threading.Thread:
+        t = real_thread(*args, **kwargs)
+        spawned.append(t)
+        return t
+    monkeypatch.setattr(threading, "Thread", spy)
+
+    log_calls: list[tuple[str, str, dict[str, Any]]] = []
+    b = bridge.GerritJiraBridge(
+        _client(),
+        sleep=lambda _: None,
+        logger=lambda level, label, **kw: log_calls.append((level, label, kw)),
+    )
+    b._handle_patchset_created(_patchset_event(change_number=801, ps_number=2))
+
+    for t in spawned:
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+
+    # AI Reviewer received exactly one event with the expected ids.
+    assert len(captured) == 1
+    assert captured[0]["change"]["number"] == 801
+    assert captured[0]["patchSet"]["number"] == 2
+
+    # Thread name carries the change/ps for ps-aux triage.
+    ai_threads = [t for t in spawned if t.name.startswith("ai-reviewer-")]
+    assert len(ai_threads) == 1
+    assert ai_threads[0].name == "ai-reviewer-801-2"
+
+    # Spawn log line is structured + carries change_id + ps.
+    spawn_logs = [c for c in log_calls if c[1] == "ai_reviewer_thread_spawned"]
+    assert len(spawn_logs) == 1
+    assert spawn_logs[0][2].get("change_id") == "801"
+    assert spawn_logs[0][2].get("ps") == "2"
+
+
+def test_patchset_created_ai_reviewer_thread_swallows_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-801 — if ``_ai_reviewer_check`` raises, the bridge must log
+    ``ai_reviewer_thread_error`` and not propagate the exception."""
+    async def boom(_event: dict[str, Any]) -> None:
+        raise RuntimeError("synthetic-ai")
+
+    import backend.routers.webhooks as _wh
+    monkeypatch.setattr(_wh, "_ai_reviewer_check", boom)
+    async def merger_noop(_event: dict[str, Any]) -> None:
+        pass
+    monkeypatch.setattr(_wh, "_proactive_merger_check", merger_noop)
+
+    import threading
+    real_thread = threading.Thread
+    spawned: list[Any] = []
+
+    def spy(*args: Any, **kwargs: Any) -> threading.Thread:
+        t = real_thread(*args, **kwargs)
+        spawned.append(t)
+        return t
+    monkeypatch.setattr(threading, "Thread", spy)
+
+    log_calls: list[tuple[str, str, dict[str, Any]]] = []
+    b = bridge.GerritJiraBridge(
+        _client(),
+        sleep=lambda _: None,
+        logger=lambda level, label, **kw: log_calls.append((level, label, kw)),
+    )
+
+    # Must not raise — daemon survival is the contract.
+    b._handle_patchset_created(_patchset_event())
+    for t in spawned:
+        t.join(timeout=2.0)
+
+    err_logs = [c for c in log_calls if c[1] == "ai_reviewer_thread_error"]
+    assert len(err_logs) == 1
+    assert "synthetic-ai" in err_logs[0][2].get("err", "")
+
+
+def test_patchset_created_ai_reviewer_independent_of_merger_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-801 — a merger crash must NOT prevent the AI Reviewer from
+    firing (the two pipelines are independent fire-and-forget threads).
+    """
+    async def merger_boom(_event: dict[str, Any]) -> None:
+        raise RuntimeError("merger crash")
+
+    ai_calls: list[dict[str, Any]] = []
+
+    async def ai_ok(event: dict[str, Any]) -> None:
+        ai_calls.append(event)
+
+    import backend.routers.webhooks as _wh
+    monkeypatch.setattr(_wh, "_proactive_merger_check", merger_boom)
+    monkeypatch.setattr(_wh, "_ai_reviewer_check", ai_ok)
+
+    import threading
+    real_thread = threading.Thread
+    spawned: list[Any] = []
+
+    def spy(*args: Any, **kwargs: Any) -> threading.Thread:
+        t = real_thread(*args, **kwargs)
+        spawned.append(t)
+        return t
+    monkeypatch.setattr(threading, "Thread", spy)
+
+    b = bridge.GerritJiraBridge(
+        _client(),
+        sleep=lambda _: None,
+        logger=lambda *a, **kw: None,
+    )
+    b._handle_patchset_created(_patchset_event(change_number=42, ps_number=1))
+    for t in spawned:
+        t.join(timeout=2.0)
+
+    assert len(ai_calls) == 1
+    assert ai_calls[0]["change"]["number"] == 42
