@@ -51,6 +51,7 @@
 | L-OP-744 | 2026-05-08 | OP-744 | [Long-running daemons need explicit pool lifecycle management](docs/sop/lessons/L-OP-744-long-running-daemons-need-explicit-pool-lifecycle.md) | L29 |
 | L-OP-746 | 2026-05-08 | OP-746 | [Measure before optimising conflict pressure](docs/sop/lessons/L-OP-746-measure-before-optimising-conflict-pressure.md) |  |
 | L-OP-749 | 2026-05-08 | OP-749 | [External mutations need idempotency keys and circuit breakers](docs/sop/lessons/L-OP-749-idempotency-and-circuit-breakers-for-external-mutations.md) |  |
+| L-OP-753 | 2026-05-08 | OP-753 | [Concurrency limits belong around the expensive operation](docs/sop/lessons/L-OP-753-concurrency-limits-belong-around-the-expensive-operation.md) |  |
 
 Legacy sequential lesson numbers are retained only as migration metadata; duplicate legacy numbers from concurrent patchsets: L29.
 
@@ -842,6 +843,33 @@ writes.
 state need both a durable cursor and an idempotent replay path. Process
 supervision only restores liveness; it does not recover events lost
 between disconnect and reconnect.
+
+---
+
+## L-OP-753 — Concurrency limits belong around the expensive operation (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-753-concurrency-limits-belong-around-the-expensive-operation.md`](docs/sop/lessons/L-OP-753-concurrency-limits-belong-around-the-expensive-operation.md)
+
+
+# Concurrency limits belong around the expensive operation
+
+**Situation**: Auto-rebase sweeps need enough parallelism to drain a burst
+of open patchsets, but an unbounded fan-out of rebase attempts can overload
+the runner host when many changes need the same hot-file rebase at once.
+
+**Fix**: OP-753 keeps sweep fan-out small and places a semaphore directly
+around each rebase attempt. The default allows two active rebase operations,
+with `OMNISIGHT_REBASE_CONCURRENCY` as the operator override.
+
+**Verification**: `backend/tests/test_auto_rebase.py::test_synthetic_eight_rebases_never_exceed_two_active_attempts`
+proves eight submitted rebase requests never exceed two active attempts,
+and `test_rebase_concurrency_env_override_allows_three_active_attempts`
+proves the environment override changes the token count.
+
+**Generalisation**: Queue fan-out and expensive-operation concurrency are
+different controls. Keep enough workers to avoid serial queue latency, but
+put the hard token bucket around the specific I/O-heavy operation that can
+overload the host.
 
 ---
 
