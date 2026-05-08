@@ -36,6 +36,7 @@ FIRST_TIME_SKILL_MULTIPLIER = 3.0
 DUPLICATE_TASK_MULTIPLIER = 0.2
 SECONDARY_CLASS_FULL_XP_LEVEL = 30
 SECONDARY_CLASS_RAMP_MULTIPLIER = 0.5
+HYBRID_SYNERGY_PARTY_XP_MULTIPLIER = 1.15
 
 OUTCOME_MULTIPLIERS: Mapping[str, float] = MappingProxyType(
     {
@@ -61,6 +62,8 @@ class TaskOutcome:
     active_debuff_ids: tuple[str, ...] = ()
     class_xp_target: ClassXpTarget = "primary"
     secondary_class_level: int = 1
+    dual_class_agent: bool = False
+    party_task: bool = False
 
 
 @dataclass(frozen=True)
@@ -175,6 +178,18 @@ def _normalise_task_outcome(
                 values.get("secondary_class_level", 1),
                 field="secondary_class_level",
             ),
+            dual_class_agent=bool(
+                values.get(
+                    "dual_class_agent",
+                    values.get("is_dual_class", values.get("dual_class", False)),
+                )
+            ),
+            party_task=bool(
+                values.get(
+                    "party_task",
+                    values.get("in_party", values.get("party_member", False)),
+                )
+            ),
         )
     _validate_outcome(outcome)
     return outcome
@@ -211,6 +226,12 @@ def _outcome_values(task_outcome: Mapping[str, Any] | Any) -> Mapping[str, Any]:
             "is_secondary_class",
             "secondary_class",
             "secondary_class_level",
+            "dual_class_agent",
+            "is_dual_class",
+            "dual_class",
+            "party_task",
+            "in_party",
+            "party_member",
         )
         if hasattr(task_outcome, name)
     }
@@ -260,6 +281,8 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
         multiplier *= DUPLICATE_TASK_MULTIPLIER
     if outcome.class_xp_target == "secondary":
         multiplier *= secondary_class_xp_multiplier(outcome.secondary_class_level)
+    if outcome.dual_class_agent and outcome.party_task:
+        multiplier *= HYBRID_SYNERGY_PARTY_XP_MULTIPLIER
     return multiplier
 
 
@@ -355,6 +378,7 @@ __all__ = [
     "ClassXpTarget",
     "DUPLICATE_TASK_MULTIPLIER",
     "FIRST_TIME_SKILL_MULTIPLIER",
+    "HYBRID_SYNERGY_PARTY_XP_MULTIPLIER",
     "LEVEL_CURVE_EXPONENT",
     "MAX_LEVEL",
     "OUTCOME_MULTIPLIERS",
