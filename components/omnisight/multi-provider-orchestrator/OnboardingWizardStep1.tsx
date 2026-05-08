@@ -84,9 +84,9 @@ export default function OnboardingWizardStep1({
       data-testid="mp-onboarding-step-1"
       aria-labelledby="mp-onboarding-step-1-title"
       className={[
-        "relative overflow-hidden rounded-lg border border-cyan-400/20",
-        "bg-slate-950 px-6 py-7 text-slate-100 shadow-[0_0_40px_rgba(8,47,73,0.28)]",
-        "md:grid md:grid-cols-[minmax(0,1fr)_320px] md:items-center md:gap-8 md:px-8 md:py-9",
+        "relative flex h-screen flex-col overflow-x-hidden overflow-y-auto border border-cyan-400/20",
+        "bg-slate-950 p-4 text-slate-100 shadow-[0_0_40px_rgba(8,47,73,0.28)]",
+        "md:h-auto md:max-w-2xl md:grid md:grid-cols-[minmax(0,1fr)_320px] md:items-center md:gap-8 md:overflow-hidden md:rounded-2xl md:p-8",
         className,
       ]
         .filter(Boolean)
@@ -152,7 +152,7 @@ export default function OnboardingWizardStep1({
 
       <div
         data-testid="mp-onboarding-step-1-orbit"
-        className="relative z-10 mx-auto mt-8 aspect-square w-full max-w-[300px] md:mt-0"
+        className="relative z-10 mx-auto mt-8 aspect-square w-full max-w-[200px] [--mp-w5-orbit-radius:76px] md:mt-0 md:max-w-[300px] md:[--mp-w5-orbit-radius:118px]"
         aria-label="Four provider lanes orbit and converge into one orchestrator core"
         role="img"
       >
@@ -200,7 +200,7 @@ export default function OnboardingWizardStep1({
             transform:
               translate(-50%, -50%)
               rotate(var(--mp-w5-angle))
-              translateX(118px)
+              translateX(var(--mp-w5-orbit-radius))
               rotate(calc(var(--mp-w5-angle) * -1))
               scale(1);
             opacity: 0.88;
@@ -218,7 +218,7 @@ export default function OnboardingWizardStep1({
             transform:
               translate(-50%, -50%)
               rotate(var(--mp-w5-angle))
-              translateX(118px)
+              translateX(var(--mp-w5-orbit-radius))
               rotate(calc(var(--mp-w5-angle) * -1))
               scale(1);
             opacity: 0.88;
