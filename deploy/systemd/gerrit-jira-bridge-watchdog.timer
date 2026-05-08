@@ -1,0 +1,25 @@
+; OP-723 — Timer for the daemon liveness watchdog (META OP-721 T2).
+;
+; Fires every 5 minutes. AC #1 ("stop the daemon manually → within 15
+; min the watchdog fires DEGRADED") is satisfied by the 10 min default
+; silence threshold + a 5 min poll cadence: worst-case detection is
+; one threshold + one poll interval = 15 min.
+;
+; OnBootSec gives an extra firing 30 s after boot so a cold-boot
+; failure (daemon never started) does not have to wait 5 minutes for
+; the regular tick. Persistent=true catches up missed firings if the
+; host was suspended.
+
+[Unit]
+Description=Run OmniSight daemon liveness watchdog every 5 min (OP-723)
+Documentation=https://soraapp.atlassian.net/browse/OP-723
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=gerrit-jira-bridge-watchdog.service
+
+[Install]
+WantedBy=timers.target

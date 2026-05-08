@@ -1,0 +1,56 @@
+# OP-723 — Daemon liveness watchdog config (META OP-721 T2)
+#
+# Read by scripts/daemon_watchdog.py, invoked once per firing of the
+# deploy/systemd/gerrit-jira-bridge-watchdog.timer (every 5 minutes).
+# For each entry below the watchdog:
+#
+#   1. Runs `systemctl [--user] is-enabled <unit>` — if missing/disabled
+#      it fires a P0 alert with code=unit_not_loaded (covers the
+#      OP-689 "daemon was never installed for two days" failure mode).
+#   2. Tails `log_path` looking for the most-recent structured-log line
+#      whose `event` field equals `heartbeat_event`. If its `timestamp`
+#      is older than `max_silence_minutes`, fires a DEGRADED alert
+#      with code=daemon_silent.
+#   3. Otherwise emits a one-line INFO `all_green` heartbeat to stdout
+#      so an operator following journalctl can confirm the watchdog
+#      itself is alive (and to satisfy AC #3 — "no false positive").
+#
+# Adding a new daemon = append another `daemons:` entry. The watchdog
+# is generic over (unit_name, max_silence_minutes); it does not bake
+# in any gerrit-jira-bridge specifics.
+
+daemons:
+  # Primary subscription-claude daemon (OP-689 + OP-715 + OP-717).
+  # Heartbeats are emitted ~every 60s by GerritJiraBridge._emit_heartbeat
+  # — see backend/agents/gerrit_jira_bridge.py. 10 min silence ≈ 10
+  # missed heartbeats, well past the noise floor of one-off network
+  # blips while still catching a hung daemon within the AC #1 window
+  # of "within 15 min the watchdog fires".
+  - unit: gerrit-jira-bridge
+    scope: user
+    log_path: /home/user/work/sora/logs/bridge/systemd.log
+    heartbeat_event: heartbeat
+    max_silence_minutes: 10
+
+# How far back to scan the daemon log file for the most recent
+# heartbeat (in bytes). 256 KiB easily covers several hours of JSON
+# heartbeat lines without slurping a multi-day log when journals
+# rotate. Tuned conservatively — if a daemon has been silent for
+# longer than this slice, the watchdog reports `daemon_silent` either
+# way.
+log_tail_bytes: 262144
+
+# Where the watchdog appends its own structured-log alerts (one JSON
+# record per line). T1 (OP-722) — the operator notifier bridge —
+# tails this file (or imports the watchdog module directly via
+# `notifier_module` below) to dispatch DEGRADED / P0 alerts to the
+# operator channel. Keeping the file as a separate sink means the
+# watchdog stays useful even when T1 is down.
+alerts_path: /home/user/work/sora/logs/bridge/watchdog-alerts.jsonl
+
+# Optional Python module dotted path. If importable, the watchdog
+# calls `notifier_module.notify(severity, code=..., **fields)` for
+# every alert in addition to writing the alerts file. T1 (OP-722)
+# delivers `backend.agents.operator_notifier`; until that ticket
+# lands the import silently no-ops and the file sink takes over.
+notifier_module: backend.agents.operator_notifier

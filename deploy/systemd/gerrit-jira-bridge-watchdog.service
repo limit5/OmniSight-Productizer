@@ -1,0 +1,47 @@
+; OP-723 — Daemon liveness watchdog (META OP-721 T2).
+;
+; Runs scripts/daemon_watchdog.py once per timer firing. Reads
+; configs/watchdog.yaml, checks each declared daemon's systemd unit
+; state + heartbeat log freshness, and routes any DEGRADED / P0 alert
+; through the T1 operator notifier (OP-722).
+;
+; Install (user-level — same scope as gerrit-jira-bridge.service so
+; the watchdog can `systemctl --user is-enabled` the daemon it watches
+; without requiring sudo):
+;
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/gerrit-jira-bridge-watchdog.service ~/.config/systemd/user/
+;   cp deploy/systemd/gerrit-jira-bridge-watchdog.timer ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now gerrit-jira-bridge-watchdog.timer
+;
+; AC #4: a python crash inside the watchdog flips Restart=on-failure
+; and emits the JSON traceback to journald (StandardError=journal),
+; which is exactly what the T3 systemd-journal monitor catches as the
+; "watchdog itself failed" signal. StartLimitBurst caps the local
+; retry storm; the next 5-minute timer firing is the longer-cadence
+; recovery path.
+
+[Unit]
+Description=OmniSight daemon liveness watchdog (OP-723 / META OP-721 T2)
+Documentation=https://soraapp.atlassian.net/browse/OP-723
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=exec
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONPATH=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/user/work/sora/OmniSight-Productizer/scripts/daemon_watchdog.py --config /home/user/work/sora/OmniSight-Productizer/configs/watchdog.yaml
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gerrit-jira-bridge-watchdog
+
+[Install]
+WantedBy=default.target
