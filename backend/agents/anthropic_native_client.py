@@ -34,6 +34,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from backend.agents.system_prompt_builder import inject_tool_catalog
 from backend.agents.tool_dispatcher import ToolDispatcher, get_default_dispatcher
 from backend.agents.tool_schemas import to_anthropic_tools
 
@@ -345,7 +346,10 @@ class AnthropicClient:
         cutting cost for long agent loops.
         """
         tool_payload = to_anthropic_tools(tools) if tools else None
-        sys_blocks, tool_payload = _apply_cache_control(system, tool_payload, enable_cache)
+        catalog_system = inject_tool_catalog(system or "", tools) if tools else system
+        sys_blocks, tool_payload = _apply_cache_control(
+            catalog_system, tool_payload, enable_cache
+        )
 
         messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
         transcript: list[dict[str, Any]] = []

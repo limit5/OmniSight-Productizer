@@ -50,6 +50,19 @@ HandlerSync = Callable[[dict[str, Any]], Any]
 HandlerAsync = Callable[[dict[str, Any]], Awaitable[Any]]
 Handler = HandlerSync | HandlerAsync
 
+_TOOL_SUMMARY_OVERRIDES: dict[str, str] = {
+    "Read": "read file",
+    "Write": "write file",
+    "Edit": "in-place edit",
+    "Bash": "shell",
+    "Grep": "search",
+    "Glob": "find files",
+    "Agent": "sub-agent",
+    "WebFetch": "fetch URL",
+    "ToolSearch": "tool discovery",
+    "Skill": "run skill",
+}
+
 
 @dataclass(frozen=True)
 class ToolError:
@@ -239,6 +252,21 @@ def _tool_error_from_bash_output(raw: Any) -> ToolError | None:
             hint=raw[:1000],
         )
     return None
+
+
+def get_tool_summary(name: str) -> str:
+    """Return the one-line catalog summary for ``name``.
+
+    Common eager tools use short operator-facing labels so the boot prompt
+    stays compact. Less common tools fall back to the first sentence from
+    the schema registry, normalised onto one line.
+    """
+    if name in _TOOL_SUMMARY_OVERRIDES:
+        return _TOOL_SUMMARY_OVERRIDES[name]
+
+    schema = get_schema(name)
+    first_sentence = schema.description.strip().split(".", 1)[0]
+    return " ".join(first_sentence.split())
 
 
 _default_dispatcher = ToolDispatcher()
