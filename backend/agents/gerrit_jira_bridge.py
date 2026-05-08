@@ -1,9 +1,10 @@
-"""Gerrit stream-events → JIRA Approved/Published bridge.
+"""Gerrit stream-events → JIRA Published bridge.
 
 OP-689 closes OP-247 Phase 3: after Gerrit merges a develop change, this
 daemon transitions the matching JIRA ticket from Approved to Published.
-It deliberately uses only transition id=7 (Deploy) and refuses to advance
-any issue that is not already Approved.
+OP-743 makes the terminal merge event authoritative: the bridge force-walks
+In Progress / Under Review / Approved tickets to Published, while leaving
+Published and Archived tickets idempotent.
 """
 from __future__ import annotations
 
@@ -23,7 +24,10 @@ from typing import Any, Callable, Iterable
 from backend.agents import jira_dispatch
 
 APPROVED_STATUS_NAMES = {"Approved", "承認済み"}
+ARCHIVED_STATUS_NAMES = {"Archived"}
+IN_PROGRESS_STATUS_NAMES = {"In Progress", "進行中"}
 PUBLISHED_STATUS_NAMES = {"Published", "公開済み"}
+UNDER_REVIEW_STATUS_NAMES = {"Under Review"}
 AUTH_FAILURE_MARKERS = (
     "Permission denied",
     "Authentication failed",
@@ -278,10 +282,10 @@ class GerritJiraBridge:
                 self.counters.jira_errors += 1
                 raise RuntimeError(f"{method} {path} -> {exc.code}: {detail}") from exc
 
-    def search_approved_tickets(self) -> list[dict[str, Any]]:
+    def search_catchup_candidate_tickets(self) -> list[dict[str, Any]]:
         jql = (
             f'project = "{self.client.project_key}" '
-            'AND status = "Approved" '
+            'AND status in ("In Progress", "Under Review", "Approved") '
             'AND assignee in (codex-bot, claude-bot) '
             "ORDER BY updated ASC"
         )
@@ -296,6 +300,10 @@ class GerritJiraBridge:
         )
         return list(resp.get("issues", []))
 
+    def search_approved_tickets(self) -> list[dict[str, Any]]:
+        """Backward-compatible alias for tests/scripts from OP-689."""
+        return self.search_catchup_candidate_tickets()
+
     def fetch_issue_status(self, ticket_key: str) -> str:
         issue = self.jira_request("GET", f"/issue/{ticket_key}?fields=status")
         status = ((issue.get("fields") or {}).get("status") or {}).get("name", "")
@@ -305,12 +313,28 @@ class GerritJiraBridge:
         resp = self.jira_request("GET", f"/issue/{ticket_key}/comment?maxResults=100")
         return list(resp.get("comments", []))
 
-    def transition_to_published(self, ticket_key: str) -> None:
+    def transition_ticket(self, ticket_key: str, transition_name: str) -> None:
         self.jira_request(
             "POST",
             f"/issue/{ticket_key}/transitions",
-            {"transition": {"id": jira_dispatch.TRANSITION_IDS["to_published"]}},
+            {"transition": {"id": jira_dispatch.TRANSITION_IDS[transition_name]}},
         )
+
+    def transition_to_published(self, ticket_key: str) -> None:
+        self.transition_ticket(ticket_key, "to_published")
+
+    def add_jira_comment(self, ticket_key: str, message: str) -> None:
+        body = {
+            "body": {
+                "type": "doc",
+                "version": 1,
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": message}],
+                }],
+            },
+        }
+        self.jira_request("POST", f"/issue/{ticket_key}/comment", body)
 
     def query_gerrit_change(self, query: str) -> GerritChange | None:
         cmd = self._ssh_cmd("gerrit", "query", "--format=JSON", query)
@@ -361,7 +385,7 @@ class GerritJiraBridge:
 
     def startup_catchup(self) -> None:
         self.log("INFO", "catchup_start")
-        for issue in self.search_approved_tickets():
+        for issue in self.search_catchup_candidate_tickets():
             ticket_key = issue["key"]
             try:
                 self.process_catchup_ticket(ticket_key)
@@ -407,7 +431,7 @@ class GerritJiraBridge:
         # Other event types are ignored — extend here if/when the daemon
         # gains additional duties (e.g. comment-added → coder-fix flow).
 
-    # ─── change-merged → JIRA Approved → Published (OP-689) ─────────
+    # ─── change-merged → JIRA Published (OP-689, OP-743) ────────────
 
     def _handle_change_merged(self, event: dict[str, Any]) -> None:
         change = extract_gerrit_change(event)
@@ -602,20 +626,72 @@ class GerritJiraBridge:
         lock = self._lock_for(ticket_key)
         with lock:
             status = self.fetch_issue_status(ticket_key)
+            original_status = status
             if status in PUBLISHED_STATUS_NAMES:
+                self.log(
+                    "INFO",
+                    "ticket_already_published",
+                    ticket_key=ticket_key,
+                    change_id=change_id,
+                )
                 return False
-            if status not in APPROVED_STATUS_NAMES:
+            if status in ARCHIVED_STATUS_NAMES:
                 self.log(
                     "WARN",
-                    "ticket_unexpected_status_skip",
+                    "ticket_archived_skip",
                     ticket_key=ticket_key,
                     change_id=change_id,
                     err=status,
                 )
                 return False
-            self.transition_to_published(ticket_key)
-            self.counters.transitions_made += 1
-            self.log("INFO", "ticket_published", ticket_key=ticket_key, change_id=change_id)
+            try:
+                if status in IN_PROGRESS_STATUS_NAMES:
+                    self.transition_ticket(ticket_key, "to_under_review")
+                    self.counters.transitions_made += 1
+                    status = "Under Review"
+                if status in UNDER_REVIEW_STATUS_NAMES:
+                    self.transition_ticket(ticket_key, "to_approved")
+                    self.counters.transitions_made += 1
+                    status = "Approved"
+                if status in APPROVED_STATUS_NAMES:
+                    self.transition_ticket(ticket_key, "to_published")
+                    self.counters.transitions_made += 1
+                else:
+                    self.log(
+                        "WARN",
+                        "ticket_unexpected_status_skip",
+                        ticket_key=ticket_key,
+                        change_id=change_id,
+                        err=status,
+                    )
+                    return False
+            except Exception as exc:
+                self.log(
+                    "ERROR",
+                    "ticket_force_publish_transition_failed",
+                    ticket_key=ticket_key,
+                    change_id=change_id,
+                    err=f"{type(exc).__name__}: {exc}",
+                    from_state=original_status,
+                    at_state=status,
+                )
+                return False
+            self.log(
+                "INFO",
+                "ticket_force_published",
+                ticket_key=ticket_key,
+                change_id=change_id,
+                from_state=original_status,
+            )
+            self.add_jira_comment(
+                ticket_key,
+                (
+                    "[bridge] Gerrit change merged; force-transitioned ticket "
+                    f"from {original_status} to 公開済み. "
+                    "(Previous state was unexpected; see OP-743 for the "
+                    "force-walk fix that allows this.)"
+                ),
+            )
             return True
 
     def _lock_for(self, ticket_key: str) -> Lock:

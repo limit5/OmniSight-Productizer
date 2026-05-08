@@ -1,9 +1,10 @@
 # Gerrit/JIRA Bridge SOP
 
 `backend/agents/gerrit_jira_bridge.py` consumes Gerrit `stream-events`
-and moves OP tickets from `Approved` to `Published` after Gerrit merges a
-develop change. It is stateless: restart behavior is a startup catchup
-JQL pass plus a fresh stream connection.
+and moves OP tickets to `Published` after Gerrit merges a develop change.
+It force-walks safe predecessor states (`In Progress`, `Under Review`,
+`Approved`) and is stateless: restart behavior is a startup catchup JQL
+pass plus a fresh stream connection.
 
 ## Install
 
@@ -27,8 +28,10 @@ JQL pass plus a fresh stream connection.
 ## Config
 
 The launcher defaults to `--agent-class subscription-claude`, which maps
-to `claude-bot` for both JIRA and Gerrit. This bot has Deploy permission
-and the bridge only uses JIRA transition id=7 (`Approved` -> `Published`).
+to `claude-bot` for both JIRA and Gerrit. This bot has permission to run
+the bridge's forward-only JIRA transitions: id=3 (`In Progress` ->
+`Under Review`), id=4 (`Under Review` -> `Approved`), and id=7
+(`Approved` -> `Published`).
 Set `OMNISIGHT_PYTHON=/path/to/python` in the unit environment if the host
 must use a project venv instead of `python3`.
 
@@ -63,9 +66,14 @@ Heartbeat lines use `event=heartbeat` and include:
   logs `event=gerrit_stream_reconnects_high`.
 - `event=malformed_json_line`: Gerrit emitted a line that was not JSON.
   The daemon increments `parse_errors` and continues.
-- `event=ticket_unexpected_status_skip`: matching ticket is not Approved.
-  This is intentional ADR 0003 protection; the bridge does not jump ahead
-  of human approval.
+- `event=ticket_force_published`: matching ticket was force-walked to
+  `Published` after Gerrit reported a merged develop change.
+- `event=ticket_already_published`: matching ticket was already terminal;
+  the duplicate merge/catchup event was a harmless no-op.
+- `event=ticket_archived_skip`: matching ticket was operator-archived; the
+  bridge does not unarchive tickets automatically.
+- `event=ticket_unexpected_status_skip`: matching ticket is in an unknown
+  workflow state outside the force-walk set.
 - `event=multiple_tickets_for_change`: one Gerrit change subject mapped to
   multiple OP keys. Do not transition manually until the operator decides
   which ticket owns the change.
@@ -75,10 +83,11 @@ Heartbeat lines use `event=heartbeat` and include:
 After install, run:
 
 ```jql
-project = "OP" AND status = "Approved" AND assignee in (codex-bot, claude-bot)
+project = "OP" AND status in ("In Progress", "Under Review", "Approved") AND assignee in (codex-bot, claude-bot)
 ```
 
 For any result, check the Gerrit change linked by the
 `[runner-pushed-to-gerrit]` comment. If the change is already `MERGED`,
 the bridge should publish it during startup catchup. The expected steady
-state after first run is zero Approved-but-merged orphan tickets.
+state after first run is zero merged tickets left in these predecessor
+states.
