@@ -92,12 +92,28 @@ from backend.agents.cost_guard import (
     InMemoryCostStore,
     ScopeKey,
 )
+from backend.agents.runner_handlers import make_runner_dispatcher
 
 
 DEFAULT_MODEL_SONNET = "claude-sonnet-4-6"
-DEFAULT_MAX_ITERATIONS = 80
+DEFAULT_MAX_ITERATIONS = 40  # Lower than auto-runner-sdk's 80; per W14.5
+                              # lesson, max_iterations_exceeded is a
+                              # decompose signal, not a retry signal.
 LAUNCHER_AGENT_CLASS = "api-anthropic"
 S1_SPRINT_NAME = "S1: MP v0.4.0"
+
+# Tool list — same as auto-runner-sdk.RUNNER_TOOLS but Skill/Agent omitted
+# for the api-anthropic batch run; we want a deterministic, narrow tool
+# surface. Read/Write/Edit/Bash/Grep/Glob give the model everything it
+# needs to read the codebase, edit/create files, and run tests.
+RUNNER_TOOLS: list[str] = ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
+
+# Stop reasons that indicate the task is structurally too big — DO NOT
+# retry the same prompt (it'll burn the same budget for the same outcome,
+# cf. W14.5 incident which lost $25 on two identical max_tokens retries).
+NON_RETRYABLE_STOP_REASONS: frozenset[str] = frozenset({
+    "max_tokens", "max_iterations_exceeded",
+})
 
 # Pickup JQL — only refined Story tickets in S1 (placeholders are explicitly
 # excluded by ``labels not in ("runner-needs-refinement")``).
@@ -344,6 +360,338 @@ async def process_ticket(
     return "ok"
 
 
+# ── Full JIRA pipeline (Stage C) ───────────────────────────────────────
+
+
+# Per-ticket worktree path (api-anthropic uses claude-bot's worktree;
+# claude-bot has Code-Review +1 ACL we'll need for AI Reviewer down the
+# line, and the same SSH key is what jira_dispatch already authenticates).
+WORKTREE_PATH = REPO.parent / "OmniSight-claude-worktree"
+
+
+def _build_system_prompt(ticket_key: str, ticket_summary: str) -> str:
+    """System prompt for the SDK runner. Pins scope discipline + W14.5 lesson."""
+    sop_path = REPO / "docs" / "sop" / "implement_phase_step.md"
+    sop_text = sop_path.read_text() if sop_path.is_file() else ""
+    claude_md = REPO / "CLAUDE.md"
+    claude_md_text = claude_md.read_text() if claude_md.is_file() else ""
+
+    return (
+        f"# Execution context\n"
+        f"- PROJECT_ROOT: `{WORKTREE_PATH}` — Read/Write/Edit/Bash/Grep/Glob "
+        f"refuse paths outside this root\n"
+        f"- Working on JIRA ticket {ticket_key}: {ticket_summary}\n"
+        f"- You are running unattended via the api-anthropic SDK launcher; "
+        f"there is no operator to ask questions of\n\n"
+        f"# 🚨 BASH TOOL RESTRICTIONS (CRITICAL — these characters are REJECTED) 🚨\n"
+        f"The Bash tool runs WITHOUT a shell. The following characters are **REJECTED** "
+        f"by the validator: `|`, `&`, `;`, `(`, `)`, `<`, `>`, `$`, `` ` ``, newline, CR.\n"
+        f"This means you CANNOT use:\n"
+        f"  ❌ `find . -name X.py | grep Y`        (no `|`)\n"
+        f"  ❌ `cmd1 && cmd2`                       (no `&`)\n"
+        f"  ❌ `python -c \"...\" > out.txt`         (no `>`)\n"
+        f"  ❌ `cmd; cmd`                           (no `;`)\n"
+        f"  ❌ `python -c \"$(cat file)\"`            (no `$`/backtick)\n"
+        f"INSTEAD do this:\n"
+        f"  ✅ Use the **Grep** tool for `grep` / `rg` searches (it's purpose-built)\n"
+        f"  ✅ Use the **Glob** tool for `find -name` patterns\n"
+        f"  ✅ Use the **Read** tool to read file contents (no `cat`)\n"
+        f"  ✅ Make **multiple separate Bash calls** instead of pipelines\n"
+        f"  ✅ Use the **Write** tool instead of `> file`\n"
+        f"  ✅ Bash is for: `python -m pytest path/to/test.py -v`, `git log --oneline`, "
+        f"`ls -la dir`, etc. — single foreground commands without redirection.\n\n"
+        f"If you hit a Bash error about 'shell metacharacter', the validator rejected "
+        f"the command. Re-read this restriction list and use the right tool.\n\n"
+        f"# CRITICAL scope discipline (W14.5 lesson)\n"
+        f"- The W14.5 incident burned $25 on two identical max_tokens retries. "
+        f"DO NOT attempt work that would exceed your token budget.\n"
+        f"- If you hit the same tool error 2+ times in a row, STOP and reconsider — "
+        f"don't blindly retry the same broken tool call (this burns iterations).\n"
+        f"- If the ticket Acceptance Criteria includes 5+ concrete deliverables "
+        f"and you realise mid-implementation that completing all of them would "
+        f"exceed ~300 lines of changes OR require 30+ tool calls, **halt early**: "
+        f"finish whatever you've started cleanly, mark the rest as TODO in a "
+        f"comment block within the file you were editing, and commit what's done.\n"
+        f"- It is FAR better to ship 60% of the work cleanly than to attempt 100% "
+        f"and produce broken/half-done code.\n"
+        f"- Sign-off marker — when you're done, write the literal phrase "
+        f"`✅ ITEM_DONE` (success) or `🛑 SCOPE_SURRENDERED <reason>` (partial) "
+        f"as the LAST line of your final response.\n\n"
+        f"# Project rules (CLAUDE.md L1, immutable)\n{claude_md_text}\n"
+    )
+
+
+def _build_user_prompt(ticket_key: str, ticket_description: str) -> str:
+    return (
+        f"Implement JIRA ticket {ticket_key}.\n\n"
+        f"=== Ticket description ===\n{ticket_description}\n\n"
+        f"=== Your task ===\n"
+        f"1. Read the relevant existing code (use Grep/Glob to find files matching "
+        f"the ticket's Files / Paths section).\n"
+        f"2. Implement the Acceptance Criteria. Stay within the declared file paths.\n"
+        f"3. Write tests for any new logic (mirror the AC's evidence pattern).\n"
+        f"4. Run the tests via Bash: `python3 -m pytest <test_file> -v`. They MUST pass.\n"
+        f"5. After tests pass, write a final response ending with `✅ ITEM_DONE` and "
+        f"a brief AC checklist showing which items are verified.\n"
+        f"6. Do NOT commit — the launcher commits + pushes after you exit.\n"
+        f"7. Do NOT update CLAUDE.md, HANDOFF.md, or memory rules.\n"
+        f"8. Do NOT touch files outside the declared Files / Paths section "
+        f"unless absolutely required (and document why in commit message).\n"
+        f"\n"
+        f"If you cannot fit the work in scope, write `🛑 SCOPE_SURRENDERED <reason>` "
+        f"and we will reschedule with a smaller decomposition. **Do not attempt to "
+        f"force-fit broken code through.**\n"
+    )
+
+
+def _is_retryable(stop_reason: str | None) -> bool:
+    """W14.5 lesson: max_tokens / max_iterations_exceeded are not retryable."""
+    return stop_reason not in NON_RETRYABLE_STOP_REASONS
+
+
+async def process_ticket_full(
+    *,
+    client: AnthropicClient | _DryRunClient,
+    guard: CostGuard,
+    ticket_key: str,
+    ticket_summary: str,
+    ticket_description: str,
+    model: str,
+    per_ticket_cap_usd: float,
+    max_spend_usd: float,
+    max_iterations: int,
+    log_outcome: Callable[[TicketOutcome], None],
+    dry_run: bool = False,
+) -> str:
+    """Full pipeline: sync worktree → JIRA In Progress → SDK invoke →
+    push Gerrit → walk JIRA. Returns the outcome status string.
+
+    On any structural failure (max_tokens, max_iterations, push fail,
+    per-ticket cap exceeded), we walk the ticket back to To Do with a
+    hint comment and move on. **No retries** — that's the W14.5 lesson.
+    """
+    started = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+    # === Idempotency ===
+    if has_existing_gerrit_ps(ticket_key):
+        log_outcome(TicketOutcome(
+            ticket_key=ticket_key, started_at=started, finished_at=started,
+            status="skipped_existing_ps", cost_usd=0.0,
+            input_tokens=0, output_tokens=0, iterations=0,
+        ))
+        return "skipped_existing_ps"
+
+    # === Pre-flight cost gate ===
+    estimate = await estimate_for(guard, model=model, in_tok=600_000, out_tok=30_000)
+    spend_so_far = await cumulative_spend(guard)
+    projected = spend_so_far + estimate.cost_usd_estimated
+    if projected > max_spend_usd:
+        finished = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        log_outcome(TicketOutcome(
+            ticket_key=ticket_key, started_at=started, finished_at=finished,
+            status="global_capped", cost_usd=0.0,
+            input_tokens=0, output_tokens=0, iterations=0,
+            error=f"hard cap: projected ${projected:.2f} > ${max_spend_usd:.2f}",
+        ))
+        return "global_capped"
+    await guard.check(estimate, per_batch_observed_usd=spend_so_far)
+
+    # === JIRA: In Progress ===
+    if not dry_run:
+        jira_client = jira_dispatch.make_client(LAUNCHER_AGENT_CLASS)
+        try:
+            jira_dispatch.transition_to_in_progress(jira_client, ticket_key)
+        except Exception as exc:
+            return _abort_and_log(
+                log_outcome, ticket_key, started, status="failed",
+                error=f"transition to In Progress failed: {exc}",
+            )
+
+    # === Worktree sync ===
+    if not dry_run:
+        try:
+            sync = jira_dispatch.sync_to_gerrit_develop(
+                WORKTREE_PATH, LAUNCHER_AGENT_CLASS, ticket_key,
+            )
+            print(f"  [{ticket_key}] worktree synced: {sync.detail}")
+        except Exception as exc:
+            return _abort_and_log(
+                log_outcome, ticket_key, started, status="failed",
+                error=f"worktree sync failed: {exc}",
+            )
+
+    # === SDK invocation ===
+    system_prompt = _build_system_prompt(ticket_key, ticket_summary)
+    user_prompt = _build_user_prompt(ticket_key, ticket_description)
+    try:
+        result = await client.run_with_tools(  # type: ignore[union-attr]
+            prompt=user_prompt,
+            tools=RUNNER_TOOLS,
+            system=system_prompt,
+            model=model,
+            max_iterations=max_iterations,
+            enable_cache=True,
+            on_tool_call="log",
+        )
+    except Exception as exc:
+        return _abort_and_log(
+            log_outcome, ticket_key, started, status="failed",
+            error=f"SDK call exception: {type(exc).__name__}: {exc}",
+        )
+
+    # === Cost record ===
+    actual_cost_usd = await _post_call_cost_record(
+        guard=guard, model=model, usage=result.usage,
+    )
+    finished = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+    # === Per-ticket cap check (post-call; can't pre-empt mid-call) ===
+    if actual_cost_usd > per_ticket_cap_usd:
+        if not dry_run:
+            _surrender_ticket(
+                ticket_key,
+                f"per-ticket cap ${per_ticket_cap_usd:.2f} exceeded "
+                f"(actual ${actual_cost_usd:.4f}). Will not retry.",
+            )
+        log_outcome(TicketOutcome(
+            ticket_key=ticket_key, started_at=started, finished_at=finished,
+            status="ticket_capped", cost_usd=actual_cost_usd,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            iterations=result.iterations,
+            error="per-ticket cap exceeded",
+        ))
+        return "ticket_capped"
+
+    # === Stop reason classification (W14.5 lesson) ===
+    if not _is_retryable(result.stop_reason):
+        if not dry_run:
+            _surrender_ticket(
+                ticket_key,
+                f"stop_reason={result.stop_reason} (structural — "
+                f"task too large, decompose needed; not retryable).",
+            )
+        log_outcome(TicketOutcome(
+            ticket_key=ticket_key, started_at=started, finished_at=finished,
+            status="failed", cost_usd=actual_cost_usd,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            iterations=result.iterations,
+            error=f"non-retryable stop_reason: {result.stop_reason}",
+        ))
+        return "failed"
+
+    # === Detect surrender marker (model said it gave up cleanly) ===
+    if "🛑 SCOPE_SURRENDERED" in result.final_text:
+        if not dry_run:
+            _surrender_ticket(
+                ticket_key,
+                f"Model surrendered scope: {result.final_text.split('SCOPE_SURRENDERED', 1)[-1][:200]}",
+            )
+        log_outcome(TicketOutcome(
+            ticket_key=ticket_key, started_at=started, finished_at=finished,
+            status="surrendered", cost_usd=actual_cost_usd,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            iterations=result.iterations,
+            error="model called SCOPE_SURRENDERED",
+        ))
+        return "surrendered"
+
+    # === Push to Gerrit + walk JIRA ===
+    if dry_run:
+        log_outcome(TicketOutcome(
+            ticket_key=ticket_key, started_at=started, finished_at=finished,
+            status="ok", cost_usd=actual_cost_usd,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            iterations=result.iterations,
+            gerrit_url="dry-run",
+        ))
+        return "ok"
+
+    try:
+        jira_dispatch.ensure_change_ids(WORKTREE_PATH, base_ref=sync.develop_sha)
+        push = jira_dispatch.push_to_gerrit_for_review(
+            WORKTREE_PATH, LAUNCHER_AGENT_CLASS, target="develop",
+        )
+    except Exception as exc:
+        _surrender_ticket(ticket_key, f"Gerrit setup failed: {type(exc).__name__}: {exc}")
+        log_outcome(TicketOutcome(
+            ticket_key=ticket_key, started_at=started, finished_at=finished,
+            status="failed", cost_usd=actual_cost_usd,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            iterations=result.iterations,
+            error=f"gerrit setup: {exc}",
+        ))
+        return "failed"
+
+    if not push.success:
+        _surrender_ticket(ticket_key, f"Gerrit push rejected: {push.detail[:200]}")
+        log_outcome(TicketOutcome(
+            ticket_key=ticket_key, started_at=started, finished_at=finished,
+            status="failed", cost_usd=actual_cost_usd,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            iterations=result.iterations,
+            error=f"push fail: {push.detail[:200]}",
+        ))
+        return "failed"
+
+    # === Success path: post AC verification + transition Under Review ===
+    try:
+        jira_dispatch.add_comment(
+            jira_client, ticket_key,
+            f"[ai-implemented 2026-05-09 SDK launcher] {result.final_text[:1500]}\n\n"
+            f"Gerrit: {push.change_url}",
+        )
+        jira_dispatch.transition_to_under_review(
+            jira_client, ticket_key, push.change_url,
+        )
+    except Exception as exc:
+        # Soft-fail — PS is up; JIRA walk can be done by operator/bridge.
+        print(f"  [{ticket_key}] post-push JIRA update failed: {exc} (PS still landed)")
+
+    log_outcome(TicketOutcome(
+        ticket_key=ticket_key, started_at=started, finished_at=finished,
+        status="ok", cost_usd=actual_cost_usd,
+        input_tokens=result.usage.input_tokens,
+        output_tokens=result.usage.output_tokens,
+        iterations=result.iterations,
+        gerrit_url=push.change_url,
+    ))
+    return "ok"
+
+
+def _abort_and_log(
+    log_outcome: Callable, ticket_key: str, started: str, *,
+    status: str, error: str,
+) -> str:
+    finished = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    log_outcome(TicketOutcome(
+        ticket_key=ticket_key, started_at=started, finished_at=finished,
+        status=status, cost_usd=0.0,
+        input_tokens=0, output_tokens=0, iterations=0,
+        error=error,
+    ))
+    return status
+
+
+def _surrender_ticket(ticket_key: str, reason: str) -> None:
+    """Walk a ticket back to To Do + post explanatory comment so the
+    operator (or a future tick) can pick it up cleanly. Failures here are
+    swallowed — JIRA being down shouldn't crash the batch run."""
+    try:
+        jira_client = jira_dispatch.make_client(LAUNCHER_AGENT_CLASS)
+        jira_dispatch.transition_back_to_todo(
+            jira_client, ticket_key,
+            f"[sdk-launcher 2026-05-09] {reason}",
+        )
+    except Exception as exc:
+        print(f"  [{ticket_key}] surrender failed: {exc}")
+
+
 async def _post_call_cost_record(
     *, guard: CostGuard, model: str, usage: TokenUsage,
 ) -> float:
@@ -385,14 +733,25 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--max-spend", type=float, default=100.0,
                    help="Hard global cap in USD (default 100).")
-    p.add_argument("--per-ticket-cap", type=float, default=8.0,
-                   help="Per-ticket budget in USD (default 8).")
+    p.add_argument("--per-ticket-cap", type=float, default=5.0,
+                   help="Per-ticket budget in USD (default 5; lower than the "
+                        "$10 that burned in W14.5).")
     p.add_argument("--pilot", type=str, default=None,
                    help="If set, process only this ticket key.")
     p.add_argument("--dry-run", action="store_true",
-                   help="Do not call the real Anthropic API.")
+                   help="Do not call the real Anthropic API; do not push.")
+    p.add_argument("--simple", action="store_true",
+                   help="Use the v1 narrow process_ticket() instead of the "
+                        "full JIRA pipeline (test/debug only).")
     p.add_argument("--model", default=DEFAULT_MODEL_SONNET)
     p.add_argument("--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS)
+    p.add_argument("--stop-loss-pct", type=float, default=70.0,
+                   help="Halt batch when cumulative spend reaches this percent "
+                        "of --max-spend (default 70). Operator can resume "
+                        "with a higher --max-spend if everything looks healthy.")
+    p.add_argument("--max-consecutive-failures", type=int, default=3,
+                   help="Halt if this many tickets in a row fail or surrender "
+                        "(default 3).")
     return p.parse_args()
 
 
@@ -412,7 +771,12 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.dry_run:
         client: Any = _DryRunClient()
     else:
-        client = AnthropicClient(api_key=_load_api_key())
+        # Build a real tool dispatcher so the model's Read/Write/Edit/Bash/
+        # Grep/Glob calls actually resolve to handlers (without this the
+        # SDK returns `no_handler_registered` for every tool call and the
+        # model surrenders immediately — pilot run lesson 2026-05-09).
+        dispatcher = make_runner_dispatcher()
+        client = AnthropicClient(api_key=_load_api_key(), dispatcher=dispatcher)
 
     if args.pilot:
         ticket_keys = [args.pilot]
@@ -420,18 +784,59 @@ async def main_async(args: argparse.Namespace) -> int:
         ticket_keys = _fetch_pickable_keys()
 
     print(f"=== S1 SDK launcher — {len(ticket_keys)} ticket(s), cap ${args.max_spend:.2f} ===")
+    print(f"=== mode: {'simple (v1)' if args.simple else 'full JIRA pipeline (v2)'}{', dry-run' if args.dry_run else ''} ===")
+    consecutive_failures = 0
+    stop_loss_threshold = args.max_spend * (args.stop_loss_pct / 100.0)
+
     for key in ticket_keys:
-        description = _fetch_description_or_empty(key)
-        await process_ticket(
-            client=client, guard=guard, ticket_key=key, description=description,
-            model=args.model, per_ticket_cap_usd=args.per_ticket_cap,
-            max_spend_usd=args.max_spend, max_iterations=args.max_iterations,
-            log_outcome=_log,
-        )
+        if args.simple:
+            description = _fetch_description_or_empty(key)
+            status = await process_ticket(
+                client=client, guard=guard, ticket_key=key,
+                description=description, model=args.model,
+                per_ticket_cap_usd=args.per_ticket_cap,
+                max_spend_usd=args.max_spend,
+                max_iterations=args.max_iterations,
+                log_outcome=_log,
+            )
+        else:
+            summary = _fetch_summary_or_key(key)
+            description = _fetch_description_or_empty(key)
+            status = await process_ticket_full(
+                client=client, guard=guard, ticket_key=key,
+                ticket_summary=summary, ticket_description=description,
+                model=args.model,
+                per_ticket_cap_usd=args.per_ticket_cap,
+                max_spend_usd=args.max_spend,
+                max_iterations=args.max_iterations,
+                log_outcome=_log,
+                dry_run=args.dry_run,
+            )
+
+        # Stop-loss handling
         spend = await cumulative_spend(guard)
-        print(f"    cumulative spend: ${spend:.2f} / ${args.max_spend:.2f}")
+        print(f"    cumulative spend: ${spend:.2f} / ${args.max_spend:.2f} ({spend/args.max_spend*100:.1f}%)")
+        if status in ("ok", "skipped_existing_ps"):
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            print(f"    consecutive failures: {consecutive_failures}/{args.max_consecutive_failures}")
+
         if spend >= args.max_spend:
-            print(f"=== GLOBAL CAP HIT at ${spend:.2f} — halting batch ===")
+            print(f"=== 🛑 GLOBAL CAP HIT at ${spend:.2f} — halting batch ===")
+            break
+        if spend >= stop_loss_threshold:
+            print(
+                f"=== ⚠️  STOP-LOSS at ${spend:.2f} ({args.stop_loss_pct:.0f}% of cap) — "
+                f"halting batch. Re-run with higher --max-spend or higher "
+                f"--stop-loss-pct if everything looks healthy. ==="
+            )
+            break
+        if consecutive_failures >= args.max_consecutive_failures:
+            print(
+                f"=== 🛑 CONSECUTIVE-FAILURE STOP-LOSS — {consecutive_failures} "
+                f"tickets failed/surrendered in a row. Halting batch. ==="
+            )
             break
 
     log_fh.close()
@@ -439,18 +844,33 @@ async def main_async(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fetch_summary_or_key(ticket_key: str) -> str:
+    try:
+        client = jira_dispatch.make_client(LAUNCHER_AGENT_CLASS)
+        issue = jira_dispatch._request(client, "GET", f"/issue/{ticket_key}?fields=summary")
+        return issue["fields"].get("summary", ticket_key)
+    except Exception:
+        return ticket_key
+
+
 def _load_api_key() -> str:
-    """Load the Anthropic API key from PG llm_credentials (single row)."""
-    import subprocess
-    out = subprocess.check_output(
-        ["docker", "exec", "omnisight-pg-primary", "psql", "-U", "omnisight",
-         "-d", "omnisight", "-At", "-c",
-         "SELECT api_key FROM llm_credentials WHERE provider='anthropic' LIMIT 1"],
-        text=True,
-    ).strip()
-    if not out:
-        raise RuntimeError("No anthropic api_key found in llm_credentials")
-    return out
+    """Load the Anthropic API key from operator-provisioned file.
+
+    Pre-flight (Stage B) saves the key to ``~/.config/omnisight/anthropic-api-key``
+    by pulling from the running backend container's env (which itself reads
+    from the encrypted llm_credentials table or the legacy Settings shim).
+    The file is mode 0600.
+    """
+    path = os.path.expanduser("~/.config/omnisight/anthropic-api-key")
+    if not os.path.isfile(path):
+        raise RuntimeError(
+            f"No API key at {path} — run pre-flight first to provision."
+        )
+    with open(path) as f:
+        key = f.read().strip()
+    if not key.startswith("sk-ant-"):
+        raise RuntimeError(f"Key at {path} does not look like an Anthropic key")
+    return key
 
 
 def _fetch_pickable_keys() -> list[str]:
