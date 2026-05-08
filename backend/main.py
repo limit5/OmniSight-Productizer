@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 import re
 import secrets
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response as StarletteResponse
 
@@ -15,6 +15,26 @@ from backend.config import settings
 from backend.routers import agents, artifacts, chat, events, health, host as _host_router, integration, invoke, providers, simulations, system, tasks, tools, webhooks, workflow as wf_router, workspaces
 from backend import db
 from backend import lifecycle as _lifecycle
+
+API_V1_PREFIX = "/api/v1"
+API_V2_PREFIX = "/api/v2"
+SUPPORTED_API_VERSIONS = ("v1", "v2")
+DEFAULT_API_VERSION = "v1"
+MIN_FRONTEND_API_VERSION = "v1"
+V1_SUNSET_HEADER = "Tue, 30 Jun 2026 23:59:59 GMT"
+DEPRECATED_API_VERSIONS = {
+    "v1": {"sunset": V1_SUNSET_HEADER},
+}
+
+
+def _api_relative_path(path: str) -> str:
+    """Return the route path after a supported API version prefix."""
+    for prefix in (API_V1_PREFIX, API_V2_PREFIX, settings.api_prefix):
+        if path == prefix:
+            return "/"
+        if path.startswith(prefix + "/"):
+            return path.removeprefix(prefix)
+    return path
 
 async def _startup_cleanup(log):
     """Reset stuck states left over from a previous crash."""
@@ -633,7 +653,7 @@ async def _rate_limit_gate(request, call_next):
     """
     from starlette.responses import JSONResponse as StarletteJSON
 
-    rel = request.url.path.removeprefix(settings.api_prefix)
+    rel = _api_relative_path(request.url.path)
     if rel in _RATE_LIMIT_EXEMPT:
         return await call_next(request)
 
@@ -747,7 +767,7 @@ async def _api_key_scope_gate(request, call_next):
         ip = request.client.host if request.client else ""
         key = await _ak.validate_bearer(raw, ip=ip)
         if key:
-            rel_path = request.url.path.removeprefix(settings.api_prefix)
+            rel_path = _api_relative_path(request.url.path)
             if not key.scope_allows(rel_path):
                 from starlette.responses import JSONResponse as StarletteJSON
                 return StarletteJSON(
@@ -1000,7 +1020,7 @@ async def _project_header_gate(request, call_next):
 async def _must_change_password_gate(request, call_next):
     from starlette.responses import JSONResponse as StarletteJSON
     path = request.url.path
-    rel = path.removeprefix(settings.api_prefix)
+    rel = _api_relative_path(path)
     if rel in _PASSWORD_CHANGE_EXEMPT or path in ("/", "/docs", "/openapi.json", "/redoc"):
         return await call_next(request)
     from backend import auth as _auth
@@ -1047,7 +1067,7 @@ async def _must_change_password_gate(request, call_next):
 # system).
 _BOOTSTRAP_EXEMPT_REL = {
     "/auth/login", "/auth/logout", "/auth/change-password",
-    "/healthz", "/health", "/livez", "/readyz",
+    "/healthz", "/health", "/livez", "/readyz", "/version",
 }
 # ``/cloudflare/*`` is exempt for L4 Step 3 — the wizard's Cloudflare
 # tunnel embed (B12 wizard) calls these endpoints before login. The
@@ -1071,6 +1091,8 @@ _BOOTSTRAP_STATIC_SUFFIXES = (
 
 def _bootstrap_path_is_exempt(path: str, rel: str) -> bool:
     """Return True if *path* bypasses the bootstrap wizard gate."""
+    if path == "/api/version":
+        return True
     if path == "/bootstrap" or path.startswith("/bootstrap/"):
         return True
     if rel == "/bootstrap" or rel.startswith("/bootstrap/"):
@@ -1105,7 +1127,7 @@ async def _graceful_shutdown_gate(request, call_next):
     from starlette.responses import JSONResponse as StarletteJSON
 
     path = request.url.path
-    rel = path.removeprefix(settings.api_prefix)
+    rel = _api_relative_path(path)
     # Liveness probes must keep working while we drain so the
     # orchestrator can still tell the process is alive (just not
     # ready).  Readiness endpoints should start failing — that is
@@ -1141,7 +1163,7 @@ async def _bootstrap_gate(request, call_next):
     from starlette.responses import RedirectResponse, JSONResponse
 
     path = request.url.path
-    rel = path.removeprefix(settings.api_prefix)
+    rel = _api_relative_path(path)
     if _bootstrap_path_is_exempt(path, rel):
         return await call_next(request)
 
@@ -1167,6 +1189,15 @@ async def _bootstrap_gate(request, call_next):
     # silently downgraded to GET on redirect — the client decides
     # whether to follow).
     return RedirectResponse(url="/bootstrap", status_code=307)
+
+
+@app.middleware("http")
+async def _api_deprecation_headers(request, call_next):
+    response = await call_next(request)
+    if request.url.path == API_V1_PREFIX or request.url.path.startswith(API_V1_PREFIX + "/"):
+        response.headers.setdefault("Deprecation", "true")
+        response.headers.setdefault("Sunset", V1_SUNSET_HEADER)
+    return response
 
 
 @app.middleware("http")
@@ -1218,177 +1249,199 @@ from backend import error_aggregation as _error_aggregation
 _error_aggregation.install_error_aggregation(app)
 
 
+@app.get("/api/version", tags=["api-version"], include_in_schema=False)
+async def api_version():
+    return {
+        "supported_versions": list(SUPPORTED_API_VERSIONS),
+        "default_version": DEFAULT_API_VERSION,
+        "min_frontend_api_version": MIN_FRONTEND_API_VERSION,
+        "deprecated_versions": DEPRECATED_API_VERSIONS,
+    }
+
+
+api_v1_router = APIRouter()
+api_v2_router = APIRouter()
+
+
+def _include_versioned_router(router: APIRouter) -> None:
+    api_v1_router.include_router(router)
+    api_v2_router.include_router(router)
+
+
 # Mount routers
-app.include_router(health.router, prefix=settings.api_prefix)
+_include_versioned_router(health.router)
 # G1 #2 — `/healthz` (liveness) and `/readyz` (readiness) are mounted
 # at the server root so systemd / docker-compose / k8s / CF health
 # checks don't need to know about the API prefix.
 app.include_router(health.probe_router)
 from backend.routers import a2a_inbound as _a2a_inbound_router  # BP.A2A.2
 app.include_router(_a2a_inbound_router.router)
-app.include_router(agents.router, prefix=settings.api_prefix)
-app.include_router(tasks.router, prefix=settings.api_prefix)
-app.include_router(chat.router, prefix=settings.api_prefix)
-app.include_router(tools.router, prefix=settings.api_prefix)
-app.include_router(providers.router, prefix=settings.api_prefix)
-app.include_router(invoke.router, prefix=settings.api_prefix)
-app.include_router(events.router, prefix=settings.api_prefix)
-app.include_router(wf_router.router, prefix=settings.api_prefix)
+_include_versioned_router(agents.router)
+_include_versioned_router(tasks.router)
+_include_versioned_router(chat.router)
+_include_versioned_router(tools.router)
+_include_versioned_router(providers.router)
+_include_versioned_router(invoke.router)
+_include_versioned_router(events.router)
+_include_versioned_router(wf_router.router)
 from backend.routers import audit as _audit_router  # Phase 53
-app.include_router(_audit_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_audit_router.router)
 from backend.routers import profile as _profile_router  # Phase 58
-app.include_router(_profile_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_profile_router.router)
 from backend.routers import projects as _projects_router  # Phase 61
-app.include_router(_projects_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_projects_router.router)
 from backend.routers import auth as _auth_router  # Phase 54
-app.include_router(_auth_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_auth_router.router)
 from backend.routers import mfa as _mfa_router  # K5/MFA
-app.include_router(_mfa_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_mfa_router.router)
 from backend.routers import observability as _obs_router  # Phase 52
-app.include_router(_obs_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_obs_router.router)
 from backend.routers import orchestration_observability as _orch_obs_router  # O9 (#272)
-app.include_router(_orch_obs_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_orch_obs_router.router)
 from backend.routers import web_observability as _web_obs_router  # W10 (#284)
-app.include_router(_web_obs_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_web_obs_router.router)
 from backend.routers import skills as _skills_router  # Phase 62
-app.include_router(_skills_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_skills_router.router)
 from backend.routers import dag as _dag_router  # Phase 56-DAG-D
-app.include_router(_dag_router.router, prefix=settings.api_prefix)
-app.include_router(workspaces.router, prefix=settings.api_prefix)
-app.include_router(artifacts.router, prefix=settings.api_prefix)
-app.include_router(webhooks.router, prefix=settings.api_prefix)
-app.include_router(simulations.router, prefix=settings.api_prefix)
-app.include_router(integration.router, prefix=settings.api_prefix)
+_include_versioned_router(_dag_router.router)
+_include_versioned_router(workspaces.router)
+_include_versioned_router(artifacts.router)
+_include_versioned_router(webhooks.router)
+_include_versioned_router(simulations.router)
+_include_versioned_router(integration.router)
 from backend.routers import secrets as _secrets_router  # I4/TENANT-SECRETS
-app.include_router(_secrets_router.router, prefix=settings.api_prefix)
-app.include_router(system.router, prefix=settings.api_prefix)
-app.include_router(_host_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_secrets_router.router)
+_include_versioned_router(system.router)
+_include_versioned_router(_host_router.router)
 from backend.routers import tenant_egress as _tenant_egress_router  # M6
-app.include_router(_tenant_egress_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_tenant_egress_router.router)
 from backend.routers import decisions as _decisions_router  # Phase 47A
-app.include_router(_decisions_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_decisions_router.router)
 from backend.routers import memory as _memory_router  # Phase 63-E
-app.include_router(_memory_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_memory_router.router)
 from backend.routers import intent as _intent_router  # Phase 68-C
-app.include_router(_intent_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_intent_router.router)
 from backend.routers import report as _report_router  # B3/REPORT-01
-app.include_router(_report_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_report_router.router)
 from backend.routers import hil as _hil_router  # C7/HIL-PLUGIN-API
-app.include_router(_hil_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_hil_router.router)
 from backend.routers import compliance as _compliance_router  # C8/COMPLIANCE-HARNESS
-app.include_router(_compliance_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_compliance_router.router)
 from backend.routers import compliance_matrix as _compliance_matrix_router  # BP.D.6
-app.include_router(_compliance_matrix_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_compliance_matrix_router.router)
 from backend.routers import mobile_compliance as _mobile_compliance_router  # P6/MOBILE-STORE-GATES
-app.include_router(_mobile_compliance_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_mobile_compliance_router.router)
 from backend.routers import safety as _safety_router  # C9/SAFETY-COMPLIANCE
-app.include_router(_safety_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_safety_router.router)
 from backend.routers import radio as _radio_router  # C10/RADIO-COMPLIANCE
-app.include_router(_radio_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_radio_router.router)
 from backend.routers import power as _power_router  # C11/POWER-PROFILING
-app.include_router(_power_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_power_router.router)
 from backend.routers import realtime as _realtime_router  # C12/REALTIME-DETERMINISM
-app.include_router(_realtime_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_realtime_router.router)
 from backend.routers import connectivity as _connectivity_router  # C13/CONNECTIVITY
-app.include_router(_connectivity_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_connectivity_router.router)
 from backend.routers import sensor_fusion as _sensor_fusion_router  # C14/SENSOR-FUSION
-app.include_router(_sensor_fusion_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_sensor_fusion_router.router)
 from backend.routers import security_stack as _security_stack_router  # C15/SECURITY-STACK
-app.include_router(_security_stack_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_security_stack_router.router)
 from backend.routers import ota_framework as _ota_framework_router  # C16/OTA-FRAMEWORK
-app.include_router(_ota_framework_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_ota_framework_router.router)
 from backend.routers import telemetry_backend as _telemetry_backend_router  # C17/TELEMETRY-BACKEND
-app.include_router(_telemetry_backend_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_telemetry_backend_router.router)
 from backend.routers import payment as _payment_router  # C18/PAYMENT-PCI-COMPLIANCE
-app.include_router(_payment_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_payment_router.router)
 from backend.routers import imaging_pipeline as _imaging_pipeline_router  # C19/IMAGING-PIPELINE
-app.include_router(_imaging_pipeline_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_imaging_pipeline_router.router)
 from backend.routers import print_pipeline as _print_pipeline_router  # C20/PRINT-PIPELINE
-app.include_router(_print_pipeline_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_print_pipeline_router.router)
 from backend.routers import enterprise_web_stack as _ews_router  # C21/ENTERPRISE-WEB-STACK
-app.include_router(_ews_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_ews_router.router)
 from backend.routers import barcode_scanner as _barcode_router  # C22/BARCODE-SCANNER-SDK
-app.include_router(_barcode_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_barcode_router.router)
 from backend.routers import machine_vision as _machine_vision_router  # C24/MACHINE-VISION
-app.include_router(_machine_vision_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_machine_vision_router.router)
 from backend.routers import motion_control as _motion_control_router  # C25/MOTION-CONTROL
-app.include_router(_motion_control_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_motion_control_router.router)
 from backend.routers import cloudflare_tunnel as _cf_tunnel_router  # B12/CF-TUNNEL-WIZARD
-app.include_router(_cf_tunnel_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_cf_tunnel_router.router)
 from backend.routers import uvc_gadget as _uvc_gadget_router  # D1/SKILL-UVC
-app.include_router(_uvc_gadget_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_uvc_gadget_router.router)
 from backend.routers import preferences as _prefs_router  # J4/USER-PREFS
-app.include_router(_prefs_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_prefs_router.router)
 from backend.routers import drafts as _drafts_router  # Q.6 (#300) per-user composer drafts
-app.include_router(_drafts_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_drafts_router.router)
 from backend.routers import privacy as _privacy_router  # SC.10.2 DSAR access
-app.include_router(_privacy_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_privacy_router.router)
 from backend.routers import api_keys as _api_keys_router  # K6/BEARER-PER-KEY
-app.include_router(_api_keys_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_api_keys_router.router)
 from backend.routers import storage as _storage_router  # M2/DISK-QUOTA-LRU
-app.include_router(_storage_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_storage_router.router)
 from backend.routers import hmi as _hmi_router  # C26/L4-CORE-26 HMI
-app.include_router(_hmi_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_hmi_router.router)
 from backend.routers import orchestrator as _orchestrator_router  # O4/ORCHESTRATOR-GATEWAY
-app.include_router(_orchestrator_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_orchestrator_router.router)
 from backend.routers import pep as _pep_router  # R0 (#306) PEP Gateway
-app.include_router(_pep_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_pep_router.router)
 from backend.routers import chatops as _chatops_router  # R1 (#307) ChatOps Interactive
-app.include_router(_chatops_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_chatops_router.router)
 from backend.routers import entropy as _entropy_router  # R2 (#308) Semantic Entropy Monitor
-app.include_router(_entropy_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_entropy_router.router)
 from backend.routers import scratchpad as _scratchpad_router  # R3 (#309) Scratchpad Offload + Auto-Continuation
-app.include_router(_scratchpad_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_scratchpad_router.router)
 from backend.routers import bootstrap as _bootstrap_router  # L1 Bootstrap wizard REST
-app.include_router(_bootstrap_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_bootstrap_router.router)
 from backend.routers import dashboard as _dashboard_router  # Phase 4-1 aggregator
-app.include_router(_dashboard_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_dashboard_router.router)
 from backend.routers import git_accounts as _git_accounts_router  # Phase 5-4 multi-account forge CRUD
-app.include_router(_git_accounts_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_git_accounts_router.router)
 from backend.routers import llm_credentials as _llm_credentials_router  # Phase 5b-3 LLM credentials CRUD
-app.include_router(_llm_credentials_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_llm_credentials_router.router)
 from backend.routers import llm_balance as _llm_balance_router  # Z.2 (#291) provider balance endpoint
-app.include_router(_llm_balance_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_llm_balance_router.router)
 from backend.routers import billing as _billing_router  # FS.8.1 Stripe checkout / portal scaffold
-app.include_router(_billing_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_billing_router.router)
 from backend.routers import admin_tenants as _admin_tenants_router  # Y2 (#278) tenant CRUD admin REST
-app.include_router(_admin_tenants_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_admin_tenants_router.router)
 from backend.routers import tenant_invites as _tenant_invites_router  # Y3 (#279) row 1 — invite issuance
-app.include_router(_tenant_invites_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_tenant_invites_router.router)
 from backend.routers import admin_super_admins as _admin_super_admins_router  # Y3 (#279) row 5 — super-admin self-service
-app.include_router(_admin_super_admins_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_admin_super_admins_router.router)
 from backend.routers import tenant_members as _tenant_members_router  # Y3 (#279) row 6 — tenant membership management
-app.include_router(_tenant_members_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_tenant_members_router.router)
 from backend.routers import tenant_projects as _tenant_projects_router  # Y4 (#280) row 1 + row 2 + row 3 + row 4 + row 5 + row 6 — project create / list / patch / archive+restore / member POST+PATCH+DELETE / cross-tenant share POST
-app.include_router(_tenant_projects_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_tenant_projects_router.router)
 from backend.routers import cmek_wizard as _cmek_wizard_router  # KS.2.1 CMEK tenant settings wizard
-app.include_router(_cmek_wizard_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_cmek_wizard_router.router)
 from backend.routers import proxy_health as _proxy_health_router  # KS.3.5 BYOG proxy heartbeat
-app.include_router(_proxy_health_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_proxy_health_router.router)
 from backend.routers import catalog as _catalog_router  # BS.2.1 — catalog entries + sources CRUD
-app.include_router(_catalog_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_catalog_router.router)
 from backend.routers import installer as _installer_router  # BS.2.2 — install jobs CRUD + sidecar long-poll
-app.include_router(_installer_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_installer_router.router)
 from backend.routers import web_sandbox as _web_sandbox_router  # W14.2 — live web preview launcher
-app.include_router(_web_sandbox_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_web_sandbox_router.router)
 from backend.routers import live_test_status as _live_test_status_router  # Z.7.7 LLM live-test status
-app.include_router(_live_test_status_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_live_test_status_router.router)
 from backend.routers import auto_skills as _auto_skills_router  # BP.M.3 L1 skill auto-distillation CRUD
-app.include_router(_auto_skills_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_auto_skills_router.router)
 from backend.routers import feature_flags as _feature_flags_router  # WP.7.8 operator feature flag registry UI
-app.include_router(_feature_flags_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_feature_flags_router.router)
 from backend.routers import canary_rollout as _canary_rollout_router  # OP-771 D10 canary rollout controls
-app.include_router(_canary_rollout_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_canary_rollout_router.router)
 from backend.routers import release_approval as _release_approval_router  # OP-770 production release approval
 app.include_router(_release_approval_router.router)
 from backend.routers import external_agents as _external_agents_router  # BP.A2A.6 external A2A agent registry UI
-app.include_router(_external_agents_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_external_agents_router.router)
 from backend.routers import batch_merge as _batch_merge_router  # OP-735 R5 AI Reviewer auto-+1 dashboard
-app.include_router(_batch_merge_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_batch_merge_router.router)
 from backend.routers import ci_dead_letter as _ci_dead_letter_router  # OP-741 CI recovery dead-letter dashboard
-app.include_router(_ci_dead_letter_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_ci_dead_letter_router.router)
 from backend.routers import conflict_dashboard as _conflict_dashboard_router  # OP-746 conflict-rate observability tile
-app.include_router(_conflict_dashboard_router.router, prefix=settings.api_prefix)
+_include_versioned_router(_conflict_dashboard_router.router)
+
+app.include_router(api_v1_router, prefix=API_V1_PREFIX)
+app.include_router(api_v2_router, prefix=API_V2_PREFIX, include_in_schema=False)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import

@@ -136,6 +136,10 @@ jobs:
         env:
           OMNISIGHT_DEBUG: "true"
         run: python scripts/dump_openapi.py
+      - name: enforce API version compatibility
+        env:
+          OMNISIGHT_DEBUG: "true"
+        run: python -m pytest backend/tests/test_api_versioning_op774.py -q
       - name: regenerate lib/generated/api-types.ts
         run: pnpm exec openapi-typescript openapi.json -o lib/generated/api-types.ts
       - name: fail on openapi drift
