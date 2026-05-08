@@ -29,6 +29,7 @@ import {
   ProviderEnergySphere,
   type ProviderEnergySphereProvider,
 } from "./ProviderEnergySphere"
+import { QuotaPulse, type QuotaPulsePosition } from "./QuotaPulse"
 
 export type ProviderConstellationSlot =
   | "top-left"
@@ -96,6 +97,17 @@ const QUOTA_LABEL: Record<ProviderConstellationQuotaState, string> = {
   watch: "Watch",
   critical: "Critical",
   unavailable: "No subscription",
+}
+
+const PULSE_POSITION_BY_SLOT: Record<
+  ProviderConstellationSlot,
+  QuotaPulsePosition
+> = {
+  "top-left": "top-left",
+  "top-right": "top-right",
+  "middle-right": "top-right",
+  "bottom-left": "bottom-left",
+  "bottom-right": "bottom-right",
 }
 
 const GEMINI_COMING_PROVIDER: ProviderConstellationProvider = Object.freeze({
@@ -245,17 +257,23 @@ function DefaultProviderSphere({
     }
 
     return (
-      <ProviderEnergySphere
-        level="normal"
-        provider={energyProvider}
-        icon={
-          <span className="font-mono text-sm font-semibold">
-            {provider.name.slice(0, 1).toUpperCase()}
-          </span>
-        }
-        size="secondary"
-        comingVersion={provider.version}
-      />
+      <span className="relative inline-flex">
+        <ProviderEnergySphere
+          level="normal"
+          provider={energyProvider}
+          icon={
+            <span className="font-mono text-sm font-semibold">
+              {provider.name.slice(0, 1).toUpperCase()}
+            </span>
+          }
+          size="secondary"
+          comingVersion={provider.version}
+        />
+        <QuotaPulse
+          provider={provider}
+          position={PULSE_POSITION_BY_SLOT[provider.slot]}
+        />
+      </span>
     )
   }
 
@@ -268,11 +286,15 @@ function DefaultProviderSphere({
   return (
     <div
       className={cn(
-        "flex h-28 w-28 flex-col items-center justify-center rounded-full border p-3 text-center shadow-[0_0_28px_rgba(56,189,248,0.16)] sm:h-32 sm:w-32",
+        "relative flex h-28 w-28 flex-col items-center justify-center rounded-full border p-3 text-center shadow-[0_0_28px_rgba(56,189,248,0.16)] sm:h-32 sm:w-32",
         QUOTA_CLASS[provider.quotaState],
       )}
       data-mp-provider-quota-source={provider.liveQuota ? "sse" : "props"}
     >
+      <QuotaPulse
+        provider={provider}
+        position={PULSE_POSITION_BY_SLOT[provider.slot]}
+      />
       <div className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em]">
         <Activity className="h-3 w-3" aria-hidden />
         <span>{QUOTA_LABEL[provider.quotaState]}</span>
