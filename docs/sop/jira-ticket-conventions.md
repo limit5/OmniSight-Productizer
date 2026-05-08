@@ -1078,6 +1078,7 @@ external_blockers: []
 - [ ] Tests pass locally + CI
 - [ ] Gerrit Code-Review +2 (1 human + 1 AI per ADR-0003)
 - [ ] Commit message contains `[OP-XXXX]`
+- [ ] For architecture/process tickets, scan `docs/sop/architecture-anti-patterns.md` for matching symptoms and cite the matching Cure or explain why none applies
 - [ ] Merge to `develop` (per ADR-0001)
 
 ## Runner notes

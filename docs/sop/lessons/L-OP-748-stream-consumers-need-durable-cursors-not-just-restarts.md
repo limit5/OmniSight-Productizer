@@ -1,3 +1,11 @@
+---
+id: L-OP-748
+ticket: OP-748
+title: Stream consumers need durable cursors, not just restarts
+date: 2026-05-08
+tags: [gerrit, jira, runner, reliability]
+---
+
 # Stream consumers need durable cursors, not just restarts
 
 **Situation**: A Gerrit `stream-events` disconnect dropped merge events

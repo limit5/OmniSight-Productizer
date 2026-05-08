@@ -50,8 +50,22 @@
 | L-OP-743 | 2026-05-08 | OP-743 | [Terminal events should permissively converge workflow state](docs/sop/lessons/L-OP-743-terminal-events-should-permissively-converge-workflow-state.md) | L29 |
 | L-OP-744 | 2026-05-08 | OP-744 | [Long-running daemons need explicit pool lifecycle management](docs/sop/lessons/L-OP-744-long-running-daemons-need-explicit-pool-lifecycle.md) | L29 |
 | L-OP-746 | 2026-05-08 | OP-746 | [Measure before optimising conflict pressure](docs/sop/lessons/L-OP-746-measure-before-optimising-conflict-pressure.md) |  |
+| L-OP-748 | 2026-05-08 | OP-748 | [Stream consumers need durable cursors, not just restarts](docs/sop/lessons/L-OP-748-stream-consumers-need-durable-cursors-not-just-restarts.md) |  |
 | L-OP-749 | 2026-05-08 | OP-749 | [External mutations need idempotency keys and circuit breakers](docs/sop/lessons/L-OP-749-idempotency-and-circuit-breakers-for-external-mutations.md) |  |
+| L-OP-750 | 2026-05-08 | OP-750 | [Orphan commit detection belongs at the runner tick boundary](docs/sop/lessons/L-OP-750-orphan-commit-detection-at-tick-boundary.md) |  |
+| L-OP-751 | 2026-05-08 | OP-751 | [Submit queue as the canonical merge mechanism](docs/sop/lessons/L-OP-751-submit-queue-as-canonical-merge-mechanism.md) |  |
+| L-OP-752 | 2026-05-08 | OP-752 | [Freeze migration scopes before pickup](docs/sop/lessons/L-OP-752-freeze-migration-scopes-before-pickup.md) |  |
 | L-OP-753 | 2026-05-08 | OP-753 | [Concurrency limits belong around the expensive operation](docs/sop/lessons/L-OP-753-concurrency-limits-belong-around-the-expensive-operation.md) |  |
+| L-OP-754 | 2026-05-08 | OP-754 | [Cross-ticket dependencies need pickup side effects](docs/sop/lessons/L-OP-754-cross-ticket-dependencies-need-pickup-side-effects.md) |  |
+| L-OP-756 | 2026-05-08 | OP-756 | [Binary auto-action gates need graceful degradation tiers](docs/sop/lessons/L-OP-756-binary-gates-need-graceful-degradation-tiers.md) |  |
+| L-OP-759 | 2026-05-08 | OP-759 | [Cross-check authoritative state before doing work](docs/sop/lessons/L-OP-759-cross-check-authoritative-state-before-work.md) |  |
+| L-OP-760 | 2026-05-08 | OP-760 | [Classify before reacting; generic error handlers leak partial state](docs/sop/lessons/L-OP-760-classify-before-reacting-generic-error-handlers-leak-partial-state.md) |  |
+| L-OP-762 | 2026-05-08 | OP-762 | [Machine-checkable release milestones beat checklist milestones](docs/sop/lessons/L-OP-762-milestones-need-machine-checkable-gates.md) |  |
+| L-OP-764 | 2026-05-08 | OP-764 | [Keep secrets and non-secret config in separate stores from day one](docs/sop/lessons/L-OP-764-secret-vs-config-separation.md) |  |
+| L-OP-766 | 2026-05-08 | OP-766 | [Release auto-promotion must stay fast-forward-only](docs/sop/lessons/L-OP-766-release-promotion-must-stay-ff-only.md) |  |
+| L-OP-769 | 2026-05-08 | OP-769 | [Release tags are write-once automation outputs](docs/sop/lessons/L-OP-769-release-tags-are-write-once.md) |  |
+| L-OP-777 | 2026-05-08 | OP-777 | [Release notes should be operator-editable Gerrit patchsets](docs/sop/lessons/L-OP-777-release-notes-should-be-reviewable-patchsets.md) |  |
+| L-OP-780 | 2026-05-08 | OP-780 | [Architecture incidents need symptom-first cookbook entries](docs/sop/lessons/L-OP-780-anti-pattern-cookbook.md) |  |
 
 Legacy sequential lesson numbers are retained only as migration metadata; duplicate legacy numbers from concurrent patchsets: L29.
 
@@ -846,6 +860,158 @@ between disconnect and reconnect.
 
 ---
 
+## L-OP-749 — External mutations need idempotency keys and circuit breakers (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-749-idempotency-and-circuit-breakers-for-external-mutations.md`](docs/sop/lessons/L-OP-749-idempotency-and-circuit-breakers-for-external-mutations.md)
+
+
+# External mutations need idempotency keys and circuit breakers
+
+**Situation**: Runner retries can repeat successful side effects when the
+failure happens after an external mutation but before the tick completes.
+JIRA comments, workflow transitions, assignee edits, and audit inserts
+are especially visible because duplicates confuse operators and make the
+ticket timeline harder to trust. Separately, polling every 90s while an
+external dependency is down creates repeated failures without progress.
+
+**Fix**: Route runner-owned external mutations through stable
+idempotency keys and a 24h SQLite response cache, and put service-level
+circuit breakers in front of JIRA REST, Gerrit SSH, Gerrit REST, and
+backend REST call paths.
+
+**Verification**: `backend/tests/test_idempotency.py` covers key replay,
+TTL pruning, and JIRA mutation subkeys. `backend/tests/test_circuit_breaker.py`
+covers five JIRA failures opening the breaker, runner skip behavior via
+`backend/tests/test_runner_backpressure.py`, and half-open recovery.
+
+**Generalisation**: Any new external mutation helper should take an
+optional idempotency key and should execute through the service's circuit
+breaker. Retrying a whole runner tick is only safe when individual side
+effects are deduplicated and unhealthy dependencies pause the loop.
+
+---
+
+## L-OP-750 — Orphan commit detection belongs at the runner tick boundary (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-750-orphan-commit-detection-at-tick-boundary.md`](docs/sop/lessons/L-OP-750-orphan-commit-detection-at-tick-boundary.md)
+
+
+# Orphan commit detection belongs at the runner tick boundary
+
+**Situation**: A runner crash after the CLI committed but before the
+Gerrit push left work stranded on a local `feature/OP-*-runner-fresh`
+branch. The following tick force-created a fresh branch for the next
+ticket, making the previous work easy to miss and requiring manual
+salvage.
+
+**Fix**: Scan runner feature branches at tick start, before ticket
+pickup mutates the worktree. If a branch contains same-ticket `[OP-XXX]`
+commits, has a non-empty diff, and has no matching open Gerrit change,
+push it to `refs/for/develop` with the bot SSH identity and leave a JIRA
+`[runner-orphan-salvage]` comment.
+
+**Verification**: `backend/tests/test_orphan_salvage.py` covers the
+dirty-worktree salvage path, existing Gerrit review skip, empty-diff
+skip, mixed-ticket alert, and the more-than-five-orphans halt guard.
+
+**Generalisation**: Destructive tick-start worktree operations need a
+preflight scan for committed-but-unpublished work. Recovery must run at
+the boundary before cleanup, branch replacement, or fresh-sync code can
+discard the evidence.
+
+---
+
+## L-OP-751 — Submit queue as the canonical merge mechanism (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-751-submit-queue-as-canonical-merge-mechanism.md`](docs/sop/lessons/L-OP-751-submit-queue-as-canonical-merge-mechanism.md)
+
+
+# Submit queue as the canonical merge mechanism
+
+**Situation**: With N parallel PSes touching the same hot file, the
+manual `rebase → +2 → wait → maybe-conflict-again → re-+2` loop is
+O(N²) work for the operator. Each merge invalidates every still-open
+sibling, the auto-rebase sweeper (OP-733) lights up, half the rebases
+conflict, and the operator chases tail conflicts back into review. The
+class of bug is "concurrent merge of overlapping changes" — exactly
+what GitHub Merge Queue and Google's Rosie were built to remove.
+
+**Fix**: OP-751 introduces a serialised submit queue. The operator
+votes a new `Submit-Ready=+1` label (separate from `Code-Review`) and
+the `submit_queue_worker.py` daemon picks the change up, rebases onto
+the current `develop` tip via Gerrit's REST `/rebase` endpoint, runs
+CI when OP-739 wires that hook, and submits atomically through
+`/submit`. Per-change `fcntl.flock` lock files prevent double-process
+between concurrent daemon instances, and a configurable inter-merge
+sleep (default 30s) rate-limits the merges so the auto-rebase sweeper
+and notifier have headroom to drain. On any failure (rebase conflict,
+submit HTTP error, CI not-ready) the worker votes `Submit-Ready=-1`
+with a human-readable comment; the operator fixes manually and
+re-marks `+1` to retry. The label ACL allows both `non-ai-reviewer`
+(operator marks `+1`) and `ai-reviewer-bots` (worker votes `-1`) to
+score `-1..+1`.
+
+**Verification**:
+- `backend/tests/test_submit_queue_worker.py::test_synthetic_five_ps_burst_all_merge_in_order_no_manual_rebase`
+  pins the AC#4 invariant: 5 PSes on the same file all merge in
+  operator-mark order, exactly one rebase per still-stale change, no
+  manual intervention.
+- `test_rebase_conflict_votes_minus_one_with_comment` and
+  `test_after_minus_one_operator_can_retry_with_plus_one` pin the
+  AC#5 failure-path round-trip.
+- `test_change_lock_blocks_concurrent_acquisition` and
+  `test_process_change_skips_when_lock_held` pin AC#3 (per-change
+  lock prevents double-process).
+- `test_project_config_defines_submit_ready_label` pins AC#1 (label
+  defined in `project.config`).
+- `test_skips_change_that_is_not_submittable` pins the contract that
+  the queue defers to Gerrit's existing `submitRecords` (Human-Plus-2
+  / No-Veto / Verified) rather than overriding policy.
+
+**Generalisation**: When the same race-condition class shows up
+repeatedly in operator workflow (sibling merge invalidates open work,
+operator chases conflicts), serialise the merge step rather than
+patching individual races. The submit queue is the canonical merge
+mechanism for OmniSight — once OP-751 ships, manual `+2 → submit`
+should be reserved for hotfixes that explicitly bypass the queue,
+and the queue's `Submit-Ready` label becomes the operator's "land
+this" verb. The same pattern applies to any pipeline where the
+output of one step is the input of the next: serialise the
+mutation, parallelise everything around it.
+
+---
+
+## L-OP-752 — Freeze migration scopes before pickup (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-752-freeze-migration-scopes-before-pickup.md`](docs/sop/lessons/L-OP-752-freeze-migration-scopes-before-pickup.md)
+
+
+# Freeze migration scopes before pickup
+
+**Situation**: META migrations can change a shared document or ticket
+format while normal runner tickets are still eligible. Without a pickup
+gate, an in-flight ticket can write the old format after the migration
+patch set has already introduced the new one, creating avoidable Gerrit
+conflicts and review ambiguity.
+
+**Fix**: Let the migration ticket hold `migration:in-flight` plus
+`migration:scope=<glob>` labels. The runner checks active migration
+scopes before pickup, pauses overlapping tickets with a JIRA comment,
+and only permits bypass when the target ticket has an audited
+`migration:override` label.
+
+**Verification**: `backend/tests/test_jira_dispatch.py` covers active
+migration scope lookup, overlap blocking, release after the migration is
+no longer active, and override auditing. `backend/tests/test_gerrit_jira_bridge.py`
+covers removing the in-flight label when the migration ticket is
+published.
+
+**Generalisation**: Structural META changes need an explicit pickup gate
+before they land. Prefer temporary labels with path scopes over broad
+runner shutdowns so unrelated tickets keep flowing.
+
+---
+
 ## L-OP-753 — Concurrency limits belong around the expensive operation (2026-05-08)
 
 Source: [`docs/sop/lessons/L-OP-753-concurrency-limits-belong-around-the-expensive-operation.md`](docs/sop/lessons/L-OP-753-concurrency-limits-belong-around-the-expensive-operation.md)
@@ -870,6 +1036,76 @@ proves the environment override changes the token count.
 different controls. Keep enough workers to avoid serial queue latency, but
 put the hard token bucket around the specific I/O-heavy operation that can
 overload the host.
+
+---
+
+## L-OP-754 — Cross-ticket dependencies need pickup side effects (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-754-cross-ticket-dependencies-need-pickup-side-effects.md`](docs/sop/lessons/L-OP-754-cross-ticket-dependencies-need-pickup-side-effects.md)
+
+
+# Cross-ticket dependencies need pickup side effects
+
+**Situation**: JIRA Blocks links can correctly describe ticket ordering,
+but a runner that only returns `False` from pre-pickup leaves operators
+without a visible waiting marker. The same ticket can be silently skipped
+on every tick, and cross-runner dependency chains are hard to diagnose.
+
+**Fix**: Treat dependency blocks as a first-class pickup outcome. The
+runner propagates `blocked-by:<key>` into a JIRA comment, adds a
+`runner-blocked:waiting-<key>` label while waiting, and removes stale
+waiting labels when the Blocks gate passes.
+
+**Verification**: `backend/tests/test_file_coordinator.py` covers Blocks
+status gating, cycle detection, and the synthetic A-before-B dispatch
+flow. `backend/tests/test_file_mutex.py` covers runner waiting-label and
+comment side effects.
+
+**Generalisation**: Any pre-pickup gate that intentionally skips work
+should leave both a machine-readable marker and an operator-readable
+comment, then clean up the marker automatically when the gate opens.
+
+---
+
+## L-OP-756 — Binary auto-action gates need graceful degradation tiers (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-756-binary-gates-need-graceful-degradation-tiers.md`](docs/sop/lessons/L-OP-756-binary-gates-need-graceful-degradation-tiers.md)
+
+
+# Binary auto-action gates need graceful degradation tiers
+
+**Situation**: OP-735 R5 implemented per-(bot, file_class) trust scoring
+as a binary on/off gate (`trust_score_ok` returned True iff failure_rate
+was below 10%). Crossing the threshold permanently disabled auto-+1 for
+that pair; recovery required enough additional successes to drop the
+running rate back under 10%, with no operator override path. A single
+late-failing patch could mute a bot for an entire file class until the
+counter caught up.
+
+**Fix**: OP-756 replaces the binary gate with a 4-tier ladder
+(`AUTO` >= 0.95, `GLANCE` >= 0.80, `COMMENT` >= 0.50, `DISABLED` < 0.50).
+A failure now slides the pair to a lower-automation tier instead of
+flipping the bot off completely: GLANCE keeps the +1 vote with a
+`runner-glance-required` hashtag for one-click operator confirmation;
+COMMENT mutes the +1 but still posts the LLM verdict for context.
+DISABLED only triggers when the success rate falls below 50%.
+Operators can short-circuit the score-derived tier with a
+`runner-trust-tier=<tier>` Gerrit hashtag so a known-bad pair can be
+pinned to COMMENT/DISABLED for debugging without poisoning the counters.
+
+**Verification**: `backend/tests/test_ai_reviewer_auto_plus_one.py`
+adds 28 OP-756 tests pinning tier boundaries, ramp-up default, operator
+pin override, hard-gate downgrade behaviour, recovery semantics, and
+the anti-fragility invariant that a single failure can never push a
+pair to DISABLED.
+
+**Generalisation**: Whenever an automated agent has a confidence-based
+auto-action, design the failure mode as a degradation ladder rather
+than a binary kill-switch. The right number of rungs is small
+(2–4) and each rung should still produce *some* useful signal so the
+bot remains observable while it earns its score back. Always provide
+an operator override hashtag/label so debugging doesn't require
+manipulating the underlying counters.
 
 ---
 
@@ -900,6 +1136,52 @@ pickup hint, not proof that work is still needed.
 
 ---
 
+## L-OP-760 — Classify before reacting; generic error handlers leak partial state (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-760-classify-before-reacting-generic-error-handlers-leak-partial-state.md`](docs/sop/lessons/L-OP-760-classify-before-reacting-generic-error-handlers-leak-partial-state.md)
+
+
+# Classify before reacting; generic error handlers leak partial state
+
+**Situation**: A Gerrit push failure used one generic runner path: comment, exit non-zero, and leave the JIRA ticket in progress. That was correct for transient failures but wrong for duplicate work, invalid identities, missing trees, Change-Id problems, conflicts, and unknown policy failures.
+
+**Fix**: OP-760 classifies push stderr before mutating JIRA. Each category maps to an explicit recovery action: force-publish duplicate merged work, revert deterministic code-quality failures, retry transient network failures, or pause unknown failures with a dead-letter label.
+
+**Verification**: `backend/tests/test_push_failure_classifier.py` covers the classifier patterns, force-publish fallback split, revert categories, retry path, and unknown escalation label.
+
+**Generalisation**: Runner error handlers should convert external stderr into a typed event before changing workflow state. Generic "log and fail" paths are acceptable only when the workflow state remains valid after the failure.
+
+---
+
+## L-OP-762 — Machine-checkable release milestones beat checklist milestones (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-762-milestones-need-machine-checkable-gates.md`](docs/sop/lessons/L-OP-762-milestones-need-machine-checkable-gates.md)
+
+
+# Machine-checkable release milestones beat checklist milestones
+
+**Situation**: Sprint D needed a way to know when `develop` was ready to
+promote to `main`. The tempting shortcut was a human-maintained "release
+ready" note, but that would duplicate state already present in JIRA,
+Gerrit, and CI, and it would drift as soon as one ticket or canary run
+changed after the note was written.
+
+**Fix**: OP-762 made JIRA `fixVersion` the milestone definition and
+implemented `scripts/release_milestone_checker.py` as the acceptance
+checker. The checker emits `milestone_ready` only when every gate is
+machine-green; otherwise it emits `milestone_blocked` with structured
+reasons that D17 can display and D5 can ignore safely.
+
+**Verification**: `backend/tests/test_release_milestone_checker.py`
+covers the synthetic five-ticket milestone, structured blocked reasons,
+and the 5-minute systemd timer contract.
+
+**Generalisation**: A milestone field should define the candidate set,
+not the readiness verdict. Promotion readiness should be recomputed from
+current source-of-truth systems and fail closed when evidence is missing.
+
+---
+
 ## L-OP-764 — Keep secrets and non-secret config in separate stores from day one (2026-05-08)
 
 Source: [`docs/sop/lessons/L-OP-764-secret-vs-config-separation.md`](docs/sop/lessons/L-OP-764-secret-vs-config-separation.md)
@@ -908,68 +1190,157 @@ Source: [`docs/sop/lessons/L-OP-764-secret-vs-config-separation.md`](docs/sop/le
 # Keep secrets and non-secret config in separate stores from day one
 
 **Situation**: Pre-OP-764, every OmniSight host carried a hand-edited
-`.env` that mixed feature flags, hostnames, and timeouts (legitimate
+``.env`` that mixed feature flags, hostnames, and timeouts (legitimate
 config) with API keys, OAuth client secrets, webhook HMAC secrets, and
 the bootstrap admin password (real secrets). Deploying a new staging
-host meant `scp .env` from prod, hand-edit the few values that
+host meant ``scp .env`` from prod, hand-edit the few values that
 differed, ship. That pattern (1) put plaintext secrets on every host,
-(2) silently drifted between environments because each host's `.env`
+(2) silently drifted between environments because each host's ``.env``
 was edited independently, and (3) gave us no audit trail when a key
 rotated.
 
 **Fix**: OP-764 split the world into two pipes that meet at boot:
-non-secret config lives in `config/<env>.yaml` checked into the repo;
-secrets live in a vault (Fernet file or HashiCorp Vault) fronted by
-`backend.secrets_provider` with a single `SECRET_FIELDS` registry that
-anchors the split. `backend.config._apply_env_overlay()` runs at
-module import — BEFORE `Settings()` — and writes both halves into
-`os.environ` only for keys not already set so a deploy `--override`
-still wins. The overlay refuses to apply a YAML entry whose key is in
-`SECRET_FIELDS` — accidental commits never reach Settings.
+
+  * Non-secret config lives in ``config/<env>.yaml``, checked into the
+    repo. Reviewers see every env-specific knob in PRs.
+  * Secrets live in a vault — Fernet-encrypted file or HashiCorp Vault
+    — fronted by ``backend.secrets_provider`` with a single
+    :data:`SECRET_FIELDS` registry that anchors the split.
+  * ``backend.config._apply_env_overlay()`` runs at module import,
+    BEFORE ``Settings()``, and writes both halves into ``os.environ``
+    only for keys not already set so a deploy ``--override`` still
+    wins. The overlay refuses to apply a YAML entry whose key is in
+    ``SECRET_FIELDS`` — accidental commits never reach Settings.
 
 **Verification**:
-`backend/tests/test_secrets_provider.py` pins SECRET_FIELDS membership
+``backend/tests/test_secrets_provider.py`` pins SECRET_FIELDS membership
 and the file-vault round-trip + encryption canary;
-`backend/tests/test_config_multi_env_overlay.py::test_synthetic_staging_spinup_no_dotenv_required`
-is the headline AC — fresh process with only `OMNISIGHT_ENV=staging`
-plus a populated vault produces a fully-configured Settings;
-`backend/tests/test_migrate_dotenv_to_vault.py` covers the legacy
-`.env` → vault + yaml round-trip including conflict refusal.
+``backend/tests/test_config_multi_env_overlay.py::test_synthetic_staging_spinup_no_dotenv_required``
+is the headline AC: a fresh process with only ``OMNISIGHT_ENV=staging``
+plus a populated vault produces a fully-configured Settings without any
+``.env`` involvement;
+``backend/tests/test_migrate_dotenv_to_vault.py`` covers the legacy
+``.env`` → vault + yaml round-trip including the conflict-without-force
+refusal path.
 
 **Generalisation**: When a single store mixes secrets with feature
 flags, every operation on the store has the same blast radius as a
 secret rotation. Split them at the lowest layer that touches both —
 config loading — and pin the split in a registry that callers consult
-instead of re-deciding. A new Settings field carrying a credential
-MUST land both as a class attribute and as a SECRET_FIELDS entry, or
-the next migration silently leaks it into checked-in YAML.
+instead of re-deciding. The registry is the load-bearing piece: a
+new Settings field that carries a credential MUST land both as a
+class attribute and as a SECRET_FIELDS entry, or the next migration
+will silently leak it into checked-in YAML.
 
 ---
 
-## L-OP-754 — Cross-ticket dependencies need pickup side effects (2026-05-08)
+## L-OP-766 — Release auto-promotion must stay fast-forward-only (2026-05-08)
 
-Source: [`docs/sop/lessons/L-OP-754-cross-ticket-dependencies-need-pickup-side-effects.md`](docs/sop/lessons/L-OP-754-cross-ticket-dependencies-need-pickup-side-effects.md)
+Source: [`docs/sop/lessons/L-OP-766-release-promotion-must-stay-ff-only.md`](docs/sop/lessons/L-OP-766-release-promotion-must-stay-ff-only.md)
 
 
-# Cross-ticket dependencies need pickup side effects
+# Release auto-promotion must stay fast-forward-only
 
-**Situation**: JIRA Blocks links can correctly describe ticket ordering,
-but a runner that only returns `False` from pre-pickup leaves operators
-without a visible waiting marker. The same ticket can be silently skipped
-on every tick, and cross-runner dependency chains are hard to diagnose.
+**Situation**: Sprint D needed `develop` to promote to `main` after the
+machine milestone gates turn green. Letting the daemon merge would hide
+hotfix divergence and make the release branch policy depend on automation
+judgement.
 
-**Fix**: Treat dependency blocks as a first-class pickup outcome. The
-runner propagates `blocked-by:<key>` into a JIRA comment, adds a
-`runner-blocked:waiting-<key>` label while waiting, and removes stale
-waiting labels when the Blocks gate passes.
+**Fix**: `backend.agents.auto_promote_main` performs two explicit git
+pre-checks: `main..develop` must contain work to promote, and
+`develop..main` must be empty. Only that shape runs
+`git push gerrit develop:main`; any `main`-only commit aborts and alerts
+the operator with the divergent commit list.
 
-**Verification**: `backend/tests/test_file_coordinator.py` covers Blocks
-status gating, cycle detection, and the synthetic A-before-B dispatch
-flow. `backend/tests/test_file_mutex.py` covers runner waiting-label and
-comment side effects.
+**Verification**: `backend/tests/test_auto_promote_main.py` covers the
+clean fast-forward promotion, the non-fast-forward alert path, ignored
+non-ready events, and cursor-based consumption of the OP-762 checker log.
 
-**Generalisation**: Any pre-pickup gate that intentionally skips work
-should leave both a machine-readable marker and an operator-readable
-comment, then clean up the marker automatically when the gate opens.
+**Generalisation**: Branch promotion daemons should move refs only when
+the desired topology is already true. They may detect and report
+divergence, but they should not invent a merge policy.
+
+---
+
+## L-OP-769 — Release tags are write-once automation outputs (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-769-release-tags-are-write-once.md`](docs/sop/lessons/L-OP-769-release-tags-are-write-once.md)
+
+
+# Release tags are write-once automation outputs
+
+**Situation**: Sprint D needed automatic tagging after staging gates pass,
+but release tags become downstream deployment evidence. Reusing a tag name
+for a different commit would make D9 approval and later rollback evidence
+ambiguous.
+
+**Fix**: `backend.agents.auto_tag_release` creates annotated SemVer tags
+only when absent. If `vX.Y.Z` already exists at another commit, the run
+fails instead of moving it. The daemon then pushes the tag and matching
+`release/vX.Y` branch to Gerrit and GitLab before emitting
+`release_tagged`.
+
+**Verification**: `backend/tests/test_auto_tag_release.py` covers the full
+synthetic `staging_passed` flow, immutable tag rejection, ignored unrelated
+events, service wiring, and docs references.
+
+**Generalisation**: Release evidence should be append-only. Automation may
+create a missing release ref, but must never reinterpret an existing one.
+
+---
+
+## L-OP-777 — Release notes should be operator-editable Gerrit patchsets (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-777-release-notes-should-be-reviewable-patchsets.md`](docs/sop/lessons/L-OP-777-release-notes-should-be-reviewable-patchsets.md)
+
+
+# Release notes should be operator-editable Gerrit patchsets
+
+**Situation**: Sprint D needed release notes from JIRA fixVersion data,
+but publishing directly from automation would turn ticket summaries into
+external copy without the operator's editorial pass.
+
+**Fix**: `backend.agents.release_notes_generator` writes
+`docs/releases/vX.Y.Z.md` and pushes it to Gerrit as a patchset. The
+operator can edit the generated draft before any public announcement.
+
+**Verification**: `backend/tests/test_release_notes_generator.py` covers
+the synthetic five-ticket milestone, section grouping, per-file lesson
+links, event-log cursor consumption, and the systemd polling contract.
+
+**Generalisation**: Generated human-facing release artefacts should be
+drafted as reviewable changes. Automation can assemble the source data,
+but the publication boundary should stay with an operator-reviewed patch.
+
+---
+
+## L-OP-780 — Architecture incidents need symptom-first cookbook entries (2026-05-08)
+
+Source: [`docs/sop/lessons/L-OP-780-anti-pattern-cookbook.md`](docs/sop/lessons/L-OP-780-anti-pattern-cookbook.md)
+
+
+# Architecture incidents need symptom-first cookbook entries
+
+**Situation**: The 2026-05-08 runner-fleet hardening sprint surfaced the
+same architecture traps across multiple tickets: flat-file registries,
+shared mutable worktree config, retry-unsafe external mutations, missing
+event cursors, strict terminal-state handlers, and migration tickets
+colliding with in-flight work. Future tickets risk re-discovering the same
+root causes if the lessons remain scattered across ticket comments.
+
+**Fix**: Consolidate repeated traps into `docs/sop/architecture-anti-patterns.md`
+using a mandatory Symptom / Root Cause / Cure / Examples / Reference Tickets
+format, then cross-link it from the ticket DoD path so authors can scan by
+symptom before filing or completing architecture/process work.
+
+**Verification**: OP-780 verifies the cookbook file exists, covers the ten
+requested sprint patterns in the required format, links from
+`docs/sop/jira-ticket-conventions.md` near Definition of Done, and regenerates
+`docs/sop/lessons-learned.md` with this per-file lesson.
+
+**Generalisation**: When a process or architecture failure recurs in 2+
+tickets, document it as a symptom-first cookbook entry with a mechanical
+cure. Ticket authors should cite the existing Cure instead of redesigning
+the response from scratch.
 
 ---
