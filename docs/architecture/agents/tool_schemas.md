@@ -15,7 +15,7 @@
 - "Deferred" tools are registered but excluded from the default eager payload — they're only sent when explicitly named, typically after a `ToolSearch` call. This keeps the default `tools=[]` small.
 - ToolSearch lazy-load responses carry both a registry-level `schema_version` and per-tool `schema_version`; the Anthropic `tools=[]` payload deliberately omits this metadata.
 - `ToolSchema` is frozen; the `_REGISTRY` dict is module-global and populated at import time, so importing this module has side effects (every `register_tool` call runs).
-- `docs/agents/tool-reference.md` must stay in sync with the registry; `--check-doc` is presumably wired into CI and exits 1 on drift.
+- `backend.docs_site_tool_reference.build_tool_reference()` must stay in sync with the registry; `--check-doc` is wired into CI and exits 1 on dynamic-renderer drift.
 - `SKILL_HD_*` entries are deliberate placeholders with `input_schema={"type": "object"}` — the validator (`_validate_schemas`) tolerates this shape, and they're filled in as each HD phase (HD.1–HD.21) ships.
 
 **Cross-module touchpoints**:

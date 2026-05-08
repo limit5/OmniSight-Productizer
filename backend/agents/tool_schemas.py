@@ -13,15 +13,14 @@ Two consumers:
 
   1. Anthropic API client (`anthropic_native_client.py`, AB.2) — calls
      `to_anthropic_tools(["Read", "Edit", ...])` to get `tools=[]` payload
-  2. Documentation (`docs/agents/tool-reference.md`) — generated from
-     the registry via `python -m backend.agents.tool_schemas --regen-doc`
+  2. Documentation — generated from the registry at docs-site build time
+     via `backend.docs_site_tool_reference.build_tool_reference()`
 
 Adding a new tool:
 
   1. Build a ToolSchema instance
   2. register_tool(schema) at module load time
-  3. python -m backend.agents.tool_schemas --regen-doc
-  4. Test test_tool_schemas.py passes
+  3. Test test_tool_schemas.py passes
 
 ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §2
 """
@@ -629,7 +628,7 @@ for _schema in _load_hd_skill_schemas(Path(__file__).resolve().parents[2]):
 
 
 def generate_markdown_reference() -> str:
-    """Generate `docs/agents/tool-reference.md` content from the registry."""
+    """Generate tool-reference Markdown content from the registry."""
     eager_count = sum(1 for s in _REGISTRY.values() if not s.deferred)
     deferred_count = sum(1 for s in _REGISTRY.values() if s.deferred)
     skill_hd_count = sum(1 for s in _REGISTRY.values() if s.category == "skill_hd")
@@ -639,7 +638,7 @@ def generate_markdown_reference() -> str:
         "",
         "> **Auto-generated from `backend/agents/tool_schemas.py`. Do NOT edit by hand.**",
         ">",
-        "> Run `python -m backend.agents.tool_schemas --regen-doc` to refresh.",
+        "> Built dynamically by `backend.docs_site_tool_reference`.",
         "",
         f"**Totals**: {len(_REGISTRY)} tools  ·  {eager_count} eager  ·  "
         f"{deferred_count} deferred (lazy-load via ToolSearch)  ·  "
@@ -805,12 +804,12 @@ def _main() -> None:
     parser.add_argument(
         "--regen-doc",
         action="store_true",
-        help="Regenerate docs/agents/tool-reference.md from registry.",
+        help="Regenerate local ignored docs/agents/tool-reference.md from registry.",
     )
     parser.add_argument(
         "--check-doc",
         action="store_true",
-        help="Verify docs/agents/tool-reference.md matches current registry "
+        help="Verify the docs-site dynamic renderer matches current registry "
         "(exit 1 on drift).",
     )
     parser.add_argument(
@@ -836,15 +835,13 @@ def _main() -> None:
         new_content = generate_markdown_reference()
 
         if args.check_doc:
-            if not doc_path.exists():
-                print(f"ERROR: {doc_path} does not exist. Run --regen-doc.")
+            from backend import docs_site_tool_reference
+
+            rendered = docs_site_tool_reference.build_tool_reference()
+            if rendered != new_content:
+                print("ERROR: docs-site tool reference renderer is out of sync.")
                 raise SystemExit(1)
-            old_content = doc_path.read_text()
-            if old_content != new_content:
-                print(f"ERROR: {doc_path} is out of sync with registry.")
-                print("Run: python -m backend.agents.tool_schemas --regen-doc")
-                raise SystemExit(1)
-            print(f"OK: {doc_path} matches registry.")
+            print("OK: docs-site tool reference renderer matches registry.")
             return
 
         doc_path.parent.mkdir(parents=True, exist_ok=True)

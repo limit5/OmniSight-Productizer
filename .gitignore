@@ -73,6 +73,7 @@ coverage-*.xml
 
 # Generated documentation indexes (regenerate locally; do not commit)
 docs/adr/README.md
+docs/agents/tool-reference.md
 docs/sop/lessons-learned.md
 docs/status/handoff_status.yaml
 

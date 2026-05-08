@@ -72,7 +72,7 @@ jobs:
       - name: Install backend deps
         run: pip install -r backend/requirements.txt
 
-      - name: Verify tool-reference.md in sync with registry
+      - name: Verify dynamic tool reference in sync with registry
         run: |
           python -m backend.agents.tool_schemas --check-doc
 
