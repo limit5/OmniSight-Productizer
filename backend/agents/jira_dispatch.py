@@ -35,7 +35,11 @@ from backend.config import settings
 from backend.agents.circuit_breaker import BREAKERS
 from backend.agents.idempotency import DEFAULT_STORE
 from backend.agents.scheduler import TicketSnapshot
-from backend.agents.scope_to_paths import ALWAYS_TOUCHED, SCOPE_TO_PATHS
+from backend.agents.scope_to_paths import (
+    ALWAYS_TOUCHED,
+    ALWAYS_TOUCHED_TEMPLATE,
+    SCOPE_TO_PATHS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1075,8 +1079,13 @@ def predict_target_files(
     2. always-touched convention paths plus first ``scope:<name>`` label mapped
        in :mod:`scope_to_paths`;
     3. always-touched convention paths.
+
+    Per-ticket lesson path is added via ALWAYS_TOUCHED_TEMPLATE (OP-795 Bug 1):
+    each ticket predicts its own ``L-{ticket}-*.md`` glob so two tickets writing
+    different lessons never collide on a shared wildcard.
     """
     files = set(ALWAYS_TOUCHED)
+    files.add(ALWAYS_TOUCHED_TEMPLATE.format(ticket=snapshot.key))
     explicit = parse_files_section_from_description(description or getattr(snapshot, "description", ""))
     if explicit:
         return files | explicit

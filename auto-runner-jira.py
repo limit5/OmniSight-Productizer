@@ -265,6 +265,7 @@ def _invoke_cli(agent_class: str, prompt: str, failure_context: str | None = Non
     if failure_context:
         full_prompt = f"{prompt.rstrip()}\n\n{failure_context.strip()}\n"
 
+    cwd: str | None = None
     if agent_class == "subscription-codex":
         if not os.path.isdir(CODEX_WORKTREE):
             print(f"[runner] codex worktree missing: {CODEX_WORKTREE}", file=sys.stderr)
@@ -275,6 +276,11 @@ def _invoke_cli(agent_class: str, prompt: str, failure_context: str | None = Non
             print(f"[runner] claude worktree missing: {CLAUDE_WORKTREE}", file=sys.stderr)
             return 2
         cmd = ["claude", "--dangerously-skip-permissions", "-p", full_prompt]
+        # OP-795 Bug 3: claude CLI doesn't take a --cd flag, so pin its cwd to
+        # the worktree via subprocess.Popen — otherwise it inherits the
+        # runner's cwd (main repo) and commits land outside the worktree,
+        # causing "no new changes" rejections at push time.
+        cwd = CLAUDE_WORKTREE
     elif agent_class.startswith("api-"):
         print(f"[runner] agent_class={agent_class} requires SDK invocation, not CLI. Skipping invoke.")
         return 99
@@ -290,6 +296,7 @@ def _invoke_cli(agent_class: str, prompt: str, failure_context: str | None = Non
     try:
         proc = subprocess.Popen(
             cmd,
+            cwd=cwd,
             stdin=subprocess.PIPE if cmd[0] == "codex" else None,
             stdout=sys.stdout,
             stderr=sys.stderr,
