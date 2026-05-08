@@ -51,6 +51,19 @@ def test_pre_commit_gate_names_all_generated_docs() -> None:
         assert path in entry
 
 
+def test_ci_gate_rejects_legacy_lessons_index() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    job = workflow["jobs"]["lessons-index-git-gate"]
+    run_blocks = "\n".join(
+        step.get("run", "")
+        for step in job["steps"]
+        if isinstance(step, dict)
+    )
+
+    assert "git ls-files --error-unmatch docs/sop/lessons-learned.md" in run_blocks
+    assert "must not be committed" in run_blocks
+
+
 def test_pre_commit_gate_blocks_readding_generated_docs(tmp_path: Path) -> None:
     hook = _pre_commit_hook()
     repo = tmp_path / "repo"
