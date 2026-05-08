@@ -213,6 +213,7 @@ TRANSITION_IDS = {
     "to_in_progress": "21",      # JP locale: "進行中"
     "back_to_todo": "11",        # JP locale: "To Do"
     "to_under_review": "3",      # "Submit for Review" — In Progress → Under Review
+    "to_approved": "4",          # "Approve" — Under Review → Approved
     "to_published": "7",         # "Deploy" — Approved → Published; bridge-only per ADR 0003
 }
 

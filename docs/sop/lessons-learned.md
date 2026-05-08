@@ -34,6 +34,7 @@
 | 17 | 2026-05-06 | `pre_pickup_ok` must check live_state in **worktree cwd**, not main repo cwd; sync runs first so checks see fresh state | OP-18 first-launch failed pre-pickup on stale main repo |
 | 18 | 2026-05-07 | Event consumers must combine stream handling with startup catchup and idempotent terminal-state checks | OP-689 Gerrit/JIRA bridge |
 | 25 | 2026-05-08 | Bot identity for sibling runner worktrees must use `extensions.worktreeConfig=true` + `git config --worktree` | OP-729 cross-runner forge-author race |
+| 29 | 2026-05-08 | Terminal source-of-truth events should permissively converge workflow state | OP-743 Gerrit/JIRA bridge force-walk |
 
 ---
 
@@ -483,3 +484,29 @@ rebase behavior, and runbook migration notes.
 from "surface blocks submit." Ship the label/status/permission surface
 first, prove operators can read and recover it, then flip enforcement
 in a later change with live signal and rollback mechanics in place.
+
+
+## Lesson 29 — Terminal events should permissively converge workflow state (2026-05-08)
+
+**Situation**: Gerrit `change-merged` is the source-of-truth terminal
+event for code landing, but the bridge originally required JIRA to be
+exactly `Approved` before moving the ticket to `Published`. Real
+operational paths left merged tickets at `In Progress` or `Under Review`
+when an intermediate transition was skipped, retried, or performed
+manually out of order.
+
+**Fix**: OP-743 changed the bridge's merge handler and startup catchup
+to force-walk known forward states (`In Progress` → `Under Review` →
+`Approved` → `Published`) while keeping `Published` idempotent and
+`Archived` protected from automatic unarchive.
+
+**Verification**: `backend/tests/test_gerrit_jira_bridge.py::test_change_merged_force_walks_five_source_states`
+pins the five-state matrix, and
+`test_catchup_force_walks_merged_under_review_ticket` proves startup
+catchup reuses the same force-walk path.
+
+**Generalisation**: Automation that reacts to an authoritative terminal
+event should converge workflow state from any safe predecessor, not only
+from the ideal predecessor. Preserve explicit terminal/operator override
+states, but do not strand work because a best-effort intermediate event
+was missed.

@@ -48,11 +48,11 @@ class FakeBridge(bridge.GerritJiraBridge):
 
     def jira_request(self, method: str, path: str, body: dict[str, Any] | None = None, *, max_attempts: int = 3) -> dict[str, Any]:
         self.requests.append((method, path, body))
-        if path.endswith("/transitions"):
+        if path.endswith("/transitions") or path.endswith("/comment"):
             return {}
         raise AssertionError(f"unexpected request: {method} {path}")
 
-    def search_approved_tickets(self) -> list[dict[str, Any]]:
+    def search_catchup_candidate_tickets(self) -> list[dict[str, Any]]:
         return self.approved
 
     def fetch_issue_status(self, ticket_key: str) -> str:
@@ -122,29 +122,80 @@ def test_comment_change_url_matcher_extracts_runner_comment_only() -> None:
     assert bridge.extract_change_numbers_from_comments(comments) == ["42"]
 
 
-def test_transition_gate_refuses_non_approved_status() -> None:
+def test_change_merged_force_walks_five_source_states() -> None:
+    cases = [
+        (
+            "OP-19",
+            "進行中",
+            ["3", "4", "7"],
+            "ticket_force_published",
+        ),
+        (
+            "OP-20",
+            "Under Review",
+            ["4", "7"],
+            "ticket_force_published",
+        ),
+        (
+            "OP-21",
+            "承認済み",
+            ["7"],
+            "ticket_force_published",
+        ),
+        (
+            "OP-22",
+            "公開済み",
+            [],
+            "ticket_already_published",
+        ),
+        (
+            "OP-23",
+            "Archived",
+            [],
+            "ticket_archived_skip",
+        ),
+    ]
+
+    for ticket_key, status, transition_ids, log_event in cases:
+        b = FakeBridge()
+        b.statuses[ticket_key] = status
+        assert b.process_ticket_for_change(ticket_key, f"I{ticket_key[3:]}") is bool(transition_ids)
+        actual_transition_ids = [
+            req[2]["transition"]["id"]
+            for req in b.requests
+            if req[1].endswith("/transitions") and req[2] is not None
+        ]
+        assert actual_transition_ids == transition_ids
+        comment_requests = [req for req in b.requests if req[1].endswith("/comment")]
+        assert len(comment_requests) == (1 if transition_ids else 0)
+        assert any(event == log_event for _level, event, _extra in b.logs)
+        if transition_ids:
+            force_logs = [extra for _level, event, extra in b.logs if event == "ticket_force_published"]
+            assert force_logs[0]["from_state"] == status
+
+
+def test_transition_gate_refuses_unknown_status() -> None:
     b = FakeBridge()
-    b.statuses["OP-19"] = "Under Review"
+    b.statuses["OP-19"] = "TODO"
     assert not b.process_ticket_for_change("OP-19", "Iabc12345")
     assert b.requests == []
     assert ("WARN", "ticket_unexpected_status_skip") == b.logs[0][:2]
 
 
-def test_already_published_is_idempotent_silent_skip() -> None:
+def test_already_published_is_idempotent_info_skip() -> None:
     b = FakeBridge()
     b.statuses["OP-19"] = "Published"
     assert not b.process_ticket_for_change("OP-19", "Iabc12345")
     assert b.requests == []
-    assert b.logs == []
+    assert ("INFO", "ticket_already_published") == b.logs[0][:2]
 
 
-def test_approved_ticket_transitions_with_id_7_only() -> None:
+def test_approved_ticket_transitions_with_id_7_and_comment() -> None:
     b = FakeBridge()
     b.statuses["OP-19"] = "Approved"
     assert b.process_ticket_for_change("OP-19", "Iabc12345")
-    assert b.requests == [
-        ("POST", "/issue/OP-19/transitions", {"transition": {"id": "7"}})
-    ]
+    assert ("POST", "/issue/OP-19/transitions", {"transition": {"id": "7"}}) in b.requests
+    assert any(req[1] == "/issue/OP-19/comment" for req in b.requests)
     assert b.counters.transitions_made == 1
 
 
@@ -170,7 +221,7 @@ def test_multiple_jira_tickets_same_change_id_logs_error() -> None:
     assert ("ERROR", "multiple_tickets_for_change") == b.logs[0][:2]
 
 
-def test_catchup_archives_one_orphan_and_leaves_under_review_alone() -> None:
+def test_catchup_force_walks_merged_under_review_ticket() -> None:
     b = FakeBridge()
     b.approved = [{"key": "OP-19"}, {"key": "OP-20"}]
     b.comments = {
@@ -184,7 +235,27 @@ def test_catchup_archives_one_orphan_and_leaves_under_review_alone() -> None:
     b.statuses = {"OP-19": "Approved", "OP-20": "Under Review"}
     b.startup_catchup()
     assert ("POST", "/issue/OP-19/transitions", {"transition": {"id": "7"}}) in b.requests
-    assert not any(req[1] == "/issue/OP-20/transitions" for req in b.requests)
+    assert ("POST", "/issue/OP-20/transitions", {"transition": {"id": "4"}}) in b.requests
+    assert ("POST", "/issue/OP-20/transitions", {"transition": {"id": "7"}}) in b.requests
+
+
+def test_failed_force_walk_transition_logs_error_and_returns() -> None:
+    class FailingBridge(FakeBridge):
+        def jira_request(self, method: str, path: str, body: dict[str, Any] | None = None, *, max_attempts: int = 3) -> dict[str, Any]:
+            self.requests.append((method, path, body))
+            if path.endswith("/transitions"):
+                raise RuntimeError("synthetic transition failure")
+            return {}
+
+    b = FailingBridge()
+    b.statuses["OP-19"] = "進行中"
+    assert not b.process_ticket_for_change("OP-19", "Iabc12345")
+    assert len([req for req in b.requests if req[1].endswith("/transitions")]) == 1
+    assert not any(req[1].endswith("/comment") for req in b.requests)
+    err_logs = [extra for _level, event, extra in b.logs if event == "ticket_force_publish_transition_failed"]
+    assert len(err_logs) == 1
+    assert err_logs[0]["from_state"] == "進行中"
+    assert err_logs[0]["at_state"] == "進行中"
 
 
 def test_malformed_line_increments_parse_errors_and_continues() -> None:
@@ -276,6 +347,8 @@ def test_gerrit_query_final_failure_logs_error_and_skips() -> None:
 
 
 def test_jira_transition_map_drift_guard() -> None:
+    assert jira_dispatch.TRANSITION_IDS["to_under_review"] == "3"
+    assert jira_dispatch.TRANSITION_IDS["to_approved"] == "4"
     assert jira_dispatch.TRANSITION_IDS["to_published"] == "7"
     assert "to_published" in jira_dispatch.TRANSITION_IDS
 
