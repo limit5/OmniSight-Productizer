@@ -102,11 +102,11 @@ _(refine on pickup)_
 """,
     ]
     expected = [
-        {"docs/sop/lessons/*.md", "backend/agents/provider_orchestrator.py", "backend/tests/test_provider_orchestrator.py"},
-        {"docs/sop/lessons/*.md", "backend/alembic/versions/XXXX_agent_character_card.py", "backend/tests/test_alembic_XXXX_agent_character_card.py"},
-        {"docs/sop/lessons/*.md", "auto-runner-jira.py", "backend/agents/jira_dispatch.py", "backend/tests/test_file_mutex.py"},
-        {"docs/sop/lessons/*.md", "docs/sop/jira-ticket-conventions.md"},
-        {"docs/sop/lessons/*.md", "backend/agents/scope_to_paths.py", "backend/tests/test_file_mutex.py"},
+        {"docs/sop/lessons/L-OP-731-*.md", "backend/agents/provider_orchestrator.py", "backend/tests/test_provider_orchestrator.py"},
+        {"docs/sop/lessons/L-OP-731-*.md", "backend/alembic/versions/XXXX_agent_character_card.py", "backend/tests/test_alembic_XXXX_agent_character_card.py"},
+        {"docs/sop/lessons/L-OP-731-*.md", "auto-runner-jira.py", "backend/agents/jira_dispatch.py", "backend/tests/test_file_mutex.py"},
+        {"docs/sop/lessons/L-OP-731-*.md", "docs/sop/jira-ticket-conventions.md"},
+        {"docs/sop/lessons/L-OP-731-*.md", "backend/agents/scope_to_paths.py", "backend/tests/test_file_mutex.py"},
     ]
 
     for description, paths in zip(descriptions, expected, strict=True):
@@ -115,15 +115,33 @@ _(refine on pickup)_
 
 def test_predict_target_files_uses_scope_label_when_files_section_missing() -> None:
     paths = jd.predict_target_files(_snapshot(labels=("scope:runner-pipeline",)), description="## Goal\n")
-    assert "docs/sop/lessons/*.md" in paths
+    # OP-795 Bug 1: per-ticket lesson path, not a shared wildcard
+    assert "docs/sop/lessons/L-OP-731-*.md" in paths
+    assert "docs/sop/lessons/*.md" not in paths
     assert "auto-runner-jira.py" in paths
     assert "backend/agents/jira_*.py" in paths
 
 
 def test_predict_target_files_includes_lessons_for_unknown_scope() -> None:
+    # OP-795 Bug 1: predicted lesson path is per-ticket, never the shared wildcard
     assert jd.predict_target_files(_snapshot(labels=("scope:unknown",)), description="## Goal\n") == {
-        "docs/sop/lessons/*.md"
+        "docs/sop/lessons/L-OP-731-*.md"
     }
+
+
+def test_op_795_two_tickets_writing_different_lessons_do_not_collide() -> None:
+    """OP-795 Bug 1 regression: previously ALWAYS_TOUCHED = {"docs/sop/lessons/*.md"}
+    matched any lesson PS via fnmatch and blocked every other ticket. With the
+    per-ticket template, two tickets adding distinct lessons predict disjoint
+    paths and `_paths_overlap` reports no collision.
+    """
+    a = jd.predict_target_files(_snapshot(key="OP-720", labels=("scope:unknown",)), description="## Goal\n")
+    b = jd.predict_target_files(_snapshot(key="OP-748", labels=("scope:unknown",)), description="## Goal\n")
+    in_flight_a_lesson = "docs/sop/lessons/L-OP-720-sibling-ps-race.md"
+    # OP-748's prediction must NOT match an in-flight OP-720 lesson path
+    assert jd._paths_overlap(b, {in_flight_a_lesson}) == set()
+    # But OP-720's own prediction DOES match its own lesson (sanity check)
+    assert jd._paths_overlap(a, {in_flight_a_lesson}) == {in_flight_a_lesson}
 
 
 def test_open_bot_owned_files_parses_three_open_patch_sets(monkeypatch: pytest.MonkeyPatch) -> None:

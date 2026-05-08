@@ -7,9 +7,17 @@ only delay pickup by one runner tick.
 from __future__ import annotations
 
 
-ALWAYS_TOUCHED: set[str] = {
-    "docs/sop/lessons/*.md",
-}
+# OP-795 Bug 1: previous value `{"docs/sop/lessons/*.md"}` matched any open PS
+# touching any per-file lesson, blocking every other ticket as soon as one
+# lesson PS was open. Per-file lessons are uniquely named L-OP-{ticket}-*.md
+# so they never collide between different tickets — handled per-ticket in
+# predict_target_files() via ALWAYS_TOUCHED_TEMPLATE rather than a wildcard
+# glob shared across all tickets.
+ALWAYS_TOUCHED: set[str] = set()
+
+# Per-ticket lesson path template — predict_target_files() formats this with
+# the ticket key so two tickets writing different lessons don't collide.
+ALWAYS_TOUCHED_TEMPLATE: str = "docs/sop/lessons/L-{ticket}-*.md"
 
 
 SCOPE_TO_PATHS: dict[str, set[str]] = {
