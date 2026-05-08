@@ -23,6 +23,7 @@ ENV:
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -42,6 +43,54 @@ DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
 def _file_mutex_skip_comment(reason: str) -> str:
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return f"[runner-file-mutex] {stamp}\n\nSkipped - {reason}. Will retry next tick."
+
+
+def already_merged_in_gerrit(ticket_key: str) -> tuple[int, str] | None:
+    """Return merged Gerrit change metadata for ``ticket_key``, if any.
+
+    Fail-open by design: a Gerrit/network problem must not block legitimate
+    pickup. Strict subject-prefix matching avoids body-only false positives.
+    """
+    user, ssh_key = jira_dispatch._GERRIT_AUTH_BY_CLASS.get(
+        AGENT_CLASS, jira_dispatch._GERRIT_AUTH_BY_CLASS["subscription-claude"]
+    )
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(jira_dispatch.GERRIT_SSH_PORT),
+        f"{user}@{jira_dispatch.GERRIT_SSH_HOST}",
+        "gerrit", "query", "--format=JSON",
+        f"message:{ticket_key} status:merged",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(
+            f"[runner] H12: Gerrit merged-check failed open for {ticket_key}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+    if result.returncode != 0:
+        print(
+            f"[runner] H12: Gerrit merged-check failed open for {ticket_key}: "
+            f"rc={result.returncode}: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return None
+
+    for line in result.stdout.splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") == "stats":
+            continue
+        if not str(data.get("subject", "")).startswith(f"[{ticket_key}]"):
+            continue
+        try:
+            return int(data["number"]), str(data["url"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
 
 
 def _check_pre_pickup_candidate(
@@ -325,6 +374,30 @@ def main() -> int:
         snapshot = winner
 
     print(f"[runner] selected: {snapshot.key} (component={snapshot.component})")
+
+    merged_info = already_merged_in_gerrit(snapshot.key)
+    if merged_info:
+        change_number, change_url = merged_info
+        print(
+            f"[runner] H12: {snapshot.key} already merged via Gerrit "
+            f"#{change_number}; auto-walking ticket to 公開済み"
+        )
+        if not DRY_RUN:
+            transitioned = jira_dispatch.force_walk_to_published(client, snapshot.key)
+            if transitioned:
+                jira_dispatch.add_comment(
+                    client,
+                    snapshot.key,
+                    (
+                        f"[runner-h12-self-heal] Detected merged Gerrit change "
+                        f"#{change_number} ({change_url}) before pickup. "
+                        "Auto-walked ticket to 公開済み. "
+                        "(Bridge daemon may have missed the change-merged event; "
+                        "OP-743 fix addresses bridge side; H12 is independent "
+                        "self-heal.)"
+                    ),
+                )
+        return 0
 
     # Step 2 (was Step 3 in Phase 1.5): sync worktree FIRST so pre-pickup checks
     # see the actual workspace state, not stale runner-host main repo state.
