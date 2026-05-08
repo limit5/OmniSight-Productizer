@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ class TicketSnapshot:
     downstream_blocked_count: int
     mutex_labels: tuple[str, ...]
     has_mutex_in_progress_sibling: bool
+    labels: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
