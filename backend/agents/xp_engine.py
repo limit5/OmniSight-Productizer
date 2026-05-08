@@ -19,6 +19,11 @@ from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
 from backend.agents.buff_registry import xp_multiplier_for_buff_ids
+from backend.agents.debuff_registry import (
+    DebuffContext,
+    active_debuff_ids_for_context,
+    xp_multiplier_for_debuff_ids,
+)
 
 OutcomeStatus = Literal["success", "partial", "fail", "failed"]
 
@@ -49,6 +54,8 @@ class TaskOutcome:
     first_time_skill_use: bool = False
     duplicate_task_within_24h: bool = False
     active_buff_ids: tuple[str, ...] = ()
+    consecutive_failures: int = 0
+    active_debuff_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,8 +78,8 @@ def award_xp(
     ``task_outcome`` may be a :class:`TaskOutcome`, a mapping, or a dataclass /
     object with matching attributes. The calculation mirrors ADR-0008:
     outcome multiplier, optional Tier-L+ multiplier, optional first-time skill
-    multiplier, optional W15 buff multipliers, and optional duplicate-task
-    anti-grinding multiplier.
+    multiplier, optional W15 buff/debuff multipliers, and optional
+    duplicate-task anti-grinding multiplier.
     """
     clean_agent_id = _clean_agent_id(agent_id)
     outcome = _normalise_task_outcome(task_outcome)
@@ -144,6 +151,12 @@ def _normalise_task_outcome(
             active_buff_ids=_clean_active_buff_ids(
                 values.get("active_buff_ids", values.get("buff_ids", ()))
             ),
+            consecutive_failures=_clean_consecutive_failures(
+                values.get("consecutive_failures", 0)
+            ),
+            active_debuff_ids=_clean_active_debuff_ids(
+                values.get("active_debuff_ids", values.get("debuff_ids", ()))
+            ),
         )
     _validate_outcome(outcome)
     return outcome
@@ -170,6 +183,9 @@ def _outcome_values(task_outcome: Mapping[str, Any] | Any) -> Mapping[str, Any]:
             "same_task_hash_within_24h",
             "active_buff_ids",
             "buff_ids",
+            "consecutive_failures",
+            "active_debuff_ids",
+            "debuff_ids",
         )
         if hasattr(task_outcome, name)
     }
@@ -199,6 +215,8 @@ def _validate_outcome(outcome: TaskOutcome) -> None:
     _clean_status(outcome.status)
     _clean_base_xp(outcome.base_xp)
     _clean_active_buff_ids(outcome.active_buff_ids)
+    _clean_consecutive_failures(outcome.consecutive_failures)
+    _clean_active_debuff_ids(outcome.active_debuff_ids)
 
 
 def _outcome_multiplier(outcome: TaskOutcome) -> float:
@@ -210,6 +228,7 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
     multiplier *= xp_multiplier_for_buff_ids(
         _clean_active_buff_ids(outcome.active_buff_ids)
     )
+    multiplier *= xp_multiplier_for_debuff_ids(_effective_debuff_ids(outcome))
     if outcome.duplicate_task_within_24h:
         multiplier *= DUPLICATE_TASK_MULTIPLIER
     return multiplier
@@ -234,6 +253,43 @@ def _clean_active_buff_ids(value: Any) -> tuple[str, ...]:
             raise ValueError("task_outcome active_buff_ids entries must be non-empty")
         out.append(clean)
     return tuple(out)
+
+
+def _clean_consecutive_failures(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("task_outcome consecutive_failures must be an int")
+    if value < 0:
+        raise ValueError("task_outcome consecutive_failures must be >= 0")
+    return value
+
+
+def _clean_active_debuff_ids(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        items = (value,)
+    else:
+        try:
+            items = tuple(value)
+        except TypeError as exc:
+            raise TypeError("task_outcome active_debuff_ids must be iterable") from exc
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise TypeError("task_outcome active_debuff_ids entries must be strings")
+        clean = item.strip()
+        if not clean:
+            raise ValueError("task_outcome active_debuff_ids entries must be non-empty")
+        out.append(clean)
+    return tuple(out)
+
+
+def _effective_debuff_ids(outcome: TaskOutcome) -> tuple[str, ...]:
+    explicit = _clean_active_debuff_ids(outcome.active_debuff_ids)
+    inferred = active_debuff_ids_for_context(
+        DebuffContext(consecutive_failures=outcome.consecutive_failures)
+    )
+    return tuple(dict.fromkeys(explicit + inferred))
 
 
 __all__ = [

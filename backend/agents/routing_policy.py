@@ -27,6 +27,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -36,6 +37,7 @@ import yaml
 from backend import feature_flags
 from backend.agents import buff_registry
 from backend.agents import cost_estimator
+from backend.agents import debuff_registry
 from backend.agents import provider_orchestrator
 from backend.agents.provider_orchestrator import ProviderAdapter, TaskSpec
 from backend.agents.provider_quota_tracker import DEFAULT_5H_CAP_TOKENS, QuotaState
@@ -68,6 +70,7 @@ class _Candidate:
     quota_state: QuotaState
     remaining_5h_quota_ratio: float
     circuit_open_count: int
+    last_retrained_at: datetime | None
 
 
 class RoutingPolicy:
@@ -78,10 +81,12 @@ class RoutingPolicy:
         *,
         orchestrator: object = provider_orchestrator,
         now: Callable[[], float] = time.monotonic,
+        utcnow: Callable[[], datetime] | None = None,
         human_assignment_resolver: HumanAssignmentResolver | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._now = now
+        self._utcnow = utcnow or _default_utcnow
         self._human_assignment_resolver = (
             human_assignment_resolver or _default_human_assignment_resolver
         )
@@ -128,7 +133,10 @@ class RoutingPolicy:
         # _quota_first_sort_key if that boost was load-bearing for any
         # production routing scenario.
         tier = _normalise_tier(task.tier)
-        candidates.sort(key=lambda candidate: _tier_sort_key(tier, task, candidate))
+        now = self._utcnow()
+        candidates.sort(
+            key=lambda candidate: _tier_sort_key(tier, task, candidate, now=now)
+        )
         return [candidate.adapter for candidate in candidates]
 
     def on_cap_hit(self, provider_id: str, retry_after_s: int | None = None) -> None:
@@ -166,6 +174,7 @@ class RoutingPolicy:
                     quota_state=quota_state,
                     remaining_5h_quota_ratio=_remaining_5h_quota_ratio(quota_state),
                     circuit_open_count=_circuit_open_count(quota_state),
+                    last_retrained_at=_adapter_last_retrained_at(adapter),
                 )
             )
         return candidates
@@ -234,36 +243,55 @@ def _circuit_open_count(state: QuotaState) -> int:
     return 1 if state.circuit_state == "open" else 0
 
 
-def _tier_sort_key(tier: str, task: TaskSpec, candidate: _Candidate) -> tuple:
+def _tier_sort_key(
+    tier: str,
+    task: TaskSpec,
+    candidate: _Candidate,
+    *,
+    now: datetime | None = None,
+) -> tuple:
     if tier == "S":
         return (
             _predicted_cost_usd(task, candidate.adapter),
-            -_routing_priority_score(candidate),
+            -_routing_priority_score(candidate, now=now),
             candidate.circuit_open_count,
             candidate.provider_id,
         )
     if tier == "X":
         return (
-            -_routing_priority_score(candidate),
+            -_routing_priority_score(candidate, now=now),
             candidate.circuit_open_count,
             candidate.provider_id,
         )
-    return _quota_first_sort_key(candidate)
+    return _quota_first_sort_key(candidate, now=now)
 
 
-def _quota_first_sort_key(candidate: _Candidate) -> tuple[float, int, str]:
+def _quota_first_sort_key(
+    candidate: _Candidate,
+    *,
+    now: datetime | None = None,
+) -> tuple[float, int, str]:
     return (
-        -_routing_priority_score(candidate),
+        -_routing_priority_score(candidate, now=now),
         candidate.circuit_open_count,
         candidate.provider_id,
     )
 
 
-def _routing_priority_score(candidate: _Candidate) -> float:
+def _routing_priority_score(
+    candidate: _Candidate,
+    *,
+    now: datetime | None = None,
+) -> float:
+    now = now or _default_utcnow()
     return (
         candidate.remaining_5h_quota_ratio
         * buff_registry.routing_priority_multiplier_for_quota_ratio(
             candidate.remaining_5h_quota_ratio
+        )
+        * debuff_registry.routing_weight_multiplier_for_last_retrained_at(
+            now,
+            candidate.last_retrained_at,
         )
     )
 
@@ -406,6 +434,61 @@ def _default_human_assignment_resolver(task: TaskSpec) -> str | None:
         if isinstance(value, str) and value.strip():
             return _normalise_provider_id(value)
     return None
+
+
+def _adapter_last_retrained_at(adapter: ProviderAdapter) -> datetime | None:
+    for attr in (
+        "last_retrained_at",
+        "last_retrain_at",
+        "last_training_at",
+        "fine_tuned_at",
+    ):
+        value = getattr(adapter, attr, None)
+        try:
+            candidate = value() if callable(value) else value
+        except Exception:
+            candidate = None
+        parsed = _coerce_datetime(candidate)
+        if parsed is not None:
+            return parsed
+
+    metadata = getattr(adapter, "metadata", None)
+    if callable(metadata):
+        try:
+            metadata = metadata()
+        except Exception:
+            metadata = None
+    if isinstance(metadata, dict):
+        for key in (
+            "last_retrained_at",
+            "last_retrain_at",
+            "last_training_at",
+            "fine_tuned_at",
+        ):
+            parsed = _coerce_datetime(metadata.get(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _coerce_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _default_utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _normalise_provider_id(provider_id: str) -> str:
