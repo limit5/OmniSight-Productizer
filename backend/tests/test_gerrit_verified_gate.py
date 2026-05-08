@@ -14,7 +14,13 @@ _PROJECT_CONFIG = _REPO_ROOT / ".gerrit" / "project.config"
 _PROJECT_CONFIG_EXAMPLE = _REPO_ROOT / ".gerrit" / "project.config.example"
 _PROVISION_SCRIPT = _REPO_ROOT / "deploy" / "scripts" / "provision-ci-bot.sh"
 _RUNBOOK = _REPO_ROOT / "docs" / "ops" / "gerrit_dual_two_rule.md"
-_LESSONS = _REPO_ROOT / "docs" / "sop" / "lessons-learned.md"
+_LESSON_OP_740 = (
+    _REPO_ROOT
+    / "docs"
+    / "sop"
+    / "lessons"
+    / "L-OP-740-parallel-gates-should-ship-default-off-before-enforcement.md"
+)
 
 
 def _section(text: str, header: str) -> str:
@@ -98,8 +104,8 @@ def test_runbook_documents_parallel_gate_migration_and_escape() -> None:
 
 
 def test_lesson_28_records_parallel_gate_default_off_rationale() -> None:
-    lessons = _LESSONS.read_text(encoding="utf-8")
+    lesson = _LESSON_OP_740.read_text(encoding="utf-8")
 
-    assert "## L-OP-740" in lessons
-    assert "Parallel gates should ship default-off before enforcement" in lessons
-    assert "applicableIf = is:false" in lessons
+    assert "id: L-OP-740" in lesson
+    assert "Parallel gates should ship default-off before enforcement" in lesson
+    assert "applicableIf = is:false" in lesson

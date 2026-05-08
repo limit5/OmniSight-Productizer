@@ -19,9 +19,15 @@ repos:
         language: system
         files: ^backend/alembic/versions/.*\.py$
         pass_filenames: true
-      - id: omnisight-lessons-index
-        name: OmniSight lessons index is generated
-        entry: python3 scripts/build_lessons_index.py --check
+      - id: omnisight-generated-docs-not-staged
+        name: OmniSight generated docs are not staged
+        entry: >
+          bash -c 'blocked_paths="docs/adr/README.md docs/sop/lessons-learned.md docs/status/handoff_status.yaml";
+          staged="$(git diff --cached --name-only --diff-filter=ACMR -- $blocked_paths)";
+          if [ -n "$staged" ]; then
+            printf "%s\n" "Generated files must not be staged:" "$staged" >&2;
+            exit 1;
+          fi'
         language: system
-        files: ^(docs/sop/lessons/.*\.md|docs/sop/lessons-learned\.md|scripts/build_lessons_index\.py)$
         pass_filenames: false
+        always_run: true

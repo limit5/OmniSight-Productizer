@@ -9,16 +9,15 @@ reading. FX.7.4 introduces ``docs/status/handoff_status.yaml`` as the
 machine-readable manifest, generated from HANDOFF.md by
 ``scripts/extract_handoff_status.py``.
 
-This test guarantees the manifest stays in sync with HANDOFF.md. If
-someone edits HANDOFF.md (adds an entry, flips a status, rewrites a
-gate) without re-running the generator, this test fails CI red with a
-diff hint that points at the stale lines.
+OP-790 removes the generated manifest from git tracking. This test now
+guarantees the generator still parses HANDOFF.md and emits the expected
+schema without requiring the generated output to exist in a clean
+checkout.
 
 What the guard checks
 ---------------------
-1. Re-runs the extractor in --check mode (which compares the current
-   HANDOFF.md against the on-disk manifest byte-for-byte).
-2. Spot-checks the manifest payload itself for invariants the generator
+1. Re-runs the extractor functions against the current HANDOFF.md.
+2. Spot-checks the generated manifest payload for invariants the generator
    guarantees (no duplicate ids, no missing required fields, every
    ``production_status`` value is in ``canonical_statuses`` plus the
    "unknown" escape hatch).
@@ -31,7 +30,6 @@ To regenerate after editing HANDOFF.md:
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -39,57 +37,50 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MANIFEST_PATH = REPO_ROOT / "docs" / "status" / "handoff_status.yaml"
 EXTRACTOR_PATH = REPO_ROOT / "scripts" / "extract_handoff_status.py"
 HANDOFF_PATH = REPO_ROOT / "HANDOFF.md"
 
 
 @pytest.fixture(scope="module")
 def manifest() -> dict:
-    """Parsed manifest payload — load once for all assertions."""
-    assert MANIFEST_PATH.exists(), (
-        f"{MANIFEST_PATH.relative_to(REPO_ROOT)} missing. "
-        f"Run: python3 scripts/extract_handoff_status.py --write"
-    )
-    with MANIFEST_PATH.open(encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+    """Generated manifest payload — load once for all assertions."""
+    sys.path.insert(0, str(EXTRACTOR_PATH.parent))
+    import extract_handoff_status
+
+    text = HANDOFF_PATH.read_text(encoding="utf-8")
+    entries, _warnings = extract_handoff_status.parse_handoff(text)
+    return extract_handoff_status.build_manifest(entries)
 
 
 def test_required_artefacts_exist() -> None:
-    """All three pieces of the manifest contract must be present."""
+    """The source and generator must be present."""
     missing = [
         p.relative_to(REPO_ROOT)
-        for p in (HANDOFF_PATH, EXTRACTOR_PATH, MANIFEST_PATH)
+        for p in (HANDOFF_PATH, EXTRACTOR_PATH)
         if not p.exists()
     ]
     assert not missing, f"FX.7.4 artefacts missing: {missing}"
 
 
-def test_manifest_matches_handoff() -> None:
-    """Re-run extractor in --check mode; non-zero exit ⇒ stale manifest.
+def test_manifest_serialises_from_handoff() -> None:
+    """Re-run extractor functions and parse the generated manifest.
 
-    This is the canonical drift check. It catches:
-      - new HANDOFF entry without manifest regen
-      - status flip in HANDOFF without manifest regen
-      - manifest hand-edited (whitespace / reordered / etc.)
+    The checked-in manifest was removed in OP-790, so this test validates
+    that the generator still produces parseable schema-v1 output from
+    HANDOFF.md without requiring the generated file to exist in git.
     """
-    proc = subprocess.run(
-        [sys.executable, str(EXTRACTOR_PATH), "--check", "--quiet"],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
+    sys.path.insert(0, str(EXTRACTOR_PATH.parent))
+    import extract_handoff_status
+
+    text = HANDOFF_PATH.read_text(encoding="utf-8")
+    entries, _warnings = extract_handoff_status.parse_handoff(text)
+    serialised = extract_handoff_status.serialise_manifest(
+        extract_handoff_status.build_manifest(entries)
     )
-    if proc.returncode != 0:
-        pytest.fail(
-            "docs/status/handoff_status.yaml is stale relative to HANDOFF.md.\n"
-            "Fix:\n"
-            "    python3 scripts/extract_handoff_status.py --write\n"
-            "    git add docs/status/handoff_status.yaml\n\n"
-            "Extractor stderr:\n"
-            f"{proc.stderr}\n"
-            "Extractor stdout:\n"
-            f"{proc.stdout}"
-        )
+
+    parsed = yaml.safe_load(serialised)
+    assert parsed["schema_version"] == 1
+    assert parsed["generated_from"] == "HANDOFF.md"
 
 
 def test_manifest_schema_invariants(manifest: dict) -> None:
