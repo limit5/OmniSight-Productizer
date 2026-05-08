@@ -6,9 +6,9 @@ Operator-facing setup guide for the Multi-Provider Subscription Orchestrator
 This file is being built out across Priority MP, Week 4. Sections below
 either link to where the content currently lives or are reserved as
 in-progress stubs for the wave that owns them. **MP.W13.3 owns the
-Gemini section** and **MP.W16.3 owns the Cap-hit recovery runbook**;
-the rest will be filled in by MP.W14.3 (xAI) and the remaining MP.W16
-sub-waves (operator setup, expiry monitoring, cost calibration).
+Gemini section**, **MP.W14.3 owns the xAI section**, and **MP.W16.3
+owns the Cap-hit recovery runbook**; the remaining MP.W16 sub-waves
+own operator setup, expiry monitoring, and cost calibration.
 
 ---
 
@@ -19,7 +19,7 @@ sub-waves (operator setup, expiry monitoring, cost calibration).
 | Anthropic Claude Code | Pro / Max 5x / Max 20x | **First-class (v0.4.0 MVP)**         | MP.W3 / MP.W16.1 |
 | OpenAI Codex          | Plus / Pro / Business  | **First-class (v0.4.0 MVP)**         | MP.W3 / MP.W16.1 |
 | Google Gemini         | Advanced / Code Assist | **Structural slot** — adapter shell present, dispatch raises `NotImplementedError`. UI sphere grayed-out with "Coming v0.5.0" tooltip. | MP.W13 (this section) |
-| xAI Grok              | SuperGrok              | **Structural slot** — adapter shell, "Coming v0.6.0" tooltip. | MP.W14 |
+| xAI Grok              | SuperGrok              | **Structural slot** — adapter shell present, dispatch returns `{kind: 'not_ready'}`. UI sphere grayed-out with "Coming v0.6.0" tooltip. | MP.W14 (this section) |
 
 The capability matrix that drives routing decisions lives in
 [ADR-0007 § Vendor capability matrix](../adr/0007-multi-provider-subscription-orchestrator.md#vendor-capability-matrix-for-routing-policy).
@@ -427,10 +427,181 @@ After the above lands:
 
 ## v0.6.0 enablement path — xAI Grok
 
-> Reserved for **MP.W14.3**. Will mirror the v0.5.0 Gemini section
-> above, with the Grok-specific differences (cap signal shape is
-> currently undocumented in ADR-0007, so the v0.6.0 ADR addendum will
-> need to nail that down before this section is drafted).
+This section is the **MP.W14.3 deliverable**: the runbook an operator
+will follow when v0.6.0 lands and xAI Grok graduates from *structural
+slot* to *first-class provider*. The shape mirrors the Gemini path
+above, but with three Grok-specific deltas worth flagging up front:
+
+- **Cap signal is undocumented in ADR-0007.** The Vendor capability
+  matrix lists Grok's cap signal as "undocumented" — that gap is the
+  primary blocker. The v0.6.0 ADR addendum must nail down the cap
+  shape (HTTP code, body field, retry-after style) before Step 2 of
+  this runbook can be executed safely.
+- **Capability rating is the lowest of the four vendors.** ADR-0007
+  rates Grok's agentic loop ★★☆☆☆ ("experimental"). Routing and
+  cost-estimator seeding should reflect that — start with a small
+  per-`agent_class` allowance and let R-MP.2 calibration widen it.
+- **SuperGrok is the only documented subscription tier.** Anthropic
+  and OpenAI ship multiple tiers; xAI's plan ladder is still
+  consolidating, so the operator path assumes SuperGrok and adds a
+  TBD note for any successor tier.
+
+Until v0.6.0, the xAI adapter's `dispatch()` returns
+`DispatchResult(success=False, error='{"kind":"not_ready",...}')` —
+running through the list below is what flips it on. The
+`xai-subscription` provider is already structurally registered with
+`provider_orchestrator` at module import; that registration does **not**
+need to be re-added.
+
+### Pre-conditions for starting the upgrade
+
+Do not begin until **all** of the following are true:
+
+- v0.6.0 release branch has been cut from `develop`
+  (per [ADR-0001](../adr/0001-five-branch-gitflow.md)).
+- ADR-0007 has an addendum (or successor ADR) that promotes Grok's
+  row in the Vendor capability matrix from "placeholder" to "✅",
+  records the dispatch / cap-signal contract xAI ships at that point,
+  and clarifies the subscription tier(s) supported beyond SuperGrok.
+- A `grok-cli`-equivalent agentic CLI exists and has been validated
+  end-to-end on at least one OmniSight epic in a sandbox tenant
+  (the v0.4.0 ADR called xAI's CLI "experimental" — that is the
+  blocker we are waiting on).
+- Operator has a SuperGrok subscription on the account that owns the
+  OmniSight `git_accounts` row for xAI (see
+  [Backend credentials model](../adr/0003-gerrit-code-review.md)
+  context — credentials live in PG, not `.env`).
+
+### Step 1 — Promote `agent_class` schema
+
+`config/agent_class_schema.yaml` is the canonical machine-readable list
+that drives TODO labels, RPG `class` field (ADR-0008), routing, and the
+cost-estimator. It does **not** currently contain `subscription-xai` /
+`api-xai`, even though
+[`backend/agents/routing_policy.py`](../../backend/agents/routing_policy.py)
+already gates `xai-subscription` to those exact strings via
+`ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS["xai"]`.
+
+When v0.6.0 lands:
+
+1. Add to `allowed_values`:
+   - `subscription-xai`
+   - `api-xai`
+2. Add matching `values:` entries with `provider_family: xai`,
+   `access_mode: subscription` / `api`, and the runner binary that
+   ships with v0.6.0.
+3. Bump `metadata.updated_at` and reference the v0.6.0 ticket.
+4. Update **both** ADR-0007 (capability matrix row) and ADR-0008 (RPG
+   class table) prose in the same change — drift between schema and
+   ADRs is what MP.W0 explicitly forbids.
+
+### Step 2 — Replace the adapter `not_ready` shells
+
+In [`backend/agents/provider_adapters/xai_subscription.py`](../../backend/agents/provider_adapters/xai_subscription.py):
+
+- `dispatch(task)` — wire to the v0.6.0 Grok agentic CLI. Replace the
+  hard-coded `{"kind": "not_ready", ...}` error payload with real
+  vendor-specific success / error shapes that match the cap-signal
+  contract recorded in the ADR-0007 addendum.
+- `health_check()` — return the live `HealthStatus` xAI's API exposes
+  (auth status, recent error rate). Today's stub hard-codes
+  `reachable=False` and `subscription_active=False`.
+- `get_quota_state()` — return a real `QuotaState`. Because Grok's
+  cap signal is currently undocumented, the v0.6.0 ADR addendum needs
+  to settle which of these the QuotaTracker schema
+  (`provider_quota_state` table, alembic 0199) will mirror:
+  - 5h-rolling + weekly window similar to Anthropic/OpenAI (preferred
+    if xAI publishes one), **or**
+  - per-query rate fallback similar to the Gemini path (graceful "no
+    rolling window" returning `remaining_5h` / `remaining_weekly`
+    ratios of `1.0`), **or**
+  - a new alembic migration that adds an xAI-shaped quota
+    representation. Pick one in the v0.6.0 ADR addendum and document
+    the choice here.
+
+The `register_adapter(...)` call at module bottom does **not** change —
+the adapter is already structurally registered.
+
+### Step 3 — Un-gate the frontend
+
+`MP.W14.2` shipped a grayed-out sphere with a "Coming v0.6.0" tooltip
+in
+[`components/omnisight/multi-provider-orchestrator/`](../../components/omnisight/multi-provider-orchestrator/).
+To flip it on:
+
+1. Remove the disabled / "Coming v0.6.0" branch in the Provider
+   Constellation render path
+   (`components/omnisight/multi-provider-orchestrator/ProviderConstellation.tsx`
+   and friends; the same `disabled` prop on `ProviderEnergySphere`
+   gates Gemini today).
+2. The provider already exists as `xai` in
+   [`lib/providers.ts`](../../lib/providers.ts) — no add is needed
+   there for this step.
+3. Confirm the sphere now picks up live SSE quota frames once
+   `provider_quota_tracker.py` starts publishing xAI state.
+
+### Step 4 — Cost-estimator seeding
+
+`backend/agents/cost_estimator.py` carries baseline rates for the MVP
+providers. Add an xAI entry:
+
+- Subscription rate: `$0` within the operator's SuperGrok plan
+  allowance.
+- API spillover rate: xAI's then-current `$/M tokens` (read off xAI's
+  pricing page at v0.6.0 cut, do not memorise the number here — it
+  will go stale).
+- Per-`agent_class` wall-time prediction: seed from the sandbox
+  validation epics required by the pre-conditions above. Because of
+  the ★★☆☆☆ capability rating, expect the seed to under-predict
+  agentic-loop wall time for Tier M and above; over-pad on the first
+  run.
+
+The estimator's per-tenant calibration (R-MP.2) takes over after the
+first ~5 dispatches; the seed only has to be *plausible*, not
+*correct*.
+
+### Step 5 — Drift guards
+
+The drift tests landed by MP.W15 enforce these invariants — re-run them
+after the changes above and expect them to **fail** until each lands:
+
+- `MP.W15.1` — `lib/providers.ts` 4-vendor list ⊆
+  `provider_orchestrator` registry. xAI already passes today
+  because the placeholder adapter is registered at import time.
+- `MP.W15.2` — ADR-0007 capability matrix labels ⊆ `routing_policy.py`
+  consumed labels. Will trip if Step 1 changes `agent_class` strings
+  but the ADR is not updated in the same commit.
+- `MP.W15.3` — cap-hit integration test (Anthropic → OpenAI fallback).
+  Add an analogous case where xAI takes over from a capped
+  Anthropic+OpenAI(+Gemini) set.
+
+### Step 6 — Smoke test before tagging v0.6.0
+
+1. Dispatch one task with `agent_class: subscription-xai` and
+   confirm `dispatch()` actually executes (no `kind: not_ready`
+   payload in the `DispatchResult.error` field).
+2. Force a cap-hit signal from each of Anthropic, OpenAI, and (if
+   v0.5.0 has shipped) Gemini, and confirm the task migrates to xAI
+   at the **task boundary** (mid-task switching is intentionally not
+   supported — see ADR-0007 § Negative consequences).
+3. Confirm the Provider Constellation sphere renders in `healthy`
+   state and the tooltip no longer reads "Coming v0.6.0".
+4. Confirm `provider_quota_state` PG table has a row for
+   `provider = 'xai-subscription'` with non-stub values.
+
+### Step 7 — Documentation
+
+After the above lands:
+
+- Move the xAI row in the §Provider status snapshot table from
+  "Structural slot" → "First-class (v0.6.0)".
+- Update [ADR-0007 § Vendor capability matrix](../adr/0007-multi-provider-subscription-orchestrator.md#vendor-capability-matrix-for-routing-policy)
+  to flip the xAI "MVP?" cell and replace the "undocumented" cap-signal
+  cell with the contract shape settled in Step 2.
+- Append a `lessons-learned.md` entry per
+  [docs/sop/jira-ticket-conventions.md §14](../sop/jira-ticket-conventions.md)
+  if anything in the upgrade surprised the operator (cap-signal shape,
+  CLI quirks, capability rating reality vs ADR estimate, etc.).
 
 ---
 
@@ -442,7 +613,10 @@ After the above lands:
 - [`config/agent_class_schema.yaml`](../../config/agent_class_schema.yaml)
   — single source of truth for agent_class values
 - [`backend/agents/provider_adapters/`](../../backend/agents/provider_adapters/)
-  — adapter shells (Gemini / xAI raise `NotImplementedError` until the
-  enablement path above runs)
+  — adapter shells (Gemini / xAI return `DispatchResult(success=False,
+  error='{"kind":"not_ready",...}')` until the enablement paths above
+  run)
 - [`backend/agents/routing_policy.py`](../../backend/agents/routing_policy.py)
-  — `_agent_class_allows_provider` already gates Gemini routing
+  — `ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS` already gates both
+  `gemini`-family (`subscription-gemini` / `api-gemini`) and `xai`-family
+  (`subscription-xai` / `api-xai`) routing
