@@ -20,6 +20,7 @@ pg_test_pool.
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -265,6 +266,21 @@ def test_smoke_passed_marker_roundtrip(tmp_path):
     assert bootstrap._smoke_has_passed() is False
 
 
+def test_bootstrap_finalized_flag_marker_roundtrip(tmp_path):
+    from backend import bootstrap
+
+    bootstrap._reset_for_tests(tmp_path / "marker.json")
+    assert bootstrap.is_bootstrap_finalized_flag() is False
+
+    marker = {"bootstrap_finalized": True}
+    (tmp_path / "marker.json").write_text(
+        json.dumps(marker),
+        encoding="utf-8",
+    )
+
+    assert bootstrap.is_bootstrap_finalized_flag() is True
+
+
 def test_unreadable_marker_is_treated_as_empty(tmp_path):
     from backend import bootstrap
 
@@ -326,3 +342,37 @@ async def test_get_bootstrap_status_fresh_install_all_red(_bootstrap_db, monkeyp
     assert status.cf_tunnel_configured is False
     assert status.smoke_passed is False
     assert status.all_green is False
+
+
+@pytest.mark.asyncio
+async def test_missing_required_steps_backfills_green_live_signals(
+    _bootstrap_db, monkeypatch,
+):
+    _, bootstrap = _bootstrap_db
+    monkeypatch.setenv("OMNISIGHT_ADMIN_PASSWORD", "rotated-password")
+
+    from backend import auth
+    from backend.config import settings
+
+    await auth.ensure_default_admin()
+    monkeypatch.setattr(settings, "llm_provider", "anthropic", raising=False)
+    monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant-xxxx", raising=False)
+    bootstrap.mark_cf_tunnel(configured=True)
+    bootstrap.mark_smoke_passed(True)
+
+    assert await bootstrap.missing_required_steps() == []
+    recorded = {row["step"] for row in await bootstrap.list_bootstrap_steps()}
+    assert set(bootstrap.REQUIRED_STEPS).issubset(recorded)
+
+
+@pytest.mark.asyncio
+async def test_is_bootstrap_finalized_fails_open_when_probe_raises(monkeypatch, tmp_path):
+    from backend import bootstrap
+
+    async def _raise():
+        raise RuntimeError("probe failed")
+
+    bootstrap._reset_for_tests(tmp_path / "marker.json")
+    monkeypatch.setattr(bootstrap, "get_bootstrap_status", _raise)
+
+    assert await bootstrap.is_bootstrap_finalized() is True

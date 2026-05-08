@@ -49,6 +49,54 @@ def test_password_hash_roundtrip():
     assert not auth.verify_password("hunter2", "garbage")
 
 
+def test_verify_pbkdf2_rejects_malformed_hashes():
+    from backend import auth
+
+    assert auth.verify_password("pw", "pbkdf2_sha256$not-an-int$salt$digest") is False
+    assert auth.verify_password("pw", "pbkdf2_sha256$320000$not-hex$digest") is False
+
+
+def test_needs_rehash_flags_legacy_only():
+    from backend import auth
+
+    legacy = "pbkdf2_sha256$320000$00$00"
+    fresh = auth.hash_password("a-long-enough-password")
+    assert auth.needs_rehash(legacy) is True
+    assert auth.needs_rehash(fresh) is False
+
+
+def test_user_to_dict_includes_auth_flags_and_tenant():
+    from backend import auth
+
+    user = auth.User(
+        id="u-test",
+        email="u@example.com",
+        name="Unit",
+        role="viewer",
+        enabled=False,
+        must_change_password=True,
+        tenant_id="t-unit",
+    )
+    assert user.to_dict() == {
+        "id": "u-test",
+        "email": "u@example.com",
+        "name": "Unit",
+        "role": "viewer",
+        "enabled": False,
+        "must_change_password": True,
+        "tenant_id": "t-unit",
+    }
+
+
+def test_session_token_lookup_hash_is_stable_sha256():
+    from backend import auth
+
+    assert auth._token_lookup_hash("session-token") == (
+        "c101e911469c969171040b50d7054331"
+        "3cf968fdef5bacc780776f8fb399ab36"
+    )
+
+
 # ── user CRUD ────────────────────────────────────────────────────
 
 

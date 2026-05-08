@@ -353,3 +353,85 @@ class TestPoolStats:
             assert after["used_size"] == before["used_size"]
         finally:
             await db_pool.close_pool()
+
+
+# ─── Group 7: pure-unit lifecycle branches ──────────────────────────
+
+
+class _FakePool:
+    def __init__(self):
+        self.closed = False
+
+    def get_min_size(self):
+        return 2
+
+    def get_max_size(self):
+        return 7
+
+    def get_size(self):
+        return 5
+
+    def get_idle_size(self):
+        return 3
+
+    async def close(self):
+        self.closed = True
+
+
+class TestPureUnitLifecycleBranches:
+    @pytest.mark.asyncio
+    async def test_init_pool_passes_defaults_to_asyncpg(self, monkeypatch):
+        fake = _FakePool()
+        captured = {}
+
+        async def _create_pool(dsn, **kwargs):
+            captured["dsn"] = dsn
+            captured.update(kwargs)
+            return fake
+
+        monkeypatch.setattr(db_pool.asyncpg, "create_pool", _create_pool)
+
+        pool = await db_pool.init_pool("postgresql://unit")
+
+        assert pool is fake
+        assert db_pool.get_pool() is fake
+        assert captured["dsn"] == "postgresql://unit"
+        assert captured["min_size"] == 5
+        assert captured["max_size"] == 20
+        assert captured["init"] is db_pool._set_connection_defaults
+
+    @pytest.mark.asyncio
+    async def test_init_pool_rejects_existing_pool_with_mock(self, monkeypatch):
+        fake = _FakePool()
+
+        async def _create_pool(dsn, **kwargs):
+            return fake
+
+        monkeypatch.setattr(db_pool.asyncpg, "create_pool", _create_pool)
+        await db_pool.init_pool("postgresql://unit")
+
+        with pytest.raises(RuntimeError, match="already active"):
+            await db_pool.init_pool("postgresql://other")
+
+    @pytest.mark.asyncio
+    async def test_close_pool_clears_mock_pool(self):
+        fake = _FakePool()
+        db_pool._pool = fake
+
+        await db_pool.close_pool()
+
+        assert fake.closed is True
+        with pytest.raises(RuntimeError, match="before init_pool"):
+            db_pool.get_pool()
+
+    def test_get_pool_stats_reports_mock_pool(self):
+        db_pool._pool = _FakePool()
+
+        assert db_pool.get_pool_stats() == {
+            "initialised": True,
+            "min_size": 2,
+            "max_size": 7,
+            "size": 5,
+            "free_size": 3,
+            "used_size": 2,
+        }
