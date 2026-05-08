@@ -32,7 +32,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
-from backend.agents import circuit_breaker, jira_dispatch, scheduler
+from backend.agents import circuit_breaker, jira_dispatch, orphan_salvage, scheduler
 
 AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
@@ -276,6 +276,18 @@ def main() -> int:
         print(f"[runner] paused - {open_services} unreachable")
         return 0
     jira_dispatch.assert_worktree_config_enabled(REPO)
+
+    worktree_path = Path(
+        CODEX_WORKTREE if AGENT_CLASS in ("subscription-codex", "api-openai")
+        else CLAUDE_WORKTREE
+    )
+    if DRY_RUN:
+        print(f"[runner] DRY_RUN: would scan orphan commits in {worktree_path}")
+    else:
+        salvaged = orphan_salvage.salvage_orphan_commits(worktree_path, AGENT_CLASS)
+        if salvaged:
+            print(f"[runner] salvaged {salvaged} orphan commits before starting tick")
+
     ok_to_pick_up, backpressure_reason = jira_dispatch.backpressure_decide(AGENT_CLASS)
     if not ok_to_pick_up:
         print(f"[runner] backpressure paused: {backpressure_reason}. Sleeping until next tick.")
@@ -313,12 +325,6 @@ def main() -> int:
         snapshot = winner
 
     print(f"[runner] selected: {snapshot.key} (component={snapshot.component})")
-
-    # Resolve worktree path early — needed for sync, pre-pickup checks, push.
-    worktree_path = Path(
-        CODEX_WORKTREE if AGENT_CLASS in ("subscription-codex", "api-openai")
-        else CLAUDE_WORKTREE
-    )
 
     # Step 2 (was Step 3 in Phase 1.5): sync worktree FIRST so pre-pickup checks
     # see the actual workspace state, not stale runner-host main repo state.

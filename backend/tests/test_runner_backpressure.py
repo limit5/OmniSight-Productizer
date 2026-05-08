@@ -173,6 +173,38 @@ def test_runner_paused_exits_zero_before_jira_pickup(monkeypatch: pytest.MonkeyP
     assert "[runner] backpressure paused: 8 open PSes (cap 8). Sleeping until next tick." in out
 
 
+def test_runner_salvage_runs_before_backpressure_and_jira_pickup(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    mod = _load_jira_runner()
+    order = []
+
+    monkeypatch.setattr(mod, "AGENT_CLASS", "subscription-codex")
+    monkeypatch.setattr(mod, "DRY_RUN", False)
+    monkeypatch.setattr(mod.circuit_breaker, "open_services", lambda: [])
+    monkeypatch.setattr(mod.jira_dispatch, "assert_worktree_config_enabled", lambda repo: order.append("config"))
+    monkeypatch.setattr(
+        mod.orphan_salvage,
+        "salvage_orphan_commits",
+        lambda worktree_path, agent_class: order.append("salvage") or 2,
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "backpressure_decide",
+        lambda agent_class: order.append("backpressure") or (False, "8 open PSes (cap 8)"),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "make_client",
+        lambda agent_class: pytest.fail("JIRA pickup must not run while backpressure pauses"),
+    )
+
+    assert mod.main() == 0
+    assert order == ["config", "salvage", "backpressure"]
+    out = capsys.readouterr().out
+    assert "[runner] salvaged 2 orphan commits before starting tick" in out
+
+
 def test_runner_open_circuit_exits_zero_before_worktree_or_jira(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
