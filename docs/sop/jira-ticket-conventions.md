@@ -939,6 +939,20 @@ META tickets follow ALL ticket conventions:
 - Prerequisites YAML
 - Lifecycle workflow (§10)
 
+### Sprint META filing DoD
+
+When filing a Sprint META with multiple child tickets, run:
+
+```
+scripts/audit_sprint_overlap.py OP-XXXX
+```
+
+If the audit reports overlapping `Files / Paths` declarations, either move
+the overlapping files into one child ticket or explicitly mark one child as
+a spike with a non-canonical output path per Pattern 12 cure (1). A Sprint
+META is ready for pickup only after the audit exits cleanly or the overlap
+is documented as intentional with the spike/non-canonical-path plan.
+
 ### Special workflow rules
 
 - **Retrospective tickets** (`meta:retrospective`):
