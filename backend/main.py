@@ -437,6 +437,10 @@ async def lifespan(app: FastAPI):
         await _db_pool.close_pool()
     except Exception as exc:  # pragma: no cover — defence in depth
         _log.warning("[lifecycle] db_pool.close_pool raised: %s", exc)
+    try:
+        app.state.error_aggregation.close()
+    except Exception as exc:  # pragma: no cover — defence in depth
+        _log.debug("[lifecycle] error aggregation close failed: %s", exc)
     await db.close()
 
 
@@ -1204,6 +1208,14 @@ async def _security_headers(request, call_next):
         ),
     )
     return response
+
+
+# OP-234: optional Sentry / DataDog error aggregation.  Installed after
+# the other HTTP middleware so uncaught failures from those gates are
+# reported too.  It is a no-op unless a Sentry DSN or DataDog API key is
+# configured.
+from backend import error_aggregation as _error_aggregation
+_error_aggregation.install_error_aggregation(app)
 
 
 # Mount routers
