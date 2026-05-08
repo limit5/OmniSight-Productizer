@@ -108,10 +108,32 @@ const GEMINI_COMING_PROVIDER: ProviderConstellationProvider = Object.freeze({
   version: "v0.5.0",
 })
 
-const GEMINI_ENERGY_PROVIDER: ProviderEnergySphereProvider = {
-  id: "gemini",
-  displayName: "Gemini",
-  brandColor: "var(--muted-foreground)",
+const GROK_COMING_PROVIDER: ProviderConstellationProvider = Object.freeze({
+  id: "grok",
+  name: "Grok",
+  slot: "bottom-right",
+  allocationPercent: 0,
+  quotaState: "unavailable",
+  state: "coming",
+  version: "v0.6.0",
+})
+
+const COMING_PROVIDERS: ReadonlyArray<ProviderConstellationProvider> = [
+  GEMINI_COMING_PROVIDER,
+  GROK_COMING_PROVIDER,
+]
+
+const COMING_ENERGY_PROVIDERS: Record<string, ProviderEnergySphereProvider> = {
+  gemini: {
+    id: "gemini",
+    displayName: "Gemini",
+    brandColor: "var(--muted-foreground)",
+  },
+  grok: {
+    id: "grok",
+    displayName: "Grok",
+    brandColor: "var(--muted-foreground)",
+  },
 }
 
 function clampPercent(value: number): number {
@@ -175,9 +197,9 @@ function applyLiveQuotaSnapshots(
   providers: ReadonlyArray<ProviderConstellationProvider>,
   snapshots: ReadonlyArray<ProviderQuotaUpdate>,
 ): ProviderConstellationProvider[] {
-  const withGemini = withGeminiComingProvider(providers.slice(0, 4))
-  if (snapshots.length === 0) return withGemini
-  return withGemini.map((provider) => {
+  const withComingProviders = withComingProviderSlots(providers)
+  if (snapshots.length === 0) return withComingProviders
+  return withComingProviders.map((provider) => {
     if (provider.state === "coming") return provider
     const snapshot = findQuotaSnapshot(provider, snapshots)
     if (!snapshot) return provider
@@ -190,22 +212,24 @@ function applyLiveQuotaSnapshots(
   })
 }
 
-function withGeminiComingProvider(
+function withComingProviderSlots(
   providers: ReadonlyArray<ProviderConstellationProvider>,
 ): ProviderConstellationProvider[] {
-  const next = providers.map((provider) =>
-    provider.id === GEMINI_COMING_PROVIDER.id
-      ? {
-          ...provider,
-          state: "coming" as const,
-          version: provider.version ?? GEMINI_COMING_PROVIDER.version,
-        }
-      : provider,
-  )
-  if (next.some((provider) => provider.id === GEMINI_COMING_PROVIDER.id)) {
-    return next
+  const comingIds = new Set(COMING_PROVIDERS.map((provider) => provider.id))
+  const activeProviders = providers
+    .filter((provider) => !comingIds.has(provider.id))
+    .slice(0, 4 - COMING_PROVIDERS.length)
+  const next = [...activeProviders]
+
+  for (const provider of COMING_PROVIDERS) {
+    const override = providers.find((candidate) => candidate.id === provider.id)
+    next.push({
+      ...(override ?? provider),
+      state: "coming" as const,
+      version: override?.version ?? provider.version,
+    })
   }
-  return [...next, GEMINI_COMING_PROVIDER]
+  return next
 }
 
 function DefaultProviderSphere({
@@ -214,11 +238,21 @@ function DefaultProviderSphere({
   provider: ProviderConstellationProvider
 }) {
   if (provider.state === "coming") {
+    const energyProvider = COMING_ENERGY_PROVIDERS[provider.id] ?? {
+      id: provider.id,
+      displayName: provider.name,
+      brandColor: "var(--muted-foreground)",
+    }
+
     return (
       <ProviderEnergySphere
         level="normal"
-        provider={GEMINI_ENERGY_PROVIDER}
-        icon={<span className="font-mono text-sm font-semibold">G</span>}
+        provider={energyProvider}
+        icon={
+          <span className="font-mono text-sm font-semibold">
+            {provider.name.slice(0, 1).toUpperCase()}
+          </span>
+        }
         size="secondary"
         comingVersion={provider.version}
       />
