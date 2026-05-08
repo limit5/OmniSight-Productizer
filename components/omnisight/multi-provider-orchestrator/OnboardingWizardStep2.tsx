@@ -146,7 +146,7 @@ export function OnboardingWizardStep2({
       data-mp-w5-step2-active={active ? "yes" : "no"}
       data-mp-w5-step2-motion={motion}
       aria-labelledby="mp-w5-step2-title"
-      className="relative isolate min-h-[320px] overflow-hidden rounded-lg border border-slate-200 bg-slate-950 px-6 py-7 text-white shadow-sm dark:border-slate-700"
+      className="relative isolate flex h-screen min-h-[320px] flex-col overflow-x-hidden overflow-y-auto border border-slate-200 bg-slate-950 p-4 text-white shadow-sm md:h-auto md:max-w-2xl md:overflow-hidden md:rounded-2xl md:p-8 dark:border-slate-700"
     >
       <div className="relative z-10 flex items-start justify-between gap-4">
         <div className="min-w-0">
@@ -168,7 +168,7 @@ export function OnboardingWizardStep2({
       <div
         data-testid="mp-w5-step2-stage"
         data-mp-w5-step2-animate={shouldAnimate ? "yes" : "no"}
-        className="absolute inset-x-6 bottom-7 top-24"
+        className="absolute inset-x-4 bottom-4 top-24 md:inset-x-8 md:bottom-8"
         aria-hidden="true"
       >
         <div className="absolute inset-0 rounded-lg border border-white/10 bg-white/[0.03]" />
