@@ -18,8 +18,10 @@ from backend.agents.character_card import (
     CharacterCardSort,
     PostgresCharacterCardStore,
 )
+from backend.agents.guild_hall import GuildHallGuild, build_guild_hall_view
 from backend.events import emit_agent_update
 from backend.models import Agent, AgentCreate, AgentProgress, AgentStatus, AgentWorkspace
+from backend.sandbox_tier import Guild
 from backend import db
 from backend.db_pool import get_conn
 
@@ -139,6 +141,35 @@ async def list_agent_cards(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return [_roster_entry_to_dict(entry) for entry in entries]
+
+
+@router.get("/guild-hall/{guild}/roster")
+async def get_guild_hall_roster(
+    guild: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    try:
+        selected_guild = Guild(guild.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"unknown guild: {guild}") from exc
+
+    registry = CharacterCardRegistry(
+        PostgresCharacterCardStore(lambda: _borrowed_conn(conn))
+    )
+    try:
+        entries = await registry.list_cards(
+            guild=selected_guild.value,
+            sort_by="level",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    view = build_guild_hall_view(entry.card for entry in entries)
+    for guild_row in view.guilds:
+        if guild_row.guild == selected_guild.value:
+            return _guild_hall_guild_to_dict(guild_row)
+
+    raise HTTPException(status_code=404, detail="Guild not found")
 
 
 @router.get("/{agent_id}", response_model=Agent)
@@ -272,4 +303,35 @@ def _roster_entry_to_dict(entry: CharacterCardRosterEntry) -> dict:
         "style_fingerprint": card.style_fingerprint,
         "created_at": card.created_at,
         "last_activity_at": entry.last_activity_at,
+    }
+
+
+def _guild_hall_guild_to_dict(guild: GuildHallGuild) -> dict:
+    return {
+        "guild": guild.guild,
+        "display_name": guild.display_name,
+        "summary": guild.summary,
+        "member_count": guild.member_count,
+        "is_empty": guild.is_empty,
+        "members": [
+            {
+                "agent_id": member.agent_id,
+                "agent_class": member.agent_class,
+                "instance_suffix": member.instance_suffix,
+                "level": member.level,
+                "xp": member.xp,
+                "specialization_label": member.specialization_label,
+            }
+            for member in guild.members
+        ],
+        "empty_placeholder": guild.empty_placeholder,
+        "recruit_cta": (
+            {
+                "label": guild.recruit_cta.label,
+                "action": guild.recruit_cta.action,
+                "guild": guild.recruit_cta.guild,
+            }
+            if guild.recruit_cta is not None
+            else None
+        ),
     }
