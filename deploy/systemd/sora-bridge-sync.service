@@ -1,0 +1,49 @@
+; OP-798 — sora-bridge git-sync service.
+;
+; Purpose: keeps /home/user/sora-bridge/ on origin/develop and bounces
+; gerrit-jira-bridge.service when (and only when) a file the daemon
+; actually imports changed. Companion to gerrit-jira-bridge-watchdog
+; (OP-723), which is the LIVENESS watchdog — different signal, do not
+; merge the two units. Liveness asks "is the daemon still running and
+; emitting heartbeats?", sync asks "is the daemon running yesterday's
+; code?".
+;
+; Install (user-level — same scope as gerrit-jira-bridge.service so
+; `systemctl --user restart` from inside this unit works without sudo):
+;
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/sora-bridge-sync.service ~/.config/systemd/user/
+;   cp deploy/systemd/sora-bridge-sync.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now sora-bridge-sync.timer
+;
+; AC #4 (sora-bridge has uncommitted changes → script skips + warns) is
+; enforced inside the script: a dirty tree exits 0 with a sync_skipped_dirty
+; record, NOT a failure. So Restart=on-failure here only fires for real
+; sync errors (fetch failure, non-FF pull, restart failure).
+
+[Unit]
+Description=Sync /home/user/sora-bridge with origin/develop (OP-798)
+Documentation=https://soraapp.atlassian.net/browse/OP-798
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=BRIDGE_DIR=/home/user/sora-bridge
+Environment=BRIDGE_REMOTE=origin
+Environment=BRIDGE_BRANCH=develop
+Environment=BRIDGE_UNIT=gerrit-jira-bridge.service
+Environment=SYNC_LOG=/home/user/work/sora/logs/bridge/sync.log
+Environment=SYNC_STATE=/home/user/work/sora/logs/bridge/sync-state.json
+ExecStart=/home/user/work/sora/OmniSight-Productizer/scripts/sync_sora_bridge.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sora-bridge-sync
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
