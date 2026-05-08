@@ -24,6 +24,7 @@ eligible for routing.
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -55,6 +56,35 @@ HIGH_QUOTA_RATIO = 0.50
 MP_ENABLED_ENV = "OMNISIGHT_MP_ENABLED"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _MODEL_MAPPING_PATH = _PROJECT_ROOT / "configs" / "model_mapping.yaml"
+_ADR_0007_PATH = (
+    _PROJECT_ROOT / "docs" / "adr" / "0007-multi-provider-subscription-orchestrator.md"
+)
+_ADR_VENDOR_MATRIX_HEADING = "## Vendor capability matrix (for routing policy)"
+
+ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS = {
+    "anthropic": frozenset({"subscription-claude", "api-anthropic"}),
+    "openai": frozenset({"subscription-codex", "api-openai"}),
+    "gemini": frozenset({"subscription-gemini", "api-gemini"}),
+    "xai": frozenset({"subscription-xai", "api-xai"}),
+}
+ROUTING_POLICY_CONSUMED_PROVIDER_LABELS = frozenset(
+    ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS
+)
+ROUTING_POLICY_CONSUMED_AGENT_CLASS_LABELS = frozenset(
+    label
+    for labels in ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS.values()
+    for label in labels
+)
+_ADR_VENDOR_LABEL_ALIASES = {
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+    "openai": "openai",
+    "codex": "openai",
+    "google": "gemini",
+    "gemini": "gemini",
+    "xai": "xai",
+    "grok": "xai",
+}
 
 _recently_capped: dict[str, float] = {}
 _RECENTLY_CAPPED_LOCK = RLock()
@@ -303,16 +333,77 @@ def _predicted_cost_usd(task: TaskSpec, adapter: ProviderAdapter) -> float:
 def _agent_class_allows_provider(agent_class: str, provider_id: str) -> bool:
     agent_class = agent_class.strip()
     provider_id = _normalise_provider_id(provider_id)
-    if provider_id == "anthropic-subscription":
-        return agent_class in {"subscription-claude", "api-anthropic"}
-    if provider_id == "openai-subscription":
-        return agent_class in {"subscription-codex", "api-openai"}
-    if provider_id == "gemini-subscription":
-        return agent_class in {"subscription-gemini", "api-gemini"}
-    if provider_id == "xai-subscription":
-        return agent_class in {"subscription-xai", "api-xai"}
     provider_prefix = provider_id.split("-", 1)[0]
+    labels = ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS.get(provider_prefix)
+    if labels is not None and provider_id == f"{provider_prefix}-subscription":
+        return agent_class in labels
     return provider_prefix in agent_class
+
+
+def adr_0007_vendor_capability_labels(
+    adr_path: Path = _ADR_0007_PATH,
+) -> frozenset[str]:
+    """Return provider-family labels declared by ADR 0007's vendor matrix."""
+    try:
+        body = adr_path.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+
+    lines = body.splitlines()
+    try:
+        start = lines.index(_ADR_VENDOR_MATRIX_HEADING)
+    except ValueError:
+        return frozenset()
+
+    labels: set[str] = set()
+    in_table = False
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if not stripped:
+            if in_table:
+                break
+            continue
+        if not stripped.startswith("|"):
+            if in_table:
+                break
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells or cells[0] in {"Provider", "---"}:
+            in_table = True
+            continue
+        label = _adr_vendor_label(cells[0])
+        if label is not None:
+            labels.add(label)
+        in_table = True
+    return frozenset(labels)
+
+
+def assert_adr_0007_vendor_capability_matrix_consumed(
+    adr_path: Path = _ADR_0007_PATH,
+) -> None:
+    """Drift guard: every ADR 0007 matrix vendor is consumed by routing."""
+    adr_labels = adr_0007_vendor_capability_labels(adr_path)
+    if not adr_labels:
+        raise AssertionError(
+            "ADR 0007 vendor capability matrix is missing or empty at "
+            f"{adr_path}"
+        )
+    missing = adr_labels - ROUTING_POLICY_CONSUMED_PROVIDER_LABELS
+    if missing:
+        raise AssertionError(
+            "ADR 0007 vendor capability matrix has unconsumed routing labels: "
+            f"{sorted(missing)!r}; consumed labels are "
+            f"{sorted(ROUTING_POLICY_CONSUMED_PROVIDER_LABELS)!r}"
+        )
+
+
+def _adr_vendor_label(raw: str) -> str | None:
+    tokens = re.findall(r"[a-z0-9]+", raw.lower())
+    for token in tokens:
+        label = _ADR_VENDOR_LABEL_ALIASES.get(token)
+        if label is not None:
+            return label
+    return None
 
 
 def _preferred_provider_family_for_task(task: TaskSpec) -> str | None:
