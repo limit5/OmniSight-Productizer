@@ -30,6 +30,7 @@ from backend.llm_adapter import tool
 from backend.db_pool import get_pool
 
 logger = logging.getLogger(__name__)
+__path__ = [str(Path(__file__).with_suffix(""))]
 
 # ─── Workspace context ───
 
