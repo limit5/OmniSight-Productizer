@@ -297,6 +297,15 @@ def get_tool_summary(name: str) -> str:
 _default_dispatcher = ToolDispatcher()
 
 
+def _slack_post_message_handler(input: dict[str, Any]) -> dict[str, Any]:
+    from backend.agents.tools.slack_tool import slack_post_message
+
+    return slack_post_message(input["channel"], input["text"])
+
+
+_default_dispatcher.register("SlackPostMessage", _slack_post_message_handler)
+
+
 def register_handler(tool_name: str) -> Callable[[Handler], Handler]:
     """Decorator: register a handler in the default dispatcher.
 

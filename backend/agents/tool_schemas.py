@@ -507,6 +507,23 @@ register_tool(
 
 register_tool(
     ToolSchema(
+        name="SlackPostMessage",
+        description="Post a message to a Slack channel using the configured bot token.",
+        category="web",
+        deferred=True,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string"},
+                "text": {"type": "string"},
+            },
+            "required": ["channel", "text"],
+        },
+    )
+)
+
+register_tool(
+    ToolSchema(
         name="ScheduleWakeup",
         description=(
             "Schedule next iteration in dynamic /loop mode. delaySeconds "
