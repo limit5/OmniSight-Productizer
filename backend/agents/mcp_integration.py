@@ -342,3 +342,92 @@ def parse_mcp_tool_name(tool_name: str) -> tuple[str, str] | None:
 
 def is_mcp_tool(tool_name: str) -> bool:
     return parse_mcp_tool_name(tool_name) is not None
+
+
+# ─── Local (in-process) MCP server registration — META OP-814 ─────
+#
+# Some MCP servers run *inside* the runner process rather than over SSE
+# (e.g. the Gerrit wrapper at :mod:`backend.agents.mcp_gerrit`, which is
+# a thin shim over ``gerrit-ssh-cli`` calls already used by
+# ``jira_dispatch``). They share the ``mcp_<server>__<method>`` naming
+# convention so the agent treats them uniformly, but they do not get
+# forwarded to Anthropic via ``mcp_servers=[]``; the runner dispatches
+# them locally.
+
+_LOCAL_MCP_HANDLERS: dict[str, Any] = {}
+_LOCAL_MCP_TOOL_SCHEMAS: dict[str, list[dict[str, Any]]] = {}
+
+
+def register_local_mcp_server(
+    server_name: str,
+    *,
+    tool_handlers: dict[str, Any],
+    tool_schemas: list[dict[str, Any]],
+) -> None:
+    """Register an in-process MCP server's tool handlers + schemas.
+
+    ``tool_handlers`` maps full tool name (``<server>__<method>``) →
+    callable. ``tool_schemas`` is the JSON Schema list the agent sees.
+    Re-registration replaces the prior entry so a hot-reload during
+    tests is safe.
+    """
+    for name in tool_handlers:
+        if not name.startswith(f"{server_name}__"):
+            raise ValueError(
+                f"Local MCP {server_name!r}: tool name {name!r} must "
+                f"start with {server_name!r} prefix"
+            )
+    _LOCAL_MCP_HANDLERS.update(tool_handlers)
+    _LOCAL_MCP_TOOL_SCHEMAS[server_name] = list(tool_schemas)
+    logger.info(
+        "Local MCP server registered: %s (%d tools)",
+        server_name, len(tool_handlers),
+    )
+
+
+def is_local_mcp_tool(tool_name: str) -> bool:
+    """Return True if ``tool_name`` matches a registered local MCP tool."""
+    return tool_name in _LOCAL_MCP_HANDLERS
+
+
+def dispatch_local_mcp_tool(tool_name: str, input: dict[str, Any]) -> Any:
+    """Execute a registered local MCP tool call."""
+    handler = _LOCAL_MCP_HANDLERS.get(tool_name)
+    if handler is None:
+        raise KeyError(
+            f"Unknown local MCP tool {tool_name!r}; known: "
+            f"{sorted(_LOCAL_MCP_HANDLERS)}"
+        )
+    return handler(input)
+
+
+def local_mcp_tool_schemas(server_name: str | None = None) -> list[dict[str, Any]]:
+    """Return JSON Schemas for all (or one) registered local MCP server."""
+    if server_name is None:
+        out: list[dict[str, Any]] = []
+        for schemas in _LOCAL_MCP_TOOL_SCHEMAS.values():
+            out.extend(schemas)
+        return out
+    return list(_LOCAL_MCP_TOOL_SCHEMAS.get(server_name, ()))
+
+
+def registered_local_mcp_servers() -> list[str]:
+    return sorted(_LOCAL_MCP_TOOL_SCHEMAS)
+
+
+def _register_default_local_mcp_servers() -> None:
+    """Register the in-process MCP servers shipped with the runner.
+
+    Currently:
+      * ``mcp_gerrit`` — META OP-814 read-only wrapper over gerrit-ssh-cli.
+    """
+    from backend.agents import mcp_gerrit
+
+    register_local_mcp_server(
+        mcp_gerrit.SERVER_NAME,
+        tool_handlers=mcp_gerrit.TOOL_HANDLERS,
+        tool_schemas=mcp_gerrit.MCP_GERRIT_TOOL_SCHEMAS,
+    )
+
+
+_register_default_local_mcp_servers()
