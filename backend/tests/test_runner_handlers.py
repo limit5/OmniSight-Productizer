@@ -319,25 +319,6 @@ def test_bash_rejects_run_in_background_before_subprocess(
     assert calls == []
 
 
-@pytest.mark.parametrize(
-    "bad_cmd",
-    [
-        "echo hi; rm -rf /",
-        "echo hi | tee out",
-        "echo hi && false",
-        "echo $(whoami)",
-        "echo `whoami`",
-        "cat < /etc/passwd",
-        "echo hi > out.txt",
-        "echo hi\nrm -rf /",
-    ],
-)
-def test_bash_rejects_shell_metacharacters(base_dir: Path, bad_cmd: str) -> None:
-    """Shell metacharacters were the RCE vector pre-FX.1.4; reject outright."""
-    with pytest.raises(ValueError, match="shell metacharacter"):
-        bash_handler({"command": bad_cmd})
-
-
 @pytest.mark.parametrize("bad_cmd", ["", "   ", "\t\n"])
 def test_bash_rejects_empty_command(base_dir: Path, bad_cmd: str) -> None:
     with pytest.raises(ValueError, match="non-empty"):
@@ -350,16 +331,20 @@ def test_bash_rejects_non_string_command(base_dir: Path) -> None:
 
 
 def test_bash_handles_quoted_args(base_dir: Path) -> None:
-    """shlex.split honours quotes — multi-word quoted args stay intact."""
+    """Quotes are preserved by /bin/bash; multi-word quoted args stay intact."""
     out = bash_handler({"command": 'echo "hello world"'})
     assert "STDOUT:\nhello world" in out
     assert "EXIT_CODE: 0" in out
 
 
-def test_bash_no_shell_means_glob_is_literal(base_dir: Path) -> None:
-    """With shell=False, `*` is not expanded — it reaches the program literally."""
+def test_bash_shell_expands_globs(base_dir: Path) -> None:
+    """OP-809: shell=True now expands globs against ``cwd=BASE_DIR``."""
+    (base_dir / "alpha.py").write_text("x")
+    (base_dir / "beta.py").write_text("x")
     out = bash_handler({"command": "echo *.py"})
-    assert "STDOUT:\n*.py" in out
+    assert "alpha.py" in out
+    assert "beta.py" in out
+    assert "*.py" not in out.split("STDOUT:\n", 1)[1].splitlines()[0]
 
 
 # ─── Grep ────────────────────────────────────────────────────────

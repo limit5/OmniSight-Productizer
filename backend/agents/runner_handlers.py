@@ -19,7 +19,7 @@ Used by ``auto-runner-sdk.py`` to back ``AnthropicClient.run_with_tools``.
 from __future__ import annotations
 
 import os
-import shlex
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -141,37 +141,135 @@ _BASH_DEFAULT_TIMEOUT_MS = 30_000
 _BASH_MAX_STDOUT = 30_000
 _BASH_MAX_STDERR = 10_000
 
-# Shell metacharacters meaningful to /bin/sh but not to execvp. With
-# shell=False they would be passed as literal argv entries, silently
-# breaking the caller's intent — and with shell=True they were the
-# RCE vector that this hardening removes (audit B4).
-_SHELL_METACHARS = ("|", "&", ";", "(", ")", "<", ">", "$", "`", "\n", "\r")
+# OP-809: Bash runs under /bin/bash (shell=True) anchored to ``cwd=BASE_DIR``.
+# The pre-OP-809 design rejected every shell metacharacter (`|`, `>`, `;`, …)
+# to prevent injection, but Sonnet 4.6 cannot internalise that constraint —
+# pilots showed it retried `find | grep` past max_iterations regardless of
+# prompt. We swap the blacklist for a narrow denylist of catastrophic /
+# exfiltration patterns. ADR-0014 explains the residual-risk acceptance:
+# the runner already has BASE_DIR write authority via Write/Edit + python,
+# so shell pipelines are incremental, not new, threat surface.
+_RM_RF_RE = re.compile(
+    r"""(?x)
+    \brm\s+
+    (?:[^\n;|&]*?\s)?                              # optional leading flags/args
+    (?:-[a-zA-Z]*[rR][a-zA-Z]*[fF][a-zA-Z]*\b
+      |-[a-zA-Z]*[fF][a-zA-Z]*[rR][a-zA-Z]*\b
+      |--recursive\s+--force
+      |--force\s+--recursive
+      |-r\s+-f
+      |-f\s+-r)
+    """
+)
+_RM_RF_DANGEROUS_TARGET_RE = re.compile(
+    r"""(?x)
+    (?<![\w/])
+    /
+    (?:\s|$|\*|/?
+       (?:etc|var|usr|bin|sbin|lib|lib64|boot|root|opt|dev|proc|sys|run|srv|mnt|media|home)
+       (?:[/\s*]|$))
+    """
+)
+_DANGEROUS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"\bdd\b[^\n|;&]*\b(?:if|of)=/dev/"),
+        "dd I/O on raw /dev/ block device",
+    ),
+    (
+        # Classic fork bomb. Tight on purpose — variants with renamed
+        # functions are accepted as residual risk per ADR-0014.
+        re.compile(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),
+        "fork bomb pattern :(){ :|: & };:",
+    ),
+    (
+        re.compile(r"(?:^|[\s|;&(])(?:sudo\s+)?u?mount\b"),
+        "filesystem mount/umount operation",
+    ),
+)
+_NET_COMMAND_RE = re.compile(r"(?:^|[\s|;&(`$])(?:curl|wget)\b")
+_URL_HOST_RE = re.compile(r"\b(?:https?|ftp|sftp|ssh)://([^\s/'\"`)]+)")
+_NET_ALLOWED_HOSTS = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "[::1]",
+        "0.0.0.0",
+        "host.docker.internal",
+    }
+)
+
+
+def _detect_rm_rf_dangerous(cmd: str) -> str | None:
+    """Detect ``rm -rf`` (or aliases) targeting absolute root or system dirs.
+
+    Walks each ``rm`` invocation in the command, then scans only that
+    invocation's argument tail (up to the next ``;``/``|``/``&``/``\\n``)
+    for a target like ``/``, ``/*``, or ``/etc``/``/usr``/etc. Targets
+    inside BASE_DIR (which the agent already has write authority over)
+    are not flagged.
+    """
+    pos = 0
+    while True:
+        match = _RM_RF_RE.search(cmd, pos)
+        if match is None:
+            return None
+        tail_start = match.end()
+        sep = re.search(r"[\n;|&]", cmd[tail_start:])
+        tail_end = tail_start + sep.start() if sep else len(cmd)
+        if _RM_RF_DANGEROUS_TARGET_RE.search(cmd[tail_start:tail_end]):
+            return "rm -rf targeting absolute root or system path"
+        pos = tail_end if tail_end > pos else pos + 1
+
+
+def _detect_network_egress(cmd: str) -> str | None:
+    if not _NET_COMMAND_RE.search(cmd):
+        return None
+    urls = _URL_HOST_RE.findall(cmd)
+    if not urls:
+        # No explicit URL token — could be reading from --config, env, or
+        # stdin. We can't allowlist a host we can't see; refuse.
+        return "curl/wget invocation without an allowlisted URL"
+    for host_port in urls:
+        host = host_port.lower()
+        # Strip an explicit port if present (host:port).
+        if host.count(":") == 1 and host.split(":", 1)[1].isdigit():
+            host = host.split(":", 1)[0]
+        if host not in _NET_ALLOWED_HOSTS:
+            return f"network egress to {host!r} not on allowlist"
+    return None
 
 
 def _validate_bash_command(cmd: Any) -> str:
-    """Reject non-string, empty, or shell-metacharacter-bearing commands.
-
-    The runner's Bash tool runs without a shell, so metacharacters like
-    `|`, `>`, `;`, `$()` would either be misleading literals or, before
-    this hardening, an injection vector.
+    """Reject non-string/empty commands and a narrow list of catastrophic
+    patterns. Everything else inside ``BASE_DIR`` (pipes, redirects, command
+    substitution, ``cmd1 && cmd2``, etc.) is allowed by design — see
+    ``docs/adr/ADR-0014-runner-bash-shell-mode.md``.
     """
     if not isinstance(cmd, str):
         raise ValueError("command must be a string")
     stripped = cmd.strip()
     if not stripped:
         raise ValueError("command must be a non-empty string")
-    for ch in _SHELL_METACHARS:
-        if ch in cmd:
-            raise ValueError(
-                "shell metacharacter "
-                f"{ch!r} is not allowed (the runner Bash tool runs "
-                "without a shell; split the work into separate calls)"
-            )
+    rm_reason = _detect_rm_rf_dangerous(stripped)
+    if rm_reason is not None:
+        raise ValueError(f"command rejected by allowlist: {rm_reason}")
+    for pat, reason in _DANGEROUS_PATTERNS:
+        if pat.search(stripped):
+            raise ValueError(f"command rejected by allowlist: {reason}")
+    egress = _detect_network_egress(stripped)
+    if egress is not None:
+        raise ValueError(f"command rejected by allowlist: {egress}")
     return stripped
 
 
 def bash_handler(payload: dict[str, Any]) -> str:
-    """Run a foreground command inside ``BASE_DIR``.
+    """Run a foreground shell pipeline inside ``BASE_DIR``.
+
+    The command is handed to ``/bin/bash -c`` (``shell=True``) so pipes,
+    redirects, and ``&&`` chains work — Sonnet 4.6 relies on these. The
+    cwd lock pins relative paths to ``BASE_DIR``; absolute-path escape is
+    governed by :func:`_validate_bash_command`'s denylist (see ADR-0014).
 
     Contract:
       ``run_in_background`` is intentionally unsupported. The runner has
@@ -187,18 +285,13 @@ def bash_handler(payload: dict[str, Any]) -> str:
             "use a foreground command with `timeout` instead"
         )
     cmd = _validate_bash_command(payload.get("command"))
-    try:
-        argv = shlex.split(cmd)
-    except ValueError as e:
-        raise ValueError(f"invalid command syntax: {e}") from e
-    if not argv:
-        raise ValueError("command parsed to empty argv")
     timeout_ms = int(payload.get("timeout") or _BASH_DEFAULT_TIMEOUT_MS)
     timeout_s = max(1, timeout_ms // 1000)
     try:
         result = subprocess.run(
-            argv,
-            shell=False,
+            cmd,
+            shell=True,
+            executable="/bin/bash",
             capture_output=True,
             text=True,
             timeout=timeout_s,
