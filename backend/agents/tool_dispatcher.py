@@ -37,10 +37,15 @@ import inspect
 import json
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from backend.agents.telemetry.tool_invocation import (
+    args_size_bytes,
+    emit_tool_invocation,
+)
 from backend.agents.tool_schemas import get_schema
 
 logger = logging.getLogger(__name__)
@@ -132,8 +137,16 @@ class ToolDispatcher:
         Never raises — exceptions are captured and returned as error
         tool_results so the calling LLM can self-correct.
         """
+        started_at = time.perf_counter()
+        input_size = args_size_bytes(tool_input)
         handler = self._handlers.get(tool_name)
         if handler is None:
+            emit_tool_invocation(
+                tool_name,
+                (time.perf_counter() - started_at) * 1000,
+                False,
+                input_size,
+            )
             return ToolResult(
                 tool_use_id=tool_use_id,
                 content=json.dumps(
@@ -156,6 +169,12 @@ class ToolDispatcher:
                 )
         except Exception as e:  # noqa: BLE001 - boundary, must capture all
             logger.exception("Tool %s raised", tool_name)
+            emit_tool_invocation(
+                tool_name,
+                (time.perf_counter() - started_at) * 1000,
+                False,
+                input_size,
+            )
             if tool_name in _STRUCTURED_ERROR_TOOLS:
                 return _error_result(
                     tool_use_id,
@@ -195,6 +214,12 @@ class ToolDispatcher:
             except (TypeError, ValueError):
                 content = str(raw)
 
+        emit_tool_invocation(
+            tool_name,
+            (time.perf_counter() - started_at) * 1000,
+            True,
+            input_size,
+        )
         return ToolResult(tool_use_id=tool_use_id, content=content, is_error=False)
 
 
