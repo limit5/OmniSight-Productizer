@@ -1,0 +1,37 @@
+; [OP-822] systemd unit -- weekly SDK runner failure-pattern audit.
+;
+; Runs scripts/sdk_failure_pattern_audit.py once. Triggered by the
+; matching .timer at Mon 06:00 UTC each week. Writes a markdown report
+; under /var/log/omnisight/ that operators read at the Monday standup
+; to spot repeating failure modes (e.g. tickets touching
+; backend/security/* failing 80% of the time at max_iterations).
+;
+; Install (user-level -- shares the same data/sdk-launcher/ JSONL run
+; logs the launcher writes, so the unit must run as the same user as
+; the launcher's host process):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/sdk-failure-audit-weekly.service ~/.config/systemd/user/
+;   cp deploy/systemd/sdk-failure-audit-weekly.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now sdk-failure-audit-weekly.timer
+
+[Unit]
+Description=OmniSight weekly SDK runner failure-pattern audit (OP-822)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+; Output directory for the weekly markdown artefact.
+Environment=OMNISIGHT_AUDIT_OUTPUT_DIR=/var/log/omnisight
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-claude-worktree/scripts/sdk_failure_pattern_audit.py
+StandardOutput=append:%h/work/sora/logs/sdk-failure-audit/run.log
+StandardError=append:%h/work/sora/logs/sdk-failure-audit/run.log
+; Cap pathological hangs (giant log file, FS issue). 5 min is far more
+; than the steady-state run time (~2 s on ~50 ticket logs).
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

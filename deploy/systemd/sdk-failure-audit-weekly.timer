@@ -1,0 +1,21 @@
+; [OP-822] Weekly Mon 06:00 UTC trigger for sdk-failure-audit-weekly.service.
+;
+; Cadence: once a week at Mon 06:00 UTC. The Monday standup reads the
+; latest report at ~09:00 UTC, so a 06:00 UTC run gives ~3 hours of
+; buffer in case the host is offline at the exact tick. Persistent=true
+; so a host that was offline at the scheduled tick fires immediately on
+; resume rather than waiting another full week -- the report's value
+; is "review last week's failure clusters at standup" and missing a
+; week during an outage would defeat the purpose.
+
+[Unit]
+Description=Weekly Mon 06:00 UTC trigger for sdk-failure-audit-weekly.service (OP-822)
+
+[Timer]
+Unit=sdk-failure-audit-weekly.service
+OnCalendar=Mon *-*-* 06:00:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
