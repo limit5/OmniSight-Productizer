@@ -12,12 +12,29 @@ from backend.agents.tool_dispatcher import ToolDispatcher
 def _envelope(result):
     assert result.is_error is True
     payload = json.loads(result.content)
-    assert {"error", "error_type", "retryable", "hint"} <= set(payload)
+    assert {
+        "error",
+        "error_type",
+        "retryable",
+        "hint",
+        "suggested_tool",
+        "suggested_args",
+    } <= set(payload)
     assert isinstance(payload["error"], str)
     assert isinstance(payload["error_type"], str)
     assert isinstance(payload["retryable"], bool)
     assert isinstance(payload["hint"], str)
-    return {key: payload[key] for key in ("error", "error_type", "retryable", "hint")}
+    return {
+        key: payload[key]
+        for key in (
+            "error",
+            "error_type",
+            "retryable",
+            "hint",
+            "suggested_tool",
+            "suggested_args",
+        )
+    }
 
 
 @pytest.mark.asyncio
@@ -37,6 +54,8 @@ async def test_read_exception_returns_tool_error_envelope():
         "error_type": "FileNotFoundError",
         "retryable": False,
         "hint": "missing input",
+        "suggested_tool": None,
+        "suggested_args": None,
     }
 
 
@@ -57,6 +76,8 @@ async def test_edit_exception_returns_tool_error_envelope():
         "error_type": "ValueError",
         "retryable": False,
         "hint": "old_string did not match",
+        "suggested_tool": None,
+        "suggested_args": None,
     }
 
 
@@ -71,6 +92,8 @@ async def test_bash_failures_return_tool_error_envelopes():
                 "error_type": "timeout",
                 "retryable": True,
                 "hint": "❌ command timed out after 1s",
+                "suggested_tool": None,
+                "suggested_args": None,
             },
         ),
         (
@@ -81,6 +104,8 @@ async def test_bash_failures_return_tool_error_envelopes():
                 "error_type": "nonzero_exit",
                 "retryable": False,
                 "hint": "STDOUT:\n\nSTDERR:\nfailed\nEXIT_CODE: 2",
+                "suggested_tool": None,
+                "suggested_args": None,
             },
         ),
         (
@@ -91,6 +116,8 @@ async def test_bash_failures_return_tool_error_envelopes():
                 "error_type": "oversized_output",
                 "retryable": True,
                 "hint": "Narrow the command or redirect large output to a file.",
+                "suggested_tool": None,
+                "suggested_args": None,
             },
         ),
     ]

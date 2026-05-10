@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
+from glob import has_magic
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +69,11 @@ def _ensure_inside_base(path: str | Path) -> Path:
 def read_handler(payload: dict[str, Any]) -> str:
     from backend import pep_gateway as _pep
 
+    raw_path = payload["file_path"]
+    if isinstance(raw_path, str) and has_magic(raw_path):
+        raise ValueError(
+            "Read expects one concrete file path; use Glob for wildcards"
+        )
     dec = _pep.classify_native_read_path("Read", payload)
     if dec is not None:
         _action, rule, reason, _scope = dec
@@ -285,6 +292,21 @@ def bash_handler(payload: dict[str, Any]) -> str:
             "use a foreground command with `timeout` instead"
         )
     cmd = _validate_bash_command(payload.get("command"))
+    # OP-810: single-purpose Bash calls (no pipe / chain / redirect) for known
+    # redirect-able programs are rejected so the dispatcher can derive a
+    # `suggested_tool` hint pointing the model at Read/Grep/Glob. Pipelines /
+    # chains pass through unchanged — that surface is OP-809's shell-composition
+    # territory and intentionally stays loose.
+    if not any(c in cmd for c in ("|", "&&", "||", ";", ">", "<")):
+        try:
+            argv = shlex.split(cmd)
+        except ValueError as e:
+            raise ValueError(f"invalid command syntax: {e}") from e
+        if argv and argv[0] in {"cat", "grep", "find"}:
+            raise ValueError(
+                f"Bash command starts with {argv[0]!r}; "
+                "use the dedicated tool instead"
+            )
     timeout_ms = int(payload.get("timeout") or _BASH_DEFAULT_TIMEOUT_MS)
     timeout_s = max(1, timeout_ms // 1000)
     try:
