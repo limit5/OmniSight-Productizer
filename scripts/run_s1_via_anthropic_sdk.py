@@ -98,10 +98,15 @@ from backend.agents.skills_loader import (
     load_default_scopes,
     make_skill_handler,
 )
+from backend.agents.static_analysis_gate import (
+    wrap_text_editor_with_static_analysis,
+)
 from backend.agents.sub_agent import make_agent_tool_handler
 from backend.agents.tool_dispatcher import (
+    BashHandlerV2,
+    TextEditorHandler,
     WORKTREE_ENV_VAR,
-    bind_built_in_tools,
+    ptc_sandbox_handler,
 )
 
 
@@ -408,6 +413,59 @@ async def process_ticket(
 # claude-bot has Code-Review +1 ACL we'll need for AI Reviewer down the
 # line, and the same SSH key is what jira_dispatch already authenticates).
 WORKTREE_PATH = REPO.parent / "OmniSight-claude-worktree"
+LINT_PROGRESS_PATH = REPO / "data" / "sdk-launcher" / "progress.txt"
+
+
+def bind_built_in_tools_with_static_analysis(
+    dispatcher: Any,
+    *,
+    worktree_root: Path | str,
+    progress_path: Path | str | None = None,
+) -> tuple[TextEditorHandler, BashHandlerV2]:
+    """Register OP-828 built-ins with OP-829 post-edit lint feedback."""
+    text_editor = TextEditorHandler(worktree_root=worktree_root)
+    linting_text_editor = wrap_text_editor_with_static_analysis(
+        text_editor,
+        worktree_root=worktree_root,
+        progress_path=progress_path,
+    )
+    bash_v2 = BashHandlerV2(cwd=worktree_root)
+    dispatcher.register("str_replace_based_edit_tool", linting_text_editor)
+    dispatcher.register("bash", bash_v2)
+    dispatcher.register("code_execution", ptc_sandbox_handler)
+    return text_editor, bash_v2
+
+
+def _mark_lint_partial_commit(worktree_path: Path, progress_path: Path) -> bool:
+    """Prefix HEAD subject when the OP-829 lint cap was reached."""
+    try:
+        progress = progress_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if "lint_partial=true" not in progress.splitlines():
+        return False
+
+    import subprocess
+
+    current = subprocess.run(
+        ["git", "log", "-1", "--format=%B"],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.rstrip()
+    lines = current.splitlines() or ["lint_partial"]
+    if "[lint_partial]" in lines[0]:
+        return False
+    lines[0] = f"[lint_partial] {lines[0]}"
+    subprocess.run(
+        ["git", "commit", "--amend", "-m", "\n".join(lines)],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return True
 
 
 def _build_system_prompt(ticket_key: str, ticket_summary: str) -> str:
@@ -458,6 +516,7 @@ def _build_system_prompt(ticket_key: str, ticket_summary: str) -> str:
         f"- Sign-off marker — when you're done, write the literal phrase "
         f"`✅ ITEM_DONE` (success) or `🛑 SCOPE_SURRENDERED <reason>` (partial) "
         f"as the LAST line of your final response.\n\n"
+        f"# Implementation SOP\n{sop_text}\n"
         f"# Project rules (CLAUDE.md L1, immutable)\n{claude_md_text}\n"
     )
 
@@ -722,6 +781,7 @@ async def process_ticket_full(
         return "ok"
 
     try:
+        _mark_lint_partial_commit(WORKTREE_PATH, LINT_PROGRESS_PATH)
         jira_dispatch.ensure_change_ids(WORKTREE_PATH, base_ref=sync.develop_sha)
         push = jira_dispatch.push_to_gerrit_for_review(
             WORKTREE_PATH, LAUNCHER_AGENT_CLASS, target="develop",
@@ -899,7 +959,11 @@ async def main_async(args: argparse.Namespace) -> int:
         # the dispatcher can locally round-trip text_editor / bash / PTC
         # calls when running outside the hosted sandbox (tests, dry-run
         # parity, future vendor-fallback paths).
-        bind_built_in_tools(dispatcher, worktree_root=WORKTREE_PATH)
+        bind_built_in_tools_with_static_analysis(
+            dispatcher,
+            worktree_root=WORKTREE_PATH,
+            progress_path=LINT_PROGRESS_PATH,
+        )
         client = AnthropicClient(api_key=_load_api_key(), dispatcher=dispatcher)
         # OP-811 (A3): wire Skill (project verbs) + Agent (sub-agent decomposition)
         # onto the dispatcher AFTER the client exists so the Agent handler can
