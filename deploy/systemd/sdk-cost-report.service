@@ -1,0 +1,32 @@
+; [OP-821] systemd unit -- daily SDK CostGuard spend report.
+;
+; Runs scripts/cron/sdk_daily_cost_report.py once. Triggered by the
+; matching .timer at 09:00 Asia/Taipei each day. Posts to Slack when
+; OMNISIGHT_SLACK_TOKEN is present; otherwise stdout is appended to the
+; run log so the host can forward it through operator email.
+;
+; Install (user-level -- shares OMNISIGHT_DATABASE_URL and optional
+; OMNISIGHT_SLACK_TOKEN with the runner host environment):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/sdk-cost-report.service ~/.config/systemd/user/
+;   cp deploy/systemd/sdk-cost-report.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now sdk-cost-report.timer
+
+[Unit]
+Description=OmniSight daily SDK CostGuard spend report (OP-821)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_SLACK_CHANNEL=#omnisight-cost
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-claude-worktree/scripts/cron/sdk_daily_cost_report.py
+StandardOutput=append:%h/work/sora/logs/sdk-cost-report/run.log
+StandardError=append:%h/work/sora/logs/sdk-cost-report/run.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

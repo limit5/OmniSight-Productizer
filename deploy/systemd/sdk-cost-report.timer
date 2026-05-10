@@ -1,0 +1,18 @@
+; [OP-821] Daily 09:00 Asia/Taipei trigger for sdk-cost-report.service.
+;
+; Cadence: once a day at 01:00 UTC, which is 09:00 at UTC+08. The
+; report reads the trailing 24h from CostGuard's cost_estimates table.
+; Persistent=true so a host that was offline at the scheduled tick fires
+; immediately on resume rather than skipping a daily spend report.
+
+[Unit]
+Description=Daily 09:00 Asia/Taipei trigger for sdk-cost-report.service (OP-821)
+
+[Timer]
+Unit=sdk-cost-report.service
+OnCalendar=*-*-* 01:00:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
