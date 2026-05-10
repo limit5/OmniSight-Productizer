@@ -96,6 +96,14 @@ from backend.agents.cost_guard import (
     InMemoryCostStore,
     ScopeKey,
 )
+from backend.agents.critic_agent import (
+    CRITIC_TIMEOUT_SECONDS,
+    CriticBackend,
+    CriticReviewOutcome,
+    CriticVerdict,
+    resolve_critic_model,
+    review_with_dissent_protocol,
+)
 from backend.agents.loop_detector import LoopDetector
 from backend.agents.runner_handlers import make_runner_dispatcher
 from backend.agents.skills_loader import (
@@ -834,6 +842,36 @@ async def process_ticket_full(
         ))
         return "surrendered"
 
+    # === Pre-commit critic (B4 / OP-833) ===
+    # Read-only Haiku critic reviews the diff against the AC before push.
+    # On 1st dissent the coder retries once; on 2nd dissent the launcher
+    # labels the ticket ``under_review:critic_dissent`` and surrenders.
+    # Critic NEVER posts to Gerrit (AC #6) — the verdict lives in the
+    # commit-message footer + a JIRA comment.
+    if not dry_run:
+        critic_outcome = await _run_critic_phase(
+            client=client,
+            ticket_key=ticket_key,
+            ticket_description=ticket_description,
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            base_ref=sync.develop_sha,
+        )
+        if critic_outcome.escalated:
+            _surrender_with_critic_dissent(ticket_key, critic_outcome)
+            log_outcome(TicketOutcome(
+                ticket_key=ticket_key, started_at=started, finished_at=finished,
+                status="critic_dissent", cost_usd=total_cost_usd,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                iterations=total_iterations,
+                error=f"critic_dissent: {critic_outcome.final_verdict.reason_code.value}",
+            ))
+            return "critic_dissent"
+        _append_critic_footer(WORKTREE_PATH, critic_outcome.final_verdict)
+    else:
+        critic_outcome = None
+
     # === Push to Gerrit + walk JIRA ===
     if dry_run:
         log_outcome(TicketOutcome(
@@ -877,11 +915,15 @@ async def process_ticket_full(
         return "failed"
 
     # === Success path: post AC verification + transition Under Review ===
+    critic_jira_block = (
+        f"\n\n{critic_outcome.final_verdict.to_jira_comment()}"
+        if critic_outcome is not None else ""
+    )
     try:
         jira_dispatch.add_comment(
             jira_client, ticket_key,
             f"[ai-implemented 2026-05-09 SDK launcher] {result.final_text[:1500]}\n\n"
-            f"Gerrit: {push.change_url}",
+            f"Gerrit: {push.change_url}{critic_jira_block}",
         )
         jira_dispatch.transition_to_under_review(
             jira_client, ticket_key, push.change_url,
@@ -927,6 +969,163 @@ def _surrender_ticket(ticket_key: str, reason: str) -> None:
         )
     except Exception as exc:
         print(f"  [{ticket_key}] surrender failed: {exc}")
+
+
+# ── Critic phase (B4 / OP-833) ────────────────────────────────────────
+
+
+CRITIC_DISSENT_LABEL = "under_review:critic_dissent"
+
+
+class _AnthropicCriticBackend:
+    """Adapter wrapping ``AnthropicClient.simple`` (sync) for the critic.
+
+    The critic is intentionally a single-shot classifier; it does NOT
+    take the ToM scratchpad / loop detector path. We wrap the sync call
+    in ``asyncio.to_thread`` so the timeout in :func:`review_once` works
+    uniformly across real and mock backends.
+    """
+
+    def __init__(self, client: AnthropicClient) -> None:
+        self._client = client
+
+    async def invoke(self, *, prompt: str, model: str) -> str:
+        text, _usage = await asyncio.to_thread(
+            self._client.simple, prompt=prompt, model=model,
+        )
+        return text
+
+
+def _git(*args: str, cwd: Path) -> str:
+    """Run a read-only git subcommand inside the worktree."""
+    import subprocess
+    r = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True,
+    )
+    return r.stdout
+
+
+def _compute_diff(worktree: Path, base_ref: str) -> str:
+    """Return ``base_ref..HEAD`` diff, capped to keep the critic prompt sane."""
+    try:
+        out = _git("diff", f"{base_ref}..HEAD", cwd=worktree)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [critic] _compute_diff failed: {exc} — using empty diff")
+        return ""
+    # Anthropic prompt limits + cost discipline — truncate huge diffs.
+    if len(out) > 200_000:
+        out = out[:200_000] + "\n\n[... diff truncated at 200k chars ...]\n"
+    return out
+
+
+def _append_critic_footer(worktree: Path, verdict: CriticVerdict) -> None:
+    """Amend HEAD's commit message with the critic verdict footer (AC #7).
+
+    Uses ``git commit --amend --no-edit`` style append. Failures are
+    swallowed (best-effort metadata) so the push still proceeds — the
+    same verdict is also posted to JIRA, so the audit trail is intact.
+    """
+    import subprocess
+    try:
+        current = _git("log", "-1", "--format=%B", cwd=worktree).rstrip()
+        footer = verdict.to_commit_footer()
+        if footer in current:
+            return
+        new_message = f"{current}\n\n{footer}\n"
+        subprocess.run(
+            ["git", "commit", "--amend", "-m", new_message],
+            cwd=str(worktree), capture_output=True, text=True, check=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [critic] footer amend failed: {exc} (verdict still in JIRA)")
+
+
+async def _run_critic_phase(
+    *,
+    client: AnthropicClient | _DryRunClient,
+    ticket_key: str,
+    ticket_description: str,
+    user_prompt: str,
+    system_prompt: str,
+    base_ref: str,
+) -> CriticReviewOutcome:
+    """Run the AC #4 dissent protocol against the freshly-committed diff.
+
+    The coder retry callback re-invokes ``client.run_with_tools`` once
+    with the critic dissent feedback prepended to the user prompt, then
+    amends the existing HEAD commit so the critic re-reviews a single
+    consolidated diff.
+    """
+    diff = _compute_diff(WORKTREE_PATH, base_ref)
+    backend: CriticBackend = _AnthropicCriticBackend(client)  # type: ignore[arg-type]
+
+    async def _coder_retry(verdict: CriticVerdict) -> str:
+        feedback = (
+            "\n\n=== CRITIC DISSENT (1 free retry) ===\n"
+            f"reason_code: {verdict.reason_code.value}\n"
+            f"reason_text: {verdict.reason_text}\n"
+            "Address this concern; the launcher will amend the existing "
+            "commit. Do NOT call git commit yourself."
+        )
+        try:
+            await client.run_with_tools(  # type: ignore[union-attr]
+                prompt=user_prompt + feedback,
+                raw_tools=BUILT_IN_TOOLS_SPEC,
+                system=system_prompt,
+                model=DEFAULT_MODEL_SONNET,
+                max_iterations=DEFAULT_MAX_ITERATIONS,
+                enable_cache=True,
+                on_tool_call="log",
+            )
+            # Amend any newly-staged or unstaged changes into HEAD so the
+            # critic re-reviews one consolidated commit.
+            import subprocess
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=str(WORKTREE_PATH), capture_output=True, text=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--amend", "--no-edit", "--allow-empty"],
+                cwd=str(WORKTREE_PATH), capture_output=True, text=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [critic] coder retry failed: {exc} — escalating")
+            raise
+        return _compute_diff(WORKTREE_PATH, base_ref)
+
+    return await review_with_dissent_protocol(
+        backend,
+        diff=diff,
+        ac_text=ticket_description,
+        coder_retry=_coder_retry,
+        model=resolve_critic_model(),
+        timeout_s=CRITIC_TIMEOUT_SECONDS,
+    )
+
+
+def _surrender_with_critic_dissent(
+    ticket_key: str, outcome: CriticReviewOutcome,
+) -> None:
+    """Label + surrender the ticket on a 2nd critic dissent (AC #4)."""
+    try:
+        jira_client = jira_dispatch.make_client(LAUNCHER_AGENT_CLASS)
+        jira_dispatch.add_label(jira_client, ticket_key, CRITIC_DISSENT_LABEL)
+        history_block = "\n".join(
+            f"- round {i}: {v.verdict} ({v.reason_code.value}) — {v.reason_text}"
+            for i, v in enumerate(outcome.history, start=1)
+        )
+        jira_dispatch.add_comment(
+            jira_client, ticket_key,
+            f"[critic-agent escalated] 2 dissent rounds without convergence.\n"
+            f"{history_block}\n\nTicket needs operator review before re-pickup.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [{ticket_key}] critic dissent escalation surface failed: {exc}")
+    _surrender_ticket(
+        ticket_key,
+        f"critic_dissent: {outcome.final_verdict.reason_code.value} — "
+        f"{outcome.final_verdict.reason_text[:200]}",
+    )
 
 
 async def _post_call_cost_record(
