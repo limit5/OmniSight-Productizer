@@ -317,6 +317,7 @@ class AnthropicClient:
         *,
         prompt: str,
         tools: list[str] | None = None,
+        raw_tools: list[dict[str, Any]] | None = None,
         system: str | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
@@ -344,9 +345,26 @@ class AnthropicClient:
         are marked with `cache_control: ephemeral`. From turn 2 onwards
         Anthropic charges 10% (90% off) for the cached prefix, dramatically
         cutting cost for long agent loops.
+
+        OP-828 (B1): when ``raw_tools`` is supplied, the caller has already
+        constructed the Anthropic ``tools=[]`` payload (e.g. for built-in
+        ``text_editor_20250728`` / ``bash_20250124`` / ``code_execution``),
+        so we skip ``to_anthropic_tools`` translation and the OmniSight
+        tool-catalog system block injection (built-in tools are documented
+        by Anthropic, not by us).
         """
-        tool_payload = to_anthropic_tools(tools) if tools else None
-        catalog_system = inject_tool_catalog(system or "", tools) if tools else system
+        if raw_tools is not None and tools:
+            raise ValueError(
+                "run_with_tools: pass either `tools` or `raw_tools`, not both"
+            )
+        if raw_tools is not None:
+            tool_payload = list(raw_tools)
+            catalog_system = system
+        else:
+            tool_payload = to_anthropic_tools(tools) if tools else None
+            catalog_system = (
+                inject_tool_catalog(system or "", tools) if tools else system
+            )
         sys_blocks, tool_payload = _apply_cache_control(
             catalog_system, tool_payload, enable_cache
         )

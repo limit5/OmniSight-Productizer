@@ -36,11 +36,17 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import shlex
+import subprocess
+import threading
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
+from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
 
 from backend.agents.telemetry.tool_invocation import (
@@ -68,6 +74,22 @@ _TOOL_SUMMARY_OVERRIDES: dict[str, str] = {
     "ToolSearch": "tool discovery",
     "Skill": "run skill",
 }
+
+
+class StructuredToolError(Exception):
+    """Raised by handlers to surface a typed error code in the tool_result.
+
+    The dispatcher's ``_tool_error_from_exception`` recognises this class and
+    forwards ``error_code`` verbatim into the ``ToolError.error`` envelope,
+    so handlers like ``text_editor`` / ``ptc_sandbox`` can emit AC-defined
+    codes (``text_editor_no_match``, ``sandbox_boundary_violation``, etc.)
+    without redefining the result-block plumbing.
+    """
+
+    def __init__(self, error_code: str, hint: str = "") -> None:
+        super().__init__(hint or error_code)
+        self.error_code = error_code
+        self.hint = hint
 
 
 @dataclass(frozen=True)
@@ -235,6 +257,13 @@ def _error_result(
 def _tool_error_from_exception(
     exc: Exception, tool_name: str, tool_input: dict[str, Any]
 ) -> ToolError:
+    if isinstance(exc, StructuredToolError):
+        return ToolError(
+            error=exc.error_code,
+            error_type=exc.error_code,
+            retryable=False,
+            hint=exc.hint[:1000],
+        )
     redirect = _suggest_redirect(tool_name, tool_input)
     return ToolError(
         error="tool_raised",
@@ -423,6 +452,598 @@ def get_tool_summary(name: str) -> str:
     schema = get_schema(name)
     first_sentence = schema.description.strip().split(".", 1)[0]
     return " ".join(first_sentence.split())
+
+
+# ─── Anthropic built-in tools (OP-828 / B1) ─────────────────────────
+#
+# Anthropic ships three server-orchestrated tool surfaces that this runner
+# now leans on instead of OmniSight-defined Read/Write/Edit/Bash:
+#
+#   text_editor_20250728  →  ``str_replace_based_edit_tool``
+#   bash_20250124         →  ``bash``
+#   code_execution_20260120 → ``code_execution`` (PTC sandbox)
+#
+# The classes below give the dispatcher concrete handlers so
+# ``test_built_in_tools_dispatch`` and ``test_ptc_sandbox_isolation`` can
+# exercise the contract without round-tripping through the live API. For
+# real runs the model still talks to Anthropic's hosted text_editor / bash
+# / sandbox; these handlers are the local fall-through that keeps the
+# launcher self-contained and unit-testable.
+
+
+WORKTREE_ENV_VAR = "OMNISIGHT_WORKTREE_PATH"
+
+
+def _resolve_worktree_root(explicit: Path | str | None = None) -> Path:
+    """Resolve the worktree root used by built-in tool handlers.
+
+    Priority: explicit arg > ``OMNISIGHT_WORKTREE_PATH`` env > runner repo
+    parent. Caller-side launch gates (``PTCSandbox.launch``) may refuse
+    when the env var is unset; this helper purposefully tolerates a
+    missing env so unit tests can construct a handler with an explicit
+    tmp path without touching process env.
+    """
+    if explicit is not None:
+        return Path(explicit).resolve()
+    env_value = os.environ.get(WORKTREE_ENV_VAR)
+    if env_value:
+        return Path(env_value).resolve()
+    return Path(__file__).resolve().parents[2]
+
+
+class TextEditorHandler:
+    """Handler for built-in ``str_replace_based_edit_tool``.
+
+    Implements the five commands listed in OP-828 AC #4: ``view``,
+    ``create``, ``str_replace``, ``insert``, ``undo_edit``. Each command
+    either returns content or raises :class:`StructuredToolError` with
+    one of the AC-listed codes (``tool_input_invalid``,
+    ``text_editor_no_match``, ``text_editor_path_outside_worktree``).
+
+    Path safety: every ``path`` argument is resolved with realpath and
+    must remain under ``worktree_root``; symlink escapes are rejected.
+
+    Undo: each successful mutating call snapshots the prior file content
+    onto a per-path stack so ``undo_edit`` can revert the most recent
+    write without git ops.
+    """
+
+    _COMMANDS = frozenset(
+        {"view", "create", "str_replace", "insert", "undo_edit"}
+    )
+
+    def __init__(self, worktree_root: Path | str | None = None) -> None:
+        self.worktree_root = _resolve_worktree_root(worktree_root)
+        self._undo: dict[str, list[str | None]] = {}
+
+    def __call__(self, payload: dict[str, Any]) -> str:
+        command = payload.get("command")
+        if command not in self._COMMANDS:
+            raise StructuredToolError(
+                "tool_input_invalid",
+                f"unknown text_editor command {command!r}",
+            )
+        path = payload.get("path")
+        if not isinstance(path, str) or not path:
+            raise StructuredToolError(
+                "tool_input_invalid", "path is required"
+            )
+        target = self._resolve(path)
+        method = getattr(self, f"_cmd_{command}")
+        return method(target, payload)
+
+    # ── path safety ────────────────────────────────────────────────
+    def _resolve(self, raw_path: str) -> Path:
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.worktree_root / candidate
+        # ``resolve`` collapses symlinks too; combined with relative_to it
+        # makes ``../`` and symlink escapes equivalently fatal.
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(self.worktree_root)
+        except ValueError as exc:
+            raise StructuredToolError(
+                "text_editor_path_outside_worktree",
+                f"path {resolved} is outside worktree {self.worktree_root}",
+            ) from exc
+        return resolved
+
+    # ── undo plumbing ──────────────────────────────────────────────
+    def _push_undo(self, target: Path) -> None:
+        key = str(target)
+        snapshot = (
+            target.read_text(encoding="utf-8") if target.is_file() else None
+        )
+        self._undo.setdefault(key, []).append(snapshot)
+
+    # ── commands ───────────────────────────────────────────────────
+    def _cmd_view(self, target: Path, payload: dict[str, Any]) -> str:
+        if not target.exists():
+            raise StructuredToolError(
+                "tool_input_invalid", f"path does not exist: {target}"
+            )
+        if target.is_dir():
+            return "\n".join(sorted(p.name for p in target.iterdir()))
+        text = target.read_text(encoding="utf-8", errors="replace")
+        lines = text.split("\n")
+        view_range = payload.get("view_range")
+        offset = 0
+        if view_range is not None:
+            if (
+                not isinstance(view_range, (list, tuple))
+                or len(view_range) != 2
+            ):
+                raise StructuredToolError(
+                    "tool_input_invalid",
+                    "view_range must be [start, end]",
+                )
+            try:
+                start = int(view_range[0])
+                end_raw = int(view_range[1])
+            except (TypeError, ValueError) as exc:
+                raise StructuredToolError(
+                    "tool_input_invalid",
+                    "view_range entries must be integers",
+                ) from exc
+            if start < 1:
+                raise StructuredToolError(
+                    "tool_input_invalid",
+                    "view_range start must be >= 1",
+                )
+            end = len(lines) if end_raw == -1 else min(len(lines), end_raw)
+            lines = lines[start - 1 : end]
+            offset = start - 1
+        return "\n".join(
+            f"{i + offset + 1}\t{line}" for i, line in enumerate(lines)
+        )
+
+    def _cmd_create(self, target: Path, payload: dict[str, Any]) -> str:
+        file_text = payload.get("file_text")
+        if not isinstance(file_text, str):
+            raise StructuredToolError(
+                "tool_input_invalid", "file_text must be a string"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._push_undo(target)
+        target.write_text(file_text, encoding="utf-8")
+        return f"created {target}"
+
+    def _cmd_str_replace(self, target: Path, payload: dict[str, Any]) -> str:
+        old_str = payload.get("old_str")
+        new_str = payload.get("new_str", "")
+        if not isinstance(old_str, str) or not old_str:
+            raise StructuredToolError(
+                "tool_input_invalid", "old_str is required"
+            )
+        if not isinstance(new_str, str):
+            raise StructuredToolError(
+                "tool_input_invalid", "new_str must be a string"
+            )
+        if not target.is_file():
+            raise StructuredToolError(
+                "tool_input_invalid", f"path is not a file: {target}"
+            )
+        text = target.read_text(encoding="utf-8")
+        count = text.count(old_str)
+        if count == 0:
+            raise StructuredToolError(
+                "text_editor_no_match",
+                f"old_str not found in {target}",
+            )
+        if count > 1:
+            raise StructuredToolError(
+                "tool_input_invalid",
+                f"old_str matches {count} times; must be unique",
+            )
+        self._push_undo(target)
+        target.write_text(text.replace(old_str, new_str, 1), encoding="utf-8")
+        return f"replaced 1 occurrence in {target}"
+
+    def _cmd_insert(self, target: Path, payload: dict[str, Any]) -> str:
+        insert_line = payload.get("insert_line")
+        insert_text = payload.get("insert_text", "")
+        if not isinstance(insert_line, int) or isinstance(insert_line, bool):
+            raise StructuredToolError(
+                "tool_input_invalid", "insert_line must be an integer"
+            )
+        if not isinstance(insert_text, str):
+            raise StructuredToolError(
+                "tool_input_invalid", "insert_text must be a string"
+            )
+        if not target.is_file():
+            raise StructuredToolError(
+                "tool_input_invalid", f"path is not a file: {target}"
+            )
+        text = target.read_text(encoding="utf-8")
+        lines = text.split("\n")
+        if insert_line < 0 or insert_line > len(lines):
+            raise StructuredToolError(
+                "tool_input_invalid",
+                f"insert_line {insert_line} out of range [0,{len(lines)}]",
+            )
+        self._push_undo(target)
+        new_block = insert_text.split("\n")
+        new_lines = lines[:insert_line] + new_block + lines[insert_line:]
+        target.write_text("\n".join(new_lines), encoding="utf-8")
+        return f"inserted at line {insert_line} in {target}"
+
+    def _cmd_undo_edit(self, target: Path, payload: dict[str, Any]) -> str:
+        del payload  # signature parity
+        stack = self._undo.get(str(target))
+        if not stack:
+            raise StructuredToolError(
+                "tool_input_invalid",
+                f"no undo history for {target}",
+            )
+        previous = stack.pop()
+        if previous is None:
+            # The last edit created the file from scratch — undo means delete.
+            if target.is_file():
+                target.unlink()
+            return f"undone create on {target}"
+        target.write_text(previous, encoding="utf-8")
+        return f"undone last edit on {target}"
+
+
+# ── PersistentBashSession + BashHandlerV2 ──────────────────────────
+
+
+class PersistentBashSession:
+    """Long-running ``/bin/bash`` subprocess used by :class:`BashHandlerV2`.
+
+    Persistence: every command is fed onto the same shell stdin, so
+    ``export FOO=bar`` / ``cd subdir`` / function definitions remain in
+    scope across calls. A unique per-call sentinel marks command end so
+    we can demultiplex output streams without polling.
+
+    Threading: a daemon thread drains ``stdout`` into a queue so the
+    caller thread can apply timeouts without deadlocking on partial
+    reads.
+    """
+
+    _SENTINEL_PREFIX = "__OMNISIGHT_BASH_DONE_"
+
+    def __init__(self, cwd: Path | str) -> None:
+        self.cwd = Path(cwd).resolve()
+        if not self.cwd.is_dir():
+            raise StructuredToolError(
+                "tool_input_invalid",
+                f"bash cwd {self.cwd} is not a directory",
+            )
+        self._proc: subprocess.Popen[str] | None = None
+        self._queue: Queue[str] = Queue()
+        self._reader: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._open()
+
+    # ── lifecycle ──────────────────────────────────────────────────
+    def _open(self) -> None:
+        self._proc = subprocess.Popen(
+            ["/bin/bash", "--noprofile", "--norc"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(self.cwd),
+            text=True,
+            bufsize=1,
+        )
+        self._queue = Queue()
+        self._reader = threading.Thread(
+            target=self._drain_stdout, daemon=True
+        )
+        self._reader.start()
+
+    def _drain_stdout(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return
+        for line in iter(proc.stdout.readline, ""):
+            self._queue.put(line)
+        self._queue.put("")  # sentinel for EOF
+
+    def restart(self) -> None:
+        """Tear down the running shell and start a fresh one (AC #5)."""
+        with self._lock:
+            self._close_locked()
+            self._open()
+
+    def close(self) -> None:
+        with self._lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        finally:
+            self._proc = None
+
+    # ── exec ──────────────────────────────────────────────────────
+    def run(self, command: str, timeout: float = 30.0) -> str:
+        if not isinstance(command, str) or not command.strip():
+            raise StructuredToolError(
+                "tool_input_invalid", "bash command must be a non-empty string"
+            )
+        with self._lock:
+            proc = self._proc
+            if proc is None or proc.poll() is not None:
+                self._open()
+                proc = self._proc
+            assert proc is not None and proc.stdin is not None  # for mypy
+            sentinel = f"{self._SENTINEL_PREFIX}{uuid.uuid4().hex}__"
+            framed = (
+                f"{command}\n"
+                f"printf '\\n%s:%s\\n' '{sentinel}' \"$?\"\n"
+            )
+            try:
+                proc.stdin.write(framed)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                raise StructuredToolError(
+                    "bash_timeout",
+                    f"shell pipe broken: {exc}",
+                ) from exc
+            return self._read_until_sentinel(sentinel, timeout)
+
+    def _read_until_sentinel(self, sentinel: str, timeout: float) -> str:
+        collected: list[str] = []
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Timed out — kill the shell so the next call gets a clean
+                # state (the in-flight command may still hold stdin).
+                self._close_locked()
+                self._open()
+                raise StructuredToolError(
+                    "bash_timeout",
+                    f"command timed out after {timeout:.1f}s",
+                )
+            try:
+                line = self._queue.get(timeout=remaining)
+            except Empty:
+                continue
+            if line == "":
+                # EOF — shell died unexpectedly.
+                raise StructuredToolError(
+                    "bash_timeout",
+                    "shell exited before sentinel",
+                )
+            idx = line.find(sentinel + ":")
+            if idx == -1:
+                collected.append(line)
+                continue
+            if idx > 0:
+                collected.append(line[:idx])
+            tail = line[idx + len(sentinel) + 1 :].strip()
+            try:
+                exit_code = int(tail)
+            except ValueError:
+                exit_code = -1
+            stdout = "".join(collected)
+            return f"{stdout}EXIT_CODE: {exit_code}"
+
+
+class BashHandlerV2:
+    """Handler for built-in ``bash`` (bash_20250124) tool name.
+
+    Maintains a persistent shell session keyed on ``(self,)`` so callers
+    that re-use the same handler instance see ``export``/``cd``/function
+    definitions persist across calls (AC #5).
+
+    Schema (mirrors Anthropic's bash_20250124):
+        - ``command`` (str): shell command to run.
+        - ``restart`` (bool): if true, recycle the underlying shell.
+    """
+
+    def __init__(self, cwd: Path | str | None = None) -> None:
+        self._cwd = _resolve_worktree_root(cwd)
+        self._session: PersistentBashSession | None = None
+
+    @property
+    def session(self) -> PersistentBashSession:
+        if self._session is None:
+            self._session = PersistentBashSession(cwd=self._cwd)
+        return self._session
+
+    def __call__(self, payload: dict[str, Any]) -> str:
+        if payload.get("restart"):
+            if self._session is not None:
+                self._session.restart()
+            return "shell restarted"
+        command = payload.get("command")
+        if command is None:
+            raise StructuredToolError(
+                "tool_input_invalid",
+                "either 'command' or 'restart' is required",
+            )
+        timeout = float(payload.get("timeout") or 30.0)
+        return self.session.run(command, timeout=timeout)
+
+    def close(self) -> None:
+        if self._session is not None:
+            self._session.close()
+            self._session = None
+
+
+# ── PTCSandbox + ptc_sandbox_handler ───────────────────────────────
+
+
+_PTC_DEFAULT_ALLOWED_CALLERS: tuple[str, ...] = (
+    "text_editor_20250728",
+    "bash_20250124",
+)
+
+
+class PTCSandbox:
+    """Local emulation of Anthropic's code_execution_20260120 sandbox.
+
+    The hosted sandbox runs server-side; this class is the runner-side
+    boundary validator that test_ptc_sandbox_isolation exercises. It
+    enforces the OP-828 invariants:
+
+    * AC #2 — sandbox launch refuses if ``OMNISIGHT_WORKTREE_PATH`` is
+      not set in the environment (worktree path is the only safe ``cwd``
+      the launcher can hand to a remote sandbox).
+    * AC #3 — only callers in ``allowed_callers`` may invoke the sandbox;
+      any HTTP / DB attempt raises ``sandbox_boundary_violation``.
+
+    Writes inside the worktree succeed via ``write_file``; writes outside
+    are rejected with the same ``sandbox_boundary_violation`` code so the
+    boundary surface stays uniform.
+    """
+
+    def __init__(
+        self,
+        cwd: Path,
+        allowed_callers: tuple[str, ...] | list[str],
+    ) -> None:
+        self.cwd = Path(cwd).resolve()
+        self.allowed_callers = tuple(allowed_callers)
+
+    @classmethod
+    def launch(
+        cls,
+        *,
+        allowed_callers: tuple[str, ...] | list[str] = _PTC_DEFAULT_ALLOWED_CALLERS,
+    ) -> PTCSandbox:
+        env_value = os.environ.get(WORKTREE_ENV_VAR)
+        if not env_value:
+            raise StructuredToolError(
+                "ptc_creds_missing",
+                f"{WORKTREE_ENV_VAR} is not set; sandbox launch refused",
+            )
+        worktree = Path(env_value).resolve()
+        if not worktree.is_dir():
+            raise StructuredToolError(
+                "ptc_creds_missing",
+                f"{WORKTREE_ENV_VAR}={worktree} is not a directory",
+            )
+        return cls(cwd=worktree, allowed_callers=tuple(allowed_callers))
+
+    # ── enforcement points ────────────────────────────────────────
+    def _ensure_caller_allowed(self, caller: str) -> None:
+        if caller not in self.allowed_callers:
+            raise StructuredToolError(
+                "sandbox_boundary_violation",
+                f"caller {caller!r} not in allowed_callers {self.allowed_callers}",
+            )
+
+    def _ensure_inside_cwd(self, raw_path: str) -> Path:
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.cwd / candidate
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(self.cwd)
+        except ValueError as exc:
+            raise StructuredToolError(
+                "sandbox_boundary_violation",
+                f"path {resolved} is outside sandbox cwd {self.cwd}",
+            ) from exc
+        return resolved
+
+    # ── public surface ────────────────────────────────────────────
+    def write_file(
+        self,
+        path: str,
+        content: str,
+        *,
+        caller: str = "text_editor_20250728",
+    ) -> Path:
+        self._ensure_caller_allowed(caller)
+        target = self._ensure_inside_cwd(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def http_request(self, *_args: Any, **_kwargs: Any) -> None:
+        raise StructuredToolError(
+            "sandbox_boundary_violation",
+            "HTTP egress is not permitted inside the PTC sandbox",
+        )
+
+    def db_query(self, *_args: Any, **_kwargs: Any) -> None:
+        raise StructuredToolError(
+            "sandbox_boundary_violation",
+            "Database access is not permitted inside the PTC sandbox",
+        )
+
+    def call(
+        self, caller: str, action: str, **kwargs: Any
+    ) -> Any:
+        """Single dispatch helper used by ptc_sandbox_handler."""
+        self._ensure_caller_allowed(caller)
+        if action == "write":
+            return str(
+                self.write_file(
+                    kwargs["path"], kwargs.get("content", ""), caller=caller
+                )
+            )
+        if action in {"http", "fetch", "request"}:
+            self.http_request(**kwargs)
+        if action in {"db", "sql", "query"}:
+            self.db_query(**kwargs)
+        raise StructuredToolError(
+            "tool_input_invalid",
+            f"unknown sandbox action {action!r}",
+        )
+
+
+def ptc_sandbox_handler(payload: dict[str, Any]) -> str:
+    """Dispatcher entry-point for ``code_execution`` tool calls.
+
+    The model rarely invokes this locally — Anthropic runs the real
+    sandbox server-side — but the dispatcher needs a handler so the unit
+    tests (``test_ptc_sandbox_isolation``) can exercise the boundary
+    contract end-to-end. Every call goes through ``PTCSandbox.launch``
+    which honours the env-var precondition.
+    """
+    sandbox = PTCSandbox.launch(
+        allowed_callers=tuple(
+            payload.get("allowed_callers") or _PTC_DEFAULT_ALLOWED_CALLERS
+        ),
+    )
+    caller = payload.get("caller", "text_editor_20250728")
+    action = payload.get("action", "write")
+    kwargs = {
+        k: v
+        for k, v in payload.items()
+        if k not in {"caller", "action", "allowed_callers"}
+    }
+    result = sandbox.call(caller, action, **kwargs)
+    return result if isinstance(result, str) else json.dumps(result)
+
+
+def bind_built_in_tools(
+    dispatcher: ToolDispatcher,
+    *,
+    worktree_root: Path | str | None = None,
+) -> tuple[TextEditorHandler, BashHandlerV2]:
+    """Register the three OP-828 built-in tool handlers on ``dispatcher``.
+
+    Returns the text-editor and bash handler instances so the caller can
+    inspect undo state or close the bash session at shutdown.
+    """
+    text_editor = TextEditorHandler(worktree_root=worktree_root)
+    bash_v2 = BashHandlerV2(cwd=worktree_root)
+    dispatcher.register("str_replace_based_edit_tool", text_editor)
+    dispatcher.register("bash", bash_v2)
+    dispatcher.register("code_execution", ptc_sandbox_handler)
+    return text_editor, bash_v2
 
 
 _default_dispatcher = ToolDispatcher()

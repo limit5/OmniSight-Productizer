@@ -588,6 +588,40 @@ for _name, _desc in [
         )
     )
 
+# Anthropic built-in tools (OP-828 — B1).
+#
+# Schema-less per Anthropic spec: the API payload uses ``{"type": "...", "name": "..."}``
+# (constructed manually in ``scripts/run_s1_via_anthropic_sdk.BUILT_IN_TOOLS_SPEC``)
+# rather than the OmniSight ``input_schema`` shape. We still register them here so
+# the dispatcher's drift-guard ``register()`` accepts handler bindings — the input
+# schema is permissive on purpose (Anthropic owns the real contract).
+for _name, _desc, _cat in [
+    (
+        "str_replace_based_edit_tool",
+        "Anthropic built-in text_editor_20250728 — view/create/str_replace/insert/undo_edit.",
+        "filesystem",
+    ),
+    (
+        "bash",
+        "Anthropic built-in bash_20250124 — persistent shell with restart action.",
+        "shell",
+    ),
+    (
+        "code_execution",
+        "Anthropic built-in code_execution_20260120 — PTC sandbox with allowed_callers.",
+        "meta",
+    ),
+]:
+    register_tool(
+        ToolSchema(
+            name=_name,
+            description=_desc,
+            category=_cat,  # type: ignore[arg-type]
+            deferred=True,
+            input_schema={"type": "object"},
+        )
+    )
+
 # Plan / Worktree / Notebook / IO meta tools
 for _name, _desc, _cat in [
     ("EnterPlanMode", "Enter Claude Code plan mode.", "plan"),
