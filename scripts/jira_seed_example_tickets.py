@@ -244,6 +244,187 @@ external_blockers: []
 **Seed example for UI verification. Not for execution.**
 """
 
+# ── B6 feature-list JSON example payload (OP-835) ────────────────
+#
+# Five sample tickets, each carrying a ``## Feature list (JSON)``
+# section in the description, so operators can verify the dual-mode
+# parser end-to-end. The schema is the one consumed by
+# ``backend.agents.feature_list_parser.parse_feature_list_json``:
+#
+#   [{"id": "FL<n>",
+#     "description": "<what must hold>",
+#     "verify": "test_<name> passes" | "manual:operator-check"}]
+#
+# Edit-time gotcha: keep the JSON valid (no trailing commas, no
+# comments). The seed script does NOT validate; that happens at
+# pickup time inside the parser.
+
+
+B6_FEATURE_LIST_EXAMPLES: list[tuple[str, str, list[str]]] = [
+    (
+        "B6 example #1 — provider_orchestrator feature-list [example]",
+        """## Goal
+Wire `ProviderAdapter` registry per ADR-0007 (feature-list demo).
+
+## Acceptance criteria
+See ``## Feature list (JSON)`` below. Submit gate uses the structured
+list; this freeform section is preserved for human readability only.
+
+## Feature list (JSON)
+
+```json
+[
+  {"id": "FL1", "description": "ProviderAdapter ABC defined", "verify": "test_provider_adapter_abc passes"},
+  {"id": "FL2", "description": "Anthropic adapter registered", "verify": "test_anthropic_adapter_registered passes"},
+  {"id": "FL3", "description": "Circuit breaker trips on 5×429", "verify": "test_circuit_breaker_threshold passes"},
+  {"id": "FL4", "description": "Operator UI shows breaker state", "verify": "manual:operator-check"}
+]
+```
+
+## Error catalog
+- `adapter_register_conflict` — two adapters claim the same id
+
+## State transitions
+register → healthy → (5×429) → open → (cool-down) → half-open → healthy
+
+## Recovery / rollback
+Idempotent register; breaker state is in-memory only.
+
+---
+**B6 dual-mode seed example. Not for execution.**
+""",
+        ["class:subscription-claude", "tier:M", "area:backend", "example", "b6:feature-list"],
+    ),
+    (
+        "B6 example #2 — locator handoff schema feature-list [example]",
+        """## Goal
+Freeze the Haiku→Sonnet handoff JSON schema per B7 prerequisites.
+
+## Acceptance criteria
+Structured below.
+
+## Feature list (JSON)
+
+```json
+[
+  {"id": "FL1", "description": "Schema file backend/agents/locator_handoff_schema.py exists", "verify": "test_locator_handoff_schema_imports passes"},
+  {"id": "FL2", "description": "files[] / hypotheses[] / confidence keys present", "verify": "test_locator_handoff_required_keys passes"},
+  {"id": "FL3", "description": "Reject >2k token payload", "verify": "test_locator_handoff_size_guard passes"}
+]
+```
+
+## Error catalog
+- `handoff_schema_violation` — coder receives payload missing required keys
+
+## State transitions
+locator_emit → schema_validate → coder_accept | reject_too_large
+
+## Recovery / rollback
+Locator can be re-invoked with reminder (max 1 retry).
+
+---
+**B6 dual-mode seed example. Not for execution.**
+""",
+        ["class:subscription-claude", "tier:S", "area:backend", "example", "b6:feature-list"],
+    ),
+    (
+        "B6 example #3 — TODO.md staging guard feature-list [example]",
+        """## Goal
+Lesson-2 F20 staging guard: TODO.md `[x][G]` flips must be staged.
+
+## Acceptance criteria
+Structured below.
+
+## Feature list (JSON)
+
+```json
+[
+  {"id": "FL1", "description": "Helper writes [x][G] and stages it", "verify": "test_todo_md_stage_helper passes"},
+  {"id": "FL2", "description": "Raise TodoNotStaged when forgotten", "verify": "test_todo_md_stage_guard_raises passes"},
+  {"id": "FL3", "description": "Integration: full commit cycle", "verify": "test_todo_md_stage_integration passes"}
+]
+```
+
+## Error catalog
+- `TodoNotStaged` — F20 staging analogue (B6 mirrors this)
+
+## State transitions
+todo_flip → write → stage → commit | TodoNotStaged
+
+## Recovery / rollback
+Idempotent: re-running stage helper is safe.
+
+---
+**B6 dual-mode seed example. Not for execution.**
+""",
+        ["class:subscription-claude", "tier:S", "area:tooling", "example", "b6:feature-list"],
+    ),
+    (
+        "B6 example #4 — bridge-state checklist item demo [example]",
+        """## Goal
+Demo a feature-list that includes a bridge-state correctness item
+(F5 past-failure relevance).
+
+## Acceptance criteria
+Structured below.
+
+## Feature list (JSON)
+
+```json
+[
+  {"id": "FL1", "description": "Bridge in 'Approved' before submit", "verify": "manual:operator-check"},
+  {"id": "FL2", "description": "Gerrit Change-Id stable across PS", "verify": "test_change_id_stable passes"}
+]
+```
+
+## Error catalog
+- `bridge_state_drift` — bridge != ticket state at submit time
+
+## State transitions
+pre_submit → bridge_check → submit | bridge_state_drift
+
+## Recovery / rollback
+Bridge poll is idempotent; submit is one-shot per Change-Id.
+
+---
+**B6 dual-mode seed example. Not for execution.**
+""",
+        ["class:subscription-claude", "tier:S", "area:backend", "example", "b6:feature-list"],
+    ),
+    (
+        "B6 example #5 — manual-only verify rows demo [example]",
+        """## Goal
+Show that all-manual ``verify`` rows are legal (operator-driven AC).
+
+## Acceptance criteria
+Structured below.
+
+## Feature list (JSON)
+
+```json
+[
+  {"id": "FL1", "description": "UI affordance visible on staging", "verify": "manual:operator-check"},
+  {"id": "FL2", "description": "Operator confirms no regressions on dashboard load", "verify": "manual:operator-check"}
+]
+```
+
+## Error catalog
+- `manual_verify_pending` — operator has not yet confirmed
+
+## State transitions
+pre_submit → checklist_inject → manual_pass → submit
+
+## Recovery / rollback
+Checklist is idempotent; re-injection produces identical payload.
+
+---
+**B6 dual-mode seed example. Not for execution.**
+""",
+        ["class:subscription-claude", "tier:S", "area:tooling", "example", "b6:feature-list"],
+    ),
+]
+
+
 META_EXAMPLE_SUMMARY = "Retro example — drift:over-run pattern demo [example]"
 
 META_EXAMPLE_DESCRIPTION = """## Retrospective example for ticket-convention demo
@@ -374,6 +555,7 @@ def main(argv: list[str]) -> int:
             META_EXAMPLE_DESCRIPTION,
             ["class:subscription-claude", "tier:S", "area:docs", "meta:retrospective", "drift:over-run", "example"],
         ),
+        *B6_FEATURE_LIST_EXAMPLES,
     ]
 
     print(f"JIRA site: {_load_env()['OMNISIGHT_JIRA_SITE_URL']}")
