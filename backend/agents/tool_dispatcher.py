@@ -37,6 +37,7 @@ import inspect
 import json
 import logging
 import re
+import shlex
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
@@ -77,6 +78,8 @@ class ToolError:
     error_type: str
     retryable: bool
     hint: str
+    suggested_tool: str | None = None
+    suggested_args: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -175,27 +178,14 @@ class ToolDispatcher:
                 False,
                 input_size,
             )
-            if tool_name in _STRUCTURED_ERROR_TOOLS:
-                return _error_result(
-                    tool_use_id,
-                    _tool_error_from_exception(e),
-                    {
-                        "tool_name": tool_name,
-                        "exception_type": type(e).__name__,
-                        "message": str(e)[:1000],
-                    },
-                )
-            return ToolResult(
+            return _error_result(
                 tool_use_id=tool_use_id,
-                content=json.dumps(
-                    {
-                        "error": "tool_raised",
-                        "tool_name": tool_name,
-                        "exception_type": type(e).__name__,
-                        "message": str(e)[:1000],
-                    }
-                ),
-                is_error=True,
+                error=_tool_error_from_exception(e, tool_name, tool_input),
+                extra={
+                    "tool_name": tool_name,
+                    "exception_type": type(e).__name__,
+                    "message": str(e)[:1000],
+                },
             )
 
         if tool_name == "Bash":
@@ -223,13 +213,13 @@ class ToolDispatcher:
         return ToolResult(tool_use_id=tool_use_id, content=content, is_error=False)
 
 
-_STRUCTURED_ERROR_TOOLS = frozenset({"Read", "Edit", "Bash"})
 _BASH_EXIT_RE = re.compile(r"(?m)^EXIT_CODE: (-?\d+)$")
 _BASH_TIMEOUT_PREFIX = "❌ command timed out after "
 _BASH_TRUNCATED_MARKERS = (
     "(... stdout truncated to last 30KB ...)",
     "(... stderr truncated to last 10KB ...)",
 )
+_GLOB_MAGIC_RE = re.compile(r"[*?\[]")
 
 
 def _error_result(
@@ -242,12 +232,17 @@ def _error_result(
     return ToolResult(tool_use_id=tool_use_id, content=content, is_error=True)
 
 
-def _tool_error_from_exception(exc: Exception) -> ToolError:
+def _tool_error_from_exception(
+    exc: Exception, tool_name: str, tool_input: dict[str, Any]
+) -> ToolError:
+    redirect = _suggest_redirect(tool_name, tool_input)
     return ToolError(
         error="tool_raised",
         error_type=type(exc).__name__,
         retryable=isinstance(exc, (TimeoutError, asyncio.TimeoutError)),
         hint=str(exc)[:1000],
+        suggested_tool=redirect[0] if redirect else None,
+        suggested_args=redirect[1] if redirect else None,
     )
 
 
@@ -277,6 +272,142 @@ def _tool_error_from_bash_output(raw: Any) -> ToolError | None:
             hint=raw[:1000],
         )
     return None
+
+
+def _suggest_redirect(
+    tool_name: str, tool_input: dict[str, Any]
+) -> tuple[str, dict[str, Any]] | None:
+    if tool_name == "Bash":
+        return _suggest_bash_redirect(tool_input.get("command"))
+    if tool_name == "Read":
+        path = tool_input.get("file_path")
+        if isinstance(path, str) and _GLOB_MAGIC_RE.search(path):
+            return "Glob", _glob_args_from_path(path)
+    return None
+
+
+def _glob_args_from_path(path: str) -> dict[str, Any]:
+    parts = path.split("/")
+    pattern_start = next(
+        (idx for idx, part in enumerate(parts) if _GLOB_MAGIC_RE.search(part)),
+        0,
+    )
+    prefix = "/".join(parts[:pattern_start])
+    pattern = "/".join(parts[pattern_start:]) or "*"
+    if prefix:
+        return {"path": prefix, "pattern": pattern}
+    return {"pattern": pattern}
+
+
+def _suggest_bash_redirect(command: Any) -> tuple[str, dict[str, Any]] | None:
+    if not isinstance(command, str):
+        return None
+    try:
+        argv = shlex.split(command.strip())
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    program = argv[0]
+    if program == "cat":
+        path = _first_non_option(argv[1:])
+        if path:
+            return "Read", {"file_path": path}
+    if program == "grep":
+        args = _translate_grep_args(argv[1:])
+        if args is not None:
+            return "Grep", args
+    if program == "find":
+        args = _translate_find_args(argv[1:])
+        if args is not None:
+            return "Glob", args
+    return None
+
+
+def _first_non_option(args: list[str]) -> str | None:
+    for arg in args:
+        if arg == "--":
+            continue
+        if not arg.startswith("-"):
+            return arg
+    return None
+
+
+def _translate_grep_args(args: list[str]) -> dict[str, Any] | None:
+    out: dict[str, Any] = {"output_mode": "files_with_matches"}
+    positionals: list[str] = []
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg in {"-r", "-R", "--recursive"}:
+            idx += 1
+            continue
+        if (
+            arg.startswith("-")
+            and not arg.startswith("--")
+            and arg not in {"-i", "-n", "-l", "-c", "-e"}
+        ):
+            if "i" in arg:
+                out["-i"] = True
+            if "n" in arg:
+                out["-n"] = True
+            if "l" in arg:
+                out["output_mode"] = "files_with_matches"
+            if "c" in arg:
+                out["output_mode"] = "count"
+            idx += 1
+            continue
+        if arg == "-i":
+            out["-i"] = True
+            idx += 1
+            continue
+        if arg == "-n":
+            out["-n"] = True
+            idx += 1
+            continue
+        if arg == "-l":
+            out["output_mode"] = "files_with_matches"
+            idx += 1
+            continue
+        if arg == "-c":
+            out["output_mode"] = "count"
+            idx += 1
+            continue
+        if arg == "-e" and idx + 1 < len(args):
+            positionals.append(args[idx + 1])
+            idx += 2
+            continue
+        if arg.startswith("--include="):
+            out["glob"] = arg.split("=", 1)[1]
+            idx += 1
+            continue
+        if arg == "--":
+            positionals.extend(args[idx + 1 :])
+            break
+        if arg.startswith("-"):
+            idx += 1
+            continue
+        positionals.append(arg)
+        idx += 1
+    if not positionals:
+        return None
+    out["pattern"] = positionals[0]
+    if len(positionals) > 1:
+        out["path"] = positionals[1]
+    return out
+
+
+def _translate_find_args(args: list[str]) -> dict[str, Any] | None:
+    out: dict[str, Any] = {}
+    if args and not args[0].startswith("-"):
+        out["path"] = args[0]
+    if "-name" in args:
+        idx = args.index("-name")
+        if idx + 1 < len(args):
+            out["pattern"] = args[idx + 1]
+    if "pattern" not in out:
+        out["pattern"] = "*"
+    return out
 
 
 def get_tool_summary(name: str) -> str:
