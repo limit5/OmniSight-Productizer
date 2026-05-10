@@ -86,13 +86,16 @@ def test_config_to_anthropic_payload_without_token():
 # ─── DEFAULT_REMOTE_MCP_CATALOG ──────────────────────────────────
 
 
-def test_catalog_has_four_known_servers():
+def test_catalog_has_known_servers():
+    """OP-813 (A5) added ``mcp_jira`` as the 5th catalog entry. Pin the
+    full set so adding a new server requires a deliberate test update."""
     names = {entry.name for entry in DEFAULT_REMOTE_MCP_CATALOG}
     assert names == {
         "claude_ai_Figma",
         "claude_ai_Gmail",
         "claude_ai_Google_Calendar",
         "claude_ai_Google_Drive",
+        "mcp_jira",  # OP-813 (A5)
     }
 
 

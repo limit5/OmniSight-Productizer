@@ -50,6 +50,12 @@ ENV_TOKEN_VAR_BY_NAME: dict[str, str] = {
     "claude_ai_Gmail":            "OMNISIGHT_MCP_GMAIL_TOKEN",
     "claude_ai_Google_Calendar":  "OMNISIGHT_MCP_GOOGLE_CALENDAR_TOKEN",
     "claude_ai_Google_Drive":     "OMNISIGHT_MCP_GOOGLE_DRIVE_TOKEN",
+    # OP-813 (A5): JIRA MCP gives the runner a tool surface for asking the
+    # ticket graph — "what's the parent META?", "which siblings are in the
+    # same Wave?", "what AC did the previous attempt verify?". Read-only;
+    # writes (transitions, comments) still go through ``jira_dispatch`` so
+    # the audit / governance layer is preserved.
+    "mcp_jira":                   "OMNISIGHT_MCP_JIRA_TOKEN",
 }
 
 
@@ -171,7 +177,41 @@ DEFAULT_REMOTE_MCP_CATALOG: tuple[_CatalogEntry, ...] = (
         ),
         sample_tools=("authenticate", "complete_authentication"),
     ),
+    # OP-813 (A5): mcp-atlassian-style JIRA bridge. Default URL points at the
+    # community ``mcp-atlassian`` reference server; operators may override to
+    # a self-hosted instance via ``OMNISIGHT_MCP_JIRA_URL``. The catalog
+    # advertises only **read** primitives — ``getTicket``, ``searchTickets``,
+    # ``getComments`` — because the runner-side governance layer (transitions,
+    # comments, AC verification) MUST stay in ``jira_dispatch``. AC#4 of
+    # OP-813 pins this read-only contract explicitly.
+    _CatalogEntry(
+        name="mcp_jira",
+        default_url="https://mcp-atlassian.local/jira",
+        description=(
+            "JIRA read-only MCP. Surface tools for the runner to query its "
+            "own ticket + siblings: getTicket(key) returns ticket fields "
+            "(summary, description, status, labels, parent, fixVersions), "
+            "searchTickets(jql) runs an arbitrary JQL and returns issue keys "
+            "+ summaries, getComments(key) returns the comment thread. "
+            "Writes (transitions, add_comment) NEVER go through MCP — they "
+            "stay in backend.agents.jira_dispatch so the governance / audit "
+            "trail is single-sourced (per OP-813 AC#4)."
+        ),
+        sample_tools=("getTicket", "searchTickets", "getComments"),
+    ),
 )
+
+
+# OP-813: read-only allowlist for JIRA MCP tool methods. The runner refuses
+# any ``mcp__mcp_jira__<method>`` call where ``<method>`` is not in this set
+# — the goal is structural enforcement of AC#4 ("no mutation via MCP") so a
+# misbehaving server (or compromised token) cannot, e.g., call
+# ``transitionTicket`` and bypass the audit layer.
+MCP_JIRA_READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "getTicket",
+    "searchTickets",
+    "getComments",
+})
 
 
 def default_catalog_by_name() -> dict[str, _CatalogEntry]:
@@ -307,10 +347,20 @@ def build_registry_from_env(
         token = src.get(env_var, "").strip()
         if not token:
             continue  # operator hasn't completed OAuth for this server
+        # OP-813: JIRA MCP allows operator override of the default URL via
+        # ``OMNISIGHT_MCP_JIRA_URL`` (self-hosted ``mcp-atlassian`` instances,
+        # air-gapped customers, alternate ports). Other entries don't expose
+        # URL override yet — they all live behind the Anthropic-managed
+        # gateway.
+        url = entry.default_url
+        if entry.name == "mcp_jira":
+            override = src.get("OMNISIGHT_MCP_JIRA_URL", "").strip()
+            if override:
+                url = override
         configs.append(
             MCPServerConfig(
                 name=entry.name,
-                url=entry.default_url,
+                url=url,
                 authorization_token=token,
                 description=entry.description,
                 enabled=True,
@@ -342,6 +392,30 @@ def parse_mcp_tool_name(tool_name: str) -> tuple[str, str] | None:
 
 def is_mcp_tool(tool_name: str) -> bool:
     return parse_mcp_tool_name(tool_name) is not None
+
+
+def is_jira_mcp_read_only_tool(tool_name: str) -> bool:
+    """OP-813 (A5): structural read-only check for the JIRA MCP server.
+
+    Returns True iff ``tool_name`` is of the form
+    ``mcp__mcp_jira__<method>`` AND ``<method>`` is in the
+    :data:`MCP_JIRA_READ_ONLY_TOOLS` allowlist (``getTicket``,
+    ``searchTickets``, ``getComments``).
+
+    The runner uses this to enforce AC#4 ("no mutation via MCP") by routing
+    only the allowlisted methods to the MCP server. A misbehaving server
+    advertising a write-shaped method (e.g., ``transitionTicket``) is
+    refused before the dispatcher fires, so the audit layer in
+    ``jira_dispatch`` remains the single source of truth for JIRA mutations.
+
+    Returns False for non-MCP tools, MCP tools targeting other servers, and
+    JIRA MCP tool names not in the allowlist.
+    """
+    parsed = parse_mcp_tool_name(tool_name)
+    if parsed is None:
+        return False
+    server, method = parsed
+    return server == "mcp_jira" and method in MCP_JIRA_READ_ONLY_TOOLS
 
 
 # ─── Local (in-process) MCP server registration — META OP-814 ─────
