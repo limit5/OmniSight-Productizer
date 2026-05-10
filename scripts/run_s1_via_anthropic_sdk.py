@@ -79,6 +79,14 @@ sys.path.insert(0, str(REPO))
 # Imports from the existing fleet — no new infra is added by this launcher;
 # every dependency below is shipped in develop.
 from backend.agents import jira_dispatch
+from backend.agents.tdd_applicability import (
+    TDDApplicability,
+    fetch_for_ticket as fetch_tdd_applicability,
+)
+from backend.agents.tdd_orchestrator import (
+    TDDOrchestrator,
+    installed_tdd_guard,
+)
 from backend.agents.anthropic_native_client import (
     AnthropicClient,
     DEFAULT_MODEL_OPUS,
@@ -550,6 +558,38 @@ def _build_user_prompt(ticket_key: str, ticket_description: str) -> str:
     )
 
 
+def _locator_tdd_decision(ticket_description: str) -> str:
+    """Temporary B7 locator stand-in for OP-834 conditional tickets."""
+    text = ticket_description.lower()
+    infra_markers = (
+        "no testable behavior",
+        "infra/scaffold",
+        "scaffold only",
+        "tooling only",
+        "documentation only",
+    )
+    if any(marker in text for marker in infra_markers):
+        return "bypass"
+    return "active"
+
+
+def _build_tdd_orchestrator(
+    *,
+    ticket_key: str,
+    ticket_description: str,
+    applicability: TDDApplicability,
+) -> TDDOrchestrator:
+    orchestrator = TDDOrchestrator(
+        ticket_key=ticket_key,
+        applicable=applicability.value,
+    )
+    if applicability.value == "conditional":
+        orchestrator.record_locator_decision(
+            _locator_tdd_decision(ticket_description)
+        )
+    return orchestrator
+
+
 def _is_retryable(stop_reason: str | None) -> bool:
     """W14.5 lesson: max_tokens / max_iterations_exceeded are not retryable."""
     return stop_reason not in NON_RETRYABLE_STOP_REASONS
@@ -659,6 +699,15 @@ async def process_ticket_full(
             )
 
     # === SDK invocation ===
+    if dry_run:
+        applicability = TDDApplicability(value="no", source="dry-run")
+    else:
+        applicability = fetch_tdd_applicability(jira_client, ticket_key)
+    tdd_orchestrator = _build_tdd_orchestrator(
+        ticket_key=ticket_key,
+        ticket_description=ticket_description,
+        applicability=applicability,
+    )
     system_prompt = _build_system_prompt(ticket_key, ticket_summary)
     user_prompt = _build_user_prompt(ticket_key, ticket_description)
     attempt_model = model
@@ -697,120 +746,121 @@ async def process_ticket_full(
         total_output_tokens += usage.output_tokens
 
     try:
-        while True:
-            async def _runner(*, prompt: str) -> RunResult:
-                return await client.run_with_tools(  # type: ignore[union-attr]
-                    prompt=prompt,
-                    raw_tools=BUILT_IN_TOOLS_SPEC,
-                    system=system_prompt,
-                    model=attempt_model,
-                    max_iterations=attempt_max_iterations,
-                    enable_cache=True,
-                    on_tool_call="log",
-                )
-
-            try:
-                outcome = await run_with_resets(
-                    runner=_runner,
-                    detector=b3_detector,
-                    scratchpad=b3_scratchpad,
-                    first_user_message=user_prompt,
-                    on_attempt_usage=_record_attempt_usage,
-                )
-            except Exception as exc:
-                return _abort_and_log(
-                    log_outcome, ticket_key, started, status="failed",
-                    error=f"SDK call exception: {type(exc).__name__}: {exc}",
-                )
-
-            finished = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
-
-            if outcome.aborted_terminal:
-                # B3 AC #5 — 3 resets used, still looping. Hard surrender.
-                sig = outcome.aborted_signature
-                sig_text = sig.render() if sig is not None else "<unknown>"
-                if not dry_run:
-                    _surrender_ticket(
-                        ticket_key,
-                        f"loop_aborted_terminal: {sig_text} repeated past "
-                        f"{b3_detector.reset_limit} resets (B3 / OP-830).",
+        with installed_tdd_guard(inner_dispatcher, tdd_orchestrator):
+            while True:
+                async def _runner(*, prompt: str) -> RunResult:
+                    return await client.run_with_tools(  # type: ignore[union-attr]
+                        prompt=prompt,
+                        raw_tools=BUILT_IN_TOOLS_SPEC,
+                        system=system_prompt,
+                        model=attempt_model,
+                        max_iterations=attempt_max_iterations,
+                        enable_cache=True,
+                        on_tool_call="log",
                     )
-                log_outcome(TicketOutcome(
-                    ticket_key=ticket_key, started_at=started, finished_at=finished,
-                    status="failed", cost_usd=total_cost_usd,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    iterations=total_iterations,
-                    error=f"loop_aborted_terminal: {sig_text}",
-                ))
-                return "failed"
 
-            assert outcome.final_result is not None  # not aborted => RunResult set
-            result = outcome.final_result
-            total_iterations += result.iterations
-            actual_cost_usd = last_attempt_cost_usd
-
-            # Per-attempt cap check (post-call; can't pre-empt mid-call).
-            if actual_cost_usd > attempt_cap_usd:
-                if not dry_run:
-                    _surrender_ticket(
-                        ticket_key,
-                        f"per-ticket cap ${attempt_cap_usd:.2f} exceeded "
-                        f"for model={attempt_model} (actual ${actual_cost_usd:.4f}). "
-                        f"Will not retry.",
+                try:
+                    outcome = await run_with_resets(
+                        runner=_runner,
+                        detector=b3_detector,
+                        scratchpad=b3_scratchpad,
+                        first_user_message=user_prompt,
+                        on_attempt_usage=_record_attempt_usage,
                     )
-                log_outcome(TicketOutcome(
-                    ticket_key=ticket_key, started_at=started, finished_at=finished,
-                    status="ticket_capped", cost_usd=total_cost_usd,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    iterations=total_iterations,
-                    error="per-ticket cap exceeded",
-                ))
-                return "ticket_capped"
+                except Exception as exc:
+                    return _abort_and_log(
+                        log_outcome, ticket_key, started, status="failed",
+                        error=f"SDK call exception: {type(exc).__name__}: {exc}",
+                    )
 
-            if _should_escalate_structural_stop(
-                ticket_key=ticket_key,
-                stop_reason=result.stop_reason,
-                escalation_counts=escalation_counts,
-            ):
-                escalation_counts[ticket_key] = escalation_counts.get(ticket_key, 0) + 1
-                attempt_model = DEFAULT_MODEL_OPUS
-                attempt_max_iterations = max_iterations * 2
-                attempt_cap_usd = DEFAULT_STRUCTURAL_RETRY_CAP_USD
-                allowed, block_reason = await _preflight_cost_gate(
-                    guard=guard, model=attempt_model, max_spend_usd=max_spend_usd,
-                )
-                if not allowed:
+                finished = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+                if outcome.aborted_terminal:
+                    # B3 AC #5 — 3 resets used, still looping. Hard surrender.
+                    sig = outcome.aborted_signature
+                    sig_text = sig.render() if sig is not None else "<unknown>"
+                    if not dry_run:
+                        _surrender_ticket(
+                            ticket_key,
+                            f"loop_aborted_terminal: {sig_text} repeated past "
+                            f"{b3_detector.reset_limit} resets (B3 / OP-830).",
+                        )
                     log_outcome(TicketOutcome(
-                        ticket_key=ticket_key, started_at=started,
-                        finished_at=finished, status="global_capped",
-                        cost_usd=total_cost_usd, input_tokens=total_input_tokens,
-                        output_tokens=total_output_tokens, iterations=total_iterations,
-                        error=block_reason,
+                        ticket_key=ticket_key, started_at=started, finished_at=finished,
+                        status="failed", cost_usd=total_cost_usd,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        iterations=total_iterations,
+                        error=f"loop_aborted_terminal: {sig_text}",
                     ))
-                    return "global_capped"
-                continue
+                    return "failed"
 
-            # === Stop reason classification (W14.5 lesson) ===
-            if not _is_retryable(result.stop_reason):
-                if not dry_run:
-                    _surrender_ticket(
-                        ticket_key,
-                        f"stop_reason={result.stop_reason} after "
-                        f"{escalation_counts.get(ticket_key, 0)} Opus escalation(s) "
-                        f"(structural — task too large, decompose needed).",
+                assert outcome.final_result is not None  # not aborted => RunResult set
+                result = outcome.final_result
+                total_iterations += result.iterations
+                actual_cost_usd = last_attempt_cost_usd
+
+                # Per-attempt cap check (post-call; can't pre-empt mid-call).
+                if actual_cost_usd > attempt_cap_usd:
+                    if not dry_run:
+                        _surrender_ticket(
+                            ticket_key,
+                            f"per-ticket cap ${attempt_cap_usd:.2f} exceeded "
+                            f"for model={attempt_model} (actual ${actual_cost_usd:.4f}). "
+                            f"Will not retry.",
+                        )
+                    log_outcome(TicketOutcome(
+                        ticket_key=ticket_key, started_at=started, finished_at=finished,
+                        status="ticket_capped", cost_usd=total_cost_usd,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        iterations=total_iterations,
+                        error="per-ticket cap exceeded",
+                    ))
+                    return "ticket_capped"
+
+                if _should_escalate_structural_stop(
+                    ticket_key=ticket_key,
+                    stop_reason=result.stop_reason,
+                    escalation_counts=escalation_counts,
+                ):
+                    escalation_counts[ticket_key] = escalation_counts.get(ticket_key, 0) + 1
+                    attempt_model = DEFAULT_MODEL_OPUS
+                    attempt_max_iterations = max_iterations * 2
+                    attempt_cap_usd = DEFAULT_STRUCTURAL_RETRY_CAP_USD
+                    allowed, block_reason = await _preflight_cost_gate(
+                        guard=guard, model=attempt_model, max_spend_usd=max_spend_usd,
                     )
-                log_outcome(TicketOutcome(
-                    ticket_key=ticket_key, started_at=started, finished_at=finished,
-                    status="failed", cost_usd=total_cost_usd,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    iterations=total_iterations,
-                    error=f"non-retryable stop_reason: {result.stop_reason}",
-                ))
-                return "failed"
-            break
+                    if not allowed:
+                        log_outcome(TicketOutcome(
+                            ticket_key=ticket_key, started_at=started,
+                            finished_at=finished, status="global_capped",
+                            cost_usd=total_cost_usd, input_tokens=total_input_tokens,
+                            output_tokens=total_output_tokens, iterations=total_iterations,
+                            error=block_reason,
+                        ))
+                        return "global_capped"
+                    continue
+
+                # === Stop reason classification (W14.5 lesson) ===
+                if not _is_retryable(result.stop_reason):
+                    if not dry_run:
+                        _surrender_ticket(
+                            ticket_key,
+                            f"stop_reason={result.stop_reason} after "
+                            f"{escalation_counts.get(ticket_key, 0)} Opus escalation(s) "
+                            f"(structural — task too large, decompose needed).",
+                        )
+                    log_outcome(TicketOutcome(
+                        ticket_key=ticket_key, started_at=started, finished_at=finished,
+                        status="failed", cost_usd=total_cost_usd,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        iterations=total_iterations,
+                        error=f"non-retryable stop_reason: {result.stop_reason}",
+                    ))
+                    return "failed"
+                break
     finally:
         # Restore the underlying dispatcher so subsequent tickets do not
         # inherit this ticket's detector state.
