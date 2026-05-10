@@ -475,7 +475,13 @@ register_tool(
                     "type": "string",
                     "description": "Skill name (no leading slash).",
                 },
-                "args": {"type": "string"},
+                "args": {
+                    "type": ["object", "string"],
+                    "description": (
+                        "Optional skill input. Markdown skills accept a string; "
+                        "executable skills accept a structured object."
+                    ),
+                },
             },
             "required": ["skill"],
         },
