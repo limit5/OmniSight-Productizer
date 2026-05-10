@@ -42,6 +42,33 @@ jobs:
       - name: scan for conflict markers
         run: python3 scripts/check_no_conflict_markers.py --verbose
 
+  runner-past-failure-regressions:
+    # OP-825 B0 — five tests that pin the auto-runner against the
+    # F4/F6/F7/F10/F11/F12/F20/F25 incident classes documented in
+    # docs/audit/2026-05-11-sprint-abc-master-plan.md §2.2. They are
+    # cheap pure-Python assertions over backend.agents.runner_health_checks
+    # and gate the rest of the matrix so a runner-side regression fails
+    # in seconds instead of hiding in the >1h backend-tests shard.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install --require-hashes -r backend/requirements.txt
+      - run: pip install --require-hashes -r backend/requirements-dev.txt
+      - name: pytest runner past-failure regressions (OP-825)
+        run: |
+          python3 -m pytest \
+            backend/tests/test_runner_pickup_bridge_currency.py \
+            backend/tests/test_runner_cross_ticket_peer_detect.py \
+            backend/tests/test_runner_prior_ps_rebase.py \
+            backend/tests/test_runner_feature_list_staging.py \
+            backend/tests/test_runner_stream_events_freshness.py \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -q
+
   lessons-index-git-gate:
     # OP-787 — lessons live in per-file front matter; the docs-site builds
     # the index dynamically, so the legacy generated file must not return.
