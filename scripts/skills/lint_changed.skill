@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+# description: Run ruff, black, and mypy checks on changed Python files only.
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+
+
+def _run(cmd: list[str]) -> list[str]:
+    if shutil.which(cmd[0]) is None:
+        return [f"{cmd[0]} unavailable"]
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    if proc.returncode == 0:
+        return []
+    lines = (proc.stdout + "\n" + proc.stderr).splitlines()
+    return [line for line in lines if line.strip()]
+
+
+def _changed_python_files() -> list[str]:
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=ACMRT", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return []
+    return sorted(
+        line.strip()
+        for line in proc.stdout.splitlines()
+        if line.strip().endswith(".py")
+    )
+
+
+def main() -> int:
+    files = _changed_python_files()
+    if not files:
+        print(json.dumps({"ruff": [], "black": [], "mypy": []}))
+        return 0
+    result = {
+        "ruff": _run(["ruff", "check", *files]),
+        "black": _run(["black", "--check", *files]),
+        "mypy": _run(["mypy", *files]),
+    }
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.stdin.read()
+    raise SystemExit(main())

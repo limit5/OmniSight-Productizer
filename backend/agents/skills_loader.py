@@ -47,8 +47,12 @@ ADR: TODO row WP.2 freezes this contract.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
+import subprocess
+import sys
 from hashlib import sha256
 from dataclasses import dataclass
 from pathlib import Path
@@ -215,7 +219,7 @@ def _legacy_header_description(body: str) -> tuple[str, str]:
 
 
 def parse_skill_file(path: Path, scope: str) -> Skill | None:
-    """Read one ``SKILL.md`` (or ``*.md``) and return a :class:`Skill`.
+    """Read one ``SKILL.md`` (or flat skill file) and return a :class:`Skill`.
 
     Returns None if the file is empty / unreadable. Logs a warning but
     does not raise — a malformed skill file shouldn't kill the loader.
@@ -227,6 +231,21 @@ def parse_skill_file(path: Path, scope: str) -> Skill | None:
         return None
     if not text.strip():
         return None
+
+    if path.suffix == ".skill":
+        description = "(no description)"
+        for line in text.splitlines()[:20]:
+            match = re.match(r"#\s*description\s*:\s*(.+)", line.strip())
+            if match:
+                description = match.group(1).strip()
+                break
+        return Skill(
+            name=path.stem,
+            description=description,
+            body=text,
+            source_path=path,
+            scope=scope,
+        )
 
     name = ""
     description = ""
@@ -422,12 +441,13 @@ def _scan_dir_for_skills(
     root: Path,
     scope: str,
 ) -> list[Skill]:
-    """Find every ``SKILL.md`` (or top-level ``*.md``) under ``root``.
+    """Find every ``SKILL.md`` (or top-level skill file) under ``root``.
 
     Convention 1: ``<root>/<skill_name>/SKILL.md`` — preferred shape, also
     the format Claude Code's bundled skills use.
 
     Convention 2: ``<root>/<skill_name>.md`` — flat layout fallback.
+    Convention 3: ``<root>/<skill_name>.skill`` — executable JSON skill.
     """
     if not root.exists() or not root.is_dir():
         return []
@@ -441,8 +461,8 @@ def _scan_dir_for_skills(
             if sk is not None:
                 out.append(sk)
             seen_paths.add(candidate)
-    # Flat *.md (skip README to avoid noise)
-    for md in sorted(root.glob("*.md")):
+    # Flat *.md / *.skill (skip README to avoid noise)
+    for md in sorted([*root.glob("*.md"), *root.glob("*.skill")]):
         if md.name.lower() in {"readme.md", "index.md"}:
             continue
         if md in seen_paths:
@@ -505,6 +525,7 @@ def _home_scope_dirs(home: Path | None = None) -> list[tuple[Path, int]]:
 
 def _bundled_scope_dirs(project_root: Path) -> list[tuple[Path, int]]:
     return [
+        (project_root / "scripts" / "skills", 130),
         (project_root / "omnisight" / "agents" / "skills", 120),
         (project_root / "configs" / "skills", 110),
     ]
@@ -619,7 +640,7 @@ def make_skill_handler(registry: SkillRegistry):
     unknown names produce a structured error so the LLM can recover.
     """
 
-    def _handler(payload: dict[str, Any]) -> str:
+    def _handler(payload: dict[str, Any]) -> Any:
         name = str(payload.get("skill", "")).strip()
         if not name:
             raise ValueError("Skill tool requires non-empty 'skill' field")
@@ -634,6 +655,8 @@ def make_skill_handler(registry: SkillRegistry):
             raise KeyError(
                 f"Unknown skill {name!r}. Available{more}: {top}"
             )
+        if skill.source_path is not None and skill.source_path.suffix == ".skill":
+            return _run_executable_skill(skill, payload)
         args = str(payload.get("args", "") or "").strip()
         body = skill.body
         if args:
@@ -641,6 +664,50 @@ def make_skill_handler(registry: SkillRegistry):
         return body
 
     return _handler
+
+
+def _run_executable_skill(skill: Skill, payload: dict[str, Any]) -> Any:
+    """Execute a flat ``*.skill`` file using JSON stdin/stdout."""
+    if skill.source_path is None:
+        raise ValueError(f"Executable skill {skill.name!r} has no source path")
+    script_path = skill.source_path.resolve()
+    args = payload.get("args")
+    if isinstance(args, dict):
+        skill_input = dict(args)
+    elif isinstance(args, str) and args.strip():
+        try:
+            decoded = json.loads(args)
+        except json.JSONDecodeError:
+            decoded = {"args": args}
+        skill_input = decoded if isinstance(decoded, dict) else {"args": decoded}
+    else:
+        skill_input = {}
+    for key, value in payload.items():
+        if key not in {"skill", "args"}:
+            skill_input[key] = value
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)],
+        input=json.dumps(skill_input),
+        text=True,
+        capture_output=True,
+        cwd=script_path.parents[2],
+        env=os.environ.copy(),
+        timeout=600,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            f"Executable skill {skill.name!r} failed with exit "
+            f"{result.returncode}: {detail[:1000]}"
+        )
+    try:
+        return json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Executable skill {skill.name!r} returned non-JSON output"
+        ) from e
 
 
 # ─── Catalog rendering for system prompt ────────────────────────

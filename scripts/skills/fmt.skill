@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+# description: Format Python files matching a path glob and report modifications.
+from __future__ import annotations
+
+import glob
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _read_input() -> dict:
+    raw = sys.stdin.read().strip()
+    return json.loads(raw) if raw else {}
+
+
+def main() -> int:
+    payload = _read_input()
+    path_glob = str(payload.get("path_glob") or payload.get("args") or "").strip()
+    if not path_glob:
+        raise SystemExit("path_glob is required")
+    files = sorted(Path(p) for p in glob.glob(path_glob, recursive=True))
+    files = [p for p in files if p.is_file()]
+    before = {p: p.read_bytes() for p in files}
+    if files:
+        if shutil.which("ruff") is None:
+            raise SystemExit("ruff is required for fmt.skill")
+        subprocess.run(["ruff", "format", *(str(p) for p in files)], check=False)
+    files_modified = sum(1 for p, content in before.items() if p.read_bytes() != content)
+    print(json.dumps({"files_modified": files_modified}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
