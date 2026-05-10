@@ -1435,6 +1435,11 @@ from backend.routers import ci_dead_letter as _ci_dead_letter_router  # OP-741 C
 _include_versioned_router(_ci_dead_letter_router.router)
 from backend.routers import conflict_dashboard as _conflict_dashboard_router  # OP-746 conflict-rate observability tile
 _include_versioned_router(_conflict_dashboard_router.router)
+from backend.routers import sdk_cost_tracker as _sdk_cost_tracker_router  # OP-820 SDK runner per-ticket spend tile
+_include_versioned_router(_sdk_cost_tracker_router.router)
+# OP-820 acceptance names /api/sdk/cost explicitly; keep the canonical
+# versioned route for frontend clients and expose this compatibility alias.
+app.include_router(_sdk_cost_tracker_router.router, prefix="/api")
 
 # Final mount: attach the aggregate v1 + v2 routers to the app. The
 # routers themselves were populated above via _include_versioned_router

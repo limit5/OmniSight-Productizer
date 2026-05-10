@@ -3266,6 +3266,53 @@ export async function getConflictTrend(): Promise<ConflictTrendResponse> {
   return request<ConflictTrendResponse>("/admin/conflict-trend")
 }
 
+// ─── SDK cost tracker tile (OP-820) ─────────────────────────────
+
+export interface SdkCostRow {
+  ticket: string
+  rolling_24h_usd: number
+  cumulative_usd: number
+  alert_count_24h: number
+  last_alert_at: string | null
+}
+
+export interface SdkCostEvent {
+  ticket: string
+  alert_id: string
+  scope: string
+  period: string
+  level: string
+  action: string
+  delta_usd: number
+  observed_usd: number
+  threshold_usd: number
+  cumulative_usd: number
+  fired_at: string
+}
+
+export interface SdkCostResponse {
+  ticket: string | null
+  window_hours: number
+  generated_at: string
+  rows: SdkCostRow[]
+  total_rolling_24h_usd: number
+  total_cumulative_usd: number
+  events: SdkCostEvent[]
+}
+
+export async function getSdkCost(ticket?: string): Promise<SdkCostResponse> {
+  const qs = ticket ? `?ticket=${encodeURIComponent(ticket)}` : ""
+  return request<SdkCostResponse>(`/sdk/cost${qs}`)
+}
+
+export function getSdkCostStreamUrl(ticket: string): string {
+  const qs = `ticket=${encodeURIComponent(ticket)}&stream=1`
+  const path = `/sdk/cost?${qs}`
+  return API_V1.startsWith("http")
+    ? `${API_V1}${path}`
+    : `${window.location.origin}${API_V1}${path}`
+}
+
 // ─── External A2A agent registry (BP.A2A.6 operator UI) ─────────
 
 export type ExternalAgentAuthMode = "none" | "bearer" | "oauth2"
