@@ -669,6 +669,47 @@ def main() -> int:
             push_result = jira_dispatch.push_to_gerrit_for_review(
                 worktree_path, AGENT_CLASS, target="develop", instance_id=INSTANCE_ID
             )
+        except jira_dispatch.NoCommitsOnBranchError as e:
+            # OP-827 fix: claude/codex CLI exited without committing. Posting AC
+            # and exiting bypasses the commit, so there is nothing to push and
+            # the right move is to revert to To Do for fresh re-pickup. Leaving
+            # the ticket as In Progress here was the OP-811/OP-813 wedge that
+            # ran for 2.5 days.
+            print(f"[runner] CLI produced no commits: {e}", file=sys.stderr)
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[runner-no-commits-from-cli] CLI exited cleanly but produced "
+                f"0 commits between {e.base_ref[:12]}..{e.head[:12]}. "
+                f"Reverting to To Do for re-pickup (post-mortem: OP-827).",
+            )
+            try:
+                jira_dispatch.transition_back_to_todo(
+                    client, snapshot.key,
+                    "[runner-no-commits-from-cli] CLI exited without committing.",
+                )
+            except Exception as revert_err:
+                print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+            return 1
+        except jira_dispatch.WorktreeDirtyError as e:
+            # OP-827 fix: CLI wrote files but never committed (or skipped
+            # ``git add``). Same wedge class as NoCommitsOnBranchError; the
+            # recovery path is identical (revert + re-pickup).
+            print(f"[runner] CLI left worktree dirty: {e}", file=sys.stderr)
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[runner-dirty-worktree] CLI exited with {len(e.dirty_files)} "
+                f"uncommitted path(s); rebase cannot proceed. First few: "
+                f"`{e.dirty_files[:5]}`. Reverting to To Do for re-pickup "
+                f"(post-mortem: OP-827).",
+            )
+            try:
+                jira_dispatch.transition_back_to_todo(
+                    client, snapshot.key,
+                    "[runner-dirty-worktree] CLI exited without committing.",
+                )
+            except Exception as revert_err:
+                print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+            return 1
         except Exception as e:
             print(f"[runner] Gerrit push setup failed: {e}", file=sys.stderr)
             jira_dispatch.add_comment(

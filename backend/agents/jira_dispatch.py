@@ -763,6 +763,48 @@ def assert_worktree_clean(worktree_path: Path) -> None:
         log.info("worktree pre-sync: recovered from %s", recovered)
 
 
+class NoCommitsOnBranchError(RuntimeError):
+    """Raised by :func:`ensure_change_ids` when the branch has no commits to
+    push relative to ``base_ref``.
+
+    OP-827 post-mortem: claude CLI sometimes finishes implementation, posts
+    the AC-verification comment, then exits without making a commit. The
+    runner's previous behaviour was to call ``git rebase`` against an empty
+    branch — git's exact error code there is non-deterministic (rc=1 with a
+    generic message), and the runner fell back to the wedge path
+    (``[runner-gerrit-setup-fail]`` comment + ticket left orphan In Progress
+    for 2.5 days in OP-811/OP-813). Surfacing the precondition explicitly
+    lets the caller route to the correct recovery (revert to To Do + clear
+    assignee).
+    """
+
+    def __init__(self, base_ref: str, head: str) -> None:
+        super().__init__(
+            f"branch has 0 commits between {base_ref[:12]}..{head[:12]} — "
+            "claude CLI exited without producing a commit"
+        )
+        self.base_ref = base_ref
+        self.head = head
+
+
+class WorktreeDirtyError(RuntimeError):
+    """Raised by :func:`ensure_change_ids` when the worktree has uncommitted
+    changes that would block ``git rebase``.
+
+    Same OP-827 lineage: distinguishes "claude wrote files but never
+    committed them" from "claude made commits and we should rebase". The
+    caller routes the former to a revert (work was lost / never landed) and
+    the latter to the standard rebase path.
+    """
+
+    def __init__(self, dirty_files: list[str]) -> None:
+        super().__init__(
+            f"worktree has {len(dirty_files)} uncommitted path(s); rebase "
+            f"refuses to run. First few: {dirty_files[:5]}"
+        )
+        self.dirty_files = dirty_files
+
+
 def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
     """Rebase commits between base_ref..HEAD with --exec amend, triggering
     the commit-msg hook on each commit so they all get a Change-Id footer.
@@ -774,8 +816,42 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
     default of "main" rebased onto local main which could contain commits
     with non-bot committer emails — Gerrit then rejects on push.
 
+    OP-827 fix: two preconditions are checked before invoking ``git rebase``
+    so the orphan-In-Progress wedge that hit OP-811/OP-813 cannot recur:
+
+    * ``NoCommitsOnBranchError`` if ``base_ref..HEAD`` is empty — claude
+      exited without committing; the right caller response is "revert to
+      To Do", not "retry the rebase".
+    * ``WorktreeDirtyError`` if ``git status --porcelain`` reports
+      uncommitted paths — same wedge cause, different shape (claude wrote
+      files but skipped both commit AND clean exit).
+
     Recommended usage: pass `develop_sha` from `sync_to_gerrit_develop()`.
     """
+    # Precondition 1: branch has at least one commit beyond base_ref.
+    rev_list = subprocess.run(
+        ["git", "rev-list", f"{base_ref}..HEAD", "--count"],
+        cwd=worktree_path, check=True, capture_output=True, text=True,
+    )
+    commit_count = int(rev_list.stdout.strip() or "0")
+    if commit_count == 0:
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree_path, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        raise NoCommitsOnBranchError(base_ref=base_ref, head=head_sha)
+
+    # Precondition 2: worktree has no uncommitted paths. ``git rebase``
+    # refuses on a dirty worktree with a non-deterministic error message,
+    # so we shape the diagnostic ourselves.
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree_path, check=True, capture_output=True, text=True,
+    )
+    dirty = [line[3:] for line in status.stdout.splitlines() if line.strip()]
+    if dirty:
+        raise WorktreeDirtyError(dirty_files=dirty)
+
     try:
         subprocess.run(
             [

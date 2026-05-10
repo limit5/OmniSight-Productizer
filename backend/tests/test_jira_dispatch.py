@@ -451,53 +451,77 @@ def test_interleaved_worktrees_commit_and_push_with_correct_email(tmp_path) -> N
     assert codex_commit_email == "rt3628+codex-bot@gmail.com rt3628+codex-bot@gmail.com"
 
 
+def _fake_passing_preconditions_run(cmd, **kwargs):
+    """OP-827: stub subprocess.run that satisfies ``ensure_change_ids``'s
+    two new preconditions (rev-list reports ≥1 commit, status is clean)
+    so the unit tests below can focus on rebase-shape / cleanup behaviour
+    without spinning up a real git repo.
+    """
+    class FakeResult:
+        returncode = 0
+        stderr = ""
+
+    if cmd[:2] == ["git", "rev-list"] and "--count" in cmd:
+        result = FakeResult()
+        result.stdout = "1\n"  # at least one commit beyond base_ref
+        return result
+    if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+        result = FakeResult()
+        result.stdout = "deadbeefcafe\n"
+        return result
+    if cmd[:2] == ["git", "status"]:
+        result = FakeResult()
+        result.stdout = ""  # clean tree
+        return result
+    result = FakeResult()
+    result.stdout = ""
+    return result
+
+
 def test_ensure_change_ids_rebase_command_shape(tmp_path, monkeypatch):
     """ensure_change_ids invokes `git rebase <base_ref> --keep-empty --exec amend`."""
     calls = []
 
-    class FakeResult:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        return FakeResult()
+        return _fake_passing_preconditions_run(cmd, **kwargs)
 
     monkeypatch.setattr("subprocess.run", fake_run)
     jd.ensure_change_ids(tmp_path, base_ref="abcdef1234")
 
-    assert len(calls) == 1
-    assert calls[0][:3] == ["git", "rebase", "abcdef1234"]
-    assert "--keep-empty" in calls[0]
-    assert "--exec" in calls[0]
+    # Filter out OP-827 precondition probes; assert only on the rebase invocation.
+    rebase_calls = [c for c in calls if c[:2] == ["git", "rebase"]]
+    assert len(rebase_calls) == 1
+    assert rebase_calls[0][:3] == ["git", "rebase", "abcdef1234"]
+    assert "--keep-empty" in rebase_calls[0]
+    assert "--exec" in rebase_calls[0]
     # The exec command must run `git commit --amend --no-edit` to trigger commit-msg hook
-    exec_idx = calls[0].index("--exec") + 1
-    assert "commit --amend --no-edit" in calls[0][exec_idx]
+    exec_idx = rebase_calls[0].index("--exec") + 1
+    assert "commit --amend --no-edit" in rebase_calls[0][exec_idx]
 
 
 def test_ensure_change_ids_quits_rebase_on_failure(tmp_path, monkeypatch):
     """OP-736: failed rebase/amend cleanup must quit half-open rebase state."""
     calls = []
 
-    class FakeResult:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
         if cmd[:2] == ["git", "rebase"] and "--exec" in cmd:
             raise subprocess.CalledProcessError(returncode=1, cmd=cmd, stderr="paused")
-        return FakeResult()
+        return _fake_passing_preconditions_run(cmd, **kwargs)
 
     monkeypatch.setattr("subprocess.run", fake_run)
     with pytest.raises(subprocess.CalledProcessError):
         jd.ensure_change_ids(tmp_path, base_ref="abcdef1234")
 
-    assert calls[0][:3] == ["git", "rebase", "abcdef1234"]
-    assert "--keep-empty" in calls[0]
-    assert calls[1] == ["git", "rebase", "--quit"]
+    # Locate the rebase invocation among the precondition probes.
+    rebase_main = next(
+        c for c in calls if c[:2] == ["git", "rebase"] and "--exec" in c
+    )
+    assert rebase_main[:3] == ["git", "rebase", "abcdef1234"]
+    assert "--keep-empty" in rebase_main
+    # Cleanup `git rebase --quit` must run after the failed rebase.
+    assert ["git", "rebase", "--quit"] in calls
 
 
 @pytest.mark.parametrize(
@@ -1109,3 +1133,106 @@ def test_pre_pickup_ok_mutex_reason_lists_each_blocking_sibling(monkeypatch) -> 
     assert "OP-101" in reason
     assert "mutex:backend/foo.py" in reason
     assert "mutex:alembic-chain-head" in reason
+
+
+# OP-827: ``ensure_change_ids`` precondition tests. Post-mortem of OP-811 +
+# OP-813 — claude CLI completed work, posted AC-verification comment, exited
+# without commit; runner's ``git rebase`` failed on the empty/dirty branch
+# and left the ticket as orphan In Progress for 2.5 days. The fix raises
+# typed exceptions so the runner can route to the revert path.
+
+
+def _init_worktree(tmp_path: Path) -> Path:
+    """Build a minimal real git repo under ``tmp_path`` and return the path."""
+    repo = tmp_path / "wt"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "test"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    return repo
+
+
+def _head_sha(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def test_ensure_change_ids_raises_no_commits_on_empty_branch(tmp_path: Path) -> None:
+    """Branch with HEAD == base_ref → NoCommitsOnBranchError, no rebase."""
+    repo = _init_worktree(tmp_path)
+    base = _head_sha(repo)
+    with pytest.raises(jd.NoCommitsOnBranchError) as ei:
+        jd.ensure_change_ids(repo, base_ref=base)
+    err = ei.value
+    assert err.base_ref == base
+    assert err.head == base
+
+
+def test_ensure_change_ids_raises_dirty_worktree(tmp_path: Path) -> None:
+    """Uncommitted changes → WorktreeDirtyError listing the dirty paths."""
+    repo = _init_worktree(tmp_path)
+    base = _head_sha(repo)
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "feature.py"], cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "feature"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    (repo / "uncommitted.py").write_text("y = 2\n", encoding="utf-8")
+    with pytest.raises(jd.WorktreeDirtyError) as ei:
+        jd.ensure_change_ids(repo, base_ref=base)
+    assert "uncommitted.py" in ei.value.dirty_files
+
+
+def test_ensure_change_ids_succeeds_with_commits_and_clean_tree(tmp_path: Path) -> None:
+    """Happy path: commits exist, worktree clean → rebase + amend runs."""
+    repo = _init_worktree(tmp_path)
+    base = _head_sha(repo)
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "feature.py"], cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "feature"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    jd.ensure_change_ids(repo, base_ref=base)
+
+
+def test_ensure_change_ids_no_commits_error_carries_diagnostic_text() -> None:
+    """Exception message includes a hint pointing at the CLI as cause."""
+    err = jd.NoCommitsOnBranchError(base_ref="abc123def456", head="abc123def456")
+    msg = str(err)
+    assert "0 commits" in msg
+    assert "abc123def456" in msg
+    assert "claude CLI" in msg or "without producing a commit" in msg
+
+
+def test_ensure_change_ids_dirty_error_truncates_long_file_list() -> None:
+    """20 dirty files → message shows first 5 only (no log explosion)."""
+    err = jd.WorktreeDirtyError(dirty_files=[f"file_{i}.py" for i in range(20)])
+    msg = str(err)
+    assert "20 uncommitted" in msg
+    assert "file_0.py" in msg
+    assert "file_19.py" not in msg
