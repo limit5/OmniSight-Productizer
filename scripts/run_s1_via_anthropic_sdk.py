@@ -99,6 +99,10 @@ from backend.agents.skills_loader import (
     make_skill_handler,
 )
 from backend.agents.sub_agent import make_agent_tool_handler
+from backend.agents.tool_dispatcher import (
+    WORKTREE_ENV_VAR,
+    bind_built_in_tools,
+)
 
 
 DEFAULT_MODEL_SONNET = "claude-sonnet-4-6"
@@ -117,6 +121,31 @@ S1_SPRINT_NAME = "S1: MP v0.4.0"
 # project-defined verb (lint_changed, run_tests, etc.) goes unused.
 RUNNER_TOOLS: list[str] = [
     "Read", "Write", "Edit", "Bash", "Grep", "Glob", "Skill", "Agent",
+]
+
+# OP-828 (B1) — Anthropic built-in tools spec. The model issues tool_use
+# blocks against these names; ``str_replace_based_edit_tool`` and ``bash``
+# round-trip through the dispatcher's local handlers, while
+# ``code_execution`` runs server-side in Anthropic's PTC sandbox. The
+# ``allowed_callers`` whitelist is the AC #3 boundary that prevents the
+# sandbox from issuing unrelated tool calls (HTTP / DB).
+BUILT_IN_TOOLS_SPEC: list[dict[str, Any]] = [
+    {
+        "type": "text_editor_20250728",
+        "name": "str_replace_based_edit_tool",
+    },
+    {
+        "type": "bash_20250124",
+        "name": "bash",
+    },
+    {
+        "type": "code_execution_20260120",
+        "name": "code_execution",
+        "allowed_callers": [
+            "text_editor_20250728",
+            "bash_20250124",
+        ],
+    },
 ]
 
 # Stop reasons that indicate the task is structurally too big — DO NOT
@@ -579,7 +608,7 @@ async def process_ticket_full(
         try:
             result = await client.run_with_tools(  # type: ignore[union-attr]
                 prompt=user_prompt,
-                tools=RUNNER_TOOLS,
+                raw_tools=BUILT_IN_TOOLS_SPEC,
                 system=system_prompt,
                 model=attempt_model,
                 max_iterations=attempt_max_iterations,
@@ -853,11 +882,24 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.dry_run:
         client: Any = _DryRunClient()
     else:
+        # OP-828 (B1): the launcher uses Anthropic built-in tools, so the
+        # PTC sandbox needs OMNISIGHT_WORKTREE_PATH set in env (AC #2 — the
+        # sandbox refuses to launch otherwise). Surface the precondition
+        # here rather than letting the first ticket's tool call fail
+        # mid-flight with a confusing structured error.
+        if not os.environ.get(WORKTREE_ENV_VAR):
+            os.environ[WORKTREE_ENV_VAR] = str(WORKTREE_PATH)
+
         # Build a real tool dispatcher so the model's Read/Write/Edit/Bash/
         # Grep/Glob calls actually resolve to handlers (without this the
         # SDK returns `no_handler_registered` for every tool call and the
         # model surrenders immediately — pilot run lesson 2026-05-09).
         dispatcher = make_runner_dispatcher()
+        # OP-828 (B1): also register the Anthropic built-in tool names so
+        # the dispatcher can locally round-trip text_editor / bash / PTC
+        # calls when running outside the hosted sandbox (tests, dry-run
+        # parity, future vendor-fallback paths).
+        bind_built_in_tools(dispatcher, worktree_root=WORKTREE_PATH)
         client = AnthropicClient(api_key=_load_api_key(), dispatcher=dispatcher)
         # OP-811 (A3): wire Skill (project verbs) + Agent (sub-agent decomposition)
         # onto the dispatcher AFTER the client exists so the Agent handler can
