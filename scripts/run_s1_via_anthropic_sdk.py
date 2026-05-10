@@ -99,6 +99,7 @@ DEFAULT_MODEL_SONNET = "claude-sonnet-4-6"
 DEFAULT_MAX_ITERATIONS = 40  # Lower than auto-runner-sdk's 80; per W14.5
                               # lesson, max_iterations_exceeded is a
                               # decompose signal, not a retry signal.
+DEFAULT_STRUCTURAL_RETRY_CAP_USD = 20.0
 LAUNCHER_AGENT_CLASS = "api-anthropic"
 S1_SPRINT_NAME = "S1: MP v0.4.0"
 
@@ -114,6 +115,7 @@ RUNNER_TOOLS: list[str] = ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
 NON_RETRYABLE_STOP_REASONS: frozenset[str] = frozenset({
     "max_tokens", "max_iterations_exceeded",
 })
+STRUCTURAL_ESCALATION_STOP_REASONS = NON_RETRYABLE_STOP_REASONS
 
 # Pickup JQL — only refined Story tickets in S1 (placeholders are explicitly
 # excluded by ``labels not in ("runner-needs-refinement")``).
@@ -449,6 +451,37 @@ def _is_retryable(stop_reason: str | None) -> bool:
     return stop_reason not in NON_RETRYABLE_STOP_REASONS
 
 
+async def _preflight_cost_gate(
+    *,
+    guard: CostGuard,
+    model: str,
+    max_spend_usd: float,
+) -> tuple[bool, str | None]:
+    """Run the launcher's strict global cap gate for one SDK attempt."""
+    estimate = await estimate_for(guard, model=model, in_tok=600_000, out_tok=30_000)
+    spend_so_far = await cumulative_spend(guard)
+    projected = spend_so_far + estimate.cost_usd_estimated
+    if projected > max_spend_usd:
+        return (
+            False,
+            f"hard cap: projected ${projected:.2f} > ${max_spend_usd:.2f}",
+        )
+    await guard.check(estimate, per_batch_observed_usd=spend_so_far)
+    return True, None
+
+
+def _should_escalate_structural_stop(
+    *,
+    ticket_key: str,
+    stop_reason: str | None,
+    escalation_counts: dict[str, int],
+) -> bool:
+    """Allow exactly one Sonnet -> Opus escalation per ticket."""
+    if stop_reason not in STRUCTURAL_ESCALATION_STOP_REASONS:
+        return False
+    return escalation_counts.get(ticket_key, 0) < 1
+
+
 async def process_ticket_full(
     *,
     client: AnthropicClient | _DryRunClient,
@@ -462,15 +495,17 @@ async def process_ticket_full(
     max_iterations: int,
     log_outcome: Callable[[TicketOutcome], None],
     dry_run: bool = False,
+    escalation_counts: dict[str, int] | None = None,
 ) -> str:
     """Full pipeline: sync worktree → JIRA In Progress → SDK invoke →
     push Gerrit → walk JIRA. Returns the outcome status string.
 
-    On any structural failure (max_tokens, max_iterations, push fail,
-    per-ticket cap exceeded), we walk the ticket back to To Do with a
-    hint comment and move on. **No retries** — that's the W14.5 lesson.
+    On structural failure (max_tokens, max_iterations), retry once with
+    Opus and doubled max_iterations. A second structural failure walks the
+    ticket back to To Do.
     """
     started = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    escalation_counts = escalation_counts if escalation_counts is not None else {}
 
     # === Idempotency ===
     if has_existing_gerrit_ps(ticket_key):
@@ -482,19 +517,18 @@ async def process_ticket_full(
         return "skipped_existing_ps"
 
     # === Pre-flight cost gate ===
-    estimate = await estimate_for(guard, model=model, in_tok=600_000, out_tok=30_000)
-    spend_so_far = await cumulative_spend(guard)
-    projected = spend_so_far + estimate.cost_usd_estimated
-    if projected > max_spend_usd:
+    allowed, block_reason = await _preflight_cost_gate(
+        guard=guard, model=model, max_spend_usd=max_spend_usd,
+    )
+    if not allowed:
         finished = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
         log_outcome(TicketOutcome(
             ticket_key=ticket_key, started_at=started, finished_at=finished,
             status="global_capped", cost_usd=0.0,
             input_tokens=0, output_tokens=0, iterations=0,
-            error=f"hard cap: projected ${projected:.2f} > ${max_spend_usd:.2f}",
+            error=block_reason,
         ))
         return "global_capped"
-    await guard.check(estimate, per_batch_observed_usd=spend_so_far)
 
     # === JIRA: In Progress ===
     if not dry_run:
@@ -523,63 +557,101 @@ async def process_ticket_full(
     # === SDK invocation ===
     system_prompt = _build_system_prompt(ticket_key, ticket_summary)
     user_prompt = _build_user_prompt(ticket_key, ticket_description)
-    try:
-        result = await client.run_with_tools(  # type: ignore[union-attr]
-            prompt=user_prompt,
-            tools=RUNNER_TOOLS,
-            system=system_prompt,
-            model=model,
-            max_iterations=max_iterations,
-            enable_cache=True,
-            on_tool_call="log",
-        )
-    except Exception as exc:
-        return _abort_and_log(
-            log_outcome, ticket_key, started, status="failed",
-            error=f"SDK call exception: {type(exc).__name__}: {exc}",
-        )
+    attempt_model = model
+    attempt_max_iterations = max_iterations
+    attempt_cap_usd = per_ticket_cap_usd
+    total_cost_usd = 0.0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_iterations = 0
 
-    # === Cost record ===
-    actual_cost_usd = await _post_call_cost_record(
-        guard=guard, model=model, usage=result.usage,
-    )
-    finished = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
-
-    # === Per-ticket cap check (post-call; can't pre-empt mid-call) ===
-    if actual_cost_usd > per_ticket_cap_usd:
-        if not dry_run:
-            _surrender_ticket(
-                ticket_key,
-                f"per-ticket cap ${per_ticket_cap_usd:.2f} exceeded "
-                f"(actual ${actual_cost_usd:.4f}). Will not retry.",
+    while True:
+        try:
+            result = await client.run_with_tools(  # type: ignore[union-attr]
+                prompt=user_prompt,
+                tools=RUNNER_TOOLS,
+                system=system_prompt,
+                model=attempt_model,
+                max_iterations=attempt_max_iterations,
+                enable_cache=True,
+                on_tool_call="log",
             )
-        log_outcome(TicketOutcome(
-            ticket_key=ticket_key, started_at=started, finished_at=finished,
-            status="ticket_capped", cost_usd=actual_cost_usd,
-            input_tokens=result.usage.input_tokens,
-            output_tokens=result.usage.output_tokens,
-            iterations=result.iterations,
-            error="per-ticket cap exceeded",
-        ))
-        return "ticket_capped"
-
-    # === Stop reason classification (W14.5 lesson) ===
-    if not _is_retryable(result.stop_reason):
-        if not dry_run:
-            _surrender_ticket(
-                ticket_key,
-                f"stop_reason={result.stop_reason} (structural — "
-                f"task too large, decompose needed; not retryable).",
+        except Exception as exc:
+            return _abort_and_log(
+                log_outcome, ticket_key, started, status="failed",
+                error=f"SDK call exception: {type(exc).__name__}: {exc}",
             )
-        log_outcome(TicketOutcome(
-            ticket_key=ticket_key, started_at=started, finished_at=finished,
-            status="failed", cost_usd=actual_cost_usd,
-            input_tokens=result.usage.input_tokens,
-            output_tokens=result.usage.output_tokens,
-            iterations=result.iterations,
-            error=f"non-retryable stop_reason: {result.stop_reason}",
-        ))
-        return "failed"
+
+        actual_cost_usd = await _post_call_cost_record(
+            guard=guard, model=attempt_model, usage=result.usage,
+        )
+        total_cost_usd += actual_cost_usd
+        total_input_tokens += result.usage.input_tokens
+        total_output_tokens += result.usage.output_tokens
+        total_iterations += result.iterations
+        finished = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+        # Per-attempt cap check (post-call; can't pre-empt mid-call).
+        if actual_cost_usd > attempt_cap_usd:
+            if not dry_run:
+                _surrender_ticket(
+                    ticket_key,
+                    f"per-ticket cap ${attempt_cap_usd:.2f} exceeded "
+                    f"for model={attempt_model} (actual ${actual_cost_usd:.4f}). "
+                    f"Will not retry.",
+                )
+            log_outcome(TicketOutcome(
+                ticket_key=ticket_key, started_at=started, finished_at=finished,
+                status="ticket_capped", cost_usd=total_cost_usd,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                iterations=total_iterations,
+                error="per-ticket cap exceeded",
+            ))
+            return "ticket_capped"
+
+        if _should_escalate_structural_stop(
+            ticket_key=ticket_key,
+            stop_reason=result.stop_reason,
+            escalation_counts=escalation_counts,
+        ):
+            escalation_counts[ticket_key] = escalation_counts.get(ticket_key, 0) + 1
+            attempt_model = DEFAULT_MODEL_OPUS
+            attempt_max_iterations = max_iterations * 2
+            attempt_cap_usd = DEFAULT_STRUCTURAL_RETRY_CAP_USD
+            allowed, block_reason = await _preflight_cost_gate(
+                guard=guard, model=attempt_model, max_spend_usd=max_spend_usd,
+            )
+            if not allowed:
+                log_outcome(TicketOutcome(
+                    ticket_key=ticket_key, started_at=started,
+                    finished_at=finished, status="global_capped",
+                    cost_usd=total_cost_usd, input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens, iterations=total_iterations,
+                    error=block_reason,
+                ))
+                return "global_capped"
+            continue
+
+        # === Stop reason classification (W14.5 lesson) ===
+        if not _is_retryable(result.stop_reason):
+            if not dry_run:
+                _surrender_ticket(
+                    ticket_key,
+                    f"stop_reason={result.stop_reason} after "
+                    f"{escalation_counts.get(ticket_key, 0)} Opus escalation(s) "
+                    f"(structural — task too large, decompose needed).",
+                )
+            log_outcome(TicketOutcome(
+                ticket_key=ticket_key, started_at=started, finished_at=finished,
+                status="failed", cost_usd=total_cost_usd,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                iterations=total_iterations,
+                error=f"non-retryable stop_reason: {result.stop_reason}",
+            ))
+            return "failed"
+        break
 
     # === Detect surrender marker (model said it gave up cleanly) ===
     if "🛑 SCOPE_SURRENDERED" in result.final_text:
@@ -590,10 +662,10 @@ async def process_ticket_full(
             )
         log_outcome(TicketOutcome(
             ticket_key=ticket_key, started_at=started, finished_at=finished,
-            status="surrendered", cost_usd=actual_cost_usd,
-            input_tokens=result.usage.input_tokens,
-            output_tokens=result.usage.output_tokens,
-            iterations=result.iterations,
+            status="surrendered", cost_usd=total_cost_usd,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            iterations=total_iterations,
             error="model called SCOPE_SURRENDERED",
         ))
         return "surrendered"
@@ -602,10 +674,10 @@ async def process_ticket_full(
     if dry_run:
         log_outcome(TicketOutcome(
             ticket_key=ticket_key, started_at=started, finished_at=finished,
-            status="ok", cost_usd=actual_cost_usd,
-            input_tokens=result.usage.input_tokens,
-            output_tokens=result.usage.output_tokens,
-            iterations=result.iterations,
+            status="ok", cost_usd=total_cost_usd,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            iterations=total_iterations,
             gerrit_url="dry-run",
         ))
         return "ok"
@@ -619,10 +691,10 @@ async def process_ticket_full(
         _surrender_ticket(ticket_key, f"Gerrit setup failed: {type(exc).__name__}: {exc}")
         log_outcome(TicketOutcome(
             ticket_key=ticket_key, started_at=started, finished_at=finished,
-            status="failed", cost_usd=actual_cost_usd,
-            input_tokens=result.usage.input_tokens,
-            output_tokens=result.usage.output_tokens,
-            iterations=result.iterations,
+            status="failed", cost_usd=total_cost_usd,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            iterations=total_iterations,
             error=f"gerrit setup: {exc}",
         ))
         return "failed"
@@ -631,10 +703,10 @@ async def process_ticket_full(
         _surrender_ticket(ticket_key, f"Gerrit push rejected: {push.detail[:200]}")
         log_outcome(TicketOutcome(
             ticket_key=ticket_key, started_at=started, finished_at=finished,
-            status="failed", cost_usd=actual_cost_usd,
-            input_tokens=result.usage.input_tokens,
-            output_tokens=result.usage.output_tokens,
-            iterations=result.iterations,
+            status="failed", cost_usd=total_cost_usd,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            iterations=total_iterations,
             error=f"push fail: {push.detail[:200]}",
         ))
         return "failed"
@@ -655,10 +727,10 @@ async def process_ticket_full(
 
     log_outcome(TicketOutcome(
         ticket_key=ticket_key, started_at=started, finished_at=finished,
-        status="ok", cost_usd=actual_cost_usd,
-        input_tokens=result.usage.input_tokens,
-        output_tokens=result.usage.output_tokens,
-        iterations=result.iterations,
+        status="ok", cost_usd=total_cost_usd,
+        input_tokens=total_input_tokens,
+        output_tokens=total_output_tokens,
+        iterations=total_iterations,
         gerrit_url=push.change_url,
     ))
     return "ok"
@@ -787,6 +859,7 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"=== mode: {'simple (v1)' if args.simple else 'full JIRA pipeline (v2)'}{', dry-run' if args.dry_run else ''} ===")
     consecutive_failures = 0
     stop_loss_threshold = args.max_spend * (args.stop_loss_pct / 100.0)
+    escalation_counts: dict[str, int] = {}
 
     for key in ticket_keys:
         if args.simple:
@@ -811,6 +884,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 max_iterations=args.max_iterations,
                 log_outcome=_log,
                 dry_run=args.dry_run,
+                escalation_counts=escalation_counts,
             )
 
         # Stop-loss handling
