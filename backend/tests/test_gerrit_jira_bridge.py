@@ -242,6 +242,53 @@ def test_cursor_save_is_atomic_private_json(tmp_path: Path) -> None:
     assert bridge.load_cursor(cursor) == ("event-1", ts)
 
 
+# OP-831: ``CURSOR_FILE`` is now env-driven so user-level systemd installs
+# can point at a writable XDG state dir. Pin the contract so a future
+# refactor can't silently revert to the hard-coded path that crash-looped
+# the daemon on 2026-05-11 (~16-minute outage).
+
+
+def test_cursor_file_default_when_env_unset(monkeypatch) -> None:
+    """Default path preserved when ``OMNISIGHT_BRIDGE_CURSOR_FILE`` unset.
+
+    Re-imports the module to re-evaluate the module-level constant
+    against the patched env. System-level installs that already have
+    ``/var/lib/omnisight-bridge`` provisioned should keep working.
+    """
+    import importlib
+    monkeypatch.delenv("OMNISIGHT_BRIDGE_CURSOR_FILE", raising=False)
+    reloaded = importlib.reload(bridge)
+    try:
+        assert reloaded.CURSOR_FILE == Path(
+            "/var/lib/omnisight-bridge/event-cursor.json"
+        )
+    finally:
+        # Ensure the rest of the suite sees the env-driven module.
+        monkeypatch.setenv(
+            "OMNISIGHT_BRIDGE_CURSOR_FILE",
+            "/tmp/test-restore-cursor.json",
+        )
+        importlib.reload(bridge)
+
+
+def test_cursor_file_env_override_honoured(monkeypatch, tmp_path: Path) -> None:
+    """``OMNISIGHT_BRIDGE_CURSOR_FILE`` env redirects the cursor path.
+
+    User-level systemd installs set this to ``~/.local/state/omnisight-
+    bridge/event-cursor.json``; CI tests use ``tmp_path`` so the assertion
+    is hermetic.
+    """
+    import importlib
+    target = tmp_path / "event-cursor.json"
+    monkeypatch.setenv("OMNISIGHT_BRIDGE_CURSOR_FILE", str(target))
+    reloaded = importlib.reload(bridge)
+    try:
+        assert reloaded.CURSOR_FILE == target
+    finally:
+        monkeypatch.delenv("OMNISIGHT_BRIDGE_CURSOR_FILE", raising=False)
+        importlib.reload(bridge)
+
+
 def test_missing_cursor_logs_first_run_warning_once(tmp_path: Path) -> None:
     b = FakeBridge()
     b.config.cursor_file = tmp_path / "event-cursor.json"

@@ -61,6 +61,16 @@ Environment=OMNISIGHT_NOTIFIER_AGENT_CLASS=subscription-claude
 ;Environment=OMNISIGHT_NOTIFIER_DEDUP_WINDOW_SECONDS=300
 ;Environment=OMNISIGHT_NOTIFIER_CRITICAL_REPAGE_SECONDS=600
 ;Environment=OMNISIGHT_NOTIFIER_P0_REPAGE_SECONDS=300
+; OP-831: cursor file path. The bridge originally hard-coded
+; /var/lib/omnisight-bridge/event-cursor.json which is root-owned and
+; not writable by user-level systemd; the resulting PermissionError
+; crash-looped the daemon for ~16 minutes on 2026-05-11 before it was
+; force-paused. Default for user-level installs lands under XDG state
+; (~/.local/state/omnisight-bridge/) so mkdir succeeds without sudo.
+; System-level installs that already have /var/lib/omnisight-bridge
+; provisioned can leave this commented out — the code falls back to
+; the legacy path automatically.
+Environment=OMNISIGHT_BRIDGE_CURSOR_FILE=/home/user/.local/state/omnisight-bridge/event-cursor.json
 ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/run_gerrit_jira_bridge.py --agent-class subscription-claude
 Restart=always
 RestartSec=5

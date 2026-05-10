@@ -26,7 +26,23 @@ from backend import db_pool
 from backend.agents import jira_dispatch
 from backend.db import _resolve_pg_dsn
 
-CURSOR_FILE = Path("/var/lib/omnisight-bridge/event-cursor.json")
+# OP-831 (2026-05-11 post-mortem): the cursor file path was hard-coded to a
+# root-owned path under ``/var/lib/``. The bridge runs as user-level systemd
+# and cannot ``mkdir`` there, so every restart entered a 7-second crash
+# loop (catchup → stream → first event → save_cursor → PermissionError →
+# systemd restart). Live change-merged events streamed past the bridge
+# unprocessed for ~16 minutes (01:08–01:24). The env override below lets
+# the systemd unit point at an XDG-compliant user-writable default
+# (``~/.local/state/omnisight-bridge/``); the legacy path remains the
+# fallback so existing root-installed deployments keep working without
+# config drift. Cross-reference: OP-827 (companion runner-side typed
+# precondition exceptions for ``ensure_change_ids``).
+CURSOR_FILE = Path(
+    os.environ.get(
+        "OMNISIGHT_BRIDGE_CURSOR_FILE",
+        "/var/lib/omnisight-bridge/event-cursor.json",
+    )
+)
 
 APPROVED_STATUS_NAMES = {"Approved", "承認済み"}
 ARCHIVED_STATUS_NAMES = {"Archived"}
