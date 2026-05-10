@@ -93,6 +93,12 @@ from backend.agents.cost_guard import (
     ScopeKey,
 )
 from backend.agents.runner_handlers import make_runner_dispatcher
+from backend.agents.skills_loader import (
+    SkillRegistry,
+    load_default_scopes,
+    make_skill_handler,
+)
+from backend.agents.sub_agent import make_agent_tool_handler
 
 
 DEFAULT_MODEL_SONNET = "claude-sonnet-4-6"
@@ -103,11 +109,15 @@ DEFAULT_STRUCTURAL_RETRY_CAP_USD = 20.0
 LAUNCHER_AGENT_CLASS = "api-anthropic"
 S1_SPRINT_NAME = "S1: MP v0.4.0"
 
-# Tool list — same as auto-runner-sdk.RUNNER_TOOLS but Skill/Agent omitted
-# for the api-anthropic batch run; we want a deterministic, narrow tool
-# surface. Read/Write/Edit/Bash/Grep/Glob give the model everything it
-# needs to read the codebase, edit/create files, and run tests.
-RUNNER_TOOLS: list[str] = ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
+# Tool list — mirrors ``auto-runner-sdk.RUNNER_TOOLS``. OP-811 (A3) adds
+# ``Skill`` (project verbs via SkillRegistry) and ``Agent`` (sub-agent
+# decomposition) so the api-anthropic launcher has the same tool surface as
+# the SDK runner. Without these, a single agent-loop iteration is forced to
+# carry every refactor end-to-end — large tickets cannot decompose, and any
+# project-defined verb (lint_changed, run_tests, etc.) goes unused.
+RUNNER_TOOLS: list[str] = [
+    "Read", "Write", "Edit", "Bash", "Grep", "Glob", "Skill", "Agent",
+]
 
 # Stop reasons that indicate the task is structurally too big — DO NOT
 # retry the same prompt (it'll burn the same budget for the same outcome,
@@ -849,6 +859,16 @@ async def main_async(args: argparse.Namespace) -> int:
         # model surrenders immediately — pilot run lesson 2026-05-09).
         dispatcher = make_runner_dispatcher()
         client = AnthropicClient(api_key=_load_api_key(), dispatcher=dispatcher)
+        # OP-811 (A3): wire Skill (project verbs) + Agent (sub-agent decomposition)
+        # onto the dispatcher AFTER the client exists so the Agent handler can
+        # bind to the same client (Anthropic SDK contract: sub-agents share the
+        # parent's dispatcher so sandbox + tool surface stay identical).
+        # ``load_default_scopes`` needs the project root to discover the three
+        # skill scopes (project / home / bundled) — we pass ``REPO`` defined
+        # at module top.
+        skill_registry: SkillRegistry = load_default_scopes(REPO)
+        dispatcher.register("Skill", make_skill_handler(skill_registry))
+        dispatcher.register("Agent", make_agent_tool_handler(client=client))
 
     if args.pilot:
         ticket_keys = [args.pilot]
