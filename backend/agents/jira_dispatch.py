@@ -31,7 +31,7 @@ from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable, Optional
 
 from backend.config import settings
 from backend.agents.circuit_breaker import BREAKERS
@@ -2096,10 +2096,62 @@ def find_mutex_holders(
     return resp.get("issues", [])
 
 
+PartyMembershipCheck = Callable[[str], Optional[str]]
+"""RPG.W17 pre-pickup membership probe.
+
+Maps an ``agent_id`` to the ``party_id`` currently gating that agent
+from individual task pickups (``None`` if the agent is free). The
+helper exists so :func:`pre_pickup_ok` stays storage-agnostic —
+production wires :func:`backend.agents.party.member_is_gated` behind
+an asyncpg connection factory; tests inject a dict lookup.
+"""
+
+
+def _party_membership_reason(
+    snapshot: TicketSnapshot,
+    membership_check: "PartyMembershipCheck | None",
+) -> str | None:
+    """Run the W17 :class:`MemberInActiveParty` pre-pickup gate.
+
+    Returns ``None`` if the gate passes (or is not configured), and a
+    structured reason string otherwise. The reason uses the
+    ``MemberInActiveParty:`` prefix so the runner can parse it and
+    fall through to the next pickup candidate, mirroring the existing
+    ``mutex conflict:`` reason format.
+
+    The agent identity is resolved from ``client.agent_class`` —
+    `claude-bot`/`codex-bot` snapshots are tied to the dispatcher
+    that fetched them, so the active-party probe checks the *picker*
+    (not the ticket assignee field, which is stale by definition
+    during pre-pickup).
+    """
+    if membership_check is None:
+        return None
+    agent_id = (snapshot.labels and _pickup_agent_from_labels(snapshot.labels)) or ""
+    if not agent_id:
+        return None
+    party_id = membership_check(agent_id)
+    if not party_id:
+        return None
+    return (
+        f"MemberInActiveParty:{agent_id} gated by party {party_id} "
+        f"holding an active Tier L+ task; ticket {snapshot.key} skipped"
+    )
+
+
+def _pickup_agent_from_labels(labels: Iterable[str]) -> str | None:
+    """Extract ``agent:<id>`` from a snapshot's labels tuple, if present."""
+    for label in labels:
+        if isinstance(label, str) and label.startswith("agent:"):
+            return label.split(":", 1)[1].strip() or None
+    return None
+
+
 def pre_pickup_ok(
     client: DispatchClient,
     snapshot: TicketSnapshot,
     worktree_path: Path | None = None,
+    party_membership_check: "PartyMembershipCheck | None" = None,
 ) -> tuple[bool, str]:
     """Combined pre-pickup gate. Returns (ok, reason).
 
@@ -2117,6 +2169,14 @@ def pre_pickup_ok(
     those labels, return False with a "mutex conflict:" reason. The
     runner skips and tries the next pickup candidate; the JIRA workflow
     validator handles ``blocks_on`` (§10) separately.
+
+    Party gate (OP-220 / W17): when ``party_membership_check`` is
+    provided, an agent whose party holds an active Tier L+ task is
+    refused individual task pickup. Reason string is prefixed
+    ``MemberInActiveParty:`` so the runner can recognise it; backward-
+    compatible — ``party_membership_check=None`` skips the gate, so
+    existing callers (auto-runner-*.py) keep working until they opt
+    in.
     """
     from backend.agents.live_state_check import evaluate, all_passed, format_failures
     from backend.agents.file_coordinator import has_unresolved_blockedby
@@ -2137,6 +2197,14 @@ def pre_pickup_ok(
         results = evaluate(prereqs["live_state_requires"], cwd=worktree_path)
         if not all_passed(results):
             return False, "live_state_requires failed:\n" + format_failures(results)
+
+    # RPG.W17 party gate (OP-220 AC #4). Refuse individual task pickup
+    # while the agent's party holds an active Tier L+ task. Opt-in via
+    # ``party_membership_check`` so runners that don't yet know about
+    # parties keep working.
+    party_reason = _party_membership_reason(snapshot, party_membership_check)
+    if party_reason is not None:
+        return False, party_reason
 
     # Mutex sibling check (OP-687). Concrete failure mode without this:
     # codex picks OP-A (mutex:foo) at 02:00, claude picks OP-B (mutex:foo)

@@ -1,0 +1,214 @@
+---
+# RPG.W17 — Synergy matrix per (Guild_A × Guild_B).
+#
+# Spec source: docs/adr/ADR-0008-agent-rpg-class-skill-leveling.md
+#                §"Party / Synergy system (W17)".
+#
+# Schema (v1)
+# -----------
+#   schema_version: 1
+#   synergies:
+#     - guilds: [<guild_slug_a>, <guild_slug_b>]
+#       label: <slug>            # e.g. "fullstack"
+#       display_name: <Title>
+#       xp_bonus: <float>        # multiplicative, e.g. 0.15 == +15%
+#       skill_bonus_target: <skill_namespace_slug | null>
+#       skill_bonus: <float | null>
+#       summary: <one-line description>
+#
+# Invariants enforced by backend/agents/synergy_registry.py:
+#   * guilds list has exactly 2 entries
+#   * (guild_a, guild_b) is order-insensitive — lookup normalises by
+#     sorting the pair, so `[backend, frontend]` and `[frontend,
+#     backend]` resolve to the same synergy.
+#   * label values are globally unique across the matrix
+#   * xp_bonus and skill_bonus must be >= 0.0
+#   * if skill_bonus is set, skill_bonus_target must be non-empty
+#
+# Lookup contract:
+#   * `synergy_for_pair(g_a, g_b)` — returns the single SynergyEntry or
+#     None.
+#   * `synergy_for_members(guilds[])` — given a party's Guild list,
+#     returns the strongest (highest xp_bonus) cross-Guild synergy
+#     that *fully covers* the party. If no entry matches the party's
+#     Guild composition, returns None (the helper raises
+#     ``SynergyComputeFailed`` upstream so callers degrade to the
+#     no-bonus base XP path per AC #3).
+#
+# Three named MUST entries from ADR-0008 §"Party / Synergy system (W17)":
+#   - backend × frontend → "fullstack" +15% party XP
+#   - security × devops  → "hardening" +10% security skill XP
+#   - data × backend     → "pipeline"  +10% data skill XP
+#
+# The rest of the matrix fills in ~12 more cross-Guild combinations
+# from ADR-0008's wider party composition table. Total entries >= 15
+# per OP-220 §AC #3 ("Full matrix has ~15 cross-Guild combinations").
+
+schema_version: 1
+
+synergies:
+  # ── MUST entries from ADR-0008 §W17 ───────────────────────────
+  - guilds: [backend, frontend]
+    label: fullstack
+    display_name: Fullstack
+    xp_bonus: 0.15
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: >-
+      Fullstack pair — Backend + Frontend coverage of the same feature
+      end-to-end. Boosts party XP by +15%.
+
+  - guilds: [security, devops]
+    label: hardening
+    display_name: Hardening
+    xp_bonus: 0.0
+    skill_bonus_target: security
+    skill_bonus: 0.10
+    summary: >-
+      Hardening pair — Security + DevOps closing infra and policy gaps
+      together. +10% security-skill XP for both members.
+
+  - guilds: [data, backend]
+    label: pipeline
+    display_name: Pipeline
+    xp_bonus: 0.0
+    skill_bonus_target: data
+    skill_bonus: 0.10
+    summary: >-
+      Pipeline pair — Data + Backend wiring ingest, ETL, and serving.
+      +10% data-skill XP for both members.
+
+  # ── Wider matrix (12 more) ────────────────────────────────────
+  - guilds: [frontend, mobile]
+    label: cross_client
+    display_name: Cross-Client
+    xp_bonus: 0.10
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: >-
+      Cross-Client pair — Frontend + Mobile sharing UI primitives and
+      design tokens across web and device targets. +10% party XP.
+
+  - guilds: [security, backend]
+    label: secure_backend
+    display_name: Secure Backend
+    xp_bonus: 0.10
+    skill_bonus_target: security
+    skill_bonus: 0.05
+    summary: >-
+      Secure-Backend pair — Security + Backend co-designing auth and
+      audit paths. +10% party XP and +5% security-skill XP.
+
+  - guilds: [security, frontend]
+    label: client_hardening
+    display_name: Client Hardening
+    xp_bonus: 0.05
+    skill_bonus_target: security
+    skill_bonus: 0.05
+    summary: >-
+      Client-Hardening pair — Security + Frontend tightening CSP,
+      cookie scoping, and client trust boundaries. +5% party XP and
+      +5% security-skill XP.
+
+  - guilds: [devops, backend]
+    label: platform
+    display_name: Platform
+    xp_bonus: 0.10
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: >-
+      Platform pair — DevOps + Backend on deploys, release, and
+      runtime observability. +10% party XP.
+
+  - guilds: [devops, data]
+    label: data_ops
+    display_name: Data Ops
+    xp_bonus: 0.05
+    skill_bonus_target: data
+    skill_bonus: 0.05
+    summary: >-
+      DataOps pair — DevOps + Data on warehouse capacity, batch
+      schedules, and pipeline reliability. +5% party XP and +5%
+      data-skill XP.
+
+  - guilds: [data, frontend]
+    label: viz_pair
+    display_name: Visualisation
+    xp_bonus: 0.10
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: >-
+      Visualisation pair — Data + Frontend on dashboards, charts, and
+      analytics-driven UI. +10% party XP.
+
+  - guilds: [data, mobile]
+    label: edge_telemetry
+    display_name: Edge Telemetry
+    xp_bonus: 0.05
+    skill_bonus_target: data
+    skill_bonus: 0.05
+    summary: >-
+      Edge-Telemetry pair — Data + Mobile on on-device metrics,
+      batching, and analytics ingest. +5% party XP and +5% data-skill
+      XP.
+
+  - guilds: [embedded, backend]
+    label: device_cloud
+    display_name: Device-Cloud
+    xp_bonus: 0.10
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: >-
+      Device-Cloud pair — Embedded + Backend on firmware sync, OTA,
+      and edge↔cloud handshake. +10% party XP.
+
+  - guilds: [embedded, mobile]
+    label: device_pair
+    display_name: Device Pair
+    xp_bonus: 0.10
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: >-
+      Device-Pair — Embedded + Mobile sharing BLE / camera SDK / on-
+      device control plane. +10% party XP.
+
+  - guilds: [embedded, security]
+    label: secure_device
+    display_name: Secure Device
+    xp_bonus: 0.05
+    skill_bonus_target: security
+    skill_bonus: 0.10
+    summary: >-
+      Secure-Device pair — Embedded + Security on secure boot, key
+      provisioning, and supply-chain integrity. +5% party XP and
+      +10% security-skill XP.
+
+  - guilds: [mobile, backend]
+    label: mobile_backend
+    display_name: Mobile-Backend
+    xp_bonus: 0.10
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: >-
+      Mobile-Backend pair — Mobile + Backend on offline sync, push
+      notifications, and API ergonomics. +10% party XP.
+
+  - guilds: [generalist, backend]
+    label: glue
+    display_name: Glue
+    xp_bonus: 0.05
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: >-
+      Glue pair — Generalist + Backend coverage for cross-cutting
+      stories that don't fit a single specialist. +5% party XP.
+
+  - guilds: [generalist, frontend]
+    label: glue_frontend
+    display_name: Glue (Frontend)
+    xp_bonus: 0.05
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: >-
+      Glue-Frontend pair — Generalist + Frontend on broad UX stories
+      that touch multiple surfaces. +5% party XP.

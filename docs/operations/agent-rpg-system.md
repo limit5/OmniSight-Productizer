@@ -1,9 +1,10 @@
 # Agent RPG System — Operator Guide
 
-> **Status**: v0.5.0 partial ship (RPG.W1-W14 core + W15-W16 + W19-W20
-> shipped; W17 + W18 + W21 deferred). Last reviewed
+> **Status**: v0.5.0 partial ship (RPG.W1-W14 core + W15-W17 + W19-W20
+> shipped; W18 + W21 deferred). Last reviewed
 > 2026-05-11 (W12 promoted to **Live** via OP-217; W13 promoted to
-> **Live** via OP-218; W14 promoted to **Live** via OP-219).
+> **Live** via OP-218; W14 promoted to **Live** via OP-219;
+> W17 promoted to **Live** via OP-220).
 > **Authoritative spec**: [ADR-0008 — Agent RPG Class & Skill Leveling
 > System](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/). This doc covers
 > *operation*, not design — when the two diverge, ADR-0008 wins and this
@@ -43,7 +44,7 @@ target ship).
 | W12    | `backend/agents/skill_leveling.py` + alembic 0226 `agent_skill_state` | **Live** (OP-217) — branch lock + decay cron live |
 | W13    | `backend/agents/tool_proficiency.py` + alembic 0227 `agent_tool_proficiency` + `config/tool_proficiency_gates.yaml` | **Live** (OP-218) — MP.W17.7 telemetry consumer + dispatcher gate live |
 | W14    | `backend/agents/talent_tree.py` + `config/talent_tree.yaml` + alembic 0228/0229 | **Live** (OP-219) — milestone lock + capstone gate live; routing weight injection feature-flagged off until W7.1 |
-| W17    | Party tables | **Deferred** — schema not yet migrated |
+| W17    | `backend/agents/party.py` + `backend/agents/synergy_registry.py` + `config/synergy_matrix.yaml` + alembic 0230 | **Live** (OP-220) — party CRUD + synergy lookup + pre-pickup gate live |
 
 If a runbook step below names a surface that is "Deferred" in this
 table, the step is provisional and will start failing the moment the
@@ -59,7 +60,7 @@ operator tries it. File an OP ticket when you hit one.
 | `agent_class` slug  | `config/agent_class_schema.yaml` (MP.W0.1 — shared with ADR-0007)                                 | Reader                   |
 | `skill_id` namespace| `backend/agents/skill_matrix.yaml` — **this file is RPG's responsibility**                         | Owner                    |
 | `tool_id` namespace | MCP server registry + A2A tool catalog (gate config in `config/tool_proficiency_gates.yaml`)        | Reader (W13 live via OP-218) |
-| Synergy matrix      | `backend/agents/synergy_registry.py` (W17 deferred — module not yet present)                       | Owner (when W17 lands)   |
+| Synergy matrix      | `backend/agents/synergy_registry.py` + `config/synergy_matrix.yaml` — **this pair is RPG's responsibility** | Owner                    |
 
 When something feels like it belongs in two places, defer to the
 column-2 owner, not RPG. The RPG drift guard (`SkillMatrixDriftError`,
@@ -523,6 +524,82 @@ daily Postgres backup (D15 dependency once shipped).
 
 ---
 
+## Party / Synergy system (W17 — live as of 2026-05-11 / OP-220)
+
+A *party* is a 2-5 agent group that takes a single Tier L+ task as a
+unit. Membership lives in `agent_party` (one row per
+`(party_id, member_agent_id)`) and the party-level state (name,
+synergy, current active task) lives in `agent_party_state` — both
+created by alembic 0230. Synergy lookup is data-driven from
+`config/synergy_matrix.yaml` via `backend/agents/synergy_registry.py`.
+
+The backend helper surface is `backend/agents/party.py`:
+
+| Helper | Purpose |
+|---|---|
+| `await create_party(store, name, member_agent_ids, member_guilds=...)` | Validate 2-5 members, compute synergy, persist |
+| `await assign_task(store, party_id, task_id)` | Per-task exclusivity — refuses 2nd active task with `PartyActiveTaskExists` |
+| `compute_party_xp_distribution(party, total_xp, personal_xp_by_member=...)` | Even split + per-member personal XP + synergy bonus |
+| `await task_complete(store, party_id, total_xp, ...)` | Composes the W17 state transition: distribute XP + release task |
+| `await member_is_gated(store, agent_id)` | Pre-pickup probe consumed by `jira_dispatch.pre_pickup_ok` |
+
+### Synergy matrix
+
+`config/synergy_matrix.yaml` declares the cross-Guild combinations.
+Three named entries are MUST per ADR-0008:
+
+- **backend × frontend → fullstack** (+15% party XP)
+- **security × devops → hardening** (+10% security-skill XP)
+- **data × backend → pipeline** (+10% data-skill XP)
+
+The file ships with ~15 entries total; pairs are order-insensitive
+(internally normalised to a sorted tuple), and the registry catches
+duplicates / malformed rows with `SynergyComputeFailed`. Per AC #3,
+`create_party` catches that exception and degrades to a no-bonus base
+XP path so a YAML edit accident does not break party creation.
+
+### Per-task exclusivity (pre-pickup gate)
+
+When a party holds an active task, its members cannot accept
+individual tasks via the JQL pickup loop.
+`backend/agents/jira_dispatch.pre_pickup_ok` accepts an optional
+`party_membership_check: PartyMembershipCheck` callable — production
+wires it to `party.member_is_gated` behind the asyncpg pool; the
+function returns the gating `party_id`, which surfaces in the reason
+string as `MemberInActiveParty:<agent_id> gated by party <party_id>
+…`. Runners parse this prefix the same way they parse `mutex conflict:`
+(OP-687) and fall through to the next pickup candidate.
+
+### Operator-facing surface
+
+`components/omnisight/agents/PartyHall.tsx` renders the active-party
+grid for the operator. Each card shows member portraits, the
+currently-assigned Tier L+ task (or "Idle — no active task"), and the
+synergy badge from `PartyBadge.tsx`. The fetch is `GET
+/agents/parties`; synergy metadata is exposed independently at `GET
+/agents/parties/synergies` for the legend.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET`  | `/agents/parties` | List every active (non-disbanded) party |
+| `GET`  | `/agents/parties/synergies` | Full synergy matrix legend |
+| `POST` | `/agents/parties` | Create a party `{name, member_agent_ids, member_guilds}` |
+| `GET`  | `/agents/parties/{party_id}` | Single party + members + synergy |
+| `POST` | `/agents/parties/{party_id}/task` | Assign a Tier L+ `{task_id}` (idempotent on same id) |
+| `POST` | `/agents/parties/{party_id}/task/complete` | Distribute XP + release task |
+
+### Recovery
+
+Alembic 0230 is forward-only. Party state can be reconstructed from
+task assignment history if `agent_party` corrupts (idempotent replay:
+re-run `create_party` + `assign_task` from the operator log). Synergy
+matrix lives entirely in YAML — replace `config/synergy_matrix.yaml`
+to rebalance without code change.
+
+---
+
 ## Skill fusion preview (W19)
 
 Two Lv-5 skills can be combined into a hybrid Lv-3 skill. The preview
@@ -565,7 +642,7 @@ either, treat the failure as an integrity issue, not a flake.
 | Skill leveling missing                             | W12 live as of 2026-05-11 — check alembic 0226 applied | Re-run `scripts/rpg_rebuild_skill_state.py` if rows are missing |
 | Tool proficiency missing                           | W13 live as of 2026-05-11 — check alembic 0227 applied + `config/tool_proficiency_gates.yaml` parses | Re-run `scripts/rpg_rebuild_tool_proficiency.py` if rows are missing |
 | Talent feature missing                             | W14 live as of 2026-05-11 — check alembic 0228/0229 applied; `config/talent_tree.yaml` present | Verify `GET /agents/{id}/talents` returns the milestone array |
-| Party feature missing                              | W17 — deferred post-v0.5.0                       | Don't promise the feature; track in TODO Priority RPG |
+| Party feature missing                              | W17 live as of 2026-05-11 — check alembic 0230 applied + `config/synergy_matrix.yaml` parses | Verify `GET /agents/parties` returns the active-party list; re-form a party via `POST /agents/parties` if rows are missing |
 
 ---
 
