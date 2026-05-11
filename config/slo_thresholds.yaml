@@ -1,0 +1,24 @@
+# OP-883 D11 — SLO thresholds for the orchestrator-side continuous
+# monitor (backend.orchestrator.slo_monitor). These numbers come from
+# the META OP-761 §Phase 3 acceptance criteria.
+#
+# Distinct from config/slos.yaml (OP-772 deploy-window worker): that
+# file drives the post-deploy 1-hour soak monitor and its tighter
+# 0.5% / 99.5% per-route SLOs. THIS file drives the always-on monitor
+# that decides between D10 canary abort and D9 full prod rollback.
+schema_version: 1
+
+# AC #2 — error rate < 1% (1-min window) AND p95 < 500ms (5-min window).
+error_rate_max: 0.01
+p95_latency_ms_max: 500
+error_rate_window_seconds: 60
+p95_window_seconds: 300
+
+# AC #1 — sample every 30s.
+sample_interval_seconds: 30
+
+# AC #3 — sustained breach window before triggering rollback.
+breach_sustain_seconds: 120
+
+# AC #4 — cooldown after a rollback fires (no re-evaluation during it).
+cooldown_seconds: 600
