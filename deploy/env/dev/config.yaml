@@ -1,0 +1,11 @@
+schema_version: 1
+env: dev
+service_name: omnisight-backend
+public_base_url: http://localhost:8000
+frontend_origin: http://localhost:3000
+auth_mode: open
+docker_runtime: runc
+llm_provider: ""
+web_search_provider: none
+token_budget_daily: 5.0
+token_budget_hourly: 1.0

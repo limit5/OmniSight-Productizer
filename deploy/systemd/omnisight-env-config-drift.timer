@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly OmniSight prod environment config drift check
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+Persistent=true
+Unit=omnisight-env-config-drift.service
+
+[Install]
+WantedBy=timers.target

@@ -273,6 +273,25 @@ jobs:
       - name: check llm_adapter firewall
         run: python3 scripts/check_llm_adapter_firewall.py
 
+  env-secrets-plaintext:
+    # OP-869 — fail PRs that touch deploy/env/*/secrets.encrypted.yaml
+    # with plaintext-looking secret fields. SOPS metadata remains
+    # readable, but secret values must stay ENC[...] wrapped.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: check encrypted env secrets
+        run: |
+          set -eu
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          git diff --name-only "$BASE" "$GITHUB_SHA" -- deploy/env \
+            | grep -E '^deploy/env/(dev|staging|prod)/secrets\.encrypted\.yaml$' \
+            | xargs -r python3 scripts/check_secrets_plaintext.py
+
   secret-pre-commit:
     # KS.4.2 — hard-gate PRs with the repository secret-scan
     # pre-commit hooks and the real scanner CLIs on PATH. The hooks
