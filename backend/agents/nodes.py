@@ -15,8 +15,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from backend.agents.repo_map import build_repo_map_system_prefix
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, TOOL_MAP, set_active_workspace
@@ -519,6 +521,12 @@ def _specialist_node_factory(agent_type: str):
                 # preview) is a no-op in build_system_prompt.
                 last_vite_error_banner=build_last_vite_error_banner(
                     state.error_history
+                ),
+                repo_map_preamble=build_repo_map_system_prefix(
+                    Path.cwd(),
+                    ticket_text="\n\n".join(
+                        part for part in (state.task_id or "", state.user_command) if part
+                    ),
                 ),
             )
             if state.last_verification_failure:
