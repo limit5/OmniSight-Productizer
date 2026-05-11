@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# OP-872 - main-repo post-commit notification + opt-in Gerrit push.
+
+set +e
+
+hook_code="PostCommitHookMissingNotificationBridge"
+push_code="PostCommitGerritPushFailed"
+
+log() {
+  printf '[omnisight-post-commit] %s\n' "$*" >&2
+}
+
+git_value() {
+  git rev-parse "$1" 2>/dev/null
+}
+
+repo_root="$(git_value --show-toplevel)"
+git_dir="$(git_value --git-dir)"
+git_common_dir="$(git_value --git-common-dir)"
+
+if [ -z "$repo_root" ] || [ -z "$git_dir" ] || [ -z "$git_common_dir" ]; then
+  exit 0
+fi
+
+git_dir_abs="$(cd "$repo_root" && cd "$git_dir" 2>/dev/null && pwd -P)"
+git_common_abs="$(cd "$repo_root" && cd "$git_common_dir" 2>/dev/null && pwd -P)"
+
+if [ "$git_dir_abs" != "$git_common_abs" ]; then
+  exit 0
+fi
+
+branch="$(git -C "$repo_root" symbolic-ref --quiet --short HEAD 2>/dev/null)"
+if [ -z "$branch" ]; then
+  branch="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null)"
+fi
+
+head_sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)"
+short_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null)"
+subject="$(git -C "$repo_root" log -1 --format=%s 2>/dev/null)"
+previous_failure_file="$git_common_abs/omnisight-post-commit-push-failed"
+previous_failure=""
+if [ -s "$previous_failure_file" ]; then
+  previous_failure="$(cat "$previous_failure_file" 2>/dev/null)"
+  rm -f "$previous_failure_file"
+fi
+
+notify_message="main-repo commit ${short_sha} on ${branch}: ${subject}"
+if [ -n "$previous_failure" ]; then
+  notify_message="${notify_message}
+
+Previous ${push_code}: ${previous_failure}"
+fi
+
+if [ -n "${OMNISIGHT_POST_COMMIT_NOTIFY_LOG:-}" ]; then
+  {
+    printf 'code=%s\n' 'MainRepoInteractiveCommit'
+    printf 'branch=%s\n' "$branch"
+    printf 'head=%s\n' "$head_sha"
+    printf 'message=%s\n' "$notify_message"
+  } >>"$OMNISIGHT_POST_COMMIT_NOTIFY_LOG"
+else
+  PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+  OMNISIGHT_POST_COMMIT_MESSAGE="$notify_message" \
+  OMNISIGHT_POST_COMMIT_BRANCH="$branch" \
+  OMNISIGHT_POST_COMMIT_HEAD="$head_sha" \
+  python - <<'PY' >/dev/null 2>&1 || log "${hook_code}: OP-721 bridge unavailable"
+import os
+import socket
+import uuid
+
+from backend.agents.operator_notifier import Notification, Severity, build_notifier_from_env
+
+notifier = build_notifier_from_env()
+channels = {k: v for k, v in notifier.channels.items() if k in {"slack", "email"}}
+if not channels:
+    raise RuntimeError("no slack/email channels configured")
+
+payload = Notification(
+    notification_id=uuid.uuid4().hex[:12],
+    severity=Severity.DEGRADED,
+    code="MainRepoInteractiveCommit",
+    message=os.environ["OMNISIGHT_POST_COMMIT_MESSAGE"],
+    context={
+        "repo": os.getcwd(),
+        "branch": os.environ.get("OMNISIGHT_POST_COMMIT_BRANCH"),
+        "head": os.environ.get("OMNISIGHT_POST_COMMIT_HEAD"),
+        "hostname": socket.gethostname(),
+    },
+)
+
+for channel in channels.values():
+    channel.send(payload)
+PY
+fi
+
+trailer="$(git -C "$repo_root" log -1 --format=%B 2>/dev/null | git interpret-trailers --parse 2>/dev/null | awk -F': *' 'tolower($1)=="push-to-gerrit"{print tolower($2)}' | tail -n 1)"
+if [ "$trailer" != "yes" ]; then
+  exit 0
+fi
+
+target_ref="HEAD:refs/for/${branch}"
+if [ -n "${OMNISIGHT_POST_COMMIT_PUSH_LOG:-}" ]; then
+  printf 'git -C %s push %s %s\n' "$repo_root" "${OMNISIGHT_POST_COMMIT_GERRIT_REMOTE:-gerrit}" "$target_ref" >>"$OMNISIGHT_POST_COMMIT_PUSH_LOG"
+  exit 0
+fi
+
+push_output="$(git -C "$repo_root" push "${OMNISIGHT_POST_COMMIT_GERRIT_REMOTE:-gerrit}" "$target_ref" 2>&1)"
+push_status=$?
+if [ "$push_status" -ne 0 ]; then
+  printf '%s\n' "$push_output" | tail -n 20 >"$previous_failure_file"
+  log "${push_code}: push failed; details will be included with the next main-repo commit notification"
+fi
+
+exit 0
