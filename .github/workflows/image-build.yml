@@ -1,0 +1,121 @@
+name: Runner Image Build
+
+# OP-864 D2 — runner-image build pipeline (Sprint D, META OP-761
+# §Phase 1). Distinct from `build-images.yml` (OP-763, which targets
+# GHCR + the production backend/frontend/bridge images via cosign-
+# keyless). This workflow targets the SELF-HOSTED registry
+# `registry.sora.services:5000` and signs the runner image with a
+# key-based cosign signature stored in the GHA secret store.
+#
+# Triggers:
+#   - push to main with Dockerfile.runner / scripts/build_image.sh changes
+#   - push of a `runner-v*` tag (canonical release)
+#   - weekly cron (Monday 04:11 UTC) — retention GC only
+#   - workflow_dispatch — manual builds with explicit tag
+
+on:
+  push:
+    branches: [main]
+    tags: ["runner-v*"]
+    paths:
+      - "Dockerfile.runner"
+      - "scripts/build_image.sh"
+      - "scripts/gc_image_registry.sh"
+      - "backend/agents/**"
+      - "auto-runner-jira.py"
+      - ".github/workflows/image-build.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Semver tag to build (e.g. v0.2.1)"
+        required: true
+        default: "v0.0.0-dev"
+  schedule:
+    # Off-the-hour to avoid the :00 cron stampede on GH-hosted runners.
+    - cron: "11 4 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: registry.sora.services:5000
+  IMAGE_PATH: omnisight/runner
+  COSIGN_VERSION: v2.4.1
+
+jobs:
+  build:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: derive tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/runner-v* ]]; then
+            tag="${GITHUB_REF#refs/tags/runner-}"
+          elif [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            short="$(echo '${{ github.sha }}' | cut -c1-12)"
+            tag="v0.0.0-main-${short}"
+          fi
+          echo "value=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: log in to self-hosted registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.SORA_REGISTRY_USER }}
+          password: ${{ secrets.SORA_REGISTRY_PASS }}
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: stage cosign key
+        # The build script expects the key at
+        # /home/user/.config/omnisight/cosign-private-key. In CI the
+        # key comes from the SORA_COSIGN_KEY secret; we stage it to
+        # the path the script reads from.
+        env:
+          KEY_MATERIAL: ${{ secrets.SORA_COSIGN_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p /home/runner/.config/omnisight
+          printf '%s' "$KEY_MATERIAL" > /home/runner/.config/omnisight/cosign-private-key
+          chmod 600 /home/runner/.config/omnisight/cosign-private-key
+
+      - name: build + sign + push
+        env:
+          OMNISIGHT_REGISTRY: ${{ env.REGISTRY }}
+          OMNISIGHT_IMAGE_PATH: ${{ env.IMAGE_PATH }}
+          OMNISIGHT_COSIGN_KEY: /home/runner/.config/omnisight/cosign-private-key
+          COSIGN_PASSWORD: ${{ secrets.SORA_COSIGN_PASSWORD }}
+        run: |
+          bash scripts/build_image.sh --tag "${{ steps.tag.outputs.value }}"
+
+  retention:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: GC old runner image tags
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_PATH: ${{ env.IMAGE_PATH }}
+          REGISTRY_USER: ${{ secrets.SORA_REGISTRY_USER }}
+          REGISTRY_PASS: ${{ secrets.SORA_REGISTRY_PASS }}
+          MIN_KEEP: "20"
+          MAX_AGE_DAYS: "30"
+        run: bash scripts/gc_image_registry.sh
