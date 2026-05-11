@@ -1,0 +1,90 @@
+# OP-855 — Runner capability matrix.
+#
+# Maps (ticket_type × area × tier) → required runner capabilities. The
+# auto-runner reads this at pickup time and explicitly enables only the
+# listed capabilities; unlisted capabilities raise CapabilityNotPermitted
+# if attempted (see backend/agents/capability_matrix.py).
+#
+# Per-ticket operator escape hatch (labels):
+#   capability:enable=<cap>   add capability for this pickup
+#   capability:disable=<cap>  remove capability for this pickup
+#
+# Audit the live mapping:
+#   python3 scripts/print_capability_matrix.py
+#
+# Recovery: matrix is YAML — rollback = revert this file (no DB state).
+
+schema_version: 1
+
+# Capability vocabulary (AC#2). Updating this list also requires updating
+# CAPABILITIES in backend/agents/capability_matrix.py — drift is asserted
+# by backend/tests/test_capability_matrix.py.
+capabilities:
+  - code_edit            # Edit / Write tool calls inside the worktree
+  - run_tests            # pytest / vitest / playwright invocations
+  - run_lint             # ruff / mypy / eslint invocations
+  - gerrit_push          # auto-runner push_to_gerrit_for_review
+  - jira_update          # add_comment / add_label / transition_*
+  - mcp_search           # MCP-Cognee / MCP-JIRA semantic lookups
+  - memory_recall        # backend/agents/project_memory reads
+  - run_migration        # Alembic upgrade/downgrade invocations
+  - deploy_action        # docker compose / canary_pipeline invocations
+  - run_outcomes_grader  # backend/agents/outcomes_grader.py invocations
+
+# Safe-default when (ticket_type, area, tier) is missing from `matrix`
+# (AC error catalog: CapabilityMatrixMissingEntry → read-only-only).
+# Read-only-only means the runner can recall lessons + search MCP but
+# cannot edit code, run tests, push, or mutate JIRA. The runner emits a
+# loud warning and the operator must add a matrix row before re-pickup.
+read_only_default:
+  - mcp_search
+  - memory_recall
+
+# Mapping. Keys are ticket_type (JIRA issuetype English name — must
+# match what JQL `issuetype = <X>` returns, see jira_dispatch.py
+# §"Ticket fetch + JQL"). Areas use the labels documented in
+# auto-runner-jira.py::RECOGNISED_AREAS. Tiers are the operator
+# Tier S/M/L/X classification from ADR-0005.
+#
+# Story is the only ticket type the auto-runner currently picks up
+# (PICKUP_JQL_TEMPLATE pins `issuetype = Story`), but the schema is
+# left open for Task/Bug/Epic so the matrix can grow without a code
+# change.
+matrix:
+  Story:
+    backend:
+      S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
+      M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+      L: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall, run_outcomes_grader]
+    frontend:
+      S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
+      M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+      L: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+    tests:
+      S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
+      M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+      L: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+    docs:
+      S: [code_edit, run_lint, jira_update, mcp_search, memory_recall]
+      M: [code_edit, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+      L: [code_edit, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+    tooling:
+      S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
+      M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+      L: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+    db:
+      S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall, run_migration]
+      M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall, run_migration]
+      L: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall, run_migration]
+    devops:
+      S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
+      M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall, deploy_action]
+      L: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall, deploy_action]
+    security:
+      S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
+      M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+      L: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall, run_outcomes_grader]
+    embedded:
+      S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
+      M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+      L: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
