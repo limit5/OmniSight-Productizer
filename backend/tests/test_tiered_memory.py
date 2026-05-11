@@ -245,9 +245,16 @@ class TestL3EpisodicMemoryDB:
 
 
 class TestL3Tools:
+    """OP-916 / AUDIT-2 (2026-05-11): these tests reach
+    ``get_pool().acquire()`` inside ``save_solution`` /
+    ``search_past_solutions`` and require the module-global db_pool
+    to be initialised. ``db_pool_init`` provides that and skips when
+    ``OMNI_TEST_PG_URL`` is unset (cleaner than the misleading
+    ``init_pool`` lifespan error the AC catalogues).
+    """
 
     @pytest.mark.asyncio
-    async def test_save_solution(self, client):
+    async def test_save_solution(self, client, db_pool_init):
         from backend.agents.tools import save_solution
         result = await save_solution.ainvoke({
             "error_signature": "linker error: undefined v4l2_open",
@@ -269,7 +276,7 @@ class TestL3Tools:
         assert "[ERROR]" in result
 
     @pytest.mark.asyncio
-    async def test_search_past_solutions_found(self, client):
+    async def test_search_past_solutions_found(self, client, db_pool_init):
         from backend.agents.tools import save_solution, search_past_solutions
         # First save one
         await save_solution.ainvoke({
@@ -286,7 +293,7 @@ class TestL3Tools:
         assert "toolchain" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_search_past_solutions_not_found(self, client):
+    async def test_search_past_solutions_not_found(self, client, db_pool_init):
         from backend.agents.tools import search_past_solutions
         result = await search_past_solutions.ainvoke({
             "error_signature": "completely_unique_nonexistent_error_zzz999",
@@ -295,7 +302,7 @@ class TestL3Tools:
         assert "No past solutions" in result
 
     @pytest.mark.asyncio
-    async def test_save_with_gerrit_id_quality_boost(self, client):
+    async def test_save_with_gerrit_id_quality_boost(self, client, db_pool_init):
         # save_solution tool acquires its own pool conn internally
         # (SP-3.12); the assert read acquires a fresh conn since the
         # save is committed by then. Explicit cleanup at the end so

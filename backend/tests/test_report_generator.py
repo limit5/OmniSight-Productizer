@@ -399,7 +399,7 @@ class TestBuildExecutionSection:
 
 class TestBuildOutcomeSection:
     @pytest.mark.asyncio
-    async def test_deploy_url_and_findings(self):
+    async def test_deploy_url_and_findings(self, db_pool_init):
         from backend.report_generator import build_outcome_section
         from backend.workflow import StepRecord, WorkflowRun
 
@@ -456,7 +456,7 @@ class TestPdfExport:
 
 class TestGenerateProjectReport:
     @pytest.mark.asyncio
-    async def test_full_pipeline(self):
+    async def test_full_pipeline(self, db_pool_init):
         from backend.report_generator import generate_project_report
         from backend.workflow import WorkflowRun
 
