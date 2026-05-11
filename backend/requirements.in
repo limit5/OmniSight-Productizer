@@ -33,6 +33,10 @@ langchain-openai==1.1.14
 langchain-groq==1.1.2
 langchain-together==0.4.0
 langchain-ollama==1.1.0
+# OP-840: repo-map preamble parses Python / TS / TSX imports for PageRank.
+tree-sitter==0.21.3
+tree-sitter-python==0.21.0
+tree-sitter-typescript==0.21.2
 # FX.6.3 (2026-05-04): explicit top-level pin for the ``anthropic`` SDK
 # so the version is controlled here rather than left to whatever
 # ``langchain-anthropic`` happens to resolve. Bumped from the previously

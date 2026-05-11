@@ -936,6 +936,7 @@ def build_system_prompt(
     domain_context: str = "",
     clone_spec_context: str = "",
     last_vite_error_banner: str = "",
+    repo_map_preamble: str = "",
 ) -> str:
     """Assemble the full system prompt from model rules + role skill + task skill + handoff.
 
@@ -985,7 +986,12 @@ def build_system_prompt(
     sections: list[str] = []
     _phase1_started = time.perf_counter()
 
-    # 0. L1 Core Rules (CLAUDE.md — immutable, always first)
+    # 0. Repo-map preamble (OP-840): task-local file context must be
+    # system-prompt data, never a user message.
+    if repo_map_preamble:
+        sections.append(repo_map_preamble)
+
+    # 1. L1 Core Rules (CLAUDE.md — immutable, always first)
     core_rules = load_core_rules()
     if core_rules:
         sections.append(f"# Core Rules (Immutable)\n\n{core_rules}")
