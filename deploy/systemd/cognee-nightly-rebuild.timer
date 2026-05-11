@@ -1,0 +1,13 @@
+; [OP-899] Daily 03:00 UTC trigger for cognee-nightly-rebuild.service.
+
+[Unit]
+Description=Daily trigger for OmniSight Cognee full rebuild (OP-899)
+
+[Timer]
+Unit=cognee-nightly-rebuild.service
+OnCalendar=*-*-* 03:00:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

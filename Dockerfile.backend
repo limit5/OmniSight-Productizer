@@ -36,6 +36,34 @@ COPY backend/requirements.txt ./requirements.txt
 # packages stopped being resolved into the lockfile).
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
+# OP-899: Cognee's current resolver graph pulls LiteLLM with an OpenAI
+# SDK patch below langchain-openai's runtime floor. Install the Cognee
+# package surface after the hashed base lock and let
+# backend.agents.cognee_integration keep the B8/B10 fallback path if an
+# upstream import regresses.
+RUN pip install --no-cache-dir --no-deps \
+        cognee==1.0.9 \
+        instructor==1.13.0 \
+        litellm==1.83.14 \
+    && pip install --no-cache-dir \
+        aiolimiter \
+        cbor2 \
+        datamodel-code-generator \
+        diskcache \
+        'fakeredis[lua]' \
+        'fastapi-users[sqlalchemy]>=15.0.2' \
+        fastuuid \
+        filetype \
+        ladybug==0.16.0 \
+        'lancedb>=0.24.0,<1.0.0' \
+        langdetect \
+        'limits>=4.4.1,<5' \
+        pylance \
+        pympler \
+        'pypdf>=6.6.2,<7' \
+        'rdflib>=7.1.4,<7.2' \
+        tokenizers
+
 # Strip pip itself + bytecode caches + unused WOFF2 compressors from
 # site-packages. The runtime never `pip install`s anything, so pip is
 # dead weight. zstandard (23 MB) + zopfli (2.7 MB) are fontTools[woff]

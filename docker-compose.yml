@@ -19,6 +19,9 @@ services:
       - OMNISIGHT_DEBUG=true
       - OMNISIGHT_FRONTEND_ORIGIN=http://localhost:3000
       - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+      - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
+      - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
+      - OMNISIGHT_COGNEE_NEO4J_PASSWORD=${OMNISIGHT_COGNEE_NEO4J_PASSWORD:-${NEO4J_PASSWORD:-}}
     env_file:
       - .env
     restart: unless-stopped
@@ -79,6 +82,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+      - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
+      - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
+      - OMNISIGHT_COGNEE_NEO4J_PASSWORD=${OMNISIGHT_COGNEE_NEO4J_PASSWORD:-${NEO4J_PASSWORD:-}}
     env_file:
       - .env
     depends_on:
@@ -101,8 +107,9 @@ services:
   #   docker compose --profile cognee up -d neo4j
   # The runtime adapter (`backend.agents.cognee_integration`) and the
   # nightly rebuild script (`scripts/cognee_full_rebuild.py`) read
-  # connection details from OMNISIGHT_COGNEE_NEO4J_* env vars; defaults
-  # match the bolt port + neo4j/neo4j credentials below.
+  # connection details from OMNISIGHT_COGNEE_NEO4J_* env vars. OP-899
+  # refuses the default "neo4j" password; set NEO4J_PASSWORD or
+  # OMNISIGHT_COGNEE_NEO4J_PASSWORD before enabling this profile.
   # See docs/operations/cognee-runbook.md for bring-up + recovery.
   # ──────────────────────────────────────────────────────────────
   neo4j:
@@ -112,18 +119,18 @@ services:
       - "7474:7474"   # HTTP browser (optional — disable in prod)
       - "7687:7687"   # Bolt protocol (driver clients connect here)
     environment:
-      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-neo4j}
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD to a non-default strong value}
       - NEO4J_PLUGINS=["apoc"]
       - NEO4J_dbms_memory_heap_initial__size=512m
       - NEO4J_dbms_memory_heap_max__size=2G
       - NEO4J_dbms_memory_pagecache_size=512m
     volumes:
-      - neo4j-data:/data
-      - neo4j-logs:/logs
-      - neo4j-import:/var/lib/neo4j/import
-      - neo4j-plugins:/plugins
+      - /var/lib/omnisight/neo4j/data:/data
+      - /var/lib/omnisight/neo4j/logs:/logs
+      - /var/lib/omnisight/neo4j/import:/var/lib/neo4j/import
+      - /var/lib/omnisight/neo4j/plugins:/plugins
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASSWORD:-neo4j} 'RETURN 1' >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASSWORD:?set NEO4J_PASSWORD} 'RETURN 1' >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -136,9 +143,3 @@ services:
     # nodes.
     mem_limit: 3g
     mem_reservation: 1g
-
-volumes:
-  neo4j-data:
-  neo4j-logs:
-  neo4j-import:
-  neo4j-plugins:

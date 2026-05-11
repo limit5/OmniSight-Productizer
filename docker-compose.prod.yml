@@ -159,6 +159,9 @@ services:
       - OMNISIGHT_ENV=production
       - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
       - OMNISIGHT_INSTANCE_ID=backend-a
+      - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
+      - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
+      - OMNISIGHT_COGNEE_NEO4J_PASSWORD=${OMNISIGHT_COGNEE_NEO4J_PASSWORD:-${NEO4J_PASSWORD:-}}
       # C1 fix: route Docker-API traffic through the allowlisted proxy
       # (see docker-socket-proxy service). The Python SDK in
       # host_metrics.py honours DOCKER_HOST; if/when backend/container.py
@@ -277,6 +280,9 @@ services:
       - OMNISIGHT_ENV=production
       - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
       - OMNISIGHT_INSTANCE_ID=backend-b
+      - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
+      - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
+      - OMNISIGHT_COGNEE_NEO4J_PASSWORD=${OMNISIGHT_COGNEE_NEO4J_PASSWORD:-${NEO4J_PASSWORD:-}}
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
       # See backend-a's note above — internal docker URL for Step-5
       # parallel-health-check frontend probe, avoiding CF tunnel loop.
