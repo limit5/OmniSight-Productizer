@@ -25,6 +25,7 @@ After creation, operator visually verifies the 3 tickets in JIRA UI
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -35,6 +36,29 @@ from pathlib import Path
 
 CRED_ENV = Path("~/.config/omnisight/jira-claude.env").expanduser()
 CRED_TOKEN = Path("~/.config/omnisight/jira-claude-token").expanduser()
+
+
+_RUNNER_MODULE_NAME = "auto_runner_jira"
+
+
+def _load_runner_module():
+    """Load the hyphenated `auto-runner-jira.py` so we can reuse its
+    RECOGNISED_AREAS / UnknownAreaLabelError instead of duplicating.
+    Avoids drift between seed-time and pickup-time validation (OP-832).
+
+    Caches via `sys.modules` so the exception class has a stable identity
+    across repeated calls — matters for tests that `pytest.raises(...)` on
+    `UnknownAreaLabelError`.
+    """
+    cached = sys.modules.get(_RUNNER_MODULE_NAME)
+    if cached is not None:
+        return cached
+    runner_path = Path(__file__).resolve().parent.parent / "auto-runner-jira.py"
+    spec = importlib.util.spec_from_file_location(_RUNNER_MODULE_NAME, runner_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_RUNNER_MODULE_NAME] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_env() -> dict[str, str]:
@@ -325,12 +349,26 @@ def _existing_ticket_key(summary: str) -> str | None:
     return None
 
 
+def _validate_area_labels(labels: list[str]) -> None:
+    """Fail fast at filing time if an `area:<X>` label is unrecognised (OP-832).
+
+    Mirrors the runner's `_build_prompt` validation so operators get feedback
+    before the runner ever picks up a wedge ticket.
+    """
+    runner = _load_runner_module()
+    declared = sorted(l.split(":", 1)[1] for l in labels if l.startswith("area:"))
+    unknown = [a for a in declared if a not in runner.RECOGNISED_AREAS]
+    if unknown:
+        raise runner.UnknownAreaLabelError(unknown, runner.RECOGNISED_AREAS)
+
+
 def _create_issue(summary: str, description_md: str, labels: list[str]) -> str:
     """Create a Story-type ticket with the given summary + description + labels.
 
     Issue type uses Japanese localised name "ストーリー" (Story) per the
     OP project's locale (gotcha #1 in JIRA reference memory).
     """
+    _validate_area_labels(labels)
     payload = {
         "fields": {
             "project": {"key": _project_key()},
