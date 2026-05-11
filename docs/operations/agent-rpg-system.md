@@ -1,8 +1,8 @@
 # Agent RPG System — Operator Guide
 
-> **Status**: v0.5.0 partial ship (RPG.W1-W12 core + W15-W16 + W19-W20
-> shipped; W13-W14 + W17 + W18 + W21 deferred). Last reviewed
-> 2026-05-11 (W12 promoted to **Live** via OP-217).
+> **Status**: v0.5.0 partial ship (RPG.W1-W13 core + W15-W16 + W19-W20
+> shipped; W14 + W17 + W18 + W21 deferred). Last reviewed
+> 2026-05-11 (W13 promoted to **Live** via OP-218).
 > **Authoritative spec**: [ADR-0008 — Agent RPG Class & Skill Leveling
 > System](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/). This doc covers
 > *operation*, not design — when the two diverge, ADR-0008 wins and this
@@ -40,7 +40,8 @@ target ship).
 | W3.x   | Daily style fingerprint cron                                  | **Deferred** — fingerprint column exists; recompute job not scheduled |
 | W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred**               |
 | W12    | `backend/agents/skill_leveling.py` + alembic 0226 `agent_skill_state` | **Live** (OP-217) — branch lock + decay cron live |
-| W13-W14, W17 | MCP/A2A proficiency, talent tree, party tables | **Deferred** — schema not yet migrated |
+| W13    | `backend/agents/tool_proficiency.py` + alembic 0227 `agent_tool_proficiency` + `config/tool_proficiency_gates.yaml` | **Live** (OP-218) — MP.W17.7 telemetry consumer + dispatcher gate live |
+| W14, W17 | Talent tree, party tables | **Deferred** — schema not yet migrated |
 
 If a runbook step below names a surface that is "Deferred" in this
 table, the step is provisional and will start failing the moment the
@@ -55,7 +56,7 @@ operator tries it. File an OP ticket when you hit one.
 | `Guild` enum        | `backend/sandbox_tier.py` (re-exporting BP.B's source of truth)                                   | Importer (`guild_registry.py`) |
 | `agent_class` slug  | `config/agent_class_schema.yaml` (MP.W0.1 — shared with ADR-0007)                                 | Reader                   |
 | `skill_id` namespace| `backend/agents/skill_matrix.yaml` — **this file is RPG's responsibility**                         | Owner                    |
-| `tool_id` namespace | MCP server registry + A2A tool catalog                                                            | Reader (W13 deferred)    |
+| `tool_id` namespace | MCP server registry + A2A tool catalog (gate config in `config/tool_proficiency_gates.yaml`)        | Reader (W13 live via OP-218) |
 | Synergy matrix      | `backend/agents/synergy_registry.py` (W17 deferred — module not yet present)                       | Owner (when W17 lands)   |
 
 When something feels like it belongs in two places, defer to the
@@ -386,6 +387,71 @@ passed.
 
 ---
 
+## MCP/A2A tool proficiency (W13 — live as of 2026-05-11 / OP-218)
+
+Per-`(agent_id, tool_id)` rows live in `agent_tool_proficiency`
+(alembic 0227). Levels are derived from invocation count + success
+ratio; ADR-0008 thresholds:
+
+| Lv | Min success count | Min success ratio | Capability                                  |
+|----|-------------------|-------------------|---------------------------------------------|
+| 1  | 0                 | 0.00              | basic invoke (bootstrap)                    |
+| 2  | 10                | 0.70              | chain 2 calls (multi-step within dispatch)  |
+| 3  | 50                | 0.80              | batch ops (e.g. `write_multiple_files`)     |
+| 4  | 200               | 0.85              | advanced flags + cross-Guild A2A handoff    |
+| 5  | 500               | 0.90              | author new MCP wrapper                      |
+
+The helper surface for backend callers is
+`backend/agents/tool_proficiency.py`:
+
+| Helper | Purpose |
+|---|---|
+| `await record_tool_invocation(store, agent_id, tool_id, outcome)` | Consumed by `mp_w17_telemetry_consumer`; increments counters + recomputes level |
+| `compute_tool_level(invocation_count, success_count)` | Pure: returns Lv 1-5 per the thresholds above |
+| `await can_invoke_at_level(store, agent_id, tool_id, required_level)` | Gate function — used by the tool dispatcher |
+| `get_required_level(tool_id)` | Reads per-tool gate from `config/tool_proficiency_gates.yaml` |
+
+### Gate enforcement
+
+The tool dispatcher (`backend/agents/tool_dispatcher.py`) exposes
+`ToolDispatcher.set_proficiency_gate(gate, agent_id=...)`. Wiring is
+opt-in: callers that pass an `agent_id` get the W13 gate; legacy
+callers without an `agent_id` bypass the gate entirely (backwards
+compat). When a gate refuses, the dispatcher returns a structured
+`tool_proficiency_insufficient` tool_result and emits
+`tool:gate:blocked` on the SSE bus so operators see the refusal in
+real time.
+
+### Per-tool required levels
+
+`config/tool_proficiency_gates.yaml` is the source of truth. The
+shipped file lists the W17.2 hardened top-10 at Lv 1 (Read/Edit/Bash/
+Grep/Glob/Write/Agent/WebFetch/Skill/ToolSearch) plus a Lv-3 sample
+gate on `mcp__filesystem__write_multiple_files` so the gate-refusal
+exercise on a fresh agent is reproducible. Tools absent from the
+YAML default to Lv 1 (permissive); a missing file raises
+`ProficiencyGateConfigMissing` at first read.
+
+### Telemetry consumer
+
+`backend/agents/mp_w17_telemetry_consumer.py` reads the W17.7
+`tool_invocation` SSE stream (already live per OP-117) and applies
+each event through `record_tool_invocation`. The consumer is
+**fail-open on telemetry**: when proficiency state is more than 24h
+stale the gate logs a `TelemetryConsumerLag` warning but keeps
+allowing invocations. The opposite — refusing when telemetry is
+behind — would block valid users on operator outages.
+
+### Recovery
+
+If `agent_tool_proficiency` is corrupted, run
+`scripts/rpg_rebuild_tool_proficiency.py` to re-derive rows from
+the `tool_invocation` log. The replay is idempotent. Use
+`--dry-run` to exercise the replay logic against a static fixture
+without touching the DB.
+
+---
+
 ## Skill fusion preview (W19)
 
 Two Lv-5 skills can be combined into a hybrid Lv-3 skill. The preview
@@ -426,7 +492,8 @@ either, treat the failure as an integrity issue, not a flake.
 | `CharacterCardGuildDriftError` on insert           | Check the Guild slug against `Guild` enum        | Update `sandbox_tier.Guild` or fix the caller |
 | Agent stuck at level 1                             | Inspect runner logs for `XpDelta`; check active debuffs | If `burnout` is permanent: reset `consecutive_failures` for that agent |
 | Skill leveling missing                             | W12 live as of 2026-05-11 — check alembic 0226 applied | Re-run `scripts/rpg_rebuild_skill_state.py` if rows are missing |
-| Talent / party feature missing                     | These are W13-W14 / W17 — deferred post-v0.5.0   | Don't promise the feature; track in TODO Priority RPG |
+| Tool proficiency missing                           | W13 live as of 2026-05-11 — check alembic 0227 applied + `config/tool_proficiency_gates.yaml` parses | Re-run `scripts/rpg_rebuild_tool_proficiency.py` if rows are missing |
+| Talent / party feature missing                     | These are W14 / W17 — deferred post-v0.5.0       | Don't promise the feature; track in TODO Priority RPG |
 
 ---
 

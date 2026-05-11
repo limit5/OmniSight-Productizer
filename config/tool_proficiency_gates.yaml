@@ -1,0 +1,61 @@
+# RPG.W13 — MCP/A2A tool proficiency required-level gates.
+#
+# Each entry maps a ``tool_id`` (the name a dispatch handler is
+# registered under in ``backend/agents/tool_dispatcher.py``) to the
+# minimum proficiency level (1-5) an agent must hold before the
+# dispatcher will forward the call. Tools absent from this file fall
+# back to Lv 1 (permissive default per the ``ProficiencyGateConfigMissing``
+# error-catalog entry on OP-218).
+#
+# Level capability semantics (from ADR-0008 §"MCP/A2A tool proficiency"):
+#   Lv 1  basic invoke (bootstrap)
+#   Lv 2  chain 2 calls (multi-step within one dispatch)
+#   Lv 3  batch ops (e.g. write_multiple_files)
+#   Lv 4  advanced flags + cross-Guild A2A handoff
+#   Lv 5  author new MCP wrapper (tool definition authoring)
+#
+# The W17.2 (OP-114) hardened-tool top-10 lists each tool agents use
+# from day one — those tools sit at Lv 1 so a fresh agent can invoke
+# them on first task. Batch / cross-Guild / authoring variants ride on
+# top at Lv 3-5.
+#
+# Editing rules:
+#   - Tool IDs must match the ``register_handler`` name exactly.
+#   - Required level must be an integer 1..5.
+#   - Comments inline are fine; the parser only reads YAML semantics.
+
+gates:
+  # ── W17.2 hardened top-10 (Lv 1 — basic invoke, allow on day one) ──
+  Read: 1
+  Edit: 1
+  Bash: 1
+  Grep: 1
+  Glob: 1
+  Write: 1
+  Agent: 1
+  WebFetch: 1
+  Skill: 1
+  ToolSearch: 1
+
+  # ── Chained / multi-step variants (Lv 2) ──────────────────────────
+  Task: 2
+  MultiEdit: 2
+
+  # ── Batch operations (Lv 3) ───────────────────────────────────────
+  # The classic Lv-3 gate sample: agents that have not crossed
+  # invocation_count=50 / ratio=0.80 on Edit/Write are refused the
+  # batch variant, forcing them to demonstrate single-file competence
+  # first. ``test_tool_proficiency_gate_refuses_under_level`` exercises
+  # this exact entry.
+  mcp__filesystem__write_multiple_files: 3
+  mcp__filesystem__edit_multiple_files: 3
+  BatchWrite: 3
+
+  # ── Advanced flags + cross-Guild A2A handoff (Lv 4) ───────────────
+  CrossGuildHandoff: 4
+  mcp__a2a__cross_guild_handoff: 4
+  AgentAdvanced: 4
+
+  # ── Author new MCP wrapper (Lv 5 — gate for tool-definition authoring) ──
+  AuthorMcpWrapper: 5
+  mcp__registry__register_wrapper: 5
