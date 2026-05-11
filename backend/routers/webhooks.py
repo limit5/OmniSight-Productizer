@@ -29,8 +29,14 @@ from backend.email_delivery.webhooks import (
     parse_email_feedback_events,
 )
 from backend.events import emit_invoke, emit_task_update
+from backend.integrations.jira_to_graphiti_webhook import (
+    GraphitiIngestionWebhookUnreachable,
+    GraphitiWebhookConfig,
+    GraphitiWebhookConfigError,
+    handle_jira_webhook,
+)
 from backend.models import (
-    Task, TaskStatus, TaskPriority,
+    TaskStatus,
 )
 from backend.stripe_webhooks import (
     StripeWebhookEvent,
@@ -42,6 +48,38 @@ from backend.stripe_webhooks import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+
+@router.post("/jira/graphiti")
+async def jira_graphiti_webhook(request: Request):
+    """Receive JIRA changelog webhooks and forward them to Graphiti."""
+    try:
+        config = GraphitiWebhookConfig.from_env()
+    except GraphitiWebhookConfigError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    raw_body = await request.body()
+    if len(raw_body) > 1_048_576:
+        return JSONResponse(status_code=413, content={"detail": "Payload too large"})
+
+    try:
+        body = json.loads(raw_body)
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+
+    try:
+        result = handle_jira_webhook(
+            body,
+            authorization=request.headers.get("Authorization", ""),
+            config=config,
+        )
+    except GraphitiIngestionWebhookUnreachable as exc:
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+    if result.get("status") == "rejected":
+        return JSONResponse(status_code=401, content={"detail": result["reason"]})
+    return result
 
 
 @router.post("/email/{provider}")
