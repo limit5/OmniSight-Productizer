@@ -56,6 +56,32 @@ INSTANCE_ID = os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or "def
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
 DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
 
+# Recognised JIRA `area:<X>` label values. Exported so other tooling
+# (seed scripts, label linters) can introspect the exact same set used
+# by the prompt-builder. Drift between this and the seed-script copy is
+# asserted by backend/tests/test_auto_runner_prompt_builder.py.
+RECOGNISED_AREAS: frozenset[str] = frozenset({
+    "backend", "frontend", "devops", "tests", "db",
+    "docs", "security", "embedded", "tooling",
+})
+
+
+class UnknownAreaLabelError(ValueError):
+    """Raised when a ticket carries an `area:<X>` label not in RECOGNISED_AREAS.
+
+    Why typed: replaces the silent forbid-all behaviour that wedged OP-829 in a
+    5-iteration self-revert loop (see OP-832 post-mortem). The runner traps this
+    and reverts the ticket so a fresh pickup with corrected labels can succeed.
+    """
+
+    def __init__(self, unknown: list[str], recognised: frozenset[str]) -> None:
+        self.unknown: list[str] = sorted(unknown)
+        self.recognised: list[str] = sorted(recognised)
+        super().__init__(
+            f"Unknown area label(s): {self.unknown}. "
+            f"Recognised areas: {self.recognised}."
+        )
+
 
 def _bot_username() -> str:
     """Resolve the per-instance bot username for this runner process."""
@@ -210,7 +236,10 @@ def _build_prompt(client: jira_dispatch.DispatchClient, key: str, description: s
     components = [c.get("name") for c in f.get("components", [])]
 
     declared_areas = sorted(l.split(":", 1)[1] for l in labels if l.startswith("area:"))
-    all_areas = ["backend", "frontend", "devops", "tests", "db", "docs", "security", "embedded", "tooling"]
+    unknown_areas = [a for a in declared_areas if a not in RECOGNISED_AREAS]
+    if unknown_areas:
+        raise UnknownAreaLabelError(unknown_areas, RECOGNISED_AREAS)
+    all_areas = sorted(RECOGNISED_AREAS)
     forbidden_areas = [a for a in all_areas if a not in declared_areas]
     tier = next((l.split(":", 1)[1] for l in labels if l.startswith("tier:")), "M")
     component_label = components[0] if components else next(
@@ -646,7 +675,27 @@ def main() -> int:
         jira_dispatch.remove_label(client, snapshot.key, jira_dispatch.FILE_COLLISION_SKIP_LABEL)
 
     # Step 4: build prompt + transition + invoke
-    prompt = _build_prompt(client, snapshot.key, description)
+    try:
+        prompt = _build_prompt(client, snapshot.key, description)
+    except UnknownAreaLabelError as e:
+        # OP-832: bad area label → don't construct a wedge prompt. Revert so
+        # a fresh pickup with operator-corrected labels can succeed.
+        print(f"[runner] bad area label on {snapshot.key}: {e}", file=sys.stderr)
+        if not DRY_RUN:
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[runner-bad-area-label]\n\n"
+                f"Unknown `area:` label(s): {e.unknown}\n"
+                f"Recognised areas: {e.recognised}\n\n"
+                f"Operator: replace the unknown label(s) with one or more recognised "
+                f"areas (or extend RECOGNISED_AREAS in `auto-runner-jira.py`), then "
+                f"the next pickup will succeed.",
+            )
+            jira_dispatch.transition_back_to_todo(
+                client, snapshot.key,
+                f"Unknown area label(s) {e.unknown}; awaiting operator label correction.",
+            )
+        return 1
 
     if DRY_RUN:
         print(f"[runner] DRY_RUN: would transition {snapshot.key} → In Progress")
