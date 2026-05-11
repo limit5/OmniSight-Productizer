@@ -1003,7 +1003,7 @@ def test_post_runner_pushed_comment_calls_add_comment_with_url(monkeypatch) -> N
     body must contain the [runner-pushed-to-gerrit] tag and the URL."""
     captured: dict = {}
 
-    def fake_add_comment(client, key, text):
+    def fake_add_comment(client, key, text, idem_key=None):
         captured["key"] = key
         captured["text"] = text
 
