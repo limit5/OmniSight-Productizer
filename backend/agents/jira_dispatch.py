@@ -1629,6 +1629,235 @@ def file_mutex_check(
     )
 
 
+# ── OP-838: atomic ticket-claim mutex ─────────────────────────────
+#
+# Why this exists: the JQL pickup filter (``assignee is EMPTY``) and the
+# ``transition_to_in_progress`` + assign call are separated by several
+# seconds of worktree prep / pre-pickup checks. Two runners ticking on
+# similar wall-clock minutes can both see a ticket as pickable, both
+# proceed past the pre-pickup gates, and both reach
+# ``transition_to_in_progress`` — JIRA accepts both writes and both CLIs
+# then race to push to Gerrit, generating duplicate Change-Ids
+# (different subjects → distinct changes, one merged + one abandoned).
+# Observed on OP-836 #356 and OP-837 #358, 2026-05-11.
+#
+# This block adds a fast, atomic claim sequence the runner runs in the
+# narrow window before ``transition_to_in_progress``: GET-assignee, PUT
+# assignee+claim-label, GET-readback. Loser detects via the readback and
+# skips the ticket on this tick. The label encodes the claiming instance
+# so multi-instance setups (OP-783) can tell their own writes apart.
+
+CLAIM_LABEL_PREFIX = "claim:"
+
+
+@dataclass(frozen=True)
+class ClaimResult:
+    """Outcome of :func:`claim_ticket_atomic`.
+
+    - ``ok=True, lost_to=None``: caller may proceed to
+      ``transition_to_in_progress``. Either we won this race or we're
+      re-claiming a ticket we already held (idempotent re-entry after
+      a runner restart with the same instance_id).
+    - ``ok=False, lost_to=<token>``: another instance claimed first.
+      Caller MUST skip the ticket and MUST NOT call
+      ``transition_to_in_progress``. ``lost_to`` is the foreign claim
+      label (or ``assignee:<accountId>`` for a cross-bot race) — used
+      verbatim in the ``[runner-mutex-lost]`` log line.
+
+    ``claim_token`` records ``{instance_id}:{utc_iso}`` for the attempt,
+    independent of label/assignee write outcome. Logged on both win and
+    loss so a post-mortem can correlate the two sides of the race.
+    """
+
+    ok: bool
+    lost_to: str | None = None
+    claim_token: str | None = None
+
+
+class RunnerMutexLost(RuntimeError):
+    """Soft signal: readback indicates another instance won the claim.
+
+    Per OP-838 ``Error catalog``. The runner-facing API surface returns
+    this as :class:`ClaimResult` (loser path returns, not raises) to keep
+    the happy path branch-free, but the typed class is exported for
+    future programmatic callers that prefer exception-based control flow.
+    """
+
+    def __init__(self, key: str, claim_token: str, observed_token: str | None) -> None:
+        super().__init__(
+            f"{key}: claim {claim_token!r} lost to {observed_token!r}"
+        )
+        self.key = key
+        self.claim_token = claim_token
+        self.observed_token = observed_token
+
+
+class RunnerMutexAPIError(RuntimeError):
+    """Wraps a transport / HTTP failure during the claim sequence.
+
+    Distinguishes "another instance won" (soft skip, retry next tick) from
+    "JIRA itself is unreachable" (escalate / pause). The runner converts
+    both to ``return 0`` so the cron tick exits cleanly, but the typed
+    class lets callers branch in tests / future code.
+    """
+
+    def __init__(self, key: str, step: str, cause: BaseException) -> None:
+        super().__init__(
+            f"{key}: claim {step} failed: {type(cause).__name__}: {cause}"
+        )
+        self.key = key
+        self.step = step
+        self.__cause__ = cause
+
+
+def _our_claim_label(instance_id: str) -> str:
+    """Default-path mutex marker per AC #4: ``claim:{instance_id}``."""
+    return f"{CLAIM_LABEL_PREFIX}{instance_id}"
+
+
+def _claim_label_instance(label: str) -> str | None:
+    """Return the instance_id portion of a ``claim:<inst>`` label, or None."""
+    if not label.startswith(CLAIM_LABEL_PREFIX):
+        return None
+    suffix = label[len(CLAIM_LABEL_PREFIX):]
+    return suffix or None
+
+
+def claim_ticket_atomic(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+) -> ClaimResult:
+    """Atomically claim ``key`` via assignee field + ``claim:<instance>`` label.
+
+    Sequence (per OP-838 AC #1):
+
+    1. GET ``/issue/<key>?fields=assignee,labels`` — bail early on a foreign
+       claim label or foreign assignee (cheap fast-fail before any write).
+    2. PUT ``/issue/<key>`` with ``assignee=bot_account_id`` AND
+       ``labels.add = claim:<instance_id>`` in a single request.
+    3. GET again — verify the assignee readback matches our bot account
+       (the primary cross-bot discriminator: assignee is single-valued and
+       last-writer-wins, so two different bots cannot both observe their
+       own accountId in the readback) and our label landed.
+    4. On readback mismatch return ``ok=False`` with ``lost_to`` describing
+       who won — the caller logs ``[runner-mutex-lost]`` and skips. On
+       success return ``ok=True`` and the caller proceeds to
+       ``transition_to_in_progress``.
+
+    The OP-836/837 race that prompted this work was cross-bot
+    (``codex-bot`` vs ``claude-bot``); the assignee readback catches that
+    case exactly. Same-bot-different-instance is a degenerate config (per
+    OP-783 each instance_id maps to a unique bot account); the pre-GET
+    label fast-fail catches the *sequential* shape of that race, but the
+    fully-interleaved shape is outside the design's atomicity guarantee
+    (operator must keep bot accounts and instance_ids 1:1).
+
+    Idempotent for the same (bot, instance_id): if pre-GET shows our own
+    ``claim:<id>`` and our own assignee, the PUT is a no-op (set-add label
+    dedup + same-value assignee write) and the readback succeeds (AC #5
+    cases 4 + 5 — same-instance re-pickup and runner-restart with
+    persisted claim state).
+
+    Raises :class:`RunnerMutexAPIError` for transport failures on any of
+    the three calls. Returns ``ClaimResult`` for the mutex-lost path.
+    """
+    our_label = _our_claim_label(instance_id)
+    utc_iso = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    our_token = f"{instance_id}:{utc_iso}"
+
+    # Step a: pre-GET.
+    try:
+        pre = _request(client, "GET", f"/issue/{key}?fields=assignee,labels")
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        raise RunnerMutexAPIError(key, "pre-GET", e) from e
+
+    pre_fields = pre.get("fields") or {}
+    pre_assignee_id = (pre_fields.get("assignee") or {}).get("accountId")
+    pre_labels = list(pre_fields.get("labels") or [])
+
+    foreign_claim = next(
+        (
+            l for l in pre_labels
+            if (inst := _claim_label_instance(l)) is not None and inst != instance_id
+        ),
+        None,
+    )
+    if foreign_claim:
+        return ClaimResult(ok=False, lost_to=foreign_claim, claim_token=our_token)
+
+    if pre_assignee_id and pre_assignee_id != client.bot_account_id:
+        return ClaimResult(
+            ok=False,
+            lost_to=f"assignee:{pre_assignee_id}",
+            claim_token=our_token,
+        )
+
+    # Step b: atomic PUT — assignee + label add in one request.
+    try:
+        _request(
+            client, "PUT", f"/issue/{key}",
+            {
+                "fields": {"assignee": {"accountId": client.bot_account_id}},
+                "update": {"labels": [{"add": our_label}]},
+            },
+        )
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        raise RunnerMutexAPIError(key, "PUT", e) from e
+
+    # Step c: post-GET readback.
+    try:
+        post = _request(client, "GET", f"/issue/{key}?fields=assignee,labels")
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        raise RunnerMutexAPIError(key, "post-GET", e) from e
+
+    post_fields = post.get("fields") or {}
+    post_assignee_id = (post_fields.get("assignee") or {}).get("accountId")
+    post_labels = list(post_fields.get("labels") or [])
+
+    # Step d.i: primary discriminator — assignee field is single-valued
+    # and last-writer-wins. Two concurrent PUTs from different bots end
+    # with exactly one bot account in the readback; everybody else loses.
+    if post_assignee_id != client.bot_account_id:
+        return ClaimResult(
+            ok=False,
+            lost_to=f"assignee:{post_assignee_id}",
+            claim_token=our_token,
+        )
+
+    # Step d.ii: our label must have landed. A missing label in the
+    # readback means the PUT was rejected or partial — treat as a loss so
+    # the caller doesn't proceed on inconsistent state.
+    if our_label not in post_labels:
+        return ClaimResult(
+            ok=False,
+            lost_to="claim-label-missing-from-readback",
+            claim_token=our_token,
+        )
+
+    return ClaimResult(ok=True, lost_to=None, claim_token=our_token)
+
+
+def release_ticket_claim(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+) -> None:
+    """Remove our ``claim:<instance>`` label from ``key``.
+
+    Best-effort cleanup for the AC #5 case 3 path ("someone already cleared
+    the prior claim"). JIRA treats a remove-op for an absent label as a
+    no-op, so this is idempotent and safe to call when no claim was set.
+    Transport failures are logged + swallowed — the claim label is audit
+    state, not load-bearing for correctness.
+    """
+    label = _our_claim_label(instance_id)
+    try:
+        remove_label(client, key, label)
+    except RuntimeError as e:
+        log.warning("release_ticket_claim: removing %s failed: %s", label, e)
+
+
 PREREQS_RE = re.compile(
     r"##\s+Prerequisites.*?```yaml\s*(.+?)\s*```",
     re.DOTALL | re.IGNORECASE,
