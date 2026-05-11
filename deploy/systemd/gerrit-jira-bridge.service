@@ -71,6 +71,12 @@ Environment=OMNISIGHT_NOTIFIER_AGENT_CLASS=subscription-claude
 ; provisioned can leave this commented out — the code falls back to
 ; the legacy path automatically.
 Environment=OMNISIGHT_BRIDGE_CURSOR_FILE=/home/user/.local/state/omnisight-bridge/event-cursor.json
+; OP-845: the bridge itself does not invoke a CLI inside a sandbox, but
+; the runner instances it monitors do. Operator install checklist:
+;   apt install bubblewrap     # bwrap on PATH (verify: which bwrap)
+;   echo OMNISIGHT_RUNNER_SANDBOX_ENFORCE=1 >> runner-claude@.service
+;   journalctl --user -u runner-claude@default | grep sandbox=wrapped
+; See docs/operations/runner-sandbox.md for the full DoD.
 ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/run_gerrit_jira_bridge.py --agent-class subscription-claude
 Restart=always
 RestartSec=5
