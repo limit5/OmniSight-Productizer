@@ -431,7 +431,7 @@ def test_dependency_blocked_candidate_gets_waiting_label_and_comment(
     monkeypatch.setattr(
         mod.jira_dispatch,
         "add_comment",
-        lambda c, k, text: calls["comments"].append((k, text)),
+        lambda c, k, text, idem_key=None: calls["comments"].append((k, text)),
     )
 
     assert mod._check_pre_pickup_candidate(_client(), snapshot) is False
@@ -448,6 +448,7 @@ def test_dependency_waiting_label_removed_after_blocker_resolves(
 ) -> None:
     mod = _load_jira_runner()
     removed: list[tuple[str, str]] = []
+    comments: list[tuple[str, str]] = []
     snapshot = _snapshot("OP-B", labels=("runner-blocked:waiting-OP-A", "scope:runner-pipeline"))
 
     monkeypatch.setattr(mod, "DRY_RUN", False)
@@ -459,6 +460,11 @@ def test_dependency_waiting_label_removed_after_blocker_resolves(
         "remove_label",
         lambda c, k, label: removed.append((k, label)),
     )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_comment",
+        lambda c, k, text, idem_key=None: comments.append((k, text)),
+    )
 
     assert mod._check_pre_pickup_candidate(_client(), snapshot) is True
 
@@ -466,6 +472,10 @@ def test_dependency_waiting_label_removed_after_blocker_resolves(
         ("OP-B", "runner-blocked:waiting-OP-A"),
         ("OP-B", jd.FILE_COLLISION_SKIP_LABEL),
     ]
+    # OP-955 AC#3: clearing markers must emit exactly one "unblocked" comment.
+    assert len(comments) == 1
+    assert comments[0][0] == "OP-B"
+    assert "[runner-dependency-unblocked]" in comments[0][1]
 
 
 def test_runner_main_all_candidates_blocked_by_file_mutex_returns_zero(

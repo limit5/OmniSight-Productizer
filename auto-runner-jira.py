@@ -34,11 +34,14 @@ ENV:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
@@ -136,6 +139,14 @@ def _dependency_skip_comment(reason: str) -> str:
     return f"[runner-dependency-blocked] {stamp}\n\nSkipped - {reason}. Will retry next tick."
 
 
+def _dependency_unblocked_comment() -> str:
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return (
+        f"[runner-dependency-unblocked] {stamp}\n\n"
+        "All blockers resolved; runner picking up next tick."
+    )
+
+
 def _blocked_by_key(reason: str) -> str | None:
     if not reason.startswith("blocked-by:"):
         return None
@@ -147,23 +158,66 @@ def _add_dependency_waiting_marker(
     snapshot: scheduler.TicketSnapshot,
     reason: str,
 ) -> None:
+    """Mark a ticket as waiting on ``blocker_key`` once per blocker transition.
+
+    OP-955: the OP-911 incident posted ~50 redundant comments over an hour
+    because the marker label was idempotent but the comment was not. The
+    label-presence check below caps the comment side at one per
+    (ticket, blocker_key) transition. When the active blocker changes
+    (was OP-X, now OP-Y), the stale ``runner-blocked:waiting-OP-X`` label
+    is dropped and a fresh comment documents the new blocker.
+    """
     blocker_key = _blocked_by_key(reason)
     if not blocker_key:
         return
-    jira_dispatch.add_label(
-        client,
-        snapshot.key,
-        jira_dispatch.dependency_waiting_label(blocker_key),
+    new_label = jira_dispatch.dependency_waiting_label(blocker_key)
+    existing_markers = jira_dispatch.dependency_waiting_labels(
+        getattr(snapshot, "labels", ())
     )
-    jira_dispatch.add_comment(client, snapshot.key, _dependency_skip_comment(reason))
+
+    if new_label in existing_markers:
+        log.debug(
+            "runner.dependency_blocked_skip_comment %s: marker %s already present",
+            snapshot.key,
+            new_label,
+        )
+        return
+
+    for stale in existing_markers:
+        if stale != new_label:
+            jira_dispatch.remove_label(client, snapshot.key, stale)
+
+    jira_dispatch.add_label(client, snapshot.key, new_label)
+
+    date_bucket = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    idem_key = f"dep-blocked-{snapshot.key}-{blocker_key}-{date_bucket}"
+    jira_dispatch.add_comment(
+        client, snapshot.key, _dependency_skip_comment(reason), idem_key=idem_key
+    )
 
 
 def _clear_dependency_waiting_markers(
     client: jira_dispatch.DispatchClient,
     snapshot: scheduler.TicketSnapshot,
 ) -> None:
-    for label in jira_dispatch.dependency_waiting_labels(getattr(snapshot, "labels", ())):
+    """Drop all waiting-* markers and post one ``unblocked`` comment.
+
+    OP-955 AC#3: when a ticket transitions from blocked → pickable, the
+    runner posts exactly one ``[runner-dependency-unblocked]`` note
+    (mirror of the blocked-side comment) and clears every
+    ``runner-blocked:waiting-*`` label. No-op when no markers exist so
+    tickets that were never blocked stay silent.
+    """
+    markers = jira_dispatch.dependency_waiting_labels(getattr(snapshot, "labels", ()))
+    if not markers:
+        return
+    for label in markers:
         jira_dispatch.remove_label(client, snapshot.key, label)
+    date_bucket = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    idem_key = f"dep-unblocked-{snapshot.key}-{date_bucket}"
+    jira_dispatch.add_comment(
+        client, snapshot.key, _dependency_unblocked_comment(), idem_key=idem_key
+    )
 
 
 def already_merged_in_gerrit(ticket_key: str) -> tuple[int, str] | None:
