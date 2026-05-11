@@ -16,9 +16,19 @@ from backend.agents.character_card import (
     CharacterCardRegistry,
     CharacterCardRosterEntry,
     CharacterCardSort,
+    CharacterSkillEntry,
     PostgresCharacterCardStore,
+    fetch_skill_entries,
 )
 from backend.agents.guild_hall import GuildHallGuild, build_guild_hall_view
+from backend.agents.skill_leveling import (
+    PostgresSkillStateStore,
+    SkillBranchAlreadyLocked,
+    SkillIdNotInMatrix,
+    SkillLevelingError,
+    lock_branch_choice as lock_skill_branch_choice,
+)
+from backend.agents.skill_matrix import SkillMatrixDriftError
 from backend.events import emit_agent_update
 from backend.models import Agent, AgentCreate, AgentProgress, AgentStatus, AgentWorkspace
 from backend.sandbox_tier import Guild
@@ -172,6 +182,54 @@ async def get_guild_hall_roster(
     raise HTTPException(status_code=404, detail="Guild not found")
 
 
+@router.get("/{agent_id}/skills")
+async def get_agent_skills(
+    agent_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W12: list per-skill state for the Character Card Skills tab."""
+    store = PostgresSkillStateStore(lambda: _borrowed_conn(conn))
+    entries = await fetch_skill_entries(store, agent_id)
+    return [_skill_entry_to_dict(entry) for entry in entries]
+
+
+@router.post("/{agent_id}/skills/{skill_id}/branch")
+async def lock_agent_skill_branch(
+    agent_id: str,
+    skill_id: str,
+    body: dict,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W12: lock the Lv-3 branch_choice for ``(agent_id, skill_id)``.
+
+    Idempotent on identical input; refuses to overwrite a different
+    branch with 409 (per ``SkillBranchAlreadyLocked``). Branch values
+    must match ``skill_matrix.yaml`` — drift returns 422.
+    """
+    branch = (body or {}).get("branch") if isinstance(body, dict) else None
+    if not isinstance(branch, str) or not branch.strip():
+        raise HTTPException(status_code=400, detail="branch is required")
+    store = PostgresSkillStateStore(lambda: _borrowed_conn(conn))
+    try:
+        state = await lock_skill_branch_choice(store, agent_id, skill_id, branch)
+    except SkillBranchAlreadyLocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SkillIdNotInMatrix as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SkillMatrixDriftError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SkillLevelingError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "agent_id": state.agent_id,
+        "skill_id": state.skill_id,
+        "level": state.level,
+        "xp": state.xp,
+        "branch_choice": state.branch_choice,
+        "last_active_at": state.last_active_at,
+    }
+
+
 @router.get("/{agent_id}", response_model=Agent)
 async def get_agent(agent_id: str):
     # Reads the in-memory mirror — no DB conn needed.
@@ -303,6 +361,18 @@ def _roster_entry_to_dict(entry: CharacterCardRosterEntry) -> dict:
         "style_fingerprint": card.style_fingerprint,
         "created_at": card.created_at,
         "last_activity_at": entry.last_activity_at,
+    }
+
+
+def _skill_entry_to_dict(entry: CharacterSkillEntry) -> dict:
+    return {
+        "skill_id": entry.skill_id,
+        "level": entry.level,
+        "xp": entry.xp,
+        "next_level_xp": entry.next_level_xp,
+        "branch_choice": entry.branch_choice,
+        "last_active_at": entry.last_active_at,
+        "branch_choice_required": entry.branch_choice_required,
     }
 
 

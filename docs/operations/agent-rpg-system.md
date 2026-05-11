@@ -1,7 +1,8 @@
 # Agent RPG System — Operator Guide
 
-> **Status**: v0.5.0 partial ship (RPG.W1-W11 core + W15-W16 + W19-W20
-> shipped; W12-W14 + W17 + W18 + W21 deferred). Last reviewed 2026-05-08.
+> **Status**: v0.5.0 partial ship (RPG.W1-W12 core + W15-W16 + W19-W20
+> shipped; W13-W14 + W17 + W18 + W21 deferred). Last reviewed
+> 2026-05-11 (W12 promoted to **Live** via OP-217).
 > **Authoritative spec**: [ADR-0008 — Agent RPG Class & Skill Leveling
 > System](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/). This doc covers
 > *operation*, not design — when the two diverge, ADR-0008 wins and this
@@ -38,7 +39,8 @@ target ship).
 | W20.2  | `backend/agents/campaign_progress.py` — chapter ledger                   | **Live**; alembic 0201 adds `tasks.rpg_campaign_id` + `rpg_campaign_title` |
 | W3.x   | Daily style fingerprint cron                                  | **Deferred** — fingerprint column exists; recompute job not scheduled |
 | W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred**               |
-| W12-W14, W17 | Skill leveling tables, MCP/A2A proficiency, talent tree, party tables | **Deferred** — schema not yet migrated |
+| W12    | `backend/agents/skill_leveling.py` + alembic 0226 `agent_skill_state` | **Live** (OP-217) — branch lock + decay cron live |
+| W13-W14, W17 | MCP/A2A proficiency, talent tree, party tables | **Deferred** — schema not yet migrated |
 
 If a runbook step below names a surface that is "Deferred" in this
 table, the step is provisional and will start failing the moment the
@@ -149,9 +151,31 @@ config that references it.
 
 ### 4. Renaming or deleting a `skill_id`
 
-**Don't, unless you know there are no rows in `agent_skill_state`
-(W12, deferred) yet.** Once W12 ships, a `skill_id` is part of a
-primary key — renames need a data migration, not a YAML edit.
+**Don't, unless you know there are no rows in `agent_skill_state`.**
+W12 (live as of 2026-05-11 / OP-217) makes `skill_id` part of the
+`(agent_id, skill_id)` primary key — renames need a data migration,
+not a YAML edit. To audit current rows::
+
+    SELECT skill_id, COUNT(*) FROM agent_skill_state GROUP BY skill_id;
+
+If the rename target has zero rows, the YAML edit is safe; otherwise
+plan a forward-only migration alongside `scripts/rpg_rebuild_skill_state.py`.
+
+### 5. Adding or renaming a Lv-3 branch
+
+`skill_matrix.yaml` carries a `branches:` list per skill (W12). Adding
+a new option is safe — the drift guard
+(`assert_branch_choice_in_matrix()`) only fails when an *existing*
+`agent_skill_state.branch_choice` no longer maps to the YAML.
+
+To rename or delete a branch with existing rows, you must do all of
+the following in the same change set:
+
+1. Add the new branch entry alongside the old one in YAML.
+2. Run `scripts/rpg_rebuild_skill_state.py --clear-branches` against a
+   staging DSN to re-derive `branch_choice` from operator intent (the
+   `lock_branch_choice` audit log is the source of truth).
+3. Remove the old branch from YAML only after no row references it.
 
 ---
 
@@ -229,7 +253,7 @@ runner code only; there is no operator endpoint to award XP by hand.
 - *"Why did Lv 50 → 51 take so long?"* — `100 × 51 ** 1.4 ≈ 21,200`,
   vs `100 × 50 ** 1.4 ≈ 20,560`. The curve is sigmoid-flat by design.
 - *"An agent's level dropped."* — Levels never drop. Skill XP (W12,
-  deferred) decays toward but cannot cross a level threshold; the
+  live) decays toward but cannot cross a level threshold; the
   card-level field is monotonic. If you observe a drop, file a bug.
 - *"Two agents with the same class are differently leveled."* — That
   is the W3 design (per-instance suffix + style fingerprint).
@@ -317,19 +341,63 @@ directly when dispatching.
 
 ---
 
+## Skill leveling (W12 — live as of 2026-05-11 / OP-217)
+
+Per-`(agent_id, skill_id)` rows live in `agent_skill_state` (alembic
+0226). The helper surface for backend callers is
+`backend/agents/skill_leveling.py`:
+
+| Helper | Purpose |
+|---|---|
+| `await award_skill_xp(store, agent_id, skill_id, delta=..., outcome=..., …)` | Apply XP delta with outcome / Tier-L+ / first-time / anti-grind multipliers |
+| `compute_level(xp)` | Pure: returns Lv 1-5 per thresholds `25 / 100 / 250 / 600 / 1500` |
+| `await lock_branch_choice(store, agent_id, skill_id, branch)` | Idempotent + refuses re-write (immutable at Lv 3) |
+| `await teach_other_agent(store, teacher, student, skill_id)` | Lv-5 only; one-shot +25 XP injection, 7-day cooldown |
+| `await decay_idle_skills(store, now=...)` | Sweep: 5%/week on rows idle >= 30 days |
+
+### Per-level unlock effects (set by `award_skill_xp`)
+
+| Lv | Unlock |
+|---|---|
+| 2  | `extended_thinking_enabled` flag set on agent's next dispatch |
+| 3  | `parallel_subtask_enabled` flag set |
+| 4  | `prompt_overhead_reduced` (skip preamble in system prompt) |
+| 5  | `teach_other_agent` capability unlocked |
+
+Crossing Lv 3 with no `branch_choice` set raises
+`branch_choice_required` on the SSE — the Character Card "Skills" tab
+shows the picker the operator clicks to choose a fork from
+`skill_matrix.yaml`.
+
+### Decay sweep
+
+Driven by `deploy/systemd/rpg-skill-decay.{service,timer}` (Mondays
+03:30 UTC) → `scripts/rpg_skill_decay_weekly.sh` → `scripts/rpg_skill_decay.py`.
+The sweep is monotonic on level: only `xp` regresses, never below
+`next_level_threshold - 1`.
+
+### Recovery
+
+If `agent_skill_state` is corrupted, run
+`scripts/rpg_rebuild_skill_state.py` to re-derive rows from
+`tasks.success_history`. The replay is idempotent; existing
+`branch_choice` values are preserved unless `--clear-branches` is
+passed.
+
+---
+
 ## Skill fusion preview (W19)
 
-Two Lv-5 skills can be combined into a hybrid Lv-3 skill. Today this
-is a **preview-only** surface — the fusion does not actually create a
-new `agent_skill_state` row (W12, deferred). The preview helper is
-exposed to the frontend via:
+Two Lv-5 skills can be combined into a hybrid Lv-3 skill. The preview
+helper is exposed to the frontend via:
 
 - `components/omnisight/agents/SkillFusionPreview.tsx` — selector + preview
 - `components/omnisight/agents/FusionPreviewModal.tsx` — confirmation modal
 - Backend logic: `backend/agents/skill_fusion.py`
 
-When W12 lands, the modal's confirm button will write to the skill
-state table. Until then it shows a deterministic preview only.
+Now that W12 is live (OP-217), the confirm button writes to
+`agent_skill_state`; before W12 shipped, this was a preview-only
+surface.
 
 ---
 
@@ -341,6 +409,7 @@ divergence — these are the **W11 contract** that this doc lives under:
 | Guard                                                | Catches                                                              | Source                                          |
 | ---------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------- |
 | `assert_skill_id_space_within_matrix()`              | Any `skill_id` in `configs/**.yaml` that is missing from `skill_matrix.yaml` | `backend/agents/skill_matrix.py:154` |
+| `assert_branch_choice_in_matrix(skill_id, branch_id)` | Any persisted `agent_skill_state.branch_choice` absent from `skill_matrix.yaml` `branches:` | `backend/agents/skill_matrix.py` (raises `SkillMatrixDriftError`) |
 | Character Card Guild slug ⊆ `GUILD_DEFINITIONS`      | Any persisted card row with a Guild not in the registry              | `character_card.py` `CharacterCardGuildDriftError` |
 
 Both raise on first divergence — no soft warnings. If CI is red on
@@ -356,7 +425,8 @@ either, treat the failure as an integrity issue, not a flake.
 | `SkillMatrixDriftError` in CI                      | `git diff` `skill_matrix.yaml` vs the offending config | Add the missing `skill_id` to YAML, re-push |
 | `CharacterCardGuildDriftError` on insert           | Check the Guild slug against `Guild` enum        | Update `sandbox_tier.Guild` or fix the caller |
 | Agent stuck at level 1                             | Inspect runner logs for `XpDelta`; check active debuffs | If `burnout` is permanent: reset `consecutive_failures` for that agent |
-| Skill leveling / talent / party feature missing    | These are W12-W14 / W17 — deferred post-v0.5.0   | Don't promise the feature; track in TODO Priority RPG |
+| Skill leveling missing                             | W12 live as of 2026-05-11 — check alembic 0226 applied | Re-run `scripts/rpg_rebuild_skill_state.py` if rows are missing |
+| Talent / party feature missing                     | These are W13-W14 / W17 — deferred post-v0.5.0   | Don't promise the feature; track in TODO Priority RPG |
 
 ---
 
