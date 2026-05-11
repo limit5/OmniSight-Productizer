@@ -1,0 +1,123 @@
+# OP-864 D2 — runner backend image (Sprint D, META OP-761 §Phase 1).
+#
+# Distinct from `Dockerfile.backend` (the production FastAPI core
+# image, shipped to GHCR by OP-763). This image packages the JIRA-
+# driven AI runner runtime — `auto-runner-jira.py` and the
+# `backend/agents/` dispatch helpers it shells into — for the
+# self-hosted control plane at `registry.sora.services:5000`.
+#
+# Design constraints:
+#   - alpine base (small attack surface; OP-864 spec line 1)
+#   - Python 3.12 (matches backend lockfile interpreter)
+#   - non-root runtime (uid 65532, matches Dockerfile.backend H4)
+#   - reproducible (SOURCE_DATE_EPOCH respected by the wheel layer;
+#     2 builds at the same git SHA produce identical digest — best
+#     effort per OP-864 AC #5)
+#
+# Tag scheme (applied by `scripts/build_image.sh`):
+#   registry.sora.services:5000/omnisight/runner:<semver>
+#   registry.sora.services:5000/omnisight/runner:sha-<short-sha>
+#
+# Build:
+#   scripts/build_image.sh --tag v0.1.0
+#
+# Sign + push are handled by the same script; do NOT `docker push`
+# manually — unsigned images are rejected at deploy time.
+
+# ── Builder ──────────────────────────────────────────────────────────
+FROM python:3.12-alpine3.20 AS builder
+
+# Pin SOURCE_DATE_EPOCH from the build script for reproducibility.
+# The default (0) keeps `pip install` deterministic when the script
+# forgets to pass it, but the script always overrides to the git
+# commit's author timestamp.
+ARG SOURCE_DATE_EPOCH=0
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /build
+
+# musl toolchain + libs needed to compile cryptography / cffi / etc.
+# from sdists when alpine wheels aren't available. None of this
+# ships in the runner stage.
+RUN apk add --no-cache --virtual .build-deps \
+        gcc g++ musl-dev libffi-dev openssl-dev cargo git make
+
+# Runner only needs a narrow subset of the backend lockfile (the
+# helpers in backend/agents/jira_dispatch.py + httpx + pydantic).
+# We install from the canonical hashed lockfile so a drift in
+# requirements.in fails the build the same way prod does.
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
+
+# Strip pip + bytecode caches + dist-info hash files that would
+# otherwise capture the build's hostname/path and break the
+# reproducibility AC (#5).
+RUN rm -rf /usr/local/lib/python3.12/site-packages/pip \
+           /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+    && find /usr/local/lib/python3.12 -name '__pycache__' -type d -exec rm -rf {} + \
+    && find /usr/local/lib/python3.12 -name '*.pyc' -delete
+
+
+# ── Runner ───────────────────────────────────────────────────────────
+FROM python:3.12-alpine3.20 AS runner
+
+ARG SOURCE_DATE_EPOCH=0
+ARG GIT_SHA=unknown
+ARG SEMVER=0.0.0
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    OMNISIGHT_WORKSPACE=/app \
+    OMNISIGHT_RUNNER_MODE=jira
+
+WORKDIR /app
+
+# Runtime libs only — libffi + openssl for cryptography, git for the
+# runner's gerrit-push step. No compilers.
+RUN apk add --no-cache \
+        libffi openssl ca-certificates git bash tini
+
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+
+# Application surface the runner actually loads at startup. We pull
+# in `backend/agents/` (jira_dispatch + helpers), the `scripts/`
+# tree (the runner shells into a few of them), and the auto-runner
+# entrypoint.
+COPY backend/agents/ ./backend/agents/
+COPY backend/__init__.py ./backend/__init__.py
+COPY auto-runner-jira.py ./auto-runner-jira.py
+COPY scripts/ ./scripts/
+COPY CLAUDE.md ./
+COPY .env.example ./.env.example
+
+# Drop pytest caches / test code that crept in via scripts/ — the
+# runtime image must not carry tests (matches OP-763 invariant).
+RUN find /app -type d -name '__pycache__' -exec rm -rf {} + \
+    && find /app -type d -name '.pytest_cache' -exec rm -rf {} + \
+    && find /app -name '*.pyc' -delete
+
+# OCI labels for registry-side introspection + downstream auditors.
+LABEL org.opencontainers.image.title="omnisight-runner" \
+      org.opencontainers.image.description="OmniSight JIRA-driven AI runner runtime" \
+      org.opencontainers.image.source="https://github.com/sora/OmniSight" \
+      org.opencontainers.image.version="${SEMVER}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.licenses="proprietary"
+
+# Non-root user (uid/gid 65532; same convention as Dockerfile.backend
+# so volume permissions match across the fleet).
+RUN addgroup -g 65532 -S app \
+    && adduser -u 65532 -G app -S -H -s /sbin/nologin app \
+    && chown -R app:app /app
+
+USER app:app
+
+# tini reaps zombie subprocesses from the runner's shell-outs to
+# git / gerrit-jira-bridge helpers (otherwise long-lived runner
+# pods accumulate defunct PIDs).
+ENTRYPOINT ["/sbin/tini", "--"]
+
+CMD ["python", "auto-runner-jira.py"]
