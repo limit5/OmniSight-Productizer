@@ -48,6 +48,7 @@ from backend.agents import (
     jira_dispatch,
     orphan_salvage,
     runner_failure_classifier,
+    runner_sandbox,
     runner_workspace_safety,
     scheduler,
 )
@@ -322,8 +323,23 @@ CLAUDE_WORKTREE = os.environ.get(
 TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_RUNNER_TIMEOUT_S", "1800"))
 
 
-def _invoke_cli(agent_class: str, prompt: str, failure_context: str | None = None) -> int:
-    """Invoke the underlying CLI for this agent_class. Returns exit code."""
+def _invoke_cli(
+    agent_class: str,
+    prompt: str,
+    failure_context: str | None = None,
+    *,
+    ticket_key: str = "default",
+    worktree_path: Path | None = None,
+) -> int:
+    """Invoke the underlying CLI for this agent_class. Returns exit code.
+
+    OP-845: when running on a platform that supports a sandbox binary
+    (Linux ``bwrap`` / macOS ``sandbox-exec``), the CLI argv is wrapped
+    via :func:`runner_sandbox.wrap_in_bubblewrap` so an injection-driven
+    write outside the worktree is blocked by the kernel, not just by
+    OP-836's post-hoc sentinel check. Wrap-vs-degrade gating lives in
+    that module — here we just thread the inputs.
+    """
     full_prompt = prompt
     if failure_context:
         full_prompt = f"{prompt.rstrip()}\n\n{failure_context.strip()}\n"
@@ -334,6 +350,7 @@ def _invoke_cli(agent_class: str, prompt: str, failure_context: str | None = Non
             print(f"[runner] codex worktree missing: {CODEX_WORKTREE}", file=sys.stderr)
             return 2
         cmd = ["codex", "exec", "--cd", CODEX_WORKTREE, "--yolo"]
+        sandbox_worktree = Path(CODEX_WORKTREE)
     elif agent_class == "subscription-claude":
         if not os.path.isdir(CLAUDE_WORKTREE):
             print(f"[runner] claude worktree missing: {CLAUDE_WORKTREE}", file=sys.stderr)
@@ -344,12 +361,28 @@ def _invoke_cli(agent_class: str, prompt: str, failure_context: str | None = Non
         # runner's cwd (main repo) and commits land outside the worktree,
         # causing "no new changes" rejections at push time.
         cwd = CLAUDE_WORKTREE
+        sandbox_worktree = Path(CLAUDE_WORKTREE)
     elif agent_class.startswith("api-"):
         print(f"[runner] agent_class={agent_class} requires SDK invocation, not CLI. Skipping invoke.")
         return 99
     else:
         print(f"[runner] unknown agent_class: {agent_class}", file=sys.stderr)
         return 2
+
+    # OP-845: wrap the CLI argv in the platform sandbox jail. Caller can
+    # pass an explicit worktree_path override; otherwise we use the
+    # per-class default chosen above.
+    effective_worktree = worktree_path or sandbox_worktree
+    try:
+        wrapped_cmd = runner_sandbox.wrap_in_bubblewrap(
+            cmd, worktree_path=effective_worktree, ticket_key=ticket_key,
+        )
+    except runner_sandbox.SandboxBinaryMissing as e:
+        # ENFORCE=1 + binary missing → abort. We surface a distinct exit
+        # code so the caller can operator-alert + revert the ticket
+        # rather than treating it like a generic CLI failure.
+        print(f"[runner] sandbox binary missing (ENFORCE=1): {e}", file=sys.stderr)
+        return 126
 
     if DRY_RUN:
         print(f"[runner] DRY_RUN: would invoke `{' '.join(cmd[:3])}...` with {len(full_prompt)} char prompt")
@@ -358,7 +391,7 @@ def _invoke_cli(agent_class: str, prompt: str, failure_context: str | None = Non
     print(f"[runner] invoking {cmd[0]} (timeout {TASK_TIMEOUT_S}s)...")
     try:
         proc = subprocess.Popen(
-            cmd,
+            wrapped_cmd,
             cwd=cwd,
             stdin=subprocess.PIPE if cmd[0] == "codex" else None,
             stdout=sys.stdout,
@@ -516,6 +549,18 @@ def main() -> int:
     print(
         f"[runner] agent_class={AGENT_CLASS}, instance_id={INSTANCE_ID}, "
         f"bot={_bot_username()}, dry_run={DRY_RUN}"
+    )
+    # OP-845: log sandbox state once at startup so journalctl shows the
+    # operator whether bubblewrap is wired before any ticket is processed.
+    _sandbox_enforce = os.environ.get(runner_sandbox.ENV_ENFORCE, "0")
+    _sandbox_status = (
+        runner_sandbox.LOG_SANDBOX_WRAPPED
+        if runner_sandbox.sandbox_available()
+        else runner_sandbox.LOG_SANDBOX_DEGRADED
+    )
+    print(
+        f"[runner] {_sandbox_status} platform={runner_sandbox.detect_platform()} "
+        f"enforce={_sandbox_enforce}"
     )
     open_services = circuit_breaker.open_services()
     if open_services:
@@ -758,7 +803,10 @@ def main() -> int:
     print(f"[runner] transitioning {snapshot.key} → In Progress")
     jira_dispatch.transition_to_in_progress(client, snapshot.key)
 
-    rc = _invoke_cli(AGENT_CLASS, prompt)
+    rc = _invoke_cli(
+        AGENT_CLASS, prompt,
+        ticket_key=snapshot.key, worktree_path=worktree_path,
+    )
 
     # OP-836 post-CLI verify — abort the Gerrit-push pipeline if the CLI
     # tampered with the worktree.

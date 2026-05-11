@@ -42,6 +42,21 @@ Environment=OMNISIGHT_RUNNER_INSTANCE_ID=%i
 ; JIRA mutations against shared rows. Default-instance setups can leave
 ; this unset and the runner falls back to ~/.config/omnisight/idem-keys.db.
 Environment=OMNISIGHT_IDEMPOTENCY_DB_PATH=%h/.config/omnisight/idem-keys-codex-bot-%i.db
+; OP-845: bubblewrap sandbox wrapper for CLI invocations.
+;
+; Production hosts: install `bubblewrap` (apt install bubblewrap) and set
+;   Environment=OMNISIGHT_RUNNER_SANDBOX_ENFORCE=1
+; so a missing binary aborts the pickup instead of silently degrading to
+; a raw (un-jailed) invocation. Verify after deploy:
+;   journalctl --user -u runner-codex@%i.service | grep 'sandbox=wrapped'
+;
+; Dev hosts: leave the env unset; the runner logs `sandbox=degraded` and
+; runs raw so a workstation without bubblewrap installed isn't blocked.
+;
+; Network deny by default. For tickets that genuinely need network
+; (web scraping, dep-fetch outside cache), set per-pickup:
+;   Environment=OMNISIGHT_RUNNER_SANDBOX_NETWORK_ALLOW=<audit-reason>
+;Environment=OMNISIGHT_RUNNER_SANDBOX_ENFORCE=1
 ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-Productizer/auto-runner-jira.py
 Restart=on-failure
 ; 90s aligns with the launcher's tmux-loop tick cadence so the runner
