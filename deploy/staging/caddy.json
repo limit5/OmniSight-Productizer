@@ -8,7 +8,7 @@
             {
               "match": [
                 {
-                  "path": ["/api/*", "/readyz", "/healthz"]
+                  "path": ["/api/*", "/readyz", "/healthz", "/health"]
                 }
               ],
               "handle": [
