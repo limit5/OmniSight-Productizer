@@ -107,6 +107,50 @@ def test_argv_shape_linux_includes_readonly_system_mounts(tmp_path, monkeypatch)
         assert found, f"missing --ro-bind for {required}"
 
 
+def test_argv_shape_linux_binds_linked_git_metadata(tmp_path, monkeypatch):
+    """Linked worktrees need their out-of-worktree git metadata mounted."""
+    _force_platform(monkeypatch, rs.PLATFORM_LINUX)
+    _force_which(monkeypatch, {"bwrap": "/usr/bin/bwrap"})
+
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "develop"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.email", "t@x"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=main, check=True)
+    (main / "README.md").write_text("seed\n")
+    subprocess.run(["git", "add", "."], cwd=main, check=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed"],
+        cwd=main, check=True,
+    )
+    worktree = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "feature/sandbox", str(worktree)],
+        cwd=main, check=True, capture_output=True,
+    )
+
+    argv = rs.wrap_in_bubblewrap(
+        ["git", "status"], worktree_path=worktree, ticket_key="OP-862",
+    )
+
+    common_dir = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=worktree, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    git_dir = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=worktree, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    expected_mounts = {
+        str((worktree / common_dir).resolve()),
+        str((worktree / git_dir).resolve()),
+    }
+    for mount in expected_mounts:
+        idx = argv.index(mount)
+        assert argv[idx - 1] == "--bind"
+        assert argv[idx + 1] == mount
+
+
 # ─── argv shape on macOS ───────────────────────────────────────────
 
 
@@ -316,6 +360,46 @@ def test_e2e_write_outside_worktree_blocked(tmp_path):
     assert "BLOCKED" in out.stdout
     assert "WROTE" not in out.stdout
     assert not forbidden.exists()
+
+
+@pytest.mark.skipif(not HAS_BWRAP, reason="bwrap not installed")
+def test_e2e_git_commit_in_linked_worktree_inside_jail(tmp_path):
+    """Regression for OP-862 audit: wrapped CLI can commit in a git worktree."""
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "develop"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.email", "t@x"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=main, check=True)
+    (main / "README.md").write_text("seed\n")
+    subprocess.run(["git", "add", "."], cwd=main, check=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed"],
+        cwd=main, check=True,
+    )
+    worktree = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "feature/sandbox", str(worktree)],
+        cwd=main, check=True, capture_output=True,
+    )
+
+    cmd = [
+        "sh", "-c",
+        (
+            "echo sandbox >> README.md && git add README.md && "
+            "git -c commit.gpgsign=false commit -m sandbox-commit"
+        ),
+    ]
+    argv = rs.wrap_in_bubblewrap(
+        cmd, worktree_path=worktree, ticket_key="OP-862",
+    )
+    out = subprocess.run(argv, capture_output=True, text=True)
+
+    assert out.returncode == 0, out.stderr
+    head = subprocess.run(
+        ["git", "log", "-1", "--format=%s"],
+        cwd=worktree, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert head == "sandbox-commit"
 
 
 # ─── OP-836 interaction ─────────────────────────────────────────────
