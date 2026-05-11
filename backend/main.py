@@ -1475,6 +1475,8 @@ from backend.api import release_state_query as _release_state_query_router  # OP
 _include_versioned_router(_release_state_query_router.router)
 from backend.release_conductor import event_router as _release_event_router  # OP-947 H2 event router ingest endpoint
 _include_versioned_router(_release_event_router.router)
+from backend.api import release_approval as _release_approval_h4_router  # OP-949 H4 operator approval web API
+_include_versioned_router(_release_approval_h4_router.router)
 
 # Final mount: attach the aggregate v1 + v2 routers to the app. The
 # routers themselves were populated above via _include_versioned_router

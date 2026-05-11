@@ -83,6 +83,18 @@ STATES: frozenset[str] = frozenset(
 )
 
 
+# OP-949 H4 — logical sub-state for the operator approval gate.
+# ``pending_approval`` is the human-readable name for a release that has
+# finished the staging gate (build passed, smoke green) but is still
+# blocked on the L1 R8 operator +2. The underlying ``release_state.state``
+# value is ``staging`` — adding a fresh literal would require an alembic
+# CHECK update which is out of OP-949's scope (the ticket area gate
+# forbids ``db``). Exposed as a stable identifier so the H4 web UI / API
+# can name the sub-state without leaking the implementation detail that
+# it is literally the ``staging`` row state.
+STATE_PENDING_APPROVAL = STATE_STAGING
+
+
 # Allowed transitions: (from_state -> set of to_states).
 # Keep this table in lock-step with the diagram in the module docstring
 # and with the alembic 0233 CHECK literal.
@@ -395,6 +407,36 @@ def get_by_release_id(*, release_id: str) -> dict[str, Any]:
             f"no release_state row for release_id={release_id!r}"
         )
     return _row_to_dict(row)
+
+
+def list_in_state(state: str) -> list[dict[str, Any]]:
+    """Return every ``release_state`` row currently sitting in ``state``.
+
+    Used by the H4 operator-approval API to surface the
+    ``pending_approval`` queue (sub-state of ``staging``). Ordered by
+    ``last_transition_at DESC`` so the freshest-blocked release lands
+    at the top of the dashboard.
+
+    Raises ``ValueError`` if ``state`` is not a known state literal so
+    a caller that drifted the enum surfaces the bug at call time rather
+    than silently returning an empty list.
+    """
+    if state not in STATES:
+        raise ValueError(
+            f"unknown state {state!r}; must be one of {sorted(STATES)}"
+        )
+    with _engine().connect() as conn:
+        rows = conn.execute(
+            sa.text(
+                "SELECT id, release_id, version, state, row_version, "
+                "       last_transition_at, transition_log_json, "
+                "       created_at "
+                "FROM release_state WHERE state = :s "
+                "ORDER BY last_transition_at DESC, id ASC"
+            ),
+            {"s": state},
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
 
 
 def get_history(*, version: str) -> list[dict[str, Any]]:
