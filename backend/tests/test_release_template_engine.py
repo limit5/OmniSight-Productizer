@@ -486,3 +486,513 @@ def test_render_plan_text_lists_relates_and_blocked_by(template_path) -> None:
     assert "R13 blockedBy R12" in text
     assert "R1 relates META" in text
     assert text.count(re.escape("v0.5.1-rc1")) or "v0.5.1-rc1" in text
+
+
+# ─────────────────────────────────────────────────────────────────────
+# OP-938 (G2) — Idempotency guard extension + release_status.py
+# ─────────────────────────────────────────────────────────────────────
+
+
+# Load release_status.py the same way we load the engine — it sits
+# outside the backend.* package tree.
+_STATUS_PATH = REPO_ROOT / "scripts" / "release_status.py"
+_status_spec = importlib.util.spec_from_file_location(
+    "release_status", _STATUS_PATH,
+)
+release_status = importlib.util.module_from_spec(_status_spec)
+sys.modules["release_status"] = release_status
+_status_spec.loader.exec_module(release_status)  # type: ignore[union-attr]
+
+
+# ── G2 fixture: stub /search/jql at the jira_dispatch._request seam ──
+
+
+@pytest.fixture
+def stub_jql(monkeypatch):
+    """Return a recorder that controls every JIRA /search/jql response.
+
+    Tests append callable(jql, fields, max_results) → response dict
+    entries to ``state["responses"]``. Each call pops the next handler;
+    if the list is empty the test fails loudly so we never silently
+    fall back to a generic empty payload.
+    """
+    state = {
+        "responses": [],  # list[Callable[(jql, fields, max_results)] -> dict]
+        "calls": [],      # list[(jql, fields, max_results)]
+    }
+
+    def fake_request(client, method, path, body=None, idem_key=None):  # noqa: ARG001
+        if path != "/search/jql" or method != "POST":
+            raise AssertionError(
+                f"unexpected request in stub_jql: {method} {path}"
+            )
+        jql = (body or {}).get("jql", "")
+        fields = (body or {}).get("fields", [])
+        max_results = (body or {}).get("maxResults", 0)
+        state["calls"].append((jql, list(fields), max_results))
+        if not state["responses"]:
+            raise AssertionError(
+                f"stub_jql ran out of responses; received call jql={jql!r}"
+            )
+        handler = state["responses"].pop(0)
+        return handler(jql, list(fields), max_results)
+
+    monkeypatch.setattr(jira_dispatch, "_request", fake_request)
+    return state
+
+
+def _issue_record(key: str, status: str, labels: list[str]) -> dict:
+    """Shape one JQL `issues[]` entry as the JIRA REST API returns it."""
+    return {
+        "key": key,
+        "fields": {
+            "summary": f"summary for {key}",
+            "status": {"name": status},
+            "labels": labels,
+        },
+    }
+
+
+# ── G2.1 — duplicate META refused (RELEASE label match) ─────────────
+
+
+def test_g2_duplicate_release_meta_refused(
+    stub_jql, template_path, meta_desc_path,
+) -> None:
+    """``find_existing_meta_matches`` must surface a RELEASE-label match."""
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {  # noqa: ARG005
+            "issues": [_issue_record(
+                "OP-9999", "In Progress",
+                ["meta:release", "RELEASE-v0.5.1-rc1"],
+            )],
+        },
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — HOTFIX scan
+    ]
+    template = engine.load_template(template_path)
+    with pytest.raises(engine.MetaAlreadyExists) as exc_info:
+        engine.apply(
+            _fake_client(),
+            template,
+            "v0.5.1-rc1",
+            template_path,
+            meta_desc_path,
+        )
+    assert "OP-9999" in str(exc_info.value)
+
+
+# ── G2.2 — duplicate HOTFIX META refused (HOTFIX-{version}+* match) ──
+
+
+def test_g2_duplicate_hotfix_meta_refused(
+    stub_jql, template_path, meta_desc_path,
+) -> None:
+    """A pre-existing HOTFIX-{version}+N META must block re-creation.
+
+    The JQL pre-check covers RELEASE-{version} AND HOTFIX-{version}+*,
+    so an in-flight hotfix for the same version stops a duplicate
+    RELEASE META from being created.
+    """
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — RELEASE
+        lambda jql, fields, mr: {  # noqa: ARG005 — HOTFIX scan
+            "issues": [_issue_record(
+                "OP-7777", "In Progress",
+                ["meta:release", "HOTFIX-v0.5.1-rc1+1"],
+            )],
+        },
+    ]
+    template = engine.load_template(template_path)
+    with pytest.raises(engine.MetaAlreadyExists) as exc_info:
+        engine.apply(
+            _fake_client(),
+            template,
+            "v0.5.1-rc1",
+            template_path,
+            meta_desc_path,
+        )
+    assert "OP-7777" in str(exc_info.value)
+
+
+# ── G2.3 — archived + --force allowed ───────────────────────────────
+
+
+def test_g2_archived_meta_with_force_allows_recreation(
+    stub_jql, monkeypatch, template_path, meta_desc_path, tmp_path,
+) -> None:
+    """An Archived META + ``--force`` is the explicit recovery path."""
+    monkeypatch.setattr(engine, "ROLLBACK_DIR", tmp_path)
+
+    issue_seq = {"n": 1000}
+
+    def fake_create_issue(client, *, summary, description_markdown, labels, issuetype="Story"):  # noqa: ARG001
+        issue_seq["n"] += 1
+        return f"OP-{issue_seq['n']}"
+
+    monkeypatch.setattr(engine, "create_issue", fake_create_issue)
+    monkeypatch.setattr(
+        file_coordinator, "add_blocked_by",
+        lambda *a, **kw: True,
+    )
+    monkeypatch.setattr(
+        file_coordinator, "jira_link_exists",
+        lambda *a, **kw: False,
+    )
+    monkeypatch.setattr(
+        file_coordinator, "jira_create_issue_link",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(jira_dispatch, "add_comment", lambda *a, **kw: None)
+
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {  # noqa: ARG005 — RELEASE
+            "issues": [_issue_record(
+                "OP-9999", "Archived",
+                ["meta:release", "RELEASE-v0.5.1-rc1"],
+            )],
+        },
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — HOTFIX
+    ]
+
+    template = engine.load_template(template_path)
+    created = engine.apply(
+        _fake_client(),
+        template,
+        "v0.5.1-rc1",
+        template_path,
+        meta_desc_path,
+        force=True,
+    )
+    assert set(created.keys()) == {"META"} | {f"R{i}" for i in range(1, 14)}
+
+
+# ── G2.4 — JQLQueryFailed → fail closed, never create META ──────────
+
+
+def test_g2_jql_query_failed_refuses_to_create(
+    stub_jql, template_path, meta_desc_path,
+) -> None:
+    """Any /search/jql failure must become JQLQueryFailed; no write."""
+    def explode(jql, fields, mr):  # noqa: ARG001
+        raise RuntimeError("simulated JIRA 500 on /search/jql")
+
+    stub_jql["responses"] = [explode]
+    template = engine.load_template(template_path)
+    with pytest.raises(engine.JQLQueryFailed) as exc_info:
+        engine.apply(
+            _fake_client(),
+            template,
+            "v0.5.1-rc1",
+            template_path,
+            meta_desc_path,
+        )
+    assert "simulated JIRA 500" in str(exc_info.value)
+    # find_existing only got as far as one call before failing.
+    assert len(stub_jql["calls"]) == 1
+
+
+def test_g2_jql_query_failed_main_exit_code_is_four(
+    monkeypatch, stub_jql, template_path, meta_desc_path,
+) -> None:
+    def explode(jql, fields, mr):  # noqa: ARG001
+        raise RuntimeError("simulated JIRA 500 on /search/jql")
+
+    stub_jql["responses"] = [explode]
+    monkeypatch.setattr(engine.jira_dispatch, "make_client", lambda cls: _fake_client())
+    rc = engine.main([
+        "--version", "v0.5.1-rc1",
+        "--template", str(template_path),
+        "--meta-description-template", str(meta_desc_path),
+    ])
+    assert rc == engine.EXIT_JQL_QUERY_FAILED == 4
+
+
+# ── G2.5 — StateAmbiguous: multiple METAs for same version ──────────
+
+
+def test_g2_state_ambiguous_alerts_p0(
+    stub_jql, template_path, meta_desc_path,
+) -> None:
+    """Two METAs sharing the version label is a P0; refuse to write."""
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {  # noqa: ARG005 — RELEASE label finds 2
+            "issues": [
+                _issue_record("OP-5001", "In Progress",
+                              ["meta:release", "RELEASE-v0.5.1-rc1"]),
+                _issue_record("OP-5002", "In Progress",
+                              ["meta:release", "RELEASE-v0.5.1-rc1"]),
+            ],
+        },
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — HOTFIX
+    ]
+    template = engine.load_template(template_path)
+    with pytest.raises(engine.StateAmbiguous) as exc_info:
+        engine.apply(
+            _fake_client(),
+            template,
+            "v0.5.1-rc1",
+            template_path,
+            meta_desc_path,
+        )
+    msg = str(exc_info.value)
+    assert "OP-5001" in msg and "OP-5002" in msg
+
+
+def test_g2_state_ambiguous_main_exit_code_is_five(
+    monkeypatch, stub_jql, template_path, meta_desc_path,
+) -> None:
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {  # noqa: ARG005
+            "issues": [
+                _issue_record("OP-5001", "In Progress",
+                              ["meta:release", "RELEASE-v0.5.1-rc1"]),
+                _issue_record("OP-5002", "In Progress",
+                              ["meta:release", "RELEASE-v0.5.1-rc1"]),
+            ],
+        },
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005
+    ]
+    monkeypatch.setattr(engine.jira_dispatch, "make_client", lambda cls: _fake_client())
+    rc = engine.main([
+        "--version", "v0.5.1-rc1",
+        "--template", str(template_path),
+        "--meta-description-template", str(meta_desc_path),
+    ])
+    assert rc == engine.EXIT_STATE_AMBIGUOUS == 5
+
+
+# ── G2.6 — release_status.py happy path ─────────────────────────────
+
+
+def test_g2_release_status_happy_path(stub_jql, capsys, monkeypatch) -> None:
+    """``release_status.py --version v0.5.1-rc1`` reports cursor + counts.
+
+    Layout: R1..R5 Published, R6 In Progress, R7..R13 To Do.
+    Cursor should be R6.
+    """
+    children = []
+    for i in range(1, 14):
+        if i <= 5:
+            status = "Published"
+        elif i == 6:
+            status = "In Progress"
+        else:
+            status = "To Do"
+        children.append(_issue_record(
+            f"OP-{2000 + i}",
+            status,
+            ["meta:release-child", "RELEASE-v0.5.1-rc1", f"release-child:R{i}"],
+        ))
+
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {  # noqa: ARG005 — RELEASE META lookup
+            "issues": [_issue_record(
+                "OP-1999", "In Progress",
+                ["meta:release", "RELEASE-v0.5.1-rc1"],
+            )],
+        },
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — HOTFIX scan
+        lambda jql, fields, mr: {  # noqa: ARG005 — child fetch
+            "issues": children,
+        },
+    ]
+
+    monkeypatch.setattr(
+        release_status.jira_dispatch, "make_client",
+        lambda cls: _fake_client(),
+    )
+    rc = release_status.main(["--version", "v0.5.1-rc1"])
+    assert rc == release_status.EXIT_OK == 0
+    out = capsys.readouterr().out
+    assert "Release status — v0.5.1-rc1" in out
+    assert "META:           OP-1999" in out
+    assert "in progress:    R6" in out
+    # Completed list reflects R1..R5; pending reflects R6..R13.
+    assert "completed:      R1, R2, R3, R4, R5" in out
+    assert "pending:        R6, R7, R8, R9, R10, R11, R12, R13" in out
+
+
+def test_g2_release_status_happy_path_json(stub_jql, capsys, monkeypatch) -> None:
+    children = [
+        _issue_record(
+            f"OP-{3000 + i}",
+            "Published" if i < 7 else ("In Progress" if i == 7 else "To Do"),
+            ["meta:release-child", "RELEASE-v0.5.1-rc1", f"release-child:R{i}"],
+        )
+        for i in range(1, 14)
+    ]
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {  # noqa: ARG005
+            "issues": [_issue_record(
+                "OP-2999", "In Progress",
+                ["meta:release", "RELEASE-v0.5.1-rc1"],
+            )],
+        },
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005
+        lambda jql, fields, mr: {"issues": children},  # noqa: ARG005
+    ]
+
+    monkeypatch.setattr(
+        release_status.jira_dispatch, "make_client",
+        lambda cls: _fake_client(),
+    )
+    rc = release_status.main(["--version", "v0.5.1-rc1", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["version"] == "v0.5.1-rc1"
+    assert payload["meta"]["key"] == "OP-2999"
+    assert payload["in_progress"] == "R7"
+    assert payload["completed"] == [f"R{i}" for i in range(1, 7)]
+    assert payload["pending"] == [f"R{i}" for i in range(7, 14)]
+    assert payload["child_count"] == 13
+
+
+# ── G2.7 — release_status.py no-such-version → exit 1 ───────────────
+
+
+def test_g2_release_status_no_such_version(
+    stub_jql, capsys, monkeypatch,
+) -> None:
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — RELEASE empty
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — HOTFIX empty
+    ]
+    monkeypatch.setattr(
+        release_status.jira_dispatch, "make_client",
+        lambda cls: _fake_client(),
+    )
+    rc = release_status.main(["--version", "v9.9.9"])
+    assert rc == release_status.EXIT_NO_SUCH_VERSION == 1
+    captured = capsys.readouterr()
+    assert "no META exists for 'v9.9.9'" in captured.err
+
+
+# ── G2.8 — release_status.py JQL outage → exit 2 ────────────────────
+
+
+def test_g2_release_status_jql_failure_exits_two(
+    stub_jql, capsys, monkeypatch,
+) -> None:
+    def explode(jql, fields, mr):  # noqa: ARG001
+        raise RuntimeError("JIRA 503 on /search/jql")
+
+    stub_jql["responses"] = [explode]
+    monkeypatch.setattr(
+        release_status.jira_dispatch, "make_client",
+        lambda cls: _fake_client(),
+    )
+    rc = release_status.main(["--version", "v0.5.1-rc1"])
+    assert rc == release_status.EXIT_JQL_QUERY_FAILED == 2
+    err = capsys.readouterr().err
+    assert "JQLQueryFailed" in err
+
+
+# ── G2.9 — release_status.py state ambiguity → exit 3 ───────────────
+
+
+def test_g2_release_status_state_ambiguous_exits_three(
+    stub_jql, capsys, monkeypatch,
+) -> None:
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {  # noqa: ARG005 — two active RELEASE METAs
+            "issues": [
+                _issue_record("OP-6001", "In Progress",
+                              ["meta:release", "RELEASE-v0.5.1-rc1"]),
+                _issue_record("OP-6002", "In Progress",
+                              ["meta:release", "RELEASE-v0.5.1-rc1"]),
+            ],
+        },
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — HOTFIX
+    ]
+    monkeypatch.setattr(
+        release_status.jira_dispatch, "make_client",
+        lambda cls: _fake_client(),
+    )
+    rc = release_status.main(["--version", "v0.5.1-rc1"])
+    assert rc == release_status.EXIT_STATE_AMBIGUOUS == 3
+    err = capsys.readouterr().err
+    assert "OP-6001" in err and "OP-6002" in err
+
+
+# ── G2.10 — idempotency proven across re-runs ───────────────────────
+
+
+def test_g2_idempotency_proven_across_reruns(
+    stub_jql, monkeypatch, template_path, meta_desc_path, tmp_path,
+) -> None:
+    """First run creates everything; second run refuses with no writes.
+
+    Wires the same fakes used for the happy path to verify *zero* JIRA
+    writes land on the second invocation — proving the JQL guard is
+    actually the gate, not a side-effect of the create path.
+    """
+    monkeypatch.setattr(engine, "ROLLBACK_DIR", tmp_path)
+
+    issue_seq = {"n": 4000}
+    created_keys: list[str] = []
+
+    def fake_create_issue(client, *, summary, description_markdown, labels, issuetype="Story"):  # noqa: ARG001
+        issue_seq["n"] += 1
+        key = f"OP-{issue_seq['n']}"
+        created_keys.append(key)
+        return key
+
+    blocked_by_calls: list[tuple] = []
+    relates_calls: list[tuple] = []
+
+    monkeypatch.setattr(engine, "create_issue", fake_create_issue)
+    monkeypatch.setattr(
+        file_coordinator, "add_blocked_by",
+        lambda *a, **kw: (blocked_by_calls.append((a, kw)) or True),
+    )
+    monkeypatch.setattr(
+        file_coordinator, "jira_link_exists",
+        lambda *a, **kw: False,
+    )
+    monkeypatch.setattr(
+        file_coordinator, "jira_create_issue_link",
+        lambda *a, **kw: relates_calls.append((a, kw)),
+    )
+    monkeypatch.setattr(jira_dispatch, "add_comment", lambda *a, **kw: None)
+
+    # Run 1 — nothing exists; expect 14 creates + 12 blockedBy edges.
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — RELEASE empty
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — HOTFIX empty
+    ]
+    template = engine.load_template(template_path)
+    created = engine.apply(
+        _fake_client(),
+        template,
+        "v0.5.1-rc1",
+        template_path,
+        meta_desc_path,
+    )
+    assert len(created) == 14
+    assert len(created_keys) == 14
+    assert len(blocked_by_calls) == 12
+
+    # Run 2 — RELEASE label now finds the META created in run 1 →
+    # idempotency guard must refuse. No new create_issue calls fire.
+    before_keys = list(created_keys)
+    before_blocked = list(blocked_by_calls)
+    stub_jql["responses"] = [
+        lambda jql, fields, mr: {  # noqa: ARG005 — RELEASE finds run-1 META
+            "issues": [_issue_record(
+                created["META"], "In Progress",
+                ["meta:release", "RELEASE-v0.5.1-rc1"],
+            )],
+        },
+        lambda jql, fields, mr: {"issues": []},  # noqa: ARG005 — HOTFIX
+    ]
+    with pytest.raises(engine.MetaAlreadyExists):
+        engine.apply(
+            _fake_client(),
+            template,
+            "v0.5.1-rc1",
+            template_path,
+            meta_desc_path,
+        )
+    # Strict invariant: nothing about the second run touched JIRA.
+    assert created_keys == before_keys
+    assert blocked_by_calls == before_blocked

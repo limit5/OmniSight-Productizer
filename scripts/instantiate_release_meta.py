@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OP-937 (G1) — Release template engine.
+"""OP-937 (G1) + OP-938 (G2) — Release template engine + idempotency guard.
 
 Instantiate a RELEASE-vX.Y.Z META + 13 child JIRA tickets from
 ``config/release_template.yaml``. The script wires the canonical
@@ -20,11 +20,16 @@ Error catalog
 * ``MetaAlreadyExists``    — idempotency guard refused re-creation
 * ``BlockedByWiringFailed``— partial state; created keys spilled to
   ``/tmp/release-rollback-<version>.json`` for operator cleanup
+* ``JQLQueryFailed``       — pre-create JQL search failed; fail closed
+  so we never duplicate a META on a transient JIRA outage (G2)
+* ``StateAmbiguous``       — multiple METAs share the same version
+  label in a non-Archived state; alert P0 (G2)
 
 State transitions
 -----------------
-validate template -> check existing -> create META -> create children
--> wire blockedBy + Relates -> comment META + return summary
+validate template -> JQL pre-check (RELEASE + HOTFIX) -> create META
+-> create children -> wire blockedBy + Relates -> comment META +
+return summary
 """
 from __future__ import annotations
 
@@ -72,6 +77,8 @@ EXIT_OK = 0
 EXIT_META_ALREADY_EXISTS = 1
 EXIT_TEMPLATE_INVALID = 2
 EXIT_WIRING_FAILED = 3
+EXIT_JQL_QUERY_FAILED = 4
+EXIT_STATE_AMBIGUOUS = 5
 
 
 # ── Custom errors ────────────────────────────────────────────────────
@@ -87,6 +94,25 @@ class MetaAlreadyExists(RuntimeError):
 
 class BlockedByWiringFailed(RuntimeError):
     """Partial state: META / children created but link wiring failed."""
+
+
+class JQLQueryFailed(RuntimeError):
+    """Pre-create JQL search failed (G2).
+
+    We fail closed: refusing to create the META is strictly safer than
+    racing through on a transient JIRA outage and creating a duplicate
+    chain. The operator must rerun once JIRA is healthy again.
+    """
+
+
+class StateAmbiguous(RuntimeError):
+    """Multiple non-Archived METAs share the same version label (G2).
+
+    A P0 condition: somewhere the release-conductor created duplicate
+    METAs for the same version. The script refuses to act because any
+    further write would entrench the ambiguity. Operator must reconcile
+    (archive the duplicate(s)) before retrying.
+    """
 
 
 # ── Template loading + validation ────────────────────────────────────
@@ -355,25 +381,117 @@ def find_existing_meta_key(
     Detection scopes to the project and the canonical
     ``RELEASE-<version>`` label so we never collide on a fuzzy summary
     match.
+
+    G2 contract:
+
+    * Any JIRA REST failure is converted to :class:`JQLQueryFailed`
+      so the caller fails closed (no duplicate META on transient
+      outages).
+    * If more than one matching issue exists, :class:`StateAmbiguous`
+      is raised — the caller must surface a P0 alert and refuse to
+      write.
     """
-    label = f"RELEASE-{version}"
-    jql = (
+    matches = find_existing_meta_matches(client, version)
+    if not matches:
+        return (None, None)
+    if len(matches) > 1:
+        keys = ", ".join(f"{key}(status={status!r})" for key, status in matches)
+        raise StateAmbiguous(
+            f"multiple METAs found for version {version!r}: [{keys}]. "
+            "Reconcile (archive duplicates) before retrying."
+        )
+    key, status = matches[0]
+    return (key, status)
+
+
+def find_existing_meta_matches(
+    client: jira_dispatch.DispatchClient,
+    version: str,
+) -> list[tuple[str, str]]:
+    """Return every META matching ``RELEASE-{version}`` or ``HOTFIX-{version}+*``.
+
+    Returns a list of ``(key, status_name)`` tuples. Empty list means no
+    pre-existing META in any state (including Archived). G2 idempotency
+    guard: callers refuse to instantiate when this returns any
+    non-Archived entry.
+
+    Implementation: we issue a single JQL against ``meta:release`` +
+    exact ``RELEASE-{version}`` label, then a label-prefix walk that
+    enumerates any ``HOTFIX-{version}+*`` labels declared on the same
+    META. The latter is implemented as a broader ``meta:release`` scan
+    with a client-side label-prefix filter so JIRA's lack of label
+    wildcards never leaves the HOTFIX side unchecked.
+    """
+    matches: list[tuple[str, str]] = []
+    seen_keys: set[str] = set()
+
+    release_label = f"RELEASE-{version}"
+    release_jql = (
         f'project = "{client.project_key}" '
-        f'AND labels = "{label}" '
+        f'AND labels = "{release_label}" '
         f'AND labels = "meta:release"'
     )
-    resp = jira_dispatch._request(
-        client,
-        "POST",
-        "/search/jql",
-        {"jql": jql, "fields": ["summary", "status"], "maxResults": 5},
-    )
-    for issue in resp.get("issues", []) or []:
-        return (
-            issue.get("key"),
+    for issue in _run_jql(client, release_jql, fields=["summary", "status", "labels"]):
+        key = issue.get("key")
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        matches.append((
+            key,
             (((issue.get("fields") or {}).get("status") or {}).get("name") or ""),
+        ))
+
+    # HOTFIX side: labels don't support wildcards in JQL, so pull every
+    # meta:release ticket and post-filter on ``HOTFIX-{version}+`` prefix.
+    # Capped at 200 results — release METAs are sparse (one per release).
+    hotfix_prefix = f"HOTFIX-{version}+"
+    hotfix_jql = (
+        f'project = "{client.project_key}" '
+        f'AND labels = "meta:release"'
+    )
+    for issue in _run_jql(
+        client, hotfix_jql, fields=["summary", "status", "labels"], max_results=200,
+    ):
+        key = issue.get("key")
+        if not key or key in seen_keys:
+            continue
+        labels = (issue.get("fields") or {}).get("labels") or []
+        if not any(isinstance(l, str) and l.startswith(hotfix_prefix) for l in labels):
+            continue
+        seen_keys.add(key)
+        matches.append((
+            key,
+            (((issue.get("fields") or {}).get("status") or {}).get("name") or ""),
+        ))
+
+    return matches
+
+
+def _run_jql(
+    client: jira_dispatch.DispatchClient,
+    jql: str,
+    *,
+    fields: list[str],
+    max_results: int = 5,
+) -> list[dict]:
+    """Wrap ``/search/jql`` so any failure becomes :class:`JQLQueryFailed`.
+
+    The release engine MUST fail closed on a JQL outage (G2 error
+    catalog) — a transient 500 / network blip is never a license to
+    create another META.
+    """
+    try:
+        resp = jira_dispatch._request(
+            client,
+            "POST",
+            "/search/jql",
+            {"jql": jql, "fields": fields, "maxResults": max_results},
         )
-    return (None, None)
+    except Exception as exc:  # noqa: BLE001 — convert ALL faults
+        raise JQLQueryFailed(
+            f"JIRA /search/jql failed; refusing to write to avoid duplicate META: {exc}"
+        ) from exc
+    return list(resp.get("issues", []) or [])
 
 
 def create_issue(
@@ -713,6 +831,17 @@ def main(argv: list[str] | None = None) -> int:
             template_desc_path,
             force=args.force,
         )
+    except JQLQueryFailed as exc:
+        print(f"JQLQueryFailed: {exc}", file=sys.stderr)
+        return EXIT_JQL_QUERY_FAILED
+    except StateAmbiguous as exc:
+        print(f"StateAmbiguous: {exc}", file=sys.stderr)
+        print(
+            "ALERT: P0 — multiple METAs share this version label. "
+            "Reconcile manually before retrying.",
+            file=sys.stderr,
+        )
+        return EXIT_STATE_AMBIGUOUS
     except MetaAlreadyExists as exc:
         print(f"MetaAlreadyExists: {exc}", file=sys.stderr)
         return EXIT_META_ALREADY_EXISTS
