@@ -1,0 +1,4 @@
+default: {files: 3, loc: 300, depth: 4}
+area:tests: {files: 8, loc: 800, depth: 6}
+area:migrations: {files: 1, loc: 100, depth: 2}
+area:docs: {files: 10, loc: 2000, depth: 1}
