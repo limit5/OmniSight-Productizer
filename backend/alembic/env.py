@@ -9,6 +9,20 @@ migration files.
 The DB URL respects `OMNISIGHT_DATABASE_PATH` env so CI runs
 against a per-shard temp file and dev runs against
 `data/omnisight.db`.
+
+OP-865 backwards-compat tag enforcement
+---------------------------------------
+Every migration generated from ``script.py.mako`` ships a docstring tag
+of the form::
+
+    backwards-compat: <safe|breaking|deprecation-window-1of2|deprecation-window-2of2>
+
+The placeholder MUST be replaced with one of the four values before the
+migration lands. ``scripts/check_migration_compat.py`` parses the tag
+from the module docstring and rejects the patchset if missing, unknown,
+or still set to the angle-bracket placeholder. See
+``docs/operations/migration-deprecation-runbook.md`` for the
+two-revision drop-column workflow.
 """
 
 from __future__ import annotations

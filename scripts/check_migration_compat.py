@@ -1,4 +1,4 @@
-"""OP-765 — patchset Alembic backwards-compatibility gate.
+"""OP-765 + OP-865 — patchset Alembic backwards-compatibility gate.
 
 The full DB engine matrix validates the committed migration chain. This
 gate is narrower and PR-shaped:
@@ -11,9 +11,30 @@ gate is narrower and PR-shaped:
 * optionally run the previous-release image's smoke command against the
   newly migrated schema.
 
-The ``migration:break-allowed`` override is deliberately explicit:
-the label must be present, ``--approved-by sora`` must be supplied, and
-a JSONL audit row is appended before the bypass succeeds.
+OP-865 layers an AST-based per-migration compat enforcer on top:
+
+* every changed migration must declare a ``backwards-compat:`` docstring
+  tag from ``{safe, breaking, deprecation-window-1of2,
+  deprecation-window-2of2}``;
+* ``op.drop_column`` is only allowed inside ``deprecation-window-2of2``
+  whose parent migration tagged ``deprecation-window-1of2`` actually
+  renamed the column to a ``_deprecated`` shadow;
+* renames must use ``op.alter_column(new_column_name=...)``; drop+add of
+  a same-table column in one revision is rejected as an old-code break;
+* adding a NOT NULL column without a server-side default is rejected;
+* adding an enum value at a non-tail position (``ALTER TYPE ... ADD
+  VALUE 'X' BEFORE/AFTER 'Y'``) is rejected — Postgres only safely
+  appends at the tail in a single-statement migration;
+* migrations tagged ``breaking`` only ship when the commit carries a
+  ``migration:approved-breaking`` trailer.
+
+Two overrides exist:
+
+* legacy OP-765 ``migration:break-allowed`` label + ``--approved-by sora``
+  — bypasses every gate; appends a JSONL audit row.
+* OP-865 ``migration:approved-breaking`` commit trailer — only bypasses
+  the per-migration ``breaking`` tag check (still has to pass the other
+  AST checks unless those individually permit the operation).
 """
 from __future__ import annotations
 
@@ -24,7 +45,6 @@ import os
 import re
 import sqlite3
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,6 +56,35 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_DIR = REPO_ROOT / "backend"
 VERSIONS_DIR = BACKEND_DIR / "alembic" / "versions"
 OVERRIDE_LABEL = "migration:break-allowed"
+APPROVED_BREAKING_TRAILER = "migration:approved-breaking"
+
+VALID_COMPAT_TAGS = (
+    "safe",
+    "breaking",
+    "deprecation-window-1of2",
+    "deprecation-window-2of2",
+)
+
+# Tag formats accepted in the docstring. Capture group 1 is the tag value.
+# OP-765 shipped ``Backwards-compat: <value>`` in the template; OP-865 prefers
+# lowercase ``backwards-compat: value`` — accept either to keep older migrations
+# rendered before the template update still valid.
+COMPAT_TAG_RE = re.compile(
+    r"^[ \t]*[Bb]ackwards-compat[ \t]*:[ \t]*([A-Za-z0-9_-]+)",
+    re.MULTILINE,
+)
+
+
+class MigrationBreakingChangeRefused(Exception):
+    """Migration tagged ``breaking`` without ``migration:approved-breaking``."""
+
+
+class MigrationMetadataMissing(Exception):
+    """Migration docstring lacks the ``backwards-compat:`` tag."""
+
+
+class MigrationEnumNonTail(Exception):
+    """Enum value added at a non-tail position (``BEFORE``/``AFTER``)."""
 
 DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
@@ -223,6 +272,436 @@ def _postgres_fingerprint(url: str) -> dict[str, list[str]]:
     finally:
         engine.dispose()
     return out
+
+
+# ── OP-865 AST-based compat enforcer ─────────────────────────────────
+
+
+def _docstring(tree: ast.Module) -> str:
+    return ast.get_docstring(tree) or ""
+
+
+def parse_compat_tag(source: str) -> str | None:
+    """Return the ``backwards-compat:`` value from the module docstring.
+
+    The tag must live in the module docstring (not a random comment) so a
+    forgotten import block cannot accidentally satisfy the check. Returns
+    ``None`` when no tag is present.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    docstring = _docstring(tree)
+    if not docstring:
+        return None
+    match = COMPAT_TAG_RE.search(docstring)
+    if not match:
+        return None
+    value = match.group(1).strip().lower()
+    # The mako template ships ``<safe|requires-coordinated-deploy>`` as a
+    # placeholder. Treat the literal placeholder as "missing" so an
+    # un-filled-in migration is loudly rejected.
+    if value.startswith("<") or value == "":
+        return None
+    return value
+
+
+def check_compat_metadata(source: str) -> CheckResult:
+    tag = parse_compat_tag(source)
+    if tag is None:
+        return CheckResult(
+            ok=False,
+            name="compat-metadata",
+            reason=(
+                "MigrationMetadataMissing: docstring must declare "
+                "`backwards-compat: " + "|".join(VALID_COMPAT_TAGS) + "`"
+            ),
+            evidence="module-level docstring scan",
+        )
+    if tag not in VALID_COMPAT_TAGS:
+        return CheckResult(
+            ok=False,
+            name="compat-metadata",
+            reason=(
+                f"MigrationMetadataMissing: unknown tag value `{tag}` — "
+                "must be one of " + "|".join(VALID_COMPAT_TAGS)
+            ),
+            evidence="module-level docstring scan",
+        )
+    return CheckResult(
+        ok=True,
+        name="compat-metadata",
+        reason=f"backwards-compat: {tag}",
+        evidence="module-level docstring scan",
+    )
+
+
+def _iter_op_calls(tree: ast.Module) -> list[ast.Call]:
+    """Yield every ``op.<func>(...)`` call in the module AST."""
+    calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            base = node.func.value
+            if isinstance(base, ast.Name) and base.id == "op":
+                calls.append(node)
+    return calls
+
+
+def _call_first_string(call: ast.Call, kw_name: str | None = None) -> str | None:
+    if kw_name is not None:
+        for kw in call.keywords:
+            if kw.arg == kw_name and isinstance(kw.value, ast.Constant):
+                value = kw.value.value
+                if isinstance(value, str):
+                    return value
+        return None
+    if call.args and isinstance(call.args[0], ast.Constant):
+        value = call.args[0].value
+        if isinstance(value, str):
+            return value
+    return None
+
+
+@dataclass(frozen=True)
+class _DropEvent:
+    table: str
+    column: str
+
+
+@dataclass(frozen=True)
+class _AddEvent:
+    table: str
+    column: str
+
+
+def _drop_column_events(tree: ast.Module) -> list[_DropEvent]:
+    events: list[_DropEvent] = []
+    for call in _iter_op_calls(tree):
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "drop_column":
+            args: list[str] = []
+            for a in call.args[:2]:
+                if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                    args.append(a.value)
+            if len(args) == 2:
+                events.append(_DropEvent(table=args[0], column=args[1]))
+    return events
+
+
+def _add_column_events(tree: ast.Module) -> list[_AddEvent]:
+    events: list[_AddEvent] = []
+    for call in _iter_op_calls(tree):
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "add_column":
+            table = _call_first_string(call)
+            column: str | None = None
+            for a in call.args[1:]:
+                if isinstance(a, ast.Call) and isinstance(a.func, ast.Attribute):
+                    if a.func.attr == "Column":
+                        column = _call_first_string(a)
+                        break
+            if table and column:
+                events.append(_AddEvent(table=table, column=column))
+    return events
+
+
+def _alter_column_renames(tree: ast.Module) -> list[tuple[str, str, str]]:
+    """Return ``(table, old_name, new_name)`` for each op.alter_column rename."""
+    out: list[tuple[str, str, str]] = []
+    for call in _iter_op_calls(tree):
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "alter_column":
+            table = _call_first_string(call) or ""
+            old_name = ""
+            if len(call.args) >= 2 and isinstance(call.args[1], ast.Constant):
+                value = call.args[1].value
+                if isinstance(value, str):
+                    old_name = value
+            new_name = _call_first_string(call, kw_name="new_column_name")
+            if table and old_name and new_name:
+                out.append((table, old_name, new_name))
+    return out
+
+
+def check_rename_pattern(source: str) -> CheckResult:
+    """Reject drop+add of a same-table column in a single revision.
+
+    The prescribed rename is ``op.alter_column(table, "old",
+    new_column_name="new")``. Drop-then-add is destructive for any
+    consumer still reading the old name during deploy.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return CheckResult(
+            False,
+            "rename-pattern",
+            "could not parse migration for AST scan",
+            "ast.parse",
+        )
+    drops = _drop_column_events(tree)
+    adds = _add_column_events(tree)
+    suspicious: list[tuple[str, str, str]] = []
+    for d in drops:
+        for a in adds:
+            if a.table == d.table and a.column != d.column:
+                suspicious.append((d.table, d.column, a.column))
+    if suspicious:
+        first = suspicious[0]
+        return CheckResult(
+            False,
+            "rename-pattern",
+            (
+                "MigrationBreakingChangeRefused: drop+add of column on "
+                f"table `{first[0]}` ({first[1]} → {first[2]}) — use "
+                "`op.alter_column(..., new_column_name=...)` to rename "
+                "in place"
+            ),
+            "AST drop_column + add_column on same table",
+        )
+    return CheckResult(
+        True,
+        "rename-pattern",
+        "no drop+add rename detected (alter_column or no rename)",
+        "AST scan",
+    )
+
+
+_ENUM_NON_TAIL_RE = re.compile(
+    r"\bALTER\s+TYPE\b[^;]+?\bADD\s+VALUE\b[^;]*?\b(BEFORE|AFTER)\b",
+    re.I | re.S,
+)
+
+
+def check_enum_tail_position(source: str) -> CheckResult:
+    """Reject ``ALTER TYPE ... ADD VALUE ... BEFORE/AFTER``.
+
+    Postgres can append an enum value at the tail in a single statement,
+    but ``BEFORE``/``AFTER`` positioning rewrites the catalog ordering
+    and cannot be wrapped in a transaction with other DDL. Treat any
+    positional ADD VALUE as non-tail.
+    """
+    match = _ENUM_NON_TAIL_RE.search(source)
+    if match:
+        return CheckResult(
+            False,
+            "enum-tail",
+            (
+                "MigrationEnumNonTail: ALTER TYPE ... ADD VALUE ... "
+                f"{match.group(1).upper()} forbidden — append at tail "
+                "(no BEFORE/AFTER) for compat-safe deploy"
+            ),
+            "regex ALTER TYPE positional ADD VALUE scan",
+        )
+    return CheckResult(
+        True,
+        "enum-tail",
+        "no positional ADD VALUE statements found",
+        "regex scan",
+    )
+
+
+def _revision_index(versions_dir: Path) -> dict[str, Path]:
+    out: dict[str, Path] = {}
+    if not versions_dir.exists():
+        return out
+    for path in versions_dir.glob("*.py"):
+        if path.name == "__init__.py":
+            continue
+        try:
+            spec = parse_migration(path)
+        except Exception:
+            continue
+        out[spec.revision] = path
+    return out
+
+
+def check_drop_column_deprecation(
+    spec: MigrationSpec,
+    *,
+    versions_dir: Path = VERSIONS_DIR,
+) -> CheckResult:
+    """``op.drop_column`` only allowed in deprecation-window-2of2 chain.
+
+    The chain shape:
+
+      Revision N-1 (deprecation-window-1of2):
+        op.alter_column("t", "col", new_column_name="col_deprecated")
+      Revision N (deprecation-window-2of2):
+        op.drop_column("t", "col_deprecated")
+    """
+    source = spec.path.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return CheckResult(
+            False,
+            "drop-deprecation-window",
+            "could not parse migration for AST scan",
+            "ast.parse",
+        )
+    drops = _drop_column_events(tree)
+    if not drops:
+        return CheckResult(
+            True,
+            "drop-deprecation-window",
+            "no op.drop_column calls",
+            "AST scan",
+        )
+    tag = parse_compat_tag(source)
+    if tag != "deprecation-window-2of2":
+        return CheckResult(
+            False,
+            "drop-deprecation-window",
+            (
+                "MigrationBreakingChangeRefused: op.drop_column requires "
+                "`backwards-compat: deprecation-window-2of2` — see "
+                "docs/operations/migration-deprecation-runbook.md"
+            ),
+            f"drop targets: {[(d.table, d.column) for d in drops]}",
+        )
+    parent_rev = spec.down_revision
+    if not isinstance(parent_rev, str):
+        return CheckResult(
+            False,
+            "drop-deprecation-window",
+            "MigrationBreakingChangeRefused: deprecation-window-2of2 must have a single parent",
+            f"down_revision: {parent_rev!r}",
+        )
+    parent_path = _revision_index(versions_dir).get(parent_rev)
+    if parent_path is None:
+        return CheckResult(
+            False,
+            "drop-deprecation-window",
+            f"MigrationBreakingChangeRefused: parent revision `{parent_rev}` not found",
+            str(versions_dir),
+        )
+    parent_source = parent_path.read_text(encoding="utf-8")
+    parent_tag = parse_compat_tag(parent_source)
+    if parent_tag != "deprecation-window-1of2":
+        return CheckResult(
+            False,
+            "drop-deprecation-window",
+            (
+                "MigrationBreakingChangeRefused: parent revision "
+                f"`{parent_rev}` must be tagged "
+                "`backwards-compat: deprecation-window-1of2`"
+            ),
+            f"parent tag: {parent_tag!r}",
+        )
+    try:
+        parent_tree = ast.parse(parent_source)
+    except SyntaxError:
+        return CheckResult(
+            False,
+            "drop-deprecation-window",
+            "could not parse parent migration for AST scan",
+            str(parent_path),
+        )
+    parent_renames = _alter_column_renames(parent_tree)
+    for drop in drops:
+        if not drop.column.endswith("_deprecated"):
+            return CheckResult(
+                False,
+                "drop-deprecation-window",
+                (
+                    "MigrationBreakingChangeRefused: drop_column target "
+                    f"`{drop.table}.{drop.column}` must end with "
+                    "`_deprecated` (renamed in window-1of2)"
+                ),
+                _display_path(spec.path),
+            )
+        matched = any(
+            t == drop.table and new == drop.column
+            for (t, _old, new) in parent_renames
+        )
+        if not matched:
+            return CheckResult(
+                False,
+                "drop-deprecation-window",
+                (
+                    "MigrationBreakingChangeRefused: parent revision "
+                    f"`{parent_rev}` does not rename a column to "
+                    f"`{drop.table}.{drop.column}`"
+                ),
+                _display_path(parent_path),
+            )
+    return CheckResult(
+        True,
+        "drop-deprecation-window",
+        "drop_column targets all resolve through deprecation-window-1of2 parent",
+        _display_path(spec.path),
+    )
+
+
+def parse_commit_trailers(commit_message: str) -> dict[str, list[str]]:
+    """Parse ``Key: value`` trailers from the last paragraph of a commit message.
+
+    Returns a dict mapping lowercased keys to lists of values (a single
+    trailer key may appear multiple times). Empty / missing commit
+    messages yield an empty dict.
+    """
+    out: dict[str, list[str]] = {}
+    if not commit_message:
+        return out
+    text = commit_message.rstrip()
+    paragraphs = re.split(r"\n\s*\n", text)
+    if not paragraphs:
+        return out
+    last = paragraphs[-1]
+    for line in last.splitlines():
+        m = re.match(r"^([A-Za-z][A-Za-z0-9_.:-]*)[ \t]*:[ \t]*(.+?)[ \t]*$", line)
+        if not m:
+            continue
+        key = m.group(1).strip().lower()
+        out.setdefault(key, []).append(m.group(2).strip())
+    return out
+
+
+def has_approved_breaking_trailer(commit_message: str) -> bool:
+    """True iff the commit message carries a ``migration:approved-breaking`` trailer.
+
+    Accepts both ``migration:approved-breaking: true`` (key/value form)
+    and the bare ``migration:approved-breaking`` line (presence form),
+    matching the GitHub trailer conventions used elsewhere in OmniSight.
+    """
+    if not commit_message:
+        return False
+    trailers = parse_commit_trailers(commit_message)
+    if APPROVED_BREAKING_TRAILER in trailers:
+        return True
+    # Bare-presence form: a line that is exactly the trailer key.
+    last = re.split(r"\n\s*\n", commit_message.rstrip())[-1]
+    for line in last.splitlines():
+        if line.strip().lower() == APPROVED_BREAKING_TRAILER:
+            return True
+    return False
+
+
+def check_breaking_trailer(source: str, commit_message: str | None) -> CheckResult:
+    tag = parse_compat_tag(source)
+    if tag != "breaking":
+        return CheckResult(
+            True,
+            "breaking-trailer",
+            f"backwards-compat: {tag} does not require approved-breaking trailer",
+            "tag scan",
+        )
+    if commit_message and has_approved_breaking_trailer(commit_message):
+        return CheckResult(
+            True,
+            "breaking-trailer",
+            "migration:approved-breaking trailer present",
+            "commit message",
+        )
+    return CheckResult(
+        False,
+        "breaking-trailer",
+        (
+            "MigrationBreakingChangeRefused: migration tagged "
+            "`backwards-compat: breaking` requires a "
+            "`migration:approved-breaking` commit trailer"
+        ),
+        "commit message",
+    )
 
 
 def _alembic(cmd: Sequence[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -457,6 +936,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "artifacts/migration-compat-overrides.jsonl",
         ),
     )
+    parser.add_argument(
+        "--commit-message",
+        default=os.environ.get("MIGRATION_COMPAT_COMMIT_MESSAGE"),
+        help=(
+            "commit message text for `migration:approved-breaking` trailer "
+            "detection; defaults to MIGRATION_COMPAT_COMMIT_MESSAGE env or "
+            "the head commit's message"
+        ),
+    )
     args = parser.parse_args(argv)
 
     raw_files = (
@@ -510,10 +998,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(report, indent=2))
         return 0
 
+    commit_message = args.commit_message
+    if commit_message is None:
+        try:
+            head = subprocess.run(
+                ["git", "log", "-1", "--pretty=%B", args.head_ref],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+            if head.returncode == 0:
+                commit_message = head.stdout
+        except (OSError, subprocess.SubprocessError):
+            commit_message = None
+
     results: list[CheckResult] = []
     for migration in migrations:
         source = migration.path.read_text(encoding="utf-8")
-        results.append(classify_old_code_compat(source))
+        results.append(check_compat_metadata(source))
+        results.append(check_rename_pattern(source))
+        results.append(check_enum_tail_position(source))
+        results.append(check_drop_column_deprecation(migration))
+        results.append(check_breaking_trailer(source, commit_message))
+        # OP-765 ``classify_old_code_compat`` rejects all destructive ops
+        # unconditionally — its philosophy is "old code shouldn't see
+        # new schema". OP-865 carves out a documented exit through the
+        # deprecation-window-* + breaking-trailer flow; only apply the
+        # old-code/new-schema scan to ``safe`` tagged migrations and to
+        # any migration whose tag could not be parsed (defensive: we
+        # already failed compat-metadata, but the OP-765 scan is the
+        # second wall).
+        tag = parse_compat_tag(source)
+        if tag in (None, "safe"):
+            results.append(classify_old_code_compat(source))
         results.append(verify_downgrade_reverts(migration, engine=args.engine, url=args.url))
 
     if args.engine == "postgres" and args.url:

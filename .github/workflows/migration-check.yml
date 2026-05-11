@@ -1,0 +1,61 @@
+name: Migration Backwards-Compat Check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/alembic/versions/*.py'
+      - 'backend/alembic/script.py.mako'
+      - 'backend/alembic/env.py'
+      - 'scripts/check_migration_compat.py'
+      - '.github/workflows/migration-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ast_backwards_compat_gate:
+    name: ast_backwards_compat_gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: install alembic + sqlalchemy (sqlite-only mode)
+        run: |
+          set -eu
+          python -m pip install --upgrade pip
+          python -m pip install "alembic>=1.13" "SQLAlchemy>=2.0"
+
+      - name: OP-865 backwards-compat enforcer (sqlite engine)
+        env:
+          JIRA_TICKET_KEY: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -eu
+          mkdir -p artifacts
+          # The script defaults --commit-message to `git log -1 --pretty=%B HEAD`,
+          # which carries the `migration:approved-breaking` trailer when the
+          # author opted into a breaking migration.
+          python3 scripts/check_migration_compat.py \
+              --engine sqlite \
+              --base-ref origin/${{ github.base_ref }} \
+              --head-ref HEAD \
+              | tee artifacts/migration-check-report.json
+
+      - name: upload migration-check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-check
+          path: artifacts/migration-check-report.json
+          retention-days: 30
