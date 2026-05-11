@@ -1,0 +1,13 @@
+; [OP-887] Hourly trigger for backup-hourly.service.
+
+[Unit]
+Description=Hourly trigger for OmniSight Postgres WAL marker (OP-887)
+
+[Timer]
+Unit=backup-hourly.service
+OnCalendar=hourly
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

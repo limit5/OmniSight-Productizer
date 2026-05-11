@@ -1,0 +1,18 @@
+; [OP-887] systemd unit -- weekly isolated Postgres restore test.
+
+[Unit]
+Description=OmniSight weekly Postgres restore test (OP-887)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/work/sora/OmniSight-claude-worktree
+EnvironmentFile=-/etc/omnisight/backup-dr.env
+ExecStart=/usr/bin/bash /home/user/work/sora/OmniSight-claude-worktree/scripts/restore_test_weekly.sh
+StandardOutput=append:/var/log/omnisight/backup-restore-test.log
+StandardError=append:/var/log/omnisight/backup-restore-test.log
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target

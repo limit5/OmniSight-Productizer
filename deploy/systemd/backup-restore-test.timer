@@ -1,0 +1,13 @@
+; [OP-887] Weekly Sun 03:37 UTC trigger for backup-restore-test.service.
+
+[Unit]
+Description=Weekly trigger for OmniSight Postgres restore test (OP-887)
+
+[Timer]
+Unit=backup-restore-test.service
+OnCalendar=Sun *-*-* 03:37:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
