@@ -45,12 +45,19 @@ sys.path.insert(0, str(REPO))
 
 from backend.agents import (
     circuit_breaker,
+    outcomes_consumer,
     jira_dispatch,
     orphan_salvage,
     runner_failure_classifier,
     runner_sandbox,
     runner_workspace_safety,
     scheduler,
+)
+from backend.agents.loop_detector import (
+    DEFAULT_GRADER_MODEL,
+    OUTCOMES_GRADER_MODEL_ENV,
+    OutcomesGraderUnavailable,
+    extract_acceptance_criteria_section,
 )
 
 AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
@@ -545,6 +552,138 @@ def _handle_gerrit_push_failure(
     return category, action
 
 
+def _run_git_text(worktree_path: Path, args: list[str], *, timeout: int = 20) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    return result.stdout
+
+
+def _collect_outcomes_context(worktree_path: Path, base_ref: str) -> tuple[str, str]:
+    completion = _run_git_text(
+        worktree_path,
+        ["log", "--oneline", "--decorate=no", f"{base_ref}..HEAD"],
+    ).strip()
+    diff = _run_git_text(
+        worktree_path,
+        ["diff", "--no-ext-diff", f"{base_ref}..HEAD"],
+        timeout=60,
+    )
+    return completion or "(no commit summary)", diff
+
+
+def _current_patchset_number(change_number: int, agent_class: str = AGENT_CLASS) -> str:
+    user, ssh_key = jira_dispatch._gerrit_auth_for_instance(agent_class, INSTANCE_ID)
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(jira_dispatch.GERRIT_SSH_PORT),
+        f"{user}@{jira_dispatch.GERRIT_SSH_HOST}",
+        "gerrit", "query", "--current-patch-set", "--format=JSON",
+        f"change:{change_number}",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    for line in result.stdout.splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") == "stats":
+            continue
+        patchset = data.get("currentPatchSet") or {}
+        number = str(patchset.get("number") or "")
+        if number:
+            return number
+    return "1"
+
+
+def _abandon_gerrit_change(change_number: int, *, reason: str) -> None:
+    patchset_number = _current_patchset_number(change_number)
+    user, ssh_key = jira_dispatch._gerrit_auth_for_instance(AGENT_CLASS, INSTANCE_ID)
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(jira_dispatch.GERRIT_SSH_PORT),
+        f"{user}@{jira_dispatch.GERRIT_SSH_HOST}",
+        "gerrit", "review", "--abandon", "--message", reason[:500],
+        f"{change_number},{patchset_number}",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+
+
+def _grade_and_consume_outcomes(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    description: str,
+    worktree_path: Path,
+    base_ref: str,
+    change_number: int | None,
+) -> str:
+    """Return ``pass``/``partial``/``fail``/``disabled`` after OP-860 handling."""
+    if not outcomes_consumer.outcomes_enabled():
+        return "disabled"
+
+    tracker = outcomes_consumer.OutcomesBudgetTracker(
+        daily_budget_usd=outcomes_consumer.outcomes_budget_usd_per_day(),
+    )
+    try:
+        tracker.ensure_available()
+    except outcomes_consumer.OutcomesBudgetExceeded as exc:
+        print(f"[outcomes-budget] {exc}; disabled until next UTC day")
+        return "disabled"
+
+    try:
+        completion_text, diff_text = _collect_outcomes_context(worktree_path, base_ref)
+        from backend.agents.anthropic_native_client import AnthropicClient
+
+        grader_model = os.environ.get(OUTCOMES_GRADER_MODEL_ENV, DEFAULT_GRADER_MODEL)
+        verdict = outcomes_consumer.grade_outcomes(
+            client=AnthropicClient(default_model=grader_model),
+            ticket_key=key,
+            ac_text=extract_acceptance_criteria_section(description),
+            completion_text=completion_text,
+            diff_text=diff_text,
+            grader_model=grader_model,
+        )
+        tracker.record(verdict.cost_usd)
+    except OutcomesGraderUnavailable as exc:
+        print(f"[outcomes-unavailable] {exc}; continuing without grader")
+        return "disabled"
+    except outcomes_consumer.OutcomesGraderRefused as exc:
+        detail = f"[outcomes-refused] {type(exc).__name__}: {exc}"
+        print(detail, file=sys.stderr)
+        jira_dispatch.add_comment(
+            client,
+            key,
+            f"{detail}\n\nRunner paused this ticket for operator review.",
+        )
+        jira_dispatch.add_label(client, key, "runner-loop-paused-pending-review")
+        jira_dispatch.notify_operator("runner-alerts", "high", detail)
+        raise
+
+    def revert_patchsets() -> None:
+        if change_number is None:
+            return
+        _abandon_gerrit_change(
+            change_number,
+            reason=f"OP-860 Outcomes grader failed {key}: {verdict.grader_reasoning}",
+        )
+
+    outcomes_consumer.consume_outcomes_verdict(
+        client=client,
+        key=key,
+        verdict=verdict,
+        revert_patchsets=revert_patchsets,
+    )
+    return verdict.verdict
+
+
 def main() -> int:
     print(
         f"[runner] agent_class={AGENT_CLASS}, instance_id={INSTANCE_ID}, "
@@ -898,6 +1037,20 @@ def main() -> int:
                     snapshot.key,
                     f"[runner-gerrit-push-recovered] {push_result.recovery_note}",
                 )
+            try:
+                outcomes_status = _grade_and_consume_outcomes(
+                    client,
+                    snapshot.key,
+                    description,
+                    worktree_path,
+                    sync_result.develop_sha,
+                    push_result.change_number,
+                )
+            except outcomes_consumer.OutcomesGraderRefused:
+                return 1
+            if outcomes_status == "fail":
+                print(f"[runner] {snapshot.key} Outcomes grader failed; ticket reopened")
+                return 0
             _finalize_under_review(client, snapshot.key, push_result.change_url)
         else:
             print(f"[runner] Gerrit push failed:\n{push_result.detail}", file=sys.stderr)
