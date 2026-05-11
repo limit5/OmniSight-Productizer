@@ -1,0 +1,389 @@
+"""RPG.W14 -- contract tests for ``backend/agents/talent_tree.py``.
+
+Covers the 9 AC cases listed on OP-219 §"Test plan":
+
+1. Lock happy at each milestone (10/30/50/80).
+2. Refuse-when-not-reached (MilestoneNotReached).
+3. Idempotent re-lock same value.
+4. Refuse re-write different value (TalentAlreadyLocked).
+5. Capstone gate (CapstoneRequiresLv80 — both Lv and Lv-80 talent pick).
+6. Routing-weight injection (matched label + +20% multiplier).
+7. Prompt enrichment present (talent reminder injected into system prompt).
+8. Drift guard (TalentIdNotInTree vs YAML).
+9. MP routing_policy unreachable degrades silently to multiplier 1.0.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+
+from backend.agents.prompt_builder import (
+    TALENT_REMINDER_HEADER,
+    enrich_system_prompt_with_talents,
+)
+from backend.agents.talent_tree import (
+    CAPSTONE_LEVEL,
+    CapstoneRequiresLv80,
+    InMemoryCapstoneStore,
+    InMemoryTalentChoiceStore,
+    MILESTONE_LEVELS,
+    MilestoneNotReached,
+    ROUTING_WEIGHT_TALENT_MATCH,
+    TALENT_TREE_PATH,
+    TalentAlreadyLocked,
+    TalentChoice,
+    TalentIdNotInTree,
+    TalentTreeError,
+    agent_talent_summary,
+    available_talents,
+    capstone_for_guild,
+    load_talent_tree,
+    lock_capstone_ability,
+    lock_talent,
+    prompt_reminders_for_talents,
+    routing_weight_multiplier_for_talents,
+)
+from backend.sandbox_tier import Guild
+
+
+T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+# ── YAML loader + shape contract ────────────────────────────────────
+
+
+def test_load_talent_tree_yaml_has_backend_and_frontend_guilds():
+    tree = load_talent_tree()
+    assert Guild.backend in tree
+    assert Guild.frontend in tree
+
+
+def test_each_guild_declares_exactly_four_milestones_with_three_options():
+    tree = load_talent_tree()
+    for guild_tree in tree.values():
+        assert set(guild_tree.options_by_milestone.keys()) == set(MILESTONE_LEVELS)
+        for milestone, options in guild_tree.options_by_milestone.items():
+            assert len(options) == 3, (
+                f"{guild_tree.guild.value} Lv {milestone} must have 3 options"
+            )
+        assert guild_tree.capstone.ability_id
+
+
+def test_available_talents_returns_three_options_backend_lv10():
+    options = available_talents("agent-A", Guild.backend, 10)
+    talent_ids = {option.talent_id for option in options}
+    assert talent_ids == {"schema-first", "performance-first", "security-first"}
+
+
+def test_available_talents_rejects_milestone_outside_set():
+    with pytest.raises(TalentTreeError):
+        available_talents("agent-A", Guild.backend, 25)
+
+
+# ── lock_talent: happy path at each milestone ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lock_talent_happy_path_lv10_backend():
+    store = InMemoryTalentChoiceStore()
+    choice = await lock_talent(
+        store,
+        "agent-A",
+        Guild.backend,
+        10,
+        "schema-first",
+        agent_level=12,
+        now=T0,
+    )
+    assert choice.milestone_level == 10
+    assert choice.talent_id == "schema-first"
+    assert choice.chosen_at == T0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "milestone,talent_id",
+    [
+        (10, "schema-first"),
+        (30, "distributed-systems"),
+        (50, "incident-commander"),
+        (80, "legacy-archaeologist"),
+    ],
+)
+async def test_lock_talent_happy_path_at_each_milestone(milestone, talent_id):
+    store = InMemoryTalentChoiceStore()
+    choice = await lock_talent(
+        store,
+        "agent-A",
+        Guild.backend,
+        milestone,
+        talent_id,
+        agent_level=milestone,  # exactly at the gate
+        now=T0,
+    )
+    assert choice.milestone_level == milestone
+    assert choice.talent_id == talent_id
+
+
+# ── lock_talent: refuse-when-not-reached ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lock_talent_refuses_when_agent_below_milestone():
+    store = InMemoryTalentChoiceStore()
+    with pytest.raises(MilestoneNotReached):
+        await lock_talent(
+            store,
+            "agent-A",
+            Guild.backend,
+            30,
+            "distributed-systems",
+            agent_level=29,
+            now=T0,
+        )
+
+
+# ── lock_talent: idempotent re-lock same value ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lock_talent_idempotent_on_same_value():
+    store = InMemoryTalentChoiceStore()
+    first = await lock_talent(
+        store, "agent-A", Guild.backend, 10, "schema-first", agent_level=10, now=T0,
+    )
+    second = await lock_talent(
+        store, "agent-A", Guild.backend, 10, "schema-first", agent_level=10, now=T0,
+    )
+    assert first == second
+    summary = await agent_talent_summary(store, "agent-A")
+    assert len(summary.choices) == 1
+
+
+# ── lock_talent: refuse re-write different value ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lock_talent_refuses_different_talent_rewrite():
+    store = InMemoryTalentChoiceStore()
+    await lock_talent(
+        store, "agent-A", Guild.backend, 10, "schema-first", agent_level=10, now=T0,
+    )
+    with pytest.raises(TalentAlreadyLocked):
+        await lock_talent(
+            store, "agent-A", Guild.backend, 10, "performance-first", agent_level=10, now=T0,
+        )
+
+
+# ── Capstone gate ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_capstone_refused_below_lv80():
+    talent_store = InMemoryTalentChoiceStore()
+    capstone_store = InMemoryCapstoneStore()
+    with pytest.raises(CapstoneRequiresLv80):
+        await lock_capstone_ability(
+            capstone_store,
+            talent_store,
+            "agent-A",
+            Guild.backend,
+            agent_level=79,
+            now=T0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_capstone_refused_without_lv80_milestone_talent():
+    talent_store = InMemoryTalentChoiceStore()
+    capstone_store = InMemoryCapstoneStore()
+    # Lv 80, but no Lv-80 milestone talent picked yet.
+    with pytest.raises(CapstoneRequiresLv80):
+        await lock_capstone_ability(
+            capstone_store,
+            talent_store,
+            "agent-A",
+            Guild.backend,
+            agent_level=80,
+            now=T0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_capstone_locks_after_lv80_and_final_pick():
+    talent_store = InMemoryTalentChoiceStore()
+    capstone_store = InMemoryCapstoneStore()
+    await lock_talent(
+        talent_store,
+        "agent-A",
+        Guild.backend,
+        CAPSTONE_LEVEL,
+        "legacy-archaeologist",
+        agent_level=80,
+        now=T0,
+    )
+    lock = await lock_capstone_ability(
+        capstone_store, talent_store, "agent-A", Guild.backend, agent_level=80, now=T0,
+    )
+    assert lock.ability_id == capstone_for_guild(Guild.backend).ability_id
+    assert lock.ability_id == "code_archaeologist"
+
+
+# ── Routing-weight injection ────────────────────────────────────────
+
+
+def test_routing_weight_multiplier_is_1_when_no_choices():
+    assert (
+        routing_weight_multiplier_for_talents((), task_labels=("security",))
+        == 1.0
+    )
+
+
+def test_routing_weight_multiplier_is_1_when_no_task_labels():
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    assert (
+        routing_weight_multiplier_for_talents(choices, task_labels=())
+        == 1.0
+    )
+
+
+def test_routing_weight_multiplier_applies_match():
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    multiplier = routing_weight_multiplier_for_talents(
+        choices, task_labels=("security",), guild=Guild.backend,
+    )
+    assert multiplier == pytest.approx(ROUTING_WEIGHT_TALENT_MATCH)
+
+
+def test_routing_weight_multiplier_stacks_multiple_matches():
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+        TalentChoice("agent-A", 30, "data-modeling", T0),
+    )
+    multiplier = routing_weight_multiplier_for_talents(
+        choices,
+        task_labels=("security", "data-model"),
+        guild=Guild.backend,
+    )
+    assert multiplier == pytest.approx(ROUTING_WEIGHT_TALENT_MATCH ** 2)
+
+
+def test_routing_weight_multiplier_label_case_insensitive():
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    multiplier = routing_weight_multiplier_for_talents(
+        choices, task_labels=("SECURITY",), guild=Guild.backend,
+    )
+    assert multiplier == pytest.approx(ROUTING_WEIGHT_TALENT_MATCH)
+
+
+# ── Prompt enrichment ───────────────────────────────────────────────
+
+
+def test_prompt_enrichment_appends_reminder_block():
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    enriched = enrich_system_prompt_with_talents(
+        "You are a backend agent.", choices, guild=Guild.backend,
+    )
+    assert TALENT_REMINDER_HEADER in enriched
+    assert "OWASP" in enriched
+    assert enriched.startswith("You are a backend agent.")
+
+
+def test_prompt_enrichment_orders_by_milestone_ascending():
+    choices = (
+        TalentChoice("agent-A", 50, "incident-commander", T0),
+        TalentChoice("agent-A", 10, "schema-first", T0),
+    )
+    reminders = prompt_reminders_for_talents(choices, guild=Guild.backend)
+    assert len(reminders) == 2
+    # Lv 10 reminder mentions schema; Lv 50 reminder mentions incident.
+    assert "schema" in reminders[0].lower()
+    assert "incident" in reminders[1].lower()
+
+
+def test_prompt_enrichment_no_op_on_empty_choices():
+    base = "You are a backend agent."
+    assert enrich_system_prompt_with_talents(base, ()) == base
+
+
+# ── Drift guard ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lock_talent_rejects_talent_id_not_in_tree():
+    store = InMemoryTalentChoiceStore()
+    with pytest.raises(TalentIdNotInTree):
+        await lock_talent(
+            store,
+            "agent-A",
+            Guild.backend,
+            10,
+            "fictional-talent",
+            agent_level=10,
+            now=T0,
+        )
+
+
+# ── MP routing_policy unreachable degrades silently ─────────────────
+
+
+def test_routing_weight_degrades_to_1_when_yaml_missing(tmp_path):
+    """If the YAML disappears, the routing-weight helper must NOT crash MP.
+
+    OP-219 §"Error catalog" — RoutingWeightInjectionFailed degrades
+    silently. The call site in :mod:`backend.agents.routing_policy`
+    catches the exception and returns 1.0; here we verify the exception
+    is raised by the talent_tree helper so the call site has something
+    to catch.
+    """
+    from backend.agents.talent_tree import RoutingWeightInjectionFailed
+
+    missing = tmp_path / "does-not-exist.yaml"
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    with pytest.raises((FileNotFoundError, RoutingWeightInjectionFailed, TalentTreeError)):
+        routing_weight_multiplier_for_talents(
+            choices, task_labels=("security",), path=missing,
+        )
+
+
+def test_routing_policy_call_site_returns_1_when_feature_flag_off(monkeypatch):
+    """The routing_policy wrapper short-circuits to 1.0 when the flag is off."""
+    from backend.agents import routing_policy
+
+    monkeypatch.setenv(routing_policy.TALENT_ROUTING_ENABLED_ENV, "false")
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    assert (
+        routing_policy.talent_routing_weight_multiplier(
+            choices, task_labels=("security",), guild=Guild.backend.value,
+        )
+        == 1.0
+    )
+
+
+def test_routing_policy_call_site_applies_multiplier_when_flag_on(monkeypatch):
+    from backend.agents import routing_policy
+
+    monkeypatch.setenv(routing_policy.TALENT_ROUTING_ENABLED_ENV, "true")
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    assert (
+        routing_policy.talent_routing_weight_multiplier(
+            choices, task_labels=("security",), guild=Guild.backend.value,
+        )
+        == pytest.approx(ROUTING_WEIGHT_TALENT_MATCH)
+    )

@@ -1,8 +1,9 @@
 # Agent RPG System — Operator Guide
 
-> **Status**: v0.5.0 partial ship (RPG.W1-W13 core + W15-W16 + W19-W20
-> shipped; W14 + W17 + W18 + W21 deferred). Last reviewed
-> 2026-05-11 (W13 promoted to **Live** via OP-218).
+> **Status**: v0.5.0 partial ship (RPG.W1-W14 core + W15-W16 + W19-W20
+> shipped; W17 + W18 + W21 deferred). Last reviewed
+> 2026-05-11 (W12 promoted to **Live** via OP-217; W13 promoted to
+> **Live** via OP-218; W14 promoted to **Live** via OP-219).
 > **Authoritative spec**: [ADR-0008 — Agent RPG Class & Skill Leveling
 > System](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/). This doc covers
 > *operation*, not design — when the two diverge, ADR-0008 wins and this
@@ -41,7 +42,8 @@ target ship).
 | W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred**               |
 | W12    | `backend/agents/skill_leveling.py` + alembic 0226 `agent_skill_state` | **Live** (OP-217) — branch lock + decay cron live |
 | W13    | `backend/agents/tool_proficiency.py` + alembic 0227 `agent_tool_proficiency` + `config/tool_proficiency_gates.yaml` | **Live** (OP-218) — MP.W17.7 telemetry consumer + dispatcher gate live |
-| W14, W17 | Talent tree, party tables | **Deferred** — schema not yet migrated |
+| W14    | `backend/agents/talent_tree.py` + `config/talent_tree.yaml` + alembic 0228/0229 | **Live** (OP-219) — milestone lock + capstone gate live; routing weight injection feature-flagged off until W7.1 |
+| W17    | Party tables | **Deferred** — schema not yet migrated |
 
 If a runbook step below names a surface that is "Deferred" in this
 table, the step is provisional and will start failing the moment the
@@ -452,6 +454,75 @@ without touching the DB.
 
 ---
 
+## Talent tree (W14 — live as of 2026-05-11 / OP-219)
+
+Per-`(agent_id, milestone_level)` rows live in `agent_talent_choice`
+(alembic 0228). The Lv-80 capstone lock lives separately in
+`agent_capstone_ability` (alembic 0229). The helper surface for
+backend callers is `backend/agents/talent_tree.py`:
+
+| Helper | Purpose |
+|---|---|
+| `available_talents(agent_id, guild, milestone)` | Read-only: returns 3 options for the Guild × milestone from `config/talent_tree.yaml` |
+| `await lock_talent(store, agent_id, guild, milestone, talent_id, *, agent_level=...)` | Idempotent + refuses re-write; gates on `agent_level >= milestone` |
+| `await agent_talent_summary(store, agent_id, *, capstone_store=...)` | Full talent chain + Lv-80 capstone lock |
+| `await lock_capstone_ability(...)` | Gated by Lv 80 + Lv-80 milestone talent already locked |
+
+### Milestone gates
+
+Locks are gated at **Lv 10 / 30 / 50 / 80** (agent.level from the W4.1
+`xp_engine`, NOT W12 per-skill levels). When an agent crosses a
+milestone and has no talent locked at that level yet, the
+`level_up(N)` hook emits `ui:talent_choice_required` SSE — the
+Character Card UI displays the "Pick required" indicator and renders
+the 3 buttons returned by `GET /agents/{id}/talents/options`.
+
+### YAML layout
+
+`config/talent_tree.yaml` is the source of truth for the 3 options per
+Guild × milestone. The drift guard in `talent_tree.py` validates the
+shape at module import — a malformed YAML raises `TalentTreeError` at
+boot. Today the file populates **backend** and **frontend** Guilds at
+all four milestones; adding a new Guild only requires populating four
+milestones + the capstone block.
+
+### Effects of a locked talent
+
+* **Routing weight (feature-flagged):** Tasks whose label matches the
+  talent's `routing_label` get a +20% multiplier in MP routing_policy.
+  Wired via `routing_policy.talent_routing_weight_multiplier()` and
+  gated by `OMNISIGHT_MP_TALENT_ROUTING_ENABLED` — off by default
+  until RPG.W7.1 (`prefer_agent_id`) lands.
+* **System-prompt enrichment:** On every dispatch,
+  `prompt_builder.enrich_system_prompt_with_talents()` appends a
+  `Talent reminders (per RPG.W14):` block to the system prompt, one
+  bullet per locked milestone (ordered by ascending milestone level).
+
+### Capstone
+
+Lv-80 unlocks a Guild capstone ability (e.g. backend Guild =
+`code_archaeologist`: 1M-context legacy-code read + surgical refactor
+proposal). The capstone lock is gated by **both** Lv 80 AND the Lv-80
+milestone talent being already locked — attempting `POST /agents/{id}/talents/capstone`
+before either gate is met returns `409 CapstoneRequiresLv80`.
+
+### Recovery
+
+Talent choices are operator decisions — no auto-rebuild possible.
+Alembic 0228 + 0229 are forward-only. On corruption: restore from
+daily Postgres backup (D15 dependency once shipped).
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET`  | `/agents/{id}/talents` | Full talent chain + capstone summary |
+| `GET`  | `/agents/{id}/talents/options?guild=...&milestone=...` | 3 options for a Guild × milestone |
+| `POST` | `/agents/{id}/talents/lock` | Lock `{guild, milestone, talent_id, agent_level}` |
+| `POST` | `/agents/{id}/talents/capstone` | Lock the Lv-80 capstone for `{guild, agent_level}` |
+
+---
+
 ## Skill fusion preview (W19)
 
 Two Lv-5 skills can be combined into a hybrid Lv-3 skill. The preview
@@ -493,7 +564,8 @@ either, treat the failure as an integrity issue, not a flake.
 | Agent stuck at level 1                             | Inspect runner logs for `XpDelta`; check active debuffs | If `burnout` is permanent: reset `consecutive_failures` for that agent |
 | Skill leveling missing                             | W12 live as of 2026-05-11 — check alembic 0226 applied | Re-run `scripts/rpg_rebuild_skill_state.py` if rows are missing |
 | Tool proficiency missing                           | W13 live as of 2026-05-11 — check alembic 0227 applied + `config/tool_proficiency_gates.yaml` parses | Re-run `scripts/rpg_rebuild_tool_proficiency.py` if rows are missing |
-| Talent / party feature missing                     | These are W14 / W17 — deferred post-v0.5.0       | Don't promise the feature; track in TODO Priority RPG |
+| Talent feature missing                             | W14 live as of 2026-05-11 — check alembic 0228/0229 applied; `config/talent_tree.yaml` present | Verify `GET /agents/{id}/talents` returns the milestone array |
+| Party feature missing                              | W17 — deferred post-v0.5.0                       | Don't promise the feature; track in TODO Priority RPG |
 
 ---
 

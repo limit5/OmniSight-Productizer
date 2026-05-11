@@ -58,7 +58,37 @@ export interface CharacterCardProps {
   badges?: readonly CharacterBadge[]
   skills?: readonly CharacterSkill[]
   tools?: readonly CharacterTool[]
+  talents?: readonly CharacterTalentMilestone[]
+  capstone?: CharacterCapstone | null
   onLockBranch?: (skillId: string, branchId: string) => void
+  onLockTalent?: (milestoneLevel: number, talentId: string) => void
+  onLockCapstone?: () => void
+}
+
+export interface CharacterTalentOption {
+  talentId: string
+  displayName: string
+  summary?: string | null
+  routingLabel?: string | null
+}
+
+export interface CharacterTalentMilestone {
+  milestoneLevel: number
+  options: readonly CharacterTalentOption[]
+  /** The locked talent_id for this milestone, or null if the operator hasn't chosen yet. */
+  chosenTalentId?: string | null
+  /** True when ``agent.level >= milestoneLevel`` AND ``chosenTalentId`` is null. */
+  choiceRequired?: boolean | null
+}
+
+export interface CharacterCapstone {
+  abilityId: string
+  displayName: string
+  summary?: string | null
+  /** True when ``agent.level >= 80`` and the Lv-80 milestone talent is locked. */
+  pickable?: boolean | null
+  /** True when the capstone ability has been locked. */
+  locked?: boolean | null
 }
 
 export interface CharacterTool {
@@ -356,7 +386,11 @@ export function CharacterCard({
   badges = [],
   skills = [],
   tools = [],
+  talents = [],
+  capstone = null,
   onLockBranch,
+  onLockTalent,
+  onLockCapstone,
 }: CharacterCardProps): ReactElement {
   const visual = GUILD_VISUALS[guild] ?? GUILD_VISUALS.generalist
   const progress = getLevelProgressPercent(xp, nextLevelXp)
@@ -365,6 +399,10 @@ export function CharacterCard({
   const visibleBadges = badges.filter((badge) => badge && BADGE_VISUALS[badge.kind])
   const visibleSkills = skills.filter((skill) => skill && skill.skillId)
   const visibleTools = tools.filter((tool) => tool && tool.toolId)
+  const visibleTalents = talents
+    .filter((talent) => talent && Number.isFinite(talent.milestoneLevel))
+    .slice()
+    .sort((a, b) => a.milestoneLevel - b.milestoneLevel)
 
   return (
     <article
@@ -667,6 +705,146 @@ export function CharacterCard({
                   )
                 })}
               </ul>
+            </section>
+          ) : null}
+
+          {visibleTalents.length > 0 || capstone ? (
+            <section
+              aria-label="Agent talent tree"
+              className="rounded-md border bg-background/50 p-3"
+              data-testid="character-card-talents"
+            >
+              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground">
+                <Crown className="size-3.5 text-fuchsia-500" aria-hidden="true" />
+                Talent tree
+              </div>
+              <ul className="flex flex-col gap-2">
+                {visibleTalents.map((milestone) => {
+                  const chosen = milestone.chosenTalentId ?? null
+                  const locked = Boolean(chosen)
+                  const needsPick = Boolean(milestone.choiceRequired) && !locked
+                  const chosenOption = chosen
+                    ? milestone.options.find((option) => option.talentId === chosen) ?? null
+                    : null
+                  return (
+                    <li
+                      key={milestone.milestoneLevel}
+                      className="rounded-md border bg-background/40 p-2"
+                      data-milestone-level={milestone.milestoneLevel}
+                      data-talent-locked={locked ? "true" : "false"}
+                      data-talent-id={chosen ?? ""}
+                      data-testid="character-card-talent-milestone"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-xs font-semibold">
+                          Lv {milestone.milestoneLevel} Talent
+                        </span>
+                        {locked ? (
+                          <span
+                            className="font-mono text-[10px] text-emerald-700 dark:text-emerald-300"
+                            data-testid="character-card-talent-locked"
+                          >
+                            Choice locked
+                          </span>
+                        ) : needsPick ? (
+                          <span className="font-mono text-[10px] text-amber-700 dark:text-amber-300">
+                            Pick required
+                          </span>
+                        ) : (
+                          <span className="font-mono text-[10px] text-muted-foreground">
+                            Lv {milestone.milestoneLevel} milestone
+                          </span>
+                        )}
+                      </div>
+                      {locked && chosenOption ? (
+                        <p
+                          className="mt-1 text-[10px] text-muted-foreground"
+                          data-testid="character-card-talent-chosen"
+                        >
+                          Locked:{" "}
+                          <span className="font-mono text-foreground">
+                            {chosenOption.displayName}
+                          </span>
+                        </p>
+                      ) : null}
+                      <div
+                        className="mt-1 flex flex-wrap items-center gap-1.5"
+                        data-testid="character-card-talent-options"
+                      >
+                        {milestone.options.map((option) => {
+                          const isChosen = option.talentId === chosen
+                          const isAlternate = locked && !isChosen
+                          return (
+                            <button
+                              key={option.talentId}
+                              type="button"
+                              disabled={locked || !onLockTalent}
+                              onClick={() =>
+                                onLockTalent?.(milestone.milestoneLevel, option.talentId)
+                              }
+                              className={cn(
+                                "rounded border px-2 py-0.5 font-mono text-[10px]",
+                                isChosen
+                                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                                  : "bg-background hover:bg-muted",
+                                isAlternate && "opacity-45",
+                                locked && "cursor-not-allowed",
+                              )}
+                              data-testid="character-card-talent-option"
+                              data-talent-option-id={option.talentId}
+                              data-talent-option-chosen={isChosen ? "true" : "false"}
+                              data-talent-option-alternate={isAlternate ? "true" : "false"}
+                              title={option.summary ?? option.displayName}
+                            >
+                              {option.displayName}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+              {capstone ? (
+                <div
+                  className="mt-2 rounded-md border bg-background/40 p-2"
+                  data-testid="character-card-capstone"
+                  data-capstone-locked={capstone.locked ? "true" : "false"}
+                  data-capstone-pickable={capstone.pickable ? "true" : "false"}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold">
+                      <Crown className="size-3 text-fuchsia-500" aria-hidden="true" />
+                      Lv 80 Capstone
+                    </span>
+                    {capstone.locked ? (
+                      <span className="font-mono text-[10px] text-emerald-700 dark:text-emerald-300">
+                        Locked
+                      </span>
+                    ) : capstone.pickable ? (
+                      <button
+                        type="button"
+                        disabled={!onLockCapstone}
+                        onClick={() => onLockCapstone?.()}
+                        className="rounded border bg-background px-2 py-0.5 font-mono text-[10px] hover:bg-muted"
+                        data-testid="character-card-capstone-lock"
+                      >
+                        Lock {capstone.displayName}
+                      </button>
+                    ) : (
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        Requires Lv 80 + final pick
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-[10px] text-muted-foreground">
+                    <span className="font-mono text-foreground">
+                      {capstone.displayName}
+                    </span>
+                    {capstone.summary ? ` — ${capstone.summary}` : null}
+                  </p>
+                </div>
+              ) : null}
             </section>
           ) : null}
 
