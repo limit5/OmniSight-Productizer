@@ -1,0 +1,16 @@
+; [OP-873] Daily 07:30 UTC trigger for jira-stale-audit.service.
+;
+; Cadence: once a day before morning operator review. Persistent=true
+; fires missed audits on host resume instead of waiting another day.
+
+[Unit]
+Description=Daily 07:30 UTC trigger for jira-stale-audit.service (OP-873)
+
+[Timer]
+Unit=jira-stale-audit.service
+OnCalendar=*-*-* 07:30:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
