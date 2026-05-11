@@ -48,6 +48,7 @@ import logging
 import os
 import platform
 import shutil
+import subprocess
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,57 @@ LINUX_READONLY_MOUNTS: tuple[str, ...] = (
 )
 """Paths the bubblewrap jail RO-binds when present. ``/lib64`` and ``/sbin``
 are absent on some distros; we skip mounts that don't exist."""
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_git_path(raw: str, worktree_path: Path) -> Path:
+    path = Path(raw)
+    if not path.is_absolute():
+        path = worktree_path / path
+    return path.resolve()
+
+
+def _git_metadata_mounts(worktree_path: Path) -> tuple[Path, ...]:
+    """Return git metadata dirs outside ``worktree_path`` that need RW bind.
+
+    Linked git worktrees have a ``.git`` pointer file inside the worktree
+    that refers to ``<main>/.git/worktrees/<name>`` plus the shared common
+    dir. Without those mounts, ``git commit`` inside the wrapped CLI sees
+    editable files but cannot update git metadata.
+    """
+    worktree_abs = worktree_path.resolve()
+    try:
+        out = subprocess.run(
+            [
+                "git", "-C", str(worktree_abs), "rev-parse",
+                "--git-dir", "--git-common-dir",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return ()
+
+    mounts: list[Path] = []
+    for raw in out:
+        raw = raw.strip()
+        if not raw:
+            continue
+        path = _resolve_git_path(raw, worktree_abs)
+        if not path.exists() or _is_relative_to(path, worktree_abs):
+            continue
+        if path not in mounts:
+            mounts.append(path)
+    return tuple(mounts)
 
 
 LOG_SANDBOX_WRAPPED = "sandbox=wrapped"
@@ -210,6 +262,9 @@ def _build_bubblewrap_argv(
 
     argv += ["--bind", worktree_abs, worktree_abs]
     argv += ["--bind", tmp_dir, tmp_dir]
+    for git_dir in _git_metadata_mounts(worktree_path):
+        git_dir_abs = str(git_dir)
+        argv += ["--bind", git_dir_abs, git_dir_abs]
 
     # Pin HOME / TMPDIR / cwd inside the jail so the CLI doesn't probe
     # for a writable $HOME outside the worktree.

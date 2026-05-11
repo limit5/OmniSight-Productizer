@@ -69,6 +69,29 @@ jobs:
             -c backend/pytest.ini \
             -q
 
+  runner-bubblewrap-escape-regressions:
+    # OP-862 — hard-gate the runner sandbox against sensitive host-path
+    # reads. The test file skips on developer machines without bwrap; CI
+    # installs it explicitly so the probes execute instead of silently
+    # passing as skips.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - name: install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: pip install --require-hashes -r backend/requirements.txt
+      - run: pip install --require-hashes -r backend/requirements-dev.txt
+      - name: pytest bubblewrap escape probes (OP-862)
+        run: |
+          python3 -m pytest \
+            backend/tests/test_bubblewrap_escape.py \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -q
+
   lessons-index-git-gate:
     # OP-787 — lessons live in per-file front matter; the docs-site builds
     # the index dynamically, so the legacy generated file must not return.
