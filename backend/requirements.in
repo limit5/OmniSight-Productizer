@@ -146,6 +146,16 @@ redis[hiredis]==7.4.0
 # post-lock step because upstream Cognee's resolver graph pins LiteLLM to
 # an OpenAI SDK patch below langchain-openai's floor. Keep the explicit
 # Neo4j driver on the 5.24 line to match the Neo4j 5.24-community service.
+#
+# OP-915 (2026-05-11): AUDIT-1 picked Option B for the aiosqlite pin
+# conflict. ``cognee==1.0.9`` (baked in ``Dockerfile.backend``) relaxed
+# the upstream ``aiosqlite<0.21`` ceiling that the older 0.1.44 release
+# series carried — 0.21.0 installs cleanly under the ``--no-deps`` bake
+# path, so the ``aiosqlite==0.21.0`` pin above stays. Option A (downgrade
+# aiosqlite to <0.21) was rejected to avoid churning the rest of the
+# lockfile for a constraint that the chosen cognee release already
+# satisfies. See ``scripts/verify_cognee_install.sh`` for the smoke
+# check and ``docs/operations/cognee-runbook.md`` §3 for bring-up.
 neo4j==5.24.0
 
 # --- C1: SSH remote runner (optional) ----------------------------------
