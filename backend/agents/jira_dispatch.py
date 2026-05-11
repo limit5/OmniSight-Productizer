@@ -1423,9 +1423,44 @@ def transition_back_to_todo(
     key: str,
     reason: str,
     idem_key: str | None = None,
+    *,
+    failure_class: "str | None" = None,
+    raw_traceback: str = "",
+    mutex_label: str | None = None,
+    area: str | None = None,
 ) -> None:
-    """In Progress → TODO with reason comment + clear assignee."""
+    """In Progress → TODO with reason comment + clear assignee.
+
+    OP-854 (C2): when ``failure_class`` is supplied, an incident row
+    lands in ``runner_incidents`` before the transition fires so the
+    C8 failure-graph and the C2 recall path can pick it up next time
+    the ticket is attempted. Recording is best-effort — a recorder
+    fault never blocks the JIRA transition (the operator still needs
+    the ticket reverted even if the audit shim is wedged).
+    """
     base_key = idem_key or f"transition-{key}-back-to-todo-{uuid.uuid4().hex[:12]}"
+    if failure_class is not None:
+        try:
+            # Local import keeps jira_dispatch importable without the
+            # incident_recorder + failure_class chain (e.g. early-boot
+            # JQL-only smoke tests).
+            from backend.agents.incident_recorder import record_runner_incident
+
+            record_runner_incident(
+                ticket_key=key,
+                failure_class=failure_class,
+                summary=reason.splitlines()[0] if reason else "",
+                raw_traceback=raw_traceback,
+                runner_class=getattr(client, "agent_class", "unknown"),
+                mutex_label=mutex_label,
+                area=area,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort wiring
+            log.warning(
+                "jira_dispatch.record_runner_incident_failed key=%s err=%s",
+                key,
+                exc,
+            )
     add_comment(
         client, key, f"Reverting to TODO. Reason:\n{reason}",
         idem_key=f"{base_key}-comment",
