@@ -1,21 +1,20 @@
-"""OP-949 H4 — Operator approval web API contract tests.
+"""OP-949 H4 — Operator approval API contract tests.
 
-Covers the AC test plan from the ticket description:
+Mirrors the 6-case Test plan in the H4 ticket, exercised at the
+backend layer:
 
-1. ``GET /approvals`` lists every release in ``pending_approval``
-   (``staging`` rows) plus every release in ``canary_5`` (still
-   abortable per AC #6).
-2. ``POST /approvals/approve`` happy path — ``staging → canary_5`` +
-   audit event row persisted (AC #4).
-3. ``POST /approvals/abort`` happy path — ``staging → failed`` and
-   ``canary_5 → rolled_back`` (AC #6).
-4. ``ApprovalAuthRefused`` — non-operator roles get 403; API-key
-   bearer-token users (the bot analogue of the Gerrit
-   ``non-ai-reviewer`` group) get 403 even when role is admin.
-5. ``RaceConditionApproval`` — two operators race; the second sees
-   409 (either via stale ``row_version`` or via "already in canary_5").
-6. ``BackendDispatchFailed`` — H2 event router insert raises; the
-   endpoint surfaces 500 + the operator-facing retry hint.
+1. List pending — only releases with an unresolved approval-pending
+   sub-state appear in ``GET /release-approvals/pending``.
+2. Approve happy path — POST records the decision, dispatches an H2
+   event, and the row drops off the pending list on next read.
+3. Abort — POST routes to the ``approval_aborted`` log entry.
+4. Auth refused — bot principals (``apikey:*`` / ``*-bot``) get 403
+   even when the role is admin.
+5. Race condition — two operators race; the second receives 409 with
+   ``error="already_resolved"`` and the prior verdict in the body.
+6. Backend dispatch fail — H2 INSERT failure is surfaced as 502
+   with ``error="dispatch_failed"`` while the decision is already
+   recorded on the state machine.
 """
 from __future__ import annotations
 
@@ -30,9 +29,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend import auth
-from backend.api import release_approval
+from backend.api import release_approval as release_approval_api
 from backend.release_conductor import event_router, state_machine
-from backend.release_conductor.event_handlers import slo_handlers
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -49,12 +47,8 @@ def _load_module(path: Path, name: str):
 
 
 @pytest.fixture()
-def release_engine():
-    """In-memory sqlite engine with the 0232 + 0233 schemas applied.
-
-    H4 reads ``release_state`` and writes ``release_events`` so both
-    migrations need to land in the test DB.
-    """
+def approval_engine():
+    """In-memory sqlite engine with the 0232 + 0233 schemas applied."""
     from alembic.operations import Operations
     from alembic.runtime.migration import MigrationContext
     from sqlalchemy.pool import StaticPool
@@ -65,8 +59,12 @@ def release_engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    mig232 = _load_module(MIGRATION_0232, "_alembic_test_0232_for_h4")
-    mig233 = _load_module(MIGRATION_0233, "_alembic_test_0233_for_h4")
+    mig232 = _load_module(
+        MIGRATION_0232, "_alembic_test_0232_for_op949"
+    )
+    mig233 = _load_module(
+        MIGRATION_0233, "_alembic_test_0233_for_op949"
+    )
     with engine.connect() as conn:
         ctx = MigrationContext.configure(connection=conn)
         with Operations.context(ctx):
@@ -74,352 +72,303 @@ def release_engine():
             mig232.upgrade()
         conn.commit()
 
-    event_router.set_engine_for_tests(engine)
     state_machine.set_engine_for_tests(engine)
-    slo_handlers.reset_for_tests()
+    event_router.set_engine_for_tests(engine)
     try:
         yield engine
     finally:
-        event_router.set_engine_for_tests(None)
         state_machine.set_engine_for_tests(None)
-        slo_handlers.reset_for_tests()
+        event_router.set_engine_for_tests(None)
         engine.dispose()
 
 
-def _walk_to(release_id: str, version: str, target_state: str) -> None:
-    """Helper: create + transition a release to ``target_state``.
+class _StubUser:
+    """Minimal `auth.User` lookalike for dependency overrides."""
 
-    Walks the happy path: pending → building → staging → canary_5.
-    """
-    state_machine.create(release_id=release_id, version=version)
-    walks = [
-        (state_machine.STATE_PENDING, state_machine.STATE_BUILDING),
-        (state_machine.STATE_BUILDING, state_machine.STATE_STAGING),
-        (state_machine.STATE_STAGING, state_machine.STATE_CANARY_5),
-    ]
-    for src, dst in walks:
-        if src == target_state:
-            return
-        state_machine.transition(
-            release_id=release_id,
-            from_state=src,
-            to_state=dst,
-            reason=f"walk-to-{dst}",
-        )
-        if dst == target_state:
-            return
+    def __init__(self, id: str = "alice", email: str = "alice@example.com"):
+        self.id = id
+        self.email = email
+        self.name = email
+        self.role = "admin"
+        self.enabled = True
+        self.must_change_password = False
+        self.tenant_id = "t-default"
 
 
-def _operator_user() -> auth.User:
-    return auth.User(
-        id="user-42",
-        email="op@example.test",
-        name="Operator 42",
-        role="operator",
-    )
-
-
-def _viewer_user() -> auth.User:
-    return auth.User(
-        id="user-9",
-        email="viewer@example.test",
-        name="Viewer 9",
-        role="viewer",
-    )
-
-
-def _apikey_admin_user() -> auth.User:
-    return auth.User(
-        id="apikey:bot-1",
-        email="bot@example.test",
-        name="Bot 1",
-        role="admin",
-    )
-
-
-@pytest.fixture()
-def operator_client(release_engine):
-    """TestClient where current_user is a non-bot operator."""
+def _make_client(user: _StubUser) -> TestClient:
+    """FastAPI TestClient with the approval router + auth bypassed."""
     app = FastAPI()
-    app.include_router(release_approval.router, prefix="/api/v1")
-    app.dependency_overrides[auth.current_user] = _operator_user
+    app.include_router(release_approval_api.router)
+
+    # The approval router uses Depends(auth.require_admin) which itself
+    # depends on auth.current_user; overriding the inner dep is enough.
+    app.dependency_overrides[auth.require_admin] = lambda: user
+    app.dependency_overrides[auth.current_user] = lambda: user
     return TestClient(app)
 
 
-@pytest.fixture()
-def viewer_client(release_engine):
-    """TestClient where current_user is a viewer (insufficient role)."""
-    app = FastAPI()
-    app.include_router(release_approval.router, prefix="/api/v1")
-    app.dependency_overrides[auth.current_user] = _viewer_user
-    return TestClient(app)
+# ─── Test #1 — list pending ───────────────────────────────────────────────
 
 
-@pytest.fixture()
-def bot_client(release_engine):
-    """TestClient where current_user is an API-key bot (must be refused)."""
-    app = FastAPI()
-    app.include_router(release_approval.router, prefix="/api/v1")
-    app.dependency_overrides[auth.current_user] = _apikey_admin_user
-    return TestClient(app)
+def test_list_pending_only_shows_unresolved(approval_engine) -> None:
+    state_machine.create(release_id="OP-1001", version="v1.0.0")
+    state_machine.transition(
+        release_id="OP-1001",
+        from_state=state_machine.STATE_PENDING,
+        to_state=state_machine.STATE_BUILDING,
+        reason="g1",
+    )
+    state_machine.transition(
+        release_id="OP-1001",
+        from_state=state_machine.STATE_BUILDING,
+        to_state=state_machine.STATE_STAGING,
+        reason="green",
+    )
+    state_machine.request_approval(
+        release_id="OP-1001",
+        canary_percent=5,
+        slo_snapshot={"error_rate": 0.001, "p95_latency_ms": 110},
+        reason="staging_gate",
+    )
 
+    # Resolved release does NOT appear.
+    state_machine.create(release_id="OP-1002", version="v1.0.1")
+    state_machine.request_approval(release_id="OP-1002", canary_percent=5)
+    state_machine.record_decision(
+        release_id="OP-1002", decision="approve", operator="bob@example.com"
+    )
 
-# ─── Case 1 — list endpoint surfaces staging + canary_5 ──────────────
-def test_list_approvals_returns_staging_and_canary_5(operator_client) -> None:
-    """AC #2 — ``pending_approval`` (staging) rows show up; AC #6 —
-    ``canary_5`` rows do too (still abortable)."""
-    _walk_to("OP-A001", "v0.1.0", state_machine.STATE_STAGING)
-    _walk_to("OP-A002", "v0.2.0", state_machine.STATE_CANARY_5)
-    # Building-state row must NOT appear in the queue (not yet awaiting
-    # approval, not yet abortable).
-    _walk_to("OP-A003", "v0.3.0", state_machine.STATE_BUILDING)
+    # Release with no approval request does NOT appear.
+    state_machine.create(release_id="OP-1003", version="v1.0.2")
 
-    resp = operator_client.get("/api/v1/release-conductor/approvals")
+    client = _make_client(_StubUser())
+    resp = client.get("/release-approvals/pending")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    release_ids = {row["release_id"] for row in body["releases"]}
-    assert release_ids == {"OP-A001", "OP-A002"}
-
-    by_id = {row["release_id"]: row for row in body["releases"]}
-    assert by_id["OP-A001"]["sub_state"] == "pending_approval"
-    assert by_id["OP-A001"]["canary_percent"] == 0
-    assert by_id["OP-A002"]["sub_state"] == "approved_canary"
-    assert by_id["OP-A002"]["canary_percent"] == 5
-
-    # Each row must carry a row_version for the optimistic-locking
-    # handshake the POST endpoints enforce.
-    for row in body["releases"]:
-        assert isinstance(row["row_version"], int)
-        assert "slo_snapshot" in row
-        assert "halted" in row["slo_snapshot"]
+    assert len(body["pending"]) == 1
+    row = body["pending"][0]
+    assert row["release_id"] == "OP-1001"
+    assert row["version"] == "v1.0.0"
+    assert row["canary_percent"] == 5
+    assert row["slo_snapshot"]["error_rate"] == pytest.approx(0.001)
+    assert row["reason"] == "staging_gate"
 
 
-def test_list_approvals_surfaces_slo_halt(operator_client) -> None:
-    """AC #3 — SLO snapshot must reflect the in-process halt registry."""
-    _walk_to("OP-SLO-1", "v9.0.0", state_machine.STATE_STAGING)
-    slo_handlers.on_slo_breach(
-        {
-            "release_id": "OP-SLO-1",
-            "breach_id": "br-1",
-            "error_rate": 0.07,
-            "p95": 1200,
-            "breach_window_start": "2026-05-12T00:00:00Z",
-        }
+# ─── Test #2 — approve happy path ─────────────────────────────────────────
+
+
+def test_approve_records_decision_and_dispatches_event(approval_engine) -> None:
+    state_machine.create(release_id="OP-2001", version="v2.0.0")
+    state_machine.request_approval(release_id="OP-2001", canary_percent=5)
+
+    client = _make_client(_StubUser(email="alice@example.com"))
+    resp = client.post(
+        "/release-approvals/OP-2001/approve",
+        json={"reason": "looks good"},
     )
-    resp = operator_client.get("/api/v1/release-conductor/approvals")
-    assert resp.status_code == 200
-    row = {r["release_id"]: r for r in resp.json()["releases"]}["OP-SLO-1"]
-    assert row["slo_snapshot"]["halted"] is True
-    assert row["slo_snapshot"]["breach"]["error_rate"] == 0.07
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["release_id"] == "OP-2001"
+    assert body["decision"] == "approve"
+    assert body["operator"] == "alice@example.com"
+    assert isinstance(body["dispatched_event_row_id"], int)
+    assert body["dispatched_event_row_id"] > 0
+    assert body["row_version"] >= 2  # at least 1 request + 1 decision bump
+
+    # Pending list is now empty.
+    pending = client.get("/release-approvals/pending").json()
+    assert pending["pending"] == []
+
+    # State machine log has the granted entry.
+    status = state_machine.get_approval_status(release_id="OP-2001")
+    assert status is not None
+    assert status["kind"] == "approval_granted"
+    assert status["operator"] == "alice@example.com"
+
+    # H2 event landed with the operator source + matching event_type.
+    row = event_router.get_event(row_id=body["dispatched_event_row_id"])
+    assert row["source"] == "operator"
+    assert row["event_type"] == "operator.approval.granted"
+    assert row["payload"]["release_id"] == "OP-2001"
 
 
-# ─── Case 2 — approve happy path ─────────────────────────────────────
-def test_approve_happy_path_advances_state_and_records_event(
-    operator_client,
+# ─── Test #3 — abort ──────────────────────────────────────────────────────
+
+
+def test_abort_routes_to_aborted_log_entry(approval_engine) -> None:
+    state_machine.create(release_id="OP-2002", version="v2.0.1")
+    state_machine.request_approval(release_id="OP-2002", canary_percent=5)
+
+    client = _make_client(_StubUser(email="alice@example.com"))
+    resp = client.post(
+        "/release-approvals/OP-2002/abort",
+        json={"reason": "p95 spike"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["decision"] == "abort"
+
+    status = state_machine.get_approval_status(release_id="OP-2002")
+    assert status is not None
+    assert status["kind"] == "approval_aborted"
+
+    row = event_router.get_event(row_id=body["dispatched_event_row_id"])
+    assert row["event_type"] == "operator.approval.aborted"
+
+
+# ─── Test #4 — auth refused (bot principals) ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "principal_id,principal_email",
+    [
+        ("apikey:abc", "apikey:my-bot"),
+        ("ci-runner", "ci-runner@example.com"),
+        ("alice", "merger-agent-bot@example.com"),
+        ("alice", "claude-bot@example.com"),
+    ],
+)
+def test_bot_principal_is_refused(
+    approval_engine, principal_id: str, principal_email: str
 ) -> None:
-    """AC #4 — operator approve → ``staging → canary_5`` + audit row."""
-    _walk_to("OP-B001", "v1.0.0", state_machine.STATE_STAGING)
-    row = state_machine.get_by_release_id(release_id="OP-B001")
-    rv = row["row_version"]
+    state_machine.create(release_id="OP-3001", version="v3.0.0")
+    state_machine.request_approval(release_id="OP-3001", canary_percent=5)
 
-    resp = operator_client.post(
-        "/api/v1/release-conductor/approvals/approve",
-        json={"release_id": "OP-B001", "row_version": rv},
+    bot = _StubUser(id=principal_id, email=principal_email)
+    client = _make_client(bot)
+    resp = client.post(
+        "/release-approvals/OP-3001/approve",
+        json={"reason": "should refuse"},
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["release_id"] == "OP-B001"
-    assert body["state"] == state_machine.STATE_CANARY_5
-    assert body["row_version"] == rv + 1
-    assert body["audit_event_row_id"] > 0
-
-    # Audit row is queryable through the H2 event router.
-    audit = event_router.get_event(row_id=body["audit_event_row_id"])
-    assert audit["source"] == release_approval.EVENT_SOURCE_OPERATOR
-    assert audit["event_type"] == release_approval.EVENT_TYPE_APPROVED
-    assert audit["payload"]["release_id"] == "OP-B001"
-    assert audit["payload"]["action"] == "approve"
-    assert audit["payload"]["actor"] == "op@example.test"
-
-
-# ─── Case 3 — abort happy path (both edges) ──────────────────────────
-def test_abort_from_staging_marks_failed(operator_client) -> None:
-    """AC #6 — abort from staging transitions to ``failed``."""
-    _walk_to("OP-C001", "v2.0.0", state_machine.STATE_STAGING)
-    row = state_machine.get_by_release_id(release_id="OP-C001")
-    rv = row["row_version"]
-    resp = operator_client.post(
-        "/api/v1/release-conductor/approvals/abort",
-        json={"release_id": "OP-C001", "row_version": rv},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["state"] == state_machine.STATE_FAILED
-
-
-def test_abort_from_canary_5_rolls_back(operator_client) -> None:
-    """AC #6 — abort from canary_5 transitions to ``rolled_back``."""
-    _walk_to("OP-C002", "v2.1.0", state_machine.STATE_CANARY_5)
-    row = state_machine.get_by_release_id(release_id="OP-C002")
-    rv = row["row_version"]
-    resp = operator_client.post(
-        "/api/v1/release-conductor/approvals/abort",
-        json={"release_id": "OP-C002", "row_version": rv},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["state"] == state_machine.STATE_ROLLED_BACK
-
-    # And the audit event records ``action=abort`` rather than approve.
-    audit = event_router.get_event(row_id=body["audit_event_row_id"])
-    assert audit["event_type"] == release_approval.EVENT_TYPE_ABORTED
-    assert audit["payload"]["action"] == "abort"
-
-
-def test_abort_from_unsupported_state_409(operator_client) -> None:
-    """Abort outside the allowed source states surfaces 409."""
-    _walk_to("OP-C003", "v2.2.0", state_machine.STATE_BUILDING)
-    row = state_machine.get_by_release_id(release_id="OP-C003")
-    resp = operator_client.post(
-        "/api/v1/release-conductor/approvals/abort",
-        json={"release_id": "OP-C003", "row_version": row["row_version"]},
-    )
-    assert resp.status_code == 409
-    assert "RaceConditionApproval" in resp.json()["detail"]
-
-
-# ─── Case 4 — auth refused ───────────────────────────────────────────
-def test_auth_refused_for_viewer_role(viewer_client) -> None:
-    """AC #5 — viewer role cannot approve (operator+ required)."""
-    _walk_to("OP-D001", "v3.0.0", state_machine.STATE_STAGING)
-    # List endpoint also gated.
-    resp = viewer_client.get("/api/v1/release-conductor/approvals")
-    assert resp.status_code == 403
-    assert "ApprovalAuthRefused" in resp.json()["detail"]
-    # Approve endpoint gated.
-    resp = viewer_client.post(
-        "/api/v1/release-conductor/approvals/approve",
-        json={"release_id": "OP-D001", "row_version": 0},
-    )
-    assert resp.status_code == 403
-    assert "ApprovalAuthRefused" in resp.json()["detail"]
-
-
-def test_auth_refused_for_apikey_bot(bot_client) -> None:
-    """AC #5 — API-key bearer bots are refused even with role=admin
-    (the L3 analogue of the Gerrit ``non-ai-reviewer`` group check)."""
-    _walk_to("OP-D002", "v3.1.0", state_machine.STATE_STAGING)
-    row = state_machine.get_by_release_id(release_id="OP-D002")
-    resp = bot_client.post(
-        "/api/v1/release-conductor/approvals/approve",
-        json={"release_id": "OP-D002", "row_version": row["row_version"]},
-    )
-    assert resp.status_code == 403
+    assert resp.status_code == 403, resp.text
     detail = resp.json()["detail"]
-    assert "ApprovalAuthRefused" in detail
-    assert "non-ai-reviewer" in detail
+    assert detail["error"] == "auth_refused"
+
+    # The pending-list endpoint also refuses bots.
+    resp2 = client.get("/release-approvals/pending")
+    assert resp2.status_code == 403
 
 
-# ─── Case 5 — race condition ─────────────────────────────────────────
-def test_race_condition_stale_row_version_409(operator_client) -> None:
-    """Two operators race; the second sees 409 ``RaceConditionApproval``.
+def test_human_principal_is_allowed(approval_engine) -> None:
+    state_machine.create(release_id="OP-3002", version="v3.0.1")
+    state_machine.request_approval(release_id="OP-3002", canary_percent=5)
+    client = _make_client(_StubUser(email="alice@example.com"))
+    resp = client.get("/release-approvals/pending")
+    assert resp.status_code == 200
 
-    Operator A clicks first — POSTs row_version=N → succeeds (transition
-    bumps to N+1). Operator B's UI is still showing row_version=N and
-    POSTs the same — the endpoint refuses with 409 because the row has
-    moved on.
-    """
-    _walk_to("OP-E001", "v4.0.0", state_machine.STATE_STAGING)
-    row = state_machine.get_by_release_id(release_id="OP-E001")
-    rv = row["row_version"]
 
-    # Operator A wins.
-    win = operator_client.post(
-        "/api/v1/release-conductor/approvals/approve",
-        json={"release_id": "OP-E001", "row_version": rv},
+# ─── Test #5 — race condition ─────────────────────────────────────────────
+
+
+def test_race_condition_second_operator_gets_409(approval_engine) -> None:
+    state_machine.create(release_id="OP-4001", version="v4.0.0")
+    state_machine.request_approval(release_id="OP-4001", canary_percent=5)
+
+    alice = _make_client(_StubUser(email="alice@example.com"))
+    bob = _make_client(_StubUser(id="bob", email="bob@example.com"))
+
+    first = alice.post(
+        "/release-approvals/OP-4001/approve", json={"reason": "first"}
     )
-    assert win.status_code == 200
+    assert first.status_code == 200
 
-    # Operator B's stale-view request — same row_version, but the row
-    # has advanced to canary_5 + row_version=N+1 already.
-    lose = operator_client.post(
-        "/api/v1/release-conductor/approvals/approve",
-        json={"release_id": "OP-E001", "row_version": rv},
+    second = bob.post(
+        "/release-approvals/OP-4001/approve", json={"reason": "racer"}
     )
-    assert lose.status_code == 409
-    assert "RaceConditionApproval" in lose.json()["detail"]
+    assert second.status_code == 409, second.text
+    detail = second.json()["detail"]
+    assert detail["error"] == "already_resolved"
+    assert detail["prior"]["operator"] == "alice@example.com"
+    assert detail["prior"]["kind"] == "approval_granted"
 
 
-def test_race_condition_row_version_mismatch_409(operator_client) -> None:
-    """Stale row_version against an unmoved row also surfaces 409.
-
-    Mirrors the case where the operator's session was open for a long
-    time and the conductor advanced state via SSE without re-fetch.
-    """
-    _walk_to("OP-E002", "v4.1.0", state_machine.STATE_STAGING)
-    row = state_machine.get_by_release_id(release_id="OP-E002")
-    resp = operator_client.post(
-        "/api/v1/release-conductor/approvals/approve",
-        json={"release_id": "OP-E002", "row_version": row["row_version"] + 99},
-    )
-    assert resp.status_code == 409
-    assert "RaceConditionApproval" in resp.json()["detail"]
+# ─── Test #6 — backend dispatch fail ──────────────────────────────────────
 
 
-# ─── Case 6 — backend dispatch failed ────────────────────────────────
-def test_backend_dispatch_failed_returns_500(operator_client) -> None:
-    """AC error catalog — H2 event insert fails → 500 + retry hint.
+def test_dispatch_failure_surfaces_as_502(approval_engine) -> None:
+    state_machine.create(release_id="OP-5001", version="v5.0.0")
+    state_machine.request_approval(release_id="OP-5001", canary_percent=5)
 
-    State transition has already committed (the failure is on the
-    audit-only persist_event call); the endpoint surfaces 500 with the
-    operator-facing retry hint so the UI can offer a Retry button.
-    """
-    _walk_to("OP-F001", "v5.0.0", state_machine.STATE_STAGING)
-    row = state_machine.get_by_release_id(release_id="OP-F001")
-    rv = row["row_version"]
+    client = _make_client(_StubUser(email="alice@example.com"))
 
     with patch.object(
-        release_approval.event_router,
+        event_router,
         "persist_event",
-        side_effect=event_router.EventInsertFailed("simulated DB down"),
+        side_effect=event_router.EventInsertFailed("DB unreachable"),
     ):
-        resp = operator_client.post(
-            "/api/v1/release-conductor/approvals/approve",
-            json={"release_id": "OP-F001", "row_version": rv},
+        resp = client.post(
+            "/release-approvals/OP-5001/approve",
+            json={"reason": "should record then fail dispatch"},
         )
-    assert resp.status_code == 500
+    assert resp.status_code == 502, resp.text
     detail = resp.json()["detail"]
-    assert "BackendDispatchFailed" in detail
-    assert "retry" in detail.lower()
+    assert detail["error"] == "dispatch_failed"
 
-    # State transition was applied even though the audit row failed;
-    # the UI must reflect via re-fetch on retry.
-    after = state_machine.get_by_release_id(release_id="OP-F001")
-    assert after["state"] == state_machine.STATE_CANARY_5
+    # The state machine log still has the granted decision — the
+    # decision is durable; only the H2 event re-queue is what failed.
+    status = state_machine.get_approval_status(release_id="OP-5001")
+    assert status is not None
+    assert status["kind"] == "approval_granted"
 
 
-# ─── Misc — release not found ────────────────────────────────────────
-def test_approve_unknown_release_404(operator_client) -> None:
-    resp = operator_client.post(
-        "/api/v1/release-conductor/approvals/approve",
-        json={"release_id": "OP-NOPE", "row_version": 0},
+# ─── Bonus contract tests (sub-state primitives) ──────────────────────────
+
+
+def test_request_approval_is_idempotent(approval_engine) -> None:
+    state_machine.create(release_id="OP-6001", version="v6.0.0")
+    first = state_machine.request_approval(
+        release_id="OP-6001", canary_percent=5, reason="r1"
+    )
+    second = state_machine.request_approval(
+        release_id="OP-6001", canary_percent=5, reason="r1"
+    )
+    assert second["deduplicated"] is True
+    assert second["row_version"] == first["row_version"]
+
+    pending = state_machine.list_pending_approvals()
+    assert [r["release_id"] for r in pending] == ["OP-6001"]
+
+
+def test_record_decision_refuses_without_pending(approval_engine) -> None:
+    state_machine.create(release_id="OP-6002", version="v6.0.1")
+    with pytest.raises(state_machine.ApprovalAlreadyResolved):
+        state_machine.record_decision(
+            release_id="OP-6002",
+            decision="approve",
+            operator="alice@example.com",
+        )
+
+
+def test_record_decision_validates_inputs(approval_engine) -> None:
+    state_machine.create(release_id="OP-6003", version="v6.0.2")
+    state_machine.request_approval(release_id="OP-6003")
+    with pytest.raises(ValueError, match="decision"):
+        state_machine.record_decision(
+            release_id="OP-6003",
+            decision="maybe",
+            operator="alice@example.com",
+        )
+    with pytest.raises(ValueError, match="operator"):
+        state_machine.record_decision(
+            release_id="OP-6003",
+            decision="approve",
+            operator="   ",
+        )
+
+
+def test_release_id_validation_at_api_boundary(approval_engine) -> None:
+    state_machine.create(release_id="OP-7001", version="v7.0.0")
+    state_machine.request_approval(release_id="OP-7001")
+    client = _make_client(_StubUser(email="alice@example.com"))
+
+    # Bad shape — leading non-alpha char.
+    resp = client.post(
+        "/release-approvals/9bad-id/approve", json={"reason": "x"}
+    )
+    assert resp.status_code == 400
+
+    # Unknown release id passes shape check but 404s downstream.
+    resp = client.post(
+        "/release-approvals/OP-9999/approve", json={"reason": "x"}
     )
     assert resp.status_code == 404
-
-
-def test_approve_only_valid_from_staging(operator_client) -> None:
-    """Approve must refuse if the row is not in pending_approval.
-
-    Mirrors the race where SSE pushed the row to canary_5 between the
-    UI's last refresh and the click; the operator's intent ("approve")
-    is no longer meaningful and we return 409 rather than silently
-    accepting + double-transitioning.
-    """
-    _walk_to("OP-G001", "v6.0.0", state_machine.STATE_CANARY_5)
-    row = state_machine.get_by_release_id(release_id="OP-G001")
-    resp = operator_client.post(
-        "/api/v1/release-conductor/approvals/approve",
-        json={"release_id": "OP-G001", "row_version": row["row_version"]},
-    )
-    assert resp.status_code == 409
-    assert "RaceConditionApproval" in resp.json()["detail"]

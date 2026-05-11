@@ -1,32 +1,27 @@
 /**
- * OP-949 H4 — Contract tests for the operator-approval admin panel.
+ * OP-949 H4 — Contract tests for the operator approval panel.
  *
  * Covers the six Test plan cases from the ticket:
- *   1. Approve happy path — clicking Approve calls the injected POST
- *      with the matching `release_id` + echoed `row_version`, then
- *      re-fetches the queue.
- *   2. Abort — clicking Abort calls the injected POST and re-fetches.
- *   3. Auth refused — 401 from the GET surfaces the `onAuthRefused`
- *      callback so the host page can redirect to /login.
- *   4. Race condition — 409 from the POST classifies as `race` and
- *      shows the inline "already actioned" banner per the error
- *      catalog (`RaceConditionApproval`).
- *   5. SSE update — `release.dashboard.updated` event re-fires the
- *      injected fetch.
- *   6. Retry after backend fail — 500 from the POST shows the inline
- *      retry button; clicking it re-invokes the same POST.
+ *   1. Approve happy path — POST + reload.
+ *   2. Abort — POST routes to /abort.
+ *   3. Auth refused — 401 from fetch triggers redirectToLogin.
+ *   4. Race condition — 409 with `error="already_resolved"` surfaces
+ *      the prior-operator hint on the row.
+ *   5. SSE update — `release.dashboard.updated` re-runs the fetch.
+ *   6. Retry after backend dispatch fail — 502 `error="dispatch_failed"`
+ *      surfaces the retry button and a second submit re-uses the prior
+ *      decision kind.
  *
- * The panel never touches the real network or the real SSE bus — every
- * transport is injected via props (`fetchApprovals`, `submitApprove`,
- * `submitAbort`, `eventTransport`).
+ * Race-protection on the buttons is also asserted (synchronous double-
+ * click coalesces into one in-flight call).
+ *
+ * The panel never touches the real network or the real shared SSE bus
+ * — every transport is injected via props.
  */
 
 import { describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
-// Mock the shared subscribeEvents so the default code path is harmless;
-// individual tests inject an explicit `eventTransport` prop when they
-// need to simulate events.
 vi.mock("@/lib/api", () => ({
   subscribeEvents: vi.fn(() => ({ close: () => {}, readyState: 1 })),
 }))
@@ -35,55 +30,61 @@ import {
   ApprovalApiError,
   ReleaseApprovalsPanel,
   RELEASE_DASHBOARD_EVENT,
-  classifyApprovalError,
-  emptyApprovalsPayload,
+  emptyPending,
   formatRelativeAge,
-  isAbortable,
-  isApprovable,
+  normalisePending,
+  normaliseRow,
   shouldShowStaleBanner,
-  type ApprovalActionPayload,
-  type ApprovalRow,
-  type ApprovalsListPayload,
+  summariseSlo,
+  type DecisionRequest,
+  type DecisionResponse,
   type EventTransport,
+  type FetchPending,
+  type PendingApprovalRow,
+  type PendingApprovalsResponse,
   type ReleaseEvent,
-  type SubmitApprovalAction,
+  type SubmitDecision,
 } from "@/components/omnisight/admin/ReleaseApprovalsPanel"
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────
 
-function makeRow(over: Partial<ApprovalRow> = {}): ApprovalRow {
+function makeRow(over: Partial<PendingApprovalRow> = {}): PendingApprovalRow {
   return {
-    release_id: "OP-100",
-    version: "v0.1.0",
+    release_id: "OP-1234",
+    version: "v1.2.3-rc1",
     state: "staging",
-    sub_state: "pending_approval",
+    canary_percent: 5,
+    slo_snapshot: {
+      error_rate: 0.001,
+      p95_latency_ms: 120,
+      observed_window_seconds: 900,
+    },
+    reason: "operator_gate",
+    requested_at: "2026-05-12T10:00:00Z",
     row_version: 3,
-    canary_percent: 0,
-    slo_snapshot: { halted: false, breach: null },
-    last_transition_at: "2026-05-12T10:00:00Z",
-    created_at: "2026-05-12T09:00:00Z",
     ...over,
   }
 }
 
-function makePayload(
-  over: Partial<ApprovalsListPayload> = {},
-): ApprovalsListPayload {
+function makePending(
+  over: Partial<PendingApprovalsResponse> = {},
+): PendingApprovalsResponse {
   return {
-    releases: over.releases ?? [makeRow()],
+    pending: over.pending ?? [makeRow()],
     generated_at: over.generated_at ?? "2026-05-12T10:30:00Z",
   }
 }
 
-function makeActionPayload(
-  over: Partial<ApprovalActionPayload> = {},
-): ApprovalActionPayload {
+function makeDecisionResponse(
+  over: Partial<DecisionResponse> = {},
+): DecisionResponse {
   return {
-    release_id: "OP-100",
-    state: "canary_5",
+    release_id: "OP-1234",
+    version: "v1.2.3-rc1",
+    decision: "approve",
+    operator: "alice@example.com",
+    dispatched_event_row_id: 99,
     row_version: 4,
-    last_transition_at: "2026-05-12T10:31:00Z",
-    audit_event_row_id: 42,
     ...over,
   }
 }
@@ -108,70 +109,70 @@ function manualTransport(): {
   }
   return {
     transport,
-    emit: (ev) => {
-      handler?.(ev)
-    },
-    emitError: () => {
-      errorHandler?.()
-    },
+    emit: (ev) => handler?.(ev),
+    emitError: () => errorHandler?.(),
     closed: () => closed,
   }
 }
 
-// ─── Pure helpers ───────────────────────────────────────────────────────────
+// ─── Pure helpers ─────────────────────────────────────────────────────────
 
-describe("classifyApprovalError", () => {
-  it("maps API error status codes to the documented error-catalog kinds", () => {
-    expect(classifyApprovalError(new ApprovalApiError(401, ""))).toBe(
-      "auth_refused",
-    )
-    expect(classifyApprovalError(new ApprovalApiError(409, ""))).toBe("race")
-    expect(classifyApprovalError(new ApprovalApiError(500, ""))).toBe(
-      "backend_failed",
-    )
-    expect(classifyApprovalError(new ApprovalApiError(503, ""))).toBe(
-      "backend_failed",
-    )
-    expect(classifyApprovalError(new Error("boom"))).toBe("unknown")
-    expect(classifyApprovalError("boom")).toBe("unknown")
+describe("normaliseRow / normalisePending", () => {
+  it("drops rows missing release_id or version", () => {
+    expect(normaliseRow(null)).toBeNull()
+    expect(normaliseRow({})).toBeNull()
+    expect(normaliseRow({ release_id: "OP-1" })).toBeNull()
+    expect(normaliseRow({ version: "v1" })).toBeNull()
+    const ok = normaliseRow({ release_id: "OP-1", version: "v1" })
+    expect(ok?.release_id).toBe("OP-1")
+    expect(ok?.canary_percent).toBeNull()
+    expect(ok?.slo_snapshot).toBeNull()
+    expect(ok?.row_version).toBe(0)
+  })
+
+  it("coerces partial payloads through normalisePending", () => {
+    const out = normalisePending({
+      pending: [
+        { release_id: "OP-1", version: "v1" } as Partial<PendingApprovalRow>,
+        { release_id: "" } as Partial<PendingApprovalRow>,
+      ],
+      generated_at: "2026-05-12T10:00:00Z",
+    })
+    expect(out.pending).toHaveLength(1)
+    expect(out.generated_at).toBe("2026-05-12T10:00:00Z")
   })
 })
 
-describe("isApprovable / isAbortable", () => {
-  it("approve only from staging; abort from staging or canary_5", () => {
-    expect(isApprovable(makeRow({ state: "staging" }))).toBe(true)
-    expect(isApprovable(makeRow({ state: "canary_5" }))).toBe(false)
-    expect(isApprovable(makeRow({ state: "building" }))).toBe(false)
-    expect(isAbortable(makeRow({ state: "staging" }))).toBe(true)
-    expect(isAbortable(makeRow({ state: "canary_5" }))).toBe(true)
-    expect(isAbortable(makeRow({ state: "building" }))).toBe(false)
-  })
-})
+describe("formatRelativeAge / shouldShowStaleBanner / summariseSlo", () => {
+  it("formats relative ages and stale banner correctly", () => {
+    const now = new Date("2026-05-11T12:00:00Z").getTime()
+    expect(formatRelativeAge(null, now)).toBe("—")
+    expect(formatRelativeAge("not-a-date", now)).toBe("not-a-date")
+    expect(formatRelativeAge("2026-05-11T11:59:30Z", now)).toBe("just now")
+    expect(formatRelativeAge("2026-05-11T11:55:00Z", now)).toBe("5m ago")
 
-describe("shouldShowStaleBanner", () => {
-  it("true on SSE error, false when fresh, true when older than threshold", () => {
     expect(shouldShowStaleBanner(0, 1000, false)).toBe(false)
-    expect(shouldShowStaleBanner(1000, 1500, false, 60_000)).toBe(false)
-    expect(shouldShowStaleBanner(1000, 200_000, false, 60_000)).toBe(true)
     expect(shouldShowStaleBanner(0, 0, true)).toBe(true)
+    expect(shouldShowStaleBanner(1000, 200_000, false, 60_000)).toBe(true)
+  })
+
+  it("summarises SLO snapshot and degrades to placeholder", () => {
+    expect(summariseSlo(null)).toBe("no SLO snapshot")
+    expect(summariseSlo({})).toBe("no SLO snapshot")
+    expect(
+      summariseSlo({
+        error_rate: 0.005,
+        p95_latency_ms: 150,
+        observed_window_seconds: 600,
+      }),
+    ).toBe("err=0.50% · p95=150ms · window=600s")
   })
 })
 
-describe("formatRelativeAge", () => {
-  it("buckets ages into s/m/h/d", () => {
-    const now = new Date("2026-05-12T12:00:00Z").getTime()
-    expect(formatRelativeAge("not-a-date", now)).toBe("—")
-    expect(formatRelativeAge("2026-05-12T11:59:30Z", now)).toBe("30s ago")
-    expect(formatRelativeAge("2026-05-12T11:55:00Z", now)).toBe("5m ago")
-    expect(formatRelativeAge("2026-05-12T09:00:00Z", now)).toBe("3h ago")
-    expect(formatRelativeAge("2026-05-10T12:00:00Z", now)).toBe("2d ago")
-  })
-})
-
-describe("emptyApprovalsPayload", () => {
+describe("emptyPending", () => {
   it("produces zero-row scaffold", () => {
-    const e = emptyApprovalsPayload()
-    expect(e.releases).toEqual([])
+    const e = emptyPending()
+    expect(e.pending).toEqual([])
     expect(typeof e.generated_at).toBe("string")
   })
 })
@@ -179,364 +180,368 @@ describe("emptyApprovalsPayload", () => {
 // ─── Test #1 — approve happy path ──────────────────────────────────────────
 
 describe("ReleaseApprovalsPanel — approve happy path", () => {
-  it("POSTs approve with the row's release_id + row_version, then re-fetches", async () => {
-    const fetchApprovals = vi.fn<[], Promise<ApprovalsListPayload>>(
-      async () => makePayload(),
+  it("POSTs the approval and reloads the pending list", async () => {
+    const submitDecision = vi.fn<Parameters<SubmitDecision>, ReturnType<SubmitDecision>>(
+      async () => makeDecisionResponse({ decision: "approve" }),
     )
-    const submitApprove = vi.fn<
-      [Parameters<SubmitApprovalAction>[0]],
-      Promise<ApprovalActionPayload>
-    >(async (req) => {
-      // Echo back what the backend would have done.
-      return makeActionPayload({ release_id: req.release_id })
-    })
+    let call = 0
+    const fetchPending = vi.fn<Parameters<FetchPending>, ReturnType<FetchPending>>(
+      async () => {
+        call += 1
+        return call === 1 ? makePending() : makePending({ pending: [] })
+      },
+    )
 
     render(
       <ReleaseApprovalsPanel
-        fetchApprovals={fetchApprovals}
-        submitApprove={submitApprove}
-        submitAbort={async () => makeActionPayload()}
-        nowImpl={() => new Date("2026-05-12T10:30:30Z").getTime()}
+        fetchPending={fetchPending}
+        submitDecision={submitDecision}
+        nowImpl={() => new Date("2026-05-11T12:00:00Z").getTime()}
       />,
     )
 
     await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(1)
+      expect(fetchPending).toHaveBeenCalledTimes(1)
     })
-
     expect(
-      screen.getByTestId("release-approvals-panel-row-OP-100"),
-    ).toBeInTheDocument()
-    expect(
-      screen.getByTestId("release-approvals-panel-row-OP-100-version")
+      screen.getByTestId("release-approvals-panel-row-OP-1234-version")
         .textContent,
-    ).toBe("v0.1.0")
+    ).toContain("v1.2.3-rc1")
+    expect(
+      screen.getByTestId("release-approvals-panel-row-OP-1234-canary")
+        .textContent,
+    ).toContain("5% canary")
+    expect(
+      screen.getByTestId("release-approvals-panel-row-OP-1234-slo").textContent,
+    ).toContain("err=0.10%")
 
     await act(async () => {
       fireEvent.click(
-        screen.getByTestId("release-approvals-panel-row-OP-100-approve"),
+        screen.getByTestId("release-approvals-panel-row-OP-1234-approve"),
       )
     })
 
-    await waitFor(() => {
-      expect(submitApprove).toHaveBeenCalledTimes(1)
+    expect(submitDecision).toHaveBeenCalledTimes(1)
+    expect(submitDecision.mock.calls[0][0]).toEqual({
+      releaseId: "OP-1234",
+      decision: "approve",
     })
-    expect(submitApprove.mock.calls[0][0]).toEqual({
-      release_id: "OP-100",
-      row_version: 3,
-    })
-    // After the POST, the panel re-fetches to refresh the queue.
     await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(2)
+      expect(fetchPending.mock.calls.length).toBeGreaterThanOrEqual(2)
+    })
+    // After the reload the row should be gone (backend returned empty
+    // pending list).
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("release-approvals-panel-pending-empty"),
+      ).toBeInTheDocument()
     })
   })
 })
 
-// ─── Test #2 — abort happy path ────────────────────────────────────────────
+// ─── Test #2 — abort ───────────────────────────────────────────────────────
 
-describe("ReleaseApprovalsPanel — abort happy path", () => {
-  it("POSTs abort with the row's release_id + row_version, then re-fetches", async () => {
-    const fetchApprovals = vi.fn<[], Promise<ApprovalsListPayload>>(
-      async () => makePayload(),
+describe("ReleaseApprovalsPanel — abort", () => {
+  it("routes the click to the abort endpoint with the matching release_id", async () => {
+    const submitDecision = vi.fn<Parameters<SubmitDecision>, ReturnType<SubmitDecision>>(
+      async () => makeDecisionResponse({ decision: "abort" }),
     )
-    const submitAbort = vi.fn<
-      [Parameters<SubmitApprovalAction>[0]],
-      Promise<ApprovalActionPayload>
-    >(async (req) =>
-      makeActionPayload({ release_id: req.release_id, state: "failed" }),
+    const fetchPending = vi.fn<Parameters<FetchPending>, ReturnType<FetchPending>>(
+      async () => makePending(),
     )
 
     render(
       <ReleaseApprovalsPanel
-        fetchApprovals={fetchApprovals}
-        submitApprove={async () => makeActionPayload()}
-        submitAbort={submitAbort}
+        fetchPending={fetchPending}
+        submitDecision={submitDecision}
+        nowImpl={() => new Date("2026-05-11T12:00:00Z").getTime()}
       />,
     )
 
     await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(1)
+      expect(
+        screen.getByTestId("release-approvals-panel-row-OP-1234-abort"),
+      ).toBeInTheDocument()
     })
 
     await act(async () => {
       fireEvent.click(
-        screen.getByTestId("release-approvals-panel-row-OP-100-abort"),
+        screen.getByTestId("release-approvals-panel-row-OP-1234-abort"),
       )
     })
 
-    await waitFor(() => {
-      expect(submitAbort).toHaveBeenCalledTimes(1)
-    })
-    expect(submitAbort.mock.calls[0][0]).toEqual({
-      release_id: "OP-100",
-      row_version: 3,
-    })
-    await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(2)
+    expect(submitDecision).toHaveBeenCalledTimes(1)
+    expect(submitDecision.mock.calls[0][0]).toEqual({
+      releaseId: "OP-1234",
+      decision: "abort",
     })
   })
 })
 
 // ─── Test #3 — auth refused ────────────────────────────────────────────────
 
-describe("ReleaseApprovalsPanel — auth refused", () => {
-  it("invokes onAuthRefused when the fetch returns 401", async () => {
-    const onAuthRefused = vi.fn()
-    const fetchApprovals = vi.fn<[], Promise<ApprovalsListPayload>>(
+describe("ReleaseApprovalsPanel — auth refused redirects to login", () => {
+  it("invokes redirectToLogin when fetch returns 401", async () => {
+    const redirect = vi.fn<[string], void>()
+    const fetchPending = vi.fn<Parameters<FetchPending>, ReturnType<FetchPending>>(
       async () => {
         throw new ApprovalApiError(
           401,
-          "ApprovalAuthRefused — login required",
+          { error: "auth_refused", reason: "not signed in" },
+          "auth_refused",
         )
       },
     )
+
     render(
       <ReleaseApprovalsPanel
-        fetchApprovals={fetchApprovals}
-        submitApprove={async () => makeActionPayload()}
-        submitAbort={async () => makeActionPayload()}
-        onAuthRefused={onAuthRefused}
+        fetchPending={fetchPending}
+        submitDecision={async () => makeDecisionResponse()}
+        redirectToLogin={redirect}
+        nowImpl={() => new Date("2026-05-11T12:00:00Z").getTime()}
       />,
     )
+
     await waitFor(() => {
-      expect(onAuthRefused).toHaveBeenCalledTimes(1)
+      expect(redirect).toHaveBeenCalledTimes(1)
     })
-    expect(
-      screen.getByTestId("release-approvals-panel-fetch-error").textContent,
-    ).toContain("ApprovalAuthRefused")
+    expect(redirect).toHaveBeenCalledWith("/admin/release-approvals")
+    // No fetch error banner — we routed away before surfacing one.
+    expect(screen.queryByTestId("release-approvals-panel-fetch-error")).toBeNull()
   })
 
-  it("also fires onAuthRefused on a POST 401 from approve", async () => {
-    const onAuthRefused = vi.fn()
-    const fetchApprovals = vi.fn<[], Promise<ApprovalsListPayload>>(
-      async () => makePayload(),
+  it("also routes on 403 from the decision POST", async () => {
+    const redirect = vi.fn<[string], void>()
+    const fetchPending = vi.fn<Parameters<FetchPending>, ReturnType<FetchPending>>(
+      async () => makePending(),
     )
-    const submitApprove = vi.fn<
-      [Parameters<SubmitApprovalAction>[0]],
-      Promise<ApprovalActionPayload>
-    >(async () => {
-      throw new ApprovalApiError(401, "ApprovalAuthRefused — bot detected")
-    })
+    const submitDecision = vi.fn<Parameters<SubmitDecision>, ReturnType<SubmitDecision>>(
+      async () => {
+        throw new ApprovalApiError(
+          403,
+          { error: "auth_refused", reason: "bot principal" },
+          "auth_refused",
+        )
+      },
+    )
 
     render(
       <ReleaseApprovalsPanel
-        fetchApprovals={fetchApprovals}
-        submitApprove={submitApprove}
-        submitAbort={async () => makeActionPayload()}
-        onAuthRefused={onAuthRefused}
+        fetchPending={fetchPending}
+        submitDecision={submitDecision}
+        redirectToLogin={redirect}
+        nowImpl={() => new Date("2026-05-11T12:00:00Z").getTime()}
       />,
     )
-
     await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(1)
+      expect(
+        screen.getByTestId("release-approvals-panel-row-OP-1234-approve"),
+      ).toBeInTheDocument()
     })
     await act(async () => {
       fireEvent.click(
-        screen.getByTestId("release-approvals-panel-row-OP-100-approve"),
+        screen.getByTestId("release-approvals-panel-row-OP-1234-approve"),
       )
     })
     await waitFor(() => {
-      expect(onAuthRefused).toHaveBeenCalledTimes(1)
+      expect(redirect).toHaveBeenCalledWith("/admin/release-approvals")
     })
-    const banner = await screen.findByTestId(
-      "release-approvals-panel-row-OP-100-error",
-    )
-    expect(banner.getAttribute("data-error-kind")).toBe("auth_refused")
   })
 })
 
 // ─── Test #4 — race condition ──────────────────────────────────────────────
 
-describe("ReleaseApprovalsPanel — race condition", () => {
-  it("classifies a 409 as race and surfaces the inline banner", async () => {
-    const fetchApprovals = vi.fn<[], Promise<ApprovalsListPayload>>(
-      async () => makePayload(),
+describe("ReleaseApprovalsPanel — race condition surfaces prior operator", () => {
+  it("renders an already-resolved banner with the prior operator email", async () => {
+    const fetchPending = vi.fn<Parameters<FetchPending>, ReturnType<FetchPending>>(
+      async () => makePending(),
     )
-    const submitApprove = vi.fn<
-      [Parameters<SubmitApprovalAction>[0]],
-      Promise<ApprovalActionPayload>
-    >(async () => {
-      throw new ApprovalApiError(
-        409,
-        "RaceConditionApproval — already approved",
-      )
-    })
+    const submitDecision = vi.fn<Parameters<SubmitDecision>, ReturnType<SubmitDecision>>(
+      async () => {
+        throw new ApprovalApiError(
+          409,
+          {
+            error: "already_resolved",
+            reason: "another operator already decided",
+            prior: { kind: "approval_granted", operator: "bob@example.com" },
+          },
+          "already_resolved",
+        )
+      },
+    )
 
     render(
       <ReleaseApprovalsPanel
-        fetchApprovals={fetchApprovals}
-        submitApprove={submitApprove}
-        submitAbort={async () => makeActionPayload()}
+        fetchPending={fetchPending}
+        submitDecision={submitDecision}
+        nowImpl={() => new Date("2026-05-11T12:00:00Z").getTime()}
       />,
     )
-
     await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(1)
+      expect(
+        screen.getByTestId("release-approvals-panel-row-OP-1234-approve"),
+      ).toBeInTheDocument()
     })
     await act(async () => {
       fireEvent.click(
-        screen.getByTestId("release-approvals-panel-row-OP-100-approve"),
+        screen.getByTestId("release-approvals-panel-row-OP-1234-approve"),
       )
     })
-
-    const banner = await screen.findByTestId(
-      "release-approvals-panel-row-OP-100-error",
-    )
-    expect(banner.getAttribute("data-error-kind")).toBe("race")
-    expect(banner.textContent).toContain("Already actioned")
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("release-approvals-panel-row-OP-1234-error")
+          .textContent,
+      ).toContain("already resolved by bob@example.com")
+    })
+    // Retry button is NOT shown on race — only on dispatch failure.
+    expect(
+      screen.queryByTestId("release-approvals-panel-row-OP-1234-retry"),
+    ).toBeNull()
   })
 })
 
 // ─── Test #5 — SSE update ──────────────────────────────────────────────────
 
-describe("ReleaseApprovalsPanel — SSE update", () => {
-  it("re-fetches the queue on release.dashboard.updated events", async () => {
-    const fetchApprovals = vi.fn<[], Promise<ApprovalsListPayload>>(
-      async () => makePayload(),
+describe("ReleaseApprovalsPanel — SSE re-fetches on dashboard updates", () => {
+  it("refetches on RELEASE_DASHBOARD_EVENT and ignores unrelated events", async () => {
+    const fetchPending = vi.fn<Parameters<FetchPending>, ReturnType<FetchPending>>(
+      async () => makePending(),
     )
-    const t = manualTransport()
+    const { transport, emit, emitError, closed } = manualTransport()
+
     render(
       <ReleaseApprovalsPanel
-        fetchApprovals={fetchApprovals}
-        submitApprove={async () => makeActionPayload()}
-        submitAbort={async () => makeActionPayload()}
-        eventTransport={t.transport}
+        fetchPending={fetchPending}
+        submitDecision={async () => makeDecisionResponse()}
+        eventTransport={transport}
+        nowImpl={() => new Date("2026-05-11T12:00:00Z").getTime()}
       />,
     )
-    await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(1)
-    })
 
-    // Unrelated event must not re-fetch.
-    act(() => {
-      t.emit({ event: "something.else", data: {} })
-    })
-    expect(fetchApprovals).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(fetchPending).toHaveBeenCalledTimes(1))
+    expect(screen.queryByTestId("release-approvals-panel-sse-stale")).toBeNull()
 
-    // The right topic re-fires the fetch.
-    act(() => {
-      t.emit({ event: RELEASE_DASHBOARD_EVENT, data: {} })
-    })
-    await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(2)
-    })
-
-    // SSE error → stale banner; recovery on next successful event.
-    act(() => {
-      t.emitError()
-    })
+    act(() => emitError())
     expect(
       screen.getByTestId("release-approvals-panel-sse-stale"),
     ).toBeInTheDocument()
+
+    await act(async () => {
+      emit({ event: RELEASE_DASHBOARD_EVENT, data: { control: "ping" } })
+    })
+    await waitFor(() => {
+      expect(fetchPending).toHaveBeenCalledTimes(2)
+    })
+    expect(screen.queryByTestId("release-approvals-panel-sse-stale")).toBeNull()
+
+    // Unrelated event is ignored.
+    act(() => emit({ event: "agent_update", data: {} }))
+    expect(fetchPending).toHaveBeenCalledTimes(2)
+
+    expect(closed()).toBe(false)
   })
 })
 
-// ─── Test #6 — retry after backend fail ────────────────────────────────────
+// ─── Test #6 — retry after backend dispatch fail ───────────────────────────
 
-describe("ReleaseApprovalsPanel — retry after backend fail", () => {
-  it("shows a Retry button on 500 and re-invokes the same POST when clicked", async () => {
-    const fetchApprovals = vi.fn<[], Promise<ApprovalsListPayload>>(
-      async () => makePayload(),
+describe("ReleaseApprovalsPanel — retry after backend dispatch fail", () => {
+  it("surfaces a retry button and re-uses the prior decision kind", async () => {
+    const fetchPending = vi.fn<Parameters<FetchPending>, ReturnType<FetchPending>>(
+      async () => makePending(),
     )
-    let calls = 0
-    const submitApprove = vi.fn<
-      [Parameters<SubmitApprovalAction>[0]],
-      Promise<ApprovalActionPayload>
-    >(async (req) => {
-      calls += 1
-      if (calls === 1) {
+    const submitDecision = vi
+      .fn<Parameters<SubmitDecision>, ReturnType<SubmitDecision>>()
+      .mockImplementationOnce(async () => {
         throw new ApprovalApiError(
-          500,
-          "BackendDispatchFailed — please retry",
+          502,
+          { error: "dispatch_failed", reason: "release_events insert failed" },
+          "dispatch_failed",
         )
-      }
-      return makeActionPayload({ release_id: req.release_id })
-    })
+      })
+      .mockImplementationOnce(async () => makeDecisionResponse({ decision: "abort" }))
 
     render(
       <ReleaseApprovalsPanel
-        fetchApprovals={fetchApprovals}
-        submitApprove={submitApprove}
-        submitAbort={async () => makeActionPayload()}
+        fetchPending={fetchPending}
+        submitDecision={submitDecision}
+        nowImpl={() => new Date("2026-05-11T12:00:00Z").getTime()}
       />,
     )
-
     await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(1)
+      expect(
+        screen.getByTestId("release-approvals-panel-row-OP-1234-abort"),
+      ).toBeInTheDocument()
     })
-
-    // First click → 500 → retry banner appears.
+    // First click: abort, then fail dispatch.
     await act(async () => {
       fireEvent.click(
-        screen.getByTestId("release-approvals-panel-row-OP-100-approve"),
+        screen.getByTestId("release-approvals-panel-row-OP-1234-abort"),
       )
     })
-    const banner = await screen.findByTestId(
-      "release-approvals-panel-row-OP-100-error",
-    )
-    expect(banner.getAttribute("data-error-kind")).toBe("backend_failed")
-    const retryBtn = screen.getByTestId(
-      "release-approvals-panel-row-OP-100-retry",
-    )
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("release-approvals-panel-row-OP-1234-error")
+          .textContent,
+      ).toMatch(/backend dispatch failed/i)
+    })
+    expect(
+      screen.getByTestId("release-approvals-panel-row-OP-1234-retry"),
+    ).toBeInTheDocument()
 
-    // Retry click → second call succeeds, re-fetch fires.
+    // Retry the dispatch — it re-uses "abort" as the decision kind.
     await act(async () => {
-      fireEvent.click(retryBtn)
+      fireEvent.click(
+        screen.getByTestId("release-approvals-panel-row-OP-1234-retry"),
+      )
     })
-    await waitFor(() => {
-      expect(submitApprove).toHaveBeenCalledTimes(2)
-    })
-    await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(2)
+    expect(submitDecision).toHaveBeenCalledTimes(2)
+    expect(submitDecision.mock.calls[1][0]).toEqual({
+      releaseId: "OP-1234",
+      decision: "abort",
     })
   })
 })
 
-// ─── Bonus — race-protection on rapid clicks ───────────────────────────────
+// ─── Bonus — race protection on button (synchronous double-click) ──────────
 
-describe("ReleaseApprovalsPanel — rapid-click coalescing", () => {
-  it("synchronously coalesces repeated approve clicks into one POST", async () => {
-    const fetchApprovals = vi.fn<[], Promise<ApprovalsListPayload>>(
-      async () => makePayload(),
-    )
-    let resolve!: (v: ApprovalActionPayload) => void
-    const submitApprove = vi.fn<
-      [Parameters<SubmitApprovalAction>[0]],
-      Promise<ApprovalActionPayload>
-    >(
+describe("ReleaseApprovalsPanel — race protection on approve button", () => {
+  it("coalesces double-clicks while the first call is in flight", async () => {
+    let release: ((v: DecisionResponse) => void) | null = null
+    const submitDecision = vi.fn<Parameters<SubmitDecision>, ReturnType<SubmitDecision>>(
       () =>
-        new Promise<ApprovalActionPayload>((r) => {
-          resolve = r
+        new Promise<DecisionResponse>((resolve) => {
+          release = resolve
         }),
+    )
+    const fetchPending = vi.fn<Parameters<FetchPending>, ReturnType<FetchPending>>(
+      async () => makePending(),
     )
 
     render(
       <ReleaseApprovalsPanel
-        fetchApprovals={fetchApprovals}
-        submitApprove={submitApprove}
-        submitAbort={async () => makeActionPayload()}
+        fetchPending={fetchPending}
+        submitDecision={submitDecision}
+        nowImpl={() => new Date("2026-05-11T12:00:00Z").getTime()}
       />,
     )
 
+    const btnId = "release-approvals-panel-row-OP-1234-approve"
     await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(1)
+      expect(screen.getByTestId(btnId)).toBeInTheDocument()
     })
-
-    const btn = screen.getByTestId(
-      "release-approvals-panel-row-OP-100-approve",
-    )
-    fireEvent.click(btn)
-    fireEvent.click(btn)
-    fireEvent.click(btn)
-    expect(submitApprove).toHaveBeenCalledTimes(1)
-
-    // Drain the pending submit so React commits the disabled→enabled cycle
-    // before the test runner tears down.
     await act(async () => {
-      resolve(makeActionPayload())
+      fireEvent.click(screen.getByTestId(btnId))
+      fireEvent.click(screen.getByTestId(btnId))
+      fireEvent.click(screen.getByTestId(btnId))
+    })
+    expect(submitDecision).toHaveBeenCalledTimes(1)
+    expect((screen.getByTestId(btnId) as HTMLButtonElement).disabled).toBe(true)
+
+    await act(async () => {
+      release?.(makeDecisionResponse())
     })
     await waitFor(() => {
-      expect(fetchApprovals).toHaveBeenCalledTimes(2)
+      expect(fetchPending.mock.calls.length).toBeGreaterThanOrEqual(2)
     })
   })
 })

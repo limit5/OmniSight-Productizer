@@ -83,18 +83,6 @@ STATES: frozenset[str] = frozenset(
 )
 
 
-# OP-949 H4 — logical sub-state for the operator approval gate.
-# ``pending_approval`` is the human-readable name for a release that has
-# finished the staging gate (build passed, smoke green) but is still
-# blocked on the L1 R8 operator +2. The underlying ``release_state.state``
-# value is ``staging`` — adding a fresh literal would require an alembic
-# CHECK update which is out of OP-949's scope (the ticket area gate
-# forbids ``db``). Exposed as a stable identifier so the H4 web UI / API
-# can name the sub-state without leaking the implementation detail that
-# it is literally the ``staging`` row state.
-STATE_PENDING_APPROVAL = STATE_STAGING
-
-
 # Allowed transitions: (from_state -> set of to_states).
 # Keep this table in lock-step with the diagram in the module docstring
 # and with the alembic 0233 CHECK literal.
@@ -409,42 +397,299 @@ def get_by_release_id(*, release_id: str) -> dict[str, Any]:
     return _row_to_dict(row)
 
 
-def list_in_state(state: str) -> list[dict[str, Any]]:
-    """Return every ``release_state`` row currently sitting in ``state``.
-
-    Used by the H4 operator-approval API to surface the
-    ``pending_approval`` queue (sub-state of ``staging``). Ordered by
-    ``last_transition_at DESC`` so the freshest-blocked release lands
-    at the top of the dashboard.
-
-    Raises ``ValueError`` if ``state`` is not a known state literal so
-    a caller that drifted the enum surfaces the bug at call time rather
-    than silently returning an empty list.
-    """
-    if state not in STATES:
-        raise ValueError(
-            f"unknown state {state!r}; must be one of {sorted(STATES)}"
-        )
-    with _engine().connect() as conn:
-        rows = conn.execute(
-            sa.text(
-                "SELECT id, release_id, version, state, row_version, "
-                "       last_transition_at, transition_log_json, "
-                "       created_at "
-                "FROM release_state WHERE state = :s "
-                "ORDER BY last_transition_at DESC, id ASC"
-            ),
-            {"s": state},
-        ).fetchall()
-    return [_row_to_dict(r) for r in rows]
-
-
 def get_history(*, version: str) -> list[dict[str, Any]]:
     """Return the append-only transition log for ``version``.
 
     Raises :class:`ReleaseNotFound` if no row exists.
     """
     return list(get(version=version)["transition_log"])
+
+
+# ─── OP-949 H4 — operator-approval sub-state ─────────────────────────
+#
+# The H3 state column is a closed enum pinned by the alembic 0233 CHECK
+# constraint, so we model "release is awaiting an operator decision" as
+# a *sub-state* recorded in ``transition_log_json``. The main ``state``
+# column is left untouched; the H2 dispatcher records an "approval
+# requested" log entry when a release reaches a gate, and the H4 web UI
+# records the operator's verdict as a matching "approval granted" /
+# "approval aborted" entry. Computing the current sub-state is a
+# tail-scan over the log entries.
+#
+# Wire shape (all entries are dicts inside the JSONL blob):
+#
+#   {"kind": "approval_pending",
+#    "state": "<current main state>",
+#    "canary_percent": <int|None>,
+#    "slo_snapshot": {...|None},
+#    "reason": "...",
+#    "at": "<iso8601>"}
+#
+#   {"kind": "approval_granted" | "approval_aborted",
+#    "operator": "<email>",
+#    "reason": "...",
+#    "at": "<iso8601>"}
+#
+# This sub-state lives only in the JSONL column — no DB CHECK, no new
+# column. That keeps the contract additive and avoids a schema change.
+
+APPROVAL_KIND_PENDING = "approval_pending"
+APPROVAL_KIND_GRANTED = "approval_granted"
+APPROVAL_KIND_ABORTED = "approval_aborted"
+
+
+class ApprovalAlreadyResolved(RuntimeError):
+    """Two operators clicked at the same time — second click loses.
+
+    Mirrors the ``RaceConditionApproval`` error from the H4 ticket's
+    error catalog. The web UI surfaces this as a "already approved /
+    already aborted by <operator>" toast so the second clicker doesn't
+    think their click failed for an infrastructure reason.
+    """
+
+
+def _latest_approval_entry(
+    log_entries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the trailing approval-* log entry, or None.
+
+    The tail-scan ignores the ordinary state-transition entries (which
+    have ``from`` / ``to`` keys but no ``kind``) and only inspects the
+    approval markers. A pending entry is the "current sub-state"; a
+    granted/aborted entry after it means the sub-state is resolved.
+    """
+    for entry in reversed(log_entries):
+        kind = entry.get("kind")
+        if kind in (
+            APPROVAL_KIND_PENDING,
+            APPROVAL_KIND_GRANTED,
+            APPROVAL_KIND_ABORTED,
+        ):
+            return entry
+    return None
+
+
+def _append_log_entry(
+    *,
+    release_id: str,
+    entry: dict[str, Any],
+    expect_unresolved_pending: bool = False,
+) -> dict[str, Any]:
+    """Append ``entry`` to the row's JSONL log with optimistic locking.
+
+    When ``expect_unresolved_pending`` is True the call refuses unless
+    the trailing approval-* entry is ``approval_pending`` — that's how
+    ``record_decision`` enforces "the approval must not already be
+    resolved by another operator". The same row_version bump that
+    protects ``transition`` from lost-update races also protects this
+    write path.
+
+    Returns the full post-write row dict.
+    """
+    if not release_id or not release_id.strip():
+        raise ValueError("release_id must be a non-empty string")
+    ts = _now_iso()
+    enriched = {**entry, "at": ts}
+
+    with _engine().begin() as conn:
+        row = conn.execute(
+            sa.text(
+                "SELECT id, state, row_version, transition_log_json, "
+                "       version "
+                "FROM release_state WHERE release_id = :rid"
+            ),
+            {"rid": release_id},
+        ).first()
+        if row is None:
+            raise ReleaseNotFound(
+                f"no release_state row for release_id={release_id!r}"
+            )
+        row_id, current_state, current_rv, current_log, version = row
+        log_entries = _parse_jsonl(current_log)
+        latest = _latest_approval_entry(log_entries)
+        if expect_unresolved_pending and (
+            latest is None or latest.get("kind") != APPROVAL_KIND_PENDING
+        ):
+            raise ApprovalAlreadyResolved(
+                f"release {release_id!r} has no unresolved approval "
+                f"(latest kind={latest.get('kind') if latest else None!r})"
+            )
+        # ``request_approval`` is idempotent — re-requesting on an
+        # already-pending row is a no-op. The dispatcher may replay
+        # webhooks, so a duplicate request must not produce a duplicate
+        # log entry.
+        if (
+            entry.get("kind") == APPROVAL_KIND_PENDING
+            and latest is not None
+            and latest.get("kind") == APPROVAL_KIND_PENDING
+        ):
+            return {
+                "release_id": release_id,
+                "version": version,
+                "state": current_state,
+                "row_version": int(current_rv),
+                "transition_log": log_entries,
+                "approval": latest,
+                "deduplicated": True,
+            }
+
+        new_line = json.dumps(enriched, separators=(",", ":"))
+        new_log = f"{current_log}\n{new_line}" if current_log else new_line
+        next_rv = int(current_rv) + 1
+        update = conn.execute(
+            sa.text(
+                "UPDATE release_state SET "
+                "  row_version = :next_rv, "
+                "  last_transition_at = :ts, "
+                "  transition_log_json = :log "
+                "WHERE id = :rid_pk AND row_version = :prev_rv"
+            ),
+            {
+                "next_rv": next_rv,
+                "ts": ts,
+                "log": new_log,
+                "rid_pk": row_id,
+                "prev_rv": current_rv,
+            },
+        )
+        if update.rowcount != 1:
+            raise RaceConditionDoubleTransition(
+                f"race detected on release {release_id!r}: another writer "
+                f"modified row_version away from {current_rv} before our "
+                f"approval-log UPDATE landed (rowcount={update.rowcount})"
+            )
+        log_entries.append(enriched)
+        return {
+            "release_id": release_id,
+            "version": version,
+            "state": current_state,
+            "row_version": next_rv,
+            "transition_log": log_entries,
+            "approval": enriched,
+            "deduplicated": False,
+        }
+
+
+def request_approval(
+    *,
+    release_id: str,
+    canary_percent: int | None = None,
+    slo_snapshot: dict[str, Any] | None = None,
+    reason: str = "operator_gate",
+) -> dict[str, Any]:
+    """Mark a release as awaiting operator approval.
+
+    Called by the H2 dispatcher when a release reaches a gate that
+    needs human sign-off (replacing the JIRA +2 gate per R8 / L1 R8).
+    Idempotent: replaying the same request on an already-pending row
+    is a no-op so duplicate webhook deliveries don't bloat the log.
+
+    Raises:
+    * :class:`ReleaseNotFound` — no row for ``release_id``.
+    * :class:`RaceConditionDoubleTransition` — concurrent log writer.
+    """
+    return _append_log_entry(
+        release_id=release_id,
+        entry={
+            "kind": APPROVAL_KIND_PENDING,
+            "canary_percent": canary_percent,
+            "slo_snapshot": slo_snapshot,
+            "reason": reason,
+        },
+    )
+
+
+def record_decision(
+    *,
+    release_id: str,
+    decision: str,
+    operator: str,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Record an operator's approve / abort verdict.
+
+    ``decision`` must be ``"approve"`` or ``"abort"``. Refuses if the
+    trailing approval-* entry isn't a pending request (i.e. nothing to
+    decide, or another operator already decided).
+
+    Raises:
+    * :class:`ReleaseNotFound` — no row for ``release_id``.
+    * :class:`ApprovalAlreadyResolved` — pending sub-state is missing
+      or has already been resolved by another operator (AC error
+      ``RaceConditionApproval``).
+    * :class:`RaceConditionDoubleTransition` — concurrent log writer
+      bumped the row_version under us.
+    """
+    if decision not in ("approve", "abort"):
+        raise ValueError(f"decision must be 'approve' or 'abort'; got {decision!r}")
+    if not operator or not operator.strip():
+        raise ValueError("operator must be a non-empty string")
+    kind = (
+        APPROVAL_KIND_GRANTED
+        if decision == "approve"
+        else APPROVAL_KIND_ABORTED
+    )
+    return _append_log_entry(
+        release_id=release_id,
+        entry={
+            "kind": kind,
+            "operator": operator.strip(),
+            "reason": reason.strip(),
+        },
+        expect_unresolved_pending=True,
+    )
+
+
+def list_pending_approvals() -> list[dict[str, Any]]:
+    """Return every release whose latest approval-* entry is pending.
+
+    Scans the ``release_state`` table and tail-scans each row's log.
+    The H4 admin panel calls this on first paint + on every SSE
+    ``release.dashboard.updated`` tick. The release set is small (≤
+    handful active at a time), so a naive scan beats maintaining a
+    secondary index.
+    """
+    with _engine().connect() as conn:
+        rows = conn.execute(
+            sa.text(
+                "SELECT id, release_id, version, state, row_version, "
+                "       last_transition_at, transition_log_json, "
+                "       created_at "
+                "FROM release_state "
+                "ORDER BY last_transition_at DESC"
+            )
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        d = _row_to_dict(row)
+        latest = _latest_approval_entry(d["transition_log"])
+        if latest is None or latest.get("kind") != APPROVAL_KIND_PENDING:
+            continue
+        out.append(
+            {
+                "release_id": d["release_id"],
+                "version": d["version"],
+                "state": d["state"],
+                "row_version": d["row_version"],
+                "last_transition_at": d["last_transition_at"],
+                "canary_percent": latest.get("canary_percent"),
+                "slo_snapshot": latest.get("slo_snapshot"),
+                "reason": latest.get("reason"),
+                "requested_at": latest.get("at"),
+            }
+        )
+    return out
+
+
+def get_approval_status(*, release_id: str) -> dict[str, Any] | None:
+    """Return the trailing approval-* entry for ``release_id``, or None.
+
+    Used by the H4 API to answer "is this release still in
+    pending-approval?" after the operator double-clicks. Returns
+    ``None`` if no approval entry has ever been written.
+    """
+    row = get_by_release_id(release_id=release_id)
+    return _latest_approval_entry(row["transition_log"])
 
 
 def _parse_jsonl(blob: str | None) -> list[dict[str, Any]]:
