@@ -94,6 +94,7 @@ class _StubAnthropic:
 
     def __init__(self, *, api_key: str) -> None:  # noqa: ARG002
         self.messages: _StubMessages | None = None  # set by helper below
+        self.beta: Any | None = None
 
 
 def _install_stub_sdk(monkeypatch: pytest.MonkeyPatch, responses: list[_StubResponse]) -> None:
@@ -108,6 +109,7 @@ def _install_stub_sdk(monkeypatch: pytest.MonkeyPatch, responses: list[_StubResp
         def __init__(self, **kwargs):  # noqa: ANN003
             super().__init__(api_key=kwargs.get("api_key", "stub"))
             self.messages = _StubMessages(iterator)
+            self.beta = type("_Beta", (), {"messages": _StubMessages(iterator)})()
 
     fake.Anthropic = _Client  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "anthropic", fake)
@@ -259,6 +261,26 @@ def test_simple_passes_system(monkeypatch):
     assert call["system"] == "Be terse."
 
 
+def test_simple_uses_stable_messages_namespace(monkeypatch):
+    _install_stub_sdk(
+        monkeypatch,
+        [
+            _StubResponse(
+                content=[_StubBlock(type="text", text="ok")],
+                stop_reason="end_turn",
+                usage=_StubUsage(),
+            )
+        ],
+    )
+
+    from backend.agents.anthropic_native_client import AnthropicClient
+
+    client = AnthropicClient()
+    client.simple(prompt="hi")
+    assert len(client._client.messages.calls) == 1  # type: ignore[attr-defined]
+    assert client._client.beta.messages.calls == []  # type: ignore[attr-defined]
+
+
 # ─── AnthropicClient.simple_params() ─────────────────────────────
 
 
@@ -321,6 +343,32 @@ async def test_run_with_tools_single_round_no_tool_use(monkeypatch):
     assert result.stop_reason == "end_turn"
     assert result.final_text == "done"
     assert result.usage.input_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_run_with_beta_builtin_tools_uses_beta_messages(monkeypatch):
+    _install_stub_sdk(
+        monkeypatch,
+        [
+            _StubResponse(
+                content=[_StubBlock(type="text", text="done")],
+                stop_reason="end_turn",
+                usage=_StubUsage(input_tokens=5, output_tokens=1),
+            )
+        ],
+    )
+
+    from backend.agents.anthropic_native_client import AnthropicClient
+
+    client = AnthropicClient()
+    result = await client.run_with_tools(
+        prompt="run in sandbox",
+        raw_tools=[{"type": "code_execution_20260120", "name": "code_execution"}],
+        enable_cache=False,
+    )
+    assert result.stop_reason == "end_turn"
+    assert client._client.messages.calls == []  # type: ignore[attr-defined]
+    assert len(client._client.beta.messages.calls) == 1  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

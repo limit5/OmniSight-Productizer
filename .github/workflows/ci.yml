@@ -57,6 +57,13 @@ jobs:
         with: { python-version: "3.12", cache: pip }
       - run: pip install --require-hashes -r backend/requirements.txt
       - run: pip install --require-hashes -r backend/requirements-dev.txt
+      - name: pytest Anthropic SDK version gate (OP-863)
+        run: |
+          python3 -m pytest \
+            backend/tests/test_sdk_version_pin.py \
+            --rootdir=backend \
+            -c backend/pytest.ini \
+            -q
       - name: pytest runner past-failure regressions (OP-825)
         run: |
           python3 -m pytest \

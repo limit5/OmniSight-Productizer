@@ -34,6 +34,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from backend.agents.anthropic_sdk_audit import assert_no_deprecated_beta_messages_call
 from backend.agents.system_prompt_builder import inject_tool_catalog
 from backend.agents.tool_dispatcher import ToolDispatcher, get_default_dispatcher
 from backend.agents.tool_schemas import to_anthropic_tools
@@ -265,16 +266,60 @@ def _is_cache_control_rejection(exc: Exception) -> bool:
     return "cache_control" in text or "cache breakpoint" in text
 
 
+def _tool_type_requires_beta_messages(tool_type: str) -> bool:
+    """Return True for Anthropic beta built-in tool type strings."""
+    return tool_type.startswith(
+        (
+            "bash_",
+            "code_execution_",
+            "computer_",
+            "memory_",
+            "text_editor_",
+        )
+    )
+
+
+def _requires_beta_messages(kwargs: dict[str, Any]) -> bool:
+    """Detect request shapes that must use ``client.beta.messages``."""
+    if kwargs.get("mcp_servers"):
+        return True
+
+    for tool in kwargs.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        tool_type = str(tool.get("type", ""))
+        if _tool_type_requires_beta_messages(tool_type):
+            return True
+    return False
+
+
+def _messages_namespace(client: Any, kwargs: dict[str, Any]) -> tuple[Any, bool]:
+    """Pick stable vs beta messages namespace for a request payload."""
+    requires_beta = _requires_beta_messages(kwargs)
+    beta_messages = getattr(getattr(client, "beta", None), "messages", None)
+    used_beta = requires_beta and beta_messages is not None
+    assert_no_deprecated_beta_messages_call(
+        requires_beta_messages=requires_beta,
+        used_beta_messages=used_beta,
+    )
+    if used_beta:
+        return beta_messages, True
+    return client.messages, False
+
+
 def _create_message_with_cache_fallback(client: Any, kwargs: dict[str, Any]) -> Any:
+    messages, _used_beta = _messages_namespace(client, kwargs)
     try:
-        return client.messages.create(**kwargs)
+        return messages.create(**kwargs)
     except Exception as exc:
         if not _is_cache_control_rejection(exc):
             raise
         logger.warning(
             "cache_breakpoint_rejected_by_api; retrying Anthropic call without cache_control"
         )
-        return client.messages.create(**_strip_cache_control(kwargs))
+        stripped = _strip_cache_control(kwargs)
+        messages, _used_beta = _messages_namespace(client, stripped)
+        return messages.create(**stripped)
 
 
 class AnthropicClient:
