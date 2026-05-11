@@ -56,6 +56,10 @@ ENV_TOKEN_VAR_BY_NAME: dict[str, str] = {
     # writes (transitions, comments) still go through ``jira_dispatch`` so
     # the audit / governance layer is preserved.
     "mcp_jira":                   "OMNISIGHT_MCP_JIRA_TOKEN",
+    # OP-853 (C4): Graphiti MCP gives the runner read-only temporal context
+    # over ticket/status/bot/review timelines. Ingestion happens in the
+    # Graphiti service; runner calls are query-only.
+    "mcp_graphiti":               "OMNISIGHT_MCP_GRAPHITI_TOKEN",
 }
 
 
@@ -199,6 +203,29 @@ DEFAULT_REMOTE_MCP_CATALOG: tuple[_CatalogEntry, ...] = (
         ),
         sample_tools=("getTicket", "searchTickets", "getComments"),
     ),
+    # OP-853 (C4): Graphiti temporal-memory MCP. Default URL points at the
+    # service name used by local/self-hosted deployments; operators may
+    # override it via ``OMNISIGHT_MCP_GRAPHITI_URL``. Only read/query-shaped
+    # tools are advertised here; write/ingest endpoints remain service-side
+    # event consumers and are refused by runner governance.
+    _CatalogEntry(
+        name="mcp_graphiti",
+        default_url="https://mcp-graphiti.local",
+        description=(
+            "Graphiti read-only temporal MCP. Surface ticket-time queries for "
+            "the runner: getTicketTimeline(key) returns status transition, bot "
+            "pickup, and Gerrit review events; "
+            "findSimilarPriorTicketsByTimeline(features) finds similar recent "
+            "tickets; getBotSuccessRateByPattern(bot, feature) summarizes bot "
+            "success rates by ticket pattern. Writes are refused before MCP "
+            "dispatch per OP-853."
+        ),
+        sample_tools=(
+            "getTicketTimeline",
+            "findSimilarPriorTicketsByTimeline",
+            "getBotSuccessRateByPattern",
+        ),
+    ),
 )
 
 
@@ -212,6 +239,17 @@ MCP_JIRA_READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "searchTickets",
     "getComments",
 })
+
+
+# OP-853: Graphiti query tools are read-only by method prefix. This mirrors
+# the ticket's contract: allow ``get*``, ``find*``, ``query*``, ``list*``;
+# refuse write-shaped names such as ``create*``, ``update*``, ``delete*``.
+MCP_GRAPHITI_READ_ONLY_PREFIXES: tuple[str, ...] = (
+    "get",
+    "find",
+    "query",
+    "list",
+)
 
 
 def default_catalog_by_name() -> dict[str, _CatalogEntry]:
@@ -347,14 +385,16 @@ def build_registry_from_env(
         token = src.get(env_var, "").strip()
         if not token:
             continue  # operator hasn't completed OAuth for this server
-        # OP-813: JIRA MCP allows operator override of the default URL via
-        # ``OMNISIGHT_MCP_JIRA_URL`` (self-hosted ``mcp-atlassian`` instances,
-        # air-gapped customers, alternate ports). Other entries don't expose
-        # URL override yet — they all live behind the Anthropic-managed
-        # gateway.
+        # OP-813 / OP-853: self-hosted MCP siblings allow operator override of
+        # the default URL. Other entries don't expose URL override yet — they
+        # all live behind the Anthropic-managed gateway.
         url = entry.default_url
         if entry.name == "mcp_jira":
             override = src.get("OMNISIGHT_MCP_JIRA_URL", "").strip()
+            if override:
+                url = override
+        elif entry.name == "mcp_graphiti":
+            override = src.get("OMNISIGHT_MCP_GRAPHITI_URL", "").strip()
             if override:
                 url = override
         configs.append(
@@ -416,6 +456,24 @@ def is_jira_mcp_read_only_tool(tool_name: str) -> bool:
         return False
     server, method = parsed
     return server == "mcp_jira" and method in MCP_JIRA_READ_ONLY_TOOLS
+
+
+def is_graphiti_mcp_read_only_tool(tool_name: str) -> bool:
+    """OP-853 (C4): structural read-only check for the Graphiti MCP server.
+
+    Returns True iff ``tool_name`` is of the form
+    ``mcp__mcp_graphiti__<method>`` AND ``<method>`` starts with one of
+    :data:`MCP_GRAPHITI_READ_ONLY_PREFIXES` (``get``, ``find``, ``query``,
+    ``list``). Mutation-shaped names are refused before dispatch so Graphiti
+    remains a temporal-query surface for the runner, not a write path.
+    """
+    parsed = parse_mcp_tool_name(tool_name)
+    if parsed is None:
+        return False
+    server, method = parsed
+    return server == "mcp_graphiti" and method.startswith(
+        MCP_GRAPHITI_READ_ONLY_PREFIXES
+    )
 
 
 # ─── Local (in-process) MCP server registration — META OP-814 ─────

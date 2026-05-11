@@ -87,8 +87,7 @@ def test_config_to_anthropic_payload_without_token():
 
 
 def test_catalog_has_known_servers():
-    """OP-813 (A5) added ``mcp_jira`` as the 5th catalog entry. Pin the
-    full set so adding a new server requires a deliberate test update."""
+    """Pin the full catalog so adding a new server is deliberate."""
     names = {entry.name for entry in DEFAULT_REMOTE_MCP_CATALOG}
     assert names == {
         "claude_ai_Figma",
@@ -96,6 +95,7 @@ def test_catalog_has_known_servers():
         "claude_ai_Google_Calendar",
         "claude_ai_Google_Drive",
         "mcp_jira",  # OP-813 (A5)
+        "mcp_graphiti",  # OP-853 (C4)
     }
 
 
@@ -520,6 +520,7 @@ def test_build_registry_from_env_uses_os_environ_when_env_none(
         "OMNISIGHT_MCP_GMAIL_TOKEN",
         "OMNISIGHT_MCP_GOOGLE_CALENDAR_TOKEN",
         "OMNISIGHT_MCP_GOOGLE_DRIVE_TOKEN",
+        "OMNISIGHT_MCP_GRAPHITI_TOKEN",
         "OMNISIGHT_MCP_DISABLE_ALL",
     ):
         monkeypatch.delenv(v, raising=False)

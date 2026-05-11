@@ -1,0 +1,26 @@
+# OP-853 - Operator steering weights for Graphiti temporal summaries.
+#
+# Values are relative weights, not percentages. Operators can tune these per
+# summary mode without changing runner code.
+defaults:
+  status_transition_recency: 1.0
+  status_transition_similarity: 1.0
+  bot_success_rate: 1.0
+  gerrit_review_velocity: 1.0
+  prior_resolution_similarity: 1.0
+
+summaries:
+  ticket_timeline:
+    status_transition_recency: 1.4
+    bot_activity: 1.0
+    gerrit_review_velocity: 0.8
+
+  similar_prior_tickets:
+    prior_resolution_similarity: 1.6
+    status_transition_similarity: 1.2
+    status_transition_recency: 1.0
+
+  bot_success_pattern:
+    bot_success_rate: 1.8
+    prior_resolution_similarity: 1.0
+    gerrit_review_velocity: 0.7

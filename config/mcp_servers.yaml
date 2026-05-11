@@ -1,0 +1,24 @@
+# OP-853 - Remote MCP server catalog overlays for operator-run services.
+servers:
+  mcp_graphiti:
+    url_env: OMNISIGHT_MCP_GRAPHITI_URL
+    token_env: OMNISIGHT_MCP_GRAPHITI_TOKEN
+    default_url: https://mcp-graphiti.local
+    mode: read_only
+    read_only_tool_prefixes:
+      - get
+      - find
+      - query
+      - list
+    temporal_tools:
+      - getTicketTimeline
+      - findSimilarPriorTicketsByTimeline
+      - getBotSuccessRateByPattern
+    ingestion:
+      jira_changelog:
+        - ticket_status_transitions
+        - bot_activity
+      gerrit_stream_events:
+        - patch_set_created
+        - code_review_plus_two
+        - change_merged
