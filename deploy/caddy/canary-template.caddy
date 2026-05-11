@@ -1,0 +1,35 @@
+# OP-882 — Caddy canary rollout template (D10 / META OP-761).
+#
+# Rendered by backend.orchestrator.canary.TrafficShiftWriter at every
+# stage transition. The writer substitutes the placeholders below and
+# atomically replaces deploy/caddy/canary.caddy with the result, then
+# the operator triggers `caddy reload` per the runbook.
+#
+# Placeholders
+#   {{STAGE_NAME}}      —  "5" | "25" | "100" | "rollback"
+#   {{CANARY_PERCENT}}  —  integer 0..100
+#   {{STABLE_WEIGHT}}   —  integer 100 - CANARY_PERCENT
+#   {{CANARY_WEIGHT}}   —  integer CANARY_PERCENT
+#
+# Stages drive a 5% → 25% → 100% ramp with a manual operator gate at
+# each transition; per-stage SLO check enforces error_rate < 0.5% and
+# p95 latency within ±20% of the captured baseline. See
+# docs/operations/canary-runbook.md for the full runbook.
+
+(omnisight_canary_upstream) {
+	reverse_proxy {$OMNISIGHT_STABLE_UPSTREAM:backend-stable:8000} {$OMNISIGHT_CANARY_UPSTREAM:backend-canary:8001} {
+		# weighted_round_robin is Caddy's implementation of
+		# weighted_load_balancing. The first weight maps to the
+		# stable upstream and the second to the canary upstream,
+		# matching the argument order above.
+		lb_policy weighted_round_robin {{STABLE_WEIGHT}} {{CANARY_WEIGHT}}
+		# Health-check so a degraded canary fast-drains and the
+		# error-rate SLO sees the breach within one stage's
+		# observe window.
+		health_uri /readyz
+		health_interval 5s
+		health_timeout 2s
+	}
+}
+
+# Stage marker (diagnostic): {{STAGE_NAME}} — {{CANARY_PERCENT}}% canary
