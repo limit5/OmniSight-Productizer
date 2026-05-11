@@ -29,6 +29,21 @@ from backend.agents.skill_leveling import (
     lock_branch_choice as lock_skill_branch_choice,
 )
 from backend.agents.skill_matrix import SkillMatrixDriftError
+from backend.agents.talent_tree import (
+    CapstoneRequiresLv80,
+    MILESTONE_LEVELS,
+    MilestoneNotReached,
+    PostgresCapstoneStore,
+    PostgresTalentChoiceStore,
+    TalentAlreadyLocked,
+    TalentIdNotInTree,
+    TalentTreeError,
+    agent_talent_summary,
+    available_talents,
+    capstone_for_guild,
+    lock_capstone_ability,
+    lock_talent,
+)
 from backend.events import emit_agent_update
 from backend.models import Agent, AgentCreate, AgentProgress, AgentStatus, AgentWorkspace
 from backend.sandbox_tier import Guild
@@ -227,6 +242,164 @@ async def lock_agent_skill_branch(
         "xp": state.xp,
         "branch_choice": state.branch_choice,
         "last_active_at": state.last_active_at,
+    }
+
+
+@router.get("/{agent_id}/talents")
+async def get_agent_talents(
+    agent_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W14: full talent chain + capstone for the Character Card."""
+    talent_store = PostgresTalentChoiceStore(lambda: _borrowed_conn(conn))
+    capstone_store = PostgresCapstoneStore(lambda: _borrowed_conn(conn))
+    summary = await agent_talent_summary(
+        talent_store, agent_id, capstone_store=capstone_store,
+    )
+    return {
+        "agent_id": summary.agent_id,
+        "milestones": [int(level) for level in MILESTONE_LEVELS],
+        "choices": [
+            {
+                "milestone_level": choice.milestone_level,
+                "talent_id": choice.talent_id,
+                "chosen_at": choice.chosen_at,
+            }
+            for choice in summary.choices
+        ],
+        "capstone": (
+            {
+                "ability_id": summary.capstone.ability_id,
+                "locked_at": summary.capstone.locked_at,
+            }
+            if summary.capstone is not None
+            else None
+        ),
+    }
+
+
+@router.get("/{agent_id}/talents/options")
+async def get_agent_talent_options(
+    agent_id: str,
+    guild: str,
+    milestone: int,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W14: the 3 picks for one Guild × milestone (read-only)."""
+    try:
+        options = available_talents(agent_id, guild, milestone)
+    except TalentTreeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "agent_id": agent_id,
+        "guild": guild,
+        "milestone": int(milestone),
+        "options": [
+            {
+                "talent_id": option.talent_id,
+                "display_name": option.display_name,
+                "summary": option.summary,
+                "routing_label": option.routing_label,
+            }
+            for option in options
+        ],
+    }
+
+
+@router.post("/{agent_id}/talents/lock")
+async def lock_agent_talent(
+    agent_id: str,
+    body: dict,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W14: lock an immutable talent pick for ``(agent_id, milestone)``.
+
+    Idempotent on identical input; refuses to overwrite a different
+    talent with 409 (per :class:`TalentAlreadyLocked`). The agent's
+    Lv must already meet the milestone — :class:`MilestoneNotReached`
+    returns 409. Talent ids must match ``config/talent_tree.yaml`` —
+    drift returns 422.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    guild = body.get("guild")
+    milestone = body.get("milestone")
+    talent_id = body.get("talent_id")
+    agent_level = body.get("agent_level")
+    if not isinstance(guild, str) or not guild.strip():
+        raise HTTPException(status_code=400, detail="guild is required")
+    if not isinstance(milestone, int) or isinstance(milestone, bool):
+        raise HTTPException(status_code=400, detail="milestone must be an integer")
+    if not isinstance(talent_id, str) or not talent_id.strip():
+        raise HTTPException(status_code=400, detail="talent_id is required")
+    if not isinstance(agent_level, int) or isinstance(agent_level, bool):
+        raise HTTPException(status_code=400, detail="agent_level must be an integer")
+
+    talent_store = PostgresTalentChoiceStore(lambda: _borrowed_conn(conn))
+    try:
+        choice = await lock_talent(
+            talent_store,
+            agent_id,
+            guild,
+            milestone,
+            talent_id,
+            agent_level=agent_level,
+        )
+    except TalentAlreadyLocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MilestoneNotReached as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TalentIdNotInTree as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TalentTreeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "agent_id": choice.agent_id,
+        "milestone_level": choice.milestone_level,
+        "talent_id": choice.talent_id,
+        "chosen_at": choice.chosen_at,
+    }
+
+
+@router.post("/{agent_id}/talents/capstone")
+async def lock_agent_capstone(
+    agent_id: str,
+    body: dict,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W14: lock the Lv-80 capstone ability after the final pick."""
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    guild = body.get("guild")
+    agent_level = body.get("agent_level")
+    if not isinstance(guild, str) or not guild.strip():
+        raise HTTPException(status_code=400, detail="guild is required")
+    if not isinstance(agent_level, int) or isinstance(agent_level, bool):
+        raise HTTPException(status_code=400, detail="agent_level must be an integer")
+
+    talent_store = PostgresTalentChoiceStore(lambda: _borrowed_conn(conn))
+    capstone_store = PostgresCapstoneStore(lambda: _borrowed_conn(conn))
+    try:
+        lock = await lock_capstone_ability(
+            capstone_store,
+            talent_store,
+            agent_id,
+            guild,
+            agent_level=agent_level,
+        )
+        ability = capstone_for_guild(guild)
+    except CapstoneRequiresLv80 as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TalentAlreadyLocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TalentTreeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "agent_id": lock.agent_id,
+        "ability_id": lock.ability_id,
+        "display_name": ability.display_name,
+        "summary": ability.summary,
+        "locked_at": lock.locked_at,
     }
 
 

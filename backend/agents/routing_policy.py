@@ -56,6 +56,11 @@ import backend.agents.provider_adapters.xai_subscription  # noqa: F401,E402
 DEFAULT_CAP_SUPPRESSION_S = 5 * 60 * 60
 HIGH_QUOTA_RATIO = 0.50
 MP_ENABLED_ENV = "OMNISIGHT_MP_ENABLED"
+# RPG.W14 — feature flag for the talent-weight injection call site.
+# Off by default until RPG.W7.1 (`prefer_agent_id` routing) lands; the
+# helper :func:`talent_routing_weight_multiplier` short-circuits to
+# ``1.0`` while the flag is off so this row is shippable ahead of W7.1.
+TALENT_ROUTING_ENABLED_ENV = "OMNISIGHT_MP_TALENT_ROUTING_ENABLED"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _MODEL_MAPPING_PATH = _PROJECT_ROOT / "configs" / "model_mapping.yaml"
 _ADR_0007_PATH = (
@@ -628,6 +633,59 @@ _DEFAULT_POLICY = RoutingPolicy()
 def is_enabled() -> bool:
     """Return whether multi-provider routing is enabled for this worker."""
     return feature_flags.resolve_env_backed_feature_flag(MP_ENABLED_ENV)
+
+
+def is_talent_routing_enabled() -> bool:
+    """Return whether the RPG.W14 talent-weight injection is active.
+
+    Feature-flagged off by default — RPG.W7.1 (``prefer_agent_id``) is
+    not yet live, so the call site is wired but inert. Enabling the
+    flag activates the +20%-per-matching-talent multiplier from
+    :mod:`backend.agents.talent_tree`.
+    """
+    return feature_flags.resolve_env_backed_feature_flag(
+        TALENT_ROUTING_ENABLED_ENV,
+        default_enabled=False,
+        env_mode="true_values",
+    )
+
+
+def talent_routing_weight_multiplier(
+    talent_choices: tuple,
+    *,
+    task_labels: tuple[str, ...],
+    guild: str | None = None,
+) -> float:
+    """RPG.W14 -- return the routing-weight multiplier for ``talent_choices``.
+
+    Returns ``1.0`` unconditionally when
+    :func:`is_talent_routing_enabled` is False, so the call site is
+    safe to wire today and "lights up" the moment the feature flag
+    flips. ``MP routing_policy unreachable`` (RoutingWeightInjectionFailed)
+    degrades silently to ``1.0`` per OP-219's error-catalog spec.
+    """
+    if not is_talent_routing_enabled():
+        return 1.0
+    if not talent_choices:
+        return 1.0
+    try:
+        # Imported lazily to keep the module import graph clean — W14
+        # is a leaf feature and routing_policy is itself imported by
+        # many other modules at startup.
+        from backend.agents.talent_tree import (
+            RoutingWeightInjectionFailed,
+            routing_weight_multiplier_for_talents,
+        )
+    except ImportError:  # pragma: no cover — defensive
+        return 1.0
+    try:
+        return routing_weight_multiplier_for_talents(
+            tuple(talent_choices),
+            task_labels=tuple(task_labels),
+            guild=guild,
+        )
+    except RoutingWeightInjectionFailed:
+        return 1.0
 
 
 def choose_provider(task: TaskSpec) -> list[ProviderAdapter]:

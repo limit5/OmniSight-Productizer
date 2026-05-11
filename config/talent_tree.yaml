@@ -1,0 +1,256 @@
+# RPG.W14 — Talent tree per (Guild × milestone level).
+#
+# Spec source: docs/adr/ADR-0008-agent-rpg-class-skill-leveling.md
+#                §"Talent tree (W14)" + §"Routing integration".
+#
+# Schema (v1)
+# -----------
+#   schema_version: 1
+#   guilds:
+#     <guild_slug>:
+#       milestones:
+#         "10": [ { talent_id, display_name, summary, routing_label,
+#                   prompt_reminder }, ... 3 entries ]
+#         "30": [ ... 3 entries ]
+#         "50": [ ... 3 entries ]
+#         "80": [ ... 3 entries ]
+#       capstone:
+#         ability_id: <slug>
+#         display_name: <Title Case>
+#         summary: <one-line capability summary>
+#
+# Invariants enforced by backend/agents/talent_tree.py:
+#   * milestone keys are exactly {10, 30, 50, 80} (no extras, no holes)
+#   * 3 options per milestone (per ADR-0008)
+#   * talent_id values are globally unique within a Guild
+#   * routing_label is a free-form task-keyword used by MP routing_policy
+#   * Lv 80 row has a 4th-tier talent_id plus a capstone block
+#
+# Operator notes
+# --------------
+# Adding a new Guild only requires populating four milestones + the
+# capstone block. The drift guard in talent_tree.py validates the shape
+# at module import — a malformed YAML raises TalentTreeError at boot.
+
+schema_version: 1
+guilds:
+  backend:
+    milestones:
+      "10":
+        - talent_id: schema-first
+          display_name: Schema-First
+          summary: Bias toward typed contracts and migration safety before code.
+          routing_label: schema
+          prompt_reminder: |
+            Treat the schema as the contract — define table / pydantic /
+            OpenAPI shapes before writing handlers, and make backward
+            compatibility explicit in every migration.
+        - talent_id: performance-first
+          display_name: Performance-First
+          summary: Bias toward query plans, caching, and tail-latency reduction.
+          routing_label: performance
+          prompt_reminder: |
+            Profile before optimising — measure p50/p95/p99, inspect the
+            EXPLAIN plan, and prefer index-driven query shapes over
+            application-side filtering.
+        - talent_id: security-first
+          display_name: Security-First
+          summary: Bias toward authn/authz, input validation, and OWASP review.
+          routing_label: security
+          prompt_reminder: |
+            Always review for OWASP top-10 before submission — especially
+            injection, broken access control, and sensitive-data exposure.
+            Refuse to merge code that drops authn checks.
+      "30":
+        - talent_id: distributed-systems
+          display_name: Distributed Systems
+          summary: Bias toward partition tolerance, idempotency, and consensus.
+          routing_label: distributed
+          prompt_reminder: |
+            Every cross-service call is unreliable — assume retries, design
+            for idempotency, and document the failure mode when the
+            partner is partitioned away.
+        - talent_id: data-modeling
+          display_name: Data Modeling
+          summary: Bias toward normalised schemas, invariants, and FK integrity.
+          routing_label: data-model
+          prompt_reminder: |
+            Model the invariants in the schema — favour FK + CHECK
+            constraints over runtime assertions. A row that can't exist
+            in an invalid state is worth more than a docstring saying it
+            shouldn't.
+        - talent_id: api-design
+          display_name: API Design
+          summary: Bias toward versioning, deprecation paths, and contract clarity.
+          routing_label: api-contract
+          prompt_reminder: |
+            Treat the public API as a versioned contract — additive
+            changes only, deprecation windows for removals, and explicit
+            error shapes documented in OpenAPI.
+      "50":
+        - talent_id: incident-commander
+          display_name: Incident Commander
+          summary: Bias toward triage discipline, blast-radius scoping, postmortems.
+          routing_label: incident
+          prompt_reminder: |
+            In an incident: stabilise first, root-cause second, blame never.
+            Write the timeline as events happen, not from memory afterwards.
+        - talent_id: refactor-master
+          display_name: Refactor Master
+          summary: Bias toward small reversible edits and behaviour-preserving moves.
+          routing_label: refactor
+          prompt_reminder: |
+            Refactor in green-tested increments — never bundle a behaviour
+            change with a structural move. If a test must change, the
+            commit must say so in the subject line.
+        - talent_id: observability
+          display_name: Observability
+          summary: Bias toward structured logs, traces, and SLO-aware metrics.
+          routing_label: observability
+          prompt_reminder: |
+            Instrument as you build — every new path needs a log line, a
+            metric, and a trace span. "Add observability later" is the
+            sentence that produces unobservable systems.
+      "80":
+        - talent_id: legacy-archaeologist
+          display_name: Legacy Archaeologist
+          summary: Bias toward decoding undocumented systems and dependency graphs.
+          routing_label: legacy
+          prompt_reminder: |
+            Read the history before changing the code — git log, blame,
+            and prior incident reports beat heroic guesses every time.
+        - talent_id: platform-builder
+          display_name: Platform Builder
+          summary: Bias toward shared abstractions, internal SDKs, and DX investment.
+          routing_label: platform
+          prompt_reminder: |
+            Build the platform that future you will thank — abstract the
+            third pattern you see, document the seams, and treat internal
+            APIs as products with users.
+        - talent_id: cost-optimiser
+          display_name: Cost Optimiser
+          summary: Bias toward $-aware design, quota budgeting, and waste removal.
+          routing_label: cost
+          prompt_reminder: |
+            Always know the per-request $ — track quota, cache reads,
+            short-circuit duplicate work, and call out any change that
+            doubles the cost without doubling the value.
+    capstone:
+      ability_id: code_archaeologist
+      display_name: Code Archaeologist
+      summary: |
+        1M-context legacy-code read + surgical refactor proposal. The
+        Lv-80 backend Guild capstone reserves a dedicated long-context
+        slot for whole-repo audits with a single-PR surgical diff.
+
+  frontend:
+    milestones:
+      "10":
+        - talent_id: accessibility-first
+          display_name: Accessibility-First
+          summary: Bias toward semantic HTML, ARIA labels, and keyboard-first flows.
+          routing_label: accessibility
+          prompt_reminder: |
+            Every interactive element needs a keyboard path and an aria
+            label — verify with the tab key before opening the PR. WCAG
+            AA is the floor, not the ceiling.
+        - talent_id: motion-first
+          display_name: Motion-First
+          summary: Bias toward animation polish, reduced-motion honor, and timing.
+          routing_label: motion
+          prompt_reminder: |
+            Respect `prefers-reduced-motion` on every animation. Animate
+            with transforms + opacity (compositor-only) and never block
+            input on a 200ms+ tween.
+        - talent_id: type-safety-first
+          display_name: Type-Safety-First
+          summary: Bias toward strict typing, exhaustive switches, and zod boundaries.
+          routing_label: typescript
+          prompt_reminder: |
+            Treat `any` as a bug. Validate untyped inputs with zod at the
+            boundary, and let the typechecker prove the interior shape
+            rather than re-checking at runtime.
+      "30":
+        - talent_id: design-system-curator
+          display_name: Design-System Curator
+          summary: Bias toward token reuse, component primitives, and visual coherence.
+          routing_label: design-system
+          prompt_reminder: |
+            Reach for the primitive before inventing — if you need a new
+            colour, font, or spacing token, propose the addition to the
+            system instead of inlining a one-off.
+        - talent_id: ssr-streaming
+          display_name: SSR & Streaming
+          summary: Bias toward server components, streaming, and hydration discipline.
+          routing_label: ssr
+          prompt_reminder: |
+            Default to server components; only flip to client for
+            interaction. Stream when the LCP-critical part can ship
+            before the data-heavy below-the-fold finishes loading.
+        - talent_id: state-management
+          display_name: State Management
+          summary: Bias toward minimal client state, URL-as-state, and derived data.
+          routing_label: state
+          prompt_reminder: |
+            Push state up to the URL or server first — only keep client
+            state for ephemeral interactions. Derived data is computed,
+            not stored.
+      "50":
+        - talent_id: perf-budget
+          display_name: Performance Budget
+          summary: Bias toward bundle-size discipline, LCP/INP targets, and lazy paths.
+          routing_label: web-perf
+          prompt_reminder: |
+            Carry a bundle / LCP / INP budget into every PR. If the
+            change tips a budget, either offset it elsewhere or write the
+            rationale in the PR body before requesting review.
+        - talent_id: visual-regression-guard
+          display_name: Visual Regression Guard
+          summary: Bias toward snapshot tests, Storybook coverage, and pixel diffs.
+          routing_label: visual-regression
+          prompt_reminder: |
+            Every visual change needs a snapshot or Storybook story
+            update. Treat an unexplained pixel diff like a failing unit
+            test — it's a regression until proven otherwise.
+        - talent_id: i18n-readiness
+          display_name: i18n Readiness
+          summary: Bias toward externalised strings, locale-aware layouts, RTL safety.
+          routing_label: i18n
+          prompt_reminder: |
+            Never inline a user-facing string — pipe through the locale
+            catalog. Watch for date/number/currency formatting and verify
+            the layout in at least one RTL locale.
+      "80":
+        - talent_id: ui-architect
+          display_name: UI Architect
+          summary: Bias toward route boundaries, data-fetch composition, and DX.
+          routing_label: ui-architecture
+          prompt_reminder: |
+            Architect the route tree first — where does data fetch live,
+            where does state hydrate, where does the streaming boundary
+            cut. Components fall out of the architecture, not the other
+            way round.
+        - talent_id: dx-tooling
+          display_name: DX Tooling
+          summary: Bias toward devtools, codemods, and shorter feedback loops.
+          routing_label: dx
+          prompt_reminder: |
+            Optimise the inner loop — a typo-to-feedback cycle that fits
+            in working memory beats any amount of after-the-fact
+            documentation. Write the codemod instead of the migration
+            guide.
+        - talent_id: design-engineering
+          display_name: Design Engineering
+          summary: Bias toward design + code crossover, prototypes, and motion.
+          routing_label: design-engineering
+          prompt_reminder: |
+            Treat the high-fidelity prototype as the source of truth —
+            ship the interaction, not the wireframe. Loop the designer
+            into the PR before merge, not after.
+    capstone:
+      ability_id: pixel_perfect_synthesizer
+      display_name: Pixel-Perfect Synthesizer
+      summary: |
+        Whole-route design-to-code synthesis at production fidelity. The
+        Lv-80 frontend Guild capstone unlocks pixel-grade visual diff
+        loops with the design system as the constraint surface.
