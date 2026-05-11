@@ -44,6 +44,23 @@ from backend.agents.talent_tree import (
     lock_capstone_ability,
     lock_talent,
 )
+from backend.agents.party import (
+    MemberAlreadyInParty,
+    Party,
+    PartyActiveTaskExists,
+    PartyError,
+    PartySizeInvalid,
+    PostgresPartyStore,
+    assign_task as assign_party_task,
+    create_party,
+    get_party,
+    list_active_parties,
+    task_complete as party_task_complete,
+)
+from backend.agents.synergy_registry import (
+    SynergyComputeFailed,
+    all_synergies,
+)
 from backend.events import emit_agent_update
 from backend.models import Agent, AgentCreate, AgentProgress, AgentStatus, AgentWorkspace
 from backend.sandbox_tier import Guild
@@ -403,6 +420,177 @@ async def lock_agent_capstone(
     }
 
 
+# ── RPG.W17 Party / Synergy endpoints (OP-220) ────────────────────
+
+
+@router.get("/parties")
+async def list_parties_endpoint(
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W17: list every active (non-disbanded) party for the Party Hall."""
+    store = PostgresPartyStore(lambda: _borrowed_conn(conn))
+    parties = await list_active_parties(store)
+    return [_party_to_dict(party) for party in parties]
+
+
+@router.get("/parties/synergies")
+async def list_synergies_endpoint():
+    """RPG.W17: full synergy matrix — populates the Party Hall UI legend."""
+    try:
+        entries = all_synergies()
+    except SynergyComputeFailed as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return [
+        {
+            "label": entry.label,
+            "display_name": entry.display_name,
+            "guilds": list(entry.guilds),
+            "xp_bonus": entry.xp_bonus,
+            "skill_bonus_target": entry.skill_bonus_target,
+            "skill_bonus": entry.skill_bonus,
+            "summary": entry.summary,
+        }
+        for entry in entries
+    ]
+
+
+@router.post("/parties", status_code=201)
+async def create_party_endpoint(
+    body: dict,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W17: create a 2-5 member party with synergy lookup from the
+    cross-Guild matrix.
+
+    Refuses with 422 on size invalid (``PartySizeInvalid``) and with
+    409 when any member is already in an active party
+    (``MemberAlreadyInParty``).
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    name = body.get("name")
+    member_agent_ids = body.get("member_agent_ids")
+    member_guilds = body.get("member_guilds")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    if not isinstance(member_agent_ids, list):
+        raise HTTPException(
+            status_code=400, detail="member_agent_ids must be a list of strings",
+        )
+    if not isinstance(member_guilds, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="member_guilds must be a mapping of member_agent_id -> guild_slug",
+        )
+    store = PostgresPartyStore(lambda: _borrowed_conn(conn))
+    try:
+        party = await create_party(
+            store,
+            name=name,
+            member_agent_ids=member_agent_ids,
+            member_guilds=member_guilds,
+        )
+    except PartySizeInvalid as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MemberAlreadyInParty as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PartyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _party_to_dict(party)
+
+
+@router.get("/parties/{party_id}")
+async def get_party_endpoint(
+    party_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W17: fetch a single party + members + synergy badge."""
+    store = PostgresPartyStore(lambda: _borrowed_conn(conn))
+    party = await get_party(store, party_id)
+    if party is None:
+        raise HTTPException(status_code=404, detail="Party not found")
+    return _party_to_dict(party)
+
+
+@router.post("/parties/{party_id}/task")
+async def assign_party_task_endpoint(
+    party_id: str,
+    body: dict,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W17: assign a Tier L+ task to the party.
+
+    Refuses with 409 (``PartyActiveTaskExists``) if the party already
+    holds another active task.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    task_id = body.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise HTTPException(status_code=400, detail="task_id is required")
+    store = PostgresPartyStore(lambda: _borrowed_conn(conn))
+    try:
+        state = await assign_party_task(store, party_id, task_id)
+    except PartyActiveTaskExists as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PartyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "party_id": state.party_id,
+        "active_task_id": state.active_task_id,
+        "active_task_assigned_at": state.active_task_assigned_at,
+    }
+
+
+@router.post("/parties/{party_id}/task/complete")
+async def complete_party_task_endpoint(
+    party_id: str,
+    body: dict,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """RPG.W17: mark the party's task complete, return XP distribution.
+
+    Body shape: ``{"total_xp": int, "personal_xp_by_member": {agent_id:
+    int}}``. ``personal_xp_by_member`` is optional and defaults to an
+    empty mapping (no personal accrual beyond the party share).
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    total_xp = body.get("total_xp")
+    personal_xp_by_member = body.get("personal_xp_by_member") or {}
+    if not isinstance(total_xp, int) or isinstance(total_xp, bool) or total_xp < 0:
+        raise HTTPException(status_code=400, detail="total_xp must be a non-negative int")
+    if not isinstance(personal_xp_by_member, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="personal_xp_by_member must be an object of agent_id -> int",
+        )
+    store = PostgresPartyStore(lambda: _borrowed_conn(conn))
+    try:
+        distribution = await party_task_complete(
+            store, party_id, total_xp,
+            personal_xp_by_member=personal_xp_by_member,
+        )
+    except PartyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "party_id": distribution.party_id,
+        "total_xp_pool": distribution.total_xp_pool,
+        "synergy_label": distribution.synergy_label,
+        "synergy_xp_bonus": distribution.synergy_xp_bonus,
+        "shares": [
+            {
+                "member_agent_id": share.member_agent_id,
+                "personal_xp": share.personal_xp,
+                "party_share": share.party_share,
+                "synergy_bonus": share.synergy_bonus,
+                "total": share.total,
+            }
+            for share in distribution.shares
+        ],
+    }
+
+
 @router.get("/{agent_id}", response_model=Agent)
 async def get_agent(agent_id: str):
     # Reads the in-memory mirror — no DB conn needed.
@@ -578,3 +766,40 @@ def _guild_hall_guild_to_dict(guild: GuildHallGuild) -> dict:
             else None
         ),
     }
+
+
+def _party_to_dict(party: Party) -> dict:
+    """Serialise a :class:`backend.agents.party.Party` aggregate for JSON."""
+    state = party.state
+    return {
+        "party_id": state.party_id,
+        "name": state.name,
+        "synergy_label": state.synergy_label,
+        "synergy_xp_bonus": state.synergy_xp_bonus,
+        "active_task_id": state.active_task_id,
+        "active_task_assigned_at": state.active_task_assigned_at,
+        "created_at": state.created_at,
+        "disbanded_at": state.disbanded_at,
+        "members": [
+            {
+                "member_agent_id": member.member_agent_id,
+                "joined_at": member.joined_at,
+                "released_at": member.released_at,
+            }
+            for member in party.members
+        ],
+        "synergy": (
+            {
+                "label": party.synergy.label,
+                "display_name": party.synergy.display_name,
+                "guilds": list(party.synergy.guilds),
+                "xp_bonus": party.synergy.xp_bonus,
+                "skill_bonus_target": party.synergy.skill_bonus_target,
+                "skill_bonus": party.synergy.skill_bonus,
+                "summary": party.synergy.summary,
+            }
+            if party.synergy is not None
+            else None
+        ),
+    }
+

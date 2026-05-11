@@ -373,6 +373,40 @@ def _effective_debuff_ids(outcome: TaskOutcome) -> tuple[str, ...]:
     return tuple(dict.fromkeys(explicit + inferred))
 
 
+def party_total_xp_pool(
+    base_xp_per_member: int,
+    party_size: int,
+    *,
+    synergy_xp_bonus: float = 0.0,
+) -> int:
+    """RPG.W17 -- compute the total XP pool that the party's task completion
+    distributes across members.
+
+    Mirrors the ADR-0008 §"Party / Synergy system (W17)" rule: each
+    member contributes their own base XP to the pool, and the entire
+    pool is multiplied by ``(1 + synergy_xp_bonus)`` before being
+    split. The pool is what
+    :func:`backend.agents.party.compute_party_xp_distribution`
+    distributes; this helper lives in ``xp_engine`` so the W4.1 curve
+    constants stay co-located with their callers.
+
+    Returns 0 for ``party_size <= 0`` or non-positive ``base_xp_per_member``.
+    """
+    if not isinstance(base_xp_per_member, int) or isinstance(base_xp_per_member, bool):
+        raise TypeError("base_xp_per_member must be an int")
+    if not isinstance(party_size, int) or isinstance(party_size, bool):
+        raise TypeError("party_size must be an int")
+    if base_xp_per_member <= 0 or party_size <= 0:
+        return 0
+    if not isinstance(synergy_xp_bonus, (int, float)) or isinstance(
+        synergy_xp_bonus, bool
+    ):
+        raise TypeError("synergy_xp_bonus must be a number")
+    multiplier = 1.0 + max(0.0, float(synergy_xp_bonus))
+    pool = base_xp_per_member * party_size
+    return max(0, math.floor(pool * multiplier))
+
+
 def skill_xp_delta_for(task_outcome: TaskOutcome | Mapping[str, Any] | Any) -> int:
     """RPG.W12 -- compute the per-skill XP delta for ``task_outcome``.
 
@@ -413,6 +447,7 @@ __all__ = [
     "award_xp",
     "level_for_xp",
     "level_threshold",
+    "party_total_xp_pool",
     "secondary_class_xp_multiplier",
     "skill_xp_delta_for",
 ]
