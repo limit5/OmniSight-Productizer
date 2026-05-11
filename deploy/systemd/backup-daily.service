@@ -1,0 +1,24 @@
+; [OP-887] systemd unit -- daily Postgres dump to S3-compatible storage.
+;
+; Install:
+;   sudo cp deploy/systemd/backup-daily.service /etc/systemd/system/
+;   sudo cp deploy/systemd/backup-daily.timer   /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now backup-daily.timer
+
+[Unit]
+Description=OmniSight daily Postgres backup to S3-compatible storage (OP-887)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/work/sora/OmniSight-claude-worktree
+EnvironmentFile=-/etc/omnisight/backup-dr.env
+ExecStart=/usr/bin/bash /home/user/work/sora/OmniSight-claude-worktree/scripts/backup_postgres_daily.sh
+StandardOutput=append:/var/log/omnisight/backup-daily.log
+StandardError=append:/var/log/omnisight/backup-daily.log
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+; [OP-887] systemd unit -- hourly WAL archive marker for 1h RPO.
+
+[Unit]
+Description=OmniSight hourly Postgres WAL archive marker (OP-887)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/work/sora/OmniSight-claude-worktree
+EnvironmentFile=-/etc/omnisight/backup-dr.env
+ExecStart=/usr/bin/bash /home/user/work/sora/OmniSight-claude-worktree/scripts/backup_wal_hourly.sh
+StandardOutput=append:/var/log/omnisight/backup-hourly.log
+StandardError=append:/var/log/omnisight/backup-hourly.log
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

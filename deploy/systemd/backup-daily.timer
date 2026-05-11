@@ -1,0 +1,13 @@
+; [OP-887] Daily 02:17 UTC trigger for backup-daily.service.
+
+[Unit]
+Description=Daily trigger for OmniSight Postgres backup (OP-887)
+
+[Timer]
+Unit=backup-daily.service
+OnCalendar=*-*-* 02:17:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
