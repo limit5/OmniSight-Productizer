@@ -31,6 +31,7 @@ tooling (OpenAPI) that key off the path.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, FastAPI
 
@@ -44,6 +45,61 @@ V1_SUNSET_HEADER = "Tue, 30 Jun 2026 23:59:59 GMT"
 DEPRECATED_API_VERSIONS = {
     "v1": {"sunset": V1_SUNSET_HEADER},
 }
+
+# OP-885 AC#4 — per-endpoint deprecation registry. Keys are the
+# version-relative path (i.e. what comes after ``/api/v1``), so a single
+# entry marks the endpoint deprecated on every mounted version prefix.
+# Each value is the RFC 8594 ``Sunset`` date (HTTP-date format string).
+# Use :func:`register_endpoint_deprecation` to populate.
+_DEPRECATED_ENDPOINTS: dict[tuple[str, str], str] = {}
+
+# Default deprecation window per OP-885 AC#4. Clients get 90 days of
+# overlap between "header started warning me" and "endpoint goes away".
+DEPRECATION_WINDOW_DAYS = 90
+
+
+def _http_date(when: datetime) -> str:
+    """Format a datetime as an RFC 7231 IMF-fixdate (HTTP-date)."""
+    return when.astimezone(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+
+def register_endpoint_deprecation(
+    path: str,
+    *,
+    method: str = "*",
+    sunset_date: datetime | None = None,
+    window_days: int = DEPRECATION_WINDOW_DAYS,
+) -> str:
+    """Mark an endpoint as deprecated with a per-endpoint Sunset date.
+
+    ``path`` is the version-relative route (e.g. ``/agents/{id}``) — the
+    middleware matches it against any of the mounted API version
+    prefixes (v1 today, v1+v2 tomorrow). ``method`` is uppercase HTTP
+    verb, or ``"*"`` for all. ``sunset_date`` defaults to "now +
+    window_days" so callers only need to remember "deprecated today,
+    gone in 90 days." Returns the Sunset header string actually
+    registered (for logging / test assertions).
+    """
+    if sunset_date is None:
+        sunset_date = datetime.now(timezone.utc) + timedelta(days=window_days)
+    header = _http_date(sunset_date)
+    _DEPRECATED_ENDPOINTS[(path, method.upper())] = header
+    return header
+
+
+def clear_endpoint_deprecations() -> None:
+    """Reset the per-endpoint deprecation registry (test helper)."""
+    _DEPRECATED_ENDPOINTS.clear()
+
+
+def _endpoint_sunset(path: str, method: str) -> str | None:
+    """Return the Sunset header for ``path`` / ``method``, or None."""
+    rel = api_relative_path(path, "/api")
+    upper = method.upper()
+    return (
+        _DEPRECATED_ENDPOINTS.get((rel, upper))
+        or _DEPRECATED_ENDPOINTS.get((rel, "*"))
+    )
 
 
 # Shared aggregate routers — exported for tests that pin the per-version
@@ -96,12 +152,30 @@ def register_versioned_api(app: FastAPI, routers: Iterable[APIRouter]) -> None:
 
 
 def install_deprecation_headers_middleware(app: FastAPI) -> None:
-    """Add the v1-only ``Deprecation`` + ``Sunset`` response middleware."""
+    """Add ``Deprecation`` + ``Sunset`` response middleware.
+
+    Two layers, in this order:
+
+    1. Per-endpoint registry (OP-885 AC#4): if the request path is
+       registered via :func:`register_endpoint_deprecation`, emit a
+       Sunset 90 days out regardless of which version prefix served it.
+       This lets us deprecate an individual route while v1 as a whole
+       lives on.
+    2. v1 blanket: every ``/api/v1/...`` response also picks up
+       ``Sunset: V1_SUNSET_HEADER`` if a per-endpoint header wasn't
+       already set. RFC 8594 forbids stacking conflicting Sunset
+       headers, so the per-endpoint header takes precedence.
+    """
 
     @app.middleware("http")
     async def _api_deprecation_headers(request, call_next):
         response = await call_next(request)
         path = request.url.path
+        sunset = _endpoint_sunset(path, request.method)
+        if sunset is not None:
+            response.headers["Deprecation"] = "true"
+            response.headers["Sunset"] = sunset
+            return response
         if path == API_V1_PREFIX or path.startswith(API_V1_PREFIX + "/"):
             response.headers.setdefault("Deprecation", "true")
             response.headers.setdefault("Sunset", V1_SUNSET_HEADER)

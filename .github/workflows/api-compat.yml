@@ -1,0 +1,61 @@
+name: API Compatibility
+
+# OP-885 D13 — fail PRs that break the public HTTP contract unless the
+# patchset's commit messages carry an ``api:approved-breaking`` trailer.
+# Run alongside, not instead of, the openapi-contract drift gate in
+# ci.yml: that one fails on un-regenerated openapi.json; this one fails
+# on _breaking_ regenerations.
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'openapi.json'
+      - 'backend/api_versioning.py'
+      - 'backend/main.py'
+      - 'backend/routers/**'
+      - 'scripts/check_api_compat.py'
+      - '.github/workflows/api-compat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api_compat_check:
+    name: api_compat_check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: OpenAPI backwards-compat diff
+        run: |
+          set -eu
+          mkdir -p artifacts
+          # Exit codes:
+          #   0  no breaking change OR override trailer present
+          #   1  APIBreakingChangeRefused
+          #   2  OpenAPIDiffParseFailed  → degrade to manual review
+          python scripts/check_api_compat.py \
+              --base-ref origin/${{ github.base_ref }} \
+              --head-ref HEAD \
+              --commit-range origin/${{ github.base_ref }}..HEAD \
+              | tee artifacts/api-compat-report.json
+
+      - name: upload api compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-compat
+          path: artifacts/
+          retention-days: 30
