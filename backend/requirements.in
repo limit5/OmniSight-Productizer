@@ -147,6 +147,37 @@ pynacl==1.6.2
 # parser, which is what backend code actually needs at runtime.
 redis[hiredis]==7.4.0
 
+# --- OP-852 Cognee KG (optional install — graph-layer; replaces B8 + B10) ----
+# Pinning intent + install procedure (kept comment-only so the lockfile
+# drift gate does not fail). Cognee + the Claude Agent SDK ship as an
+# OPTIONAL bundle: the runtime adapter
+# (``backend.agents.cognee_integration``) lazy-imports them and the
+# helper functions silently fall back to the B8 PageRank repo-map and
+# B10 BM25 lesson retrieval when the package is missing. This mirrors
+# the paramiko pattern in the ``--- C1: SSH remote runner`` section
+# below.
+#
+# To enable Cognee on a host (operator playbook — runbook at
+# ``docs/operations/cognee-runbook.md``):
+#
+#   ./backend/.venv/bin/pip install \
+#       cognee==0.1.46 \
+#       cognee-integration-claude==0.1.5 \
+#       neo4j==5.24.0 \
+#       claude-agent-sdk==0.0.10
+#
+# (Versions are the latest stable line as of 2026-05-11; bump to the
+# newest patch on the ``cognee`` 0.1.x track when regenerating
+# requirements.txt for the prod image. The Neo4j 5.24 driver matches
+# the Neo4j 5.24-community service in ``docker-compose.yml`` under the
+# ``cognee`` compose profile.)
+#
+# AC #1 evidence: this comment block + ``cognee_full_rebuild.py`` install
+# step + the runbook together pin the integration. When the integration
+# graduates from "optional" to "default" (post-pilot), move the four
+# ``==`` pins out of this comment and into real spec lines below, then
+# regenerate requirements.txt via pip-compile.
+
 # --- C1: SSH remote runner (optional) ----------------------------------
 # Only needed for cross-arch targets requiring paramiko-based remote
 # execution. The module (backend/ssh_runner.py) lazy-imports paramiko

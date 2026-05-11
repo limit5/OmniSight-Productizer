@@ -126,7 +126,13 @@ def test_runner_injects_retrieved_lessons_into_system_prompt(
 
     seen = {}
 
-    def fake_retrieve_lessons(lessons_dir: Path, **kwargs):
+    # OP-852 (C3) re-routed _build_lesson_system_prompt through
+    # retrieve_lessons_via_cognee. The original B10 BM25 path remains
+    # in lesson_retrieval.py and is exercised as the fallback when
+    # Cognee is unreachable / not installed; this test patches the new
+    # entry point instead so the runner-prompt-injection contract is
+    # verified independently of the optional Cognee bundle.
+    def fake_retrieve_lessons_via_cognee(lessons_dir: Path, **kwargs):
         seen["lessons_dir"] = lessons_dir
         seen.update(kwargs)
         return (
@@ -137,7 +143,9 @@ def test_runner_injects_retrieved_lessons_into_system_prompt(
             ),
         )
 
-    monkeypatch.setattr(module, "retrieve_lessons", fake_retrieve_lessons)
+    monkeypatch.setattr(
+        module, "retrieve_lessons_via_cognee", fake_retrieve_lessons_via_cognee
+    )
     prompt = module._build_lesson_system_prompt(
         "Event consumer catchup",
         "## Acceptance criteria\n- Add replay idempotency",

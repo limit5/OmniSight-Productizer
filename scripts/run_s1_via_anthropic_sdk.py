@@ -84,6 +84,7 @@ from backend.agents.lesson_retrieval import (
     build_lessons_system_message,
     retrieve_lessons,
 )
+from backend.agents.cognee_integration import retrieve_lessons_via_cognee
 from backend.agents.tdd_applicability import (
     TDDApplicability,
     fetch_for_ticket as fetch_tdd_applicability,
@@ -656,8 +657,14 @@ def _parse_grader_verdict(text: str) -> tuple[str, str]:
 
 
 def _build_lesson_system_prompt(ticket_summary: str, ticket_description: str) -> str:
-    """Build the OP-848 prior-lessons system-message block."""
-    lessons = retrieve_lessons(
+    """Build the OP-848 prior-lessons system-message block.
+
+    OP-852 (C3): retrieval is routed through Cognee KG semantic search;
+    the helper falls back to the OP-848 BM25 index when Cognee is
+    unreachable / not installed / times out, so the prompt body is
+    shape-stable regardless of the optional bundle's presence.
+    """
+    lessons = retrieve_lessons_via_cognee(
         WORKTREE_PATH / "docs" / "sop" / "lessons",
         ticket_title=ticket_summary,
         acceptance_criteria=ticket_description,

@@ -93,3 +93,52 @@ services:
     # the floor is per-replica, not aggregate).
     mem_limit: 2g
     mem_reservation: 256m
+
+  # ──────────────────────────────────────────────────────────────
+  # OP-852 (Sprint C / C3): Neo4j graph store for Cognee KG.
+  # Lives behind the "cognee" profile so default `docker compose up`
+  # workflows are unaffected. Bring up with:
+  #   docker compose --profile cognee up -d neo4j
+  # The runtime adapter (`backend.agents.cognee_integration`) and the
+  # nightly rebuild script (`scripts/cognee_full_rebuild.py`) read
+  # connection details from OMNISIGHT_COGNEE_NEO4J_* env vars; defaults
+  # match the bolt port + neo4j/neo4j credentials below.
+  # See docs/operations/cognee-runbook.md for bring-up + recovery.
+  # ──────────────────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.24-community
+    profiles: ["cognee"]
+    ports:
+      - "7474:7474"   # HTTP browser (optional — disable in prod)
+      - "7687:7687"   # Bolt protocol (driver clients connect here)
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-neo4j}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=2G
+      - NEO4J_dbms_memory_pagecache_size=512m
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+      - neo4j-import:/var/lib/neo4j/import
+      - neo4j-plugins:/plugins
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASSWORD:-neo4j} 'RETURN 1' >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    # OP-852 cgroup memory caps. Heap 2G + pagecache 512m + JVM overhead
+    # → 3g ceiling tolerates startup + sustained ECL ingest, 1g floor
+    # keeps the daily backup snapshot from getting evicted under host
+    # pressure. Scale up the heap envs above if the KG grows past ~50k
+    # nodes.
+    mem_limit: 3g
+    mem_reservation: 1g
+
+volumes:
+  neo4j-data:
+  neo4j-logs:
+  neo4j-import:
+  neo4j-plugins:
