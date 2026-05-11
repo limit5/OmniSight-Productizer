@@ -2205,6 +2205,21 @@ CREATE INDEX IF NOT EXISTS idx_release_audit_ts
     ON release_audit(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_release_audit_outcome_ts
     ON release_audit(outcome, ts DESC);
+
+-- OP-879 D7 (alembic 0223): per-endpoint latency p50/p95/p99 baseline.
+-- Schema rationale documented in
+-- `backend/alembic/versions/0223_metric_baselines.py`.
+CREATE TABLE IF NOT EXISTS metric_baselines (
+    endpoint        TEXT PRIMARY KEY,
+    p50_ms          REAL NOT NULL CHECK (p50_ms >= 0),
+    p95_ms          REAL NOT NULL CHECK (p95_ms >= 0),
+    p99_ms          REAL NOT NULL CHECK (p99_ms >= 0),
+    sample_count    INTEGER NOT NULL DEFAULT 0 CHECK (sample_count >= 0),
+    deployment_tag  TEXT NOT NULL DEFAULT '',
+    captured_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_metric_baselines_captured_at
+    ON metric_baselines(captured_at DESC);
 """
 
 
