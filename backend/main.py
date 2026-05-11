@@ -1473,6 +1473,8 @@ from backend.api import project_state as _project_state_router  # OP-904 F6 cros
 _include_versioned_router(_project_state_router.router)
 from backend.api import release_state_query as _release_state_query_router  # OP-948 H3 release conductor state query
 _include_versioned_router(_release_state_query_router.router)
+from backend.release_conductor import event_router as _release_event_router  # OP-947 H2 event router ingest endpoint
+_include_versioned_router(_release_event_router.router)
 
 # Final mount: attach the aggregate v1 + v2 routers to the app. The
 # routers themselves were populated above via _include_versioned_router
