@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from backend.agents.repo_map import build_repo_map_system_prefix
+from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, TOOL_MAP, set_active_workspace
@@ -522,7 +522,13 @@ def _specialist_node_factory(agent_type: str):
                 last_vite_error_banner=build_last_vite_error_banner(
                     state.error_history
                 ),
-                repo_map_preamble=build_repo_map_system_prefix(
+                # OP-852: Cognee KG (C3) replaces the B8 PageRank repo-map.
+                # The helper silently falls back to B8's
+                # ``build_repo_map_system_prefix`` when Cognee is
+                # unreachable / not installed / times out, so this swap
+                # is a runtime upgrade with no behaviour change for
+                # operators who have not enabled the optional bundle.
+                repo_map_preamble=build_repo_map_via_cognee(
                     Path.cwd(),
                     ticket_text="\n\n".join(
                         part for part in (state.task_id or "", state.user_command) if part
