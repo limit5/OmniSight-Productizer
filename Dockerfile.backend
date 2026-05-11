@@ -41,10 +41,24 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 # package surface after the hashed base lock and let
 # backend.agents.cognee_integration keep the B8/B10 fallback path if an
 # upstream import regresses.
+#
+# OP-915 (AUDIT-1, 2026-05-11): this RUN layer is the "Option C" install
+# path for the audit P0-1 finding — the runtime image strips pip in the
+# final ``rm -rf .../pip`` step below, so any cognee bring-up MUST land
+# here at image build time. ``claude-agent-sdk`` is bundled alongside
+# cognee because ``backend.agents.cognee_integration`` documents the
+# optional ``cognee-integration-claude`` wrapper as the preferred query
+# path when present; pinning it pre-bake means the runtime image carries
+# the SDK rather than relying on a runtime install path that no longer
+# exists. ``--no-deps`` for the three pinned packages keeps cognee's
+# transitive aiosqlite/openai/etc. constraints out of the resolver
+# (covered by the hashed base lock above); the second ``pip install``
+# pulls the listed extras that cognee imports at module-load time.
 RUN pip install --no-cache-dir --no-deps \
         cognee==1.0.9 \
         instructor==1.13.0 \
         litellm==1.83.14 \
+        claude-agent-sdk==0.1.80 \
     && pip install --no-cache-dir \
         aiolimiter \
         cbor2 \
@@ -58,6 +72,7 @@ RUN pip install --no-cache-dir --no-deps \
         'lancedb>=0.24.0,<1.0.0' \
         langdetect \
         'limits>=4.4.1,<5' \
+        'mcp>=1.19.0' \
         pylance \
         pympler \
         'pypdf>=6.6.2,<7' \

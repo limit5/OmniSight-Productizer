@@ -60,6 +60,47 @@ non-overlapping data and never read each other's storage (AC #6).
 
 ## 3. Initial bring-up
 
+### 3.0 Dependency resolution path (OP-915 / AUDIT-1)
+
+The audit (`docs/audit/2026-05-11-deep-system-audit-late.md` §P0-1)
+flagged two ways the original OP-899 bring-up could stall:
+
+1. `backend/requirements.in` pins `aiosqlite==0.21.0`, but the old
+   `cognee==0.1.44` line carried `aiosqlite<0.21` as a transitive cap.
+2. The runtime image strips `pip` (Dockerfile.backend §runner) so
+   `docker compose exec backend pip install cognee` raises
+   `ModuleNotFoundError: No module named 'pip'`.
+
+**Resolution — Option B + Option C** (chosen 2026-05-11 under OP-915):
+
+* **B (aiosqlite).** Stay on `aiosqlite==0.21.0`. `cognee==1.0.9` (the
+  release the OP-899 bake step pins) relaxed the upstream
+  `aiosqlite<0.21` ceiling, so no lockfile churn is required. The bake
+  step uses `pip install --no-deps cognee==1.0.9 ...` to keep cognee's
+  resolver out of the picture entirely; the hashed base lock owns
+  aiosqlite + every other shared transitive.
+* **C (container).** `Dockerfile.backend` pre-bakes `cognee`,
+  `instructor`, `litellm`, `claude-agent-sdk`, plus the second-stage
+  extras (`aiolimiter`, `fakeredis[lua]`, `lancedb`, `pylance`,
+  `rdflib`, `tokenizers`, …) before pip is stripped from the runtime
+  layer. The container image therefore ships with cognee importable;
+  `docker compose exec backend pip install ...` is **not** part of any
+  bring-up path and would fail by design.
+
+Verify after rebuild with:
+
+```bash
+# Host-side (a freshly built image hasn't been started yet):
+scripts/verify_cognee_install.sh path/to/python   # any python3 with the wheel set
+# Container-side (once `backend` is up):
+scripts/verify_cognee_install.sh --container omnisight-productizer-backend-a-1
+```
+
+Either invocation prints `OK cognee=<v> aiosqlite=<v> claude_agent_sdk=<v>`
+on success and a `FAIL <module> ...` line + traceback on regression.
+
+### 3.1 Compose bring-up sequence
+
 ```bash
 # 1. Build or pull a backend image that includes OP-899's Cognee layer.
 docker compose build backend
@@ -77,6 +118,9 @@ docker compose --profile cognee up -d neo4j
 docker compose ps neo4j
 
 # 5. Verify the backend-a runtime imports Cognee and reaches Neo4j.
+#    The smoke script (OP-915 / AUDIT-1) checks cognee + aiosqlite +
+#    claude-agent-sdk in one shot; the healthcheck adds the Neo4j leg.
+scripts/verify_cognee_install.sh --container omnisight-productizer-backend-a-1
 docker compose exec backend python -m scripts.cognee_healthcheck
 
 # 6. Apply schema heads before serving traffic.
