@@ -619,12 +619,19 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+# OP-844 — reviewer system prompt now carries the indirect prompt-
+# injection defense directive so the model treats the change subject /
+# diff (which both originate from the patch author and are therefore
+# untrusted) as data to review, not instructions to follow.
+from backend.agents import reviewer_safety as _reviewer_safety
+
 _REVIEW_PROMPT_HEADER = (
     "You are an automated AI code reviewer for a Gerrit patchset. The "
     "human reviewer always casts the final +2; your role is signal "
     "only. Be brief: at most 8 lines, no preamble. Comment on bugs, "
     "missing tests, security risks, or contract violations. If the "
     "diff looks fine, reply with a single line approving the patch."
+    "\n\n" + _reviewer_safety.UNTRUSTED_SYSTEM_DIRECTIVE
 )
 
 
@@ -634,14 +641,24 @@ def _build_review_prompt(
     files: Sequence[str] = (),
     subject: str = "",
 ) -> str:
+    """Build the reviewer prompt with untrusted-content delimiters.
+
+    The change subject AND diff body both originate from the patch
+    author and are therefore untrusted (OP-844 / JHU April 2026
+    indirect-injection demo). Both go inside
+    ``<untrusted_external_content>`` delimiters; the file list and
+    static header stay outside so the model can tell operator-
+    controlled scaffolding apart from external payload.
+    """
     parts = [_REVIEW_PROMPT_HEADER]
-    if subject:
-        parts.append(f"\nChange subject: {subject}")
     if files:
         joined = ", ".join(files[:20])
         parts.append(f"\nFiles touched ({len(files)}): {joined}")
-    if diff:
-        parts.append("\nUnified diff:\n" + diff)
+    wrapped = _reviewer_safety.join_untrusted_blocks(
+        [("change_subject", subject), ("unified_diff", diff)],
+    )
+    if wrapped:
+        parts.append("\n" + wrapped)
     return "\n".join(parts)
 
 
@@ -739,6 +756,18 @@ def review_patchset(
 
     reply = (reply_text or "").strip()
     if not reply:
+        # Even on an empty reply, write an audit row so post-hoc
+        # forensics can confirm the call happened (input_hash present,
+        # output_hash empty, redaction_count 0). Audit failures must
+        # not block the empty-reply path.
+        try:
+            _reviewer_safety.write_audit_entry(
+                input_text=prompt,
+                output_text="",
+                redaction_count=0,
+            )
+        except _reviewer_safety.ReviewerAuditWriteFail:
+            pass
         return ReviewResult(
             score=0,
             message=_with_footer(
@@ -749,6 +778,14 @@ def review_patchset(
             model_id=chosen_model,
             skipped_reason="empty_reply",
         )
+
+    # OP-844 — egress-side defense. Run the reply through the API-key
+    # deny-list before it can land on Gerrit/JIRA; matches get replaced
+    # with [REDACTED:api-key-shape] and an operator-visible alert fires.
+    # The audit row is written here for every non-empty reply.
+    reply, _egress_matches = _reviewer_safety.post_process_reply(
+        reply, input_text=prompt,
+    )
 
     # Token + cost accounting. The adapter doesn't surface usage so we
     # fall back to a char/4 estimate. Pricing rates come from the
