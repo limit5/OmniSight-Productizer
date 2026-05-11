@@ -1,0 +1,7 @@
+[Unit]
+Description=OmniSight prod environment config drift check
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+ExecStart=/usr/bin/python3 /home/user/work/sora/OmniSight-Productizer/scripts/drift_detect_env_config.py --running-config /run/omnisight/prod/config.yaml --git-config /home/user/work/sora/OmniSight-Productizer/deploy/env/prod/config.yaml

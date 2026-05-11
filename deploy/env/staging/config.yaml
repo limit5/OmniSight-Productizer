@@ -1,0 +1,11 @@
+schema_version: 1
+env: staging
+service_name: omnisight-backend
+public_base_url: https://staging.omnisight.example
+frontend_origin: https://staging.omnisight.example
+auth_mode: strict
+docker_runtime: runsc
+llm_provider: anthropic
+web_search_provider: none
+token_budget_daily: 25.0
+token_budget_hourly: 5.0

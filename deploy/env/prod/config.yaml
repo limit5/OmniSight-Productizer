@@ -1,0 +1,11 @@
+schema_version: 1
+env: prod
+service_name: omnisight-backend
+public_base_url: https://omnisight.example
+frontend_origin: https://omnisight.example
+auth_mode: strict
+docker_runtime: runsc
+llm_provider: anthropic
+web_search_provider: none
+token_budget_daily: 50.0
+token_budget_hourly: 10.0

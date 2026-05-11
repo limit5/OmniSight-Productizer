@@ -1,0 +1,3 @@
+creation_rules:
+  - path_regex: deploy/env/(dev|staging|prod)/secrets\.encrypted\.yaml$
+    age: age1fk6rj9q3e740xxs5qjdxu4dprkxz5hfqgavtakr9fskc0g72upzs0gkzzs
