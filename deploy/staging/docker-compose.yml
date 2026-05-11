@@ -5,8 +5,9 @@
 #   docker compose -f deploy/staging/docker-compose.yml --env-file deploy/staging/.env up -d
 #
 # Auto-deploy path:
-#   scripts/auto_deploy_staging.py consumes `main_promoted` events and sets
-#   OMNISIGHT_IMAGE_TAG from the promoted SHA before pull/migrate/up.
+#   scripts/staging_deploy.sh consumes `change-merged` events for main,
+#   assigns color-specific host ports, pulls the D2 image tag, starts the
+#   standby Compose project, and switches the external Caddy ingress.
 services:
   postgres:
     image: postgres:16-alpine

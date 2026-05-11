@@ -1,0 +1,34 @@
+# OP-878 D6 staging ingress.
+#
+# Install this snippet into the existing host Caddy ingress. The deploy
+# script atomically rewrites the imported active-upstream file, validates
+# Caddy, then reloads so staging.sora.services moves between blue/green
+# Compose stacks without editing this site block.
+#
+# Expected active-upstream file shape:
+#   reverse_proxy 127.0.0.1:18080
+
+staging.sora.services {
+	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/staging-access.log
+		format json
+	}
+
+	header {
+		X-Environment staging
+	}
+
+	handle /health {
+		import /var/lib/omnisight/staging/active-upstream.caddy
+	}
+
+	handle /readyz {
+		import /var/lib/omnisight/staging/active-upstream.caddy
+	}
+
+	handle {
+		import /var/lib/omnisight/staging/active-upstream.caddy
+	}
+}
