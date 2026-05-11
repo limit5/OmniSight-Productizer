@@ -125,6 +125,14 @@ Conclusion: deleting one of B3's 3 resets to "make room" for an Outcomes-graded 
 
 ## 6. Sprint child to file (proposed)
 
+> **Update 2026-05-11**: This recommendation was accepted; the sprint
+> child is **OP-847** (Tier M, area `backend|docs|tests`). The opt-in
+> env flag is `OMNISIGHT_OUTCOMES_FINAL_ATTEMPT` (default `0`). See
+> `backend/agents/loop_detector.py` (`OutcomesConfig`, `load_outcomes_config`),
+> `backend/agents/context_reset.py` (`run_with_resets(outcomes_config=...,
+> outcomes_grader=...)`), and `backend/tests/test_b16_outcomes_final.py`
+> for the implementation.
+
 **`B16 — Outcomes-graded final attempt (operator-opt-in)`** — Tier S, ~150 LOC, area `backend`.
 
 Scope:

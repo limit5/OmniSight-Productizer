@@ -31,10 +31,24 @@ Reset semantics (per AC #4 and FSM Q1-Q4):
 Reset upper bound = 3 (per AC #5). After 3 resets the orchestrator returns
 ``ResetOutcome(aborted_terminal=True)``; the launcher surfaces this as
 ``loop_aborted_terminal`` and surrenders the ticket.
+
+B16 — Outcomes-graded final attempt (OP-847, operator-opt-in).
+When the caller passes an enabled ``OutcomesConfig`` + grader callable
+to ``run_with_resets``, the attempt that fires at
+``detector.reset_count == detector.reset_limit - 1`` (i.e. the last
+attempt before terminal abort) is wrapped in an Outcomes envelope:
+after the runner returns a ``RunResult`` the grader is invoked with
+the rubric; on grader-FAIL the orchestrator returns
+``ResetOutcome(aborted_terminal=True, outcomes_verdict=...)``. The
+first 2 attempts remain pure B3 — Outcomes never substitutes for a
+reset (per the OP-843 spike's disjoint-failure-mode finding). When the
+grader raises ``OutcomesGraderUnavailable`` the orchestrator degrades
+to pure B3 (final result accepted as-is) and logs the fallback.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -42,11 +56,16 @@ from typing import Any
 from backend.agents.anthropic_native_client import RunResult, TokenUsage
 from backend.agents.loop_detector import (
     LoopDetector,
+    OutcomesConfig,
+    OutcomesGraderUnavailable,
+    OutcomesVerdict,
     ToolCallSignature,
     classify_tool_error,
 )
 from backend.agents.tom_scratchpad import ToMScratchpad
 from backend.agents.tool_dispatcher import ToolDispatcher, ToolResult
+
+logger = logging.getLogger(__name__)
 
 
 class LoopResetRequired(Exception):
@@ -182,19 +201,85 @@ def build_reset_user_prompt(
 
 @dataclass
 class ResetOutcome:
-    """Aggregated outcome of a multi-attempt orchestration."""
+    """Aggregated outcome of a multi-attempt orchestration.
+
+    ``outcomes_verdict`` is populated when B16 (OP-847) fired the
+    grader on the final attempt. ``None`` means either Outcomes was
+    disabled, the orchestration never reached the final attempt, or
+    the grader was unavailable (graceful degrade).
+    """
 
     final_result: RunResult | None
     aborted_terminal: bool
     reset_count: int
     total_usage: TokenUsage
     aborted_signature: ToolCallSignature | None
+    outcomes_verdict: OutcomesVerdict | None = None
 
 
 # Type alias for the runner factory the orchestrator calls. Caller binds
 # system, model, tools, max_iterations etc. — the orchestrator only
 # varies the user prompt across attempts.
 RunnerCallable = Callable[..., Awaitable[RunResult]]
+
+# B16 (OP-847) grader callable: given (rubric, runner_result) return an
+# ``OutcomesVerdict`` carrying pass/fail + grader usage tokens. Caller
+# wires this to ``client.simple(model=grader_model, ...)`` in
+# production; tests pass a stub. Raise ``OutcomesGraderUnavailable``
+# to opt this attempt out (degrade to pure B3 acceptance).
+OutcomesGraderCallable = Callable[[str, RunResult], Awaitable[OutcomesVerdict]]
+
+
+def _is_outcomes_final_attempt(
+    *, detector: LoopDetector, config: OutcomesConfig | None,
+) -> bool:
+    """B16 trigger gate. ``True`` iff Outcomes is enabled AND the
+    orchestrator is about to run the LAST attempt of the budget
+    (``reset_count == reset_limit - 1``). The first two attempts in a
+    3-attempt budget always run as pure B3 (OP-843 spike: do not
+    substitute Outcomes for any reset, only add it as a graded final).
+    """
+    if config is None or not config.enabled:
+        return False
+    return detector.reset_count == detector.reset_limit - 1
+
+
+async def _grade_final_attempt(
+    *,
+    grader: OutcomesGraderCallable | None,
+    config: OutcomesConfig,
+    result: RunResult,
+    on_attempt_usage: Callable[[TokenUsage], Awaitable[None]] | None,
+) -> OutcomesVerdict | None:
+    """Invoke the grader on the final-attempt ``RunResult``. Returns
+    ``None`` when no grader is wired or the grader is unavailable —
+    the orchestrator interprets ``None`` as "degrade to pure B3, accept
+    the result as-is" (AC #1 error catalog: ``OutcomesGraderUnavailable``).
+
+    On success, threads the grader's input/output tokens through
+    ``on_attempt_usage`` so the launcher's ``_post_call_cost_record``
+    captures the Haiku cost alongside the worker's Sonnet cost (AC #4).
+    """
+    if grader is None:
+        logger.warning(
+            "[outcomes-final] grader callable not wired; falling back to B3 accept"
+        )
+        return None
+    try:
+        verdict = await grader(config.rubric, result)
+    except OutcomesGraderUnavailable as e:
+        logger.warning(
+            "[outcomes-final] OutcomesGraderUnavailable: %s — falling back to B3 accept",
+            e,
+        )
+        return None
+    if on_attempt_usage is not None:
+        grader_usage = TokenUsage(
+            input_tokens=verdict.grader_input_tokens,
+            output_tokens=verdict.grader_output_tokens,
+        )
+        await on_attempt_usage(grader_usage)
+    return verdict
 
 
 async def run_with_resets(
@@ -204,6 +289,8 @@ async def run_with_resets(
     scratchpad: ToMScratchpad,
     first_user_message: str,
     on_attempt_usage: Callable[[TokenUsage], Awaitable[None]] | None = None,
+    outcomes_config: OutcomesConfig | None = None,
+    outcomes_grader: OutcomesGraderCallable | None = None,
 ) -> ResetOutcome:
     """Drive ``runner(prompt=...)`` attempts until either:
 
@@ -218,12 +305,24 @@ async def run_with_resets(
     ``on_attempt_usage`` fires after every *successful* runner return so
     the launcher can record the actual cost. CostGuard tally is **not**
     reset across attempts — the same ticket shares one budget.
+
+    B16 (OP-847): when ``outcomes_config.enabled`` and the orchestrator
+    is about to start the LAST attempt, the runner's ``RunResult`` is
+    passed through ``outcomes_grader`` (Haiku rubric+grader). A
+    grader-FAIL produces ``aborted_terminal=True`` with
+    ``outcomes_verdict`` carrying the reasoning. A grader-PASS or
+    grader-unavailable accepts the result identically to pure B3.
+    Per AC #7, ``outcomes_config=None`` (or ``enabled=False``) restores
+    pure B3 behaviour bit-for-bit.
     """
     current_prompt = first_user_message
     total_usage = TokenUsage()
     last_result: RunResult | None = None
 
     while True:
+        is_final = _is_outcomes_final_attempt(
+            detector=detector, config=outcomes_config,
+        )
         try:
             result = await runner(prompt=current_prompt)
         except LoopResetRequired as e:
@@ -273,6 +372,40 @@ async def run_with_resets(
                 scratchpad=scratchpad,
             )
             continue
+
+        # B16 — Outcomes-graded final attempt. The grader only fires
+        # when the runner produced a completion (we reached this point,
+        # so neither LoopResetRequired nor a deferred reset_required
+        # branched out). Grader hallucinated-pass is out of scope here
+        # (caught downstream by B4 critic — AC #1 error catalog).
+        if is_final and outcomes_config is not None and outcomes_config.enabled:
+            verdict = await _grade_final_attempt(
+                grader=outcomes_grader,
+                config=outcomes_config,
+                result=result,
+                on_attempt_usage=on_attempt_usage,
+            )
+            if verdict is not None and not verdict.passed:
+                logger.info(
+                    "[outcomes-final] grader FAIL — terminal abort. reasoning=%s",
+                    verdict.grader_reasoning[:200],
+                )
+                return ResetOutcome(
+                    final_result=last_result,
+                    aborted_terminal=True,
+                    reset_count=detector.reset_count,
+                    total_usage=total_usage,
+                    aborted_signature=None,
+                    outcomes_verdict=verdict,
+                )
+            return ResetOutcome(
+                final_result=last_result,
+                aborted_terminal=False,
+                reset_count=detector.reset_count,
+                total_usage=total_usage,
+                aborted_signature=None,
+                outcomes_verdict=verdict,
+            )
 
         return ResetOutcome(
             final_result=last_result,
