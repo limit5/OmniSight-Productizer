@@ -20,7 +20,7 @@ from backend import intent_memory as _imem
 
 
 @pytest.fixture(autouse=True)
-async def _clean_episodic_memory(client):
+async def _clean_episodic_memory(client, db_pool_init):
     """SP-3.12 (2026-04-20): before the port every test got its own
     SQLite tempfile via a local fresh_db fixture, so cross-test state
     leakage wasn't possible. Post-port the tests share the test PG,
@@ -28,6 +28,12 @@ async def _clean_episodic_memory(client):
     need explicit isolation. TRUNCATE on both entry and exit matches
     the pg_test_conn savepoint's semantics without the savepoint
     machinery.
+
+    OP-916 / AUDIT-2 (2026-05-11): adds ``db_pool_init`` so the
+    module-global pool is guaranteed initialised before the TRUNCATE
+    below — and so the whole file skips cleanly when
+    ``OMNI_TEST_PG_URL`` is unset (was raising the misleading
+    ``init_pool`` lifespan error).
     """
     from backend.db_pool import get_pool
     async with get_pool().acquire() as conn:

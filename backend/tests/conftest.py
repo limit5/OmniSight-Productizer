@@ -722,6 +722,70 @@ if _ASYNCPG_AVAILABLE:
 
 
     @pytest_asyncio.fixture
+    async def db_pool_init(pg_test_alembic_upgraded: str):
+        """OP-916 / AUDIT-2 (2026-05-11): initialise the module-global
+        ``backend.db_pool`` for tests whose subject code reaches
+        ``get_pool()`` directly (rather than receiving a conn from a
+        fixture).
+
+        Affected tests prior to this fixture:
+          - ``test_tiered_memory.py::TestL3Tools`` — save_solution /
+            search_past_solutions tool implementations call
+            ``get_pool().acquire()`` internally
+          - ``test_intent_memory.py`` — autouse ``_clean_episodic_memory``
+            fixture and ``_imem.record_clarification_choice`` both
+            borrow from the module-global pool
+          - ``test_report_generator.py::TestBuildOutcomeSection::
+            test_deploy_url_and_findings`` — ``build_outcome_section``
+            calls ``get_pool()`` directly
+
+        Without an init, those tests surfaced
+        ``RuntimeError: db_pool.get_pool called before init_pool —
+        check lifespan ordering in backend/main.py`` (the error
+        message is misleading; production lifespan is fine, this is a
+        test-infrastructure gap per AUDIT-2 §P0-2).
+
+        Depends on ``pg_test_alembic_upgraded`` so the test PG is at
+        HEAD schema (episodic_memory + debug_findings tables present).
+        That dependency chains through ``pg_test_dsn`` which calls
+        ``pytest.skip(...)`` when ``OMNI_TEST_PG_URL`` is unset — so
+        these tests skip cleanly on environments without the test PG
+        rather than failing with the misleading lifespan error.
+
+        Scope: function. The AC suggested session-scope; the error
+        catalog explicitly flags ``FixtureScopeBleedover`` as a known
+        hazard and prescribes function-scope with cleanup. We follow
+        the catalog. The session-scoped ``pg_test_alembic_upgraded``
+        dependency already amortises the alembic upgrade across all
+        tests in the session, so per-test pool init is the only
+        repeated cost.
+
+        Idempotent w.r.t. ``client``: if ``client`` (or any sibling
+        fixture) has already initialised the pool, we yield the
+        existing pool and skip both init and close. Cleanup only fires
+        if THIS fixture is the owner — prevents a teardown
+        race with ``client``'s own conditional close_pool.
+        """
+        from backend import db_pool as _db_pool
+
+        owns_pool = _db_pool._pool is None
+        if owns_pool:
+            await _db_pool.init_pool(
+                pg_test_alembic_upgraded,
+                min_size=1,
+                max_size=5,
+                command_timeout=10.0,
+                statement_cache_size=256,
+                init=None,
+            )
+        try:
+            yield _db_pool.get_pool()
+        finally:
+            if owns_pool and _db_pool._pool is not None:
+                await _db_pool.close_pool()
+
+
+    @pytest_asyncio.fixture
     async def pg_test_conn(pg_test_pool):
         """Borrow a connection wrapped in an outer transaction; roll back
         on teardown so tests never pollute each other.
