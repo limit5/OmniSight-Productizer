@@ -724,6 +724,30 @@ def main() -> int:
         )
         return 1
 
+    # OP-838: atomic claim mutex before transition_to_in_progress. The JQL
+    # pickup filter (`assignee is EMPTY`) and `transition_to_in_progress` are
+    # separated by several seconds of worktree prep + pre-pickup checks; two
+    # runner instances ticking concurrently can both pass every gate up to
+    # this point and both proceed to push to Gerrit, generating duplicate
+    # Change-Ids. Observed on OP-836 #356 and OP-837 #358 on 2026-05-11.
+    try:
+        claim = jira_dispatch.claim_ticket_atomic(client, snapshot.key, INSTANCE_ID)
+    except jira_dispatch.RunnerMutexAPIError as e:
+        print(
+            f"[runner-mutex-api-error] {snapshot.key}: {e}; skipping pickup, "
+            f"will retry on next tick.",
+            file=sys.stderr,
+        )
+        return 0
+    if not claim.ok:
+        print(
+            f"[runner-mutex-lost] {snapshot.key}: lost claim to {claim.lost_to} "
+            f"(our token: {claim.claim_token}); skipping pickup, will retry "
+            f"on next tick."
+        )
+        return 0
+    print(f"[runner] {snapshot.key} claim acquired (token: {claim.claim_token})")
+
     # OP-836 sentinel — stamps worktree pre-launch so we can detect post-CLI
     # tamper (CLI deleted it, reset HEAD to non-descendant SHA, swapped
     # branches). Layered with the perm-isolation check above.
