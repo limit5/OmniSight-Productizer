@@ -1,0 +1,17 @@
+; [OP-877] Daily 07:00 UTC trigger for auto-promote-develop.service.
+;
+; Cadence: once a day at 07:00 UTC. Persistent=true so a host that
+; was offline at the scheduled tick fires immediately on resume rather
+; than skipping a daily auto-promote evaluation.
+
+[Unit]
+Description=Daily 07:00 UTC trigger for auto-promote-develop.service (OP-877)
+
+[Timer]
+Unit=auto-promote-develop.service
+OnCalendar=*-*-* 07:00:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

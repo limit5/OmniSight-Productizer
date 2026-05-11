@@ -2184,6 +2184,27 @@ CREATE INDEX IF NOT EXISTS idx_firewall_events_tenant_class_time
     ON firewall_events(tenant_id, classification, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_firewall_events_input_hash
     ON firewall_events(input_hash);
+
+-- OP-877 D5 (alembic 0207): durable audit row per daily auto-promote tick.
+-- Schema rationale + cross-table separation from `deploy_audit` documented
+-- in `backend/alembic/versions/0207_release_audit.py`.
+CREATE TABLE IF NOT EXISTS release_audit (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    outcome         TEXT NOT NULL
+                          CHECK (outcome IN ('promoted','noop',
+                                             'milestone_not_accepted',
+                                             'ff_not_possible',
+                                             'push_rejected')),
+    fix_version     TEXT,
+    develop_sha     TEXT NOT NULL DEFAULT '',
+    main_sha        TEXT NOT NULL DEFAULT '',
+    detail          TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_release_audit_ts
+    ON release_audit(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_release_audit_outcome_ts
+    ON release_audit(outcome, ts DESC);
 """
 
 
