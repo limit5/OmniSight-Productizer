@@ -630,6 +630,74 @@ class WorktreeSyncResult:
     branch_name: str           # e.g. "feature/OP-18-runner-fresh"
     develop_sha: str           # SHA of fetched develop tip
     detail: str                # short status string
+    worktree_path: Path | None = None  # OP-817: ephemeral dir when ephemeral=True
+
+
+# OP-817: per-ticket ephemeral worktree base directory. Concurrent ticks of
+# different tickets must not share a single CLAUDE_WORKTREE (the 2026-05-09
+# codex-2 DU file incident wedged 3 tickets when two ticks raced on `git
+# switch` / `commit` / `push`). Each ephemeral worktree is created under this
+# base as ``<ticket>-<run_id>`` and torn down after push (success OR failure).
+EPHEMERAL_WORKTREE_BASE = Path("~/work/sora-worktrees").expanduser()
+
+
+def _new_run_id() -> str:
+    """Short, unique-per-tick suffix for ephemeral worktree directories."""
+    return uuid.uuid4().hex[:12]
+
+
+def _ephemeral_worktree_dir(ticket_key: str, run_id: str) -> Path:
+    """Compute the per-tick worktree path under ``EPHEMERAL_WORKTREE_BASE``."""
+    return EPHEMERAL_WORKTREE_BASE / f"{ticket_key}-{run_id}"
+
+
+def cleanup_ephemeral_worktree(
+    main_repo: Path,
+    worktree_path: Path,
+) -> None:
+    """Tear down an ephemeral worktree created by ``sync_to_gerrit_develop(...,
+    ephemeral=True)``.
+
+    Idempotent and best-effort: ``git worktree remove --force`` first (so git's
+    administrative metadata under ``<main_repo>/.git/worktrees/`` is cleaned
+    up), then ``rm -rf`` on the directory regardless. Caller invokes this in a
+    ``finally`` block — leaking an ephemeral dir defeats the whole point of
+    per-tick isolation, so we never raise. Errors are logged.
+    """
+    import shutil
+    import subprocess as _sp
+
+    if main_repo.exists():
+        try:
+            _sp.run(
+                ["git", "worktree", "remove", "--force", str(worktree_path)],
+                cwd=main_repo, capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, _sp.SubprocessError) as exc:
+            log.warning(
+                "cleanup_ephemeral_worktree: `git worktree remove` failed for %s: %s",
+                worktree_path, exc,
+            )
+
+    if worktree_path.exists():
+        try:
+            shutil.rmtree(worktree_path, ignore_errors=True)
+        except OSError as exc:
+            log.warning(
+                "cleanup_ephemeral_worktree: rmtree failed for %s: %s",
+                worktree_path, exc,
+            )
+
+    # Defensive: prune dangling administrative entries even if `remove` above
+    # already succeeded (no-op when already clean).
+    if main_repo.exists():
+        try:
+            _sp.run(
+                ["git", "worktree", "prune"],
+                cwd=main_repo, capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, _sp.SubprocessError):
+            pass
 
 
 def sync_to_gerrit_develop(
@@ -637,6 +705,9 @@ def sync_to_gerrit_develop(
     agent_class: str,
     ticket_key: str,
     instance_id: str | None = None,
+    *,
+    ephemeral: bool = False,
+    run_id: str | None = None,
 ) -> WorktreeSyncResult:
     """Fetch latest develop from Gerrit + cut a fresh feature branch.
 
@@ -654,16 +725,68 @@ def sync_to_gerrit_develop(
     work from prior runs is lost). Acceptable per design — Gerrit is
     source of truth, JIRA tracks intent.
 
+    OP-817: when ``ephemeral=True``, ``worktree_path`` is treated as the
+    **main repo** and a brand-new worktree directory is created under
+    ``EPHEMERAL_WORKTREE_BASE/<ticket_key>-<run_id>/`` via ``git worktree
+    add``. Concurrent ticks of different tickets no longer race on a
+    shared ``CLAUDE_WORKTREE`` (the 2026-05-09 incident wedged 3 tickets).
+    Caller MUST call :func:`cleanup_ephemeral_worktree` in a ``finally``
+    block on the path returned in ``WorktreeSyncResult.worktree_path``.
+
     Raises CalledProcessError if any git op fails.
     """
-    assert_worktree_clean(worktree_path)
-
     import os
     import subprocess
     _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
 
     env = os.environ.copy()
     env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key}"
+
+    if ephemeral:
+        # Treat ``worktree_path`` as the main repo and add a fresh worktree.
+        main_repo = worktree_path
+        run_id = run_id or _new_run_id()
+        ephemeral_path = _ephemeral_worktree_dir(ticket_key, run_id)
+        EPHEMERAL_WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
+
+        # If the dir already exists (collision on run_id), refuse rather than
+        # silently reusing — the whole point of ephemeral is isolation.
+        if ephemeral_path.exists():
+            raise RuntimeError(
+                f"ephemeral worktree dir already exists: {ephemeral_path}; "
+                "pass a unique run_id or clean up the stale directory."
+            )
+
+        # Step 1: fetch develop from Gerrit into the main repo.
+        BREAKERS["gerrit_ssh"].call(
+            subprocess.run,
+            ["git", "fetch", _gerrit_ssh_url(agent_class, instance_id), "develop"],
+            cwd=main_repo, env=env, check=True, capture_output=True, text=True, timeout=60,
+        )
+
+        # Step 2: capture fetched SHA from main repo.
+        develop_sha = subprocess.run(
+            ["git", "rev-parse", "FETCH_HEAD"],
+            cwd=main_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Step 3: add a fresh worktree at the develop tip on a new branch.
+        # `-B` forces branch creation; `--detach` is avoided because callers
+        # rely on a named feature branch for `git push HEAD:refs/for/develop`.
+        branch_name = f"feature/{ticket_key}-runner-fresh"
+        subprocess.run(
+            ["git", "worktree", "add", "-B", branch_name, str(ephemeral_path), develop_sha],
+            cwd=main_repo, check=True, capture_output=True, text=True,
+        )
+
+        return WorktreeSyncResult(
+            branch_name=branch_name,
+            develop_sha=develop_sha,
+            detail=f"ephemeral worktree {ephemeral_path} at {develop_sha[:12]}",
+            worktree_path=ephemeral_path,
+        )
+
+    assert_worktree_clean(worktree_path)
 
     # Step 1: fetch develop from Gerrit
     BREAKERS["gerrit_ssh"].call(
