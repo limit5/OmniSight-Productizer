@@ -1,7 +1,9 @@
-# Cognee KG runbook (OP-852)
+# Cognee KG runbook (OP-899)
 
-**Status**: Optional bundle — runtime degrades to B8 + B10 baselines when
-disabled. Spec source: `docs/audit/2026-05-11-sprint-abc-master-plan.md` §3.4.
+**Status**: Enabled runtime bundle — backend containers install Cognee,
+and runtime degrades to B8 + B10 baselines when the package or Neo4j is
+unavailable. Spec source:
+`docs/audit/2026-05-11-sprint-c-readiness-for-sprint-f.md` §1-2.
 
 This runbook covers bring-up, daily operations, recovery, and the
 fallback verification procedure that satisfies the OP-852 DoD ("5
@@ -47,7 +49,8 @@ non-overlapping data and never read each other's storage (AC #6).
 ```
 
 * **Neo4j** — runs in the `cognee` Docker compose profile. Heap 2 G,
-  pagecache 512 M, mem_limit 3 G, mem_reservation 1 G.
+  pagecache 512 M, mem_limit 3 G, mem_reservation 1 G. Persistent
+  storage is pinned to `/var/lib/omnisight/neo4j/`.
 * **pgvector** — reuses the existing OmniSight Postgres instance for
   embeddings (no new service).
 * **Adapter** — `backend/agents/cognee_integration.py`. Lazy-imports
@@ -58,15 +61,14 @@ non-overlapping data and never read each other's storage (AC #6).
 ## 3. Initial bring-up
 
 ```bash
-# 1. Install the optional bundle on the host that will host the worker.
-./backend/.venv/bin/pip install \
-    cognee==0.1.46 \
-    cognee-integration-claude==0.1.5 \
-    neo4j==5.24.0 \
-    claude-agent-sdk==0.0.10
+# 1. Build or pull a backend image that includes OP-899's Cognee layer.
+docker compose build backend
 
-# 2. Set the Neo4j password (default 'neo4j' is fine for dev).
-export NEO4J_PASSWORD='change-me-in-prod'
+# 2. Set a strong Neo4j password. The literal default 'neo4j' is refused.
+export NEO4J_PASSWORD='change-me-before-running'
+export OMNISIGHT_COGNEE_NEO4J_PASSWORD="$NEO4J_PASSWORD"
+export OMNISIGHT_COGNEE_NEO4J_URI='bolt://neo4j:7687'
+export OMNISIGHT_COGNEE_NEO4J_USER='neo4j'
 
 # 3. Bring up Neo4j under the cognee profile.
 docker compose --profile cognee up -d neo4j
@@ -74,10 +76,17 @@ docker compose --profile cognee up -d neo4j
 # 4. Wait for the healthcheck to settle.
 docker compose ps neo4j
 
-# 5. Seed the KG with a full rebuild.
+# 5. Verify the backend-a runtime imports Cognee and reaches Neo4j.
+docker compose exec backend python -m scripts.cognee_healthcheck
+
+# 6. Apply schema heads before serving traffic.
+docker compose exec backend python -m alembic upgrade head
+docker compose exec backend python -m alembic current
+
+# 7. Seed the KG with a full rebuild.
 PYTHONPATH=. python -m scripts.cognee_full_rebuild --repo-root .
 
-# 6. Sanity-check that a query path returns a Cognee preamble (instead
+# 8. Sanity-check that a query path returns a Cognee preamble (instead
 #    of falling back to B8 / B10).
 PYTHONPATH=. python -c "
 from pathlib import Path
@@ -94,7 +103,7 @@ print(build_repo_map_via_cognee(Path.cwd(), ticket_text='backend/agents/cognee_i
 
 | Cron | Cadence | Command |
 |---|---|---|
-| Nightly full rebuild | `0 4 * * *` | `PYTHONPATH=/app python -m scripts.cognee_full_rebuild --repo-root /app` |
+| Nightly full rebuild | `0 3 * * *` | `deploy/systemd/cognee-nightly-rebuild.timer` → `python -m scripts.cognee_full_rebuild --repo-root /opt/omnisight` |
 | Backup snapshot | `30 4 * * *` | `docker compose exec neo4j neo4j-admin database dump neo4j --to-path=/backups` |
 
 ### Incremental ingestion on commit
@@ -109,19 +118,21 @@ to code only.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OMNISIGHT_COGNEE_NEO4J_URL` | `bolt://localhost:7687` | Bolt URL |
+| `OMNISIGHT_COGNEE_NEO4J_URI` | `bolt://neo4j:7687` | Bolt URI |
 | `OMNISIGHT_COGNEE_NEO4J_USER` | `neo4j` | Auth |
-| `OMNISIGHT_COGNEE_NEO4J_PASSWORD` | `neo4j` | Auth — override in prod |
+| `OMNISIGHT_COGNEE_NEO4J_PASSWORD` | _(required)_ | Auth — must not be `neo4j` |
 | `OMNISIGHT_COGNEE_QUERY_TIMEOUT` | `30` | Seconds before `CogneeQueryTimeout` |
 | `OMNISIGHT_COGNEE_TENANT_ID` | `t-default` | Dataset namespace prefix |
-| `NEO4J_PASSWORD` | `neo4j` | Compose env for the `neo4j` service |
+| `NEO4J_PASSWORD` | _(required)_ | Compose env for the `neo4j` service; must not be `neo4j` |
 
 ## 5. Error catalog → operator action
 
 | Error code | Adapter exception | Operator action |
 |---|---|---|
-| `cognee_not_installed` | `CogneeNotInstalled` | (Expected on hosts without the optional bundle.) Install per §3 if you want Cognee here. |
-| `cognee_neo4j_unavailable` | `CogneeNeo4jUnavailable` | Check `docker compose ps neo4j` + `docker compose logs neo4j`. Restart the service. Runtime stays on B8 + B10 in the meantime — no operator-visible regression. |
+| `CogneePackageImportFailed` | `CogneeNotInstalled` | Backend image is missing Cognee or one of its import-time deps. Rebuild the OP-899 backend image; runtime helpers stay on B8 + B10. |
+| `Neo4jStartFailed` | `CogneeNeo4jUnavailable` | Check `docker compose ps neo4j` + `docker compose logs neo4j`. Restart the service. Do **not** auto-recreate `/var/lib/omnisight/neo4j/`; runtime stays on B8 + B10 in the meantime. |
+| `Neo4jPasswordDefault` | `Neo4jPasswordDefault` | Set `NEO4J_PASSWORD` / `OMNISIGHT_COGNEE_NEO4J_PASSWORD` to a strong non-default value and restart. |
+| `AlembicUpgradeFailed` | backend startup/deploy failure | Refuse backend start; run `python -m alembic upgrade head`, then verify `0206`, `0207`, and `0224` are present in `alembic current`. |
 | `cognee_index_corruption` | `CogneeIndexCorruption` | Schema mismatch — usually after a `cognee` package upgrade. Run `scripts/cognee_full_rebuild.py` (idempotent). |
 | `cognee_query_timeout` | `CogneeQueryTimeout` | Inspect `OMNISIGHT_COGNEE_QUERY_TIMEOUT`; check Neo4j load. The single query falls back to B8 / B10 — no data loss. |
 | `cognee_ingest_failed` | _(logged, not raised)_ | One source failed during ECL; report counts the failure but the rebuild continues. Re-run the full rebuild to retry. |
@@ -130,7 +141,7 @@ to code only.
 
 ### Pause Cognee at runtime
 
-Set `NEO4J_PASSWORD=invalid` (or stop the `neo4j` service). The next
+Stop the `neo4j` service or set a wrong non-default password. The next
 adapter call raises `CogneeNeo4jUnavailable` and every helper falls
 back to B8 / B10. No code change required.
 
@@ -141,7 +152,7 @@ back to B8 / B10. No code change required.
 docker compose stop worker backend
 docker compose exec neo4j neo4j-admin database dump neo4j --to-path=/backups
 docker compose down neo4j
-docker volume rm <project>_neo4j-data
+sudo mv /var/lib/omnisight/neo4j /var/lib/omnisight/neo4j.$(date +%Y%m%d%H%M%S).bak
 docker compose --profile cognee up -d neo4j
 PYTHONPATH=. python -m scripts.cognee_full_rebuild --repo-root .
 docker compose start backend worker

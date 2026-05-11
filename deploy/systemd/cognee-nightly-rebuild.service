@@ -1,0 +1,25 @@
+; [OP-899] Nightly Cognee KG full rebuild.
+;
+; Install:
+;   sudo cp deploy/systemd/cognee-nightly-rebuild.service /etc/systemd/system/
+;   sudo cp deploy/systemd/cognee-nightly-rebuild.timer   /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now cognee-nightly-rebuild.timer
+
+[Unit]
+Description=OmniSight Cognee nightly full rebuild (OP-899)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/omnisight
+EnvironmentFile=-/etc/omnisight/cognee.env
+Environment=PYTHONPATH=/opt/omnisight
+ExecStart=/usr/bin/python3 -m scripts.cognee_full_rebuild --repo-root /opt/omnisight
+StandardOutput=append:/var/log/omnisight/cognee-nightly-rebuild.log
+StandardError=append:/var/log/omnisight/cognee-nightly-rebuild.log
+TimeoutStartSec=7200
+
+[Install]
+WantedBy=multi-user.target

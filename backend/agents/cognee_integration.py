@@ -11,12 +11,11 @@ Design notes
 
 Lazy imports
 ------------
-``cognee`` and ``claude-agent-sdk`` are NOT hard runtime dependencies of
-the OmniSight backend — they ship in their own optional install bundle
-(see ``backend/requirements.in`` "Cognee KG" comment block). The adapter
-lazily imports the package; callers that go through the public helpers
-``build_repo_map_via_cognee`` / ``retrieve_lessons_via_cognee`` always
-fall back to the B8 / B10 baselines when:
+``cognee`` is installed in the backend runtime image for OP-899, but the
+adapter still lazily imports the package; callers that go through the
+public helpers ``build_repo_map_via_cognee`` /
+``retrieve_lessons_via_cognee`` always fall back to the B8 / B10
+baselines when:
 
 * the package is not installed (``CogneeNotInstalled``),
 * Neo4j is unreachable (``CogneeNeo4jUnavailable``),
@@ -61,17 +60,18 @@ from backend.agents.repo_map import build_repo_map_system_prefix
 log = logging.getLogger(__name__)
 
 # Error catalog (AC + master plan §3.4)
-COGNEE_NOT_INSTALLED = "cognee_not_installed"
-COGNEE_NEO4J_UNAVAILABLE = "cognee_neo4j_unavailable"
+COGNEE_NOT_INSTALLED = "CogneePackageImportFailed"
+COGNEE_NEO4J_UNAVAILABLE = "Neo4jStartFailed"
 COGNEE_INDEX_CORRUPTION = "cognee_index_corruption"
 COGNEE_QUERY_TIMEOUT = "cognee_query_timeout"
 COGNEE_INGEST_FAILED = "cognee_ingest_failed"
+NEO4J_PASSWORD_DEFAULT = "Neo4jPasswordDefault"
 
 # Tunables — all overridable via OMNISIGHT_COGNEE_* env vars (see CogneeConfig).
 DEFAULT_QUERY_TIMEOUT = 30.0
-DEFAULT_NEO4J_URL = "bolt://localhost:7687"
+DEFAULT_NEO4J_URI = "bolt://localhost:7687"
 DEFAULT_NEO4J_USER = "neo4j"
-DEFAULT_NEO4J_PASSWORD = "neo4j"
+DEFAULT_NEO4J_PASSWORD = ""
 DEFAULT_TENANT_ID = "t-default"
 DEFAULT_REPO_MAP_TOP_N = 50
 DEFAULT_LESSON_TOP_K = 3
@@ -115,12 +115,16 @@ class CogneeQueryTimeout(CogneeError):
     """Query exceeded the configured timeout."""
 
 
+class Neo4jPasswordDefault(CogneeError):
+    """Refuse startup when the operator left Neo4j's default password."""
+
+
 # ── Config + value objects ─────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class CogneeConfig:
-    neo4j_url: str = DEFAULT_NEO4J_URL
+    neo4j_uri: str = DEFAULT_NEO4J_URI
     neo4j_user: str = DEFAULT_NEO4J_USER
     neo4j_password: str = DEFAULT_NEO4J_PASSWORD
     query_timeout: float = DEFAULT_QUERY_TIMEOUT
@@ -129,7 +133,11 @@ class CogneeConfig:
     @classmethod
     def from_env(cls) -> "CogneeConfig":
         return cls(
-            neo4j_url=os.environ.get("OMNISIGHT_COGNEE_NEO4J_URL", DEFAULT_NEO4J_URL),
+            neo4j_uri=(
+                os.environ.get("OMNISIGHT_COGNEE_NEO4J_URI")
+                or os.environ.get("OMNISIGHT_COGNEE_NEO4J_URL")
+                or DEFAULT_NEO4J_URI
+            ),
             neo4j_user=os.environ.get("OMNISIGHT_COGNEE_NEO4J_USER", DEFAULT_NEO4J_USER),
             neo4j_password=os.environ.get(
                 "OMNISIGHT_COGNEE_NEO4J_PASSWORD", DEFAULT_NEO4J_PASSWORD
@@ -141,6 +149,20 @@ class CogneeConfig:
             ),
             tenant_id=os.environ.get("OMNISIGHT_COGNEE_TENANT_ID", DEFAULT_TENANT_ID),
         )
+
+    def validate_password(self) -> None:
+        if self.neo4j_password.strip() == DEFAULT_NEO4J_USER:
+            raise Neo4jPasswordDefault(
+                f"{NEO4J_PASSWORD_DEFAULT}: set OMNISIGHT_COGNEE_NEO4J_PASSWORD "
+                "to a non-default strong value"
+            )
+
+
+@dataclass(frozen=True)
+class CogneeHealthcheckResult:
+    ok: bool
+    status: str
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -212,6 +234,7 @@ class CogneeAdapter:
         cognee_module: Any = None,
     ) -> None:
         self.config = config
+        self.config.validate_password()
         if cognee_module is None:
             cognee_module = _import_cognee_module()
         self._cognee = cognee_module
@@ -566,17 +589,69 @@ async def run_ecl_pipeline(
     )
 
 
+def healthcheck(config: CogneeConfig | None = None) -> CogneeHealthcheckResult:
+    """Read-only Cognee + Neo4j readiness probe for backend replicas.
+
+    The probe intentionally does not create, drop, or repair Neo4j
+    state. ``Neo4jStartFailed`` must alert without auto-recreating the
+    persistent volume because that volume contains operator data.
+    """
+    config = config or CogneeConfig.from_env()
+    try:
+        config.validate_password()
+    except Neo4jPasswordDefault as exc:
+        return CogneeHealthcheckResult(False, NEO4J_PASSWORD_DEFAULT, str(exc))
+    try:
+        _import_cognee_module()
+    except CogneeNotInstalled as exc:
+        return CogneeHealthcheckResult(False, COGNEE_NOT_INSTALLED, str(exc))
+    try:
+        neo4j = importlib.import_module("neo4j")
+    except ImportError as exc:
+        return CogneeHealthcheckResult(
+            False,
+            COGNEE_NOT_INSTALLED,
+            f"{COGNEE_NOT_INSTALLED}: install neo4j==5.24.0 ({exc})",
+        )
+    try:
+        driver = neo4j.GraphDatabase.driver(
+            config.neo4j_uri,
+            auth=(config.neo4j_user, config.neo4j_password),
+        )
+        try:
+            with driver.session() as session:
+                session.run("RETURN 1 AS ok").consume()
+        finally:
+            driver.close()
+    except Exception as exc:  # noqa: BLE001 — driver surfaces many connection/auth classes
+        return CogneeHealthcheckResult(False, COGNEE_NEO4J_UNAVAILABLE, str(exc))
+    return CogneeHealthcheckResult(True, "READY", config.neo4j_uri)
+
+
 # ── Internal helpers ───────────────────────────────────────────────────
 
 
 def _import_cognee_module() -> Any:
     try:
+        _patch_starlette_status_for_cognee()
         return importlib.import_module("cognee")
     except ImportError as exc:
         raise CogneeNotInstalled(
             f"{COGNEE_NOT_INSTALLED}: install via "
-            f"`pip install cognee cognee-integration-claude`"
+            f"`pip install cognee`"
         ) from exc
+
+
+def _patch_starlette_status_for_cognee() -> None:
+    """Bridge Cognee's 422 constant name to Starlette's public spelling."""
+    try:
+        status = importlib.import_module("starlette.status")
+    except ImportError:
+        return
+    if not hasattr(status, "HTTP_422_UNPROCESSABLE_CONTENT") and hasattr(
+        status, "HTTP_422_UNPROCESSABLE_ENTITY"
+    ):
+        status.HTTP_422_UNPROCESSABLE_CONTENT = status.HTTP_422_UNPROCESSABLE_ENTITY
 
 
 def _normalize_hit(hit: Any) -> CogneeQueryResult:
