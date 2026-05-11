@@ -44,6 +44,7 @@ REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
 from backend.agents import (
+    capability_matrix,
     circuit_breaker,
     jira_dispatch,
     orphan_salvage,
@@ -229,13 +230,115 @@ def _check_pre_pickup_candidate(
     return False
 
 
-def _build_prompt(client: jira_dispatch.DispatchClient, key: str, description: str) -> str:
-    """Construct the agent prompt per §5 prompt-injection contract."""
-    issue = jira_dispatch._request(client, "GET", f"/issue/{key}?fields=summary,labels,components")
+_CAPABILITY_MATRIX: capability_matrix.CapabilityMatrix | None = None
+
+# Side channel for `_build_prompt` → `main()`: stash the resolved capability
+# set under the ticket key so main() can gate sensitive ops (gerrit push,
+# jira update, ...) without re-fetching the issue. Cleared once main() has
+# consumed the value; the slot tolerates back-to-back pickups in the same
+# process because each tick overwrites the previous entry.
+_LAST_RESOLVED_CAPABILITIES: dict[str, frozenset[str]] = {}
+
+
+def _load_capability_matrix() -> capability_matrix.CapabilityMatrix:
+    """Lazy-load + cache ``config/capability_matrix.yaml`` for this process."""
+    global _CAPABILITY_MATRIX
+    if _CAPABILITY_MATRIX is None:
+        _CAPABILITY_MATRIX = capability_matrix.load_capability_matrix()
+    return _CAPABILITY_MATRIX
+
+
+def _resolve_runner_capabilities(
+    ticket_type: str,
+    declared_areas: list[str],
+    tier: str,
+    labels: list[str],
+) -> frozenset[str]:
+    """Resolve runner capabilities for the current ticket (AC#3 + AC#4).
+
+    Multi-area tickets union the per-area capability sets; the operator
+    label overrides (``capability:enable=`` / ``capability:disable=``)
+    apply on top so a problematic capability can be removed without
+    touching the YAML.
+    """
+    matrix = _load_capability_matrix()
+    if declared_areas:
+        return matrix.resolve_for_areas(
+            ticket_type, declared_areas, tier, labels=labels,
+        )
+    # No declared area: deliberately ask for an unmapped key so the
+    # matrix returns the read-only safe-default + emits the missing-entry
+    # warning. Operator should fix the labels rather than relying on the
+    # default; the runner still works because read-only-only means the
+    # ticket can't push to Gerrit unless an explicit override is added.
+    return matrix.resolve(ticket_type, "<no-area>", tier, labels=labels)
+
+
+def _require_runner_capability(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+    enabled: frozenset[str],
+    capability: str,
+) -> bool:
+    """Enforce a capability before the runner performs a sensitive op.
+
+    Returns True if permitted. On refusal, posts a `[runner-capability-blocked]`
+    comment + reverts the ticket to TODO so an operator can either extend the
+    matrix or add `capability:enable=<cap>` before re-pickup. Never raises —
+    the runner main-loop continues so cleanup can finish.
+    """
+    try:
+        capability_matrix.require_capability(enabled, capability)
+        return True
+    except capability_matrix.CapabilityNotPermitted as e:
+        print(
+            f"[runner-capability-blocked] {snapshot.key}: refusing {capability!r}; "
+            f"enabled={sorted(enabled)}",
+            file=sys.stderr,
+        )
+        if not DRY_RUN:
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[runner-capability-blocked]\n\n{e}\n\n"
+                f"Operator: extend `config/capability_matrix.yaml` for this "
+                f"(ticket_type × area × tier) combination, or add label "
+                f"`capability:enable={capability}` to grant a one-shot override.",
+            )
+            try:
+                jira_dispatch.transition_back_to_todo(
+                    client, snapshot.key,
+                    f"[runner-capability-blocked] {capability!r} not permitted",
+                )
+            except Exception as revert_err:  # noqa: BLE001 — log + continue
+                print(
+                    f"[runner] revert-to-TODO after capability refusal failed: {revert_err}",
+                    file=sys.stderr,
+                )
+        return False
+
+
+def _build_prompt(
+    client: jira_dispatch.DispatchClient,
+    key: str,
+    description: str,
+) -> str:
+    """Construct the agent prompt per §5 prompt-injection contract.
+
+    Side effect (OP-855): resolves the capability matrix for this ticket
+    and stashes the result in :data:`_LAST_RESOLVED_CAPABILITIES` so
+    ``main()`` can gate sensitive runner operations without a second
+    issue fetch. The prompt itself ends with a `# Enabled capabilities`
+    section listing the permitted operations.
+    """
+    issue = jira_dispatch._request(
+        client, "GET", f"/issue/{key}?fields=summary,labels,components,issuetype",
+    )
     f = issue["fields"]
     summary = f.get("summary", "<no summary>")
     labels = f.get("labels", [])
     components = [c.get("name") for c in f.get("components", [])]
+    issuetype_raw = f.get("issuetype") or {}
+    ticket_type = issuetype_raw.get("name", "Story") if isinstance(issuetype_raw, dict) else "Story"
 
     declared_areas = sorted(l.split(":", 1)[1] for l in labels if l.startswith("area:"))
     unknown_areas = [a for a in declared_areas if a not in RECOGNISED_AREAS]
@@ -249,6 +352,20 @@ def _build_prompt(client: jira_dispatch.DispatchClient, key: str, description: s
     )
 
     forbidden_block = "\n  - ".join(forbidden_areas) if forbidden_areas else "(none)"
+
+    enabled_capabilities = _resolve_runner_capabilities(
+        ticket_type, declared_areas, tier, list(labels),
+    )
+    _LAST_RESOLVED_CAPABILITIES[key] = enabled_capabilities
+    cap_lines = "\n  - ".join(sorted(enabled_capabilities)) or "(none)"
+    capabilities_block = (
+        f"\n# Enabled capabilities (OP-855 capability matrix)\n\n"
+        f"This pickup runs with the following capabilities enabled. Do NOT\n"
+        f"attempt operations outside this list — the runner blocks them at\n"
+        f"the tool-dispatch boundary (raises CapabilityNotPermitted):\n\n"
+        f"  - {cap_lines}\n"
+    )
+
     return f"""You are working on JIRA ticket {key}.
 
 Component: {component_label}
@@ -263,7 +380,7 @@ Stay strictly within these boundaries. Do NOT introduce changes to:
 If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
-
+{capabilities_block}
 # Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
 
 DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.
@@ -723,6 +840,24 @@ def main() -> int:
     # Step 4: build prompt + transition + invoke
     try:
         prompt = _build_prompt(client, snapshot.key, description)
+    except capability_matrix.CapabilityMatrixError as e:
+        # Malformed capability matrix / unknown override → halt and surface to
+        # operator. Reverting matters because the runner can't decide what the
+        # CLI is allowed to do.
+        print(f"[runner] capability matrix invalid for {snapshot.key}: {e}", file=sys.stderr)
+        if not DRY_RUN:
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[runner-capability-matrix-invalid]\n\n{e}\n\n"
+                f"Operator: fix `config/capability_matrix.yaml` (or the "
+                f"`capability:enable=` / `capability:disable=` label) before "
+                f"the next pickup.",
+            )
+            jira_dispatch.transition_back_to_todo(
+                client, snapshot.key,
+                f"[runner-capability-matrix-invalid] {e}",
+            )
+        return 1
     except UnknownAreaLabelError as e:
         # OP-832: bad area label → don't construct a wedge prompt. Revert so
         # a fresh pickup with operator-corrected labels can succeed.
@@ -742,6 +877,11 @@ def main() -> int:
                 f"Unknown area label(s) {e.unknown}; awaiting operator label correction.",
             )
         return 1
+
+    enabled_caps = _LAST_RESOLVED_CAPABILITIES.get(snapshot.key, frozenset())
+    print(
+        f"[runner] {snapshot.key} capabilities: {sorted(enabled_caps)}"
+    )
 
     if DRY_RUN:
         print(f"[runner] DRY_RUN: would transition {snapshot.key} → In Progress")
@@ -829,6 +969,13 @@ def main() -> int:
             print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
         return 1
     if rc == 0:
+        # OP-855 capability gate: refuse the auto-push if `gerrit_push` is
+        # not in the matrix for this (ticket_type × area × tier). Operator
+        # can re-enable per-pickup via `capability:enable=gerrit_push`.
+        if not _require_runner_capability(
+            client, snapshot, enabled_caps, "gerrit_push",
+        ):
+            return 1
         # Phase 1 of OP-247: auto-push to Gerrit + transition Under Review.
         # Phase 3 SHIPPED in OP-689; events-stream consumer:
         # backend/agents/gerrit_jira_bridge.py.
