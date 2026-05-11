@@ -2220,6 +2220,39 @@ CREATE TABLE IF NOT EXISTS metric_baselines (
 );
 CREATE INDEX IF NOT EXISTS idx_metric_baselines_captured_at
     ON metric_baselines(captured_at DESC);
+
+-- OP-881 D9 (alembic 0224): orchestrator-side bookkeeping ledger for
+-- `POST /api/v1/prod/deploy`. One row per release_id (UNIQUE) so the
+-- idempotence check is a single indexed lookup. Schema rationale +
+-- separation from `deploy_audit` documented in
+-- `backend/alembic/versions/0224_prod_deploy_audit.py`.
+CREATE TABLE IF NOT EXISTS prod_deploy_audit (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id      TEXT NOT NULL UNIQUE,
+    image_tag       TEXT NOT NULL,
+    actor           TEXT NOT NULL,
+    status          TEXT NOT NULL
+                          CHECK (status IN (
+                              'running','completed',
+                              'aborted_approval_refused',
+                              'aborted_smoke_failed',
+                              'aborted_timeout',
+                              'aborted_error'
+                          )),
+    last_step       TEXT
+                          CHECK (last_step IS NULL OR last_step IN (
+                              'approval','image_pull','secrets_decrypt',
+                              'smoke_pre_check','blue_green_switch','completed'
+                          )),
+    started_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at     TEXT,
+    elapsed_seconds REAL,
+    error_class     TEXT,
+    error_message   TEXT,
+    context_json    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_prod_deploy_audit_status_started
+    ON prod_deploy_audit(status, started_at DESC);
 """
 
 
