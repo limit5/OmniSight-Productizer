@@ -1,0 +1,56 @@
+# OP-851 (C1) — Anthropic Memory Tool standalone integration.
+#
+# Operator-facing defaults for backend/agents/memory_tool_handler.py.
+# Every value below is overridable by an env var; the env var name is
+# named in the comment so operators can `grep OMNISIGHT_MEMORY_` to
+# discover the full set without reading code.
+
+# Anthropic API tool spec (AC #1). Pinned to the conference-announced
+# version so a model upgrade does not silently re-wire the tool ID.
+spec:
+  type: memory_20260120
+  name: memory
+
+# Beta header required to enable memory_20260120 on the Messages API.
+# Per the C1 spike (see module docstring) this is a *feature flag*,
+# not a runtime gate — it does NOT require Managed Agents runtime.
+beta_header: managed-agents-2026-04-01
+
+# Per-fleet shared filesystem (AC #3). Override via
+# OMNISIGHT_MEMORY_TOOL_ROOT. The handler appends the fleet_id, so
+# multiple fleets on the same host share the parent dir but isolate
+# their memory under <root>/<fleet_id>/.
+storage:
+  root: /var/omnisight/memory
+  # Storage size cap in MB (AC #4). Override via
+  # OMNISIGHT_MEMORY_TOOL_CAP_MB.
+  cap_mb: 100
+  # Eviction policy when cap reached. Only "oldest-first" is wired
+  # in C1 (per AC #4). Anything else is a config error.
+  eviction_policy: oldest-first
+
+# Tier-aware filter (AC #6 — full version is C6).
+# - tier:S / tier:M  → auto-recallable
+# - tier:L           → requires opt-in (OMNISIGHT_MEMORY_TIER_L_OPTIN=1)
+# - tier:X           → refused; operator approval required out of band
+tier:
+  default: S
+  tier_l_optin: false
+  refuse_tier_x: true
+
+# Audit log (AC #5). Path is per-ticket; the runner passes
+# `<worktree>/.runner/progress-<KEY>.txt` to the handler so memory
+# rows multiplex with B3 ToM scratchpad rows in the same file.
+audit:
+  enabled: true
+  jsonl_type: memory_tool
+
+# Lesson seeding (AC #7).
+# - source: per-file lesson archive (OP-745, replaces old lessons-learned.md)
+# - target: /memories/lesson:<id>.md under the fleet storage root
+# - overwrite: false  → re-running the runner does not clobber operator
+#   hand-edits made after the initial seed
+seeding:
+  source: docs/sop/lessons
+  prefix: "lesson:"
+  overwrite: false
