@@ -124,6 +124,13 @@ from backend.agents.loop_detector import (
     OutcomesVerdict,
     load_outcomes_config,
 )
+from backend.agents.reflection_loop import (
+    ERROR_CAP_EXCEEDED as REFLECTION_ERROR_CAP_EXCEEDED,
+    REFLECTION_LIMIT,
+    ReflectionCounter,
+    ReflectionInput,
+    build_lint_reflection_input,
+    build_test_reflection_input,
 from backend.agents.runner_handlers import make_runner_dispatcher
 from backend.agents.skills_loader import (
     SkillRegistry,
@@ -131,6 +138,7 @@ from backend.agents.skills_loader import (
     make_skill_handler,
 )
 from backend.agents.static_analysis_gate import (
+    run_static_analysis,
     wrap_text_editor_with_static_analysis,
 )
 from backend.agents.sub_agent import make_agent_tool_handler
@@ -749,6 +757,60 @@ def _should_escalate_structural_stop(
     return escalation_counts.get(ticket_key, 0) < 1
 
 
+def _detect_reflection_failure(
+    *,
+    worktree_path: Path,
+    lint_progress_path: Path,
+    tdd_orchestrator: TDDOrchestrator,
+) -> ReflectionInput | None:
+    """Probe B2 (lint) / B5 (TDD) surfaces for unresolved failures (OP-850 AC #1).
+
+    Lint surface (B2): if ``LINT_PROGRESS_PATH`` reports ``lint_partial=true``,
+    re-run static analysis on the diff vs. ``HEAD`` to recover fresh
+    diagnostics for the structured payload.
+
+    Test surface (B5): if the TDD orchestrator observed a red test and a
+    subsequent source edit but never green-confirmed, treat the run as
+    leaving a test failure unresolved.
+
+    Returns ``None`` when neither surface reports a failure (the common
+    happy-path case), so the caller can ``if rv is not None:`` cheaply.
+    """
+    try:
+        lint_partial = "lint_partial=true" in lint_progress_path.read_text(encoding="utf-8")
+    except OSError:
+        lint_partial = False
+    if lint_partial:
+        import subprocess
+        try:
+            diff = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD"],
+                cwd=worktree_path, capture_output=True, text=True, check=True, timeout=10,
+            )
+            changed = [f for f in diff.stdout.splitlines() if f.strip()]
+        except (OSError, subprocess.SubprocessError):
+            changed = []
+        if changed:
+            result = run_static_analysis(
+                changed, worktree_root=worktree_path, progress_path=None,
+            )
+            payload = build_lint_reflection_input(result)
+            if payload is not None:
+                return payload
+
+    state = tdd_orchestrator.state
+    if state.source_edited and state.coder_unlocked and not state.green_confirmed:
+        last_event = state.events[-1] if state.events else "no_events"
+        return build_test_reflection_input(
+            file=f"<tdd:{state.ticket_key}>",
+            line=0,
+            expected="green test run after source edits",
+            actual=f"tdd orchestrator never green-confirmed (last_event={last_event})",
+            traceback=state.last_error or "no captured traceback; rerun pytest to surface failure",
+        )
+    return None
+
+
 async def process_ticket_full(
     *,
     client: AnthropicClient | _DryRunClient,
@@ -852,6 +914,13 @@ async def process_ticket_full(
     b3_detector = LoopDetector(ticket_key=ticket_key)
     b3_scratchpad = ToMScratchpad(
         progress_path=WORKTREE_PATH / ".runner" / f"progress-{ticket_key}.txt",
+    )
+    # OP-850 (B12) — task-level reflection counter; reuses B3 cap pattern
+    # + JSONL persistence (AC #5). The counter lives next to the
+    # scratchpad so a runner restart can rehydrate via ``.load(path)``.
+    reflection_counter = ReflectionCounter(
+        ticket_key=ticket_key,
+        persistence_path=WORKTREE_PATH / ".runner" / f"reflection-{ticket_key}.jsonl",
     )
     inner_dispatcher = getattr(client, "dispatcher", None)
     if inner_dispatcher is not None and not dry_run:
@@ -1006,6 +1075,43 @@ async def process_ticket_full(
                         output_tokens=total_output_tokens,
                         iterations=total_iterations,
                         error=f"non-retryable stop_reason: {result.stop_reason}",
+                    ))
+                    return "failed"
+
+                # === B12 (OP-850) reflection on B2/B5 unresolved failure ===
+                # Task-level retry distinct from B3 call-level loop detection
+                # (L-OP-843 disambiguation). Each reflection consumes 0.5 of
+                # ``max_iterations`` (AC #4); per-type cap is 3 (AC #3).
+                reflection_payload = (
+                    None if dry_run else _detect_reflection_failure(
+                        worktree_path=WORKTREE_PATH,
+                        lint_progress_path=LINT_PROGRESS_PATH,
+                        tdd_orchestrator=tdd_orchestrator,
+                    )
+                )
+                if reflection_payload is not None:
+                    failure_type = reflection_payload.failure_type
+                    if reflection_counter.can_reflect(failure_type):
+                        reflection_counter.record_reflection(failure_type)
+                        user_prompt = (
+                            f"{user_prompt}\n\n---\n\n{reflection_payload.to_user_turn()}"
+                        )
+                        attempt_max_iterations = (
+                            reflection_counter.adjusted_max_iterations(max_iterations)
+                        )
+                        continue
+                    _surrender_ticket(
+                        ticket_key,
+                        f"{REFLECTION_ERROR_CAP_EXCEEDED}: {failure_type} failures "
+                        f"unresolved after {REFLECTION_LIMIT} reflections (B12 / OP-850).",
+                    )
+                    log_outcome(TicketOutcome(
+                        ticket_key=ticket_key, started_at=started, finished_at=finished,
+                        status="failed", cost_usd=total_cost_usd,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        iterations=total_iterations,
+                        error=f"{REFLECTION_ERROR_CAP_EXCEEDED}: {failure_type}",
                     ))
                     return "failed"
                 break
