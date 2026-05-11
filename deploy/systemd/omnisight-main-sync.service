@@ -1,0 +1,53 @@
+; OP-837 — OmniSight-Productizer main repo git-sync service.
+;
+; Sister of OP-798's sora-bridge-sync. Same shape, different target:
+; this one keeps /home/user/work/sora/OmniSight-Productizer/ on
+; gerrit/develop so the runner's auto-runner-jira.py + its imports
+; (jira_dispatch, runner_workspace_safety, etc.) reflect merged fixes
+; without operator intervention.
+;
+; Crucially DOES NOT restart any service: the runner is a bash loop in
+; tmux, not a systemd unit. Each tick re-reads source from disk, so a
+; successful pull is automatically picked up by the next tick (~90 s).
+; The script just emits a structured log line when runner-code files
+; change so the operator's grep can confirm.
+;
+; Install (user-level — same scope as the runner / bridge):
+;
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/omnisight-main-sync.service ~/.config/systemd/user/
+;   cp deploy/systemd/omnisight-main-sync.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now omnisight-main-sync.timer
+
+[Unit]
+Description=Sync /home/user/work/sora/OmniSight-Productizer with gerrit/develop (OP-837)
+Documentation=https://soraapp.atlassian.net/browse/OP-837
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+Environment=MAIN_DIR=/home/user/work/sora/OmniSight-Productizer
+Environment=MAIN_REMOTE=gerrit
+Environment=MAIN_BRANCH=develop
+; AUTO_STASH default OFF — dirty-skip is the safe default; operator
+; explicitly opts in if they want auto-preserve of untracked draft work.
+; Environment=AUTO_STASH=1
+Environment=SYNC_LOG=%h/.local/state/omnisight-main-sync/sync.log
+Environment=SYNC_STATE=%h/.local/state/omnisight-main-sync/state.json
+; SSH key for the gerrit remote — without this, git fetch falls back to
+; the user's default identity which usually doesn't have Gerrit ACL,
+; producing "Permission denied (publickey)" failures every tick.
+Environment="GIT_SSH_COMMAND=ssh -i /home/user/.config/omnisight/gerrit-claude-bot-ed25519 -o StrictHostKeyChecking=no"
+ExecStart=/home/user/work/sora/OmniSight-Productizer/scripts/sync_omnisight_main.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=omnisight-main-sync
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

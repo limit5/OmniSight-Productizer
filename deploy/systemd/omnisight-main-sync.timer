@@ -1,0 +1,24 @@
+; OP-837 — Timer for OmniSight-Productizer main repo git-sync.
+;
+; Cadence: 5 minutes (matches OP-798 / sora-bridge-sync). Worst-case
+; staleness for runner code = 5 min + one runner tick (~90 s) ≈ 6.5 min,
+; well within the original 7-hour wedge window the script aims to
+; eliminate.
+;
+; OnBootSec gives an extra firing 60 s after boot so a reboot doesn't
+; have to wait the full 5 min before the first reconciliation.
+; Persistent=true catches up missed firings if the host was suspended.
+
+[Unit]
+Description=Run omnisight-main git-sync every 5 min (OP-837)
+Documentation=https://soraapp.atlassian.net/browse/OP-837
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=omnisight-main-sync.service
+
+[Install]
+WantedBy=timers.target
