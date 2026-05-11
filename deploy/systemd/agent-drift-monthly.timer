@@ -1,0 +1,13 @@
+; [OP-909] Monthly trigger for agent-drift-monthly.service.
+
+[Unit]
+Description=Monthly trigger for agent-drift-monthly.service (OP-909)
+
+[Timer]
+Unit=agent-drift-monthly.service
+OnCalendar=*-*-01 08:00:00 UTC
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,21 @@
+; [OP-909] Monthly agent drift report.
+;
+; Runs scripts/agent_drift_report.py once. Triggered by the matching
+; .timer on the first day of each month. Writes markdown under docs/audit/.
+
+[Unit]
+Description=OmniSight monthly agent drift report (OP-909)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-claude-worktree/scripts/agent_drift_report.py
+StandardOutput=append:%h/work/sora/logs/agent-drift-monthly/run.log
+StandardError=append:%h/work/sora/logs/agent-drift-monthly/run.log
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

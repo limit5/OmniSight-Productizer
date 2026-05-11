@@ -50,6 +50,7 @@ from backend.agents import (
     outcomes_consumer,
     jira_dispatch,
     orphan_salvage,
+    runner_metrics_recorder,
     runner_failure_classifier,
     runner_sandbox,
     runner_workspace_safety,
@@ -254,6 +255,7 @@ _CAPABILITY_MATRIX: capability_matrix.CapabilityMatrix | None = None
 # consumed the value; the slot tolerates back-to-back pickups in the same
 # process because each tick overwrites the previous entry.
 _LAST_RESOLVED_CAPABILITIES: dict[str, frozenset[str]] = {}
+_LAST_TICKET_METADATA: dict[str, dict[str, str]] = {}
 
 
 def _load_capability_matrix() -> capability_matrix.CapabilityMatrix:
@@ -406,6 +408,11 @@ def _build_prompt(
         ticket_type, declared_areas, tier, list(labels),
     )
     _LAST_RESOLVED_CAPABILITIES[key] = enabled_capabilities
+    _LAST_TICKET_METADATA[key] = {
+        "ticket_type": ticket_type,
+        "tier": tier,
+        "area": ",".join(declared_areas) if declared_areas else "<none>",
+    }
     cap_lines = "\n  - ".join(sorted(enabled_capabilities)) or "(none)"
     capabilities_block = (
         f"\n# Enabled capabilities (OP-855 capability matrix)\n\n"
@@ -1134,6 +1141,19 @@ def main() -> int:
     print(f"[runner] transitioning {snapshot.key} → In Progress")
     jira_dispatch.transition_to_in_progress(client, snapshot.key)
 
+    metric_meta = _LAST_TICKET_METADATA.get(snapshot.key, {})
+    metric_id, metric_started_at = runner_metrics_recorder.record_pickup_sync(
+        runner_metrics_recorder.RunnerMetricStart(
+            agent_class=AGENT_CLASS,
+            instance_id=INSTANCE_ID,
+            ticket_key=snapshot.key,
+            ticket_type=metric_meta.get("ticket_type", snapshot.component or "unknown"),
+            tier=metric_meta.get("tier", "M"),
+            area=metric_meta.get("area", "<none>"),
+            claude_model_used=os.environ.get("ANTHROPIC_MODEL")
+            or os.environ.get("CLAUDE_MODEL"),
+        )
+    )
     rc = _invoke_cli(
         AGENT_CLASS, prompt,
         ticket_key=snapshot.key, worktree_path=worktree_path,
@@ -1158,7 +1178,23 @@ def main() -> int:
             )
         except Exception as revert_err:
             print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+        runner_metrics_recorder.record_completion_sync(
+            metric_id=metric_id,
+            ticket_key=snapshot.key,
+            agent_class=AGENT_CLASS,
+            instance_id=INSTANCE_ID,
+            outcome="failure",
+            started_at=metric_started_at,
+        )
         return 1
+    runner_metrics_recorder.record_completion_sync(
+        metric_id=metric_id,
+        ticket_key=snapshot.key,
+        agent_class=AGENT_CLASS,
+        instance_id=INSTANCE_ID,
+        outcome=runner_metrics_recorder.outcome_from_return_code(rc),
+        started_at=metric_started_at,
+    )
     if rc == 0:
         # OP-855 capability gate: refuse the auto-push if `gerrit_push` is
         # not in the matrix for this (ticket_type × area × tier). Operator
