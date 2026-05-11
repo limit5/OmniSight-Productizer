@@ -48,6 +48,7 @@ from backend.agents import (
     jira_dispatch,
     orphan_salvage,
     runner_failure_classifier,
+    runner_workspace_safety,
     scheduler,
 )
 
@@ -702,10 +703,59 @@ def main() -> int:
         print(f"[runner] DRY_RUN: prompt preview ({len(prompt)} chars):\n---\n{prompt[:1200]}\n---")
         return 0
 
+    # OP-836 L1 prevention: refuse to launch the CLI if the main repo is
+    # writable to the launching user (would let the CLI commit into the wrong
+    # tree, the OP-811/813/832/835 wedge family). No-op unless
+    # OMNISIGHT_RUNNER_CWD_ENFORCE is set so dev environments aren't broken.
+    try:
+        runner_workspace_safety.assert_main_repo_unwritable_for_cli(worktree_path)
+    except runner_workspace_safety.MainRepoWritableInLaunchEnvError as e:
+        print(f"[runner] cwd-unsafe for {snapshot.key}: {e}", file=sys.stderr)
+        jira_dispatch.add_comment(
+            client, snapshot.key,
+            f"[runner-cwd-unsafe]\n\nLaunch refused: {e}\n\n"
+            f"This guard (OP-836) prevents the OP-811/813/832/835 wedge "
+            f"family where the CLI commits into the main repo instead of the "
+            f"assigned worktree.",
+        )
+        jira_dispatch.transition_back_to_todo(
+            client, snapshot.key,
+            "[runner-cwd-unsafe] Launch refused; main repo writable.",
+        )
+        return 1
+
+    # OP-836 sentinel — stamps worktree pre-launch so we can detect post-CLI
+    # tamper (CLI deleted it, reset HEAD to non-descendant SHA, swapped
+    # branches). Layered with the perm-isolation check above.
+    sentinel_path = runner_workspace_safety.write_workspace_sentinel(
+        worktree_path, snapshot.key,
+    )
+
     print(f"[runner] transitioning {snapshot.key} → In Progress")
     jira_dispatch.transition_to_in_progress(client, snapshot.key)
 
     rc = _invoke_cli(AGENT_CLASS, prompt)
+
+    # OP-836 post-CLI verify — abort the Gerrit-push pipeline if the CLI
+    # tampered with the worktree.
+    try:
+        runner_workspace_safety.verify_workspace_sentinel(sentinel_path, worktree_path)
+    except runner_workspace_safety.WorkspaceTamperedError as e:
+        print(f"[runner] workspace tampered for {snapshot.key}: {e}", file=sys.stderr)
+        jira_dispatch.add_comment(
+            client, snapshot.key,
+            f"[runner-workspace-tampered]\n\n{e}\n\n"
+            f"Reverting to To Do; operator should investigate the CLI's "
+            f"workspace mutations before re-pickup.",
+        )
+        try:
+            jira_dispatch.transition_back_to_todo(
+                client, snapshot.key,
+                f"[runner-workspace-tampered] {e}",
+            )
+        except Exception as revert_err:
+            print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+        return 1
     if rc == 0:
         # Phase 1 of OP-247: auto-push to Gerrit + transition Under Review.
         # Phase 3 SHIPPED in OP-689; events-stream consumer:
