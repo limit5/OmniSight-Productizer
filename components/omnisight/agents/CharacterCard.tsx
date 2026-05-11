@@ -57,7 +57,18 @@ export interface CharacterCardProps {
   buffs?: readonly CharacterBuff[]
   badges?: readonly CharacterBadge[]
   skills?: readonly CharacterSkill[]
+  tools?: readonly CharacterTool[]
   onLockBranch?: (skillId: string, branchId: string) => void
+}
+
+export interface CharacterTool {
+  toolId: string
+  displayName?: string | null
+  level: number
+  invocationCount: number
+  successCount: number
+  requiredLevel?: number | null
+  lastUsedAt?: string | null
 }
 
 export interface CharacterSkillBranchOption {
@@ -344,6 +355,7 @@ export function CharacterCard({
   buffs = [],
   badges = [],
   skills = [],
+  tools = [],
   onLockBranch,
 }: CharacterCardProps): ReactElement {
   const visual = GUILD_VISUALS[guild] ?? GUILD_VISUALS.generalist
@@ -352,6 +364,7 @@ export function CharacterCard({
   const activeBuffs = buffs.filter((buff) => buff && BUFF_VISUALS[buff.kind])
   const visibleBadges = badges.filter((badge) => badge && BADGE_VISUALS[badge.kind])
   const visibleSkills = skills.filter((skill) => skill && skill.skillId)
+  const visibleTools = tools.filter((tool) => tool && tool.toolId)
 
   return (
     <article
@@ -583,6 +596,72 @@ export function CharacterCard({
                             </button>
                           ))}
                         </div>
+                      ) : null}
+                    </li>
+                  )
+                })}
+              </ul>
+            </section>
+          ) : null}
+
+          {visibleTools.length > 0 ? (
+            <section
+              aria-label="Agent tool proficiency"
+              className="rounded-md border bg-background/50 p-3"
+              data-testid="character-card-tools"
+            >
+              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground">
+                <Wrench className="size-3.5 text-sky-500" aria-hidden="true" />
+                Tools
+              </div>
+              <ul className="flex flex-col gap-2">
+                {visibleTools.map((tool) => {
+                  const invocations = Math.max(0, Math.trunc(tool.invocationCount))
+                  const successes = Math.max(0, Math.min(invocations, Math.trunc(tool.successCount)))
+                  const ratio = invocations > 0 ? successes / invocations : 0
+                  const ratioPercent = clampPercent(ratio * 100)
+                  const requiredLevel = Number.isFinite(tool.requiredLevel)
+                    ? Math.max(1, Math.trunc(Number(tool.requiredLevel)))
+                    : null
+                  const blocked = requiredLevel !== null && tool.level < requiredLevel
+                  return (
+                    <li
+                      key={tool.toolId}
+                      className="rounded-md border bg-background/40 p-2"
+                      data-tool-id={tool.toolId}
+                      data-tool-level={tool.level}
+                      data-tool-blocked={blocked ? "true" : "false"}
+                      data-testid="character-card-tool"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-xs font-semibold">
+                          {tool.displayName?.trim() || tool.toolId}
+                        </span>
+                        <span className="font-mono text-[10px] text-muted-foreground">
+                          Lv {Math.max(1, Math.trunc(tool.level))} · {invocations.toLocaleString()} invocations ·{" "}
+                          {Math.round(ratioPercent)}% success
+                        </span>
+                      </div>
+                      <div
+                        aria-label={`Tool ${tool.toolId} success ${Math.round(ratioPercent)} percent`}
+                        className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted"
+                        role="progressbar"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={Math.round(ratioPercent)}
+                      >
+                        <div
+                          className={cn("h-full rounded-full transition-all", visual.barClass)}
+                          style={{ width: `${ratioPercent}%` }}
+                        />
+                      </div>
+                      {blocked ? (
+                        <p
+                          className="mt-1 text-[10px] text-rose-700 dark:text-rose-300"
+                          data-testid="character-card-tool-gate-blocked"
+                        >
+                          Gate: requires Lv {requiredLevel} (refused)
+                        </p>
                       ) : null}
                     </li>
                   )

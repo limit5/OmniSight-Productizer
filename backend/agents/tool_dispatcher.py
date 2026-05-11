@@ -127,11 +127,33 @@ class ToolResult:
         return block
 
 
+ProficiencyGate = Callable[[str, str], Awaitable[bool]]
+"""Async (tool_name, agent_id) -> True/False gate hook (W13)."""
+
+
 class ToolDispatcher:
     """Registers and executes tool handlers."""
 
     def __init__(self) -> None:
         self._handlers: dict[str, Handler] = {}
+        self._proficiency_gate: ProficiencyGate | None = None
+        self._current_agent_id: str | None = None
+
+    def set_proficiency_gate(
+        self, gate: ProficiencyGate | None, *, agent_id: str | None = None
+    ) -> None:
+        """Install a W13 proficiency gate that runs before each handler.
+
+        ``gate(tool_name, agent_id)`` returns True to allow the call and
+        False to refuse it; on refusal the dispatcher returns a
+        ``tool_proficiency_insufficient`` error result (the calling LLM
+        can self-correct just like any other handler error). When
+        ``agent_id`` is ``None`` the gate is bypassed entirely — this is
+        the default for backwards compatibility with callers that have
+        not yet wired W13.
+        """
+        self._proficiency_gate = gate
+        self._current_agent_id = agent_id
 
     def register(self, tool_name: str, handler: Handler) -> Handler:
         """Register a handler for `tool_name`. Raises if already registered."""
@@ -183,6 +205,42 @@ class ToolDispatcher:
                 ),
                 is_error=True,
             )
+
+        if (
+            self._proficiency_gate is not None
+            and self._current_agent_id is not None
+        ):
+            try:
+                allowed = await self._proficiency_gate(
+                    tool_name, self._current_agent_id
+                )
+            except Exception as gate_exc:  # noqa: BLE001 — gate must not crash dispatch
+                logger.exception("Proficiency gate raised on %s", tool_name)
+                allowed = True  # fail-open per W13 §"Error catalog"
+                _ = gate_exc
+            if not allowed:
+                emit_tool_invocation(
+                    tool_name,
+                    (time.perf_counter() - started_at) * 1000,
+                    False,
+                    input_size,
+                )
+                return _error_result(
+                    tool_use_id=tool_use_id,
+                    error=ToolError(
+                        error="tool_proficiency_insufficient",
+                        error_type="ToolProficiencyInsufficient",
+                        retryable=False,
+                        hint=(
+                            f"agent {self._current_agent_id!r} does not meet "
+                            f"the required proficiency level for {tool_name!r}"
+                        ),
+                    ),
+                    extra={
+                        "tool_name": tool_name,
+                        "agent_id": self._current_agent_id,
+                    },
+                )
 
         try:
             if inspect.iscoroutinefunction(handler):
