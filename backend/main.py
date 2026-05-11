@@ -1469,6 +1469,8 @@ _include_versioned_router(_sdk_cost_tracker_router.router)
 # OP-820 acceptance names /api/sdk/cost explicitly; keep the canonical
 # versioned route for frontend clients and expose this compatibility alias.
 app.include_router(_sdk_cost_tracker_router.router, prefix="/api")
+from backend.api import project_state as _project_state_router  # OP-904 F6 cross-task awareness aggregator
+_include_versioned_router(_project_state_router.router)
 
 # Final mount: attach the aggregate v1 + v2 routers to the app. The
 # routers themselves were populated above via _include_versioned_router
