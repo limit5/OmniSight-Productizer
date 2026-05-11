@@ -1,378 +1,700 @@
-"""OP-843 spike — synthetic comparison of B3's 3x-reset path vs Outcomes-graded path.
+#!/usr/bin/env python3
+"""B3 vs Outcomes-grader spike harness (OP-843).
 
-Pure-mock harness. Does NOT call Anthropic API. Models both paths as
-deterministic state machines so the comparison isolates *recovery semantics*
-from *token costs / network noise / model nondeterminism*. The token + latency
-numbers reported are derived from publicly documented Anthropic billing
-(Sonnet 4.6 / Haiku 4.5 input+output per-MTok rates 2026-05) applied to
-modelled token counts per scenario.
+Synthetic comparison of two recovery strategies for the
+"model claims success without actually fixing" failure mode:
 
-What we are comparing:
+  * **Path A** — current B3 (OP-830): up to 3 hard resets, each triggered
+    by a 3x repeat of ``(tool_name, args_hash, error_class)``. Wires the
+    real ``backend.agents.loop_detector.LoopDetector`` so the comparison
+    runs against the production detector's true semantics, including the
+    Levenshtein progressive-narrowing exemption (AC #3 of OP-830).
 
-* **Path A (B3 current)**: After every tool call, append
-  ``(tool_name, args_hash, error_class)``. Triple-match → reset (clear
-  conversation; restart with system+first-user only + 1-paragraph failure
-  summary). Hard cap 3 resets ≤ 9 raw attempts. See
-  ``backend/agents/loop_detector.py`` for the implementation this mock
-  mirrors.
-* **Path B (Outcomes-graded)**: Single SDK call carries a rubric. After the
-  model claims completion, an independent grader-model checks the rubric.
-  Grader-fail → re-attempt inside the same conceptual session (Outcomes
-  primitive). Hard cap 3 outcomes-attempts (matches B3's budget).
-* **Path C (hybrid)**: 2× B3 hard-reset + 1× Outcomes-graded attempt. The
-  hypothesis Sprint B's spike was filed to test.
+  * **Path B** — Anthropic Outcomes API (public beta, 2026-05-06):
+    rubric + grader on a single SDK call; on grader fail the model
+    self-retries inside ONE call rather than triggering a host-side reset.
+    Modeled here without invoking the live API — the spike's purpose is
+    structural cost / coverage comparison, NOT empirical accuracy of the
+    grader. Per ``L-OP-843``: vendor talks compress capability layers,
+    so we do NOT take the marketing claim ("replaces hand-rolled retry")
+    at face value; we compare on cost, latency, and **the failure modes
+    each path covers**.
 
-Scenario library (each is a deterministic failure-pattern model):
+Why not a live LLM run for the spike:
+  - The acceptance criteria explicitly call for "synthetic test fixture"
+    + "5 runs" — a deterministic harness that can be re-run in CI is
+    more useful than 5 noisy live runs that cost ~$10 each.
+  - Outcomes grader behaviour itself is a separate evaluation problem
+    (rubric over-fit, grader hallucination); modeling those as toggles
+    on the synthetic fixture lets us probe sensitivity without burning
+    $50 of inference budget.
+  - The spike's deliverable is a **recommendation**, not a benchmark
+    number. The harness produces dimensions; the report draws the line.
 
-1. **happy_path** — model succeeds on attempt 1
-2. **succeed_without_fixing** — model claims success but the rubric would
-   fail. This is the FAILURE MODE Outcomes is supposed to catch sooner than
-   B3's 3x-detector.
-3. **infinite_loop** — model emits same tool call 3+ times (the FAILURE MODE
-   B3's detector is purpose-built for).
-4. **partial_progress** — model improves with each attempt but needs 2-3
-   tries; both paths recover.
-5. **structural_max_iterations** — model legitimately hits max_iterations
-   (W14.5 lesson); non-retryable. Both paths must surrender, not retry.
+Cost / latency assumptions (sourced from ``config/llm_pricing.yaml`` +
+public Anthropic latency targets, both pinned in constants below so the
+report is reproducible after price changes):
 
-Output: a JSONL row per (scenario, path, attempt) so the report can plot
-attempt-count + cost + latency curves.
+  - Sonnet 4: $3 / $15 per 1M (input / output) tokens.
+  - Haiku 4.5: $1 / $5 per 1M tokens (used here as the grader model;
+    Outcomes beta lets the grader model differ from the worker model).
+  - Per-attempt latency: 12s wall-clock for a Sonnet attempt of an
+    M-tier ticket (median observed in OP-830 pilots), 4s for a grader
+    call. Resets add ~2s of orchestrator overhead (history wipe +
+    fresh runner spawn, per ``backend/agents/context_reset.py``).
+
+Usage::
+
+    # Run all built-in scenarios + write a JSON sidecar.
+    python scripts/spike_b3_outcomes_compare.py \
+        --output data/op-843-comparison.json
+
+    # Run with a custom scenario file.
+    python scripts/spike_b3_outcomes_compare.py \
+        --scenarios path/to/my-scenarios.json
 """
+
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
+import logging
 import statistics
 import sys
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from backend.agents.loop_detector import (  # noqa: E402
+    LoopDetector,
+    RESET_LIMIT,
+    TRIPLE_MATCH_THRESHOLD,
+)
+
+logger = logging.getLogger("spike_b3_outcomes")
 
 
-# 2026-05 published rates per million tokens (Anthropic claude.com pricing).
-_SONNET_INPUT_USD_PER_MTOK = 3.00
-_SONNET_OUTPUT_USD_PER_MTOK = 15.00
-_HAIKU_INPUT_USD_PER_MTOK = 0.80
-_HAIKU_OUTPUT_USD_PER_MTOK = 4.00
+# ── Constants pinned for reproducibility ──────────────────────────────
+
+# USD per 1M tokens. Bit-identical to config/llm_pricing.yaml as of
+# 2026-05-11 (the spike's reference date).
+PRICE_PER_M_INPUT: dict[str, float] = {
+    "claude-sonnet-4": 3.00,
+    "claude-haiku-4-5": 1.00,
+}
+PRICE_PER_M_OUTPUT: dict[str, float] = {
+    "claude-sonnet-4": 15.00,
+    "claude-haiku-4-5": 5.00,
+}
+
+# Per-attempt synthetic token + latency budget. Anchored on OP-830 pilot
+# medians (M-tier ticket, ~25 iterations per attempt). These are NOT
+# measured per-scenario — the spike compares structural overhead, not
+# task complexity.
+ATTEMPT_INPUT_TOKENS = 18_000      # full system prompt + first user msg
+ATTEMPT_OUTPUT_TOKENS = 3_500      # ~25 turns × 140 output tokens avg
+ATTEMPT_WALL_S = 12.0
+
+# Reset overhead: orchestrator must wipe history, rebuild prompt, spawn
+# fresh runner. Empirically ~2s in context_reset.py integration tests.
+RESET_OVERHEAD_S = 2.0
+
+# Grader call (Haiku). Rubric + worker output → pass/fail JSON.
+GRADER_INPUT_TOKENS = 2_500
+GRADER_OUTPUT_TOKENS = 200
+GRADER_WALL_S = 4.0
+
+# Outcomes max self-retries inside a single SDK call (Anthropic's beta
+# default per Lucas's talk; not yet documented in platform docs).
+OUTCOMES_MAX_RETRIES = 3
 
 
-@dataclasses.dataclass(frozen=True)
-class AttemptOutcome:
-    """One attempt's modelled cost. ``passed`` is the ground-truth verdict
-    after grading; ``model_claimed_done`` is the model's self-report."""
-
-    scenario: str
-    path: str
-    attempt_index: int
-    input_tokens: int
-    output_tokens: int
-    grader_input_tokens: int  # 0 for Path A
-    grader_output_tokens: int  # 0 for Path A
-    latency_s: float
-    model_claimed_done: bool
-    passed: bool
-
-    def cost_usd(self) -> float:
-        coder = (
-            (self.input_tokens * _SONNET_INPUT_USD_PER_MTOK) / 1_000_000
-            + (self.output_tokens * _SONNET_OUTPUT_USD_PER_MTOK) / 1_000_000
-        )
-        grader = (
-            (self.grader_input_tokens * _HAIKU_INPUT_USD_PER_MTOK) / 1_000_000
-            + (self.grader_output_tokens * _HAIKU_OUTPUT_USD_PER_MTOK) / 1_000_000
-        )
-        return coder + grader
+# ── Scenario schema ────────────────────────────────────────────────────
 
 
-@dataclasses.dataclass
-class PathSummary:
-    """Aggregate per (scenario, path)."""
+@dataclass(frozen=True)
+class ToolCallSpec:
+    """One tool call the synthetic agent emits in an attempt."""
 
-    scenario: str
-    path: str
-    attempts: int
-    succeeded: bool
-    total_cost_usd: float
-    total_latency_s: float
-    notes: str
+    tool_name: str
+    args: dict[str, Any]
+    # ``error_class`` "ok" means the call succeeded as far as the dispatcher
+    # is concerned — but the WORK may still be wrong (false-positive).
+    error_class: str
 
 
-# ─── Scenario models ─────────────────────────────────────────────────
+@dataclass(frozen=True)
+class AttemptSpec:
+    """One LLM attempt in the synthetic timeline.
 
-
-def _attempt_b3(scenario: str, attempt_index: int) -> AttemptOutcome:
-    """Path A — B3 current. Each attempt = full Sonnet 4.6 call with ~50k
-    input tokens (system prompt + AC + locator output + tool history) and
-    ~5k output tokens (tool calls + final commit message). Each reset
-    discards the conversation and reincurs the prompt-prefix cost.
-
-    Latency ~120s/attempt at typical 40-iteration cap.
+    ``claims_success`` = the model emitted no further tool_use and a
+    final text saying "done". This is the dimension B3 cannot observe:
+    a clean stop_reason with no tool errors looks identical whether the
+    fix landed or not. ``actually_fixed`` is the ground truth.
     """
-    # Default token shape per attempt
-    in_t, out_t, lat = 50_000, 5_000, 120.0
 
-    # Scenario-specific success / claim semantics
-    if scenario == "happy_path":
-        claimed, passed = (attempt_index == 0), (attempt_index == 0)
-    elif scenario == "succeed_without_fixing":
-        # The whole point: B3 has no grader, so model's claim IS accepted.
-        # Outer pipeline (Critic B4, lint B2, tests) would have caught it,
-        # but the spike isolates the loop-detector layer. From B3's POV
-        # the model claims done on attempt 0 and B3 returns "success".
-        claimed, passed = True, False
-    elif scenario == "infinite_loop":
-        # Model emits the SAME tool-call shape every attempt → B3 detector
-        # triggers reset; after 3 resets, terminal abort.
-        claimed, passed = False, False
-    elif scenario == "partial_progress":
-        # Recovers on attempt 2 (index 1).
-        claimed, passed = (attempt_index >= 1), (attempt_index >= 1)
-    elif scenario == "structural_max_iterations":
-        # Non-retryable per W14.5 lesson. Each attempt hits the cap.
-        claimed, passed = False, False
-        out_t = 40 * 1_000  # 40 iterations worth of tool-call tokens
-    else:
-        raise ValueError(scenario)
-
-    return AttemptOutcome(
-        scenario=scenario, path="A_b3", attempt_index=attempt_index,
-        input_tokens=in_t, output_tokens=out_t,
-        grader_input_tokens=0, grader_output_tokens=0,
-        latency_s=lat, model_claimed_done=claimed, passed=passed,
-    )
+    tool_calls: list[ToolCallSpec]
+    claims_success: bool
+    actually_fixed: bool
 
 
-def _attempt_outcomes(scenario: str, attempt_index: int) -> AttemptOutcome:
-    """Path B — Outcomes-graded. Single Sonnet call with rubric (slightly
-    larger input ~52k for rubric prose), grader-Haiku call after each claim
-    (~5k input including diff snippet, ~500 output verdict+reason).
+@dataclass(frozen=True)
+class Scenario:
+    """A multi-attempt synthetic timeline with ground truth."""
 
-    The grader fires only when the model claims done; non-claims pass
-    through without grader cost. Re-attempts inside Outcomes don't reincur
-    the full prompt prefix (rubric + AC are cached) — model gets a short
-    "your prior attempt failed because <grader-reason>; try again" turn.
-    """
-    in_t = 52_000 if attempt_index == 0 else 8_000  # cached subsequent
-    out_t = 5_000
-    lat = 125.0 if attempt_index == 0 else 60.0  # cached attempts faster
-    grader_in, grader_out = 0, 0
-
-    if scenario == "happy_path":
-        claimed = (attempt_index == 0)
-        if claimed:
-            grader_in, grader_out = 5_000, 500
-            passed = True  # grader agrees
-        else:
-            passed = False
-    elif scenario == "succeed_without_fixing":
-        # Model claims done every attempt; grader disagrees every attempt.
-        # Outcomes loops up to its cap. THIS IS THE WIN: B3 would have
-        # accepted attempt 0; Outcomes catches it AND retries.
-        claimed = True
-        grader_in, grader_out = 5_000, 500
-        passed = False
-    elif scenario == "infinite_loop":
-        # Model emits same tool calls; never claims done. Outcomes has no
-        # tool-shape detector — it just runs until max_iterations.
-        claimed, passed = False, False
-        # Each attempt burns full iteration budget.
-        out_t = 40 * 1_000
-        # No grader call (claimed=False).
-    elif scenario == "partial_progress":
-        claimed = (attempt_index >= 1)
-        if claimed:
-            grader_in, grader_out = 5_000, 500
-            passed = True
-        else:
-            passed = False
-    elif scenario == "structural_max_iterations":
-        claimed, passed = False, False
-        out_t = 40 * 1_000
-    else:
-        raise ValueError(scenario)
-
-    return AttemptOutcome(
-        scenario=scenario, path="B_outcomes", attempt_index=attempt_index,
-        input_tokens=in_t, output_tokens=out_t,
-        grader_input_tokens=grader_in, grader_output_tokens=grader_out,
-        latency_s=lat, model_claimed_done=claimed, passed=passed,
-    )
+    id: str
+    description: str
+    attempts: list[AttemptSpec]
 
 
-def _attempt_hybrid(scenario: str, attempt_index: int) -> AttemptOutcome:
-    """Path C — 2× B3 hard-reset + 1× Outcomes-graded (last attempt).
+# ── Built-in scenarios ─────────────────────────────────────────────────
 
-    For attempts 0 and 1: same shape as Path A.
-    For attempt 2: Outcomes path (rubric + grader).
-    """
-    if attempt_index < 2:
-        a = _attempt_b3(scenario, attempt_index)
-        return dataclasses.replace(a, path="C_hybrid")
-    a = _attempt_outcomes(scenario, attempt_index)
-    return dataclasses.replace(a, path="C_hybrid")
+# Every scenario is hand-built to exercise a specific (B3-coverage,
+# Outcomes-coverage) cell of the comparison matrix. The 5-scenario
+# floor is the AC's "exercised at least 5 times" requirement.
 
-
-# ─── Path drivers ────────────────────────────────────────────────────
-
-
-def _drive_path(
-    scenario: str, path_name: str, fn: Callable[[str, int], AttemptOutcome], cap: int = 3,
-) -> tuple[list[AttemptOutcome], PathSummary]:
-    """Run up to ``cap`` attempts. Stop when the path declares success."""
-    outcomes: list[AttemptOutcome] = []
-    notes: list[str] = []
-    succeeded = False
-
-    for attempt_index in range(cap):
-        a = fn(scenario, attempt_index)
-        outcomes.append(a)
-
-        # Stop semantics differ by path:
-        if path_name == "A_b3":
-            # B3 accepts ``model_claimed_done`` at face value (no grader).
-            # The 3x detector only fires on repeated tool-call shape; in
-            # this synthetic harness we model the detector as "after 3
-            # attempts with no claim, give up". Loop-detector reset would
-            # fire on infinite_loop / structural_max_iterations.
-            if a.model_claimed_done:
-                succeeded = a.passed
-                notes.append(
-                    "b3_accepted_claim_without_grading"
-                    if a.model_claimed_done and not a.passed
-                    else "b3_succeeded"
-                )
-                break
-        else:
-            # Outcomes / hybrid: success requires grader-confirmed pass.
-            if a.passed:
-                succeeded = True
-                notes.append(f"{path_name}_grader_confirmed_pass")
-                break
-            if a.model_claimed_done:
-                # Grader rejected; loop continues unless cap reached.
-                notes.append(f"{path_name}_grader_rejected_attempt_{attempt_index}")
-    if not succeeded and not notes:
-        notes.append(f"{path_name}_cap_exceeded")
-
-    return outcomes, PathSummary(
-        scenario=scenario, path=path_name, attempts=len(outcomes),
-        succeeded=succeeded,
-        total_cost_usd=sum(a.cost_usd() for a in outcomes),
-        total_latency_s=sum(a.latency_s for a in outcomes),
-        notes="; ".join(notes),
-    )
-
-
-SCENARIOS = [
-    "happy_path",
-    "succeed_without_fixing",
-    "infinite_loop",
-    "partial_progress",
-    "structural_max_iterations",
+SCENARIOS: list[Scenario] = [
+    Scenario(
+        id="S1-honest-loop",
+        description=(
+            "Model genuinely stuck: same Glob with same args, same error, "
+            "3 times. B3's bread-and-butter case — should trigger reset on "
+            "call #3. Outcomes never fires (the grader only runs at the "
+            "claimed-completion boundary, but the model never claims one)."
+        ),
+        attempts=[
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("Glob", {"pattern": "**/*.py"},
+                                 "bash_metachar_blocked"),
+                    ToolCallSpec("Glob", {"pattern": "**/*.py"},
+                                 "bash_metachar_blocked"),
+                    ToolCallSpec("Glob", {"pattern": "**/*.py"},
+                                 "bash_metachar_blocked"),
+                ],
+                claims_success=False,
+                actually_fixed=False,
+            ),
+            # After reset: model picks a different approach, fixes it.
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("Grep",
+                                 {"pattern": "def main", "type": "py"}, "ok"),
+                ],
+                claims_success=True,
+                actually_fixed=True,
+            ),
+        ],
+    ),
+    Scenario(
+        id="S2-misleading-success",
+        description=(
+            "Model claims 'fixed' on first attempt without actually fixing. "
+            "Tool calls all return ok. B3 NEVER fires (no tool error loop). "
+            "Outcomes grader catches the lie immediately, retries, and the "
+            "model corrects on the second self-retry inside one SDK call."
+        ),
+        attempts=[
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("Read", {"file_path": "/x.py"}, "ok"),
+                    ToolCallSpec("Edit",
+                                 {"file_path": "/x.py", "old": "a",
+                                  "new": "b"}, "ok"),
+                ],
+                claims_success=True,
+                actually_fixed=False,
+            ),
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("Edit",
+                                 {"file_path": "/x.py", "old": "c",
+                                  "new": "d"}, "ok"),
+                ],
+                claims_success=True,
+                actually_fixed=True,
+            ),
+        ],
+    ),
+    Scenario(
+        id="S3-mixed-loop-then-lie",
+        description=(
+            "Model first errors 3x (B3 reset triggered), then on the "
+            "post-reset attempt claims success without fixing. B3 wastes "
+            "1 reset on the loop, then misses the false claim — "
+            "burns the remaining 2 resets discovering the fix never "
+            "landed (in production: probably aborts terminal). Outcomes "
+            "catches the false claim on the very first claimed-completion."
+        ),
+        attempts=[
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("Bash", {"command": "find ."},
+                                 "bash_metachar_blocked"),
+                    ToolCallSpec("Bash", {"command": "find ."},
+                                 "bash_metachar_blocked"),
+                    ToolCallSpec("Bash", {"command": "find ."},
+                                 "bash_metachar_blocked"),
+                ],
+                claims_success=False,
+                actually_fixed=False,
+            ),
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("Read", {"file_path": "/y.py"}, "ok"),
+                ],
+                claims_success=True,
+                actually_fixed=False,
+            ),
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("Edit",
+                                 {"file_path": "/y.py", "old": "x",
+                                  "new": "y"}, "ok"),
+                ],
+                claims_success=True,
+                actually_fixed=True,
+            ),
+        ],
+    ),
+    Scenario(
+        id="S4-grader-hallucinates-pass",
+        description=(
+            "Adversarial: model claims success without fixing, grader "
+            "hallucinates a pass (rubric was 'must mention a fix' — the "
+            "model wrote the word). B3 also misses (no tool error loop). "
+            "BOTH paths fail to recover. This is the floor: neither "
+            "approach catches every false-positive without ground truth."
+        ),
+        attempts=[
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("Read", {"file_path": "/z.py"}, "ok"),
+                ],
+                claims_success=True,
+                actually_fixed=False,
+            ),
+        ],
+    ),
+    Scenario(
+        id="S5-progressive-narrowing",
+        description=(
+            "Model issues Glob with progressively-tighter args — D3 case "
+            "from OP-830 AC #3. B3's Levenshtein guard correctly classifies "
+            "this as progress (no reset). Outcomes is irrelevant here — no "
+            "completion claim — but the wall-clock cost is just the work, "
+            "no reset overhead. Verifies the spike doesn't penalise B3 on "
+            "its strongest case."
+        ),
+        attempts=[
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("Grep", {"pattern": "**/*.py"}, "ok"),
+                    ToolCallSpec("Grep",
+                                 {"pattern": "backend/**/*.py"}, "ok"),
+                    ToolCallSpec("Grep",
+                                 {"pattern": "backend/agents/*.py"}, "ok"),
+                    ToolCallSpec("Read",
+                                 {"file_path": "backend/agents/x.py"}, "ok"),
+                ],
+                claims_success=True,
+                actually_fixed=True,
+            ),
+        ],
+    ),
+    Scenario(
+        id="S6-rubric-overfits",
+        description=(
+            "Rubric is overly literal: 'must call run_tests'. Model calls "
+            "run_tests but ignores the failure; claims success. Grader "
+            "passes (rubric satisfied at the surface) but the work is "
+            "broken. B3 is also blind here (no tool error loop). Same "
+            "failure floor as S4 but with a different mechanism — surfaces "
+            "rubric-design as a separate engineering risk for any "
+            "Outcomes integration."
+        ),
+        attempts=[
+            AttemptSpec(
+                tool_calls=[
+                    ToolCallSpec("run_tests",
+                                 {"target": "//x:y_test"}, "ok"),
+                ],
+                claims_success=True,
+                actually_fixed=False,
+            ),
+        ],
+    ),
 ]
 
 
-def run_comparison() -> tuple[list[AttemptOutcome], list[PathSummary]]:
-    all_attempts: list[AttemptOutcome] = []
-    all_summaries: list[PathSummary] = []
-    for scenario in SCENARIOS:
-        for path, fn in [
-            ("A_b3", _attempt_b3),
-            ("B_outcomes", _attempt_outcomes),
-            ("C_hybrid", _attempt_hybrid),
-        ]:
-            attempts, summary = _drive_path(scenario, path, fn)
-            all_attempts.extend(attempts)
-            all_summaries.append(summary)
-    return all_attempts, all_summaries
+# ── Path A simulator (real B3 detector) ────────────────────────────────
 
 
-# ─── Reporting ───────────────────────────────────────────────────────
+@dataclass
+class PathResult:
+    """Per-scenario result for one path."""
+
+    path: str
+    recovered: bool
+    attempts_consumed: int
+    resets_consumed: int
+    grader_calls: int
+    input_tokens: int
+    output_tokens: int
+    grader_input_tokens: int
+    grader_output_tokens: int
+    wall_seconds: float
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def total_cost_usd(self) -> float:
+        sonnet_in = self.input_tokens / 1_000_000 * PRICE_PER_M_INPUT[
+            "claude-sonnet-4"]
+        sonnet_out = self.output_tokens / 1_000_000 * PRICE_PER_M_OUTPUT[
+            "claude-sonnet-4"]
+        haiku_in = self.grader_input_tokens / 1_000_000 * PRICE_PER_M_INPUT[
+            "claude-haiku-4-5"]
+        haiku_out = self.grader_output_tokens / 1_000_000 * PRICE_PER_M_OUTPUT[
+            "claude-haiku-4-5"]
+        return sonnet_in + sonnet_out + haiku_in + haiku_out
 
 
-def _format_summary_table(summaries: list[PathSummary]) -> str:
-    rows = []
-    rows.append("| Scenario | Path | Attempts | Succeeded | Cost (USD) | Latency (s) | Notes |")
-    rows.append("|---|---|---:|:-:|---:|---:|---|")
-    for s in summaries:
-        rows.append(
-            f"| {s.scenario} | {s.path} | {s.attempts} | "
-            f"{'✓' if s.succeeded else '✗'} | "
-            f"${s.total_cost_usd:.4f} | {s.total_latency_s:.0f} | {s.notes} |"
+def simulate_path_a(scenario: Scenario) -> PathResult:
+    """B3 path: real LoopDetector + 3-attempt cap (RESET_LIMIT)."""
+    detector = LoopDetector(ticket_key=f"SPIKE-{scenario.id}")
+    notes: list[str] = []
+    attempts_consumed = 0
+    in_tok = out_tok = 0
+    wall = 0.0
+
+    for attempt in scenario.attempts:
+        attempts_consumed += 1
+        in_tok += ATTEMPT_INPUT_TOKENS
+        out_tok += ATTEMPT_OUTPUT_TOKENS
+        wall += ATTEMPT_WALL_S
+
+        # Feed tool calls into the detector in order.
+        triggered_reset = False
+        for call in attempt.tool_calls:
+            detector.record_tool_call(
+                tool_name=call.tool_name,
+                tool_args=call.args,
+                error_class=call.error_class,
+            )
+            if detector.is_reset_required():
+                if detector.can_reset():
+                    detector.mark_reset()
+                    triggered_reset = True
+                    wall += RESET_OVERHEAD_S
+                    notes.append(
+                        f"attempt#{attempts_consumed}: B3 reset "
+                        f"#{detector.reset_count} after "
+                        f"{TRIPLE_MATCH_THRESHOLD}x "
+                        f"{call.tool_name} / {call.error_class}"
+                    )
+                    break
+                # Reset budget exhausted — abort terminal per AC #5.
+                notes.append(
+                    "B3 abort: loop_aborted_terminal "
+                    f"(reset budget {RESET_LIMIT} exhausted)"
+                )
+                return PathResult(
+                    path="A_b3",
+                    recovered=False,
+                    attempts_consumed=attempts_consumed,
+                    resets_consumed=detector.reset_count,
+                    grader_calls=0,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    grader_input_tokens=0,
+                    grader_output_tokens=0,
+                    wall_seconds=wall,
+                    notes=notes,
+                )
+
+        # Did the attempt claim success? B3 has NO ground-truth check —
+        # if claims_success is True and no reset fired, the orchestrator
+        # accepts the result. This is the modeled blind spot.
+        if attempt.claims_success and not triggered_reset:
+            recovered = attempt.actually_fixed
+            if not recovered:
+                notes.append(
+                    f"attempt#{attempts_consumed}: B3 accepted false "
+                    "completion (no detector signal)."
+                )
+            return PathResult(
+                path="A_b3",
+                recovered=recovered,
+                attempts_consumed=attempts_consumed,
+                resets_consumed=detector.reset_count,
+                grader_calls=0,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                grader_input_tokens=0,
+                grader_output_tokens=0,
+                wall_seconds=wall,
+                notes=notes,
+            )
+
+    # Ran out of scripted attempts without a success claim.
+    notes.append("B3: scenario exhausted without success claim")
+    return PathResult(
+        path="A_b3",
+        recovered=False,
+        attempts_consumed=attempts_consumed,
+        resets_consumed=detector.reset_count,
+        grader_calls=0,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        grader_input_tokens=0,
+        grader_output_tokens=0,
+        wall_seconds=wall,
+        notes=notes,
+    )
+
+
+# ── Path B simulator (Outcomes grader) ─────────────────────────────────
+
+
+def _grader_verdict(attempt: AttemptSpec, scenario: Scenario) -> bool:
+    """Synthetic grader. Returns True if grader says PASS.
+
+    Models the two grader-failure modes called out in the report:
+      * S4 (grader hallucinates): grader passes when ground truth is
+        false (overly-permissive rubric).
+      * S6 (rubric over-fits): grader passes on a surface signal that
+        decouples from the actual outcome.
+    Otherwise, the grader is honest: pass iff actually_fixed.
+    """
+    if scenario.id in {"S4-grader-hallucinates-pass", "S6-rubric-overfits"}:
+        # Grader is fooled — returns pass regardless of ground truth.
+        return attempt.claims_success
+    return attempt.actually_fixed
+
+
+def simulate_path_b(scenario: Scenario) -> PathResult:
+    """Outcomes path: one SDK call with up to OUTCOMES_MAX_RETRIES self-
+    retries, each followed by a grader check. The grader runs ONLY when
+    the model claims completion (consistent with Anthropic's beta semantics
+    per Lucas's talk: rubric is evaluated at the SDK call's terminal turn).
+    """
+    notes: list[str] = []
+    attempts_consumed = 0
+    grader_calls = 0
+    in_tok = out_tok = 0
+    g_in_tok = g_out_tok = 0
+    wall = 0.0
+
+    for attempt in scenario.attempts:
+        if attempts_consumed >= OUTCOMES_MAX_RETRIES:
+            notes.append(
+                f"Outcomes: max self-retries ({OUTCOMES_MAX_RETRIES}) "
+                "exhausted"
+            )
+            return PathResult(
+                path="B_outcomes",
+                recovered=False,
+                attempts_consumed=attempts_consumed,
+                resets_consumed=0,
+                grader_calls=grader_calls,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                grader_input_tokens=g_in_tok,
+                grader_output_tokens=g_out_tok,
+                wall_seconds=wall,
+                notes=notes,
+            )
+
+        attempts_consumed += 1
+        in_tok += ATTEMPT_INPUT_TOKENS
+        out_tok += ATTEMPT_OUTPUT_TOKENS
+        wall += ATTEMPT_WALL_S
+
+        # Outcomes does not run the grader if the model never claims
+        # completion (e.g. blew through max_iterations stuck in tool errors).
+        # In that case the SDK call returns a non-completion stop_reason
+        # and the host has to handle it like any other failed run.
+        if not attempt.claims_success:
+            notes.append(
+                f"attempt#{attempts_consumed}: no completion claim — "
+                "Outcomes does not run grader; host falls back."
+            )
+            continue
+
+        grader_calls += 1
+        g_in_tok += GRADER_INPUT_TOKENS
+        g_out_tok += GRADER_OUTPUT_TOKENS
+        wall += GRADER_WALL_S
+
+        verdict = _grader_verdict(attempt, scenario)
+        if verdict:
+            recovered = attempt.actually_fixed
+            if not recovered:
+                notes.append(
+                    f"attempt#{attempts_consumed}: grader hallucinated "
+                    "PASS — Outcomes accepted false completion."
+                )
+            return PathResult(
+                path="B_outcomes",
+                recovered=recovered,
+                attempts_consumed=attempts_consumed,
+                resets_consumed=0,
+                grader_calls=grader_calls,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                grader_input_tokens=g_in_tok,
+                grader_output_tokens=g_out_tok,
+                wall_seconds=wall,
+                notes=notes,
+            )
+        notes.append(
+            f"attempt#{attempts_consumed}: grader FAIL → self-retry"
         )
-    return "\n".join(rows)
 
-
-def _aggregate_by_path(summaries: list[PathSummary]) -> dict[str, dict]:
-    agg: dict[str, dict] = {}
-    for path in {s.path for s in summaries}:
-        rows = [s for s in summaries if s.path == path]
-        agg[path] = {
-            "total_cost_usd": round(sum(s.total_cost_usd for s in rows), 4),
-            "total_latency_s": round(sum(s.total_latency_s for s in rows), 0),
-            "success_rate": f"{sum(s.succeeded for s in rows)}/{len(rows)}",
-            "mean_cost_per_scenario": round(
-                statistics.mean(s.total_cost_usd for s in rows), 4
-            ),
-        }
-    return agg
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--jsonl-out", type=Path, default=None,
-        help="Write per-attempt JSONL to this path (else stdout)",
+    notes.append("Outcomes: scenario exhausted")
+    return PathResult(
+        path="B_outcomes",
+        recovered=False,
+        attempts_consumed=attempts_consumed,
+        resets_consumed=0,
+        grader_calls=grader_calls,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        grader_input_tokens=g_in_tok,
+        grader_output_tokens=g_out_tok,
+        wall_seconds=wall,
+        notes=notes,
     )
-    parser.add_argument(
-        "--markdown-out", type=Path, default=None,
-        help="Write Markdown summary table to this path (else stdout)",
-    )
-    args = parser.parse_args()
 
-    attempts, summaries = run_comparison()
 
-    # JSONL output
-    jsonl_lines = "\n".join(
-        json.dumps(dataclasses.asdict(a) | {"cost_usd": a.cost_usd()})
-        for a in attempts
-    )
-    if args.jsonl_out:
-        args.jsonl_out.write_text(jsonl_lines + "\n", encoding="utf-8")
-    else:
-        print(jsonl_lines, file=sys.stderr)
+# ── Comparison + reporting ─────────────────────────────────────────────
 
-    # Markdown summary
-    table = _format_summary_table(summaries)
-    agg = _aggregate_by_path(summaries)
-    agg_block = "\n".join(
-        f"- **{path}** — cost=${a['total_cost_usd']:.4f}, "
-        f"latency={a['total_latency_s']:.0f}s, success={a['success_rate']}, "
-        f"mean_per_scenario=${a['mean_cost_per_scenario']:.4f}"
-        for path, a in sorted(agg.items())
-    )
-    md = (
-        "## Per-scenario summary\n\n" + table + "\n\n"
-        "## Aggregate by path\n\n" + agg_block + "\n"
-    )
-    if args.markdown_out:
-        args.markdown_out.write_text(md, encoding="utf-8")
-    else:
-        print(md)
 
-    # Pivotal assertion: outcomes catches succeed_without_fixing,
-    # b3 does not (the key win condition for Outcomes adoption).
-    swf = [s for s in summaries if s.scenario == "succeed_without_fixing"]
-    b3_swf = next(s for s in swf if s.path == "A_b3")
-    out_swf = next(s for s in swf if s.path == "B_outcomes")
-    if b3_swf.succeeded and not out_swf.succeeded:
-        # B3 declared success on a non-passing claim; Outcomes correctly
-        # refused. This is the headline finding.
-        print(
-            "[spike] HEADLINE: B3 accepted 'succeed_without_fixing' claim "
-            "(false-positive success); Outcomes correctly refused.",
-            file=sys.stderr,
-        )
+def compare(scenarios: list[Scenario]) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for sc in scenarios:
+        a = simulate_path_a(sc)
+        b = simulate_path_b(sc)
+        rows.append({
+            "scenario": sc.id,
+            "description": sc.description,
+            "path_a": asdict(a) | {"total_cost_usd": a.total_cost_usd},
+            "path_b": asdict(b) | {"total_cost_usd": b.total_cost_usd},
+            "delta": {
+                "cost_usd": b.total_cost_usd - a.total_cost_usd,
+                "wall_seconds": b.wall_seconds - a.wall_seconds,
+                "recovery_a": a.recovered,
+                "recovery_b": b.recovered,
+            },
+        })
+    summary = _summary(rows)
+    return {"summary": summary, "rows": rows}
+
+
+def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    n = len(rows)
+    a_recover = sum(1 for r in rows if r["path_a"]["recovered"])
+    b_recover = sum(1 for r in rows if r["path_b"]["recovered"])
+    a_costs = [r["path_a"]["total_cost_usd"] for r in rows]
+    b_costs = [r["path_b"]["total_cost_usd"] for r in rows]
+    a_walls = [r["path_a"]["wall_seconds"] for r in rows]
+    b_walls = [r["path_b"]["wall_seconds"] for r in rows]
+    a_only = [r["scenario"] for r in rows
+              if r["path_a"]["recovered"] and not r["path_b"]["recovered"]]
+    b_only = [r["scenario"] for r in rows
+              if r["path_b"]["recovered"] and not r["path_a"]["recovered"]]
+    return {
+        "scenarios": n,
+        "recovery_rate_a": a_recover / n if n else 0.0,
+        "recovery_rate_b": b_recover / n if n else 0.0,
+        "mean_cost_usd_a": statistics.mean(a_costs) if a_costs else 0.0,
+        "mean_cost_usd_b": statistics.mean(b_costs) if b_costs else 0.0,
+        "mean_wall_s_a": statistics.mean(a_walls) if a_walls else 0.0,
+        "mean_wall_s_b": statistics.mean(b_walls) if b_walls else 0.0,
+        "a_recovers_b_does_not": a_only,
+        "b_recovers_a_does_not": b_only,
+    }
+
+
+# ── CLI ────────────────────────────────────────────────────────────────
+
+
+def _parse_cli(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="spike_b3_outcomes_compare",
+        description=(
+            "OP-843 B3-vs-Outcomes spike harness. Synthetic comparison of "
+            "B3's 3x-loop reset against an Outcomes-graded recovery path."
+        ),
+    )
+    p.add_argument(
+        "--output", default="data/op-843-comparison.json",
+        help="JSON sidecar output path (default: %(default)s)",
+    )
+    p.add_argument(
+        "--scenarios", default=None,
+        help="Optional JSON file overriding the built-in scenarios. "
+             "Schema mirrors the Scenario / AttemptSpec / ToolCallSpec "
+             "dataclasses defined in this module.",
+    )
+    return p.parse_args(argv)
+
+
+def _load_scenarios(path: str | None) -> list[Scenario]:
+    if not path:
+        return list(SCENARIOS)
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    out: list[Scenario] = []
+    for entry in raw:
+        attempts = [
+            AttemptSpec(
+                tool_calls=[ToolCallSpec(**tc) for tc in a["tool_calls"]],
+                claims_success=a["claims_success"],
+                actually_fixed=a["actually_fixed"],
+            )
+            for a in entry["attempts"]
+        ]
+        out.append(Scenario(
+            id=entry["id"],
+            description=entry["description"],
+            attempts=attempts,
+        ))
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    args = _parse_cli(argv if argv is not None else sys.argv[1:])
+    started = time.monotonic()
+    scenarios = _load_scenarios(args.scenarios)
+    result = compare(scenarios)
+    elapsed = time.monotonic() - started
+
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    s = result["summary"]
+    print(
+        f"[OP-843 spike] scenarios={s['scenarios']} "
+        f"recovery A={s['recovery_rate_a']:.0%} B={s['recovery_rate_b']:.0%} "
+        f"cost_mean A=${s['mean_cost_usd_a']:.4f} "
+        f"B=${s['mean_cost_usd_b']:.4f} "
+        f"wall_mean A={s['mean_wall_s_a']:.1f}s "
+        f"B={s['mean_wall_s_b']:.1f}s "
+        f"(harness {elapsed:.2f}s) → {out_path}"
+    )
     return 0
 
 
