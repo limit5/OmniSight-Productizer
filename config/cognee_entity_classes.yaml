@@ -1,0 +1,120 @@
+# Cognee starter ontology — entity-class registry for the F5 ECL ingestion.
+#
+# Reference: OP-903 (F5 — Cognee initial ECL ingestion) acceptance §3.
+# Each class is the smallest stable unit the ECL pipeline recognises
+# during the bootstrap pass. Anything the entity extractor encounters
+# that does NOT match one of these classes is routed through the
+# multi-LLM ontology proposal gate (backend/agents/ontology_proposal.py)
+# before it can be promoted into the KG.
+#
+# Schema per entry:
+#   name:        PascalCase class identifier (KG node label)
+#   source:      which corpus the class is sourced from (one of:
+#                python, jira, adr, lesson, retrospective, all)
+#   description: 1-line semantic definition for the 2nd-LLM gate
+#   examples:    representative entity literals (used by tests +
+#                the proposal reviewer for few-shot grounding)
+#
+# Promotion rule (governance): once added here, an entity class is
+# considered stable and may NOT be silently renamed. Renames go
+# through the weekly operator-review digest (see
+# docs/operations/cognee-ontology-governance.md).
+
+version: 1
+last_reviewed: 2026-05-11
+
+classes:
+  # ── Python source (AST-aware) ────────────────────────────────────
+  - name: PythonModule
+    source: python
+    description: A single .py file, addressed by repo-relative dotted path.
+    examples:
+      - backend.agents.scheduler
+      - scripts.cognee_initial_ingest
+
+  - name: PythonClass
+    source: python
+    description: A top-level or nested class definition inside a PythonModule.
+    examples:
+      - DispatchClient
+      - TicketSnapshot
+
+  - name: PythonFunction
+    source: python
+    description: A function or method (free or bound), keyed by qualname.
+    examples:
+      - make_client
+      - DispatchClient.add_comment
+
+  - name: PythonImport
+    source: python
+    description: A from-X-import-Y edge between modules; used for fan-in/fan-out graph.
+    examples:
+      - backend.agents.scheduler -> backend.config
+
+  # ── JIRA ────────────────────────────────────────────────────────
+  - name: JiraTicket
+    source: jira
+    description: A JIRA issue (Epic / Story / Sub-task), keyed by issue key.
+    examples:
+      - OP-903
+      - OP-852
+
+  - name: JiraComponent
+    source: jira
+    description: JIRA Components field value, used as a priority namespace.
+    examples:
+      - HIGH
+      - MP
+
+  - name: JiraStatus
+    source: jira
+    description: A workflow status the ticket has occupied, with timestamp.
+    examples:
+      - TODO
+      - In Progress
+      - Under Review
+
+  - name: JiraLink
+    source: jira
+    description: A directional dependency edge between two JiraTickets (blocks / is-blocked-by / relates-to).
+    examples:
+      - OP-903 blocks OP-906
+      - OP-903 is-blocked-by OP-902
+
+  # ── ADRs ────────────────────────────────────────────────────────
+  - name: ADR
+    source: adr
+    description: An architecture decision record (docs/adr/ADR-NNNN-*.md).
+    examples:
+      - ADR-0003-gerrit-code-review
+      - ADR-0007-multi-provider-subscription-orchestrator
+
+  - name: ADRDecision
+    source: adr
+    description: The "Decision" section of an ADR, distilled to a one-sentence rule.
+    examples:
+      - "Code review uses self-hosted Gerrit (not GitHub PR)."
+
+  # ── Lessons ─────────────────────────────────────────────────────
+  - name: Lesson
+    source: lesson
+    description: A single dated entry in docs/sop/lessons-learned.md (Situation / Fix / Verification).
+    examples:
+      - "Lesson 14 — git hooks for worktrees"
+      - "Lesson 17 — pre_pickup_ok must check worktree cwd"
+
+  # ── Retrospectives ──────────────────────────────────────────────
+  - name: Retrospective
+    source: retrospective
+    description: A cross-Phase or cross-ticket retrospective doc under docs/retrospectives/.
+    examples:
+      - 2026-05-06-phase2-path-validation
+
+  # ── Cross-corpus links ──────────────────────────────────────────
+  - name: TicketReference
+    source: all
+    description: A textual mention of a JIRA key (e.g. OP-903) inside source / docs / lessons.
+    examples:
+      - OP-903 mentioned in scripts/cognee_initial_ingest.py
+      - OP-689 mentioned in docs/sop/lessons-learned.md
