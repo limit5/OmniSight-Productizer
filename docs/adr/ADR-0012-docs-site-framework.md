@@ -7,7 +7,7 @@ date: 2026-05-08
 
 # ADR 0012 — Docs-site framework: MkDocs (Material)
 
-**Status**: Accepted (2026-05-08, Sprint E — META OP-785)
+**Status**: Accepted (2026-05-08, Sprint E — META OP-784)
 
 **Decider**: sora (operator) + AI fleet
 
