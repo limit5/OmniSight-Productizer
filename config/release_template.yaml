@@ -1,0 +1,185 @@
+# Release META template — OP-937 (G1)
+#
+# Defines the canonical 13-child release pipeline created by
+# ``scripts/instantiate_release_meta.py``. Each entry describes one
+# JIRA ticket: name, blockedBy chain (relative R-id), runner class,
+# tier, area labels, and Acceptance Criteria text.
+#
+# The script substitutes ``{version}`` placeholders at instantiation
+# time. The blocked_by chain uses relative R-ids ("R1", "R2", …)
+# that the script resolves to real OP-keys after the children are
+# created — never write absolute OP-keys here.
+#
+# Direction reminder (L-OP-874):
+#   blocked_by is the BLOCKER side. The script wires the JIRA Blocks
+#   link as inward=blocker, outward=blocked via
+#   backend.agents.file_coordinator.add_blocked_by.
+#
+# Versioning: bump ``version`` whenever the structure changes so the
+# META comment can record which template each release was cut from.
+
+version: "v1"
+
+meta:
+  # Summary template — the script substitutes {version} at runtime.
+  summary_template: "RELEASE-{version} META — production release conductor"
+  # Labels always applied to the META ticket itself. The script adds
+  # ``RELEASE-{version}`` (tag-style label) so JQL can scope to a
+  # single release.
+  labels:
+    - "agent:auto"
+    - "meta:release"
+  # tier:X intentionally — the META is a planning/audit container,
+  # not a runner-pickable Story. Children carry their own tier.
+  # The script derives the `tier:<X>` label from `meta.tier` below,
+  # so we deliberately leave it out of the static label list.
+  tier: "X"
+  # Class is irrelevant for META (tier:X is excluded by runner JQL)
+  # but JIRA still wants a value if we add ``class:`` labels later.
+  class: "subscription-claude"
+  issuetype: "Story"
+
+children:
+  - r_id: "R1"
+    name: "Cut release branch + tag (release/{version})"
+    blocked_by: []
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["devops", "tooling"]
+    ac: |
+      - [ ] `release/{version}` branch cut from `main`, pushed to gerrit + GitHub
+      - [ ] Annotated tag `{version}` created against the new branch tip
+      - [ ] `scripts/cut_release_branch.sh --version {version}` exits 0
+      - [ ] Pre-flight (`scripts/milestone_check.py --version {version}`) passes
+
+  - r_id: "R2"
+    name: "Bump version files + lockfiles ({version})"
+    blocked_by: ["R1"]
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["tooling", "tests"]
+    ac: |
+      - [ ] `package.json` / `pyproject.toml` reflect `{version}`
+      - [ ] Lockfiles (`pnpm-lock.yaml`, etc.) regenerated and committed
+      - [ ] Drift guard (`scripts/check_version_pin_consistency.py`) green
+
+  - r_id: "R3"
+    name: "Regenerate CHANGELOG.md for {version}"
+    blocked_by: ["R2"]
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["docs", "tooling"]
+    ac: |
+      - [ ] `CHANGELOG.md` has a `## {version}` section with all fixVersion = {version} tickets
+      - [ ] `scripts/auto_changelog.py --version {version}` regenerates cleanly
+      - [ ] No orphan tickets (closed without fixVersion) in the milestone
+
+  - r_id: "R4"
+    name: "Build + push release container images for {version}"
+    blocked_by: ["R3"]
+    class: "subscription-claude"
+    tier: "M"
+    areas: ["devops"]
+    ac: |
+      - [ ] All Dockerfiles in the matrix build cleanly tagged `{version}`
+      - [ ] Images pushed to GHCR + internal mirror
+      - [ ] SBOMs attached per `docs/operations/release-image-pipeline.md`
+
+  - r_id: "R5"
+    name: "Verify image signatures + provenance ({version})"
+    blocked_by: ["R4"]
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["security", "devops"]
+    ac: |
+      - [ ] Cosign verifies every `{version}` image against the release signer key
+      - [ ] Provenance attestation present (SLSA L3) for each image
+      - [ ] `scripts/verify_release_signatures.sh --version {version}` exits 0
+
+  - r_id: "R6"
+    name: "Deploy {version} to staging"
+    blocked_by: ["R5"]
+    class: "subscription-claude"
+    tier: "M"
+    areas: ["devops"]
+    ac: |
+      - [ ] Staging cluster pulled and rolled `{version}` images
+      - [ ] Alembic upgrade ran cleanly (no manual intervention)
+      - [ ] `/readyz` returns 200 for backend + frontend on staging
+
+  - r_id: "R7"
+    name: "Staging smoke + baseline diff ({version})"
+    blocked_by: ["R6"]
+    class: "subscription-claude"
+    tier: "M"
+    areas: ["tests", "backend"]
+    ac: |
+      - [ ] Full smoke matrix green on staging
+      - [ ] Baseline diff (latency, error rate) shows no negative regressions
+      - [ ] Blue-green canary watch is clean for 30 minutes
+
+  - r_id: "R8"
+    name: "Capture prod ship approval ({version})"
+    blocked_by: ["R7"]
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["devops"]
+    ac: |
+      - [ ] `/admin/release-approval?tag={version}` records operator reason
+      - [ ] `deploy_audit` row `kind=approve, status=succeeded` written
+      - [ ] Approval surface returns `status=approved` for the tag
+
+  - r_id: "R9"
+    name: "Blue-green prod deploy ({version})"
+    blocked_by: ["R8"]
+    class: "subscription-claude"
+    tier: "L"
+    areas: ["devops"]
+    ac: |
+      - [ ] backend-a rolled to `{version}` and passed `/readyz`
+      - [ ] backend-b rolled to `{version}` and passed `/readyz`
+      - [ ] frontend rolled to `{version}`; `deploy_audit` shows `status=succeeded`
+
+  - r_id: "R10"
+    name: "Production smoke + SLO verification ({version})"
+    blocked_by: ["R9"]
+    class: "subscription-claude"
+    tier: "M"
+    areas: ["tests", "backend"]
+    ac: |
+      - [ ] Prod smoke suite green
+      - [ ] SLO dashboard within burn-rate budget for 60 minutes post-deploy
+      - [ ] Synthetic-probe latency p95 within baseline
+
+  - r_id: "R11"
+    name: "Publish release notes for {version}"
+    blocked_by: ["R10"]
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["docs"]
+    ac: |
+      - [ ] `release-notes/{version}.md` published to docs site
+      - [ ] GitHub Release created and attached to tag `{version}`
+      - [ ] Operator broadcast (mailing list / status page) sent
+
+  - r_id: "R12"
+    name: "Promote tag + lock release branch ({version})"
+    blocked_by: ["R11"]
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["devops", "tooling"]
+    ac: |
+      - [ ] Tag `{version}` signed by release-signer key
+      - [ ] `release/{version}` branch protection set to read-only
+      - [ ] `develop` fast-forwarded onto `main` per ADR-0001
+
+  - r_id: "R13"
+    name: "Close release META + retrospective ({version})"
+    blocked_by: ["R12"]
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["docs"]
+    ac: |
+      - [ ] Retrospective lands at `docs/retrospectives/<date>-{version}.md`
+      - [ ] META `RELEASE-{version}` transitioned to Published
+      - [ ] All R1-R12 children verified Published; META comment summarises the cycle

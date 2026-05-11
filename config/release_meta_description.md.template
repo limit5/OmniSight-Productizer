@@ -1,0 +1,73 @@
+## RELEASE-{version} — production release META
+
+This ticket is the state machine for the **{version}** production
+release. It carries no implementation work itself; the 13 child
+tickets `R1`..`R13` (linked below) drive the release cycle end-to-end,
+serialised by a `blockedBy` chain.
+
+The JIRA graph IS the conductor. The runner JQL IS the executor.
+There is no external orchestration service — pickup of each child
+depends on its blocker reaching Published, exactly as for any other
+runner ticket. (See `docs/operations/release-conductor-pattern.md`
+and `docs/operations/release-conductor-runbook.md` for the long-form
+contract.)
+
+## Template provenance
+
+- Template file: `config/release_template.yaml`
+- Template version: `{template_version}`
+- Instantiated by: `scripts/instantiate_release_meta.py --version {version}`
+- Instantiated at (UTC): `{created_at}`
+
+## Child map
+
+The script comments the resolved `R-id → OP-key` map onto this ticket
+after all 13 children land. The child list below is the static plan;
+the comment is the live reference.
+
+| R-id | Phase | Tier | Areas |
+|---|---|---|---|
+{child_table}
+
+## State machine
+
+Pickup gating is enforced by the existing runner pre-pickup gate
+(`backend.agents.file_coordinator.has_unresolved_blockedby`). Every
+child sits in `To Do` until its declared blocker reaches Published.
+The chain is strictly sequential by default (R1 → R2 → ... → R13);
+template authors may declare additional `blocked_by` entries to
+serialise across non-adjacent children.
+
+## Recovery
+
+If instantiation fails partway through the script:
+
+1. The script writes the created ticket keys to
+   `/tmp/release-rollback-{version}.json` before exiting non-zero.
+2. The operator runs `scripts/instantiate_release_meta.py
+   --rollback {version}` (G2 — not yet shipped) or deletes the
+   listed tickets by hand.
+3. Re-running the script without `--force` refuses while the META
+   key exists; deleting the META and the rollback file is the
+   supported way to reset.
+
+`--force` is reserved for the rare case where the META was Archived
+(workflow-cleaned) but the operator needs a fresh instance — it
+bypasses the `MetaAlreadyExists` guard. Use `--dry-run` first.
+
+## Acceptance criteria (META)
+
+- [ ] All 13 children (`R1`..`R13`) created with correct labels and AC
+- [ ] `blockedBy` chain wired in the L-OP-874 direction (inward=blocker,
+      outward=blocked)
+- [ ] Each child carries a `Relates` link back to this META
+- [ ] Operator-readable child map comment landed within 30 seconds of
+      META creation
+- [ ] Closing R13 transitions this META to Published (see R13 AC)
+
+## DoD
+
+- [ ] All R1-R13 children Published
+- [ ] `release-notes/{version}.md` linked from docs site
+- [ ] Retrospective committed under `docs/retrospectives/`
+- [ ] This META transitioned to Published, closing the release cycle
