@@ -611,6 +611,12 @@ for _name, _desc, _cat in [
         "Anthropic built-in code_execution_20260120 — PTC sandbox with allowed_callers.",
         "meta",
     ),
+    (
+        "memory",
+        "Anthropic built-in memory_20260120 — client-side per-fleet filesystem "
+        "memory; OmniSight handler in backend.agents.memory_tool_handler.",
+        "meta",
+    ),
 ]:
     register_tool(
         ToolSchema(

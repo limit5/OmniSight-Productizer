@@ -84,6 +84,12 @@ from backend.agents.lesson_retrieval import (
     build_lessons_system_message,
     retrieve_lessons,
 )
+from backend.agents.memory_tool_handler import (
+    MEMORY_TOOL_BETA_HEADER,
+    MEMORY_TOOL_NAME,
+    MemoryToolHandler,
+    build_memory_tool_handler,
+)
 from backend.agents.cognee_integration import retrieve_lessons_via_cognee
 from backend.agents.tdd_applicability import (
     TDDApplicability,
@@ -176,6 +182,12 @@ RUNNER_TOOLS: list[str] = [
 # ``code_execution`` runs server-side in Anthropic's PTC sandbox. The
 # ``allowed_callers`` whitelist is the AC #3 boundary that prevents the
 # sandbox from issuing unrelated tool calls (HTTP / DB).
+#
+# OP-851 (C1) appends the Anthropic Memory Tool (``memory_20260120``).
+# The C1 spike confirms the tool is standalone — see
+# ``backend/agents/memory_tool_handler.py`` module docstring. Beta
+# header ``managed-agents-2026-04-01`` is pinned by ``AnthropicClient``
+# via ``MemoryToolHandler.beta_header()``.
 BUILT_IN_TOOLS_SPEC: list[dict[str, Any]] = [
     {
         "type": "text_editor_20250728",
@@ -192,6 +204,12 @@ BUILT_IN_TOOLS_SPEC: list[dict[str, Any]] = [
             "text_editor_20250728",
             "bash_20250124",
         ],
+    },
+    # C1 (OP-851) — Anthropic Memory Tool. Client-side: the runner
+    # implements storage at /var/omnisight/memory/<fleet-id>/.
+    {
+        "type": "memory_20260120",
+        "name": "memory",
     },
 ]
 
@@ -491,6 +509,30 @@ def bind_built_in_tools_with_static_analysis(
     dispatcher.register("bash", bash_v2)
     dispatcher.register("code_execution", ptc_sandbox_handler)
     return text_editor, bash_v2
+
+
+def bind_memory_tool(
+    dispatcher: Any,
+    *,
+    fleet_id: str,
+    lessons_dir: Path,
+    progress_path: Path | None = None,
+) -> MemoryToolHandler | None:
+    """OP-851 (C1) — wire the Anthropic Memory Tool client-side handler.
+
+    Returns the handler when the C1 spike passes (default path); the
+    runner can swap in B10 BM25 retrieval as a fallback when ``None``
+    is returned (AC error catalog: ``MemoryToolUnavailable``).
+    """
+    handler = build_memory_tool_handler(
+        fleet_id=fleet_id,
+        progress_path=progress_path,
+        seed_dir=lessons_dir,
+    )
+    if handler is None:
+        return None
+    dispatcher.register(MEMORY_TOOL_NAME, handler)
+    return handler
 
 
 def _mark_lint_partial_commit(worktree_path: Path, progress_path: Path) -> bool:
@@ -1533,7 +1575,29 @@ async def main_async(args: argparse.Namespace) -> int:
             worktree_root=WORKTREE_PATH,
             progress_path=LINT_PROGRESS_PATH,
         )
-        client = AnthropicClient(api_key=_load_api_key(), dispatcher=dispatcher)
+        # OP-851 (C1) — Anthropic Memory Tool. The handler is registered
+        # alongside the OP-828 built-ins; the BUILT_IN_TOOLS_SPEC list
+        # already includes the ``memory_20260120`` entry. If the C1 spike
+        # check fails (e.g. operator kill-switch set), bind_memory_tool
+        # returns None and the model can still call into B10 BM25 via
+        # the lesson-system-prompt path (handled in _build_lesson_system_prompt).
+        memory_handler = bind_memory_tool(
+            dispatcher,
+            fleet_id=os.environ.get("OMNISIGHT_FLEET_ID", "default"),
+            lessons_dir=WORKTREE_PATH / "docs" / "sop" / "lessons",
+            progress_path=LINT_PROGRESS_PATH,
+        )
+        if memory_handler is None:
+            print("  [C1] Memory Tool spike failed — falling back to B10 BM25 only")
+        client = AnthropicClient(
+            api_key=_load_api_key(),
+            dispatcher=dispatcher,
+            # OP-851 (C1) — Memory Tool beta. The header is a feature
+            # flag, not a runtime gate (see spike result in
+            # memory_tool_handler.py docstring); always send it so the
+            # ``memory_20260120`` entry in BUILT_IN_TOOLS_SPEC is honoured.
+            beta_headers=[MEMORY_TOOL_BETA_HEADER],
+        )
         # OP-811 (A3): wire Skill (project verbs) + Agent (sub-agent decomposition)
         # onto the dispatcher AFTER the client exists so the Agent handler can
         # bind to the same client (Anthropic SDK contract: sub-agents share the

@@ -332,6 +332,7 @@ class AnthropicClient:
         default_model: str = DEFAULT_MODEL_SONNET,
         max_tokens_default: int = 8192,
         dispatcher: ToolDispatcher | None = None,
+        beta_headers: list[str] | None = None,
     ) -> None:
         # Lazy import so test code can monkeypatch easily and so unrelated
         # callers don't pull anthropic SDK into their import graph.
@@ -345,10 +346,21 @@ class AnthropicClient:
                 "Set the env var or pass api_key explicitly."
             )
 
-        self._client = anthropic.Anthropic(api_key=resolved_key)
+        # OP-851 (C1): beta headers — comma-joined per Anthropic spec.
+        # Pinned at construction so every messages.create() in this
+        # client's lifetime carries the same beta surface; the policy
+        # is "one beta set per client" to avoid the cache-key drift
+        # that would otherwise blow the prompt cache.
+        client_kwargs: dict[str, Any] = {"api_key": resolved_key}
+        if beta_headers:
+            client_kwargs["default_headers"] = {
+                "anthropic-beta": ",".join(beta_headers),
+            }
+        self._client = anthropic.Anthropic(**client_kwargs)
         self.default_model = default_model
         self.max_tokens_default = max_tokens_default
         self.dispatcher = dispatcher or get_default_dispatcher()
+        self.beta_headers = tuple(beta_headers) if beta_headers else ()
 
     @property
     def messages(self):  # noqa: ANN201 - returns SDK proxy, dynamic

@@ -97,6 +97,13 @@ def _install_anthropic_sdk_stub(
     class _Client:
         def __init__(self, **_kwargs: Any) -> None:
             self.messages = _Messages()
+            # OP-863 SDK audit gate: when raw_tools include a beta-only spec
+            # (Memory Tool / Outcomes / etc.) the production code routes via
+            # client.beta.messages.create(). Expose the same _Messages here
+            # so the stub satisfies that path. We share the same recorder so
+            # call assertions stay consistent regardless of which namespace
+            # the launcher picked.
+            self.beta = types.SimpleNamespace(messages=self.messages)
 
     fake = types.ModuleType("anthropic")
     fake.Anthropic = _Client  # type: ignore[attr-defined]
