@@ -1427,6 +1427,35 @@ app.include_router(_deploy_audit_router.router)
 # OP-778 deployment dashboard backend API
 from backend.routers import release_dashboard as _release_dashboard_router
 app.include_router(_release_dashboard_router.router)
+# OP-889 D17 deployments dashboard — versioned `/admin/deploy-history` JSON
+# read endpoint that the DeploymentsPanel.tsx polls + re-fetches on every
+# `release.dashboard.updated` SSE tick. Thin facade over the OP-778
+# `release_dashboard.snapshot()` so the frontend gets current_prod_tag +
+# in_flight + history (last 20) + canary in one round-trip.
+from fastapi import APIRouter as _APIRouter, Depends as _Depends, Query as _Query
+from backend import auth as _auth, release_dashboard as _release_dashboard
+_deploy_history_router = _APIRouter(
+    prefix="/admin/deploy-history", tags=["deployments-dashboard"],
+)
+
+
+@_deploy_history_router.get("")
+async def _deploy_history(
+    limit: int = _Query(20, ge=1, le=200),
+    _user: _auth.User = _Depends(_auth.require_admin),
+):
+    snap = _release_dashboard.snapshot()
+    history = snap.get("history") or []
+    return {
+        "current_prod_tag": snap.get("current_prod_tag"),
+        "in_flight": snap.get("in_flight") or [],
+        "history": history[-limit:],
+        "canary": snap.get("canary"),
+        "generated_at": snap.get("generated_at"),
+    }
+
+
+_include_versioned_router(_deploy_history_router)
 from backend.routers import external_agents as _external_agents_router  # BP.A2A.6 external A2A agent registry UI
 _include_versioned_router(_external_agents_router.router)
 from backend.routers import batch_merge as _batch_merge_router  # OP-735 R5 AI Reviewer auto-+1 dashboard
