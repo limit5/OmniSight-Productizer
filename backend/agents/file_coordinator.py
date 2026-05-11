@@ -7,6 +7,7 @@ at pickup time; this module creates the planning-layer ordering.
 from __future__ import annotations
 
 import logging
+import os
 import urllib.error
 from dataclasses import dataclass
 from typing import Mapping, Sequence
@@ -19,6 +20,47 @@ log = logging.getLogger(__name__)
 SKIP_FILE_COORDINATOR_LABEL = "skip-file-coordinator"
 PUBLISHED_STATES = {"公開済み", "Published"}
 FILE_GRAPH_JQL = 'project = OP AND status in ("To Do", "進行中", "Under Review")'
+
+# OP-874: when this env var is "1"/"true"/"yes" (case-insensitive), the
+# blockedBy check in ``has_unresolved_blockedby`` flips fail-open → fail-closed:
+# an exception talking to JIRA returns ``(True, "skipped")`` so the runner
+# refuses to pick up the ticket until JIRA recovers, rather than allowing
+# pickup and risking a stale-blocker merge-conflict cascade.
+BLOCKEDBY_FAIL_CLOSED_ENV = "OMNISIGHT_BLOCKEDBY_FAIL_CLOSED"
+
+# OP-874: marker emitted on the blocked ticket whenever ``add_blocked_by``
+# wires a blockedBy link. The audit script (``scripts/audit_blockedby_directions.py``)
+# uses this marker — along with the legacy ``[file-coordinator] Linked blockedBy``
+# marker emitted by ``serialize_file_chains`` — to recover the operator-intended
+# direction of each link and flag any that are reversed.
+ADD_BLOCKED_BY_COMMENT_PREFIX = "[blocked-by-link]"
+
+
+class BlockedByLinkAlreadyExists(RuntimeError):
+    """``add_blocked_by`` no-op: the requested link already exists.
+
+    Idempotent callers should swallow this; loud callers (audit ``--fix``)
+    use it to detect a redundant restore attempt.
+    """
+
+
+class BlockedByLinkSelfReference(ValueError):
+    """``add_blocked_by(X, X)`` — defensive guard against self-links."""
+
+
+class BlockedByAuditDirectionMismatch(RuntimeError):
+    """Auditor found a Blocks link whose direction contradicts operator intent."""
+
+
+def _fail_closed_enabled() -> bool:
+    """Return True iff ``OMNISIGHT_BLOCKEDBY_FAIL_CLOSED`` is set truthy.
+
+    Default OFF preserves the historical fail-open behaviour. Operators
+    flip this on in prod once they trust the audit + helper to keep the
+    blockedBy graph healthy.
+    """
+    raw = os.environ.get(BLOCKEDBY_FAIL_CLOSED_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -146,7 +188,17 @@ def jira_create_issue_link(
     outward: str,
     link_type: str = "Blocks",
 ) -> None:
-    """Create a JIRA issue link where ``inward`` blocks ``outward``."""
+    """Create a JIRA issue link where ``inward`` blocks ``outward``.
+
+    .. deprecated:: OP-874
+       The ``inward``/``outward`` parameter naming mirrors the raw
+       Atlassian REST schema and is easy to invert (see Gerrit #387 /
+       OP-858). New operator code should call :func:`add_blocked_by`,
+       which takes intent-named ``blocked_key``/``blocker_key`` arguments
+       and is impossible to flip silently. This low-level helper stays
+       for ``serialize_file_chains`` and for the audit script's ``--fix``
+       restore path, both of which have to speak the raw schema.
+    """
     jira_dispatch._request_idempotent(
         client,
         "POST",
@@ -158,6 +210,56 @@ def jira_create_issue_link(
         },
         f"file-coordinator-link-{inward}-{outward}",
     )
+
+
+def add_blocked_by(
+    client: jira_dispatch.DispatchClient,
+    blocked_key: str,
+    blocker_key: str,
+    *,
+    reason: str | None = None,
+    link_type: str = "Blocks",
+) -> bool:
+    """Wire ``blocked_key`` as blockedBy ``blocker_key`` with intent-safe args.
+
+    Wraps :func:`jira_create_issue_link` with explicit ``blocked`` /
+    ``blocker`` parameter names so an operator cannot silently invert
+    the link direction. Idempotent: if the link already exists the
+    helper returns ``False`` without re-posting. A ``reason`` string,
+    when supplied, lands as a ``[blocked-by-link]`` comment on the
+    blocked ticket so the audit script can verify operator intent
+    against the link's actual direction.
+
+    Returns ``True`` when a new link was created, ``False`` when the
+    link already existed (idempotent no-op).
+
+    Raises :class:`BlockedByLinkSelfReference` when ``blocked_key ==
+    blocker_key``.
+    """
+    if blocked_key == blocker_key:
+        raise BlockedByLinkSelfReference(
+            f"add_blocked_by refused self-link: {blocked_key} cannot block itself"
+        )
+    if jira_link_exists(
+        client, blocked=blocked_key, blocker=blocker_key, link_type=link_type
+    ):
+        log.info(
+            "add_blocked_by idempotent no-op: %s already blockedBy %s",
+            blocked_key,
+            blocker_key,
+        )
+        return False
+    jira_create_issue_link(
+        client, inward=blocker_key, outward=blocked_key, link_type=link_type,
+    )
+    if reason:
+        jira_dispatch.add_comment(
+            client,
+            blocked_key,
+            f"{ADD_BLOCKED_BY_COMMENT_PREFIX} blockedBy {blocker_key}: {reason}",
+            idem_key=f"add-blocked-by-{blocked_key}-{blocker_key}",
+        )
+    return True
 
 
 def jira_get_blocked_by(
@@ -186,11 +288,23 @@ def has_unresolved_blockedby(
     client: jira_dispatch.DispatchClient,
     snapshot: TicketSnapshot,
 ) -> tuple[bool, str]:
-    """Return whether ``snapshot`` has a blocker that is not published."""
+    """Return whether ``snapshot`` has a blocker that is not published.
+
+    Exception handling honours :data:`BLOCKEDBY_FAIL_CLOSED_ENV` (OP-874):
+    default is fail-open (return ``(False, "skipped")`` — allow pickup),
+    flipping the env var truthy fails closed (``(True, "skipped")`` —
+    block pickup) so a wedged JIRA cannot silently bypass the gate.
+    """
+    fail_closed = _fail_closed_enabled()
     try:
         blockers = jira_get_blocked_by(client, snapshot.key)
     except (RuntimeError, urllib.error.URLError, OSError) as exc:
-        return False, f"blockedBy check skipped: {type(exc).__name__}: {exc}"
+        reason = (
+            f"blockedBy check skipped (fail-closed): {type(exc).__name__}: {exc}"
+            if fail_closed
+            else f"blockedBy check skipped: {type(exc).__name__}: {exc}"
+        )
+        return fail_closed, reason
     try:
         for blocker_key in blockers:
             reverse_blockers = jira_get_blocked_by(client, blocker_key)
@@ -205,7 +319,12 @@ def has_unresolved_blockedby(
             if state not in PUBLISHED_STATES:
                 return True, f"blocked by {blocker_key} (state={state})"
     except (RuntimeError, urllib.error.URLError, OSError) as exc:
-        return False, f"blockedBy state check skipped: {type(exc).__name__}: {exc}"
+        reason = (
+            f"blockedBy state check skipped (fail-closed): {type(exc).__name__}: {exc}"
+            if fail_closed
+            else f"blockedBy state check skipped: {type(exc).__name__}: {exc}"
+        )
+        return fail_closed, reason
     return False, "all blockers resolved"
 
 
