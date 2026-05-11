@@ -23,7 +23,7 @@ from typing import Any, Callable, Iterable
 from uuid import uuid4
 
 from backend import db_pool
-from backend.agents import jira_dispatch
+from backend.agents import jira_dispatch, reviewer_safety
 from backend.db import _resolve_pg_dsn
 
 # OP-831 (2026-05-11 post-mortem): the cursor file path was hard-coded to a
@@ -431,13 +431,28 @@ class GerritJiraBridge:
         self.transition_ticket(ticket_key, "to_published")
 
     def add_jira_comment(self, ticket_key: str, message: str) -> None:
+        # OP-844 — defense-in-depth egress filter. The bridge daemon
+        # itself never invokes Claude (the AI Reviewer pipeline it
+        # spawns lives in ``ai_reviewer.review_patchset`` where the
+        # primary defense fires), but anything ``add_jira_comment``
+        # forwards may have been composed from upstream LLM output;
+        # this second pass guarantees no api-key-shape token ever
+        # leaves the bridge process even if a future caller forgets
+        # to sanitize.
+        sanitized, matches = reviewer_safety.egress_filter(message)
+        if matches:
+            self.log(
+                "ALERT", "bridge_jira_comment_redacted",
+                ticket_key=ticket_key,
+                redaction_count=len(matches),
+            )
         body = {
             "body": {
                 "type": "doc",
                 "version": 1,
                 "content": [{
                     "type": "paragraph",
-                    "content": [{"type": "text", "text": message}],
+                    "content": [{"type": "text", "text": sanitized}],
                 }],
             },
         }
